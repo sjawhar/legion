@@ -259,6 +259,32 @@ func TestPublishHandler_RejectsAgentTopics(t *testing.T) {
 	}
 }
 
+// A presence subject is no topic to publish on: it carries the listener's own check of whether a
+// session's plugin holds a NATS connection, which that plugin answers, so the route refuses a
+// publish naming one, the prefix itself included, before anything reaches the bus.
+func TestPublishHandler_RejectsPresenceSubjects(t *testing.T) {
+	// Validation runs before deps.client is used, so a minimal non-nil deps is enough.
+	handler := publishHandler(&listenerDeps{}, logging.New("test"))
+
+	for _, topic := range []string{bus.PresenceSubjectPrefix, bus.PresenceSubject("ses_abc123")} {
+		t.Run(topic, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish",
+				strings.NewReader(`{"source_session":"ses_test","topic":"`+topic+`","message":"hello"}`))
+			request.Header.Set("Content-Type", "application/json")
+			handler.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
+			}
+			const want = "cannot publish to presence subjects"
+			if !strings.Contains(recorder.Body.String(), want) {
+				t.Fatalf("body = %s, want it to carry %q", recorder.Body.String(), want)
+			}
+		})
+	}
+}
+
 func TestPublishHandler_MethodNotAllowed(t *testing.T) {
 	state := &listenerDeps{}
 	handler := publishHandler(state, logging.New("test"))
@@ -1014,7 +1040,7 @@ func TestSendHandler_AcceptsHumanSource(t *testing.T) {
 // answers 200 with no body at all, as this route always has.
 func TestDeleteSessionHandler_IsIdempotent(t *testing.T) {
 	_, sessions := setupSessionsTest(t, nil, map[string]int{"ses_closed": 1234})
-	handler := deleteSessionHandler(sessions)
+	handler := deleteSessionHandler(sessions, nil, logging.New("test"))
 
 	for i := range 2 {
 		rr := httptest.NewRecorder()
@@ -1045,7 +1071,7 @@ func TestDeleteSessionHandler_DeletesTheSameClientInstancesRegistration(t *testi
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/sessions/"+sessionID+"?client_instance_id="+instanceID, nil)
-	deleteSessionHandler(sessions).ServeHTTP(rr, req)
+	deleteSessionHandler(sessions, nil, logging.New("test")).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
@@ -1072,7 +1098,7 @@ func TestDeleteSessionHandler_KeepsAnotherClientInstancesRegistration(t *testing
 		"/v1/sessions/"+sessionID+"?client_instance_id=4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a",
 		nil,
 	)
-	deleteSessionHandler(sessions).ServeHTTP(rr, req)
+	deleteSessionHandler(sessions, nil, logging.New("test")).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
@@ -1115,7 +1141,7 @@ func TestDeleteSessionHandler_RejectsOtherMethods(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/ses_closed", nil)
-	deleteSessionHandler(sessions).ServeHTTP(rr, req)
+	deleteSessionHandler(sessions, nil, logging.New("test")).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", rr.Code)
@@ -3709,6 +3735,40 @@ func TestListenerDeliveryHandler_FailedDeliveryOnExceptionTopic_NoException(t *t
 	}
 	if !errors.Is(err, natsgo.ErrTimeout) {
 		t.Fatalf("unexpected error waiting for exception: %v", err)
+	}
+}
+
+// The live topics lane leaves a session's presence subject (bus.PresenceSubjectPrefix) alone: a
+// message there is the listener's own check of whether that session's plugin holds a NATS
+// connection, which the plugin answers on its own connection, never a message to fan out. The
+// lane subscribes to every notification topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1), so without the skip
+// a presence request would be decoded and delivered to every session on this machine that follows
+// the subject. A session following it is a row an earlier build stored, since
+// /v1/interests/subscribe leaves such a topic out now; the lane's skip does not depend on that.
+// The team topic the same session follows, handed to the same handler, is received, so the skip
+// is what dropped the request and not the rig.
+func TestTheLiveLaneLeavesAPresenceSubjectAlone(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	sessionID := "ses_presence_" + id.New()
+	presence, team := bus.PresenceSubject(sessionID), "notifications.team.presence-"+id.New()
+	if _, err := harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{presence, team}); err != nil {
+		t.Fatalf("register %s's interests: %v", sessionID, err)
+	}
+	if err := harness.sessions.Put(sessionID, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register %s: %v", sessionID, err)
+	}
+	live := liveDeliveryHandler(harness.config)
+
+	request := listenerTestEnvelope(presence, "presence-"+id.New())
+	live(&natsgo.Msg{Subject: presence, Data: marshalListenerEnvelope(t, request)})
+	if logs := harness.logs.String(); strings.Contains(logs, request.EventID) {
+		t.Fatalf("the live lane took the presence request %s:\n%s", request.EventID, logs)
+	}
+
+	item := listenerTestEnvelope(team, "team-"+id.New())
+	live(&natsgo.Msg{Subject: team, Data: marshalListenerEnvelope(t, item)})
+	if logs := harness.logs.String(); !strings.Contains(logs, item.EventID) {
+		t.Fatalf("the live lane dropped the team topic %s too, so the test shows nothing:\n%s", item.EventID, logs)
 	}
 }
 

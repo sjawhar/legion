@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-626",
+  "previousHandoff": "",
+  "planDocument": "dispatch://INFRA-626/artifact/plan-md",
+  "base": {
+    "commit": "c77d054d2912",
+    "note": "main as of planning, which carries sjawhar/legion#2446 (INFRA-594: the per-session consumer s-<id>, the relay subject notifications.envoy.deliver.<id>, the registration's delivery answer). The pod's workspace was 19 commits behind that; the plan commit sits on c77d054d2912, so the implementer starts there with no merge. The spec's other two prerequisites, #2588 and #2603, are open with changes requested and conflict with main; nothing in this plan waits for them."
+  },
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the push rules, the handoff, the pull-request body and handoff_complete; this change touches four packages and two Go modules, so its references/pr-body.md defines the proof each acceptance line needs",
+      "skill://legion-worker/references/tools.md: the Go, Dispatch-browser-suite and Postgres runs happen in the pod, and LEGION_TEST_PG_DSN is already set there",
+      "skill://envoy: the change rewrites what envoy_publish and envoy_send answer, and skills/envoy/SKILL.md and references/deliveries.md state today's answers, so the skill is both the source to read and a file to edit",
+      "skill://plain-words: the two tool texts, the Dispatch queued line and the pull-request body are read by people",
+      "skill://ce-simplify-code: the simplify pass over the listener's send and publish paths before the handoff",
+      "skill://dispatch: any comment or ask this phase posts"
+    ],
+    "test": [
+      "skill://legion-worker: the tester's evidence rules and the committed test handoff",
+      "skill://legion-worker/references/pr-body.md: each proof entry needs criterion, surface, command, observed, headSha and a negative control; A4, A6 and A10 each have an obvious negative control (a plugin that declares no check, an unknown session, an unreadable listener)",
+      "skill://legion-worker/references/tools.md: how to run the Dispatch browser suite and a Postgres-backed Go test in the pod",
+      "skill://envoy: what the publish and send answers mean, so a test reads the right thing"
+    ],
+    "review": [
+      "skill://legion-worker/references/merge-gate.md: the approval, the approved head and what may sit above it",
+      "skill://legion-worker/references/review-threads.md: replying on and resolving threads, and judging a bot's finding",
+      "skill://ce-simplify-code: the change adds a bucket, a probe and a fourth delivery state across four packages, so the review judges whether each one earns its place",
+      "skill://plain-words: the tool texts, the Dispatch line and the documents the change rewrites"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1. In production the whole change is inert until the hub's NATS users change, and the spec routes that through a backlog issue, so A11 cannot be run as written.",
+        "answer": "Split in two. The presence probe moves to notifications.envoy.presence.<session id>, which every grant already covers, so the send's connected/stopped answer and Dispatch's queueing reach production as soon as the listener image and the worker image's plugins are pinned (plan D1, A11 part one). The new bucket keeps the spec's degraded behaviour and waits for the hub release, so the publish count and the no-entry queued case are A11 part two, which the pull request asks the controller to release (T11). The architect decides whether sign-off waits for part two; the plan recommends it does not."
+      },
+      {
+        "finding": "F2. The 1-second presence probe does not fit the send route's 3.5-second budget, and A4's 'within 1.5 seconds' contradicts it.",
+        "answer": "D2: the probe runs concurrently with the sender-stamp read, so the worst case stays 1 s entry read + 1 s (probe and stamp together) + 1.5 s publish. A4's 1.5 s holds, because its target has a warm cached entry and the probe is the only wait."
+      },
+      {
+        "finding": "F3. A send to a session with no entry is refused 403 by deliveryModeVerdict, which reads the entry's capabilities.",
+        "answer": "D6: the listener reads capabilities and title from the record when there is no entry; a record with no capabilities accepts the send and lets the resumed session decide."
+      },
+      {
+        "finding": "F4. The count's two sources contradict the prerequisite: #2603 deletes Registry.MatchAll, which is the interest-row matcher A1 needs.",
+        "answer": "D11: the interest-row half sits in one function, recipientsFor, in a new file, and the pull request body tells #2603's author that the function must survive."
+      },
+      {
+        "finding": "F5. The base branch is unsettled, and on today's base a team topic is a core topic with a second, different recipient list.",
+        "answer": "The branch starts at main c77d054d2912. Both non-role branches of publishHandler set the count, so the answer does not depend on whether the topic is stream-captured. topicRecipients keeps its own confirmed list for the 504 body; recipients is a superset and the documents say so (T10)."
+      },
+      {
+        "finding": "F6. 'The plan chooses a new state or a mark on sent' leaves every reader of attempt state undecided.",
+        "answer": "D8: a fourth state, queued, which counts as taken by the listener for the outbox's suppression, the sweep, owed answers and acceptance (api/message_delivery.go:226), and differs only in the words a person reads and in isSafeRetry. T8 lists each reader and the migration pair."
+      },
+      {
+        "finding": "F7. A queued attempt never ends, and the Dispatch line promises more than the stream keeps.",
+        "answer": "The Dispatch line carries the horizon: 'Queued: <session> is stopped; it gets the message if it runs again within 72 hours' (T9), matching the tool text. A queued attempt stays terminal, as the spec's non-goal on expiry notices requires."
+      },
+      {
+        "finding": "F8. 'Only to a caller that asks for stopped sessions' has no wire shape.",
+        "answer": "D10: GET /v1/registry/<id>?include_stopped=1, answering 200 with state, last_seen, title, capabilities and topics from the record and no port or host; without the parameter nothing changes, GET /v1/sessions stays live-only, and the browser suite's fake listener grows the same mode."
+      },
+      {
+        "finding": "F9. Who writes the record, what a failed write does to a registration, and what a stop writes.",
+        "answer": "D5: the listener serving the session writes it at registration (after the consumer call), at a subscription change and at a clean stop, where the topics stay and only last_seen moves; a failed record write is a WARN and never fails a registration; the 10-minute throttle reads the shared record, as store.Registry.UpsertWithin does, so A9 holds however many listeners serve the session."
+      },
+      {
+        "finding": "F10. Adding the bucket to ListenerBuckets widens the host and Dispatch grants too, so every session on a host can write another session's record.",
+        "answer": "Accepted and written down: it is the same class as envoy_sessions, which every session can already write. T6 says so in the permissions file's comment and T10 in packages/envoy/AGENTS.md, and INFRA-840's per-session grant is where the narrowing belongs."
+      },
+      {
+        "finding": "F11. What 'stopped' means when more than one process answers for one session id.",
+        "answer": "D12: the reply carries the session id and the client instance id; the listener compares the session id only, so any live process on that id reads connected. packages/envoy/AGENTS.md says that, and says connected promises a live plugin and never a delivery."
+      },
+      {
+        "finding": "F12. With 30 days of records the count is rarely zero, so R3's line may never fire for the incident that opened the issue.",
+        "answer": "D7: the answer carries recipients and recipients_connected, and the tool says 'published <id> to 3 other sessions (2 running now)'. Both A2 regexes still match."
+      },
+      {
+        "finding": "F13. The publish text lives in the hosts, not in tool-contract.ts; 'confirmed' already exists on the send result; and a plugin cannot learn synchronously that its presence subscription was accepted.",
+        "answer": "T7: a publishConfirmationText in tool-contract.ts so both hosts render one text; sendConfirmationText keeps the unconfirmed-recipient wording for a connected answer and never writes 'sent' for a stopped one; the plugin subscribes, flushes and checks for a permission refusal before it declares the check, and re-declares after a reconnect."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "The presence subject is envoy.presence.<session id>, a core NATS request whose no-responders answer means the session is stopped, and a second with no answer counts as connected (a stalled plugin).",
+      "plan": "The subject is notifications.envoy.presence.<session id>, and the listener decides on the reply: a reply carrying the target's session id means connected, while no-responders or no reply inside the 1-second deadline means stopped.",
+      "evidence": "The live hub is the off-cluster VM whose authorization is rendered from envoy-infra@2.9.1 (theorem-labs/agent-infra envoy/Pulumi.yaml), and no rendered rule grants envoy.presence.* to the listener or to a session; a new grant replaces the VM (envoy/README.md:245-247), which dispatch://INFRA-7/spec R5 reserves for INFRA-553 (backlog) or INFRA-14's clustered hub (needs_review). On notifications. every grant already exists: listener publish notifications.> (infra/core/permissions.go:59), session subscribe notifications.> (:202), session publish _INBOX.> (:201 with :29), listener subscribe _INBOX.> (:75). The production listener runs ENVOY_SUBSCRIBE_ALL_TOPICS=1 and its live-topics lane subscribes notifications.> (cmd/listener/live_topics.go:14,39), so no-responders cannot fire there and the reply must be the signal.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A4 and A5 name envoy.presence.<session id>; both now name notifications.envoy.presence.<session id>.",
+          "A4's third clause, a listener whose NATS user has no publish on envoy.presence.*, becomes a listener whose publish on the presence subject is denied, which the test builds with ErrPublishDenied."
+        ],
+        "settledDecisions": [
+          {
+            "decision": "A connection check, not an entry check or a receipt: the probe is on a presence subject of its own, outside notifications., and a second with no answer counts as connected.",
+            "detail": "The subject moves under notifications.envoy.presence., which the Decisions paragraph rejected for the relay subject because the live-topics lane always has a subscriber there; the plan accepts that and reads the reply instead. A stalled plugin that holds its connection and does not answer within a second now reads stopped, where the spec reads connected. The message is stored either way, so the difference is the word the sender sees."
+          }
+        ]
+      }
+    },
+    {
+      "spec": "The record holds the topics its consumer's filter holds, written only after the consumer call that sets the filter succeeds.",
+      "plan": "The record holds the topics the registration stored (store.Interest.Topics), still written only after the consumer call succeeds.",
+      "evidence": "sessionConsumerFilter keeps the agent subject and the topics the stream captures (cmd/listener/session_delivery.go:364-376), and notifications.team.> is not a stream subject on this base (internal/bus/stream.go:135-146), so a filter-only record would count no team-topic subscriber and A1's cleanly stopped session would not be counted. The registered topics are a superset of the filter under #2603 too.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "The 200 body gets a new field, recipients.",
+      "plan": "The 200 body gets recipients and recipients_connected, and the tool text names both: published <id> to 3 other sessions (2 running now).",
+      "evidence": "The record lasts 30 days and the production listener saw 228 distinct sessions in 24 hours with 571 live now, so a team topic will rarely count zero and R3's zero line would stop firing for the case in the Problem, three broadcasts on 2026-10-27 that reached no running session. Both of A2's regexes still match the new texts.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    }
+  ],
+  "tasks": [
+    "T1. A core request helper exported from internal/bus/stored.go, the presence subject in internal/bus/stream.go, the live lane's handler skipping it, and publishHandler and subscribeHandler refusing it.",
+    "T2. The known-session record: a new bucket envoy_known_sessions with a 30-day maximum age, a kvwatch watcher, an in-memory map with the existing expiry heap, a subject index over the records' topics, writes at registration, subscription change and stop, a degraded start when the bucket cannot be opened, and a memory test at 100,000 records.",
+    "T3. The publish count: recipientsFor in a new file, and recipients plus recipients_connected on the 200 body of both non-role branches.",
+    "T4. The send answer: the probe, state and last_seen, capabilities from the record when there is no entry, connected_only, and the registration field that declares the check.",
+    "T5. GET /v1/registry/<id>?include_stopped=1.",
+    "T6. Grants: the new bucket through ListenerBuckets, the expected lists in infra/core/permissions_test.go and the rendered goldens, and a comment saying the presence subject needs no rule.",
+    "T7. The clients: transport.ts fields, one sendConfirmationText and one publishConfirmationText, and the presence subscription, declaration, move and texts in pi-envoy and claude-envoy.",
+    "T8. Dispatch's server: the migration pair for the queued state, the Envoy client, the resolve and send paths, and every reader of attempt state.",
+    "T9. Dispatch's pages and the browser suite, including the fake listener's stopped-session mode and the tests A10 names.",
+    "T10. The documents: packages/envoy/AGENTS.md, infra/README.md, infra/docs/nats-hub.md, skills/envoy, skills/legion-worker/references/findings.md, and a changelog fragment per changed package.",
+    "T11. The pull-request body, the note for #2603's author, and the request for one envoy-infra release and the listener image pins."
+  ],
+  "productionCheck": {
+    "partOne": "Provable with no hub change, once envoy-cluster/Pulumi.prod.yaml pins the new listener image and the worker image carries the new plugins: envoy_send to a session killed with SIGKILL less than 5 minutes earlier answers queued; a send to a running session answers sent, which is connected; a publish answers without recipients and the listener logs the bucket gap once; and dispatch-production-check.sh runs on the merge commit.",
+    "partTwo": "Needs the hub's authorization to carry the new bucket, which is one hub VM replacement under dispatch://INFRA-553 or dispatch://INFRA-14: the publish count, the no other session subscribes line, and a send to a suspended Legion session answering queued."
+  }
+}

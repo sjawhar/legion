@@ -56,14 +56,16 @@ func openLiveTopics(urls []string, machineID string, handler nats.MsgHandler) (*
 // and with no line logged, since the live lane receives each of those messages too: a role lane
 // (the role lane arbitrates it), a subject the stream stores (the durable delivers it, and a
 // role forward travels on its holder's agent subject, which the stream stores, while keeping its
-// role topic), and a session's relay subject (bus.DeliverSubjectPrefix: the frame is the stored
+// role topic), a session's relay subject (bus.DeliverSubjectPrefix: the frame is the stored
 // message the session's consumer delivered, which the listener owning the session relays to it
-// alone). Every other message goes through the delivery handler, whose fanout delivers it to
-// every session on this machine subscribed to its topic.
+// alone), and a session's presence subject (bus.PresenceSubjectPrefix: the request is the
+// listener's own check of whether that session's plugin holds a NATS connection, which the plugin
+// answers on its own connection). Every other message goes through the delivery handler, whose
+// fanout delivers it to every session on this machine subscribed to its topic.
 func liveDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
 	handler := listenerDeliveryHandler(cfg)
 	return func(msg *nats.Msg) {
-		if strings.HasPrefix(msg.Subject, contracts.RoleTopicPrefix) || strings.HasPrefix(msg.Subject, bus.DeliverSubjectPrefix) || bus.StreamCaptures(msg.Subject) {
+		if strings.HasPrefix(msg.Subject, contracts.RoleTopicPrefix) || strings.HasPrefix(msg.Subject, bus.DeliverSubjectPrefix) || strings.HasPrefix(msg.Subject, bus.PresenceSubjectPrefix) || bus.StreamCaptures(msg.Subject) {
 			return
 		}
 		handler(deliveryMessage{data: msg.Data, mode: liveDelivery, msg: msg})

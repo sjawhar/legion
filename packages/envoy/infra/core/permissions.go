@@ -66,6 +66,13 @@ func listenerGrant(machineID string) Permissions {
 		jsAck + bus.Stream + "." + durable + ".>",
 		jsAPI + "INFO",
 	}
+	// Each bucket named here is granted to every user built on this grant: the listener's own,
+	// the host user a host's sessions share (HostPermissions) and Dispatch's. Adding
+	// bus.KnownSessionBucket to bus.ListenerBuckets therefore widens the host and Dispatch grants
+	// too, so any session on a host can write another session's known-session record. That is the
+	// same class of reach the session registry (bus.SessionBucket) already has today, and
+	// dispatch://INFRA-840, which gives each session a NATS user of its own, is the place that
+	// narrows both; nothing here can, since one user serves every session on the host.
 	for _, bucket := range bus.ListenerBuckets() {
 		publish = append(publish, bucketPermissions(bucket)...)
 	}
@@ -196,6 +203,13 @@ func DispatchPermissions(machineID string) Permissions {
 // reply inboxes (the receipt a role delivery waits for), then its agent stream's frames
 // (contracts.AgentStreamFramesSubject). Subscribe: every notification topic, then its agent
 // stream's control subject (contracts.AgentStreamControlSubject).
+//
+// A session's presence subject (bus.PresenceSubject, notifications.envoy.presence.<session id>)
+// needs no rule of its own in either direction: notifications.> already covers it both ways, the
+// session's subscribe here and the listener's publish of the probe in listenerGrant. The
+// narrowed session subscribe of sjawhar/legion#2603 must keep notifications.envoy.presence.*
+// even so: a session that may not subscribe to its own presence subject cannot answer the probe,
+// and the listener then reads a live session as stopped.
 func SessionPermissions() Permissions {
 	return Permissions{
 		Publish:   Rules{Allow: []string{inboxes, contracts.AgentStreamFramesSubject("*")}},

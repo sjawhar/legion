@@ -47,7 +47,7 @@ func (c *Client) NextStoredMessage(ctx context.Context, subject string, seq uint
 	if err != nil {
 		return StoredMessage{}, err
 	}
-	reply, err := c.requestConfirmed(ctx, storedMessageAPI, request)
+	reply, err := c.RequestCore(ctx, storedMessageAPI, request)
 	if err != nil {
 		return StoredMessage{}, err
 	}
@@ -77,13 +77,16 @@ func (c *Client) NextStoredMessage(ctx context.Context, subject string, seq uint
 	}, nil
 }
 
-// requestConfirmed sends data to subject as a request and returns its one reply. The publish is
-// confirmed as RequestCoreTo's is (publishConfirmed), so a request the server refuses under the
+// RequestCore sends data to subject as a core NATS request and returns its one reply. The publish
+// is confirmed as RequestCoreTo's is (publishConfirmed), so a request the server refuses under the
 // connection's publish permissions returns ErrPublishDenied at once; a plain request would wait
 // out its whole deadline, since core NATS answers a denied publish to no one but the async error
 // callback. One publishConfirmed cannot confirm for another reason still waits for its reply, and
 // returns that reason if ctx ends first. A no-responders status reply is nats.ErrNoResponders.
-func (c *Client) requestConfirmed(ctx context.Context, subject string, data []byte) (*nats.Msg, error) {
+//
+// The wait is the caller's to bound: a ctx carrying a deadline ends the wait at it, and a ctx with
+// none waits storedMessageWait.
+func (c *Client) RequestCore(ctx context.Context, subject string, data []byte) (*nats.Msg, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, storedMessageWait)

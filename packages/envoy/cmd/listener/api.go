@@ -63,9 +63,18 @@ type sendResponse struct {
 	Duplicate bool   `json:"duplicate,omitempty"`
 }
 
+// publishResponse is the answer to a publish. Recipients and RecipientsConnected are the counts
+// recipientsFor made just before the message was published: how many sessions other than the
+// sender follow the topic, and how many of those hold a session entry now. They are pointers so
+// that a count of zero is carried rather than omitted - "no other session subscribes" is the
+// answer that matters most - and nil, left out, where there is no count to give: a listener with
+// no known-session store sends neither, as does a role topic, whose answer names its holder. An
+// older client reads neither field.
 type publishResponse struct {
 	contracts.Envelope
-	Holder string `json:"holder,omitempty"`
+	Holder              string `json:"holder,omitempty"`
+	Recipients          *int   `json:"recipients,omitempty"`
+	RecipientsConnected *int   `json:"recipients_connected,omitempty"`
 }
 
 type subscribeResponse struct {
@@ -639,7 +648,13 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 // no body, as this route always has. The delete runs within sendRequestBudget of the request's
 // own context, so one the bus does not answer is the bus-unavailable 503 with Retry-After: 1
 // inside the caller's attempt (writeStoreError).
-func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
+//
+// A delete that removed the entry moves the session's known-session record on, keeping its topics
+// (session.KnownSessions.TouchWithin): the session stopped cleanly, and a publish on a topic it
+// followed still counts it as a recipient, since Envoy keeps its messages for 72 hours and it can
+// resume under the same id. A delete that removed nothing leaves the record alone, and a known
+// store this listener could not open does nothing at all; neither outcome changes this answer.
+func deleteSessionHandler(sessions *session.SessionRegistry, known *session.KnownSessions, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -653,11 +668,26 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 		instanceID := strings.TrimSpace(r.URL.Query().Get("client_instance_id"))
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
+		// Whether the delete removes an entry is read before it runs: Delete is idempotent and
+		// EntryDeleted counts a key that was already absent, so neither answer tells a stop from
+		// a repeat of one. A session this listener never held is left alone, with no write.
+		_, entryErr := sessions.Get(sessionID)
+		held := entryErr == nil
+		stopped := func() {
+			if !held {
+				return
+			}
+			if err := known.TouchWithin(ctx, sessionID); err != nil {
+				logger.Warn("known-session record not moved on at a clean stop",
+					slog.String("session_id", sessionID), slog.String("error", err.Error()))
+			}
+		}
 		if instanceID == "" {
 			if err := sessions.Delete(ctx, sessionID); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
 				writeStoreError(ctx, w, err, http.StatusInternalServerError)
 				return
 			}
+			stopped()
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -668,6 +698,7 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 		}
 		switch outcome {
 		case session.EntryDeleted:
+			stopped()
 			writeJSON(w, http.StatusOK, deleteSessionResponse{Deleted: true})
 		case session.EntryKeptForAnotherInstance:
 			writeJSON(w, http.StatusOK, deleteSessionResponse{
@@ -746,6 +777,10 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to agent topics; use /v1/messages/send for direct agent messages")
 			return
 		}
+		if strings.HasPrefix(request.Topic, bus.PresenceSubjectPrefix) {
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to presence subjects; "+bus.PresenceSubjectPrefix+" is the listener's own check of whether a session's plugin holds a NATS connection, not a topic to publish on")
+			return
+		}
 		if message, field := validateMessageBody(request.messageBody); message != "" {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, message, field)
 			return
@@ -787,6 +822,9 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			sendToTopic(ctx, w, record, d, item, arrived)
 			return
 		}
+		// The counts are of the moment the message is published, and are read from memory alone
+		// (recipientsFor), so taking them here costs the publish below nothing.
+		recipients, connected := recipientCounts(d, item.Topic, item.SourceSession)
 		// The sender stamp's read and the publish take this one deadline, derived from the
 		// caller's own context, so this route too answers a bus it cannot reach rather than
 		// spending the caller's attempt.
@@ -797,7 +835,7 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuseBusUnavailable(w, err)
 			return
 		}
-		record.accept(w, publishResponse{Envelope: item})
+		record.accept(w, publishResponse{Envelope: item, Recipients: recipients, RecipientsConnected: connected})
 	}
 }
 
@@ -1474,9 +1512,20 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		// open, a fork parent's agent subject and any topic its envoy_subscribe took included. The
 		// registry drops such a topic from the stored row too (`store.Registry.Upsert`), so a row an
 		// earlier build stored with one is cleaned by this registration.
+		// A topic under bus.PresenceSubjectPrefix is left out the same way, whichever session's it
+		// is: a plugin subscribes to its own presence subject on its own NATS connection and never
+		// registers it as an interest, while a session registered on another session's presence
+		// subject would answer the listener's check for it and make a stopped session read
+		// connected, since every session shares one NATS user until dispatch://INFRA-840 gives each
+		// its own.
 		warnings := make([]string, 0)
 		topics := make([]string, 0, len(body.Topics)+1)
 		for _, topic := range append(body.Topics, contracts.AgentSubject(body.SessionID)) {
+			if strings.HasPrefix(topic, bus.PresenceSubjectPrefix) {
+				warnings = append(warnings, fmt.Sprintf("%s was not registered: it is a session's presence subject, which that session's own plugin subscribes to on its own NATS connection and no session registers as an interest",
+					topic))
+				continue
+			}
 			if bus.ReachesPrivateStreamSubject(body.SessionID, topic) {
 				warnings = append(warnings, fmt.Sprintf("%s was not registered: it reaches a private stream subject (another session's inbox, a failed-delivery lane, or the Legion controller lane), and of those a session registers only its own agent subject, %s",
 					topic, contracts.AgentSubject(body.SessionID)))
@@ -1485,7 +1534,7 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			topics = append(topics, topic)
 		}
 		if len(warnings) > 0 {
-			logger.Warn("listener subscribe refused topics reaching private stream subjects",
+			logger.Warn("listener subscribe refused topics",
 				slog.String("session_id", body.SessionID), slog.Any("refused", warnings))
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
@@ -1521,6 +1570,25 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			if delivery.relayed() {
 				// The relay serves every registration answered consumer, so there is one to tell.
 				d.consumers.relay.registered(body.SessionID, epochChanged)
+			}
+		}
+		// The session is known for the next 30 days, with the topics just stored - the registered
+		// ones, which carry the team and other topics the consumer's filter drops. The record is
+		// written only when no consumer call failed (recorded): a registration whose Ensure was
+		// refused left the consumer's filter where it was, and a record claiming the topics that
+		// filter never took would count the session as a recipient of them. A failed write is this
+		// WARN and nothing else: the registration is answered whatever it did
+		// (session.KnownSessions).
+		if delivery.recorded() {
+			if err := d.known.RecordWithin(ctx, session.KnownSession{
+				SessionID:        body.SessionID,
+				Title:            body.Title,
+				Capabilities:     body.Capabilities,
+				Topics:           item.Topics,
+				ClientInstanceID: body.ClientInstanceID,
+			}); err != nil {
+				logger.Warn("listener known-session record not written",
+					slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
 			}
 		}
 		warningCtx, cancelWarnings := context.WithTimeout(ctx, unwiredRepositoryWarningTimeout)
@@ -1595,7 +1663,7 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 		d.consumers.refollow(ctx, d, sessionID)
 	}))
 	v1.Handle("/v1/sessions", sessionsHandler(d.registry, d.sessions))
-	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions))
+	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions, d.known, logger))
 	v1.HandleFunc("/v1/messages/send", sendHandler(d, logger))
 	v1.HandleFunc("/v1/messages/publish", publishHandler(d, logger))
 	v1.HandleFunc("/v1/replay", replayHandler(d))
