@@ -1733,7 +1733,7 @@ so. A write (`drop database`, a `kubectl cp`, a start in the runner) is never re
 
 | Subcommand | What it does |
 | --- | --- |
-| `up <up's flags>` | Refuses, before it creates anything, a commit with no image, a `--pg-major` other than production's, a `--pg-volume` that is not a whole number of Gi or is above 240Gi, an image tag that does not resolve to a digest, stored-order flags it cannot build the checker from (The stored-order check, below: a `--dispatch-commit` the git store does not hold; a tree without `cmd/dispatch/storedorder.go` and no `--stored-order-source`, or one with it and a `--stored-order-source`; a source or checker commit the git store does not hold or whose tree lacks INFRA-707's files or registration), an overlay whose subcommand table lacks the registration's anchor, a checker that does not compile (naming the dispatch commit, the source commit and the compiler's first error), and a `--browsertype-commit` that the git store does not hold or whose tree has no `loadtest/browsertype`. Refuses with exit status 2 while the lock exists. Then takes the lock, installs the copy, builds `loadgen` and (with `--browsertype-commit`) `browsertype`, starts the heartbeat and the sampler, and prints each container's requests and limits and the size of the Postgres data volume. |
+| `up <up's flags>` | Refuses, before it creates anything, a commit with no image, a `--pg-major` other than production's, a `--pg-volume` that is not a whole number of Gi or is above 240Gi, an image tag that does not resolve to a digest, stored-order flags it cannot build the checker from (The stored-order check, below: a `--dispatch-commit` the git store does not hold; a tree without `cmd/dispatch/storedorder.go` and no `--stored-order-source`, or one with it and a `--stored-order-source`; a source or checker commit the git store does not hold or whose tree lacks INFRA-707's files or registration), an overlay whose subcommand table lacks the registration's anchor, a checker that does not compile (naming the dispatch commit, the source commit and the compiler's first error), and a `--browsertype-commit` that the git store does not hold, whose tree has no `loadtest/browsertype` or whose `browsertype` has no `-protect` or no `-person` flag (Browser typing, below). Refuses with exit status 2 while the lock exists. Then takes the lock, installs the copy, builds `loadgen` and (with `--browsertype-commit`) `browsertype`, starts the heartbeat and the sampler, and prints each container's requests and limits and the size of the Postgres data volume. |
 | `seed` | `loadgen seed` from the runner through Dispatch's Service, then `loadgen seed-finish`. Then it stops Dispatch and the listener and renames the database to the template `dispatch_seed`. |
 | `step NAME FACTOR [--duration 10m] [--reads-only] [--typing [--typing-peers 2] [--typing-rate 5] [--typing-docs 20]]` | The reset, the Postgres data volume read (The Postgres data volume, below), then one `loadgen run` at FACTOR × (4 events/s, 60 requests/s) with the `series-sessions` count, then the crash check, the stored-order check, `cgroup-merge` and `tables`. FACTOR can be fractional (`8.5`). `--reads-only` sends 0 events, and is refused with `--typing`. Postgres's write-out counters go into `pg-stats-before.json` and `pg-stats-after.json`. `--typing` adds browser typing (below), into the documents `loadgen plan-docs` says the step's own writes plan the most versions for. |
 | `series [--duration 10m]` | 1x, 2x, 3x, 5x, 7x, 10x and `10x-reads`, then the refinement (below). |
@@ -1990,7 +1990,7 @@ documents get agent writes alone, and the stored-order check can only find what 
 break. `step --typing` and `replay --typing` add the browsers: INFRA-707's `browsertype` connects
 `--typing-peers` peers (default 2) to each of the step's `--typing-docs` documents (default 20)
 and each types inside existing paragraph text at `--typing-rate` keystroke updates per second
-(default 5), as session `ses-browsertype`, while `loadgen run` sends the step's own writes. The
+(default 5), each peer a person of its own, while `loadgen run` sends the step's own writes. The
 curves run without it: `all` runs no typing, and `collect` leaves a step that typed out of
 `curves/` (a replay is left out anyway), so typing never moves a knee. The steps that type are
 the caller's: for INFRA-514, the two replays and the step `10x-typing`, each named with
@@ -2003,7 +2003,11 @@ directory, moved into `<run>/browsertype` once the lock is taken. `state.json` `
 records the commit and the binary's sha256. The runner gets the binary as `/work/browsertype` only
 when its sha256 differs there. Before it creates anything, `up` refuses, and names, a commit that
 git does not have or whose tree has no `packages/envoy/loadtest/browsertype`, and, after the
-build and still before the lock, a `browsertype` whose `-help` lists no `-protect`. `--typing`
+build and still before the lock, a `browsertype` whose `-help` lists no `-protect` and one whose
+`-help` lists no `-person`. A `--browsertype-commit` before INFRA-707's `67ac05a4` is refused for
+that second reason: its driver connects with the copy's agent token, which Dispatch's document
+room no longer admits (sjawhar/legion#2541), so its peers would type nothing. Give `67ac05a4` or
+a later commit. `--typing`
 on a run that `up` gave no `--browsertype-commit` is refused, naming the flag, before the step
 touches anything.
 
@@ -2034,14 +2038,19 @@ The documents are the ones the step writes most:
   names the count and the step runs on; `--reads-only` with `--typing` is refused, since a step
   with no agent write has nothing to rank its documents by.
 
-The copy's agent token (`DISPATCH_AGENT_TOKEN`, from `state.json`) goes into the runner's
-`/work/typing/token` on the standard input of `kubectl exec`: it is on no command line, in no
-recorded file, and never printed, and it is removed when typing stops. Then, just before `loadgen
+The peers are people, not the copy's agent: Dispatch admits only the identity service's person
+into a document room (sjawhar/legion#2541). Peer n of every document connects as the person
+`browsertype-<n>`, named in the `X-Dispatch-User` header, which the copy's Dispatch reads a
+person from and trusts (`manifests/dispatch.yaml`:
+`DISPATCH_IDENTITY=header:X-Dispatch-User`, `DISPATCH_IDENTITY_HEADER_TRUSTED=1`). The runner is
+given no credential of the copy for typing; it holds the step's document list under
+`/work/typing`, removed when typing stops. Just before `loadgen
 run` starts, so the peers connect during its 30 s warm-up, the runner starts:
 
 ```bash
-/work/browsertype -url http://dispatch.<namespace>.svc:8766 -token-file /work/typing/token \
-  -session ses-browsertype -artifacts-file /work/typing/<step>.docs -peers <P> -rate <R> \
+/work/browsertype -url http://dispatch.<namespace>.svc:8766 \
+  -identity-header X-Dispatch-User -person browsertype \
+  -artifacts-file /work/typing/<step>.docs -peers <P> -rate <R> \
   -duration <s> -seed 1 -protect 'Revision token'
 ```
 
@@ -2239,7 +2248,8 @@ on polling would, at the dead step's deadline, `kill -TERM` the pid `/work/logs/
 holds in whatever pod is then named `runner` — a later run's step of the same name.
 
 The same names are why nothing of one run touches the copy once the lock names another: before
-it stops a runner job, removes a step's files or the browser typing token from the runner, scales
+it stops a runner job, removes a step's files or its browser typing document list from the
+runner, copies that list in, scales
 `dispatch` or `listener`, resets the runner's own directories or streams the replay's bundle into
 it, or streams, restores or removes the replay dump in `postgres-0`, `cluster.sh` reads the lock
 and leaves all of it alone when the run there is not its own, saying which copy it left. That
@@ -2250,8 +2260,8 @@ all anyone is told about it. Failing closed is to act on nothing this time, not 
 watching: a step's disk watcher and its wait on the runner job, the two that keep polling,
 record nothing and stop no job at a poll where no read of the lock answered and read it again at
 the next poll, while a lock that names another run ends them. A step that ends because its wait
-found the lock renamed therefore stops no typing job and deletes no token of the run that holds
-the namespace now.
+found the lock renamed therefore stops no typing job and deletes no document list of the run
+that holds the namespace now.
 
 ## What this harness does not do
 

@@ -21,7 +21,8 @@
 # whose dispatch subcommand table lacks the registration's anchor, and a checker that does not
 # compile (naming the dispatch commit, the source commit and the compiler's first error), and a
 # --browsertype-commit that the git store does not hold or whose tree has no loadtest/browsertype
-# (naming it), each before any kubectl call creates anything and leaving no scratch directory,
+# (naming it), and a browsertype whose -help lists no -protect or no -person (naming the flag),
+# each before any kubectl call creates anything and leaving no scratch directory,
 # and refuses with exit 2 while the lock exists,
 # naming the holder and the heartbeat's age, and past 15 min calling it stale and naming the down
 # command; down refuses another run's lock; replay-prepare refuses a manifest whose seed is null and
@@ -80,8 +81,9 @@
 # a step whose reset.json names no template exports none, naming each; (c) step and replay refuse
 # --typing on a run without --browsertype-commit, naming it, before anything; up
 # --browsertype-commit builds browsertype with the stored-order build code and records it; step
-# and replay --typing write the agent token into the runner from standard input (on no command
-# line, in no file under the step directory, never printed), start browsertype with the step's
+# and replay --typing start browsertype as people (-identity-header X-Dispatch-User -person
+# browsertype, neither -token-file nor -session, and no token written into the runner or printed)
+# with the step's
 # flags before loadgen's run and stop it with SIGTERM after the stored-order commands (their order
 # in the fake kubectl's log), type into the K documents loadgen plan-docs names from the step's own
 # flags, run stored-order over those documents (one --artifact each) before the run over every
@@ -115,7 +117,8 @@
 # out; (w) the disk watcher and the runner-job wait of a step killed outright stop at their
 # next poll, recording no failure in that step's directory and stopping no runner job, however
 # little free space the volume then shows, a wait past its deadline stops no job once the lock
-# names another run and the step's EXIT trap then stops no browser typing and removes no token
+# names another run and the step's EXIT trap then stops no browser typing and removes no
+# document list
 # there, while a wait with no pid and start time still stops its job while the lock is its own
 # run's; (x) a step whose heap.txt alone did not come back from the runner is no
 # failed step: its summary.json is here, it says in a note and in heap-missing.txt where heap.txt
@@ -124,7 +127,7 @@
 # existence check that failed removes nothing there; (y) with the lock naming another run,
 # nothing of this run writes into, kills in or removes from the copy those fixed names reach:
 # runner_stop and runner_step_remove (runner_exec) and typing_stop stop and remove nothing,
-# runner_start, runner_put, typing_start's token write and psql_write (postgres_exec) and
+# runner_start, runner_put, typing_start's document list and psql_write (postgres_exec) and
 # stop_copy (scale_to) refuse outright, each saying which pod or deployment it left alone, a
 # command whose --run names this run is refused, naming both runs, and collect, which reads this
 # pod's run directory and no pod of the copy, packs and uploads that run with such a --run,
@@ -302,11 +305,9 @@ case $verb in
         fi
         printf '%s\n' "${cmd[4]}" >>"$FAKE_DIR/runner-heap-kept"
         ;;
-      # Browser typing: the agent token written into the runner from standard input, the token and
-      # document list removed when typing stops.
-      'sh -c umask 077 && mkdir -p "$1" && cat >"$1/token" sh '*)
-        mkdir -p "$FAKE_DIR/runner${cmd[4]}" && cat >"$FAKE_DIR/runner${cmd[4]}/token"
-        ;;
+      # Browser typing: the step's document list removed from the runner when typing stops. No
+      # call writes a credential of the copy there, so a token write would reach the catch-all
+      # below and fail the call.
       "rm -f /work/typing/"*) ;;
       # A replay step: the runner's directories, the bundle copied in and verified there.
       "sh -c rm -rf /work/bundle"*) ;;
@@ -549,12 +550,15 @@ if [ "${*: -1}" = ./loadtest/browsertype ]; then
     exit 1
   }
   printf 'GOWORK=%s CGO_ENABLED=%s go %s\n' "${GOWORK:-}" "${CGO_ENABLED:-}" "$*" >>"$FAKE_DIR/go-browsertype.log"
-  # Its -help lists -protect, as INFRA-707's fixed driver does; FAKE_BT_NO_PROTECT=1 builds one
-  # without it, as the driver before that fix.
+  # Its -help lists -protect and -person, as INFRA-707's driver of commit 67ac05a4 does;
+  # FAKE_BT_NO_PROTECT=1 builds one without -protect, as the driver before that fix, and
+  # FAKE_BT_NO_PERSON=1 one without -person, as the driver before it connected as people.
   if [ -n "${FAKE_BT_NO_PROTECT:-}" ]; then
     printf '#!/usr/bin/env bash\n[ "$1" = -help ] && { echo "  -peers int"; exit 0; }\necho "fake browsertype: $*"\n' >"$out"
-  else
+  elif [ -n "${FAKE_BT_NO_PERSON:-}" ]; then
     printf '#!/usr/bin/env bash\n[ "$1" = -help ] && { echo "  -protect value"; exit 0; }\necho "fake browsertype: $*"\n' >"$out"
+  else
+    printf '#!/usr/bin/env bash\n[ "$1" = -help ] && { echo "  -protect value"; echo "  -person string"; exit 0; }\necho "fake browsertype: $*"\n' >"$out"
   fi
   chmod +x "$out"
   exit 0
@@ -1057,6 +1061,18 @@ grep -qF -- "has no -protect flag" "$tmp/out" || fail "up's refusal of a browser
 no_create || fail "up created something before refusing a browsertype without -protect"
 [ ! -f "$fake/lock.json" ] || fail "up took the lock before refusing a browsertype without -protect"
 pass "up refuses a browsertype with no -protect before the lock, naming the flag"
+
+# A browsertype whose -help lists no -person connects with the copy's agent token, which
+# Dispatch's document room no longer admits (sjawhar/legion#2541): refused the same way, after
+# its build and before the lock.
+reset_fake
+FAKE_BT_NO_PERSON=1 run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok" --browsertype-commit "$commit_bt"
+((RC != 0)) || fail "up accepted a browsertype with no -person"
+grep -qF -- "has no -person flag" "$tmp/out" || fail "up's refusal of a browsertype without -person does not say so: $(tail -3 "$tmp/out")"
+grep -qF -- "67ac05a4" "$tmp/out" || fail "up's refusal of a browsertype without -person names no commit that has the flag: $(tail -3 "$tmp/out")"
+no_create || fail "up created something before refusing a browsertype without -person"
+[ ! -f "$fake/lock.json" ] || fail "up took the lock before refusing a browsertype without -person"
+pass "up refuses a browsertype with no -person before the lock, naming the flag and the commit that has it"
 
 # ---- (b) replay-prepare's refusals ---------------------------------------------------------------------
 
@@ -1642,25 +1658,33 @@ grep -qxF -- "plan-docs -json -seed $run_dir/seed.json -sessions 400 -top 3 -eve
   fail "the step's typing documents are not the 3 plan-docs plans the most versions for: $(cat "$fake/runner/work/typing/10x-typing.docs" 2>/dev/null)"
 ! grep -q 'WARNING: step 10x-typing:' "$tmp/out" ||
   fail "a step whose 3rd typed document has 30 planned versions warned: $(grep 'WARNING: step 10x-typing:' "$tmp/out")"
-grep -qxF -- "typing-10x-typing /work/browsertype -url http://dispatch.$ns.svc:8766 -token-file /work/typing/token -session ses-browsertype -artifacts-file /work/typing/10x-typing.docs -peers 3 -rate 2.5 -duration 8810s -seed 1 -protect Revision token" \
+grep -qxF -- "typing-10x-typing /work/browsertype -url http://dispatch.$ns.svc:8766 -identity-header X-Dispatch-User -person browsertype -artifacts-file /work/typing/10x-typing.docs -peers 3 -rate 2.5 -duration 8810s -seed 1 -protect Revision token" \
   "$fake/runner-starts" || fail "browsertype did not start with the step's flags: $(grep '^typing-' "$fake/runner-starts")"
-# The token: written into the runner from standard input, on no command line, in no file under the
-# step directory, never printed.
-[ "$(cat "$fake/runner/work/typing/token")" = "$dispatch_token" ] || fail "the runner's token file does not hold the copy's agent token"
+# Its peers are people, not the copy's agent: the start line names -person and neither of the
+# agent token's flags.
+bt_start=$(grep -F 'typing-10x-typing /work/browsertype ' "$fake/runner-starts")
+{ [[ $bt_start != *-token-file* ]] && [[ $bt_start != *-session* ]]; } ||
+  fail "browsertype still starts with the agent token's flags: $bt_start"
+[[ $bt_start == *" -person browsertype "* ]] || fail "browsertype's start line names no -person: $bt_start"
+# No call of the typing path writes a credential of the copy into the runner.
+# shellcheck disable=SC2016 # the runner script an older cluster.sh wrote the token with
+! grep -qF 'cat >"$1/token"' "$fake/kubectl.log" ||
+  fail "a kubectl call of the typing path wrote a token into the runner: $(grep -F 'cat >"$1/token"' "$fake/kubectl.log" | tail -n1)"
+[ ! -e "$fake/runner/work/typing/token" ] ||
+  fail "the typing path left a token in the runner: $(cat "$fake/runner/work/typing/token")"
 # (loadgen run's own command line carries -token; browsertype's calls are those naming it, its
 # job or its runner directory.)
 grep -E 'browsertype|/work/typing|sh typing-' "$fake/kubectl.log" >"$tmp/typing-calls" || fail "kubectl.log holds no browsertype call"
 ! grep -qF -- "$dispatch_token" "$tmp/typing-calls" || fail "a browsertype kubectl call carries the agent token on its command line"
 ! grep -rqF -- "$dispatch_token" "$tdir" || fail "a file under the step directory holds the agent token: $(grep -rlF -- "$dispatch_token" "$tdir")"
 ! grep -qF -- "$dispatch_token" "$tmp/out" || fail "step --typing printed the agent token"
-# The order in kubectl.log: the token, browsertype's start, loadgen's start (its warm-up, then its
-# window), the two stored-order commands, then browsertype's SIGTERM.
-# shellcheck disable=SC2016 # the token write's runner script, as kubectl.log holds it
-token_at=$(line_of 'cat >"$1/token"') bt_at=$(line_of 'sh typing-10x-typing /work/browsertype ') lg_at=$(line_of ' sh step-10x-typing ')
+# The order in kubectl.log: the document list copied in, browsertype's start, loadgen's start
+# (its warm-up, then its window), the two stored-order commands, then browsertype's SIGTERM.
+docs_at=$(line_of 'runner:/work/typing/10x-typing.docs') bt_at=$(line_of 'sh typing-10x-typing /work/browsertype ') lg_at=$(line_of ' sh step-10x-typing ')
 so_at=$(line_of '/work/envoy-dispatch stored-order' last) kill_at=$(line_of 'kill -TERM' last)
 grep -n -- 'kill -TERM' "$fake/kubectl.log" | tail -n1 | grep -qF 'sh typing-10x-typing' || fail "the SIGTERM did not go to typing-10x-typing"
-((token_at < bt_at && bt_at < lg_at && lg_at < so_at && so_at < kill_at)) ||
-  fail "the order is not token, browsertype, loadgen, stored-order, SIGTERM (kubectl.log lines $token_at, $bt_at, $lg_at, $so_at, $kill_at)"
+((docs_at < bt_at && bt_at < lg_at && lg_at < so_at && so_at < kill_at)) ||
+  fail "the order is not the document list, browsertype, loadgen, stored-order, SIGTERM (kubectl.log lines $docs_at, $bt_at, $lg_at, $so_at, $kill_at)"
 # The typed documents first, one --artifact each, then the run over every document, both since the
 # window start and both within the 7200 s bound.
 mapfile -t so_calls < <(grep -F '/work/envoy-dispatch stored-order' "$fake/kubectl.log")
@@ -1724,7 +1748,7 @@ printf '%s\n' '| 10x-typing 2 78 |' '| 10x-typing-err 2 78 |' '| r16-typing 2 78
 [ "$(logged_steps 'curves -out')" = plain ] || fail "collect's curves took a typing step: '$(logged_steps 'curves -out')'"
 run_cluster down --namespace "$ns"
 ((RC == 0)) || fail "down of the typing run exited $RC"
-pass "up --browsertype-commit builds browsertype; step and replay --typing start it before loadgen with the token from standard input, type into the documents their own writes plan the most versions for, stop it after the stored-order commands, and record browsertype.txt and browsertype.json; a peer error is no step failure; collect's STORED-ORDER.md has the typed and typing columns and its curves leave typing steps out"
+pass "up --browsertype-commit builds browsertype; step and replay --typing start it before loadgen as people (-identity-header, -person, no token anywhere), type into the documents their own writes plan the most versions for, stop it after the stored-order commands, and record browsertype.txt and browsertype.json; a peer error is no step failure; collect's STORED-ORDER.md has the typed and typing columns and its curves leave typing steps out"
 
 # up --stored-order-source: the checker is the dispatch tree (commit_old, without the command) with
 # the source's INFRA-707 files copied into its scratch copy and the source's stored-order entry
@@ -2614,7 +2638,8 @@ run_cluster down --namespace "$ns"
 # would read as an exit status; a wait at its deadline stops nothing once the lock names another
 # run, and neither does the step's own way out, which that wait starts (the step shell reads the
 # wait's output under errexit, so it ends there and runs its EXIT trap: step_at_exit,
-# typing_stop_at_exit, typing_stop, which would TERM typing-<name> and remove the agent token in
+# typing_stop_at_exit, typing_stop, which would TERM typing-<name> and remove that step's
+# document list in
 # the pod named runner -- another run's by then); and a wait with no pid and start time (seed,
 # seed-refs, seed-finish and typing_stop) is what it was, stopping its job at the deadline while
 # the lock is its own run's.
@@ -2647,16 +2672,16 @@ run_cluster down --namespace "$ns"
     fail "a wait at its deadline stopped step-pgkill although the lock names run $other_run: $(cat "$fake/runner-stops")"
   ((wait_rc != 0)) || fail "a wait that ended because the lock names another run returned 0"
   # What the step shell does next on that path: its EXIT trap, with the typing of a --typing step
-  # still running as job typing-pgkill and its token in TYPING_DIR.
+  # still running as job typing-pgkill and its document list in TYPING_DIR.
   TYPING=1 TYPING_PEERS=2 TYPING_RATE=5 TYPING_DOCS=1
   TYPING_LIST=(doc-1)
   TYPING_STEP=(pgkill "$kill_dir")
-  token_rms=$(grep -c -- "rm -f $TYPING_DIR/token" "$fake/kubectl.log" || true)
+  docs_rms=$(grep -c -- "rm -f $TYPING_DIR/pgkill.docs" "$fake/kubectl.log" || true)
   typing_stop_at_exit
   ! grep -qx 'typing-pgkill' "$fake/runner-stops" 2>/dev/null ||
     fail "the EXIT trap of a step that ended because the lock names run $other_run stopped the browser typing job typing-pgkill, which that run's typing is: $(cat "$fake/runner-stops")"
-  [ "$(grep -c -- "rm -f $TYPING_DIR/token" "$fake/kubectl.log" || true)" = "$token_rms" ] ||
-    fail "that EXIT trap removed the agent token from the runner, which is run $other_run's pod now"
+  [ "$(grep -c -- "rm -f $TYPING_DIR/pgkill.docs" "$fake/kubectl.log" || true)" = "$docs_rms" ] ||
+    fail "that EXIT trap removed the step's typing document list from the runner, which is run $other_run's pod now"
   [ ! -e "$kill_dir/browsertype.json" ] && [ ! -e "$kill_dir/browsertype.txt" ] ||
     fail "that EXIT trap wrote a browsertype record of a job it must not touch: $(names "$kill_dir")"
   # The lock is this run's again, so a wait with no pid and start time stops its job as it did.
@@ -2669,7 +2694,7 @@ run_cluster down --namespace "$ns"
     fail "a wait with no pid and start time did not stop its job past its deadline: $(cat "$fake/runner-stops" 2>/dev/null)"
 )
 rm -f -- "$fake/lock.json"
-pass "the disk watcher and the runner-job wait of a step that was killed outright stop at their next poll, record nothing and stop no runner job; a wait stops no job at its deadline once the lock names another run, and the step's EXIT trap then stops no browser typing and removes no token there"
+pass "the disk watcher and the runner-job wait of a step that was killed outright stop at their next poll, record nothing and stop no runner job; a wait stops no job at its deadline once the lock names another run, and the step's EXIT trap then stops no browser typing and removes no document list there"
 
 # (x) A copy-back where heap.txt alone did not come back. Every other file of the step is here,
 # so the step is a complete one: marking it failed (kind copy_back) would drop its row from the
@@ -2789,21 +2814,21 @@ guard_out=$tmp/guard.out
   TYPING=1 TYPING_PEERS=2 TYPING_RATE=5 TYPING_DOCS=1
   TYPING_LIST=(doc-1)
   mkdir -p "$own_dir/steps/guard"
-  # The agent token: the runner holds /work/browsertype already (up put it there), so
-  # put_executable copies nothing and the token write is typing_start's first call that reaches
-  # the pod. Unguarded it would write this run's token over the token of run $other_run, whose
-  # runner pod that is.
+  # The document list: the runner holds /work/browsertype already (up put it there), so
+  # put_executable copies nothing and that list's runner_put is typing_start's first call that
+  # reaches the pod. Unguarded it would write this run's documents into the runner pod of run
+  # $other_run and type into that run's copy.
   guard_rc=0
-  tokens=$(grep -cF 'cat >"$1/token"' "$fake/kubectl.log" || true)
+  starts=$(grep -c -- 'typing-guard /work/browsertype' "$fake/runner-starts" 2>/dev/null || true)
   copies=$(grep -c -- ' cp ' "$fake/kubectl.log" || true)
   (typing_start guard "$own_dir/steps/guard" 60) 2>"$guard_out" || guard_rc=$?
   ((guard_rc != 0)) || fail "typing_start returned 0 although the lock names run $other_run"
-  [ "$(grep -cF 'cat >"$1/token"' "$fake/kubectl.log" || true)" = "$tokens" ] ||
-    fail "typing_start wrote this run's agent token into run $other_run's runner pod: $(grep -F 'cat >"$1/token"' "$fake/kubectl.log" | tail -n1)"
-  [ ! -e "$fake/runner$TYPING_DIR/token" ] ||
-    fail "the agent token lies in the pod named runner, which is run $other_run's now"
+  [ ! -e "$fake/runner$TYPING_DIR/guard.docs" ] ||
+    fail "typing_start's document list lies in the pod named runner, which is run $other_run's now"
   [ "$(grep -c -- ' cp ' "$fake/kubectl.log" || true)" = "$copies" ] ||
-    fail "typing_start copied browsertype into run $other_run's runner: the runner holds it already, so put_executable must copy nothing and the token write must guard itself"
+    fail "typing_start copied a file into run $other_run's runner: the runner holds browsertype already, so put_executable must copy nothing and the document list's runner_put must guard itself"
+  [ "$(grep -c -- 'typing-guard /work/browsertype' "$fake/runner-starts" 2>/dev/null || true)" = "$starts" ] ||
+    fail "typing_start started the browser typing job in run $other_run's runner pod: $(grep -- 'typing-guard /work/browsertype' "$fake/runner-starts")"
   grep -qF 'the runner pod' "$guard_out" ||
     fail "typing_start did not name the pod it left alone: $(cat "$guard_out")"
   typing_stop guard "$own_dir/steps/guard" 2>"$guard_out" ||
@@ -2868,7 +2893,7 @@ run_cluster down --namespace "$ns" --run "$own_run"
 ((RC == 0)) || fail "down --run $own_run exited $RC: $(cat "$tmp/out")"
 [ -f "$fake/lock.json" ] || fail "down --run $own_run deleted run $other_run's lock"
 rm -f -- "$fake/lock.json"
-pass "with the lock naming another run, runner_stop, runner_step_remove and typing_stop touch nothing of the copy, runner_start, runner_put, typing_start's token write, psql_write and stop_copy refuse outright, each naming the pod or deployment it left alone, a command whose --run names this run is refused, naming both runs, and collect packs and uploads that run without reading the lock"
+pass "with the lock naming another run, runner_stop, runner_step_remove and typing_stop touch nothing of the copy, runner_start, runner_put, typing_start's document list, psql_write and stop_copy refuse outright, each naming the pod or deployment it left alone, a command whose --run names this run is refused, naming both runs, and collect packs and uploads that run without reading the lock"
 
 # (z) The daemons' lock read. cmd__heartbeat and cmd__sampler come through use_run any-run,
 # which reads no lock when --run names their run, as the daemons' own --run does; only after

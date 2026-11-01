@@ -16,8 +16,9 @@
 #       no --stored-order-source, or with it and a --stored-order-source; a source without
 #       INFRA-707's files or registration; a dispatch subcommand table without the registration's
 #       anchor; a build failure, naming the commits and the compiler's first error), and a
-#       --browsertype-commit that the git store does not hold or whose tree has no
-#       packages/envoy/loadtest/browsertype, and a --pg-volume that is not a whole number of Gi
+#       --browsertype-commit that the git store does not hold, whose tree has no
+#       packages/envoy/loadtest/browsertype or whose built browsertype has no -protect or no
+#       -person flag (below), and a --pg-volume that is not a whole number of Gi
 #       or is above the 240Gi the namespace's quota leaves beside NATS's three 20Gi claims.
 #       Refuses with exit 2 while the lock ConfigMap
 #       dispatch-loadtest-lock exists. Then takes the lock, installs the copy (Postgres 16 CPU /
@@ -135,10 +136,12 @@
 # Browser typing (step and replay --typing, INFRA-707's race of agent writes and browser typing):
 # INFRA-707's browsertype of --browsertype-commit, refused without it, types into the K
 # (--typing-docs) documents the step writes most, --typing-peers peers each at --typing-rate
-# keystroke updates per second, through Dispatch's document websocket as session
-# ses-browsertype with the copy's agent token, which goes into the runner's /work/typing/token on
-# kubectl exec's standard input (never on a command line, in no recorded file, never printed) and
-# is removed when typing stops. A replay's documents are the artifacts with the most agent
+# keystroke updates per second, through Dispatch's document websocket as people: each peer is a
+# person of its own, browsertype-<peer>, named in the X-Dispatch-User header the copy's Dispatch
+# reads a person from (manifests/dispatch.yaml's DISPATCH_IDENTITY), since Dispatch admits only
+# a person into a document room (sjawhar/legion#2541). The runner holds no credential of the
+# copy for it, only each step's document list under /work/typing, removed when typing stops. A
+# replay's documents are the artifacts with the most agent
 # writes (artifact.version events the replay sends) in the bundle's window.jsonl over the
 # sub-window, mapped to the copy's ids through loadtest.replay_ids; a load step's are the K
 # documents `loadgen plan-docs` names from seed.json and the step's own loadgen run flags, those
@@ -314,10 +317,13 @@ STORED_ORDER_SECONDS=${LOADTEST_STORED_ORDER_SECONDS:-7200}
 STORED_ORDER_EVIDENCE_SECONDS=600
 STORED_ORDER_TABLES=(artifacts:id doc_checkpoints:artifact_id artifact_versions:artifact_id:number doc_updates:artifact_id:version doc_snapshots:artifact_id:name)
 STORED_ORDER_START_TABLES=(doc_checkpoints:artifact_id artifact_versions:artifact_id:number doc_updates:artifact_id:version doc_snapshots:artifact_id:name)
-# Browser typing: the session INFRA-707's browsertype peers act as, and the runner's files: the
-# agent token (written on kubectl exec's standard input, removed when typing stops) and each
-# step's document list.
-TYPING_SESSION=ses-browsertype
+# Browser typing: the login prefix of the people INFRA-707's browsertype peers are (peer n of
+# every document is <prefix>-<n>), the header the copy's Dispatch reads a person from -- the one
+# manifests/dispatch.yaml's DISPATCH_IDENTITY=header:X-Dispatch-User names, trusted there
+# (DISPATCH_IDENTITY_HEADER_TRUSTED=1) -- and the runner's directory, which holds each step's
+# document list and no credential of the copy.
+TYPING_PERSON=browsertype
+TYPING_IDENTITY_HEADER=X-Dispatch-User
 TYPING_DIR=/work/typing
 # The text browsertype must never type into: loadgen's edits replace the spec's "Revision token
 # rN" and its uploads read it, so one keystroke there fails every later edit and upload to the
@@ -2240,27 +2246,30 @@ typing_chosen() {
 
 # typing_start NAME DIR SECONDS: when the step runs browser typing, browsertype detached in the
 # runner as job typing-NAME, just before loadgen run (whose bound is SECONDS) starts, so its peers
-# connect during the warm-up: the binary (put_executable), the copy's agent token into
-# TYPING_DIR/token through runner_exec's standard input (never on a command line, in no recorded
-# file, never printed; put_executable above it may have copied nothing, so that write is this
-# run's first read of the lock here), the document list, then browsertype for SECONDS, the
+# connect during the warm-up: the binary (put_executable), the document list into TYPING_DIR
+# (which the step and the replay create in the runner), then browsertype for SECONDS, the
 # stored-order check's bound and 600 s more, which outlasts loadgen's window, grace, the
-# after-work and the check; typing_stop ends it before that. A step that dies before typing_stop
+# after-work and the check; typing_stop ends it before that. Its peers are people, not the copy's
+# agent: each connects as TYPING_PERSON-<peer> in the TYPING_IDENTITY_HEADER header, so the
+# runner is given no credential of the copy. A step that dies before typing_stop
 # stops it on its way out (step_at_exit, the EXIT trap run_in_runner sets), so no browsertype
 # types into a later step.
+#
+# put_executable above it may have copied nothing (the runner holds the binary already), so the
+# document list's runner_put is this run's first call here that reaches the pod, and it reads
+# the lock itself: a copy the lock gives another run gets neither that file nor the job, because
+# runner_put dies when it is refused.
 typing_start() {
   local name=$1 dir=$2 seconds=$3 docs
   [ -n "$TYPING" ] || return 0
   put_executable "$BROWSERTYPE_BIN" /work/browsertype
-  # shellcheck disable=SC2016 # expanded by the runner's sh
-  state .secrets.dispatch_token | runner_exec -i sh -c 'umask 077 && mkdir -p "$1" && cat >"$1/token"' sh "$TYPING_DIR" ||
-    die "step $name: writing the agent token for browsertype into the runner failed"
   docs=$RUN_DIR/tmp/typing-$name.docs
   printf '%s\n' "${TYPING_LIST[@]}" >"$docs"
   runner_put "$docs" "$TYPING_DIR/$name.docs"
   rm -f -- "$docs"
-  runner_start "typing-$name" /work/browsertype -url "http://dispatch.$NS.svc:8766" -token-file "$TYPING_DIR/token" \
-    -session "$TYPING_SESSION" -artifacts-file "$TYPING_DIR/$name.docs" -peers "$TYPING_PEERS" -rate "$TYPING_RATE" \
+  runner_start "typing-$name" /work/browsertype -url "http://dispatch.$NS.svc:8766" \
+    -identity-header "$TYPING_IDENTITY_HEADER" -person "$TYPING_PERSON" \
+    -artifacts-file "$TYPING_DIR/$name.docs" -peers "$TYPING_PEERS" -rate "$TYPING_RATE" \
     -duration "$((seconds + STORED_ORDER_SECONDS + 600))s" -seed 1 -protect "$TYPING_PROTECT"
   note "step $name: browsertype (commit $(state '.browsertype.commit[0:12]')) started: $TYPING_PEERS peers on each of ${#TYPING_LIST[@]} documents at $TYPING_RATE keystroke updates/s, until the stored-order check ends"
   TYPING_STEP=("$name" "$dir")
@@ -2290,13 +2299,14 @@ typing_summary() {
 
 # typing_stop NAME DIR: when the step runs browser typing and has not stopped it yet (no
 # DIR/browsertype.json): SIGTERM to browsertype, its exit status (at most 120 s later), its output
-# into DIR/browsertype.txt and typing_summary into DIR/browsertype.json, the token removed from the
-# runner, and one line naming the sums. A peer error or a non-zero exit is said, never a step
+# into DIR/browsertype.txt and typing_summary into DIR/browsertype.json, the step's document
+# list removed from the runner, and one line naming the sums. A peer error or a non-zero exit is
+# said, never a step
 # failure. Called right after the stored-order command, and again after the check (which a run
 # whose state.json records no checker does not run), so it never fails.
 #
 # It stops, waits for and removes nothing once the lock names another run: the job typing-NAME
-# and the token under TYPING_DIR are in the pod named runner, which is that run's now, so
+# and the document list under TYPING_DIR are in the pod named runner, which is that run's now, so
 # runner_stop (through runner_exec) stops nothing and this function writes no record of a job it
 # never stopped. The step shell's EXIT trap comes through here (step_at_exit,
 # typing_stop_at_exit), and a step ends on that path exactly when its wait on the runner job
@@ -2311,8 +2321,8 @@ typing_stop() {
   }
   rc=$(runner_wait "$job" 120 "$dir") || rc=timeout
   if [ -f "$dir/$job.log" ]; then mv -f -- "$dir/$job.log" "$dir/browsertype.txt"; else : >"$dir/browsertype.txt"; fi
-  runner_exec rm -f "$TYPING_DIR/token" "$TYPING_DIR/$name.docs" >/dev/null ||
-    note "step $name: removing the agent token from the runner failed"
+  runner_exec rm -f "$TYPING_DIR/$name.docs" >/dev/null ||
+    note "step $name: removing the step's typing document list from the runner failed"
   [[ $rc =~ ^[0-9]+$ ]] || rc=null
   if ! typing_summary "$dir/browsertype.txt" "$rc" >"$dir/browsertype.json.tmp"; then
     rm -f -- "$dir/browsertype.json.tmp"
@@ -2472,7 +2482,7 @@ run_step() {
   write_copy_meta "$dir/copy-meta.json" "$dir" "$phase" "$reads"
   put_loadgen
   runner_has "$RUN_DIR/seed.json" /work/seed.json -f || runner_put "$RUN_DIR/seed.json" /work/seed.json
-  runner_exec mkdir -p /work/meta /work/steps || die "mkdir in the runner failed"
+  runner_exec mkdir -p /work/meta /work/steps "$TYPING_DIR" || die "mkdir in the runner failed"
   runner_put "$dir/copy-meta.json" "/work/meta/$name.json"
 
   endpoints
@@ -3011,7 +3021,8 @@ run_replay() {
       migration: $p[0].migration_after, prepared: $p[0], reset_at: $r[0].ended}' >"$dir/last-reset.json"
   jq -n --slurpfile p "$rec" '{dispatch_commit: $p[0].dispatch_commit, dispatch_image: $p[0].dispatch_image,
     newest_migration: $p[0].schema_version}' >"$dir/envoy-dispatch.json"
-  runner_exec sh -c 'rm -rf /work/bundle /work/root && mkdir -p /work/meta /work/steps /work/root/replay /work/root/bin' ||
+  # shellcheck disable=SC2016 # $1 is expanded by the runner's sh
+  runner_exec sh -c 'rm -rf /work/bundle /work/root && mkdir -p /work/meta /work/steps /work/root/replay /work/root/bin "$1"' sh "$TYPING_DIR" ||
     die "replay $name: preparing the runner's directories failed"
   tar -C "$RUN_DIR/replay" -cf - bundle | runner_exec -t 900 -i tar -C /work -xf - ||
     die "copying the bundle into the runner failed"
@@ -3274,8 +3285,8 @@ up_run() {
 
   # The stored-order checker, before the lock, so a checker that does not build is refused.
   stored_order_build "$commit" "$so_source" "$so_checker"
-  # browsertype too, before the lock, so a driver that does not build or has no -protect is refused
-  # with nothing taken.
+  # browsertype too, before the lock, so a driver that does not build or whose -help lists no
+  # -protect or no -person is refused with nothing taken.
   if [ -n "$bt_commit" ]; then
     note "building browsertype (static) of commit $bt_commit, for browser typing"
     build_at_commit "$bt_commit" ./loadtest/browsertype "$CHECKER_TMP/browsertype" || die "up: go build of browsertype at commit $bt_commit failed"
@@ -3283,6 +3294,8 @@ up_run() {
     bt_help=$("$CHECKER_TMP/browsertype" -help 2>&1 || true)
     [[ $bt_help == *-protect* ]] ||
       die "up: browsertype of commit $bt_commit has no -protect flag: it would type into loadgen's '$TYPING_PROTECT' paragraph and fail every later edit and upload of the typed documents; give a commit of INFRA-707's driver that has -protect"
+    [[ $bt_help == *-person* ]] ||
+      die "up: browsertype of commit $bt_commit has no -person flag: Dispatch admits only the identity service's person into a document room (sjawhar/legion#2541), so a driver that connects with the copy's agent token types nothing; give a commit of INFRA-707's driver at or after 67ac05a4, which takes -person and -identity-header"
   fi
 
   set_run "lt-$(date -u +%Y%m%dt%H%M%S)-$(random_hex 2)"
