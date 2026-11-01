@@ -853,7 +853,7 @@ The rule in brief is `internal/dispatch/store/README.md`, beside the migrations 
 A migration added from now on is named `<UTC timestamp>_<name>.up.sql`, the timestamp the moment its author created it, `YYYYMMDDHHMMSS` (`date -u +%Y%m%d%H%M%S`), with its census as `<same timestamp>_<name>.census.sql`.
 The numbered versions are the sequence the set grew up with;
 every one of those files keeps the number it landed with, and no number is added again:
-the series closed at `0157_document_edit_notices_notify.up.sql`, which `migrationid` records once for Dispatch, and a set holding a number above it is refused (`migrationid.Check`), so a branch that takes the next number fails on its own, before it merges.
+the series closed at `0161_delivery_run_warnings.up.sql`, which `migrationid` records once for Dispatch, and a set holding a number above it is refused (`migrationid.Check`), so a branch that takes the next number fails on its own, before it merges.
 Two pull requests open at once used to take one number each and collide only when the first merged — nothing conflicts in git — while two timestamps taken a moment apart belong to their own authors.
 The version is the file name's leading digits read as a number, as before, so every timestamp orders after every number and timestamps order among themselves by time.
 A 14-digit version is past what an `integer` column holds, so `schema_migrations.version` is a `bigint`.
@@ -1315,6 +1315,12 @@ The column is added with no default, so no row is rewritten, and the previous re
 The column takes `block_refs` `ACCESS EXCLUSIVE` and the view `graph_edges` `ACCESS EXCLUSIVE` for the migration's short transaction, so a block index write and a reference read wait behind it.
 It refuses and rewrites no row; its census answers `0`.
 No shipped block type declares a `block[]` attribute, so no pointer row exists for a build that does not know one to drop.
+
+Migration `20261101183525_graph_edges_ask_parts_and_block_pointers` re-states `graph_edges` once with the arms of both migrations of this release that wrote it.
+`20261101143211` added an ask's parts and `20261101144855` filtered the `block_refs` arm by `block_ref_listed`, each from `0142`'s arms, and timestamps sort them, so the later one replaced the view the earlier one wrote.
+This states every arm of both, and is the arm list a later migration re-states from.
+It creates nothing and reads no stored row; it refuses and rewrites no row, and its census answers `0`.
+It takes the view `ACCESS EXCLUSIVE` for its short transaction, as the two before it do.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
@@ -2256,18 +2262,10 @@ Each item below names a path with its method and identity, then its purpose.
   The answer is `{node, edges}`, the node read and its edges.
   Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`.
   The node read, each edge's `node` and each edge's `block` carry the six facts of every node, `made_by`, `made_at`, `changed_by`, `changed_at`, `parent` and `parent_version` ([Reference graph](#reference-graph)).
-<<<<<<< conflict 1 of 1
-+++++++ nkyspzno a7a9f51e "test: record handoff"
-  A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document), and one a block of a comment or issue message, or a part of an ask, holds from that block (`node.kind` `block`, id `comment/<uuid>#<block id>`, `message/<uuid>#<block id>` or `ask/<uuid>#<part id>`, `node.parent` the comment, message or ask);
+  A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document);
+  a typed block's `block[]` pointer is an edge of the attribute's kind from it, listed only while its target has a type the attribute allows;
+  and a mention a block of a comment or issue message, or a part of an ask, holds is listed from that block (`node.kind` `block`, id `comment/<uuid>#<block id>`, `message/<uuid>#<block id>` or `ask/<uuid>#<part id>`, `node.parent` the comment, message or ask);
   a document's, comment's, message's or ask's own read also lists the edges at its blocks, an ask's parts among them, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`, and a reply that names a block of the comment or message read, or a part of the ask read, is listed once, under that block.
-%%%%%%% diff from: vlvxlmuq 4644a072 "feat(scripts): measure Legion pull requests' merge conflicts before and after a fix (#2411)"
-\\\\\\\        to: ttznowrr 8d555cc2 "chore: fold changelog fragments [skip ci]"
--  A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document), and one a block of a comment or issue message holds from that block (`node.kind` `block`, id `comment/<uuid>#<block id>` or `message/<uuid>#<block id>`, `node.parent` the comment or message);
-+  A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document);
-+  a typed block's `block[]` pointer is an edge of the attribute's kind from it, listed only while its target has a type the attribute allows;
-+  and a mention a block of a comment or issue message holds is listed from that block (`node.kind` `block`, id `comment/<uuid>#<block id>` or `message/<uuid>#<block id>`, `node.parent` the comment or message);
-   a document's, comment's or message's own read also lists the edges at its blocks, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`, and a reply that names a block of the comment or message read is listed once, under that block.
->>>>>>> conflict 1 of 1 ends
   A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`;
   pinned to a version (`#b-<id>@v<N>`; for a comment's block, a revision of the comment, and for an ask's part, a revision of the ask's parts) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges.
   `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`, `INVALID_REFERENCE` too for a message block pinned with `@v<N>` (a message never changes);

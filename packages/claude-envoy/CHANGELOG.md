@@ -1,5 +1,13 @@
 # Changelog
 
+## [main@6b1524cdb8aa] - 2026-11-01
+
+### Fixed
+
+- The bundled `dispatch request-approval` finds an ask block whose id the renderer writes
+  `id="…"`, such as `a b` (`id="a b"`) or `R&D` (`id="R&amp;D"`), instead of naming it as one the
+  latest version does not hold yet and refusing every request over the document.
+
 ## [main@2605f55135db] - 2026-11-01
 
 ### Added

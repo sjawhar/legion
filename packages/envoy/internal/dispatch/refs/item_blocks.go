@@ -576,7 +576,7 @@ func itemBlockPairs(next []itemblocks.Block, ids []string, located []text.Locate
 	for index, block := range next {
 		nodes[index] = model.ArtifactBlock{ID: ids[index], From: block.From, To: block.To}
 	}
-	return blockPairs(nodes, located)
+	return blockPairs(nodes, located, nil)
 }
 
 // replaceItemBlockRefs reconciles the item's block mentions with pairs, matching on the columns

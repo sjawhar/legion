@@ -142,7 +142,8 @@ func askPartsSum(parts []itemblocks.Block) string {
 
 // askPartPairs is each distinct link the parts hold, from the part that holds it. A part is its
 // own text, so each part's mentions are read from that text alone and paired to it, with no
-// offset arithmetic into one body (blockPairs over the one part).
+// offset arithmetic into one body (blockPairs over the one part). An ask's text is prose, never
+// a typed block, so a part holds no block pointer and the pairs are its mentions alone.
 func askPartPairs(parts []itemblocks.Block, ids []string, serverURL string) []blockPair {
 	var pairs []blockPair
 	for index, part := range parts {
@@ -151,7 +152,7 @@ func askPartPairs(parts []itemblocks.Block, ids []string, serverURL string) []bl
 			continue
 		}
 		node := []model.ArtifactBlock{{ID: ids[index], From: 0, To: len(part.Text)}}
-		pairs = append(pairs, blockPairs(node, located)...)
+		pairs = append(pairs, blockPairs(node, located, nil)...)
 	}
 	return pairs
 }

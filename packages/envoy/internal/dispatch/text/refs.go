@@ -385,6 +385,52 @@ func EncodeBlockID(id string) string {
 	return b.String()
 }
 
+// FormatBlockRef writes a block of a document as every writer writes one:
+// `dispatch://<ISSUE>/spec` for a block of an issue's primary document,
+// `dispatch://<ISSUE or PROJECT>/artifact/<slug>` for any other document of an issue or a project
+// (a project's document whose slug is spec included), then `#b-` and the id as EncodeBlockID
+// writes it, then `@v<Pin>` when the reference is pinned. It is false for a reference that is not
+// to a block, for a block of a comment or a message (Item set), and for a block of an agent
+// conversation's document, which no block reference names. Its twin is formatBlockReference in
+// @legion/contracts.
+func FormatBlockRef(ref Ref) (string, bool) {
+	if ref.Kind != "block" || ref.Item != "" || ref.Session != "" || ref.ID == "" || (ref.IssueKey == "") == (ref.Project == "") {
+		return "", false
+	}
+	var document string
+	switch {
+	case ref.IssueKey != "" && ref.ID == "spec":
+		document = ref.IssueKey + "/spec"
+	case ref.IssueKey != "":
+		document = ref.IssueKey + "/artifact/" + ref.ID
+	default:
+		document = ref.Project + "/artifact/" + ref.ID
+	}
+	written := "dispatch://" + document + "#b-" + EncodeBlockID(ref.Block)
+	if ref.Pin > 0 {
+		written += "@v" + strconv.Itoa(ref.Pin)
+	}
+	return written, true
+}
+
+// CanonicalBlockRef reads value as one block of a document written exactly as FormatBlockRef
+// writes it - the one way a typed block's `block[]` attribute holds a pointer: value is the one
+// reference text would cite there (ExtractAt with no server URL, so a dashboard URL is never one),
+// it starts at value's first byte, it is a block, and FormatBlockRef writes it back as value. That
+// last check refuses what the reader alone accepts: lower-case or needless percent-encoding, an
+// issue's primary document spelled `artifact/spec`, anything trailing the reference, and a block
+// of a comment or a message.
+func CanonicalBlockRef(value string) (Ref, bool) {
+	located := ExtractAt(value, "")
+	if len(located) != 1 || located[0].Offset != 0 || located[0].Kind != "block" {
+		return Ref{}, false
+	}
+	if written, ok := FormatBlockRef(located[0].Ref); !ok || written != value {
+		return Ref{}, false
+	}
+	return located[0].Ref, true
+}
+
 // parseBlock reads `<document or item reference>#b-<block id>[@v<N>]`: a block of an issue's
 // spec, an issue's document or a project's document, optionally pinned to version N of that
 // document, or a part of an ask (`KEY/ask/<id>`, or a project document's

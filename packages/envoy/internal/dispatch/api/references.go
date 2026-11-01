@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
@@ -353,10 +354,15 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 	target, _ := refs.TargetOf(ref)
 	query := refs.Query{Direction: direction, Kind: target.Kind, ID: target.ID}
 	if kinds := strings.TrimSpace(values.Get("kind")); kinds != "" {
+		linkKinds := pmdoc.LinkKinds()
 		for _, kind := range strings.Split(kinds, ",") {
 			kind = strings.TrimSpace(kind)
-			if !refs.KnownKind(kind) {
-				return refs.Query{}, text.Ref{}, errorf(http.StatusBadRequest, "INVALID_KIND", "kind %q is not one of %s", kind, strings.Join(refs.Kinds, ", "))
+			if !slices.Contains(model.GraphEdgeKinds, kind) && !slices.Contains(linkKinds, kind) {
+				declared := "none"
+				if len(linkKinds) > 0 {
+					declared = strings.Join(linkKinds, ", ")
+				}
+				return refs.Query{}, text.Ref{}, errorf(http.StatusBadRequest, "INVALID_KIND", "kind %q is not one of %s, nor a block[] attribute the block schema declares (%s)", kind, strings.Join(model.GraphEdgeKinds, ", "), declared)
 			}
 			query.Kinds = append(query.Kinds, kind)
 		}

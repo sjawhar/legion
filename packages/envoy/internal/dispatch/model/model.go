@@ -1775,6 +1775,11 @@ type GraphExcerpt struct {
 	Text    string `json:"text"`
 }
 
+// GraphEdgeKinds is every structural edge kind graph_edges emits. A typed block's `block[]`
+// attribute makes edges of a kind named by the attribute (pmdoc.LinkKinds), which is never one of
+// these: a schema name equal to one would merge silently with it in every reader.
+var GraphEdgeKinds = []string{"mentions", "child_of", "blocked_by", "attached_to", "anchored_to", "owned_by", "replies_to", "followed_by", "part_of", "depends_on", "affects"}
+
 // GraphEdge is one typed, timestamped edge of graph_edges seen from the queried node: Node is
 // the other end, Direction is "in" for edges pointing at the queried node and "out" for edges
 // it writes. SourceSeq is the events.id that introduced a mention; nil for structural edges.

@@ -65,15 +65,27 @@ export function serviceSubjectLabel(subject: string): string {
   return subject;
 }
 
-export type BlockAttributeKind = "string" | "bool" | "enum" | "string[]" | "actor" | "timestamp";
+export type BlockAttributeKind =
+  | "string"
+  | "bool"
+  | "enum"
+  | "string[]"
+  | "block[]"
+  | "actor"
+  | "timestamp";
 
 export type BlockContentRule = "paragraph+" | "block+" | "paragraph+ bullet_list?";
 
+// A `block[]` attribute points at blocks: canonical block references (parseBlockPointerValue in
+// dispatch-block-ref.ts), each making an edge of the attribute's name (GraphEdgeKind). `targets`,
+// which only a `block[]` attribute carries, limits the types of the blocks it points at; absent
+// or empty, it points at any block.
 export interface BlockAttributeSchema {
   readonly kind: BlockAttributeKind;
   readonly choices?: readonly string[];
   readonly default?: string | boolean | readonly string[];
   readonly server?: boolean;
+  readonly targets?: readonly string[];
 }
 
 export interface BlockTypeSchema {
@@ -2140,6 +2152,10 @@ export interface ArtifactReferences {
   readonly referenced_by: ReferencedBy[];
 }
 
+// GraphEdgeKind is an edge's kind: one of the structural kinds, or the name of a typed block's
+// `block[]` attribute (BlockAttributeSchema), whose pointers are edges of that kind. The block
+// schema decides those names (Go's pmdoc.LinkKinds), so any other string is admitted beside the
+// structural ones, which keep their completion; none of them is ever an attribute's name.
 export type GraphEdgeKind =
   | "mentions"
   | "child_of"
@@ -2151,7 +2167,8 @@ export type GraphEdgeKind =
   | "followed_by"
   | "part_of"
   | "depends_on"
-  | "affects";
+  | "affects"
+  | (string & {});
 
 // GraphNode is one end of a reference-graph edge. `ref` is its dispatch:// address; a
 // session node has none. A component node's id is `<project>/<component id>`.
