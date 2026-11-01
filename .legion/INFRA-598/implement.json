@@ -2,38 +2,41 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-598",
-  "previousHandoff": "beff7ca3bce27cfbf47b9ec57b17f3dc14edf150",
+  "previousHandoff": "7eb1f45abcf0ea1766ce5bdb2e1adcd3f07081db",
   "proof": [
     {
-      "criterion": "Tester round 11: cluster.test.sh is green over repeated runs under CPU load (the collect assertion and every other position-based read of the shared kubectl.log read the command's own calls by session)",
-      "surface": "cluster.test.sh under four busy loops on this 2-CPU pod, one run at a time",
-      "command": "cd packages/envoy && (4 x 'while :; do :; done' &) && for n in 1..5: timeout 5400 bash loadtest/cluster/cluster.test.sh",
-      "observed": "5 of 5 green at b467bd82: 55 PASS, 0 FAIL each, ended 05:29:46, 06:07:46, 06:46:41, 07:24:57, 08:03:27Z (dispatch://INFRA-598/artifact/cluster-test-under-load-b467bd82-txt); at 78a12fbe four loaded runs were green before the 03:02Z pod restart cut the fifth (cluster-test-under-load-round8-txt)",
-      "headSha": "b467bd82ac56",
-      "negativeControl": "the tester's own loaded runs at d9d38377, before the fix: iter-2 of 3 red with 'collect --run ... read the lock, which names another run'"
+      "criterion": "Review round 8: the disk watcher and the runner-job wait read the lock once per poll and stop the job on that answer; the wait ends only once the stopped job has an exit status; a TERM during the watcher's act is kept and pg_disk_watch_stop is bounded",
+      "surface": "cluster.sh under cluster.test.sh's fakes (FAKE_LOCK_GET_OK_TIMES, FAKE_LOCK_GET_FAIL_TIMES, FAKE_LOCK_GET_DELAY, FAKE_RC_UNTIL_KILL), case (dd)",
+      "command": "cd packages/envoy && (4 x 'while :; do :; done' &) && for n in 1 2 3: timeout 5400 bash loadtest/cluster/cluster.test.sh",
+      "observed": "at 83986ea7: 3 of 3 green under load, 56 PASS 0 FAIL each, ended 15:44:31, 16:23:48, 17:03:25Z (dispatch://INFRA-598/artifact/cluster-test-under-load-83986ea7-txt); at the merge fe522a73 (same loadtest tree as head ce1289aa): 3 of 3 green, 56 PASS 0 FAIL each, ended 18:07:43, 18:47:34, 19:30:42Z (dispatch://INFRA-598/artifact/cluster-test-under-load-fe522a73-txt); shellcheck of cluster.sh clean",
+      "headSha": "ce1289aa9d1c",
+      "negativeControl": "case (dd) against b467bd82's cluster.sh (scratch copy): 14 FAIL lines, among them 'the disk watcher stopped no runner job although its own read of the lock answered', 'the wait ended with status 1 at a deadline its own read of the lock answered', 'pg_disk_watch_stop did not return within 45 s: the TERM that landed inside the watcher's read of the lock was lost'"
     },
     {
-      "criterion": "Architect's round-8 item: browser typing works with browsertype at 67ac05a4 and later against a Dispatch after f93dd689 (#2541): -person, no token write",
-      "surface": "GKE namespace loadtest, from this worker pod; and cluster.test.sh's fakes",
-      "command": "cluster.sh up --namespace loadtest --storage-class premium-rwo --dispatch-commit f93dd6895f3a --pg-major 18 --production-repo <deployment repo> --stored-order-source 67ac05a4 --browsertype-commit 67ac05a4; seed; step 1x-typing 1 --duration 3m --typing --typing-docs 5; down",
-      "observed": "run lt-20261101t042332-f302: browsertype exit 0, 10 peers on 5 documents, sent=27375 skipped=0 errors=0; stored-order over the typed documents 2 clean, 3 mismatched (finding for INFRA-707); down exit 0, namespace empty (dispatch://INFRA-598/artifact/cluster-typing-step-as-people-lt-20261101t042332-f302-log-txt). Fakes: start line names -identity-header X-Dispatch-User -person browsertype and no -token-file/-session; no token written; up refuses a browsertype without -person; 55 PASS",
-      "headSha": "b467bd82ac56",
-      "negativeControl": "live: the same up with --browsertype-commit abd86842 (before 67ac05a4) exits 1 before the lock: 'has no -person flag ... give a commit of INFRA-707's driver at or after 67ac05a4', no lock or pod left; fakes: the new suite against 78a12fbe's cluster.sh fails 'up accepted a browsertype with no -person', and with that case removed the old token write 'sh -c umask 077 && mkdir -p \"$1\" && cat >\"$1/token\"' is refused by the fake"
+      "criterion": "Forward merge of main (GitHub reported CONFLICTING; #2633 fixes main's only red check): six conflicts in the 2-core harness resolved against both parents; the PR's file set is unchanged but for the fragment renames",
+      "surface": "the merged tree's Go and shell tests; GitHub mergeability; jj diff --name-only against the fork point",
+      "command": "cd packages/envoy && go test -p 1 -count=1 ./loadtest/... && bash loadtest/common.test.sh && bash loadtest/run-step.test.sh; gh pr view 2462 --json mergeable",
+      "observed": "go test ok (loadtest, loadtest/browsertype); common.test.sh and run-step.test.sh exit 0; MERGEABLE at ce1289aa; file set 56 paths before (83986ea7) and after (ce1289aa), differing only by INFRA-598-*.yaml -> pr2462-Added-*.yaml; fingerprints 025682c78ab0306e -> 41d9755edee445b2 (fe522a73, conflicts resolved) -> 41d9755edee445b2 (db84a8ba, clean) -> cefe12d85ac46fe4 (ce1289aa, renames); comment https://github.com/sjawhar/legion/pull/2462#issuecomment-6563150133",
+      "headSha": "ce1289aa9d1c",
+      "negativeControl": "before the merge GitHub reported 83986ea7 CONFLICTING and ran no check on it (the tester's measurement, 18:52Z)"
     }
   ],
   "filesChanged": [
     "packages/envoy/loadtest/cluster/cluster.sh",
     "packages/envoy/loadtest/cluster/cluster.test.sh",
-    "packages/envoy/loadtest/README.md"
+    "packages/envoy/loadtest/README.md",
+    "packages/envoy/.changes/unreleased/pr2462-Added-20261028-123000.yaml (renamed from INFRA-598-cluster-load-test.yaml)",
+    "packages/envoy/.changes/unreleased/pr2462-Added-20261029-210000.yaml (renamed from INFRA-598-stored-order-typing.yaml)",
+    "merge resolutions: packages/envoy/loadtest/{README.md,common.sh,main.go,run.go,sample.go,stack.sh}"
   ],
   "trickyParts": [
-    "Without the token write, nothing created /work/typing in the runner before kubectl cp of the document list; run_step and run_replay now create it with the runner's other directories (the fake cp does mkdir -p, so only the live step proves it).",
-    "runner_put of the document list is now typing_start's first call that reaches the pod; it dies when the lock names another run, which the guard case asserts."
+    "runner_term has no guard of its own; it is listed as exempt and runs only right after its caller's copy_is_ours answered 0.",
+    "runner_wait no longer breaks at its TERM: it prints timeout once the job records an exit status, with one SIGKILL after RUNNER_STOP_GRACE_SECONDS; typing_stop's wait is therefore no longer bounded at 120 s.",
+    "pg_disk_watch_stop kills the watcher and the children of its act after PG_DISK_STOP_SECONDS (300), and notes it, naming the step."
   ],
   "deviations": [
-    "The live typing step ran on Dispatch f93dd6895f3a, the #2541 merge itself: main's tip c656fc4f has no published envoy image, and up named f93dd689 as the newest ancestor with one."
+    "runner_stop's guard subject is 'the runner job NAME in the runner pod', so the existing (y)/(aa) assertions on 'the runner pod' hold unchanged.",
+    "The three loaded runs ran at the first merge fe522a73; the head adds the clean merge of #2633 (no loadtest file changed) and the fragment renames."
   ],
-  "openQuestions": [
-    "The live step's stored-order check found 3 of 5 typed documents mismatched under 1x load with browser typing (evidence kept on this pod under the run's steps/1x-typing/stored-order-evidence); that is INFRA-707's subject, reported to the architect."
-  ]
+  "openQuestions": []
 }
