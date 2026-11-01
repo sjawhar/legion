@@ -88,6 +88,12 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // that agent onto the current plugin, and a pod replaced for any other reason in the same sweep
 // still is.
 //
+// A ServiceAccount other than the configured one (accountDrift) is the one kind of drift no round
+// and no install answers, so a pod carrying it is replaced here whatever kind of pod it is and
+// whatever the launch is installing: the account is fixed for the pod's life, and until the pod is
+// created afresh its agents go on holding the identity the old account grants, so the old account
+// can be deleted only once every such pod has gone.
+//
 // Replacing a live pod — its Sandbox Running, the pod its own, not ended, its init containers
 // passed — ends the process of every role
 // still running in it, wherever its turn stood, so the Suspended patch that replaces it names it
@@ -147,12 +153,20 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	pod := r.storedPod(s.Name)
 	_, initExit := failedInit(pod)
 	live := s.mode() != modeSuspended && ownedBy(pod, s.UID) && !terminal(pod) && initExit == nil
+	_, accountDrifted := accountDrift(pod, r.pod.ServiceAccount)
 	installing := l.spec.Plugins != nil
 	migrate := supersededDisk(s, l)
 	// A live pod no round covers is this launch's to replace for every kind of drift: its three
 	// facets come through movedInPod, and the shape its template was built from is read here,
 	// unless this launch is installing a stale-plugin pair into it (roundCovers, shapeDrift).
-	replace := !live || migrate ||
+	//
+	// A pod running as a ServiceAccount other than the configured one is replaced here whatever
+	// kind of pod it is and whatever the launch is installing (accountDrift): the account is
+	// fixed for the pod's life, so no install can move it and no update round can either — the
+	// round's own replacement is what a covered pod's other drift waits for, and this one cannot
+	// wait, since until the pod is created afresh its agents go on holding the identity the old
+	// account grants.
+	replace := !live || accountDrifted || migrate ||
 		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 }) ||
 		(!installing && !roundCovers(l.kind) && len(r.shapeDrift(s, l.kind)) > 0)
 	if !replace {

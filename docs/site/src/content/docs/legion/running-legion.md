@@ -516,7 +516,9 @@ To stand it up:
    next apply: a forced one writes its copy back, and one without force fails on any key whose value
    differs and leaves yours. Either way, stop that tool declaring the ConfigMap first.
 3. Put `pod.yml`'s contents under `runtime.kubernetes.pod` in `legion.yaml`, with your endpoint's
-   token audience in place of `${MODEL_TOKEN_AUDIENCE}`.
+   token audience in place of `${MODEL_TOKEN_AUDIENCE}` and the ServiceAccount your pods run as in
+   place of `${POD_SERVICE_ACCOUNT}`. `legion start --check-config` refuses either placeholder
+   unfilled.
 
 Name every role Legion's agents use in `modelRoles` (`default`, `review`, `oracle`, `deep`, `smol`,
 `slow`, and the rest the example names): the daemon refuses to boot when an agent's role has no

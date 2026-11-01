@@ -338,10 +338,9 @@ func TestAnInjectedSidecarLeavesAPodOfTheEarlierLayout(t *testing.T) {
 // launcher's state is read, so the supervisor repoints each uncharged. Such a pod's launchers
 // predate the update round's contract and cannot be asked to push first, so the first relaunch
 // replaces it where it stands, an installing launch included, where a launch into a pod that has
-// merely drifted keeps it; the replacement is
-// a fresh pod on the configured image, so that launch installs nothing; the pod it makes runs one
-// container, the siblings' old processes read as the daemon's replacement (Displaced), and a
-// sibling resumes into the same new pod.
+// merely drifted keeps it; the replacement is a fresh pod on the configured image, so that launch
+// installs nothing; the pod it makes runs one container, the siblings' old processes read as the
+// daemon's replacement (Displaced), and a sibling resumes into the same new pod.
 func TestAnIssuePodOfTheEarlierLayoutIsStaleForEveryRoleAndReplacedByTheNextLaunch(t *testing.T) {
 	g := newRig(t, nil)
 	tester, reviewer := workerSpec(t), testSpec(t, otherToken, claim.RoleReviewer, testTree)

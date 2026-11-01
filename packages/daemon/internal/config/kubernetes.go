@@ -635,7 +635,9 @@ func ReadPodFile(path string) (PodConfig, error) {
 	return pod, nil
 }
 
-// readPod reads `runtime.kubernetes.pod`, refusing a shape no pod could carry.
+// readPod reads `runtime.kubernetes.pod`, refusing a shape no pod could carry, and a
+// ServiceAccount still holding a ${…} placeholder: nothing in Legion expands one, as the token
+// projection says, so the API server would refuse every pod for an account that does not exist.
 func readPod(value *yaml.Node) (PodConfig, error) {
 	if value == nil {
 		return PodConfig{}, nil
@@ -661,7 +663,23 @@ func readPod(value *yaml.Node) (PodConfig, error) {
 	if pod.ServiceAccount, err = optionalString(fields["service_account"], podKey+".service_account"); err != nil {
 		return PodConfig{}, err
 	}
+	if err := unfilledPlaceholder(podKey+".service_account", pod.ServiceAccount, "the ServiceAccount the pods run as"); err != nil {
+		return PodConfig{}, err
+	}
 	return pod, nil
+}
+
+// unfilledPlaceholder refuses a value still holding a `${…}` placeholder: nothing in Legion expands
+// one, so the value would be read as the placeholder's own text — a ServiceAccount no namespace
+// has, an audience no service issues a token for — and whatever uses it would refuse it far from
+// the configuration that wrote it, in a message naming neither. key is the key as the operator
+// wrote it and put what belongs in its place, so the one refusal still reads as the key's own
+// sentence. A value holding no placeholder, an unset key's "" included, is no error.
+func unfilledPlaceholder(key, value, put string) error {
+	if !strings.Contains(value, "${") {
+		return nil
+	}
+	return fmt.Errorf("%s %q is an unfilled placeholder: put %s in its place", key, value, put)
 }
 
 // readPodEnv is `pod.env`: a mapping of variable to value, refusing a variable shaped like a
@@ -1041,8 +1059,8 @@ func readTokenProjection(value *yaml.Node, key string) (*corev1.ServiceAccountTo
 	if token.Audience, err = optionalString(fields["audience"], key+".audience"); err != nil {
 		return nil, err
 	}
-	if strings.Contains(token.Audience, "${") {
-		return nil, fmt.Errorf("%s.audience %q is an unfilled placeholder: put the audience the token is for in its place", key, token.Audience)
+	if err := unfilledPlaceholder(key+".audience", token.Audience, "the audience the token is for"); err != nil {
+		return nil, err
 	}
 	expiry, err := readInt(fields["expiration_seconds"], key+".expiration_seconds")
 	switch {

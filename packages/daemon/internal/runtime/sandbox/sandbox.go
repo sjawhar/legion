@@ -21,6 +21,7 @@
 package sandbox
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -701,6 +702,40 @@ func imageOtherThan(spec *corev1.PodSpec, image string) (string, bool) {
 	return "", false
 }
 
+// defaultServiceAccount is the account a pod runs as when its spec names none: the namespace's
+// own, which the API server writes onto the pod at creation.
+const defaultServiceAccount = "default"
+
+// serviceAccountOr is the account a pod named name runs as: name, or the namespace's default when
+// name is empty. Both sides of accountDrift read through it, so the one rule that an unset account
+// is `default` lives here alone.
+func serviceAccountOr(name string) string {
+	return cmp.Or(name, defaultServiceAccount)
+}
+
+// accountDrift is the ServiceAccount p runs as, and whether it is not account, the one this
+// runtime creates every pod with (runtime.kubernetes.pod.service_account). A pod runs as the
+// account it was created with for its whole life — the field is fixed on the pod, and nothing the
+// daemon writes to the Sandbox moves it — so an operator who changes service_account reaches a
+// running pod only by replacing it: until then its agents hold the identity the old account
+// grants, whatever the configuration now says they may reach. relaunch replaces such a pod at the
+// next launch of any of its roles, reconcileCachePod at the next ensure of a cache's (a sweep, or
+// a new issue pod of its repository), and ReconcileOrphans warns of each one it finds, as all
+// three do for imageDrift. The comparison is of the live pod's spec.ServiceAccountName, never the
+// Sandbox's stored template: the API server keeps a named account as written. It reads an unset
+// account as `default` on both sides, because the two sides spell the same account differently —
+// the daemon writes "" into the template when service_account is unset (manifest.go, config's
+// optionalString), where the API server writes "default" into the pod it creates — and comparing
+// either raw would read every pod of a deployment that names no account as drifted and replace
+// the whole fleet. A nil pod holds no drift: it is replaced for being absent.
+func accountDrift(p *corev1.Pod, account string) (string, bool) {
+	if p == nil {
+		return "", false
+	}
+	runs := serviceAccountOr(p.Spec.ServiceAccountName)
+	return runs, runs != serviceAccountOr(account)
+}
+
 func decodeSandbox(u *unstructured.Unstructured) (*sandbox, error) {
 	var s sandbox
 	if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &s); err != nil {
@@ -946,13 +981,17 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 // either: the claim path passes over it, and sweepCaches keeps, repairs or retires it after the
 // claim path. known's located claims join the watch, unless it already holds a newer incarnation
 // of the claim, and are evaluated at once. Nothing here lists Secrets: each goes with its Sandbox.
-// Each Sandbox whose pod runs an image other than the runtime's (imageDrift) is warned of, named
-// with both images, at the boot reconciliation and at every sweep until its update round replaces
-// the pod (warnImageDrift): a release whose daemon stops serving a route, or stops
-// setting a variable, that the previous image's agents call or read leaves such a pod's agents
-// calling this daemon as the older release, so it is pinned only once every tree is drained or
-// every pod relaunched, and the boot log is where an operator reads which pods are still to go.
-// Only a warning: refusing the pod would stop it being observed.
+// Each Sandbox whose pod runs an image other than the runtime's (imageDrift), or as a
+// ServiceAccount other than the configured one (accountDrift), is warned of, named with both
+// images or both accounts, at the boot reconciliation and at every sweep until the pod is
+// replaced — its update round's replacement for the image, a relaunch of one of its roles for the
+// account, which no round answers (warnPodDrift): a release whose daemon stops serving a route,
+// or stops setting a variable, that the previous image's agents call or read leaves such a pod's
+// agents calling this daemon as the older release, and a pod created under an account the
+// configuration has since moved off leaves its agents holding the identity that account grants,
+// so a release is pinned, or the old account deleted, only once every tree is drained or every
+// pod relaunched, and the boot log is where an operator reads which pods are still to go. Only a
+// warning: refusing the pod would stop it being observed.
 func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {
 	var errs []error
 	// controllers are the Sandboxes of the known controller claims, which the sweep keeps.
@@ -979,7 +1018,7 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 		if u.GetLabels()[labelProbe] != "" || u.GetLabels()[labelCache] != "" || u.GetDeletionTimestamp() != nil {
 			continue
 		}
-		r.warnImageDrift(u)
+		r.warnPodDrift(u)
 		if age := r.now().Sub(u.GetCreationTimestamp().Time); age < grace {
 			continue
 		}
@@ -991,17 +1030,26 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 	return errors.Join(errs...)
 }
 
-// warnImageDrift logs, for the Sandbox u, the pod it owns in the store when a container of it runs
-// an image other than the runtime's (imageDrift): the Sandbox's name, the image found and the
-// configured one, as ReconcileOrphans says. A same-named pod u does not own is an earlier
-// Sandbox's, on its way out, and is nothing of u's to warn about.
-func (r *Runtime) warnImageDrift(u *unstructured.Unstructured) {
+// warnPodDrift logs, for the Sandbox u, what the pod it owns in the store runs that a pod created
+// now would not: a container on an image other than the runtime's (imageDrift), and the pod
+// running as a ServiceAccount other than the configured one (accountDrift). Each kind of drift is
+// one warning of its own, naming the Sandbox, what was found and what is configured, as
+// ReconcileOrphans says, so a pod holding both is named twice. A same-named pod u does not own is
+// an earlier Sandbox's, on its way out, and is nothing of u's to warn about. No cache Sandbox is
+// ever warned of, for the account as for the image: ReconcileOrphans passes over it before the
+// call, since its own sweep replaces its pod for either drift without a relaunch to wait for.
+func (r *Runtime) warnPodDrift(u *unstructured.Unstructured) {
 	pod := r.storedPod(u.GetName())
 	if !ownedBy(pod, u.GetUID()) {
 		return
 	}
 	if other, drifted := imageDrift(pod, r.image); drifted {
 		r.log.Warn(fmt.Sprintf("sandbox runtime: %s runs image %s, the configured image is %s; its agents call this daemon as the older release until its update round replaces the pod", u.GetName(), other, r.image),
+			"sandbox", u.GetName(), "pod", pod.UID)
+	}
+	if account, drifted := accountDrift(pod, r.pod.ServiceAccount); drifted {
+		r.log.Warn(fmt.Sprintf("sandbox runtime: %s runs as ServiceAccount %s, the configured ServiceAccount is %s; its agents hold that identity until the pod is relaunched",
+			u.GetName(), account, serviceAccountOr(r.pod.ServiceAccount)),
 			"sandbox", u.GetName(), "pod", pod.UID)
 	}
 }
