@@ -291,6 +291,14 @@ function heading(page: Page, name: string): Locator {
   return page.getByRole("heading", { exact: true, level: 1, name });
 }
 
+/** An issue's own title. The title is not the only `h1` an issue page can hold: the shell shows a
+ *  loading skeleton `h1` before the issue arrives, and a document whose text opens on a top-level
+ *  heading - as this fixture's spec does - puts that heading on the page too. The header holds the
+ *  one heading the issue is identified by. */
+function issueHeading(page: Page, name: string): Locator {
+  return page.getByTestId("issue-header").getByRole("heading", { exact: true, level: 1, name });
+}
+
 /** A document open in the editor and connected: the editor chunk ran and the Yjs stack synced. */
 function openDocument(page: Page, text: string): readonly Locator[] {
   return [documentEditor(page).filter({ hasText: text }), connectedDot(page)];
@@ -356,7 +364,7 @@ function visits(seed: Seeded): readonly Visit[] {
       ],
       url: `${agent}/artifacts/${seed.agentArtifact}`,
     },
-    { route: "/issues/:key/*", shows: (page) => [heading(page, shown.issue)], url: issue },
+    { route: "/issues/:key/*", shows: (page) => [issueHeading(page, shown.issue)], url: issue },
     {
       loads: ["editor"],
       route: "/issues/:key/*",

@@ -389,7 +389,7 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 	w.consumers, err = intake.OpenConsumers(ctx, js, w.pool, intake.ConsumerSpec{
 		Project: cfg.Project, Repositories: heard, Deploys: cfg.Projects[cfg.Project].Deploys, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
 		ReviewPermission: w.reviewerCanWrite, ReviewBody: w.reviewBody,
-		RepositoryMapping: w.mappingChange, PrepareRepository: w.prepareRepository,
+		RepositoryMapping: w.mappingChange, PrepareRepository: w.prepareRepository, PrepareArtifact: w.prepareArtifact,
 	})
 	if err != nil {
 		conn.Close()
@@ -615,9 +615,10 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 // keep keeps, judged against every record, while every summary of the listing is still the walk
 // each chain is read up.
 func (w *workflowRuntime) reconcileListing(ctx context.Context, issues []dispatch.IssueSummary, keep func(records map[string]*record.Issue, summary dispatch.IssueSummary) bool, boot bool) error {
-	// The transaction performs no I/O: what admission reads of a todo issue's repository, and the
-	// Dispatch chain above its parent, are read now, up one walk over the whole listing
-	// (listingAncestry); each listed issue's fact carries that chain to admission.
+	// The transaction performs no I/O: what admission reads of a todo issue's repository, the
+	// Dispatch chain above its parent, and who set the label of a labelled triage root the workflow
+	// does not record, are read now, up one walk over the whole listing (listingAncestry); each
+	// listed issue's fact carries that chain, or that setter, to admission.
 	var records map[string]*record.Issue
 	var walk ancestry
 	var err error
@@ -633,17 +634,28 @@ func (w *workflowRuntime) reconcileListing(ctx context.Context, issues []dispatc
 			continue
 		}
 		fact := intake.ListedIssue(summary)
-		if summary.Status == "todo" {
+		labelledTriageRoot := fact.LabelledTriageRoot()
+		if fact.Status == "todo" || labelledTriageRoot {
 			if walk == nil {
 				if records, walk, err = w.listingAncestry(ctx, issues); err != nil {
 					return err
 				}
 			}
+		}
+		switch {
+		case fact.Status == "todo":
 			prepared, err := w.prepareListed(ctx, records, walk, fact)
 			if err != nil {
 				return fmt.Errorf("prepare the repository of %s for admission: %w", summary.Key, err)
 			}
 			fact.Ancestry = prepared.Ancestry
+		case labelledTriageRoot && records[summary.Key] == nil:
+			// The listing carries no actor, so the setter is read from the log as an event's is;
+			// a recorded root a person moved back to triage is never queued again, so its log is
+			// not read.
+			if fact.LabelSetter, err = w.labelSetter(ctx, summary.Key); err != nil {
+				return fmt.Errorf("prepare who set the label of %s for admission: %w", summary.Key, err)
+			}
 		}
 		scope = append(scope, summary)
 		listed = append(listed, fact)

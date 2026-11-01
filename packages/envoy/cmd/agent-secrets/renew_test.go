@@ -78,6 +78,11 @@ func steppedWaits(capacity int) (chan chan time.Time, func(time.Duration) <-chan
 	}
 }
 
+// podRenewal is the renewToken a pod's renewer carries, as cmdRenew builds it.
+func podRenewal(read func() (string, error)) renewToken {
+	return renewToken{field: "pod_token", what: "pod token", until: "the file becomes readable", read: read}
+}
+
 func renewalSession(t *testing.T, broker string) (*client, Signer, string, string) {
 	t.Helper()
 	dir := newKeyDir(t)
@@ -132,7 +137,7 @@ func TestRenewSendsThePodsCurrentToken(t *testing.T) {
 	var stderr bytes.Buffer
 	result := make(chan int, 1)
 	go func() {
-		result <- renewLoop(ctx, client, signer, enrollmentID, func() (string, error) { return readPodToken(tokenFile) }, &stderr, after)
+		result <- renewLoop(ctx, client, signer, enrollmentID, podRenewal(func() (string, error) { return readPodToken(tokenFile) }), &stderr, after)
 	}()
 	receive(t, first, "first renewal")
 	receive(t, waits, "wait for the next renewal") <- time.Now()
@@ -180,7 +185,7 @@ func TestRenewWithoutAPodTokenFileSendsNoBody(t *testing.T) {
 	defer cancel()
 	result := make(chan int, 1)
 	go func() {
-		result <- renewLoop(ctx, client, signer, enrollmentID, func() (string, error) { return "", nil }, io.Discard, after)
+		result <- renewLoop(ctx, client, signer, enrollmentID, boxRenewal, io.Discard, after)
 	}()
 	awaitRetry(t, waits, result, "an iat-skewed PROOF_INVALID")
 	mu.Lock()
@@ -205,6 +210,8 @@ func TestRenewStopsOnlyForTerminalBrokerCodes(t *testing.T) {
 		status        int
 	}{
 		{"POD_TOKEN_REQUIRED", "a pod enrollment's renewal must carry its projected token", http.StatusForbidden},
+		{"VM_TOKEN_REQUIRED", "a VM enrollment's renewal must carry its VM identity token", http.StatusForbidden},
+		{"VM_NOT_LISTED", "this VM is not one its fleet's settings allow: instance example-vm-1 does not match", http.StatusForbidden},
 		{"ENROLLMENT_NOT_LIVE", "enrollment is not live", http.StatusUnauthorized},
 		{"PROOF_INVALID", "enrollment is not live", http.StatusUnauthorized},
 		{"PROOF_INVALID", "proof invalid: not live", http.StatusUnauthorized},
@@ -224,7 +231,7 @@ func TestRenewStopsOnlyForTerminalBrokerCodes(t *testing.T) {
 				cancel()
 				return make(chan time.Time)
 			}
-			if got := renewLoop(ctx, client, signer, enrollmentID, func() (string, error) { return "", nil }, io.Discard, after); got != exitRenewRefused {
+			if got := renewLoop(ctx, client, signer, enrollmentID, boxRenewal, io.Discard, after); got != exitRenewRefused {
 				t.Fatalf("renew loop exit = %d, want %d", got, exitRenewRefused)
 			}
 		})
@@ -265,7 +272,7 @@ func TestRenewRetriesEveryOtherRefusal(t *testing.T) {
 			defer cancel()
 			result := make(chan int, 1)
 			go func() {
-				result <- renewLoop(ctx, client, signer, enrollmentID, func() (string, error) { return "a-pod-token", nil }, io.Discard, after)
+				result <- renewLoop(ctx, client, signer, enrollmentID, podRenewal(func() (string, error) { return "a-pod-token", nil }), io.Discard, after)
 			}()
 			awaitRetry(t, waits, result, tc.code) <- time.Now()
 			awaitRetry(t, waits, result, tc.code+" again")
@@ -362,7 +369,7 @@ func TestRenewNeverSendsABlankLaterToken(t *testing.T) {
 	result := make(chan int, 1)
 	var stderr syncWriter
 	go func() {
-		result <- renewLoop(ctx, client, signer, enrollmentID, func() (string, error) { return readPodToken(tokenFile) }, &stderr, after)
+		result <- renewLoop(ctx, client, signer, enrollmentID, podRenewal(func() (string, error) { return readPodToken(tokenFile) }), &stderr, after)
 	}()
 	receive(t, first, "first renewal")
 	awaitRetry(t, waits, result, "the wait after the first renewal") <- time.Now()

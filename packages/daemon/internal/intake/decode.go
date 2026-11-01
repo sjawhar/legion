@@ -294,7 +294,7 @@ func decodeDispatchEvent(event dispatchEvent, unread *[]string) (Fact, error) {
 			kind = DispatchArtifactChangesRequested
 		}
 		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: kind, Version: artifact.Version, Reason: artifact.Reason,
-			Mark: event.mark(), Actor: dispatch.Actor(event.Actor)}, nil
+			Actor: dispatch.Actor(event.Actor), Mark: event.mark()}, nil
 	case "artifact.version":
 		var artifact struct {
 			ArtifactID string `json:"artifact_id"`

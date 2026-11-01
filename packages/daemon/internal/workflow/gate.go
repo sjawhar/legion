@@ -540,13 +540,34 @@ func (e *Engine) gateRequestFound(ctx context.Context, tx pgx.Tx, fact intake.Ga
 // copy a hand-over carried to a child of its tree, now a root of its own (admit's readmit), takes
 // only an approval that opens it or keeps it open (copyTakes). register_gate refuses a document of
 // another issue, so no other gate names it.
+//
+// A person's approval of a parked labelled root's primary document is that person's handover of
+// the root (personHandoverQueues), and the daemon queues the root's todo itself, as admission does
+// for a person's legion label on a root in triage (admit's queuePersonHandover): a dispatch_status
+// row observed at the status the approval found, so its delivery writes nothing once the status
+// moved, marked as a person's handover so that one such row at a time is pending for the issue
+// (record.Store.PersonHandoverPending) — a redelivery of the event, or a second approval while the
+// row waits, queues nothing, since the pending row carries the same write, and the issue's other
+// status rows suppress nothing. The root's own gate is not applied: a recorded root's re-admission
+// clears it, and the new architect's register_gate reads the approval from Dispatch, as it does for
+// any approval Dispatch already shows, so a design-approved notice is never written for a tree
+// with no architect. Every carried copy of the gate is applied as today, since the carried tree
+// is its own. The queue is logged once it commits, under admission's message for a person's
+// handover with source approval, so the proof reads which path queued a root from that field.
 func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.DispatchArtifact) (intake.Result, error) {
+	queues, err := e.personHandoverQueues(ctx, tx, fact)
+	if err != nil {
+		return intake.Result{}, err
+	}
 	gates, err := e.store.GatesForArtifact(ctx, tx, fact.ArtifactID)
 	if err != nil {
 		return intake.Result{}, err
 	}
 	for _, gate := range gates {
 		carried := gate.Issue != fact.Key
+		if queues && !carried {
+			continue
+		}
 		if carried && !copyTakes(gate, fact) {
 			continue
 		}
@@ -554,7 +575,65 @@ func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.Di
 			return intake.Result{}, err
 		}
 	}
+	if !queues {
+		return intake.Result{}, nil
+	}
+	pending, err := e.store.PersonHandoverPending(ctx, tx, fact.Key)
+	if err != nil || pending {
+		return intake.Result{}, err
+	}
+	if err := e.enqueue(ctx, tx, fact.Key, record.StatusWrite{Status: "todo", ObservedStatus: fact.Issue.Status, PersonHandover: true}); err != nil {
+		return intake.Result{}, err
+	}
+	e.logOnCommit(ctx, "admission: queued a person's handover", "issue", fact.Key, "source", "approval")
 	return intake.Result{}, nil
+}
+
+// personHandoverQueues says whether fact is a person's approval that queues its root as the
+// person's handover: an approval (not a changes request or a version) that Dispatch names a
+// person as having made (Actor.Person()), of the primary document of a root — no parent — that
+// carries the legion label and is parked (backlog or icebox), whose tree is not live. The approval
+// is the person's newer act than the park: a person who approves a parked labelled root's spec
+// wants it run, whoever parked it and whether or not it ran before. An unrecorded root is queued
+// by the write; a recorded root whose tree finished is re-admitted by it as a new generation, as a
+// person's own todo re-admits one today, and its tree lingering or long closed makes no
+// difference. A root whose tree is live — it holds a slot, waits for one, or waits on a person —
+// is not queued, whatever Dispatch shows: its gate takes the approval as today, and the park's own
+// event, when the daemon applies it, takes the tree out (leave).
+//
+// The decision reads Dispatch's view of the issue (fact.Issue), which the daemon's prepare stage
+// sets for a person's non-carried approval and nothing else: a nil view — the gate seed's or the
+// boot catch-up's fact, a version event, a session's or Dispatch's own review — queues nothing,
+// since the daemon reads the issue only when a person's own act could queue it. A carried approval
+// (CarriedApproval) queues nothing either: it is the review Dispatch writes in the person's name
+// when their answer to a decision block was the whole change since the version they approved,
+// Dispatch's bookkeeping of an earlier approval and not a new act of theirs.
+//
+// dispatchArtifact ties its skip of the root's own gate to this decision rather than to the tree
+// being live: a lingering root that is not parked — closed as done, or still in triage — queues
+// nothing and keeps today's behaviour, its gate taking the event, so a reopen inside the linger
+// sees the approvals given while it lingered.
+func (e *Engine) personHandoverQueues(ctx context.Context, tx pgx.Tx, fact intake.DispatchArtifact) (bool, error) {
+	view := fact.Issue
+	if view == nil || !fact.PersonApproval() {
+		return false, nil
+	}
+	parked := view.Status == "backlog" || view.Status == "icebox"
+	if view.Parent != nil || !view.HandedOver || !parked || view.PrimaryArtifactID != fact.ArtifactID {
+		return false, nil
+	}
+	stored, err := e.store.Issue(ctx, tx, fact.Key)
+	if err != nil {
+		return false, err
+	}
+	if stored == nil {
+		return true, nil
+	}
+	live, err := record.TreeLive(ctx, e.store, tx, *stored)
+	if err != nil {
+		return false, err
+	}
+	return !live, nil
 }
 
 // copyTakes says whether a carried copy of another root's gate takes an event of that root's

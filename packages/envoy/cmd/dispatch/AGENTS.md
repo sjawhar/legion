@@ -116,20 +116,24 @@ and its identity (`Identity`): `us.cohere.embed-v4:0` on Bedrock, `azure:<endpoi
 host>/<deployment>` on Azure. `embeddings.model` records the identity of the client that made
 each vector, `api/search.go` compares a query vector only with stored vectors of
 its own identity, and `embedqueue.Run` runs the coverage pass (`embedqueue/coverage.go`, `Cover`)
-at start and every 10 minutes: it embeds what no trigger enqueued, repairs a row whose text changed
-with the triggers off, settles a dead row with nothing to embed, and, once the configured embedder
-has answered, drops every vector another identity made and re-admits a row dead under another
+once at start: it embeds what no trigger enqueued, repairs a row whose text changed with the
+triggers off, settles a dead row with nothing to embed, and, once the configured embedder has
+answered, drops every vector another identity made and re-admits a row dead under another
 identity. Answered means an Embed by this process's queue has succeeded (`Deps.proven`, which
 `Run` shares between its two loops) or, when none has and such rows exist (one `exists` query, so a
 pass with none calls the embedder zero times), an `embedCanary` embed the pass sends succeeds; a
-failed or throttled canary leaves those rows in place for the next pass and logs one WARN with the
-identity, the error and the counts left. `coverageSources` there is the one list of what meaning
+failed or throttled canary leaves those rows in place and logs one WARN with the identity, the
+error and the counts left. After the boot pass only those identity steps run again
+(`runCoverage`): at once when the queue's first embed proves an embedder the pass's canary could
+not, and every `identityRecheckInterval` (10 minutes, jittered) while a run still finds another
+identity's rows, so a vector an old-configuration process commits during a roll is dropped; once a
+run finds none, the loop holds no timer. `coverageSources` there is the one list of what meaning
 search covers, read by the pass and by `GET /api/v1/search/coverage` (`embedqueue.Coverage`); its
 texts are the triggers' (0073-0077; an issue's, since 0140, its title and its spec, the latest
 version of its primary document, which a second trigger on `artifact_versions` re-queues on a spec
 edit) byte for byte, so a kind added to search changes both. There is no backfill subcommand: the
-pass is the only catch-up, and it takes no lease, so every process of a deployment takes the same
-embedder settings (README "Search").
+boot pass is the only catch-up, and it takes no lease, so every process of a deployment takes the
+same embedder settings (README "Search").
 
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
 with comma-separated `owner/repo=KEY` entries (`api.SeedRepoProjects`). Stored dashboard mappings are
@@ -622,11 +626,12 @@ attempt runs again; and a repeat whose first request committed a write but whose
 comment routes, the single-session send and the broadcast commit a recovery point with what they
 made, so their repeat answers `201` from a fresh read instead and resumes what delivery it owes,
 which the delivery sweep also finishes on its own. Keys belong to the caller's login and are kept
-24 hours (`request_keys`, migration `0137`, swept by the suggestion-outcome sweep's pass). A write
-without the header runs unkeyed, as before. `PUT` and `DELETE` take no key. Every write route,
-`PUT` and `DELETE` included, that names its presser in `Dispatch-Login` runs only as that person:
-another person, or any bearer, is `409 LOGIN_CHANGED` before anything runs, its key untouched; a
-caller that resolves to nobody keeps the route's own `401` (`refuseChangedLogin`, `api/server.go`).
+24 hours (`request_keys`, migration `0137`, swept by the maintenance sweep's pass once a minute).
+A write without the header runs unkeyed, as before. `PUT` and `DELETE` take no key. Every write
+route, `PUT` and `DELETE` included, that names its presser in `Dispatch-Login` runs only as that
+person: another person, or any bearer, is `409 LOGIN_CHANGED` before anything runs, its key
+untouched; a caller that resolves to nobody keeps the route's own `401` (`refuseChangedLogin`,
+`api/server.go`).
 
 | Path | Method | Access | Purpose |
 | --- | --- | --- | --- |
@@ -785,16 +790,17 @@ itself, so every package the server imports is in that filter; `packages/envoy/A
 conventions) says what keeps it current.
 
 The two-process tests (`multiprocess_test.go`, INFRA-66, INFRA-555) start two real Dispatch servers on one
-Postgres and one NATS and drive the properties a rolling release depends on — one pass per period
-across the leased maintenance loops, the delivery intake's standby and takeover, each outbox row
-published once, an event-feed subscription receiving another process's event, a document room
-closed when the other process writes it, a sign-in started on one process completed on the other,
-people kept signed in across a key rotation, a process whose key set a live peer does not share
-refused at boot, `server.started` published once per fleet-wide build, every dashboard asset of
-either of two builds served by both processes, and the builds `GET /api/v1/dashboard/builds` names
-as live. They build only under the `multiprocess` tag and run in their own CI job
-(`dispatch-multiprocess` in `.github/workflows/ci.yaml`), because two servers and
-their NATS take minutes rather than seconds:
+Postgres and one NATS and drive the properties a rolling release depends on — no two passes of a
+leased loop at once, one pass per period across a leased timer loop, a woken loop's held lease
+retried until each process has run its own pass, the delivery intake's standby and takeover, each
+outbox row published once, an event-feed subscription receiving another process's event, a
+document room closed when the other process writes it, a sign-in started on one process completed
+on the other, people kept signed in across a key rotation, a process whose key set a live peer
+does not share refused at boot, `server.started` published once per fleet-wide build, every
+dashboard asset of either of two builds served by both processes, and the builds
+`GET /api/v1/dashboard/builds` names as live. They build only under the `multiprocess` tag and run
+in their own CI job (`dispatch-multiprocess` in `.github/workflows/ci.yaml`), because two servers
+and their NATS take minutes rather than seconds:
 
 ```sh
 env DISPATCH_TEST_DATABASE_URL=… go test -tags multiprocess -count=1 -timeout 30m ./cmd/dispatch

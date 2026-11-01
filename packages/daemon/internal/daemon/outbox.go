@@ -526,6 +526,16 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 		}
 		return nil
 	}
+	// A person's handover row was queued for a person's legion label on an unrecorded triage root,
+	// or for a person's approval of a parked labelled root's spec. A person who took the label off
+	// between the queue and this delivery withdrew that handover, and a todo on an unlabelled issue
+	// would be nobody's: admission records nothing of a todo without the label (its "not handed to
+	// Legion" exit), so the write would only wake the controller for an issue it must not take. The
+	// row is dropped and logged once instead; the status guard above has already let a park stand.
+	if payload.PersonHandover && !issue.HandedOver {
+		r.log.Info("outbox: a person's handover is not written; the label is gone", "row", row.ID, "issue", row.Issue)
+		return nil
+	}
 	if payload.HandOver {
 		if holds, err := r.handOverHolds(ctx, row, payload); err != nil || !holds {
 			return err

@@ -239,19 +239,40 @@ type limitRecord struct {
 // times those list calls for one result.
 const webhookRedeliveryLease = "webhook-redelivery"
 
+// jittered is the wait Run leaves after each sweep (duty.Jittered). It is a variable only so a test
+// can fix the draw.
+var jittered = duty.Jittered
+
 // Run sweeps now and then every interval until ctx ends, logging each sweep's counts: the failed
-// attempts listed, the deliveries they belong to, and how many deliveries had each outcome. Each
-// sweep runs under webhookRedeliveryLease for one interval, so one sweep's listings are what the
-// installation's rate limit pays for that interval however many processes sweep - a process that
-// starts in the middle of another's interval, which is what a rolling update makes, finds that
+// attempts listed, the deliveries they belong to, and how many deliveries had each outcome. After
+// each sweep it waits the interval plus up to a tenth of it again (duty.Jittered), drawn afresh
+// every period, so two processes started together drift apart rather than reaching the lease in
+// step every interval for the life of both. The first sweep is not delayed: a process that starts
+// sweeps at once, as it always has.
+//
+// Each sweep runs under webhookRedeliveryLease for one interval, so one sweep's listings are what
+// the installation's rate limit pays for that interval however many processes sweep - a process
+// that starts in the middle of another's interval, which is what a rolling update makes, finds that
 // interval swept and skips. The period is interval itself, the loop's own tick, and not the
-// package's Interval. The ticks are duty.RunLeased's, a ticker's: the first at the moment Run
-// starts, then one each interval; the first tick a sweep overran comes at once with the moment it
-// was due, and only the ones after it are dropped, so a lone process sweeps every period its
-// sweeps do not overrun. leases is required, as it is of every leased loop
-// (cmd/dispatch exits at boot if the lease pool cannot be opened).
+// package's Interval. Each sweep's due time, the moment it hands duty.Exclusive and the one its
+// period is judged by, is the moment Run started for the first and the moment its timer fired for
+// every later one - never the moment the lease was taken, which a slow lease would carry into the
+// next period and so cost the sweep after it that period. A timer armed once the sweep before has
+// returned, for at least one interval, always reaches the next period, so neither a slow lease nor
+// the jitter ever makes a process skip its own next sweep. leases is required, as it is of every
+// leased loop (cmd/dispatch exits at boot if the lease pool cannot be opened).
 func (s *Sweeper) Run(ctx context.Context, interval time.Duration, leases duty.Leases) {
-	duty.RunLeased(ctx, leases, webhookRedeliveryLease, interval, duty.TickAtStart, s.sweepAndReport)
+	due := time.Now()
+	for {
+		duty.Exclusive(ctx, leases, webhookRedeliveryLease, due, interval, s.sweepAndReport)
+		timer := time.NewTimer(jittered(interval))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case due = <-timer.C:
+		}
+	}
 }
 
 // sweepAndReport is one sweep of the running loop and its log line.
