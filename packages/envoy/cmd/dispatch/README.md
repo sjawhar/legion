@@ -891,7 +891,7 @@ The rule in brief is `internal/dispatch/store/README.md`, beside the migrations 
 A migration added from now on is named `<UTC timestamp>_<name>.up.sql`, the timestamp the moment its author created it, `YYYYMMDDHHMMSS` (`date -u +%Y%m%d%H%M%S`), with its census as `<same timestamp>_<name>.census.sql`.
 The numbered versions are the sequence the set grew up with;
 every one of those files keeps the number it landed with, and no number is added again:
-the series closed at `0157_document_edit_notices_notify.up.sql`, which `migrationid` records once for Dispatch, and a set holding a number above it is refused (`migrationid.Check`), so a branch that takes the next number fails on its own, before it merges.
+the series closed at `0161_delivery_run_warnings.up.sql`, which `migrationid` records once for Dispatch, and a set holding a number above it is refused (`migrationid.Check`), so a branch that takes the next number fails on its own, before it merges.
 Two pull requests open at once used to take one number each and collide only when the first merged — nothing conflicts in git — while two timestamps taken a moment apart belong to their own authors.
 The version is the file name's leading digits read as a number, as before, so every timestamp orders after every number and timestamps order among themselves by time.
 A 14-digit version is past what an `integer` column holds, so `schema_migrations.version` is a `bigint`.
