@@ -1993,6 +1993,20 @@ hog_oomkilled() {
     jq -e '[.status.containerStatuses[]?.state.terminated.reason, .status.containerStatuses[]?.lastState.terminated.reason] | index("OOMKilled")' >/dev/null
 }
 
+# ---- the deployment pod block (LEGION_E2E_POD_FILE) ------------------------------------------------
+
+# block_account is the ServiceAccount the pods of the deployment block LEGION_E2E_POD_FILE named
+# run as: the block's own `service_account`, and the namespace's `default` when the block names
+# none or names it empty. That is one rule in three readings of the same field — this one, the
+# verdict's own (`def account`, lib/deployment-pod-block-verdict.jq) and the daemon's
+# (serviceAccountOr, internal/runtime/sandbox/sandbox.go), which reads an unset
+# runtime.kubernetes.pod.service_account the same way. The empty case is spelled out because jq's
+# `//` keeps an empty string, so a reading that leaves it to `//` holds every pod of such a
+# deployment to a nameless account and fails the pod-shape checkpoint on a pod that is right.
+block_account() {
+  jq -r 'if (.service_account // "") == "" then "default" else .service_account end' "$pod_block"
+}
+
 # ---- the pod-shape watcher (checkpoint pod-shape) --------------------------------------------------
 
 # check_pod_shape SPEC prints each way the pod object SPEC departs from the issue-pod shape, or
@@ -3117,7 +3131,7 @@ if [ -n "$pod_file" ]; then
   jq -e 'type == "object" and ((.volumes // []) | type == "array") and ((.volume_mounts // []) | type == "array") and ((.env // {}) | type == "object")' "$pod_file" >/dev/null 2>&1 ||
     fail "LEGION_E2E_POD_FILE=$pod_file is not a JSON object with volumes, volume_mounts and env in runtime.kubernetes.pod's shape"
   jq -cS . "$pod_file" >"$pod_block" || fail "could not copy LEGION_E2E_POD_FILE=$pod_file into the run"
-  note "LEGION_E2E_POD_FILE=$pod_file: the run's pods carry that block, copied into the run as $pod_block (sha256 $(sha256sum "$pod_block" | cut -d' ' -f1); service account $(jq -r '.service_account // "the namespace default"' "$pod_block"), $(jq '.volumes // [] | length' "$pod_block") volumes)"
+  note "LEGION_E2E_POD_FILE=$pod_file: the run's pods carry that block, copied into the run as $pod_block (sha256 $(sha256sum "$pod_block" | cut -d' ' -f1); ServiceAccount $(block_account), $(jq '.volumes // [] | length' "$pod_block") volumes)"
 fi
 # The production services, each a fully-qualified host (a bare alias resolves through whatever
 # search domain the box or the pod has) and no path. A refusal names the variable, never its value.
@@ -3137,10 +3151,11 @@ pod_service_account=$(bash "$root/scripts/e2e/lib/pod-service-account.sh") ||
   fail "LEGION_E2E_POD_SERVICE_ACCOUNT is not a ServiceAccount name the operator route's pod.yml can carry (the reason is above)"
 # pod_account is the ServiceAccount every pod of the run must run as, which pod-shape holds each
 # to: the run's own under the operator route, and the block's own under LEGION_E2E_POD_FILE, whose
-# pods carry the deployment's block instead. It is settled here, once, so the shape watcher forked
-# later judges against the same account the main shell does.
+# pods carry the deployment's block instead (block_account, which reads an account the block names
+# empty as the namespace's `default`, as the verdict and the daemon both do). It is settled here,
+# once, so the shape watcher forked later judges against the same account the main shell does.
 pod_account=$pod_service_account
-[ -z "$pod_file" ] || pod_account=$(jq -r '.service_account // "default"' "$pod_block")
+[ -z "$pod_file" ] || pod_account=$(block_account)
 # The branch-built daemon links no release plugin pair (only a release workflow build does), so a
 # daemon started from this checkout boots in the degraded mode (a Warn and `plugins: none` from
 # `--check-config`) unless the run's legion.yaml names runtime.kubernetes.plugins itself. Stage 4b
