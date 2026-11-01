@@ -415,7 +415,8 @@ func (c *Client) restoreSubscriptions() (pending bool, err error) {
 		// A reconnect in place leaves a subscription valid: nats.go has already re-sent its SUB, so
 		// it delivers as it did. Unsubscribing it to bind again would race the server's release of
 		// the consumer's push binding, which refuses the new bind while it still sees the old one.
-		// One on a replaced connection is invalid and is bound again.
+		// One on a replaced connection is invalid and is bound again. A registration its caller
+		// ended (DrainSubscription) is no longer here to bind.
 		if subscription.handler == nil || subscription.active.IsValid() {
 			continue
 		}
@@ -442,7 +443,7 @@ func (c *Client) restoreSubscriptions() (pending bool, err error) {
 	for index, subscription := range restoring {
 		slog.Info("envoy nats resubscribing", slog.String("name", c.name), slog.String("subject", registrations[index].subject))
 		sub, err := bind(registrations[index], conn, js)
-		if err := c.endBind(subscription, sub, err); err != nil {
+		if err := c.endBind(subscription, sub, err, false); err != nil {
 			errs = append(errs, err)
 		}
 	}

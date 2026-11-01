@@ -115,17 +115,30 @@ func (s *Service) recordEditNotice(ctx context.Context, tx pgx.Tx, artifactID st
 	return nil
 }
 
-// editNoticeLease names the lease one sweep runs under, editNoticeInterval the sweep's period and
-// the wait after each sweep before the next, editNoticeBatch the most due notices one sweep sends,
-// and editNoticeDiffBytes the most a notice's diff holds. A notice is due at most
-// editNoticeInterval, plus the time the sweep before took, before a sweep sends it, so a person's
-// edit reaches its sessions within the quiet time plus five seconds and that sweep's time.
+// EditNoticesChannel is the Postgres notification channel a document's edit notice announces itself
+// on at commit each time a writer gives it a due time (document_edit_notices_notify, migration
+// 0157): the channel whose pglisten.Hub wake the server passes to RunEditNotices.
+const EditNoticesChannel = "dispatch_edit_notices"
+
+// editNoticeLease names the lease one sweep runs under, editNoticeBatch the most due notices one
+// sweep sends, and editNoticeDiffBytes the most a notice's diff holds.
 const (
 	editNoticeLease     = "edit-notices"
-	editNoticeInterval  = 5 * time.Second
 	editNoticeBatch     = 20
 	editNoticeDiffBytes = 4096
 )
+
+// editNoticeSchedule is the sweep's pace. minGap is the least time from one sweep's start to the
+// next one's, whatever woke it (duty.WokenLoop.MinGap), and also how long a sweep waits, plus up to
+// a tenth again, when another process holds the lease. A test runs the loop faster.
+type editNoticeSchedule struct {
+	minGap time.Duration
+}
+
+// editNoticeSweepSchedule is the server's pace: five seconds between sweeps, the period of the
+// timer this loop replaced, so under load it sweeps no more often than that timer did, and a
+// notice goes at most five seconds after its quiet window ends.
+var editNoticeSweepSchedule = editNoticeSchedule{minGap: 5 * time.Second}
 
 // dueEditNotices lists the documents whose quiet window has ended, oldest first. It is read with no
 // lock: each id is claimed on its own, under its owner's lock, by dueEditNotice.
@@ -140,24 +153,74 @@ const dueEditNotice = `
 	delete from document_edit_notices where artifact_id = $1 and due_at <= now()
 	returning from_version, to_version, editors, last_editor`
 
+// nextEditNoticeDue is how long until the earliest due time of any notice, in microseconds on the
+// database's clock - the clock dueEditNotices judges by, so a skew between this host's clock and
+// the database's neither wakes the loop before the notice is due nor holds it after - rounded up,
+// so the sweep it schedules finds the notice due; null when no notice has one (a held row,
+// holdEditNotice, has none). A notice still due after a sweep - one past a full batch, or one
+// whose send failed - answers a wait at or below zero, so the next sweep is as soon as the loop's
+// gap allows. min(due_at) is read from document_edit_notices_due (migration 0129).
+const nextEditNoticeDue = `
+	select ceil(extract(epoch from min(due_at) - now()) * 1000000)::bigint
+	from document_edit_notices`
+
 // RunEditNotices sends each document's edit notice once its quiet window ends: one
 // artifact.human_edited event, which reaches the sessions the document credits and its issue's
-// route (outbox.addAuthorRoutes). It sweeps at start and then editNoticeInterval after each
-// sweep returns (duty.RunLeasedAfterEachPass) until ctx ends, under the edit-notices lease, so one
-// process sweeps a period however many serve the database. The window is a row, not a timer, so a
-// notice still pending when a process stops is sent by the next sweep of any process.
-func (s *Service) RunEditNotices(ctx context.Context, leases duty.Leases) {
+// route (outbox.addAuthorRoutes). It is a woken loop (duty.RunWoken) under the edit-notices
+// lease: one sweep at start, then a sweep when wake is signalled - in the server, the
+// pglisten.Hub wake on EditNoticesChannel, which a trigger on document_edit_notices notifies each
+// time a writer gives a notice a due time, and which the hub also signals after each successful
+// LISTEN - and at the earliest due time of any notice, which each sweep reads after it sends
+// (nextEditNoticeDue). Sweeps start at least five seconds apart, so a notice goes within five
+// seconds of its due time, and a notice still due after a sweep - past a full batch, or one whose
+// send failed - is swept again five seconds later. With no notice due or pending it holds no
+// timer and makes no statement. A nil wake leaves the loop with its start and its due times.
+//
+// The window is a row, not a timer, so a notice still pending when a process stops is sent by
+// the next sweep of any process: each process's boot sweep reads the earliest due time.
+func (s *Service) RunEditNotices(ctx context.Context, leases duty.Leases, wake <-chan struct{}) {
+	s.runEditNotices(ctx, leases, wake, editNoticeSweepSchedule)
+}
+
+func (s *Service) runEditNotices(ctx context.Context, leases duty.Leases, wake <-chan struct{}, schedule editNoticeSchedule) {
 	ctx = store.WithTransactionTracking(ctx)
-	duty.RunLeasedAfterEachPass(ctx, leases, editNoticeLease, editNoticeInterval, func(ctx context.Context) time.Duration {
-		sent, err := s.sendDueEditNotices(ctx)
-		if err != nil && ctx.Err() == nil {
-			slog.Error("dispatch: send edit notices", "error", err)
-		}
-		if sent > 0 {
-			slog.Info("dispatch: sent edit notices", "notices", sent)
-		}
-		return editNoticeInterval
+	duty.RunWoken(ctx, duty.WokenLoop{
+		Lease:  editNoticeLease,
+		Leases: leases,
+		Wake:   wake,
+		MinGap: schedule.minGap,
+		Pass:   s.editNoticePass,
 	})
+}
+
+// editNoticePass is one sweep: it sends the due notices (sendDueEditNotices) and returns when the
+// loop next needs to run with no wake, the earliest due time left (nextEditNoticeDue), or the zero
+// time when no notice has one. A sweep whose read of the due ids or of that time failed asks again
+// now, which the loop holds to its gap.
+func (s *Service) editNoticePass(ctx context.Context) time.Time {
+	sent, err := s.sendDueEditNotices(ctx)
+	if sent > 0 {
+		slog.Info("dispatch: sent edit notices", "notices", sent)
+	}
+	switch {
+	case ctx.Err() != nil:
+		return time.Time{}
+	case err != nil:
+		slog.Error("dispatch: send edit notices", "error", err)
+		return time.Now()
+	}
+	var wait *int64
+	if err := s.store.Pool.QueryRow(ctx, nextEditNoticeDue).Scan(&wait); err != nil {
+		if ctx.Err() != nil {
+			return time.Time{}
+		}
+		slog.Error("dispatch: read the next edit notice's due time", "error", err)
+		return time.Now()
+	}
+	if wait == nil {
+		return time.Time{}
+	}
+	return time.Now().Add(time.Duration(*wait) * time.Microsecond)
 }
 
 // sendDueEditNotices sends up to editNoticeBatch due notices, each in a transaction of its own, and

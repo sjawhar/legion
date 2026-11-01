@@ -67,10 +67,10 @@ const outboxStopBudget = httpDrainBeforeDocuments + documentShutdownTimeout
 // exits 1 and a supervisor never reads either as a clean stop: serving failed, or the registry
 // refused to count this process as live again beside a live process whose signing keys it does not
 // share (lost, processes.Registration.Lost). Either cancels ctx, so the stop is the one a signal
-// makes: the listener closes at once, the requests in flight are answered, and the registry's row
-// is deleted.
+// makes: the listener closes at once, the requests in flight are answered, the intakes stop, and
+// the registry's row is deleted.
 func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *http.Server, listener net.Listener,
-	documentService *docs.Service, pool *store.Pool, waitBackground, deregister func(), lost <-chan error, outboxStopped <-chan struct{}) error {
+	documentService *docs.Service, pool *store.Pool, waitBackground, waitIntakes, deregister func(), lost <-chan error, outboxStopped <-chan struct{}) error {
 	serveErr := make(chan error, 1)
 	go func() {
 		slog.Info("dispatch: listening", "addr", listener.Addr().String())
@@ -88,7 +88,7 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 		cancel()
 	}
 	slog.Info("dispatch: shutting down")
-	shutdown(server, documentService, pool, waitBackground, deregister, outboxStopped)
+	shutdown(server, documentService, pool, waitBackground, waitIntakes, deregister, outboxStopped)
 	select {
 	case err := <-serveErr:
 		return err
@@ -102,20 +102,32 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 // client's receipt timeout. The document service settles the documents owed within
 // documentShutdownTimeout once those requests are done, or httpDrainBeforeDocuments after the
 // signal with some still running. waitBackground then waits for the delivery hub, every live
-// socket and the subscriptions they ran to finish their Lifetime-driven shutdown. The database
-// pool closes once every request has answered and no connection of the shared or document-rooms
-// pool is in use, and once the events outbox has stopped (outboxStopped closes when its Run
-// returns; nil is a process with no outbox), which it waits for until outboxStopBudget after
-// shutdown began: the outbox records its last batch and releases the publisher hold through that
-// pool. While the database answers, nothing but the runtime's kill bounds the wait for the
-// requests, so a write in flight commits and is answered if it finishes before the kill. Then
-// deregister takes this process out of the registry of live server processes: it runs only once
-// HTTP has drained and the wait for the outbox is over, so a draining process counts as live until
-// its last request is answered, and before the pool closes. A database that has stopped answering
-// (silentProbes) holds its connections forever, so Dispatch exits without them, and the database
-// rolls back whatever they held open; it deregisters nothing then, since the delete would wait on
-// that database too, and its row's heartbeat stops with the process instead.
-func shutdown(server *http.Server, documentService *docs.Service, pool *store.Pool, waitBackground, deregister func(), outboxStopped <-chan struct{}) {
+// socket and the subscriptions they ran to finish their Lifetime-driven shutdown, and waitIntakes
+// for the GitHub intakes to finish their stop (delivery.StartIntakes' stop), which began at the
+// signal, beside the HTTP drain and the document shutdown: a message in its handler finishes and is
+// acknowledged, or is given up and handed back to NATS, delivery's intakeStopBudget (15 s) after
+// the signal at the latest, the one deadline of that stop, which counts from the signal and which a
+// bind under way at the signal spends rather than extends. That wait ends 10 s inside the latest
+// the document service's budget ends (stopGrace less its 5 s reserve, 25 s after the signal), which
+// leaves the given-up handlers' prompt return, their negative acknowledgements and the intakes'
+// clients closing room inside it, so it never makes the shutdown longer than the document budget
+// already can, nor pushes deregister and the pool's close past stopGrace. It comes before the pool
+// closes because nothing else keeps the pool open for a handler: one waiting on GitHub holds no
+// connection, so waitUntilIdle finds the pool idle, and its writes would fail on the closed pool
+// once GitHub answered, with its message acknowledged all the same. The database pool closes once
+// every request has answered and no connection of the shared or document-rooms pool is in use, and
+// once the events outbox has stopped (outboxStopped closes when its Run returns; nil is a process
+// with no outbox), which it waits for until outboxStopBudget after shutdown began: the outbox
+// records its last batch and releases the publisher hold through that pool. While the database
+// answers, nothing but the runtime's kill bounds the wait for the requests, so a write in flight
+// commits and is answered if it finishes before the kill. Then deregister takes this process out of
+// the registry of live server processes: it runs only once HTTP has drained and the wait for the
+// outbox is over, so a draining process counts as live until its last request is answered, and
+// before the pool closes. A database that has stopped answering (silentProbes) holds its
+// connections forever, so Dispatch exits without them, and the database rolls back whatever they
+// held open; it deregisters nothing then, since the delete would wait on that database too, and its
+// row's heartbeat stops with the process instead.
+func shutdown(server *http.Server, documentService *docs.Service, pool *store.Pool, waitBackground, waitIntakes, deregister func(), outboxStopped <-chan struct{}) {
 	started := time.Now()
 	drained := make(chan struct{})
 	go func() {
@@ -135,6 +147,7 @@ func shutdown(server *http.Server, documentService *docs.Service, pool *store.Po
 		slog.Warn("dispatch: shutdown document service", "error", err)
 	}
 	waitBackground()
+	waitIntakes()
 	if waitUntilIdle(drained, pool) {
 		waitForOutbox(outboxStopped, started.Add(outboxStopBudget))
 		deregister()

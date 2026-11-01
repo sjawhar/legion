@@ -48,6 +48,8 @@ Extends docs/solutions/legion/schema-bump-branch-rechecks-mains-version-at-every
   `0152_outbox_claim`; diff check
   https://github.com/sjawhar/legion/pull/2395#issuecomment-6551902095. Of 120 files in this pull
   request's own diff, 14 differed, all of them the renumbering; the SQL changed in one comment.
+  Main's #2391 then took `0151`-`0157`, and the merge with it renamed them again to
+  `0158_duty_holds` and `0159_outbox_claim`.
 - A block (`0158`/`0159` for this pull request, `0151`-`0157` and `0160` for two others) was
   proposed and withdrawn once `CheckNumberedOneToN`'s refusal of gaps was pointed out.
 - `internal/dispatch/store` passed at `d99681ce` on a superuser Postgres 17 (255.3 s, the numbering
