@@ -2,34 +2,43 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-251",
-  "previousHandoff": "b05c202bbef73fb20a087565e82e0bfe43f60c42",
+  "previousHandoff": "8f5605f93976b81dfb5789996bd888264cbd4b61",
   "proof": [
     {
-      "criterion": "The branch builds a daemon that migrates its database (the tester's round-24 failure)",
-      "surface": "the daemon's store package and the property model at the merge head, which now carries main's timestamp-aware migration loader",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u OMP_SESSION_SQL_DSN_FILE LEGION_TEST_PG_DSN=<own Postgres on the issue volume> LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -count=1 ./internal/store/... ./internal/record/ ./internal/supervise/",
-      "observed": "Merge bc514a0d84a0dd5a4b5c2071f8b9ed912b786755 (jj new legion/INFRA-251 main, main 6b1524cdb8aa, no conflict). store 215s ok (TestMigrateAppliesEveryEmbeddedMigration among them), store/migrations ok, record ok, supervise ok; the property model's seeds migrate and run. Changed lines of the branch diff are identical before and after the merge (sha256 of the +/- lines 3fd71f3b41125e75 both sides; 78 files, 12233 insertions, 259 deletions both sides).",
-      "headSha": "42250925f8e9f62dc22d46c5e83163a7bd9398b3",
-      "negativeControl": "At the tester's d90356ab (the renamed migrations without main's loader) TestMigrateAppliesEveryEmbeddedMigration fails: 'unable to encode 20261101163106 into binary format for int4' (tester's evidence)."
+      "criterion": "Review 5729779186 Minor (gate.go:605): the handover's guard is reached by a test and shares applyArtifact's check",
+      "surface": "workflow.Engine.dispatchArtifact through intake facts on a real Postgres (person_handover_test.go)",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u OMP_SESSION_SQL_DSN_FILE LEGION_TEST_PG_DSN=<own Postgres on the issue volume> go test -count=1 -run 'TestAHandoverApprovalTheGateWouldNotTakeLeavesItAsItWas|Handover|PersonsApproval' ./internal/workflow/",
+      "observed": "ok. recordHandover and applyArtifact now both read artifactIgnored (off, stale). The new table test's three cases (an approval of v2 with the gate at v3; an approval at seq 9 after a changes request of v2 at seq 12; any approval under gates.design off) each queue the person's handover status write and leave the gate exactly as seeded. The comment names the gate's three readers: the re-admission's keepStaleApproval, readmit's carried copy for an orphaned child, and read_state's designGate.",
+      "headSha": "8b3c87d819aa817d15cdd2abcfb7698ebb09a336",
+      "negativeControl": "With the guard replaced by `false && (off || stale)`, all three subtests FAIL (the gate takes the approval)."
     },
     {
-      "criterion": "The property oracle accepts a second telling exactly when the first catch-up's own telling write failed (or its task was taken back), citing the ruling, and every other double telling stays a failure; seed 41 is pinned and passes",
-      "surface": "kept_decision_property_test.go keptRun.tell/held with keptForgetStore.failedTellings; kept_decision_regression_seeds_test.go",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u OMP_SESSION_SQL_DSN_FILE LEGION_TEST_PG_DSN=<own Postgres on the issue volume> LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -count=1 -run '^TestKeptDecisionsRegressionSeeds$' ./internal/daemon/ ; LEGION_KEPT_PROPERTY_RUNS=150 LEGION_KEPT_PROPERTY_STEPS=300 go test -run '^TestKeptDecisionsReachTheCurrentArchitectOnce$' ./internal/daemon/",
-      "observed": "Pinned seeds 39 of 39 pass, seed-41-at-300-steps among them (4.12 s). 150 seeds x 300 steps pass. A throwaway driver of tell() (deleted) showed: failed catch-up 112 then catch-up 115 accepted; the same with the write not failed rejected 'told 2 times'; failed 112 and 115 then 118 rejected 'told 3 times'; prompt then non-retold prompt rejected; prompt then retold prompt accepted; failed catch-up then a retold prompt rejected; a telling to another tree's architect unaffected. The tester's seed-41 trace (row 112's forget errored at step 288, row 115 named ask-0015 at step 304) matches the case the oracle now accepts.",
-      "headSha": "42250925f8e9f62dc22d46c5e83163a7bd9398b3",
-      "negativeControl": "With tellingFailed forced false, the throwaway driver's accept case fails 'ask-0015 was told 2 times'. Seed 41 itself did not reproduce on this pod in 50 runs (25 at 100 steps, 25 at 300) nor in a 150x300 sweep under the old oracle: it reaches the case only on some schedules, as the tester's single failure in 150 did."
+      "criterion": "Review 5729779186 Minor (parked_decision_test.go:597): the admit test asserts what it promises",
+      "surface": "admit.Admission and the workflow engine on a real Postgres",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u OMP_SESSION_SQL_DSN_FILE LEGION_TEST_PG_DSN=<own Postgres on the issue volume> go test -count=1 -run 'TestARootAPersonsApprovalHandsOverIsToldNoStaleApproval' ./internal/admit/",
+      "observed": "ok. The test now asserts no design-approved notice for LEGION-ROOT and exactly one status write {todo, observed backlog, PersonHandover}, before the re-admission's no-stale-pair checks.",
+      "headSha": "8b3c87d819aa817d15cdd2abcfb7698ebb09a336",
+      "negativeControl": "With dispatchArtifact's handover branch disabled (the approval applied to the gate as before #2619), the test FAILs at parked_decision_test.go:600 naming the design-approved notice; with recordHandover recording nothing, it FAILs on the stale pair."
+    },
+    {
+      "criterion": "Review 5729779186 Important (parked-decisions.md:174): the walk skips only the approval personHandoverQueues queues",
+      "surface": "skills/legion-controller/references/parked-decisions.md walk step 3 and the paragraph under The notice",
+      "command": "curl -sS -H \"Authorization: Bearer $(cat \"$DISPATCH_TOKEN_FILE\")\" \"$DISPATCH_URL/api/v1/issues/INFRA-168/events?limit=200\"; the same curl of /api/v1/issues/INFRA-168; dispatch read --issue INFRA-251",
+      "observed": "The skip now needs all three of: no child_of under Links (dispatch read --issue INFRA-251 shows `child_of issue dispatch://INFRA-168` for a child), the event's payload.artifact_id equal to the root's primary_artifact_id (both read live on INFRA-168: a0d2035b-\u2026), and a payload.reason not beginning 'Carried forward from the approval of version' (Dispatch's carryReason, packages/envoy/internal/dispatch/docs/approval_carry.go:62). A carried approval and an approval on a root that keeps its Dispatch parent are judged as decisions, and the notice paragraph names both as notices that remain. The skills guard passes (14 tests).",
+      "headSha": "8b3c87d819aa817d15cdd2abcfb7698ebb09a336",
+      "negativeControl": "The Spec approval: line shows no review reason for an approval (dispatch read --issue INFRA-168: 'Spec approval: approved v22 by \u2026'), so the reference names the events API payload, which does carry it."
     }
   ],
   "filesChanged": [
-    "packages/daemon/internal/daemon/kept_decision_property_test.go",
-    "packages/daemon/internal/daemon/kept_decision_regression_seeds_test.go",
-    "merge of main 6b1524cdb8aa (no conflict)"
+    "packages/daemon/internal/workflow/gate.go",
+    "packages/daemon/internal/workflow/person_handover_test.go",
+    "packages/daemon/internal/admit/parked_decision_test.go",
+    "skills/legion-controller/references/parked-decisions.md"
   ],
   "deviations": [
-    "Seed 41's failure is schedule-dependent and did not recur here, so its pin proves the run passes, not that it reaches the failed write each time; the oracle's accept and reject cases were exercised directly by a throwaway driver instead."
+    "The reviewer's fix named the Spec approval: line's reason; that line shows no reason for an approval, so the reference reads payload.reason from the events API instead. packages/claude-envoy/legion/skills carries no parked-decisions.md on this branch, so there is no copy to regenerate."
   ],
   "openQuestions": [
-    "In the four daemon packages run together on this pod, the only failures were environmental: dropping a test database ('permission denied to terminate process', SQLSTATE 42501), no rootless Docker, gVisor's empty SigIgn, and NATS streams shared between packages run in parallel."
+    "The workflow and admit packages run whole on this pod failed only on the pod Postgres's database drops (permission denied to terminate process, SQLSTATE 42501) and one connection reset that passed when run alone."
   ]
 }
