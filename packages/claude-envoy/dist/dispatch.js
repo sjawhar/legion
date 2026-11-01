@@ -15626,6 +15626,7 @@ function dispatchDocumentSubject(project, slug, type) {
 function agentSubject(session) {
   return `${AGENT_TOPIC_PREFIX}${session}`;
 }
+var GHOSTWISPR_TOPIC_PREFIX = "notifications.ghostwispr.";
 
 // ../contracts/src/legion-roles.ts
 var LEGION_ROLES = [
@@ -22052,6 +22053,15 @@ var InterestWireSchema = object({
   updated_at: number2().int().optional(),
   warnings: array(string2()).optional()
 });
+var DeliveryAnswerWireSchema = discriminatedUnion("mode", [
+  object({
+    mode: literal("consumer"),
+    subject: string2().min(1),
+    stream_id: string2(),
+    gap: boolean2()
+  }),
+  object({ mode: literal("core"), reason: string2() })
+]);
 var SessionWireSchema = object({
   session_id: string2(),
   machine_id: string2(),
@@ -22107,6 +22117,20 @@ var ReplayWireSchema = object({
     refused: string2().optional()
   }))
 });
+var DELIVERY_NOT_ANSWERED = "not_answered";
+var DELIVERY_UNREADABLE = "unreadable_answer";
+function parseSubscribeAnswer(body) {
+  const interest = InterestWireSchema.parse(body);
+  const raw = typeof body === "object" && body !== null && "delivery" in body ? body.delivery : undefined;
+  if (raw === undefined || raw === null) {
+    return { ...interest, delivery: { mode: "core", reason: DELIVERY_NOT_ANSWERED } };
+  }
+  const delivery = DeliveryAnswerWireSchema.safeParse(raw);
+  return {
+    ...interest,
+    delivery: delivery.success ? delivery.data : { mode: "core", reason: DELIVERY_UNREADABLE }
+  };
+}
 function mergeInterestSources(registryTopics, liveTopics) {
   const interests = new Map;
   for (const topic of registryTopics) {
@@ -22206,7 +22230,7 @@ function createEnvoyClient(config) {
     body: JSON.stringify(body)
   }, options);
   return {
-    subscribe: async (input) => InterestWireSchema.parse(JSON.parse(await post("/v1/interests/subscribe", {
+    subscribe: async (input) => parseSubscribeAnswer(JSON.parse(await post("/v1/interests/subscribe", {
       session_id: input.sessionID,
       dir: input.directory,
       topics: expandSubscriptionTopics(input.topics),
@@ -22215,6 +22239,7 @@ function createEnvoyClient(config) {
       ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
       driving: input.driving,
       ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
+      ...input.delivery === undefined ? {} : { delivery: input.delivery },
       ...input.clientInstanceID === undefined ? {} : { client_instance_id: input.clientInstanceID },
       host: machineID(),
       plugin: input.plugin.name,
