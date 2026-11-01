@@ -9,4 +9,4 @@ body: |-
     (`skill://legion-controller/references/parked-decisions.md`).
 time: 2026-10-29T15:30:00Z
 custom:
-    Issue: INFRA-251
+    Issue: pr2163

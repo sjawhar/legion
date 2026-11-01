@@ -117,7 +117,7 @@ func newMainPathRig(t *testing.T, wired bool) *mainPathRig {
 	admission := admit.New(records, engine, 1, mainPathProject, quietLogger())
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	// The hold of what a root architect's task names is the claim store's own write
-	// (0068_parked_decisions), so this rig runs through the daemon's own claim store: a task held
+	// (20261101163106_parked_decisions), so this rig runs through the daemon's own claim store: a task held
 	// on the claim holds those rows, and the next start of the root names none of them again.
 	trees := outboxTreeStore(t, pool, mainPathRoot)
 	sup.deps.Store = keptClaimStore{Store: trees}

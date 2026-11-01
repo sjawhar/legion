@@ -6,11 +6,11 @@ import (
 	"testing"
 )
 
-// 0068 adds parked_decisions and readmitted_approvals: a decision is kept under the issue it was
+// 20261101163106 adds parked_decisions and readmitted_approvals: a decision is kept under the issue it was
 // made on, one row per Dispatch reference, and a root keeps one approval below its spec's latest
 // version. Both carry the claim of the outbox row that names them and the hold of the delivery
 // that carries them, and both go with the issue they name.
-func TestParkedDecisionsArriveWith0068AndGoWithTheirIssue(t *testing.T) {
+func TestParkedDecisionsArriveWith20261101163106AndGoWithTheirIssue(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
 	migrateThrough(t, store, 67)
@@ -19,7 +19,7 @@ func TestParkedDecisionsArriveWith0068AndGoWithTheirIssue(t *testing.T) {
 		t.Fatalf("look for parked_decisions at 0067: %v", err)
 	}
 	if exists {
-		t.Fatal("parked_decisions exists at 0067, want it added by 0068")
+		t.Fatal("parked_decisions exists at 0067, want it added by 20261101163106")
 	}
 	if _, err := store.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)

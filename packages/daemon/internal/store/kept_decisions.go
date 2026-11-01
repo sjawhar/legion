@@ -11,7 +11,7 @@ import (
 // tree could hear them (record.KeptDecisions, carried as supervise.Delivery.Kept and persisted as
 // pending_task_deliveries.kept_decisions) is held by the delivery that task was queued as, and
 // told at that delivery's confirmation. Those rows stand in parked_decisions throughout
-// (0068_parked_decisions): the claim's write of the delivery takes each from the start row that
+// (20261101163106_parked_decisions): the claim's write of the delivery takes each from the start row that
 // named it and marks it held by this claim and delivery id, the write recording the confirmation
 // tells it, and the write that retires the delivery leaves it KEPT again. Each is the delivery's
 // own write, so no ordering of queues, confirmations, retirements and restarts can leave a row

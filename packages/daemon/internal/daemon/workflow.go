@@ -467,7 +467,7 @@ func (w *workflowRuntime) rootHears(ctx context.Context, c supervise.Claim, _ su
 // rootTask answers supervise's Deps.RootTask: what a root architect's held task of a run says now,
 // at the moment it is about to be sent. Such a task names the decisions a person made while nobody
 // in the root's tree could hear them, and holds those rows on its own delivery until the turn that
-// takes it confirms (the claim store's putDelivery, 0068_parked_decisions). An issue it names can
+// takes it confirms (the claim store's putDelivery, 20261101163106_parked_decisions). An issue it names can
 // have left this tree while the task waited — a child a linger handed to Legion, a parked child a
 // person's todo orphaned, a grandchild handed over beside its parent — and the tree it stands in
 // now is the one that owes the person an answer, not this one.

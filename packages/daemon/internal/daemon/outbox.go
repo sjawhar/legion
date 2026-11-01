@@ -1054,7 +1054,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			// of what its tree is owed travels with it as well (supervise.Delivery.Kept): the
 			// claim's write of the delivery takes those rows from this start row and holds them
 			// under that claim and delivery id, and the write recording the turn's confirmation
-			// tells them (the claim store's putDelivery, 0068_parked_decisions).
+			// tells them (the claim store's putDelivery, 20261101163106_parked_decisions).
 			kept, err := keptJSON(payload.Kept)
 			if err != nil {
 				return err
