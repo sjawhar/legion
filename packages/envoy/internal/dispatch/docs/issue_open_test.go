@@ -175,14 +175,18 @@ func TestClosingAnIssueOnOneProcessClosesEveryProcessesRoomsAndReopeningMakesThe
 // or waits on the document's lock behind a settlement or a compaction, and the close's notification
 // closes the room meanwhile, which hands the room's queued updates to the gate (CloseRoom flushes
 // it). The room's observer took the update before the close, which the gate tells by comparing the
-// update's age with how long ago the issue closed (gateAppend). Here task A's persistence is
-// held while the issue closes through task B; alice's socket closes, the hold runs out, her
-// keystroke is stored, and her browser comes back read-only holding it.
+// update's age with how long ago the issue closed (gateAppend). Here task A's appends wait at a
+// gate the test holds (gatedAppends) while the issue closes through task B; alice's socket closes,
+// the test opens the gate, her keystroke is stored, and her browser comes back read-only holding
+// it. The gate is an event, not a wait: the append stays unstored for exactly as long as the test
+// needs, whatever the race detector costs the run, and the test reads back that the keystroke is
+// unstored rather than that the head stands still, since a browser's connect makes a durable
+// append of its own that changes no content and lands whenever it lands.
 func TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenItsAppendReachesTheGateAfter(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
-	taskA, serverA := newTestServiceInstance(t, database)
-	taskA.hooks = newTestHooks()
+	taskA, appends := newGatedServiceInstance(t, database)
+	serverA := newTestServer(t, taskA)
 	taskB, _ := newTestServiceInstance(t, storetest.SecondProcess(t, database))
 	seedServiceText(t, taskA, artifactID, "before")
 	waitForLandedAppends(t, taskA, artifactID)
@@ -190,24 +194,25 @@ func TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenItsAppendReachesTheGateA
 	runRoomSync(t, newRoomSync(taskB))
 	alice := connectWithScope(t, serverA.URL, artifactID, "alice", "read-write", "before\n")
 	waitForLandedAppends(t, taskA, artifactID)
-	head := storedHead(t, database, artifactID)
 
-	const hold = 3 * time.Second
-	held := time.Now().Add(hold)
-	if err := taskA.HoldRoomPersistence(artifactID, hold); err != nil {
-		t.Fatalf("hold task A's persistence: %v", err)
-	}
+	appends.hold()
+	// Registered here, so it runs before every cleanup registered above it: a test that fails
+	// with the gate held leaves neither the room's close nor the service's shutdown waiting on an
+	// append that never comes.
+	t.Cleanup(appends.release)
 	typeOver(t, alice, "before", "typed before the close")
-	waitFor(t, roomWait(t), "task A's room to take alice's keystroke", func() bool {
-		return strings.Contains(residentRoomMarkdown(t, taskA, artifactID), "typed before the close")
+	waitFor(t, roomWait(t), "task A's room to take alice's keystroke and its append to reach the held gate", func() bool {
+		return appends.waiting.Load() > 0 &&
+			strings.Contains(residentRoomMarkdown(t, taskA, artifactID), "typed before the close")
 	})
 	writeIssueClosed(t, taskB.store, "DOC-1", true)
 	requireEnds(t, alice, "closing the issue through task B left alice's browser on task A connected")
-	if moved := storedHead(t, database, artifactID); moved != head || time.Now().After(held) {
-		t.Fatalf("the close was meant to take effect while task A held alice's keystroke unstored, but the head moved from %d to %d or the hold ran out first", head, moved)
+	if stored := storedMarkdown(t, database, artifactID); strings.Contains(stored, "typed before the close") {
+		t.Fatalf("the close was meant to take effect while task A held alice's keystroke at the gate, but the store already holds %q", stored)
 	}
 	// The room's close waits for its persistence to store what it holds (CloseRoom's flush), so
-	// once the room is gone the keystroke's append has been decided.
+	// once the gate is open and the room is gone the keystroke's append has been decided.
+	appends.release()
 	waitFor(t, roomWait(t), "task A's room to finish closing", func() bool {
 		return taskA.srv.GetDoc(artifactID) == nil
 	})
