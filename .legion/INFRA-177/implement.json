@@ -2,65 +2,66 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-177",
-  "previousHandoff": "9d51502c2bc9865db7819ae14d3e124ae99c0656",
+  "previousHandoff": "2905c0c4ea5a27428193af2ee812f0b6b2d3f5bc",
   "filesChanged": [
-    ".github/e2e-scripts.json (conflict: main's envoy-session-delivery.sh row beside this change's handoff-cutover-github.sh row, both kept)",
-    "scripts/e2e/README.md (conflict: main's envoy-session-delivery.sh entry and section beside this change's handoff-records.sh and handoff-cutover-github.sh entries and sections, both kept; main's own edit of the lib/port-file.sh sentence taken as main wrote it)",
-    "one forward merge with main@origin 0642a37a (#2633): fe131b9406fc7b76ee85a2b37d86e7fe830de0b5"
+    "docs/kubernetes.md (finding 1)",
+    "packages/envoy/internal/dispatch/store/migrations/20261101144901_handoffs.up.sql (finding 2)",
+    "packages/daemon/internal/api/handoff.go (finding 3)",
+    "packages/pi-legion/scripts/skill-scenarios/score.ts (finding 4)",
+    "packages/pi-legion/scripts/skill-scenarios/score.test.ts (finding 4)",
+    "packages/daemon/internal/daemon/handoff_records_live_test.go (finding 5)",
+    "packages/pi-legion/extensions/legion-phase-stall-omp.test.ts (finding 6)"
   ],
   "proof": [
     {
-      "criterion": "The forward merge changes no line of this pull request's own diff, so the change under review is the one already approved",
-      "surface": "the fingerprint of skill://legion-worker/references/conflicts-and-rewrites.md, over all 558 files of the pull request's diff",
-      "command": "jj diff --from \"fork_point(\\\"main\\\"@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, at 9d51502c and at fe131b94",
-      "observed": "1cf097aeb6b1fc58de8b5428aa330e6591e4772943b7a1c384fa4a04650d264c on both sides: unchanged. A per-file comparison of the two diffs reports no file whose added or removed lines differ.",
-      "headSha": "fe131b9406fc7b76ee85a2b37d86e7fe830de0b5",
-      "negativeControl": "The same per-file comparison across the previous round (fa59a830 -> 9d51502c) reports 58 files moved, among them live.e2e.ts and the two renamed migrations, so the comparison does detect a moved line."
+      "criterion": "Finding 3: a stale-assignment refusal names the handoff record, so a planner, tester or reviewer completion, which carries a record and no commit, is covered by it",
+      "surface": "the daemon's own API tests over staleAssignment's two refusals",
+      "command": "cd packages/daemon && go test ./internal/api/ -count=1; go vet -tags e2e ./...",
+      "observed": "ok github.com/sjawhar/legion/daemon/internal/api in 180 s, and vet exit 0. Both refusals now read 'complete it with a handoff of its own, never this completion's record, commit or verdict'. A grep of packages, skills and docs for the old wording \"completion's commit or verdict\" returns nothing, so no prompt, skill or test pinned it.",
+      "headSha": "fad8b67a86b1d581711894f66b6b847e4427a806",
+      "negativeControl": "The same grep before the edit returned the two call sites in api/handoff.go, which is how the absence afterwards is read as a complete change rather than an empty search."
     },
     {
-      "criterion": "GitHub reports the pull request mergeable again",
-      "surface": "GitHub's own mergeability for pull request 2354",
-      "command": "gh pr view 2354 --repo sjawhar/legion --json headRefOid,mergeable,mergeStateStatus",
-      "observed": "headRefOid fe131b9406fc7b76ee85a2b37d86e7fe830de0b5, mergeable MERGEABLE, mergeStateStatus BLOCKED (the base's required checks have not settled on this head yet). Before the merge the same read answered CONFLICTING / DIRTY at 9d51502c.",
-      "headSha": "fe131b9406fc7b76ee85a2b37d86e7fe830de0b5",
-      "negativeControl": "The same command at 9d51502c, before the push, answered mergeable CONFLICTING and mergeStateStatus DIRTY."
+      "criterion": "Finding 5: the duplicate first-line helper is gone and the one call reads the same line it did",
+      "surface": "the whole daemon against a real Dispatch server, which drives parseWritten on every handoff write",
+      "command": "LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/hr3_infra177 bash scripts/e2e/handoff-records.sh",
+      "observed": "PASS in 97 s, every check ok. parseWritten parses each `Recorded the <phase> handoff of <KEY>, version <n> (id <uuid>)` line through the inlined strings.Cut, and firstLineOf no longer exists; only main's firstLine is left in the package.",
+      "headSha": "fad8b67a86b1d581711894f66b6b847e4427a806",
+      "negativeControl": "Within the same run, with Dispatch stopped the write exits 1 and the completion answers 502 DISPATCH_READ_FAILED with the issue still in planning, so the proof's parse is reached on a real answer rather than skipped."
     },
     {
-      "criterion": "The whole handoff-record mechanism still holds over main's new tree: the Dispatch write, the daemon's read-back and each refusal",
-      "surface": "the whole daemon against a real Dispatch server and the real dispatch CLI",
-      "command": "LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/hr2_infra177 bash scripts/e2e/handoff-records.sh",
-      "observed": "PASS in 84 s, every check ok, HANDOFF_NOT_NEW and A10 among them.",
-      "headSha": "fe131b9406fc7b76ee85a2b37d86e7fe830de0b5",
-      "negativeControl": "Within the same run, with Dispatch stopped the write exits 1 and POST /legion/v1/handoff/complete answers 502 DISPATCH_READ_FAILED with the issue still in planning."
+      "criterion": "Finding 6: the quiet wait and the bound both assertions measure against are one constant, so changing the wait is one edit",
+      "surface": "the real Oh My Pi binary driven by the pi-legion extension harness",
+      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp bun test ./extensions/legion-phase-stall-omp.test.ts",
+      "observed": "10 pass, 0 fail, 76 expect() calls in 179 s, 'a WAITING reply buys its quiet wait, and the reminder comes again when the wait is over' among them. `const waitMs = 1_500` feeds LEGION_STALL_WAITING_MS through String(waitMs), and `const waitedAtLeastMs = waitMs - 100` is the one bound at both assertion sites.",
+      "headSha": "fad8b67a86b1d581711894f66b6b847e4427a806",
+      "negativeControl": "The same suite was 1 fail at fa59a830 (CI run 41177359220, job 124475085043) before this round's predecessor fixed the quiet-window assertion, so the case does fail when the window is wrong."
     },
     {
-      "criterion": "The two checks the conflicted files feed still pass, so neither resolution broke the proof selector or the CI filters",
-      "surface": "the repository's own gate scripts",
-      "command": "bash .github/scripts/select-e2e-proofs.test.sh; bash .github/scripts/check-ci-filters.sh",
-      "observed": "select-e2e-proofs.test.sh: 100 passed, 0 failed, PASS. check-ci-filters.sh: exit 0. python3 -c 'json.load(...)' on .github/e2e-scripts.json: ok. scripts/semantic-line-breaks.ts on scripts/e2e/README.md: exit 0, and the guides layout test's e2e-README case passes.",
-      "headSha": "fe131b9406fc7b76ee85a2b37d86e7fe830de0b5",
-      "negativeControl": "The union merge first left no blank line before main's `## envoy-session-delivery.sh` heading, which the per-file diff comparison caught as the one line of this change's diff that had moved; restoring it brought the fingerprint back to 1cf097ae."
+      "criterion": "Finding 4: the scorer reads the base label's real shape, a body with previousHandoff and no completed, and the comments name it",
+      "surface": "the scorer's own test suite over TestHandoff",
+      "command": "cd packages/pi-legion && bun test ./scripts/skill-scenarios/score.test.ts",
+      "observed": "73 pass, 0 fail, 367 expect() calls, with the new case 'a tester handoff of a checkout whose prompt asks for previousHandoff is read too' among them; it asserts the body carries no `completed` key and that TestHandoff reads it. The comment on TestHandoff and the comment above the base-label case now name previousHandoff as main's shape since sjawhar/legion#2585 and completed as the shape before it.",
+      "headSha": "fad8b67a86b1d581711894f66b6b847e4427a806",
+      "negativeControl": "The same case with implementerProof removed is refused by TestHandoff, asserted in the case itself, so the parse is not vacuous."
     },
     {
-      "criterion": "This change's reader-facing surface and its numbers still hold over main's new tree",
-      "surface": "Chromium against the real Dispatch server, the real omp, and the two modules' sources",
-      "command": "cd packages/dispatch && bun run e2e -- --project=chromium --project=iphone -g 'a fresh page load opens the socket at the current head and stays within a bounded request budget'; bun run e2e:deployed -- --project=chromium e2e/handoffs.e2e.ts; cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp bun test ./extensions/legion-phase-stall-omp.test.ts",
-      "observed": "The budget spec 2 passed (chromium and iphone) on a fresh web build; handoffs.e2e.ts 3 passed; the stall suite 10 pass. Numbers read against main@origin 0642a37a just before the push: contract 45 against main's 44, pinned 45 in packages/pi-legion/package.json and packages/claude-envoy/package.json; migrations 20261101144900_handoff_records and 20261101144901_handoffs, both after main's 0161_delivery_run_warnings and 20261101144855_block_pointer_links.",
-      "headSha": "fe131b9406fc7b76ee85a2b37d86e7fe830de0b5",
-      "negativeControl": "Recorded in round 12 at 14f6fdc9: against a build of 8a4d97bf, before the Conversation change, the Conversation spec fails with 'Expected: 2, Received: 0' cards while the Activity spec passes."
+      "criterion": "Findings 1 and 2: the two prose corrections hold, and neither breaks the gate that reads its file",
+      "surface": "the repository's own doc and migration gates",
+      "command": "bun test scripts/semantic-line-breaks.guides.test.ts; bash .github/scripts/check-private-names.sh; cd packages/envoy && go test ./internal/pgmigrate/... -count=1 && go test ./internal/dispatch/store/ -run 'Number|Timestamp|Shipped' -count=1",
+      "observed": "The guides case covering docs/kubernetes.md passes and check-private-names exits 0. pgmigrate ok; TestMigrationSetTakesNumbersThenTimestamps, TestMigrationSetRefusesANewMigrationNumberedAfterTheShippedSet, TestEveryShippedCensusAnswersAtTheSchemaBeforeItsMigration, TestEveryShippedCensusNamesTheNewMigrationsItReads and TestMigrateAppliesBothTimestampedMigrationsOnceOnAFreshDatabase all PASS over the reworded migration comment. docs/kubernetes.md now says the stale record moves an implementing issue to testing on its next pull request event before the implementer has completed anything, and the migration comment points at migrationid and the README instead of naming 0149.",
+      "headSha": "fad8b67a86b1d581711894f66b6b847e4427a806",
+      "negativeControl": "The same guides test still fails its Envoy-guide case, on main's own packages/envoy/cmd/dispatch/README.md text, which shows the test is not passing vacuously; that failure is main's and the architect gave it to the controller."
     }
   ],
   "trickyParts": [
-    "The conflict arrived while the issue was in testing. The merge, the resolution, the checks and both fingerprints were prepared in the working copy and reported; the tester moved the issue back with request_backward_move, and only then was anything pushed (docs/solutions/legion/a-conflict-that-arrives-while-another-role-holds-the-phase-...-LEGION-663.md).",
-    "Both conflicts were two sides inserting at one point, so the resolution is a union: git merge-file --union driven through jj resolve --tool, then the one blank line it swallowed restored by hand and folded into the merge commit. The per-file fingerprint comparison is what found that blank line.",
-    "The tester reports that it ran no round at 9d51502c, so the next round is a full one measured from round 21's head d29a6a04, not from the unchanged fingerprint of this merge."
+    "Finding 3 has no review thread, since staleAssignment's lines are outside the diff. It is answered in the pull request body under the Threads section and reported to the reviewer on its role topic.",
+    "Finding 1's old sentence claimed a stale record would start the implementer on a red without waiting for the tester's turn. Main's phaseEnded waits for no turn, so that effect cannot happen; the remaining one is record.PhaseRow.Completed reading true in a new implementing round, which moves the issue to testing on its next pull request event."
   ],
   "deviations": [],
-  "openQuestions": [
-    "packages/envoy/cmd/dispatch/README.md fails scripts/semantic-line-breaks.ts at 11 lines of main's own 'Stored-order check' and migration-numbering text. It fails identically on main alone, that layout test is deliberately kept out of CI, and --write moves 74 lines of main's prose, so it was reported to the architect rather than widened into an approved pull request on its way to the merge. The architect decides whether it is fixed here or in a change of its own."
-  ],
+  "openQuestions": [],
   "discoveredComplexity": [
-    "This pod's PostgreSQL limits three Go lanes without touching their assertions: legion_test may not pg_terminate_backend, so storetest's drop of its isolated database fails in the daemon's internal/store and Dispatch's internal/dispatch/store and api; it may not create an event trigger (TestCensusDoesNotExemptACatalogMigrationAnEventTriggerRunsOn); and the server runs max_wal_senders=0, so the census's replication connection is refused. Every test itself passes.",
-    "The stray branches legion/INFRA-177-rescue (2055bbbe, a tree byte-identical to 91ab50e0), legion/INFRA-177-wip (9e3fe863) and legion/INFRA-177-rescue-jj-91ab50e03e8a are deleted on the architect's instruction; legion/INFRA-177 is the only branch this issue leaves."
+    "The reviewer's non-finding stands as it wrote it: six docs/solutions notes that #2585 added with status: active still teach the committed handoff and previousHandoff. Per the architect's ruling that census is retro's, before READY, and this round left them alone.",
+    "packages/envoy/cmd/dispatch/README.md's 11 semantic-line-breaks failures are main's own text and fail identically on main; the architect took that defect to the controller and kept it out of this pull request."
   ]
 }
