@@ -171,7 +171,10 @@ At every start (step 4 of the start procedure) and on each `tick`:
    (an answer as `<question> -> <answer>`) and its author (`user <login>`), but no id. An
    `artifact.approved` or `artifact.changes_requested` event, with the approval request's
    `ask.answered` at the same time, is one decision whose `ref` is `dispatch://<KEY>/spec`, and
-   the issue's `Spec approval:` line shows a request's reason. For any other ask or a comment, find
+   the issue's `Spec approval:` line shows a request's reason. An `artifact.approved` of the root's
+   own spec is no decision to judge: it is the person's handover, which the daemon queues itself
+   (the paragraph under **The notice**), so skip it, and with it the approval request's
+   `ask.answered` at the same time. For any other ask or a comment, find
    the item: `Open asks:` names an ask still open, and `dispatch search` finds an ask or a comment
    by its words. The id at the end of a hit's link (`/asks/<id>`, `?ask=<id>`, `#b-<block id>`,
    `/comments/<id>`, `?comment=<id>`) names it. Read an ask with `dispatch read --ref

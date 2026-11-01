@@ -415,9 +415,6 @@ delivered_more() { [ "$(controller_deliveries "$1" "$2")" -gt "$3" ]; }
 log_has() {
   jq -R -s -e "any(split(\"\\n\")[] | fromjson? | select(type == \"object\"); $1)" "$evidence/logs/daemon.log" >/dev/null
 }
-undelivered_logged() {
-  log_has ".issue == \"$1\" and (.msg | startswith(\"outbox notice finished undelivered: its architect\"))"
-}
 sent_logged() { log_has ".issue == \"$1\" and .msg == \"outbox parked decision sent to the controller\""; }
 # architect_turn_holds ISSUE TEXT: a user turn of ISSUE's architect session holds TEXT.
 architect_turn_holds() {
@@ -836,9 +833,8 @@ until_true 300 "Dispatch to show $tree4 todo by legion-daemon:$project" todo_by_
 until_true 600 "$tree4 to be admitted" active "$tree4"
 until_true 1800 "$tree4 to reach planning" issue_phase "$tree4" planning
 ! sent_logged "$tree4" || fail "the outbox relayed a parked decision on $tree4 to the controller"
-! relayed_logged "$tree4" design-approved || fail "the workflow relayed $tree4's approval to the controller"
 ! log_has ".issue == \"$tree4\" and (.msg | startswith(\"outbox notice finished undelivered: its architect\")) and (.kind | IN(\"design-approved\", \"design-changes-requested\", \"carried-gate-opened\"))" ||
-  fail "the outbox finished a spec notice of $tree4 undelivered: the root's own gate took the approval"
+  fail "the outbox finished a spec notice of $tree4 undelivered: the approval that queued it wrote a notice"
 [ "$(controller_deliveries "$session1_file" "$(notice_needle parked-decision "$tree4")")" = "$told4" ] ||
   fail "session 1 received another parked-decision on $tree4 after the approval"
 note "the daemon queued $tree4 as the person's handover (source approval), it is admitted and planning, and no parked-decision was sent for the approval ($(since "$waited"))"

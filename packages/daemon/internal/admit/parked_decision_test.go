@@ -571,3 +571,45 @@ func TestASpecDecisionNoticeNamesWhoMadeItAndWhere(t *testing.T) {
 		})
 	}
 }
+
+// A person who approves the latest version of a parked labelled root's spec hands the root over
+// (sjawhar/legion#2619): the daemon queues its todo and writes no notice. The approval is still the
+// newest the gate knows of, so the re-admission that todo brings keeps no stale pair: the gate was
+// approved at version 2 and revised to 3 before the park, and the person has now approved 3. A
+// start that named the pair would tell the new architect to request approval of the version the
+// person just approved, and send the person an ask they have already answered.
+func TestARootAPersonsApprovalHandsOverIsToldNoStaleApproval(t *testing.T) {
+	ctx := context.Background()
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, nil)
+	parkedRoot(t, pool)
+	inTx(t, pool, func(tx pgx.Tx) {
+		if err := record.NewStore().PutGate(ctx, tx, record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 3,
+			ApprovedVersion: new(2)}); err != nil {
+			t.Fatalf("put the gate: %v", err)
+		}
+	})
+	view := &dispatch.Issue{Key: "LEGION-ROOT", Project: testProject, Title: "root", Status: "backlog", Labels: []string{dispatch.LegionLabel},
+		HandedOver: true, PrimaryArtifactID: "artifact-root"}
+	approval := intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved,
+		Version: 3, Mark: record.EventMark{Seq: 4, At: fixedNow}, Actor: alice, Issue: view}
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "approved", approval, admission.engine, admission); err != nil {
+		t.Fatalf("apply the person's approval: %v", err)
+	}
+	if notices := parkedDecisionNotices(t, pool); len(notices) != 0 {
+		t.Fatalf("parked-decision notices = %#v, want none: the approval is the person's handover", notices)
+	}
+	readmitRoot(t, pool, admission)
+	starts := architectStartRows(t, pool)
+	if len(starts) != 1 {
+		t.Fatalf("architect starts %#v, want one", starts)
+	}
+	if strings.Contains(starts[0].Task, "request approval") || (starts[0].Kept != nil && starts[0].Kept.Approved != 0) {
+		t.Fatalf("the start's task %q (kept %#v) names an approval pair, want none: the person approved the latest version", starts[0].Task, starts[0].Kept)
+	}
+	inTx(t, pool, func(tx pgx.Tx) {
+		if approved, latest, err := record.NewStore().ReadmittedApproval(ctx, tx, "LEGION-ROOT"); err != nil || approved != 0 || latest != 0 {
+			t.Fatalf("kept approval after the re-admission = %d, %d, %v; want none", approved, latest, err)
+		}
+	})
+}

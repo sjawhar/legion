@@ -548,10 +548,12 @@ func (e *Engine) gateRequestFound(ctx context.Context, tx pgx.Tx, fact intake.Ga
 // moved, marked as a person's handover so that one such row at a time is pending for the issue
 // (record.Store.PersonHandoverPending) — a redelivery of the event, or a second approval while the
 // row waits, queues nothing, since the pending row carries the same write, and the issue's other
-// status rows suppress nothing. The root's own gate is not applied: a recorded root's re-admission
-// clears it, and the new architect's register_gate reads the approval from Dispatch, as it does for
-// any approval Dispatch already shows, so a design-approved notice is never written for a tree
-// with no architect. Every carried copy of the gate is applied as today, since the carried tree
+// status rows suppress nothing. The root's own gate takes the approval quietly (recordHandover): it
+// records the version approved, so the re-admission the todo brings keeps no stale approval pair
+// for the new architect's start (admit's keepStaleApproval), and it writes no notice and answers no
+// wait, since the tree has no architect. The re-admission then clears the gate, and the new
+// architect's register_gate reads the approval from Dispatch, as it does for any approval Dispatch
+// already shows. Every carried copy of the gate is applied as today, since the carried tree
 // is its own. The queue is logged once it commits, under admission's message for a person's
 // handover with source approval, so the proof reads which path queued a root from that field.
 func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.DispatchArtifact) (intake.Result, error) {
@@ -566,6 +568,9 @@ func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.Di
 	for _, gate := range gates {
 		carried := gate.Issue != fact.Key
 		if queues && !carried {
+			if err := e.recordHandover(ctx, tx, gate, fact); err != nil {
+				return intake.Result{}, err
+			}
 			continue
 		}
 		if carried && !copyTakes(gate, fact) {
@@ -587,6 +592,21 @@ func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.Di
 	}
 	e.logOnCommit(ctx, "admission: queued a person's handover", "issue", fact.Key, "source", "approval")
 	return intake.Result{}, nil
+}
+
+// recordHandover records on a parked root's own gate the person's approval that queues the root as
+// their handover (personHandoverQueues), with nothing else applyArtifact does: no notice, no
+// answered wait, no log of a gate opened, since the tree has no architect to hear any of it. Its
+// one reader is the re-admission the queued todo brings, whose keepStaleApproval would otherwise
+// find the approval the gate held before the spec's last revision and have the new architect told
+// to request approval of the version the person has just approved. An approval of a version older
+// than the gate's latest, or one the gate has already seen superseded, records nothing, as
+// applyArtifact records nothing for it; under gates.design off no artifact event moves a gate.
+func (e *Engine) recordHandover(ctx context.Context, tx pgx.Tx, gate record.DesignGate, fact intake.DispatchArtifact) error {
+	if e.cfg.DesignGate == config.DesignGateOff || fact.Version < gate.LatestVersion || classify.StaleReview(gate, fact.Version, fact.Mark) {
+		return nil
+	}
+	return e.store.PutGate(ctx, tx, classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, fact.Version, fact.Mark))
 }
 
 // personHandoverQueues says whether fact is a person's approval that queues its root as the
