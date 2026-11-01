@@ -2,35 +2,48 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-251",
-  "previousHandoff": "079532ed2107768e91509e32d4dd54bda49b0c2c",
-  "round": 20,
-  "headSha": "695ee39dea13",
-  "handoffHead": "2bfe17dfabf0df1767e0d0c7d29c313ee168fc96",
-  "provider": "Every turn of this round ran on anthropic/claude-opus-5-5, this session's model; no subagent ran. No model ran inside any test.",
-  "scope": "Forward-merge re-check 946d850c -> 695ee39d: the fingerprint is unchanged, so this round ran the bare gates only, as the architect asked. I computed the branch's own diff against each head's fork point (e622d943 and 081e9e60), leaving out .legion/, with index and hunk-header lines removed. Both sha256 values are d8a7e86d3f16985c, over 82 files on each side. The merge brought only main's #2621 (packages/pi-legion/extensions/legion-background-subagent-omp.test.ts and one docs/solutions file) and main's release and changelog commits.",
+  "previousHandoff": "0103f7a7bf102ab1be73409fe228ba4bf846665d",
+  "round": 21,
+  "headSha": "1ff14783191d",
+  "handoffHead": "644bd97b55a3733738f33ff155012a90a77af8dd",
+  "provider": "Every turn of this round ran on anthropic/claude-opus-5-5, this session's model; no subagent ran.",
+  "scope": "The compare 695ee39d...1ff14783 changes scripts/e2e/parked-decision-devbox.sh (148 lines), scripts/e2e/README.md (9) and the .legion/ handoffs. No daemon or other code moved.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The implementer's fingerprint claim (3f7d4072..., 77 files, unchanged) holds under my own procedure: my fingerprint, d8a7e86d3f16985c over 82 files, is the same at 946d850c and at 695ee39d. The pi-legion test passes 10 of 10 on the pinned Oh My Pi."
+    "how": "bash -n passes. shellcheck v0.10.0 -x (fetched from its release; the pod has none) exits 0 on the script at 1ff14783 and on stage3-devbox-workflow.sh, and flags SC2119/SC2120 on the script at 8d19216c, as the implementer says. I wrote my own command-word check: shfmt v3.10.0 --to-json lists every literal command word, and bash resolves each after sourcing transcript, rig, omp-home, workflow and leftovers. At 1ff14783, 114 words: unresolved only docker, mise and tmux, the devbox programs the prerequisites loop requires, which this pod lacks. At 8d19216c the same check also leaves pick_port and log_size unresolved. In my own harness I re-ran the implementer's listener and Dispatch smoke, and got the same result."
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "The pi-legion background-subagent test, red at 079532ed, passes at this head",
-      "surface": "bun test of packages/pi-legion/extensions/legion-background-subagent-omp.test.ts against the pinned Oh My Pi binary (.omp-pin: github:sjawhar/oh-my-pi@18.13.3-sami.20261029-115123, the linux-x64 asset of release v18.13.3-sami.20261029-115123, 'omp/18.13.3') and a real nats-server",
-      "command": "LEGION_TEST_OMP=<that omp> LEGION_TEST_NATS_URL=nats://127.0.0.1:54333 bun test extensions/legion-background-subagent-omp.test.ts, 10 times",
-      "observed": "10 of 10 pass. Each run measured that the subagent started 21 to 53 ms before the role's turn ended, and that the turn ended 79 to 135 ms before the subagent's request was released.",
-      "headSha": "695ee39dea13",
-      "negativeControl": "Without LEGION_TEST_OMP the test skips ('0 pass, 1 skip'), so these runs did drive the binary."
-    },
-    {
-      "criterion": "The daemon packages and the pinned seeds",
-      "surface": "go test on the pod's PostgreSQL 18.6 and nats-server 2.10.29",
-      "command": "go test -count=1 -timeout 50m ./internal/admit/ ./internal/workflow/ ./internal/record/ ./internal/store/ ./internal/supervise/ ./internal/daemon/; then go test -v -skip 'TestDaemonPermissionsOnRealServers|TestATerminalAttempt' ./internal/daemon/",
-      "observed": "record and supervise are ok. All 38 TestKeptDecisionsRegressionSeeds subtests PASS, and 270 daemon tests passed. Every failure I classified by message is the pod's, not this change's. (1) 53 tests failed only in cleanup, with 'permission denied to terminate process (SQLSTATE 42501)' (sjawhar/legion#2613); 32 more are the parents of those. (2) Two tests panicked with 'rootless Docker not found': TestDaemonPermissionsOnRealServers and TestTheWorkflowConnectsAsTheNatsSeedTheDaemonResolved. (3) TestATerminalAttemptIgnoresSIGTSTP and TestATerminalAttemptLeavesLaterChildrenSIGTTOUsDefault fail with 'parse SigIgn \"\"': gVisor's /proc/self/status has no SigIgn line, and this change does not touch foreground.go or foreground_test.go. (4) One admit test met 'failed to receive message' at the shared PostgreSQL under load; run again alone it passed 3 of 3. Invariant failures: 0.",
-      "headSha": "695ee39dea13",
-      "negativeControl": "The pinned seeds are each a past failure."
+      "criterion": "CI reads green at the head (a bare gate)",
+      "evidence": "GitHub reports #2163 CONFLICTING (mergeStateStatus DIRTY), read 2026-11-01T12:44Z, and no check run exists at 1ff14783 or at 644bd97b, because GitHub starts no pull_request workflow on a conflicting head. git merge-tree --write-tree main@origin(9ee0862f2341) 644bd97b reports 'CONFLICT (content)' in packages/daemon/internal/intake/decode.go, facts.go and intake_test.go, against main's 9e1f057ed286 'feat(daemon): the daemon queues a person's handover itself (LEGION-755) (#2619)'. The implementer reintegrates main with a merge (skill://legion-worker/references/conflicts-and-rewrites.md). This change's script port is not at fault: CI at the previous head 2bfe17df read 15 success and 1 cancelled pr-title."
     }
   ],
-  "ci": "Head 2bfe17df, read 2026-11-01T08:07Z: changes and pr-title success; every other lane, test included, still queued. Not waited on, so its green is not yet read. GitHub: mergeable UNKNOWN."
+  "failed": 1,
+  "proof": [
+    {
+      "criterion": "Each rig call of the ported script against stage3-devbox-workflow.sh at main",
+      "surface": "The two scripts' function bodies and rig lines, diffed",
+      "command": "diff <(awk '/^start_listener\\(\\) \\{/,/^}/' stage3.sh) <(... parked-decision-devbox.sh), likewise for start_dispatch and start_daemon; grep of the docker run, install-plugin-profile, keep_port, mise, wait_for_run_processes and App lines",
+      "observed": "start_listener: identical but ENVOY_MACHINE_ID (legion-e2e3 vs legion-e2e-pd). start_dispatch: identical but Stage 3's optional `keep` argument for its restart path, which this script has no use for. start_daemon: the same start_kept/env/await_start call, without Stage 3's restart path (keep_port and write_legion_config inside it; the script does both in boot) and without Stage 3's daemon_runs_the_pinned_omp check of the omp the daemon resolved. That check is not ported. The script's omp_invocation is `mise x $pin -- omp` and it unsets LEGION_OMP_PATH, as Stage 3 does. The Postgres container line is byte-identical (pgvector@sha256:2358fcba...). The NATS line is the same but for the image: this script uses mirror.gcr.io/library/nats:2.10, as AGENTS.md says devbox proofs do, and Stage 3 at main uses bare nats:2.10. install-plugin-profile now passes --omp $pin after mise install, as Stage 3 does. require_app_inputs, write_github_apps and read_app_logins are called in prerequisites, in Stage 3's order.",
+      "headSha": "1ff14783191d",
+      "negativeControl": "The same comparison is what shows the one Stage 3 check not ported (daemon_runs_the_pinned_omp)."
+    },
+    {
+      "criterion": "In the pod, without docker: the ported listener, Dispatch and daemon starts on held ports, and the prerequisites App check",
+      "surface": "A throwaway harness that sources the script's libs and evals the script's own start_listener, start_dispatch, write_legion_config and start_daemon bodies verbatim (awk-extracted). In place of the two containers: the pod's PostgreSQL 18 under the container's user legion with its password, databases dispatch and legion, and nats-server 2.10.29 -js on a port it reports. The binaries are built as the script builds them.",
+      "command": "HARNESS_APPS=0 bash $TMPDIR/pdh/harness.sh",
+      "observed": "prerequisites: require_app_inputs implement review and write_github_apps wrote github-apps.yaml naming app_id 5341240 (implement) and 5341243 (review), each with an agent-secrets private_key_command. app_key_unsets covers LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 and GH_REVIEW_APP_PRIVATE_KEY_B64. rig: the listener served on kernel-chosen port 46997, held by the listener alone (held_only_by). Dispatch served on its keeper's port 33678, held by Dispatch and its keeper alone, and took dispatch_human's project create and its repository mapping PUT, then listed the project. boot: keep_port held the daemon's port, write_legion_config named it, and `legion start --check-config` printed 'Config OK: project=PDH21586'.",
+      "headSha": "1ff14783191d",
+      "negativeControl": "The same harness over the script at 8d19216c stops at its first rig call: 'pick_port: command not found', 'log_size: command not found', 'port_listener: unbound variable'."
+    },
+    {
+      "criterion": "Which checkpoints this pod could and could not reach",
+      "surface": "As above",
+      "command": "As above",
+      "observed": "Reached: bash -n, shellcheck, the command-word check, the prerequisites App inputs and github-apps.yaml, rig's listener, Dispatch, project and mapping on held ports, and boot's keep_port, legion.yaml and --check-config. Not reached: (1) read_app_logins and start_daemon. Both read the App keys through agent-secrets, and the broker held each read for a person's approval ('waiting for sami@theorem.dev to approve it under Credential requests in their Dispatch Inbox'), so I cancelled both requests (60ae3499-9d75-48cf-afdc-0a6bbcc456e2 and de91c83c-b17a-4134-be92-a5b3c837da57; agent-secrets status reads 'cancelled'). This run asks no person to approve a key read. (2) Everything needing docker, mise, tmux, the model route or the proof human's gh: the containers, the plugin install, controller-up and every later checkpoint (trees-wait-on-a-person to the end). Those wait for the merge lane's devbox run.",
+      "headSha": "1ff14783191d",
+      "negativeControl": "Not applicable."
+    }
+  ],
+  "ci": "No check run exists at 1ff14783 or 644bd97b: the pull request is CONFLICTING (failures[0]). At the previous head 2bfe17df: 15 success, 1 cancelled pr-title."
 }
