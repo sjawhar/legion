@@ -281,8 +281,6 @@ test("a session that goes away before the send is excluded by the server and nam
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "one browser proves the broadcast flow");
-  // Room for the Tester's 12 s listener take-over wait below beside the rest of the row.
-  test.setTimeout(60_000);
   await setLiveSessions([planner, tester, observer]);
   await setSessionSendStatus(tester.session_id, 404);
 
@@ -315,10 +313,10 @@ test("a session that goes away before the send is excluded by the server and nam
     await expect(page.getByRole("article", { name: "Observer" })).toHaveCount(0);
 
     const failed = page.getByRole("article", { name: "Tester" });
-    // The Tester's send settles failed only once the listener take-over window has passed
-    // (listenerTakeoverWindow, 12 s, in packages/envoy/internal/dispatch/api/envoy_resolve.go),
-    // most of the default 15 s expect timeout.
-    await expect(failed.getByText(/^Failed:/)).toBeVisible({ timeout: 30_000 });
+    // The Tester's send settles failed only once the listener take-over window has passed: half a
+    // second under the harness's DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW (e2e/run-server.sh), of
+    // the twelve seconds a deployment runs.
+    await expect(failed.getByText(/^Failed:/)).toBeVisible();
     await expect(
       page.getByRole("article", { name: "Planner" }).getByText("Asking Planner (BTW)")
     ).toBeVisible();

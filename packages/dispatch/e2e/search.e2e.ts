@@ -241,6 +241,8 @@ test("an ask hit says whether it is answered, and an answered one shows its late
   }
 });
 
+// SLOW(>=2s): a seeded project document, issue and message, and the two routes the palette's
+// hits open - a Conversation turn and the document, which mounts its editor.
 test("a project-document hit is grouped under the document and opens it; a message hit opens its Conversation turn", async ({
   browser,
 }) => {

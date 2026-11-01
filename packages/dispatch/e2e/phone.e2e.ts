@@ -752,8 +752,6 @@ async function expectStacked(control: Locator): Promise<void> {
   }
 }
 
-// SLOW(>=2s): eleven seeding writes and seven route renders of the same long name, in two
-// projects.
 test("a long name ends in an ellipsis wherever a link or control truncates it @phone", async ({
   browser,
 }, testInfo) => {

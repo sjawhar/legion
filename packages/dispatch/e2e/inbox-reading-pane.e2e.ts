@@ -501,8 +501,6 @@ test("the reading pane shows an anchored question and a question in no document 
   }
 });
 
-// SLOW(>=2s): the six-question seed every row of this file reads, and the three addresses this
-// row proves a cold load of, a reload among them.
 test("the arrow keys, j, k, Enter and ?item= drive the reading pane", async ({ browser }) => {
   const seed = await seedInbox();
   const alice = await asUser(browser, "alice");

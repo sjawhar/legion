@@ -149,6 +149,8 @@ var settings = []setting{
 		Description: "How long a mark no comment, ask or suggestion records is kept before the settlement sweep expires it, for an end-to-end test process; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
 	{Name: "DISPATCH_TEST_ROUTE_ROSTER_TTL", Default: "`5s`", Required: "no",
 		Description: "How long a test process's stored listener answer serves issue reads' `route_status` and `GET /api/v1/agents`; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
+	{Name: "DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW", Default: "`12s`", Required: "no",
+		Description: "How long a test process's sender keeps trying a listener that is being replaced before a send to a session that is gone settles failed; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
 	{Name: "DISPATCH_TEST_EDIT_NOTICE_QUIET", Default: "`30s`", Required: "no",
 		Description: "How long a document stays quiet after a person's last settled version before its `artifact.human_edited` notice goes, for an end-to-end test process; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
 	{Name: "DISPATCH_TEST_ROSTER_UNCACHED", Required: "no",

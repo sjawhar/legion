@@ -714,8 +714,6 @@ test("an approval request for an unassigned issue's non-primary document remains
   }
 });
 
-// SLOW(>=2s): Three cold routes a reader arrives on, because each bare ask URL must be resolved
-// from a fresh load, plus the Inbox landing they are compared against.
 test("an approval ask's Inbox row, drawer link and bare ask route land on the spec with the approve control in view, while an anchored ask and an unanchored question still land where they do today", async ({
   browser,
 }) => {

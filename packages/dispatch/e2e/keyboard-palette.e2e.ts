@@ -1,3 +1,5 @@
+import { setTimeout as sleep } from "node:timers/promises";
+
 import { expect, type Page, test } from "@playwright/test";
 
 import { QUERY_RETRY_DELAY_MS } from "../web/src/api/query-client";
@@ -1043,12 +1045,14 @@ test("a row whose control has gone since the palette opened does nothing", async
       page.locator('[data-testid="issue-header"] button[aria-label="Reopen issue"]')
     ).toHaveCount(0);
 
-    // The row checks its control again when it runs, so it writes nothing.
+    // The row checks its control again when it runs, so it writes nothing. The palette closing
+    // is the run's own signal - a PATCH would have left with the same task - and the read below
+    // is a round trip past it; the margin covers the request's dispatch alone.
     await reopen.click();
     await expect(dialog).toHaveCount(0);
-    await page.waitForTimeout(500);
-    expect(patches).toBe(0);
+    await sleep(100);
     expect((await getIssue(issue.key)).status).toBe("in_progress");
+    expect(patches).toBe(0);
   } finally {
     await context.close();
   }

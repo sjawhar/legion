@@ -368,6 +368,8 @@ test("a rotation loses no event and makes no extra request @phone", async ({ bro
   }
 });
 
+// SLOW(>=2s): a cold load in WebKit and in Firefox with the page's first live socket held open
+// through it, which each engine then has to replay the missed change on.
 test("a change committed while the page loads is shown without a reload @phone", async ({
   browser,
 }) => {

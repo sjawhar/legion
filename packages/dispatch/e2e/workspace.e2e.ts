@@ -14,6 +14,8 @@ test.beforeEach(async () => {
 
 // Every surface a human alone acts on has to come up non-empty from this one seed: an empty
 // Inbox, Agents page or broadcast would prove nothing about a change to it.
+// SLOW(>=2s): the whole workspace seed, the four surfaces it has to fill and three full-page
+// screenshots of them.
 test("the seeded workspace fills every human-only surface", async ({ browser }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "one browser proves the seeded workspace");
   const seeded = await seedWorkspace();

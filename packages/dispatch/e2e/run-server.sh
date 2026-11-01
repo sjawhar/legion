@@ -200,6 +200,18 @@ settle_delay="${DISPATCH_TEST_SETTLE_DELAY:-250ms}"
 mark_wait="${DISPATCH_TEST_MARK_WAIT:-250ms}"
 unrecorded_mark_ttl="${DISPATCH_TEST_UNRECORDED_MARK_TTL:-4s}"
 
+# How long a sender keeps trying a listener that is being replaced before a send settles failed,
+# read before the sweep below and passed under the same DISPATCH_TEST_HOOKS=1. 500ms in place of
+# the server's own 12 s (listenerTakeoverWindow, internal/dispatch/api/envoy_resolve.go), which a
+# production sender spends so a send made as a listener hands over still reaches the session. No
+# row here proves that hand-off - the Go tests of internal/dispatch/api do - while a row whose
+# session is really gone waits the whole window out before the failure it reads appears, twice
+# over where it also retries. 500ms leaves such a sender its first try and one backed-off retry
+# (takeoverFirstBackoff, 250ms) under one idempotency key, which is the behaviour those rows read.
+# A caller that set the variable itself keeps its own value, as it does for the settle delay
+# above.
+listener_takeover_window="${DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW:-500ms}"
+
 # Meaning search's embedder, read before the sweep below. The file-store block above gives this
 # process the AWS SDK's own variables so it can reach the lane's S3 server, and Bedrock - the
 # default place DISPATCH_EMBEDDER names - takes those same static keys as its credentials and the
@@ -278,6 +290,7 @@ exec "${listen[@]}" env \
   "${port_env[@]}" \
   DISPATCH_TEST_EMBEDDER_OFF="$embedder_off" \
   DISPATCH_TEST_HOOKS=1 \
+  DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW="$listener_takeover_window" \
   DISPATCH_TEST_MARK_WAIT="$mark_wait" \
   DISPATCH_TEST_ROSTER_UNCACHED=1 \
   DISPATCH_TEST_SETTLE_DELAY="$settle_delay" \

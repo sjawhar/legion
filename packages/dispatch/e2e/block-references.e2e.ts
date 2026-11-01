@@ -309,8 +309,6 @@ test("a link to a block of a comment shows the block's new text once its author 
 // The author's edit that deletes the cited paragraph is an edit too: the open card and the link
 // stop showing the paragraph's text without a reload, and read as a freshly loaded page reads the
 // same link (no text of a paragraph the comment no longer holds).
-// SLOW(>=2s): a Conversation page, a hover card opened from the keyboard and one live refetch;
-// the seconds are the render, not a wait.
 test("a link to a block of a comment stops showing the block's text once its author deletes it, with no reload", async ({
   page,
 }) => {

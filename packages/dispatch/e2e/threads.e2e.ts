@@ -266,6 +266,8 @@ test("a Conversation reply after an agent-authored reply targets the root withou
     await alice.close();
   }
 });
+// SLOW(>=2s): two browser contexts on one Conversation, and the resolve, reopen and edit the
+// title names, each of which both pages have to show.
 test("resolve, reopen, then edit leaves one comment turn in its final state @phone", async ({
   browser,
 }, testInfo) => {
@@ -454,6 +456,8 @@ test("the phone Conversation opens a full-height thread view with its composer p
     await alice.close();
   }
 });
+// SLOW(>=2s): two pages of one reader - the Inbox and the issue - an anchored ask seeded and
+// then retracted live on both, and a full-page screenshot.
 test("a session retraction leaves its reason on the card and removes the human's live inbox item @phone", async ({
   browser,
 }, testInfo) => {

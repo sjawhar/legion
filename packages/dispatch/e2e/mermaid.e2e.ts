@@ -288,8 +288,6 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-// SLOW(>=2s): a cold load of the Conversation and one real Mermaid draw, which is 2.2 s in WebKit
-// alone; the row is the shared per-row cost plus its own single step.
 test("a comment holding a mermaid block draws a diagram, its source behind Mermaid source @phone", async ({
   browser,
 }, testInfo) => {
@@ -355,8 +353,6 @@ test("an issue message holding a mermaid block draws a diagram in the Conversati
   }
 });
 
-// SLOW(>=2s): a cold load, a thread expanded and one real Mermaid draw, which is 2.1 s in WebKit
-// alone; the row is the shared per-row cost plus its own single step.
 test("a reply to a comment holding a mermaid block draws a diagram under its comment @phone", async ({
   browser,
 }, testInfo) => {
@@ -451,8 +447,6 @@ test("a diagram too large to draw in time shows the reason, and the page keeps r
   }
 });
 
-// SLOW(>=2s): a cold load, a thread expanded and one real Mermaid draw, which is 2.0 s in WebKit
-// alone; the row is the shared per-row cost plus its own single step.
 test("a mermaid label holding markup draws as text, never as an element @phone", async ({
   browser,
 }, testInfo) => {
@@ -951,8 +945,6 @@ test("with no worker a document's diagram shows its source @phone", async ({ bro
 
 // A worker that drew once can fail later, as when a redeploy removes its chunk: the block then
 // shows its edited source as code, never the last drawing above a source it no longer matches.
-// SLOW(>=2s): one real Mermaid draw, then the edit that asks the failing worker for the next
-// one; in WebKit that is 2.2 s, and neither draw waits on a timer.
 test("a document diagram whose worker fails after its first drawing shows its source @phone", async ({
   browser,
 }) => {

@@ -266,6 +266,8 @@ async function expectSelectedMarginItem(
   }
 }
 
+// SLOW(>=2s): four anchored writes, each seeded on its own transaction, and the four links the
+// row lands on in turn, in WebKit.
 test("emitted document item hrefs select and scroll their anchored thread @phone", async ({
   browser,
 }, testInfo) => {
@@ -435,6 +437,8 @@ test("a desktop document item link shows its far-away card and its quote", async
   }
 });
 
+// SLOW(>=2s): a long seeded document, the landing scroll settled over it in WebKit and on a
+// phone, and the editor selection that opens the margin's composer.
 test("a composer opened from the document is in the margin's view after a comment link @phone", async ({
   browser,
 }, testInfo) => {
@@ -764,6 +768,8 @@ test("a past version's comment link lands on its quote in a document with no dia
   }
 });
 
+// SLOW(>=2s): a long seeded document with two referencing asks, the reference read held through
+// the landing, and thirty paragraphs inserted above the linked quote.
 test("a resolving reference above a linked card does not end the hold", async ({ browser }) => {
   const { comment, issue } = await seedLongDocument();
   const target = await createIssue({

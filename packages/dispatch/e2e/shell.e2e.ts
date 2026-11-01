@@ -205,7 +205,6 @@ test("a page chunk that fails on every load reloads three times and then shows t
 // page stays the reader's. The Navigation API's `navigate` event fires for it with `downloadRequest`
 // set and `destination.sameDocument` false, and a chunk that fails after it must still reload the
 // page, as on any page nobody is leaving.
-// SLOW(>=2s): a cold Firefox load of the document route, a real download and a real reload.
 test("a chunk that fails after a Download link was followed reloads the page", async ({
   browser,
 }, testInfo) => {
@@ -401,7 +400,6 @@ test("a page whose entry chunk is missing on every load reloads three times and 
 
 // One budget for the whole tab: a page chunk's failures that already reloaded the page three times
 // leave none for the entry chunk, so the two recoveries cannot hand the page back and forth.
-// SLOW(>=2s): five real document loads of a page whose entry chunk 404s.
 test("a missing entry chunk after a page chunk spent the tab's reloads stays", async ({
   browser,
 }, testInfo) => {

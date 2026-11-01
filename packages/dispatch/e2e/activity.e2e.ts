@@ -80,6 +80,8 @@ test("the Activity tab lists the event rows the Conversation does not draw", asy
   }
 });
 
+// SLOW(>=2s): four messages written in the order the dividers read, three events back-dated and
+// the read watermark set, before one cold load of the Activity tab.
 test("Activity breaks its rows by day and marks where the reader stopped", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Dividers" });

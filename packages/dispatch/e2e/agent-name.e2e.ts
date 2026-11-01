@@ -261,8 +261,6 @@ test("Claimed by, a Conversation turn, an Inbox ask card and a margin comment sh
   }
 });
 
-// SLOW(>=2s): the seed's session writes and the two navigations the live links make, which are
-// what the row proves.
 test("the live link opens that agent's conversation, running or not @phone", async ({
   browser,
 }, testInfo) => {
@@ -430,8 +428,6 @@ test("the page reads the agent list once, asks nothing per agent, and shows a re
   }
 });
 
-// SLOW(>=2s): the seed's session writes and the Board and List tours, whose six navigations are
-// the keyboard openings the row proves.
 test("a claimed List row and Board card open their issue by keyboard, and the claim's agent link opens the agent @phone", async ({
   browser,
 }, testInfo) => {

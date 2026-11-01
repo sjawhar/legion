@@ -27,6 +27,10 @@ import { asUser } from "./users";
 const bob = { actor: { kind: "session" as const, id: "bob" }, as: "agent" as const };
 let renames = 0;
 
+// The reader's dwell on a conversation card before its read mark is written: `DWELL_MS`,
+// `web/src/features/shell/useDwell.ts`, which exports nothing a spec can import.
+const DWELL_MS = 1_000;
+
 /**
  * bob renames the open issue, again every 2 s, until its header shows the new name from a read
  * of `GET /api/v1/issues/<key>` the page sent after the write (`reads` counts them). Only the
@@ -339,6 +343,7 @@ test("live: new events on the open issue appear in Conversation and mark it read
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
+  await page.clock.install();
   await page.goto(`/issues/${issue.key}/conversation`);
   await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
     "aria-selected",
@@ -348,14 +353,19 @@ test("live: new events on the open issue appear in Conversation and mark it read
   await createMessage(issue.key, { body: "Live message from bob" }, bob);
 
   await expect(page.getByText("Live message from bob")).toBeVisible();
+  // The mark is written once the reader has dwelt on the newest card (`DWELL_MS`), a page timer
+  // the page's own clock spends; the jump repeats because the timer is armed only once the
+  // observer has reported the card.
   await expect
     .poll(
-      () =>
-        page.evaluate(async (key) => {
+      async () => {
+        await page.clock.runFor(DWELL_MS);
+        return page.evaluate(async (key) => {
           const response = await fetch("/api/v1/me/state");
           const state = (await response.json()) as Record<string, { last_read_seq: number }>;
           return state[key]?.last_read_seq ?? 0;
-        }, issue.key),
+        }, issue.key);
+      },
       { intervals: [50, 50, 100, 100, 250] }
     )
     .toBeGreaterThan(0);
@@ -412,6 +422,8 @@ test("live: the stream recovers after the connection drops", async ({ browser },
   await alice.close();
 });
 
+// SLOW(>=2s): two live sockets, each with its own subscribe and replay, and the two messages
+// written across the forced disconnect between them.
 test("live: a forced server disconnect resumes from the last event id", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Disconnect target" });
@@ -545,12 +557,25 @@ test("live: a change committed while the first live socket fails to open is show
       (response) => new URL(response.url()).pathname === "/auth/whoami" && response.ok()
     );
 
+    // The second socket waits a draw from [0, RECONNECT_SPREAD_MS) armed when the first
+    // handshake failed (`web/src/api/live-socket.ts`), which the page's own clock spends.
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}/conversation`);
     const head: string = (await (await whoami).json()).event_head;
     await expect(page.getByText("Before the failed handshake", { exact: true })).toBeVisible();
     await refused.promise;
     await patchIssue(issue.key, { title: "Committed while the socket was down" }, bob);
     committed.resolve();
+    // The jump repeats because the draw is armed only once the refusal has reached the page.
+    await expect
+      .poll(
+        async () => {
+          await page.clock.runFor(RECONNECT_SPREAD_MS);
+          return opens;
+        },
+        { intervals: [50, 50, 100, 200, 500] }
+      )
+      .toBe(2);
 
     await expect(
       page.getByText("Committed while the socket was down", { exact: true })

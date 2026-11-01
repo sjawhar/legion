@@ -172,8 +172,6 @@ test("reading a document gives its headings ids without versioning it or crediti
   }
 });
 
-// SLOW(>=2s): two browser contexts, two live editors and the settlement that writes the one
-// version both are credited with - which is the whole of what this row proves.
 test("two users edit the same spec, see each other's text and cursor, and settle one version attributed to both @phone", async ({
   browser,
 }, testInfo) => {
@@ -345,8 +343,6 @@ test("an agent edit lands live in every open editor", async ({ browser }) => {
   }
 });
 
-// SLOW(>=2s): the reload is the property, so the row pays a second cold load of the document and
-// its editor mount.
 test("reloading mid-edit reopens the same content", async ({ browser }) => {
   await createProject({ key: "LOAD", name: "Reloads" });
   const issue = await createIssue({
@@ -544,6 +540,8 @@ for (const row of [
   { key: "IDLE", reader: "an editor", readOnly: false },
   { key: "VIEW", reader: "a read-only viewer", readOnly: true },
 ]) {
+  // SLOW(>=2s): fourteen clock steps through the provider's half-minute receive timeout, each
+  // leaving PROVIDER_ECHO_MS of real time for what those timers sent to come back.
   test(`an idle document provider stays on one connection past its receive timeout, as ${row.reader}`, async ({
     browser,
   }, testInfo) => {

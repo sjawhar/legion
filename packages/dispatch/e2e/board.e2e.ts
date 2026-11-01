@@ -246,7 +246,6 @@ test("the board is the kanban: whole-card drag orders List and Board alike, Iceb
   }
 });
 
-// SLOW(>=2s): six seeded cards, four real rank PATCHes and two in-app navigations with a goBack.
 test("v toggles List and Board; Shift+J/K rank a focused card through the one move path; o, Enter, p and Escape work the card; Space lifts nothing", async ({
   browser,
 }) => {
@@ -407,8 +406,6 @@ test("v toggles List and Board; Shift+J/K rank a focused card through the one mo
   }
 });
 
-// SLOW(>=2s): two real drags with their landing animations, one rank the server rejects, and the
-// board's refetch after it.
 test("a stale board refreshes and says so when the server rejects the rank", async ({
   browser,
 }) => {
@@ -901,8 +898,6 @@ test("a filtered drag names the visible neighbours and the hidden card interleav
   }
 });
 
-// SLOW(>=2s): two document loads - the second is the per-login toggle's own proof - and one real
-// cross-lane drag.
 test("the board groups into priority swimlanes on a toggle that persists per signed-in user, and dragging across lanes reassigns priority @phone", async ({
   browser,
 }, testInfo) => {

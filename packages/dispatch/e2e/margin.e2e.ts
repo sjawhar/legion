@@ -259,7 +259,6 @@ test("an agent's quote-anchored comment and ask render as highlights in open edi
   }
 });
 
-// SLOW(>=2s): two browser contexts, two live editors and the settlement a version waits for.
 test("highlights follow edits in the other browser and preserve their anchor state @phone", async ({
   browser,
 }) => {
@@ -636,8 +635,6 @@ test("a Conversation reply to an agent's anchored comment carries no anchor and 
   }
 });
 
-// SLOW(>=2s): the ask is written through the composer in the document and then answered in the
-// Inbox, which is a second view of the same page and a second write.
 test("margin ask composer sends option choices that the inbox records as a selected answer", async ({
   browser,
 }, testInfo) => {
@@ -703,7 +700,6 @@ test("margin ask composer sends option choices that the inbox records as a selec
   }
 });
 
-// SLOW(>=2s): two browser contexts, the second of which opens the issue cold - the property.
 test("a viewer who opens the issue after an anchored ask is answered sees it in the margin @phone", async ({
   browser,
 }, testInfo) => {

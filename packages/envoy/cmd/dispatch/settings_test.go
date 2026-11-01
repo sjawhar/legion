@@ -1695,6 +1695,27 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_ROUTE_ROSTER_TTL": "1m"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
+		"DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{}); boot.ListenerTakeoverWindow != 0 {
+				t.Errorf("DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW unset: ListenerTakeoverWindow = %v, want 0 (the server's own twelve seconds)", boot.ListenerTakeoverWindow)
+			}
+			const shortWindow = time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":                    "1",
+				"DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW": shortWindow.String(),
+			})
+			if boot.ListenerTakeoverWindow != shortWindow {
+				t.Errorf("DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW: ListenerTakeoverWindow = %v, want %v", boot.ListenerTakeoverWindow, shortWindow)
+			}
+			if options := appContextOptions(boot, routes.AppContextOptions{}); options.ListenerTakeoverWindow != shortWindow {
+				t.Errorf("DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW: the router is handed ListenerTakeoverWindow = %v, want %v", options.ListenerTakeoverWindow, shortWindow)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW": invalid},
+					fmt.Sprintf("DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
 		"DISPATCH_TEST_EDIT_NOTICE_QUIET": func(t *testing.T) {
 			const shortQuiet = 3 * time.Second
 			boot := resolveWith(t, map[string]string{

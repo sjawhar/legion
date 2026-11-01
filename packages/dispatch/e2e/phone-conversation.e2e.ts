@@ -815,6 +815,8 @@ test("on a phone, the stuck live-updates pill covers none of the docked composer
 // A thread opened full-screen on a phone has its own composers fixed at the foot of the screen:
 // the one a comment's Reply opens there, and the thread card's own inline reply. The connection
 // pill sits above whichever is on screen, grown by a refusal's row, while the page is offline.
+// SLOW(>=2s): two composers each filled and refused, and two rounds offline and back, whose
+// reconnects WebKit has to carry on a phone viewport.
 test("on a phone, the connection pill covers none of a thread's composers @phone", async ({
   browser,
 }) => {

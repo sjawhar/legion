@@ -1048,6 +1048,8 @@ test("a document-scrolling route is never capped for the keyboard, at mount or a
 // A reader who goes back into a live session's transcript is reading it, and a turn that arrives
 // while they are back there is news to come back to, not a reason to take the page away from
 // them. The control is how they come back, and what it counts is what they have not seen.
+// SLOW(>=2s): a forty-turn replay rebuilt into the live view, then eight live frames and a
+// message, with the thread's scroll measured after each.
 test("a reader scrolled back into a live session's transcript keeps their place, and Jump to latest carries what arrived @phone", async ({
   browser,
 }, testInfo) => {

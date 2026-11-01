@@ -322,8 +322,6 @@ test.describe("inbox selection @phone", () => {
 
   // Two rows can fail for two reasons; the bar names the first and says there are others rather
   // than flattening a sign-out and a validation refusal into one sentence.
-  // SLOW(>=2s): seven seed writes and the inbox render; both refusals are answered at once, so
-  // nothing here is waited on.
   test("a bulk snooze refused two different ways names the first reason and says so", async ({
     browser,
   }) => {

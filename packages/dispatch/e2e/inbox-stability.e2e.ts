@@ -170,8 +170,6 @@ async function leaveRow(page: Page): Promise<void> {
     .toBe(true);
 }
 
-// SLOW(>=2s): sixteen seeded issues and their asks, a sixteen-row Inbox and the progress note's
-// round trip.
 test("a row being typed into keeps its draft when an agent's progress note flips its turn, and holds its place only while the reader's hand is on it @phone", async ({
   browser,
 }) => {
@@ -229,8 +227,6 @@ test("a row being typed into keeps its draft when an agent's progress note flips
   }
 });
 
-// SLOW(>=2s): sixteen seeded issues and their asks, a sixteen-row Inbox and the Ask back's
-// round trip.
 test("the reader's own Ask back leaves the view still and holds the row only where their hand is @phone", async ({
   browser,
 }) => {

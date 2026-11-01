@@ -18,6 +18,7 @@ import {
 } from "./editor";
 import { askCard as inboxAskCard, inboxRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { assertPageFits, assertWhole } from "./unclipped";
 import { asUser } from "./users";
 
@@ -41,6 +42,8 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): two browser contexts, two mounted editors on one live document, the reload the
+// row proves the text and the version picker survive, and a full-page screenshot.
 test("documentCollaborationLive", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const alice = await asUser(browser, "alice");
@@ -130,6 +133,9 @@ test("picking a file on the Documents tab uploads it at once and lists it", asyn
   }
 });
 
+// SLOW(>=2s): two browser contexts, two mounted editors on one live document, a comment, a
+// suggestion accepted into a named version, an ask answered from bob's Inbox, and a full-page
+// screenshot.
 test("comment, suggest, and ask anchor marks on a project document; accept edits the text; the ask flows through the Inbox @phone", async ({
   browser,
 }, testInfo) => {
@@ -208,7 +214,8 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
     // A document has no assignee, so its question is in nobody's own list: the Inbox reaches it
     // under the Unassigned filter. The short row names the document the question belongs to,
     // and the card - which from 1280 px the reading pane draws (INFRA-575) - answers it.
-    await bobPage.goto("/?assignee=unassigned");
+    // Neither move is a cold load the row proves: bob is already signed in and on the page.
+    await navigateInApp(bobPage, "/?assignee=unassigned");
     const inboxDocumentRow = inboxRow(bobPage, askId);
     await expect(inboxDocumentRow.getByRole("link", { name: /CORE.*Design notes/ })).toBeVisible();
     const inboxAsk = await inboxAskCard(bobPage, askId);
@@ -220,7 +227,7 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
         ask: { answer: { text: "Yes, publish it.", user: "bob" }, state: "answered" },
       });
     await expect(inboxDocumentRow).toHaveCount(0);
-    await bobPage.goto(path);
+    await navigateInApp(bobPage, path);
     await setDocumentSheet(bobPage, testInfo.project.name, true);
     await expect(bobPage.getByText("Yes, publish it.")).toBeVisible();
     await bobPage.screenshot({

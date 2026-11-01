@@ -106,7 +106,6 @@ test("an edit typed while the document transport is down survives a reload", asy
   }
 });
 
-// SLOW(>=2s): two document loads and the acknowledgement round trip, in three engines.
 test("unsent edits are named, then cleared after acknowledgement and a connected reload", async ({
   browser,
 }) => {
@@ -283,7 +282,6 @@ test("a reopened issue's page names no unsent edit before typing, and an edit ty
   }
 });
 
-// SLOW(>=2s): two document loads and the apply-before-acknowledgement round trip.
 test("an edit applied before its acknowledgement clears its row on reload", async ({ browser }) => {
   const issue = await makeIssue();
   const alice = await asUser(browser, "alice");

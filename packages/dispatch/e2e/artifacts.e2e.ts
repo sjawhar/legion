@@ -65,6 +65,8 @@ function postAsPage(page: Page, path: string, data?: object) {
   return page.request.post(path, { data, headers: { Origin: dashboardOrigin } });
 }
 
+// SLOW(>=2s): three real uploads with the versions they build, the artifact page's version list
+// and comparison, and the references and phone layout read after them.
 test("artifacts upload, version, references, and phone layout @phone", async ({
   page,
 }, testInfo) => {
@@ -277,6 +279,8 @@ test("the artifacts tab filter narrows rows by name and kind @phone", async ({
   await expect(page.getByTestId("artifact-notes-md")).toBeVisible();
 });
 
+// SLOW(>=2s): a real upload the live feed counts into the tab, and the keyboard tour of five
+// tabs with each tab's box measured, at 390 px and back.
 test("an uploaded document is linked from the Activity tab and counted on its own tab @phone", async ({
   page,
 }, testInfo) => {

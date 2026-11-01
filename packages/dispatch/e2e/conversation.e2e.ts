@@ -247,8 +247,6 @@ test("Conversation updates an open ask in place after an agent edit and preserve
   }
 });
 
-// SLOW(>=2s): 210 real writes bury the comment, and the server appends an issue's events one at a
-// time whether they are sent in bursts or in turn.
 test("a deep link to an old unanchored comment scrolls its Conversation turn into view @phone", async ({
   browser,
 }, testInfo) => {
@@ -892,8 +890,6 @@ test("an ask answered after a later comment thread sorts above it", async ({ bro
 
 // The defect this tab exists to fix: a conversation older than any window of the event log was
 // unreachable without paging back through it. The three per-issue reads have no window at all.
-// SLOW(>=2s): 205 real writes push the ask past the Activity tab's 200-event page, and the server
-// appends an issue's events one at a time.
 test("a closed ask older than 200 events is listed under Closed with no paging", async ({
   browser,
 }) => {
@@ -1082,9 +1078,6 @@ test("a reply quotes the passage it names", async ({ browser }) => {
 // The Conversation tab's comment editor carries each block's id through the edit, so a reply that
 // cites the second paragraph follows it wherever the author moves it and through every rewording,
 // and the save names it (`blocks`) rather than leaving the server to match it by its text.
-// SLOW(>=2s): the five edits the title names, each one the editor opened on the blocks route, a
-// real keystroke or chord in the field, and a save whose `blocks` the row reads back - every one
-// of them a step this row is about.
 test("the editor keeps a cited passage's id through move, reword, split, delete and restore", async ({
   browser,
 }) => {

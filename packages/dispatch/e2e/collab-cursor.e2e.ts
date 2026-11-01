@@ -77,8 +77,6 @@ for (const { name, edge, type, code } of cases) {
   });
 }
 
-// SLOW(>=2s): Two contexts, one per collaborator, each with a mounted editor in WebKit; the row
-// waits on no timer.
 test("a reader outside the editor sees a collaborator's cursor even where their own stale selection sits", async ({
   browser,
 }) => {

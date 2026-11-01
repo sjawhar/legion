@@ -324,6 +324,8 @@ test("sidebar: an issue event while the sidebar's first reads are in flight disc
   }
 });
 
+// SLOW(>=2s): an event barrier - a real write the page has to show before the count starts - the
+// pin written from another tab, and two windows drained to half a second of quiet traffic.
 test("pin: a pin from another tab shows in this tab's sidebar within 2 s with one pinned-list read @phone", async ({
   browser,
 }, testInfo) => {

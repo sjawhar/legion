@@ -441,6 +441,8 @@ test("a quote-anchored inbox ask names and opens its document", async ({ browser
   }
 });
 
+// SLOW(>=2s): three seeded asks and a live session's interests waited for on the issue's event
+// list, an Inbox of three rows screenshotted, and the margin answer that empties one of them.
 test("inbox shows current asks and answers issue asks in the margin @phone", async ({
   browser,
 }, testInfo) => {

@@ -165,8 +165,6 @@ test("a send a server that is down answers 503 is tried again, not refused, and 
 // to leave: it accepts the prompt, reloads while the first attempt's answer is still out, and the
 // reloaded page sends the message again under the same key, which Dispatch answers with the
 // message the first attempt made.
-// SLOW(>=2s): One cold page load and one reload, in WebKit only; the row is already the shared
-// per-test cost plus its own single step.
 test("a send held through a reload is resumed under its key, and delivered once @phone", async ({
   browser,
 }) => {
@@ -262,8 +260,6 @@ test("a broadcast whose answer is lost is tried again under its key, and each ag
 // and the reloaded page sends the identical request under the same key, which Dispatch answers
 // with the broadcast the first attempt made. It was pressed before this visit, so the page stays
 // on Agents and its strip links the broadcast rather than opening it.
-// SLOW(>=2s): One cold page load and one reload, in WebKit only; the row is already the shared
-// per-test cost plus its own single step.
 test("a broadcast held through a reload is resumed under its key, and each agent hears it once @phone", async ({
   browser,
 }) => {

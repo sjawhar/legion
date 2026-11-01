@@ -562,8 +562,6 @@ test("a quote-anchored ask identifies its document in the margin and Conversatio
   }
 });
 
-// SLOW(>=2s): three pages - alice's issue, alice's Inbox and bob's own context - with the close
-// and the pin reaching each of them.
 test("closing an issue removes its asks from the inbox and pinning stays private @phone", async ({
   browser,
 }, testInfo) => {
@@ -861,6 +859,8 @@ test("issue header keeps every control in a shared row on a phone and the whose-
   }
 });
 
+// SLOW(>=2s): a cold issue load and the reload the row proves the indicator survives, with a
+// live comment written on either side of it.
 test("issue header flips between Waiting on you and Waiting on agents as the newest reply changes", async ({
   browser,
 }) => {

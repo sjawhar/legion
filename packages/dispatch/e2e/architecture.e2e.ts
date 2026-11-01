@@ -82,8 +82,6 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-// SLOW(>=2s): the fixture syncs a six-file component model from the fake GitHub and attaches work
-// in every mode before the page opens; no wait is taken, and the tour runs on one load.
 test("a project with a source opens on its Architecture: bars, drill-down, details, a bar that moves on a status change, and the Unassigned picker @phone", async ({
   browser,
 }, testInfo) => {

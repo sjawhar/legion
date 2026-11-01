@@ -348,8 +348,6 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
   }
 });
 
-// SLOW(>=2s): a seed, one page load, the folds the row reads and a full-page screenshot per
-// width; every second is a step the row asserts.
 test("Agents shows the newest exchange, folds the older ones, and lets the viewer clear the conversation @phone", async ({
   browser,
 }, testInfo) => {
@@ -453,8 +451,6 @@ test("Agents shows the newest exchange, folds the older ones, and lets the viewe
   }
 });
 
-// SLOW(>=2s): a seed, one page load and the live delivery the row observes, which the socket
-// brings with no wait of the row's own.
 test("a session's untargeted reply lands in the open conversation", async ({ browser }) => {
   await setLiveSessions([planner]);
   await createProject({ key: "CORE", name: "Core" });
@@ -1041,8 +1037,6 @@ test("a narrow or short screen gets the compact composer, filled within 45% of i
 // its computed style, not the composer by name: with a refused send's row present, which the rows
 // above never have, a strip inside that box would count against the 45%. A `display: contents`
 // element generates no box, so it sticks nothing.
-// SLOW(>=2s): 40 recipient chips rendered for real, a refused send, and the sticky box measured
-// filled at each compact size; the layout under measurement is what the row proves.
 test("on a narrow or short screen a refused send's row stays out of the sticky block, which holds 45% with the message filled", async ({
   browser,
 }, testInfo) => {
@@ -1169,8 +1163,6 @@ async function openNoticeFixture(page: Page, sessions: FakeSession[]) {
   };
 }
 
-// SLOW(>=2s): 40 recipient chips rendered for real at each of three compact sizes, with the
-// exclusion line read off the page; the layout under measurement is what the row proves.
 test("with half the recipients unable to take the mode, the compact composer keeps its budget and every exclusion stays reachable on one line", async ({
   browser,
 }, testInfo) => {
@@ -1220,8 +1212,6 @@ test("with half the recipients unable to take the mode, the compact composer kee
 });
 
 test.describe("the composer's notices share one slot, highest first, within budget on compact screens", () => {
-  // SLOW(>=2s): 120 recipient chips rendered for real at each of three compact sizes; the layout
-  // under measurement is what the row proves.
   test("the limit alone: 120 recipients", async ({ browser }, testInfo) => {
     test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
     const alice = await asUser(browser, "alice");
@@ -1237,8 +1227,6 @@ test.describe("the composer's notices share one slot, highest first, within budg
     }
   });
 
-  // SLOW(>=2s): 120 recipient chips rendered for real at each of three compact sizes; the layout
-  // under measurement is what the row proves.
   test("the limit over exclusions: 120 selected, 110 recipients, each excluded chip still names its reason", async ({
     browser,
   }, testInfo) => {

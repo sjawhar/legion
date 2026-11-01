@@ -341,6 +341,8 @@ test("type-ahead on a header picker moves its choice without switching the sessi
 // so a held picker keeps focus and its keys still step its choice, but Enter sends nothing. The
 // step survives the switch's end, since the session reported no new thinking level meanwhile, so
 // Enter afterwards switches to it.
+// SLOW(>=2s): a replay seed and two switch round trips through the fake listener, in Firefox and
+// WebKit, each of which lays out the live view's header afresh.
 test("a held header picker keeps focus and steps its choice but Enter sends nothing until the switch ends, and Enter then switches to that step @phone", async ({
   browser,
 }, testInfo) => {

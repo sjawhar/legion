@@ -15,9 +15,6 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-// SLOW(>=2s): a Firefox launch and document load with its collaboration socket - the row exists
-// because Firefox's own editing mishandles this case, so the engine's real boot is part of the
-// cost. No deliberate wait.
 test("typing over the whole last line of a code block replaces that line", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({

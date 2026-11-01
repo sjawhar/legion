@@ -661,8 +661,6 @@ test("an agent's bearer cannot switch a session: the messages route answers 403 
 test("a switch the session never answers says so after 30 seconds and keeps the header, a late answer replaces that, and a send that failed says so without waiting for the deadline @phone", async ({
   browser,
 }, testInfo) => {
-  // Room for the failed send's 12 s listener take-over wait at the end of the row.
-  test.setTimeout(60_000);
   const session = liveSession(9);
   const id = session.session_id;
   await setLiveSessions([session]);
@@ -700,13 +698,13 @@ test("a switch the session never answers says so after 30 seconds and keeps the 
     await expect(status).toHaveText("The session answered: Model set to anthropic/model-b.");
 
     // The send itself fails: Dispatch answers with a failed attempt, and the page says so with no
-    // wait for the deadline. Dispatch answers only once the listener take-over window has passed
-    // (listenerTakeoverWindow, 12 s, in packages/envoy/internal/dispatch/api/envoy_resolve.go),
-    // in real time the page's installed clock does not hold back, so this wait gets more than the
-    // default 15 s expect timeout.
+    // wait for the deadline. Dispatch answers only once the listener take-over window has passed:
+    // half a second under the harness's DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW
+    // (e2e/run-server.sh), of the twelve seconds a deployment runs, in real time the page's
+    // installed clock does not hold back.
     await setSessionSendStatus(id, 404);
     await model.selectOption("openai/model-c");
-    await expect(status).toHaveText(/^No answer came from the session: \S/, { timeout: 30_000 });
+    await expect(status).toHaveText(/^No answer came from the session: \S/);
     await expect(status).not.toHaveText(NO_ANSWER);
     await expect(model).toBeEnabled();
     await expect(send).toBeEnabled();

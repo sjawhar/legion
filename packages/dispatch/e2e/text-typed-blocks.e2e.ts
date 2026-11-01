@@ -229,8 +229,6 @@ test("a reply under a document's decision keeps the lists of the typed blocks it
 // sit flush with the card's edges as a document's decision does. The reply sits in the footer of
 // the document's decision, whose `prose-sm` spacing for the reply's paragraphs and lists must not
 // reach the nested card's first and last lines.
-// SLOW(>=2s): an issue document with a decision card, its reply and the nested card whose first
-// and last lines are measured; the time is the editor's mount.
 test("a decision in a reply under a document's decision sits flush in its card", async ({
   browser,
 }) => {
