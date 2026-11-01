@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/persistence"
 
+	"github.com/sjawhar/envoy/internal/brokertoken"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -63,6 +64,12 @@ type testServerOptions struct {
 	// oidc is the service-account token verifier; nil is the unconfigured
 	// deployment, whose bearer handling is untouched by that feature.
 	oidc ServiceTokenVerifier
+	// brokerTokens decides a caller presenting an access token the secrets broker issued, under
+	// the DPoP scheme. It is built from the test's own database, as the persistence seam below
+	// is, because the verifier's DPoP replay store is a table of it (store.NewDPoPProofs); nil
+	// is the deployment with no broker, which is every test but broker_token_test.go's and
+	// project_scope_test.go's, and answers such a presentation 401 UNAUTHORIZED.
+	brokerTokens func(*store.Store) *brokertoken.Verifier
 	// identity resolves a cookie caller; nil is headerIdentity, which names the person the
 	// X-Dispatch-User header names.
 	identity identity.Identity
@@ -105,6 +112,10 @@ type testServerOptions struct {
 	// server with no dashboard, as the Go test rigs are.
 	dashboardEntry string
 }
+
+// testServerURL is the public origin every test server serves under: what a link a handler
+// writes names, and what a DPoP proof's 'htu' is checked against (broker_token_test.go).
+const testServerURL = "https://dispatch.example"
 
 // testSigningKey is the one-key set the package's session cookies are signed with.
 var testSigningKey = auth.SingleSigningKey("signing-key")
@@ -170,7 +181,11 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 	if options.persistence != nil {
 		documentPersistence = options.persistence(database)
 	}
-	documentService := docs.New(docs.Deps{Store: database, Persistence: documentPersistence, Events: broker, ServerURL: "https://dispatch.example", Settle: settle})
+	var brokerTokens *brokertoken.Verifier
+	if options.brokerTokens != nil {
+		brokerTokens = options.brokerTokens(database)
+	}
+	documentService := docs.New(docs.Deps{Store: database, Persistence: documentPersistence, Events: broker, ServerURL: testServerURL, Settle: settle})
 	t.Cleanup(func() {
 		if err := documentService.Shutdown(context.Background()); err != nil {
 			t.Errorf("shutdown document service: %v", err)
@@ -186,7 +201,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		Identity:         people,
 		AgentTokens:      sharedAgentTokens(t, "agent-token"),
 		DefaultProject:   options.defaultProject,
-		ServerURL:        "https://dispatch.example",
+		ServerURL:        testServerURL,
 		Docs:             documentService,
 		Events:           broker,
 		App:              options.app,
@@ -196,6 +211,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		EnvoyURL:         options.envoyURL,
 		EnvoyTimeout:     options.envoyTimeout,
 		OIDC:             options.oidc,
+		BrokerTokens:     brokerTokens,
 		AgentStream:      options.agentStream,
 		Embedder:         options.embedder,
 		Files:            options.files,
@@ -1904,6 +1920,56 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 		if err == nil || response == nil || (response.StatusCode != http.StatusUnauthorized && response.StatusCode != http.StatusForbidden) {
 			t.Fatalf("revoked cookie websocket %s: response=%#v err=%v, want rejected handshake", path, response, err)
 		}
+	}
+}
+
+// The document socket takes a signed-in person's cookie and nothing else (INFRA-264). The shared
+// agent token the HTTP API accepts is no credential for it: the handshake is refused, where the
+// same room admits the cookie. A bearer once named its own session in a header the socket read,
+// which made it a second, weaker door into Dispatch.
+func TestTheDocumentSocketTakesACookieAndNotTheSharedAgentToken(t *testing.T) {
+	handler, _, cookie, request := newCookieServer(t)
+	if response := request(http.MethodPost, "/api/v1/projects", map[string]string{"key": "TEST", "name": "Test"}); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := request(http.MethodPost, "/api/v1/issues", map[string]string{"project": "TEST", "title": "Document door"})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	issue := decodeBody[struct {
+		PrimaryArtifactID string `json:"primary_artifact_id"`
+	}](t, created)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + issue.PrimaryArtifactID
+
+	// The same token answers GET /api/v1/whoami as the shared agent, so the socket's refusal is
+	// the socket's own and not an unknown value.
+	whoami := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+	whoami.Header.Set("Authorization", "Bearer agent-token")
+	whoamiResponse := httptest.NewRecorder()
+	handler.ServeHTTP(whoamiResponse, whoami)
+	if whoamiResponse.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/whoami with the shared agent token: status=%d body=%s, want 200", whoamiResponse.Code, whoamiResponse.Body.String())
+	}
+	connection, response, err := gws.DefaultDialer.Dial(wsURL, http.Header{"Authorization": []string{"Bearer agent-token"}})
+	if connection != nil {
+		_ = connection.Close()
+	}
+	if err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("the document socket with the shared agent token: response=%#v err=%v, want a refused handshake (401)", response, err)
+	}
+	// The same room admits the person the browser signs in as, and a bearer beside that cookie is
+	// no second credential: the person is who the connection is.
+	for name, header := range map[string]http.Header{
+		"the signed-in person's cookie":             {"Cookie": []string{cookie.Name + "=" + cookie.Value}},
+		"that cookie beside the shared agent token": {"Cookie": []string{cookie.Name + "=" + cookie.Value}, "Authorization": []string{"Bearer agent-token"}},
+	} {
+		connection, response, err := gws.DefaultDialer.Dial(wsURL, header)
+		if err != nil {
+			t.Fatalf("the document socket with %s: response=%#v err=%v", name, response, err)
+		}
+		_ = connection.Close()
 	}
 }
 
