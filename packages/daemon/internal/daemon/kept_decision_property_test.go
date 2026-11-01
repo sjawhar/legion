@@ -83,6 +83,13 @@ type keptTelling struct {
 	// of the row it was queued by again. It is the one extra telling to an architect the
 	// invariant accepts (held).
 	retold bool
+	// afterFailedWrite is whether this telling repeats, to the same architect, a catch-up whose own
+	// telling write failed (keptForgetStore.tellingFailed): the publish reached the architect and
+	// the forget did not commit, so the decision stood kept and a later catch-up named it again.
+	// The architect ruled that second telling acceptable
+	// (https://github.com/sjawhar/legion/pull/2163#issuecomment-6542200410): a failed write may tell
+	// a decision twice, never lose it. tell sets it, and held counts it as it counts a retold task.
+	afterFailedWrite bool
 	// named is the generation the telling itself names, and root the generation its root stood at
 	// when the daemon decided to send it — read where the catch-up's publish began, not once it
 	// returned (observe).
@@ -334,13 +341,29 @@ func (p *keptPublisher) published() []outboxPublish {
 type keptForgetStore struct {
 	record.Store
 	fails atomic.Bool
+	// failedTellings is every catch-up telling, by the outbox row its publish went out under (the
+	// row a re-held copy copies), whose forget failed: the telling's own write did not commit, so
+	// the decision it told stands kept and a later catch-up may name it again (held, tell).
+	failedTellings sync.Map
 }
 
 func (s *keptForgetStore) ForgetKeptDecisions(ctx context.Context, tx pgx.Tx, root string, kept record.KeptDecisions, row int64) error {
 	if s.fails.Load() {
+		telling := row
+		if err := tx.QueryRow(ctx, `select coalesce((payload->>'resend_of')::bigint, id) from outbox where id = $1`, row).Scan(&telling); err != nil &&
+			!errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		s.failedTellings.Store(telling, true)
 		return errors.New("tester: the forget's transaction did not commit")
 	}
 	return s.Store.ForgetKeptDecisions(ctx, tx, root, kept, row)
+}
+
+// tellingFailed is whether the catch-up telling published under row had its forget fail.
+func (s *keptForgetStore) tellingFailed(row int64) bool {
+	_, failed := s.failedTellings.Load(row)
+	return failed
 }
 
 // keptClaimStore is the claim store this run's supervisor writes through: the daemon's own
@@ -2914,6 +2937,11 @@ func (r *keptRun) report() {
 // confirmed the task), and a turn the death of its process ended — and sending it again is the
 // lesser fault there too. Zero tellings is never one of them: the resend is excused only beside a
 // telling that stands, so a decision the machine lost between the two is a fault all the same.
+//
+// A catch-up after one whose own telling write failed is counted the same way (afterFailedWrite):
+// the first publish reached the architect and its forget did not commit, so the decision stood
+// kept and a later catch-up named it again, which the architect ruled acceptable
+// (https://github.com/sjawhar/legion/pull/2163#issuecomment-6542200410).
 func (r *keptRun) held() {
 	for _, tracked := range r.tracked {
 		owedTo, stands := r.owedTree[tracked.ref], r.treeOf(tracked.issue)
@@ -2923,9 +2951,11 @@ func (r *keptRun) held() {
 		for _, telling := range r.told[tracked.ref] {
 			line := fmt.Sprintf("at step %d by %s, the architect of %s, while %s stood in the tree of %s",
 				telling.step, telling.how, telling.tree, tracked.issue, telling.issueTree)
-			if telling.retold && told[telling.tree] {
-				// The task this architect was already told was taken back and sent again. The
-				// telling it repeats is the one counted; this one is the accepted second.
+			if (telling.retold || telling.afterFailedWrite) && told[telling.tree] {
+				// The task this architect was already told was taken back and sent again, or the
+				// catch-up that told it failed its own telling write (afterFailedWrite, ruled at
+				// https://github.com/sjawhar/legion/pull/2163#issuecomment-6542200410). The telling
+				// it repeats is the one counted; this one is the accepted second.
 				retold++
 				continue
 			}
@@ -2945,7 +2975,7 @@ func (r *keptRun) held() {
 		}
 		r.fatalf("%s, an ask of %s, which stands in the tree of %s and owes its answer to the architect of %s, was told %d times to that "+
 			"architect, %d times to another tree's architect (%s) and %d times to the architect of a tree it left by a row composed before it "+
-			"left (%s), want once, never, and at most once (%d further tellings were tasks the machine took back and sent again): a person's "+
+			"left (%s), want once, never, and at most once (%d further tellings were tasks the machine took back and sent again, or catch-ups after one whose telling write failed): a person's "+
 			"decision kept while nobody in its tree could hear it must reach the architect of the tree its own issue stood in when it was "+
 			"told, and the architect of the tree it moved into when the move found it still kept or still held",
 			tracked.ref, tracked.issue, stands, owedTo, owed, len(elsewhere), keptElsewhere(elsewhere),
@@ -3119,23 +3149,41 @@ func (r *keptRun) architectToHear(key string) bool {
 // between the keeping and the telling, and a row composed before that can still tell the tree it
 // left, so where the debt stands is read once the run has quiesced (held).
 //
-// One second telling to one architect is accepted, and only one: the task it was already told is
-// one the machine took back — a confirmation a refusal took back, or a turn its process died in —
-// and sent again under a new id (retold, keptRun.resent). The daemon cannot know whether the agent
-// read the first, so telling it again is the lesser fault; a third is a fault, and so is any
-// repeat of a task nothing took back.
+// One second telling to one architect is accepted per cause, and only these: the task it was
+// already told is one the machine took back — a confirmation a refusal took back, or a turn its
+// process died in — and sent again under a new id (retold, keptRun.resent); or the catch-up that
+// told it failed its own telling write (afterFailedWrite: its forget did not commit, so the
+// decision stood kept and a later catch-up named it again), which the architect ruled acceptable
+// (https://github.com/sjawhar/legion/pull/2163#issuecomment-6542200410). The daemon cannot know
+// whether the agent read the first, or the write that would have recorded the telling did not
+// commit, so telling it again is the lesser fault. Every other repeat is a fault: a telling
+// repeats an earlier one only once, and only where that earlier telling's own write failed or its
+// task was taken back.
 func (r *keptRun) tell(telling keptTelling) {
-	var earlier int
+	var earlier, excused int
+	var first keptTelling
 	for _, before := range r.told[telling.ref] {
 		if before.tree != telling.tree {
 			continue
 		}
-		earlier++
-		if !telling.retold || earlier > 1 {
-			r.fatalf("%s was told %d times to the architect of %s: first at step %d by %s, now by %s; a person's decision reaches its "+
-				"architect once, and a second time only as a task the machine took back and sent again",
-				telling.ref, earlier+1, telling.tree, before.step, before.how, telling.how)
+		if earlier == 0 {
+			first = before
 		}
+		earlier++
+		if !before.prompt && r.records.tellingFailed(before.row) {
+			excused++
+		}
+	}
+	switch {
+	case earlier == 0:
+	case earlier-excused == 0 && excused <= 1 && !telling.retold:
+		telling.afterFailedWrite = true
+	case earlier-excused == 1 && excused == 0 && telling.retold:
+	default:
+		r.fatalf("%s was told %d times to the architect of %s: first at step %d by %s, now by %s; a person's decision reaches its "+
+			"architect once, and a second time only as a task the machine took back and sent again, or after a catch-up whose own "+
+			"telling write failed",
+			telling.ref, earlier+1, telling.tree, first.step, first.how, telling.how)
 	}
 	switch {
 	case telling.prompt && !telling.hears:
