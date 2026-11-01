@@ -2,36 +2,25 @@
  "schemaVersion": 1,
  "phase": "implement",
  "issue": "INFRA-625",
- "completed": "2026-11-01T16:55:00Z",
- "previousHandoff": "",
+ "completed": "2026-11-01T19:45:00Z",
+ "previousHandoff": "9412cdb5580236eac31a6c4abba55c0fa6575010",
  "proof": [
   {
-   "criterion": "The pull request merges with main again, with both sides of the one conflict kept whole.",
-   "surface": "GitHub's own mergeability for #2519, and the Go document suites against a real Postgres (the pod harness lane).",
-   "command": "jj git fetch && jj new legion/INFRA-625 main@origin -m 'merge: ...' (one conflict resolved) && cd packages/envoy && go build ./... && go vet ./internal/dispatch/... && gofmt -l internal/dispatch/ && source /legion/harness/env.sh && export DISPATCH_TEST_DATABASE_URL=\"$DATABASE_URL\" && go test -count=1 -p 1 -timeout 50m ./internal/dispatch/docs/ ./internal/dispatch/pmdoc/; then gh pr view 2519 --json mergeable",
-   "observed": "MERGEABLE at 2898fcf0. ok docs 1491.846s and ok pmdoc 862.252s; build, vet and gofmt clean. The conflict was pending_authors.go, where both sides moved one block out: main's #2496 into the new docs/roomcursor.go with its roomInstance and cursor-gate rewrite, this branch into websocket.go beside LoadDoc. Main's home is kept, this branch's two comment edits re-applied there, and the duplicate declarations (roomLoad, beginRoomLoad, read, takeState, took, start) and their two imports removed from websocket.go. The load-failure path is whole, and failRoomLoad's comment now records why the record is dropped before the room fails: a write committing in the gap installs no shadow naming a load that will leave no instance.",
-   "headSha": "2898fcf0d09658e639ed810439645cd83a5a2888",
-   "negativeControl": "The four rows that carry this branch's load behaviour pass by name at the merged head (TestALoadThatPanicsFailsItsRoomWhereThePanicIsMet, TestTheStoreJudgesAnUpdateByItsHeader, TestLoadFailureMakesDocumentServiceUnavailable, TestCorruptLoadRefusesTheSocketAndReadsAsUnloadable), and grep finds none of the symbols round 4 deleted (applyRoom, failUnfinishedLoad, roomLoadWaitedOn, roomLoadNumber, loadsBegun, beforeFailUnfinishedLoad), so neither side was lost or reinstated."
-  },
-  {
-   "criterion": "The reader's surfaces still hold their bounds at the merged head, which carries main's Dispatch web changes.",
-   "surface": "The Dispatch Conversation, the Inbox's ask card, a hover card and the live session view in Chromium against the real Go server and Postgres 17, plus the package's unit surface.",
-   "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/<spec> --project=chromium; and bun test web/src/features/refs/MarkdownBody.test.tsx && bun run test && bun run typecheck; bunx biome check . from the root",
-   "observed": "With uptime at load average 0.00: heavy-bodies.e2e.ts 17 passed (1.5m), heavy-streamed-turn.e2e.ts 1 passed (12.9s), heavy-document-writes.e2e.ts 1 passed (1.2m). MarkdownBody.test.tsx 51 pass / 0 fail, the package 3,138 pass / 0 fail, tsc clean, biome clean over the repository.",
-   "headSha": "2898fcf0d09658e639ed810439645cd83a5a2888",
-   "negativeControl": "The forward-merge fingerprint moved, 5641942670c8 -> 552ce84721fa, which is the resolution moving code between files rather than a silent change of behaviour; the comment on the pull request names every line of it, and the rows above are what say the behaviour is unchanged."
+   "criterion": "The approved change merges with a green main, with both sides kept and nothing of the approved code changed.",
+   "surface": "GitHub's own mergeability for #2519, the package's unit surface, and the Go store package against the pod's Postgres.",
+   "command": "jj git fetch && jj new legion/INFRA-625 main@origin -m 'merge: ...' (no conflict) && bun install && (cd packages/contracts && bun run build) && cd packages/dispatch && bun test web/src/features/refs/MarkdownBody.test.tsx && bun run test && bun run typecheck; bunx biome check . ; cd packages/envoy && go build ./internal/dispatch/... && go test -count=1 -timeout 25m ./internal/dispatch/store/; gh pr view 2519 --json mergeable",
+   "observed": "MERGEABLE at 9125d44d. MarkdownBody.test.tsx 51 pass / 0 fail, packages/dispatch 3,138 pass / 0 fail, tsc clean, biome clean, go build clean, and main's TestMigrationSetTakesNumbersThenTimestamps green now that #2633 (0642a37a) is in. The merge took no conflict; the only change to this branch's own diff over main is four lines of bun.lock, where bun install wrote back main's released workspace versions (pi-envoy 13.11.1 -> 14.2.0, pi-legion 15.7.1 -> 16.3.0) beside this branch's four untouched patchedDependencies. Fingerprint 552ce84721fa -> 16450fd783de, and diffing the two fingerprint inputs against each other gives those four lines and nothing else.",
+   "headSha": "9125d44d91b44fef8b273bbea5a67ea74dccabea",
+   "negativeControl": "The one red in the store package, TestScannedTimestampsCarryUTCWhateverTheHostZone/text with 'read a timestamptz: simple protocol queries must be run with client_encoding=UTF8', fails identically on main's own tree: 0642a37a extracted with git archive into $TMPDIR and run against the same database. So it is this pod's Postgres lane, not this change."
   }
  ],
  "filesChanged": [
-  "packages/envoy/internal/dispatch/docs/pending_authors.go (resolved to main's content; the block it held now lives in roomcursor.go)",
-  "packages/envoy/internal/dispatch/docs/roomcursor.go (this branch's two comment edits re-applied at main's new home)",
-  "packages/envoy/internal/dispatch/docs/websocket.go (duplicate declarations and two imports removed; failRoomLoad's comment records the order against main's shadow)"
+  "bun.lock (main's released pi-envoy and pi-legion versions, written back by bun install; the four patchedDependencies unchanged)"
  ],
  "trickyParts": [
-  "Both sides moved the same block out of pending_authors.go, so the conflict was a choice of home rather than of content. Keeping main's home leaves this branch's diff over main as its load-failure path alone.",
-  "Main's roomLoad can now be named by a cold write's shadow, so the order in failRoomLoad - drop the record, then fail the room - is load-bearing and is written into the code's own comment."
+  "The first bun install after this merge must be followed by a rebuild of @legion/contracts (cd packages/contracts && bun run build), or packages/dispatch's typecheck fails with TS2307 and its suites fail with it."
  ],
  "openQuestions": [
-  "The changelog fragments on this branch are named INFRA-625-<slug>.yaml, which carries a Dispatch key in a file name. The repository guide asks for pr<number>-<kind>-<timestamp>. They were written before the first review and have passed five rounds; renaming them is a change above the approved head outside docs/solutions/, so this round left them alone. The architect decides whether a later round renames them."
+  "The changelog fragments on this branch are still named INFRA-625-<slug>.yaml where the guide asks for pr<number>-<kind>-<timestamp>. Renaming them is a change above the approved head outside docs/solutions/, so this merge round left them alone, as the rounds before it did."
  ]
 }
