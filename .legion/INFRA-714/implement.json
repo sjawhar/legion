@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-714",
-  "completed": "2026-11-01T19:30:00Z",
+  "completed": "2026-11-01T21:00:00Z",
   "proof": [
     {
       "criterion": "A3 / R1 - a red CI settlement moves no issue and reaches the phase holder, the implementer and the architect as one message naming each check and its conclusion, and the result they are told is the code head's latest attempt, carried by a handoff-only head.",
@@ -307,6 +307,14 @@
       "observed": "Every Go package ok. main's #2633 closes the daemon's numbered migration series at 0067 in migrationid.go, and every store refuses a numbered file above it, so this branch's 0069 to 0081 would each have been refused; they are timestamps now, in the same order, with each test's name, its in-file references and the version it migrates through moving with them. INFRA-484's own branch is at 20261029195520, after this branch's, so the two no longer collide whichever merges first; #2538 is still open, so none of its daemon changelog entries is this branch's to restore yet. The second merge took no conflict at all: the unchanged-diff fingerprint is 595e823fe296d4dd3fb969071d766cdef54ad814 on both sides of it and the changed-file set the same 419 files.",
       "headSha": "a1cc46d6315f7b1f65fee767e18aeb8c7624782e",
       "negativeControl": "The rename is a refusal the toolchain makes rather than a claim: before it every test of internal/admit and internal/store failed `migration 0069_phase_pass.up.sql takes version 69: the numbered migrations ended at 67`, and after it both are ok. The claudebridge conflict had its own: taking both sides left `TestOnlyTheStepsTheProviderRefusedAreReportedRefused` failing `the bridge wrote nothing within 10s`, because main answers a delivery when Claude Code echoes it and the branch's fake held its step open waiting for that answer; the fake sends and no longer waits, and the package is ok."
+    },
+    {
+      "criterion": "The tester's one failure: a test this branch added was racy, which makes CI's red say nothing about the branch. It now gives the same answer every run, and the behaviour it was ambiguous about is pinned on both sides.",
+      "surface": "The real bridge against the fake Claude Code over its real stdin, stdout and inbox socket, which is the surface the race lived on.",
+      "command": "cd packages/daemon && go test ./internal/claudebridge/ -count=100 -timeout 20m -run 'TestOnlyTheStepsTheProviderRefusedAreReportedRefused' ; the same with -run 'TestARefusalWithNothingQueuedEndsItsTurnAndTheNextDeliveryIsANewOne' ; CGO_ENABLED=1 go test ./internal/claudebridge/ -count=10 -race",
+      "observed": "Each hundred-run prints `0` failures (`grep -c '^--- FAIL'`) and ends `ok github.com/sjawhar/legion/daemon/internal/claudebridge`, 2.787s and 2.408s; the package is ok over ten runs under -race in 74.9s; and the whole daemon tree under load reports no failure. The cause was the fake sending a delivery and then failing its step: the two reach the bridge through two cases of one select, so which arrived first decided whether the refusal was the turn's outcome, and the fake cannot order them because a queued delivery emits no frame it can see. The test orders them instead — it sends the delivery itself, waits for the bridge's own `Envoy delivery ev1 waits for the next step`, and only then opens the gate the fake's step is held at. The fake's fail-then case, which both delivered and failed, is replaced by fail-when, the held step alone.",
+      "headSha": "4cfed344a3d16ebf00cb3fe0deb5bc20531b9dff",
+      "negativeControl": "The tester's own measurement is the control for the race, and it is a count rather than a run: at the previous head the same command printed 19 failures in 100 while its sibling printed 0 over the same 100, and it prints 0 now. For the behaviour, the second test is the control of the first: TestARefusalWithNothingQueuedEndsItsTurnAndTheNextDeliveryIsANewOne drives the other order and requires the opposite answer — the turn reported refused with the provider's words at sequence 1, then the delivery's own turn reported clean at sequence 2 — so a bridge that waited for an in-flight delivery, or one that attributed it to the ended turn, fails one of the two whichever way it erred."
     }
   ],
   "filesChanged": [
@@ -351,5 +359,5 @@
     "cmd/legion's TestProbeImageReadsEachRolesOwnOverlaysAsTheRoleStarts fails in a Kubernetes issue pod on this branch's base as well; it was reproduced at the parent commit with every changed file restored. internal/intake's TestConsumerLagCountsEveryConsumerWhileNATSRefusesTheOldestMessageRead starts a NATS container and internal/runtime/tmux's TestNewRefusesLaunchersItCannotRun wants tmux on PATH, neither of which a pod has, and nine internal/daemon tests are the known gVisor and Docker cases. CI's run at this head is the proof for all of them.",
     "TestTheKeeperRetriesAControllerWhoseLaunchesRanOut was a race rather than a pre-existing failure, which two workers reported it as. Its three refused launches and the keeper's retry all fell between two ten-millisecond polls, so the wait read zero spawns and then four and never the failure it exists to prove. The retry is now two seconds; the test ran five times green."
   ],
-  "previousHandoff": "15c215e87cb479a7a64b189e4b7c34b586a2be15"
+  "previousHandoff": "4a35a271a2b932699ea52cb1833ec3af40bce4e3"
 }
