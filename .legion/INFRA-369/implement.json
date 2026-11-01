@@ -2,49 +2,40 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-369",
-  "completed": "2026-11-01T22:40:00Z",
-  "round": "the forward merge of main at 0642a37a, which carries sjawhar/legion#2394's block pointer links, and plan task T7: a block[] attribute value naming a part of an ask is refused as one naming a block of a comment or a message is",
-  "previousHandoff": "9768bcbd52bf6d8d0eff273ae0fcb95b84cd6672",
+  "completed": "2026-11-01T23:21:05Z",
+  "round": "the red CI check at 3e4f9289 (the three Dispatch skills at exactly 2000 words), and the live-room gap the tester found: nothing drove Docs.SetBlockAttributes into the block-pointer validator, for any kind",
+  "previousHandoff": "3e4f92898bd32fa5dca556ae4586e8a2e6fcea57",
   "proof": [
     {
-      "criterion": "The merge keeps both sides: #2394's block pointer links and this branch's ask parts are one graph, and the acceptance lines of both hold at the merged head.",
-      "surface": "A real Dispatch stack in the issue's pod - the Go server on PostgreSQL 17 with pgvector against a database created empty for the run, the production SPA bundle, a real Chromium - driven through the acceptance driver and the dashboard.",
-      "command": "psql -Atc 'create database dispatch_prove369'; DATABASE_URL=postgres://postgres:dispatch@127.0.0.1:55432/dispatch_prove369?sslmode=disable DISPATCH_E2E_PORT=38211 FAKE_ENVOY_PORT=38212 FAKE_GITHUB_PORT=38213 FAKE_BROKER_PORT=38214 bash packages/dispatch/e2e/run-server.sh; then bash packages/dispatch/e2e/acceptance/block-graph.sh; then DISPATCH_E2E_REUSE_SERVERS=1 bunx playwright test --config e2e/playwright.config.ts e2e/ask-part-references.e2e.ts --project=chromium --reporter=list",
-      "observed": "The server booted against the empty database and applied 165 migrations, this branch's three timestamped ones last (20261101143211, 20261101143212, 20261101183525, the last applied at 20:59:51.337167+00). Driver: EXIT=0, PASS=171 FAIL=0 SKIP=0, its A6/A11/A15/R7/R10/R11 lines all PASS, among them 'A6 the ask's read names each option's part (b2, b3) at revision 1', 'R7 ask the three links start at the question, the option and the answer', 'A15 ask ?to=<second option>@v1 has pin.state removed with removed_version 3'. Browser: 2 passed - the reference renders as a link that opens the ask at that part, and the Referenced by panel names an option's backlink as its ask, not an artifact.",
-      "headSha": "156cbec967ab8776e43d4994c6a2367d86042fe5",
-      "negativeControl": "GET /api/v1/references?to=dispatch://CORE-3/ask/<id>%23b-b9 -> 404 {\"code\":\"NOT_FOUND\",\"error\":\"no part \\\"b9\\\" in ask <id>\"}, while b1, b2 and b3 each answer 200 with their own text."
+      "criterion": "The word guard the push went red on is green with margin, and nothing of the branch's reference form is given up to get there.",
+      "surface": "The guard itself, run in this pod against the staged skills partition it builds (packages/pi-envoy/src/skills-guard.test.ts, which counts every file of skills/dispatch, skills/dispatch-first and skills/dispatch-writing-specs as wc -w does, frontmatter included).",
+      "command": "find skills/dispatch skills/dispatch-first skills/dispatch-writing-specs -type f | xargs cat | wc -w; then cd packages/pi-envoy && bun test src/skills-guard.test.ts",
+      "observed": "1997 words, and the suite passes: 11 tests, 0 fail, 1 skip. Three words were cut from skills/dispatch/SKILL.md, each a redundancy and no instruction: 'local path' -> 'path', 'Do not repeat' -> 'never repeat', and 'from Dispatch **Settings -> Agent tokens**' -> 'from **Settings -> Agent tokens**' inside this skill's own setup section. The added reference line, dispatch://KEY/ask/<id>#b-<part>[@vN], stands: it is the address this issue exists to give.",
+      "headSha": "8105eb4fe5ddfbb4e25da8c3fa5a37ee1b7de30f",
+      "negativeControl": "The job log of CI run 41349059082, job pi-envoy 124976536702, at the previous head: 'Expected: < 2000, Received: 2000' at skills-guard.test.ts:98. main alone counts 1999, so the branch's one line is what crossed it."
     },
     {
-      "criterion": "T7: a block[] attribute value naming a part of an ask is refused on every write path, with the same sentence the server gives for a block of a comment or a message, and with the article right.",
-      "surface": "The same Go server, built with the block[] schema the Go tests install (pmdoctest.BlockPointerSchema: a claim whose serves is block[] targets:[requirement]), on a second empty database; driven over HTTP on the upload and edit-op routes and over the websocket room with @hocuspocus/provider, which bypasses the editor's own guard.",
-      "command": "curl -X POST /api/v1/issues/CORE-1/artifacts; curl -X POST /api/v1/artifacts/{id}/edits (an insert carrying markdown and a retype setting the attribute); a Bun script joining ws://127.0.0.1:38221/ws/doc/<artifact> and setting the stored claim's serves attribute, then POST /api/v1/artifacts/_test/quiesce and GET /api/v1/artifacts/{id}/text",
-      "observed": "Upload: 400 INVALID_MARKDOWN, 'typed block \"claim\" attribute \"serves\": \"dispatch://CORE-1/ask/41999b7b-...#b-b2\" is a block of an ask: a block[] attribute points only at a block of a document', and the document was not created. Edit op: 400 INVALID_OP on that op's field, the same sentence. Live room: the server logs 'updated document outside Proof schema' with that sentence, writes no version (versions still [1]), and the next read answers 409 DOC_SCHEMA carrying it. Beside each, a comment's block reads 'is a block of a comment' and a message's 'is a block of a message': the article differs by kind, as the change intends.",
-      "headSha": "156cbec967ab8776e43d4994c6a2367d86042fe5",
-      "negativeControl": "The same claim pointing at the spec's own requirement, dispatch://CORE-1/spec#b-r1, is accepted 201 and writes version 1, so the refusal is the pointer's target kind and not the attribute. Red-before at the parent commit: the server rendered 'is a block of a ask' (wrong article) and contracts refused with the wrong reason, '\"...\" is not a block reference as Dispatch writes one'."
+      "criterion": "The live room's own write meets both block-pointer refusals: a pointer at a block of a type the attribute's targets do not allow, and one naming a part of an ask.",
+      "surface": "The Go server's document service against PostgreSQL 17: Docs.SetBlockAttributes inside a Docs.Join transaction, which is the call the live room and the answer route make, with pmdoctest.BlockPointerSchema installed and a real indexed spec behind it.",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch?sslmode=disable' go test ./internal/dispatch/api/ -run 'TestSetBlockAttributesRefusesABlockPointerInTheLiveRoom' -count=1 -timeout 20m -v",
+      "observed": "PASS, four subtests: a pointer at a paragraph and at a callout are refused pmdoc.ErrBlockPointer naming the attribute, the target's type and the allowed type; a part of an ask, plain and pinned @v1, is refused as the value (pmdoc.ErrSchema, never docs.ErrDocSchema) with the message ending 'is a block of an ask: a block[] attribute points only at a block of a document'; after each refusal the room's markdown and checks.md's artifact, version count and block_refs are unchanged; and a pointer at an allowed requirement is accepted and reads back on the block as ':::claim{#c1 serves=\"dispatch://CORE-1/artifact/checks-md#b-r2\"}'.",
+      "headSha": "8105eb4fe5ddfbb4e25da8c3fa5a37ee1b7de30f",
+      "negativeControl": "Red-before, run by me after the worker reported it: with the ask arm of validateBlockPointerValues removed (pmdoc/schema.go:372) and everything else intact, both ask rows fail, reporting the generic 'is not a block reference as Dispatch writes one' in place of the sentence; restored byte for byte, and the diff then held the test file alone. Removing refuseBlockPointers (docs/mutation.go:377) turns the two type rows red."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/refs/graph.go - the merge's one arm list: #2394's heldByABlock of any kind, the document ?from= arm filtered by block_ref_listed, and this branch's ask_block loader, itemKinds, asksCitingTheDocument, repliesFrom and AskBacklinkExclusions, with BacklinkCounts stating both",
-    "packages/envoy/internal/dispatch/refs/ask_blocks.go - askPartPairs passes #2394's third blockPairs parameter (nil: an ask's text is prose and holds no pointer); the text merge had kept both signatures and the tree did not compile",
-    "packages/envoy/internal/dispatch/store/migrations/20261101183525_graph_edges_ask_parts_and_block_pointers.up.sql and .census.sql - graph_edges stated once with every arm of both branches; it creates nothing and rewrites no row",
-    "packages/envoy/internal/dispatch/pmdoc/schema.go - the block pointer refusal names an ask's part with its own article",
-    "packages/envoy/internal/dispatch/pmdoc/testdata/block-pointer-values.json and packages/contracts/src/dispatch-block-ref.ts - the twin corpora gain the ask rows (an issue ask, a project-document ask, a pinned one), so the Go and TypeScript refusals are pinned to one sentence",
-    "packages/envoy/AGENTS.md, packages/contracts/AGENTS.md, packages/envoy/cmd/dispatch/AGENTS.md, packages/envoy/cmd/dispatch/README.md - the merge's prose resolutions, each side's facts kept",
-    "packages/contracts/.changes/unreleased/pr2546-ask-part-references.yaml and packages/envoy/.changes/unreleased/pr2546-ask-parts.yaml - the refusal's sentence"
+    "skills/dispatch/SKILL.md - three redundant words cut, so the three Dispatch skills total 1997 of the guard's 2000",
+    "packages/envoy/internal/dispatch/api/block_pointers_test.go - TestSetBlockAttributesRefusesABlockPointerInTheLiveRoom, with setBlockAttributes (a Docs.Join transaction, as answerAsk's WriteBlock makes one) and artifactMarkdown (the room's current rendering)"
   ],
   "trickyParts": [
-    "Two branches open at once each restated graph_edges from 0142's arms. Timestamps sort main's 20261101144855 after this branch's 20261101143211, so main's view silently replaced the ask arms and no conflict marker said so. The fix is a third migration stating the view once from both arm lists; renaming this branch's migrations was rejected (it defeats timestamped versions and churns every citation) and editing main's applied migration is unsafe for any database that ran it.",
-    "A text merge of refs/ask_blocks.go kept both call shapes of blockPairs, which does not compile. A merge resolution is not proven by its conflict markers being gone: the build is the check.",
-    "The block[] refusal has no reachable HTTP surface on a stock build, because no shipped block type declares a block[] attribute (packages/envoy/AGENTS.md:1679, and GET /api/v1/schema/blocks lists none). Driving the three write paths needed a server built with the Go tests' schema through one untracked file, since deleted. Without such a schema the standing guard is the twin corpora alone."
+    "The live write validates the same tree twice: pmdoc.SetBlockAttributes' own out.Validate() (retype.go:127) and pmdoc.Update's want.Validate() (update.go:22). Removing either alone leaves the test green, and removing both makes the room record the value and refuse its own document afterwards, which is a different behaviour. The test therefore asserts the refusal is the value's (pmdoc.ErrSchema and not docs.ErrDocSchema), and the red-before that isolates it removes the ask arm of validateBlockPointerValues rather than a validator call.",
+    "The test needs newTestServer rather than blockIndexHandler: refuseBlockPointers reads each target's type from the block index in the write's own transaction, so the document service under test must be the one the handlers write through (deps.Docs)."
   ],
   "deviations": [
-    "The architect's acceptance line for T7 said 400 INVALID_MARKDOWN on all three write paths. That holds for an upload alone. An edit op answers 400 INVALID_OP on the op's field, by docs/edits.go's invalidSchemaOp, which api/block_pointers_test.go:101 already pins for a block-pointer refusal; the live room answers 409 DOC_SCHEMA on the next read, because a websocket frame carries no HTTP status. The refusal sentence is byte-identical on all three. Nothing was changed to match the acceptance line: the line is wrong for two of the paths, and the branch's behaviour is each route's own.",
-    "The forward merge's unchanged-diff fingerprint is not equal (0002d540... -> ac27c9e6...). It cannot be: the head adds T7's own commit, and the merge resolved five conflicted files whose branch-owned lines it necessarily rewrote. Both fingerprints are posted on the pull request."
+    "The architect's acceptance asked for red-before by removing out.Validate() at pmdoc/retype.go:127. That cannot hold on this path, for the double validation above; the green result is recorded and the refusal is isolated two other ways instead, both red."
   ],
-  "openQuestions": [
-    "A block[] attribute in packages/envoy/internal/dispatch/pmdoc/schema/blocks.json would make this refusal reachable with no scaffold. That belongs to sjawhar/legion#2394's own work, not here."
-  ],
+  "openQuestions": [],
   "discoveredComplexity": [
-    "TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves refuses itself on this pod's C-collated Postgres and says so in its own failure text; it is not this branch's and CI runs it on a correctly collated server. TestMigrationSetTakesNumbersThenTimestamps, red on main for the whole of this issue, is green at this head: #2633 closed main's numbered series at 0161 and is in this merge."
+    "internal/dispatch/pmdoc needs more than a 10-minute deadline on this pod: it runs about 934 s and passes at 35m, and its differential tests shell out to Bun, so they fail with 'Cannot find module @legion/contracts' until bun install has linked the workspace."
   ]
 }
