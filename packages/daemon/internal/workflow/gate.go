@@ -596,17 +596,32 @@ func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.Di
 
 // recordHandover records on a parked root's own gate the person's approval that queues the root as
 // their handover (personHandoverQueues), with nothing else applyArtifact does: no notice, no
-// answered wait, no log of a gate opened, since the tree has no architect to hear any of it. Its
-// one reader is the re-admission the queued todo brings, whose keepStaleApproval would otherwise
-// find the approval the gate held before the spec's last revision and have the new architect told
-// to request approval of the version the person has just approved. An approval of a version older
-// than the gate's latest, or one the gate has already seen superseded, records nothing, as
-// applyArtifact records nothing for it; under gates.design off no artifact event moves a gate.
+// answered wait, no log of a gate opened, since the tree has no architect to hear any of it. The
+// gate it writes has three readers before the new architect registers: the re-admission the
+// queued todo brings, whose keepStaleApproval would otherwise find the approval the gate held
+// before the spec's last revision and have the new architect told to request approval of the
+// version the person has just approved; a re-admission of a child of this root's tree as an orphan,
+// which carries a copy of this gate to that child (admit's readmit); and read_state's designGate.
+// An event applyArtifact records nothing for (artifactIgnored: under gates.design off, or an
+// approval of a version older than the gate's latest or one the gate has already seen superseded)
+// records nothing here either.
 func (e *Engine) recordHandover(ctx context.Context, tx pgx.Tx, gate record.DesignGate, fact intake.DispatchArtifact) error {
-	if e.cfg.DesignGate == config.DesignGateOff || fact.Version < gate.LatestVersion || classify.StaleReview(gate, fact.Version, fact.Mark) {
+	if off, stale := e.artifactIgnored(gate, fact); off || stale {
 		return nil
 	}
 	return e.store.PutGate(ctx, tx, classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, fact.Version, fact.Mark))
+}
+
+// artifactIgnored says why an artifact event changes no gate state, if it does not: off when the
+// design gate is off, so no artifact event moves a gate, and stale for a review of a version older
+// than the gate's latest, or one the gate has already seen superseded (classify.StaleReview). A
+// version event is never stale. applyArtifact and recordHandover both read it, so the two never
+// disagree on which events a gate takes.
+func (e *Engine) artifactIgnored(gate record.DesignGate, fact intake.DispatchArtifact) (off, stale bool) {
+	off = e.cfg.DesignGate == config.DesignGateOff
+	stale = fact.Kind != intake.DispatchArtifactVersion &&
+		(fact.Version < gate.LatestVersion || classify.StaleReview(gate, fact.Version, fact.Mark))
+	return off, stale
 }
 
 // personHandoverQueues says whether fact is a person's approval that queues its root as the
@@ -712,9 +727,7 @@ func copyTakes(gate record.DesignGate, fact intake.DispatchArtifact) bool {
 // recorded as told.
 func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.DesignGate, fact intake.DispatchArtifact, carried bool) error {
 	key := gate.Issue
-	off := e.cfg.DesignGate == config.DesignGateOff
-	stale := fact.Kind != intake.DispatchArtifactVersion &&
-		(fact.Version < gate.LatestVersion || classify.StaleReview(gate, fact.Version, fact.Mark))
+	off, stale := e.artifactIgnored(gate, fact)
 	if off || stale {
 		why := "workflow: a review the person has already followed with another changes no gate state"
 		if off {

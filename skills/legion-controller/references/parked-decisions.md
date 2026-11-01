@@ -37,11 +37,14 @@ A session's reply on an ask of a parked tree is no decision. The daemon sends no
 logs `workflow: a session's reply on a parked tree is not relayed`; the reply stays on the Dispatch
 ask for the person who asked, and the walk below skips it.
 
-A person's approval of a parked root's own spec (its primary document), when its tree is not
+A person's own approval of a parked root's own spec (its primary document), when its tree is not
 live, is no notice either: it is that person's handover, and the daemon sets the root `todo`
-itself, whoever parked it (`admission: queued a person's handover`, `source=approval`). The spec
-notices that remain are a request for changes, a carried approval, and an approval of a document
-that is not the root's primary one.
+itself, whoever parked it (`admission: queued a person's handover`, `source=approval`). Two
+approvals of a root's spec are not that handover and still come as notices: a carried approval,
+which Dispatch writes in the person's name when their answer to a decision block was the whole
+change since the version they approved, and an approval on a root that keeps a Dispatch parent,
+as a child a linger handed to Legion does. The other spec notices are a request for changes and
+an approval of a document that is not the root's primary one.
 
 ## Deciding
 
@@ -171,10 +174,15 @@ At every start (step 4 of the start procedure) and on each `tick`:
    (an answer as `<question> -> <answer>`) and its author (`user <login>`), but no id. An
    `artifact.approved` or `artifact.changes_requested` event, with the approval request's
    `ask.answered` at the same time, is one decision whose `ref` is `dispatch://<KEY>/spec`, and
-   the issue's `Spec approval:` line shows a request's reason. An `artifact.approved` of the root's
-   own spec is no decision to judge: it is the person's handover, which the daemon queues itself
-   (the paragraph under **The notice**), so skip it, and with it the approval request's
-   `ask.answered` at the same time. For any other ask or a comment, find
+   the issue's `Spec approval:` line shows a request's reason. Skip an `artifact.approved` only
+   when it is the person's handover, which the daemon queues itself (the paragraph under **The
+   notice**), and with it the approval request's `ask.answered` at the same time. It is that
+   handover when all three hold: the root's `dispatch read` shows no `child_of` under `Links:`;
+   the event's `payload.artifact_id` is the root's `primary_artifact_id`; and its `payload.reason`
+   does not begin `Carried forward from the approval of version`. The events `curl` of
+   [Triage a root](skill://legion-controller/references/triage.md#triage-a-root) step 2 shows the
+   payload, and the same `curl` of `/api/v1/issues/<root>` shows `primary_artifact_id`. Judge
+   every other approval as a decision. For any other ask or a comment, find
    the item: `Open asks:` names an ask still open, and `dispatch search` finds an ask or a comment
    by its words. The id at the end of a hit's link (`/asks/<id>`, `?ask=<id>`, `#b-<block id>`,
    `/comments/<id>`, `?comment=<id>`) names it. Read an ask with `dispatch read --ref

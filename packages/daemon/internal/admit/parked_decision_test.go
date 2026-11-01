@@ -596,8 +596,17 @@ func TestARootAPersonsApprovalHandsOverIsToldNoStaleApproval(t *testing.T) {
 	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "approved", approval, admission.engine, admission); err != nil {
 		t.Fatalf("apply the person's approval: %v", err)
 	}
-	if notices := parkedDecisionNotices(t, pool); len(notices) != 0 {
-		t.Fatalf("parked-decision notices = %#v, want none: the approval is the person's handover", notices)
+	if told := gateNotices(t, pool, "LEGION-ROOT", "design-approved"); len(told) != 0 {
+		t.Fatalf("design-approved notices for LEGION-ROOT = %#v, want none: the approval is the person's handover", told)
+	}
+	var handovers []record.StatusWrite
+	for _, effect := range effects(t, pool) {
+		if write, ok := effect.payload.(record.StatusWrite); ok && effect.issue == "LEGION-ROOT" {
+			handovers = append(handovers, write)
+		}
+	}
+	if want := []record.StatusWrite{{Status: "todo", ObservedStatus: "backlog", PersonHandover: true}}; !reflect.DeepEqual(handovers, want) {
+		t.Fatalf("status writes for LEGION-ROOT = %#v, want the person's handover %#v", handovers, want)
 	}
 	readmitRoot(t, pool, admission)
 	starts := architectStartRows(t, pool)

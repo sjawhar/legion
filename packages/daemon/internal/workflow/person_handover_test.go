@@ -183,6 +183,45 @@ func TestAPersonsApprovalOfARecordedParkedRootsSpecQueuesItAndRecordsItQuietly(t
 	}
 }
 
+// A person's approval that queues a parked root as their handover records on the root's gate only
+// what applyArtifact would record: an approval of a version older than the gate's latest, one the
+// gate has already seen superseded by a later changes request of that version, and any approval
+// under gates.design off leave the gate as it was, while the root is still queued. Recording any
+// of them would set an approved version the spec has moved past, which the re-admission's
+// keepStaleApproval would then hand the new architect as a stale pair.
+func TestAHandoverApprovalTheGateWouldNotTakeLeavesItAsItWas(t *testing.T) {
+	two := 2
+	for _, tc := range []struct {
+		name   string
+		policy config.DesignGate
+		gate   record.DesignGate
+	}{
+		{name: "an approval of a version older than the gate's latest", policy: config.DesignGateRootIssues,
+			gate: record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3}},
+		{name: "an approval a later changes request of its version superseded", policy: config.DesignGateRootIssues,
+			gate: record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2,
+				ToldChangesVersion: &two, ToldChangesReason: "split the migration", ToldChangesMark: askSeq(12)}},
+		{name: "an approval under gates.design off", policy: config.DesignGateOff,
+			gate: record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, lingeringRoot("backlog"))
+			seedGate(t, pool, tc.gate)
+			apply := applyFacts(t, pool, testEngine(tc.policy, nil))
+
+			apply("approval", approvalOf(askPerson, parkedRootView("backlog")))
+
+			if got, want := statusWrites(t, pool, "LEGION-208"), []record.StatusWrite{personHandoverWrite("backlog")}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("status writes = %#v, want %#v", got, want)
+			}
+			if got := gateState(t, pool, "LEGION-208"); !reflect.DeepEqual(got, tc.gate) {
+				t.Fatalf("the parked root's gate = %#v, want it left as %#v", got, tc.gate)
+			}
+		})
+	}
+}
+
 // A root whose tree is live takes a person's approval on its gate as today, whatever Dispatch shows
 // of its status: a slotted root whose person approved and then parked it, the approval prepared
 // after the park and applied before the park's event, opens its gate and is told design-approved,
