@@ -119,9 +119,8 @@ push made, by its SHA; then complete. A red at the code is a `REQUEST_CHANGES` n
 never an approval; so is an unmet goal, or a requirement unmet with no act of the owner letting
 it go, naming that. A requirement an open child of the tree carries is pending until the parent's
 last round, a full round for you, named by the forward-merge comment's
-`parent's last round: full test round`. One only the deploy can show is met here when the change
-holds what it needs and the plan names the observation, unmet when nobody
-observes it or the plan measures something else, and never pending. A request for changes does not
+`parent's last round: full test round`. One only the deploy can show is judged here as your own
+core text says, by what the change holds and what the plan will observe. A request for changes does not
 wait: it stands whatever CI says and the issue leaves reviewing with it. Nor does the approval at
 a handoff-only commit, since the round reads no CI verdict; a red the daemon reads later, at that
 commit or above, is the code's red and resumes the implementer wherever the issue is, without the
