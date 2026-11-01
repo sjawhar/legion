@@ -461,17 +461,39 @@ const ygoHandshakeTimeout = 30 * time.Second
 // to it is stalled from the moment it connects and this deadline runs from there.
 const ygoPeerWriteTimeout = 10 * time.Second
 
+// ygoCloseFrameTimeout is how long ygo waits for a revoked socket's close frame to go out before
+// it closes the connection without it (sjawhar/ygo provider/websocket/server.go,
+// closeFrameTimeout, the deadline on ServeHTTP's WriteControl). The slow page below reads
+// nothing, so that wait runs out in full and the close follows it.
+const ygoCloseFrameTimeout = time.Second
+
 // revokeAfterDialBound is how soon after the slow page connects the revoke must be taken, a
 // quarter of the earlier of the two deadlines ygo would end that socket on by itself, and
-// revokedEndBound is how long after the revoke the socket must end: the two seconds the page
-// reads nothing for, and two more to drain what was in flight and read the end, which takes
-// milliseconds on a loopback socket. Together they put the end at most 6.5 s after the page
-// connected, well inside both, so an end this test accepts is the revoke's work and neither of
-// theirs.
+// revokedServerEndBound is how long after the revoke the server's side of that socket must end:
+// ygo's wait for the close frame, and a second and a half for a loaded runner to then close the
+// connection and return from ServeHTTP, which is work of a few milliseconds. Together they put
+// the server's end at most 5 s after the page connected, half of ygoPeerWriteTimeout and a sixth
+// of ygoHandshakeTimeout, so an end this test accepts is the revoke's work and neither of theirs.
+//
+// Nothing here bounds how long the page then takes to read that end: that is the drain below.
 const (
-	revokeAfterDialBound = min(ygoPeerWriteTimeout, ygoHandshakeTimeout) / 4
-	revokedEndBound      = 4 * time.Second
+	revokeAfterDialBound  = min(ygoPeerWriteTimeout, ygoHandshakeTimeout) / 4
+	revokedServerEndBound = ygoCloseFrameTimeout + 1500*time.Millisecond
 )
+
+// revokedDrainBound is how long the page is given to read the end of its socket once the server
+// has closed it. It bounds no part of the revoke - requireRevokedSocketEnded does that - only how
+// long the page takes to pull what the server had already written through the 4096-byte receive
+// buffer it dialled with. On this pod that is about a megabyte and takes 20 ms, but it is the
+// receive window that sets the pace, not the revoke, and a page that can take only 4 KB every
+// 10 ms needs three seconds for the same bytes.
+const revokedDrainBound = 30 * time.Second
+
+// revokedDrainReceiveBuffer is the receive buffer the page is given for that drain. Its small one
+// has done its work by then - it is what kept the server's write stalled from the dial until the
+// close - and raising it lets the page take what is left in far fewer passes: on this pod the
+// drain fell from about 20 ms to about 3 ms.
+const revokedDrainReceiveBuffer = 4 << 20
 
 // A page on a slow link takes nothing from its socket for longer than the revoked close waits, so
 // it reads the connection's end as 1006 rather than 4412 and loses nothing by it; the rule is in
@@ -480,9 +502,10 @@ const (
 // each, and the slow page then connects to a room holding far more than its buffers can take and
 // reads nothing: the server's write of all of it is part way out when the re-check revokes that
 // socket, and the page starts reading two seconds later. The re-check must return that page's
-// admission as one it closed; its socket must end within revokedEndBound of the revoke, with one
-// of the two codes the provider reconnects on - never a protocol error from a frame cut in half,
-// and never a socket that does not end; and the page's reconnect must hold the server's whole
+// admission as one it closed; the server's side of that socket must end within
+// revokedServerEndBound of the revoke; the page must then read the socket's end with one of the
+// two codes the provider reconnects on - never a protocol error from a frame cut in half, and
+// never a socket that does not end; and the page's reconnect must hold the server's whole
 // document once it has synced, the writes that were in flight included.
 func TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole(t *testing.T) {
 	service, artifactID := newTestService(t)
@@ -525,16 +548,28 @@ func TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole(t *testing.T) {
 		t.Fatalf("the revoke came %v after the slow page connected, past %v: a run this slow cannot tell the revoke's close from ygo's own %v deadline on the stalled write",
 			took, revokeAfterDialBound, ygoPeerWriteTimeout)
 	}
+
+	// The page reads nothing for these two seconds, which is longer than ygo waits for the close
+	// frame to go out, so the frame is given up on and the connection closed while the page still
+	// reads nothing: what it reads below is a connection dropped without one.
 	time.Sleep(2 * time.Second)
 
-	// The end must reach the page within revokedEndBound of the revoke, which is what makes it
-	// the revoke's: both deadlines ygo would end this socket on by itself fall after it.
-	_ = reader.SetReadDeadline(revokedAt.Add(revokedEndBound))
+	// The revoke's own work, and all of it: the server has closed that socket and its ServeHTTP
+	// has returned. Within revokedServerEndBound of the revoke this is the revoke's doing, since
+	// both deadlines ygo would end this socket on by itself fall far later.
+	requireRevokedSocketEnded(t, &service.schemaAdmissions, revoked[0], revokedAt)
+
+	// What is left is the page pulling what the server had already written to it out of the
+	// socket, which is the slowest part of this test on a loaded runner and says nothing about
+	// the revoke. It gets a buffer and a deadline wide enough to finish, and the end it then
+	// reads must still be one the provider reconnects on.
+	raiseReceiveBuffer(t, reader)
+	_ = reader.SetReadDeadline(time.Now().Add(revokedDrainBound))
 	var ended error
 	for ended == nil {
 		_, _, ended = reader.ReadMessage()
 	}
-	requireReconnectableEnd(t, ended, fmt.Sprintf("the revoked page, reading two seconds after the revoke and within %v of it", revokedEndBound))
+	requireReconnectableEnd(t, ended, "the revoked page, reading two seconds after the revoke")
 
 	want, err := service.Text(context.Background(), artifactID)
 	if err != nil {
@@ -545,6 +580,41 @@ func TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole(t *testing.T) {
 	address := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + artifactID + "?" + page(1, 1).Encode()
 	reconnected := docstest.Dial(t, address, http.Header{"X-Dispatch-User": []string{"alice"}}, artifactID, crdt.New())
 	waitForPeerDocument(t, reconnected, want)
+}
+
+// requireRevokedSocketEnded waits for the server's side of admission's socket to end, and fails
+// if it is still open revokedServerEndBound after revokedAt. The socket has ended once its
+// ServeHTTP has returned, which is when websocket.go removes the admission, so this reads the
+// admissions under their own lock, as every other reader of them does.
+func requireRevokedSocketEnded(t *testing.T, admissions *schemaAdmissions, admission *schemaAdmission, revokedAt time.Time) {
+	t.Helper()
+	deadline := revokedAt.Add(revokedServerEndBound)
+	for {
+		admissions.mu.Lock()
+		_, open := admissions.sockets[admission]
+		admissions.mu.Unlock()
+		if !open {
+			return
+		}
+		if now := time.Now(); now.After(deadline) {
+			t.Fatalf("the revoked page's socket was still open on the server %v after the revoke, past %v: the revoke cancels that socket's request context, on which ygo waits at most %v for the close frame to go out, closes the connection and returns from ServeHTTP",
+				now.Sub(revokedAt), revokedServerEndBound, ygoCloseFrameTimeout)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// raiseReceiveBuffer gives a slow page's socket a receive buffer big enough to take what is left
+// in it in few passes, for a test that is done with the small one dialSlowPage set.
+func raiseReceiveBuffer(t *testing.T, connection *gws.Conn) {
+	t.Helper()
+	tcp, ok := connection.UnderlyingConn().(*net.TCPConn)
+	if !ok {
+		t.Fatalf("the page is reading a %T, want the TCP connection dialSlowPage opened", connection.UnderlyingConn())
+	}
+	if err := tcp.SetReadBuffer(revokedDrainReceiveBuffer); err != nil {
+		t.Fatalf("raise the revoked page's receive buffer to %d bytes: %v", revokedDrainReceiveBuffer, err)
+	}
 }
 
 // requireReconnectableEnd accepts the two ends a revoked socket may have, and only those: the
