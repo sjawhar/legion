@@ -1139,8 +1139,9 @@ func TestClusteredNatsHubCluster(t *testing.T) {
 	// election logs selfElected unconditionally (nats-server v2.15.1,
 	// server/jetstream_cluster.go:10080), but only once its first entry as leader is committed and
 	// applied (server/raft.go:6321 and 1603-1613), which is later than the moment /jsz names it
-	// (server/raft.go:6307 and 4839-4841, read at server/jetstream_cluster.go:14075): 20 ms later
-	// in one run of fifteen. So the wait below requires the line as well as the agreement, rather
+	// (server/raft.go:6307 and 4839-4841, read at server/jetstream_cluster.go:14075): the line
+	// reached the test's buffer 2.8-13.7 ms after both survivors named the new leader in four of
+	// twelve measured runs. So the wait below requires the line as well as the agreement, rather
 	// than reading the log once after it. A raft group reaches a new leader only through a term
 	// that has none, so counting the line proves the leaderless state happened. Sampling /jsz for
 	// an empty leader would not: that state lasted 18-49 ms in five of six measured runs, and
