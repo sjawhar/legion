@@ -79,11 +79,12 @@ func (s *Service) SetAskBlockText(
 	actor model.Actor,
 ) (AskBlockText, error) {
 	var stored *AskBlockText
-	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
-		tree, err := startTree(current, doc)
+	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error {
+		valid, err := startTree(current, doc)
 		if err != nil {
 			return err
 		}
+		tree := valid.Node()
 		block, emptyQuestion, err := askBlockToEdit(tree, blockID)
 		if err != nil {
 			return err
@@ -622,10 +623,11 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 //
 // This is where the reason the rest of this package names lives: no document edit writes a decision
 // a question, since a delete writes no words and an insert anchored on a block of a decision
-// lands beside that decision rather than in it (pmdoc.BlockBoundary reads the document-level
-// block holding the anchor); and a decision left asking nothing is refused every document edit
-// that changes it (validateEditedAskBlocks). So the question is written here or nowhere, and a
-// refusal that names a document edit of such a decision names a step no caller can take.
+// lands beside that decision rather than in it (pmdoc.ValidDocument.BlockBoundary reads the
+// document-level block holding the anchor); and a decision left asking nothing is refused every
+// document edit that changes it (validateEditedAskBlocks). So the question is written here or
+// nowhere, and a refusal that names a document edit of such a decision names a step no caller can
+// take.
 //
 // An ask asking nothing has no text in the paragraphs the write replaces, so replacing them
 // loses no word. It can still lose what is no word - an image, a link whose text is empty - so a
