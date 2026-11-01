@@ -258,11 +258,16 @@ type deliveryView struct {
 	readFrom time.Time
 	// body is the last answer, nil until the first and while delivery is not configured; seq the
 	// change position it reflects and changedAt when that change was recorded; readingSeq the
-	// position a read under way reflects, so a change at or before it marks nothing.
-	body       *deliveryLiveEncoded
-	seq        int64
-	readingSeq int64
-	changedAt  *time.Time
+	// position a read under way reflects, so a change at or before it marks nothing, once
+	// readingKnown says the read has recorded it. A change caught up while a read has begun but not
+	// yet recorded its position is held in startingSeq and decided when it has (deliveryHub.read):
+	// marking it then would recompute the view for a change the read already holds.
+	body         *deliveryLiveEncoded
+	seq          int64
+	readingSeq   int64
+	readingKnown bool
+	startingSeq  int64
+	changedAt    *time.Time
 	// from and at are the window start and the pipeline clock the last answer resolved; expiry is
 	// the next moment something leaves it, zero for a custom range or a pinned at.
 	from, at time.Time

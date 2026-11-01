@@ -158,7 +158,12 @@ func (h *deliveryHub) recompute(view *deliveryView, cause string) {
 
 	now := h.clock.Now()
 	h.mu.Lock()
-	view.computing, view.readingSeq = false, 0
+	view.computing, view.readingSeq, view.readingKnown = false, 0, false
+	if view.startingSeq > 0 {
+		// The read ended before it recorded its position, so it holds none of the change.
+		h.markDirtyLocked(view, now, deliveryCauseChange)
+		view.startingSeq = 0
+	}
 	sent := 0
 	switch {
 	case h.views[spec.key] != view:
@@ -220,7 +225,12 @@ func (h *deliveryHub) read(view *deliveryView, spec deliveryLiveSpec) (deliveryV
 		return read, err
 	}
 	h.mu.Lock()
-	view.readingSeq = read.seq
+	view.readingSeq, view.readingKnown = read.seq, true
+	if view.startingSeq > read.seq {
+		// A change caught up before this read recorded its position, and after it.
+		h.markDirtyLocked(view, h.clock.Now(), deliveryCauseChange)
+	}
+	view.startingSeq = 0
 	h.mu.Unlock()
 	if read.seq > 0 {
 		if read.changedAt, err = delivery.ChangeAt(ctx, pool, read.seq); err != nil {
