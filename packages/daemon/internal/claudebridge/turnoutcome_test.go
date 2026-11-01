@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
 // reportingRig is a rig whose pane names a daemon: every turn the bridge ends is reported to the
@@ -75,11 +74,17 @@ func (r *reportingRig) reported() claim.TurnOutcomeRequest {
 	}
 }
 
-// untilTurnEnds reads the bridge's frames up to and including the turn's end.
+// untilTurnEnds reads the bridge's frames up to and including the turn's end, and the
+// `prompt_result` behind it. A turn the daemon's prompt started ends with two frames, not one:
+// `agent_end`, which names no prompt, because a turn Claude Code started by itself when a
+// background task finished ends with one just like it, and then the `prompt_result` that says
+// whose turn it was. Every turn of these cases is a prompt's, so leaving the second frame unread
+// would hand it to the next read of the stream.
 func (r *rig) untilTurnEnds() {
 	r.t.Helper()
 	for r.next()["type"] != "agent_end" {
 	}
+	r.expect("prompt_result", nil)
 }
 
 // The bridge reports every turn it ends, clean and refused alike, with its own sequence counted
@@ -111,22 +116,6 @@ func TestTheBridgeReportsEveryTurnItEndsCleanAndRefusedAlike(t *testing.T) {
 	}
 	if refused.Message == "" || refused.BootToken != testBootToken {
 		t.Fatalf("the refused turn was reported %+v, want the provider's message and the launch's boot token", refused)
-	}
-}
-
-// A turn the daemon's own abort ended is not the provider refusing it: the interrupt was asked
-// for, so the turn is reported clean and nothing counts against the claim.
-func TestATurnTheDaemonAbortedIsReportedClean(t *testing.T) {
-	r := newReportingRig(t, "-p", "--resume", sessionID)
-
-	r.prompt("p1", "hang")
-	r.expect("agent_start", nil)
-	r.send(shimwire.Abort{ID: "a1"})
-	r.expect("response", map[string]any{"id": "a1", "command": "abort", "success": true})
-	r.untilTurnEnds()
-
-	if report := r.reported(); report.Outcome != claim.TurnClean || report.Message != "" {
-		t.Fatalf("the aborted turn was reported %+v, want it clean with no message", report)
 	}
 }
 

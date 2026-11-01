@@ -238,6 +238,19 @@ Legion uses GitHub's own review mechanisms rather than labels:
   such a head and runs no check on it, so no CI result would ever arrive: the daemon takes the
   issue back to `implementing` from `testing`, `reviewing`, `accepting`, `retro` or `merging`,
   starts the implementer with the base to merge forward, and tells the architect.
+  No role's turn is interrupted: the tester, a reviewer whose round is not yet completed, or the
+  merger keeps its turn, its background jobs, its process and its session, and the implementer's
+  start acts at once. Each of them is told on its own Envoy role topic that its phase has ended,
+  which phase the issue is in now and why, and that the workspace belongs to the new phase, so it
+  stops writing there and leaves whatever it has uncommitted. Only the implementer's row is
+  re-minted, so a completion the tester, the reviewer or the merger sends for the phase it lost
+  still names the assignment that phase gave it and is refused `HANDOFF_NOT_CURRENT_PHASE`;
+  `HANDOFF_STALE_ASSIGNMENT` comes once the issue has handed that role the phase again. From retro
+  the implementer keeps its turn, is told the same way, and is handed the implementing task after
+  it; a retro completion that reaches the daemon after the move reports the assignment retro handed
+  it while the phase holds the implementing one, so it is refused `HANDOFF_STALE_ASSIGNMENT`; the
+  implementer merges the base forward in the implementing task's own turn and completes that work
+  with a handoff of its own, never retro's commit.
 - **An implementer that completes with no pull request** is refused (`HANDOFF_NO_PULL_REQUEST`)
   until one is open on its branch, and the daemon's read of that issue tells its architect
   `pull-request-missing`, once per handoff commit, so an issue never waits in `implementing`

@@ -89,7 +89,9 @@ export interface PhaseReminder {
    * continuation text to return to the host, or undefined. A host that cannot turn this settle
    * into one more turn of the same session gets undefined whatever it asked: a refused turn earns
    * no continuation — its reminder comes from the timer this arms instead — and Claude Code's
-   * `StopFailure`, the one settle it ignores the answer of, is exactly a refused turn. */
+   * `StopFailure`, the one settle it ignores the answer of, is exactly a refused turn. A settle
+   * whose `backgroundWork` is set is a turn ending with the session's own background job still
+   * running, which buys the same quiet wait a WAITING line does. */
   readonly settle: (turn: TurnEnd) => Promise<string | undefined>;
   /** `session_switch`, `session_branch`, `session_tree`. */
   readonly sessionChanged: () => void;

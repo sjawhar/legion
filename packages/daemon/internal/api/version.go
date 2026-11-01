@@ -428,8 +428,18 @@ package api
 // the repository is served all the same. (This branch took 41, then 42; 42 is declared by main's
 // stalled-worker reminder, so this change takes the number above it, as the collision note says.)
 //
-// 44: taken by sjawhar/legion#2538, open when this number was chosen; no daemon of this branch
-// declares it. A gap, left so the history reads as it happened.
+// 44: a Claude Code role's start command and pane no longer carry
+// CLAUDE_CODE_DISABLE_BACKGROUND_TASKS; CLAUDE_CONFIG_DIR and CLAUDE_CODE_DISABLE_CRON stay, and
+// the name is no longer the runtime's, so an operator's `runtime.kubernetes.pod.env` and
+// `runtime.tmux.pane_env` may set it as they may set Claude Code's other variables. A role may
+// leave a background task running past the end of a turn: when it finishes, Claude Code starts a
+// turn of its own, which the bridge reports to the daemon as a turn (`internal/claudebridge`), so
+// the result is read in a turn the daemon sees rather than after one the daemon thinks has ended.
+// The worker container's and the pane's environment is one of this contract's surfaces, so
+// dropping a variable from it bumps the number, as adding the three at 42 did, and the image probe
+// holds this daemon and the image that runs its roles together. This change adds no store
+// migration. (This branch took 43; main then landed the consumer lag at 43, so this branch takes
+// the number above it, as the collision note says.)
 //
 // 45: dispatch://INFRA-714 -- the daemon is an event-driven state machine, and its strictly parsed
 // shapes change with it. The phase enum loses `awaiting_merge` (both places it is spelled: the
@@ -449,7 +459,7 @@ package api
 // `pass`, `lastTurnStart` or `lastTurnEnd`, and a plugin from this contract refuses an older
 // daemon's `checksVerdict` and `fixAttempts`; the boot gate and `legion probe-image` refuse the
 // mixed pair. (This branch took 42, then 43 when main landed the consumer-lag state at 43;
-// sjawhar/legion#2538 is taking 44, so this branch takes the number above it, as
+// main landed the background-task contract at 44, so this branch takes the number above it, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
 // says.)
 //

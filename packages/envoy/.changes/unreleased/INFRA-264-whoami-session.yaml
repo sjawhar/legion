@@ -1,0 +1,9 @@
+kind: Changed
+body: |-
+    `GET /api/v1/whoami` answers `session` and `project` beside `owner` and `service`: the session
+    the caller's credential itself proved, which only an access token the secrets broker issued
+    does, and the one project key that credential may write. Both are null for every other
+    credential, which proves neither, and every existing field keeps its meaning.
+time: 2026-10-29T00:00:01.000000000Z
+custom:
+    Issue: INFRA-264

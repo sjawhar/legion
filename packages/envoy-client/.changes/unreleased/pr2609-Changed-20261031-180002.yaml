@@ -1,0 +1,6 @@
+kind: Changed
+body: |-
+  `envoy_send` and `envoy_publish` describe `urgency` as how soon the recipient should act, shown on its card, and say that it does not deliver a message sooner or ahead of others.
+time: 2026-10-31T18:00:02.000000000Z
+custom:
+    Issue: pr2609

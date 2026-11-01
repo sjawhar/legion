@@ -145,6 +145,7 @@ func samples(t *testing.T) map[string][]Event {
 		"StreamTurnStart":      {StreamTurnStart{}},
 		"StreamTurnEnd":        {StreamTurnEnd{}},
 		"IssueTurnEnded":       {IssueTurnEnded{}},
+		"StreamPromptResult":   {StreamPromptResult{}},
 		"StreamClosed":         {StreamClosed{}},
 		"StreamLateRefusal":    {StreamLateRefusal{}},
 		"PromptAcked":          {PromptAcked{}},
@@ -281,6 +282,8 @@ func fenced(ev Event, c Claim) Event {
 		return StreamTurnEnd{Claim: c.Token}
 	case IssueTurnEnded:
 		return IssueTurnEnded{Claim: c.Token}
+	case StreamPromptResult:
+		return StreamPromptResult{Claim: c.Token, DeliveryID: c.Pending.ID, AgentInvoked: true}
 	case StreamClosed:
 		return StreamClosed{Claim: c.Token}
 	case StreamLateRefusal:

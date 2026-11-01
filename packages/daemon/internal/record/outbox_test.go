@@ -42,6 +42,8 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		CheckBound{},
 		ApprovalCarry{Repo: "sjawhar/legion", Number: 42, Approved: "c0de", Head: "handoff"},
 		RoleMessage{Role: "legion.sjawhar-legion.LEGION-208.implementer", Body: "Pull request #42: CI settled at c0de: unit failed."},
+		PhaseEnded{Role: claim.RoleTester, From: phase.Testing, To: phase.Implementing, Reason: "the head conflicts with main"},
+		PhaseEnded{Role: claim.RoleImplementer, From: phase.Retro, To: phase.Implementing, Reason: "the head conflicts with main", TaskFollows: true},
 	}
 	for _, payload := range payloads {
 		t.Run(string(payload.OutboxKind()), func(t *testing.T) {
@@ -85,9 +87,9 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 func TestEveryOutboxKindIsInExactlyOneLane(t *testing.T) {
 	every := []OutboxKind{OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindSupervise,
 		OutboxKindGateSeed, OutboxKindLingerClose, OutboxKindIssueSuspend, OutboxKindWorkspaceRemove, OutboxKindIssueBranch,
-		OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindApprovalCarry, OutboxKindRoleMessage}
+		OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindApprovalCarry, OutboxKindRoleMessage, OutboxKindPhaseEnded}
 	lanes := map[OutboxKind][]OutboxLane{}
-	for _, lane := range []OutboxLane{LaneLifecycle, LaneBoard} {
+	for _, lane := range []OutboxLane{LaneLifecycle, LaneBoard, LaneRoleMessage} {
 		for _, kind := range LaneKinds(lane) {
 			lanes[kind] = append(lanes[kind], lane)
 		}
@@ -148,6 +150,12 @@ func TestNewOutboxRowRefusesInvalidPayloads(t *testing.T) {
 		{name: "a deploy run without a workflow", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Workflow = "" })}, reason: deployRunRefusal},
 		{name: "a deploy run without a step", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Step = "" })}, reason: deployRunRefusal},
 		{name: "a deploy run without a branch", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Branch = "" })}, reason: deployRunRefusal},
+		{name: "a phase-ended message to an architect", payload: PhaseEnded{Role: claim.RoleArchitect, From: phase.Accepting, To: phase.Implementing, Reason: "CI is red at head: pytest"}, reason: "never to an architect"},
+		{name: "a phase-ended message to no role", payload: PhaseEnded{From: phase.Testing, To: phase.Implementing, Reason: "CI is red at head: pytest"}, reason: "never to an architect"},
+		{name: "a phase-ended message without the phase that ended", payload: PhaseEnded{Role: claim.RoleTester, To: phase.Implementing, Reason: "CI is red at head: pytest"}, reason: "names the phase that ended and the different phase"},
+		{name: "a phase-ended message out of the phase the issue is in", payload: PhaseEnded{Role: claim.RoleImplementer, From: phase.Implementing, To: phase.Implementing, Reason: "CI is red at head: pytest"}, reason: "names the phase that ended and the different phase"},
+		{name: "a phase-ended message without a reason", payload: PhaseEnded{Role: claim.RoleTester, From: phase.Testing, To: phase.Implementing}, reason: "carries the reason the architect's notice carries"},
+		{name: "a phase-ended task that follows for another role", payload: PhaseEnded{Role: claim.RoleTester, From: phase.Testing, To: phase.Implementing, Reason: "CI is red at head: pytest", TaskFollows: true}, reason: "only the implementer is told its task follows"},
 		{name: "a check look bound without a look", payload: CheckLook{}, reason: "check look bound requires the look it bounds"},
 		{name: "unsupported payload", payload: unsupportedOutboxPayload{}, reason: "unknown outbox payload"},
 	} {
@@ -184,6 +192,8 @@ func TestDecodeOutboxPayloadRefusesInvalidRows(t *testing.T) {
 		{name: "an approval carry without its pull request", row: OutboxRow{ID: 46, Kind: OutboxKindApprovalCarry, Payload: json.RawMessage(`{"repo":"sjawhar/legion","approved":"c0de","head":"handoff"}`)}, reason: "requires its repository and pull request number"},
 		{name: "an approval carry of one head", row: OutboxRow{ID: 47, Kind: OutboxKindApprovalCarry, Payload: json.RawMessage(`{"repo":"sjawhar/legion","number":42,"approved":"c0de","head":"c0de"}`)}, reason: "an approval of the head needs no carry"},
 		{name: "a role message with no body", row: OutboxRow{ID: 48, Kind: OutboxKindRoleMessage, Payload: json.RawMessage(`{"role":"legion.sjawhar-legion.LEGION-208.architect"}`)}, reason: "role message requires body"},
+		{name: "a phase-ended message to an architect", row: OutboxRow{ID: 49, Kind: OutboxKindPhaseEnded, Payload: json.RawMessage(`{"role":"architect","from":"accepting","to":"implementing","reason":"the head conflicts with main"}`)}, reason: "never to an architect"},
+		{name: "a phase-ended message with an unknown field", row: OutboxRow{ID: 50, Kind: OutboxKindPhaseEnded, Payload: json.RawMessage(`{"role":"tester","from":"testing","to":"implementing","reason":"the head conflicts with main","quiesce":"tester"}`)}, reason: "unknown field"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := DecodeOutboxPayload(tc.row)

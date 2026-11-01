@@ -124,13 +124,24 @@ func (r *readyWorkerRig) boot() {
 	r.machine.Wait()
 }
 
-// workTheTask runs the turn the delivered task starts and ends it, which retires the task: the
-// tester is then the phase holder the issue waits on, idle with nothing pending — where CI, a
-// review or an operator's resume leaves one.
+// workTheTask runs the turn the delivered task starts and ends it, then sends the prompt's own
+// result, which is what retires the task: with background work on, an agent_end names no prompt —
+// a background result wakes a settled session and starts turns the daemon never prompted — so a
+// delivery's life ends at its StreamPromptResult rather than at any turn end. The tester is then
+// the phase holder the issue waits on, idle with nothing pending, where CI, a review or an
+// operator's resume leaves one.
 func (r *readyWorkerRig) workTheTask() {
 	r.t.Helper()
 	ctx := context.Background()
-	for _, ev := range []supervise.Event{supervise.StreamTurnStart{Claim: r.token}, supervise.StreamTurnEnd{Claim: r.token}} {
+	pending := r.claim().Pending
+	if pending == nil {
+		r.t.Fatal("the tester holds no task to work")
+	}
+	for _, ev := range []supervise.Event{
+		supervise.StreamTurnStart{Claim: r.token},
+		supervise.StreamTurnEnd{Claim: r.token},
+		supervise.StreamPromptResult{Claim: r.token, DeliveryID: pending.ID, AgentInvoked: true},
+	} {
 		if err := r.machine.Handle(ctx, ev); err != nil {
 			r.t.Fatalf("work the task: handle %T: %v", ev, err)
 		}

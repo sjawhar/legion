@@ -1,12 +1,14 @@
 package record
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -420,7 +422,7 @@ func scanIssue(row scanner) (*Issue, error) {
 }
 
 func (s *Postgres) Phases(ctx context.Context, tx pgx.Tx, issue string) ([]PhaseRow, error) {
-	rows, err := tx.Query(ctx, `select issue, role, claim, handoff_commit, pass, rounds, verdict, summary, last_handoff, decision, completed_at from phases
+	rows, err := tx.Query(ctx, `select issue, role, claim, handoff_commit, pass, rounds, verdict, summary, last_handoff, decision, completed_at, assignment from phases
 		where issue = $1 order by role`, issue)
 	if err != nil {
 		return nil, fmt.Errorf("list phases for %s: %w", issue, err)
@@ -449,14 +451,14 @@ func (s *Postgres) PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) erro
 		}
 	}
 	_, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, pass, rounds, verdict, summary, last_handoff,
-		decision, completed_at)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		decision, completed_at, assignment)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		on conflict (issue, role) do update set claim = excluded.claim,
 		handoff_commit = excluded.handoff_commit, pass = excluded.pass, rounds = excluded.rounds, verdict = excluded.verdict,
 		summary = excluded.summary, last_handoff = excluded.last_handoff, decision = excluded.decision,
-		completed_at = excluded.completed_at`,
+		completed_at = excluded.completed_at, assignment = excluded.assignment`,
 		phase.Issue, string(phase.Role), string(phase.Claim), phase.HandoffCommit, phase.Pass, phase.Rounds, phase.Verdict, phase.Summary, phase.LastHandoff,
-		decision, phase.CompletedAt,
+		decision, phase.CompletedAt, phase.Assignment,
 	)
 	if err != nil {
 		return fmt.Errorf("put %s phase on %s: %w", phase.Role, phase.Issue, err)
@@ -469,7 +471,7 @@ func scanPhase(row scanner) (PhaseRow, error) {
 	var role, token string
 	var decision []byte
 	if err := row.Scan(&phase.Issue, &role, &token, &phase.HandoffCommit, &phase.Pass, &phase.Rounds, &phase.Verdict, &phase.Summary, &phase.LastHandoff,
-		&decision, &phase.CompletedAt); err != nil {
+		&decision, &phase.CompletedAt, &phase.Assignment); err != nil {
 		return PhaseRow{}, err
 	}
 	phase.CompletedAt = phase.CompletedAt.UTC()
@@ -700,7 +702,12 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where, issues, key, describ
 		// last in the handoff completion key, and a new generation's completion at a commit the last
 		// one already reported has to be a fact of its own, which a pass put back to zero would not
 		// make it.
-		"update phases set handoff_commit = '', rounds = 0, verdict = '', summary = '', decision = null where " + where,
+		//
+		// The assignment goes with the run too: the start that re-enters the phase mints the next
+		// one, and until it does the cleared row names none, which the completion route reads as
+		// nothing to compare rather than as a mismatch to refuse.
+		"update phases set handoff_commit = '', rounds = 0, verdict = '', summary = '', decision = null, " +
+			"assignment = '' where " + where,
 	} {
 		if _, err := tx.Exec(ctx, statement, key); err != nil {
 			return fmt.Errorf("%s: %w", describe, err)
@@ -1204,7 +1211,7 @@ const outboxLaneFree = `not (outbox.kind = any($5::text[]) and exists (select 1 
 const outboxClaimable = outboxUnleasedDue + ` and ` + outboxInOrder + ` and ` + outboxLaneFree
 
 // lifecycleKindNames is the lifecycle lane's kinds as the outbox stores them, the $5 every
-// statement embedding the predicates takes and the lane UnfinishedLanes sorts rows into.
+// statement embedding the predicates takes: the lane rule is the lifecycle lane's alone.
 var lifecycleKindNames = kindNames(laneKinds[LaneLifecycle])
 
 // outboxDueArgs is the parameters of a statement that embeds the predicates: now, the ordering
@@ -1328,28 +1335,37 @@ func (s *Postgres) NextDue(ctx context.Context, tx pgx.Tx, issue string, kinds [
 }
 
 // UnfinishedLanes is every lane of project's issues with a row still in the outbox — due, running,
-// backing off or held — by issue then lane: the lanes the runner needs an executor for.
+// backing off or held — by issue then lane: the lanes the runner needs an executor for. The kinds
+// left are read and sorted into lanes here (LaneOf), rather than mapped in SQL, so laneKinds stays
+// the one place a kind's lane is written down however many lanes there are. A kind this binary has
+// no lane for — a row a newer daemon of a rolling restart queued — is left out: this daemon has no
+// executor for it either, and the daemon that wrote it runs it.
 func (s *Postgres) UnfinishedLanes(ctx context.Context, tx pgx.Tx, project string) ([]LaneKey, error) {
-	rows, err := tx.Query(ctx, `select distinct issue, case when kind = any($2::text[]) then $3::text else $4::text end as lane
-		from outbox where split_part(issue, '-', 1) = $1 order by issue, lane`,
-		project, lifecycleKindNames, string(LaneLifecycle), string(LaneBoard))
+	rows, err := tx.Query(ctx, `select distinct issue, kind from outbox where split_part(issue, '-', 1) = $1`, project)
 	if err != nil {
 		return nil, fmt.Errorf("list the unfinished outbox lanes of %s: %w", project, err)
 	}
 	defer rows.Close()
 	lanes := []LaneKey{}
+	seen := map[LaneKey]bool{}
 	for rows.Next() {
-		var key LaneKey
-		var lane string
-		if err := rows.Scan(&key.Issue, &lane); err != nil {
+		var issue, kind string
+		if err := rows.Scan(&issue, &kind); err != nil {
 			return nil, fmt.Errorf("list the unfinished outbox lanes of %s: %w", project, err)
 		}
-		key.Lane = OutboxLane(lane)
+		key := LaneKey{Issue: issue, Lane: LaneOf(OutboxKind(kind))}
+		if key.Lane == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
 		lanes = append(lanes, key)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list the unfinished outbox lanes of %s: %w", project, err)
 	}
+	slices.SortFunc(lanes, func(a, b LaneKey) int {
+		return cmp.Or(strings.Compare(a.Issue, b.Issue), strings.Compare(string(a.Lane), string(b.Lane)))
+	})
 	return lanes, nil
 }
 

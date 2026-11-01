@@ -919,7 +919,7 @@ func (e *Engine) retryPhase(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 			reason += ": " + r.reason
 		}
 	}
-	return e.start(ctx, tx, issue, RoleFor(from), task(issue, record.PhaseRow{}, pr, reason), "", freshSession)
+	return e.restart(ctx, tx, issue, RoleFor(from), task(issue, record.PhaseRow{}, pr, reason), freshSession)
 }
 
 func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMove) (intake.Result, error) {
@@ -1045,8 +1045,8 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	// retro back to implementing on a conflicting head - hands the running worker the new phase's
 	// task once its turn is over, as any start of a working claim does. A move no completion
 	// records - the head started conflicting with its base while the tester tested, or the reviewer
-	// reviewed a round it had not completed (takenOver) - waits for that role's turn instead: the
-	// next role's start interrupts it and acts once it is over.
+	// reviewed a round it had not completed - starts the next role the same way: that role keeps
+	// its turn, its jobs, its process and its session, and the start waits for none of them.
 	starting := RoleFor(row.To)
 	// A pull request GitHub has already merged leaves the merger nothing to merge, so no merger is
 	// started for it and the merge closes the issue the moment it reaches merging. The close is
@@ -1055,15 +1055,14 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	// architect got at the merge could not say it, since the issue was elsewhere then.
 	mergedAlready := row.To == phase.Merging && pr != nil && pr.State == record.PullRequestMerged
 	if !mergedAlready {
-		quiesce, err := e.takenOver(ctx, tx, issue.Key, trigger, from, starting)
-		if err != nil {
-			return err
-		}
-		if err := e.start(ctx, tx, issue, starting, task(issue, handoff, pr, reason), quiesce, false); err != nil {
+		if err := e.start(ctx, tx, issue, starting, task(issue, handoff, pr, reason), false); err != nil {
 			return err
 		}
 	}
 	if err := e.notice(ctx, tx, issue.Key, noticeFor(trigger, from, handoff, reason)); err != nil {
+		return err
+	}
+	if err := e.phaseEnded(ctx, tx, issue, trigger, from, row.To, starting, reason); err != nil {
 		return err
 	}
 	if mergedAlready {
@@ -1092,46 +1091,28 @@ func noticeFor(trigger TriggerKind, from phase.Phase, handoff record.PhaseRow, r
 	return record.Notice{Kind: "phase-finished", Role: RoleFor(from), Phase: from, Summary: handoff.Summary, Verdict: handoff.Verdict}
 }
 
-// daemonRaised says whether the daemon raises trigger on its own, out of something it read of the
-// pull request, rather than an agent's handoff or request raising it: a head that conflicts with
-// its base, the review GitHub delivered, and the merge that closes the issue. Every other trigger
-// is a worker's completion or the architect's own act, and the phase it ends was the worker's to
-// end.
-func daemonRaised(trigger TriggerKind) bool {
-	switch trigger {
-	case TriggerConflict, TriggerReviewApproved, TriggerReviewRejected, TriggerPullRequestMerged:
-		return true
+// phaseEnded tells the role a conflicting-head transition out of from leaves with no phase that
+// its phase ended, which phase the issue is in now and why (record.PhaseEnded), on that role's own
+// Envoy topic. Only that move sends one: every other move out of a phase is the working role's own
+// completion or backward move, which that role made and so already knows of, and the approval and
+// the merge the daemon raises of its own leave a role that has just finished the work they report,
+// with no reason of the kind this message carries. Before this change the trigger was the CI red
+// that moved an issue, which moves none now (dispatch://INFRA-714 R1); a head that starts
+// conflicting with its base is what takes its place.
+// The recipient is RoleFor(from) whenever that is a role other than the architect, read from the
+// transition alone rather than from what the role had done: the tester in testing, the reviewer in
+// reviewing whether or not it completed its round, the merger in merging, and the implementer in
+// retro, which is also the role starting, told that its task for the new phase follows. Accepting
+// sends none — its role is the architect, which the conflict notice tells (noticeFor). Without the
+// message nothing tells that role: no transition stops a worker, and the daemon's next task for a
+// role is delivered only once that role's turn ends, while this message reaches its session at its
+// next model turn and ends a wait.
+func (e *Engine) phaseEnded(ctx context.Context, tx pgx.Tx, issue record.Issue, trigger TriggerKind, from, to phase.Phase, starting claim.Role, reason string) error {
+	ended := RoleFor(from)
+	if trigger != TriggerConflict || ended == "" || ended == claim.RoleArchitect {
+		return nil
 	}
-	return false
-}
-
-// takenOver is the role a transition on trigger out of from takes the phase from while that role
-// may still be at work in it: a move the daemon made on its own (daemonRaised) out of a phase
-// whose role has reported no completion - the head started conflicting with its base while the
-// tester tested, or the reviewer's own review decided a round it had not completed. Every other
-// move is a completion's (the outgoing worker's turn reports it once its handoff is committed and
-// pushed) or the outgoing role's own request (a backward move from inside its turn), and takes
-// over from nobody. Nor does a move between two phases of one role -
-// retro back to implementing, where starting, the role the transition starts, is the one leaving -
-// take the phase from anyone: the implementer keeps its turn and is handed the new phase's task
-// once it ends, and a start may not wait on its own role (record.SuperviseRequest's Quiesce). The
-// architect, whose phase accepting is, holds no workspace turn either: a conflict there starts the
-// implementer waiting on nobody. Two daemon-raised moves start no role at all - the approval into
-// accepting, which is the architect's, and the merge into done, which closes the issue - so the
-// quiesce they grant is one start never asks for.
-func (e *Engine) takenOver(ctx context.Context, tx pgx.Tx, issue string, trigger TriggerKind, from phase.Phase, starting claim.Role) (claim.Role, error) {
-	if !daemonRaised(trigger) {
-		return "", nil
-	}
-	leaving := RoleFor(from)
-	if leaving == "" || leaving == claim.RoleArchitect || leaving == starting {
-		return "", nil
-	}
-	row, err := e.phaseRow(ctx, tx, issue, leaving)
-	if err != nil || row.HandoffCommit != "" {
-		return "", err
-	}
-	return leaving, nil
+	return e.enqueue(ctx, tx, issue.Key, record.PhaseEnded{Role: ended, From: from, To: to, Reason: reason, TaskFollows: ended == starting})
 }
 
 func (e *Engine) row(from phase.Phase, trigger TriggerKind, target phase.Phase, snapshot Snapshot) (Row, bool) {

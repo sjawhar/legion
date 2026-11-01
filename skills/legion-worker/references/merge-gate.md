@@ -19,15 +19,17 @@ below, and `skill://legion-worker/references/conflicts-and-rewrites.md`).
 - The reviewer reads CI on GitHub and verifies the `Threads` and `E2E` facts there directly —
   never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
   `task(agent="thermonuclear-code-quality")` once at that head — the head the round reviews —
-  and records the verdict. The CI it reads is the checks that stand for the code under review:
-  those GitHub ran for the newest push of the branch that started `pull_request` workflows, when
-  every commit above that push's head changes only `.legion/<issue>/`. GitHub starts no workflow
-  run for a head whose commit message carries `skip-checks: true`, which every handoff-only push
-  but retro's and the reviewer's does. The reviewer's push never carries the `skip-checks: true`
-  line, whatever paths it touches, because the daemon moves the issue to `accepting` only once
-  GitHub reports the approved head mergeable, and a base that requires a check answers `blocked`
-  for a head GitHub was told to skip; retro's push carries no such line for its own reason, so
-  both heads get GitHub's workflow runs of their own. With `<o>/<r>`, `<n>`, `<base>`, `<headRefName>` and `<headRefOid>` from
+  waits for each one's result with `wait`, since each runs as a job of its own, and records the
+  verdict from what those results say. The CI it reads is the checks that stand for the code
+  under review: those GitHub ran for the newest push of the branch that started `pull_request`
+  workflows, when every commit above that push's head changes only `.legion/<issue>/`. GitHub
+  starts no workflow run for a head whose commit message carries `skip-checks: true`, which every
+  handoff-only push before retro does, but retro's and the reviewer's does. The reviewer's push
+  never carries the `skip-checks: true` line, whatever paths it touches, because the daemon moves
+  the issue to `accepting` only once GitHub reports the approved head mergeable, and a base that
+  requires a check answers `blocked` for a head GitHub was told to skip; retro's push carries no
+  such line for its own reason, so both heads get GitHub's workflow runs of their own. With
+  `<o>/<r>`, `<n>`, `<base>`, `<headRefName>` and `<headRefOid>` from
   `gh pr view <n> --json baseRefName,headRefOid,headRefName`, four reads. The required set is the
   base branch's rulesets' required checks and its branch protection's, when it has any. Both
   branch endpoints take the base as a URL path, each segment escaped and each `/` kept (a raw `#`

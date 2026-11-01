@@ -298,3 +298,62 @@ func TestTheMergersSquashMessageIsItsOwn(t *testing.T) {
 		}
 	}
 }
+
+// Background work is on for every role: Legion writes no Oh My Pi settings overlay, so
+// a long bash call becomes a background job and a task subagent runs as one, and a role reads a
+// result with the `wait` tool. Nothing takes a turn away from a role either: a CI red
+// that ends a phase starts the implementer at once and tells the role by one message, which stops
+// nothing. So no part may say a takeover cancels a turn or tell a role to keep its work in
+// the foreground, and a part that dispatches a task subagent names the tool that reads its result.
+//
+// Both halves are read over the markdown parts alone, and both are exact. The call shape appears
+// in prompts_test.go and in this file, which are not prompt text, and the English word "wait" is
+// in many parts — go/implementer.md forbids waiting for CI — so the needle is the backticked
+// token. Each retired sentence is joined from its two halves, as TestNoPartSaysLegionNeverMerges
+// keeps its phrases a pattern, so that a grep for one over this directory finds prompt text and
+// never this test. The parts that dispatch are listed here rather than counted, so a part that
+// stopped dispatching fails as loudly as one that started: a reader that found nothing would
+// otherwise pass while checking nothing. The skills half of this rule, over skills/ and the
+// plugin the Claude Code roles load, is packages/pi-legion/src/skills-guard.test.ts.
+func TestNoPartKeepsItsWorkInTheForegroundAndEveryDispatchNamesWait(t *testing.T) {
+	retired := []string{
+		"interrupts" + " your turn",
+		"tool calls" + " are cancelled",
+		"interrupted" + " its turn",
+		"run none" + " in the background",
+		"one foreground" + " command",
+		"blocking" + ": true",
+	}
+	var dispatching []string
+	for _, dir := range []string{"go", "roles"} {
+		parts := goParts
+		if dir == "roles" {
+			parts = roleParts
+		}
+		err := eachPart(parts, dir, func(name string, body []byte) error {
+			if !strings.HasSuffix(name, ".md") {
+				return nil
+			}
+			part, text := dir+"/"+name, string(body)
+			for _, phrase := range retired {
+				if strings.Contains(text, phrase) {
+					t.Errorf("%s says %q, which does not hold: nothing interrupts a turn and background work is on", part, phrase)
+				}
+			}
+			if strings.Contains(text, `task(agent="`) {
+				dispatching = append(dispatching, part)
+				if !strings.Contains(text, "`wait`") {
+					t.Errorf("%s dispatches a task subagent and never names `wait`, the tool that reads a job's result", part)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("read the %s parts: %v", dir, err)
+		}
+	}
+	want := []string{"go/claude-mechanics.md", "roles/implementer.md", "roles/planner.md"}
+	if !slices.Equal(dispatching, want) {
+		t.Errorf("the parts that dispatch a task subagent are %q, want %q", dispatching, want)
+	}
+}

@@ -113,6 +113,19 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		input.Project = project
+	}
+	// The one write whose project its address does not name, so withinProjectScope leaves it
+	// here by its class (scopeProjectInBody). It runs the moment that project is settled —
+	// read from the body above, or from the repository the external ref names — and so before
+	// the ref is resolved to an issue already imported: a scoped caller naming one imported
+	// into another project is refused rather than answered that project's issue, which
+	// respondWithExistingExternalIssue would also record a related-check outcome on. Nothing
+	// is written before this point.
+	if covers, scoped := s.callerProject(r); scoped && covers != input.Project {
+		refuseWriteOutsideProjectScope(w, covers, input.Project)
+		return
+	}
+	if input.External != "" {
 		existingKey, err := s.resolveIssueRef(r.Context(), input.External)
 		if err == nil {
 			var existingProject string
@@ -122,7 +135,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 				s.writeHandlerError(w, err)
 				return
 			}
-			if existingProject != project {
+			if existingProject != input.Project {
 				writeError(
 					w,
 					"EXTERNAL_PROJECT_MISMATCH",
@@ -130,12 +143,12 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 					fmt.Sprintf(
 						"external issue project %s must match repository settings project %s",
 						existingProject,
-						project,
+						input.Project,
 					),
 				)
 				return
 			}
-			s.respondWithExistingExternalIssue(w, r, existingKey, project, actor)
+			s.respondWithExistingExternalIssue(w, r, existingKey, input.Project, actor)
 			return
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {

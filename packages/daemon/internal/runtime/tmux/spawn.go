@@ -19,7 +19,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
-	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
@@ -222,9 +221,8 @@ type PaneInputs struct {
 // file — a non-empty GH_TOKEN would — then LEGION_GH_OWNERS_DIR, the bundle's root, and
 // LEGION_GH_PATH, the real gh the `legion gh` wrapper first on the pane's PATH runs;
 // PI_SHELL_PREFIX, which keeps this daemon's launcher directory (its legion and gh) first in the
-// agent's bash tool; PI_CONFIG_FILES, the operator's overlays, then the role's own, then the
-// turn-scoping overlay writeTurnScopeOverlay writes (podsafety.TurnScopeOverlay), last so its keys
-// outrank theirs), the
+// agent's bash tool; PI_CONFIG_FILES, the operator's overlays, then the role's own, and nothing of
+// Legion's own, which names no settings overlay at all — empty where neither names one), the
 // four XDG base directories under `<state_dir>/home`, the operator's pane variables sorted, the
 // spec's own variables sorted, then a `<NAME>_FILE` pointer per secret file. PATH is never among
 // them — tmux would replace it (LEGION-91) — and neither is any secret's value. No other tool path
@@ -266,8 +264,7 @@ func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile
 		add("LEGION_GH_PATH", in.GH)
 	}
 	add("PI_SHELL_PREFIX", shellprefix.For(workerbin.LauncherDir(in.StateDir)))
-	overlays := slices.Concat(in.PiConfigFiles, in.RoleConfigFiles, []string{filepath.Join(in.StateDir, podsafety.TurnScopeFile)})
-	add("PI_CONFIG_FILES", strings.Join(overlays, ":"))
+	add("PI_CONFIG_FILES", strings.Join(slices.Concat(in.PiConfigFiles, in.RoleConfigFiles), ":"))
 	add("GIT_TERMINAL_PROMPT", "0")
 	for _, dir := range xdgDirectories(in.StateDir) {
 		add(dir[0], dir[1])
@@ -296,26 +293,13 @@ func makePaneHome(stateDir string) error {
 	return nil
 }
 
-// writeTurnScopeOverlay writes podsafety.TurnScopeOverlay under stateDir, read-only, so panePairs
-// can name it last in a pane's PI_CONFIG_FILES, after the operator's own overlays
-// (runtime.tmux.pi_config_files): the same overlay a pod's shim writes (podsafety.Apply), and the
-// two keys supervise.Machine.Quiesce's own promise depends on regardless of runtime (LEGION-462),
-// which no operator overlay outranks here.
-func writeTurnScopeOverlay(stateDir string) error {
-	return podsafety.WriteReadOnly(filepath.Join(stateDir, podsafety.TurnScopeFile), podsafety.TurnScopeOverlay)
-}
-
 // PaneVariables is a launch's environment without the launch, for a process this runtime does not
 // start that must be told exactly what a pane is: the rigs under packages/pi-legion/scripts, which
-// run Oh My Pi under it. It makes the pane's home as a launch does (makePaneHome) and writes the
-// turn-scoping overlay as a launch does (writeTurnScopeOverlay), then returns the variables
-// panePairs tells a pane for spec, NAME=value in their order, files being the secret files they
-// point at.
+// run Oh My Pi under it. It makes the pane's home as a launch does (makePaneHome), then returns the
+// variables panePairs tells a pane for spec, NAME=value in their order, files being the secret
+// files they point at.
 func PaneVariables(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile) ([]string, error) {
 	if err := makePaneHome(in.StateDir); err != nil {
-		return nil, err
-	}
-	if err := writeTurnScopeOverlay(in.StateDir); err != nil {
 		return nil, err
 	}
 	pairs := panePairs(spec, in, files)
@@ -487,9 +471,6 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		r.log.Info("tmux runtime: resuming a recorded "+harness+" session", "claim", spec.Claim, "backend", backend, "session", spec.ResumeSessionFile)
 	}
 	if err := makePaneHome(r.stateDir); err != nil {
-		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
-	}
-	if err := writeTurnScopeOverlay(r.stateDir); err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
 	// The credential is minted before the launch lock, since a mint is a network call every other

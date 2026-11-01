@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { PHASE_STALL_ENTRY } from "@legion/pi-shared/phase-stall";
 import {
   type Cleanup,
+  call,
   type LegionPane,
   type LegionPaneOptions,
   type Reply,
@@ -723,6 +724,49 @@ test.skipIf(omp === undefined && !onActions)(
     // self-check and read no third open-ask snapshot: one nudge per period, and no loop.
     const asks = pane.requests.filter((request) => request.path === "/api/v1/asks/open");
     expect(asks).toHaveLength(2);
+  },
+  180_000
+);
+
+// Background work is on for every role, so a worker can end its turn with a job of its own
+// still running. The pinned Oh My Pi holds `session_stop` back until its agent-owned async jobs
+// are idle (omp://extensions.md: it "defers until agent-owned background jobs are fully idle"),
+// so the phase reminder — which rides that hook — never fires into such a wait, and the job's own
+// result wakes the session into the next turn. Nothing in the plugin decides this, which is
+// exactly why only the real binary can say it: a pin that stopped deferring would remind a
+// working worker that it has done nothing, with every unit test still green.
+test.skipIf(omp === undefined && !onActions)(
+  "a turn that ends while the session waits on its own background job gets no reminder, and the job's result wakes it",
+  async () => {
+    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const pane = await stallPane(
+      omp,
+      [
+        [call("bash", { command: "sleep 4; echo background-done", async: true })],
+        [{ type: "text", text: "I started the build; I will be woken when it is done." }],
+        [{ type: "text", text: "WAITING: nothing more." }],
+      ],
+      // Longer than the job, so the pane settles on the woken turn rather than before it.
+      { quietMs: 12_000 }
+    );
+
+    const turns = pane.turns();
+    // Three turns: the assignment's, the one its tool result continued, and the one the finished
+    // job woke. Nothing prompted the third.
+    expect(turns).toHaveLength(3);
+    expect(userText(turns[2] as Request)).toContain("background-done");
+    // No reminder reached the worker in between: the turn that ended with the job running earned
+    // none, because `session_stop` never fired while the job was pending.
+    for (const turn of turns) {
+      expect(userText(turn as Request)).not.toContain(
+        "Your turn ended with your Legion phase still open"
+      );
+    }
+    const entries = await pane.phaseEntries();
+    expect(stallCounts(entries).filter((count) => count !== 0)).toEqual([]);
+    // The phase is still open underneath; the WAITING line of the woken turn is what quiets it.
+    expect(entries.at(-1)).toMatchObject({ state: "waiting", count: 0 });
+    expect(pane.completions()).toHaveLength(0);
   },
   180_000
 );

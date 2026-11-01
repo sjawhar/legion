@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +27,10 @@ import (
 // line it reads to FAKE_CLAUDE_RECORD and answers each as fakeClaude's script says.
 const fakeClaudeEnv = "LEGION_TEST_FAKE_CLAUDE"
 
+// fakeClaudeGateEnv names the file whose appearance lets a replay write its stream's last line
+// (rig.open), so a test can act while the turn that line ends is still running.
+const fakeClaudeGateEnv = "FAKE_CLAUDE_GATE"
+
 func TestMain(m *testing.M) {
 	if os.Getenv(fakeClaudeEnv) == "1" {
 		os.Exit(fakeClaude())
@@ -34,11 +39,9 @@ func TestMain(m *testing.M) {
 }
 
 // fakeClaude answers Claude Code's stream-json the way the probes recorded it: each user message
-// gets a system/init, then its script's lines, then a result; an interrupt gets a control_response
-// and ends the user message being answered with error_during_execution. A user message's text picks
-// its script:
+// gets a system/init, then its script's lines, then a result. A user message's text picks its
+// script:
 //   - "/rename <title>": no init, an assistant line naming the title, a success result;
-//   - "hang": nothing until an interrupt;
 //   - "handoff ok": a `legion` handoff_complete call and its result;
 //   - "say <text>": an assistant message of text;
 //   - "inbox <text>": writes one delivery to LEGION_CLAUDE_INBOX and reads its answer;
@@ -47,6 +50,8 @@ func TestMain(m *testing.M) {
 //     Claude Code's own cap on the steps of one turn rather than the provider refusing it;
 //   - "fail-then <text>": one step the provider refused, with a delivery queued behind it, so the
 //     turn goes on and ends on a step that ran;
+//   - "replay <file>": no init of the fake's own — the lines of testdata/<file>, a recorded Claude
+//     Code stream, written as they were recorded, the last held back until the gate opens;
 //   - anything else: an assistant message "done".
 func fakeClaude() int {
 	record, err := os.OpenFile(os.Getenv("FAKE_CLAUDE_RECORD"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
@@ -66,7 +71,6 @@ func fakeClaude() int {
 	result := func(subtype string, isError bool) {
 		emit(map[string]any{"type": "result", "subtype": subtype, "is_error": isError})
 	}
-	hanging := false
 	reader := bufio.NewReader(os.Stdin)
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -75,9 +79,7 @@ func fakeClaude() int {
 		}
 		fmt.Fprintf(record, "in %s", line)
 		var msg struct {
-			Type      string `json:"type"`
-			RequestID string `json:"request_id"`
-			Message   struct {
+			Message struct {
 				Content []struct {
 					Text string `json:"text"`
 				} `json:"content"`
@@ -86,25 +88,18 @@ func fakeClaude() int {
 		if json.Unmarshal(line, &msg) != nil {
 			return 3
 		}
-		if msg.Type == "control_request" {
-			emit(map[string]any{"type": "control_response", "response": map[string]any{"subtype": "success", "request_id": msg.RequestID}})
-			if hanging {
-				hanging = false
-				result("error_during_execution", true)
-			}
-			continue
-		}
 		body := msg.Message.Content[0].Text
 		if title, ok := strings.CutPrefix(body, "/rename "); ok {
 			assistant(text("Session renamed to: " + title))
 			result("success", false)
 			continue
 		}
+		if file, ok := strings.CutPrefix(body, "replay "); ok {
+			replay(record, file)
+			continue
+		}
 		emit(map[string]any{"type": "system", "subtype": "init", "session_id": "s"})
 		switch {
-		case body == "hang":
-			hanging = true
-			continue
 		case body == "handoff ok":
 			assistant(map[string]any{"type": "tool_use", "id": "tu1", "name": "mcp__legion__legion", "input": map[string]any{"op": "handoff_complete", "summary": "s"}})
 			emit(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": []map[string]any{
@@ -154,12 +149,47 @@ func fakeClaude() int {
 	}
 }
 
+// replay writes a recorded Claude Code stream line for line, holding its last line back until the
+// gate opens. The recordings are of the pinned Claude Code (2.1.310, the version
+// docker/claude-code/package-lock.json pins) under claudelaunch.Argv's own flags: a line is what
+// that binary wrote, never written by hand.
+func replay(record *os.File, file string) {
+	raw, err := os.ReadFile(filepath.Join("testdata", file))
+	if err != nil {
+		fmt.Fprintln(record, "replay", err)
+		return
+	}
+	lines := bytes.Split(bytes.TrimSpace(raw), []byte("\n"))
+	for i, line := range lines {
+		if i == len(lines)-1 {
+			waitForGate(record)
+		}
+		fmt.Fprintf(os.Stdout, "%s\n", line)
+	}
+}
+
+// waitForGate waits up to 10s for the test to open the gate, and returns at once when none is set.
+func waitForGate(record *os.File) {
+	gate := os.Getenv(fakeClaudeGateEnv)
+	if gate == "" {
+		return
+	}
+	for range 1000 {
+		if _, err := os.Stat(gate); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	fmt.Fprintln(record, "the gate never opened")
+}
+
 // rig runs one bridge over the fake Claude: frames go in through daemon, come out on frames.
 type rig struct {
 	t       *testing.T
 	daemon  *io.PipeWriter
 	frames  chan map[string]any
 	record  string
+	gate    string
 	done    chan int
 	stopped context.CancelFunc
 }
@@ -174,9 +204,9 @@ func newRig(t *testing.T, args ...string) *rig {
 func newRigWithEnv(t *testing.T, extra []string, args ...string) *rig {
 	t.Helper()
 	dir := t.TempDir()
-	record := filepath.Join(dir, "record")
+	record, gate := filepath.Join(dir, "record"), filepath.Join(dir, "gate")
 	argv := append([]string{os.Args[0]}, args...)
-	env := append(os.Environ(), fakeClaudeEnv+"=1", "FAKE_CLAUDE_RECORD="+record,
+	env := append(os.Environ(), fakeClaudeEnv+"=1", "FAKE_CLAUDE_RECORD="+record, fakeClaudeGateEnv+"="+gate,
 		"CLAUDE_CONFIG_DIR="+dir, "LEGION_ROLE=implementer", "LEGION_ISSUE=ACME-7")
 	env = append(env, extra...)
 	cfg, err := Configure(argv, env)
@@ -186,7 +216,7 @@ func newRigWithEnv(t *testing.T, extra []string, args ...string) *rig {
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	cfg.Stdin, cfg.Stdout, cfg.Log = inR, outW, io.Discard
-	r := &rig{t: t, daemon: inW, frames: make(chan map[string]any, 100), record: record, done: make(chan int, 1)}
+	r := &rig{t: t, daemon: inW, frames: make(chan map[string]any, 100), record: record, gate: gate, done: make(chan int, 1)}
 	ctx, cancel := context.WithCancel(context.Background())
 	r.stopped = cancel
 	go func() {
@@ -232,19 +262,24 @@ func (r *rig) send(frame shimwire.Frame) {
 	}
 }
 
+// nextRaw is the next frame the bridge wrote, pane summaries (tool_execution_start) included.
+func (r *rig) nextRaw() map[string]any {
+	r.t.Helper()
+	select {
+	case frame := <-r.frames:
+		return frame
+	case <-time.After(10 * time.Second):
+		r.t.Fatal("the bridge wrote nothing within 10s")
+		return nil
+	}
+}
+
 // next is the next frame the bridge wrote that is not a pane summary (tool_execution_start).
 func (r *rig) next() map[string]any {
 	r.t.Helper()
 	for {
-		select {
-		case frame := <-r.frames:
-			if frame["type"] == "tool_execution_start" {
-				continue
-			}
+		if frame := r.nextRaw(); frame["type"] != "tool_execution_start" {
 			return frame
-		case <-time.After(10 * time.Second):
-			r.t.Fatal("the bridge wrote nothing within 10s")
-			return nil
 		}
 	}
 }
@@ -271,6 +306,14 @@ func (r *rig) quiet() {
 	case frame := <-r.frames:
 		r.t.Fatalf("got %v, want no frame", frame)
 	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// open lets a replay write the last line of its recorded stream (fakeClaudeGateEnv).
+func (r *rig) open() {
+	r.t.Helper()
+	if err := os.WriteFile(r.gate, nil, 0o600); err != nil {
+		r.t.Fatal(err)
 	}
 }
 
@@ -340,49 +383,29 @@ func TestATurnIsOneUserMessageWhenTheHandoffSucceeds(t *testing.T) {
 }
 
 // A prompt during a turn is acknowledged and then refused in Oh My Pi's busy words, so the daemon
-// takes the task back uncharged and sends it again at the turn's end.
+// takes the task back uncharged and sends it again at the turn's end. The gate holds the turn's
+// own result back, so the turn is still running when the second prompt arrives.
 func TestAPromptDuringATurnIsRefusedBusy(t *testing.T) {
 	r := newRig(t, "-p", "--resume", sessionID)
-	r.prompt("p1", "hang")
+	r.prompt("p1", backgroundDuringPrompt)
 	r.expect("agent_start", nil)
+	if !r.state("g1") {
+		t.Error("isStreaming during the turn is false")
+	}
 	r.prompt("p2", "say again")
 	refusal := r.expect("response", map[string]any{"id": "p2", "command": "prompt", "success": false})
 	if !strings.HasPrefix(refusal["error"].(string), "Agent is already processing") {
 		t.Errorf("the refusal %q is not Oh My Pi's busy answer", refusal["error"])
 	}
-	r.send(shimwire.Abort{ID: "a1"})
-	r.expect("response", map[string]any{"id": "a1", "command": "abort", "success": true})
+	r.open()
 	r.expect("agent_end", nil)
 	if strings.Contains(r.recorded(), "say again") {
 		t.Errorf("Claude Code read the refused prompt: %s", r.recorded())
 	}
 }
 
-// An abort becomes an interrupt; its answer is Claude Code's acknowledgement, and the interrupted
-// user message's result ends the turn. Until then the turn is streaming: the
-// "hang" turn cannot end before the abort, so the state asked during it is the turn's own.
-func TestAnAbortInterruptsAndEndsTheTurn(t *testing.T) {
-	r := newRig(t, "-p", "--resume", sessionID)
-	r.prompt("p1", "hang")
-	r.expect("agent_start", nil)
-	if !r.state("g1") {
-		t.Error("isStreaming during the turn is false")
-	}
-	r.send(shimwire.Abort{ID: "a1"})
-	r.expect("response", map[string]any{"id": "a1", "command": "abort", "success": true})
-	r.expect("agent_end", nil)
-	if !strings.Contains(r.recorded(), `"subtype":"interrupt"`) {
-		t.Errorf("no interrupt reached Claude Code: %s", r.recorded())
-	}
-	// An abort with no turn running is answered at once.
-	r.send(shimwire.Abort{ID: "a2"})
-	r.expect("response", map[string]any{"id": "a2", "command": "abort", "success": true})
-	r.quiet()
-}
-
 // A step Claude Code ends in error reaches the daemon as Oh My Pi reports a failed step: the
-// assistant message_end with stopReason "error" and the failure as its errorMessage. An interrupted
-// step is not a failure, and TestAnAbortInterruptsAndEndsTheTurn holds that it sends none.
+// assistant message_end with stopReason "error" and the failure as its errorMessage.
 func TestAFailedStepIsOhMyPisFailedMessage(t *testing.T) {
 	r := newRig(t, "-p", "--resume", sessionID)
 	r.prompt("p1", "fail WAITING on the provider")
@@ -406,6 +429,9 @@ func TestEnvoyDeliveriesBecomeUserTurns(t *testing.T) {
 	r.prompt("p1", "inbox the CI is green")
 	r.expect("agent_start", nil)
 	r.expect("agent_end", nil)
+	// The prompt's turn is over and the bridge says so: the frame that names the prompt, which an
+	// agent_end never does (shimwire.PromptResult).
+	r.expect("prompt_result", map[string]any{"id": "p1", "agentInvoked": true})
 	recorded := r.recorded()
 	if !strings.Contains(recorded, `inbox-answer {"id":"ev1","ok":true}`) {
 		t.Fatalf("the inbox did not answer the delivery: %s", recorded)
@@ -433,6 +459,126 @@ func TestEnvoyDeliveriesBecomeUserTurns(t *testing.T) {
 	}
 	if answer, _ := bufio.NewReader(conn).ReadBytes('\n'); !strings.Contains(string(answer), "an id and content") {
 		t.Errorf("a malformed delivery was answered %q", answer)
+	}
+}
+
+// backgroundTurn and backgroundDuringPrompt are the two recorded streams these cases drive the
+// bridge with (replay). In backgroundTurn one prompt starts a background Bash command and ends its
+// turn; the task finishes between turns, and lines 13-15 — task_updated, task_notification and
+// background_tasks_changed, each naming the task and its run — are followed by the system/init of
+// the turn Claude Code starts by itself, its assistant lines and its own result. In
+// backgroundDuringPrompt the task finishes while a foreground command of the same turn still runs,
+// and the same three lines arrive inside that turn, which has one result, its last line.
+const (
+	backgroundTurn         = "replay background-turn.jsonl"
+	backgroundDuringPrompt = "replay background-during-prompt.jsonl"
+)
+
+// A background task that finishes between turns wakes Claude Code into a turn of its own, which
+// the daemon is told of as a turn: agent_start when the init of that turn arrives, agent_end when
+// its result does, and in between only what Claude Code's own lines carry. The prompt's turn ends
+// on its own result first, so the daemon sees two turns, not one long one — and only the first
+// carries a prompt_result behind it, which is the whole of how the daemon tells them apart.
+func TestATurnClaudeCodeStartsByItselfIsATurnOfTheDaemons(t *testing.T) {
+	r := newRig(t, "-p", "--resume", sessionID)
+	r.prompt("p1", backgroundTurn)
+	r.open()
+	var types []string
+	for ends := 0; ends < 2; {
+		typ, _ := r.nextRaw()["type"].(string)
+		types = append(types, typ)
+		if typ == "agent_end" {
+			ends++
+		}
+	}
+	// The prompt's turn carries one tool call, the background Bash command, which the bridge shows
+	// on the pane; the turn Claude Code started by itself calls no tool, so the bridge writes
+	// nothing of its own between that turn's start and its end.
+	want := []string{"agent_start", "tool_execution_start", "agent_end", "prompt_result", "agent_start", "agent_end"}
+	if !slices.Equal(types, want) {
+		t.Fatalf("the daemon saw %q, want %q", types, want)
+	}
+	r.quiet()
+}
+
+// The three lines a background task writes when it finishes during a turn end no turn: the daemon
+// sees one agent_start, and the agent_end only once the turn's own result arrives.
+func TestABackgroundTaskFinishingDuringATurnDoesNotEndIt(t *testing.T) {
+	r := newRig(t, "-p", "--resume", sessionID)
+	r.prompt("p1", backgroundDuringPrompt)
+	r.expect("agent_start", nil)
+	// The turn's two tool calls, the background command and the foreground one; the task's three
+	// lines come between the second call and the turn's result, which the gate holds back.
+	for i := range 2 {
+		if frame := r.nextRaw(); frame["type"] != "tool_execution_start" {
+			t.Fatalf("got %v, want tool call %d of the turn", frame, i+1)
+		}
+	}
+	r.quiet()
+	r.open()
+	r.expect("agent_end", nil)
+	r.expect("prompt_result", map[string]any{"id": "p1", "agentInvoked": true})
+	r.quiet()
+}
+
+// A prompt that arrives during a turn Claude Code started by itself is refused as one during any
+// turn is, and the daemon sends it again at that turn's end; the turn itself is untouched, and
+// Claude Code never reads the refused task.
+func TestAPromptDuringAClaudeStartedTurnIsRefusedBusy(t *testing.T) {
+	r := newRig(t, "-p", "--resume", sessionID)
+	r.prompt("p1", backgroundTurn)
+	r.expect("agent_start", nil)
+	r.expect("agent_end", nil)
+	r.expect("prompt_result", map[string]any{"id": "p1", "agentInvoked": true})
+	r.expect("agent_start", nil)
+	if !r.state("g1") {
+		t.Error("isStreaming during the turn Claude Code started is false")
+	}
+	r.prompt("p2", "say again")
+	refusal := r.expect("response", map[string]any{"id": "p2", "command": "prompt", "success": false})
+	if !strings.HasPrefix(refusal["error"].(string), "Agent is already processing") {
+		t.Errorf("the refusal %q is not Oh My Pi's busy answer", refusal["error"])
+	}
+	r.open()
+	r.expect("agent_end", nil)
+	r.quiet()
+	if strings.Contains(r.recorded(), "say again") {
+		t.Errorf("Claude Code read the refused prompt: %s", r.recorded())
+	}
+}
+
+// An Envoy delivery that arrives during a turn Claude Code started by itself is queued as it is
+// during any turn — the inbox answers it at once and the turn runs on — and is the user message of
+// the turn the bridge starts as soon as that one ends.
+func TestAnEnvoyDeliveryDuringAClaudeStartedTurnFollowsIt(t *testing.T) {
+	r := newRig(t, "-p", "--resume", sessionID)
+	r.prompt("p1", backgroundTurn)
+	r.expect("agent_start", nil)
+	r.expect("agent_end", nil)
+	r.expect("prompt_result", map[string]any{"id": "p1", "agentInvoked": true})
+	r.expect("agent_start", nil)
+	conn, err := net.Dial("unix", inboxPathOf(t, r))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := json.NewEncoder(conn).Encode(InboxDelivery{ID: "ev9", Content: "say the CI is green"}); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := bufio.NewReader(conn).ReadBytes('\n')
+	if err != nil || !strings.Contains(string(answer), `"ok":true`) {
+		t.Fatalf("the inbox answered %q, %v", answer, err)
+	}
+	if strings.Contains(r.recorded(), "the CI is green") {
+		t.Errorf("the delivery reached Claude Code during the turn it started: %s", r.recorded())
+	}
+	r.quiet()
+	r.open()
+	r.expect("agent_end", nil)
+	r.expect("agent_start", nil)
+	r.expect("agent_end", nil)
+	if !strings.Contains(r.recorded(), `"text":"say the CI is green"`) {
+		t.Errorf("the delivery was no user message: %s", r.recorded())
 	}
 }
 

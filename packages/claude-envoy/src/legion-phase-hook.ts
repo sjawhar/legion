@@ -79,15 +79,45 @@ const HOOK_EVENTS = [
 const WRITTEN_LINES_KEPT = 32
 
 /** One hook call's arguments: the event, and that event's own fields. Claude Code substitutes
- * `${…}` as strings, so every field is one, `stopHookActive` ("true"/"false") included. */
+ * `${…}` as strings, so every field is one — `stopHookActive` ("true"/"false") and
+ * `backgroundTasks` (the JSON array, as text) included. */
 const hookArguments = z.object({
   event: z.enum(HOOK_EVENTS),
   lastAssistantMessage: z.string().optional(),
   stopHookActive: z.string().optional(),
+  backgroundTasks: z.string().optional(),
   toolName: z.string().optional(),
   agentId: z.string().optional(),
   prompt: z.string().optional(),
 })
+
+/** The `${background_tasks}` payload: one entry per task of the session, of which only the status
+ * decides anything here. Claude Code 2.1.310 writes each as
+ * `{ id, type, status, description, command }`. */
+const backgroundTaskList = z.array(z.object({ status: z.string() }).loose())
+
+/**
+ * Whether the turn now ending leaves background work of this session's own still running, from
+ * `${background_tasks}` in the `Stop` hook's input. Claude Code substitutes it as that JSON array
+ * rendered to text, and as `[]` when there are none; measured on 2.1.310 against a `Bash` call
+ * with `run_in_background: true`, whose task reads `"status":"running"` at the `Stop` of the turn
+ * that started it.
+ *
+ * A status other than `running` — a task that finished inside the turn — is no reason to keep the
+ * reminder back, and an argument an older binary does not substitute at all is read as no
+ * background work, which is the behaviour before this field existed.
+ */
+function backgroundWorkRunning(tasks: string | undefined): boolean {
+  if (tasks === undefined || tasks.trim() === "") return false
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(tasks)
+  } catch {
+    return false
+  }
+  const list = backgroundTaskList.safeParse(parsed)
+  return list.success && list.data.some((task) => task.status === "running")
+}
 
 /** The tool as `tools/list` declares it. */
 export function phaseHookToolDefinition() {
@@ -424,15 +454,20 @@ export function createPhaseHookEndpoint(deps: PhaseHookDeps): PhaseHookEndpoint 
       switch (event.event) {
         case "Stop": {
           // `stop_hook_active` arrives as "true" once this hook has already continued the turn. It
-          // decides nothing: the count is what bounds a run of reminders.
+          // decides nothing: the count is what bounds a run of reminders. `background_tasks` does
+          // decide: a turn that ends with a background task of the worker's own still running is
+          // a worker waiting to be woken by it, not a stalled one.
+          const backgroundWork = backgroundWorkRunning(event.backgroundTasks)
           deps.log.debug("legion: a Claude Code phase worker's turn is settling", {
             issue: claim.issue,
             role: claim.role,
             stopHookActive: event.stopHookActive ?? "",
+            backgroundWork,
           })
           const reminded = await reminder.settle({
             kind: "settle",
             lastAssistantText: event.lastAssistantMessage ?? "",
+            backgroundWork,
           })
           return reminded === undefined ? {} : { decision: "block", reason: reminded }
         }

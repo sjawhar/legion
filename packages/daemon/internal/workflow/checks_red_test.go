@@ -769,15 +769,28 @@ func checksRedNotice(t *testing.T, pool *pgxpool.Pool) (reason string, from phas
 	return reason, phase.Phase(stopped)
 }
 
-// implementerStart is the implementer's start the outbox holds: its task, and the role the start
-// waits for before it acts (record.SuperviseRequest's Quiesce), "" for none.
-func implementerStart(t *testing.T, pool *pgxpool.Pool) (task string, quiesce claim.Role) {
+// phaseStartKeys is every key a phase worker's start payload carries
+// (record.SuperviseRequest): the operation, the issue's tree, the role, its task, the issue
+// generation, the phase the start serves and the assignment it hands that role. The list is
+// asserted whole rather than key by key, so a start that grows a field nobody meant it to carry —
+// a role to wait for before it acts, say — fails here.
+const phaseStartKeys = "assignment,generation,op,phase,role,task,tree"
+
+// implementerStart is the task of the implementer's start the outbox holds. The start carries
+// phaseStartKeys and nothing else: it runs at once, as every other start does, whatever phase the
+// daemon's own move took the issue out of, and waits for no turn to end.
+func implementerStart(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
-	var waits string
-	if err := pool.QueryRow(context.Background(), "select payload->>'task', coalesce(payload->>'quiesce', '') from outbox where kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = 'implementer'").Scan(&task, &waits); err != nil {
+	var task, keys string
+	if err := pool.QueryRow(context.Background(), `select payload->>'task',
+		(select string_agg(key, ',' order by key) from jsonb_object_keys(payload) as key)
+		from outbox where kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = 'implementer'`).Scan(&task, &keys); err != nil {
 		t.Fatalf("read the implementer's start: %v", err)
 	}
-	return task, claim.Role(waits)
+	if keys != phaseStartKeys {
+		t.Fatalf("the implementer's start carries %s, want %s", keys, phaseStartKeys)
+	}
+	return task
 }
 
 // applyRefusingNothing applies each fact as its own event, and fails the test on a refusal.

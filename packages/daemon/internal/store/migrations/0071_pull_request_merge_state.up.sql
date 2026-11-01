@@ -1,0 +1,16 @@
+-- 0071_pull_request_merge_state.up.sql — GitHub's merge state for a pull request's head
+-- (record.PullRequest.MergeState), as GitHub answers it in `mergeable_state` on the
+-- /pulls/{number} read the daemon already makes, in GitHub's own lowercase spelling.
+--
+-- The daemon kept only the tri-state mergeability it decodes from that same answer's nullable
+-- `mergeable` boolean, which cannot tell a head GitHub holds on a check or a review the repository
+-- requires ('blocked') from one GitHub would merge now ('clean'): GitHub answers `mergeable: true`
+-- for both. The merge state is the answer the spec's definition of mergeable is written in - clean,
+-- unstable or has_hooks, and never blocked - so it is kept beside the boolean, which goes on
+-- deciding a conflicting head exactly as it did.
+--
+-- Every existing row takes '', which reads as "never read": no pass before this release recorded a
+-- merge state, there is nothing in the row to derive one from, and the daemon's next read of the
+-- pull request fills it. '' is also what tells a row never read from one GitHub answered 'unknown'
+-- on while it was still computing the merge.
+alter table pull_requests add column merge_state text not null default '';

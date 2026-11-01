@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -254,9 +255,7 @@ func TestAPhaseCompletionLeavesTheWorkerResidentUntilItsIssueCloses(t *testing.T
 		t.Fatalf("while its turn still runs the planner is %s, want working", got)
 	}
 
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: planner}); err != nil {
-		t.Fatalf("end the planning turn: %v", err)
-	}
+	endTurn(ctx, t, machine, planner)
 	run("the rows due after the turn")
 	after := machine.Claim()
 	if after.State != supervise.StateIdle || after.Generation != before.Generation || after.Session != before.Session || after.SessionFile != before.SessionFile ||
@@ -269,11 +268,10 @@ func TestAPhaseCompletionLeavesTheWorkerResidentUntilItsIssueCloses(t *testing.T
 
 	// Another role's question arrives through Envoy, which starts a turn of the planner's own with no
 	// delivery behind it; then its architect asks one through the daemon, a task of no phase.
-	for _, ev := range []supervise.Event{supervise.StreamTurnStart{Claim: planner}, supervise.StreamTurnEnd{Claim: planner}} {
-		if err := machine.Handle(ctx, ev); err != nil {
-			t.Fatalf("answer the Envoy question: handle %T: %v", ev, err)
-		}
+	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: planner}); err != nil {
+		t.Fatalf("answer the Envoy question: %v", err)
 	}
+	endTurn(ctx, t, machine, planner)
 	const question = "Why does the plan keep the old API?"
 	prompted := len(conn.Prompts())
 	if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: planner, Task: question}); err != nil {
@@ -283,11 +281,10 @@ func TestAPhaseCompletionLeavesTheWorkerResidentUntilItsIssueCloses(t *testing.T
 	if sent := conn.Prompts()[prompted]; sent.Message != question {
 		t.Fatalf("the planner was sent %q, want the architect's question", sent.Message)
 	}
-	for _, ev := range []supervise.Event{supervise.StreamTurnStart{Claim: planner, DeliveryID: machine.Claim().Pending.ID}, supervise.StreamTurnEnd{Claim: planner}} {
-		if err := machine.Handle(ctx, ev); err != nil {
-			t.Fatalf("answer the architect's question: handle %T: %v", ev, err)
-		}
+	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: planner, DeliveryID: machine.Claim().Pending.ID}); err != nil {
+		t.Fatalf("answer the architect's question: %v", err)
 	}
+	endTurn(ctx, t, machine, planner)
 	// Answering, it completes again, and the completion changes nothing.
 	result, err := intake.ApplyFact(ctx, pool, "api", "handoff:planner:after", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RolePlanner, Claim: planner, Commit: "plan-2"}, engine)
 	if err != nil || result.Refusal == nil || result.Refusal.Code != "HANDOFF_NOT_CURRENT_PHASE" {
@@ -387,9 +384,7 @@ func TestAnIssuesCloseWaitsForTheWorkersTurnToEnd(t *testing.T) {
 			machine.Claim().State, rows, attempts, len(rt.CallsOf("Suspend")))
 	}
 
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: planner}); err != nil {
-		t.Fatalf("end the planning turn: %v", err)
-	}
+	endTurn(ctx, t, machine, planner)
 	if got := machine.Claim(); got.State != supervise.StateSuspended || got.Session != "ses-plan" || got.SessionFile != "/tmp/plan.jsonl" || len(rt.CallsOf("Suspend")) != 1 {
 		t.Fatalf("after its turn the planner is %s on %q with %d suspensions, want suspended once with its session kept", got.State, got.Session, len(rt.CallsOf("Suspend")))
 	}
@@ -400,6 +395,123 @@ func TestAnIssuesCloseWaitsForTheWorkersTurnToEnd(t *testing.T) {
 	if rows, _ := suspendRow(); rows != 0 || len(rt.CallsOf("Suspend")) != 1 {
 		t.Fatalf("after the retry the planner's suspend rows left = %d and suspensions %d, want the row finished and one suspension",
 			rows, len(rt.CallsOf("Suspend")))
+	}
+}
+
+// The head starting to conflict with its base while the tester is in a turn — running a tool, its
+// phase not completed — takes the phase back to implementing with nobody's completion. The
+// implementer's start runs at once, as at every other phase change: it waits for no turn to end,
+// and hands the implementer the conflict's task while the tester is still working. The tester's
+// turn is its own — nothing interrupts it and nothing stops it — and it keeps its launch, its
+// session and its capability.
+func TestAConflictStartsTheImplementerWhileTheTesterIsStillInItsTurn(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U", LastDispatchSeq: 5}
+	putOutboxIssue(t, pool, records, issue)
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		return records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: issue.Key, Repo: "acme/widgets", Number: 86, Branch: "legion/LEGION-208", HeadSHA: "sha-1",
+			HeadUpdatedAt: time.Now(), Failing: []string{}, CheckRuns: []record.AttemptRun{}})
+	}); err != nil {
+		t.Fatalf("seed the pull request: %v", err)
+	}
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	sup.deps.PhaseHolds = (&workflowRuntime{pool: pool, records: records}).phaseHolds
+	boot := func(role claim.Role, task string, p phase.Phase) (*supervise.Machine, *fake.Conn) {
+		t.Helper()
+		token, err := claim.NewToken("legion", issue.Key, role)
+		if err != nil {
+			t.Fatal(err)
+		}
+		machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: role, State: supervise.StateQueued}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn := fake.NewConn()
+		sup.deps.Conns.(*fake.Conns).Register(token, conn)
+		if err := machine.Handle(ctx, supervise.RequestSpawn{Claim: token}); err != nil {
+			t.Fatalf("spawn the %s: %v", role, err)
+		}
+		generation := machine.Claim().Generation
+		for _, ev := range []supervise.Event{
+			supervise.StreamHello{Claim: token, Generation: generation},
+			supervise.RequestRegister{Claim: token, Generation: generation, Session: "ses-" + string(role), SessionFile: "/tmp/" + string(role) + ".jsonl", CapabilityHash: []byte(role)},
+			supervise.RequestReady{Claim: token, Generation: generation, Session: "ses-" + string(role)},
+		} {
+			if err := machine.Handle(ctx, ev); err != nil {
+				t.Fatalf("boot the %s: handle %T: %v", role, ev, err)
+			}
+		}
+		if task != "" {
+			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: task, Phase: p, Generation: 1}); err != nil {
+				t.Fatalf("deliver the %s's task: %v", role, err)
+			}
+			machine.Wait()
+			if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: token}); err != nil {
+				t.Fatalf("start the %s's turn: %v", role, err)
+			}
+		}
+		return machine, conn
+	}
+	// The implementer finished implementing and is idle; the tester is in its testing turn.
+	implementer, implementerConn := boot(claim.RoleImplementer, "", "")
+	tester, _ := boot(claim.RoleTester, "Continue Workflow. Issue: LEGION-208. Phase: testing.", phase.Testing)
+	before := tester.Claim()
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	clock := time.Now()
+	runner := &outbox{
+		dispatchProject: "LEGION",
+		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
+		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "testing"}}, notices: &outboxPublisher{},
+		handlers: []intake.Handler{engine}, now: func() time.Time { return clock }, log: quietLogger(),
+	}
+	run := func(what string) {
+		t.Helper()
+		clock = clock.Add(time.Hour)
+		if err := runner.RunOnce(ctx); err != nil {
+			t.Fatalf("run %s: %v", what, err)
+		}
+		implementer.Wait()
+	}
+	conflictTasks := func() int {
+		t.Helper()
+		count := 0
+		for _, prompt := range implementerConn.Prompts() {
+			if strings.Contains(prompt.Message, "Phase: implementing.") && strings.Contains(prompt.Message, "the head conflicts with main") {
+				count++
+			}
+		}
+		return count
+	}
+
+	if result, err := intake.ApplyFact(ctx, pool, "github", "conflict", intake.PullRequestMergeability{Repo: "acme/widgets", Number: 86, HeadSHA: "sha-1",
+		Base: "main", Mergeable: record.MergeabilityConflicting}, engine); err != nil || result.Refusal != nil {
+		t.Fatalf("apply the conflicting head = %+v, %v", result, err)
+	}
+	run("the send-back's effects")
+	testwait.Eventually(t, "the implementer to be handed its conflict task", func() bool { return conflictTasks() == 1 })
+	during := tester.Claim()
+	if during.State != supervise.StateWorking {
+		t.Fatalf("while the implementer started the tester is %s, want working: its turn is its own", during.State)
+	}
+
+	endTurn(ctx, t, tester, before.Token)
+	run("the rows due after the tester's turn ends")
+	after := tester.Claim()
+	if after.State != supervise.StateIdle || after.Generation != before.Generation || after.Session != before.Session || after.Locator == nil ||
+		*after.Locator != *before.Locator || !bytes.Equal(after.CapabilityHash, before.CapabilityHash) {
+		t.Fatalf("after the send-back the tester is %+v, want idle on its launch, session and capability", after)
+	}
+	if conflictTasks() != 1 {
+		t.Fatalf("the implementer was handed %d conflict tasks, want the one the start delivered", conflictTasks())
+	}
+	for _, method := range []string{"Suspend", "Release"} {
+		for _, call := range rt.CallsOf(method) {
+			if call.Locator.Claim == before.Token {
+				t.Fatalf("the runtime was asked to %s the tester: %+v", method, call)
+			}
+		}
 	}
 }
 
@@ -743,9 +855,7 @@ func TestASameRoleBackwardMoveNeverStopsTheWorkerInItsNewPhase(t *testing.T) {
 		takeTask()
 	}
 	run()
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: token}); err != nil {
-		t.Fatalf("end the retro turn: %v", err)
-	}
+	endTurn(ctx, t, machine, token)
 	run()
 
 	// The runtime recovers, and every row runs to its end.

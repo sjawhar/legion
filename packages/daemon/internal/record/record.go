@@ -392,6 +392,17 @@ type PhaseRow struct {
 	// ClearGeneration resets the row without it. Behind a completion an old daemon wrote, a stale time
 	// at worst makes a review read as the reviewer's answer: one extra review-stuck notice.
 	CompletedAt time.Time
+	// Assignment is the task the issue's current phase handed this role, the token the start that
+	// handed it minted (workflow.Engine.start), written here in the transition's own transaction
+	// and onto that start's payload. It is one half of what a completion is held to: the other is
+	// the assignment the claim's worker took (supervise.Claim.ServingAssignment), and a completion
+	// reported for an earlier one is refused (api/handoff.go, HANDOFF_STALE_ASSIGNMENT). Unlike
+	// HandoffCommit it is not cleared when the role starts again — the start that clears the
+	// handoff writes the new assignment here — and unlike the issue's generation it is new at every
+	// phase entry, which is what tells one testing phase from the next within one run. Empty on a
+	// row no start has stamped: a daemon upgraded in place, where both sides are empty and every
+	// completion is accepted, and a row ClearGeneration reset.
+	Assignment string
 }
 
 // ReviewDecision is what one review decided: its state (changes_requested or approved), its body,

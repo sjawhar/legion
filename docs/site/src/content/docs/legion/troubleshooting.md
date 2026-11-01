@@ -683,12 +683,31 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   branch; …`; the issue moves on once a pull request is recorded open, and when the daemon's next read of
   the issue finds none open on the branch the architect is told
   ([An architect is told `pull-request-missing`](#an-architect-is-told-pull-request-missing)).
+- **A worker's completion refused `HANDOFF_STALE_ASSIGNMENT`.** The phase the completing turn was
+  working ended under that turn, and the role has since been handed the phase's work again: the
+  issue left the phase and came back, or CI settled red while the tester tested, while the reviewer
+  reviewed a round it had not completed, or while the merger worked toward its `READY`. The daemon
+  ends no turn, so the turn reporting the completion is the earlier assignment's and nothing is
+  recorded. The refusal names the issue, the role and the phase: the worker ends that turn without
+  completing, and reports that commit and that verdict no further. The phase was entered again, so
+  the task the daemon queued for the assignment it hands the role now — which arrives as the
+  session's next prompt — is work of its own: a testing assignment after a red is for the head the
+  fix pushed, and the verdict on the head before it answers for nothing there. The worker does that
+  task's work, writes a handoff of its own for it, and completes in its turn. When no such task is
+  queued for it, the refusal says so and the worker tells its architect.
 
 An issue back in `in_progress` from `retro` or `merging` has a head that conflicts with its base:
 GitHub computes no merge ref for such a head and runs no check on it at all, so the daemon sent
 the issue back to the implementer with the base to merge forward and told the architect. From
 `retro` the implementer kept its turn and was handed the implementing task once that turn ended;
-from `merging` the merger's turn was interrupted. The work comes back through testing, review,
+from `merging` the merger kept its turn, its jobs, its process and its session. Neither turn was
+interrupted: each role was told on its own Envoy role topic that its phase had ended and that the
+workspace is the implementer's now. The implementer's retro completion after the move reports the
+assignment retro handed it while the phase holds the implementing one, so it is refused
+(`HANDOFF_STALE_ASSIGNMENT`), and the implementer merges the base forward in the implementing
+task's own turn and completes that work with a handoff of its own, never retro's commit; the
+merger's row still names the assignment merging gave it, so a completion it sends for the phase it
+lost is refused (`HANDOFF_NOT_CURRENT_PHASE`). The work comes back through testing, review,
 acceptance and retro to a new merge. A red check sends nothing back from anywhere.
 
 The pull request's state as the daemon sees it:
