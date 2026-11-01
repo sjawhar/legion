@@ -1023,7 +1023,7 @@ const defaultStallWaitingMs = 900_000
 // worker will really run on: no configuration the worker accepts is refused here, and none it
 // accepts slips past the floor either.
 func stallWaitingMs(env func(string) string) float64 {
-	raw := strings.TrimSpace(env("LEGION_STALL_WAITING_MS"))
+	raw := strings.Trim(env("LEGION_STALL_WAITING_MS"), " \t\n\v\f\r\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
 	if raw == "" {
 		return defaultStallWaitingMs
 	}
@@ -1039,6 +1039,11 @@ func stallWaitingMs(env func(string) string) float64 {
 // forms, which Go's own ParseFloat reads the same way. A string Number() makes NaN of is this
 // function's false.
 func jsNumber(raw string) (float64, bool) {
+	if strings.ContainsRune(raw, '_') {
+		// Go's own parsers take a separator in a numeric literal and Number() does not, so a value
+		// written with one is NaN to the worker and must be here too.
+		return 0, false
+	}
 	if len(raw) > 2 && raw[0] == '0' {
 		base := 0
 		switch raw[1] {

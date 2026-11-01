@@ -446,6 +446,11 @@ type Machine struct {
 	// restart has no prompt of its own outstanding and asks the agent where it is instead
 	// (askFirst).
 	awaitingResult string
+	// asyncWork is the last turn's end naming background work of the agent's own that was still
+	// running (StreamTurnEnd.AwaitingAsyncWork). While it holds, the agent works for itself and a
+	// turn of that work's own follows, so the idle suspend's wait is not armed (notIdle). Every
+	// turn's end writes it afresh, so the end of the turn that work ran clears it.
+	asyncWork bool
 	// askFirst is a restored claim whose agent an earlier daemon was talking to: a pending
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
 	// machine asks the agent (get_state) before it acts on either.
@@ -1318,6 +1323,8 @@ func (m *Machine) idleWait() {
 // that is about to be given work.
 func (m *Machine) notIdle() (bool, string) {
 	switch {
+	case m.asyncWork:
+		return true, "background work of the agent's own"
 	case m.claim.Pending != nil:
 		return true, "a delivery"
 	case m.send != nil:

@@ -349,7 +349,7 @@ func superviseEvent(ev stream.Event) (supervise.Event, error) {
 	case stream.TurnStart:
 		return supervise.StreamTurnStart{Claim: ev.Claim, DeliveryID: ev.DeliveryID}, nil
 	case stream.TurnEnd:
-		return supervise.StreamTurnEnd{Claim: ev.Claim}, nil
+		return supervise.StreamTurnEnd{Claim: ev.Claim, AwaitingAsyncWork: ev.AwaitingAsyncWork}, nil
 	case stream.PromptResult:
 		return supervise.StreamPromptResult{Claim: ev.Claim, DeliveryID: ev.DeliveryID,
 			AgentInvoked: ev.AgentInvoked, Error: ev.Error}, nil

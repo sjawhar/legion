@@ -39,9 +39,12 @@ type TurnStart struct {
 	DeliveryID string
 }
 
-// TurnEnd is OMP's agent_end: the turn is over.
+// TurnEnd is OMP's agent_end: the turn is over. AwaitingAsyncWork is that end naming background
+// work of the agent's own that is still running, so another turn of its own follows and the
+// agent is not idle (shimwire.AgentEnd).
 type TurnEnd struct {
-	Claim claim.Token
+	Claim             claim.Token
+	AwaitingAsyncWork bool
 }
 
 // PromptResult is OMP's prompt_result: the work of one prompt is over. It is the only frame that

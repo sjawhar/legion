@@ -305,3 +305,24 @@ func TestARuleResumeForTheIdleSuspendIsRefusedOnceAnotherSuspensionTookTheClaim(
 	h.wantState(StateSuspended)
 	h.wantCalls("Resume", 0)
 }
+
+// A turn that ends while background work of the agent's own is still running arms no wait: Oh My
+// Pi says so on that agent_end (awaitingAsyncWork), writes no session_stop, and starts a turn of
+// that work's own when it ends. A job longer than the whole idle suspend would otherwise be
+// killed with the process that runs it, and the phase left with nothing to wake it. The wait
+// begins at the end of the turn that work runs.
+func TestAWorkerWaitingOnItsOwnBackgroundWorkIsNotSuspended(t *testing.T) {
+	h := idleHarness(t)
+	h.reach(StateIdle)
+	h.must(StreamTurnStart{Claim: h.token})
+	h.must(StreamTurnEnd{Claim: h.token, AwaitingAsyncWork: true})
+	h.advance(3 * testIdleSuspend)
+	h.wantState(StateIdle)
+	h.wantCalls("Suspend", 0)
+
+	// The background work's own turn ends: nothing is left running, and the wait begins.
+	h.must(StreamTurnStart{Claim: h.token})
+	h.must(StreamTurnEnd{Claim: h.token})
+	h.advance(testIdleSuspend)
+	h.wantState(StateSuspended)
+}

@@ -269,8 +269,13 @@ type AgentStart struct {
 }
 
 // AgentEnd is OMP finishing a turn. Its real form carries the whole transcript, which is why it
-// is the frame that arrives chunked.
-type AgentEnd struct{}
+// is the frame that arrives chunked. AwaitingAsyncWork is Oh My Pi saying the turn ended while
+// background work of the agent's own is still running (`awaitingAsyncWork`, omp://rpc.md): the
+// session has not settled, Oh My Pi writes no session_stop, and a turn of that work's own
+// follows, so the agent is not idle however quiet its stream is.
+type AgentEnd struct {
+	AwaitingAsyncWork bool `json:"awaitingAsyncWork,omitempty"`
+}
 
 // PromptResult is Oh My Pi reporting how one prompt's work ended, and the only frame that names
 // the prompt a turn belonged to: ID is the `prompt` command's own request id, where AgentEnd
@@ -414,7 +419,10 @@ func (f AgentStart) MarshalJSON() ([]byte, error) {
 	return marshalFrame(TypeAgentStart, plain(f))
 }
 
-func (AgentEnd) MarshalJSON() ([]byte, error) { return marshalFrame(TypeAgentEnd, struct{}{}) }
+func (f AgentEnd) MarshalJSON() ([]byte, error) {
+	type plain AgentEnd
+	return marshalFrame(TypeAgentEnd, plain(f))
+}
 
 func (f PromptResult) MarshalJSON() ([]byte, error) {
 	type plain PromptResult
@@ -646,7 +654,7 @@ func Decode(line []byte) (Frame, error) {
 	case TypeAgentStart:
 		return decodeInto[AgentStart](trimmed)
 	case TypeAgentEnd:
-		return AgentEnd{}, nil
+		return decodeInto[AgentEnd](trimmed)
 	case TypePromptResult:
 		return decodeInto[PromptResult](trimmed)
 	case TypeShutdown:

@@ -37,8 +37,14 @@ type StreamTurnStart struct {
 	DeliveryID string
 }
 
-// StreamTurnEnd is the agent's turn ending.
-type StreamTurnEnd struct{ Claim claim.Token }
+// StreamTurnEnd is the agent's turn ending. AwaitingAsyncWork is Oh My Pi saying background work
+// of the agent's own is still running, so the session has not settled and a turn of that work's
+// own follows: the claim is idle of the daemon's tasks but the agent is not idle at all, and the
+// idle suspend's wait is not armed while it holds (notIdle).
+type StreamTurnEnd struct {
+	Claim             claim.Token
+	AwaitingAsyncWork bool
+}
 
 // StreamPromptResult is Oh My Pi saying how one prompt's work ended (shimwire.PromptResult): the
 // one frame that names the prompt a turn belonged to, where agent_start and agent_end name none.
@@ -1032,7 +1038,8 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 // a turn that ends while the task's prompt is still outstanding retires nothing, because Oh My
 // Pi's agent_end names no prompt and a role's own background result starts turns the daemon
 // never prompted.
-func turnEnded(m *Machine, ctx context.Context, _ Event) error {
+func turnEnded(m *Machine, ctx context.Context, ev Event) error {
+	m.asyncWork = ev.(StreamTurnEnd).AwaitingAsyncWork
 	m.askFirst = false
 	if m.held != nil {
 		if err := m.suspendHeld(ctx); err != nil {
@@ -1066,6 +1073,11 @@ func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 // fenced out before it reaches a row (fence, Timer), so a claim this row runs for is idle with
 // nothing waiting for it. The table's own ignores hold the states.
 func idleSuspend(m *Machine, ctx context.Context, _ Event) error {
+	// The timer that fired is taken out of the table first, so a suspension the runtime refuses
+	// leaves the claim idle with nothing armed and the decision's own idleWait starts the wait
+	// afresh: the worker is suspended at the next whole wait rather than kept for good by one
+	// failed stop.
+	m.disarm(TimerIdle)
 	m.log.Info("supervise: the worker was idle for its whole idle suspend; suspending it and keeping its session",
 		"idleSuspend", m.deps.Timeouts.IdleSuspend)
 	return m.suspendNow(ctx, RequestSuspend{Claim: m.claim.Token, Reason: "idle for worker_idle_suspend_seconds", By: SuspendedByIdle})
