@@ -111,7 +111,9 @@ test("a bar Comment on another document while a margin send is out opens its own
     await sendFromBar(page, "quick", "Left behind");
 
     await navigateInApp(page, `/issues/${second.key}/spec`);
-    await expect(page.getByRole("heading", { level: 1, name: "Opened next" })).toBeVisible();
+    await expect(
+      page.getByTestId("issue-header").getByRole("heading", { level: 1, name: "Opened next" })
+    ).toBeVisible();
     await expect(connectedDot(page)).toHaveText("connected");
     await setSheet(page, test.info().project.name, false);
     await selectEditorText(page, "brown");
@@ -164,7 +166,9 @@ test("leaving a document while a margin send is out keeps its draft and refusal 
 
     await navigateInApp(page, `/issues/${issue.key}/spec`);
     await expect(
-      page.getByRole("heading", { level: 1, name: "Left with a send out" })
+      page
+        .getByTestId("issue-header")
+        .getByRole("heading", { level: 1, name: "Left with a send out" })
     ).toBeVisible();
     await expect(connectedDot(page)).toHaveText("connected");
     await setSheet(page, project, true);

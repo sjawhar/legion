@@ -14,7 +14,9 @@ const session = {
  *  `/auth/whoami` answers), so a key pressed before the page renders reaches no handler. */
 async function openIssue(page: Page, key: string, title: string): Promise<void> {
   await page.goto(`/issues/${key}`);
-  await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
+  await expect(
+    page.getByTestId("issue-header").getByRole("heading", { level: 1, name: title })
+  ).toBeVisible();
   await page.locator("body").focus();
 }
 
@@ -111,7 +113,9 @@ test("the issue scope reaches the header controls and the tab chords, and ? list
     await expect(titleInput).toBeFocused();
     await expect(titleInput).toHaveValue(/sp0/);
     await page.keyboard.press("Escape");
-    await expect(page.getByRole("heading", { level: 1, name: "Keyboard issue" })).toBeVisible();
+    await expect(
+      page.getByTestId("issue-header").getByRole("heading", { level: 1, name: "Keyboard issue" })
+    ).toBeVisible();
     await expect
       .poll(() => getIssue(issue.key))
       .toMatchObject({
@@ -542,7 +546,9 @@ test.describe("issue page", () => {
       await page.setViewportSize({ width: 1280, height: 900 });
       await page.goto(`/issues/${issue.key}`);
       await expect(
-        page.getByRole("heading", { level: 1, name: "Priority and options" })
+        page
+          .getByTestId("issue-header")
+          .getByRole("heading", { level: 1, name: "Priority and options" })
       ).toBeVisible();
 
       let patched = 0;

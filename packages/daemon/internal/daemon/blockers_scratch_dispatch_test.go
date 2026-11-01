@@ -1007,7 +1007,9 @@ func dispatchCall(t *testing.T, baseURL, method, path string, body, into any) {
 
 // createBlockersIssue creates one issue of project through Dispatch's own API, carrying the legion
 // label that hands it to Legion, optionally under parent, and waiting on waits. It is created in
-// triage, where every Dispatch issue starts; the test moves it on with its own write.
+// triage, where every Dispatch issue starts, by a session (createDispatchIssue): the label is a
+// session's, so the root is the controller's triage wake and never a person's handover the daemon
+// would queue as todo itself (LEGION-755) ahead of the test's own write, which moves it on.
 func createBlockersIssue(t *testing.T, baseURL, project, title, parent string, waits []string) string {
 	t.Helper()
 	body := map[string]any{"project": project, "title": title, "labels": []string{"legion"}}
@@ -1017,23 +1019,25 @@ func createBlockersIssue(t *testing.T, baseURL, project, title, parent string, w
 	if len(waits) > 0 {
 		body["blocked_by"] = waits
 	}
-	return createDispatchIssue(t, baseURL, title, body)
+	return createDispatchIssue(t, baseURL, title, body, asSession)
 }
 
 // createUnhandedIssue creates one issue of project through Dispatch's own API without the legion
-// label: someone else's work, which nobody hands to Legion. It is created in triage.
+// label, as the person: someone else's work, which nobody hands to Legion. It is created in triage.
 func createUnhandedIssue(t *testing.T, baseURL, project, title string) string {
 	t.Helper()
-	return createDispatchIssue(t, baseURL, title, map[string]any{"project": project, "title": title})
+	return createDispatchIssue(t, baseURL, title, map[string]any{"project": project, "title": title}, asPerson)
 }
 
-// createDispatchIssue posts body as a new issue to Dispatch and answers the key Dispatch gave it.
-func createDispatchIssue(t *testing.T, baseURL, title string, body map[string]any) string {
+// createDispatchIssue posts body as a new issue to Dispatch as identity — the person `smoke`, or a
+// session through the server's agent bearer with the session named in the body's actor
+// (dispatchCallAs) — and answers the key Dispatch gave it.
+func createDispatchIssue(t *testing.T, baseURL, title string, body map[string]any, identity scratchIdentity) string {
 	t.Helper()
 	var created struct {
 		Key string `json:"key"`
 	}
-	dispatchCall(t, baseURL, http.MethodPost, "/api/v1/issues", body, &created)
+	dispatchCallAs(t, baseURL, http.MethodPost, "/api/v1/issues", body, &created, identity)
 	if created.Key == "" {
 		t.Fatalf("Dispatch created %q without a key", title)
 	}

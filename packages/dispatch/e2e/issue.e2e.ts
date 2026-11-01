@@ -227,7 +227,9 @@ test("issue header copies its key and persists its title, status, and route @pho
 
   try {
     await page.goto(`/issues/${issue.key}`);
-    const heading = page.getByRole("heading", { level: 1, name: "First decision" });
+    const heading = page
+      .getByTestId("issue-header")
+      .getByRole("heading", { level: 1, name: "First decision" });
     await expect(heading).toBeVisible();
     const copyKey = page.getByRole("button", { name: `Copy issue key ${issue.key}` });
     await copyKey.click();
@@ -895,7 +897,10 @@ test("issue header gives the title the row's free space beside a short details l
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-  const title = page.getByRole("heading", { level: 1 });
+  // The title is not the page's only `h1`: the shell's loading skeleton is one, and a rendered
+  // document whose text opens on a top-level heading puts that heading on the page too. The
+  // header holds the one heading the issue is identified by.
+  const title = page.getByTestId("issue-header").getByRole("heading", { level: 1 });
   const measureTitle = () =>
     page.evaluate(() => {
       const heading = document.querySelector("[data-testid=issue-header] h1") as HTMLElement;
@@ -997,7 +1002,7 @@ test("issue header delivers the click that ends a title edit to the control unde
   // `disabled` while their previous write is in flight, and a browser drops a click on a
   // disabled button.
   const pressWhileEditingTitle = async (control: Locator) => {
-    await page.getByRole("heading", { level: 1 }).click();
+    await page.getByTestId("issue-header").getByRole("heading", { level: 1 }).click();
     await expect(page.getByLabel("Issue title")).toBeFocused();
     await expect(control).toBeEnabled();
     const box = await control.boundingBox();
@@ -1012,7 +1017,9 @@ test("issue header delivers the click that ends a title edit to the control unde
     for (const width of [1024, 1279]) {
       await page.setViewportSize({ height: 800, width });
       await page.goto(`/issues/${issue.key}`);
-      await expect(page.getByRole("heading", { level: 1, name: "Short title" })).toBeVisible();
+      await expect(
+        page.getByTestId("issue-header").getByRole("heading", { level: 1, name: "Short title" })
+      ).toBeVisible();
 
       const pin = page.getByRole("button", { name: "Pin issue" });
       await pressWhileEditingTitle(pin);
@@ -1319,7 +1326,7 @@ test("an issue's whole title wraps at every width, whether prose or one unbroken
     const page = await context.newPage();
     for (const issue of [prose, oneWord]) {
       await page.goto(`/issues/${issue.key}`);
-      const title = page.getByRole("heading", { level: 1 });
+      const title = page.getByTestId("issue-header").getByRole("heading", { level: 1 });
       await expect(title).toHaveText(issue.title);
       // Whole means nothing between the title and the document clips it: no clamp, ellipsis, or
       // box shorter or narrower than the text it holds, at the width this project renders.
