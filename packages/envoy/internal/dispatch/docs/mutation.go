@@ -245,7 +245,7 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 // is deterministic over one state - pmdoc.Read and ReadForRendering differ only in copying
 // attributes, and both trees render through pmdoc.RenderWithBlockOffsets - so either is the very
 // string the render would make. A fork no rendering is known for is rendered here.
-func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error) error {
+func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(doc *crdt.Doc, current pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error) error {
 	op, err := s.openLiveOperation(ctx, artifactID)
 	if err != nil {
 		return err
@@ -281,7 +281,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 			if known != nil {
 				known.Add(1)
 			} else {
-				beforeMarkdown, startErr = documentMarkdown(before)
+				beforeMarkdown, startErr = documentMarkdownValid(before)
 				s.renderPaths.beforeRendered.Add(1)
 			}
 			rendered = true
@@ -314,7 +314,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	var markdown string
 	var offsets []pmdoc.BlockOffset
 	if err == nil {
-		markdown, offsets, err = documentMarkdownWithOffsets(tree)
+		markdown, offsets, err = documentMarkdownValidWithOffsets(tree)
 	}
 	if err != nil {
 		return joinedSchemaError(err, start)
@@ -338,32 +338,32 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 		markdown = beforeMarkdown
 	}
 	if err == nil {
-		contentChanged, weighedFrom = !unchanged, before
+		contentChanged, weighedFrom = !unchanged, before.Node()
 	}
 	// The ask blocks the write added are read off the tree before it now, so that tree is done
 	// with ahead of the decode check the record runs.
 	var added map[string]struct{}
 	if contentChanged {
-		added = addedAskBlockIDs(before, tree)
+		added = addedAskBlockIDs(before.Node(), tree.Node())
 	}
-	if err := refuseGrowth(growth{before: beforeMarkdown, after: markdown, unchanged: unchanged, margin: margin, anchors: anchorWatch{before: weighedFrom, after: tree}, serverState: func() bool {
-		return weighedFrom != nil && tree.EqualOutsideServerState(weighedFrom)
+	if err := refuseGrowth(growth{before: beforeMarkdown, after: markdown, unchanged: unchanged, margin: margin, anchors: anchorWatch{before: weighedFrom, after: tree.Node()}, serverState: func() bool {
+		return weighedFrom != nil && tree.Node().EqualOutsideServerState(weighedFrom)
 	}}); err != nil {
 		return err
 	}
 	// The tree before the write has served every use it has, so it is let go before the record's
 	// decode check (LEGION-504).
-	before, weighedFrom = nil, nil
+	before, weighedFrom = pmdoc.ValidDocument{}, nil
 	// What the room's update observer can take in place of rendering the room after this update
 	// (publishedRendering): this operation's rendering, when its fork was read warm.
 	var rendering publishedRendering
 	if op.read.warm {
 		rendering = publishedRendering{forkReadMark: op.read, markdown: markdown}
 		if contentChanged {
-			rendering.askBlocks = askBlockIDs(tree)
+			rendering.askBlocks = askBlockIDs(tree.Node())
 		}
 	}
-	if err := s.recordLiveOperation(ctx, &op, actor, renderedTree{tree: tree, markdown: markdown, offsets: offsets}, contentChanged, rendering, weak.Pointer[crdt.Doc]{}); err != nil {
+	if err := s.recordLiveOperation(ctx, &op, actor, renderedTree{tree: tree.Node(), markdown: markdown, offsets: offsets}, contentChanged, rendering, weak.Pointer[crdt.Doc]{}); err != nil {
 		return err
 	}
 	// A server lifecycle write (withLifecycleWrite) is no edit of the document: it credits no
@@ -438,10 +438,12 @@ func (s *Service) applyMargin(ctx context.Context, artifactID string, actor mode
 	}
 	rendered, reused := s.reuseRendering(op.write, op.fork, "margin")
 	if !reused {
-		if rendered.tree, err = s.readFork(op.fork); err != nil {
+		valid, err := s.readFork(op.fork)
+		if err != nil {
 			return err
 		}
-		if rendered.markdown, rendered.offsets, err = documentMarkdownWithOffsets(rendered.tree); err != nil {
+		rendered.tree = valid.Node()
+		if rendered.markdown, rendered.offsets, err = documentMarkdownValidWithOffsets(valid); err != nil {
 			return err
 		}
 	}
@@ -557,12 +559,13 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	}
 	var canonical string
 	var unchanged bool
-	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
+	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, start pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
-		current, err := startTree(current, doc)
+		valid, err := startTree(start, doc)
+		current := valid.Node()
 		var currentMarkdown string
 		if err == nil {
-			currentMarkdown, err = documentMarkdown(current)
+			currentMarkdown, err = documentMarkdownValid(valid)
 		}
 		// A tree outside the Proof schema - one treeOf refuses, or one it reads that does not
 		// render - has no readable text to compare or reanchor against: this replacement repairs it.
@@ -894,7 +897,7 @@ func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.
 	}
 	if fork != nil {
 		tree, err := s.readFork(fork)
-		return tree, true, err
+		return tree.Node(), true, err
 	}
 	live := s.srv.GetDoc(artifactID)
 	if live == nil {
@@ -1285,10 +1288,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		if err != nil {
 			return EditOutcome{}, err
 		}
-		if err := checkEditPrecondition(tree, *precondition); err != nil {
-			return EditOutcome{}, err
-		}
-		token, err := nodeToken(tree)
+		token, err := checkEditPrecondition(tree, *precondition)
 		if err != nil {
 			return EditOutcome{}, err
 		}
@@ -1308,23 +1308,28 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 	if err := lockTableAnchorRows(ctx, tx, artifactID, snapshots); err != nil {
 		return EditOutcome{}, err
 	}
-	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
+	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		// Read before the Yjs transaction opens: the state vector takes the document lock.
 		since := authoredClock(ctx, artifactID, doc)
 		var mutationErr error
 		transact(func(transaction *crdt.Transaction) {
-			tree, err := editTree(current, func() (*pmdoc.Node, error) { return treeOfTransaction(transaction, fragment) })
+			start, err := editTree(current, func() (*pmdoc.Node, error) { return treeOfTransaction(transaction, fragment) })
 			if err != nil {
 				mutationErr = err
 				return
 			}
-			if err := checkEditPrecondition(tree, *precondition); err != nil {
+			tree := start.node
+			// The token of the document the check read, which the batch takes as the token it
+			// started from: the stamp below mints only block ids, which the token leaves out, so
+			// the two runs of the batch encode nothing again.
+			before, err := checkEditPrecondition(tree, *precondition)
+			if err != nil {
 				mutationErr = err
 				return
 			}
 			if len(snapshots) > 0 {
-				if err := verifyTableAnchorSnapshots(tree, ops, snapshots); err != nil {
+				if err := verifyTableAnchorSnapshots(tree, ops, snapshots, before); err != nil {
 					mutationErr = err
 					return
 				}
@@ -1333,12 +1338,12 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			// identified; a browser-authored block the closer has not yet stamped gets its id
 			// here, and the same ids persist through the update below.
 			stamped := stampAskBlockIDs(tree)
-			batch, err := applyOperations(tree, ops)
+			batch, err := applyBatch(start, ops, nil, before)
 			if err != nil {
 				mutationErr = err
 				return
 			}
-			if err := requirePreconditionCoverage(tree, ops, *precondition); err != nil {
+			if err := requirePreconditionCoverage(start, ops, *precondition, before); err != nil {
 				mutationErr = err
 				return
 			}
@@ -1348,11 +1353,12 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 				mutationErr = &ErrInvalidAskBlock{Reason: err}
 				return
 			}
-			if outcome, mutationErr = batch.outcome(len(ops)); mutationErr != nil {
+			var written pmdoc.ValidDocument
+			if outcome, written, mutationErr = batch.outcome(len(ops)); mutationErr != nil {
 				return
 			}
 			mutationErr = recordInsertedText(ctx, artifactID, "", fragment, since, batch.writes, func() error {
-				if err := pmdoc.Update(transaction, fragment, next); err != nil {
+				if err := pmdoc.UpdateDocument(transaction, fragment, written); err != nil {
 					return err
 				}
 				s.registerStampedAskBlocks(ctx, artifactID, stamped)
@@ -1393,15 +1399,16 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		return EditOutcome{Token: token}, nil
 	}
 	var outcome EditOutcome
-	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
+	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		since := authoredClock(ctx, artifactID, doc)
-		tree, err := editTree(current, func() (*pmdoc.Node, error) { return treeOf(doc) })
+		start, err := editTree(current, func() (*pmdoc.Node, error) { return treeOf(doc) })
 		if err != nil {
 			return err
 		}
+		tree := start.node
 		stamped := stampAskBlockIDs(tree)
-		batch, err := s.applyOperations(ctx, artifactID, tree, ops)
+		batch, err := s.applyOperations(ctx, artifactID, start, ops)
 		if err != nil {
 			return err
 		}
@@ -1410,13 +1417,14 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		if err := validateEditedAskBlocks(tree, next); err != nil {
 			return &ErrInvalidAskBlock{Reason: err}
 		}
-		if outcome, err = batch.outcome(len(ops)); err != nil {
+		var written pmdoc.ValidDocument
+		if outcome, written, err = batch.outcome(len(ops)); err != nil {
 			return err
 		}
 		return recordInsertedText(ctx, artifactID, "", fragment, since, batch.writes, func() error {
 			var updateErr error
 			transact(func(transaction *crdt.Transaction) {
-				if updateErr = pmdoc.Update(transaction, fragment, next); updateErr != nil {
+				if updateErr = pmdoc.UpdateDocument(transaction, fragment, written); updateErr != nil {
 					return
 				}
 				s.registerStampedAskBlocks(ctx, artifactID, stamped)
@@ -1439,21 +1447,30 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 // startTree is the tree a mutate starts from: current, applyLive's own read of the fork, or, when
 // that tree is outside the schema (nil), the fork read again, for the refusal its caller answers
 // or the repair it makes.
-func startTree(current *pmdoc.Node, doc *crdt.Doc) (*pmdoc.Node, error) {
-	if current != nil {
+func startTree(current pmdoc.ValidDocument, doc *crdt.Doc) (pmdoc.ValidDocument, error) {
+	if current.Node() != nil {
 		return current, nil
 	}
-	return treeOf(doc)
+	return treeOfUnshared(doc)
 }
 
 // editTree is the tree an edit batch starts from: current (startTree), which the batch's
 // operations copy rather than change, unless a block lacks its id. The ids an edit stamps
 // (stampAskBlockIDs) go on a tree read for the edit, since current is applyLive's to compare with.
-func editTree(current *pmdoc.Node, read func() (*pmdoc.Node, error)) (*pmdoc.Node, error) {
-	if current != nil && pmdoc.BlockIDRepairCount(current) == 0 {
-		return current, nil
+//
+// A batch that starts from current takes applyLive's validation of it with it: the stamp that
+// follows mints no id on a tree whose ids are all there (BlockIDRepairCount is EnsureBlockIDsCount's
+// own walk, pmdoc/block_ids.go), so it leaves that tree, and its validity, as they are. A tree read
+// for the repair is validated by the batch's first step that needs it.
+func editTree(current pmdoc.ValidDocument, read func() (*pmdoc.Node, error)) (*batchTree, error) {
+	if current.Node() != nil && pmdoc.BlockIDRepairCount(current.Node()) == 0 {
+		return validatedBatchTree(current), nil
 	}
-	return read()
+	tree, err := read()
+	if err != nil {
+		return nil, err
+	}
+	return newBatchTree(tree), nil
 }
 
 // SetBlockAttributes applies server-owned typed-block state through the
@@ -1500,12 +1517,13 @@ func withoutAnswer(attributes map[string]any) (withheld map[string]any, withhold
 }
 
 func (s *Service) setBlockAttributes(ctx context.Context, artifactID, blockID string, attributes map[string]any, actor model.Actor) error {
-	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
+	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
-		tree, err := startTree(current, doc)
+		valid, err := startTree(current, doc)
 		if err != nil {
 			return err
 		}
+		tree := valid.Node()
 		next, err := pmdoc.SetBlockAttributes(tree, blockID, pmdoc.Attrs(pmdoc.LineFeedAttrs(attributes)))
 		if err != nil {
 			return err
@@ -1709,9 +1727,11 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 		if rendering, reused := s.reuseRendering(write, fork, "capture"); reused {
 			return rendering, capture, nil
 		}
-		if tree, err = s.readFork(fork); err != nil {
-			return renderedTree{}, authorCapture{}, err
+		valid, readErr := s.readFork(fork)
+		if readErr != nil {
+			return renderedTree{}, authorCapture{}, readErr
 		}
+		tree = valid.Node()
 	} else {
 		// The head under the document's advisory lock, which this transaction holds from here to
 		// its end: every append, this process's own included, waits for it, so no room's cursor

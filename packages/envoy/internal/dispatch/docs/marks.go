@@ -89,12 +89,13 @@ type Anchored struct {
 
 // MarkQuote marks one matching quote and returns what the new mark anchors to.
 func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (Anchored, error) {
-	err := s.applyLive(ctx, artifactID, mark.By, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
+	err := s.applyLive(ctx, artifactID, mark.By, func(doc *crdt.Doc, current pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
-		tree, err := startTree(current, doc)
+		valid, err := startTree(current, doc)
 		if err != nil {
 			return err
 		}
+		tree := valid.Node()
 
 		var markErr error
 		transact(func(txn *crdt.Transaction) {
@@ -241,14 +242,15 @@ func (s *Service) RejectSuggestion(ctx context.Context, artifactID, id string, a
 }
 
 func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor, accept bool) error {
-	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
+	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		// Read before the Yjs transaction opens: the state vector takes the document lock.
 		since := authoredClock(ctx, artifactID, doc)
-		tree, err := startTree(current, doc)
+		valid, err := startTree(current, doc)
 		if err != nil {
 			return err
 		}
+		tree := valid.Node()
 		range_, _, ok := pmdoc.FindMark(tree, string(MarkSuggestion), id)
 		if !ok {
 			return ErrAnchorOrphaned
@@ -327,34 +329,38 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 				return mark.Type == string(MarkSuggestion) && mark.Attrs["id"] == id
 			}))
 		}
-		next, err := pmdoc.Splice(tree, range_, replacement)
+		next, err := valid.Splice(range_, replacement)
 		if err != nil {
 			return acceptSpliceRefusal(err)
+		}
+		// Where the suggestion lies in the document the accept started from, which every refusal
+		// below reads against the tree it holds then (matchedBlocks).
+		found, err := matchedBlocks(valid, range_)
+		if err != nil {
+			return err
 		}
 		// The browser editor's table plugin pads a table the accept cut to its width, as it does
 		// after a reject, before anything reads the accept back, where the browser's accept writes
 		// the replacement where Splice does (padsLikeTheBrowser).
 		if padsLikeTheBrowser(tree, range_, at, inline) {
-			if next, err = padCutTables(tree, next, range_, budget); err != nil {
+			if next, err = padCutTables(next, found, budget); err != nil {
 				return acceptSpliceRefusal(err)
 			}
 		}
 		if code {
-			if err := refuseAcceptedCodeThatReshapes(tree, next, range_, at, with); err != nil {
+			if err := refuseAcceptedCodeThatReshapes(valid, next, found, at, with); err != nil {
 				return err
 			}
 		}
-		if next, err = settleAccepted(tree, next, range_, with); err != nil {
-			return err
-		}
-		if err := refuseCodePipeInTableCell(tree, next, range_, "replace_with", "replace_with", with, "reject the suggestion, or reply asking for text the cell can hold"); err != nil {
+		next = settleAccepted(valid, next, found, with)
+		if err := refuseCodePipeInTableCell(valid, next, found, "replace_with", "replace_with", with, "reject the suggestion, or reply asking for text the cell can hold"); err != nil {
 			return err
 		}
 		if !insideAsk(at) {
-			if err := refuseUnreadableAccept(tree, next, range_, at, with, replacement); err != nil {
+			if err := refuseUnreadableAccept(valid, next, found, range_, at, with, replacement); err != nil {
 				return err
 			}
-			if err := refuseReshapedAccept(tree, next, range_, at, with, replacement); err != nil {
+			if err := refuseReshapedAccept(valid, next, found, range_, at, with, replacement); err != nil {
 				return err
 			}
 		}

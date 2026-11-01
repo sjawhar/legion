@@ -34,7 +34,7 @@ const conditionalEditQueueLockNamespace int32 = 0x51554555
 const conditionalEditReleaseTimeout = 5 * time.Second
 
 // The statements of the document's queue across processes (doc_conditional_edit_queue, migration
-// 0152). The admission's sum counts the members' rows other than this process's own, whose count
+// 0153). The admission's sum counts the members' rows other than this process's own, whose count
 // it holds in memory, and deletes the rows of processes that are no members: one that died, or
 // whose room-sync connection is down, counts for nothing until it is a member again, and writes
 // its row back with its next admission.

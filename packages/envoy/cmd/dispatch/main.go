@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sjawhar/envoy/internal/brokertoken"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
@@ -68,8 +69,8 @@ var buildCommit string
 
 type bootConfig struct {
 	DatabaseURL string
-	// AgentTokens is DISPATCH_AGENT_TOKEN parsed: every value the API and the document websocket
-	// accept as the shared agent token, the first the current one.
+	// AgentTokens is DISPATCH_AGENT_TOKEN parsed: every value the API accepts as the shared agent
+	// token, the first the current one.
 	AgentTokens    *auth.SharedAgentTokens
 	RepoProjects   string
 	DefaultProject string
@@ -323,13 +324,14 @@ func main() {
 	requestIdentity := requestIdentityFor(boot, signingKey, people, sessions, signIn)
 
 	broker := events.NewBroker()
-	documentService := newDocumentService(boot, docs.Deps{
+	documentService := docs.New(docs.Deps{
 		Store:           database,
 		Events:          broker,
 		Identity:        requestIdentity,
 		ServerURL:       serverURL,
 		Settle:          boot.SettleDelay,
 		EditNoticeQuiet: boot.EditNoticeQuiet,
+		TestHooks:       boot.TestHooksEnabled,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 	// The asks a close or a reopen by a release older than the withdrawal left: at boot, then on an
@@ -382,6 +384,15 @@ func main() {
 	// configured verifier, and every JWT-shaped bearer would be sent to it.
 	if serviceTokens != nil {
 		built.OIDC = serviceTokens
+	}
+	brokerTokens, err := brokerTokenVerifier(boot, database, serverURL)
+	if err != nil {
+		slog.Error("dispatch: build the broker access-token verifier", "error", err)
+		os.Exit(1)
+	}
+	built.BrokerTokens = brokerTokens
+	if brokerTokens != nil {
+		slog.Info("dispatch: deciding access tokens the secrets broker issued", "broker", redact.URL(boot.AgentSecretsURL))
 	}
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, built))
 
@@ -1041,16 +1052,6 @@ func devSignInSharedSigningKey(shared string) string {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-// newDocumentService is the document service main serves the document websocket and the API's
-// documents from: built, what main made from the rest of the configuration, with every setting the
-// service takes from boot filled in. The settings tests build it through here, as they build the
-// router through appContextOptions, so dropping a hand-off here fails a case.
-func newDocumentService(boot bootConfig, built docs.Deps) *docs.Service {
-	built.AgentTokens = boot.AgentTokens
-	built.TestHooks = boot.TestHooksEnabled
-	return docs.New(built)
-}
-
 // dashboardPublishTimeout bounds the boot's publish of its dashboard build and the prune after it.
 // A first publish writes the whole build, 45 files and 5.4 MB for the dashboard of 2026-10-27; a
 // restart on a stored build writes nothing.
@@ -1280,6 +1281,33 @@ func serviceTokenVerifier(boot bootConfig) *oidc.LazyVerifier {
 		return nil
 	}
 	return oidc.NewLazyVerifier(boot.OIDCIssuer, boot.OIDCAudience)
+}
+
+// brokerTokenVerifier decides callers presenting an access token the secrets broker issued, under
+// the RFC 9449 DPoP scheme. It is built from the settings Dispatch already has and needs none of
+// its own: the broker DISPATCH_AGENT_SECRETS_URL names, which the approval relays already call,
+// Dispatch's own projected ServiceAccount token from DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE,
+// which it already presents there, and DISPATCH_SERVER_URL as the origin a proof's 'htu' is
+// checked against. Spent proofs are recorded in Dispatch's own database (store.DPoPProofs), which
+// the maintenance pass sweeps.
+//
+// A deployment with no broker gets nil: Dispatch then has no such credential kind, and a DPoP
+// presentation is refused as any non-bearer Authorization header has always been
+// (401 UNAUTHORIZED).
+func brokerTokenVerifier(boot bootConfig, database *store.Store, serverURL string) (*brokertoken.Verifier, error) {
+	if boot.AgentSecretsURL == "" {
+		return nil, nil
+	}
+	return brokertoken.New(brokertoken.Options{
+		BrokerURL: boot.AgentSecretsURL,
+		Account:   brokertoken.NewAccountToken(boot.AgentSecretsTokenFile),
+		Origin:    strings.TrimSuffix(serverURL, "/"),
+		Replay:    store.NewDPoPProofs(database.Pool),
+		// Dispatch's own rule for which address a request came from, the one its access log and
+		// its other buckets read; the check itself has none, so this says whose proxy header is
+		// trusted here (auth.ForwardedAddress).
+		Address: auth.ForwardedAddress,
+	})
 }
 
 // healthzHandler answers the readiness probe: 200 while this process can serve requests, which is

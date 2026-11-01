@@ -295,7 +295,7 @@ func (sources askBlockSources) author(id string, fallback model.Actor) (model.Ac
 	return fallback, true
 }
 
-// The durable ask authors (doc_ask_block_authors, migration 0151) are the authors of the ask blocks
+// The durable ask authors (doc_ask_block_authors, migration 0152) are the authors of the ask blocks
 // no settlement has indexed yet, one row per block, outliving the room and the process that saw the
 // write: a browser's block is recorded by the append of the update whose render first showed it
 // (appendUpdateTxClass), a joined write's or a seed's by the transaction that commits it

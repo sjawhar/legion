@@ -57,7 +57,7 @@ const (
 	// and the queries for it; awareness_relay.go has its wire format.
 	documentAwarenessChannel = "dispatch_doc_awareness"
 	// issueOpenChangedChannel carries the key of an issue that was closed or reopened, sent by the
-	// trigger migration 0150 puts on issues.closed_at (Service.issueOpenChanged).
+	// trigger migration 0151 puts on issues.closed_at (Service.issueOpenChanged).
 	issueOpenChangedChannel = "dispatch_issue_open_changed"
 	// documentQueryChannel carries one process's question about a room to every other member,
 	// and documentAnswerChannel each member's answer to it; room_query.go has their wire format.

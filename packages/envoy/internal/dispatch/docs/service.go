@@ -20,7 +20,6 @@ import (
 	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/provider/websocket"
 
-	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -60,7 +59,6 @@ type Deps struct {
 	Persistence       VersionedStore
 	Events            *events.Broker
 	Identity          identity.Identity
-	AgentTokens       *auth.SharedAgentTokens
 	ServerURL         string
 	Settle            time.Duration
 	MarkWait          time.Duration
@@ -107,7 +105,6 @@ type Service struct {
 	persistence       VersionedStore
 	events            *events.Broker
 	identity          identity.Identity
-	agentTokens       *auth.SharedAgentTokens
 	serverURL         string
 	settle            time.Duration
 	markWait          time.Duration
@@ -672,7 +669,6 @@ func New(deps Deps) *Service {
 		persistence:       persist,
 		events:            deps.Events,
 		identity:          deps.Identity,
-		agentTokens:       deps.AgentTokens,
 		serverURL:         strings.TrimSuffix(deps.ServerURL, "/"),
 		settle:            settle,
 		markWait:          markWait,
@@ -2601,7 +2597,7 @@ func (s *Service) readRoomIssueStates(ctx context.Context, sql string, arg any) 
 
 // issueOpenChanged is issueOpenChangedChannel's handler, on its room-sync lane (roomSync.handlers):
 // issueKey's closed_at changed, in a transaction of any process - this one's, another's, or an
-// earlier build's - whose commit the trigger of migration 0150 announced. It reads the issue's
+// earlier build's - whose commit the trigger of migration 0151 announced. It reads the issue's
 // state now rather than trusting the notification for it: a close and a reopen in quick
 // succession may both be read as the second, which is the truth by then. Every room this process
 // holds of the issue's documents takes that state (setRoomIssueOpen). A document no room here
