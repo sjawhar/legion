@@ -2290,9 +2290,22 @@ func (r *keptRun) turn(tree *keptTree) {
 		r.waitMachines()
 	}
 	tree.conn.SetStreaming(false)
-	r.handle(machine, supervise.StreamTurnEnd{Claim: tree.token})
+	r.endTurn(tree, machine)
 	r.waitMachines()
 	r.tracef("turn tree=%s state=%s pending=%t", tree.key, machine.Claim().State, machine.Claim().Pending != nil)
+}
+
+// endTurn is a turn's end as Oh My Pi reports it: the agent_end, and, for the turn a confirmed
+// task's prompt ran, that prompt's result, which is what retires the delivery now that a role's
+// own background work can start turns the daemon never prompted (supervise's promptResulted). A
+// turn no confirmed task was running in ends with no result, as on the wire; a result for a
+// delivery the claim no longer holds is fenced out by the machine.
+func (r *keptRun) endTurn(tree *keptTree, machine *supervise.Machine) {
+	pending := machine.Claim().Pending
+	r.handle(machine, supervise.StreamTurnEnd{Claim: tree.token})
+	if pending != nil && !pending.ConfirmedAt.IsZero() {
+		r.handle(machine, supervise.StreamPromptResult{Claim: tree.token, DeliveryID: pending.ID, AgentInvoked: true})
+	}
 }
 
 // awaitingConfirmation is whether the root's architect holds a task that names kept decisions and

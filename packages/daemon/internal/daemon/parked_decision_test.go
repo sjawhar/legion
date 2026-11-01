@@ -442,11 +442,10 @@ func TestARetriedStartDeliversItsTaskOnce(t *testing.T) {
 		p := machine.Claim().Pending
 		return p != nil && !p.DeliveredAt.IsZero()
 	})
-	for _, ev := range []supervise.Event{supervise.StreamTurnStart{Claim: token}, supervise.StreamTurnEnd{Claim: token}} {
-		if err := machine.Handle(ctx, ev); err != nil {
-			t.Fatalf("handle %T: %v", ev, err)
-		}
+	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: token}); err != nil {
+		t.Fatalf("start the task's turn: %v", err)
 	}
+	endTurn(ctx, t, machine, token)
 	machine.Wait()
 	if pending := machine.Claim().Pending; pending != nil {
 		t.Fatalf("the delivery after its turn ended = %#v, want it retired", pending)
@@ -523,11 +522,10 @@ func TestAStartWhoseForgetFailedIsNotDeliveredAgainAfterItsTurn(t *testing.T) {
 		p := machine.Claim().Pending
 		return p != nil && !p.DeliveredAt.IsZero()
 	})
-	for _, ev := range []supervise.Event{supervise.StreamTurnStart{Claim: token}, supervise.StreamTurnEnd{Claim: token}} {
-		if err := machine.Handle(ctx, ev); err != nil {
-			t.Fatalf("handle %T: %v", ev, err)
-		}
+	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: token}); err != nil {
+		t.Fatalf("start the task's turn: %v", err)
 	}
+	endTurn(ctx, t, machine, token)
 	machine.Wait()
 	if pending := machine.Claim().Pending; pending != nil {
 		t.Fatalf("the delivery after its turn ended = %#v, want it retired", pending)

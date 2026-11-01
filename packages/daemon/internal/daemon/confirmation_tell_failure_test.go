@@ -40,9 +40,13 @@ func TestADecisionToldInATurnWhoseConfirmationFailedIsToldAgain(t *testing.T) {
 		}
 	}
 	machine, _ := r.sup.Machine(r.token)
+	// The turn the prompt ran starts and ends, and Oh My Pi reports the prompt's result, which is
+	// what retires the delivery (supervise's promptResulted).
+	sent := machine.Claim().Pending.ID
 	for _, ev := range []supervise.Event{
 		supervise.StreamTurnStart{Claim: r.token},
 		supervise.StreamTurnEnd{Claim: r.token},
+		supervise.StreamPromptResult{Claim: r.token, DeliveryID: sent, AgentInvoked: true},
 	} {
 		_ = machine.Handle(r.ctx, ev)
 		machine.Wait()
