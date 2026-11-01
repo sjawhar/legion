@@ -832,14 +832,15 @@ const (
 	followedTopicModeNotAdvertised
 )
 
-// judgeFollowedTopic is the one judgement of a message on a topic sessionID follows: the durable
-// path's fan-out (fanoutDelivery) and the relay of a serving-port session's consumer
-// (sessionRelays.pushUntilAccepted), which push the same messages by different routes, both apply
-// it, so each refusal holds whichever route a session's message takes. A copy the session already
-// took, or one already on its way to it, is refused by the dedupe and attempt caches, which are
-// keyed on the envelope's dedupe key: one upstream event published on several of a session's
-// topics (contracts/normalize.go) reaches it once. An echo of the session's own message, and a
-// delivery mode its entry does not advertise, are refused too.
+// judgeFollowedTopic is the durable path fan-out's (fanoutDelivery) judgement of a message on a
+// topic sessionID follows: judgeFollowedTopicWithoutAttempt, the judgement the relay of a
+// serving-port session's consumer applies too (sessionRelays.followedTopicVerdict), so each refusal
+// holds whichever route a session's message takes, and then the attempt cache, which the fan-out
+// alone reads as a refusal. A copy the session already took is refused by the dedupe cache, and,
+// on the fan-out's route, one already on its way to it by the attempt cache; both are keyed on the
+// envelope's dedupe key, so one upstream event published on several of a session's topics
+// (contracts/normalize.go) reaches it once. An echo of the session's own message, and a delivery
+// mode its entry does not advertise, are refused too.
 //
 // mode is the delivery mode the envelope targets, "" when it targets none, and modeErr the failure
 // of reading it (envelopeDeliveryMode): both are read once per message rather than once per
