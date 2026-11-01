@@ -2,47 +2,43 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-707",
-  "previousHandoff": "efd263bacf8593783a89a99abe520eeba0a7457f",
+  "previousHandoff": "f4409c4b0dd3fbe5bc67746f7628c1280cd6c57d",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2496",
-  "codeHead": "67ac05a4a0c143056bc0c68fad08ca37798b6be8",
-  "round": "forward merge after the daemon's send-back (head efd263ba CONFLICTING with main d04cb867, #2522); a full round because #2522 changes the write path",
+  "codeHead": "0c066286514a079792f75a7a0437ba52f1f0c3c7",
+  "round": "forward merge after review round 6 approved 599901d3 and GitHub reported #2496 CONFLICTING with main 3d3fb96d (#2391); docs-only conflict, so the docs package and the stored-order family once",
   "proof": [
     {
       "criterion": "1. A test drives an agent write racing browser updates on one warm room, fails on main, passes at the head over enough rounds (count and main's failure rate stated).",
       "surface": "Go tests against a real Postgres 18.6 + pgvector 0.8.7 (local, as CI runs them)",
-      "command": "cd packages/envoy && GOWORK=off GOMAXPROCS=4 GOMEMLIMIT=12GiB DISPATCH_TEST_DATABASE_URL=<local PG 18.6 + pgvector> go test -p 1 ./internal/dispatch/docs/ -count=1 -timeout 75m ; same -run TestStoredOrderSoak -v -timeout 60m -args -stored-order-rounds=200 ; CGO_ENABLED=1 go test -race -p 1 ./internal/dispatch/docs/ -run 'TestStoredOrder|Backfill|TestAFailedRooms' -count=1 -timeout 60m (r8.sh in the evidence artifact)",
-      "observed": "At 67ac05a4: whole internal/dispatch/docs package ok 1450.8s; TestStoredOrderSoak -stored-order-rounds=200: rounds=200 counted=200 mismatching_counted_rounds=0 mismatches=0 (write p50 92 ms, p99 294 ms); CGO_ENABLED=1 go test -race -run 'TestStoredOrder|Backfill|TestAFailedRooms' -timeout 60m ok; TestStoredOrderFormattedWritesReplayToEveryVersion and every TestStoredOrder*, backfill, flush, read-point and shadow test green; #2522's precondition_token_test.go, refusal_order_test.go and write_corpus_test.go byte-identical to main d04cb867 and green; cmd/dispatch and loadtest/browsertype ok. Logs: dispatch://INFRA-707/artifact/infra-707-implementer-evidence-tar-gz version 8. p = 1 on main, so n = 200.",
-      "headSha": "67ac05a4a0c143056bc0c68fad08ca37798b6be8",
+      "command": "cd packages/envoy && GOWORK=off GOMAXPROCS=4 GOMEMLIMIT=12GiB DISPATCH_TEST_DATABASE_URL=<local PG 18.6 + pgvector> go test -p 1 ./internal/dispatch/docs/ -count=1 -timeout 75m ; go test -p 1 ./internal/dispatch/docs/ -run TestStoredOrder -count=1 -v -timeout 30m ; go test -p 1 ./cmd/dispatch/ ./loadtest/browsertype/ -run 'StoredOrder|Protect|Keystroke' -count=1 (r9.sh in the evidence artifact)",
+      "observed": "At 0c066286: whole internal/dispatch/docs package ok 1437.3s; -run TestStoredOrder -v: 15 tests ok, TestStoredOrderFormattedWritesReplayToEveryVersion included, soak 12 rounds 0 mismatches; cmd/dispatch stored-order and loadtest/browsertype ok; build, vet, gofmt clean. The 200-round soak (0 mismatches) and CGO_ENABLED=1 -race ran at 67ac05a4, whose write-path code 0c066286 carries unchanged (round_shape.py: only dispatch-docs.md differs). Logs: dispatch://INFRA-707/artifact/infra-707-implementer-evidence-tar-gz version 9.",
+      "headSha": "0c066286514a079792f75a7a0437ba52f1f0c3c7",
       "negativeControl": "The new test with the format cleanup turned back on in newDocumentCopy: FAIL, the last version holds \"seed\\n\\n*xy*\\n\\n*xy*\\n\" where the room renders \"seed\\n\\n*x*y\\n\\n*xy*\\n\". Earlier: main 7c2effba's production code plus storedorder.go and storedorder_test.go fails all ten window tests and the soak."
     },
     {
       "criterion": "Stored history replays under real browsers and agent HTTP writes on a real Dispatch server; browsertype -protect leaves the protected paragraph alone",
       "surface": "local real envoy-dispatch built from the head, Postgres 18.6 + pgvector, browsertype peers over the document websocket, agent writes over the HTTP API, envoy-dispatch stored-order from the same head",
-      "command": "PROTECT='The last paragraph of the seed.' run.sh head <67ac05a4 packages/envoy> 18801 60 (server DISPATCH_IDENTITY=header:X-Dispatch-User; browsertype -person e2e-browser -peers 3 -rate 8; then envoy-dispatch stored-order --since <start>); run.sh base <d04cb867 packages/envoy> 18802 60",
-      "observed": "Head 67ac05a4: agent 56 delete + 44 insert + 20 replace edits, 68 named versions, 55 uploads all accepted; 6 peers sent=639 errors=0; stored-order documents=2 clean=2 mismatched=0 over 1,706 + 1,741 updates and 95 + 102 versions, exit 0; protected sentence intact in both; 0 server ERROR lines.",
-      "headSha": "67ac05a4a0c143056bc0c68fad08ca37798b6be8",
-      "negativeControl": "Same run with the server built from main d04cb867: stored-order clean=0 mismatched=2 (24 + 23 mismatches: versions whose stored markdown differs from the fold, stored classes that differ), exit 1."
+      "command": "PROTECT='The last paragraph of the seed.' run.sh head <0c066286 packages/envoy> 18801 60 ; run.sh base <3d3fb96d packages/envoy> 18802 60",
+      "observed": "Head 0c066286: agent 56 delete + 44 insert + 19 replace edits, 66 named versions, 54 uploads all accepted; 6 peers errors=0; stored-order documents=2 clean=2 mismatched=0 over 1,703 + 1,733 updates and 95 + 98 versions, exit 0; protected sentence intact in both; 0 server ERROR lines.",
+      "headSha": "0c066286514a079792f75a7a0437ba52f1f0c3c7",
+      "negativeControl": "Same run with the server built from main 3d3fb96d: clean=0 mismatched=2 (22 + 18 mismatches), exit 1."
     }
   ],
   "filesChanged": [
-    "merge resolution: packages/envoy/internal/dispatch/docs/livewrite.go, mutation.go (#2522's ValidDocument fork read under this PR's readForkTree)",
-    "packages/envoy/loadtest/browsertype/main.go (peers connect as people: -identity-header, -person)",
-    "packages/envoy/cmd/dispatch/README.md (browsertype paragraph)"
+    ".dispatch/architecture/dispatch-docs.md (merge resolution: both paragraphs kept)"
   ],
   "trickyParts": [
     "RoomFlush is exported (fields unexported) because it crosses VersionedStore, which a test store in internal/dispatch/api wraps.",
-    "Local harness: pg.sh (Postgres 18.6 + pgvector under $TMPDIR/pg18, port 55418); restart it if tests fail with connection refused.",
-    "The full round's first two starts were cut by the 03:02Z INFRA pod restart, which also took the scratch volume; the harness was restored from evidence artifact version 7 and the E2E server now needs DISPATCH_SIGNING_KEY under header identity (it no longer runs dev sign-in). Memory peak 9.58 GiB over 1,084 samples; no leftover process (ps check empty)."
+    "Memory peak 10.29 GiB over 710 samples during the docs package run; sampler ended, no leftover process."
   ],
   "deviations": [],
   "openQuestions": [
-    "CI on 67ac05a4 was still queued at 04:17Z; the daemon reads it."
+    "CI on 0c066286 was queued at the push; the daemon reads it."
   ],
   "answersToReview": [
-    "Merge 67ac05a4 of main d04cb867 (https://github.com/sjawhar/legion/pull/2496#issuecomment-6552537113): livewrite.go keeps this PR's readForkTree name with #2522's ValidDocument signature, body and comment (treeOfUnshared); mutation.go applyMargin, heldTree and captureWrite take #2522's valid.Node() shape through readForkTree, and the old combined capture body this PR split stays dropped.",
-    "Main's #2541 removed docs.ActorHeader and the document socket's agent-token door, so browsertype did not build: its peers now connect as people named in the server's identity header (-identity-header, default X-Dispatch-User; -person <prefix>, peer n is <prefix>-<n>) in place of -token-file/-session; cmd/dispatch/README.md says the same; INFRA-598's implementer told which cluster.sh lines change (2262-2263).",
-    "go.work.sum: the merge carries main's file (equal in both parents), not the 136 checksum lines a local go build adds.",
-    "Fingerprint 8cb51c95\u2026 -> 1241ec25\u2026, changed; round-shape.py is in neither the repository nor the Legion skills here, so the comment classifies the round by hand: a full round.",
-    "Main moved on to d09b46d7 (release-only commits, no packages/envoy file); merge-tree shows no conflict and GitHub reports MERGEABLE, so no further merge."
+    "Merge 0c066286 of main 3d3fb96d (https://github.com/sjawhar/legion/pull/2496#issuecomment-6557459869): the one conflict, .dispatch/architecture/dispatch-docs.md, keeps this PR's stored-order paragraph and #2391's dispatch-duty dependency and background-loops paragraph; against main only this PR's first paragraph differs.",
+    "round_shape.py (dispatch://INFRA-592/artifact/round-shape-py) 599901d3 -> 0c066286, base 3d3fb96d: files in old diff 67, new diff 67; files whose own diff differs: 1 (changed .dispatch/architecture/dispatch-docs.md, by context only). Fingerprint 0e405626... unchanged.",
+    "No runtime file of the write path conflicted; main's docs-package changes (edit_notices.go, reference_excerpts.go, task_progress.go, block_index.go) merged automatically.",
+    "GitHub reports MERGEABLE at 0c066286."
   ]
 }
