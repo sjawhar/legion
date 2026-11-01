@@ -70,6 +70,7 @@
         "!packages/proof-editor/src/mermaid-code-block-view.ts",
         "!packages/proof-editor/src/typed-block-drawing.ts",
         "!packages/proof-editor/src/ask-content.ts",
+        "!packages/proof-editor/src/editor-change-decorations.ts",
         "packages/proof-editor/upstream/**"
       ],
       "assist": { "enabled": false },

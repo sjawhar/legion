@@ -9,13 +9,13 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/sjawhar/envoy/internal/broker/oauth"
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 )
 
-// introspectionResponse is POST /v1/oauth/introspect's answer: oauth.Introspection itself, named
-// here because the broker's generated HTTP reference documents a route's answer from a type this
-// package declares. The route adds no field of its own.
-type introspectionResponse = oauth.Introspection
+// introspectionResponse is POST /v1/oauth/introspect's answer: oauthwire.Introspection itself,
+// named here because the broker's generated HTTP reference documents a route's answer from a type
+// this package declares. The route adds no field of its own.
+type introspectionResponse = oauthwire.Introspection
 
 // introspect is POST /v1/oauth/introspect: the RFC 7662 request, a form whose token parameter
 // names the access token to read back, answered with what the broker knows about it — whether it

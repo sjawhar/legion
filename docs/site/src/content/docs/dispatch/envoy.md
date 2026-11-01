@@ -149,7 +149,7 @@ published still gets it when it reconnects
 | `notifications.legion.<project>.controller` | A Legion project's controller. |
 | `notifications.slack.*.<channel>.mention` | Every mention of the Slack app in one channel, whatever the team. |
 | `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, with the reason. |
-| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. It reaches every session subscribed to it when it is published, and is not kept for a session that subscribes later. A session that holds its own NATS connection receives it directly, its own publish included. A publish through the listener also hands it to each other such session registered on the topic, on any machine, and waits for each to confirm it: if one does not within four seconds, the publish fails naming each session that did not, and every session it does not name received it. A session that stopped without unregistering stays registered for up to five minutes and is named in that time. A registered session whose connection was down gets the message from the stream when it reconnects ([Messages a session missed](#messages-a-session-missed)). A session the listener delivers to over a serve port, such as an OpenCode agent, is not waited for: it receives the topic through its machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`, which a host's own listener sets; the shared hub's listener does not), except a publish of its own, which the listener does not echo back. A topic outside `notifications.` is refused. |
+| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. It reaches every session subscribed to it when it is published, and is not kept for a session that subscribes later. A session that holds its own NATS connection receives it directly, its own publish included. A publish through the listener also hands it to each other such session registered on the topic, on any machine, and waits for each to confirm it: if one does not within four seconds, the publish fails naming each session that did not, and every session it does not name received it. A session that stopped without unregistering stays registered for up to five minutes and is named in that time. A registered session whose connection was down gets the message from the stream when it reconnects ([Messages a session missed](#messages-a-session-missed)). A session the listener delivers to over a serve port is not waited for: it receives the topic through its machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`, which a host's own listener sets; the shared hub's listener does not), except a publish of its own, which the listener does not echo back. A topic outside `notifications.` is refused. |
 
 An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscription in the
 listener. A subscription to `<subject>.>` also covers `<subject>` itself, so subscribing to a pull
@@ -224,10 +224,10 @@ session's inbox reached through a registered topic, and every failed-delivery la
 Besides each session's id, title, directory, topics and roles, a row carries the plugin the
 session registered through, which every registration sends:
 
-| Field | Oh My Pi | Claude Code | OpenCode |
-| --- | --- | --- | --- |
-| `plugin` | `@sjawhar/pi-envoy` | `@sjawhar/claude-envoy` | `@sjawhar/opencode-legion-envoy` |
-| `plugin_version` | the package version (a source checkout reports the version of the last release in its history) | the first 12 characters of the marketplace commit Claude Code installed it from, or `source` when it runs from outside Claude Code's plugin cache (a checkout, `--plugin-dir`) | the package version |
+| Field | Oh My Pi | Claude Code |
+| --- | --- | --- |
+| `plugin` | `@sjawhar/pi-envoy` | `@sjawhar/claude-envoy` |
+| `plugin_version` | the package version (a source checkout reports the version of the last release in its history) | the first 12 characters of the marketplace commit Claude Code installed it from, or `source` when it runs from outside Claude Code's plugin cache (a checkout, `--plugin-dir`) |
 
 A session whose plugin predates the two fields shows neither. The `envoy_sessions` tool of the
 Oh My Pi and Claude Code plugins shows them too.
@@ -241,8 +241,8 @@ read from its row:
 - **Claude Code:** it does when its commit contains that change's squash commit:
   `gh api repos/sjawhar/legion/compare/<squash commit>...<plugin_version> --jq .status` answers
   `ahead` or `identical`.
-- **Anything else:** `source`, a row without the fields, and an OpenCode session (whose plugin has
-  no recovery of missed messages) are checked by hand, or counted as not having it.
+- **Anything else:** `source` and a row without the fields are checked by hand, or counted as not
+  having it.
 
 ## The NATS grant a Legion daemon needs
 

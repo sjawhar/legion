@@ -111,7 +111,7 @@ type dispatchInput struct {
 }
 
 // dispatchClusterOnlyRefusals is every input the cluster-only mode refuses, one row each, holding
-// a value a consumer would plausibly send. The nine rows of the tailnet and sign-in groups come
+// a value a consumer would plausibly send. The eight rows of the tailnet and sign-in groups come
 // from the groups' own tables, which are where those values are written
 // (dispatchSandboxTailnetGroup, dispatchSandboxSignInGroup), so a group that gains an input is
 // refused here without that input being written down a second time.
@@ -134,6 +134,7 @@ func dispatchClusterOnlyRefusals() []dispatchInput {
 		{"databaseVersion", func(a *gcp.DispatchArgs) { a.DatabaseVersion = pulumi.StringRef("POSTGRES_18") }},
 		{"databaseTier", func(a *gcp.DispatchArgs) { a.DatabaseTier = pulumi.StringRef("db-custom-4-15360") }},
 		{"databaseAvailabilityType", func(a *gcp.DispatchArgs) { a.DatabaseAvailabilityType = pulumi.StringRef("REGIONAL") }},
+		{"databaseWaitsFor", func(a *gcp.DispatchArgs) { a.DatabaseWaitsFor = pulumi.String("example-ordering-value") }},
 		{"namespace", func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef("example-namespace") }},
 		{"existingNamespace", func(a *gcp.DispatchArgs) { a.ExistingNamespace = pulumi.BoolRef(true) }},
 		{"replicas", func(a *gcp.DispatchArgs) { a.Replicas = pulumi.IntRef(2) }},
@@ -142,6 +143,7 @@ func dispatchClusterOnlyRefusals() []dispatchInput {
 		{"natsInCluster", func(a *gcp.DispatchArgs) { a.NatsInCluster = pulumi.BoolRef(true) }},
 		{"natsReplicas", func(a *gcp.DispatchArgs) { a.NatsReplicas = pulumi.IntRef(dispatchNatsReplicas) }},
 		{"streamMaxBytes", func(a *gcp.DispatchArgs) { a.StreamMaxBytes = pulumi.IntRef(dispatchStreamMaxBytes) }},
+		{"signingKeyGenerations", func(a *gcp.DispatchArgs) { a.SigningKeyGenerations = []int{0, 1} }},
 		{"appCpu", func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("1") }},
 		{"appMemory", func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("4Gi") }},
 		{"proxyCpu", func(a *gcp.DispatchArgs) { a.ProxyCpu = pulumi.StringRef("1") }},

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { fireEvent, render } from "@testing-library/react";
-import { createRef, type ReactNode } from "react";
+import { createRef, type ReactNode, type RefObject } from "react";
 
 import { type AnchorRow, ViewportAnchor } from "./ViewportAnchor";
 
@@ -9,6 +9,7 @@ const LIST_TOP = 100;
 const VIEWPORT_HEIGHT = 600;
 
 const anchor = createRef<ViewportAnchor>();
+const scrollerRef = createRef<HTMLDivElement>();
 
 /** The row the next commit will anchor to, as `getSnapshotBeforeUpdate` will choose it. */
 function chosen(): AnchorRow | null {
@@ -20,14 +21,23 @@ function List({
   enabled,
   groups,
   rows,
+  scroller,
 }: {
   enabled?: () => boolean;
   /** A row's group; rows default to one shared group. */
   groups?: Readonly<Record<string, string>>;
   rows: string[];
+  /** When given, the rows scroll in this element instead of the document. */
+  scroller?: RefObject<HTMLDivElement | null>;
 }): ReactNode {
-  return (
-    <ViewportAnchor enabled={enabled} group="data-group" item="data-row" ref={anchor}>
+  const list = (
+    <ViewportAnchor
+      enabled={enabled}
+      group="data-group"
+      item="data-row"
+      ref={anchor}
+      scroller={scroller}
+    >
       {rows.map((id) => (
         <div data-group={groups?.[id] ?? "one"} data-row={id} key={id} tabIndex={-1}>
           <button type="button">{id}</button>
@@ -35,10 +45,19 @@ function List({
       ))}
     </ViewportAnchor>
   );
+  return scroller === undefined ? (
+    list
+  ) : (
+    <div data-scroller="" ref={scroller}>
+      {list}
+    </div>
+  );
 }
 
 // A fixed geometry: rows are ROW_HEIGHT tall, stacked from LIST_TOP in DOM order, in a
-// VIEWPORT_HEIGHT window that scrolls through `window.scrollY`.
+// VIEWPORT_HEIGHT window that scrolls through `window.scrollY` - or, where the list is rendered
+// in a scroller, through that element's `scrollTop`, the scroller itself filling the window and
+// never moving.
 const rows = () => [...document.querySelectorAll<HTMLElement>("[data-row]")];
 const viewportTop = (id: string) =>
   document.querySelector(`[data-row="${id}"]`)?.getBoundingClientRect().top;
@@ -68,11 +87,16 @@ beforeEach(() => {
     this: Element
   ) {
     const all = rows();
-    const isList = !this.hasAttribute("data-row");
-    const top = isList
-      ? LIST_TOP - window.scrollY
-      : LIST_TOP + all.indexOf(this as HTMLElement) * ROW_HEIGHT - window.scrollY;
-    const height = isList ? all.length * ROW_HEIGHT : ROW_HEIGHT;
+    // Whatever scrolls the rows carries them: the window, or the scroller when one is rendered.
+    const offset = scrollerRef.current?.scrollTop ?? window.scrollY;
+    const isScroller = this.hasAttribute("data-scroller");
+    const isRow = this.hasAttribute("data-row");
+    const top = isScroller
+      ? 0
+      : isRow
+        ? LIST_TOP + all.indexOf(this as HTMLElement) * ROW_HEIGHT - offset
+        : LIST_TOP - offset;
+    const height = isScroller ? VIEWPORT_HEIGHT : isRow ? ROW_HEIGHT : all.length * ROW_HEIGHT;
     return {
       bottom: top + height,
       height,
@@ -86,7 +110,8 @@ beforeEach(() => {
     };
   });
   const point = spyOn(document, "elementFromPoint").mockImplementation((_x, y) => {
-    const index = Math.floor((window.scrollY + y - LIST_TOP) / ROW_HEIGHT);
+    const offset = scrollerRef.current?.scrollTop ?? window.scrollY;
+    const index = Math.floor((offset + y - LIST_TOP) / ROW_HEIGHT);
     return rows()[index] ?? null;
   });
   restoreSpies = [() => rect.mockRestore(), () => point.mockRestore()];
@@ -228,6 +253,24 @@ test("a current node reordered within its group is still followed", () => {
     // r7 is promoted two places up its section.
     view.rerender(<List rows={[...ids(4), "r7", "r5", "r6", ...ids(5, 8)]} />);
     expect(viewportTop("r7")).toBe(before);
+    expect(window.scrollY).toBe(0);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("rows scrolling in an element are pinned by that element's scrollTop, and the window stays", () => {
+  const view = render(<List rows={ids(12)} scroller={scrollerRef} />);
+  try {
+    const scroller = scrollerRef.current;
+    if (scroller === null) throw new Error("scroller missing");
+    scroller.scrollTop = 100;
+    // The same geometry as the window case: the centre of the scroller's box is r7.
+    const before = viewportTop("r7");
+    expect(chosen()).toEqual({ id: "r7", via: "center" });
+    view.rerender(<List rows={["new-a", "new-b", ...ids(12)]} scroller={scrollerRef} />);
+    expect(viewportTop("r7")).toBe(before);
+    expect(scroller.scrollTop).toBe(200);
     expect(window.scrollY).toBe(0);
   } finally {
     view.unmount();

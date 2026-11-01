@@ -241,7 +241,11 @@ func TestListMarksAndMarkAttrs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []MarkRef{{"proofComment", "c1"}, {"dispatchAsk", "a1"}, {"proofSuggestion", "s1"}}
+	want := []Marked{
+		{MarkRef{"proofComment", "c1"}, "user:sami"},
+		{MarkRef{"dispatchAsk", "a1"}, "session:01a0"},
+		{MarkRef{"proofSuggestion", "s1"}, "session:01a0"},
+	}
 	if got := ListMarks(doc); !reflect.DeepEqual(got, want) {
 		t.Fatalf("ListMarks = %v, want %v", got, want)
 	}
@@ -369,9 +373,11 @@ func TestFindMarkReadsEachOfTwoMarksOfOneTypeOnOneRun(t *testing.T) {
 			if len(covering) != 2 || !containsSameMark(covering, bob) || !containsSameMark(covering, alice) {
 				t.Fatalf("AnchorMarksCovering(brown) = %v, want both comments", covering)
 			}
-			if refs := ListMarks(doc); !reflect.DeepEqual(refs, []MarkRef{{Type: "proofComment", ID: "c1"}, {Type: "proofComment", ID: "c2"}}) &&
-				!reflect.DeepEqual(refs, []MarkRef{{Type: "proofComment", ID: "c2"}, {Type: "proofComment", ID: "c1"}}) {
-				t.Fatalf("ListMarks = %v, want each comment once", refs)
+			bobsRef := Marked{MarkRef{Type: "proofComment", ID: "c1"}, "user:bob"}
+			alicesRef := Marked{MarkRef{Type: "proofComment", ID: "c2"}, "user:alice"}
+			if refs := ListMarks(doc); !reflect.DeepEqual(refs, []Marked{bobsRef, alicesRef}) &&
+				!reflect.DeepEqual(refs, []Marked{alicesRef, bobsRef}) {
+				t.Fatalf("ListMarks = %v, want each comment once with its author", refs)
 			}
 		})
 	}
@@ -480,7 +486,7 @@ func TestSpliceInlineKeepsNeighbourMarks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := Splice(doc, rangeChange, with)
+	out, err := splice(doc, rangeChange, with)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,7 +516,7 @@ func TestSpliceAcrossBlocksReplacesBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := Splice(doc, Range{From: from.From, To: to.To}, with)
+	out, err := splice(doc, Range{From: from.From, To: to.To}, with)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,7 +575,7 @@ func TestSpliceNestedTextblocks(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := Splice(doc, r, with)
+			got, err := splice(doc, r, with)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -601,7 +607,7 @@ func TestSpliceCrossListItemsReplacesOnlySelectedItems(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := Splice(doc, Range{From: from.From, To: to.To}, with)
+	got, err := splice(doc, Range{From: from.From, To: to.To}, with)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -631,7 +637,7 @@ func TestSpliceAcrossTextblocksKeepsPartialBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := Splice(doc, Range{From: from.From, To: to.To}, with)
+	got, err := splice(doc, Range{From: from.From, To: to.To}, with)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -713,7 +719,7 @@ func TestSpliceMatchesEngineReplaceRange(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := Splice(doc, r, with)
+			got, err := splice(doc, r, with)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -742,7 +748,7 @@ func TestSpliceBlockReplacementDoesNotFlattenIntoParagraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := Splice(doc, r, with)
+	got, err := splice(doc, r, with)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -795,7 +801,7 @@ func TestSpliceDoesNotJoinTextblocksWithDifferentAttrs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := Splice(doc, Range{From: from.From, To: to.To}, with)
+			got, err := splice(doc, Range{From: from.From, To: to.To}, with)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -820,7 +826,7 @@ func TestSpliceAtBlockBoundariesAndDeletes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := Splice(doc, Range{From: 0, To: 6}, with)
+	got, err := splice(doc, Range{From: 0, To: 6}, with)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -836,7 +842,7 @@ func TestSpliceAtBlockBoundariesAndDeletes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err = Splice(doc, Range{From: 0, To: 6}, empty)
+	got, err = splice(doc, Range{From: 0, To: 6}, empty)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -852,7 +858,7 @@ func TestSpliceAtBlockBoundariesAndDeletes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err = Splice(only, Range{From: 0, To: 6}, empty)
+	got, err = splice(only, Range{From: 0, To: 6}, empty)
 	if err != nil {
 		t.Fatal(err)
 	}

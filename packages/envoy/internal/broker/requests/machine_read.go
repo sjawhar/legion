@@ -61,10 +61,10 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 	var live bool
 	enr := enrollmentRow{ID: enrollmentID}
 	err := m.Store.Pool.QueryRow(ctx, `select g.enrollment_id, g.expires_at, g.revoked_at is null and `+grantUnexpired("g")+` and e.revoked_at is null and enrollment_lease_live(e.lease_expires_at),
-		g.request_id, r.rules_version, coalesce(r.decided_by, ''), r.lifetime_seconds, e.kind, e.operator, e.subject, c.service
+		g.request_id, r.rules_version, coalesce(r.decided_by, ''), r.lifetime_seconds, e.kind, e.operator, e.subject, c.service, c.host
 		from grants g join enrollments e on e.id=g.enrollment_id join requests r on r.id=g.request_id
 		left join launcher_credentials c on c.id = e.launcher_credential_id where g.id=$1`, grantID).
-		Scan(&owner, &expires, &live, &requestID, &policyVersion, &decidedBy, &lifetime, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service)
+		Scan(&owner, &expires, &live, &requestID, &policyVersion, &decidedBy, &lifetime, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service, &enr.Host)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, ErrGrantNotLive
 	}
@@ -74,7 +74,7 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 	if owner != enrollmentID {
 		return nil, nil, ErrNotYours
 	}
-	if !live {
+	if !live || m.vmRemoved(enr) {
 		return nil, nil, ErrGrantNotLive
 	}
 	if err := m.VerifyChain(ctx, grantID); err != nil {
@@ -88,7 +88,7 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 	// mints for the github-owners the grant was just checked against, never a later read's.
 	set := m.Policy.Get()
 	if policyVersion != set.Version || anyServiceOwned(set, granted) {
-		requester, err := enr.requester(ctx, m.Store.Pool, m.ServicesByAccount)
+		requester, err := m.requester(ctx, m.Store.Pool, enr)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -578,7 +578,7 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names [
 		return Request{}, false, err
 	}
 	if rulesVersion != set.Version || anyServiceOwned(set, granted) {
-		requester, err := enr.requester(ctx, m.Store.Pool, m.ServicesByAccount)
+		requester, err := m.requester(ctx, m.Store.Pool, enr)
 		if err != nil {
 			return Request{}, false, err
 		}
