@@ -2,32 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-251",
-  "previousHandoff": "0d35ace8e6af927699a8e0b14fabeb95fc5e72d2",
-  "headReviewed": "the handoff push above ab06eee9dbde (code head 9dda974d2bc7)",
-  "completed": "2026-11-01T03:16:23Z",
-  "decision": "changes_requested",
-  "round": "narrowed round: review 5722761728's three findings and two Minors against the ownership rule, the composer lock, spentKept, and the round's tests",
+  "previousHandoff": "8c77911b11be0c23d385b6c4972b9e749dca14f2",
+  "headReviewed": "the handoff push above 0103f7a7bf10 (code head 695ee39dea13)",
+  "completed": "2026-11-01T09:32:14Z",
+  "decision": "approved",
+  "round": "narrowed round: the merges of main kept both sides, review 5726218763's five Minors are fixed, nothing merged reopens a way to lose a kept decision, and the last merge moved nothing of this change",
   "critical": 0,
-  "important": 2,
-  "minor": 5,
+  "important": 0,
+  "minor": 0,
   "accepted": [
-    "Review 5722761728's three findings are fixed on the ownership rule: a taken-back confirmation puts its marks back (put-back insert), a hold takes only rows its own claim owns, and a release clears only the hold. ClaimKeptDecisions clears the void hold it overrides. Each has a test that fails with only its fix reverted (deep review ran the mutations).",
-    "Every naming path reads through UnclaimedKept's lock and claims all-or-nothing in one transaction under SerializeFacts: admission, QueueCatchUp from ready, HandOverKept, Adopt, spentKept and rootTask.",
-    "Lock order: every writer goes parked_decisions then readmitted_approvals. A deadlock is possible only between two single multi-row statements, and every aborted side retries (fact replay, outbox retry, saved/settle) with at worst a second telling.",
-    "spentKept loses nothing and tells no wrong tree; the DropCatchUps telling-wide lease guard is right."
+    "The merges kept both sides: main's delivery assignment and this change's Row, Kept, kept_decisions and delivered_rows survive in store/claims.go (claimSelect, putClaim with 28 values, putDelivery, scanClaim), supervise/delivery.go queue and daemon/outbox.go's start; migrations are 0068/0069 after main's 0067. The diff of the branch's own diffs at 8c77911b and 079532ed shows only these unions, the renumber and the Minors.",
+    "The last merge (695ee39d) moved nothing of this change: the unchanged-diff fingerprint is de5b6dc8c0a2e9d4 at both 079532ed and 0103f7a7.",
+    "Nothing merged reopens a loss: RetireDelivery is the only delete of a pending delivery and releases its holds in the same transaction; #2571 only delays retiring a confirmed delivery, which holds nothing; its AgentInvoked=false take-back writes the delivery unconfirmed, so holdKeptDecisions puts the told rows back.",
+    "Review 5726218763's five Minors are fixed, and the new tests can fail (pg_locks read by the second session's pid; TestAHoldReleaseLeavesAClaimThatCounts puts a hold back beside the claim; TestALateReportOfASpentCatchUpNamesWhatItsRowReleased covers spentKept's claims==0 branch).",
+    "c7d8ae93 adds the prompt result main's supervisor now waits for and leaves every kept-decision assertion as it was."
   ],
-  "keyFindings": [
-    {"severity": "important", "file": "CI run 41254193153 (code head 31ac9c55)", "description": "main's required ci-ok is failure because test failed at the code head: intake TestConsumePreparesAnIssueEventsRepositoryBeforeApplyingIt (prepared 3 times, want 2, after a NATS permissions violation on $JS.API.STREAM.MSG.GET) and launcher TestTheContainersStopEndsEveryRoleWithinOneStopGrace (stop took 2.73 s). Neither package's tested behaviour is changed by this branch, so both read as flakes, but a red required check is not approved."},
-    {"severity": "important", "file": "pull request", "description": "GitHub reports #2163 CONFLICTING/DIRTY against main at 03:15Z, so no pull_request run can judge a new head. Forward-merge main, then the new head's CI decides the test failures."},
-    {"severity": "minor", "file": "packages/daemon/internal/record/store.go:776", "description": "The all-or-nothing check cannot catch the race its comment describes: with the lock removed, the second composer's UPDATE re-checks against its old snapshot and claims anyway (deep review's mutation). The lock is what prevents it; say so."},
-    {"severity": "minor", "file": "packages/daemon/internal/store/kept_decisions.go:36", "description": "The put-back runs on every unconfirmed write, not only a taken-back confirmation; the comment and daemon/workflow.go:513 state the narrower condition. Make the comment state what the insert does and why it is safe."},
-    {"severity": "minor", "file": "packages/daemon/internal/store/kept_decisions_test.go:297", "description": "pg_locks is read cluster-wide; filter on the second composer's backend pid. TestAHoldReleaseLeavesAClaimThatCounts' second assertion stays green with the release change reverted; spentKept's claims==0 branch has no test."},
-    {"severity": "minor", "file": "packages/daemon/internal/daemon/notice_exceptions.go:188", "description": "'the decisions wait in the outbox, never in the table alone' is false when the root does not hear (CatchUpTheTreesOwed writes nothing)."},
-    {"severity": "minor", "file": "packages/daemon/internal/workflow/catch_up.go:57", "description": "Still describes the old DropCatchUps rule (one live lease) rather than the telling-wide one."}
-  ],
+  "keyFindings": [],
   "notFindings": [
-    "A CHECK constraint for claimed-or-held, one shared helper for supersededKept/spentKept and for the hold-ownership SQL, and moving the UnclaimedKept pairing into EnqueueNaming are maintainability, not faults."
+    "record/outbox.go:406-410's comment on SuperviseRequest.Kept still says a queued start task forgets its decisions; the delivery holds them until confirmation. A stale comment, not a fault, so left out under the architect's narrowed scope."
   ],
-  "providers": "Verified from each run's own turns in the session store: DeepReview18, 75 assistant turns, all anthropic / claude-opus-5-5; CodeQuality18, 27 assistant turns, all anthropic / claude-opus-5-5.",
-  "ci": "CI head 31ac9c55 (only .legion/ above it): run 41254193153 completed failure; ci-ok failure, test failure, every other lane success, pr-title success. Read 2026-11-01T03:15Z."
+  "providers": "Verified from each run's own turns in the session store: DeepReview20, 47 assistant turns, and CodeQuality20, 29 assistant turns, all anthropic / claude-opus-5-5.",
+  "ci": "CI head 2bfe17df (only .legion/INFRA-251/test.json above it): ci-ok success and pr-title success, main's whole required set, read 2026-11-01T09:32Z; test, lint and pi-legion success."
 }
