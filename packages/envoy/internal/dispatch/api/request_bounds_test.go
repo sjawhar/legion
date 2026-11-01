@@ -263,15 +263,21 @@ func TestARequestOnAFullPoolAnswersDatabaseBusy(t *testing.T) {
 // The live socket is mounted outside the route table, so it is neither admitted nor bounded by the
 // read deadline: it stays open, and keeps sending its heartbeat, long after an ordinary read's
 // deadline would have ended it.
+//
+// The heartbeat is the socket's own liveness clock too: the page must answer each ping within two
+// heartbeats or the socket closes, with no close frame (live_socket.go, pongWait). So the
+// heartbeat here is long beside the read deadline, and the socket is held open across many
+// deadlines: measured on a 3-CPU pod, a 20 ms heartbeat (40 ms to answer) dropped the socket in
+// 6 runs of 400, and a 100 ms one in 1 of 600.
 func TestTheLiveSocketOutlivesTheReadDeadline(t *testing.T) {
-	const deadline = 100 * time.Millisecond
+	const deadline, heartbeat = 20 * time.Millisecond, 250 * time.Millisecond
 	rig := newLiveSocketRig(t, testServerOptions{
-		readDeadline: deadline, streamHeartbeat: 20 * time.Millisecond,
+		readDeadline: deadline, streamHeartbeat: heartbeat,
 	}, nil)
 
 	opened := time.Now()
 	client := rig.dial(t, asUser("alice"))
-	for time.Since(opened) <= 3*deadline {
+	for time.Since(opened) <= 3*heartbeat {
 		if frame := decodeSocketFrame(t, client.take(t, time.Second, "a heartbeat")); frame == nil {
 			t.Fatalf("the live socket sent a frame that is not one of its own after %v", time.Since(opened))
 		}
