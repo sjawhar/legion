@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-562",
-  "completed": "2026-11-01T00:21:22Z",
+  "completed": "2026-11-01T04:13:46Z",
   "proof": [
     {
       "criterion": "Items 1 and 2: a message or mention whose request is cancelled after commit reaches its recipient without a retry; pending attempts a killed process left are sent by the other process under their own key",
@@ -267,6 +267,14 @@
       "observed": "The one conflict was cmd/dispatch/stream_replicas_test.go's import list: the branch's store and storetest imports and main's (#2580) logtest import; all three kept. The file's five tests PASS, TestEditNoticeRestart 5 of 5 PASS, both migration guard tests PASS (main still tops out at 0149, #2411 open, 0150-0153 kept), check-ci-filters 28 gates, go build/vet (plain, multiprocess, memory)/gofmt clean. The unchanged-diff fingerprint is the same before and after the merge (61825754\u2026).",
       "headSha": "6dc52eb20e70",
       "negativeControl": "Before the resolution jj resolve --list reported `packages/envoy/cmd/dispatch/stream_replicas_test.go 2-sided conflict` and nothing else; after it none."
+    },
+    {
+      "criterion": "CI red at 2daf26d9 (run 41256365139): envoy-go's TestEditNoticeRestart and envoy-smoke's TestLive* are not this PR's; and the head merges with main d09b46d7, which conflicted in four files and took migration 0150_dpop_proofs",
+      "surface": "CI job logs of run 41256365139 and main's run 41226348622; the merged tree: the api package and the routes-table tests on a rootless Postgres 17, the Dispatch migration guard, check-ci-filters, the guides' layout check",
+      "command": "gh api repos/sjawhar/legion/actions/jobs/{124706936608,124706936632}/logs; cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra562_merge?sslmode=disable go test -count=1 -timeout 55m ./internal/dispatch/api/ && go test -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' -v ./internal/dispatch/store/; uv run --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh; bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md",
+      "observed": "envoy-go job 124706936608: `--- FAIL: TestEditNoticeRestart ... no edit notice within 10s`, the test main's own run 41226348622 (job 124623150839) also failed and that passed 20 of 20 on main and on the head before. envoy-smoke job 124706936632: TestLiveListener/AdoptionPreviews/SeedReachesNATS/GoConsumers each failed at `build the plugin: ... link: mapping output file failed: no space left on device` on the runner, in packages/envoy/infra/host, which this PR does not touch (its diff against its fork point holds no packages/envoy/infra path). Merge 4a6d06a7 with main d09b46d7: routes_table.go takes main's routeRow table with this PR's four every-process test-hook descriptions; server.go keeps main's comment (decideBrokerToken) with this PR's test-hooks sentences; server_test.go keeps both constants (testTakeoverWindow, testServerURL) and every DepsInput field of both sides (ListenerTakeoverWindow, TestHookTimeout, BrokerTokens); cmd/dispatch/AGENTS.md keeps this PR's five test-hook rows and main's /ws/doc row. Main's #2541 took 0150_dpop_proofs, so this PR's migrations moved 0150-0153 -> 0151-0154 with every reference (file headers, README, AGENTS.md, Go comments, pr2387 fragments), main's dpop references untouched; SQL unchanged. api ok 1738.379s; the routes-table tests ok; both migration guard tests PASS; check-ci-filters 28 gates; layout check clean on both guides; go build/vet (plain, multiprocess, memory)/gofmt clean. The rescue branch legion/INFRA-562-rescue (6b081600) has the same tree as 4a6d06a7.",
+      "headSha": "4a6d06a72cc0",
+      "negativeControl": "Before the resolution jj resolve --list reported 2-sided conflicts in cmd/dispatch/AGENTS.md, api/routes_table.go, api/server.go and api/server_test.go; before the renumbering the merged tree held two version-0150 migrations (0150_dpop_proofs and 0150_message_delivery_urgency), which TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny refuses."
     }
   ],
   "filesChanged": [
