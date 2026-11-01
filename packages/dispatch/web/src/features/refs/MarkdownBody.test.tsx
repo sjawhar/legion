@@ -664,14 +664,25 @@ test("a code span containing tag-shaped text renders the literal characters with
 });
 
 test("raw unsupported HTML renders as literal text with no element created", async () => {
-  const view = render(<MarkdownBody markdown="<img src=x onerror=alert(1)>" />);
+  // The engine draws a block of HTML as a paragraph whose one child is that block's text as
+  // inline HTML (`remarkHtmlBlockParagraphs`), so a body that is nothing but a tag parses and the
+  // literal-text fallback never runs for it. What a reader sees is what it was: the characters
+  // the author wrote, and no element built from them.
+  for (const [markdown, tag] of [
+    ["<img src=x onerror=alert(1)>", "img"],
+    ["<div>y</div>", "div"],
+  ] as const) {
+    const view = render(<MarkdownBody markdown={markdown} />);
 
-  try {
-    expect(await within(view.container).findByText("<img src=x onerror=alert(1)>")).not.toBeNull();
-    expect(view.container.querySelector("img")).toBeNull();
-    expect(view.container.firstElementChild?.getAttribute("data-markdown-fallback")).toBe("true");
-  } finally {
-    view.unmount();
+    try {
+      expect(await within(view.container).findByText(markdown)).not.toBeNull();
+      const body = view.container.firstElementChild as HTMLElement;
+      expect(body.querySelector(tag)).toBeNull();
+      expect(body.querySelector("p")?.textContent).toBe(markdown);
+      expect(body.getAttribute("data-markdown-fallback")).toBeNull();
+    } finally {
+      view.unmount();
+    }
   }
 });
 

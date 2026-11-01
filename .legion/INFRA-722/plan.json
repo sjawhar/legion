@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-722",
+  "completed": "2026-10-29T09:07:51Z",
+  "plan": "dispatch://INFRA-722/artifact/plan-md",
+  "evidence": "dispatch://INFRA-722/artifact/infra722-planner-prototypes-tar-gz (probe harness, classes.jsonl of the 320 misreads with minimal forms, three throwaway prototypes with result.md, probe matrices, generators, proposed fixtures)",
+  "summary": "The 916 documents are all accepted at base f45c6716 and main 88840d35; 320 misread on their LF text, classed T 83 / L 38 / S 34 / I 4 (tables: read as the engine, D3), H 75 (lazy line holding only an HTML tag: by the architect's decision the engine gets a Legion-owned html-flow that does not open kind 7 on a lazy line, Go keeps its reading, Go refuses only the tab-grammar shape, and the renderer stops writing a bare tag line, D4), F 2 (fence over a narrower whitespace line: read alike, D5), P 70 (list spread in quotes in typed blocks: read alike, D6, after D3), W 14 (INFRA-719). CRLF is out of scope: the write path converts it (D2). NUL is read as U+FFFD at the reader's entry (D7). The footnote refusal moves to typedDefinitionRefusal with named constants and no accept/refuse change (D8). Fixtures per D9 (46 documents, 21 forms), census per D10 (INFRA-719's tools and timing, plus the engine's old-vs-new reading of stored markdown), browser test per D12.",
+  "tasks": [
+    "T0 setup: bun install, fetch the evidence bundle into $TMPDIR, build the probe binary",
+    "T1 red tests first: corpus fixtures (read-alike shapes, H included), corpus-errors files with a test over blockMarkdownReaders naming each constant (the 11 S typed-block forms, the tab-grammar shapes), Render test for the code-span tag line, NUL reading test, proof-editor test that the engine keeps the container of a lazy tag line; red at the fork point",
+    "T2 tables (D3): findTableRows answers GFM's rules (equal cell counts counted as micromark counts, no delimiter row on a partly lazy line via lazyLinesAttr, no row 4+ columns in on untrimmed lines, lone | no header), the failed-pair table read alike or refused by name; table_test.go updates; AGENTS.md",
+    "T3 H and F (D4, D5): packages/proof-editor/src/html-flow.ts (copy of micromark-core-commonmark 2.0.3 html-flow with its MIT notice, kind 7 never opening while interrupting, own construct name, registered beside remarkContainerDirectives in lib-headless.ts and lib.ts) with the old-against-new fuzz; pmdoc html_flow.go detection and the tab-grammar refusal (wraps ErrBlockHTML); render_inline.go writes the prefix before a code-span tag line; fenceClosure reads a narrower whitespace line as an empty code line; bun run gen again",
+    "T4 P (D6) after T2: quotedInTypedBlockSpread, opensInQuoteAround, the P3 condition, delete nestedQuotedListBlank, quoteEndsAtFence in the renderer",
+    "T5 NUL (D7): nulAsReplacement at parseUnstamped and ParseInline; withNulsWritten kept",
+    "T6 footnote refusal refactor (D8) in its own commit: typedDefinitionRefusal, two constants, list_spacing_test from the constants with the second test asserting the constant, TestParseNamesTheFirstRefusedBlock pairs, differential against its parent with identical accept/refuse sets",
+    "T7 AGENTS.md and a changie fragment (--custom Issue=pr<PR number>, no Dispatch key)",
+    "T8 browser test packages/dispatch/e2e/<slug>.e2e.ts (chromium): spec shape 1 heading and the narrower-header paragraph alike in editor and comment, spec shape 2 and a comment holding '> a' then '<b>' keep their container and text in the editor, version view and comment, the code-span document's stored markdown keeps the prefix, the tab-grammar shape refused 400 INVALID_MARKDOWN, NUL shows U+FFFD; red at the fork point",
+    "T9 green runs: pmdoc and dispatch Go suites (linearity tests compared at the fork point), differential over the named corpora (every GATE 0 except listed engine-tree churn), the 916 per-class table at the head, bun run check, biome, typecheck, red runs in a fork-point extract",
+    "T10 census (D10) at the head and the PR body (each class with count and fix or refusal, CRLF finding, short-row note, runs, GATE block, census, E2E lines); merge main when GitHub reports a conflict (D1), regenerating fixtures.json",
+    "Production check after the close: dispatch-production-check.sh, then the census again with rewrites of latest versions after the deploy carries the merge"
+  ],
+  "acceptance": [
+    {"criterion": "A1 read-alike shapes are corpus fixtures, pass at head, fail at main", "surface": "TestParseMatchesMilkdownForFixtures over fixtures.json", "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc -run 'TestParseMatchesMilkdownForFixtures|TestFixturesAreWithinSchema|TestRenderParseRoundTrip|<new tests>' -count=1 -timeout 0 -v; cd pmdoc/gen && bun run check", "negativeControl": "the same tests in a fork-point extract: each new fixture subtest fails"},
+    {"criterion": "A1 refused shapes (11 S typed-block forms, tab-grammar shapes) refused with a named reason", "surface": "corpus-errors test over Parse, ParseForWrite, ParseFragment", "command": "T1's command", "negativeControl": "at the fork point every refused shape is accepted"},
+    {"criterion": "D4 engine: kind 7 never opens on a lazy line; comments keep their container", "surface": "packages/proof-editor unit test on the headless engine; old-against-new fuzz", "command": "cd packages/proof-editor && bun test tests/<html-flow test>; the fuzz command on the PR", "negativeControl": "at the fork point '> a\\n<b>\\n' reads doc[paragraph()]; every fuzz difference is a lazy kind-7 line"},
+    {"criterion": "A2 differential against main: 0 regressions, 0 churn, 0 lost fixed points", "surface": "pmdoc differential over in-repo, delimiter, url, reference, n916 (LF), classes, H/F fuzz, P families, rv581r3", "command": "bash pmdoc/gen/differential.sh --base $(fork point) --corpus $TMPDIR/infra722-impl/corpus --out $TMPDIR/infra722-impl/diff", "negativeControl": "the P prototype alone gives 9 GATE misreads, so the gate bites"},
+    {"criterion": "A3 census of every stored version on the PR, each found document rewritten", "surface": "production Dispatch through the agent token, INFRA-719's census tools", "command": "infra-719-crawl.ts, -dedupe.py, -census-run.sh <fork point> <distinct> census, -census-compare.py; rewrites after the deploy", "negativeControl": "the runner over the class documents' base renderings and the code-span matrix reports changes"},
+    {"criterion": "NUL read as U+FFFD with a fixture that fails at main; census counts NUL", "surface": "fixture and reading test; census columns", "command": "T1's command; T10's census", "negativeControl": "at the fork point the tree holds U+0000"},
+    {"criterion": "footnote refusal refactor with no behaviour change", "surface": "refactor commit alone", "command": "differential against the refactor commit's parent; go test -run 'TestParseNamesTheFirstRefusedBlock|TestBrowserListSpacing|TestCorpusErrorsOfItemSpread|TestAListInADefinition'", "negativeControl": "the differential's accept/refuse gates over the same corpora"},
+    {"criterion": "reader-facing: editor, comment and version view agree; the tab-grammar refusal reaches the API", "surface": "Dispatch issue page and Conversation in chromium", "command": "cd packages/dispatch && bun run e2e -- e2e/<slug>.e2e.ts --project=chromium", "negativeControl": "the same spec at the fork point fails on each row"}
+  ],
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker with references/pr-body.md (body, proofs, simplify pass), conflicts-and-rewrites.md (merging main on the expected conflict, D1), default-branch-check.md, merge-gate.md (the production check after the close) and findings.md",
+      "skill://dispatch: the census rewrites and the production writes through the dispatch CLI",
+      "skill://ce-simplify-code: the simplify pass over the settled change"
+    ],
+    "test": [
+      "skill://legion-worker with references/pr-body.md: proof rules for re-running T1, T8, the differential, the 916 table and the fork-point red runs"
+    ],
+    "review": [
+      "skill://legion-worker with references/merge-gate.md and review-threads.md: approving the head, checking the html-flow port, the table rules, D6 after D3, the refactor's unchanged accept/refuse set and that no Dispatch key entered the tree"
+    ]
+  },
+  "repositoryRules": [
+    "No Dispatch key anywhere in sjawhar/legion files, comments, test or fixture names, changelog fragments or commit subjects; cite a PR number",
+    "docs/solutions learnings are <slug>-pr<PR number>.md with no related_issues",
+    "Changelog via changie new --custom Issue=pr<PR number>; never edit CHANGELOG.md",
+    "skip-checks: true only on a push that changes nothing outside .legion/"
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "F1: Go's renderer stores a class-H shape (code span's later line holding one tag, written without its container prefix) for documents that read alike", "answer": "D4: the renderer writes the prefix on such a line (codeLineOpensHTML); a stored-bytes change counted by the census (D10)"},
+      {"finding": "F2: reading H as the engine would delete text; the comment half of the title cannot be fixed in Go", "answer": "Reported to the architect, who decided the engine fix: D4 adds a Legion-owned html-flow in packages/proof-editor so kind 7 never opens on a lazy line; Go keeps its reading of H with no refusal; comments keep their container"},
+      {"finding": "F3: the spec's NUL refusal claim is false at base and main; the defect is a silent tree/bytes divergence; census must count U+FFFD", "answer": "D7 reads U+0000 as U+FFFD at the reader entry, keeps withNulsWritten for browser edits; D10 counts raw U+0000 and U+FFFD; D11(b) and specDepartures record the false claim"},
+      {"finding": "F4: 'the 15 typed-block documents' names no reproducible set", "answer": "D9 defines the set by a stated jq predicate: 46 documents, 21 distinct minimal forms (11 S refused by the existing definition rule, 10 H read alike after D4); recorded as a spec departure the architect accepted"},
+      {"finding": "F5: refused shapes cannot be testdata/corpus fixtures; corpus-errors has no generic test; red direction inverted", "answer": "D9 and T1: corpus-errors files asserted by a test over blockMarkdownReaders naming each constant; red at the fork point means accepted; H sections red via fixtures.json regenerated by the fork point's engine"},
+      {"finding": "F6: main did not compile; #2481 overlaps; fixtures.json and wantNames conflicts", "answer": "D1: base f45c6716 compiles and main is fixed (#2482/#2484); merge main on the real conflict, regenerate fixtures.json with bun run gen, wantNames alphabetical; no W shape in our fixtures"},
+      {"finding": "F7: A2 names three gates of seven; corpus-errors and CRLF corpora not covered", "answer": "T9: every GATE line 0 except listed engine-tree churn; named corpora including LF-converted n916; corpus-errors covered by T1's test"},
+      {"finding": "F8: census finds almost nothing by construction; rewrite meaning and timing; ParseRendering refusal column", "answer": "D10 adopts INFRA-719 D8 timing (rewrite latest versions after the deploy, past versions listed), adds a newly-refused-by-ParseRendering column with escalation, a negative control, and states a 0 does not prove no stored document displays wrongly"},
+      {"finding": "F9: class P reaches stored bytes (C32:286)", "answer": "D6 reads P alike with the renderer change quoteEndsAtFence; the census's Go reading and bytes columns count it; threshold: all 70 read alike, GATE 0"},
+      {"finding": "F10: the no-behaviour-change refactor has no machine check; overclaim in more places", "answer": "D8: refactor in its own commit with the differential against its parent, constants asserted by tests, TestParseNamesTheFirstRefusedBlock pairs; doc comment, AGENTS.md and the new fragment amended (the folded CHANGELOG is never edited); second test's three inputs measured to carry the holding-a-block refusal"},
+      {"finding": "F11: reader changes move the renderer's escapes", "answer": "D3: measured one engine-tree churn document (A13:708, an escape no longer needed, both bytes read alike); listed in the PR; churn gate 0"},
+      {"finding": "F12: CRLF out of scope with the two-part reason", "answer": "D2"},
+      {"finding": "F13: missing browser proof and production check", "answer": "D12/T8 browser test red at the fork point; production check section with dispatch-production-check.sh and the census rewrites"}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {"spec": "A1: 'Both shapes and the 15 typed-block documents are corpus fixtures'", "plan": "The typed-block set is every class S or H document of the 916 whose minimal form holds a footnote definition inside a typed block: 46 documents, 21 distinct minimal forms; the 11 S forms are corpus-errors files refused by name, the 10 H forms corpus fixtures", "evidence": "No member list exists in the probe bundle, the issue or review 5689398270; no slice of the measured classification gives 15 (classes.jsonl; gap analysis F4)", "outcome": {"kind": "changed", "acceptance": ["A1's '15 typed-block documents' becomes the 46 documents / 21 distinct forms D9 defines (architect accepted; the planner first reported 18 and sent the correction)"]}},
+    {"spec": "Change: 'Go reads each shape as the engine does, or refuses it'", "plan": "For class H the engine changes: a Legion-owned html-flow in packages/proof-editor does not open a kind-7 HTML block on a lazy line, so the engine reads H as Go and CommonMark do; Go needs no H refusal", "evidence": "micromark-core-commonmark 2.0.3 html-flow.js:317-321 opens kind 7 only on a lazy line, against CommonMark's rule that type 7 cannot interrupt a paragraph; milkdown then drops the container and its text in every comment and version view", "outcome": {"kind": "changed", "scope": "packages/proof-editor's markdown reading is in scope (architect's decision, 2026-10-29)"}},
+    {"spec": "Change: 'Go reads each shape as the engine does, or refuses it' (the reader only)", "plan": "Also changes the renderer: a code span's later line that is exactly one HTML tag is written behind its containers' prefix, so a document that reads alike is not stored as a shape the engine misreads", "evidence": "At base and main `> `x\\n> <b>\\n> y`` is stored as `> `x\\n<b>\\ny`` and the engine reads that rendering as one paragraph; 18 of 54 code-span documents (gap analysis F1, html-fence prototype)", "outcome": {"kind": "changed", "scope": "the renderer's code-span line writing is in scope; stored bytes of such documents change and the census counts them"}},
+    {"spec": "'any write holding a NUL is refused as reading back otherwise, at main 1767c9af and after #2373 alike'", "plan": "Same change (U+0000 read as U+FFFD), with a reading fixture rather than a refusal; the census counts raw U+0000 and U+FFFD", "evidence": "Ten NUL shapes are accepted at base f45c6716 (and main); Go's tree keeps U+0000 while Render writes U+FFFD", "outcome": {"kind": "unchanged"}}
+  ]
+}

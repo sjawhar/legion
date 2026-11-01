@@ -9,11 +9,12 @@ release, an npm publish and a pin bump.
 
 Two different commits of `sjawhar/proof-sdk` matter here, and they are not the same fact.
 
-The files in the table below, but for `src/directive-factories.ts`, were copied byte for byte out
-of **24a5fc94915cda5704897c497af6312c140db40d**, the fork's v0.3.13 — the last commit that still
-held them. The cut that followed deleted them from the fork, so that commit stays the audit
-source however far the fork line moves. `src/directive-factories.ts` comes from
-micromark-extension-directive 4.0.0 instead.
+The files in the table below, but for `src/directive-factories.ts` and `src/html-flow.ts`, were
+copied byte for byte out of **24a5fc94915cda5704897c497af6312c140db40d**, the fork's v0.3.13 —
+the last commit that still held them. The cut that followed deleted them from the fork, so that
+commit stays the audit source however far the fork line moves. `src/directive-factories.ts` comes
+from micromark-extension-directive 4.0.0 instead, and `src/html-flow.ts` from
+micromark-core-commonmark 2.0.3.
 
 The upstream modules this package imports at runtime come from the git dependency, pinned at
 **dc6a852b2ab45463dc9d3d17762235450c8ff0d6** on the fork's cleaned `library` line. Moving that
@@ -31,8 +32,9 @@ pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstre
 | `src/lib.css` | The editor stylesheet |
 | `src/tests/*.test.ts` | The suites that came with those files |
 | `src/directive-factories.ts` | `factoryName`, `factoryLabel` and `factoryAttributes`, copied from micromark-extension-directive 4.0.0 (`lib/factory-name.js`, `lib/factory-label.js` and `lib/factory-attributes.js`), which does not export them: `src/directive-container.ts` tokenizes a `:::` opener's name, label and attributes with them. They are kept whole, the `disallowEol` branches for `false` that neither call takes included (INFRA-581) |
+| `src/html-flow.ts` | `htmlFlowStrict`, micromark's HTML (flow) construct, copied from micromark-core-commonmark 2.0.3 (`dev/lib/html-flow.js`), which exports its own but gives no way to change the one reading this package needs: `./html-blocks` registers it under `<` with micromark's disabled by name. One line differs, and the paragraph below says which |
 
-Twenty files under `src/` are legion's own rather than copies, so the file-by-file audit below does
+Twenty-one files under `src/` are legion's own rather than copies, so the file-by-file audit below does
 not reach them:
 
 | File | What it is |
@@ -56,6 +58,7 @@ not reach them:
 | `src/directive-container.ts` | `directiveContainerSyntax`, the micromark extension `remarkContainerDirectives` registers for the `:::name[label]{attributes}` container: a micromark document construct, held on the document tokenizer's container stack as a block quote or a list item is, in place of micromark-extension-directive's flow construct, which tokenized a block's content once for each block around it, so a body nesting `:::` a few thousand deep froze a reader's tab for about a minute (INFRA-581). It emits that package's token types, so `mdast-util-directive` builds the same `containerDirective` nodes from them; its `resolveAll` (`resolveDirectiveContainers`) and the `lazyContentEnd` construct keep the flow construct's reading of blank lines, lazy lines and the line endings after fences; and an opener standing inside `maxDirectiveNesting` (32) open directive containers does not open, so its line reads as the text it is. It reads an opener's name, label and attributes with the copied factories in `src/directive-factories.ts`; it is also biome-checked |
 | `src/editor/schema/leaf-marks.ts` | `withoutLeafMarks`: a node that is inline, is a leaf and is not text - `html`, `image`, `hardbreak`, `footnote_reference` - may hold no mark, so every parse seam (`src/lib-headless.ts`'s `parseMarkdown`, `src/lib.ts`'s shared `parserCtx` and its `setMarkdown`) strips the emphasis, strong, strikethrough or link mark the markdown wrapped around one. Go's reader of the same document holds marks on text alone (`packages/envoy/internal/dispatch/pmdoc/node.go` refuses a mark on any node that is not text) and the editor's own collaborative store drops such a mark on the next round trip, so a document drew one way in the editor and another way in a comment or a past version. The rule is structural rather than a list of those four names, because that is the shape both readers have. The bottom-up walk returns the same node wherever nothing changed, so a document holding no marked leaf comes back as it went in, and it builds with `node.mark` and `node.copy` rather than `Node.fromJSON` or `doc.check()`, which validate attributes the commonmark preset's own image parser leaves `null`. It is composed beside `withBlockIds`, never folded into it, since that walk returns its input unchanged when no block was missing an id |
 | `src/nested-links.ts` | `remarkHoistNestedLinks` and the `$remark` plugin that registers it: a `link` holding a `link` is rewritten into siblings, the inner link beside the runs around it and each run wrapped in a copy of the outer link's `url` and `title`, so `[a <https://u.test> b](u)` reads as `a ` under the label's link, the autolink's text under its own, and ` b` under the label's again. The only markdown that nests the two is an autolink inside a link label, since CommonMark forbids an inline link there, and `@milkdown/transformer` cannot read that label as written: it holds one flat mark set, so the link mark runner's `closeMark` on the inner autolink removes the `link` type outright (`removeFromSet`) and every later run of the label was left with no link at all, where Go's reader gives it the label's link again (`packages/envoy/internal/dispatch/pmdoc/parse.go`). The hoisted spelling is the tree Go's renderer writes for itself (`[a ](u)<https://u.test>[ b](u)`), so both readers agree rather than meeting at a third reading. It is registered at every parse seam - the explicit chain in `src/lib-headless.ts` and, through `remarkCtx`, `src/lib.ts`'s shared `parserCtx` and its `setMarkdown` - and changes no output, since a unified transformer runs on `runSync` at parse and never on `stringify` |
+| `src/html-blocks.ts` | How this package reads a block of HTML: `strictHtmlFlowSyntax`, which registers `htmlFlowStrict` from `./html-flow` under `<` and disables micromark's `htmlFlow` by name, and `remarkHtmlBlockParagraphs`, which draws each block of HTML as a paragraph holding the same text as one inline `html` node, since the Proof schema has no node for a block of HTML and Milkdown drew one as a thrown parse or a dropped container. `remarkStrictHtmlFlow`, `libraryRemarkHtmlFlowPlugin` and `libraryRemarkHtmlBlockPlugin` install them on the headless parse processor and on the editor: the construct beside the directive construct, the transform after the mark plugins, whose own block-level span is a pair of blocks of HTML until they have paired it, and before the typed-block transforms, which read the drawn paragraph as the block's content (#2507); it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
 Twenty-four kinds of edit are allowed in the copied files, and no others: the import specifiers of
@@ -148,11 +151,15 @@ that make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table but `src/directive-factories.ts`
-has that counterpart, and the only lines that differ should be the twenty-four kinds.
+and `src/html-flow.ts` has that counterpart, and the only lines that differ should be the
+twenty-four kinds.
 `src/directive-factories.ts`'s counterparts are those three files of micromark-extension-directive
 4.0.0 (`node_modules/.bun/micromark-extension-directive@4.0.0` at the repository root, or the
 package's npm tarball); each function there differs from its source by the join and the type
-annotations and casts alone.
+annotations and casts alone. `src/html-flow.ts`'s counterpart is
+`node_modules/.bun/micromark-core-commonmark@2.0.3/node_modules/micromark-core-commonmark/dev/lib/html-flow.js`,
+and it differs from it by the construct's name, the one line its notice quotes, the import of
+`blankLine` from the package rather than a copy of it, and the type annotations alone.
 
 `scripts/`, `tests/` and `upstream/` are legion's own. `scripts/` and `tests/` are linted and
 type-checked like any other package's; `upstream/` is generated, and Biome is off over it the
@@ -165,14 +172,42 @@ boundary is `any` again.
 The copied files are proof-sdk's and stay under its MIT license, as does `upstream/`, which tsc
 derives from proof-sdk's pinned sources; `LICENSE` beside this file is that license, taken from the
 fork at 24a5fc94. `src/directive-factories.ts` is micromark-extension-directive's instead and
-stays under that package's MIT license, whose notice the file carries at its top. Legion's own
-files listed above, `scripts/` and `tests/` are under the repository's Apache-2.0 license.
+`src/html-flow.ts` micromark-core-commonmark's, and each stays under that package's MIT license,
+whose notice the file carries at its top. Legion's own files listed above, `scripts/` and
+`tests/` are under the repository's Apache-2.0 license.
 
 `src/directive-container.ts` relies on two parts of micromark's document tokenizer: a container
 state's `_closeFlow`, which a closing fence sets to end the flow inside the block, and a
 construct's `resolveAll`, which runs over the document's events once it is tokenized. micromark,
 which reaches this package through `mdast-util-from-markdown`, stays at 4.0.2 in `bun.lock`: a
 move must keep both working, and 4.0.3 is quadratic for quotes and lists (micromark/micromark#246).
+
+`src/html-flow.ts` is micromark's HTML (flow) construct with one line changed, in `tagName`,
+where a block of one complete tag (an HTML block of kind 7) is found: upstream returns
+`self.interrupt && !self.parser.lazy[self.now().line]`, the copy returns `self.interrupt`, so
+such a block never opens while interrupting a paragraph, on a lazy line as on any other.
+CommonMark forbids a type-7 block from interrupting a paragraph at all and goldmark, which the
+Dispatch server reads documents with, obeys that: the server reads `> a` then `<b>` as one quoted
+paragraph of `a ` and the inline HTML. Here the block opened, exiting the containers behind the
+lazy line, and milkdown, which has no node for a block of HTML there, dropped the block with its
+container and the container's text, so a reader of that comment saw neither the quote nor the
+word `a`. Every other kind of HTML block reads as micromark reads it, a kind-7 block that opens a
+paragraph of its own included.
+
+A block of HTML that does open still has to draw: the schema has no node for one and gains none,
+and Milkdown built the schema's inline `html` node where only a block may stand, so the parse
+threw `Cannot create node for doc` and the whole view failed to draw rather than drawing — and in
+a block quote, a list item or a footnote definition it dropped the container with the block and
+every word around it, the same loss of a reader's text the lazy line used to cause.
+`src/html-blocks.ts`'s `remarkHtmlBlockParagraphs` draws each block of HTML as a
+paragraph whose one child is that block's text as one inline `html` node, so the block draws in
+place, keeps its container, and writes back as the markdown it was written as, with neither the
+copied construct nor the schema touched (#2507). It is registered after the mark plugins, since a
+record mark covering whole blocks is written as a `<span …>` line and a `</span>` line — two
+blocks of HTML until `remarkProofMarks` and `remarkDispatchMarks` have paired them — and before
+the typed-block transforms, which check a `:::` block's content against the node types its rule
+names. `tests/html-flow.test.ts` holds every half, in both engines, with the markdown each tree
+writes back.
 
 ## The upstream boundary
 

@@ -349,7 +349,7 @@ func (r *renderer) block(n *Node, prefix string) {
 		r.writeSyntax("> ")
 		r.enter(n, prefix+"> ")
 		r.blocksNoTrailing(n.Children, prefix+"> ")
-		r.blanksEndingQuotedList(n.Children, prefix+"> ", false)
+		r.blanksEndingQuotedList(n.Children, prefix+"> ", r.quoteEndsAtFence())
 		r.leave()
 	case "bullet_list", "ordered_list":
 		r.list(n, prefix)
@@ -431,8 +431,16 @@ func (r *renderer) block(n *Node, prefix string) {
 			return
 		}
 		r.writeSyntax(fence + n.Type + "{" + attrs + "}\n" + prefix)
+		tight := r.inTightItemBelowQuotes()
 		r.enterTyped(n, prefix, colons)
-		r.blocksNoTrailing(n.Children, prefix)
+		if tight {
+			// A typed block's lines are the list item's, so a tight item's typed block writes its
+			// blocks as the item writes its own (itemBlocks): a blank line between two of them
+			// would be a blank line of the item, which the browser editor reads as spacing it.
+			r.itemBlocks(n.Children, false, prefix, prefix, false)
+		} else {
+			r.blocksNoTrailing(n.Children, prefix)
+		}
 		r.blanksEndingQuotedList(n.Children, prefix, true)
 		r.leave()
 		r.writeSyntax("\n" + prefix + fence)
@@ -1115,12 +1123,17 @@ func holdsLineBreakToWrite(nodes []*Node) bool {
 
 // nulAsReplacement is text with each U+0000 written as U+FFFD, which is what CommonMark reads the
 // character as (§2.3 Insecure characters), so no markdown carries one back; PostgreSQL's text and
-// jsonb cannot store one either. A browser's edit can still put one in a live document, past every
-// check a route makes, so text Dispatch takes from a document's tree passes through this: its
-// rendering (asWritten), an anchor's quote (FindMark), an ask block's question and options and a
-// heading's text (TextContent), and the text a quote is matched against (buildFlattenedText). A
-// document's settlement and every write that versions it store that text, so one U+0000 left in it
-// as it is would fail all of them, and text copied from what a read serves would match nothing.
+// jsonb cannot store one either. Every reader of a caller's markdown reads the character that way
+// too, as the browser editor's parser does, where it takes the caller's bytes in (parseUnstamped,
+// readInline): goldmark keeps a U+0000 in the tree it builds, so a write holding one would
+// otherwise be accepted into a tree whose rendering holds U+FFFD instead.
+//
+// A browser's edit can still put one in a live document, past every check a route makes, so text
+// Dispatch takes from a document's tree passes through this: its rendering (asWritten), an anchor's
+// quote (FindMark), an ask block's question and options and a heading's text (TextContent), and the
+// text a quote is matched against (buildFlattenedText). A document's settlement and every write
+// that versions it store that text, so one U+0000 left in it as it is would fail all of them, and
+// text copied from what a read serves would match nothing.
 func nulAsReplacement(text string) string {
 	if strings.IndexByte(text, 0) < 0 {
 		return text

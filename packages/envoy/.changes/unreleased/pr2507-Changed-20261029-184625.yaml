@@ -1,0 +1,5 @@
+kind: Changed
+body: 'The refusal of a footnote definition inside a typed block now names what the reader checks rather than more than it tests: a definition inside a typed block holding a block other than a paragraph, which the browser editor reads with other spacing, refused with the definition''s other blocks until those are shown to read alike. No document''s accept or refuse state changes.'
+time: 2026-10-29T18:46:25.063991714Z
+custom:
+    Issue: pr2507

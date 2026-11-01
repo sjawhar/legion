@@ -1,0 +1,7 @@
+kind: Fixed
+body: |-
+    A blank line inside a typed block in a list item now reads as the browser editor's parser reads it, wherever it stands in the block: after its opening fence, between two of its blocks, or above its closing fence. That parser counts such a line toward the item's spread, and the reader read only the lines ending the block, refusing them, so a document holding one elsewhere was stored with an item drawn spread in the editor and tight in the tree. A list is no longer spread by the blank lines after an item ending in a typed block no fence closes, which are that block's. One shape is refused by name instead of read: a blank line inside a typed block a footnote definition in a list item holds.
+    The renderer writes a tight item's typed block with the item's tight lines, as it already writes a footnote definition's, so a rendering no longer spaces an item its tree reads tight, and a document whose typed block holds a fenced code block and a paragraph side by side is stored where it was refused.
+time: 2026-11-01T23:30:00.000000000Z
+custom:
+    Issue: pr2507

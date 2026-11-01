@@ -165,26 +165,24 @@ func (lazyAwareTable) Extend(m goldmark.Markdown) {
 	m.Parser().AddOptions(parser.WithParagraphTransformers(util.Prioritized(lazyTableRows{table: tableTransformer}, 200)))
 }
 
-// lazyTableRows keeps a table's header and delimiter rows off lazy continuation lines, and opens
-// no table whose header line holds one pipe and nothing else but spaces and tabs. In GFM, and in
-// the browser editor's parser, a line that continues a paragraph in a list item, a quote or a
-// footnote definition without that container's prefix only continues the paragraph; goldmark's
-// transformer reads a paragraph's lines as rows wherever they came from, so `- a\n|-|` would
-// become a table in the list item. A lazy line is one the reader began at its line start
-// although the paragraph's first line began after a container's prefix. The browser editor's
-// parser reads a header line of a lone `|` as text, so `|\n-|` is the paragraph `| -|`, where
-// goldmark reads a table of one empty cell. Where goldmark would read a table (findTableRows),
-// the budget pays for its padded cells before goldmark's transformer builds them.
+// lazyTableRows runs goldmark's table transformer only where the browser editor's parser reads a
+// table too (findTableRows): its delimiter row on no lazy continuation line and not four columns
+// or more past its container, under a header row holding as many cells as it. In GFM, and in that
+// parser, a line that continues a paragraph in a list item, a quote or a footnote definition
+// without that container's prefix only continues the paragraph; goldmark's transformer reads a
+// paragraph's lines as rows wherever they came from, so `- a\n|-|` would become a table in the
+// list item. That parser reads a header line of a lone `|` as text, so `|\n-|` is the paragraph
+// `| -|`, where goldmark reads a table of one empty cell: no cell opens on such a line
+// (headerCells), so it is a header of none and no table forms. The transformer runs on the lines
+// of the table that parser reads, the lines before them left a paragraph of their own where
+// goldmark would read no table in them at all (textBeforeTable). Where goldmark would read a
+// table, the budget pays for its padded cells before goldmark's transformer builds them.
 type lazyTableRows struct{ table parser.ParagraphTransformer }
 
 func (t lazyTableRows) Transform(node *ast.Paragraph, reader gmtext.Reader, pc parser.Context) {
 	source := reader.Source()
-	rows, found, _ := findTableRows(node.Lines(), source, 1)
+	rows, found, _ := findTableRows(paragraphTableLines(node, source, pc), 1)
 	if !found {
-		return
-	}
-	header := node.Lines().At(rows.header)
-	if lazy := lazyLines(node.Lines(), source); lazy != nil && (lazy[rows.header] || lazy[rows.header+1]) || lonePipe(source[header.Start:header.Stop]) {
 		return
 	}
 	padding := rows.padding(node.Lines(), source)
@@ -194,32 +192,102 @@ func (t lazyTableRows) Transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 	if count := countedElements(pc); count != nil && rows.charge(count, node.Lines()) {
 		return
 	}
-	t.transform(node, reader, pc)
+	t.transform(node, rows, reader, pc)
 }
 
-// tableRows is the table goldmark's transformer reads in a paragraph's lines (findTableRows): the
-// line its header row is, and the width of its delimiter row.
+// tableRows is the table the browser editor's parser reads in a paragraph's lines (findTableRows):
+// the line its header row is, and the width of its delimiter row.
 type tableRows struct{ header, width int }
 
-// findTableRows reads lines as goldmark's table transformer does (extension/table.go Transform),
-// their indentation expanded where it holds a tab (tabExpandedLine), as transform hands them to it:
-// the first line after the first that reads as a delimiter row (tableDelimiterWidth) makes a table
-// under the line before it, its header, unless the header holds more cells than the delimiter row.
-// The header's cells are counted as the browser editor's parser counts them (rowCells), so a header
-// that holds more there, where goldmark reads a `|` after an even run of backslashes as text, makes
-// no table, as in that parser.
-// It reads lines for that delimiter row from from on, and stops there; next is where a read of
-// lines added after these resumes, or -1 once the delimiter row is read.
-func findTableRows(lines *gmtext.Segments, source []byte, from int) (rows tableRows, found bool, next int) {
-	for delimiter := max(from, 1); delimiter < lines.Len(); delimiter++ {
-		width, ok := tableDelimiterWidth(tabExpandedLine(lines.At(delimiter), source), source)
-		if !ok {
+// tableLines is a paragraph's lines as the browser editor's parser read them: each as it was read,
+// before a close for a setext underline took its indentation off (lineRecordingParagraph,
+// underlineAfterTable), and where the lazy continuation lines among them start (lazyLinesAttr).
+// That parser reads a delimiter row off the line as it is written, after the containers' prefix:
+// the indentation such a close takes off is indentation a delimiter row may not have.
+type tableLines struct {
+	lines  *gmtext.Segments
+	read   map[int]gmtext.Segment
+	lazy   []int
+	source []byte
+}
+
+// paragraphTableLines is paragraph's lines with what the parse recorded of them: the lines as they
+// were read (untrimmedLinesKey) and the lazy ones among them (lazyLinesAttr).
+func paragraphTableLines(paragraph *ast.Paragraph, source []byte, pc parser.Context) tableLines {
+	read, _ := pc.Get(untrimmedLinesKey).(map[int]gmtext.Segment)
+	lazy, _ := paragraph.Attribute(lazyLinesAttr)
+	starts, _ := lazy.([]int)
+	return tableLines{lines: paragraph.Lines(), read: read, lazy: starts, source: source}
+}
+
+func (l tableLines) len() int { return l.lines.Len() }
+
+// at is line index as it was read, its indentation expanded where it holds a tab (tabExpandedLine):
+// a line goldmark trimmed for a setext underline holds its indentation again, which is how
+// goldmark's transformer reads the lines of every paragraph it has not closed.
+func (l tableLines) at(index int) gmtext.Segment {
+	return tabExpandedLine(l.asRead(index), l.source)
+}
+
+// asRead is line index as lineRecordingParagraph read it, before the paragraph trimmed its
+// leading whitespace, or the line itself where the parse recorded none under its start. The parse
+// keys each line it records by where the trimmed line starts (recordLine, lines.go), while the
+// line of a paragraph goldmark has not closed starts where its containers left it, untrimmed, so
+// the lookup misses on every line of such a paragraph. What it misses is that same untrimmed
+// segment, recorded under the trimmed start, so the line itself is the answer there, and a closed
+// paragraph's trimmed lines find what they were read as.
+func (l tableLines) asRead(index int) gmtext.Segment {
+	line := l.lines.At(index)
+	if read, ok := l.read[line.Start]; ok {
+		return read
+	}
+	return line
+}
+
+// isLazy reports whether line index is a lazy continuation line, one no container around the
+// paragraph continues (lazyLinesAttr). lineRecordingParagraph.Continue appends each lazy line's
+// start as it reads it, so the starts rise and a search over them costs a logarithm rather than
+// the walk a scan of every candidate delimiter row would pay for every lazy line before it.
+func (l tableLines) isLazy(index int) bool {
+	if len(l.lazy) == 0 {
+		return false
+	}
+	_, lazy := slices.BinarySearch(l.lazy, lineStart(l.source, l.lines.At(index).Start))
+	return lazy
+}
+
+// findTableRows reads lines as the browser editor's parser reads them
+// (micromark-extension-gfm-table's tokenizeTable): it tries a header row and the delimiter row
+// under it at every line, and the first pair that holds makes a table of the lines from its
+// header on. A pair holds where the second line reads as a delimiter row (tableDelimiterWidth)
+// and the first holds as many cells as that row has columns (headerCells) - GFM's rule, which
+// goldmark holds a header wider than the delimiter row to and a narrower one, which it pads out
+// to the delimiter row's width, not to.
+// That parser reads no delimiter row on a lazy continuation line, and no row of a table four
+// columns or more past its container: a header row there is indented code to it, which a
+// paragraph's line only continues the paragraph, and goldmark reads a delimiter row there where a
+// close for a setext underline took the line's indentation off (underlineAfterTable), which is
+// why the lines are read as they were written (tableLines). A pair that fails on any of these
+// leaves its lines to the pair starting at the next line, and the lines of every failed pair are
+// the text before the table (textBeforeTable).
+// It reads lines for a pair from from on; next is where a read of lines added after these
+// resumes, or -1 once a table is found.
+func findTableRows(lines tableLines, from int) (rows tableRows, found bool, next int) {
+	for delimiter := max(from, 1); delimiter < lines.len(); delimiter++ {
+		width, ok := tableDelimiterWidth(lines.at(delimiter), lines.source)
+		if !ok || lines.isLazy(delimiter) {
 			continue
 		}
-		rows = tableRows{header: delimiter - 1, width: width}
-		return rows, tableRowWidth(tabExpandedLine(lines.At(rows.header), source), source) <= rows.width, -1
+		header := lines.at(delimiter - 1)
+		if indent, _ := util.IndentWidth(header.Value(lines.source), 0); indent > 3 {
+			continue
+		}
+		if headerCells(header, lines.source) != width {
+			continue
+		}
+		return tableRows{header: delimiter - 1, width: width}, true, -1
 	}
-	return tableRows{}, false, lines.Len()
+	return tableRows{}, false, lines.len()
 }
 
 // padding is the cells the table in lines holds as goldmark's transformer writes it, its cells
@@ -299,6 +367,34 @@ func tableRowWidth(segment gmtext.Segment, source []byte) int {
 	return width
 }
 
+// headerCells is how many cells the browser editor's parser reads in a table's header row (size in
+// micromark-extension-gfm-table's tokenizeTable): a cell opens at the row's first character where
+// that is no `|`, and after every `|` ending one where anything but a space or a tab follows
+// before the line ends. A `|` an odd run of backslashes escapes ends no cell
+// (escapedByBackslashes), as in rowCells. Goldmark counts one cell fewer in a row that ends with
+// two pipes, `a||`, whose last `|` it drops as the row's closing one and whose empty cell before
+// it it writes nothing of; it pads such a row out to its table's width, so the cells it writes
+// where a table forms are the ones that parser reads.
+func headerCells(segment gmtext.Segment, source []byte) int {
+	segment = segment.TrimLeftSpace(source)
+	segment = segment.TrimRightSpace(source)
+	line := segment.Value(source)
+	cells, open := 0, len(line) > 0 && line[0] != '|'
+	for index, char := range line {
+		if char == ' ' || char == '\t' {
+			continue
+		}
+		if open {
+			cells++
+			open = false
+		}
+		if char == '|' && !escapedByBackslashes(line, index) {
+			open = true
+		}
+	}
+	return cells
+}
+
 // rowCells calls visit with each cell the browser editor's parser splits a table line into: its
 // first `|` and its last dropped, whatever stands before either, as goldmark's transformer drops
 // them (parseRow), and a cell ending at each other `|` that no odd run of backslashes stands
@@ -330,8 +426,10 @@ func rowCells(segment gmtext.Segment, source []byte, visit func(index int, value
 // table that takes the paragraph's first line takes the paragraph's place, starting where its text
 // does and after the blank line before it if there was one; goldmark gives it neither. The browser
 // list spacing reads both, the blank line through blankAfterAttr, since goldmark's looseness, which
-// reads HasBlankPreviousLines, has never seen it.
-func (t lazyTableRows) transform(node *ast.Paragraph, reader gmtext.Reader, pc parser.Context) {
+// reads HasBlankPreviousLines, has never seen it. The lines before the table's header row that
+// goldmark would not leave of its own accord are left a paragraph first (textBeforeTable).
+func (t lazyTableRows) transform(node *ast.Paragraph, rows tableRows, reader gmtext.Reader, pc parser.Context) {
+	textBeforeTable(node, rows, reader.Source())
 	lines := node.Lines()
 	first := lines.At(0)
 	start := first.TrimLeftSpace(reader.Source()).Start
@@ -378,6 +476,55 @@ func (t lazyTableRows) transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 		table = placed
 	}
 	markRows(table, rowStarts, lazyStarts, rowSegments, reader.Source())
+}
+
+// textBeforeTable leaves the lines before the table's header row a paragraph of their own, where
+// goldmark's transformer would leave none. That transformer reads a paragraph's lines from the
+// first and gives the table up at the first line it reads as a delimiter row under a header row
+// of another width (extension/table.go:168-170 at v1.8.6), where the browser editor's parser
+// tries a header and delimiter row at every line and reads the lines of the pairs it refused as
+// the text before the table it reads further on (findTableRows). Handing the transformer the
+// lines from the header row on is what makes it read that table, and the lines before them are
+// the paragraph it leaves itself where it reads the table where that parser does.
+func textBeforeTable(node *ast.Paragraph, rows tableRows, source []byte) {
+	lines := node.Lines()
+	if rows.header == 0 || firstDelimiterRow(lines, source) == rows.header+1 {
+		return
+	}
+	// Goldmark closes the paragraph it leaves itself once the transformer has run, and a close
+	// trims every line's leading whitespace and the last line's trailing whitespace, its line
+	// ending among it (parser/paragraph.go Close). Nothing closes this one, so it is trimmed here.
+	text := gmtext.NewSegments()
+	for index := range rows.header {
+		line := lines.At(index)
+		text.Append(line.TrimLeftSpace(source))
+	}
+	last := text.At(rows.header - 1)
+	text.Set(rows.header-1, last.TrimRightSpace(source))
+	before := ast.NewParagraph()
+	before.SetLines(text)
+	// The blank line before the paragraph is the blank line before the text, not before the table,
+	// which the text now stands between (blankAfterAttr, transform).
+	before.SetBlankPreviousLines(node.HasBlankPreviousLines())
+	node.SetBlankPreviousLines(false)
+	node.Parent().InsertBefore(node.Parent(), node, before)
+	rest := gmtext.NewSegments()
+	rest.AppendAll(lines.Sliced(rows.header, lines.Len()))
+	node.SetLines(rest)
+	if read, ok := node.Attribute(readLinesAttr); ok {
+		node.SetAttribute(readLinesAttr, read.([]gmtext.Segment)[rows.header:])
+	}
+}
+
+// firstDelimiterRow is the line goldmark's transformer reads as a table's delimiter row in lines,
+// the first after the first (parseDelimiter), or -1 where it reads none.
+func firstDelimiterRow(lines *gmtext.Segments, source []byte) int {
+	for index := 1; index < lines.Len(); index++ {
+		if _, ok := tableDelimiterWidth(tabExpandedLine(lines.At(index), source), source); ok {
+			return index
+		}
+	}
+	return -1
 }
 
 // markRows marks table with what its rows hold that the browser editor's parser reads otherwise
@@ -489,7 +636,7 @@ func (p underlineAfterTable) Open(parent ast.Node, reader gmtext.Reader, pc pars
 	if !ok || paragraph.Parent() != parent {
 		return p.BlockParser.Open(parent, reader, pc)
 	}
-	table, textBefore := scanForTable(paragraph, reader.Source())
+	table, textBefore := scanForTable(paragraph, reader.Source(), pc)
 	if !table {
 		return p.BlockParser.Open(parent, reader, pc)
 	}
@@ -523,7 +670,8 @@ var tableScanAttr = []byte("pmdoc-table-scan")
 
 // tableScan is what findTableRows has read of an open paragraph's lines. Goldmark tries every line
 // opening with `-` or `=` under an open paragraph as a setext underline, and an open paragraph only
-// gains lines, so each is read once for a delimiter row however many lines after it goldmark tries.
+// gains lines, so each is read once as a header and delimiter row's pair however many lines after
+// it goldmark tries.
 type tableScan struct {
 	rows  tableRows
 	found bool
@@ -533,7 +681,7 @@ type tableScan struct {
 // scanForTable is formsTable for the open paragraph underlineAfterTable asks about, resuming the
 // read where the last one on paragraph stopped (tableScan). formsTable does not keep it, since the
 // paragraph interruptsOpenBlock asks about can be closed, its lines trimmed after it was read.
-func scanForTable(paragraph *ast.Paragraph, source []byte) (table, textBefore bool) {
+func scanForTable(paragraph *ast.Paragraph, source []byte, pc parser.Context) (table, textBefore bool) {
 	value, _ := paragraph.Attribute(tableScanAttr)
 	scan, _ := value.(*tableScan)
 	if scan == nil {
@@ -541,17 +689,16 @@ func scanForTable(paragraph *ast.Paragraph, source []byte) (table, textBefore bo
 		paragraph.SetAttribute(tableScanAttr, scan)
 	}
 	if scan.next >= 0 {
-		scan.rows, scan.found, scan.next = findTableRows(paragraph.Lines(), source, scan.next)
+		scan.rows, scan.found, scan.next = findTableRows(paragraphTableLines(paragraph, source, pc), scan.next)
 	}
 	return scan.found, scan.found && scan.rows.header > 0
 }
 
-// formsTable reports whether goldmark's table transformer reads a table in paragraph's lines
-// (findTableRows), and whether text stands before that table, which the transformer leaves a
-// paragraph of its own. It reads the lines up to the first delimiter row: the ones after it change
-// neither.
-func formsTable(paragraph *ast.Paragraph, source []byte) (table, textBefore bool) {
-	rows, found, _ := findTableRows(paragraph.Lines(), source, 1)
+// formsTable reports whether a table forms in paragraph's lines (findTableRows), and whether text
+// stands before that table, which is left a paragraph of its own (textBeforeTable). It reads the
+// lines up to the table's header and delimiter rows: the ones after them change neither.
+func formsTable(paragraph *ast.Paragraph, source []byte, pc parser.Context) (table, textBefore bool) {
+	rows, found, _ := findTableRows(paragraphTableLines(paragraph, source, pc), 1)
 	return found, found && rows.header > 0
 }
 
@@ -661,30 +808,4 @@ func keepEscapedClosingPipes(table *extensionast.Table, lines []gmtext.Segment, 
 		last.Stop = segment.Stop
 		cell.Lines().Set(cell.Lines().Len()-1, last)
 	}
-}
-
-// lonePipe reports whether line holds one pipe and nothing else but spaces, tabs and its line
-// ending.
-func lonePipe(line []byte) bool {
-	return string(bytes.Trim(line, " \t\n")) == "|"
-}
-
-// lazyLines reports which of a paragraph's lines are lazy continuation lines, or nil when none is.
-func lazyLines(lines *gmtext.Segments, source []byte) []bool {
-	if lines.Len() < 2 {
-		return nil
-	}
-	if first := lines.At(0); first.Start == lineStart(source, first.Start) {
-		return nil
-	}
-	var lazy []bool
-	for index := 1; index < lines.Len(); index++ {
-		if line := lines.At(index); line.Start == lineStart(source, line.Start) {
-			if lazy == nil {
-				lazy = make([]bool, lines.Len())
-			}
-			lazy[index] = true
-		}
-	}
-	return lazy
 }
