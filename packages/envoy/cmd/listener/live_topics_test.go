@@ -222,7 +222,7 @@ func requirePromptCarries(t *testing.T, text string, item contracts.Envelope) {
 // the role lanes off the bus, so such a publish went out over core NATS to no one and the session
 // was never told: this test fails there with no prompt in 2 s. The row that follows the topic is
 // seeded as a build before team topics were stored left one (seedUncapturedTopics), since
-// /v1/interests/subscribe refuses such a topic by name now. The topic is published from a bus
+// /v1/interests/subscribe drops such a topic from a registration with a warning now. The topic is published from a bus
 // client of the test's own, as a session holding its own NATS connection publishes, so nothing in
 // the listener's /v1 path can hand it to the session. A second prompt within a second would be
 // the same publish delivered twice.
@@ -447,8 +447,8 @@ func TestTwoListenersOnOneMachineDeliverALiveTopicOnce(t *testing.T) {
 // reported, so the failed delivery of that prompt (the watcher's port answers 500) publishes no
 // second one. The refusal is a btw-mode message (frameDeliveryMode) to a subscriber that
 // advertises no capability. Both rows are seeded as a build before team topics were stored left
-// them (seedUncapturedTopics): /v1/interests/subscribe refuses a topic the stream does not
-// capture by name now. The watcher follows the live topic's own lane: the wildcard over every
+// them (seedUncapturedTopics): /v1/interests/subscribe drops a topic the stream does not
+// capture from a registration, with a warning, now. The watcher follows the live topic's own lane: the wildcard over every
 // lane also reaches the agent subjects' lanes, a private stream subject the listener does not
 // store (bus.ReachesPrivateStreamSubject).
 func TestALiveTopicExceptionIsReadBackOnce(t *testing.T) {
@@ -543,7 +543,8 @@ func TestALiveLaneDropsAnInvalidEnvelope(t *testing.T) {
 // The live lane leaves a session's relay subject (notifications.envoy.deliver.<id>) alone: a frame
 // there is a stored message the listener owning the session relays to it from its consumer, never
 // one to fan out, even to a session whose row names the subject as a topic - one an earlier build
-// stored, since /v1/interests/subscribe refuses the subject by name now (seedUncapturedTopics).
+// stored, since /v1/interests/subscribe drops the subject from a registration now
+// (seedUncapturedTopics).
 // Core NATS keeps one publisher's order, so a live topic's envelope published after the frame
 // being the first prompt shows the frame was dropped, not late.
 func TestSessionConsumerRelaySubjectIsNotFannedOutByTheLiveLane(t *testing.T) {

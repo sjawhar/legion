@@ -45,11 +45,10 @@ import {
 } from "@legion/envoy-client/session-settings"
 import { postSlackReply } from "@legion/envoy-client/slack-post"
 import {
+  refuseUncapturedTopics,
   registrationTopics,
   rememberedTopics,
   replayFollowedSubjects,
-  subscribeRefusesTopic,
-  uncapturedTopicRefusal,
 } from "@legion/envoy-client/stream-topics"
 import {
   EnvoyToolOperation,
@@ -1371,13 +1370,8 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       // nothing else: a stored row and a restored state reach `followedTopics.follow` instead —
       // so it is refused by name, in the listener's own words, rather than leaving the session
       // following a subject nothing is ever delivered on. A private stream subject is left out
-      // of the registration without a word, as it always was (`subscribeRefusesTopic`).
-      const uncaptured = topics.filter((topic) => subscribeRefusesTopic(directSubject, topic))
-      if (uncaptured.length > 0) {
-        throw new Error(
-          uncaptured.map((topic) => uncapturedTopicRefusal(topic, identity.id)).join("; "),
-        )
-      }
+      // of the registration without a word, as it always was (`refuseUncapturedTopics`).
+      refuseUncapturedTopics(identity.id, directSubject, topics)
       if (shuttingDown) return []
       const fresh: string[] = []
       for (const topic of expandSubscriptionTopics(topics)) {

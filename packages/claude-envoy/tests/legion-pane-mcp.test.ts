@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { createServer, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { consumerDelivery } from "@legion/envoy-client/test/subscribe-answer"
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
@@ -57,12 +58,7 @@ test("a Legion pane's server registers on its transcript, claims its role, serve
         // Every accepted registration is answered with the session's own consumer.
         return Response.json({
           ...interest,
-          delivery: {
-            mode: "consumer",
-            subject: `notifications.envoy.deliver.${SESSION}`,
-            stream_id: "stream-1",
-            gap: false,
-          },
+          delivery: consumerDelivery(SESSION),
         })
       }
       if (request.method === "POST" && url.pathname === "/v1/roles/set") {

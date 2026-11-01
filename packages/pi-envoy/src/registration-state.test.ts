@@ -180,7 +180,6 @@ function createHarness(): Harness {
     },
     getRole: async (role) => control.getRole(role),
     listSessions: notUsed("listSessions"),
-    subscribeServingPort: notUsed("subscribeServingPort"),
   };
 
   const state = createRegistrationState({

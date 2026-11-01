@@ -2,7 +2,10 @@ package bus
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -139,53 +142,32 @@ func TestControllerNoticeRolePairsALaneWithItsRoleToken(t *testing.T) {
 // project whose controller role its claims name: the holder registers that lane because the
 // notices reach it through its own consumer alone (INFRA-771), while another project's
 // controller lane, and every other private subject, stay out of a controller's registration too.
+// The cases are testdata/private-stream-subjects.json, which @legion/envoy-client's mirror of this
+// rule runs too (stream-topics.test.ts): one file, read by both, so a case added for either is run
+// by both on the next test run and neither can drift from a hand copy. Each case is a session id,
+// a topic, the roles that session holds and the answer.
 func TestReachesPrivateStreamSubjectBoundsInterests(t *testing.T) {
-	controller := []string{"legion-ACME-controller", "reviewer"}
-	for _, tc := range []struct {
-		sessionID, topic string
-		roles            []string
-		want             bool
-	}{
-		{sessionID: "ses_a", topic: "notifications.agent.ses_a", want: false},
-		{sessionID: "ses_a", topic: "notifications.agent.ses_b", want: true},
-		{sessionID: "ses_a", topic: "notifications.agent.*", want: true},
-		{sessionID: "ses_a", topic: "notifications.agent.>", want: true},
-		{sessionID: "ses_a", topic: "notifications.agent.ses_a.>", want: true},
-		{sessionID: "ses_a", topic: "notifications.>", want: true},
-		{sessionID: "ses_a", topic: "notifications.*.ses_a", want: true},
-		{sessionID: "ses_a", topic: "notifications.*.*.x", want: true},
-		{sessionID: "ses_a", topic: ">", want: true},
-		{sessionID: ">", topic: "notifications.agent.>", want: true},
-		{sessionID: "*", topic: "notifications.agent.*", want: true},
-		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.notifications.agent.ses_a", want: true},
-		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.notifications.agent.ses_b", want: true},
-		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.notifications.agent.>", want: true},
-		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.notifications.team.deploys", want: true},
-		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.notifications.team.>", want: true},
-		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.>", want: true},
-		{sessionID: "ses_a", topic: "notifications.envoy.>", want: true},
-		{sessionID: "ses_a", topic: "notifications.legion.ACME.controller", want: true},
-		{sessionID: "ses_a", topic: "notifications.legion.>", want: true},
-		{sessionID: "ses_a", topic: "notifications.*.ACME.controller", want: true},
-		{sessionID: "ses_a", topic: "notifications.legion.ACME.controller", roles: controller, want: false},
-		{sessionID: "ses_a", topic: "notifications.legion.OTHER.controller", roles: controller, want: true},
-		{sessionID: "ses_a", topic: "notifications.legion.>", roles: controller, want: true},
-		{sessionID: "ses_a", topic: "notifications.legion.*.controller", roles: controller, want: true},
-		{sessionID: "ses_a", topic: "notifications.agent.ses_b", roles: controller, want: true},
-		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.notifications.agent.ses_a", roles: controller, want: true},
-		{sessionID: "ses_a", topic: "notifications.legion.ACME.controller", roles: []string{"legion-OTHER-controller"}, want: true},
-		{sessionID: "ses_a", topic: "notifications.agent", want: false},
-		{sessionID: "ses_a", topic: "notifications.*", want: false},
-		{sessionID: "ses_a", topic: "notifications.legion", want: false},
-		{sessionID: "ses_a", topic: "notifications.dispatch.issue.KEY-1.>", want: false},
-		{sessionID: "ses_a", topic: "notifications.github.acme.widgets.pr.7.>", want: false},
-		{sessionID: "ses_a", topic: "notifications.team.x.>", want: false},
-		{sessionID: "ses_a", topic: "notifications.role.reviewer", want: false},
-		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.notifications.role.reviewer", want: false},
-		{sessionID: "ses_a", topic: "notifications.exceptions.agent.ses_b", want: false},
-	} {
-		if got := ReachesPrivateStreamSubject(tc.sessionID, tc.topic, tc.roles); got != tc.want {
-			t.Errorf("ReachesPrivateStreamSubject(%q, %q, %v) = %v, want %v", tc.sessionID, tc.topic, tc.roles, got, tc.want)
+	raw, err := os.ReadFile(filepath.Join("testdata", "private-stream-subjects.json"))
+	if err != nil {
+		t.Fatalf("read the shared cases: %v", err)
+	}
+	var cases []struct {
+		SessionID string   `json:"sessionID"`
+		Topic     string   `json:"topic"`
+		Roles     []string `json:"roles"`
+		Want      bool     `json:"want"`
+	}
+	if err := json.Unmarshal(raw, &cases); err != nil {
+		t.Fatalf("read the shared cases: %v", err)
+	}
+	// The file held 37 cases when this was written: a read that answers a handful of them, or
+	// none, passes while covering nothing.
+	if len(cases) < 37 {
+		t.Fatalf("the shared cases hold %d rows, want at least 37", len(cases))
+	}
+	for _, tc := range cases {
+		if got := ReachesPrivateStreamSubject(tc.SessionID, tc.Topic, tc.Roles); got != tc.Want {
+			t.Errorf("ReachesPrivateStreamSubject(%q, %q, %v) = %v, want %v", tc.SessionID, tc.Topic, tc.Roles, got, tc.Want)
 		}
 	}
 }

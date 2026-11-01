@@ -261,13 +261,6 @@ func publishDeliveryException(client *bus.Client, item contracts.Envelope, reaso
 		}
 		return nil
 	}
-	if origin != "" && bus.StreamCaptures(exception.Topic) {
-		// The stream keeps one copy however many listeners raise it, each from its own durable.
-		if err := client.PublishStoredAs(context.Background(), exception, "exception."+reason+"."+origin); err != nil {
-			return fmt.Errorf("publish delivery exception: %w", err)
-		}
-		return nil
-	}
 	if err := client.Publish(exception); err != nil {
 		return fmt.Errorf("publish delivery exception: %w", err)
 	}

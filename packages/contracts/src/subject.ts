@@ -361,7 +361,7 @@ export type Subject =
  * it: a `notifications.` topic no stream subject captures and no role lane
  * (`bus.ReachesNoSession` in packages/envoy/internal/bus, `streamDeliversNothing` in
  * `@legion/envoy-client`). The listener leaves such a topic out of a registration and names it in
- * this warning (`uncapturedTopicWarning` in packages/envoy/cmd/listener/api.go, built from the
+ * this warning (`splitUncapturedTopics` in packages/envoy/cmd/listener/api.go, which names it with
  * `contracts.UncapturedTopicRefusal` `scripts/gen-go.ts` emits from this builder), and each
  * plugin's explicit subscribe refuses such a topic in the same words (`envoy_subscribe` in
  * pi-envoy, `follow` in claude-envoy, both through `uncapturedTopicRefusal` in

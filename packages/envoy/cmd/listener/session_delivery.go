@@ -129,6 +129,12 @@ type sessionDelivery struct {
 	relay sessionRelay
 	// now is the clock of the no-grant backoff; time.Now unless a test sets it.
 	now func() time.Time
+	// beforeRegister runs at the top of each register call, before the consumer's filter is set;
+	// nil unless a test sets it. The window between a registration's plan and its filter is where
+	// another writer's row lands and makes the plan's compare-and-swap fail, and only a test that
+	// can write in that window can drive the re-plan and the second filter the route then makes
+	// (subscribeHandler's loop).
+	beforeRegister func()
 	// locks keeps the consumer calls made for one session one at a time: a registration's create or
 	// filter update, an unsubscribe's filter update and the relay's restart at the ack floor, which
 	// deletes the consumer and creates it again when a message awaits an ack. A create landing
@@ -199,6 +205,9 @@ func (m *sessionDelivery) drain(ctx context.Context) {
 // session consumers answered it, and its messages come down the durable path
 // (dispatch://INFRA-429 removes that path and this exception with it).
 func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, topics []string) (sessionDeliveryOutcome, *deliveryRefusal) {
+	if m != nil && m.beforeRegister != nil {
+		m.beforeRegister()
+	}
 	outcome, refusal := m.consumerFor(ctx, body, topics)
 	if refusal != nil && body.Port > 0 {
 		return sessionDeliveryOutcome{}, nil
@@ -420,7 +429,8 @@ func (l *sessionLocks) lock(sessionID string) (unlock func()) {
 // (INFRA-771), so a notice published while the controller was away is delivered from the stream
 // when it returns. A topic the stream does not store reaches the session on no path of its own: a
 // role lane reaches its holder as a forward on the holder's agent subject, and a topic an earlier
-// build's row still names, which /v1/interests/subscribe refuses now, reaches nothing.
+// build's row still names, which /v1/interests/subscribe drops from a registration with a
+// warning now, reaches nothing.
 // SessionConsumers reduces the list to filters that do not overlap.
 //
 // A topic the server would refuse as a filter subject (bus.CheckFilterSubject: an empty token, as

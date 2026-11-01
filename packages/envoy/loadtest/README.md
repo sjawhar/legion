@@ -622,33 +622,6 @@ and counts the pull requests on the stream's consumers, those of session consume
 (`s-<session>`) apart. The 5 s sampler also reads NATS `/jsz`: the JetStream consumers and API
 requests.
 
-#### Consumer delivery
-
-With `LOADTEST_SESSION_DELIVERY=consumer` (or `loadgen run -session-delivery consumer`), each
-session also does what the pi plugin does in consumer mode:
-
-- It subscribes its relay subject, `notifications.envoy.deliver.<session>`, before it registers.
-- Its registration carries `delivery: {consumer: true, epoch}`, with one random epoch per NATS
-  connection. The run reads each answer's `delivery.mode`. `summary.json`
-  `sessions.delivery` counts the sessions whose last answer was `consumer`, and those whose last
-  answer was `core`, by reason. A step whose sessions answered `core` measured the core path.
-- It answers each relay frame `received`, then `done`, on the frame's reply subject. The frame is
-  the session's receipt: the first frame of each stream sequence counts, matched to its write by
-  the event id in the payload as a core receipt is. A frame of a sequence that the session has
-  received already counts as a duplicate, not as a receipt.
-- It keeps its core subscriptions. While the listener relays the session, a core copy is not
-  counted; on the agent topic it answers the empty lane receipt when it has a reply subject.
-
-A relay frame carries the stream's store time of the event (`Envoy-Stored-At`). The **delivery
-latency from publish** is the receipt time minus that time, over the same receipts as the other
-latencies (`events.delivery_ms_from_publish`). A core receipt has no such time. Each relay frame
-is a row of `relay-frames.csv` in the step directory.
-
-In both modes, `loadgen` subscribes `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` on a
-connection of its own and counts the pull requests on the stream's consumers, those of session
-consumers (`s-<session>`) apart. The 5 s sampler also reads NATS `/jsz`: the JetStream consumers
-and API requests.
-
 ### Event kinds
 
 The event generator sends five kinds of write, each on its real route. Each write carries a

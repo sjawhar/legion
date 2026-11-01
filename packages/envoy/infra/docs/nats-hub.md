@@ -184,7 +184,9 @@ VM's metadata holds it in the clear.
 A session user lets anything that reaches 4222 publish and subscribe as `SessionPermissions()`
 allows: it reads the relay subject of any session, so it can take another session's messages and
 acknowledge them away, and it publishes agent stream frames and answers stream replay requests
-for any session id, so it can fake any agent's live stream in Dispatch. It reads no other
+for any session id, so it can fake any agent's live stream in Dispatch. Beyond the relay
+subjects it reads only the presence subjects, `notifications.envoy.presence.*`, which carry no
+message and which nothing in this repository publishes yet (dispatch://INFRA-626), and no other
 notification topic. With one, the tailnet's
 policy is the gate on 4222: which devices it lets reach the hub's 4222 decides who is on the bus.
 A `listener` opens a second door, port 9020, with or without a session user, and it grants far

@@ -3,7 +3,6 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
 import { agentSubject, roleToken } from "@legion/contracts";
-import { deliverSubject } from "@legion/envoy-client/consumer-delivery";
 import type { ZodNumberProperty } from "@legion/pi-shared/pi-types";
 
 /** The daemon's golden registration answer (`packages/daemon/internal/api`), so a field the daemon
@@ -36,6 +35,7 @@ mock.module("nats", () => ({
   }),
 }));
 
+import { consumerDelivery } from "@legion/envoy-client/test/subscribe-answer";
 import { hostAgentRegistryMock } from "@legion/pi-shared/test/host-registry";
 
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
@@ -179,12 +179,7 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
         topics: body.topics,
         // A session receives only what its own consumer holds (INFRA-771), so every
         // registration asks the listener for one, and one answered without it is refused.
-        delivery: {
-          mode: "consumer",
-          subject: deliverSubject(body.session_id),
-          stream_id: "legion-role-claim-stream",
-          gap: false,
-        },
+        delivery: consumerDelivery(body.session_id, { streamID: "legion-role-claim-stream" }),
       });
     }
     return Response.json({ session_id: sessionID, machine_id: "test", dir: "/tmp", topics: [] });

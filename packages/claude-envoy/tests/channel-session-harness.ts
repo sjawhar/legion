@@ -12,6 +12,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { deliverSubject, RelayHeader } from "@legion/envoy-client/consumer-delivery"
 import { sessionConfigFile } from "@legion/envoy-client/session-settings"
+import { consumerDelivery } from "@legion/envoy-client/test/subscribe-answer"
 import type { EnvoyClient, SubscribeResult } from "@legion/envoy-client/transport"
 import type {
   ChannelBrokerMessage,
@@ -326,12 +327,7 @@ export function noInterest(sessionID = "ses_claude"): SubscribeResult {
     machine_id: "devbox",
     dir: "/tmp",
     topics: [`notifications.agent.${sessionID}`],
-    delivery: {
-      mode: "consumer",
-      subject: deliverSubject(sessionID),
-      stream_id: "stream-1",
-      gap: false,
-    },
+    delivery: consumerDelivery(sessionID),
   }
 }
 

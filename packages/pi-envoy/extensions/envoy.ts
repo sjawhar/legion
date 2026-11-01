@@ -93,11 +93,7 @@ import {
   sessionSettings,
 } from "@legion/envoy-client/session-settings";
 import { postSlackReply } from "@legion/envoy-client/slack-post";
-import {
-  replayFollowedSubjects,
-  subscribeRefusesTopic,
-  uncapturedTopicRefusal,
-} from "@legion/envoy-client/stream-topics";
+import { refuseUncapturedTopics, replayFollowedSubjects } from "@legion/envoy-client/stream-topics";
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -3620,15 +3616,8 @@ export default function envoyExtension(pi: PiApi): void {
           // (`registrationTopics`). A caller that names one here asked for this topic by name,
           // so it is told by name, in the listener's own words, rather than left following a
           // subject nothing is ever delivered on. A private stream subject is left out of the
-          // registration without a word, as it always was (`subscribeRefusesTopic`).
-          const uncaptured = requested.filter((topic) =>
-            subscribeRefusesTopic(agentSubject(sessionID), topic)
-          );
-          if (uncaptured.length > 0) {
-            throw new Error(
-              uncaptured.map((topic) => uncapturedTopicRefusal(topic, sessionID)).join("; ")
-            );
-          }
+          // registration without a word, as it always was (`refuseUncapturedTopics`).
+          refuseUncapturedTopics(sessionID, agentSubject(sessionID), requested);
           const added: string[] = [];
           const already: string[] = [];
           for (const topic of requested) {

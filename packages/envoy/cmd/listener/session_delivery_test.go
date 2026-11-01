@@ -323,6 +323,60 @@ func TestSessionConsumerKeepsTheControllerNoticeLaneAHeartbeatOmits(t *testing.T
 	rig.awaitPending(t, sessionID, 1)
 }
 
+// A registration whose compare-and-swap loses to another registration of the same session
+// filters the session's consumer again for the plan it stores, so the filter and the row still
+// name one set (store.InterestPlan). The case is two registrations planned at one revision: the
+// second (S) plans, filters on {T, C} and stores them while the first (H) is between its plan
+// and its own consumer call, so H's filter call lands after S's and sets the filter back to
+// {T}; H's write is then refused the revision S took, H plans again from the row S stored, and
+// the route filters on that new plan before writing it. Without that second filter the
+// registration S was answered 200 for leaves C out of the consumer until the session's next
+// heartbeat, and every message published on C in that window is skipped.
+func TestSessionConsumerFiltersAgainWhenItsWriteLosesTheCompareAndSwap(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+	const (
+		sessionID = "ses_cas_refilter"
+		followed  = "notifications.dispatch.issue.CAS-1.>"
+		added     = "notifications.dispatch.issue.CAS-2.>"
+	)
+	heartbeat := `{"session_id":"` + sessionID + `","self_subscribed":true,
+		"topics":["` + followed + `"],"delivery":{"consumer":true,"epoch":"e"}}`
+	subscribe := `{"session_id":"` + sessionID + `","self_subscribed":true,
+		"topics":["` + followed + `","` + added + `"],"delivery":{"consumer":true,"epoch":"e"}}`
+	rig.subscribe(t, heartbeat)
+
+	// S runs whole inside H's window, between H's plan and H's own consumer call: it plans at the
+	// revision H planned at, filters on {T, C} and stores them. Once only, so H's second pass
+	// through the window runs against a settled row.
+	// A plain flag, not sync.Once: the inner registration runs this hook too, and a Once whose
+	// Do is re-entered from inside its own call never returns.
+	fired := false
+	rig.deps.consumers.beforeRegister = func() {
+		if fired {
+			return
+		}
+		fired = true
+		rig.subscribe(t, subscribe)
+	}
+	rig.subscribe(t, heartbeat)
+	rig.deps.consumers.beforeRegister = nil
+
+	stored, err := rig.harness.registry.Get(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("read the stored interest row: %v", err)
+	}
+	if !slices.Contains(stored.Topics, added) {
+		t.Fatalf("stored topics %v, want the topic %s the second registration was answered 200 for", stored.Topics, added)
+	}
+	want := slices.Compact(slices.Sorted(slices.Values(sessionConsumerFilter(sessionID, stored.Topics))))
+	if got := rig.filters(t, sessionID); !slices.Equal(got, want) {
+		t.Fatalf("consumer filters %v, want %v: a registration that re-plans after a lost compare-and-swap must filter on the plan it stores", got, want)
+	}
+	// A message on the topic the lost write would have left out of the filter is the consumer's.
+	rig.store(t, "notifications.dispatch.issue.CAS-2.comment")
+	rig.awaitPending(t, sessionID, 1)
+}
+
 func TestSessionConsumerOverlappingFollowsAreAccepted(t *testing.T) {
 	rig := newSessionConsumerRig(t)
 	const sessionID = "ses_overlap"

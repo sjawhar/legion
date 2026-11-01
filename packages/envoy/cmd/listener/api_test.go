@@ -2984,8 +2984,8 @@ func TestSubscribeHandlerDropsAnUncapturedNotificationTopicByName(t *testing.T) 
 			if !slices.Equal(answer.Topics, want) {
 				t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
 			}
-			if len(answer.Warnings) != 1 || answer.Warnings[0] != uncapturedTopicWarning(topic, sessionID) {
-				t.Fatalf("warnings = %q, want only %q", answer.Warnings, uncapturedTopicWarning(topic, sessionID))
+			if len(answer.Warnings) != 1 || answer.Warnings[0] != contracts.UncapturedTopicRefusal(topic, sessionID) {
+				t.Fatalf("warnings = %q, want only %q", answer.Warnings, contracts.UncapturedTopicRefusal(topic, sessionID))
 			}
 			stored, err := registry.Get(context.Background(), sessionID)
 			if err != nil {
@@ -3155,8 +3155,8 @@ func TestInterestSubscribeDropsAnUncapturedTopicAndStoresTheRest(t *testing.T) {
 	if !slices.Equal(answer.Topics, want) {
 		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
 	}
-	if len(answer.Warnings) != 1 || answer.Warnings[0] != uncapturedTopicWarning(stale, interestSession) {
-		t.Fatalf("warnings = %q, want only %q", answer.Warnings, uncapturedTopicWarning(stale, interestSession))
+	if len(answer.Warnings) != 1 || answer.Warnings[0] != contracts.UncapturedTopicRefusal(stale, interestSession) {
+		t.Fatalf("warnings = %q, want only %q", answer.Warnings, contracts.UncapturedTopicRefusal(stale, interestSession))
 	}
 	stored, err := rig.deps.registry.Get(context.Background(), interestSession)
 	if err != nil {
@@ -3180,8 +3180,8 @@ func TestInterestSubscribeStoresOnlyTheAgentSubjectWhenEveryTopicIsUncaptured(t 
 	if want := []string{own}; !slices.Equal(answer.Topics, want) {
 		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
 	}
-	if len(answer.Warnings) != 1 || answer.Warnings[0] != uncapturedTopicWarning(stale, interestSession) {
-		t.Fatalf("warnings = %q, want only %q", answer.Warnings, uncapturedTopicWarning(stale, interestSession))
+	if len(answer.Warnings) != 1 || answer.Warnings[0] != contracts.UncapturedTopicRefusal(stale, interestSession) {
+		t.Fatalf("warnings = %q, want only %q", answer.Warnings, contracts.UncapturedTopicRefusal(stale, interestSession))
 	}
 	stored, err := rig.deps.registry.Get(context.Background(), interestSession)
 	if err != nil {
@@ -3212,8 +3212,8 @@ func TestInterestSubscribeWarnsAboutAnUncapturedTopicAndAPrivateOneTogether(t *t
 	if len(answer.Warnings) != 2 {
 		t.Fatalf("warnings = %q, want one for %s and one for %s", answer.Warnings, stale, other)
 	}
-	if answer.Warnings[0] != uncapturedTopicWarning(stale, interestSession) {
-		t.Fatalf("warning for %s = %q, want %q", stale, answer.Warnings[0], uncapturedTopicWarning(stale, interestSession))
+	if answer.Warnings[0] != contracts.UncapturedTopicRefusal(stale, interestSession) {
+		t.Fatalf("warning for %s = %q, want %q", stale, answer.Warnings[0], contracts.UncapturedTopicRefusal(stale, interestSession))
 	}
 	if !strings.HasPrefix(answer.Warnings[1], other+" was not registered: it reaches a private stream subject") {
 		t.Fatalf("warning for %s = %q, want it named as reaching a private stream subject", other, answer.Warnings[1])

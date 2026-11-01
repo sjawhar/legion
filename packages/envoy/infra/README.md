@@ -2874,13 +2874,15 @@ receives nothing until that user's grant carries the session consumers.
 `SessionPermissions()` is what any agent session needs, with `*` for the session id. It publishes
 to `_INBOX.>`, for the replies to a session consumer's
 relay frames, and `agentstream.*.frames`, and subscribes to its own relay subject
-`notifications.envoy.deliver.*`, the presence probe a listener sends it before it reports a send
-delivered, `notifications.envoy.presence.*` (dispatch://INFRA-626), and
+`notifications.envoy.deliver.*`, the presence probe `notifications.envoy.presence.*`, and
 `agentstream.*.control` — no other `notifications.` subject,
-so a session can read no topic the listener does not relay to it. No stream subject captures the
-presence subject, so nothing is ever stored or read there; while sessions share one user, each
-can answer another session's probe, and so report a stopped session live, until the per-session
-credentials of dispatch://INFRA-840. It does not
+so a session can read no topic the listener does not relay to it. Nothing in this repository
+publishes or subscribes to the presence subject yet: it is granted here so that
+dispatch://INFRA-626, which has a listener probe a session before it reports a send delivered,
+needs no second grant change. No stream subject captures it, so nothing is ever stored or read
+there, and it carries no message; while sessions share one user, each will be able to answer
+another session's probe, and so report a stopped session live, until the per-session credentials
+of dispatch://INFRA-840. It does not
 subscribe to `_INBOX.>`, so a client holding this set alone may answer a request but not make one:
 sessions that share one user holding it, as a `gcp:NatsHub`'s `sessionUser` does, would otherwise
 each receive every other session's replies, so request/reply from such a session is refused by

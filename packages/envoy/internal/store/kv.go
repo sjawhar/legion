@@ -646,6 +646,15 @@ func (r *Registry) PlanInterest(ctx context.Context, sessionID string, requested
 	return r.planInterest(ctx, sessionID, slices.Clone(requested), false)
 }
 
+// PlanInterestAfterConflict is PlanInterest over the row the bucket now holds rather than the
+// cached one: the caller's last plan was refused its write (UpsertPlanned, ErrInterestPlanConflict)
+// by the writer that stored that row, and a plan made from a cache still behind it would be
+// refused again. Its caller filters the session's consumer on this plan before writing it, as it
+// did for the first, so the filter and the row still name one set after a conflict.
+func (r *Registry) PlanInterestAfterConflict(ctx context.Context, sessionID string, requested []string) (InterestPlan, error) {
+	return r.planInterest(ctx, sessionID, slices.Clone(requested), true)
+}
+
 // planInterest is PlanInterest over a row read from the cache, or from the bucket alone when
 // fromBucket is set: a plan made again after the bucket refused a write at the revision the last
 // plan read must see the row that refused it, which the cache may not hold yet.
@@ -666,59 +675,53 @@ func (r *Registry) planInterest(ctx context.Context, sessionID string, requested
 	}, nil
 }
 
-// ErrInterestPlanConflict is a registration whose interest row was rewritten under every plan
-// UpsertPlanned made for it. The listener answers it the bus-unavailable 503, and the plugin's
-// next heartbeat registers again; nothing is stored, so the row keeps whatever the write that
-// won it holds.
-var ErrInterestPlanConflict = errors.New("the interest record changed under every plan of this registration")
+// ErrInterestPlanConflict is a write whose interest row was rewritten under the plan it was made
+// for: another writer stored the row between the plan and the write, so the compare-and-swap
+// found a revision that is not the plan's. Its caller plans again
+// (PlanInterestAfterConflict), filters the session's consumer on the new plan and writes again,
+// InterestPlanAttempts times in all; past that the listener answers the bus-unavailable 503 and
+// the plugin's next heartbeat registers again. Nothing is stored for a refused write, so the row
+// keeps whatever the write that won it holds.
+var ErrInterestPlanConflict = errors.New("the interest record changed under the plan of this registration")
 
-// interestPlanAttempts bounds UpsertPlanned's plans of one registration. Each conflict means
-// another writer stored sessionID's row between this plan and its write, which only an
-// unsubscribe, a role claim or another registration of the same session does; three attempts
-// cover a burst of those and still end, rather than letting one session's registration spin
-// against a writer that keeps winning.
-const interestPlanAttempts = 3
+// InterestPlanAttempts bounds the plans one registration makes. Each conflict means another
+// writer stored the session's row between a plan and its write, which only an unsubscribe, a
+// role claim or another registration of the same session does; three attempts cover a burst of
+// those and still end, rather than letting one session's registration spin against a writer that
+// keeps winning.
+const InterestPlanAttempts = 3
 
 // UpsertPlanned is UpsertWithin for a caller holding a plan (PlanInterest): it writes the row
 // that plan decided, under the roles that decided it, rather than reading the session's roles
 // again.
 //
-// The write is a compare-and-swap at the revision the plan read (putInterestAt), because seconds
-// pass between the plan and this call - the listener's registration route creates or re-filters
-// the session's consumer in between - and an unsubscribe landing in that window would otherwise
-// be undone: the plan merged the row as it stood, so writing it back puts every topic the
-// unsubscribe removed into the row again, and the row only ever grows from there. A refused
-// write plans again from the row the bucket now holds (planInterest from the bucket, so the plan
-// sees the row that refused the write rather than a cache still behind it) and writes that,
-// interestPlanAttempts times in all; past that it is ErrInterestPlanConflict and nothing is
-// stored.
+// The write is one compare-and-swap at the revision the plan read (putInterestAt), because
+// seconds pass between the plan and this call - the listener's registration route creates or
+// re-filters the session's consumer in between - and an unsubscribe landing in that window would
+// otherwise be undone: the plan merged the row as it stood, so writing it back puts every topic
+// the unsubscribe removed into the row again, and the row only ever grows from there. A refused
+// write is ErrInterestPlanConflict and stores nothing. Planning again is the caller's, not this
+// call's: the filter of the session's consumer is built from the plan, so a plan made here would
+// store a row the filter was never set for, and the two would name different sets until the
+// session's next heartbeat (InterestPlan, cmd/listener's subscribeHandler).
 func (r *Registry) UpsertPlanned(ctx context.Context, item Interest, plan InterestPlan) (Interest, error) {
-	for attempt := 1; ; attempt++ {
-		cur, getErr := r.Get(ctx, item.SessionID)
-		merged, buf, unchanged, err := r.interestRow(cur, getErr, item, plan)
-		if err != nil {
-			return Interest{}, err
-		}
-		if unchanged {
-			return cur, nil
-		}
-		revision, stored, err := r.putInterestAt(ctx, merged.SessionID, buf, plan.Revision)
-		if err != nil {
-			return Interest{}, err
-		}
-		if stored {
-			r.recordInterest(merged, revision, getErr)
-			return merged, nil
-		}
-		if attempt == interestPlanAttempts {
-			return Interest{}, fmt.Errorf("write %s's interest record: %w after %d plans",
-				item.SessionID, ErrInterestPlanConflict, attempt)
-		}
-		plan, err = r.planInterest(ctx, item.SessionID, plan.Requested, true)
-		if err != nil {
-			return Interest{}, err
-		}
+	cur, getErr := r.Get(ctx, item.SessionID)
+	merged, buf, unchanged, err := r.interestRow(cur, getErr, item, plan)
+	if err != nil {
+		return Interest{}, err
 	}
+	if unchanged {
+		return cur, nil
+	}
+	revision, stored, err := r.putInterestAt(ctx, merged.SessionID, buf, plan.Revision)
+	if err != nil {
+		return Interest{}, err
+	}
+	if !stored {
+		return Interest{}, fmt.Errorf("write %s's interest record: %w", item.SessionID, ErrInterestPlanConflict)
+	}
+	r.recordInterest(merged, revision, getErr)
+	return merged, nil
 }
 
 // upsert is UpsertWithin's write, over the row cur that getErr reports the read of and the plan

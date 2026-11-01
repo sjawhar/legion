@@ -151,6 +151,10 @@
       "types": "./test/stall-scenario.ts",
       "bun": "./test/stall-scenario.ts"
     },
+    "./test/subscribe-answer": {
+      "types": "./test/subscribe-answer.ts",
+      "bun": "./test/subscribe-answer.ts"
+    },
     "./tool-contract": {
       "types": "./src/tool-contract.ts",
       "bun": "./src/tool-contract.ts",

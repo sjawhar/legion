@@ -199,14 +199,16 @@ func DispatchPermissions(machineID string) Permissions {
 // answer to a presence probe), then its agent stream's frames
 // (contracts.AgentStreamFramesSubject). Subscribe: its own relay subject (bus.DeliverSubject),
 // the subject the listener that owns the session publishes every message of the session's
-// consumer (bus.SessionConsumerName) on, then the presence probe the listener sends before it
-// reports a send delivered (notifications.envoy.presence.<session id>, dispatch://INFRA-626,
-// which owns the prefix's constant), then its agent stream's control subject
+// consumer (bus.SessionConsumerName) on, then the presence subject
+// (notifications.envoy.presence.<session id>), then its agent stream's control subject
 // (contracts.AgentStreamControlSubject). A session subscribes to no notification topic that
 // carries a message: it receives what its consumer delivers, on the relay subject, and nothing
 // else. The presence subject carries none, and no stream subject captures it
-// (TestSessionPresenceSubjectIsStoredByNoStream), so nothing is ever stored or read there: the
-// probe is a core request whose answer is the session saying it is running.
+// (TestSessionPresenceSubjectIsStoredByNoStream), so nothing is ever stored or read there.
+// Nothing in this repository publishes or subscribes to that subject yet: the grant is ahead of
+// dispatch://INFRA-626, which has a listener probe a session with a core request before it
+// reports a send delivered, and which owns the prefix's constant, so that change needs no change
+// of this set.
 //
 // A Legion controller session needs nothing added for its project's notice lane
 // (notifications.legion.<project>.controller, the daemon's notify.ControllerTopic): it registers
@@ -217,8 +219,8 @@ func DispatchPermissions(machineID string) Permissions {
 //
 // What this set does not solve: every session on a shared user holds the same set, so the relay
 // subject carries * and one session can read another's relay frames, and the presence subject
-// carries * and one session can answer another's probe — reporting a stopped session live —
-// until the per-session credentials of dispatch://INFRA-840. dispatch://INFRA-778 is what hands
+// carries * and one session will be able to answer another's probe, reporting a stopped session
+// live, once that change lands — until the per-session credentials of dispatch://INFRA-840. dispatch://INFRA-778 is what hands
 // a deployment's sessions this grant; nothing here does.
 func SessionPermissions() Permissions {
 	return Permissions{
@@ -231,10 +233,11 @@ func SessionPermissions() Permissions {
 	}
 }
 
-// sessionPresenceSubject is the presence probe of every session, with * for the session id: the
-// core request a listener sends to find out whether the session is running before it reports a
-// send delivered (dispatch://INFRA-626). The prefix's constant lives in internal/bus with that
-// change; this literal is the grant's own copy until the two meet.
+// sessionPresenceSubject is the presence subject of every session, with * for the session id,
+// which dispatch://INFRA-626 has a listener send a core request on to find out whether the
+// session is running before it reports a send delivered. Nothing here sends or answers one. The
+// prefix's constant lives in internal/bus with that change; this literal is the grant's own copy
+// until the two meet.
 const sessionPresenceSubject = "notifications.envoy.presence.*"
 
 // DaemonPermissions is the NATS grant one Legion daemon needs. The grant itself lives with

@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { mkdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+import { consumerDelivery } from "@legion/envoy-client/test/subscribe-answer"
 import type { Interest, SubscribeResult } from "@legion/envoy-client/transport"
 import type {
   ChannelBrokerMessage,
@@ -66,12 +67,7 @@ function interest(): Interest {
 function registered(): SubscribeResult {
   return {
     ...interest(),
-    delivery: {
-      mode: "consumer",
-      subject: "notifications.envoy.deliver.ses_current",
-      stream_id: "stream-1",
-      gap: false,
-    },
+    delivery: consumerDelivery("ses_current"),
   }
 }
 

@@ -339,7 +339,8 @@ order; that relay, not a subscription of this plugin's, is where the session's m
   new epoch.
 - The answer's one mode is `consumer` (`takeDeliveryAnswer`), and the relay carries the agent
   subject and every followed topic, each of which the stream stores (`streamStores`; the listener
-  refuses a registration naming any other `notifications.` topic). A registration the listener can
+  drops any other `notifications.` topic from the registration and names it in a warning, so a
+  row an earlier build left still registers). A registration the listener can
   give no consumer is refused by name (`503 no_grant` or `consumer_error`, `409 not_requested` or
   `invalid_session_id`) and nothing is registered: the session starts with Envoy inbound
   unavailable, says so, and asks again at each heartbeat. There is no second path to fall back to.

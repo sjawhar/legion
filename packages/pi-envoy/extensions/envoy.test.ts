@@ -47,6 +47,7 @@ import {
 } from "@legion/envoy-client/test/envoy-stack";
 import { startStallProxy } from "@legion/envoy-client/test/stall-proxy";
 import { runFreezeScenario } from "@legion/envoy-client/test/stall-scenario";
+import { consumerDelivery } from "@legion/envoy-client/test/subscribe-answer";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
@@ -1045,20 +1046,6 @@ function response(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200 });
 }
 
-/**
- * The delivery answer a listener gives a registration it can give a consumer: the session's
- * relay subject, the one path a message reaches the session by. A registration answered anything
- * else fails in the client (`parseSubscribeAnswer`), as a registration the listener refuses does.
- */
-function consumerDelivery(sessionID: string) {
-  return {
-    mode: "consumer" as const,
-    subject: deliverSubject(sessionID),
-    stream_id: TEST_STREAM_ID,
-    gap: false,
-  };
-}
-
 function responseWithRegistration(
   input: string | URL | Request,
   init: RequestInit | undefined,
@@ -1076,7 +1063,7 @@ function responseWithRegistration(
     machine_id: "test",
     dir: body.dir,
     topics: body.topics,
-    delivery: consumerDelivery(body.session_id),
+    delivery: consumerDelivery(body.session_id, { streamID: TEST_STREAM_ID }),
   });
 }
 
@@ -2987,7 +2974,7 @@ describe("envoy OMP extension", () => {
           machine_id: "test",
           dir: "/tmp",
           topics: ["notifications.agent.ses_omp"],
-          delivery: consumerDelivery("ses_omp"),
+          delivery: consumerDelivery("ses_omp", { streamID: TEST_STREAM_ID }),
         });
       }
       if (url.pathname === "/v1/sessions") return response([]);
@@ -3222,7 +3209,7 @@ describe("envoy OMP extension", () => {
           machine_id: "test",
           dir: "/tmp",
           topics: ["notifications.agent.ses_omp"],
-          delivery: consumerDelivery("ses_omp"),
+          delivery: consumerDelivery("ses_omp", { streamID: TEST_STREAM_ID }),
         });
       }
       return new Response(JSON.stringify({ error: "no live session ses_missing" }), {
@@ -9681,7 +9668,7 @@ console.log(JSON.stringify(args));
           machine_id: "test",
           dir: "/tmp",
           topics: body.topics,
-          delivery: consumerDelivery(body.session_id),
+          delivery: consumerDelivery(body.session_id, { streamID: TEST_STREAM_ID }),
         });
       }
       return responseWithRegistration(input, init, {});
@@ -11110,7 +11097,7 @@ console.log(JSON.stringify(args));
           machine_id: "test",
           dir: "/tmp",
           topics: ["notifications.agent.ses_delivery"],
-          delivery: consumerDelivery("ses_delivery"),
+          delivery: consumerDelivery("ses_delivery", { streamID: TEST_STREAM_ID }),
         });
       }
       if (path === "/api/v1/comments/33333333-3333-4333-8333-333333333333/reply") {
@@ -13644,7 +13631,7 @@ console.log(JSON.stringify(args));
           machine_id: "test",
           dir: body.dir,
           topics: body.topics,
-          delivery: consumerDelivery(body.session_id),
+          delivery: consumerDelivery(body.session_id, { streamID: TEST_STREAM_ID }),
         });
       }
       return response({});
@@ -14535,7 +14522,7 @@ console.log(JSON.stringify(args));
           machine_id: "test",
           dir: body.dir,
           topics: [...registryTopics],
-          delivery: consumerDelivery(body.session_id),
+          delivery: consumerDelivery(body.session_id, { streamID: TEST_STREAM_ID }),
         });
       }
       if (url.pathname === "/v1/interests/unsubscribe") {
@@ -14628,7 +14615,7 @@ console.log(JSON.stringify(args));
           machine_id: "test",
           dir: body.dir,
           topics: body.topics,
-          delivery: consumerDelivery(body.session_id),
+          delivery: consumerDelivery(body.session_id, { streamID: TEST_STREAM_ID }),
         });
       }
       if (url.pathname === "/v1/interests/ses_list") {
@@ -15274,7 +15261,7 @@ console.log(JSON.stringify(args));
             machine_id: "test",
             dir: "/tmp/envoy-omp-test",
             topics: body?.topics ?? [],
-            delivery: consumerDelivery("ses_awaiting_retry"),
+            delivery: consumerDelivery("ses_awaiting_retry", { streamID: TEST_STREAM_ID }),
           });
         }
         return response({});
@@ -15808,7 +15795,7 @@ console.log(JSON.stringify(args));
         dir: body.dir ?? "/tmp",
         topics: body.topics ?? [],
         warnings: ["no matching event in stream"],
-        delivery: consumerDelivery(body.session_id ?? "ses_omp"),
+        delivery: consumerDelivery(body.session_id ?? "ses_omp", { streamID: TEST_STREAM_ID }),
       });
     };
     const { default: envoyExtension } = await import("./envoy.ts?subscribe-warnings");
@@ -16046,12 +16033,10 @@ describe("consumer delivery", () => {
           machine_id: "test",
           dir: body.dir,
           topics: body.topics,
-          delivery: {
-            mode: "consumer",
-            subject: RELAY,
-            stream_id: STREAM,
+          delivery: consumerDelivery(SESSION, {
+            streamID: STREAM,
             gap: options.gap === true && registrations.length === 1,
-          },
+          }),
         });
       }
       if (

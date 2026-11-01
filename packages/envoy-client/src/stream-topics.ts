@@ -4,6 +4,7 @@ import {
   GHOSTWISPR_TOPIC_PREFIX,
   LEGION_NOTICE_TOPIC_PREFIX,
   ROLE_TOPIC_PREFIX,
+  uncapturedTopicRefusal,
 } from "@legion/contracts";
 
 /** The topic a failed delivery's report goes to is this prefix followed by the original topic. */
@@ -63,13 +64,12 @@ export function streamDeliversNothing(topic: string): boolean {
  * What a caller that names a topic nothing would be delivered on (`streamDeliversNothing`) is
  * told, in the listener's own words: the sentence is written once, as `uncapturedTopicRefusal` in
  * `@legion/contracts`, which `packages/contracts/scripts/gen-go.ts` emits as
- * `contracts.UncapturedTopicRefusal` for the listener's `uncapturedTopicWarning`
- * (packages/envoy/cmd/listener/api.go), the warning POST /v1/interests/subscribe answers when it
- * leaves such a topic out of a registration. A host's own subscribe tool refuses such a topic
- * with this sentence (`envoy_subscribe` in pi-envoy, `follow` in claude-envoy), so the two read
- * alike: a registration carries topics nobody typed — a stored row, a restored transcript — and
- * is told in a warning, where a tool call is a caller asking for this one topic by name and is
- * answered by name.
+ * `contracts.UncapturedTopicRefusal` for the listener's own warning (`splitUncapturedTopics` in
+ * packages/envoy/cmd/listener/api.go), which POST /v1/interests/subscribe answers when it leaves
+ * such a topic out of a registration. A host's own subscribe tool refuses such a topic with this
+ * sentence (`refuseUncapturedTopics` below), so the two read alike: a registration carries topics
+ * nobody typed — a stored row, a restored transcript — and is told in a warning, where a tool
+ * call is a caller asking for this one topic by name and is answered by name.
  */
 export { uncapturedTopicRefusal } from "@legion/contracts";
 
@@ -86,6 +86,24 @@ export { uncapturedTopicRefusal } from "@legion/contracts";
  */
 export function subscribeRefusesTopic(ownAgentSubject: string, topic: string): boolean {
   return streamDeliversNothing(topic) && !reachesPrivateStreamSubject(ownAgentSubject, topic);
+}
+
+/**
+ * Throws when a host's subscribe tool was handed a topic it refuses (`subscribeRefusesTopic`),
+ * naming every such topic in the listener's own words. Both hosts' tools call it on what their
+ * caller named — `envoy_subscribe` in pi-envoy, `follow` in claude-envoy — so a caller reads the
+ * same sentence from either, and neither follows a subject nothing is ever delivered on. A topic
+ * a stored row or a restored transcript carries never comes here: those are followed and left out
+ * of the registration instead (`registrationTopics`).
+ */
+export function refuseUncapturedTopics(
+  sessionID: string,
+  ownAgentSubject: string,
+  topics: readonly string[]
+): void {
+  const uncaptured = topics.filter((topic) => subscribeRefusesTopic(ownAgentSubject, topic));
+  if (uncaptured.length === 0) return;
+  throw new Error(uncaptured.map((topic) => uncapturedTopicRefusal(topic, sessionID)).join("; "));
 }
 
 /**

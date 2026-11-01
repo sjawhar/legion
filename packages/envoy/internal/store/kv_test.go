@@ -1259,14 +1259,17 @@ func storedInterest(t *testing.T, conn *natsgo.Conn, sessionID string) Interest 
 	return item
 }
 
-// A registration's write stores its plan at the revision the plan was read at and plans again
-// when the bucket refuses it, so an unsubscribe that lands between the two is not undone. Seconds
-// pass in that window: the listener's registration route plans first, then creates or re-filters
-// the session's consumer, each bus call waiting up to 5 s, and writes the plan after
-// (cmd/listener's subscribeHandler). Until INFRA-771's review the write read the row again and
-// merged the plan into it unconditionally, so a topic the unsubscribe had removed was written
-// back by the plan that had read it, and the row only ever grew from there; the likeliest trigger
-// is the daemon's fire-and-forget unsubscribe at the end of a role racing the next heartbeat.
+// A registration's write stores its plan at the revision the plan was read at and is refused when
+// the bucket holds another, so an unsubscribe that lands between the two is not undone: its
+// caller plans again from the row the bucket now holds and writes that
+// (PlanInterestAfterConflict, which the listener's registration route calls in the loop that also
+// filters the session's consumer on each plan). Seconds pass in that window: the route plans
+// first, then creates or re-filters the consumer, each bus call waiting up to 5 s, and writes the
+// plan after (cmd/listener's subscribeHandler). Until INFRA-771's review the write read the row
+// again and merged the plan into it unconditionally, so a topic the unsubscribe had removed was
+// written back by the plan that had read it, and the row only ever grew from there; the likeliest
+// trigger is the daemon's fire-and-forget unsubscribe at the end of a role racing the next
+// heartbeat.
 func TestUpsertPlannedKeepsAnUnsubscribeThatOutranItsPlan(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -1306,9 +1309,16 @@ func TestUpsertPlannedKeepsAnUnsubscribeThatOutranItsPlan(t *testing.T) {
 		t.Fatalf("unsubscribe from the issue topic: %v", err)
 	}
 
-	answered, err := reg.UpsertPlanned(ctx, Interest{SessionID: sessionID, MachineID: "m1"}, plan)
+	if _, err := reg.UpsertPlanned(ctx, Interest{SessionID: sessionID, MachineID: "m1"}, plan); !errors.Is(err, ErrInterestPlanConflict) {
+		t.Fatalf("the write of a plan the unsubscribe outran answered %v, want %v", err, ErrInterestPlanConflict)
+	}
+	again, err := reg.PlanInterestAfterConflict(ctx, sessionID, plan.Requested)
 	if err != nil {
-		t.Fatalf("write the heartbeat whose plan the unsubscribe outran: %v", err)
+		t.Fatalf("plan the heartbeat again after the refused write: %v", err)
+	}
+	answered, err := reg.UpsertPlanned(ctx, Interest{SessionID: sessionID, MachineID: "m1"}, again)
+	if err != nil {
+		t.Fatalf("write the heartbeat the second plan decided: %v", err)
 	}
 	if slices.Contains(answered.Topics, followed) {
 		t.Fatalf("the write answered topics %v; the unsubscribe removed %s, so the registration must not write it back", answered.Topics, followed)

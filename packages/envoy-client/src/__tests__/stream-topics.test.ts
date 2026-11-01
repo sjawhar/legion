@@ -107,63 +107,29 @@ describe("a controller notice lane", () => {
 });
 
 /**
- * The listener's own table: `TestReachesPrivateStreamSubjectBoundsInterests` in
- * packages/envoy/internal/bus/stored_test.go, the file this mirror answers case for case. The
- * rows are read out of that Go source rather than retyped, so a case added there is run here on
- * the next test run instead of drifting out of a hand copy.
+ * The listener's own cases: `packages/envoy/internal/bus/testdata/private-stream-subjects.json`,
+ * which `TestReachesPrivateStreamSubjectBoundsInterests` in packages/envoy/internal/bus reads
+ * too. One file, read by both, so a case added for either is run by both on the next test run
+ * and neither side can drift from a hand copy.
  */
-const GO_TABLE = resolve(import.meta.dir, "../../../envoy/internal/bus/stored_test.go");
-const GO_TABLE_TEST = "func TestReachesPrivateStreamSubjectBoundsInterests(t *testing.T) {";
+const SHARED_CASES = resolve(
+  import.meta.dir,
+  "../../../envoy/internal/bus/testdata/private-stream-subjects.json"
+);
 
-interface GoCase {
+interface SharedCase {
   readonly sessionID: string;
   readonly topic: string;
-  readonly roles: readonly string[];
+  readonly roles?: readonly string[];
   readonly want: boolean;
 }
 
-/** The rows of the Go table, each `{sessionID: "…", topic: "…", roles: …, want: …},`. */
-function goTableCases(source: string): GoCase[] {
-  const start = source.indexOf(GO_TABLE_TEST);
-  if (start < 0) throw new Error(`${GO_TABLE} no longer holds ${GO_TABLE_TEST}`);
-  // The table ends with the function: its own closing brace is the first one in column 0.
-  const body = source.slice(start, source.indexOf("\n}", start));
-  // The slices the rows name, such as `controller := []string{"legion-ACME-controller", …}`.
-  const named = new Map<string, string[]>();
-  for (const [, name, items] of body.matchAll(/(\w+) := \[\]string\{([^}]*)\}/g)) {
-    named.set(
-      name,
-      [...items.matchAll(/"([^"]*)"/g)].map(([, item]) => item)
-    );
-  }
-  const roleList = (written: string | undefined): readonly string[] => {
-    if (written === undefined) return [];
-    if (written.startsWith("[]string{")) {
-      return [...written.matchAll(/"([^"]*)"/g)].map(([, item]) => item);
-    }
-    const slice = named.get(written);
-    if (slice === undefined)
-      throw new Error(`the Go table names a slice this test cannot read: ${written}`);
-    return slice;
-  };
-  return [
-    ...body.matchAll(
-      /\{sessionID: "([^"]*)", topic: "([^"]*)"(?:, roles: (\[\]string\{[^}]*\}|\w+))?, want: (true|false)\}/g
-    ),
-  ].map(([, sessionID, topic, roles, want]) => ({
-    sessionID: sessionID ?? "",
-    topic: topic ?? "",
-    roles: roleList(roles),
-    want: want === "true",
-  }));
-}
-
 test("a topic reaching a private stream subject is the listener's rule, case for case", () => {
-  const cases = goTableCases(readFileSync(GO_TABLE, "utf8"));
-  // The Go table held 35 rows when this was written: a parse that reads a handful of them, or
+  const cases: SharedCase[] = JSON.parse(readFileSync(SHARED_CASES, "utf8"));
+  // The file held 37 cases when this was written: a read that answers a handful of them, or
   // none, passes while covering nothing.
-  expect(cases.length).toBeGreaterThanOrEqual(35);
-  for (const { sessionID, topic, roles, want } of cases) {
+  expect(cases.length).toBeGreaterThanOrEqual(37);
+  for (const { sessionID, topic, roles = [], want } of cases) {
     expect({
       topic,
       roles,

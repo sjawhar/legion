@@ -107,16 +107,13 @@ export type Interest = z.infer<typeof InterestWireSchema>;
 export type DeliveryAnswer = z.infer<typeof DeliveryAnswerWireSchema>;
 
 /**
- * The registration's answer: the interest, and the consumer the listener gave the session. A
- * registration that names no serving port carries one or is refused (`parseSubscribeAnswer`);
- * only a serving-port registration the listener could give no consumer is answered without one,
- * its messages pushed to its port instead (`sessionDelivery.register` in
- * packages/envoy/cmd/listener), which is the shape `subscribeServingPort` answers.
+ * The registration's answer: the interest, and the consumer the listener gave the session. Every
+ * registration this client makes carries one or is refused (`parseSubscribeAnswer`): a session
+ * receives only what its own consumer holds. A serving-port registration, which the listener
+ * answers without one when it could give none and pushes to the port instead, is made by no
+ * caller of this client any more — the OpenCode plugin that made them is gone (sjawhar/legion#2607).
  */
 export type SubscribeResult = Interest & { readonly delivery: DeliveryAnswer };
-
-/** What a serving-port registration is answered (`subscribeServingPort`). */
-export type ServingPortSubscribeResult = Interest & { readonly delivery?: DeliveryAnswer };
 
 /** Where a session's stream sequence was up to: what a new consumer may be seeded from. */
 export interface ResumePoint {
@@ -172,22 +169,8 @@ export function parseSubscribeAnswer(body: unknown): SubscribeResult {
 }
 
 /**
- * Reads a serving-port registration's answer, which the listener pushes to rather than relays:
- * it carries the consumer this listener could give the session, and none when it could give it
- * none, where every other registration would have been refused. A `delivery` field this build
- * cannot read is still a failure: the listener answered something about delivery that this build
- * would act on wrongly.
- */
-function parseServingPortSubscribeAnswer(body: unknown): ServingPortSubscribeResult {
-  const raw =
-    typeof body === "object" && body !== null && "delivery" in body ? body.delivery : undefined;
-  if (raw === undefined || raw === null) return InterestWireSchema.parse(body);
-  return parseSubscribeAnswer(body);
-}
-
-/**
- * Live NATS subscriptions and the listener's registry can disagree after a reconnect or a
- * human removal; this reports both, and which side knows each topic. Registry topics come
+ * The subjects a session holds open and the listener's registry can disagree after a reconnect
+ * or a human removal; this reports both, and which side knows each topic. Registry topics come
  * first in insertion order, then the live-only ones.
  */
 export function mergeInterestSources(
@@ -399,11 +382,6 @@ export class EnvoyApiError extends Error {
 
 export type EnvoyClient = {
   readonly subscribe: (input: SubscribeInput) => Promise<SubscribeResult>;
-  /**
-   * Registers a session the listener pushes to on its serving port (`SubscribeInput.port`, the
-   * port it serves on), which is answered a consumer only when this listener can give it one.
-   */
-  readonly subscribeServingPort: (input: SubscribeInput) => Promise<ServingPortSubscribeResult>;
   readonly unsubscribe: (input: UnsubscribeInput) => Promise<void>;
   readonly getInterest: (sessionID: string) => Promise<Interest>;
   readonly send: (input: SendInput) => Promise<SendResult>;
@@ -493,8 +471,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       options
     );
 
-  // What POST /v1/interests/subscribe carries. Both registrations send the same body and differ
-  // only in how strictly they read the answer (`parseServingPortSubscribeAnswer`).
+  // What POST /v1/interests/subscribe carries.
   const subscribeBody = (input: SubscribeInput) => ({
     session_id: input.sessionID,
     dir: input.directory,
@@ -527,10 +504,6 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
   return {
     subscribe: async (input) =>
       parseSubscribeAnswer(JSON.parse(await post("/v1/interests/subscribe", subscribeBody(input)))),
-    subscribeServingPort: async (input) =>
-      parseServingPortSubscribeAnswer(
-        JSON.parse(await post("/v1/interests/subscribe", subscribeBody(input)))
-      ),
     unsubscribe: async (input) => {
       await post("/v1/interests/unsubscribe", {
         session_id: input.sessionID,
