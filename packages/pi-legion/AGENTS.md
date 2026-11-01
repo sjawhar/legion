@@ -90,7 +90,7 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 44's update round (the
+number is the one `DaemonAPIVersion` declares, last bumped by contract 45's update round (the
 `legion` tool's `ready_for_update` op, which posts `POST /legion/v1/claims/ready-for-update` with
 the round its update task named and the head of `legion/<issue>@origin`, and the `updateRound` and
 `updateHead` fields every claim view gains), after contract 43's strict `consumers` on

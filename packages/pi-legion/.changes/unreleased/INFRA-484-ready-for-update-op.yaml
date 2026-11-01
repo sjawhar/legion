@@ -10,4 +10,4 @@ body: |-
   on the new pod in the same session; a round that ends having replaced nothing — the drift it
   was opened for went away — sends that held task instead, or tells the worker the round is over
   where no task waits.
-  `legion.daemonApiVersion` is 44.
+  `legion.daemonApiVersion` is 45.

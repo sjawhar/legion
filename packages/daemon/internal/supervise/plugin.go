@@ -31,9 +31,8 @@ const PodUpdateContract = 45
 // CannotAnswerUpdate says whether c's worker has no ready_for_update op to answer its update task
 // with: its process runs now (HoldsCapability) and the registration that process made declared a
 // plugin contract below the one that introduced the op. It is the one statement of that rule,
-// read by the turn's end, which is such a worker's answer (answerByTurnEnd), by the stale-plugin
-// lane (refreshPlugin) and by the daemon's own pass, which posts no relaunch for a claim no
-// install can carry (internal/daemon's refreshStalePlugins).
+// read by the turn's end, which is such a worker's answer (answerByTurnEnd), and by the
+// stale-plugin lane (refreshPlugin).
 //
 // The running process is half the rule, and the half a reading of the contract alone would get
 // wrong. A claim with none — suspended, failed, launching, or still queued — records the contract

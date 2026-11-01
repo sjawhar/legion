@@ -1982,9 +1982,10 @@ func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time
 // A claim still in the turn it answered this round from is left exactly as the post found it, as
 // a plugin round's own worker is: the task that turn is reading is the round's ask, which the
 // turn's end retires, so a release decided now would read a worker that holds something, tell it
-// nothing, and leave it idle with nothing to start its next turn. The next sweep posts the end
-// again once the turn is over. An end that replaced the pod does not wait: that process is gone,
-// and leaving the round on the claim would outlive the pod it was opened over.
+// nothing, and leave it idle with nothing to start its next turn. The end is held for that turn
+// (Machine.roundOver) and runs once it is over (afterTurn). An end that replaced the pod does not
+// wait: that process is gone, and leaving the round on the claim would outlive the pod it was
+// opened over.
 //
 // A claim's own plugin round ends with the relaunch it was opened for: the worker has pushed its
 // work and answered, so the process is replaced now, through the path the stale-plugin lane used
@@ -2150,7 +2151,7 @@ func (m *Machine) clearUpdate() {
 // round it read, and the round that replaced it promises something else of the pod and the disk,
 // so counting that answer would replace a pod no worker has pushed for. A claim in no round at
 // all is the same case: every answer names a round it is not in. The refusal names both rounds,
-// so the worker can read what happened and answer the round it is actually in.
+// and tells the worker to end its turn and answer the task the daemon then sends.
 //
 // The line it logs is the one durable record of the head: the claim's UpdateHead goes with the
 // round that ends (clearUpdate), and the answer is what an operator reads the replacement back

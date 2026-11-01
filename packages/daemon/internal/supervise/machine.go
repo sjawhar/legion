@@ -385,13 +385,13 @@ type Deps struct {
 	// its plugin contract and whether it can relaunch at all. nil is a daemon whose every launch
 	// installs a plugin, which is what every caller that states nothing means.
 	//
-	// A claim it answers true for and whose process is below PodUpdateContract is never
-	// relaunched by the stale-plugin lane and never charged for its stale registration
-	// (staleRegistration): the relaunch would keep the pod, bring the same plugin back and charge
-	// the claim toward failed, and a failed claim cannot push its work. Such a claim is left
-	// running, and the update round over its pod is what carries it: it is asked like any other
-	// worker and answers by ending the turn the task starts (askForUpdate, answerByTurnEnd), and
-	// the replacement brings it up on a new image (internal/daemon's refreshStalePlugins).
+	// A claim it answers true for, at any contract, is never relaunched by the stale-plugin lane
+	// and never charged for its stale registration (staleRegistration): the relaunch would keep
+	// the pod, bring the same plugin back and charge the claim toward failed, and a failed claim
+	// cannot push its work. Such a claim is left running, and the update round over its pod is
+	// what carries it: it is asked like any other worker and answers by ending the turn the task
+	// starts (askForUpdate, answerByTurnEnd), and the replacement brings it up on a new image
+	// (internal/daemon's refreshStalePlugins).
 	NoPluginInstall func(c Claim) bool
 	// TaskConfirmed is told of each claim whose pending delivery a turn has just confirmed: the
 	// agent took the work the daemon gave it. The workflow decides what a root still owes its

@@ -5,5 +5,5 @@ body: |-
   pod shares, or `plugin:<daemon contract>`, one claim's own — and `updateHead`, the commit the
   worker reported as the head of its issue branch at origin when it answered the round. Both are
   absent while no round is open, and both are the worker's own report, which nothing verifies.
-  Daemon API contract 44 declares them, so a strict reader before it refuses a state that carries
+  Daemon API contract 45 declares them, so a strict reader before it refuses a state that carries
   either.

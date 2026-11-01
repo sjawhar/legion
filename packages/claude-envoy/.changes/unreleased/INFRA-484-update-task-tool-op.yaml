@@ -8,4 +8,4 @@ body: |-
   blocks nothing, so that turn ends and the daemon sees it end. No reminder follows that turn:
   the daemon is what wakes the worker again, with the task it held behind the round, or, when the
   round ends having replaced nothing, with a short task saying the round is over.
-  `package.json`'s `legion.daemonApiVersion` is 44.
+  `package.json`'s `legion.daemonApiVersion` is 45.

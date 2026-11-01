@@ -13,8 +13,7 @@ body: |-
     A worker whose plugin is older than the contract that added the operation is asked all the
     same, and its task tells it what to do without one: push, and end the turn. The daemon reads
     the end of that turn as the answer and records it with no head, so no release needs an
-    operator's drain. A turn the daemon cut, and a turn it never saw begin, are no answer: the
-    round asks again.
+    operator's drain. A turn the daemon never saw begin is no answer: the round asks again.
 
     A round that ends having replaced nothing — the drift went away — releases every worker that
     answered it, an idle one at once and a working one when its turn ends, and a worker whose pod
