@@ -54,6 +54,13 @@ const (
 	metadataTimeout = 10 * time.Second
 )
 
+// metadataClient asks the metadata server for identity tokens on a transport with no proxy at
+// all, as cloud.google.com/go/compute/metadata does. http.DefaultClient honours HTTP_PROXY, and
+// the metadata server's address is link-local, not loopback, so the default transport would hand a
+// proxy the VM's identity token, which logs in as that VM for up to an hour. renew --vm fetches
+// one before every renewal, so it would hand over a fresh one each time.
+var metadataClient = &http.Client{Transport: &http.Transport{}}
+
 // vmIdentity is what a VM's identity token says about the VM, as the broker reads it too.
 type vmIdentity struct {
 	Account    string // the instance's service account, the token's `email`
@@ -97,7 +104,7 @@ func metadataToken(ctx context.Context, audience string) (string, error) {
 		return "", fmt.Errorf("ask the metadata server at %s: %w", callURL, err)
 	}
 	req.Header.Set("Metadata-Flavor", "Google")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := metadataClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("the metadata server at %s could not be reached (%s names its host): %w", callURL, metadataHostVar, err)
 	}
