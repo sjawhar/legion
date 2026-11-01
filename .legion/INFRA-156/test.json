@@ -2,51 +2,44 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-156",
-  "completed": "2026-10-31T21:35:00Z",
-  "headTested": "d62f960d23b5f04ae201605a3d3dbacb05547324",
-  "previousHeadTested": "cecaddc344cfa15c7ac2b1b3706fd39cc46c1795",
-  "fingerprint": "b7d5f7a24d974890",
-  "fingerprintCheck": "changed 843d32db -> b7d5f7a2 only in packages/dispatch/web/src/features/doc/ProofDocument.tsx (merge 3e6565b3 of main efed4e4d): the editor effect's dependency list holds documentRef beside #2548's pendingWaiter; migration stays 0150 (main's highest 0149). Tested that file in a real browser plus the basic checks, as the architect scoped.",
+  "previousHandoff": "db65ce4213e47a0566a09c8473146decbc0ff991",
+  "completed": "2026-11-01T03:55:00Z",
+  "headTested": "ff2209033ee7968221b03afa90f68ee7eac7d958",
+  "previousHeadTested": "d62f960d23b5f04ae201605a3d3dbacb05547324",
+  "fingerprint": "e86a2b46b242f8ba",
+  "fingerprintCheck": "changed b7d5f7a2 -> e86a2b46 by merge e2d85fd1 of main 072a7d34: migration 0150 -> 0151_block_pointer_links, guide text, and docs/mutation.go applyLive passing tree.Node() to refuseBlockPointers after main's #2522. Tested those, as the architect scoped.",
   "provider": "Anthropic (anthropic/claude-opus-5-5), the model that answered this testing session",
-  "outcome": "Pass. CI run 41241548407 at d62f960d was queued when read; the editor/web typecheck and doc tests are the CI dispatch job's, read there, not re-run. GitHub: MERGEABLE.",
+  "outcome": "Pass. CI run 41269264830 at ff220903 was queued when read; the migration and census Go tests are CI's and not read yet (queued, not passed). GitHub: MERGEABLE. Note: at this head the document websocket admits only a person's session (bearer 401), main's change; the live room was held with a person's cookie.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the merged ProofDocument in headless Chromium against the head's built dashboard, ran #2548's compose-wait e2e rows (15 passed), and t.py 80/80 on a database first migrated by main efed4e4d (https://github.com/sjawhar/legion/pull/2394#issuecomment-6549343956)."
+    "how": "Drove the same surface independently at ff220903 on a database first migrated by main 072a7d34 (150): t.py 80/80 and every applyLive write path with the room idle and live (https://github.com/sjawhar/legion/pull/2394#issuecomment-6552982963)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The merged ProofDocument still hands documentRef to the editor, so the editor refuses a same-document pointer to a disallowed block type",
-      "surface": "headless Chromium on the head's own built dashboard (bun run build:web), served by a server built from the head with a scratch block[] schema; the live editor's setBlockAttributes reached through the page's React state",
-      "command": "browser eval: open /issues/BRW-1 (requirement r1, callout k1, paragraph, claim{#c1 serves=r1}); handle.setBlockAttributes('c1', ...) for each value (https://github.com/sjawhar/legion/pull/2394#issuecomment-6549343956)",
-      "observed": "serves at callout k1 refused 'typed block \"claim\" #c1 attribute \"serves\" points at dispatch://BRW-1/spec#b-k1, a \"callout\" block; it points only at requirement'; serves at the paragraph refused naming \"paragraph\"; serves at artifact/spec#b-r1 refused (not canonical); serves at a comment block refused; cites (no targets) at k1 accepted, settled into version 2 as cites=\"...#b-k1\" serves=\"...#b-r1\", and ?to=#b-k1 lists cites from c1",
-      "headSha": "d62f960d23b5f04ae201605a3d3dbacb05547324",
-      "negativeControl": "the type refusal exists only when documentRef is set (without it the editor refuses no same-document target); cites with no targets at the same callout is accepted"
+      "criterion": "Migration 0151_block_pointer_links applies on a database at main's 0150_dpop_proofs and keeps every existing edge",
+      "surface": "main's Dispatch server at 072a7d34, then the head's server on the same Postgres 17 + pgvector database",
+      "command": "bash $TMPDIR/infra156-tester/upgrade.sh <main 072a7d34 binary> <head binary> infra156_tester_up21 8795 (https://github.com/sjawhar/legion/pull/2394#issuecomment-6552982963)",
+      "observed": "schema_version 150 -> 151 (schema_migrations 151, 150, 149); graph_edges holds block_ref_listed; existing block_refs rows kept, to_types null; the same four mentions edges (spec, document, comment, message blocks)",
+      "headSha": "ff2209033ee7968221b03afa90f68ee7eac7d958",
+      "negativeControl": "a block[] pointer to a callout on the upgraded database is refused 400 INVALID_MARKDOWN"
     },
     {
-      "criterion": "A document opens once with no reconnect loop (documentRef is a string recomputed each render)",
-      "surface": "the same headless Chromium tab, CDP Network.webSocketCreated",
-      "command": "open /issues/BRW-1, wait for .ProseMirror, then 8 s (https://github.com/sjawhar/legion/pull/2394#issuecomment-6549343956)",
-      "observed": "exactly one ws://127.0.0.1:8799/ws/doc/<spec id>?schema_version=2 socket over the window",
-      "headSha": "d62f960d23b5f04ae201605a3d3dbacb05547324",
-      "negativeControl": "none induced; a dependency that changed identity each render would show as repeated /ws/doc sockets in the same window"
+      "criterion": "A block[] pointer to a disallowed block type is refused on every applyLive write path (upload, edit op, and either while the room is live), and an allowed one is stored and listed",
+      "surface": "the head's real server over HTTP, with the document's room idle and then held live by a Hocuspocus/Yjs client on /ws/doc with a person's session cookie",
+      "command": "curl uploads and POST /edits against paths.md (claim{#c1 serves=r1}) on UPG-2; bun zz-hold.ts holding the room (https://github.com/sjawhar/legion/pull/2394#issuecomment-6552982963)",
+      "observed": "idle: upload at callout k1 400 INVALID_MARKDOWN, edit insert 400 INVALID_OP; live (client synced): upload 400 INVALID_MARKDOWN, edit insert 400 INVALID_OP, edit retype serves=[k1] 400 INVALID_OP, each 'block pointer refused: ... a \"callout\" block; it points only at requirement'; edit insert at r1 200 and the live client received it (tree [c1, c4, c6, c8]); ?to=#b-r1&kind=serves lists c1, c4, c6, c8; ?to=#b-k1 lists none",
+      "headSha": "ff2209033ee7968221b03afa90f68ee7eac7d958",
+      "negativeControl": "the same insert at requirement r1 is accepted 200"
     },
     {
-      "criterion": "#2548's compose-wait e2e rows still pass at this head",
-      "surface": "the repository's Dispatch e2e harness (bun e2e/run.ts) with Playwright Chromium against a server built from the head",
-      "command": "bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/compose-wait.e2e.ts --project=chromium (https://github.com/sjawhar/legion/pull/2394#issuecomment-6549343956)",
-      "observed": "15 passed (9.9m)",
-      "headSha": "d62f960d23b5f04ae201605a3d3dbacb05547324",
-      "negativeControl": "none: these are main's rows, run unchanged"
-    },
-    {
-      "criterion": "Migration 0150_block_pointer_links applies on a database at main's 0149 and keeps every existing edge, comment and message blocks included; A3 checks and CI filters hold",
-      "surface": "main's server at efed4e4d then the head's server on the same database; t.py over HTTP; check-ci-filters.sh in a scratch clone",
-      "command": "upgrade.sh <main efed4e4d> <head> infra156_tester_up20 8795; python3 t.py; uv run --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh (https://github.com/sjawhar/legion/pull/2394#issuecomment-6549343956)",
-      "observed": "149 -> 150, graph_edges holds block_ref_listed, the same four mentions edges; t.py 80/80; filters exit 0",
-      "headSha": "d62f960d23b5f04ae201605a3d3dbacb05547324",
-      "negativeControl": "serves naming a callout -> 400 INVALID_MARKDOWN 'block pointer refused' (t.py check 1f)"
+      "criterion": "A3 checks and CI filters still hold",
+      "surface": "t.py against the head's server on the upgraded database; check-ci-filters.sh in a scratch clone",
+      "command": "python3 t.py http://127.0.0.1:8795; uv run --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh (https://github.com/sjawhar/legion/pull/2394#issuecomment-6552982963)",
+      "observed": "t.py 80/80; filters exit 0",
+      "headSha": "ff2209033ee7968221b03afa90f68ee7eac7d958",
+      "negativeControl": "serves naming a callout -> 400 INVALID_MARKDOWN (t.py check 1f)"
     }
   ]
 }
