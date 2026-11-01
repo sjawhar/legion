@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-934",
+  "previousHandoff": "",
+  "headReviewed": "ac35a42b765bcfde49ae1b5ec858646969511e64",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "scripts/e2e/lib/stage4b-pods.test.ts",
+      "description": "Line 261 names legion-infra-worker, the ServiceAccount the private deployment creates (dispatch://INFRA-321). AGENTS.md 'This repository is public' keeps names of the private infrastructure out of the tree, and the spec's Summary says the change names no project or deployment. Use a neutral name (operator-account), and change the PR body's two E2E lines that quote it."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/e2e/stage4a-sandbox-runtime.sh",
+      "description": "The account fill and its grep check are written twice, once in each model-route arm (:422-425 and :431-433), with messages that already differ. The fill does not depend on the route: do it once after esac, as claude-backend-sandbox.sh:589-602 does."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/runtime/sandbox/account_drift_test.go",
+      "description": "Lines 93-98 re-implement lastStart (restage_test.go:104), and with no start sent the loop yields a zero LauncherStart and fails with 'names no command after --' instead of naming the missing start. Use lastStart(t, g, spec.Claim)."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/kubernetes.md",
+      "description": "Fixed by the reviewer's own prose commit: the unset-account sentence at :1623 claimed no drift at all where a pod on another account is replaced; the stale-plugin list at :1812 left out account drift; :2884 and sandbox.go's accountDrift comment said the API server leaves the field as written where it writes default for a pod naming none; :4286-4287 said every live pod is replaced at its next launch where a cache pod is replaced at the sweep; sandbox.go's ReconcileOrphans comment said each drift is 'pinned'; account_drift_test.go's comments said the issue keeps its disk."
+    }
+  ]
+}
