@@ -11,6 +11,7 @@ package main
 import (
 	"crypto/ecdsa"
 	"encoding/json"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -23,7 +24,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
-	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
@@ -37,13 +37,16 @@ const (
 	// podAccount is the identity BROKER_EXCHANGE_ACCOUNTS lists here whose pods the test drives,
 	// with the project and the person its entry gives it; listedAccount is listed too, for another
 	// project and another person; otherAccount is listed nowhere; apiAccount is the listed caller
-	// of the introspection route, BROKER_API_ACCOUNTS' own.
-	podAccount    = "system:serviceaccount:example-ns:example-worker"
-	listedAccount = "system:serviceaccount:other-ns:example-worker"
-	otherAccount  = "system:serviceaccount:example-ns:example-other"
-	apiAccount    = "system:serviceaccount:example-ns:example-dispatch"
-	person        = "ada@example.com"
-	project       = "ACME"
+	// of the introspection route, BROKER_API_ACCOUNTS' own; registrarAccount is the deployment's
+	// own daemon, which BROKER_SERVICE_LOGINS lets log in as legion-daemon and which registers the
+	// pods it starts under their session names.
+	podAccount       = "system:serviceaccount:example-ns:example-worker"
+	listedAccount    = "system:serviceaccount:other-ns:example-worker"
+	otherAccount     = "system:serviceaccount:example-ns:example-other"
+	apiAccount       = "system:serviceaccount:example-ns:example-dispatch"
+	registrarAccount = "system:serviceaccount:example-ns:example-daemon"
+	person           = "ada@example.com"
+	project          = "ACME"
 	// enrolmentAudience is what a pod's enrolment token and a listed caller's own token carry;
 	// exchangeAudience is what a token presented to the exchange must carry, and workflowAudience
 	// what a GitHub workflow run's would. A token minted for one is not spendable at another.
@@ -56,9 +59,11 @@ const (
 	heldSession    = "example-session"
 	renewalSession = "example-renewal"
 	// firstPodUID is the pod that first claims heldSession; secondPodUID is another pod of the
-	// very same listed account, which is the same principal.
+	// very same listed account, which is the same principal and which its deployment registers
+	// for that name as well; thirdPodUID is a pod of that account registered for nothing.
 	firstPodUID  = "pod-uid-1"
 	secondPodUID = "pod-uid-2"
+	thirdPodUID  = "pod-uid-3"
 	// longAccessSeconds is the access-token lifetime of the run every step but the renewal drives,
 	// long enough that a token minted at its start is still live at its end; shortAccessSeconds is
 	// the few seconds the renewal run is started with, so that proof waits seconds, not minutes.
@@ -69,7 +74,8 @@ const (
 // TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt is the live proof of the exchange: the
 // real binary on a fresh schema, a pod's projected token exchanged with a DPoP proof of a key this
 // test generates and no client credential at all, the minted token read back by the listed API
-// account, a second pod of the same account writing under the first's session name, a lapsed token
+// account, a second pod of the same account writing under the first's session name once its
+// deployment has registered it too, a lapsed token
 // renewed from the same standing pod token, and the eight refusals that
 // keep the credential-less path from being a way in for anyone else. It skips when
 // BROKER_TEST_DATABASE_URL is unset, as every Postgres-backed broker test does.
@@ -111,7 +117,11 @@ func TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt(t *testing.T) {
 		}
 	})
 
+	registrarToken := accountToken(t, cluster, clusterKey, registrarAccount)
 	standingPodToken := mintPodToken(t, cluster, clusterKey, podAccount, exchangeAudience, firstPodUID)
+	// The deployment's daemon registers the pod it starts, with the pod's own enrolment-audience
+	// token — the one it already hands POST /v1/enrollments — before that pod exchanges anything.
+	live.registered(t, mintPodToken(t, cluster, clusterKey, podAccount, enrolmentAudience, firstPodUID), heldSession, registrarToken)
 	var accessToken string
 
 	t.Run("a pod's token, a proof of the caller's own key and no client credential mint an access token", func(t *testing.T) {
@@ -142,7 +152,7 @@ func TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt(t *testing.T) {
 			{"session", body["session"], heldSession, "the session the token's writes are recorded as"},
 			{"person", body["person"], person, "the person the entry gives that account"},
 			{"project", body["project"], project, "the project the entry gives that account"},
-			{"project_scope", body["project_scope"], oauth.ProjectScopeNamed, "that the project is the one named project it may write"},
+			{"project_scope", body["project_scope"], oauthwire.ProjectScopeNamed, "that the project is the one named project it may write"},
 			{"client_id", body["client_id"], oauthwire.ExchangeClientID, "the client the exchange issued it to"},
 			{"jkt", body["jkt"], jkt, "the thumbprint of this test's own key, which is what makes a stolen token useless"},
 		} {
@@ -157,6 +167,9 @@ func TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt(t *testing.T) {
 	})
 
 	t.Run("a second pod of the same account writes under the session name the first holds", func(t *testing.T) {
+		// Its deployment registered it as it started it, the one thing the first pod's own
+		// registration does not cover.
+		live.registered(t, mintPodToken(t, cluster, clusterKey, podAccount, enrolmentAudience, secondPodUID), heldSession, registrarToken)
 		status, body := live.exchange(t, exchangeForm(mintPodToken(t, cluster, clusterKey, podAccount, exchangeAudience, secondPodUID), heldSession))
 		second, _ := body["access_token"].(string)
 		if status != http.StatusOK || second == "" {
@@ -176,6 +189,7 @@ func TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt(t *testing.T) {
 		renewalAddr := renewalBroker.Addr
 		renewal := newLiveBroker(renewalAddr, key)
 		podToken := mintPodToken(t, cluster, clusterKey, podAccount, exchangeAudience, "pod-uid-renewal")
+		renewal.registered(t, mintPodToken(t, cluster, clusterKey, podAccount, enrolmentAudience, "pod-uid-renewal"), renewalSession, registrarToken)
 
 		status, body := renewal.exchange(t, exchangeForm(podToken, renewalSession))
 		first, _ := body["access_token"].(string)
@@ -203,6 +217,10 @@ func TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt(t *testing.T) {
 			t.Fatalf("introspection of the renewed token = %d %v, want 200, live, under the session %s", status, body, renewalSession)
 		}
 	})
+
+	// The pod of the other listed account below is registered for the name it asks for, so what
+	// refuses it is the claim on that name and not a missing registration.
+	live.registered(t, mintPodToken(t, cluster, clusterKey, listedAccount, enrolmentAudience, "pod-uid-other"), heldSession, registrarToken)
 
 	// The negative controls on the exchange, each the request that works but for one thing. The
 	// broker's own refusals name what they refused; the two the library answers are pinned by
@@ -298,10 +316,71 @@ func TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt(t *testing.T) {
 	}
 }
 
+// TestAPodWritesOnlyUnderASessionRegisteredForIt is the live proof of the second rule, on the real
+// binary: a pod exchanges under a session name only while a registration its deployment made says
+// that pod uid may use it. The three pods here are one account, so they are one principal and the
+// claim on the name refuses none of them — the registration is all that tells them apart. The pod
+// its deployment registered writes under the name; the pod that replaces it writes under it too,
+// once registered, which is why a relaunch is not a lockout; and a third pod of that very account,
+// registered for nothing, is refused it, the refusal naming the session. Registering that third
+// pod is what then answers it.
+func TestAPodWritesOnlyUnderASessionRegisteredForIt(t *testing.T) {
+	databaseURL := storetest.URL(t)
+	cluster, github := oidctest.New(t), oidctest.New(t)
+	clusterKey := cluster.PublishKey(t, "cluster-key")
+	github.PublishKey(t, "github-key")
+	key := proofKey(t)
+
+	broker := startBroker(t, brokerOptions{Env: exchangeEnv(t, databaseURL, cluster, github, longAccessSeconds)})
+	broker.Await(t, "token exchange")
+	live := newLiveBroker(broker.Addr, key)
+	registrarToken := accountToken(t, cluster, clusterKey, registrarAccount)
+	// Each pod's two tokens: the enrolment-audience one its registration names it by, and the
+	// exchange-audience one it presents itself, both bound to the one pod uid.
+	enrolment := func(uid string) string {
+		return mintPodToken(t, cluster, clusterKey, podAccount, enrolmentAudience, uid)
+	}
+	subject := func(uid string) string {
+		return mintPodToken(t, cluster, clusterKey, podAccount, exchangeAudience, uid)
+	}
+
+	for _, uid := range []string{firstPodUID, secondPodUID} {
+		t.Run("the pod its deployment registered writes under the name ("+uid+")", func(t *testing.T) {
+			live.registered(t, enrolment(uid), heldSession, registrarToken)
+			status, body := live.exchange(t, exchangeForm(subject(uid), heldSession))
+			if status != http.StatusOK || body["access_token"] == nil {
+				t.Fatalf("the exchange of the registered pod %s naming %s = %d %v, want 200 with an access token", uid, heldSession, status, body)
+			}
+		})
+	}
+
+	t.Run("an unregistered third pod of the same account is refused that name", func(t *testing.T) {
+		status, body := live.exchange(t, exchangeForm(subject(thirdPodUID), heldSession))
+		description, _ := body["error_description"].(string)
+		if status != http.StatusBadRequest || body["error"] != "invalid_grant" || body["access_token"] != nil {
+			t.Fatalf("the exchange of the unregistered pod %s of %s naming %s = %d %v %q, want 400 invalid_grant and no access token: the name belongs to the account, so nothing but the registration keeps one of its pods out of another's session",
+				thirdPodUID, podAccount, heldSession, status, body, description)
+		}
+		if !strings.Contains(description, "'"+heldSession+"'") || !strings.Contains(description, "registration") {
+			t.Fatalf("the refusal reads %q, which must name the session %s and say that a pod writes under a name its deployment registered for it", description, heldSession)
+		}
+	})
+
+	t.Run("registering that third pod answers it", func(t *testing.T) {
+		live.registered(t, enrolment(thirdPodUID), heldSession, registrarToken)
+		status, body := live.exchange(t, exchangeForm(subject(thirdPodUID), heldSession))
+		if status != http.StatusOK || body["access_token"] == nil {
+			t.Fatalf("the exchange of %s once registered for %s = %d %v, want 200 with an access token", thirdPodUID, heldSession, status, body)
+		}
+	})
+}
+
 // exchangeEnv is what one broker run of this test needs beyond productionEnv: the fresh schema it
 // migrates and serves from, the cluster issuer with the audience a pod enrols with and the one it
 // exchanges with, the GitHub issuer, the two listed accounts with their projects and persons, the
-// listed caller of the introspection route, and how long an access token it mints lasts.
+// two listed callers — dispatch, which reads a token back and ends one, and listener, which only
+// reads one back — the registrar that logs in as the deployment's daemon
+// and registers its pods' session names, and how long an access token it mints lasts.
 func exchangeEnv(t *testing.T, databaseURL string, cluster, github *oidctest.Issuer, accessSeconds int) []string {
 	t.Helper()
 	fakeSecretsFile := filepath.Join(t.TempDir(), "fake-secrets.json")
@@ -319,7 +398,8 @@ func exchangeEnv(t *testing.T, databaseURL string, cluster, github *oidctest.Iss
 		"BROKER_EXCHANGE_ACCOUNTS=" + podAccount + "=" + project + "=" + person + " " + listedAccount + "=OTHER=mallory@example.com",
 		"BROKER_EXCHANGE_GITHUB_ISSUER=" + github.URL(),
 		"BROKER_EXCHANGE_GITHUB_AUDIENCE=" + workflowAudience,
-		"BROKER_API_ACCOUNTS=dispatch=" + apiAccount,
+		"BROKER_API_ACCOUNTS=dispatch=" + apiAccount + " listener=" + listenerAccount,
+		"BROKER_SERVICE_LOGINS=legion-daemon=" + registrarAccount,
 		"BROKER_ACCESS_TOKEN_SECONDS=" + strconv.Itoa(accessSeconds),
 	}
 }
@@ -378,14 +458,18 @@ type liveBroker struct {
 	plain *http.Client
 }
 
+// newPlainBroker drives the broker listening at addr with no key: the routes a listed caller
+// reaches present that caller's ServiceAccount token and sign no proof.
+func newPlainBroker(addr string) *liveBroker {
+	return &liveBroker{base: "http://" + addr, plain: &http.Client{}}
+}
+
 // newLiveBroker drives the broker listening at addr, signing a proof of key for every request the
 // exchange judges a credential-less caller on.
 func newLiveBroker(addr string, key *ecdsa.PrivateKey) *liveBroker {
-	return &liveBroker{
-		base:  "http://" + addr,
-		dpop:  &http.Client{Transport: helper.NewDPoPTransport(key, http.DefaultTransport)},
-		plain: &http.Client{},
-	}
+	live := newPlainBroker(addr)
+	live.dpop = &http.Client{Transport: helper.NewDPoPTransport(key, http.DefaultTransport)}
+	return live
 }
 
 // exchange posts an RFC 8693 token exchange, with a DPoP proof of the caller's key, and answers
@@ -402,34 +486,108 @@ func (l *liveBroker) introspect(t *testing.T, token, bearer string) (int, map[st
 	return l.post(t, l.plain, "/v1/oauth/introspect", url.Values{"token": {token}}, bearer)
 }
 
-// post sends one form to the broker and logs both halves as the live run's transcript, with every
-// credential named rather than repeated.
-func (l *liveBroker) post(t *testing.T, client *http.Client, path string, form url.Values, bearer string) (int, map[string]any) {
+// registerPodSession records that the pod podToken names may exchange under session, the way a
+// deployment's daemon does: its own ServiceAccount login token on the Authorization header, the
+// pod's enrolment-audience token and the name in a JSON body. An empty bearer sends no header.
+func (l *liveBroker) registerPodSession(t *testing.T, podToken, session, bearer string) (int, map[string]any) {
 	t.Helper()
-	request, err := http.NewRequest(http.MethodPost, l.base+path, strings.NewReader(form.Encode()))
+	return l.postJSON(t, "/v1/oauth/exchange/pod-sessions", map[string]any{"pod_token": podToken, "session": session}, bearer)
+}
+
+// registered registers the pod for session and fails the test unless the broker took it: a step
+// a test makes on the way to an exchange, not the thing it is proving.
+func (l *liveBroker) registered(t *testing.T, podToken, session, bearer string) {
+	t.Helper()
+	if status, body := l.registerPodSession(t, podToken, session, bearer); status != http.StatusOK || body["session"] != session {
+		t.Fatalf("registering a pod for %s = %d %v, want 200 naming that session", session, status, body)
+	}
+}
+
+// brokerCall is one request to the live broker as send makes it: the method and path, the body
+// and the content type it is sent under (empty for a request that carries neither), the bearer
+// whose Authorization header goes on when it is not empty, and the request half as the transcript
+// shows it, with every credential named rather than repeated.
+type brokerCall struct {
+	method      string
+	path        string
+	contentType string
+	body        string
+	bearer      string
+	shown       string
+}
+
+// send sends one request to the broker, reads its answer and logs both halves as the live run's
+// transcript. The answer is handed back as the bytes the broker sent, because what a route's
+// answer has to be is its caller's to hold it to: JSON for most of them, and RFC 7009's empty
+// body for a revocation that worked.
+func (l *liveBroker) send(t *testing.T, client *http.Client, call brokerCall) (int, []byte) {
+	t.Helper()
+	request, err := http.NewRequest(call.method, l.base+call.path, strings.NewReader(call.body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if bearer != "" {
-		request.Header.Set("Authorization", "Bearer "+bearer)
+	if call.contentType != "" {
+		request.Header.Set("Content-Type", call.contentType)
+	}
+	if call.bearer != "" {
+		request.Header.Set("Authorization", "Bearer "+call.bearer)
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		t.Fatalf("POST %s: %v", path, err)
+		t.Fatalf("%s %s: %v", call.method, call.path, err)
 	}
 	defer response.Body.Close()
 	answer, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Logf("> %s %s %s\n< %d %s", call.method, call.path, call.shown, response.StatusCode, shownAnswer(answer))
+	return response.StatusCode, answer
+}
+
+// post sends one form to the broker and answers the status and the JSON body it gave.
+func (l *liveBroker) post(t *testing.T, client *http.Client, path string, form url.Values, bearer string) (int, map[string]any) {
+	t.Helper()
+	status, answer := l.send(t, client, brokerCall{
+		method: http.MethodPost, path: path, contentType: formContentType,
+		body: form.Encode(), bearer: bearer, shown: shownForm(form),
+	})
 	var body map[string]any
 	if err := json.Unmarshal(answer, &body); err != nil {
-		t.Fatalf("POST %s answered %d %s, which is not JSON: %v", path, response.StatusCode, answer, err)
+		t.Fatalf("POST %s answered %d %s, which is not JSON: %v", path, status, answer, err)
 	}
-	t.Logf("> POST %s %s\n< %d %s", path, shownForm(form), response.StatusCode, shownAnswer(answer, body))
-	return response.StatusCode, body
+	return status, body
 }
+
+// postJSON sends one JSON body to the broker, with no DPoP proof, every credential in the body
+// named in the transcript rather than repeated.
+func (l *liveBroker) postJSON(t *testing.T, path string, fields map[string]any, bearer string) (int, map[string]any) {
+	t.Helper()
+	encoded, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shown := map[string]any{}
+	for name, value := range fields {
+		if credentialFields[name] || name == "pod_token" {
+			shown[name] = "<" + name + ">"
+			continue
+		}
+		shown[name] = value
+	}
+	status, answer := l.send(t, l.plain, brokerCall{
+		method: http.MethodPost, path: path, contentType: "application/json",
+		body: string(encoded), bearer: bearer, shown: fmt.Sprint(shown),
+	})
+	var body map[string]any
+	if err := json.Unmarshal(answer, &body); err != nil {
+		t.Fatalf("POST %s answered %d %s, which is not JSON: %v", path, status, answer, err)
+	}
+	return status, body
+}
+
+// formContentType is what an OAuth request's form body is sent as (RFC 6749 Section 3.2).
+const formContentType = "application/x-www-form-urlencoded"
 
 // credentialFields are the request fields whose value is a credential; the transcript names those
 // and shows every other field in full, since a refusal's own sentence is the evidence.
@@ -448,10 +606,16 @@ func shownForm(form url.Values) string {
 	return shown.Encode()
 }
 
-// shownAnswer is the broker's answer as the transcript shows it: the JSON it sent, with the access
-// token it carries named rather than repeated.
-func shownAnswer(answer []byte, body map[string]any) string {
+// shownAnswer is the broker's answer as the transcript shows it: what it sent, with the access
+// token a token answer carries named rather than repeated. An answer that is not a JSON object —
+// a revocation's empty body, or a refusal in some other form — is shown as it came, since it
+// carries no token to name.
+func shownAnswer(answer []byte) string {
 	shown := strings.TrimSpace(string(answer))
+	var body map[string]any
+	if err := json.Unmarshal(answer, &body); err != nil {
+		return shown
+	}
 	if token, _ := body["access_token"].(string); token != "" {
 		shown = strings.ReplaceAll(shown, token, "<access_token>")
 	}
