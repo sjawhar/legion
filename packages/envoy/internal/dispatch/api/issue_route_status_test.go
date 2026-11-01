@@ -625,6 +625,27 @@ func TestAListenerFailureOneServerMetReadsUnknownOnTheOther(t *testing.T) {
 	}
 }
 
+// A refill one server met is a refill on every server. dispatch://INFRA-261's approved spec
+// (version 14) has every Dispatch view that reads the agent list - the Agents page and route
+// status among them - show a refilling state while the listener refills, and never an agent's
+// absence or an unreachable listener. The second server reads the answer the first stored, so it
+// must show that same refilling state: route status unknown for the refilling reason, and the
+// Agents read the ENVOY_REFILLING answer with the listener's own Retry-After. Both TTLs are a
+// minute, so a slow machine's reads stay inside them.
+func TestARefillOneServerMetIsARefillOnTheOther(t *testing.T) {
+	roster := &fakeRoster{}
+	roster.set("ses-sre", "sre")
+	roster.refilling.Store(true)
+	handler, _, served := cachedRouteStatusServer(t, roster)
+	served.rosters.ttl, served.rosters.silenceTTL = time.Minute, time.Minute
+	other, _ := secondRouteStatusServer(t, served)
+	key := routedIssueKey(t, handler, "role:sre")
+
+	requireReach(t, handler, key, "unknown", "", "refilling")
+	requireReach(t, other, key, "unknown", "", "refilling")
+	requireEnvoyRefilling(t, dispatchRequest(t, other, http.MethodGet, "/api/v1/agents", nil, "alice"), "7")
+}
+
 // A listener answer is stored only over an older one, by when its call was sent: a fetch that was
 // sent first and answers last does not replace the answer a later fetch on the other server
 // stored, and the reads waiting on it are served that newer answer. The listener holds its first
