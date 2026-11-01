@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-644",
-  "previousHandoff": "05a9bbe26b62897a8e907170127336f2fff02834",
+  "previousHandoff": "3b282aed7dfb2c38f43b0f196562fb486ef15279",
   "proof": [
+    {
+      "criterion": "Round 2 (review of 39eb0986): the no-origin credit rule lives in creditContentChange alone and its test asserts what the pinned ygo does; a margin publish records no rendering; the replica and every copy still hold the room, including under the room's own formatting writes",
+      "surface": "docs package live rooms against the pod's own test Postgres (render-reuse harness, real ygo websocket rooms, browser peers, cold reads over the stored updates)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=$LEGION_TEST_PG_DSN go test -count=1 ./internal/dispatch/docs/ and CGO_ENABLED=1 go test -race -count=1 -run 'TestRenderReuseARandomisedEditStorm|Format|NilOrigin' ./internal/dispatch/docs/",
+      "observed": "every docs test passes at 073590ff (no --- FAIL; the package's FAIL line is storetest's teardown alone, 'permission denied to terminate process', 5 drops); the race subset passes; testADeleteThatDanglesABoldRun sees two logged updates, the second nil-origin and classified changed=false; TestRenderReuseAnAnchoredCommentRendersNothingTwice still counts observerMarginOnly: 1",
+      "headSha": "073590ff72029c345ead5b1c159f98aa7c41f584",
+      "negativeControl": "without crdt.WithFormatCleanup(false) in newDocumentCopy, TestAColdReadReplaysAChurnOfFormattingToTheRoomsMarkdown fails in all 3 seeds ('the cold read differs from what the room held at byte 70 of 1417'); with testADeleteThatDanglesABoldRun's classification check inverted, it fails at that line"
+    },
     {
       "criterion": "Copies of a room replay its commits exactly at ygo v1.54.1-sami.3 (#2496's review): the replica equals the room in state vector, delete set, every text's ToDelta and state bytes after local Server.Apply formatting, browser formatting and API writes",
       "surface": "docs package live room against Postgres (render-reuse harness, real ygo websocket room, browser peer)",
@@ -38,23 +46,16 @@
     }
   ],
   "filesChanged": [
-    "packages/envoy/go.mod, go.sum: sjawhar/ygo v1.54.1-sami.3",
-    "packages/envoy/internal/dispatch/docs/tree.go: newDocumentCopy replays with crdt.WithFormatCleanup(false); documentRenderingValidWithLayout",
-    "packages/envoy/internal/dispatch/docs/mutation.go: a write's render of its validated fork records the layout without validating again",
-    "packages/envoy/internal/dispatch/pmdoc/layout.go: ValidDocument.RenderWithLayout",
-    "packages/envoy/internal/dispatch/docs/render_formatting_test.go, peer_test.go: the format replay test",
-    "packages/envoy/internal/dispatch/pmdoc/valid_layout_test.go: the validated-render equivalence test",
-    "packages/envoy/internal/dispatch/docs/nil_origin_credit_test.go: helper renamed copiedRoomMarkdown (clash with main's roomMarkdown)",
-    "packages/envoy/internal/dispatch/docs/websocket.go: main's taken stored state named stored (clash with the load's rendering)",
-    "packages/envoy/.changes/unreleased/pr2485-observer-renders-touched-blocks.yaml: fragment named for the pull request"
+    "packages/envoy/internal/dispatch/docs/websocket.go: observeAskBlocksForUpdate back to its base signature",
+    "packages/envoy/internal/dispatch/docs/mutation.go, livewrite.go, replica.go: a margin publish records no rendering; replicaRendering has no layout-less carve-out; ygo citations and spliceTouched's declines",
+    "packages/envoy/.changes/unreleased/pr2485-observer-renders-touched-blocks.yaml, packages/envoy/AGENTS.md: the no-origin credit rule; spliceTouched's declines",
+    "packages/envoy/internal/dispatch/docs/*_test.go: one renderOfRoom, replicaHoldsTheRoom, xmlTextWithPrefix, writeInRoom and forceRecover; raceEnabled; storm_race/norace and cold_formatting deleted; the cold churn case moved to format_replay_test.go"
   ],
   "trickyParts": [
-    "Three forward merges (main 151d2d79, efed4e4d, d09b46d7); each fingerprint and resolution is a comment on #2485. #2522's merge changed measured code, so a confirming replay and 1x pair ran at the merged head.",
-    "Two pod replacements lost the scratch disk; each step was uploaded as it ended and a pair a replacement cut was dropped and run again."
+    "Round 2's only production change on a measured path is the margin publish: a publish the margin-only path does not answer (a room other than the one its fork was built from, or a replica holding no rendering) is now measured by the observer instead of compared against the write's markdown. The round 5 and 6 pairs were not re-run for it."
   ],
   "deviations": [
-    "The confirming 1x pair cannot run on main d09b46d7 itself: the editor harness lives only on INFRA-605's branch (#2445, open, 134 commits behind main, 18 files conflicting). Its base is the editor base with #2522 cherry-picked and its head the editor head with #2522 resolved as merge 7a985b8c resolves it.",
-    "The corpus was rebuilt by the same rule (30 largest LINUX issue documents plus LINUX-129 and LINUX-364) over the project's documents on 2026-11-01, so its members differ from the October set; the list is dispatch://INFRA-644/artifact/infra644-corpus-list-tsv."
+    "cold_formatting_test.go was the tester's file (fdf027f0), not a red test; the review asked to fold or drop it. Its C1 case duplicated render_formatting_test.go's fixed case and was dropped; its churn case, which passed with and without WithFormatCleanup(false) because every churn commit reached the room as a remote apply, moved to format_replay_test.go and now also interleaves the room's own writes and checks the reload, so it fails without the option."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
