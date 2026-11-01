@@ -1,5 +1,33 @@
 # Changelog
 
+## [main@ed9113e7c092] - 2026-11-01
+
+### Changed
+
+- The shipped `dispatch` command accepts only `omp` and `claude` as `DISPATCH_HOST`, and reads
+  `OPENCODE_CONFIG_DIR` no longer; `envoy_publish`'s description no longer names an OpenCode
+  agent as the kind of session a serve port reaches. Legion no longer supports OpenCode.
+- The plugin declares daemon API contract 44 in `package.json`'s `legion.daemonApiVersion`:
+  a Claude Code role's start command and pane no longer carry
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, so a role may leave a background task running past
+  the end of a turn and read its result in the turn Claude Code starts when it finishes.
+  `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_DISABLE_CRON=1` stay.
+- The channel instructions describe `urgency` as how soon the sender asks the reader to act, and say that it does not change when or in what order deliveries arrive.
+
+### Fixed
+
+- The Legion plugin's `Stop` hook entry now carries `${background_tasks}`, Claude Code's list of
+  the session's own tasks, and a turn that ends with one of them still running earns no phase
+  reminder: the task's result starts the next turn, so the worker is waiting to be woken rather
+  than stalled. A hook argument an older binary does not substitute reads as no background work,
+  which is the behaviour before this field existed.
+
+## [main@f699b1316430] - 2026-10-31
+
+### Changed
+
+- The channel server mints a client instance id when the process starts and sends it on every registration and on each deregistration. A `/clear` handoff therefore removes the registry entry of the old session id only while that entry still belongs to this process, and the soft reclaim that follows takes the role only when the named predecessor has no live registration, when its live registration carries the same instance id, or when either side carries no instance id. A refusal that names the predecessor itself now keeps the role record of that session, which belongs to the live holder; a refusal naming any other session removes it.
+
 ## [main@1d3e69553791] - 2026-10-31
 
 ### Fixed

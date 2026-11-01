@@ -74,11 +74,11 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // row unchecked, and the OK line's capabilities mark says so (capabilities=browser-skipped, which
 // the daemon's probe Sandbox refuses: it never passes the flag, and passes only an image whose
 // whole capability list was checked). The
-// probe Sandbox starts it on the pod baseline's variables and overlay, with no state home of its
-// own: with --pod-safety, as a worker's shim starts Oh My Pi (podsafety.Apply: the turn-scoping
-// overlay named first in PI_CONFIG_FILES, written to a fresh temporary directory since the probe
-// pod mounts no state volume, and the two session-placing variables where the pod leaves them
-// unset), but not the per-role state home the shim makes (podsafety.EnsureStateHome): the probe
+// probe Sandbox starts it on the pod baseline's variables, with no state home of its
+// own: with --pod-safety, as a worker's shim starts Oh My Pi (podsafety.Apply: the two
+// session-placing variables where the pod leaves them unset, and no overlay of Legion's own,
+// since it writes none, so the probe reads the role's own PI_CONFIG_FILES as its pod carries
+// it), but not the per-role state home the shim makes (podsafety.EnsureStateHome): the probe
 // pod runs one container, so no broker lock collides; with --provider-env-dir, each
 // provider key exported after it as the shim exports them (shim.ReadProviderEnv); and with
 // --role-references, the references of the role prompts the daemon inlines into its pods
@@ -92,8 +92,8 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // an issue pod's launcher runs every role, its own `legion version` as the shim, over a layout of
 // its own in that directory (launcher.CheckRoleNamespaces), and refuses, exit 1, when the
 // namespaces, a mount role-init makes or the shim fails there. That layout's home is an empty
-// directory on the probe's volume carrying no mount, so the check does not make the overlay over
-// the image's own home, bind a home's volume back, or copy a config home.
+// directory on the probe's volume carrying no mount, so the check does not bind a home's volume
+// back or copy a config home.
 func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("probe-image", "usage: legion probe-image --plugin-root <dir> --envoy-plugin-root <dir> [flags]", stderr)
 	omp := flags.String("omp", "", "the OMP executable to probe (default: $LEGION_OMP_PATH)")
@@ -207,15 +207,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	environ := os.Environ()
 	if *podSafety {
-		state, err := os.MkdirTemp("", "legion-probe-image-")
-		if err == nil {
-			defer os.RemoveAll(state)
-			environ, err = podsafety.Apply(environ, state)
-		}
-		if err != nil {
-			fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
-			return 1
-		}
+		environ = podsafety.Apply(environ)
 	}
 	if *providerEnvDir != "" {
 		providerEnv, err := shim.ReadProviderEnv(*providerEnvDir, os.LookupEnv)

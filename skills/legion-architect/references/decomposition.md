@@ -43,9 +43,10 @@ EOF
   child that is a to-do, a fix found in review, a proof of the root's acceptance, or a part of
   the architect's own work, and say where it folds: the root's pull request or an open child's.
   Then name every root requirement neither its pull request nor a child of this list carries."*
-  A child survives only when it cannot ride in the root's pull request or an open child's: its
-  code is in a repository no open pull request of this tree is in, or it is its own deploy,
-  applied before other work of the tree can build on it.
+  `wait` for its verdict, since it runs as a job of its own. A child survives only when it
+  cannot ride in the root's pull request or an open child's: its code is in a repository no open
+  pull request of this tree is in, or it is its own deploy, applied before other work of the
+  tree can build on it.
   A repeated change — the same edit per program, directory or wave of this tree's own work —
   survives as one child, never one per instance, and a deletion of what this tree replaced rides
   in the pull request of the last change it waits on, never a child of its own: a wave is an order
@@ -54,7 +55,8 @@ EOF
   root, in a root session): the architect who wrote the list rereads each child as needed, and
   the comment stops a later session filing the same children again.
 - Then paste each survivor's whole spec into a fresh `task(agent="plan-gap-analyst")` to check it
-  against `skill://dispatch-writing-specs`, and fix what it flags: your own reread misses the terms
+  against `skill://dispatch-writing-specs`, `wait` for its result, and fix what it flags: your own
+  reread misses the terms
   and item numbers you already know. File only the survivors, and reply under the verdict comment
   with each one's key.
 - Before `release_children`, check that every child you filed is named under a verdict comment,

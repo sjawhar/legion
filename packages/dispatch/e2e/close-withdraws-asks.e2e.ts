@@ -13,6 +13,7 @@ import {
   requestApproval,
 } from "./api";
 import { connectedDot, countDocumentSockets, documentEditor } from "./editor";
+import { inboxRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -77,13 +78,15 @@ interface Opened {
   sockets: () => number;
 }
 
-/** Opens alice's Inbox and the issue page, and waits until both show every ask open. */
+/** Opens alice's Inbox and the issue page, and waits until both show every ask open. The Inbox
+ *  is read as the list it is: from 1280 px each question is a short row and only the selected
+ *  one is a card, so the rows are what says the issue's three asks are listed. */
 async function openIssueAndInbox(browser: Browser, seeded: Seeded): Promise<Opened> {
   const alice = await asUser(browser, "alice");
   const inbox = await alice.newPage();
   await inbox.goto("/");
   for (const id of seeded.askIds) {
-    await expect(inbox.getByTestId(`ask-${id}`)).toBeVisible();
+    await expect(inboxRow(inbox, id)).toBeVisible();
   }
   const page = await alice.newPage();
   const sockets = countDocumentSockets(page, seeded.artifactId);
@@ -121,8 +124,14 @@ async function expectWithdrawn(
     decision.getByRole("button", { name: "Add a note or answer in your own words" })
   ).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Awaiting approval" })).toHaveCount(0);
+  // The close takes every one of the issue's questions out of the Inbox. From 1280 px the
+  // reading column is showing one of them, and a row the reader is reading is held where they
+  // last saw it rather than taken from under them (INFRA-575, `heldRow`), so it is on the
+  // reader's next look at the list that the Inbox has none of them left.
+  await inbox.reload();
+  await expect(inbox.getByText("Nothing needs you")).toBeVisible();
   for (const id of seeded.askIds) {
-    await expect(inbox.getByTestId(`ask-${id}`)).toHaveCount(0);
+    await expect(inboxRow(inbox, id)).toHaveCount(0);
   }
 }
 
@@ -182,7 +191,7 @@ test("a person's Close withdraws the issue's asks, an earlier version keeps its 
     await expect(decision.getByRole("radio", { name: "Hold Wait for review" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Awaiting approval" })).toBeVisible();
     for (const id of seeded.askIds) {
-      await expect(inbox.getByTestId(`ask-${id}`)).toBeVisible();
+      await expect(inboxRow(inbox, id)).toBeVisible();
     }
     // Reloaded, the block still hosts the open, answerable card.
     await page.reload();

@@ -188,6 +188,15 @@ Separate the keys with one space or one line feed. Every whitespace character se
 so a key itself holds none, and two in a row, a CR LF among them, enclose an empty key, which
 Dispatch refuses to start with.
 
+On a deployment built by `envoy-infra`'s `gcp:Dispatch`, you write no key and edit no Secret:
+each step above is one `pulumi up` of the component's `signingKeyGenerations`, the ordered list
+of key generations `DISPATCH_SIGNING_KEY` holds. A deployment running one key is at `[0]`; step 1
+is `[0, 1]`, step 2 is `[1, 0]`, and step 3 is `[1]`. The component generates each generation's
+key, renders them in the list's order and replaces the app's pods on each apply, which is the
+restart each step needs. Its README (`packages/envoy/infra/README.md`) holds the rest of the
+procedure: which pods roll, what a dropped generation costs, and the two lists the component
+refuses.
+
 ## Running it on your machine
 
 To see Dispatch working, seeded with example issues, asks, agents and a broadcast and opened
@@ -380,13 +389,14 @@ A second server also costs connections, and Postgres counts them per server. Eac
 to 64 connections for requests, up to 13 for the periodic work it runs once across the servers, up
 to 4 for loading documents, one for the health check, one for the events outbox, and up to 2 for
 reading where the event log is safe to stream from (the event horizon), and it holds
-four more open for as long as it runs: one each for the three things that wait on Postgres
-notifications, which are delivery, the live socket's event-feed relay, and closing a document
-session another server has written to, and one for its entry in the list of running servers, which
-it renews every five seconds. That is 89 connections for one server at its ceiling, and twice that
-for two, past a default Postgres's limit of 100. Check the database's connection
-limit before you start the second server: a limit sized for one server, with whatever else uses
-that database counted in, is the thing that runs out.
+five more open for as long as it runs: one each for the four things that wait on Postgres
+notifications, which are delivery, the live socket's event-feed relay, closing a document session
+another server has written to, and waking its background work when the rows that work reads
+change, and one for its entry in the list of running servers, which it renews every five seconds.
+That is 90 connections for one server at its ceiling, and twice that for two, past a default
+Postgres's limit of 100. Check the database's connection limit before you start the second server:
+a limit sized for one server, with whatever else uses that database counted in, is the thing that
+runs out.
 
 What a reader sees while two servers are serving:
 

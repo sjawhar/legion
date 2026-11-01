@@ -59,6 +59,15 @@ const APIAccount = "system:serviceaccount:example-ns:example-dispatch"
 // APICaller is the name that account calls as, the one the broker logs when it acts.
 const APICaller = "dispatch"
 
+// ListenerAccount is the second ServiceAccount every Rig's BROKER_API_ACCOUNTS names, as the
+// caller "listener": the Envoy listener, which reads one of the broker's access tokens back
+// through introspection and relays no person's decision. A Rig lists it so a test can drive a
+// listed caller reaching past its own routes, which is 403 ACCOUNT_LACKS_POWER.
+const ListenerAccount = "system:serviceaccount:example-ns:example-listener"
+
+// ListenerCaller is the name that second account calls as.
+const ListenerCaller = "listener"
+
 // The one account every Rig's BROKER_EXCHANGE_ACCOUNTS lists and what a pod running as it may
 // write: ExchangeSession is the session name the entry fixes, so a token minted for that pod
 // carries it and a request naming any other is refused.
@@ -97,7 +106,10 @@ type Rig struct {
 	// server calls (UI). It is minted once, for an hour, so a test may send it from a goroutine
 	// of its own where failing t is not allowed.
 	UIToken string
-	Store   *store.Store
+	// ListenerToken is ListenerAccount's own token, minted the same way: a listed caller that may
+	// introspect and nothing else, for a test driving what a caller's powers refuse.
+	ListenerToken string
+	Store         *store.Store
 	// Secrets is the secrets.Local standing in for Secrets Manager, which a test writes to as a
 	// person would, before asking the broker to reread a secret.
 	Secrets *secrets.Local
@@ -109,6 +121,10 @@ type Rig struct {
 	podKey    *oidctest.Key
 	// serviceLogins is the broker's live BROKER_SERVICE_LOGINS: DaemonAccount, as legion-daemon.
 	serviceLogins map[string]string
+	// vmIssuer and vmKey stand in for Google's issuer and the key it signs a VM's identity token
+	// with: nil unless WithVMFleet wired the broker to trust them.
+	vmIssuer *oidctest.Issuer
+	vmKey    *oidctest.Key
 }
 
 // Option changes how NewRig wires its broker.
@@ -118,6 +134,29 @@ type rigConfig struct {
 	lease    time.Duration
 	maxConns int
 	minters  map[string]requests.Minter
+	vmFleet  bool
+}
+
+// The one VM fleet WithVMFleet binds: VMAccount is its Google service account, bound to service
+// VMService in project VMProject for instances named VMInstances, and VMAudience the audience its
+// identity tokens carry. VMSecret is an agent-tier secret VMService owns, holding VMSecretValue.
+const (
+	VMAccount     = "example-fleet@example-project.iam.gserviceaccount.com"
+	VMService     = "example-fleet"
+	VMProject     = "example-project"
+	VMInstances   = "example-vm-*"
+	VMAudience    = "example-vm-audience"
+	VMSecret      = "TEST_VM_SECRET"
+	VMSecretValue = "test-vm-secret-v1"
+)
+
+// WithVMFleet makes the broker trust a local issuer standing in for Google's, for VMAudience, as
+// cmd/broker/main.go does when BROKER_GOOGLE_OIDC_AUDIENCE is set, with VMAccount bound to
+// VMService, VMProject and VMInstances (BROKER_VM_SERVICES, BROKER_VM_PROJECTS,
+// BROKER_VM_INSTANCES), and adds VMSecret, which VMService owns. MintVMToken mints the fleet's
+// identity tokens.
+func WithVMFleet() Option {
+	return func(c *rigConfig) { c.vmFleet = true }
 }
 
 // WithLease sets the enrollment lease the broker grants, an hour by default, for a test whose
@@ -158,11 +197,17 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	}
 	st := storetest.Open(t, params...)
 	operator := "ada@example.com"
-	local := secrets.NewLocal(
+	fixtures := []secrets.LocalSecret{
 		policytest.Secret("TEST_SECRET", operator, policy.TierHuman, "test-secret-v1"),
 		policytest.Secret("TEST_AUTO_SECRET", operator, policy.TierAgent, "test-auto-secret-v1"),
-	)
-	cur := policytest.Current(t, local)
+	}
+	var services []string
+	if config.vmFleet {
+		fixtures = append(fixtures, policytest.Secret(VMSecret, VMService, policy.TierAgent, VMSecretValue))
+		services = append(services, VMService)
+	}
+	local := secrets.NewLocal(fixtures...)
+	cur := policytest.Current(t, local, services...)
 
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
@@ -178,10 +223,25 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	serviceLogins := map[string]string{DaemonAccount: "legion-daemon"}
 	enr := &enroll.Service{Store: st, Lease: config.lease, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}, ServiceLogins: serviceLogins}
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
+	var vmIssuer *oidctest.Issuer
+	var vmKey *oidctest.Key
+	if config.vmFleet {
+		vmIssuer = oidctest.New(t)
+		vmKey = vmIssuer.PublishKey(t, "vm-signing-key")
+		vmVerifier, err := oidc.New(context.Background(), vmIssuer.URL(), VMAudience)
+		if err != nil {
+			t.Fatalf("oidc.New(the VM issuer): %v", err)
+		}
+		enr.VM = enroll.GoogleVMVerifier{Verifier: vmVerifier}
+		enr.VMServicesByAccount = map[string]string{VMAccount: VMService}
+		enr.VMProjects = map[string]string{VMAccount: VMProject}
+		enr.VMInstancePatterns = map[string]string{VMAccount: VMInstances}
+	}
 
 	reqMachine := &requests.Machine{
 		Store: st, Policy: cur, Secrets: policytest.Store(local), PendingTTL: 12 * time.Hour,
 		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay, Minters: config.minters,
+		VMServicesByAccount: enr.VMServicesByAccount, VMProjects: enr.VMProjects, VMInstancePatterns: enr.VMInstancePatterns,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
 	provider := NewOAuthProvider(t, st, issuer)
@@ -192,8 +252,11 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	}
 
 	api.Register(mux, api.Deps{
-		PublicURL:   srv.URL,
-		APIAccounts: map[string]string{APIAccount: APICaller},
+		PublicURL: srv.URL,
+		APIAccounts: map[string]api.Account{
+			APIAccount:      Caller(t, APICaller),
+			ListenerAccount: Caller(t, ListenerCaller),
+		},
 		// The one verifier serves both, as the broker's own wiring does: a pod enrolling and a
 		// listed caller present tokens of the same issuer for the same audience.
 		AccountTokens: enroll.K8sPodVerifier{Verifier: podVerifier},
@@ -214,9 +277,23 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 		Secrets:   local,
 		podIssuer: issuer, podKey: podKey,
 		serviceLogins: serviceLogins,
+		vmIssuer:      vmIssuer, vmKey: vmKey,
 	}
 	rig.UIToken = rig.MintAccountToken(t, APIAccount, time.Hour)
+	rig.ListenerToken = rig.MintAccountToken(t, ListenerAccount, time.Hour)
 	return rig
+}
+
+// Caller is the account a caller name carries, for an api.Deps a test wires itself as well as for
+// the Rig's own: the broker's boot reads BROKER_API_ACCOUNTS this way, and a name its table does
+// not know fails t here exactly as it would refuse that boot.
+func Caller(t *testing.T, name string) api.Account {
+	t.Helper()
+	account, known := api.AccountFor(name)
+	if !known {
+		t.Fatalf("api.AccountFor(%q): the broker knows no caller of that name", name)
+	}
+	return account
 }
 
 // MachineLoginURL is the rig broker's machine-login page, the device grant's verification_uri.
@@ -402,6 +479,52 @@ func (r *Rig) MintPodToken(t *testing.T, podUID string) string {
 // legion-daemon with its token (POST /v1/launcher-credentials/token), as a Legion daemon's own
 // account does.
 const DaemonAccount = "system:serviceaccount:legion-system:legion-daemon-test"
+
+// VMIdentity is the VM a token MintVMToken mints names. Each field left zero takes the fleet's
+// default: VMAccount, VMProject, zone example-zone-a, instance example-vm-1 (which VMInstances
+// matches), instance id 1000000000000000001, VMAudience, and a lifetime of an hour, as Google's are.
+type VMIdentity struct {
+	Account, Project, Zone, Instance, InstanceID, Audience string
+	Lifetime                                               time.Duration
+}
+
+// MintVMToken mints a Compute Engine VM's identity token in Google's full format (email,
+// email_verified, and the google.compute_engine claims) for vm, signed by the issuer WithVMFleet
+// stands up in Google's place: what a VM's metadata server answers for
+// /instance/service-accounts/default/identity?audience=...&format=full. It expires vm.Lifetime from
+// now and was issued an hour before that, as Google's tokens live an hour; a negative lifetime mints
+// one already expired. It fails t on a Rig built without WithVMFleet.
+func (r *Rig) MintVMToken(t *testing.T, vm VMIdentity) string {
+	t.Helper()
+	if r.vmIssuer == nil {
+		t.Fatal("MintVMToken needs a Rig built WithVMFleet")
+	}
+	or := func(value, fallback string) string {
+		if value == "" {
+			return fallback
+		}
+		return value
+	}
+	account := or(vm.Account, VMAccount)
+	lifetime := vm.Lifetime
+	if lifetime == 0 {
+		lifetime = time.Hour
+	}
+	claims := r.vmIssuer.Claims("100000000000000000001", or(vm.Audience, VMAudience))
+	expires := time.Now().Add(lifetime)
+	claims["iat"] = expires.Add(-time.Hour).Unix()
+	claims["nbf"] = claims["iat"]
+	claims["exp"] = expires.Unix()
+	claims["email"] = account
+	claims["email_verified"] = true
+	claims["google"] = map[string]any{"compute_engine": map[string]any{
+		"project_id":    or(vm.Project, VMProject),
+		"zone":          or(vm.Zone, "example-zone-a"),
+		"instance_name": or(vm.Instance, "example-vm-1"),
+		"instance_id":   or(vm.InstanceID, "1000000000000000001"),
+	}}
+	return r.vmIssuer.Mint(t, r.vmKey, claims)
+}
 
 // MintAccountToken mints a projected ServiceAccount token for account, expiring lifetime from now
 // (a negative lifetime mints one already expired), signed by this Rig's own local OIDC issuer for

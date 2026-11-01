@@ -1,0 +1,17 @@
+kind: Changed
+body: |-
+    When the GitHub intake stops, it drains its subscription, the one its bus client bound again on
+    a new connection when the client replaced its connection, and holds the messages queued behind a
+    busy pull request or run, and those NATS hands it meanwhile, until no handler is running. The
+    messages in a handler get up to 15 s from the stop to finish and be acknowledged; the handlers
+    still running then are given up, their GitHub calls cancelled, and their messages handed back to
+    NATS. Only then are the held messages handed back, so the next holder never runs a pull
+    request's or run's next message while this process still runs the one before it. The intake
+    then waits for the drain to end and releases the subscription, so a reconnect does not bind the
+    stopped one again. Dispatch's shutdown waits for that stop, which begins at the signal, before
+    it closes its database pool, so a handler GitHub answers during the stop writes what it fetched
+    rather than failing on a closed pool with its message acknowledged (`cmd/dispatch/README.md`,
+    "Background loops").
+time: 2026-10-28T12:35:13.386610925Z
+custom:
+    Issue: pr2391

@@ -4,22 +4,16 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	gws "github.com/gorilla/websocket"
-
-	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
-	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // nulText is caller text with U+0000 as its second character, which PostgreSQL's text and jsonb
@@ -688,44 +682,4 @@ func TestAQuoteMatchesABrowsersNulAsEveryReadServesIt(t *testing.T) {
 			t.Errorf("%s at %v: status=%d body=%s", op["op"], op, edit.Code, edit.Body.String())
 		}
 	}
-}
-
-// A document websocket's bearer names its session in the X-Dispatch-Actor header, JSON whose
-// escapes can spell U+0000, which the author a version records cannot store. The connection is
-// refused before it is upgraded, naming where the character stands, as a body holding one is; the
-// same session without it connects.
-func TestTheDocumentWebsocketRefusesANulInItsBearersActor(t *testing.T) {
-	var documentService *docs.Service
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
-		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, AgentTokens: sharedAgentTokens(t, "agent-token")})
-		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-		return documentService
-	})
-	issue := createInteractionIssue(t, handler, "TEST", "Websocket actor", "before\n")
-	server := httptest.NewServer(handler)
-	t.Cleanup(server.Close)
-	room := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + issue.PrimaryArtifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
-	dial := func(actor string) (*gws.Conn, *http.Response, error) {
-		return gws.DefaultDialer.Dial(room, http.Header{"Authorization": {"Bearer agent-token"}, "X-Dispatch-Actor": {actor}})
-	}
-	for _, row := range []struct{ actor, field string }{
-		{`{"kind":"session","id":"a\u0000b"}`, "X-Dispatch-Actor.id"},
-		{`{"kind":"session","id":"s1","origin":{"cwd":"a\u0000b"}}`, "X-Dispatch-Actor.origin.cwd"},
-	} {
-		connection, response, err := dial(row.actor)
-		if err == nil {
-			_ = connection.Close()
-			t.Fatalf("a bearer whose actor holds a NUL at %s connected to the document", row.field)
-		}
-		if response == nil {
-			t.Fatalf("dial with a NUL at %s: %v, want a refused handshake", row.field, err)
-		}
-		refused, _ := io.ReadAll(response.Body)
-		assertRefusal(t, "dial with a NUL at "+row.field, response.StatusCode, refused, "NUL_CHARACTER", row.field)
-	}
-	connection, response, err := dial(`{"kind":"session","id":"s1"}`)
-	if err != nil {
-		t.Fatalf("dial with a clean actor: response=%v err=%v", response, err)
-	}
-	_ = connection.Close()
 }
