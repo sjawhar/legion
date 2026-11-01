@@ -475,8 +475,23 @@ figure came from
 Some tests fail in a Kubernetes issue pod whatever your change, because of the pod, not the branch.
 A tmux pane runs on its host, and none of this holds there. Their proof is CI's run at the head:
 cite that run, and name in your handoff each package the pod could not run. The cases below are
-the known ones, not every one: a failure they do not name is yours to explain.
+the known ones, not every one: a failure they do not name is yours to explain. Two of them are
+about any work a pod runs, a test or a tool of your own, and not about a test suite alone.
 
+- **Check your own output, never the job's phase.** A Kubernetes Job that reports `Succeeded`
+  says its container exited 0, and nothing more: read the artefact your work was to produce, or
+  the log line that proves it ran, before you believe any result. A lane measured this on
+  2026-11-01: two pods running a native toolchain died with `Error: Stack overflow.` after 23
+  seconds, and their Job still reported `Succeeded`, because the process they ran (`rocq repl`)
+  exits 0 when a command inside it fails. The toolchain is incidental; any interpreter, driver or
+  wrapper that swallows an inner failure gives the same clean phase over a silent no-result, and
+  a lane that trusts the phase records it as a run that worked.
+
+  Two habits make that phase true. Detect the failure in the text your tool prints and exit
+  non-zero yourself, rather than passing the wrapper's exit code on. And write a verdict that
+  matters to durable storage as it is produced, not at the end: a node can vanish within a minute
+  of a pod ending, so an unpersisted log is gone even when nothing killed anything, and a
+  terminating pod's grace period can be as short as 25 seconds, which is no time to flush.
 - **gVisor.** Every pod runs under gVisor, which does not give a test every interface the Linux
   kernel does. In `packages/envoy` the tests of `cmd/agent-secrets`, `cmd/agent-secrets-helper`
   and `internal/broker/helper` fail: the helper identifies its peer with `SO_PEERPIDFD`, which
@@ -487,6 +502,13 @@ the known ones, not every one: a failure they do not name is yours to explain.
   later release may have it. A timing test can fail too: `internal/dispatch/pmdoc`'s linearity
   tests time a call by the process's CPU time, which gVisor counts in 10 ms ticks, so a call under
   10 ms can measure 0 s and the test reports `+Inf times`.
+- **Compare durations within one pod, never across pods.** A gVisor sandbox runs syscall-heavy
+  work 2.2 to 3.8 times slower than the same work outside it, and a pod lands on whatever node
+  the autoscaler provisions, so two pods are two machines, two sets of neighbours and two
+  moments. Three parts, all measured: within one pod, comparable — run both arms there, as two
+  containers on one node started together, and a difference between them is a difference between
+  the arms; across pods, not comparable; across platforms, not until something measures the gap.
+  Label every figure taken there a gVisor figure.
 - **No Docker.** The image carries no container runtime, so a test that starts one through
   testcontainers panics `rootless Docker not found`: in `packages/envoy`, the tests that use
   `internal/tests3` (`internal/dispatch/files`, which `DISPATCH_TEST_NO_CONTAINERS=1` skips) and
