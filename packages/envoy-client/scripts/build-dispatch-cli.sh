@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Bundles the `dispatch` command (bin/dispatch.ts) into <out dir>/dispatch.js: the one statement of
 # the CLI bundle's entry, target and format, which every host plugin that ships the command builds
-# through (packages/pi-envoy's build and scripts/pi-plugin-prepack.sh, packages/envoy-plugin's build
-# and prepack). claude-envoy builds its bundles with Bun.build in its own scripts/build.ts, and only
-# main's Rebuild Claude Envoy plugin workflow commits them.
+# through (packages/pi-envoy's build and scripts/pi-plugin-prepack.sh). claude-envoy builds its
+# bundles with Bun.build in its own scripts/build.ts, and only main's Rebuild Claude Envoy plugin
+# workflow commits them.
 #
 #   packages/envoy-client/scripts/build-dispatch-cli.sh <out dir> [<metafile>]
 #
