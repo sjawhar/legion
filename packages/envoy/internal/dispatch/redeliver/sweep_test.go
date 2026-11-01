@@ -272,6 +272,64 @@ func TestSweepAsksAgainForEveryFailedDeliveryUntilGitHubRecordsItOK(t *testing.T
 	}
 }
 
+// A record waits the longest backoff, an hour, between its last request and the next, and the
+// index brings it back to a sweep when that hour is up and not before. GitHub recorded that
+// request OK, so the listing of the sweep that reads the record must still carry the OK attempt:
+// the listing is what closes a delivery, and a window no wider than the backoff no longer holds
+// the attempt by the time the record is read. A delivery GitHub has delivered would otherwise be
+// asked for again every hour until it expired undelivered. Here GitHub refused every request but
+// the last, so its log holds no failed attempt of this delivery inside any later window and the
+// record is the only thing that brings it back.
+func TestADeliveryRecoveredDuringTheLongestBackoffIsDeliveredAndAskedForNoMore(t *testing.T) {
+	h := newHarness(t)
+	failed := h.fail("guid-recovered", http.StatusServiceUnavailable, 0)
+	h.webhook.Refuse(failed.ID, http.StatusInternalServerError)
+
+	// Six refused requests take the record to the longest backoff. The seventh, an hour after the
+	// sixth, is the one GitHub takes, and the receiver answers its redelivery 200.
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-recovered"); got != redeliver.RequestRefused {
+		t.Fatalf("first sweep: outcome %q, want %q", got, redeliver.RequestRefused)
+	}
+	for _, wait := range []time.Duration{2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 16 * time.Minute, 32 * time.Minute} {
+		h.clock.advance(wait)
+		if got := outcome(h.sweep(redeliver.Options{}), "guid-recovered"); got != redeliver.RequestRefused {
+			t.Fatalf("after backoff %s: outcome %q, want %q", wait, got, redeliver.RequestRefused)
+		}
+	}
+	h.webhook.Refuse(failed.ID, 0)
+	h.clock.advance(time.Hour)
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-recovered"); got != redeliver.Redelivered {
+		t.Fatalf("after the longest backoff: outcome %q, want %q", got, redeliver.Redelivered)
+	}
+	if got := len(h.requests()); got != 7 {
+		t.Fatalf("requests before the recovery %d, want 7", got)
+	}
+
+	// The running loop sweeps every interval, and these ticks are offset by a minute so none
+	// lands in the minute the record is due in: the sweep that reads it is the one just past that
+	// minute, which is what the loop's tick and the jitter after it leave.
+	due := h.clock.Now().Add(time.Hour)
+	h.clock.advance(time.Minute)
+	closed := false
+	for h.clock.Now().Before(due.Add(2 * time.Minute)) {
+		report := h.sweep(redeliver.Options{})
+		if got := len(h.requests()); got != 7 {
+			t.Fatalf("the sweep %s past the due time asked for a delivered delivery: %d requests, want 7", h.clock.Now().Sub(due), got)
+		}
+		switch got := outcome(report, "guid-recovered"); got {
+		case "":
+		case redeliver.Delivered:
+			closed = true
+		default:
+			t.Fatalf("the sweep %s past the due time: outcome %q, want %q or none", h.clock.Now().Sub(due), got, redeliver.Delivered)
+		}
+		h.clock.advance(redeliver.Interval)
+	}
+	if !closed {
+		t.Fatalf("no sweep closed the recovered delivery as %q:\n%s", redeliver.Delivered, h.logs)
+	}
+}
+
 // GitHub keeps a delivery 72 hours. One still failing 72 hours after its first failed attempt is
 // expired: the sweep says so once, at ERROR, and never asks for it again.
 func TestSweepExpiresADeliveryStillFailingAfter72Hours(t *testing.T) {
@@ -1150,6 +1208,47 @@ func TestDryRunReportsWithoutActing(t *testing.T) {
 	}
 	if got := h.logs.count("webhook delivery expired undelivered", "guid=guid-expiring"); got != 1 {
 		t.Fatalf("the continuous sweep logged the expiry %d times, want once:\n%s", got, h.logs)
+	}
+}
+
+// The running sweep repairs its index as it reads it: an entry no open record names is what a
+// sweeper that died mid-write left behind, and the sweep that reads it deletes it (openDue). A dry
+// run writes nothing at all, so it leaves that entry where it is and the next sweep that acts is
+// what repairs it.
+func TestAContinuousDryRunLeavesAStrayIndexEntry(t *testing.T) {
+	h := newHarness(t)
+	// The key is the index's own, `pending.<YYYYMMDD>.<HH>.<MM>.<GUID>` in UTC (index.go): a
+	// minute inside the sweep's window, and a GUID the bucket holds no record for.
+	stray := "pending." + h.clock.Now().UTC().Add(-time.Minute).Format("20060102.15.04") + ".guid-gone"
+	if _, err := h.state.Put(stray, nil); err != nil {
+		t.Fatalf("write the stray index entry: %v", err)
+	}
+	h.fail("guid-backlog", http.StatusServiceUnavailable, time.Minute)
+
+	if got := outcome(h.sweep(redeliver.Options{DryRun: true}), "guid-backlog"); got != redeliver.WouldRedeliver {
+		t.Fatalf("the dry run: outcome %q, want %q", got, redeliver.WouldRedeliver)
+	}
+	if got := h.requests(); len(got) != 0 {
+		t.Fatalf("a dry run requested %v", got)
+	}
+	// A bucket with nothing in it answers ErrNoKeysFound rather than an empty list, and that is
+	// just what a dry run that deleted the entry leaves, so the keys are read through here and
+	// the failure below names the defect rather than the read.
+	keys := func() []string {
+		t.Helper()
+		held, err := h.state.Keys()
+		if err != nil && !errors.Is(err, natsgo.ErrNoKeysFound) {
+			t.Fatalf("read the state bucket: %v", err)
+		}
+		return held
+	}
+	if held := keys(); !slices.Contains(held, stray) {
+		t.Fatalf("a dry run deleted the stray index entry %s, leaving %v", stray, held)
+	}
+
+	h.sweep(redeliver.Options{})
+	if held := keys(); slices.Contains(held, stray) {
+		t.Fatalf("the running sweep left the stray index entry %s", stray)
 	}
 }
 
