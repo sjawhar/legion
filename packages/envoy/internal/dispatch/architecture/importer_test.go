@@ -99,19 +99,75 @@ type fakeSource struct {
 	// holdArchBlobs is fakeRepo.holdBlobs for archRepo, whose repository repo
 	// builds from the fields above.
 	holdArchBlobs bool
+	// holdInstallations holds every installation lookup until the test
+	// releases it. A sync's installation lookup is its first GitHub call and
+	// is never served from a cache, so a second caller of one source that
+	// arrives while this hold stands is certainly inside the running flight
+	// before any head is read.
+	holdInstallations bool
 
 	mu                sync.Mutex
 	installationReads int
 	headReads         int
 	treeReads         int
 	blobReads         int
-	// held is closed by the first blob read a hold stops and release by
-	// releaseBlobs; holds makes both, because a test writes fakeSource as a
-	// literal and there is no constructor to make them in.
+	// blobs is the hold holdArchBlobs (or another repository's holdBlobs)
+	// stops its reads at, and installations the one holdInstallations stops
+	// its lookups at.
+	blobs         releasableHold
+	installations releasableHold
+}
+
+// releasableHold is one route of the fake held open: every read the hold
+// stops waits until the test releases it, so a test can keep one sync
+// mid-fetch while it drives another caller. A test writes fakeSource as a
+// literal and there is no constructor to make the channels in, so whichever
+// side comes first — the test's waitHeld or the read it waits for — makes
+// them.
+type releasableHold struct {
+	open     sync.Once
 	held     chan struct{}
 	release  chan struct{}
-	heldOnce sync.Once
+	arrived  sync.Once
 	released sync.Once
+}
+
+// channels answers the hold's two channels: held, which the first read the
+// hold stops closes, and release, which the test closes to let them answer.
+func (h *releasableHold) channels(t *testing.T) (held, release chan struct{}) {
+	h.open.Do(func() {
+		h.held, h.release = make(chan struct{}), make(chan struct{})
+		// A test that fails with a read still held must not hang the package.
+		t.Cleanup(func() { h.releaseHeld(t) })
+	})
+	return h.held, h.release
+}
+
+// waitHeld returns once a held read has arrived.
+func (h *releasableHold) waitHeld(t *testing.T) {
+	t.Helper()
+	held, _ := h.channels(t)
+	select {
+	case <-held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no read reached the hold within 10s")
+	}
+}
+
+// releaseHeld lets every held read answer.
+func (h *releasableHold) releaseHeld(t *testing.T) {
+	_, release := h.channels(t)
+	h.released.Do(func() { close(release) })
+}
+
+// wait blocks a held read until the release or the request's end.
+func (h *releasableHold) wait(t *testing.T, r *http.Request) {
+	held, release := h.channels(t)
+	h.arrived.Do(func() { close(held) })
+	select {
+	case <-release:
+	case <-r.Context().Done():
+	}
 }
 
 // fakeRepo is one repository of the fake GitHub other than archRepo: its
@@ -156,52 +212,15 @@ func (f *fakeSource) lookups() (installations, heads int) {
 	return f.installationReads, f.headReads
 }
 
-// holds answers the hold's two channels, making them on first use: either
-// side may come first, the test's waitHeld or the blob read it waits for.
-func (f *fakeSource) holds() (held, release chan struct{}) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.held == nil {
-		f.held, f.release = make(chan struct{}), make(chan struct{})
-		// A test that fails with a read still held must not hang the package.
-		f.t.Cleanup(f.releaseBlobs)
-	}
-	return f.held, f.release
-}
-
-// waitHeld returns once a held blob read has arrived.
-func (f *fakeSource) waitHeld(t *testing.T) {
-	t.Helper()
-	held, _ := f.holds()
-	select {
-	case <-held:
-	case <-time.After(10 * time.Second):
-		t.Fatal("no blob read reached the hold within 10s")
-	}
-}
-
-// releaseBlobs lets every held blob read answer.
-func (f *fakeSource) releaseBlobs() {
-	_, release := f.holds()
-	f.released.Do(func() { close(release) })
-}
-
-// wait blocks a held blob read until the release or the request's end.
-func (f *fakeSource) wait(r *http.Request) {
-	held, release := f.holds()
-	f.heldOnce.Do(func() { close(held) })
-	select {
-	case <-release:
-	case <-r.Context().Done():
-	}
-}
-
 func (f *fakeSource) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repos/{owner}/{repo}/installation", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.installationReads++
 		f.mu.Unlock()
+		if f.holdInstallations {
+			f.installations.wait(f.t, r)
+		}
 		if _, ok := f.repo(r); !ok {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -290,7 +309,7 @@ func (f *fakeSource) handler() http.Handler {
 		}
 		repo, _ := f.repo(r)
 		if repo.holdBlobs {
-			f.wait(r)
+			f.blobs.wait(f.t, r)
 		}
 		content, ok := repo.files[strings.TrimPrefix(r.PathValue("sha"), "blob-")]
 		if !ok {
@@ -642,34 +661,170 @@ func TestSyncRemovedFileRetiresItsComponent(t *testing.T) {
 	}
 }
 
-func TestSyncOfOneProjectIsSerialized(t *testing.T) {
+// Two callers of one source cost one set of GitHub calls: they share the
+// flight, so GitHub is asked once for the installation, once for the head,
+// once for the tree and once per file, one snapshot is written, one event is
+// emitted, and both callers are answered that one row. The second caller
+// starts while the first's installation lookup is held — the flight's first
+// GitHub call, and an uncached one — so it joins the flight before any head
+// is read.
+func TestTwoConcurrentImportsOfOneSourceShareOneGitHubSync(t *testing.T) {
 	ctx := context.Background()
-	fake := &fakeSource{t: t, files: validFiles()}
+	files := validFiles()
+	fake := &fakeSource{t: t, files: files, holdInstallations: true}
 	importer, database := newImporterFixture(t, fake)
 
-	var wait sync.WaitGroup
-	failures := make(chan error, 2)
-	for range 2 {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			if _, err := importer.Sync(ctx, "CORE", archRepo); err != nil {
-				failures <- err
-			}
-		}()
-	}
-	wait.Wait()
-	close(failures)
-	for err := range failures {
-		t.Fatalf("concurrent sync: %v", err)
+	started := syncInBackground(importer)
+	fake.installations.waitHeld(t)
+	joined := joinInBackground(importer, archRepo)
+	fake.installations.releaseHeld(t)
+
+	for _, caller := range []struct {
+		who      string
+		answered <-chan syncAnswer
+	}{
+		{"the caller that started the flight", started},
+		{"the caller that joined it", joined},
+	} {
+		answer := waitForSync(t, caller.answered, caller.who)
+		if answer.err != nil || answer.source.LastCommit == nil || *answer.source.LastCommit != commitOne {
+			t.Fatalf("%s answered %+v (err %v); want the row at %s with no error",
+				caller.who, answer.source, answer.err, commitOne)
+		}
 	}
 
+	installations, heads := fake.lookups()
+	trees, blobs := fake.reads()
+	if installations != 1 || heads != 1 || trees != 1 || blobs != len(files) {
+		t.Fatalf("two callers of one source cost %d installation lookups, %d head lookups, %d tree reads and %d blob reads; want 1, 1, 1 and %d",
+			installations, heads, trees, blobs, len(files))
+	}
 	var snapshots int
 	if err := database.Pool.QueryRow(ctx, `select count(*) from architecture_snapshots`).Scan(&snapshots); err != nil || snapshots != 1 {
 		t.Fatalf("snapshots = %d err %v, want 1", snapshots, err)
 	}
 	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{"architecture.synced " + commitOne}) {
-		t.Fatalf("concurrent syncs emitted %#v", got)
+		t.Fatalf("two callers of one source emitted %#v, want one architecture.synced", got)
+	}
+}
+
+// One source's slow GitHub holds up no other source of its project: a flight
+// is one source's, so acme/infra imports and answers while legion/arch is
+// still inside the blob read the test holds.
+//
+// The model read is folded in because it belongs to the same held moment:
+// while a sync waits on GitHub it must hold no pooled connection. It holds
+// none today either — loadSourceByRepo is one Pool.QueryRow, resolve's
+// transaction commits before the token call, and Ref, Dir and DirFiles all
+// run outside every transaction — so that assertion is no regression test
+// for the per-project lock that is gone. Its value is the day someone moves
+// a fetch inside a transaction, where a slow GitHub would hold a connection
+// of the shared pool for as long as it took.
+func TestASlowSourceDoesNotBlockAnotherSourceOfItsProject(t *testing.T) {
+	fake := &fakeSource{t: t, files: validFiles(), holdArchBlobs: true}
+	importer, database := newImporterFixture(t, fake)
+	addSource(t, database, fake, infraRepo, commitInfraOne, infraFiles())
+
+	slow := syncInBackground(importer)
+	fake.blobs.waitHeld(t)
+	if use := database.Pool.Use(); use.InUse != 0 {
+		t.Fatalf("%d pooled connections are in use while a sync waits on GitHub; want 0, because no fetch may run inside a transaction", use.InUse)
+	}
+
+	infra := waitForSync(t, syncRepoInBackground(importer, infraRepo), "acme/infra's sync, while legion/arch's was held")
+	if infra.err != nil || infra.source.LastCommit == nil || *infra.source.LastCommit != commitInfraOne {
+		t.Fatalf("acme/infra answered %+v (err %v); want the row at %s with no error", infra.source, infra.err, commitInfraOne)
+	}
+
+	fake.blobs.releaseHeld(t)
+	held := waitForSync(t, slow, "legion/arch's released sync")
+	if held.err != nil || held.source.LastCommit == nil || *held.source.LastCommit != commitOne {
+		t.Fatalf("legion/arch answered %+v (err %v); want the row at %s with no error", held.source, held.err, commitOne)
+	}
+	want := []string{
+		archRepo + " api", archRepo + " server", archRepo + " store",
+		infraRepo + " infra", infraRepo + " infra-db", infraRepo + " infra-dns",
+	}
+	if got := sourceComponents(t, database); !reflect.DeepEqual(got, want) {
+		t.Fatalf("components = %#v\nwant %#v", got, want)
+	}
+}
+
+// syncCount is what Close waits on, and a sync.WaitGroup is not it: a flight
+// may start while a wait is already waiting, which is the Add-after-Wait a
+// WaitGroup forbids. The counter holds stop open while a flight is
+// outstanding, returns once the last one ends, and refuses every flight that
+// begins after it, so a goroutine that starts late does nothing.
+func TestTheFlightCounterWaitsForEveryFlightAndThenRefusesMore(t *testing.T) {
+	var flights syncCount
+	if !flights.begin() {
+		t.Fatal("the first flight was refused by a counter nobody has stopped")
+	}
+	stopped := make(chan struct{})
+	go func() {
+		flights.stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("stop returned while a flight was still outstanding")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	flights.done()
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("stop did not return once the last flight ended")
+	}
+	if flights.begin() {
+		t.Fatal("a flight that began after stop was admitted; want it refused, so a goroutine starting late does nothing")
+	}
+}
+
+// The process stopping ends the flight it left running and waits for it: the
+// caller, whose own context is never cancelled, is answered, and the row
+// records nothing, because a stopping process is the one thing that
+// suppresses a sync's record of its own failure.
+func TestCloseWaitsForTheSyncItLeftRunning(t *testing.T) {
+	fake := &fakeSource{t: t, files: validFiles(), holdArchBlobs: true}
+	importer, database := newImporterFixture(t, fake)
+
+	answered := syncInBackground(importer)
+	fake.blobs.waitHeld(t)
+	closed := make(chan struct{})
+	go func() {
+		importer.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Close did not return within 30s of a flight held in its blob read; want it to end the flight and wait for it")
+	}
+
+	answer := waitForSync(t, answered, "the caller whose flight Close ended")
+	if answer.err == nil {
+		t.Fatalf("the caller was answered %+v with no error; want the failure of the flight Close ended", answer.source)
+	}
+	var lastCommit, lastError, lastSyncAt *string
+	if err := database.Pool.QueryRow(context.Background(), `
+		select last_commit, last_error, last_sync_at::text from architecture_sources where project_key = 'CORE'
+	`).Scan(&lastCommit, &lastError, &lastSyncAt); err != nil {
+		t.Fatalf("read the source row: %v", err)
+	}
+	text := func(value *string) string {
+		if value == nil {
+			return "<nil>"
+		}
+		return *value
+	}
+	if lastCommit != nil || lastError != nil || lastSyncAt != nil {
+		t.Fatalf("the row records commit %s, error %s, last_sync_at %s; want all three unwritten by a sync the process stopped",
+			text(lastCommit), text(lastError), text(lastSyncAt))
+	}
+	if got := projectEvents(t, database); len(got) != 0 {
+		t.Fatalf("events = %#v, want none: a sync the process stopped records nothing", got)
 	}
 }
 
@@ -1977,14 +2132,45 @@ type syncAnswer struct {
 	err    error
 }
 
-// syncInBackground starts process's sync of CORE's source and answers it on the channel.
+// syncInBackground starts process's sync of CORE's source from archRepo and answers it on the
+// channel.
 func syncInBackground(process *Importer) <-chan syncAnswer {
+	return syncRepoInBackground(process, archRepo)
+}
+
+// syncRepoInBackground starts process's sync of CORE's source from repo and answers it on the
+// channel.
+func syncRepoInBackground(process *Importer, repo string) <-chan syncAnswer {
 	answer := make(chan syncAnswer, 1)
 	go func() {
-		source, err := process.Sync(context.Background(), "CORE", archRepo)
+		source, err := process.Sync(context.Background(), "CORE", repo)
 		answer <- syncAnswer{source: source, err: err}
 	}()
 	return answer
+}
+
+// joinInBackground starts a caller of repo's sync meant to join the flight already running, and
+// gives it the moment it needs to reach that flight. A caller that joins a flight makes no call
+// of its own — no GitHub read, no query, nothing a test can wait for — so this settle is what
+// keeps the test about one shared flight; the flight cannot end underneath it meanwhile, because
+// the caller returns while the test still holds the read that flight is stopped at.
+func joinInBackground(process *Importer, repo string) <-chan syncAnswer {
+	answer := syncRepoInBackground(process, repo)
+	time.Sleep(500 * time.Millisecond)
+	return answer
+}
+
+// waitForSync answers what a background sync returned, failing the test rather than hanging when
+// it never does: a caller left waiting on a flight is the regression these tests are about.
+func waitForSync(t *testing.T, answered <-chan syncAnswer, who string) syncAnswer {
+	t.Helper()
+	select {
+	case answer := <-answered:
+		return answer
+	case <-time.After(30 * time.Second):
+		t.Fatalf("%s did not return within 30s", who)
+		return syncAnswer{}
+	}
 }
 
 // requireSettledAtTheNewerHead checks the held process's answer and the stored state once both
@@ -2087,5 +2273,31 @@ func TestAFailureMetBeforeAnotherProcessesImportNeverMarksTheSourceFailed(t *tes
 	branch.releaseHeld()
 
 	requireSettledAtTheNewerHead(t, database, <-held, commitTwo, infraComponents,
+		[]string{"architecture.synced " + commitOne, "architecture.synced " + commitTwo})
+}
+
+// A person who pushes and then asks for a Refresh is never answered from a flight that read the
+// branch head before the push: the second caller joins the flight already running, is handed an
+// answer whose head lookup predates its own call, and takes a second flight rather than that
+// answer. One importer with two callers is the case that matters, since two processes never
+// share a flight.
+func TestACallerAfterTheHeadWasReadIsNotToldTheOlderHead(t *testing.T) {
+	branch := newMovingBranch(t, commitOne, map[string]map[string]string{commitOne: validFiles(), commitTwo: infraFiles()})
+	branch.holdBlobs(commitOne)
+	process, _, database := twoProcesses(t, branch)
+
+	beforeThePush := syncInBackground(process)
+	branch.waitHeld(t)
+	branch.moveHead(commitTwo)
+	afterThePush := joinInBackground(process, archRepo)
+	branch.releaseHeld()
+
+	older := waitForSync(t, beforeThePush, "the caller that asked before the push")
+	if older.err != nil || older.source.LastCommit == nil || *older.source.LastCommit != commitOne {
+		t.Fatalf("the caller that asked before the push answered %+v (err %v); want the row at %s with no error",
+			older.source, older.err, commitOne)
+	}
+	requireSettledAtTheNewerHead(t, database,
+		waitForSync(t, afterThePush, "the caller that asked after the push"), commitTwo, infraComponents,
 		[]string{"architecture.synced " + commitOne, "architecture.synced " + commitTwo})
 }
