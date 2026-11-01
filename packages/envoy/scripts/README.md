@@ -74,16 +74,19 @@ itself (`internal/testnats/cmd/natsd`), so it needs no container runtime. It
 posts signed public GitHub fixtures and a three-paragraph direct message,
 checks the one-warning response for a never-seen GitHub repository, reads the
 registered session back by id from `/v1/registry/<session_id>` and an id that
-never registered as `404 {"error":"no live session <id>"}`, rejects an unheld
-role publish before claiming it for the fake session, captures the raw
-notification envelopes, and proves both the Go prompt text and the shared
-TypeScript renderer print the full direct message once, with no separate
-summary line repeating its first line.
+never registered as `404 {"error":"no live session <id>","state":"gone"}` —
+dispatch://INFRA-392 puts the state the refusal was decided on beside the kept
+`no live session <id>` prefix, with a `last_seen` only when this listener still
+remembers a registration, which an id nothing ever registered has none of —
+rejects an unheld role publish before claiming it for the fake session,
+captures the raw notification envelopes, and proves both the Go prompt text
+and the shared TypeScript renderer print the full direct message once, with no
+separate summary line repeating its first line.
 
 It also proves the three answers a sender gets when a send cannot be delivered:
 a send to a session the store does not hold is refused `404 {"error":"no live
-session <id>"}`; each send leaves exactly one `listener send` record in
-`listener.log`, INFO when accepted and WARN when refused, carrying
+session <id>","state":"gone"}`; each send leaves exactly one `listener send`
+record in `listener.log`, INFO when accepted and WARN when refused, carrying
 `target_session`, `event_id`, `source`, `source_session`, `payload_summary`,
 `outcome` and `status`; and a send whose bus is gone is refused `503` with
 `{"error":"envoy: the message bus did not answer: …"}` and `Retry-After: 1`

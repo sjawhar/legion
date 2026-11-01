@@ -26,6 +26,8 @@ func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "restart-test")
 	listener.waitHealthy(t)
 
+	// writerSession is the session a round's write subscribes.
+	writerSession := func(round int) string { return "ses_restart_writer_" + strconv.Itoa(round) }
 	// subscribe writes an interest through another listener's registry and waits for this
 	// listener's cache to list it, failing as round's write when it does not within 3s of since.
 	subscribe := func(round int, since time.Time) {
@@ -34,7 +36,7 @@ func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
 		if err != nil {
 			t.Fatalf("restart %d: open the interest registry as another listener: %v", round, err)
 		}
-		sessionID := "ses_restart_writer_" + strconv.Itoa(round)
+		sessionID := writerSession(round)
 		if _, err := registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "other-listener"}, []string{"notifications.agent." + sessionID}); err != nil {
 			t.Fatalf("restart %d: subscribe through another listener: %v", round, err)
 		}
@@ -47,8 +49,8 @@ func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
-	// One interest before the first restart, so the cache has applied a revision a Rewatch can
-	// resume after: an empty bucket has none, and is read in full.
+	// One interest before the first restart, so the read after the reconnect has a row to keep: an
+	// empty bucket's read keeps nothing and would prove nothing.
 	subscribe(0, time.Now())
 
 	for restart := 1; restart <= 3; restart++ {
@@ -63,15 +65,26 @@ func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
 		}
 		reconnectedAt := time.Now()
 
-		// The reconnect hook's Rewatch resumes the interest cache after the last revision it
-		// applied rather than reading the bucket again. Nothing was written while the server was
-		// down, and every write before it (the previous round's) reached the cache, so the
-		// resumed watcher applies none. The write below waits for that line, so it cannot land
-		// before the resumed consumer exists and be counted in it.
-		warmUp := interestWarmUp(t, listener, restart+1)
-		if warmUp["outcome"] != "resumed" || warmUp["entries"] != float64(0) || warmUp["delete_markers"] != float64(0) {
-			t.Fatalf("restart %d: the interest cache's warm-up after the reconnect = %v, want resumed with no entries and no delete markers", restart, warmUp)
+		// Every watcher a watch installs reads the whole bucket again, and nothing empties the
+		// cache first (kvwatch.Cache): the reconnect hook's Rewatch does not resume after the last
+		// revision applied, so its warm-up is a completed read holding every interest written so
+		// far. The copy keeps its rows through that read and removes only what a completed read
+		// found no evidence of (kvwatch.Copy, packages/envoy/AGENTS.md, "KV cache watchers"), so
+		// GET /v1/interests/, which answers from the copy, lists every one of them throughout: a
+		// re-read that emptied the cache and refilled it would drop one. The write below waits for
+		// the warm-up line, so it cannot land inside the read and be counted in it.
+		kept := func() {
+			for round := range restart {
+				if id := writerSession(round); !listsInterest(t, listener.port, id) {
+					t.Fatalf("restart %d: while its bucket was read again, the interest cache stopped listing %s, written before the restart", restart, id)
+				}
+			}
 		}
+		warmUp := interestWarmUp(t, listener, restart+1, kept)
+		if warmUp["outcome"] != "completed" || warmUp["entries"] != float64(restart) || warmUp["delete_markers"] != float64(0) {
+			t.Fatalf("restart %d: the interest cache's warm-up after the reconnect = %v, want a completed read of the whole bucket, its %d interests and no delete markers", restart, warmUp, restart)
+		}
+		kept()
 
 		subscribe(restart, reconnectedAt)
 	}
@@ -89,11 +102,13 @@ func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
 }
 
 // interestWarmUp waits for the listener's nth interest registry warm-up line (1 is its start's)
-// and returns it.
-func interestWarmUp(t *testing.T, p *listenerProcess, n int) map[string]any {
+// and returns it, running while on every pass of the wait, which is how a caller checks what the
+// cache answers while the read it waits for runs.
+func interestWarmUp(t *testing.T, p *listenerProcess, n int, while func()) map[string]any {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
+		while()
 		var lines []map[string]any
 		for line := range strings.SplitSeq(p.Output.String(), "\n") {
 			var record map[string]any

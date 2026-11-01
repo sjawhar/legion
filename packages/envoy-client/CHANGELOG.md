@@ -1,5 +1,71 @@
 # Changelog
 
+## [main@6b1524cdb8aa] - 2026-11-01
+
+### Fixed
+
+- `dispatch request-approval` finds an ask block whose id the renderer writes `id="…"` (an id
+  holding a space, `&` or another character the `#` shortcut cannot hold, such as `a b` or
+  `R&D`, written `id="a b"` and `id="R&amp;D"`). It looked only for `ask{#<id>`, so it named such
+  a block as one the latest version does not hold yet and refused every request over the
+  document; it now looks for the opener as `@legion/contracts`' `typedBlockIdAttribute` writes it.
+
+## [main@2605f55135db] - 2026-11-01
+
+### Added
+
+- `@legion/envoy-client/consumer-delivery`: the relay protocol of consumer delivery, which both
+  plugins share. `createConsumerDelivery` takes each frame the owning listener relays on
+  `notifications.envoy.deliver.<session id>` (`DELIVER_SUBJECT_PREFIX`, `decodeRelayFrame` for its
+  `Envoy-*` headers), answers `received` before any host work, hands the frames to the host one at
+  a time in stream order (a frame stops holding up the next once the host returns, releases it or
+  settles it), sends `progress` every 20 s while a frame is held unwritten, and answers `done`
+  once the host wrote it, or `nak` when the session cannot take it. A frame the replay ledger
+  already holds, one on a subject no followed topic matches, and one stored before its topic was
+  followed (2 s of clock allowance) that no replay cursor on its stream followed from below its
+  sequence either are answered `done` unshown. A frame whose delivery threw is
+  answered `nak`, and from its third delivery on `done` with the host's failure notice. A frame
+  delivered before, or stored before the current NATS connection's epoch began, is marked `late`,
+  so a host never starts a side turn for it. The resume point (the lowest sequence held unwritten
+  minus one, else the highest written) and each topic's follow time are a snapshot the host
+  persists through the delivery's `persist` option, which offers it only when it changed, and a
+  registration answer that reports a gap, or names another stream than the resume that
+  registration sent (its own point or the seeded one), tells the session once. A
+  session with no resume point of its own — one moving from the core path, whose consumer has
+  never relayed it a frame — registers the lowest cursor the replay ledger holds over its agent
+  subject and the followed topics the stream stores, so its first consumer starts there instead
+  of at the stream's end and what was stored while it was away is still delivered; such a session
+  has no follow times either, so the ledger's cursors are what say it followed each topic before
+  the resume, and its stored frames are shown rather than dropped. `answered`
+  also records the stored topics the listener relays (`relays`, `relaying`) and puts the replay
+  engine in consumer mode, which `close` leaves again; `registeredWithoutRelay` is what a host
+  calls for a registration that asked for no relay, so this module is the one writer of that
+  mode. `transport` gains the registration's
+  `delivery` field (`DeliveryRequest`, with `epoch` and `resume`) and the answer's
+  (`DeliveryAnswer`, always read: a missing or unreadable field is `core`).
+  `@legion/envoy-client/stream-topics`' `streamStores` says whether the stream stores a topic, as
+  the listener's `bus.StreamCaptures` does. The replay engine's `setConsumerMode(true)` stops its
+  `POST /v1/replay` calls while the listener relays the session's consumer.
+  `@legion/envoy-client/tool-contract` gains `sessionsOnMachine`, the `envoy_sessions` machine
+  filter both plugins ran a copy of: it matches the machine a session's process runs on (`host`)
+  and the listener it registered through (`machine_id`), and lists every session when the
+  argument is absent or empty (INFRA-594).
+
+### Changed
+
+- `@legion/envoy-client/test/envoy-stack`'s `EnvoyStack` gains `monitorUrl`, natsd's monitoring
+  base URL. `@legion/envoy-client/test/stall-scenario`'s `runFreezeScenario` takes the `stack` in
+  place of `envoyUrl` and puts a session on consumer delivery through the freeze: it waits for a
+  registration answered `consumer` with the relay subject subscribed, then checks that the
+  connection nats.js dials in place of the frozen one subscribes the relay subject again (natsd's
+  `/connz`), that the session's entry in `envoy_sessions` names a new epoch, and that the message
+  sent during the freeze and one sent after it are each shown once, neither as a replay (INFRA-594).
+- `envoy_subscribe` and `envoy_publish` describe stored delivery: a stored topic (agent, dispatch,
+  github, slack, legion, ghostwispr, whatsapp, and a role message, which reaches its holder as a
+  stored copy on the holder's agent topic) reaches each subscribed session once from the durable
+  consumer its listener relays to it, also one that was away or restarted; team and other ad-hoc
+  topics are live only (INFRA-594).
+
 ## [main@ed9113e7c092] - 2026-11-01
 
 ### Changed

@@ -16,12 +16,18 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// The three routes that read a session's interest record - GET /v1/sessions, GET
-// /v1/registry/<session_id> and GET /v1/interests/<session_id> - read a record the interest cache
-// misses through to the bucket, and on a bus that went silent without closing the connection that
-// read would wait out the JetStream MaxWait (10 s), as long as this listener's HTTP write timeout.
-// Each must answer such a read as the named 503 with Retry-After: 1 inside the caller's 5 s
-// attempt, and never as a session with no topics.
+// The two routes that read one session's interest record - GET /v1/registry/<session_id> and GET
+// /v1/interests/<session_id> - read a record the interest cache misses through to the bucket, and
+// on a bus that went silent without closing the connection that read would wait out the JetStream
+// MaxWait (10 s), as long as this listener's HTTP write timeout. Each must answer such a read as
+// the named 503 with Retry-After: 1 inside the caller's 5 s attempt, and never as a session with
+// no topics.
+//
+// GET /v1/sessions makes no such read: it joins the interest copy (store.Registry.Cached), so a
+// silent bus holds nothing back and it answers the copies it has. That is what it must do here -
+// serve, at once, with each session's cached topics - because a listing that read one record per
+// row would hold the whole list, which every Dispatch mention and broadcast reads, behind a
+// bucket that does not answer.
 //
 // The rig is the relay TestASendAndAPublishAnswerABusThatStoppedAnsweringInsideTheBudget freezes.
 // One live session has subscribed to nothing, so the interest cache holds no record for it and
@@ -61,6 +67,9 @@ func TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget(t *t
 			t.Fatalf("the listener's session cache does not hold %s (%v): the session read could be what fails", id, err)
 		}
 	}
+	// The listing answers the refilling 503 until the session copy has completed a read of its
+	// bucket, which is no answer about the reads this test freezes.
+	waitForSessions(t, sessions)
 	if _, err := registry.Upsert(store.Interest{SessionID: cached, MachineID: "test-machine", Dir: "/test/" + cached},
 		[]string{contracts.AgentSubject(cached), topic}); err != nil {
 		t.Fatalf("write %s's interest record: %v", cached, err)
@@ -95,7 +104,7 @@ func TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget(t *t
 		return get(sessionEntryHandler(state), "/v1/registry/"+id)
 	}
 	interests := func(id string) (*httptest.ResponseRecorder, time.Duration) {
-		return get(adminInterestsHandler(registry, sessions), "/v1/interests/"+id)
+		return get(adminInterestsHandler(registry, sessions, nil), "/v1/interests/"+id)
 	}
 	wantTopics := func(t *testing.T, info sessionInfo, want []string) {
 		t.Helper()
@@ -169,7 +178,28 @@ func TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget(t *t
 	}
 	t.Run("sessions", func(t *testing.T) {
 		recorder, elapsed := list()
-		wantBusUnanswered(t, "GET /v1/sessions", recorder, elapsed)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("GET /v1/sessions with the bus silent: status %d, body %s; want the 200 the copies answer, since the listing reads no record",
+				recorder.Code, recorder.Body.String())
+		}
+		if elapsed >= within {
+			t.Fatalf("GET /v1/sessions with the bus silent answered after %s, want inside %s: the listing waited on the bus", elapsed, within)
+		}
+		var rows []sessionInfo
+		if err := json.Unmarshal(recorder.Body.Bytes(), &rows); err != nil {
+			t.Fatalf("decode the session list %s: %v", recorder.Body.String(), err)
+		}
+		if len(rows) != 2 {
+			t.Fatalf("GET /v1/sessions with the bus silent listed %d rows, want 2: %s", len(rows), recorder.Body.String())
+		}
+		for _, row := range rows {
+			if row.SessionID == cached {
+				wantTopics(t, row, cachedTopics)
+			} else {
+				wantTopics(t, row, nil)
+			}
+		}
+		t.Logf("GET /v1/sessions with the bus silent: 200 in %s", elapsed)
 	})
 	t.Run("registry", func(t *testing.T) {
 		recorder, elapsed := entry(missed)

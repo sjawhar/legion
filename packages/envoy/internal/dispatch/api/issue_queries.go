@@ -247,8 +247,20 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if routed := slices.ContainsFunc(issues, func(issue model.IssueSummary) bool { return issue.Route != nil }); routed {
-		roster := s.readRouteRoster(r.Context())
-		if routeStatus != "" && routeStatus != model.RouteUnknown && !roster.answered {
+		judged := routeStatus != "" && routeStatus != model.RouteUnknown
+		var roster routeRoster
+		if judged {
+			// A filter for a judged state cannot be cut from an answer it could not read: a failed
+			// read of the stored answer is the database's failure and is answered as one, and only
+			// a listener that did not answer is the listener's.
+			if roster, err = s.readRouteRoster(r.Context()); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+		} else {
+			roster = s.routeRosterOrUnknown(r.Context())
+		}
+		if judged && !roster.answered {
 			// No route can be judged, so a filter for a judged state refuses rather than answer
 			// a list that would read as "every route reaches someone" (or "nobody's does").
 			if roster.reason == model.RouteReasonRefilling {
@@ -349,7 +361,7 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 	var reach model.IssueRouteReach
 	var liveness model.IssueClaimLiveness
 	if issue.Route != nil || issueClaimSession(issue.Claim) != "" {
-		roster := s.readRouteRoster(r.Context())
+		roster := s.routeRosterOrUnknown(r.Context())
 		reach = roster.reach(issue.Route)
 		liveness = roster.claimLiveness(issue.Claim, time.Now())
 	}

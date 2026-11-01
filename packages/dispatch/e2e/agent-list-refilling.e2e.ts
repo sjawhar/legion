@@ -25,13 +25,22 @@ import { asUser } from "./users";
 // The Agents page and an agent's conversation page poll the list every 15 s, so they move from a
 // complete read to a refilling one in place, keeping the rows they had; assertions on those two
 // pages wait for that poll with `POLL_TIMEOUT`. The other views read again on a reload or a Retry.
-// A failed read surfaces only after the shared retry policy's two retries 500 ms apart
-// (`web/src/main.tsx`), well inside the default expect timeout. Running-state marks are found by
-// their accessible names (`Running`, `Not running`, `Running state unknown`: `AgentName`'s mark).
+// A refused read surfaces only once the shared retry policy's two retries are out
+// (`web/src/main.tsx`), and a refusal that names a wait is left alone for it: Dispatch passes the
+// listener's `Retry-After: 5` on with ENVOY_REFILLING (`agentsAnswer` below pins it), and each
+// retry waits those 5 s plus a random share of them again (`queryRetryDelay`,
+// `web/src/api/query-client.ts`), so a view's first refilling read says so up to 20 s after the
+// page made it. Every assertion that waits for one gives it `REFILL_TIMEOUT`. Running-state marks
+// are found by their accessible names (`Running`, `Not running`, `Running state unknown`:
+// `AgentName`'s mark).
 
 const REFILLING = "The agent list is refilling. Try again in a moment.";
-// One 15 s poll, its two retries and a margin, measured from whenever the state flipped.
-const POLL_TIMEOUT = 30_000;
+// The two retries of a read Dispatch refused as refilling, each waiting out the answer's own
+// `Retry-After: 5` and up to as much again, and a margin.
+const REFILL_TIMEOUT = 30_000;
+// One 15 s poll, the refilling read it makes (`REFILL_TIMEOUT`) and a margin, measured from
+// whenever the state flipped.
+const POLL_TIMEOUT = 50_000;
 const PLANNER_ROLE = "refill-planner";
 const DOCUMENT_SLUG = "refill-notes";
 
@@ -174,26 +183,26 @@ async function expectFreshViewsRefilling(page: Page, fixture: RefillFixture): Pr
   await openIssueConversation(page, fixture.issueKey);
   // The issue's ask card shows its own recipients notice in the Conversation and the margin.
   const header = page.getByTestId("issue-header");
-  await expect(refillingNotice(header)).toHaveText(REFILLING);
+  await expect(refillingNotice(header)).toHaveText(REFILLING, { timeout: REFILL_TIMEOUT });
   await expect(refillingNotice(header)).toHaveAttribute("role", "status");
   await expect(page.getByRole("button", { name: "Subscribers", exact: true })).toBeVisible();
   await expect(page.getByTestId("issue-route-refilling")).toHaveText(
     `Route reach unknown: ${REFILLING}`
   );
   const suggestions = await openMentionSuggestions(page);
-  await expect(refillingNotice(suggestions)).toHaveText(REFILLING);
+  await expect(refillingNotice(suggestions)).toHaveText(REFILLING, { timeout: REFILL_TIMEOUT });
   await expectNoAbsenceClaim(page);
   await expectNoUnreachableWording(page);
 
   await page.goto(documentPath);
-  await expect(refillingNotice(page)).toHaveText(REFILLING);
+  await expect(refillingNotice(page)).toHaveText(REFILLING, { timeout: REFILL_TIMEOUT });
   await expect(page.getByRole("region", { name: "Subscribed agents" })).toHaveCount(0);
   await expectNoAbsenceClaim(page);
   await expectNoUnreachableWording(page);
 
   await page.goto("/");
   const recipients = askRecipients(page, fixture.askId);
-  await expect(refillingNotice(recipients)).toHaveText(REFILLING);
+  await expect(refillingNotice(recipients)).toHaveText(REFILLING, { timeout: REFILL_TIMEOUT });
   const toggle = recipients.getByRole("button", { name: "Recipients", exact: true });
   await toggle.click();
   await expect(
@@ -217,7 +226,7 @@ test.beforeEach(async () => {
 test("a list that starts refilling after a complete read claims no agent absent, and recovers", async ({
   browser,
 }) => {
-  test.setTimeout(150_000);
+  test.setTimeout(300_000);
   const fixture = await seedRefillFixture([planner, watcher]);
   const alice = await asUser(browser, "alice");
   try {
@@ -255,7 +264,7 @@ test("a list that starts refilling after a complete read claims no agent absent,
     // The open composer reads the list again as its suggestions open: the rows it had stay, and
     // the refilling notice stands where "No live agents match." would.
     const during = await openMentionSuggestions(issuePage);
-    await expect(refillingNotice(during)).toHaveText(REFILLING);
+    await expect(refillingNotice(during)).toHaveText(REFILLING, { timeout: REFILL_TIMEOUT });
     await expect(during.getByRole("option", { name: planner.title })).toBeVisible();
     await expect(issuePage.getByText("No live agents match.")).toHaveCount(0);
 
@@ -276,7 +285,7 @@ test("a list that starts refilling after a complete read claims no agent absent,
     // The ask card read while the list refilled is the one a Retry brings back.
     await page.goto("/");
     const refilled = askRecipients(page, fixture.askId);
-    await expect(refillingNotice(refilled)).toHaveText(REFILLING);
+    await expect(refillingNotice(refilled)).toHaveText(REFILLING, { timeout: REFILL_TIMEOUT });
 
     await setListsState("ok");
 
@@ -312,7 +321,7 @@ test("a list that starts refilling after a complete read claims no agent absent,
 });
 
 test("an empty list that starts refilling never says nobody is connected", async ({ browser }) => {
-  test.setTimeout(150_000);
+  test.setTimeout(300_000);
   const fixture = await seedRefillFixture([]);
   const alice = await asUser(browser, "alice");
   try {
@@ -359,7 +368,7 @@ test("an empty list that starts refilling never says nobody is connected", async
     await setListsState("refilling");
 
     const during = await openMentionSuggestions(issuePage);
-    await expect(refillingNotice(during)).toHaveText(REFILLING);
+    await expect(refillingNotice(during)).toHaveText(REFILLING, { timeout: REFILL_TIMEOUT });
     await expect(issuePage.getByText("No live agents match.")).toHaveCount(0);
 
     await expectFreshViewsRefilling(page, fixture);
@@ -377,7 +386,7 @@ test("an empty list that starts refilling never says nobody is connected", async
 });
 
 test("a listener refilling from the first read shows every view refilling", async ({ browser }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(200_000);
   const fixture = await seedRefillFixture([planner, watcher]);
   await setListsState("refilling");
   // What every view below reads: Dispatch's own refilling answer, not an unreachable listener.
@@ -390,14 +399,14 @@ test("a listener refilling from the first read shows every view refilling", asyn
   try {
     const page = await alice.newPage();
     await page.goto("/agents");
-    await expect(refillingNotice(page)).toHaveText(REFILLING);
+    await expect(refillingNotice(page)).toHaveText(REFILLING, { timeout: REFILL_TIMEOUT });
     await expect(page.getByRole("heading", { name: "Agents", level: 1 })).toBeVisible();
     await expect(page.getByRole("alert")).toHaveCount(0);
     await expectNoAbsenceClaim(page);
     await expectNoUnreachableWording(page);
 
     await page.goto(livePath);
-    await expect(refillingNotice(page)).toHaveText(REFILLING);
+    await expect(refillingNotice(page)).toHaveText(REFILLING, { timeout: REFILL_TIMEOUT });
     await expect(page.getByTestId("agent-list-loading")).toHaveCount(0);
     await expectNoAbsenceClaim(page);
     await expectNoUnreachableWording(page);

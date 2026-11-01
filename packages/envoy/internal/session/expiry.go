@@ -134,9 +134,11 @@ func (r *SessionRegistry) armExpiryLocked() {
 	r.expiryArmedFor = earliest
 }
 
-// expireDue is the expiry timer's callback. It pops every deadline that has passed and re-arms the
-// timer for the next one. While the copy does not follow its bucket it pops nothing and only looks
-// again (unfollowedRecheck).
+// expireDue is the expiry timer's callback. It pops every deadline that has passed, re-arms the
+// timer for the next one, and then calls OnChange's functions for each entry it removed from the
+// cache: a lapse has no watch event, so this and PruneLapsed, which sweeps the cache for the same
+// entries without waiting for the timer, are where the relay hears of one. While the copy does not
+// follow its bucket it pops nothing and only looks again (unfollowedRecheck).
 //
 // A live entry's deadline removes the entry only when the cache still holds it with that same
 // expiresAt; a write that replaced it since moved the deadline, and then nothing happens. It is
@@ -147,12 +149,13 @@ func (r *SessionRegistry) armExpiryLocked() {
 // live view (departedLocked), so LastSeen answers the same before and after the removal, and the
 // id's lastSeen deadline.
 //
-// A lastSeen deadline removes the id's lastSeen record. The fence entry outlives it and is dropped
-// by the next completed read that finds the bucket no longer holds the key
+// A lastSeen deadline removes the id's lastSeen record. It changes no entry, so it reports
+// nothing: a read already answered the id as gone when its entry left. The fence entry outlives it
+// and is dropped by the next completed read that finds the bucket no longer holds the key
 // (kvwatch.Copy.CompleteRead).
 func (r *SessionRegistry) expireDue() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	defer r.unlockAndNotify()
 	r.expiryArmedFor = time.Time{}
 	if !r.following() {
 		r.armExpiryLocked()
@@ -171,6 +174,7 @@ func (r *SessionRegistry) expireDue() {
 			}
 			r.setExpiryLocked(id, expireLastSeen, r.retireLocked(id, cs, now))
 			r.cache.Remove(id)
+			r.changedLocked(id)
 		case expireLastSeen:
 			if seen, ok := r.lastSeen[id]; ok {
 				if seen.expiresAt.After(now) {

@@ -151,6 +151,20 @@ func pauseBeforeRetry(ctx context.Context) bool {
 	return waitUnlessDone(ctx, publishRetryPause) == nil && ctx.Err() == nil
 }
 
+// forwardAndWait forwards item to subject through the delivery configuration's forwardRole and
+// waits for its outcome, which is the form a route needs: it answers its sender with what the
+// forward did, where the role lane hands the wait over and reports it later. storedOnly asks for a
+// forward that counts as delivered once the stream acknowledges storing it, with no receipt
+// (roleForwardStoredOnly): a holder served on a port has no NATS subscriber to answer one, and
+// takes the stored copy through its listener instead.
+func (d *listenerDeps) forwardAndWait(subject string, item contracts.Envelope, window time.Duration, storedOnly bool) error {
+	wait, err := d.delivery.forwardRole(subject, item, window, storedOnly)
+	if err != nil {
+		return err
+	}
+	return wait()
+}
+
 // forwardRefused reports whether a forward failed in a way another attempt repeats: NATS refuses
 // the envelope or subject however often it is sent (bus.ErrRefused), or the listener's grant does
 // not allow the subject (bus.ErrPublishDenied). A role send answers it at once, as
@@ -162,7 +176,8 @@ func forwardRefused(err error) bool {
 
 // unconfirmedReason is the outcome a send gives a recipient that never sent its receipt, from the
 // last forward made to it: receipt_timeout when that forward reached the server and drew no
-// receipt, delivery_failed for anything else, no forward at all among them.
+// receipt, delivery_failed for anything else — a forward the stream did not store
+// (bus.ErrForwardNotStored), and no forward at all, among them.
 func unconfirmedReason(lastForward error) sendOutcome {
 	if errors.Is(lastForward, bus.ErrReceiptTimeout) {
 		return sendReceiptTimeout
@@ -376,7 +391,7 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 				return
 			}
 			send.attempts++
-			err := d.delivery.forwardRole(contracts.AgentSubject(send.holder), forwarded, window)
+			err := d.forwardAndWait(contracts.AgentSubject(send.holder), forwarded, window, roleForwardStoredOnly(resolved.entry))
 			if err == nil {
 				d.confirm(item.DedupeKey, send.holder)
 				send.delivered(sendDelivered)
@@ -453,7 +468,7 @@ func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.
 			if window <= 0 {
 				break
 			}
-			err := d.delivery.forwardRole(contracts.AgentSubject(sessionID), item, window)
+			err := d.forwardAndWait(contracts.AgentSubject(sessionID), item, window, false)
 			if err == nil {
 				d.confirm(item.DedupeKey, sessionID)
 				return sendDelivered

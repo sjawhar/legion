@@ -119,6 +119,12 @@ inject directly in this session". A first launch may instead say "waiting for yo
 policy … Messages are dropped until it loads" and keep saying it after the policy has loaded;
 messages reach the agent anyway.
 
+A message sent while an Oh My Pi or Claude Code session is restarting or has briefly lost its
+connection is kept, and reaches the session once it is back. Envoy counts a message to a Claude
+Code session in channel mode as delivered once Claude Code accepts its channel notification, the
+last signal Claude Code gives, so a message Claude Code drops after that, as it does while its
+channel is ignored, is not sent again.
+
 On an Oh My Pi session, your Send or Aside arrives as your own message in its conversation, and the
 agent answers there. A Send or Aside that starts with `/` runs as the session's terminal would run
 it. A command that prints output, such as `/session` or `/compact`, posts that output as the

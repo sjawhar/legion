@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // fakeRoster is the live-session list a route-status test's listener answers: session id to
@@ -520,5 +521,157 @@ func TestClaimLivenessDatesWhenAnUnresponsiveHoldersClaimComesFree(t *testing.T)
 	silent := routeRoster{reason: model.RouteReasonUnreachable}
 	if got := text(silent.claimLiveness(claim("session", "ses-live"), now)); got != "unknown null null" {
 		t.Fatalf("with no list to judge by: %s, want unknown null null", got)
+	}
+}
+
+// A route is judged against the stored listener answer, the route_roster row. When the database
+// cannot read that row, the failure is the database's: a filter for a judged state answers it as
+// one, never as the listener's silence (503 ENVOY_UNAVAILABLE, whose remedy - route_status=unknown
+// - points an operator at the listener). A read that only shows a route still serves the issue,
+// with its route unknown.
+func TestARouteStatusFilterAnswersAFailedRosterReadAsTheDatabases(t *testing.T) {
+	roster := &fakeRoster{}
+	roster.set("ses-sre", "sre")
+	handler, database := routeStatusServer(t, roster)
+	key := routedIssueKey(t, handler, "role:sre")
+	requireReach(t, handler, key, "live", "ses-sre", "")
+
+	if _, err := database.Pool.Exec(context.Background(), `alter table route_roster rename to route_roster_unreadable`); err != nil {
+		t.Fatalf("make the route_roster row unreadable: %v", err)
+	}
+	for _, filter := range []string{"live", "no_holder"} {
+		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=TEST&route_status="+filter, nil, "alice")
+		code := decodeBody[struct {
+			Code string `json:"code"`
+		}](t, response).Code
+		if response.Code != http.StatusInternalServerError || code == "ENVOY_UNAVAILABLE" {
+			t.Fatalf("route_status=%s with the roster unreadable: status=%d body=%s, want 500 naming no listener failure",
+				filter, response.Code, response.Body.String())
+		}
+	}
+	requireReach(t, handler, key, "unknown", "", "unreachable")
+}
+
+// secondRouteStatusServer is a second server process beside served: the same database and the
+// same listener, but a pool of its own (storetest.SecondProcess), a roster cache of its own with
+// served's TTLs and fetch bound, and its own single-flight fetch, so the two share only what
+// Postgres holds, as two envoy-dispatch processes do.
+func secondRouteStatusServer(t *testing.T, served *server) (http.Handler, *server) {
+	t.Helper()
+	deps := served.deps
+	deps.Store = storetest.SecondProcess(t, served.deps.Store)
+	mux := http.NewServeMux()
+	other := register(mux, served.lifetime, deps)
+	t.Cleanup(func() { waitBackgroundOf(t, other) })
+	other.rosters.ttl, other.rosters.silenceTTL = served.rosters.ttl, served.rosters.silenceTTL
+	other.rosters.timeout = served.rosters.timeout
+	return mux, other
+}
+
+// Two server processes judge a route against one listener answer: the one the first stored
+// serves the second for its TTL, so a route the first reads live is never read as reaching nobody
+// on the second because the second asked the listener a moment later, and the second makes no
+// call of its own. Both TTLs are a minute, so a slow machine's reads stay inside them.
+func TestTwoServersJudgeARouteAgainstTheOneStoredListenerAnswer(t *testing.T) {
+	roster := &fakeRoster{}
+	roster.set("ses-sre", "sre")
+	handler, _, served := cachedRouteStatusServer(t, roster)
+	served.rosters.ttl = time.Minute
+	other, _ := secondRouteStatusServer(t, served)
+	key := routedIssueKey(t, handler, "role:sre")
+	before := roster.lookups.Load()
+
+	if got := detailReach(t, handler, key); got != "live ses-sre" {
+		t.Fatalf("the first server reads %s, want live ses-sre", got)
+	}
+	roster.end("ses-sre")
+	if got := detailReach(t, other, key); got != "live ses-sre" {
+		t.Fatalf("the second server reads %s inside the TTL of the answer the first stored, want live ses-sre", got)
+	}
+	if got := detailReach(t, handler, key); got != "live ses-sre" {
+		t.Fatalf("the first server reads %s on its second read, want live ses-sre", got)
+	}
+	if calls := roster.lookups.Load() - before; calls != 1 {
+		t.Fatalf("three reads on two servers inside the TTL made %d listener calls, want 1", calls)
+	}
+}
+
+// A listener failure one server meets is every server's: the stored silence has the second read
+// unknown too, without a call of its own, even though the listener answers again by then. The
+// silence is a minute, so a slow machine's reads stay inside it.
+func TestAListenerFailureOneServerMetReadsUnknownOnTheOther(t *testing.T) {
+	roster := &fakeRoster{}
+	roster.down.Store(true)
+	handler, _, served := cachedRouteStatusServer(t, roster)
+	served.rosters.ttl, served.rosters.silenceTTL = time.Minute, time.Minute
+	other, _ := secondRouteStatusServer(t, served)
+	key := routedIssueKey(t, handler, "role:sre")
+	before := roster.lookups.Load()
+
+	if got := detailReach(t, handler, key); got != "unknown null" {
+		t.Fatalf("the first server reads %s with the listener down, want unknown null", got)
+	}
+	roster.down.Store(false)
+	roster.set("ses-sre", "sre")
+	if got := detailReach(t, other, key); got != "unknown null" {
+		t.Fatalf("the second server reads %s inside the silence the first stored, want unknown null", got)
+	}
+	blind := dispatchRequest(t, other, http.MethodGet, "/api/v1/issues?project=TEST&route_status=no_holder", nil, "alice")
+	if blind.Code != http.StatusServiceUnavailable {
+		t.Fatalf("route_status=no_holder on the second server inside the silence: status=%d body=%s, want 503", blind.Code, blind.Body.String())
+	}
+	if calls := roster.lookups.Load() - before; calls != 1 {
+		t.Fatalf("three reads on two servers inside the silence made %d listener calls, want 1", calls)
+	}
+}
+
+// A listener answer is stored only over an older one, by when its call was sent: a fetch that was
+// sent first and answers last does not replace the answer a later fetch on the other server
+// stored, and the reads waiting on it are served that newer answer. The listener holds its first
+// call and answers it with nobody; every later call lists ses-sre holding sre.
+func TestAnOlderListenerAnswerNeverReplacesANewerOne(t *testing.T) {
+	var calls atomic.Int32
+	gate := make(chan struct{})
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sessions" {
+			http.NotFound(w, r)
+			return
+		}
+		if calls.Add(1) == 1 {
+			<-gate
+			_, _ = w.Write([]byte(`[]`))
+			return
+		}
+		_, _ = w.Write([]byte(`[{"session_id":"ses-sre","title":"worker","roles":["sre"]}]`))
+	}))
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate) }) }
+	// Release before the close, which waits for every request in flight to finish.
+	t.Cleanup(listener.Close)
+	t.Cleanup(release)
+	_, _, _, first := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL, envoyTimeout: time.Minute})
+	first.rosters.ttl, first.rosters.timeout = time.Minute, time.Minute
+	_, second := secondRouteStatusServer(t, first)
+
+	older := make(chan routeRoster, 1)
+	go func() { older <- readRoster(t, first, context.Background()) }()
+	awaitCalls(t, &calls, 1)
+	if got := sreReach(readRoster(t, second, context.Background())); got != "live ses-sre" {
+		t.Fatalf("the second server's own fetch reads %s, want live ses-sre", got)
+	}
+	release()
+	select {
+	case roster := <-older:
+		if got := sreReach(roster); got != "live ses-sre" {
+			t.Fatalf("the read waiting on the older fetch reads %s, want the newer stored live ses-sre", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the read waiting on the older fetch never returned")
+	}
+	if got := sreReach(readRoster(t, first, context.Background())); got != "live ses-sre" {
+		t.Fatalf("the first server's next read reads %s, want the newer stored live ses-sre", got)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("the listener saw %d calls, want 2: one fetch per server", got)
 	}
 }

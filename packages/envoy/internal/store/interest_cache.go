@@ -9,10 +9,26 @@ import (
 	"github.com/sjawhar/envoy/internal/kvwatch"
 )
 
-// newInterestCopy is an empty copy of the interest bucket, which keeps every interest it can
-// decode (decodeInterest).
-func newInterestCopy() kvwatch.Copy[Interest] {
-	return kvwatch.NewCopy(kvwatch.Rows[Interest]{Decode: decodeInterest})
+// newInterestCopy is the copy of the interest bucket r keeps, which holds every interest it can
+// decode (decodeInterest) and keeps r's subject index in step with its rows (kvwatch.Rows).
+func newInterestCopy(r *Registry) kvwatch.Copy[Interest] {
+	return kvwatch.NewCopy(kvwatch.Rows[Interest]{Decode: decodeInterest, Stored: r.indexInterestLocked, Removed: r.unindexInterestLocked})
+}
+
+// indexInterestLocked and unindexInterestLocked keep the subject index in step with the copy: the
+// index is what Match and MatchAll walk, so every interest the copy stores is set in it and every
+// one it removes is taken out. The copy calls each under r.mu, held for writing.
+func (r *Registry) indexInterestLocked(sessionID string, item Interest) {
+	if r.index == nil {
+		r.index = newSubjectIndex()
+	}
+	r.index.set(sessionID, item)
+}
+
+func (r *Registry) unindexInterestLocked(sessionID string, _ Interest) {
+	if r.index != nil {
+		r.index.remove(sessionID)
+	}
 }
 
 // decodeInterest is the interest a put record of the bucket, delivered or read, leaves in the

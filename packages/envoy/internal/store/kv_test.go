@@ -23,6 +23,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -34,7 +35,8 @@ import (
 // delivers it (interestCache.Apply).
 func holding(t *testing.T, interests map[string]Interest) *Registry {
 	t.Helper()
-	r := &Registry{cache: newInterestCopy()}
+	r := &Registry{index: newSubjectIndex()}
+	r.cache = newInterestCopy(r)
 	for sessionID, item := range interests {
 		value, err := json.Marshal(item)
 		if err != nil {
@@ -599,7 +601,8 @@ func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) 
 	if err != nil {
 		t.Fatalf("wrap the role KV bucket: %v", err)
 	}
-	r := &Registry{roleKV: roles, now: time.Now, cache: newInterestCopy()}
+	r := &Registry{roleKV: roles, now: time.Now, index: newSubjectIndex()}
+	r.cache = newInterestCopy(r)
 	handle, err := bus.WrapKeyValue(conn, kv)
 	if err != nil {
 		t.Fatalf("wrap the KV bucket: %v", err)
@@ -2999,6 +3002,76 @@ func TestOpeningTheRegistryReadsEveryRoleRevisionWithoutAGetPerKey(t *testing.T)
 	}
 	if release, err := registry.ReleaseExpiredRoleClaim(context.Background(), deleted, fmt.Sprintf("ses_%03d", claims), time.Minute); err != nil || release != ExpiredRoleClaimMissing {
 		t.Fatalf("deleted claim = %v, %v; want it missing", release, err)
+	}
+}
+
+// A claim another listener's registry writes reaches this registry's CachedRoleHolder through the
+// role watcher, and so do its release and its replacement, and the cache answers with no read of the
+// bucket, so the role lane resolves a holder without a round trip per message.
+func TestCachedRoleHolderFollowsAnotherRegistrysClaimsWithoutReadingTheBucket(t *testing.T) {
+	uri := testnats.URL(t)
+	reader, writer := testnats.Connect(t, uri), testnats.Connect(t, uri)
+	defer reader.Close()
+	defer writer.Close()
+	readerRegistry, err := Open(reader, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open the reading registry: %v", err)
+	}
+	t.Cleanup(readerRegistry.StopWatch)
+	writerRegistry, err := Open(writer, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open the writing registry: %v", err)
+	}
+	t.Cleanup(writerRegistry.StopWatch)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := readerRegistry.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("warm the reading registry: %v", err)
+	}
+	gets, err := reader.SubscribeSync(fmt.Sprintf("$JS.API.DIRECT.GET.KV_%s.>", bus.RoleClaimBucket))
+	if err != nil {
+		t.Fatalf("watch direct gets: %v", err)
+	}
+	defer func() { _ = gets.Unsubscribe() }()
+	legacyGets, err := reader.SubscribeSync(fmt.Sprintf("$JS.API.STREAM.MSG.GET.KV_%s", bus.RoleClaimBucket))
+	if err != nil {
+		t.Fatalf("watch stream message gets: %v", err)
+	}
+	defer func() { _ = legacyGets.Unsubscribe() }()
+	reads := func() int {
+		t.Helper()
+		if err := reader.Flush(); err != nil {
+			t.Fatalf("flush the reader: %v", err)
+		}
+		return pending(t, gets) + pending(t, legacyGets)
+	}
+	requireHolder := func(role, want string) {
+		t.Helper()
+		waitFor(t, 5*time.Second, func() bool { return holderOf(readerRegistry, role) == want })
+		before := reads()
+		holder, err := readerRegistry.CachedRoleHolder(role)
+		if err != nil || holder != want {
+			t.Fatalf("CachedRoleHolder(%s) = %q, %v; want %q", role, holder, err, want)
+		}
+		if after := reads(); after != before {
+			t.Fatalf("CachedRoleHolder(%s) read the bucket %d times, want none", role, after-before)
+		}
+	}
+
+	if _, err := writerRegistry.SetRole("ses_first", "m1", "reviewer", false); err != nil {
+		t.Fatalf("claim the role: %v", err)
+	}
+	requireHolder("reviewer", "ses_first")
+	if _, err := writerRegistry.SetRole("ses_second", "m1", "reviewer", false); err != nil {
+		t.Fatalf("take the role over: %v", err)
+	}
+	requireHolder("reviewer", "ses_second")
+	if err := writerRegistry.Remove(context.Background(), "ses_second", []string{contracts.RoleTopicPrefix + "reviewer"}); err != nil {
+		t.Fatalf("release the role: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return holderOf(readerRegistry, "reviewer") == "" })
+	if holder, err := readerRegistry.CachedRoleHolder("reviewer"); err != nil || holder != "" {
+		t.Fatalf("CachedRoleHolder after the release = %q, %v; want no holder", holder, err)
 	}
 }
 

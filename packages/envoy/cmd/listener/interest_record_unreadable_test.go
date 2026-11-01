@@ -16,8 +16,8 @@ import (
 )
 
 // An interest record the bucket holds and this build cannot decode is not a bus that did not
-// answer: the bus answered, with a record no retry will change. The three routes that read a
-// session's interest record - GET /v1/sessions, GET /v1/registry/<session_id> and GET
+// answer: the bus answered, with a record no retry will change. The three routes that report a
+// session's interests - GET /v1/sessions, GET /v1/registry/<session_id> and GET
 // /v1/interests/<session_id> - must not answer it with the bus-unavailable 503, its
 // busUnansweredPrefix body or its Retry-After: 1. That label sends every caller into a retry that
 // can never succeed and points an operator's filter at an outage that never happened; on GET
@@ -28,9 +28,10 @@ import (
 // topics - is the route's to choose; this test pins only that it is not the bus's answer.
 //
 // The record is written into the interest bucket directly, as another build or a hand edit could
-// leave it, so the listener's interest cache never holds it and every read of it reaches the
-// bucket. The negative control is a second session with a readable record on the same rig,
-// served 200 with its topics.
+// leave it, so the listener's interest cache never holds it: the two single-session routes read it
+// from the bucket, and the listing, which joins the interest copy alone (store.Registry.Cached),
+// builds its row without it. The negative control is a second session with a readable record on
+// the same rig, served 200 with its topics.
 func TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering(t *testing.T) {
 	const (
 		readable   = "ses_interest_record_readable"
@@ -58,6 +59,9 @@ func TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering(t *testing.
 			t.Fatalf("register %s: %v", id, err)
 		}
 	}
+	// The listing answers the refilling 503 until the session copy has completed a read of its
+	// bucket, and that answer is no answer about the record this test is about.
+	waitForSessions(t, sessions)
 	if _, err := registry.Upsert(store.Interest{SessionID: readable, MachineID: "test-machine", Dir: "/test/" + readable},
 		[]string{contracts.AgentSubject(readable), topic}); err != nil {
 		t.Fatalf("write %s's interest record: %v", readable, err)
@@ -101,7 +105,7 @@ func TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering(t *testing.
 	}{
 		{"/v1/sessions", sessionsHandler(registry, sessions)},
 		{"/v1/registry/" + unreadable, sessionEntryHandler(state)},
-		{"/v1/interests/" + unreadable, adminInterestsHandler(registry, sessions)},
+		{"/v1/interests/" + unreadable, adminInterestsHandler(registry, sessions, nil)},
 	} {
 		t.Run(route.path, func(t *testing.T) {
 			recorder := get(route.handler, route.path)

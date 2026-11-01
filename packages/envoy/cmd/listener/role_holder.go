@@ -22,6 +22,23 @@ type roleClaimResolver interface {
 	RoleClaim(ctx context.Context, role string) (store.RoleClaim, error)
 }
 
+// readRoleClaim reads role's claim for a resolution (resolveRoleHolderFrom). A resolution given a
+// firstHolder reads it from there — the registry's watched copy of the role bucket
+// (store.Registry.CachedRoleHolder), which costs no round trip, so a role message the lane
+// forwards reads no bucket. A route, which answers a caller within its own deadline, passes no
+// firstHolder and reads the bucket itself. The copy names a holder, not a whole claim, and the
+// resolution reads nothing else from it.
+func readRoleClaim(ctx context.Context, registry roleClaimResolver, firstHolder func(role string) (string, error), role string) (store.RoleClaim, error) {
+	if firstHolder == nil {
+		return registry.RoleClaim(ctx, role)
+	}
+	holder, err := firstHolder(role)
+	if err != nil {
+		return store.RoleClaim{}, err
+	}
+	return store.RoleClaim{HolderSessionID: holder}, nil
+}
+
 type roleHolderState string
 
 const (
@@ -318,11 +335,22 @@ const roleHolderReadTimeout = 2 * time.Second
 // can name it. It unwraps to the read's own error: an ended ctx, wrapped naming the call that did
 // not answer, which a route answers as a bus that did not answer; or store.ErrMalformedRoleClaim,
 // a claim record that cannot be read (writeRoleClaimUnreadable).
+//
+// It reads the claim from registry itself. Role delivery, whose read of a claim is the registry's
+// watched copy of the role bucket, resolves through resolveRoleHolderFrom instead.
 func resolveRoleHolder(ctx context.Context, registry roleClaimResolver, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
+	return resolveRoleHolderFrom(ctx, registry, nil, sessions, role)
+}
+
+// resolveRoleHolderFrom is resolveRoleHolder reading its claim through readRoleClaim, so a
+// resolution given a firstHolder spends no bucket round trip on it. One resolution is one claim
+// read: a resolution never retries, because a holder that stopped answering keeps its claim and
+// so there is no release of one for a later read to see past.
+func resolveRoleHolderFrom(ctx context.Context, registry roleClaimResolver, firstHolder func(role string) (string, error), sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
 	if err := ctx.Err(); err != nil {
 		return roleHolderResult{}, &roleHolderFailure{step: roleHolderClaimRead, cause: fmt.Errorf("resolve role %s's holder: %w", role, err)}
 	}
-	claim, err := registry.RoleClaim(ctx, role)
+	claim, err := readRoleClaim(ctx, registry, firstHolder, role)
 	if err != nil {
 		return roleHolderResult{}, &roleHolderFailure{step: roleHolderClaimRead, cause: err}
 	}

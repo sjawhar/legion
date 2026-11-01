@@ -9,6 +9,7 @@ import {
   type SetRoleInput,
   type SetRoleResult,
   type SubscribeInput,
+  type SubscribeResult,
   type UnsubscribeInput,
 } from "@legion/envoy-client/transport";
 import type { NatsConnection } from "nats";
@@ -43,6 +44,13 @@ const interestFor = (sessionID: string): Interest => ({
   topics: [],
 });
 
+// A listener that answers no `delivery` field, which the client reads as the core path: this
+// module carries the answer through untouched, and no test here reads it.
+const subscribeResultFor = (sessionID: string): SubscribeResult => ({
+  ...interestFor(sessionID),
+  delivery: { mode: "core", reason: "not_answered" },
+});
+
 const registrationFor = (sessionID: string): RegistrationInput => ({
   sessionID,
   directory: "/w",
@@ -71,7 +79,7 @@ interface HarnessControl {
   /** The one session open here, which the module's `sessionOpen` answers for. */
   open: string;
   deadlineMs: number;
-  subscribe: (input: SubscribeInput) => Promise<Interest>;
+  subscribe: (input: SubscribeInput) => Promise<SubscribeResult>;
   setRole: (input: SetRoleInput) => Promise<SetRoleResult>;
   getRole: (role: string) => Promise<RoleInfo>;
   getInterest: (sessionID: string) => Promise<Interest>;
@@ -130,7 +138,7 @@ function createHarness(): Harness {
   const control: HarnessControl = {
     open: "",
     deadlineMs: 60_000,
-    subscribe: async (input) => interestFor(input.sessionID),
+    subscribe: async (input) => subscribeResultFor(input.sessionID),
     setRole: async () => ({ claimed: true, interest: interestFor("ses_a") }),
     getRole: async (role) => ({ role, holder: "", last_seen: 1, state: "gone" }),
     getInterest: async (sessionID) => interestFor(sessionID),

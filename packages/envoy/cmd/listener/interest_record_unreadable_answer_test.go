@@ -17,11 +17,15 @@ import (
 )
 
 // An interest record this build cannot decode (store.ErrMalformedInterest) is answered as what it
-// is. The two single-session routes answer a 500 with no Retry-After whose body names the session
-// and that its interest record is unreadable, as an unreadable role claim is answered. GET
-// /v1/sessions does not refuse the listing for it: it lists that session with no topics and roles
-// beside the readable one with its topics, and the registry logs the unreadable record at WARN,
-// once per read, naming the session.
+// is. The two single-session routes, which read the record itself, answer a 500 with no
+// Retry-After whose body names the session and that its interest record is unreadable, as an
+// unreadable role claim is answered, and the registry logs the decode failure at WARN once per
+// read, naming the session. GET /v1/sessions does not refuse the listing for it: it lists that
+// session with no topics and roles beside the readable one with its topics, and logs nothing,
+// because it joins the interest copy (store.Registry.Cached) and reads no key of the bucket. The
+// copy never holds a record it could not decode (interestCache.Apply evicts it), so the row the
+// listing builds from the copy is the same row the read-through routes report: the session, with
+// no topics.
 func TestAnUnreadableInterestRecordIsAnsweredAsUnreadable(t *testing.T) {
 	const (
 		readable   = "ses_interest_answer_readable"
@@ -48,6 +52,9 @@ func TestAnUnreadableInterestRecordIsAnsweredAsUnreadable(t *testing.T) {
 			t.Fatalf("register %s: %v", id, err)
 		}
 	}
+	// The listing answers the refilling 503 until the session copy has completed a read of its
+	// bucket, which says nothing about the record this test writes.
+	waitForSessions(t, sessions)
 	if _, err := registry.Upsert(store.Interest{SessionID: readable, MachineID: "test-machine", Dir: "/test/" + readable},
 		[]string{contracts.AgentSubject(readable), topic}); err != nil {
 		t.Fatalf("write %s's interest record: %v", readable, err)
@@ -76,9 +83,10 @@ func TestAnUnreadableInterestRecordIsAnsweredAsUnreadable(t *testing.T) {
 		handler http.HandlerFunc
 	}{
 		{"/v1/registry/" + unreadable, sessionEntryHandler(state)},
-		{"/v1/interests/" + unreadable, adminInterestsHandler(registry, sessions)},
+		{"/v1/interests/" + unreadable, adminInterestsHandler(registry, sessions, nil)},
 	} {
 		t.Run(route.path, func(t *testing.T) {
+			before := len(logs.String())
 			recorder := get(route.handler, route.path)
 			if recorder.Code != http.StatusInternalServerError {
 				t.Fatalf("status %d, body %s; want 500", recorder.Code, recorder.Body.String())
@@ -93,6 +101,13 @@ func TestAnUnreadableInterestRecordIsAnsweredAsUnreadable(t *testing.T) {
 			head := "envoy: the interest record of session " + unreadable + " is unreadable: malformed interest record: invalid character "
 			if !strings.HasPrefix(refusal.Error, head) {
 				t.Fatalf("the refusal reads %q, want it to begin %q", refusal.Error, head)
+			}
+			warnings := warnLinesNaming(logs.String()[before:], unreadable)
+			if len(warnings) != 1 {
+				t.Fatalf("the route logged %d WARN lines naming %s, want 1: %v", len(warnings), unreadable, warnings)
+			}
+			if message, _ := warnings[0]["error"].(string); !strings.HasPrefix(message, "invalid character ") {
+				t.Fatalf("the WARN line %v does not carry the decode failure", warnings[0])
 			}
 		})
 	}
@@ -117,17 +132,19 @@ func TestAnUnreadableInterestRecordIsAnsweredAsUnreadable(t *testing.T) {
 		t.Fatalf("GET /v1/sessions row for %s = %+v, want its topics to include %s and its roles reviewer", readable, row, topic)
 	}
 
-	var warnings []map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(logs.String()[before:]), "\n") {
+	if warnings := warnLinesNaming(logs.String()[before:], unreadable); len(warnings) != 0 {
+		t.Fatalf("GET /v1/sessions logged %d WARN lines naming %s, want none: the listing reads the interest copy, never the record: %v", len(warnings), unreadable, warnings)
+	}
+}
+
+// warnLinesNaming is every WARN record in logs whose session_id is sessionID.
+func warnLinesNaming(logs string, sessionID string) []map[string]any {
+	var found []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(logs), "\n") {
 		var record map[string]any
-		if json.Unmarshal([]byte(line), &record) == nil && record["level"] == "WARN" && record["session_id"] == unreadable {
-			warnings = append(warnings, record)
+		if json.Unmarshal([]byte(line), &record) == nil && record["level"] == "WARN" && record["session_id"] == sessionID {
+			found = append(found, record)
 		}
 	}
-	if len(warnings) != 1 {
-		t.Fatalf("GET /v1/sessions logged %d WARN lines naming %s, want 1: %v", len(warnings), unreadable, warnings)
-	}
-	if message, _ := warnings[0]["error"].(string); !strings.HasPrefix(message, "invalid character ") {
-		t.Fatalf("the WARN line %v does not carry the decode failure", warnings[0])
-	}
+	return found
 }

@@ -20,6 +20,8 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -199,7 +201,9 @@ func startDispatchNATS(t *testing.T, urls []string, overrides map[string]string)
 	client := startDispatchStream(t, urls, overrides)
 	_, pemText := githubapptest.Key(t)
 	app := &auth.AppConfig{ClientID: replicasTestClientID, PEM: pemText}
-	sweeper, err := webhookSweeper(client, app, "", resolveWith(t, overrides).NATSReplicas)
+	// The store only carries the GitHub rate limits a send reads; nothing here sends, and the
+	// bucket this opens reads none, so an empty one is every database this needs.
+	sweeper, err := webhookSweeper(client, &store.Store{}, app, "", resolveWith(t, overrides).NATSReplicas)
 	if err != nil {
 		return err
 	}
@@ -278,10 +282,13 @@ func TestRedeliverWebhooksRaisesAnR1RedeliveryBucketToTheReplicaSetting(t *testi
 	}
 	key, pemText := githubapptest.Key(t)
 	github := githubapptest.NewWebhook(t, &key.PublicKey, replicasTestClientID, nil)
+	// redeliver-webhooks opens the database that holds the GitHub rate limits every process obeys.
+	database := storetest.Open(t)
 
 	var stdout, stderr bytes.Buffer
 	code := runSubcommand(context.Background(), []string{"redeliver-webhooks", "--since", "1h", "--dry-run"}, envGetter(map[string]string{
 		"NATS_URLS":                cluster.URL(),
+		"DATABASE_URL":             database.Pool.Config().ConnString(),
 		"XDG_CONFIG_HOME":          t.TempDir(),
 		"DISPATCH_APP_CLIENT_ID":   replicasTestClientID,
 		"DISPATCH_APP_PEM_B64":     pemText,

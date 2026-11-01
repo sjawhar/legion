@@ -211,7 +211,7 @@ func (r *SessionRegistry) deleteGone(ctx context.Context, candidate goneCandidat
 	}
 	r.mu.Lock()
 	r.cache.Evict(r.watcher, epoch, candidate.sessionID, revision+1)
-	r.mu.Unlock()
+	r.unlockAndNotify()
 	return true, nil
 }
 

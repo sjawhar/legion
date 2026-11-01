@@ -44,6 +44,22 @@ const InterestWireSchema = z.object({
   warnings: z.array(z.string()).optional(),
 });
 
+/**
+ * How the listener delivers a session's stored subjects, answered to a registration that asked
+ * for consumer delivery: `consumer` relays the session's durable consumer on `subject`;
+ * `core` (`reason` is the listener's machine-readable why) keeps the core subscriptions and
+ * `POST /v1/replay`. The reason is read as a string, so one a later listener adds still parses.
+ */
+const DeliveryAnswerWireSchema = z.discriminatedUnion("mode", [
+  z.object({
+    mode: z.literal("consumer"),
+    subject: z.string().min(1),
+    stream_id: z.string(),
+    gap: z.boolean(),
+  }),
+  z.object({ mode: z.literal("core"), reason: z.string() }),
+]);
+
 const SessionWireSchema = z.object({
   session_id: z.string(),
   machine_id: z.string(),
@@ -146,6 +162,51 @@ export type EnvoyClientConfig = {
 
 export type Interest = z.infer<typeof InterestWireSchema>;
 
+export type DeliveryAnswer = z.infer<typeof DeliveryAnswerWireSchema>;
+
+/**
+ * The registration's answer: the interest, and the delivery mode. A listener of an earlier release
+ * answers no `delivery` field, which reads as `core` (`not_answered`).
+ */
+export type SubscribeResult = Interest & { readonly delivery: DeliveryAnswer };
+
+/** Where a session's stream sequence was up to: what a new consumer may be seeded from. */
+export interface ResumePoint {
+  /** The stream's `envoy_stream_id`. */
+  readonly stream_id: string;
+  readonly seq: number;
+}
+
+/** The registration's `delivery` field: this session asks for consumer delivery. */
+export interface DeliveryRequest {
+  readonly consumer: true;
+  /** A random string per plugin NATS connection; a new one restarts the relay at its ack floor. */
+  readonly epoch: string;
+  readonly resume?: ResumePoint;
+}
+
+/** The reason a registration answer without a `delivery` field (an earlier listener) reads as. */
+const DELIVERY_NOT_ANSWERED = "not_answered";
+
+/** The reason an answer whose `delivery` field this build cannot read reads as. */
+const DELIVERY_UNREADABLE = "unreadable_answer";
+
+// An answer without a `delivery` field (an earlier listener), or with an unreadable one (a mode a
+// later listener adds), is `core`: the core path still works, so neither fails the registration.
+function parseSubscribeAnswer(body: unknown): SubscribeResult {
+  const interest = InterestWireSchema.parse(body);
+  const raw =
+    typeof body === "object" && body !== null && "delivery" in body ? body.delivery : undefined;
+  if (raw === undefined || raw === null) {
+    return { ...interest, delivery: { mode: "core", reason: DELIVERY_NOT_ANSWERED } };
+  }
+  const delivery = DeliveryAnswerWireSchema.safeParse(raw);
+  return {
+    ...interest,
+    delivery: delivery.success ? delivery.data : { mode: "core", reason: DELIVERY_UNREADABLE },
+  };
+}
+
 /**
  * Live NATS subscriptions and the listener's registry can disagree after a reconnect or a
  * human removal; this reports both, and which side knows each topic. Registry topics come
@@ -187,6 +248,8 @@ export type SubscribeInput = {
   readonly capabilities?: readonly string[];
   readonly driving: boolean;
   readonly selfSubscribed?: boolean;
+  /** Asks for consumer delivery (`DeliveryRequest`); absent keeps the core path. */
+  readonly delivery?: DeliveryRequest;
   /**
    * The client instance that drives this session: one Oh My Pi Envoy extension instance, one
    * Claude Code channel-server process, minted once when that instance starts. The listener
@@ -373,7 +436,7 @@ export class EnvoyApiError extends Error {
 }
 
 export type EnvoyClient = {
-  readonly subscribe: (input: SubscribeInput) => Promise<Interest>;
+  readonly subscribe: (input: SubscribeInput) => Promise<SubscribeResult>;
   readonly unsubscribe: (input: UnsubscribeInput) => Promise<void>;
   readonly getInterest: (sessionID: string) => Promise<Interest>;
   readonly send: (input: SendInput) => Promise<SendResult>;
@@ -471,7 +534,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
 
   return {
     subscribe: async (input) =>
-      InterestWireSchema.parse(
+      parseSubscribeAnswer(
         JSON.parse(
           await post("/v1/interests/subscribe", {
             session_id: input.sessionID,
@@ -484,6 +547,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
             ...(input.selfSubscribed === undefined
               ? {}
               : { self_subscribed: input.selfSubscribed }),
+            ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
             // The client instance driving this session (`clientInstanceID`), omitted when the
             // caller has none so an older listener sees an unchanged body. The listener stores it
             // on the registry entry, where a soft role claim and a deregistration compare it.

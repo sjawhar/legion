@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
@@ -38,12 +39,38 @@ const (
 	testSecretsKMSKeyARN = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
 )
 
+// testSignInIssuer is the provider every broker these tests start signs people in at. Nothing
+// dials it: the approval page reads a provider's discovery document at a person's first sign-in,
+// so a broker nobody signs in to never reaches for it. approval_page_test.go's fixture overrides
+// these settings with a local issuer that answers.
+const testSignInIssuer = "https://signin.example"
+
+// signInClientSecretFile writes the sign-in client's secret into a file of t's own and answers
+// its path, the file BROKER_SIGNIN_CLIENT_SECRET_FILE names.
+func signInClientSecretFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "signin-client-secret")
+	if err := os.WriteFile(path, []byte(brokertest.SignInClientSecret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // productionEnv is the configuration every broker needs besides its addresses and database: the
-// namespace it serves and the key every secret there is on.
-var productionEnv = []string{
-	"BROKER_MACHINE_LOGIN_URL=https://dispatch.example/credentials/machine",
-	"BROKER_SECRETS_PREFIX=" + testSecretsPrefix,
-	"BROKER_SECRETS_KMS_KEY_ARN=" + testSecretsKMSKeyARN,
+// namespace it serves, the key every secret there is on, the page a machine login's code is
+// typed on, and the four settings a person signs in to its approval page with, which it refuses
+// to start without.
+func productionEnv(t *testing.T) []string {
+	t.Helper()
+	return []string{
+		"BROKER_MACHINE_LOGIN_URL=https://dispatch.example/credentials/machine",
+		"BROKER_SECRETS_PREFIX=" + testSecretsPrefix,
+		"BROKER_SECRETS_KMS_KEY_ARN=" + testSecretsKMSKeyARN,
+		"BROKER_SIGNIN_ISSUER=" + testSignInIssuer,
+		"BROKER_SIGNIN_CLIENT_ID=" + brokertest.SignInClientID,
+		"BROKER_SIGNIN_CLIENT_SECRET_FILE=" + signInClientSecretFile(t),
+		"BROKER_SIGNIN_DOMAIN=" + brokertest.SignInDomain,
+	}
 }
 
 func TestPortZeroPublicURLRefusedInProduction(t *testing.T) {
@@ -74,14 +101,19 @@ func TestNonZeroPortPublicURLIsFineInProduction(t *testing.T) {
 // config holds the config's ServicesByAccount, keyed by account so one service may have several,
 // without which no pod is ever a service's.
 func TestTheRequestMachineCarriesTheServicesByAccount(t *testing.T) {
+	secretFile := signInClientSecretFile(t)
 	cfg, err := config.Load(func(name string) string {
 		return map[string]string{
-			"BROKER_DATABASE_URL":        "postgres://unused",
-			"BROKER_PUBLIC_URL":          "https://secrets.internal.example",
-			"BROKER_MACHINE_LOGIN_URL":   "https://dispatch.example/credentials/machine",
-			"BROKER_SERVICES":            "example-service=system:serviceaccount:example:example-sa example-service=system:serviceaccount:example:another-sa",
-			"BROKER_SECRETS_PREFIX":      "example/agent-secrets/",
-			"BROKER_SECRETS_KMS_KEY_ARN": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+			"BROKER_DATABASE_URL":              "postgres://unused",
+			"BROKER_PUBLIC_URL":                "https://secrets.internal.example",
+			"BROKER_MACHINE_LOGIN_URL":         "https://dispatch.example/credentials/machine",
+			"BROKER_SERVICES":                  "example-service=system:serviceaccount:example:example-sa example-service=system:serviceaccount:example:another-sa",
+			"BROKER_SECRETS_PREFIX":            "example/agent-secrets/",
+			"BROKER_SECRETS_KMS_KEY_ARN":       "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+			"BROKER_SIGNIN_ISSUER":             testSignInIssuer,
+			"BROKER_SIGNIN_CLIENT_ID":          brokertest.SignInClientID,
+			"BROKER_SIGNIN_CLIENT_SECRET_FILE": secretFile,
+			"BROKER_SIGNIN_DOMAIN":             brokertest.SignInDomain,
 		}[name]
 	})
 	if err != nil {
@@ -119,7 +151,7 @@ func TestTheRequestMachineCarriesTheServicesByAccount(t *testing.T) {
 // real socket.
 func TestMainRefusesPortZeroPublicURLInProduction(t *testing.T) {
 	cmd := exec.Command(buildBroker(t))
-	cmd.Env = append(append(os.Environ(), productionEnv...),
+	cmd.Env = append(append(os.Environ(), productionEnv(t)...),
 		"BROKER_DATABASE_URL=postgres://nonexistent-host-this-test-must-never-reach/db",
 		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
 	)
@@ -176,7 +208,7 @@ func buildBroker(t *testing.T) string {
 func runRefusedBroker(t *testing.T, binPath string, env ...string) string {
 	t.Helper()
 	cmd := exec.Command(binPath)
-	cmd.Env = append(append(append(os.Environ(), productionEnv...), noAWSEnv(t)...), env...)
+	cmd.Env = append(append(append(os.Environ(), productionEnv(t)...), noAWSEnv(t)...), env...)
 	out, err := cmd.CombinedOutput()
 	exitErr, isExit := err.(*exec.ExitError)
 	if err == nil || !isExit || exitErr.ExitCode() == 0 {
@@ -312,7 +344,7 @@ func startBroker(t *testing.T, options brokerOptions) *brokerProcess {
 		binary = buildBroker(t)
 	}
 	cmd := exec.Command(binary)
-	cmd.Env = append(append(os.Environ(), productionEnv...), options.Env...)
+	cmd.Env = append(append(os.Environ(), productionEnv(t)...), options.Env...)
 	p := &brokerProcess{Process: cmdtest.Start(t, "broker", cmd)}
 	// Cleanups run last-registered-first, so this one — registered after cmdtest.Start's own —
 	// asks the broker to stop and waits its whole stop budget out before cmdtest's cleanup kills

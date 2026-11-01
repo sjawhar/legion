@@ -593,7 +593,7 @@ func TestListsRefuseAfterTheBoundWhileNATSIsDown(t *testing.T) {
 			func(err error) bool { return isUnrecoverableSelfHealthFailure(err, rig.client, rig.caches) },
 			rig.client.Connected,
 			func() error {
-				return rebuildListenerDependencies(context.Background(), rig.client, rig.caches, nil, "", nil)
+				return rebuildListenerDependencies(context.Background(), rig.client, rig.caches, nil, "", nil, nil)
 			},
 		)
 		rig.awaitServed(t, 10*time.Second, "both lists once the monitor read the buckets again")

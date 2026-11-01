@@ -21,19 +21,22 @@ import (
 )
 
 // GET /v1/sessions lists every live session the session bucket holds, even one whose id the
-// interest bucket refuses as a key (bus.ErrRefused): the bus did not fail to answer, so the list is
-// not refused for it, and the session is listed with no topics and roles, as it was before the
-// interest read was bounded. An earlier listener stored session ids past this one's write bound
-// (testnats.LegacyKeys); the unreadable one, 3,987 bytes in envoy_sessions, is past envoy_interests'
-// 3,974-byte get bound, so its interest read is bus.ErrTooLarge, while the readable one, 3,969
-// bytes, still fits it and reads as no record. A direct bucket write can also store an id outside
-// nats.go's key alphabet, `ses:bad`, whose interest read is bus.ErrInvalidKey. Each refused one is
-// logged at WARN once per listing, naming the session. GET /v1/registry/<session_id> answers such a
-// live session the same way, 200 with no topics and roles, logged at WARN, and Dispatch's envoy
-// client finds it through that route rather than reading a 413 or 400 as a session that cannot
-// exist. GET /v1/interests/<session_id>, which asks for the interest record by that key, still
-// answers the refused key as the caller's own input: 413 for the too-long id and 400 for the
-// invalid one, with no Retry-After, since a retry sends the same key.
+// interest bucket refuses as a key (bus.ErrRefused): the listing joins the interest copy
+// (store.Registry.Cached) and reads no key of the bucket, so there is no read to refuse and the
+// session is listed with no topics and roles. An earlier listener stored session ids past this
+// one's write bound (testnats.LegacyKeys); the unreadable one, 3,987 bytes in envoy_sessions, is
+// past envoy_interests' 3,974-byte get bound, so a read of its interest record would be
+// bus.ErrTooLarge, while the readable one, 3,969 bytes, still fits it and reads as no record. A
+// direct bucket write can also store an id outside nats.go's key alphabet, `ses:bad`, whose
+// interest read would be bus.ErrInvalidKey. The listing logs nothing for any of them, because it
+// makes none of those reads: a line here would mean the list had gone back to one bucket read per
+// row, which over a slow KV leader holds the answer for seconds per row
+// (TestTheListsMakeNoNATSReadWhileNATSStalls). GET /v1/registry/<session_id>, which does read the
+// one record, answers such a live session 200 with no topics and roles and logs it at WARN once,
+// and Dispatch's envoy client finds it through that route rather than reading a 413 or 400 as a
+// session that cannot exist. GET /v1/interests/<session_id>, which asks for the interest record by
+// that key, still answers the refused key as the caller's own input: 413 for the too-long id and
+// 400 for the invalid one, with no Retry-After, since a retry sends the same key.
 func TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses(t *testing.T) {
 	const (
 		ordinary   = "ses_refused_list_ordinary"
@@ -103,6 +106,9 @@ func TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses(t *testing.T
 			time.Sleep(20 * time.Millisecond)
 		}
 	}
+	// The listing answers the refilling 503 until the session copy has completed a read of its
+	// bucket, whatever the copy already holds.
+	waitForSessions(t, sessions)
 
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	get := func(handler http.HandlerFunc, path string) *httptest.ResponseRecorder {
@@ -137,25 +143,15 @@ func TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses(t *testing.T
 		}
 	}
 
-	warned := map[string]int{}
+	var warned []map[string]any
 	for _, line := range strings.Split(strings.TrimSpace(logs.String()[before:]), "\n") {
 		var record map[string]any
-		if json.Unmarshal([]byte(line), &record) != nil || record["level"] != "WARN" {
-			continue
+		if json.Unmarshal([]byte(line), &record) == nil && record["level"] == "WARN" {
+			warned = append(warned, record)
 		}
-		id, _ := record["session_id"].(string)
-		message, _ := record["error"].(string)
-		if !strings.Contains(message, "key") {
-			t.Fatalf("a WARN line for the %d-byte session %.16s carries %.200q, want the key refusal", len(id), id, message)
-		}
-		warned[id]++
 	}
-	if len(warned) != 2 || warned[unreadableLegacy] != 1 || warned[invalidKey] != 1 {
-		counts := map[int]int{}
-		for id, n := range warned {
-			counts[len(id)] = n
-		}
-		t.Fatalf("GET /v1/sessions logged WARN lines by session id length %v, want one each for the %d-byte id and %s", counts, len(unreadableLegacy), invalidKey)
+	if len(warned) != 0 {
+		t.Fatalf("GET /v1/sessions logged %d WARN lines %v, want none: the listing joins the interest copy and reads no key of the bucket, so a refused id gives it nothing to report", len(warned), warned)
 	}
 
 	// GET /v1/registry/<session_id> answers each live session the interest bucket refuses as the list
@@ -211,7 +207,7 @@ func TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses(t *testing.T
 		{invalidKey, http.StatusBadRequest},
 	} {
 		t.Run("interests/"+refused.id[:min(len(refused.id), 8)], func(t *testing.T) {
-			recorder := get(adminInterestsHandler(registry, sessions), "/v1/interests/"+refused.id)
+			recorder := get(adminInterestsHandler(registry, sessions, nil), "/v1/interests/"+refused.id)
 			if recorder.Code != refused.want {
 				t.Fatalf("GET /v1/interests/<the %d-byte id %.16s>: status %d, body %.300s; want %d", len(refused.id), refused.id, recorder.Code, recorder.Body.String(), refused.want)
 			}

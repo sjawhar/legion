@@ -90,3 +90,12 @@ then set it `todo` with the `legion` tool's `set_status`. A plan row you wrote w
 behind it moves nothing. The label comes first: it is what
 lets the daemon admit the root. Do not apply that recovery to an issue already in an active Legion
 tree; its architect and daemon own its lifecycle. Update the weekly-plan owner row after the move.
+
+## A root the plan defers
+
+A person's `legion` label outranks a plan's deferral. The daemon queues the root at once: a
+person's label on an unrecorded root in `triage` is the root's `todo`, written by the daemon. A
+labelled root the weekly plan says to defer is parked by you at your next backlog pass, not
+before: `set_status` it to `backlog`, or to `icebox` for a longer deferral, and cite the plan's
+ruling in a comment on the issue. The cost is the architect's work between the daemon's `todo`
+and your park.

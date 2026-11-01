@@ -3,7 +3,6 @@ package identity
 import (
 	"context"
 	"errors"
-	"regexp"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/oidc"
@@ -26,10 +25,6 @@ var (
 	// this one recorded its subject, so the cookie this sign-in would issue must not be given out.
 	ErrSignInSuperseded = errors.New("another account signed in to this address meanwhile")
 )
-
-// emailShape is an address with one @ and a dotted domain, the shape the deployment repository's
-// identity_email accepts from a federated username.
-var emailShape = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 
 // SignInRule is who may sign in to Dispatch and how Dispatch treats their sign-in: GroupRule for
 // the members of a Cognito sign-in pool's group, or DomainRule for the people of a Google

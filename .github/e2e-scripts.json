@@ -103,6 +103,10 @@
       "needs": "a devbox: tmux, the pinned Oh My Pi on a model route (LEGION_E2E_MODEL_ROUTE), a Chromium that Playwright drives, and its own Postgres and NATS containers"
     },
     {
+      "script": "envoy-session-delivery.sh",
+      "needs": "an issue pod and a model provider, so it is run by hand and never in CI: a loopback Postgres with pgvector (LEGION_TEST_PG_DSN), the model gateway key file (/var/run/model-gateway-key/key, or SESSION_DELIVERY_MODEL_KEY_FILE), go, bun and the checkout's node_modules, jq, curl, socat 1.8.0 or later, setsid, psql, git, tar, pgrep, mkfifo and python3"
+    },
+    {
       "script": "envoy-session-states.sh",
       "needs": "a Legion pod: its own model route for both agent runtimes (LEGION_E2E_MODEL_BASE_URL, LEGION_E2E_MODEL_KEY_FILE, LEGION_E2E_MODEL_ID and LEGION_E2E_CLAUDE_MODEL), the worker image's Oh My Pi and Claude Code pin, and a loopback PostgreSQL with pgvector (ENVOY_SESSION_STATES_PG_DSN); it starts its own NATS, listeners and Dispatch"
     },

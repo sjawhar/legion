@@ -241,6 +241,10 @@ export interface CredentialPendingRow {
   identifiers: string[]; // secret rule keys, or [hostname] for a launcher_credential
   requested_at: string; // RFC3339
   session?: CredentialSession;
+  /** An `agent_secret` row's page on the secrets broker, where a person signed in to the broker
+   *  decides it (`<BROKER_PUBLIC_URL>/approve/<record>`). Absent on a machine login's row, and on
+   *  every row from a broker older than that page. */
+  approve_url?: string;
 }
 export interface CredentialPendingResponse {
   pending: CredentialPendingRow[];
@@ -276,18 +280,21 @@ export interface CredentialRecord {
   requested_at: string;
   decided: CredentialDecisionEvent | null;
   session?: CredentialSession;
+  /** An `agent_secret` record's page on the secrets broker, where a person signed in to the
+   *  broker decides it (`<BROKER_PUBLIC_URL>/approve/<record>`). Absent on a machine login's
+   *  record, and on every record from a broker older than that page. */
+  approve_url?: string;
 }
 
 export interface CredentialApproval {
   state: "approved";
-  grant_id: string | null;
   credential_id: string | null;
 }
 export interface CredentialDenial {
   state: "denied";
 }
-/** What approve and deny answer, relayed verbatim from the broker: an approval names the grant or
- *  the launcher credential it made, and a denial is `{state: "denied"}` alone. */
+/** What a machine login's approve and deny answer, relayed verbatim from the broker: an approval
+ *  names the launcher credential it made, and a denial is `{state: "denied"}` alone. */
 export type CredentialDecisionResponse = CredentialApproval | CredentialDenial;
 
 interface CredentialGrantFields {

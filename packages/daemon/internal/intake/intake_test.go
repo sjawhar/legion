@@ -276,14 +276,15 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "Dispatch artifact approved",
 			subject: "notifications.dispatch.issue.CAPTURE-4.artifact.approved",
 			file:    "dispatch/artifact-approved.json",
-			want:    DispatchArtifact{Key: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactApproved, Version: 2, Mark: mark(5, "2026-09-23T00:46:26.997872Z")},
+			want: DispatchArtifact{Key: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactApproved, Version: 2,
+				Actor: dispatch.Actor{Kind: "user", ID: "smoke"}, Mark: mark(5, "2026-09-23T00:46:26.997872Z")},
 		},
 		{
 			name:    "Dispatch artifact changes requested",
 			subject: "notifications.dispatch.issue.CAPTURE-3.artifact.changes_requested",
 			file:    "dispatch/artifact-changes-requested.json",
 			want: DispatchArtifact{Key: "CAPTURE-3", ArtifactID: "e7860036-ca1a-4ec6-8bd0-51d5f1b6fbd8", Kind: DispatchArtifactChangesRequested, Version: 2, Reason: "Captured reviewer reason",
-				Mark: mark(7, "2026-09-23T00:45:50.37209Z")},
+				Actor: dispatch.Actor{Kind: "user", ID: "smoke"}, Mark: mark(7, "2026-09-23T00:45:50.37209Z")},
 		},
 		// The ask and claim envelopes below are built by hand from Dispatch's own types
 		// (model.AskEventPayload, model.CommentEventPayload with ask_state and ask_waiting_on, and
@@ -2018,6 +2019,62 @@ func TestResolveReviewBodyRestoresATruncatedReviewsBody(t *testing.T) {
 	other := PullRequestChecks{Repo: "acme/widgets", Number: 42}
 	if got, err := resolveReviewBody(context.Background(), answering("ignored", nil), other); err != nil || !reflect.DeepEqual(got, Fact(other)) {
 		t.Fatalf("a fact that is not a review = %#v, %v; want it unchanged", got, err)
+	}
+}
+
+// prepareArtifact has the daemon ready a Dispatch review event before it is applied
+// (ConsumerSpec.PrepareArtifact), as prepareRepository does an issue event's: the workflow
+// performs no I/O, so Dispatch's view of the issue a person's approval is on is read here, and the
+// fact the preparation returns is the one applied. A failed preparation is the error, so the
+// delivery is naked and retried rather than applied without the view; a daemon with no preparer,
+// and every fact that is not a review, pass through untouched.
+func TestPrepareArtifactReadiesAReviewEventBeforeItIsApplied(t *testing.T) {
+	approval := DispatchArtifact{Key: "LEGION-755", ArtifactID: "art-1", Kind: DispatchArtifactApproved, Version: 3, Actor: dispatch.Actor{Kind: "user", ID: "sami"}}
+	view := dispatch.Issue{Key: "LEGION-755", Status: "backlog", HandedOver: true, PrimaryArtifactID: "art-1"}
+	var asked []DispatchArtifact
+	answering := func(issue *dispatch.Issue, err error) ConsumerSpec {
+		return ConsumerSpec{AckWait: time.Second, PrepareArtifact: func(_ context.Context, artifact DispatchArtifact) (DispatchArtifact, error) {
+			asked = append(asked, artifact)
+			artifact.Issue = issue
+			return artifact, err
+		}}
+	}
+	t.Run("a review is the fact the preparer returns", func(t *testing.T) {
+		asked = nil
+		got, err := prepareArtifact(context.Background(), answering(&view, nil), approval)
+		if err != nil {
+			t.Fatalf("prepare the review's issue: %v", err)
+		}
+		prepared, ok := got.(DispatchArtifact)
+		if !ok || prepared.Issue == nil || prepared.Issue.Key != view.Key || prepared.Issue.Status != view.Status {
+			t.Fatalf("the review = %#v, want it carrying Dispatch's view of %s", got, view.Key)
+		}
+		if len(asked) != 1 || !reflect.DeepEqual(asked[0], approval) {
+			t.Fatalf("the preparer was asked %#v, want once, with the decoded review", asked)
+		}
+	})
+	t.Run("a daemon with no preparer applies the review as decoded", func(t *testing.T) {
+		got, err := prepareArtifact(context.Background(), ConsumerSpec{AckWait: time.Second}, approval)
+		if err != nil || !reflect.DeepEqual(got, Fact(approval)) {
+			t.Fatalf("with no preparer = %#v, %v; want the review unchanged", got, err)
+		}
+	})
+	t.Run("a failed preparation naks the delivery", func(t *testing.T) {
+		if _, err := prepareArtifact(context.Background(), answering(nil, errors.New("Dispatch answered 502")), approval); err == nil || !strings.Contains(err.Error(), "Dispatch answered 502") {
+			t.Fatalf("a failed preparation = %v; want the preparer's error, so the delivery is retried", err)
+		}
+	})
+	asked = nil
+	for _, other := range []Fact{
+		DispatchIssue{Key: "LEGION-755", Seq: 1, Type: "issue.updated", Status: "triage", HandedOver: true},
+		PullRequestReview{Repo: "acme/widgets", Number: 42, State: "approved", Author: "a-writer"},
+	} {
+		if got, err := prepareArtifact(context.Background(), answering(&view, nil), other); err != nil || !reflect.DeepEqual(got, other) {
+			t.Fatalf("a fact that is not a review = %#v, %v; want it unchanged", got, err)
+		}
+	}
+	if len(asked) != 0 {
+		t.Fatalf("the preparer was asked %#v for facts that are not reviews, want nothing", asked)
 	}
 }
 

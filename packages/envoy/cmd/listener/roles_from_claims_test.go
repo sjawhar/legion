@@ -235,16 +235,24 @@ func (feedsNothing) Apply(kvwatch.Entry, kvwatch.Read) {}
 func (feedsNothing) CompleteRead(kvwatch.Read)         {}
 
 // requireRolesOrUnanswered fails the test unless recorder answers 200 with the session's rows
-// (rolesOf reads them) holding exactly want, or the role claim view's own bus-unavailable 503
-// (roleViewUnanswered). It reports whether the answer was the 200.
-func requireRolesOrUnanswered(t *testing.T, what string, recorder *httptest.ResponseRecorder, want []string, rolesOf func([]byte) []string) bool {
+// (rolesOf reads them) holding exactly want, or exactly kept, the copy the view had when the read
+// under way began, or the role claim view's own bus-unavailable 503 (roleViewUnanswered). It
+// reports whether the answer was the 200 holding want. Both lists name every role the session
+// holds in the bucket being read, so no answer it allows is that session short of one.
+func requireRolesOrUnanswered(t *testing.T, what string, recorder *httptest.ResponseRecorder, want, kept []string, rolesOf func([]byte) []string) bool {
 	t.Helper()
 	switch recorder.Code {
 	case http.StatusOK:
-		if got := rolesOf(recorder.Body.Bytes()); !slices.Equal(got, want) {
-			t.Fatalf("%s answered 200 with roles %v, want %v or the bus-unavailable 503: a holder reported without its role", what, got, want)
+		got := rolesOf(recorder.Body.Bytes())
+		switch {
+		case slices.Equal(got, want):
+			return true
+		case slices.Equal(got, kept):
+			return false
+		default:
+			t.Fatalf("%s answered 200 with roles %v, want %v, the copy the view had (%v), or the bus-unavailable 503: a holder reported without its role", what, got, want, kept)
+			return false
 		}
-		return true
 	case http.StatusServiceUnavailable:
 		if !roleViewUnanswered(recorder) {
 			t.Fatalf("%s answered 503 with Retry-After %q and body %s, want the bus-unavailable 503 naming the role claim view's refusal", what, recorder.Header().Get("Retry-After"), recorder.Body.String())
@@ -295,14 +303,16 @@ func TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes(t
 	}
 }
 
-// A recreated role bucket empties the role claim view, and the refill that follows delivers the
-// claims one at a time. Until it has delivered them all, GET /v1/registry/<session_id> and GET
-// /v1/sessions answer the holder's roles or the bus-unavailable 503 with Retry-After: 1, never the
-// holder with no roles. The holder's claim is the last of thousands, so the routes are asked while
-// the refill runs. The reset empties the holders and their revisions both: after the refill, a
-// claim only the old bucket had (planner's) gives the holder nothing, and a claim the new bucket
-// writes at a lower revision than the old bucket's claim of the same role (architect's) gives its
-// holder the role.
+// A recreated role bucket is read whole again, and nothing empties the view first: the copy keeps
+// every holder it had through that read and loses only what the completed read found no evidence
+// of (kvwatch.Copy). So until the read completes, GET /v1/registry/<session_id> and GET
+// /v1/sessions answer the holder with the roles the copy held, or the bus-unavailable 503 with
+// Retry-After: 1, and never the holder short of a role it holds, nor a part of the new bucket the
+// read has reached so far. The holder's claim is the last of thousands, so the routes are asked
+// while the read runs. The read's completion is what resets the view, holders and revisions both:
+// after it, a claim only the old bucket had (planner's) gives the holder nothing, and a claim the
+// new bucket writes at a lower revision than the old bucket's claim of the same role
+// (architect's) gives its holder the role, since a read of a recreated bucket drops the fence.
 func TestARecreatedRoleBucketIsNeverAnsweredAsAHolderWithoutItsRole(t *testing.T) {
 	const (
 		holder = "ses_recreated_roles_holder"
@@ -354,6 +364,9 @@ func TestARecreatedRoleBucketIsNeverAnsweredAsAHolderWithoutItsRole(t *testing.T
 	}
 
 	want := []string{"reviewer"}
+	// planner's claim is the old bucket's alone, so it is the copy the view keeps until the read
+	// of the new bucket completes and sweeps it.
+	kept := []string{"planner", "reviewer"}
 	entryRoles := func(body []byte) []string {
 		var info sessionInfo
 		if err := json.Unmarshal(body, &info); err != nil {
@@ -374,23 +387,23 @@ func TestARecreatedRoleBucketIsNeverAnsweredAsAHolderWithoutItsRole(t *testing.T
 		t.Fatalf("GET /v1/sessions answered 200 without %s: %s", holder, body)
 		return nil
 	}
-	unanswered := 0
+	refilling := 0
 	for deadline := time.Now().Add(30 * time.Second); ; {
 		entry := sessionEntryRoute(t, state, holder)
-		entryAnswered := requireRolesOrUnanswered(t, "GET /v1/registry/"+holder, entry, want, entryRoles)
+		entryAnswered := requireRolesOrUnanswered(t, "GET /v1/registry/"+holder, entry, want, kept, entryRoles)
 		list := httptest.NewRecorder()
 		sessionsHandler(registry, sessions).ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/v1/sessions", nil))
-		listAnswered := requireRolesOrUnanswered(t, "GET /v1/sessions", list, want, listedRoles)
+		listAnswered := requireRolesOrUnanswered(t, "GET /v1/sessions", list, want, kept, listedRoles)
 		if entryAnswered && listAnswered {
 			break
 		}
-		unanswered++
+		refilling++
 		if time.Now().After(deadline) {
-			t.Fatal("the session routes still answer 503 30 s after the rewatch")
+			t.Fatal("the session routes still answer the copy the view had, or 503, 30 s after the rewatch")
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Logf("the session routes answered the bus-unavailable 503 %d times while the refill ran", unanswered)
+	t.Logf("the session routes answered the copy the view had, or the bus-unavailable 503, %d times while the read of the new bucket ran", refilling)
 	if got := decodeSessionInfo(t, sessionEntryRoute(t, state, target)).Roles; !slices.Equal(got, []string{"architect"}) {
 		t.Fatalf("after the refill GET /v1/registry/%s reports roles %v, want [architect]: the old bucket's revision fenced out the new bucket's claim", target, got)
 	}

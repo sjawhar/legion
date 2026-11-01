@@ -21,6 +21,43 @@ import (
 // ErrUnavailable reports that the Envoy listener could not serve a request.
 var ErrUnavailable = errors.New("envoy listener unavailable")
 
+// ErrUnreachable marks the ErrUnavailable failures no listener answered: the request found no
+// connection, lost it, or ran out of time before an answer, or a 502, 503 or 504 came back - a
+// gateway in front of a listener that is gone, or a listener behind its starting gate
+// (cmd/listener/main.go startingGate). Those are what a listener being replaced gives for a few
+// seconds, so asking again a little later may be answered. Every other ErrUnavailable - a status
+// the listener chose, such as the 401 it gives a token it refuses, or an answer that does not
+// decode - is the listener's own answer, which asking again only repeats. An ErrUnreachable
+// failure is ErrUnavailable too, with the same text, so a caller that asks only errors.Is(err,
+// ErrUnavailable) reads it exactly as before.
+var ErrUnreachable = errors.New("envoy listener unreachable")
+
+// unreachableError marks the ErrUnavailable failure it wraps as ErrUnreachable without adding to
+// its text.
+type unreachableError struct{ error }
+
+func (unreachableError) Is(target error) bool { return target == ErrUnreachable }
+
+func (e unreachableError) Unwrap() error { return e.error }
+
+// unreachable marks err, an ErrUnavailable failure, as ErrUnreachable.
+func unreachable(err error) error { return unreachableError{err} }
+
+// gatewayStatus reports whether a listener answered with a status that comes from in front of it
+// or from its starting gate rather than from a decision about the request: a 502, 503 or 504.
+func gatewayStatus(code int) bool {
+	return code == http.StatusBadGateway || code == http.StatusServiceUnavailable || code == http.StatusGatewayTimeout
+}
+
+// unavailableStatus is the ErrUnavailable failure err a non-200 answer reads as, marked
+// ErrUnreachable when its status is a gatewayStatus.
+func unavailableStatus(code int, err error) error {
+	if gatewayStatus(code) {
+		return unreachable(err)
+	}
+	return err
+}
+
 // ErrReceiptTimeout reports a send the listener never answered within the client's window. It
 // is the one failure that says nothing about whether the message landed: the listener publishes
 // the envelope before it answers (cmd/listener/api.go), so the agent may already hold it. Only
@@ -206,7 +243,7 @@ func (c *Client) Sessions(ctx context.Context) ([]Session, error) {
 	c.authorize(request)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("%w: GET /v1/sessions: %v", ErrUnavailable, err)
+		return nil, unreachable(fmt.Errorf("%w: GET /v1/sessions: %v", ErrUnavailable, err))
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -237,7 +274,7 @@ func (c *Client) ListInterests(ctx context.Context) ([]Interest, error) {
 	c.authorize(request)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("%w: GET /v1/interests/: %v", ErrUnavailable, err)
+		return nil, unreachable(fmt.Errorf("%w: GET /v1/interests/: %v", ErrUnavailable, err))
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -275,7 +312,7 @@ func (c *Client) Interest(ctx context.Context, sessionID string) (Interest, erro
 	c.authorize(request)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return Interest{}, fmt.Errorf("%w: GET /v1/interests/%s: %v", ErrUnavailable, sessionID, err)
+		return Interest{}, unreachable(fmt.Errorf("%w: GET /v1/interests/%s: %v", ErrUnavailable, sessionID, err))
 	}
 	defer response.Body.Close()
 	switch response.StatusCode {
@@ -283,7 +320,8 @@ func (c *Client) Interest(ctx context.Context, sessionID string) (Interest, erro
 		return Interest{}, ErrNotFound
 	}
 	if response.StatusCode != http.StatusOK {
-		return Interest{}, fmt.Errorf("%w: GET /v1/interests/%s returned %d", ErrUnavailable, sessionID, response.StatusCode)
+		return Interest{}, unavailableStatus(response.StatusCode,
+			fmt.Errorf("%w: GET /v1/interests/%s returned %d", ErrUnavailable, sessionID, response.StatusCode))
 	}
 
 	var interest Interest
@@ -316,11 +354,12 @@ func (c *Client) Unsubscribe(ctx context.Context, sessionID string, topics []str
 	c.authorize(request)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("%w: POST /v1/interests/unsubscribe: %v", ErrUnavailable, err)
+		return nil, unreachable(fmt.Errorf("%w: POST /v1/interests/unsubscribe: %v", ErrUnavailable, err))
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%w: POST /v1/interests/unsubscribe returned %d", ErrUnavailable, response.StatusCode)
+		return nil, unavailableStatus(response.StatusCode,
+			fmt.Errorf("%w: POST /v1/interests/unsubscribe returned %d", ErrUnavailable, response.StatusCode))
 	}
 
 	var decoded struct {
@@ -357,7 +396,7 @@ func (c *Client) Role(ctx context.Context, role string) (Session, error) {
 	c.authorize(request)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return Session{}, fmt.Errorf("%w: GET /v1/roles/%s: %v", ErrUnavailable, role, err)
+		return Session{}, unreachable(fmt.Errorf("%w: GET /v1/roles/%s: %v", ErrUnavailable, role, err))
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -431,7 +470,9 @@ func (c *Client) lapsedRoleHolder(ctx context.Context, response *http.Response) 
 // being refilled is absent from the list while its record is there to be read, and a missing
 // row cannot tell the two apart. Every other status, a body that does not decode and a
 // transport failure alike are ErrUnavailable carrying the listener's own reason, so a read the
-// message bus did not answer reads as "ask again", never as "that session is gone".
+// message bus did not answer reads as "ask again", never as "that session is gone"; only a
+// transport failure and a 502, 503 or 504 are also ErrUnreachable, because a status the listener
+// chose - a 401 for a token it refuses, say - is its answer and asking again repeats it.
 func (c *Client) Session(ctx context.Context, sessionID string) (Session, error) {
 	request, err := http.NewRequestWithContext(
 		ctx, http.MethodGet, c.baseURL+"/v1/registry/"+url.PathEscape(sessionID)+includeUnresponsive, nil,
@@ -442,7 +483,7 @@ func (c *Client) Session(ctx context.Context, sessionID string) (Session, error)
 	c.authorize(request)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return Session{}, fmt.Errorf("%w: GET /v1/registry/%s: %v", ErrUnavailable, sessionID, err)
+		return Session{}, unreachable(fmt.Errorf("%w: GET /v1/registry/%s: %v", ErrUnavailable, sessionID, err))
 	}
 	defer response.Body.Close()
 	switch response.StatusCode {
@@ -454,14 +495,14 @@ func (c *Client) Session(ctx context.Context, sessionID string) (Session, error)
 			Error string `json:"error"`
 		}
 		if err := json.NewDecoder(response.Body).Decode(&failure); err == nil && failure.Error != "" {
-			return Session{}, fmt.Errorf(
+			return Session{}, unavailableStatus(response.StatusCode, fmt.Errorf(
 				"%w: GET /v1/registry/%s returned %d: %s",
 				ErrUnavailable, sessionID, response.StatusCode, failure.Error,
-			)
+			))
 		}
-		return Session{}, fmt.Errorf(
+		return Session{}, unavailableStatus(response.StatusCode, fmt.Errorf(
 			"%w: GET /v1/registry/%s returned %d", ErrUnavailable, sessionID, response.StatusCode,
-		)
+		))
 	}
 
 	var session Session
@@ -536,16 +577,26 @@ func (c *Client) Send(ctx context.Context, input SendInput) (SendResult, error) 
 // and a same-mode retry is therefore safe. A connect that timed out wrote nothing, and reports
 // the same "Client.Timeout exceeded while awaiting headers" text as a listener that went quiet,
 // so the text cannot tell them apart; requestWritten can. The cause is wrapped, not formatted,
-// so a caller can ask the same question again.
+// so a caller can ask the same question again. Either way no listener answered, so both are
+// ErrUnreachable.
 func sendTransportError(err error, requestWritten bool) error {
 	var timeout net.Error
 	timedOut := errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout())
 	if requestWritten && timedOut {
-		return fmt.Errorf("%w: %w: POST /v1/messages/send: %w", ErrUnavailable, ErrReceiptTimeout, err)
+		return unreachable(fmt.Errorf("%w: %w: POST /v1/messages/send: %w", ErrUnavailable, ErrReceiptTimeout, err))
 	}
-	return fmt.Errorf("%w: POST /v1/messages/send: %w", ErrUnavailable, err)
+	return unreachable(fmt.Errorf("%w: POST /v1/messages/send: %w", ErrUnavailable, err))
 }
 
+// listenerResponseError is the error a role lookup or a send reports for a non-200 answer. A 502,
+// 503 or 504 is ErrUnavailable and ErrUnreachable whatever its body says: the listener behind its
+// starting gate answers 503 {"error":"service starting"} (cmd/listener/main.go startingGate), and
+// a gateway in front of one that is gone answers 502 or 504, so either is "ask again" rather than
+// the listener's verdict on the request. Any other status with a JSON reason is that reason alone,
+// which a delivery records and a person reads verbatim ("no live session <id>", "message is
+// required", "unauthorized"). The reason is kept on the unavailable error too, for the same
+// reader. Any other status without one is ErrUnavailable alone: the listener answered, and asking
+// again repeats it.
 func listenerResponseError(response *http.Response) error {
 	var body struct {
 		Error string `json:"error"`
@@ -557,17 +608,25 @@ func listenerResponseError(response *http.Response) error {
 }
 
 // listenerRefusal is a refused answer as its caller reports it: the listener's own reason when
-// its body named one, and its status when the body named nothing a caller could act on.
+// its body named one, and its status when the body named nothing a caller could act on. A 502,
+// 503 or 504 is ErrUnavailable and ErrUnreachable whatever its body says, reason and all, since
+// it comes from in front of the listener or from its starting gate rather than from a decision
+// about the request.
 func listenerRefusal(response *http.Response, reason string) error {
+	code := response.StatusCode
 	if reason != "" {
+		if gatewayStatus(code) {
+			return unreachable(fmt.Errorf("%w: listener returned %d: %s", ErrUnavailable, code, reason))
+		}
 		return errors.New(reason)
 	}
-	return fmt.Errorf("%w: listener returned %d", ErrUnavailable, response.StatusCode)
+	return unavailableStatus(code, fmt.Errorf("%w: listener returned %d", ErrUnavailable, code))
 }
 
 // listFailure classifies a list read's non-200 answer from its body: the listener's refilling 503
 // is a *RefillingError, anything else ErrUnavailable carrying the listener's own reason when its
-// body names one.
+// body names one, and ErrUnreachable too when the status is a 502, 503 or 504, which comes from
+// in front of the listener or from its starting gate rather than from a verdict on the read.
 func listFailure(response *http.Response, route string) error {
 	var body struct {
 		Error string `json:"error"`
@@ -578,7 +637,9 @@ func listFailure(response *http.Response, route string) error {
 		return &RefillingError{RetryAfter: response.Header.Get("Retry-After"), route: route, reason: body.Error}
 	}
 	if !decoded || body.Error == "" {
-		return fmt.Errorf("%w: %s returned %d", ErrUnavailable, route, response.StatusCode)
+		return unavailableStatus(response.StatusCode,
+			fmt.Errorf("%w: %s returned %d", ErrUnavailable, route, response.StatusCode))
 	}
-	return fmt.Errorf("%w: %s returned %d: %s", ErrUnavailable, route, response.StatusCode, body.Error)
+	return unavailableStatus(response.StatusCode,
+		fmt.Errorf("%w: %s returned %d: %s", ErrUnavailable, route, response.StatusCode, body.Error))
 }

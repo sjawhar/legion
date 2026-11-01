@@ -14894,93 +14894,6 @@ function itemFromSearch(search) {
   return ask === null ? { id, kind: "comment" } : { id, kind: "ask" };
 }
 
-// ../contracts/src/dispatch-block-ref.ts
-var encoder = new TextEncoder;
-function encodeBlockId(id) {
-  let encoded = "";
-  for (const character of id) {
-    for (const byte of encoder.encode(character)) {
-      const bare = byte >= 48 && byte <= 57 || byte >= 65 && byte <= 90 || byte >= 97 && byte <= 122 || byte === 45;
-      encoded += bare ? String.fromCharCode(byte) : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
-    }
-  }
-  return encoded;
-}
-function decodeBlockId(encoded) {
-  if (encoded === "" || encoded.includes("@")) {
-    return;
-  }
-  let id;
-  try {
-    id = decodeURIComponent(encoded);
-  } catch {
-    return;
-  }
-  return id === "" || hasControlCharacter(id) ? undefined : id;
-}
-var MAX_BLOCK_PIN = 9223372036854775807n;
-function parseBlockFragment(encoded) {
-  const at = encoded.indexOf("@");
-  const pin = at === -1 ? undefined : encoded.slice(at + 1).match(/^v([1-9][0-9]*)$/)?.[1];
-  if (at !== -1 && (pin === undefined || BigInt(pin) > MAX_BLOCK_PIN)) {
-    return;
-  }
-  const block = decodeBlockId(at === -1 ? encoded : encoded.slice(0, at));
-  if (block === undefined) {
-    return;
-  }
-  return pin === undefined ? { block } : { block, pin };
-}
-// ../contracts/src/dispatch-snippet.ts
-var HTML_ENTITIES = [
-  ["&lt;", "<"],
-  ["&gt;", ">"],
-  ["&#39;", "'"],
-  ["&#34;", '"'],
-  ["&amp;", "&"]
-];
-function decodeEntities(text) {
-  let decoded = text;
-  for (const [entity, character] of HTML_ENTITIES) {
-    decoded = decoded.replaceAll(entity, character);
-  }
-  return decoded;
-}
-function hasOnlyBalancedMarkers(snippet) {
-  let marked = false;
-  for (const marker of snippet.matchAll(/<mark>|<\/mark>/gu)) {
-    if (marker[0] === "<mark>") {
-      if (marked)
-        return false;
-      marked = true;
-    } else {
-      if (!marked)
-        return false;
-      marked = false;
-    }
-  }
-  return !marked;
-}
-function snippetSegments(snippet) {
-  if (!hasOnlyBalancedMarkers(snippet)) {
-    return snippet === "" ? [] : [{ text: decodeEntities(snippet), mark: false }];
-  }
-  let mark = false;
-  const segments = [];
-  for (const part of snippet.split(/(<mark>|<\/mark>)/u)) {
-    if (part === "<mark>") {
-      mark = true;
-    } else if (part === "</mark>") {
-      mark = false;
-    } else if (part !== "") {
-      segments.push({ text: decodeEntities(part), mark });
-    }
-  }
-  return segments;
-}
-function snippetText(snippet) {
-  return snippetSegments(snippet).map(({ text, mark }) => mark ? `**${text}**` : text).join("");
-}
 // ../contracts/src/dispatch-text-rules.ts
 var SESSION_ID_PATTERN = "[^/?#\\s\\p{Z}\\p{Cc}<>\"'`\\[\\]|]+";
 var sessionIdOnly = new RegExp(`^${SESSION_ID_PATTERN}$`, "u");
@@ -14996,6 +14909,7 @@ var PICTURE_TYPES = {
 function isPictureType(mime) {
   return PICTURE_TYPES[mime] === true;
 }
+
 // ../contracts/src/dispatch-tools.ts
 function dispatchToolSchema(spec, z, opts) {
   const shape = spec.arguments(z);
@@ -15557,6 +15471,249 @@ var dispatchToolSpecs = [
     strict: true
   }
 ];
+
+// ../contracts/src/dispatch-block-ref.ts
+var encoder = new TextEncoder;
+function encodeBlockId(id) {
+  let encoded = "";
+  for (const character of id) {
+    for (const byte of encoder.encode(character)) {
+      const bare = byte >= 48 && byte <= 57 || byte >= 65 && byte <= 90 || byte >= 97 && byte <= 122 || byte === 45;
+      encoded += bare ? String.fromCharCode(byte) : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+    }
+  }
+  return encoded;
+}
+var MAX_BLOCK_ID_BYTES = 256;
+function decodeBlockId(encoded) {
+  if (encoded === "" || encoded.includes("@")) {
+    return;
+  }
+  let id;
+  try {
+    id = decodeURIComponent(encoded);
+  } catch {
+    return;
+  }
+  return id === "" || hasControlCharacter(id) ? undefined : id;
+}
+var MAX_BLOCK_PIN = 9223372036854775807n;
+function parseBlockFragment(encoded) {
+  const at = encoded.indexOf("@");
+  const pin = at === -1 ? undefined : encoded.slice(at + 1).match(/^v([1-9][0-9]*)$/)?.[1];
+  if (at !== -1 && (pin === undefined || BigInt(pin) > MAX_BLOCK_PIN)) {
+    return;
+  }
+  const block = decodeBlockId(at === -1 ? encoded : encoded.slice(0, at));
+  if (block === undefined) {
+    return;
+  }
+  return pin === undefined ? { block } : { block, pin };
+}
+var PROJECT_KEY = PROJECT_KEY_PATTERN.source.slice(1, -1);
+var ISSUE_KEY = `${PROJECT_KEY}-[1-9][0-9]*`;
+var DOCUMENT_SLUG = "[a-z0-9]+(?:-[a-z0-9]+)*";
+var ISSUE_KEY_ONLY = new RegExp(`^${ISSUE_KEY}$`);
+var BLOCK_REFERENCE = new RegExp(`^dispatch://(?:(${ISSUE_KEY})/spec|(${ISSUE_KEY}|${PROJECT_KEY})/artifact/(${DOCUMENT_SLUG}))#b-(.*)$`, "s");
+var ITEM_BLOCK_REFERENCE = new RegExp(`^dispatch://(?:${ISSUE_KEY}/(comment|message)|${PROJECT_KEY}/artifact/${DOCUMENT_SLUG}/(comment))/([^/?#]+)#b-(.*)$`, "s");
+var atIdBound = `dispatch://CORE-1/spec#b-${"x".repeat(MAX_BLOCK_ID_BYTES)}`;
+var DISPATCH_BLOCK_POINTER_VALUES = [
+  {
+    value: "dispatch://CORE-1/spec#b-x",
+    ok: true,
+    why: "a block of an issue's primary document"
+  },
+  {
+    value: "dispatch://CORE-1/artifact/notes-md#b-x",
+    ok: true,
+    why: "a block of an issue's document"
+  },
+  {
+    value: "dispatch://CORE/artifact/handbook-md#b-x",
+    ok: true,
+    why: "a block of a project's document"
+  },
+  {
+    value: "dispatch://CORE/artifact/spec#b-x",
+    ok: true,
+    why: "a project's document whose slug is spec"
+  },
+  { value: "dispatch://CORE-1/spec#b-d%C3%A9cision%3A1", ok: true, why: "a Unicode id" },
+  { value: "dispatch://CORE-1/spec#b-x@v2", ok: true, why: "a pinned block" },
+  { value: "dispatch://CORE-1/spec#b-x@v9223372036854775807", ok: true, why: "the largest pin" },
+  {
+    value: "dispatch://CORE-1/spec#b-x dispatch://CORE/artifact/handbook-md#b-y",
+    ok: true,
+    why: "two references separated by one space"
+  },
+  { value: "", ok: true, why: "no pointers" },
+  { value: atIdBound, ok: true, why: "an id of exactly 256 bytes" },
+  {
+    value: "dispatch://CORE-1/artifact/spec#b-x",
+    ok: false,
+    why: "an issue's primary document is written /spec"
+  },
+  { value: "dispatch://CORE-1/spec", ok: false, why: "a document, not a block" },
+  {
+    value: "dispatch://agent/s1/artifact/x#b-y",
+    ok: false,
+    why: "an agent's document has no blocks to point at"
+  },
+  { value: "dispatch://CORE-1/spec#b-d%c3%a9", ok: false, why: "lower-case hex" },
+  { value: "dispatch://CORE-1/spec#b-%41", ok: false, why: "an over-encoded ASCII letter" },
+  { value: "dispatch://CORE-1/spec#b-x%2Dy", ok: false, why: "an over-encoded -" },
+  { value: "dispatch://CORE-1/spec#b-%FF", ok: false, why: "invalid UTF-8" },
+  { value: "dispatch://CORE-1/spec#b-%0A", ok: false, why: "a control character" },
+  { value: "dispatch://CORE-1/spec#x", ok: false, why: "a fragment that is not b-" },
+  { value: "dispatch://CORE-1/spec#c-x", ok: false, why: "a fragment that is not b-" },
+  { value: "dispatch://CORE-1/spec#b-", ok: false, why: "an empty id" },
+  { value: `${atIdBound}x`, ok: false, why: "an id over 256 bytes" },
+  { value: "dispatch://CORE-1/artifact/notes-md@v2#b-x", ok: false, why: "a versioned document" },
+  { value: "dispatch://CORE-1#b-x", ok: false, why: "an issue names no document" },
+  {
+    value: "dispatch://CORE-1/spec#b-x@v9223372036854775808",
+    ok: false,
+    why: "a pin past the largest"
+  },
+  { value: "dispatch://CORE-1/spec#b-x@v01", ok: false, why: "a pin with a leading zero" },
+  { value: "dispatch://CORE-1/spec#b-x@v0", ok: false, why: "a pin of zero" },
+  {
+    value: "https://dispatch.example/issues/CORE-1/spec#b-x",
+    ok: false,
+    why: "a dashboard URL of a block"
+  },
+  { value: "dispatch://CORE-1/spec#b-x.", ok: false, why: "trailing punctuation" },
+  { value: "dispatch://CORE-1/spec#b-x)", ok: false, why: "a trailing parenthesis" },
+  {
+    value: "dispatch://CORE-1/spec#b-x,dispatch://CORE-1/spec#b-y",
+    ok: false,
+    why: "references joined by a comma"
+  },
+  {
+    value: "dispatch://CORE-1/spec#b-x dispatch://CORE-1/spec#b-x",
+    ok: false,
+    why: "a repeated reference"
+  },
+  {
+    value: "dispatch://CORE-1/spec#b-x  dispatch://CORE-1/spec#b-y",
+    ok: false,
+    why: "a doubled space"
+  },
+  { value: " dispatch://CORE-1/spec#b-x", ok: false, why: "a leading space" },
+  { value: "dispatch://CORE-1/spec#b-x ", ok: false, why: "a trailing space" },
+  {
+    value: "dispatch://CORE-1/spec#b-x\tdispatch://CORE-1/spec#b-y",
+    ok: false,
+    why: "a tab between references"
+  },
+  {
+    value: "dispatch://CORE-1/spec#b-x\uFEFFdispatch://CORE-1/spec#b-y",
+    ok: false,
+    why: "U+FEFF between references"
+  },
+  {
+    value: "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2",
+    ok: false,
+    why: "a block of an issue's comment",
+    problem: "a block[] attribute points only at a block of a document"
+  },
+  {
+    value: "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2@v1",
+    ok: false,
+    why: "a block of a revision of an issue's comment",
+    problem: "a block[] attribute points only at a block of a document"
+  },
+  {
+    value: "dispatch://CORE/artifact/handbook-md/comment/88888888-8888-4888-8888-888888888888#b-b2",
+    ok: false,
+    why: "a block of a project document's comment",
+    problem: "a block[] attribute points only at a block of a document"
+  },
+  {
+    value: "dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2",
+    ok: false,
+    why: "a block of an issue message",
+    problem: "a block[] attribute points only at a block of a document"
+  },
+  {
+    value: "dispatch://CORE-1/artifact/notes-md/comment/c1#b-x",
+    ok: false,
+    why: "an issue document's comment, a shape no reference has",
+    problem: "is not a block reference as Dispatch writes one"
+  },
+  {
+    value: "dispatch://CORE-1/comment/%ZZ#b-x",
+    ok: false,
+    why: "a comment id that does not decode",
+    problem: "is not a block reference as Dispatch writes one"
+  },
+  {
+    value: "dispatch://CORE-1/spec#b-x dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2",
+    ok: false,
+    why: "a document's block, then an issue message's",
+    problem: "a block[] attribute points only at a block of a document"
+  }
+];
+var TYPED_BLOCK_ID_SHORTCUT_EXCLUDED = `	
+\r "#&'.<=>\`}`;
+function typedBlockIdAttribute(id) {
+  if (id !== "" && ![...TYPED_BLOCK_ID_SHORTCUT_EXCLUDED].some((stop) => id.includes(stop))) {
+    return `#${id}`;
+  }
+  const value = id.replaceAll("&", "&amp;").replaceAll('"', "&#x22;").replaceAll(`
+`, "&#xA;").replaceAll("\r", "&#xD;");
+  return `id="${value}"`;
+}
+// ../contracts/src/dispatch-snippet.ts
+var HTML_ENTITIES = [
+  ["&lt;", "<"],
+  ["&gt;", ">"],
+  ["&#39;", "'"],
+  ["&#34;", '"'],
+  ["&amp;", "&"]
+];
+function decodeEntities(text) {
+  let decoded = text;
+  for (const [entity, character] of HTML_ENTITIES) {
+    decoded = decoded.replaceAll(entity, character);
+  }
+  return decoded;
+}
+function hasOnlyBalancedMarkers(snippet) {
+  let marked = false;
+  for (const marker of snippet.matchAll(/<mark>|<\/mark>/gu)) {
+    if (marker[0] === "<mark>") {
+      if (marked)
+        return false;
+      marked = true;
+    } else {
+      if (!marked)
+        return false;
+      marked = false;
+    }
+  }
+  return !marked;
+}
+function snippetSegments(snippet) {
+  if (!hasOnlyBalancedMarkers(snippet)) {
+    return snippet === "" ? [] : [{ text: decodeEntities(snippet), mark: false }];
+  }
+  let mark = false;
+  const segments = [];
+  for (const part of snippet.split(/(<mark>|<\/mark>)/u)) {
+    if (part === "<mark>") {
+      mark = true;
+    } else if (part === "</mark>") {
+      mark = false;
+    } else if (part !== "") {
+      segments.push({ text: decodeEntities(part), mark });
+    }
+  }
+  return segments;
+}
+function snippetText(snippet) {
+  return snippetSegments(snippet).map(({ text, mark }) => mark ? `**${text}**` : text).join("");
+}
 // ../contracts/src/envelope.ts
 var isSubject = (value) => typeof value === "string" && value.length > 0;
 var EnvelopeSchema = object({
@@ -15626,6 +15783,7 @@ function dispatchDocumentSubject(project, slug, type) {
 function agentSubject(session) {
   return `${AGENT_TOPIC_PREFIX}${session}`;
 }
+var GHOSTWISPR_TOPIC_PREFIX = "notifications.ghostwispr.";
 
 // ../contracts/src/legion-roles.ts
 var LEGION_ROLES = [
@@ -16015,7 +16173,7 @@ function parseCommand(argv, io) {
   for (let index = 0;index < rest.length; index++) {
     const token = rest[index];
     if (!token.startsWith("--")) {
-      if (ISSUE_KEY.test(token) && surface.flags.has("--issue")) {
+      if (ISSUE_KEY2.test(token) && surface.flags.has("--issue")) {
         if (index === 0) {
           if (claim("issue", `the issue key ${token}`, false))
             args["issue"] = token;
@@ -16134,7 +16292,7 @@ function appendedItem(kind, flag, value, number) {
   const parsed = number(flag, value);
   return parsed === undefined ? undefined : { value: parsed };
 }
-var ISSUE_KEY = /^[A-Z][A-Z0-9]*-\d+$/;
+var ISSUE_KEY2 = /^[A-Z][A-Z0-9]*-\d+$/;
 function quoteWord(value) {
   return BARE_WORD.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
 }
@@ -19890,7 +20048,8 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const stillOpen = (named, state) => state === "answered" ? `${named}, answered but still open in version ${latest}: it settles into a version on its own in about two seconds; wait for that version` : `${named}, ${state} but still open in version ${latest}: write the decision into the text with dispatch doc-edit, which writes a version that carries it`;
   const open = blocks.flatMap((block) => {
     const ask = asks.get(block.id);
-    const openers = lines.filter((line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`));
+    const id = typedBlockIdAttribute(block.id);
+    const openers = lines.filter((line) => line.includes(`ask{${id} `) || line.includes(`ask{${id}}`));
     const states = openers.map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
     const named = ask === undefined ? `block ${block.id}` : `${JSON.stringify(ask.question)} (block ${block.id}, ask ${ask.id})`;
     if (states.length === 0)
@@ -22053,6 +22212,15 @@ var InterestWireSchema = object({
   updated_at: number2().int().optional(),
   warnings: array(string2()).optional()
 });
+var DeliveryAnswerWireSchema = discriminatedUnion("mode", [
+  object({
+    mode: literal("consumer"),
+    subject: string2().min(1),
+    stream_id: string2(),
+    gap: boolean2()
+  }),
+  object({ mode: literal("core"), reason: string2() })
+]);
 var SessionWireSchema = object({
   session_id: string2(),
   machine_id: string2(),
@@ -22108,6 +22276,20 @@ var ReplayWireSchema = object({
     refused: string2().optional()
   }))
 });
+var DELIVERY_NOT_ANSWERED = "not_answered";
+var DELIVERY_UNREADABLE = "unreadable_answer";
+function parseSubscribeAnswer(body) {
+  const interest = InterestWireSchema.parse(body);
+  const raw = typeof body === "object" && body !== null && "delivery" in body ? body.delivery : undefined;
+  if (raw === undefined || raw === null) {
+    return { ...interest, delivery: { mode: "core", reason: DELIVERY_NOT_ANSWERED } };
+  }
+  const delivery = DeliveryAnswerWireSchema.safeParse(raw);
+  return {
+    ...interest,
+    delivery: delivery.success ? delivery.data : { mode: "core", reason: DELIVERY_UNREADABLE }
+  };
+}
 function mergeInterestSources(registryTopics, liveTopics) {
   const interests = new Map;
   for (const topic of registryTopics) {
@@ -22207,7 +22389,7 @@ function createEnvoyClient(config) {
     body: JSON.stringify(body)
   }, options);
   return {
-    subscribe: async (input) => InterestWireSchema.parse(JSON.parse(await post("/v1/interests/subscribe", {
+    subscribe: async (input) => parseSubscribeAnswer(JSON.parse(await post("/v1/interests/subscribe", {
       session_id: input.sessionID,
       dir: input.directory,
       topics: expandSubscriptionTopics(input.topics),
@@ -22216,6 +22398,7 @@ function createEnvoyClient(config) {
       ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
       driving: input.driving,
       ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
+      ...input.delivery === undefined ? {} : { delivery: input.delivery },
       ...input.clientInstanceID === undefined ? {} : { client_instance_id: input.clientInstanceID },
       host: machineID(),
       plugin: input.plugin.name,

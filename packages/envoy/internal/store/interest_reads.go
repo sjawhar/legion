@@ -10,7 +10,6 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
-	"github.com/sjawhar/envoy/internal/routing"
 )
 
 // ErrMalformedInterest is an interest record the bucket holds and this build cannot decode. The bus
@@ -61,39 +60,49 @@ func (r *Registry) Cached(sessionID string) (Interest, bool) {
 	return r.cache.Get(sessionID)
 }
 
-// Match returns the cached interests registered on machineID whose topics match topic: a
-// listener delivers live only to the sessions of its own machine.
+// Match returns the cached interests registered on machineID whose topics match topic, looked up
+// in the subject index: a listener delivers live only to the sessions of its own machine.
 func (r *Registry) Match(machineID string, topic string) []Interest {
-	return r.match(topic, func(item Interest) bool { return item.MachineID == machineID })
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.matchLocked(func(visit func(string)) { r.index.match(machineID, topic, visit) })
 }
 
 // MatchAll returns every cached interest whose topics match topic, on any machine, sorted by
 // SessionID for deterministic output: a sender that must confirm delivery to each subscribed
 // session needs them all, wherever each session registered.
 func (r *Registry) MatchAll(topic string) []Interest {
-	out := r.match(topic, func(Interest) bool { return true })
+	r.mu.RLock()
+	out := r.matchLocked(func(visit func(string)) { r.index.matchAll(topic, visit) })
+	r.mu.RUnlock()
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].SessionID < out[j].SessionID
 	})
 	return out
 }
 
-// match returns the cached interests keep accepts that have a topic pattern matching topic.
-func (r *Registry) match(topic string, keep func(Interest) bool) []Interest {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+// matchLocked collects the cached interests walk visits, once each: a session's interest can hold
+// several patterns that match one subject, and the index visits its key once per matching
+// pattern. A registry with no index yet, which a test can build as a literal, matches nothing.
+// Callers hold r.mu.
+func (r *Registry) matchLocked(walk func(visit func(key string))) []Interest {
 	out := []Interest{}
-	for _, item := range r.cache.All() {
-		if !keep(item) {
-			continue
-		}
-		for _, pattern := range item.Topics {
-			if routing.Match(pattern, topic) {
-				out = append(out, item)
-				break
-			}
-		}
+	if r.index == nil {
+		return out
 	}
+	var seen map[string]struct{}
+	walk(func(key string) {
+		if _, dup := seen[key]; dup {
+			return
+		}
+		if seen == nil {
+			seen = map[string]struct{}{}
+		}
+		seen[key] = struct{}{}
+		if item, ok := r.cache.Get(key); ok {
+			out = append(out, item)
+		}
+	})
 	return out
 }
 

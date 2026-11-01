@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -103,6 +104,13 @@ type testServerOptions struct {
 	lifetime context.Context
 	// streamHeartbeat replaces the sockets' fifteen-second heartbeat.
 	streamHeartbeat time.Duration
+	// takeoverWindow replaces the listener take-over window (Deps.ListenerTakeoverWindow); zero is
+	// testTakeoverWindow. A test proving the window itself passes its own, listenerTakeoverWindow
+	// for the production twelve seconds.
+	takeoverWindow time.Duration
+	// testHookTimeout replaces the test hooks' acknowledgement timeout (Deps.TestHookTimeout);
+	// zero keeps the production ten seconds.
+	testHookTimeout time.Duration
 	// liveSocketAge is the server's Deps.LiveSocketAge: nil draws each socket's age as
 	// production does.
 	liveSocketAge func() time.Duration
@@ -113,6 +121,14 @@ type testServerOptions struct {
 	// server with no dashboard, as the Go test rigs are.
 	dashboardEntry string
 }
+
+// testTakeoverWindow is the listener take-over window of a test server that sets none. A send to
+// a session that is gone, or a listener that refuses, waits the window out before it settles, and
+// the production twelve seconds made every such test sleep that long. 750 ms leaves exactly one
+// retry: the first, after takeoverFirstBackoff (250 ms), still starts inside it whenever the first
+// try took under half a second, which a test whose take-over answers on the second try relies on,
+// and the second, 500 ms later, never does, so a window run out costs about a quarter second.
+const testTakeoverWindow = 750 * time.Millisecond
 
 // testServerURL is the public origin every test server serves under: what a link a handler
 // writes names, and what a DPoP proof's 'htu' is checked against (broker_token_test.go).
@@ -145,6 +161,12 @@ func newTestHandler(t *testing.T) http.Handler {
 func newTestHandlerWithStore(t *testing.T) (http.Handler, *store.Store) {
 	t.Helper()
 	handler, database, _ := newTestServer(t, testServerOptions{})
+	return handler, database
+}
+
+func newTestHandlerWithTestHooks(t *testing.T) (http.Handler, *store.Store) {
+	t.Helper()
+	handler, database, _ := newTestServer(t, testServerOptions{testHooks: true})
 	return handler, database
 }
 
@@ -198,25 +220,27 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		people = options.identity
 	}
 	deps, err := NewDeps(DepsInput{
-		Store:            database,
-		Identity:         people,
-		AgentTokens:      sharedAgentTokens(t, "agent-token"),
-		DefaultProject:   options.defaultProject,
-		ServerURL:        testServerURL,
-		Docs:             documentService,
-		Events:           broker,
-		App:              options.app,
-		GitHubAPIBase:    options.githubAPIBase,
-		TestHooksEnabled: options.testHooks,
-		StreamHeartbeat:  options.streamHeartbeat,
-		EnvoyURL:         options.envoyURL,
-		EnvoyTimeout:     options.envoyTimeout,
-		OIDC:             options.oidc,
-		BrokerTokens:     brokerTokens,
-		AgentStream:      options.agentStream,
-		Embedder:         options.embedder,
-		Files:            options.files,
-		DashboardEntry:   options.dashboardEntry,
+		Store:                  database,
+		Identity:               people,
+		AgentTokens:            sharedAgentTokens(t, "agent-token"),
+		DefaultProject:         options.defaultProject,
+		ServerURL:              testServerURL,
+		Docs:                   documentService,
+		Events:                 broker,
+		App:                    options.app,
+		GitHubAPIBase:          options.githubAPIBase,
+		TestHooksEnabled:       options.testHooks,
+		StreamHeartbeat:        options.streamHeartbeat,
+		EnvoyURL:               options.envoyURL,
+		EnvoyTimeout:           options.envoyTimeout,
+		ListenerTakeoverWindow: cmp.Or(options.takeoverWindow, testTakeoverWindow),
+		TestHookTimeout:        options.testHookTimeout,
+		OIDC:                   options.oidc,
+		BrokerTokens:           brokerTokens,
+		AgentStream:            options.agentStream,
+		Embedder:               options.embedder,
+		Files:                  options.files,
+		DashboardEntry:         options.dashboardEntry,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -229,9 +253,9 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		served.agentWatchInterval = options.agentWatchInterval
 	}
 	// waitBackground, as production's shutdown calls it: every keyed handler and every delivery a
-	// handler detached from its request, then the sockets, the hub and the relay. A broadcast's
-	// deliveries and a keyed handler outlive the client that started them, so a test that did not
-	// wait for them would close its database under a worker still writing.
+	// handler detached from its request, then the sockets, the hub, the relay and the test hooks'
+	// listener. A broadcast's deliveries and a keyed handler outlive the client that started them,
+	// so a test that did not wait for them would close its database under a worker still writing.
 	t.Cleanup(func() { waitBackgroundOf(t, served) })
 	return mux, database, deps, served
 }

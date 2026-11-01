@@ -25,6 +25,11 @@ type Registry struct {
 	// cache is the copy of the interest bucket: its interests, revision fence, marks and read epoch
 	// (kvwatch.Copy, newInterestCopy), which every write site reaches through.
 	cache kvwatch.Copy[Interest]
+	// index indexes the cached interests' topic patterns by subject token (subjectIndex), which is
+	// what Match and MatchAll walk rather than every cached interest. The copy's own hooks keep it
+	// in step (indexInterestLocked, unindexInterestLocked), so a recreated bucket's read takes its
+	// departed sessions out of it at the sweep that removes their rows.
+	index *subjectIndex
 	// watcher feeds the cache from the interest bucket. Every watcher it installs reads the whole
 	// bucket again (interestCache): the cache keeps every interest through the read and removes
 	// the ones the read found no evidence of only once it completes. Once a read has completed the
@@ -33,11 +38,12 @@ type Registry struct {
 	watcher *kvwatch.Watcher
 	// roleWatcher feeds roleHolders from the role bucket, so a session's roles are read from the
 	// claims with no bucket call (RolesHeldBy), which answers only while its copy can be served
-	// (kvwatch.Watcher.Servable). holdersMu guards roleHolders, the copy of the role bucket: the
-	// session each role's claim names, its revision fence, which keeps a delayed watcher record
-	// from undoing a claim this registry wrote, its marks and its read epoch (kvwatch.Copy,
-	// newRoleHolderCopy), so a claim write this registry made through a handle on a bucket since
-	// recreated cannot land in the new bucket's view and fence out its lower revisions.
+	// (kvwatch.Watcher.Servable), and a role's holder is too (CachedRoleHolder). holdersMu guards
+	// roleHolders, the copy of the role bucket: the session each role's claim names, its revision
+	// fence, which keeps a delayed watcher record from undoing a claim this registry wrote or read,
+	// its marks and its read epoch (kvwatch.Copy, newRoleHolderCopy), so a claim write this registry
+	// made through a handle on a bucket since recreated cannot land in the new bucket's view and
+	// fence out its lower revisions.
 	roleWatcher *kvwatch.Watcher
 	holdersMu   sync.RWMutex
 	roleHolders kvwatch.Copy[string]
@@ -104,12 +110,13 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 	r := &Registry{
 		roleKV:                roleKV,
 		log:                   opts.log,
-		cache:                 newInterestCopy(),
+		index:                 newSubjectIndex(),
 		roleHolders:           newRoleHolderCopy(),
 		now:                   opts.now,
 		openedAt:              opts.now(),
 		restoredRoleRevisions: restoredRoleRevisions,
 	}
+	r.cache = newInterestCopy(r)
 	r.watcher = kvwatch.New("interest registry", kv, interestCache{r}, kvwatch.WithLogger(opts.log))
 	r.roleWatcher = r.newRoleWatcher(roleKV)
 	// No eager load: the watchers populate the caches asynchronously. A synchronous load of N
@@ -238,4 +245,39 @@ func (r *Registry) Rewatch(conn *nats.Conn) error {
 	r.roleKV = roleKV
 	r.kvMu.Unlock()
 	return r.roleWatcher.Rewatch(conn)
+}
+
+// CachedInterest returns sessionID's interest from the cache alone, and whether the cache holds
+// one; it never reads the bucket. It is Cached, under the name the listener's durable delivery
+// reads the cache by (cmd/listener/durable.go).
+func (r *Registry) CachedInterest(sessionID string) (Interest, bool) {
+	return r.Cached(sessionID)
+}
+
+// CachedRoleHolder returns role's holder from the role claim watcher's copy of the bucket, and on
+// a miss reads the bucket as RoleHolder does, which fills the copy (setOwnRoleHolder). The copy
+// holds every claim this registry wrote, read or watched, so it answers without a round trip; a
+// claim another listener wrote reaches it through the watcher, a moment after the bucket. The
+// listener's role lane resolves each role message's holder through it, and reads the bucket
+// itself (RoleHolder) when the holder it found was superseded. An unclaimed role is a miss, which
+// returns an empty holder without an error.
+func (r *Registry) CachedRoleHolder(role string) (string, error) {
+	r.holdersMu.RLock()
+	holder, ok := r.roleHolders.Get(role)
+	r.holdersMu.RUnlock()
+	if ok {
+		return holder, nil
+	}
+	// The epoch is read before the bucket, so a claim read through a handle on a bucket since
+	// recreated is dropped rather than fencing out the new bucket's lower revisions.
+	epoch := r.roleViewEpoch()
+	claim, entry, err := r.roleClaim(context.Background(), role)
+	if err != nil {
+		return "", err
+	}
+	if entry == nil {
+		return "", nil
+	}
+	r.setOwnRoleHolder(role, claim.HolderSessionID, entry.Revision(), epoch)
+	return claim.HolderSessionID, nil
 }

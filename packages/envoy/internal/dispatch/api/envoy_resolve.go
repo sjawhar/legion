@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -14,12 +15,13 @@ import (
 )
 
 // Dispatch's Envoy listener client is a cross-service HTTP call bounded only by its five
-// second timeout (internal/dispatch/envoy/client.go), and production runs one Dispatch task
-// on a pool of store.sharedPoolSize connections. A listener call made while a transaction is
-// open therefore holds one of them - and the rows that transaction locked - for as long as
-// the listener takes to answer, so that many concurrent ones empty the pool and stall every
-// unrelated Dispatch request until the listener replies. A listener restart, which happens on
-// every listener deploy, is enough to trigger it.
+// second timeout (internal/dispatch/envoy/client.go), and each Dispatch process serves every
+// request it takes from its own pool of store.sharedPoolSize connections. A listener call made
+// while a transaction is open therefore holds one of them - and the rows that transaction
+// locked, which the other processes' requests wait on too - for as long as the listener takes
+// to answer, so that many concurrent ones empty the pool and stall every unrelated Dispatch
+// request until the listener replies. A listener restart, which happens on every listener
+// deploy, is enough to trigger it.
 //
 // So no listener call runs with a transaction or a pooled connection held, and this file is
 // the one place the shape is spelled:
@@ -37,6 +39,22 @@ import (
 //  1. claim  - one short transaction commits the attempt as pending and takes it;
 //  2. send   - the listener call, with nothing held;
 //  3. settle - a second short transaction records the outcome and appends the receipt.
+//
+// A sender that never reaches its settle - its process killed, the database refusing the write -
+// leaves the attempt pending under its claim. Whichever process runs the delivery sweep next
+// sends it once the claim lease (claimLapsed) has passed, under the attempt's own number and
+// idempotency key (delivery_sweep.go); only an attempt past the duplicate window waits for a
+// Retry.
+//
+// Between its first send and its settle a sender may try again (takeoverRetry.retry): a listener
+// being replaced refuses connections, answers 503, or does not hold the session yet for a few
+// seconds, and a send that met one of those waits it out under the attempt and the idempotency key
+// it already holds, renewing its claim before each try, rather than settling the attempt failed. A
+// comment's mention resolution that decides which sessions the comment's other routes skip waits
+// one out too, before the comment's transaction opens and with nothing held
+// (resolveThroughTakeover), and the sender of that mention carries on in the same window rather
+// than opening a second one. That attempt keeps the resolution those routes were decided on, for
+// whichever sender finishes it (deliverResolvedCommentMention).
 
 // errStaleResolution is how a locked write reports that a row the pre-transaction listener
 // resolution depended on had changed by the time it held the lock. It never reaches a client:
@@ -102,7 +120,7 @@ func resolveThenLock[R, T any](
 // an ended session.
 func (s *server) resolveDeliveryTarget(ctx context.Context, route model.Route, delivery string) (string, string, string) {
 	if s.deps.Envoy == nil {
-		return "", "", "envoy listener: ENVOY_URL is not configured"
+		return "", "", listenerNotConfiguredText
 	}
 	var target dispatchenvoy.Session
 	var err error
@@ -136,21 +154,185 @@ func hasCapability(capabilities []string, value string) bool {
 	return false
 }
 
+// listenerNotConfiguredText is what every delivery records when no listener is configured. It
+// is the one failure under listenerUnreachablePrefix that no take-over ends.
+const listenerNotConfiguredText = "envoy listener: ENVOY_URL is not configured"
+
+// listenerUnreachablePrefix begins the failure deliveryErrorText records for a listener nothing
+// answered (dispatchenvoy.ErrUnreachable): a connection refused, reset or timed out, a 502, 503 or
+// 504.
+const listenerUnreachablePrefix = "envoy listener: "
+
+// listenerAnsweredPrefix begins the failure deliveryErrorText records for every other
+// dispatchenvoy.ErrUnavailable: a status the listener chose, such as the 401 it gives a token it
+// refuses, or an answer that does not decode.
+const listenerAnsweredPrefix = "envoy listener answered: "
+
+// deliveryErrorText is the failure a delivery records for a listener error. Its prefix keeps a
+// take-over's failures (listenerUnreachablePrefix) apart from the listener's own answers
+// (listenerAnsweredPrefix), because retryableDeliveryFailure reads the recorded text.
 func deliveryErrorText(err error) string {
-	if errors.Is(err, dispatchenvoy.ErrUnavailable) {
-		return "envoy listener: " + strings.TrimPrefix(err.Error(), "envoy listener unavailable: ")
+	reason := strings.TrimPrefix(err.Error(), "envoy listener unavailable: ")
+	switch {
+	case errors.Is(err, dispatchenvoy.ErrUnreachable):
+		return listenerUnreachablePrefix + reason
+	case errors.Is(err, dispatchenvoy.ErrUnavailable):
+		return listenerAnsweredPrefix + reason
 	}
 	return err.Error()
+}
+
+// listenerTakeoverWindow is how long, from its first try, a sender keeps trying a listener that
+// is being replaced. The listener's take-over is meant to end within 10 seconds (INFRA-557), so a
+// send made at its start still reaches the session once the successor answers; the two seconds
+// past that target leave room for the last backoff. A session that is really gone settles
+// "no live session" that much later than its first try. It is the window every deployment runs:
+// Deps.ListenerTakeoverWindow replaces it only when set, and neither routes.BuildAppContext nor
+// cmd/dispatch sets it; only this package's tests do.
+const listenerTakeoverWindow = 12 * time.Second
+
+// takeoverFirstBackoff is the wait before a sender's first retry; each later wait doubles it,
+// up to takeoverMaxBackoff, so a short blip costs a quarter second and a full take-over a try
+// every two seconds.
+const (
+	takeoverFirstBackoff = 250 * time.Millisecond
+	takeoverMaxBackoff   = 2 * time.Second
+)
+
+// retryableDeliveryFailure reports whether a failure a try recorded is one a listener take-over
+// gives, which a later try can outlast: the listener unreachable (listenerUnreachablePrefix - a
+// connection refused, reset or timed out, a 502, 503 or 504 - but never
+// listenerNotConfiguredText), a receipt timeout, or the listener holding no record of the session
+// yet - "no live session", as the registry read is recorded and as the send's own 404 words it. A
+// receipt timeout is safe to repeat because the retry carries the same idempotency key, which the
+// listener recognises as a repeat (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts). Anything
+// else is the listener's answer - a session that does not take this mode, a send it refused, a
+// status it chose such as a 401 for a token it refuses (listenerAnsweredPrefix) - which no
+// successor answers differently, and the attempt settles with it at once.
+//
+// It reads the recorded text rather than the error behind it because a resumed mention's first
+// try sends with the resolve error its row already holds (mentionResolutionFor), which survives
+// only as that text.
+func retryableDeliveryFailure(failure string) bool {
+	switch {
+	case failure == listenerNotConfiguredText:
+		return false
+	case failure == receiptTimeoutText,
+		strings.HasPrefix(failure, listenerUnreachablePrefix),
+		strings.HasPrefix(failure, "no live session"):
+		return true
+	}
+	return false
+}
+
+// takeoverRetry paces one sender's tries at a listener that is being replaced, from the moment of
+// its first try. A comment mention's first try is its resolution before the comment's transaction
+// (resolveThroughTakeover), so its window spans that resolution and the sender's tries after the
+// commit together.
+type takeoverRetry struct {
+	first   time.Time
+	backoff time.Duration
+	// window is how long after first a try may still start: listenerTakeoverWindow, or the
+	// server's Deps.ListenerTakeoverWindow when set.
+	window time.Duration
+}
+
+// newTakeoverRetry starts the pacing of a sender about to make its first try, in this server's
+// take-over window.
+func (s *server) newTakeoverRetry() takeoverRetry {
+	return takeoverRetry{
+		first:   time.Now(),
+		backoff: takeoverFirstBackoff,
+		window:  cmp.Or(s.deps.ListenerTakeoverWindow, listenerTakeoverWindow),
+	}
+}
+
+// retry is the one take-over loop every sender runs: it makes a try, and while again allows
+// another after a take-over's failure, renews and tries again; it returns the failure the last try
+// recorded, "" for one that succeeded. try makes one try and returns its failure, leaving whatever
+// else the try produced in its caller's variables. renew prepares the next try of an attempt - it
+// resolves again what the attempt names and renews the claim - and reports whether this sender
+// still holds the attempt; a sender that no longer does makes no further try and settles with the
+// last one, and an error from renew ends the tries with that error. renew is nil for tries that
+// hold no attempt (resolveThroughTakeover).
+func (r *takeoverRetry) retry(ctx context.Context, try func() string, renew func() (bool, error)) (string, error) {
+	failure := try()
+	for r.again(ctx, failure) {
+		if renew != nil {
+			held, err := renew()
+			if err != nil {
+				return failure, err
+			}
+			if !held {
+				break
+			}
+		}
+		failure = try()
+	}
+	return failure, nil
+}
+
+// resolveThroughTakeover resolves one target as resolveMentionTargets does, with nothing held,
+// and, when wait is set, waits out a listener take-over the way a sender does: a resolution whose
+// outcome is a take-over's (retryableDeliveryFailure) is taken again after takeoverRetry's backoff
+// until the listener answers otherwise or the window closes. A comment resolves this way the
+// mentions and the route its transaction decides suppress_route and the payload's mentions from,
+// which the outbox's session routes skip, so those are decided on what the listener answered
+// rather than on its silence.
+//
+// It returns the pacing with the resolution, and the mention's sender after the commit carries on
+// in it (deliverResolvedCommentMention) rather than opening a window of its own: a resolution that
+// already waited the window out settles with its outcome on that sender's first try, so a comment's
+// request waits about one window for a take-over, however long it spent resolving.
+func (s *server) resolveThroughTakeover(
+	ctx context.Context, target, delivery string, wait bool,
+) (ResolvedMention, takeoverRetry) {
+	takeover := s.newTakeoverRetry()
+	var resolved ResolvedMention
+	resolve := func() string {
+		resolved = s.resolveMentionTargets(ctx, []string{target}, delivery)[0]
+		return resolved.ResolveError
+	}
+	if !wait {
+		resolve()
+		return resolved, takeover
+	}
+	// A try that holds nothing has nothing to renew, so retry answers no error.
+	_, _ = takeover.retry(ctx, resolve, nil)
+	return resolved, takeover
+}
+
+// again reports whether the sender tries once more after a try that recorded failure, having
+// waited out the backoff first: only for a take-over's failure, and only while that next try still
+// starts inside the window (listenerTakeoverWindow unless the server sets another). Otherwise, or
+// when ctx ends during the wait, the sender settles its attempt with failure.
+//
+// A sender that tries again renews its claim before the try and settles on the claim it renewed
+// last, so a claim never ages toward the claimLapsed lease while its sender is still trying: the
+// delivery sweep finds nothing to take, and a person's Retry finds the attempt held.
+func (r *takeoverRetry) again(ctx context.Context, failure string) bool {
+	if !retryableDeliveryFailure(failure) || time.Since(r.first)+r.backoff > r.window {
+		return false
+	}
+	wait := time.NewTimer(r.backoff)
+	defer wait.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-wait.C:
+	}
+	r.backoff = min(2*r.backoff, takeoverMaxBackoff)
+	return true
 }
 
 // claimLapsed is the predicate a claim transaction selects beside the pending attempt it locks:
 // whether that attempt is free for this sender to take, because nobody holds it or whoever
 // claimed it never came back within the lease, model.DeliveryClaimLapse (a minute), the window
-// the outbox's mention deferral shares. A send is bounded by the listener client's own window
-// (five seconds by default, DepsInput.EnvoyTimeout in a test) and the short transaction that
-// records its outcome, so a claim older than the lease was left by a process that died between
-// the two. A retry beside a live claim takes an attempt of its own rather than two senders
-// driving one.
+// the outbox's mention deferral shares. A sender renews its claim before every try
+// (takeoverRetry), and a try is bounded by the listener client's own window (five seconds by
+// default, DepsInput.EnvoyTimeout in a test) and the short transaction that records its outcome,
+// so a claim older than the lease was left by a process that died before its settle. A retry
+// beside a live claim takes an attempt of its own rather than two senders driving one.
 //
 // What a retry beside a lapsed claim does depends on its mode. In the attempt's own mode it
 // resumes that attempt under its original number, and so its original idempotency key, whose
