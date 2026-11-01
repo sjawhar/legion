@@ -1,0 +1,142 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-904",
+  "previousHandoff": "",
+  "plan": "dispatch://INFRA-904/artifact/plan-md (version 1)",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase's own mechanics — the workspace binding, the handoff, the push and `handoff_complete` — and its no-deferrals rule, which this change is about.",
+      "legion-worker/references/pr-body.md: the pull request body this change edits, and the shape of the proof each replay must record (`#what-a-proof-is`).",
+      "plain-words: every changed text is prose an agent reads and follows, and the owner's condition on this issue is that each one is short and plain.",
+      "asd-ste100: the role prompts and the new agent definition are parsed by a model with no person to resolve an ambiguity, which is what this skill is for."
+    ],
+    "test": [
+      "legion-worker: the tester's own phase mechanics and the handoff its `proof` array takes.",
+      "legion-worker/references/pr-body.md: the six fields each proof entry needs, which the replay results must fill when they are re-run from the issue's harness artifact."
+    ],
+    "review": [
+      "legion-worker: the reviewer's round, the merge-gate order, and the no-deferrals rule the change extends.",
+      "legion-worker/references/merge-gate.md: 'The reviewer' and 'The production check after the close' are two of the sections this change edits, so the reviewer reads what it changed against what it says.",
+      "plain-words: the owner's condition (R9 in the plan) is a judgement about brevity and clarity of the changed texts, which only a reader can make."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1. The spec's two arms name only packages/daemon and packages/pi-legion, but skills/ is not inside pi-legion (scripts/pi-plugin-prepack.sh copies it from the checkout root), so both arms would stage the same skills and A7 would have no control.",
+        "answer": "Plan decision D7: each arm extracts four parts — packages/daemon, packages/pi-legion, skills/ and scripts/pi-plugin-prepack.sh — from its own commit, and stages the skills with its own copy of that script. Before the first run the harness diffs the two staged trees and fails if they are identical for a file the change touches. Recorded as a departure from the spec's Proof."
+      },
+      {
+        "finding": "F2. The owner's short-text condition binds the build but has no acceptance criterion and no number: which tree the budget covers, net or per file, whether the new agent counts, and what 'a few sentences' is.",
+        "answer": "Plan section 1 names it R9 and section 2 D1 gives the numbers as the plan's reading, not the owner's: net line delta over skills/**/*.md <= 0 against main (baseline 4,952 lines measured 2026-11-01), each changed role prompt +<= 6 lines except roles/reviewer.md at +<= 10, the new agent <= 45 lines, and the pull request carries one before/after table. A site that cannot hold its number without dropping a requirement is a decision for the architect, never a silent overrun."
+      },
+      {
+        "finding": "F3. Several Design rules in the spec's Files list are case law the short-text condition forbids writing, and the spec does not say which requirement goes unserved when they are cut.",
+        "answer": "Plan decision D3: none is dropped. Each becomes one clause — the child-sibling move in wake-routing.md's Split, the parent's last round in merge-gate.md, the base under gates.design: off in roles/reviewer.md, the two PR-body lines in pr-body.md, and pending/unmet/waived in core/reviewer.md. Recorded as the plan's chief departure, for the architect to weigh."
+      },
+      {
+        "finding": "F4. No definition of 'the harness passed' when a model's verdict varies, and no exit from the 'fix the stance' loop.",
+        "answer": "Plan decisions D4 and D5: a criterion passes exactly as its acceptance line states (every run); a run is excused and re-run only on a harness fault named by a transcript line, never on a model verdict; at most three stance revisions per failing criterion, then the implementer stops and sends the decision to the architect with the per-run verdicts and transcripts. results.jsonl carries one record per run."
+      },
+      {
+        "finding": "F5. A3 has no control and no tolerance, so one true finding by the stricter reviewer in nine runs fails the criterion, and no sharper stance removes a true finding.",
+        "answer": "The plan does not narrow A3 (section 7, first risk). A persistent A3 failure whose flag the implementer judges correct goes to the architect as a decision with the run's own text, since reading an acceptance line downward is the behaviour this issue exists to stop."
+      },
+      {
+        "finding": "F6. A8's frozen production log lines cannot be fetched: INFRA-492's window was 2026-10-30, the dispatch pod is hours old and nothing aggregates the logs; also a person on a personal token logs caller_kind=token, not user.",
+        "answer": "Plan decision D8: A8 asks for frozen lines, not fetched ones. The fixture is built from the live line format (packages/envoy/internal/dispatch/accesslog/accesslog.go:210) and PR sjawhar/legion#2324's own Production: line, and holds no line that could be a person at any caller kind. Its provenance is written in the artifact and on the pull request. Recorded as a departure."
+      },
+      {
+        "finding": "F7. A6's second variant asks the plan reviewer to reject INFRA-184's plan for the triage advice, which entered that spec at version 5 — after the version 4 the plan was written against.",
+        "answer": "Kept as written and named as a risk (plan section 7). Version 4's goal is that each text an agent gets after a write is true for that agent, and the triage advice is a fourth such text, so the variant is a goal-level check, which is exactly what R6 asks for. It is the hardest run to hit three times in three, and a persistent failure goes to the architect under D5."
+      },
+      {
+        "finding": "F8. INFRA-497 had an open child, INFRA-511, at the approval A2 and A7 replay, and the new rule makes a requirement an open child carries pending rather than unmet.",
+        "answer": "Plan section 4: INFRA-511's record is inside INFRA-497's frozen inputs, because it was true at the approval. INFRA-511's own spec says the part is not in it, so the expected verdict stays unmet; a run that answers 'pending, carried by INFRA-511' is a failure, and the fixture carries the child's spec so the reviewer can see it does not carry the part."
+      },
+      {
+        "finding": "F9. Freezing the inputs means cutting them, and nothing in the spec says how the cut is checked; `dispatch read --all-events` prints today's status and approval, and `gh pr view` prints today's reviews.",
+        "answer": "Plan decision D12: each case is cut at the timestamp of the approval being replayed — every later event dropped, the header's Status:, Spec approval: and Claimed by: lines rewritten to that moment, the body taken from GitHub's userContentEdits at or before it, the diff reconstructed from the case's git bundle. verify-freeze.ts fails a case on any timestamp later than its approval anywhere in its fixtures, and runs before any session."
+      },
+      {
+        "finding": "F10. A7 needs a composer the rig refuses (daemon-pane.go:213-216 refuses a tree architect), and the program must live inside the extracted module because internal packages cannot be imported from outside it.",
+        "answer": "Plan section 4: cmd/goal-pane/main.go is overlaid into the arm's daemon module with go run -overlay, the trick daemon-pane.ts:20-41 already uses, so no file enters the workspace and A1 stays true. It calls prompts.New and Composer.Compose itself, under gates.design: root-issues, which every replayed case ran under."
+      },
+      {
+        "finding": "F11. The planner's 'does not complete until the architect answers' has no handoff shape, and planReview's existing rejected/remainingIssues shape says the opposite of the new rule.",
+        "answer": "Plan decision D9: no handoff field is added, since a new requirement on a handoff between roles is a Boundary in STRATEGY.md. planReview keeps its shape; roles/planner.md says the goal rejection is not one of the three rounds and that the planner covers the requirement or sends the decision to the architect, answering the phase reminder with a WAITING line until it answers."
+      },
+      {
+        "finding": "F12. roles/core/common.md:5 already carries the no-deferral rule for the four composing roles and is absent from the spec's Files list, so three near-duplicates would grow three files instead.",
+        "answer": "Plan decision D2 and section 3.1: one sentence is added to that paragraph, keeping the literal sentence roles_test.go:91-113 pins, and per-role text says only what differs. It serves R1, R5 and R6 at one site and keeps R9. Its blast radius — it also reaches the tester — is named in the decision."
+      },
+      {
+        "finding": "F13. The criteria name labels the base documents do not carry: INFRA-492's spec v10 Acceptance is four unnumbered bullets, so 'names acceptance 4' cannot be matched.",
+        "answer": "Plan decision D6: per case the harness holds a list of phrases from the criterion's own words, matched case-insensitively by the scorer, the same for both arms; for INFRA-492 the phrases are 'request log', 'caller kind', 'user' and 'served time', not the label. No model judge, because a second varying component would make the control's 'at most 5 in 12' incomparable. Every verdict text is recorded whole."
+      },
+      {
+        "finding": "F14. R6's second half (the architect's decomposition check) is tested by no acceptance criterion, and R7's post-merge half rests on A8 alone.",
+        "answer": "Plan decision D11 adds a supplementary replay for the decomposition check — 3 runs on the change's text and 3 on main's, over a root whose child list drops a requirement, scored the same way and reported beside A6. It is evidence, not a new criterion, and does not gate the phase. R7's pre-merge half stays in A2's INFRA-195 case as the spec places it."
+      },
+      {
+        "finding": "F15. The spec never says how 72 sessions are run or what survives an interruption, and the operator overlays disagree on the model (overlay.yml and role-reviewer.yml against project.yml).",
+        "answer": "Plan section 4: the overlays are applied in the daemon's own order, the resolved model is recorded per run and both arms must resolve the same one; at most 6 sessions at once, --max-time 30m each, one result.json per run so a replaced pod re-runs nothing it already has, and transcripts split below 20 MiB per Dispatch artifact."
+      },
+      {
+        "finding": "F16. Structural rules decide where each sentence may go: no core and no interactive fragment may contain LEGION_, handoff_, .legion/, skip-checks, envoy_publish, roleToken, spawn_worker, legion-worker or agent=.",
+        "answer": "Plan section 3.2 states it at the site: core/reviewer.md carries the stance alone, and the red-team dispatch, LEGION_TREE and the read_record base all go to roles/reviewer.md. Section 3.5 adds that the architect skill's section numbers must not change, since three prompts cite them by number."
+      },
+      {
+        "finding": "F17 (unverified claim 1). A2's control bar, 'at most 5 catches in 12 runs', is a chosen threshold and not a measurement: nothing in the repository or Dispatch measures today's catch rate.",
+        "answer": "Kept as the approved acceptance line states. Plan step 3 runs the control arm first, before any text is written, so a bar that fails is read as a leading task text — which the spec says to make neutral and run again — and never as a weak stance."
+      },
+      {
+        "finding": "F18 (unverified claim 2). INFRA-71, the sixth failing case in Problem, is replayed by no criterion, and the spec says the replays cannot show a parent's last round.",
+        "answer": "Named in the plan's risks (section 7, last item) so the architect can weigh it. The spec's Proof already states it, so the plan neither adds a case nor reads a criterion down."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "Design and Files put each rule in its own paragraph across 27 texts: 'Moving a child's requirement within the tree', 'A requirement that only the deploy can show', 'A person's record', the three pr-blocked rows, the parent's last round and the base under gates.design: off.",
+      "plan": "Each rule becomes one clause inside the role's few sentences, at the sites plan section 3 names; no case list and no step-by-step paragraph is written. skills/legion-worker/references/conflicts-and-rewrites.md is not edited: its last-round clause lands in merge-gate.md's reviewer section instead.",
+      "evidence": "The issue owner's answer on dispatch://INFRA-904/ask/f77e1f18-1525-4044-b64e-2c3ef745c726 at 2026-10-31T17:45:29Z, recorded again in dispatch://INFRA-904/comment/bbfbddfb-e237-4daa-84c4-00624cedd50e: each changed text is a few sentences, the Design rules are what the agent must understand and not text to copy, and the skills must not grow overall.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "The spec's Files list: the rules it places are compressed to one clause each, and conflicts-and-rewrites.md leaves the list."
+      }
+    },
+    {
+      "spec": "Proof, Two arms: 'The change's arm uses the head's packages/daemon and packages/pi-legion; the control uses main's, both extracted with git archive.'",
+      "plan": "Each arm extracts four parts from its own commit — packages/daemon, packages/pi-legion, skills/ and scripts/pi-plugin-prepack.sh — and stages the skills with its own copy of that script, and the harness fails when the two staged skill trees are identical for a file the change touches.",
+      "evidence": "scripts/pi-plugin-prepack.sh:25,55-66 copies each skill from the root of the checkout the script itself is in, and packages/pi-legion/package.json ships files: [dist, agents] with omp.skills: [dist/skills]; nothing under packages/pi-legion holds skill text. With the two-part arm, both arms would read the same skills and A7 would have no control.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "The replay arms: what each one extracts. No acceptance line changes; this is what makes A2, A5, A7 and A8 compare two different texts at all."
+      }
+    },
+    {
+      "spec": "Proof, Freeze the inputs: 'The harness fetches them with its own credentials before any run.'",
+      "plan": "A8's request-log fixture is constructed from the live line format and from PR sjawhar/legion#2324's own Production: line, holding no line that could be a person at any caller kind, with its provenance written in the artifact and on the pull request. Every other input of every case is fetched.",
+      "evidence": "The production request logs of INFRA-492's check window (2026-10-30) no longer exist: the dispatch pod is hours old and no aggregator is documented anywhere in docs/ or AGENTS.md. A8's own wording asks for 'frozen request-log lines', not fetched ones. A person on a personal token logs caller_kind=token (packages/envoy/internal/dispatch/accesslog/accesslog.go:210), so 'no caller_kind=user line' alone would not mean no person.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "A8's inputs: one fixture is constructed rather than fetched. A8's assertions are unchanged."
+      }
+    },
+    {
+      "spec": "Acceptance names A1 to A8 and no criterion for the architect's decomposition check, which R6 requires.",
+      "plan": "One supplementary replay is added beside A6: 3 runs on the change's text and 3 on main's, over a root whose child list drops a requirement. It is evidence for R6's second half, not a new criterion, and it does not gate the phase.",
+      "evidence": "R6 names two planning steps, the planner's plan check and the architect's decomposition; A6 replays only the first, and skills/legion-architect/references/decomposition.md:39-57 is the text the second one changes.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "Evidence added, nothing removed: the plan proves a requirement the Acceptance section leaves untested."
+      }
+    }
+  ]
+}
