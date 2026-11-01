@@ -52,6 +52,13 @@ const (
 	// row never has to take an absent service as either "no service" or "a claim this build of
 	// the broker did not write".
 	ClaimService = "service"
+	// ClaimMachine is the machine a person signed in on acted through: the Google account the
+	// trade's actor token named (exchange.Claims.Actor). It is set only beside ClaimPerson, and
+	// only for a person's sign-in; it is absent from every other token, which no machine acted
+	// for. The RFC 8693 'act' claim the library writes beside it records the same delegation as
+	// the actor token's issuer spells it, a Google subject rather than an account, so this is
+	// the name an introspection can answer and a reader can act on.
+	ClaimMachine = "machine"
 	// ClaimProjectScope is what ClaimProject means, one of oauthwire.ProjectScopeNamed or
 	// oauthwire.ProjectScopePerson. It is written always, so a reader never has to take an
 	// absent project as either "every project" or "none".
@@ -157,6 +164,22 @@ type ExchangeConfig struct {
 	// unused by one that does not; enroll.Service.IssueTokenLoginTx is what the broker's wiring
 	// hands over.
 	MachineCredentials MachineCredentials
+	// PersonAudience is what a person's own Google identity token's `aud` must carry
+	// (BROKER_SIGNIN_DEVICE_AUDIENCE): the device-flow client `agent-secrets login` runs
+	// Google's device grant as. It is an audience of its own beside Google.Audience, which is a
+	// machine's, so neither token is spendable where the other is: a machine's identity token
+	// cannot be presented as the person it acts for, and a person's sign-in token cannot be
+	// presented as a machine. Empty is a broker that accepts no person's sign-in at all, whose
+	// person subject token type and machine actor token type are then not registered, so a
+	// caller presenting either is refused by the library before any handler of the broker's
+	// runs. Its issuer and keys are Google's own, since both tokens come from the one issuer.
+	PersonAudience string
+	// PersonSignIns records the sign-in of the person a trade names on the box key its DPoP
+	// proof presented, in the transaction the exchange carries, and refuses with ErrSignInRevoked
+	// a trade whose key that person has revoked. It is what makes a revoked sign-in stop working
+	// at the broker rather than at the person's own machine, and it is required of a broker that
+	// accepts a person's Google identity token and unused by one that does not.
+	PersonSignIns PersonSignIns
 }
 
 // validate refuses a configuration the exchange could not serve.
@@ -172,6 +195,12 @@ func (c ExchangeConfig) validate() error {
 	}
 	if c.Google.configured() && c.MachineCredentials == nil {
 		return errors.New("oauth: a broker that accepts a machine's Google identity token needs MachineCredentials: the exchange mints the machine's launcher credential, and without it no machine it answers could enroll or read a secret")
+	}
+	if c.PersonAudience != "" && !c.Google.configured() {
+		return errors.New("oauth: a broker that accepts a person's Google identity token needs the Google issuer too: the machine the person signs in on presents its own identity token as the actor, and the entries that list that machine are the Google ones")
+	}
+	if c.PersonAudience != "" && c.PersonSignIns == nil {
+		return errors.New("oauth: a broker that accepts a person's Google identity token needs PersonSignIns: the first trade records the sign-in the box key belongs to, and every later one is held to it")
 	}
 	return nil
 }
@@ -207,6 +236,24 @@ type MachineCredential struct {
 // MachineCredentials creates or re-uses the credential cred describes, in the transaction ctx
 // carries, and answers its id.
 type MachineCredentials func(ctx context.Context, cred MachineCredential) (string, error)
+
+// PersonSignIn is one person's sign-in on one machine as the exchange decided it. The broker's
+// wiring turns it into a row; nothing here is the provider's to decide.
+type PersonSignIn struct {
+	// Person is the login the person's own Google identity token names, the token's person.
+	Person string
+	// Thumbprint is the RFC 7638 thumbprint of the box key the request's DPoP proof presented:
+	// the key `agent-secrets login` made at the sign-in and keeps with Google's refresh token,
+	// which is what tells this sign-in from the person's others.
+	Thumbprint string
+	// Machine is the Google account of the machine the person signed in on, as the actor token
+	// named it and BROKER_VM_SERVICES lists it.
+	Machine string
+}
+
+// PersonSignIns records the sign-in in, in the transaction ctx carries, and answers
+// ErrSignInRevoked when that person has revoked that box key.
+type PersonSignIns func(ctx context.Context, in PersonSignIn) error
 
 // tokenTypes are the token types the library registers for the exchange, keyed by the exact
 // string a request names them with.
@@ -264,19 +311,47 @@ func (c ExchangeConfig) tokenTypes() map[string]oauth2.RFC8693TokenType {
 			},
 		}
 	}
+	if c.PersonAudience != "" {
+		// A person's own token and the machine's actor token come from the one issuer and are
+		// checked against the one key set; what tells them apart is the audience each must
+		// carry, which the broker checks itself (audience). Both are registered together: a
+		// person's trade carries both, and neither is presentable alone — the person type as a
+		// subject with no actor is refused by the decision, and the machine type is an actor
+		// type the exchange client may present and no subject type at all.
+		for _, name := range []string{oauthwire.SubjectTokenTypePerson, oauthwire.ActorTokenTypeMachine} {
+			types[name] = &rfc8693.JWTType{
+				Name:   name,
+				Issuer: c.Google.Issuer,
+				JWTValidationConfig: rfc8693.JWTValidationConfig{
+					// A person's sign-in holds Google's refresh token and mints an identity
+					// token from it whenever one is wanted, and the machine presents the same
+					// metadata token its own trades do, so neither is single use, for the
+					// reason a machine's subject token is not. What keeps a copied pair from
+					// being spendable is the box key the sign-in is recorded against.
+					ValidateJTI:                false,
+					JWTLifetimeToleranceWindow: googleTolerance,
+					ValidateFunc:               keyFunc(c.Google.Keys),
+				},
+			}
+		}
+	}
 	return types
 }
 
-// issuerOf is the configured issuer a subject token type's tokens come from, and false for a type
-// that is not one of the three JWT kinds.
+// issuerOf is the configured issuer a token type's tokens come from, and false for a type that
+// is not one of the JWT kinds. The machine's actor token is Google's own, the same token its
+// subject type names; a person's carries the device-flow client's audience over Google's issuer
+// and keys, so it is answered as an issuer of its own.
 func (c ExchangeConfig) issuerOf(subjectTokenType string) (IssuerConfig, bool) {
 	switch subjectTokenType {
 	case oauthwire.SubjectTokenTypeKubernetes:
 		return c.Kubernetes, true
 	case oauthwire.SubjectTokenTypeGitHub:
 		return c.GitHub, true
-	case oauthwire.SubjectTokenTypeGoogle:
+	case oauthwire.SubjectTokenTypeGoogle, oauthwire.ActorTokenTypeMachine:
 		return c.Google, true
+	case oauthwire.SubjectTokenTypePerson:
+		return IssuerConfig{Issuer: c.Google.Issuer, Audience: c.PersonAudience, Keys: c.Google.Keys}, true
 	}
 	return IssuerConfig{}, false
 }
@@ -311,7 +386,9 @@ func keyFunc(keys KeySource) jwt.Keyfunc {
 // decision during validation, through Store.ExchangeSubject. The Google subject type mints or
 // moves the machine's own launcher credential here (machineCredential), for the same reason and
 // in the same transaction: the answer names it, and a machine whose token committed without it
-// could enroll nothing. Beside those, and for every
+// could enroll nothing. The person subject type records the sign-in its box key belongs to here
+// (personSignIn), for the same reason again: a revoke that commits first refuses the trade, and
+// one that commits after it ends the token the trade minted. Beside those, and for every
 // type, the registration a pod's session name needs is read before the library builds anything
 // (registeredPodSession). The claim on the session name is made
 // for every type once the library has built the answer, because that is when the issued token's
@@ -358,6 +435,12 @@ func (p *Provider) exchangeGrant(w http.ResponseWriter, r *http.Request) {
 	if request.GetRequestForm().Get(FormSubjectTokenType) == oauthwire.SubjectTokenTypeGoogle {
 		credentialID, credential, err = p.machineCredential(txCtx, r, session)
 		if err != nil {
+			p.writeError(ctx, w, request, err)
+			return
+		}
+	}
+	if request.GetRequestForm().Get(FormSubjectTokenType) == oauthwire.SubjectTokenTypePerson {
+		if err := p.personSignIn(txCtx, session); err != nil {
 			p.writeError(ctx, w, request, err)
 			return
 		}
@@ -429,9 +512,9 @@ func (p *Provider) reserveSessions(ctx context.Context) error {
 
 // decide is the exchange's own decision, and the only one: what the minted token says, and who
 // the session name it says it is writing under belongs to. Both paths into the exchange reach it
-// — the three JWT subject types through Store.ExchangeSubject while the library validates the
+// — the four JWT subject types through Store.ExchangeSubject while the library validates the
 // request, the machine access-token type from exchangeGrant once it has — so one function decides
-// for all four.
+// for all five.
 //
 // In order: the subject token's audience, which the library never checks and which a token minted
 // for another service would fail; the policy's decision, which names the session, the person or
@@ -469,6 +552,20 @@ func (p *Provider) decide(_ context.Context, request oauth2.Requester, subjectTo
 		if err = p.audience(subjectTokenType, subjectToken); err == nil {
 			claims, err = p.exchange.Policy.Google(subjectToken, name)
 		}
+	case oauthwire.SubjectTokenTypePerson:
+		// Two tokens, each held to the audience its own type is configured with: the person's
+		// to the device-flow client's, the machine's to the one a machine trades for itself
+		// with, so neither is spendable in the other's place. The actor token's claims are on
+		// the session because the library validated it before it asked for the subject
+		// (rfc8693.CustomJWTTypeHandler), and a request that carried none leaves it nil, which
+		// the policy refuses by name.
+		actor := session.GetActorToken()
+		if err = p.audience(subjectTokenType, subjectToken); err == nil && actor != nil {
+			err = p.audience(oauthwire.ActorTokenTypeMachine, actor)
+		}
+		if err == nil {
+			claims, err = p.exchange.Policy.Person(subjectToken, actor, name)
+		}
 	case tokenTypeAccessToken:
 		// A machine access token is the broker's own, so there is no issuer to check it against:
 		// the login that was issued it recorded the approver it acts for and the launcher
@@ -493,6 +590,14 @@ func (p *Provider) decide(_ context.Context, request oauth2.Requester, subjectTo
 	session.Extra[ClaimSession] = claims.Session
 	session.Extra[ClaimPerson] = claims.Person
 	session.Extra[ClaimService] = claims.Service
+	if claims.Actor == "" {
+		// Absent rather than empty, unlike the service: every token carries a person or a
+		// service, so an absent one of those would be ambiguous, where a machine is the mark of
+		// the one kind of trade that has an actor at all.
+		delete(session.Extra, ClaimMachine)
+	} else {
+		session.Extra[ClaimMachine] = claims.Actor
+	}
 	switch claims.Scope {
 	case exchange.ProjectScopeNamed:
 		session.Extra[ClaimProjectScope] = oauthwire.ProjectScopeNamed
@@ -617,6 +722,41 @@ func (p *Provider) machineCredential(ctx context.Context, r *http.Request, sessi
 	// subject type).
 	session.Extra[oauthwire.ExtraCredentialID] = id
 	return id, cred, nil
+}
+
+// personSignIn records the sign-in the person's trade belongs to
+// (ExchangeConfig.PersonSignIns), in the exchange's own transaction, and refuses a trade whose
+// box key that person has revoked.
+//
+// The sign-in is the person, the box key and the machine: the person the decision named, the
+// RFC 7638 thumbprint of the key the request's DPoP proof presented — which is the key
+// `agent-secrets login` made at the sign-in and keeps with Google's refresh token — and the
+// Google account the actor token named. The first trade of a person and a box key writes the
+// row; every later trade of that pair is the same sign-in, used again.
+//
+// It runs in the transaction the token is written in, for the reason the machine's credential
+// does: a revoke that commits first refuses this trade, and one that commits after it ends the
+// token this trade minted, so no token outlives the sign-in it was minted under.
+//
+// A revoked key is invalid_grant rather than a server error, and names the sign-in command: the
+// subject token is sound and it is the broker's own record that refuses, which the person fixes
+// by signing in again, with a key of its own.
+func (p *Provider) personSignIn(ctx context.Context, session *oauthstore.ExchangeSession) error {
+	person, _ := session.Extra[ClaimPerson].(string)
+	machine, _ := session.Extra[ClaimMachine].(string)
+	thumbprint := session.GetDPoPJWKThumbprint()
+	if person == "" || machine == "" || thumbprint == "" {
+		return oauth2.ErrServerError.WithDebugf("the exchange reached a person's sign-in with person (%t), machine (%t) and bound key (%t)",
+			person != "", machine != "", thumbprint != "")
+	}
+	err := p.exchange.PersonSignIns(ctx, PersonSignIn{Person: person, Thumbprint: thumbprint, Machine: machine})
+	if errors.Is(err, ErrSignInRevoked) {
+		return oauth2.ErrInvalidGrant.WithHintf("%s revoked this machine's sign-in, so the key this proof was signed with trades nothing. Sign in again with `agent-secrets login`.", person).WithWrap(err).WithDebugError(err)
+	}
+	if err != nil {
+		return oauth2.ErrServerError.WithWrap(err).WithDebugError(err)
+	}
+	return nil
 }
 
 // machineHost is the machine as its credential's row records it, which is what an operator reads

@@ -48,6 +48,11 @@ const (
 	// carrying anything else is not spendable at this broker.
 	podAudience      = "https://broker.example"
 	workflowAudience = "https://broker.example/ci"
+	// signInDomain is the Google Workspace domain a person signing in on a machine must belong
+	// to, BROKER_SIGNIN_DOMAIN's value in these tests, and deviceAudience the audience the
+	// device-flow client's own ID tokens carry.
+	signInDomain   = "example.com"
+	deviceAudience = "https://broker.example/signin"
 )
 
 // newPolicy builds the exchange's listed identities, failing the test on an entry it refuses.
@@ -55,7 +60,7 @@ const (
 // other test passes none.
 func newPolicy(t *testing.T, accounts []exchange.AccountEntry, workflows []exchange.WorkflowEntry, machines ...exchange.GoogleEntry) *exchange.Set {
 	t.Helper()
-	set, err := exchange.NewSet(accounts, workflows, machines)
+	set, err := exchange.NewSet(accounts, workflows, machines, signInDomain)
 	if err != nil {
 		t.Fatalf("exchange.NewSet: %v", err)
 	}

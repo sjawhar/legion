@@ -77,6 +77,10 @@ const (
 	claimsGoogleAudience = "https://broker.example/machines"
 	claimsGoogleAccount  = "example-fleet@example-project.iam.gserviceaccount.com"
 	claimsGoogleService  = "example-fleet"
+	// The person half: the audience the device-flow client's ID token carries and the Workspace
+	// domain a signing-in person must belong to.
+	claimsDeviceAudience = "https://broker.example/signin"
+	claimsSignInDomain   = "example.com"
 )
 
 // The claims docs/kubernetes.md lists are exactly the claims an exchanged token carries. Both sides
@@ -105,7 +109,7 @@ func issuedClaims(t *testing.T) []string {
 		Account: claimsPodAccount,
 		Project: claimsProject,
 		Person:  claimsPerson,
-	}}, nil, []exchange.GoogleEntry{{Account: claimsGoogleAccount, Service: claimsGoogleService}})
+	}}, nil, []exchange.GoogleEntry{{Account: claimsGoogleAccount, Service: claimsGoogleService}}, claimsSignInDomain)
 	if err != nil {
 		t.Fatalf("exchange.NewSet: %v", err)
 	}
@@ -116,11 +120,14 @@ func issuedClaims(t *testing.T) []string {
 		Policy:     policy,
 		Kubernetes: IssuerConfig{Issuer: claimsIssuer, Audience: claimsAudience},
 		Google:     IssuerConfig{Issuer: claimsGoogleIssuer, Audience: claimsGoogleAudience},
+		// The person's own token is checked against Google's issuer too, under the device-flow
+		// client's audience; the actor token below is the machine's, under Google's own.
+		PersonAudience: claimsDeviceAudience,
 	}}
 
 	subjects := []struct {
-		tokenType string
-		token     map[string]any
+		tokenType    string
+		token, actor map[string]any
 	}{{
 		tokenType: oauthwire.SubjectTokenTypeKubernetes,
 		token: map[string]any{
@@ -138,6 +145,20 @@ func issuedClaims(t *testing.T) []string {
 		tokenType: oauthwire.SubjectTokenTypeGoogle,
 		token: map[string]any{
 			"aud":            claimsGoogleAudience,
+			"email_verified": true,
+			"email":          claimsGoogleAccount,
+		},
+	}, {
+		tokenType: oauthwire.SubjectTokenTypePerson,
+		token: map[string]any{
+			"sub":            "109" + claimsPerson,
+			"aud":            claimsDeviceAudience,
+			"email":          claimsPerson,
+			"email_verified": true,
+			"hd":             claimsSignInDomain,
+		},
+		actor: map[string]any{
+			"aud":            claimsGoogleAudience,
 			"email":          claimsGoogleAccount,
 			"email_verified": true,
 		},
@@ -152,6 +173,11 @@ func issuedClaims(t *testing.T) []string {
 				FormSession:          {claimsSessionName},
 			},
 			Session: session,
+		}
+		if subject.actor != nil {
+			// Where the library puts an actor token it has validated, which decide reads a
+			// person's sign-in through (rfc8693.CustomJWTTypeHandler).
+			session.SetActorToken(subject.actor)
 		}
 		if _, err := provider.decide(context.Background(), request, subject.token); err != nil {
 			t.Fatalf("the exchange refused the %s subject token this check decides against: %v; "+

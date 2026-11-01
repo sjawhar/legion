@@ -103,6 +103,22 @@ type Config struct {
 	// naming the ones missing, since nobody could approve a secret request on a page nobody can
 	// sign in to.
 	SignIn approval.SignIn
+	// BROKER_SIGNIN_DEVICE_AUDIENCE: the audience a person's own Google identity token must
+	// carry to be traded at the RFC 8693 token exchange, where such a token is a subject token
+	// (urn:envoy:params:oauth:token-type:person-google-identity) and the machine the person
+	// signed in on presents its own as the actor token
+	// (urn:envoy:params:oauth:token-type:machine-google-identity). It is the OAuth client id of
+	// the device-flow client `agent-secrets login` runs Google's device authorization grant as,
+	// since Google puts the client's id in an ID token's aud. Its issuer is
+	// BROKER_GOOGLE_OIDC_ISSUER, Google's own unless a dev stack says otherwise, and the person
+	// it names is held to BROKER_SIGNIN_DOMAIN through the hd claim, exactly as a person
+	// signing in to the broker's own approval page is. Needs BROKER_GOOGLE_OIDC_AUDIENCE, whose
+	// machines are the boxes a person may sign in on. Unset, the broker accepts no person's
+	// sign-in and registers neither token type, so a caller presenting either is refused by
+	// name. It is not one of the four SignInSettings, which are required together: those are
+	// what a person approves a secret request through and no broker serves without them, where
+	// this one is optional, as the whole Google exchange is.
+	SignInDeviceAudience string
 	// BROKER_SECRETS_STORE: which secret store the agent secrets live in: aws-secrets-manager (the
 	// default when unset, AWS Secrets Manager with the agent-secrets key in AWS KMS) or
 	// gcp-secret-manager (Google Cloud Secret Manager with the agent-secrets key in Cloud KMS, read
@@ -859,8 +875,9 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 		cfg.ServiceLogins[entry.subject] = entry.service
 	}
+	cfg.SignInDeviceAudience = strings.TrimSpace(getenv("BROKER_SIGNIN_DEVICE_AUDIENCE"))
 	if cfg.GoogleOIDCAudience == "" {
-		for _, setting := range []string{"BROKER_VM_SERVICES", "BROKER_VM_PROJECTS", "BROKER_VM_INSTANCES", "BROKER_VM_EXCHANGE_ACCOUNTS"} {
+		for _, setting := range []string{"BROKER_VM_SERVICES", "BROKER_VM_PROJECTS", "BROKER_VM_INSTANCES", "BROKER_VM_EXCHANGE_ACCOUNTS", "BROKER_SIGNIN_DEVICE_AUDIENCE"} {
 			if strings.TrimSpace(getenv(setting)) != "" {
 				return Config{}, fmt.Errorf("%s needs BROKER_GOOGLE_OIDC_AUDIENCE, whose Google identity tokens it configures", setting)
 			}

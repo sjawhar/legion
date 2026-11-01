@@ -10,7 +10,7 @@
 // a sentinel the caller maps onto an OAuth error. A Set is built once and is then immutable, so
 // the same subject token decides the same way however many exchanges run at once.
 //
-// Four kinds of subject token reach it, and what decides each one's claims differs:
+// Five kinds of subject token reach it, and what decides each one's claims differs:
 //
 //   - a pod's Kubernetes service-account token, where an entry keyed on the account subject
 //     (system:serviceaccount:<namespace>:<name>) gives the project and the person, and the token
@@ -20,12 +20,16 @@
 //   - a machine's Google identity token, where an entry keyed on the account's email address
 //     gives the service, may pin the Compute Engine project and instance names the machine may
 //     carry, and may give a person and a project as a pod's entry does;
+//   - a person's own Google identity token, carried with the machine's as the actor token, where
+//     the Workspace domain decides the person and that same machine entry decides the box they
+//     may sign in from;
 //   - a dev box session's machine credential, which no entry lists, because the person is the
 //     approver the credential already records.
 //
 // The principal is the caller's standing identity, never the instance asking: the listed account
 // for a pod, the listed workflow for a run, the listed Google account for a machine, the person
-// for a dev box. A session name belongs to one principal, so a pod's replacement and a workflow's
+// for a sign-in and for a dev box. A session name belongs to one principal, so a pod's
+// replacement and a workflow's
 // next run keep writing under the name
 // their predecessor held, and a caller of any other principal is refused it. Instance is the
 // second rule beside it, and the only thing that separates two callers of one principal: the pod
@@ -41,16 +45,21 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
+	"github.com/sjawhar/envoy/internal/oidc"
 )
 
 // Why a subject token is refused. Each stands for one answer an operator can act on: list the
 // identity (ErrNoEntry), mint the token in a pod rather than by hand (ErrNoPodBinding), ask under
 // the session the entry fixes (ErrSessionMismatch), name a session (ErrSessionRequired), name a
 // usable one (ErrSessionInvalid), present a token that carries the claims its kind must
-// (ErrClaimMissing), verify the machine's address with its provider (ErrEmailNotVerified), mint
-// the machine's token on a Compute Engine instance or unpin its entry (ErrNoComputeEngine), run
-// the machine where its entry allows (ErrMachineNotAllowed), or, of a registration, leave an
-// entry that fixes a session alone (ErrSessionFixed).
+// (ErrClaimMissing), verify the machine's or the person's address with its provider
+// (ErrEmailNotVerified), sign in with an account of the configured Workspace domain
+// (ErrNotInDomain), present the machine's own identity token beside the person's
+// (ErrNoActorToken), mint the machine's token on a Compute Engine instance or unpin its entry
+// (ErrNoComputeEngine), run the machine where its entry allows (ErrMachineNotAllowed), or, of a
+// registration, leave an entry that fixes a session alone (ErrSessionFixed).
 var (
 	ErrNoEntry           = errors.New("exchange: no entry lists this identity")
 	ErrNoPodBinding      = errors.New("exchange: the subject token is bound to no pod")
@@ -59,6 +68,8 @@ var (
 	ErrSessionInvalid    = errors.New("exchange: the request names an unusable session")
 	ErrClaimMissing      = errors.New("exchange: the subject token carries no such claim")
 	ErrEmailNotVerified  = errors.New("exchange: the subject token's email address is not verified")
+	ErrNotInDomain       = errors.New("exchange: the person's Google account is not in the sign-in domain")
+	ErrNoActorToken      = errors.New("exchange: the person's token came with no machine acting for them")
 	ErrNoComputeEngine   = errors.New("exchange: the subject token carries no Compute Engine claims")
 	ErrMachineNotAllowed = errors.New("exchange: the machine is not one the entry allows")
 	ErrSessionFixed      = errors.New("exchange: the entry fixes the session name it writes under")
@@ -273,6 +284,13 @@ type Claims struct {
 	// subject must carry. Service holds the same string when the entry names no person, and
 	// nothing when it names one, so a reader that wants the fleet of every machine reads this.
 	Fleet string
+	// Actor is the machine acting for the person in a delegation (RFC 8693 Section 2.1): the
+	// Google account the request's actor token names, as BROKER_VM_SERVICES lists it. It is set
+	// by Person alone and empty for every other decision, none of which has an actor. It is a
+	// claim of the minted token in the sense that the provider writes it onto the stored session
+	// and an introspection answers it (oauth.ClaimMachine), beside the RFC 8693 'act' claim the
+	// library builds from the actor token's own subject; this is the account an operator reads.
+	Actor string
 }
 
 // Reservation is a session name an entry fixes and the principal it belongs to. The broker holds
@@ -361,12 +379,14 @@ type GoogleEntry struct {
 // so the key is the whole identity and no partial match exists.
 type workflowKey struct{ repository, workflow, ref string }
 
-// Set is the listed identities as one build of the configuration read them. It is immutable once
-// built, so every Pod, Workflow, Google and Machine on it is a pure function of its arguments.
+// Set is the listed identities as one build of the configuration read them, with the Google
+// Workspace domain a person signing in on a machine must belong to. It is immutable once built,
+// so every Pod, Workflow, Google, Person and Machine on it is a pure function of its arguments.
 type Set struct {
 	accounts     map[string]AccountEntry
 	workflows    map[workflowKey]WorkflowEntry
 	google       map[string]GoogleEntry
+	signInDomain string
 	reservations []Reservation
 }
 
@@ -379,11 +399,18 @@ type Set struct {
 // that pins a Compute Engine project without an instance pattern or the other way round says
 // nothing clear about which machines it means, and one that names a person without a project, or
 // a project without a person, says nothing clear about what they may write.
-func NewSet(accounts []AccountEntry, workflows []WorkflowEntry, machines []GoogleEntry) (*Set, error) {
+//
+// signInDomain is the Google Workspace domain BROKER_SIGNIN_DOMAIN names, which Person holds a
+// signing-in person's own token to. It is a field of the set rather than an argument of that
+// decision because it is configuration exactly as the entries are, and it is refused nothing
+// here: an empty one admits nobody (oidc.WorkspaceLogin), which is what a broker told about no
+// domain should do with a person's token.
+func NewSet(accounts []AccountEntry, workflows []WorkflowEntry, machines []GoogleEntry, signInDomain string) (*Set, error) {
 	set := &Set{
-		accounts:  make(map[string]AccountEntry, len(accounts)),
-		workflows: make(map[workflowKey]WorkflowEntry, len(workflows)),
-		google:    make(map[string]GoogleEntry, len(machines)),
+		accounts:     make(map[string]AccountEntry, len(accounts)),
+		workflows:    make(map[workflowKey]WorkflowEntry, len(workflows)),
+		google:       make(map[string]GoogleEntry, len(machines)),
+		signInDomain: signInDomain,
 	}
 	fixedBy, spelledBy := map[string]string{}, map[string]string{}
 	reserve := func(where, session, principal string) error {
@@ -708,6 +735,95 @@ func (s *Set) allowedMachine(entry GoogleEntry, identity GoogleIdentity) error {
 			ErrMachineNotAllowed, identity.Account, identity.Compute.Instance, entry.Instance)
 	}
 	return nil
+}
+
+// Person answers the claims for a person's own Google identity token, presented with the
+// machine's own as the actor token (RFC 8693 Section 2.1): the sign-in `agent-secrets login`
+// made on that machine, where the person is the subject and the machine is only acting for
+// them.
+//
+// The two tokens are read by the two rules that belong to them. The person's is held to the
+// Workspace rule the broker's own approval sign-in is held to (oidc.WorkspaceLogin): a subject,
+// an email of an address's shape that Google has verified, and the `hd` claim equal to the
+// configured domain, which an empty configured domain can never match. The domain comes from
+// `hd` alone, never from the address's suffix, because a personal Google account can hold an
+// address under a Workspace's domain. Google's signature, the issuer, the expiry and the
+// audience of the device-flow client are checked before this is reached
+// (oauth.ExchangeConfig.Person). The machine's is held to the entry rules a machine trading for
+// itself is held to: its account is one BROKER_VM_SERVICES lists, Google holds that address
+// verified, and the machine runs where the entry pins it, so a person cannot sign in from a box
+// of an account the deployment does not list.
+//
+// The principal is the person, as it is for a dev box session's machine credential: every
+// machine and every session of one person is one holder, so a person keeps their session names
+// from box to box, and no other identity may write under one of them. The token names no
+// project either, and says so with the person scope: a person's sign-in is their own identity
+// on their own box, which reaches whichever projects that person reaches, and pinning one here
+// would hand the box less than the person has rather than more.
+//
+// What it does not decide is whether that person's sign-in on that box key still stands: the
+// box key's thumbprint is the DPoP proof's, which this package never sees, and the sign-in is a
+// row the provider reads in the exchange's own transaction
+// (oauth.ExchangeConfig.PersonSignIns).
+func (s *Set) Person(token, actor map[string]any, session string) (Claims, error) {
+	if actor == nil {
+		return Claims{}, fmt.Errorf("%w: a person signs in on a machine, so the machine's own Google identity token is presented as the actor token (%s)", ErrNoActorToken, oauthwire.ActorTokenTypeMachine)
+	}
+	machine := ReadGoogleIdentity(actor)
+	if machine.Account == "" {
+		return Claims{}, fmt.Errorf("%w: the actor token carries no email claim, so it names no machine (ask for it with format=full)", ErrClaimMissing)
+	}
+	entry, listed := s.google[machine.Account]
+	if !listed {
+		return Claims{}, fmt.Errorf("%w: no entry lists the Google account %s, which the actor token names as the machine", ErrNoEntry, machine.Account)
+	}
+	if !machine.EmailVerified {
+		return Claims{}, fmt.Errorf("%w: the machine %s presented an actor token whose email_verified is not true", ErrEmailNotVerified, machine.Account)
+	}
+	if err := s.allowedMachine(entry, machine); err != nil {
+		return Claims{}, err
+	}
+	login, err := oidc.WorkspaceLogin(personClaims(token), s.signInDomain)
+	switch {
+	case errors.Is(err, oidc.ErrNoSubject):
+		return Claims{}, fmt.Errorf("%w: the subject token carries no sub claim, so it names no person", ErrClaimMissing)
+	case errors.Is(err, oidc.ErrNoEmail):
+		return Claims{}, fmt.Errorf("%w: the subject token carries no email claim of an address's shape, so it names no person", ErrClaimMissing)
+	case errors.Is(err, oidc.ErrNotInDomain):
+		return Claims{}, fmt.Errorf("%w: %s signed in, and this broker takes the Google Workspace domain BROKER_SIGNIN_DOMAIN names; sign in again with `agent-secrets login` as an account of that domain", ErrNotInDomain, login)
+	case errors.Is(err, oidc.ErrEmailNotVerified):
+		return Claims{}, fmt.Errorf("%w: %s presented a token whose email_verified is not true", ErrEmailNotVerified, login)
+	case err != nil:
+		return Claims{}, fmt.Errorf("%w: the subject token is not a person's Google identity token (%v)", ErrClaimMissing, err)
+	}
+	name, err := resolveSession("", session, login)
+	if err != nil {
+		return Claims{}, err
+	}
+	return Claims{
+		Session:   name,
+		Person:    login,
+		Scope:     ProjectScopePerson,
+		Principal: personPrincipal(login),
+		Actor:     machine.Account,
+	}, nil
+}
+
+// personClaims is the reading of a person's Google identity token that oidc.WorkspaceLogin
+// judges: the four claims its rule names, out of the claim map of a token the exchange's own
+// verifier has already checked. It is the one place those claim names are spelled for a person,
+// as ReadGoogleIdentity is for a machine; `email_verified` is read through the same isVerified,
+// since Google writes it as a boolean on some of its tokens and as the string "true" on others.
+func personClaims(token map[string]any) oidc.Claims {
+	subject, _ := token["sub"].(string)
+	email, _ := token["email"].(string)
+	domain, _ := token["hd"].(string)
+	return oidc.Claims{
+		Subject:       subject,
+		Email:         email,
+		EmailVerified: isVerified(token["email_verified"]),
+		HostedDomain:  domain,
+	}
 }
 
 // Machine answers the claims for a dev box session's machine credential, credential being the

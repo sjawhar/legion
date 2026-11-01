@@ -35,6 +35,18 @@ const (
 	// for a workload identity pool, which carries the machine's service account in its `email`
 	// claim. Broker-defined for the same reason as SubjectTokenTypeKubernetes.
 	SubjectTokenTypeGoogle = "urn:envoy:params:oauth:token-type:google-identity"
+	// SubjectTokenTypePerson is the subject_token_type a person presents their own Google
+	// identity token under: the ID token `agent-secrets login`'s device grant (RFC 8628) got for
+	// them, minted for the device-flow client BROKER_SIGNIN_DEVICE_AUDIENCE names. It is the
+	// person half of a sign-in on a machine; the machine half is ActorTokenTypeMachine, which
+	// the same request carries. Broker-defined for the reason SubjectTokenTypeKubernetes is.
+	SubjectTokenTypePerson = "urn:envoy:params:oauth:token-type:person-google-identity"
+	// ActorTokenTypeMachine is the actor_token_type a machine presents its own Google identity
+	// token under while the person signed in on it trades theirs (RFC 8693 Section 2.1). It is
+	// the very token SubjectTokenTypeGoogle names, under a type of its own because what it
+	// proves here is different: not who is asking, but which box the person is asking from.
+	// Broker-defined for the reason SubjectTokenTypeKubernetes is.
+	ActorTokenTypeMachine = "urn:envoy:params:oauth:token-type:machine-google-identity"
 	// SubjectTokenTypeAccessToken is RFC 8693's own name for an access token: the only kind the
 	// exchange mints, the kind it asks for, and the kind a dev box session presents its machine
 	// login's token as. The library spells it in a package its users cannot import.
@@ -75,6 +87,13 @@ type Introspection struct {
 	// both, so a reader that records who is answerable for a write reads Person, and one that
 	// decides what a machine may reach reads this.
 	Service string `json:"service,omitempty"`
+	// Machine is the machine a person signed in on acted through: the Google account of the
+	// actor token the exchange was made with, as BROKER_VM_SERVICES lists it. It is set only
+	// beside Person, and only for a token a person's sign-in on a machine minted; every other
+	// token names no machine. The token's own RFC 8693 'act' claim records the same delegation
+	// as the actor token's issuer spells it, which is a Google subject rather than an account,
+	// so this is the name a reader can act on.
+	Machine string `json:"machine,omitempty"`
 	// ProjectScope is what Project means: ProjectScopeNamed or ProjectScopePerson. A machine
 	// login's own token, which no exchange decided for, carries neither this nor Project.
 	ProjectScope string `json:"project_scope,omitempty"`

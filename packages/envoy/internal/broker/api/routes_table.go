@@ -309,6 +309,19 @@ func routes() []apiRoute {
 		// asks before it gets them again. The revoking person is the login the request names, which
 		// the broker still takes on the caller's word: a revoke only takes power away.
 		{http.MethodPost, "/v1/grants/{id}/revoke-by-approver", accountAuth(relaysDecisions, (*server).revokeByApprover)},
+		// List the sign-ins the named person made on their machines with `agent-secrets login`,
+		// by machine: one row per box key they signed in with and have not revoked, each naming
+		// the machine's Google account, the box key's thumbprint, and when the sign-in was made
+		// and last used. The person is the one the caller names, as it is for every list
+		// Dispatch's server relays.
+		{http.MethodGet, "/v1/person-signins", accountAuth(relaysDecisions, (*server).listPersonSignIns)},
+		// End one of the named person's sign-ins: that box key trades no token at the exchange
+		// again, and every access token already minted on that box under that sign-in ends in
+		// the revoke's own transaction, so none of them outlives it. The person's sign-ins on
+		// their other boxes keep working, and the box signs in again with a key of its own. The
+		// revoking person is the one the request names, which the broker takes on the caller's
+		// word: a revoke only takes power away.
+		{http.MethodPost, "/v1/person-signins/{id}/revoke", accountAuth(relaysDecisions, (*server).revokePersonSignIn)},
 		// List the logins of the calling credential's operator's own machines, as Dispatch's
 		// machine-logins page lists them, without the service logins that page also lists.
 		{http.MethodGet, "/v1/operator/machines", launcherAuth((*server).listOperatorMachines)},

@@ -669,8 +669,11 @@ func TestTheProviderHasThreeClientsAndNoOther(t *testing.T) {
 
 // TestTheExchangeClientIsConfidentialAndNarrow: the library refuses a public client at the
 // token-exchange grant, so that client must never read as public; it may present exactly the
-// three kinds of subject token this broker accepts, ask for an access token and nothing else,
-// and present no actor token. Only it may exchange a machine login's token.
+// five kinds of subject token this broker accepts, ask for an access token and nothing else,
+// and present the machine's Google identity token as the one actor token a person's sign-in
+// carries and nothing else. Only it may exchange a machine login's token, and it says that an
+// authorization outside the subject token decides a delegation, since Google puts no 'may_act'
+// in a person's ID token.
 func TestTheExchangeClientIsConfidentialAndNarrow(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newStore(t)
@@ -693,7 +696,8 @@ func TestTheExchangeClientIsConfidentialAndNarrow(t *testing.T) {
 		{name: "subject token types", got: exchanger.GetSupportedSubjectTokenTypes(),
 			want: []string{
 				oauthwire.SubjectTokenTypeKubernetes, oauthwire.SubjectTokenTypeGitHub,
-				oauthwire.SubjectTokenTypeGoogle, "urn:ietf:params:oauth:token-type:access_token",
+				oauthwire.SubjectTokenTypeGoogle, oauthwire.SubjectTokenTypePerson,
+				"urn:ietf:params:oauth:token-type:access_token",
 			}},
 		{name: "requested token types", got: exchanger.GetSupportedRequestTokenTypes(),
 			want: []string{"urn:ietf:params:oauth:token-type:access_token"}},
@@ -704,14 +708,11 @@ func TestTheExchangeClientIsConfidentialAndNarrow(t *testing.T) {
 			}
 		})
 	}
-	for _, actor := range exchanger.GetSupportedActorTokenTypes() {
-		if actor == "urn:ietf:params:oauth:token-type:access_token" || actor == oauthwire.SubjectTokenTypeKubernetes ||
-			actor == oauthwire.SubjectTokenTypeGitHub || actor == oauthwire.SubjectTokenTypeGoogle {
-			t.Errorf("the exchange client permits %s as an actor token", actor)
-		}
+	if got := exchanger.GetSupportedActorTokenTypes(); !slices.Equal(got, []string{oauthwire.ActorTokenTypeMachine}) {
+		t.Errorf("actor token types = %v, want the machine's Google identity token alone: an empty list means every type, and any other type is one nobody may act under", got)
 	}
-	if len(exchanger.GetSupportedActorTokenTypes()) == 0 {
-		t.Error("the exchange client permits every actor token type, which an empty list means")
+	if !exchanger.GetAllowActorTokenWithoutMayAct() {
+		t.Error("the exchange client refuses a delegation whose subject token carries no may_act, which is every person's Google ID token")
 	}
 	machine, err := s.GetClient(ctx, oauthwire.ClientID)
 	if err != nil {

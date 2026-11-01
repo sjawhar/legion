@@ -40,6 +40,12 @@ const (
 	instanceName    = "example-vm-7"
 	pinnedService   = "example-fleet"
 	poolService     = "example-pool"
+	// signInDomain is the Google Workspace domain BROKER_SIGNIN_DOMAIN names in these tests, the
+	// one a person signing in on a machine must belong to; otherDomain is any other Workspace,
+	// and stranger a person of it.
+	signInDomain = "example.com"
+	otherDomain  = "other.example"
+	stranger     = "mallory@other.example"
 )
 
 // The principals the listed entries' session names belong to, as the exchange spells them.
@@ -75,6 +81,7 @@ func listed(t *testing.T) *exchange.Set {
 			{Account: poolAccount, Service: poolService},
 			{Account: fixedAccount, Service: poolService, Session: machineSession},
 		},
+		signInDomain,
 	)
 	if err != nil {
 		t.Fatalf("NewSet: %v", err)
@@ -203,7 +210,7 @@ func TestNewSetRefusesAnEntryItCannotServe(t *testing.T) {
 			machines: []exchange.GoogleEntry{withMachine(func(e *exchange.GoogleEntry) { e.Session = fixedSession })}, names: pinnedAccount},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			set, err := exchange.NewSet(c.accounts, c.workflows, c.machines)
+			set, err := exchange.NewSet(c.accounts, c.workflows, c.machines, signInDomain)
 			if err == nil {
 				t.Fatalf("NewSet(%s) = %v, want a refusal", c.name, set)
 			}
@@ -221,7 +228,7 @@ func TestNewSetTakesTheSameAccountAndWorkflowKeyTwiceApart(t *testing.T) {
 			{Repository: repository, Workflow: workflow, Ref: ref, Project: project, Person: person},
 			{Repository: repository, Workflow: workflow, Ref: "refs/heads/release", Project: "OTHER", Person: person},
 		},
-		nil,
+		nil, signInDomain,
 	)
 	if err != nil {
 		t.Fatalf("NewSet(one workflow on two refs): %v", err)
@@ -678,6 +685,151 @@ func TestGoogleSaysWhichRefusalItIs(t *testing.T) {
 			if name != other && text == otherText {
 				t.Errorf("the refusals of %s and of %s read alike: %q", name, other, text)
 			}
+		}
+	}
+}
+
+// personToken is a person's own Google identity token's claims as the exchange is handed them:
+// the subject Google gives the account, the address it was minted for, whether Google holds that
+// address verified, and the Workspace domain in `hd`.
+func personToken(login string, verified any, domain string) map[string]any {
+	token := map[string]any{"sub": "109" + login, "email": login, "email_verified": verified}
+	if domain != "" {
+		token["hd"] = domain
+	}
+	return token
+}
+
+// TestPersonAnswersTheSignedInPersonAndTheMachineActingForThem pins what a sign-in's trade
+// decides: the person is the subject of the token and the machine only acts for them, so the
+// claims name the person, the machine's listed account as the actor, and no project at all —
+// a person's sign-in on their own box reaches whichever projects that person reaches, as their
+// dev box's machine credential does. The principal is the person, so one person's boxes are one
+// holder and their session names follow them from box to box. The machine's fleet decides
+// nothing else: a fleet whose entry names a person and one whose entry names none answer alike,
+// because what the token names is the person who signed in, never the fleet.
+func TestPersonAnswersTheSignedInPersonAndTheMachineActingForThem(t *testing.T) {
+	set := listed(t)
+	for _, c := range []struct {
+		name         string
+		token, actor map[string]any
+		session      string
+		want         exchange.Claims
+	}{
+		{name: "a person of the domain on a pinned machine",
+			token: personToken(person, true, signInDomain), actor: googleToken(pinnedAccount, true, cloudProject, instanceName), session: "example-box-1",
+			want: exchange.Claims{Session: "example-box-1", Person: person, Scope: exchange.ProjectScopePerson, Principal: personPrincipal, Actor: pinnedAccount}},
+		{name: "the same person on a second box of a fleet that names nobody",
+			token: personToken(person, true, signInDomain), actor: googleToken(poolAccount, true, "", ""), session: "example-box-2",
+			want: exchange.Claims{Session: "example-box-2", Person: person, Scope: exchange.ProjectScopePerson, Principal: personPrincipal, Actor: poolAccount}},
+		{name: "an address Google spells with capitals is the lowercase login",
+			token: personToken("Ada@example.com", true, signInDomain), actor: googleToken(poolAccount, true, "", ""), session: "example-box-3",
+			want: exchange.Claims{Session: "example-box-3", Person: person, Scope: exchange.ProjectScopePerson, Principal: personPrincipal, Actor: poolAccount}},
+		{name: "email_verified as the string Google writes on some of its tokens",
+			token: personToken(person, "true", signInDomain), actor: googleToken(poolAccount, "true", "", ""), session: "example-box-4",
+			want: exchange.Claims{Session: "example-box-4", Person: person, Scope: exchange.ProjectScopePerson, Principal: personPrincipal, Actor: poolAccount}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			claims, err := set.Person(c.token, c.actor, c.session)
+			if err != nil || claims != c.want {
+				t.Fatalf("Person(%s) = %+v, %v; want %+v", c.name, claims, err, c.want)
+			}
+		})
+	}
+}
+
+// TestPersonRefusesWhatItCannotDecide walks every way a sign-in's trade is refused, each by the
+// sentinel an operator acts on and naming what to fix. The machine is read first and the person
+// second, so a box no entry lists is refused whoever is signed in on it.
+func TestPersonRefusesWhatItCannotDecide(t *testing.T) {
+	set := listed(t)
+	for _, c := range []struct {
+		name         string
+		token, actor map[string]any
+		session      string
+		want         error
+		names        string
+	}{
+		{name: "no actor token at all", token: personToken(person, true, signInDomain), actor: nil, session: "example-box",
+			want: exchange.ErrNoActorToken, names: "machine-google-identity"},
+		{name: "an actor token naming no account", token: personToken(person, true, signInDomain), actor: map[string]any{"email_verified": true}, session: "example-box",
+			want: exchange.ErrClaimMissing, names: "email"},
+		{name: "an actor token of an account no entry lists", token: personToken(person, true, signInDomain), actor: googleToken(strangerAccount, true, "", ""), session: "example-box",
+			want: exchange.ErrNoEntry, names: strangerAccount},
+		{name: "a machine whose own address Google has not verified", token: personToken(person, true, signInDomain), actor: googleToken(pinnedAccount, false, cloudProject, instanceName), session: "example-box",
+			want: exchange.ErrEmailNotVerified, names: pinnedAccount},
+		{name: "a machine running where its entry does not allow", token: personToken(person, true, signInDomain), actor: googleToken(pinnedAccount, true, "other-project", instanceName), session: "example-box",
+			want: exchange.ErrMachineNotAllowed, names: "other-project"},
+		{name: "a person's token naming no subject", token: map[string]any{"email": person, "email_verified": true, "hd": signInDomain}, actor: googleToken(poolAccount, true, "", ""), session: "example-box",
+			want: exchange.ErrClaimMissing, names: "sub"},
+		{name: "a person's token naming no address", token: map[string]any{"sub": "109", "email_verified": true, "hd": signInDomain}, actor: googleToken(poolAccount, true, "", ""), session: "example-box",
+			want: exchange.ErrClaimMissing, names: "email"},
+		{name: "a person of another Workspace domain", token: personToken(stranger, true, otherDomain), actor: googleToken(poolAccount, true, "", ""), session: "example-box",
+			want: exchange.ErrNotInDomain, names: stranger},
+		{name: "a person's token carrying no hd at all", token: personToken(person, true, ""), actor: googleToken(poolAccount, true, "", ""), session: "example-box",
+			want: exchange.ErrNotInDomain, names: person},
+		{name: "a person whose address Google has not verified", token: personToken(person, false, signInDomain), actor: googleToken(poolAccount, true, "", ""), session: "example-box",
+			want: exchange.ErrEmailNotVerified, names: person},
+		{name: "no session, which no entry fixes for a person", token: personToken(person, true, signInDomain), actor: googleToken(poolAccount, true, "", ""), session: "",
+			want: exchange.ErrSessionRequired, names: person},
+		{name: "a session carrying whitespace", token: personToken(person, true, signInDomain), actor: googleToken(poolAccount, true, "", ""), session: "example box",
+			want: exchange.ErrSessionInvalid, names: person},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			claims, err := set.Person(c.token, c.actor, c.session)
+			if !errors.Is(err, c.want) {
+				t.Fatalf("Person(%s) = %+v, %v; want %v", c.name, claims, err, c.want)
+			}
+			if !strings.Contains(err.Error(), c.names) {
+				t.Errorf("Person(%s) refused with %q, which does not name %q", c.name, err, c.names)
+			}
+		})
+	}
+}
+
+// TestPersonSaysWhichRefusalItIs: the refusals the spec names each read differently, since what
+// the person does about each one differs — sign in as an account of the domain, verify the
+// address, present the machine's token, have the fleet listed, or run where the entry allows.
+func TestPersonSaysWhichRefusalItIs(t *testing.T) {
+	set := listed(t)
+	said := map[string]string{}
+	for name, c := range map[string]struct{ token, actor map[string]any }{
+		"another domain":             {personToken(stranger, true, otherDomain), googleToken(poolAccount, true, "", "")},
+		"an unverified person":       {personToken(person, false, signInDomain), googleToken(poolAccount, true, "", "")},
+		"an unverified machine":      {personToken(person, true, signInDomain), googleToken(pinnedAccount, false, cloudProject, instanceName)},
+		"a machine no entry lists":   {personToken(person, true, signInDomain), googleToken(strangerAccount, true, "", "")},
+		"no machine acting for them": {personToken(person, true, signInDomain), nil},
+		"a machine where it may not": {personToken(person, true, signInDomain), googleToken(pinnedAccount, true, "other-project", instanceName)},
+	} {
+		_, err := set.Person(c.token, c.actor, "example-box")
+		if err == nil {
+			t.Fatalf("Person(%s) was answered, want a refusal", name)
+		}
+		said[name] = err.Error()
+	}
+	for name, text := range said {
+		for other, otherText := range said {
+			if name != other && text == otherText {
+				t.Errorf("the refusals of %s and of %s read alike: %q", name, other, text)
+			}
+		}
+	}
+}
+
+// TestAnEmptySignInDomainAdmitsNobody: a set built with no domain refuses every person, whatever
+// their token says, rather than taking every account outside any Workspace. It is the rule
+// oidc.WorkspaceLogin states, and the one a broker told about no domain has to follow.
+func TestAnEmptySignInDomainAdmitsNobody(t *testing.T) {
+	set, err := exchange.NewSet(nil, nil, []exchange.GoogleEntry{{Account: poolAccount, Service: poolService}}, "")
+	if err != nil {
+		t.Fatalf("NewSet: %v", err)
+	}
+	for _, token := range []map[string]any{
+		personToken(person, true, signInDomain),
+		personToken(person, true, ""),
+	} {
+		if _, err := set.Person(token, googleToken(poolAccount, true, "", ""), "example-box"); !errors.Is(err, exchange.ErrNotInDomain) {
+			t.Errorf("Person(hd %v) = %v, want %v: an empty configured domain admits nobody", token["hd"], err, exchange.ErrNotInDomain)
 		}
 	}
 }

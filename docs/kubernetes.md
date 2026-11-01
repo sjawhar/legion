@@ -4549,8 +4549,8 @@ each issue's pod (every role of it alike) and the image probe's.
 #### The Dispatch identity the broker can issue
 
 The secrets broker also serves an RFC 8693 token exchange at `POST /v1/oauth/token`, which every caller reaches with `client_id=dispatch-token-exchange` (`ExchangeClientID`, `packages/envoy/internal/broker/oauthwire`).
-It takes four kinds of subject token, each under its own `subject_token_type`:
-a pod's projected Kubernetes service-account token, minted for the exchange's own audience (`SubjectTokenTypeKubernetes`), a GitHub Actions workflow run's token (`SubjectTokenTypeGitHub`), a machine's Google identity token (`SubjectTokenTypeGoogle`), and a machine login's own access token (`SubjectTokenTypeAccessToken`).
+It takes five kinds of subject token, each under its own `subject_token_type`:
+a pod's projected Kubernetes service-account token, minted for the exchange's own audience (`SubjectTokenTypeKubernetes`), a GitHub Actions workflow run's token (`SubjectTokenTypeGitHub`), a machine's Google identity token (`SubjectTokenTypeGoogle`), a person's own Google identity token, carried with the machine's as the actor token (`SubjectTokenTypePerson`, with `ActorTokenTypeMachine`), and a machine login's own access token (`SubjectTokenTypeAccessToken`).
 
 The exchange answers with an opaque Dispatch access token, bound to the key the request's DPoP proof names (`exchangeGrant`, `packages/envoy/internal/broker/oauth/exchange.go`).
 The token lives `BROKER_ACCESS_TOKEN_SECONDS`, 900 seconds by default (`packages/envoy/internal/broker/config/config.go`).
@@ -4561,6 +4561,9 @@ An issued token carries these claims and no others:
 - `person` — the person the session acts for.
 
 - `service` — the service a token that names no person is, and nothing for a token that names one.
+
+- `machine` — the machine a person signed in on acted through, the Google account its actor token named.
+  Every other kind of subject token carries none.
 
 - `project_scope` — `named` or `person`, which says what `project` means.
 
@@ -4576,6 +4579,8 @@ A workflow run's token needs an entry for its repository, its workflow path and 
 A machine's Google identity token needs an entry for the account its `email` claim names (`BROKER_VM_SERVICES`, `Set.Google`), which gives the service, may pin the Compute Engine project and instance names the machine may carry (`BROKER_VM_PROJECTS`, `BROKER_VM_INSTANCES`), and may give a person and a project as a pod's entry does (`BROKER_VM_EXCHANGE_ACCOUNTS`);
 an entry that gives neither mints a token that names its service and no person at all.
 A machine login's token needs no entry at all: the person is the login's approver, the scope is `person`, and the token names no project (`Set.Machine`).
+A person's own Google identity token needs the machine's own as the actor token, of an account an entry lists (`Set.Person`):
+the person's `hd` claim must name the Workspace domain `BROKER_SIGNIN_DOMAIN` gives, the scope is `person`, and the token names that person and that machine.
 A session name belongs to one principal — the service account, the workflow, the Google account, or the person
 — and the broker refuses `invalid_grant` to another principal that names it (`claimSession`, `packages/envoy/internal/broker/oauth/exchange.go`).
 A claim holds the name for `oauthstore.SessionRetention`, 90 days, past the expiry of the token the claim was made for (`BindSession`, `packages/envoy/internal/broker/oauthstore/exchange.go`).

@@ -3,7 +3,7 @@
 // against a local OpenID issuer standing in for the cluster's. Being listed is not being allowed:
 // the caller's name says which of the broker's named-caller routes that account reaches, so the
 // introspection-only caller is refused every route Dispatch's server relays a person's decisions
-// through, and the dispatch caller still reaches all eleven. Nothing here is a unit test — the
+// through, and the dispatch caller still reaches all thirteen. Nothing here is a unit test — the
 // binary is the one cmd/broker builds and every request crosses a socket.
 package main
 
@@ -41,9 +41,9 @@ const (
 
 // TestAListedAccountReachesOnlyItsOwnRoutes lists two callers and drives every route accountAuth
 // authenticates from both. The listener caller, listed for introspection alone, is refused each
-// of the ten relay routes — approve, deny, both revoke-by-approver and the RFC 7009 token
-// revocation among them — 403 ACCOUNT_LACKS_POWER naming itself and the route, and still reads a
-// token back; the dispatch caller reaches all eleven.
+// of the twelve relay routes — approve, deny, both revoke-by-approver, the RFC 7009 token
+// revocation and both person sign-in routes among them — 403 ACCOUNT_LACKS_POWER naming itself
+// and the route, and still reads a token back; the dispatch caller reaches all thirteen.
 func TestAListedAccountReachesOnlyItsOwnRoutes(t *testing.T) {
 	databaseURL := storetest.URL(t)
 	cluster := oidctest.New(t)
@@ -69,7 +69,7 @@ func TestAListedAccountReachesOnlyItsOwnRoutes(t *testing.T) {
 	// pattern is what the broker names in a refusal, path what this test calls.
 	for _, route := range []struct {
 		method, pattern, path, contentType, body string
-		// relays is true for the ten routes Dispatch's server relays a person's decisions and
+		// relays is true for the twelve routes Dispatch's server relays a person's decisions and
 		// reads through, false for introspection, the one route the listener caller may call.
 		relays bool
 	}{
@@ -94,6 +94,9 @@ func TestAListedAccountReachesOnlyItsOwnRoutes(t *testing.T) {
 		{method: http.MethodGet, pattern: "/v1/grants", path: "/v1/grants?approver=" + powersApprover, relays: true},
 		{method: http.MethodPost, pattern: "/v1/grants/{id}/revoke-by-approver", path: "/v1/grants/" + unknownID + "/revoke-by-approver",
 			contentType: "application/json", body: `{"approver":"` + powersApprover + `"}`, relays: true},
+		{method: http.MethodGet, pattern: "/v1/person-signins", path: "/v1/person-signins?person=" + powersApprover, relays: true},
+		{method: http.MethodPost, pattern: "/v1/person-signins/{id}/revoke", path: "/v1/person-signins/" + unknownID + "/revoke",
+			contentType: "application/json", body: `{"person":"` + powersApprover + `"}`, relays: true},
 	} {
 		t.Run("as listener: "+route.method+" "+route.pattern, func(t *testing.T) {
 			status, body := live.callAs(t, route.method, route.path, listenerToken, route.contentType, route.body)
@@ -126,7 +129,7 @@ func TestAListedAccountReachesOnlyItsOwnRoutes(t *testing.T) {
 			// "this account is not listed".
 			status, body := live.callAs(t, route.method, route.path, dispatchToken, route.contentType, route.body)
 			if code, _ := body["code"].(string); status == http.StatusForbidden && (code == lacksPower || code == "ACCOUNT_NOT_LISTED") {
-				t.Fatalf("%s %s as dispatch = %d %v, want anything but the authority's refusal: the dispatch caller reaches all eleven routes as it did before", route.method, route.pattern, status, body)
+				t.Fatalf("%s %s as dispatch = %d %v, want anything but the authority's refusal: the dispatch caller reaches all thirteen routes as it did before", route.method, route.pattern, status, body)
 			}
 		})
 	}

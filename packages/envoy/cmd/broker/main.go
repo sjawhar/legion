@@ -438,7 +438,7 @@ func main() {
 	// token. Both halves are optional and the grant is composed either way: a broker told about
 	// no issuer accepts no subject token at all, which the line below says once at boot rather
 	// than leaving an operator to read it out of a refusal.
-	exchangePolicy, err := exchange.NewSet(cfg.ExchangeAccounts, cfg.ExchangeWorkflows, cfg.ExchangeGoogleAccounts)
+	exchangePolicy, err := exchange.NewSet(cfg.ExchangeAccounts, cfg.ExchangeWorkflows, cfg.ExchangeGoogleAccounts, cfg.SignIn.Domain)
 	fatal(err)
 	exchangeConfig := oauth.ExchangeConfig{Policy: exchangePolicy}
 	if cfg.ExchangeK8sAudience != "" {
@@ -452,6 +452,15 @@ func main() {
 		// shared: BROKER_GOOGLE_OIDC_AUDIENCE is what made it read one, so this is never nil.
 		exchangeConfig.Google = oauth.IssuerConfig{Issuer: cfg.GoogleOIDCIssuer, Audience: cfg.GoogleOIDCAudience, Keys: discovered.GoogleKeys}
 		exchangeConfig.MachineCredentials = machineCredentials(enr)
+	}
+	if cfg.SignInDeviceAudience != "" {
+		// A person signs in through Google, which is also the issuer of the machine's actor
+		// token, so BROKER_SIGNIN_DEVICE_AUDIENCE needs BROKER_GOOGLE_OIDC_AUDIENCE and the two
+		// share the key set read above. What a person may be is BROKER_SIGNIN_DOMAIN's to say,
+		// which the exchange's policy already holds.
+		exchangeConfig.PersonAudience = cfg.SignInDeviceAudience
+		exchangeConfig.PersonSignIns = personSignIns()
+		slog.Info("google person sign-in", "issuer", cfg.GoogleOIDCIssuer, "audience", cfg.SignInDeviceAudience, "domain", cfg.SignIn.Domain)
 	}
 	if cfg.ExchangeGitHubIssuer != "" {
 		// The GitHub issuer has no second reader, so it keeps a key source of its own, read here
@@ -861,6 +870,25 @@ func machineCredentials(enr *enroll.Service) oauth.MachineCredentials {
 			return "", err
 		}
 		return id.String(), nil
+	}
+}
+
+// personSignIns is oauth.ExchangeConfig.PersonSignIns over the broker's store: the sign-in a
+// person's trade belongs to, written in the exchange's own transaction
+// (store.RecordPersonSignIn), so the sign-in and the access token minted under it land
+// together. A box key that person has revoked is store.ErrSignInRevoked, which the exchange
+// answers invalid_grant naming the sign-in command.
+func personSignIns() oauth.PersonSignIns {
+	return func(ctx context.Context, in oauth.PersonSignIn) error {
+		tx, ok := oauthstore.TxFrom(ctx)
+		if !ok {
+			return errors.New("broker: a person's sign-in is recorded in the exchange's transaction")
+		}
+		err := store.RecordPersonSignIn(ctx, tx, in.Person, in.Thumbprint, in.Machine)
+		if errors.Is(err, store.ErrSignInRevoked) {
+			return fmt.Errorf("%w: %v", oauth.ErrSignInRevoked, err)
+		}
+		return err
 	}
 }
 

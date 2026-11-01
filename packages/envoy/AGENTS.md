@@ -4620,7 +4620,13 @@ the issuer of the Google identity tokens machines present, `Config.GoogleOIDCIss
 it is a variable because a dev stack has no Google, `cmd/dev-oidc-issuer` standing in for it on a loopback port, and it is read only where `BROKER_GOOGLE_OIDC_AUDIENCE` is set), `BROKER_GOOGLE_OIDC_AUDIENCE` (optional;
 the audience a machine's Google identity token must carry, `Config.GoogleOIDCAudience`, at the RFC 8693 token exchange, where such a token is a subject token;
 it needs `BROKER_VM_SERVICES`, since an audience no machine service is listed for could accept no token;
-unset, `BROKER_VM_SERVICES`, `BROKER_VM_PROJECTS`, `BROKER_VM_INSTANCES` and `BROKER_VM_EXCHANGE_ACCOUNTS` are each refused, naming the variable and this one), `BROKER_VM_SERVICES` (optional;
+unset, `BROKER_VM_SERVICES`, `BROKER_VM_PROJECTS`, `BROKER_VM_INSTANCES`, `BROKER_VM_EXCHANGE_ACCOUNTS` and `BROKER_SIGNIN_DEVICE_AUDIENCE` are each refused, naming the variable and this one), `BROKER_SIGNIN_DEVICE_AUDIENCE` (optional;
+the audience a person's own Google identity token must carry, `Config.SignInDeviceAudience`, at the RFC 8693 token exchange, where such a token is a subject token (`urn:envoy:params:oauth:token-type:person-google-identity`) and the machine the person signed in on presents its own as the actor token (`urn:envoy:params:oauth:token-type:machine-google-identity`).
+It is the OAuth client id of the device-flow client `agent-secrets login` runs Google's device authorization grant as, since Google puts a client's id in the `aud` of the ID tokens it mints for it;
+the issuer is `BROKER_GOOGLE_OIDC_ISSUER` and the person is held to `BROKER_SIGNIN_DOMAIN` through the `hd` claim, by the very function the broker's own approval sign-in is held by (`oidc.WorkspaceLogin`), so an empty domain admits nobody.
+It needs `BROKER_GOOGLE_OIDC_AUDIENCE`, whose machines are the boxes a person may sign in from, and it is **not** one of the four `config.SignInSettings`:
+those four are required together because no broker serves an approval page without them, where this one is optional, as the whole Google exchange is.
+Unset, the broker registers neither of those two token types at all, so a caller presenting either is refused by the library naming it), `BROKER_VM_SERVICES` (optional;
 whitespace-separated `name=<service account email>` entries, such as `example-service=example-fleet@example-project.iam.gserviceaccount.com`, keyed by account in `Config.VMServicesByAccount`;
 read by its own parser (`parseVMServiceAccounts`), since `parseServiceAccounts` takes only Kubernetes subjects.
 After the same service-name form and refusal of `shared`, `vmAccountRefusal` takes only a user-managed account, `<account id>@<project id>.iam.gserviceaccount.com` in lowercase as a token carries it, and refuses with a message of its own such an address written with capital letters, a project's default account (Compute Engine's `<number>-compute@developer.gserviceaccount.com` or App Engine's `<project id>@appspot.gserviceaccount.com`, which the project's workloads run as by default), and a Google-managed service agent (`service-<number>@…`, or any `gcp-sa-` domain);
@@ -4684,7 +4690,7 @@ with the AWS store, a `BROKER_SECRETS_PREFIX` that does not end in `/`, starts w
 with the GCP store, a prefix not of its form (a project id in place of the number among them) and a key name outside `global`;
 the other store's key variable set; exactly one of `BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set;
 a `BROKER_API_ACCOUNTS`, `BROKER_SERVICE_LOGINS` or `BROKER_EXCHANGE_K8S_AUDIENCE` set with no cluster issuer, a `BROKER_EXCHANGE_ACCOUNTS` with no `BROKER_EXCHANGE_K8S_AUDIENCE` and a `BROKER_EXCHANGE_WORKFLOWS` with no `BROKER_EXCHANGE_GITHUB_ISSUER`, each naming the pair whose tokens its callers present;
-any of `BROKER_VM_SERVICES`, `BROKER_VM_PROJECTS` and `BROKER_VM_INSTANCES` set with no `BROKER_GOOGLE_OIDC_AUDIENCE`, and that audience set with no `BROKER_VM_SERVICES`;
+any of `BROKER_VM_SERVICES`, `BROKER_VM_PROJECTS`, `BROKER_VM_INSTANCES` and `BROKER_SIGNIN_DEVICE_AUDIENCE` set with no `BROKER_GOOGLE_OIDC_AUDIENCE`, and that audience set with no `BROKER_VM_SERVICES`;
 each machine-account refusal of the paragraph above; and a `_SECONDS` variable that isn't a whole number between the min and max its row of Load's `ints` table gives (non-numeric fails the same check as out of range).
 `cmd/broker/main.go` logs at boot, before it loads the AWS config or opens the database, how it signs in (`database sign-in method=rds-iam` when `Config.DatabaseIAM`, else `method=password`), then which store it built and under what (`secret store store=<store>
 credentials=aws-sdk|application-default|fake secrets file`;
@@ -4720,7 +4726,7 @@ It also checks where those codes are produced:
 every helper `Response` literal that is not `OK: true` must name its fields and set `Code` to a documented `Code*` constant, and every `int`-returning function in `cmd/agent-secrets` (and every `os.Exit` there) may return only `0`, `1`, a documented `exit*` constant or another such function's result.
 The CLI reference is the built binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 38 HTTP routes
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 40 HTTP routes
 — a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the contract for every row is the broker's design overview.
 Each row's handler is wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `renewAuth`, `accountAuth`, `accountAuthAfterRecordKind`, `serviceAuth`, `signInAuth`), which fixes both the credential `server.authenticate` checks and the caller the handler receives (a launcher `enroll.Credential`, an enrollment id, the `approval.Session` a `signInAuth` row's page reads, or, for an `accountAuth` route, the name `BROKER_API_ACCOUNTS` gives the calling service
 — which is all that credential says, so every such handler takes its subject from the path or body:
@@ -4732,7 +4738,7 @@ A bad credential is a 401 (`LAUNCHER_INVALID`, `PROOF_INVALID`, or, for `account
 — the credential is good and it is the broker's list that refuses
 — and `ACCOUNT_LACKS_POWER`, for a listed caller reaching a route its name does not carry, naming that caller and that route.
 No refusal repeats the token.
-Each `accountAuth` row declares the power it needs, `readsTokensBack` (`POST /v1/oauth/introspect`) or `relaysDecisions` (the ten routes Dispatch's server relays a person's decisions, ends one of the broker's tokens and reads through, the two decide rows among them), `accountPowers` says which powers each caller name carries, and `authenticate` checks the two before the handler runs, so listing an account for introspection alone never gives it approval or revocation authority (`TestEveryAccountRouteDeclaresItsPower` fails on an `accountAuth` row that declares none).
+Each `accountAuth` row declares the power it needs, `readsTokensBack` (`POST /v1/oauth/introspect`) or `relaysDecisions` (the twelve routes Dispatch's server relays a person's decisions, ends one of the broker's tokens and reads through, the two decide rows and the two person sign-in rows among them), `accountPowers` says which powers each caller name carries, and `authenticate` checks the two before the handler runs, so listing an account for introspection alone never gives it approval or revocation authority (`TestEveryAccountRouteDeclaresItsPower` fails on an `accountAuth` row that declares none).
 The two `accountAuthAfterRecordKind` rows declare `relaysDecisions` as well, and `decideRecord` checks it against that same table once it has read the record's kind and authenticated its own caller, since `authenticate` reads no credential for them; that test passes over them, being no `accountAuth` rows, and `cmd/broker/account_powers_test.go` is what pins them, driving each as the `listener` caller and reading `403 ACCOUNT_LACKS_POWER`.
 `accountCaller` is the check a daemon's token login makes (`machine.Service.VerifyServiceToken`), against the same verifier and with the same taxonomy);
 `serviceAuth` is that same check, taken as the whole of a route's authentication:
@@ -4791,11 +4797,14 @@ Read `routes()` for the current, authoritative route list.
 
 The RFC 8693 token exchange is the token endpoint's other grant (`POST /v1/oauth/token`, `oauth.Provider.exchangeGrant`):
 a caller presents the platform identity it already holds and gets back one of the broker's access tokens, which it writes Dispatch with.
-Four subject tokens reach it, each under its own `subject_token_type` (`internal/broker/oauthwire`, the wire contract the broker and its callers share):
+Five subject tokens reach it, each under its own `subject_token_type` (`internal/broker/oauthwire`, the wire contract the broker and its callers share):
 a pod's projected ServiceAccount token (`urn:envoy:params:oauth:token-type:kubernetes-service-account`, minted for `BROKER_EXCHANGE_K8S_AUDIENCE` and verified against `BROKER_K8S_OIDC_ISSUER`, and it must carry the pod it is bound to);
 a continuous-integration workflow run's GitHub token (`urn:envoy:params:oauth:token-type:github-workflow-run`, against `BROKER_EXCHANGE_GITHUB_ISSUER`/`_AUDIENCE`, single use, since a run mints a fresh one per request, while a pod's standing token is exchanged as often as its role needs);
 a machine's Google identity token (`urn:envoy:params:oauth:token-type:google-identity`, minted for `BROKER_GOOGLE_OIDC_AUDIENCE` and verified against `BROKER_GOOGLE_OIDC_ISSUER`, not single use, since a metadata server hands the same token out until it is nearly spent, and admitted an hour of lifetime as a workflow run's is);
+a person's own Google identity token (`urn:envoy:params:oauth:token-type:person-google-identity`, minted for `BROKER_SIGNIN_DEVICE_AUDIENCE` and verified against `BROKER_GOOGLE_OIDC_ISSUER`, not single use for the reason a machine's is not), carried with the machine's own as the actor token (`urn:envoy:params:oauth:token-type:machine-google-identity`, the one actor token the exchange client may present, the very token the machine trades for itself with and so held to `BROKER_GOOGLE_OIDC_AUDIENCE`);
 and a dev box session's own machine access token (`urn:ietf:params:oauth:token-type:access_token`), which no entry lists, because the person is the approver its machine login already records.
+The exchange client is registered for that one actor type and for no `may_act` claim (`exchangeRegisteredClient`, `oauthstore/client.go`): Google puts no `may_act` in a person's ID token, so what authorizes the delegation is the broker's own — the machine's actor token, held to the entry rules `BROKER_VM_SERVICES` makes, and the sign-in row the box key is recorded in.
+A machine trading for itself carries no actor token at all and reaches none of that.
 A subject token must be signed with one of its issuer's published asymmetric keys
 — `none` and a shared secret are refused before any key is fetched — and its audience is checked by the broker itself, which the library does not do.
 Every caller presents the same client id, `dispatch-token-exchange`, and no client credential at all (`exchangeClientAuth`):
@@ -4809,8 +4818,18 @@ handed the verified claims, it answers the session the token writes as, the pers
 — `named`, the one project `BROKER_EXCHANGE_ACCOUNTS`/`BROKER_EXCHANGE_WORKFLOWS`/`BROKER_VM_EXCHANGE_ACCOUNTS` fixes, or `person`, every project its person may write, which is what a person's own credential gets and the word a token naming no person at all carries, being held to no one project.
 It is also the one reading of a Google identity token's own claim shapes (`exchange.ReadGoogleIdentity`, `GoogleIdentity`, `ComputeEngine`), which `enroll.GoogleVMVerifier.VerifyGoogle` reads the same token through, so `email`, `email_verified` and the `google.compute_engine` members are spelled once.
 Its refusals are one answer an operator can act on each:
-`ErrNoEntry`, `ErrNoPodBinding`, `ErrSessionMismatch`, `ErrSessionRequired`, `ErrSessionInvalid`, `ErrClaimMissing`, `ErrEmailNotVerified` and `ErrNoComputeEngine` and `ErrMachineNotAllowed` of a machine, and, of a pod-session registration, `ErrSessionFixed`.
+`ErrNoEntry`, `ErrNoPodBinding`, `ErrSessionMismatch`, `ErrSessionRequired`, `ErrSessionInvalid`, `ErrClaimMissing`, `ErrEmailNotVerified`, `ErrNoComputeEngine` and `ErrMachineNotAllowed` of a machine, and `ErrNotInDomain` and `ErrNoActorToken` of a person's sign-in, and, of a pod-session registration, `ErrSessionFixed`.
 The whole exchange runs in one transaction, because the claim on the session name and the token it is claimed for must land together or not at all.
+
+A person's sign-in on a machine is a row of `person_signins` (migration 0025, `internal/broker/store/person_signin.go`): the person, the RFC 7638 thumbprint of the box key `agent-secrets login` made and keeps with Google's refresh token, the machine's Google account, and the times it was made, last used and revoked, under a live-unique index on the person and the thumbprint.
+The first trade of a person and a box key writes the row, in the exchange's own transaction (`store.RecordPersonSignIn`, `oauth.ExchangeConfig.PersonSignIns`), and every later trade of that pair moves its last use;
+a thumbprint that is simply new is a second sign-in of its own, which is the person signing in on a second box, and a thumbprint the person has **revoked** is refused for good — the revoked row stays beside any later one, so signing in again with the very key that was revoked cannot undo the revoke, and the refusal names `agent-secrets login`.
+Revoking ends the tokens in the same statement: every live `oauth_access_tokens` row whose stored session names that person and is bound to that thumbprint is deactivated with the row, so none of them outlives the sign-in by `BROKER_ACCESS_TOKEN_SECONDS` plus `brokertoken.AffirmativeCacheTTL`, exactly as revoking a machine login ends its credential's tokens.
+Only access tokens, since an exchanged trade is answered no refresh token.
+`GET /v1/person-signins?person=<email>` lists a person's live sign-ins by machine and `POST /v1/person-signins/{id}/revoke` (body `{"person"}`) ends one (`handlers_ui_personsignin.go`);
+both are `accountAuth(relaysDecisions)`, the power only `dispatch` holds, and both name the person the caller gives, which Dispatch filled from its own session, as every relayed list and revoke does — an empty one is `400 PERSON_REQUIRED`, and a sign-in of anyone else is answered `404 NOT_FOUND` as an id nothing has, so nobody learns another person's sign-ins by trying ids.
+The minted token names the person and, as the `machine` claim and the introspection answer's `machine` field, the machine's account;
+the RFC 8693 `act` claim the library writes beside it records the same delegation as the actor token's own subject spells it.
 
 A pod exchanges under a session name only while a registration says that pod may (`oauth_pod_sessions`, migration 0021).
 What that binding holds, and what it does not:
