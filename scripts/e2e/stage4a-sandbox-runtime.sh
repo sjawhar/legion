@@ -407,8 +407,6 @@ pass
 
 begin operator-route
 anthropic_key_args=()
-# shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
-account_placeholder='${POD_SERVICE_ACCOUNT}'
 case "$model_route" in
 gateway)
   # shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
@@ -419,18 +417,14 @@ gateway)
   # shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
   placeholder='${MODEL_TOKEN_AUDIENCE}'
   pod=$(<"$operator_route/pod.yml")
-  pod=${pod//"$placeholder"/"$gateway_audience"}
-  printf '%s\n' "${pod//"$account_placeholder"/"$pod_service_account"}" >"$work/pod.yml"
+  printf '%s\n' "${pod//"$placeholder"/"$gateway_audience"}" >"$work/pod.yml"
   grep -qF "audience: \"$gateway_audience\"" "$work/pod.yml" || fail "the operator route's pod.yml has no token audience $placeholder to fill with the gateway's"
-  grep -qF "service_account: $pod_service_account" "$work/pod.yml" || fail "the operator route's pod.yml has no ServiceAccount $account_placeholder to fill with the run's"
   note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $operator_route, label legion.dev/project=$run_label"
-  note "operator pod: $work/pod.yml, the operator route's with its token audience from LEGION_E2E_MODEL_GATEWAY_AUDIENCE and its ServiceAccount from LEGION_E2E_POD_SERVICE_ACCOUNT"
+  note "operator pod: $work/pod.yml, the operator route's with its token audience from LEGION_E2E_MODEL_GATEWAY_AUDIENCE"
   ;;
 key-file)
   cp "$operator_route/models-key-file.yml" "$work/models.yml"
-  pod=$(<"$operator_route/pod-key-file.yml")
-  printf '%s\n' "${pod//"$account_placeholder"/"$pod_service_account"}" >"$work/pod.yml"
-  grep -qF "service_account: $pod_service_account" "$work/pod.yml" || fail "the operator route's pod-key-file.yml has no ServiceAccount $account_placeholder to fill with the run's"
+  cp "$operator_route/pod-key-file.yml" "$work/pod.yml"
   # No check here makes a real model round trip (the pods run a stub agent, decision 7; Legion's
   # own image probe makes none either), so this is a locally-generated placeholder, never printed:
   # it proves the key-file plumbing (provider_keys, the shim's export into the agent's
@@ -438,9 +432,18 @@ key-file)
   (umask 077 && od -An -N32 -tx1 /dev/urandom | tr -d ' \n' >"$work/anthropic-api-key")
   anthropic_key_args=(--from-file=ANTHROPIC_API_KEY="$work/anthropic-api-key")
   note "[operator] ConfigMap $route_configmap: models-key-file.yml (Anthropic's own endpoint, no gateway) and overlay.yml from $operator_route, label legion.dev/project=$run_label"
-  note "operator pod: $work/pod.yml, the key-file fixture with its ServiceAccount from LEGION_E2E_POD_SERVICE_ACCOUNT (no projected token: operator-token's projected-token assertion is skipped, the rest still run and pass)"
+  note "operator pod: $work/pod.yml, the key-file fixture (no projected token: operator-token's projected-token assertion is skipped, the rest still run and pass)"
   ;;
 esac
+# The ServiceAccount is the operator's own whichever route the run takes, so it is filled once,
+# here, over whichever fixture the arm above wrote.
+# shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
+account_placeholder='${POD_SERVICE_ACCOUNT}'
+pod=$(<"$work/pod.yml")
+printf '%s\n' "${pod//"$account_placeholder"/"$pod_service_account"}" >"$work/pod.yml"
+grep -qF "service_account: $pod_service_account" "$work/pod.yml" ||
+  fail "the operator route's pod fixture has no ServiceAccount $account_placeholder to fill with the run's"
+note "operator pod $work/pod.yml: its ServiceAccount from LEGION_E2E_POD_SERVICE_ACCOUNT"
 op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$operator_route/overlay.yml" \
   --dry-run=client -o yaml | op label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
   fail "the operator could not create ConfigMap $route_configmap"

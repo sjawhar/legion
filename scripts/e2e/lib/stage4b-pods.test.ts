@@ -258,7 +258,7 @@ block_account`,
   }
 
   test("a block naming an account runs its pods as that account", () => {
-    expect(accountOf({ service_account: "legion-infra-worker" })).toBe("legion-infra-worker");
+    expect(accountOf({ service_account: "operator-account" })).toBe("operator-account");
   });
 
   test("a block naming no account runs its pods as the namespace's default", () => {

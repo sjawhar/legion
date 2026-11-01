@@ -9,7 +9,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
-	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
 // otherAccount is the ServiceAccount an operator moves runtime.kubernetes.pod.service_account to
@@ -90,12 +89,7 @@ func TestARelaunchReplacesAPodRunningAnotherServiceAccount(t *testing.T) {
 				// The inverse of a kept drifted image's installing Resume, which starts through
 				// the install wrapper: this pod was replaced, so its fresh copies are already
 				// current and the argv starts the shim directly.
-				var start shimwire.LauncherStart
-				for _, frame := range g.sent(spec.Claim) {
-					if s, ok := frame.(shimwire.LauncherStart); ok {
-						start = s
-					}
-				}
+				start := lastStart(t, g, spec.Claim)
 				i := slices.Index(start.Argv, "--")
 				if i < 0 || i+1 >= len(start.Argv) {
 					t.Fatalf("the installing Resume's argv %q names no command after --", start.Argv)
