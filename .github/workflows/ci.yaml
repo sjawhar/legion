@@ -2234,7 +2234,7 @@ jobs:
           # pgvector, the copy in ghcr.io/sjawhar/legion/ci (.github/ci-images.yaml) this job's
           # service used before the lanes.
           export DISPATCH_E2E_PG_IMAGE=ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
-          export DISPATCH_E2E_WORKERS=4
+          export DISPATCH_E2E_WORKERS=3
           export PLAYWRIGHT_JSON_OUTPUT_NAME=report.json
           status=0
           bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --reporter=list,json || status=$?
