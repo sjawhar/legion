@@ -134,6 +134,14 @@ const teardownTimeout = 5 * time.Second
 // the lease it was about to give back, so what that connection holds is unknown.
 var errLeaseNotHeld = errors.New("the unlock reports this session did not hold the lease")
 
+// ExclusiveFunc is Exclusive's signature. A loop that gates its passes on a lease takes one of
+// these and is handed Exclusive itself (RunWoken, the webhook redelivery sweep's Run), and a test
+// of that loop's schedule hands it a lease of its own making instead: the schedule is then a loop,
+// a fake clock and nothing else, which is what lets it run inside a synctest bubble, where a
+// Postgres connection may not go (a bubbled goroutine blocked on a socket never blocks durably,
+// so the clock never advances past the statement it waits on).
+type ExclusiveFunc func(ctx context.Context, leases Leases, name string, due time.Time, period time.Duration, pass func(context.Context)) bool
+
 // Exclusive runs pass exactly when this process takes the lease named name and that loop's period
 // is not already served, and reports whether it ran. It is the once-per-period guard a periodic
 // maintenance loop needs once two envoy-dispatch processes serve one database: each process fires

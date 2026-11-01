@@ -24,7 +24,7 @@ func signal(wake chan struct{}) {
 
 // runLoop runs loop with exclusive in place of Exclusive until the returned cancel is called, and
 // done closes once it has returned.
-func runLoop(loop WokenLoop, exclusive exclusiveFunc) (cancel context.CancelFunc, done <-chan struct{}) {
+func runLoop(loop WokenLoop, exclusive ExclusiveFunc) (cancel context.CancelFunc, done <-chan struct{}) {
 	ctx, cancel := context.WithCancel(context.Background())
 	finished := make(chan struct{})
 	go func() {
@@ -59,7 +59,7 @@ func wantPassesAt(t *testing.T, passes *passClock, start time.Time, offsets ...t
 }
 
 // noLease is an exclusive the rows without a lease never call.
-func noLease(t *testing.T) exclusiveFunc {
+func noLease(t *testing.T) ExclusiveFunc {
 	return func(context.Context, Leases, string, time.Time, time.Duration, func(context.Context)) bool {
 		t.Error("a loop with no lease asked for one")
 		return false

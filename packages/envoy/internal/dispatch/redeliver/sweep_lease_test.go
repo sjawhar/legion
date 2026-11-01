@@ -3,6 +3,7 @@ package redeliver_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -185,22 +187,75 @@ func (e *sweepEnds) times() []time.Time {
 	return slices.Clone(e.ends)
 }
 
+// errNoStateInABubble is what the sweeper's Open answers inside the synctest bubble below, so the
+// sweeps there reach neither NATS nor GitHub. A bubble's clock advances only while every goroutine
+// in it is durably blocked, which a goroutine waiting on a socket never is, so a round trip out of
+// the bubble would hold that clock for as long as the wire took - and nats.go waits for its reply
+// on a channel it makes on the caller's goroutine, inside the bubble, which the connection's
+// response subscription then answers on from outside it: not a panic a test could read, but the
+// runtime's fatal "send on synctest channel from outside bubble" (nats.go createNewRequestAndSend
+// and respHandler, runtime/chan.go chansend). What a sweep does is sweep_test.go's; that the pass
+// the loop runs under the lease is the sweep is the Postgres row at the end of this file.
+var errNoStateInABubble = errors.New("the schedule's test opens no state")
+
+// sweepTime stands for a real sweep's own time inside the bubble - the listing, the records it
+// writes, the lease's own statements around it - so a loop that ticked on a fixed cadence rather
+// than waiting after each sweep would show it missing from the gap.
+const sweepTime = 10 * time.Second
+
+// sweepLease is a lease of this test's own in duty.Exclusive's shape (duty.ExclusiveFunc): it
+// records the fake clock when each sweep took the lease and when it gave it back, with the name,
+// due time and period the loop handed it, and runs the sweep in between.
+type sweepLease struct {
+	mu      sync.Mutex
+	took    []time.Time
+	gave    []time.Time
+	names   []string
+	dues    []time.Time
+	periods []time.Duration
+}
+
+func (l *sweepLease) exclusive(ctx context.Context, _ duty.Leases, name string, due time.Time, period time.Duration, pass func(context.Context)) bool {
+	l.mu.Lock()
+	l.took = append(l.took, time.Now())
+	l.names = append(l.names, name)
+	l.dues = append(l.dues, due)
+	l.periods = append(l.periods, period)
+	l.mu.Unlock()
+	pass(ctx)
+	time.Sleep(sweepTime)
+	l.mu.Lock()
+	l.gave = append(l.gave, time.Now())
+	l.mu.Unlock()
+	return true
+}
+
+// times answers when each sweep took the lease and when it gave it back.
+func (l *sweepLease) times() (took, gave []time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.took), slices.Clone(l.gave)
+}
+
 // The running sweep sweeps at start and then waits the interval plus up to a tenth of it again
 // after every sweep (duty.Jittered), drawn afresh each period, so two processes started together
 // drift apart rather than reaching the lease in step for the life of both. With the draw fixed at
-// its smallest and at its largest, the first sweep lists before any wait could have ended, and
-// each later one lists, measured from the end of the sweep before it, after exactly the interval
-// plus the draw - at least one interval, a plain ticker's being the interval less the sweep's own
-// time, and under 1.1 of one - allowing a little for the lease's own statements between the two.
-// Each wait of at least one interval reaches the next period, so every sweep runs and none is
-// skipped as served.
+// its smallest and at its largest, the first sweep is due the moment the loop starts, before any
+// wait, and each later one is due, measured from the end of the sweep before it, after exactly the
+// interval plus the draw: at least one interval, a plain ticker's being the interval less the
+// sweep's own time, and under 1.1 of one. Each sweep is handed the moment its timer fired as its
+// due time, the moment duty.Exclusive buckets its period by.
+//
+// It runs on the fake clock of a synctest bubble, where those gaps are exact: measured against the
+// wall clock they carried whatever the lease's own statements and a loaded runner's scheduler took
+// between one sweep and the next, which no allowance bounds (run 41295911468 read 1.245970106s for
+// a wait of 1.099999999s). The bubble's lease is this test's own; that the wait of at least one
+// interval always reaches the next period, which is what keeps a sweep from being skipped as
+// served, is the row below against the real one.
 func TestTheRunningSweepSweepsAtStartThenWaitsBetweenOneAndOnePointOneIntervals(t *testing.T) {
 	const (
-		interval = time.Second
+		interval = time.Minute
 		sweeps   = 4
-		// What the lease's statements between one sweep's summary and the next one's listing
-		// take: the record of the pass and the unlock, then the next take, the period read.
-		leaseAllowance = 100 * time.Millisecond
 	)
 	for _, tc := range []struct {
 		name string
@@ -211,46 +266,155 @@ func TestTheRunningSweepSweepsAtStartThenWaitsBetweenOneAndOnePointOneIntervals(
 		{name: "largest draw", draw: func(n time.Duration) time.Duration { return n - 1 }, wait: interval + interval/10 - 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// Each row opens the pool afresh, which clears the period the row before recorded.
-			leases := redeliverTestLeases(t)
 			redeliver.FixJitter(t, tc.draw)
-			h := newHarness(t)
-			github := &timedGitHub{}
-			ends := &sweepEnds{}
-			sweeper := &redeliver.Sweeper{
-				GitHub: github,
-				Open:   func() (bus.KeyValue, error) { return h.state, nil },
-				Logger: slog.New(slog.NewTextHandler(ends, nil)),
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			done := make(chan struct{})
-			started := time.Now()
-			go func() {
-				defer close(done)
-				sweeper.Run(ctx, interval, leases)
-			}()
-			for deadline := time.Now().Add(sweeps * 3 * interval); len(ends.times()) < sweeps; {
-				if time.Now().After(deadline) {
-					cancel()
-					<-done
-					t.Fatalf("%d sweeps in %v, want %d: listings at %v", len(ends.times()), sweeps*3*interval, sweeps, github.times())
+			synctest.Test(t, func(t *testing.T) {
+				logs := &lockedBuffer{}
+				lease := &sweepLease{}
+				sweeper := &redeliver.Sweeper{
+					Open:   func() (bus.KeyValue, error) { return bus.KeyValue{}, errNoStateInABubble },
+					Logger: slog.New(slog.NewTextHandler(logs, nil)),
 				}
-				time.Sleep(10 * time.Millisecond)
-			}
+				ctx, cancel := context.WithCancel(context.Background())
+				done := make(chan struct{})
+				started := time.Now()
+				go func() {
+					defer close(done)
+					sweeper.RunUnderLease(ctx, interval, lease.exclusive)
+				}()
+				// One sweep's time plus its wait is the loop's whole cycle, so this ends after
+				// the fourth sweep and before the fifth is due.
+				time.Sleep(sweeps*(sweepTime+tc.wait) - sweepTime)
+				cancel()
+				<-done
+
+				took, gave := lease.times()
+				if len(took) < sweeps || len(gave) < sweeps {
+					t.Fatalf("%d sweeps took the lease and %d gave it back in the time %d cycles of the loop take, want %d of each", len(took), len(gave), sweeps, sweeps)
+				}
+				if first := took[0].Sub(started); first != 0 {
+					t.Errorf("the first sweep was due %v after the loop started, want at start, before any wait", first)
+				}
+				for index := 1; index < sweeps; index++ {
+					wait := took[index].Sub(gave[index-1])
+					if wait < interval || wait >= interval+interval/10 {
+						t.Errorf("sweep %d was due %v after sweep %d ended, want within [%v, %v)", index+1, wait, index, interval, interval+interval/10)
+					}
+					if wait != tc.wait {
+						t.Errorf("sweep %d was due %v after sweep %d ended, want %v for this draw", index+1, wait, index, tc.wait)
+					}
+				}
+				if len(took) != sweeps {
+					t.Errorf("%d sweeps in the time %d cycles of the loop take, want %d: the loop left less between two of them than it drew", len(took), sweeps, sweeps)
+				}
+				if attempted := logs.count("webhook redelivery sweep failed"); attempted != len(gave) {
+					t.Errorf("%d of the %d sweeps that ended ran a sweep, want all of them: the pass the loop runs under the lease is the sweep itself\n%s", attempted, len(gave), logs)
+				}
+				for index := range took {
+					if lease.names[index] != webhookRedeliveryLease || lease.periods[index] != interval {
+						t.Errorf("sweep %d took lease %q for a period of %v, want %s for %v", index+1, lease.names[index], lease.periods[index], webhookRedeliveryLease, interval)
+					}
+					if !lease.dues[index].Equal(took[index]) {
+						t.Errorf("sweep %d was handed a due time of %v, want %v, the moment its timer fired", index+1, lease.dues[index].Sub(started), took[index].Sub(started))
+					}
+				}
+			})
+		})
+	}
+}
+
+// shortestWaits fixes the loop's draw at its smallest - a wait of exactly one interval, the
+// shortest it ever leaves and so the tightest case for the next period's boundary - and records
+// the moment each wait was asked for, which is the moment the lease of the sweep before it was
+// given back.
+type shortestWaits struct {
+	mu sync.Mutex
+	at []time.Time
+}
+
+func (w *shortestWaits) draw(time.Duration) time.Duration {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.at = append(w.at, time.Now())
+	return 0
+}
+
+func (w *shortestWaits) times() []time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return slices.Clone(w.at)
+}
+
+// No sweep of a lone process is refused as a period another pass has served. A sweep is skipped
+// when duty_passes already records a pass in the period its due time falls in, and the loop's own
+// waits must never land one there: each wait is at least the interval, which is the period the
+// sweep hands duty.Exclusive, so two sweeps are always in different periods however long a sweep
+// or its lease took. This row runs the real sweep under the real lease - what the fake clock above
+// models - and counts what came of each: every sweep listed, none was skipped, and the first
+// listed before the loop had asked for any wait at all.
+func TestNoSweepOfALoneProcessIsSkippedAsAPeriodAlreadyServed(t *testing.T) {
+	const (
+		interval = 100 * time.Millisecond
+		sweeps   = 4
+		// Far longer than four sweeps of this interval take on a database that answers, so it
+		// bounds this row's liveness and measures nothing: a run that reaches it prints the
+		// lease's own log, which names what was not coming.
+		deadline = 30 * time.Second
+	)
+	leases := redeliverTestLeases(t)
+	logs := captureDefaultLogs(t)
+	waits := &shortestWaits{}
+	redeliver.FixJitter(t, waits.draw)
+	h := newHarness(t)
+	github := &timedGitHub{}
+	ends := &sweepEnds{}
+	// The sweep's own lines go to both: ends reads the summary that closes each sweep, and
+	// swept holds every line, so a sweep that failed is counted below rather than waited past.
+	swept := &lockedBuffer{}
+	sweeper := &redeliver.Sweeper{
+		GitHub: github,
+		Open:   func() (bus.KeyValue, error) { return h.state, nil },
+		Logger: slog.New(slog.NewTextHandler(io.MultiWriter(ends, swept), nil)),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sweeper.Run(ctx, interval, leases)
+	}()
+	for until := time.Now().Add(deadline); len(ends.times()) < sweeps; {
+		if time.Now().After(until) {
 			cancel()
 			<-done
+			t.Fatalf("%d sweeps in %v at an interval of %v, want %d: listings at %v\n%s", len(ends.times()), deadline, interval, sweeps, github.times(), logs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
 
-			listings, finished := github.times(), ends.times()
-			if first := listings[0].Sub(started); first >= interval {
-				t.Errorf("the first sweep listed %v after the start, want at start, before the shortest wait (%v) could end", first, interval)
-			}
-			for index := 1; index < sweeps; index++ {
-				wait := listings[index].Sub(finished[index-1])
-				if wait < tc.wait || wait >= tc.wait+leaseAllowance {
-					t.Errorf("sweep %d listed %v after sweep %d ended, want %v for this draw (within [%v, %v)) plus the lease's statements",
-						index+1, wait, index, tc.wait, interval, interval+interval/10)
-				}
-			}
-		})
+	// Each attempt either swept or is one of these, and each of these is a fixture of this row
+	// failing rather than the loop choosing: such an attempt ran no sweep and still left a wait,
+	// so reading the counts below as the loop's doing would be reading the database's instead.
+	// The shutdown is the one sweep that may fail, since it cancels a listing in flight.
+	for _, failure := range []string{"dispatch duty: take the lease", "dispatch duty: read the loop's last pass"} {
+		if attempts := logs.count(failure, "lease="+webhookRedeliveryLease); attempts != 0 {
+			t.Fatalf("%q for %d of the sweep's attempts:\n%s", failure, attempts, logs)
+		}
+	}
+	if failed := swept.count("webhook redelivery sweep failed") - swept.count("webhook redelivery sweep failed", "context canceled"); failed != 0 {
+		t.Fatalf("%d sweeps failed for something other than the shutdown:\n%s", failed, swept)
+	}
+	if skipped := logs.count("dispatch duty: leased pass skipped", "lease="+webhookRedeliveryLease); skipped != 0 {
+		t.Errorf("%d sweeps were skipped, want none: a wait of at least one interval reaches the next period\n%s", skipped, logs)
+	}
+	listings, drawn := github.times(), waits.times()
+	if len(listings) < sweeps {
+		t.Fatalf("%d listings for %d sweeps, want one each", len(listings), sweeps)
+	}
+	if len(drawn) == 0 {
+		t.Fatal("the loop asked for no wait at all")
+	}
+	if !listings[0].Before(drawn[0]) {
+		t.Errorf("the first sweep listed %v after the loop asked for its first wait, want it at start, before any wait", listings[0].Sub(drawn[0]))
 	}
 }
