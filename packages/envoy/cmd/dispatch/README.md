@@ -30,7 +30,8 @@ Each item below names a variable, then its purpose.
 
   One value, or several separated by whitespace, so the shared token can rotate with an overlap:
   write the new value followed by the old one, move every consumer to the new one, then write the new value alone.
-  The first is the current value; the API and the document websocket accept every value, comparing a bearer with each in constant time.
+  The first is the current value; the API accepts every value, comparing a bearer with each in constant time.
+  The document websocket takes no bearer at all: it is a person's cookie connection only.
   Whitespace at either end is ignored; startup refuses an empty entry (two whitespace characters in a row, a CR LF among them) or a repeated one, naming its position, never its value.
   A request that authenticates with a value after the first logs one WARN line, `dispatch: request authenticated with a previous shared agent token`, with `entry` (the value's position), `address` (the rightmost `X-Forwarded-For` entry, which is the load balancer's view of the caller, or the connection's own address without one), `user_agent` and `path`, at most once per address and User-Agent every 10 minutes, and never a token.
   Each field keeps its first 256 bytes, and the server remembers up to 10,000 callers; one past that is logged on each request.
@@ -159,6 +160,63 @@ Half the pair refuses to boot, naming the missing variable; neither leaves beare
 A verified caller acts as the `session` it names in the request body, and every actor it writes carries `service`, the token's verified subject (`system:serviceaccount:<namespace>:<name>`)
 — set from the token, never from the body.
 A JWT the verifier rejects is `401 OIDC_TOKEN_INVALID` naming the reason class; it is never retried as a personal token.
+
+With `DISPATCH_AGENT_SECRETS_URL` set, an access token the secrets broker issued is a fifth credential, and the only one that proves a session of its own.
+It is presented under RFC 9449's DPoP scheme
+— `Authorization: DPoP <token>` with a `DPoP:` proof header signed by the key the token is bound to
+— because that RFC refuses a DPoP-bound token presented under any other scheme;
+the server decides a request by its scheme before it reads any token, so such a presentation is never retried as a bearer, and a bearer is never sent to this check.
+The server asks the broker what the token is (RFC 7662 introspection on `/v1/oauth/introspect`, presenting the same projected ServiceAccount token `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` names as the approval relays do, one affirmative answer reused for five seconds from the broker's answer) and checks the proof against the `jkt` that answer carries, with `DISPATCH_SERVER_URL` as the origin the proof's `htu` must name.
+No setting of its own configures it.
+A revoked token therefore stops resolving within five seconds of the introspection that last called it live, not of the revocation:
+an introspection already in flight when the token is revoked is remembered from the moment it completes, and it may take up to five seconds to complete.
+A verified caller acts as the session the token names, for the person it names, and `actor` in the body does not decide that session:
+absent is accepted, one naming the same session is accepted and its `origin` kept, and one naming any other writer is `403 ACTOR_SESSION_MISMATCH` naming the session the token carries.
+A token scoped to one project carries that project on every actor it writes, set from the token and never from the body;
+a token scoped to its person names no single project and carries none.
+Each refusal is its own code and none repeats the token:
+`401 BROKER_TOKEN_NOT_ACTIVE` (the broker does not hold the token live), `401 BROKER_TOKEN_PROOF_INVALID` (the proof did not meet RFC 9449 Section 4.3, a proof presented twice included
+— a proof is single use by its `jti` and target URI), `401 BROKER_TOKEN_KEY_MISMATCH` (a sound proof signed by a key that is not the token's), `401 BROKER_TOKEN_NOT_A_SESSION` (the token is live but is no session's credential:
+it names no session or no person, or it was issued to a client other than the exchange a session's token comes from, which a machine login's own access token is
+— Dispatch records a write under the session its credential proved, so it acts on none of these rather than letting a body name a session for a credential that names none), `429 BROKER_TOKEN_RATE_LIMITED` (this source address's introspection bucket is empty;
+nothing was asked of the broker) and `503 BROKER_UNAVAILABLE` (the broker answered nothing, so the token was never judged
+— a 503 for the reason `OIDC_ISSUER_UNAVAILABLE` is one).
+A websocket re-resolves its caller every heartbeat from the request that opened it, and for this credential that re-resolution is the broker's introspection answer alone:
+the upgrade's proof authenticated it and cannot be presented a second time.
+Without `DISPATCH_AGENT_SECRETS_URL` there is no such credential, and a `DPoP` presentation is the `401 UNAUTHORIZED` `invalid bearer token` any Authorization header that is not a bearer has always been.
+
+A credential that names one project may write that project and nothing else.
+Every mutating row of the route table declares what its write belongs to (`internal/dispatch/api/routes_table.go`, `writeClasses`;
+a `GET` row declares nothing), in four classes:
+*a project's* — the issue-key rows, the project-key rows, the artifact-id rows, the ask-id rows, the comment-id rows, and the message rows that carry an issue;
+*a project the body names* — the issue create alone, whose project its address does not name, so `createIssue` makes the same check itself once that project is settled;
+*the calling session's* — an agent conversation's own artifact and messages, the two routes a session answers its own delivery on, and the caller-private `me` rows;
+and *the deployment's* — the project create, the repository-to-project map, the delivery settings and session groups, the broadcast, and the credential and machine-login decisions.
+`Register` wraps every mutating route in two checks (`internal/dispatch/api/project_scope.go`), which run after the caller is resolved and before the handler, so no route is left to check either for itself.
+
+The project check resolves the project the addressed object belongs to
+— an issue key, a project key, an artifact id, an ask id, a comment id or a message id, each by one read
+— and lets through only a target that resolves to the caller's own project.
+It fails closed, so a target that resolves to another project, to no project at all (an object belonging to none), or to nothing at all (no such row, or an id Postgres will not read as a uuid) is `403 PROJECT_SCOPE`, naming the project the credential covers and the project the write belongs to where one resolved, and nothing of the credential.
+The two refusals still read differently — a target of another project names that project, one that resolved to nothing says the write resolves to no project of that credential's
+— so failing closed does not close an existence oracle and does not claim to.
+Nothing is read out that way: no GET route is project-scoped, so every answer this check can colour is a refusal of the caller's own write.
+Each resolver sends the raw path value to Postgres, as the handler behind it does, so the check reads a path exactly as the handler then addresses its row by it
+— Postgres's uuid parser takes a hyphen after any group of four digits, and a check that parsed ids in Go admitted those spellings unjudged.
+A deployment-wide write is `403 PROJECT_SCOPE_DEPLOYMENT`, naming the credential's project and the route:
+a credential that may write one project may not create another or change a setting that is not any project's.
+`POST /api/v1/issues` takes its project from the body, or from the repository an external ref names, rather than from its address, so its handler makes the same check, with the same refusal, the moment that project is settled
+— before the ref is resolved to an issue already imported, and before anything is written.
+
+The session check holds the rows classed *the calling session's* whose path names a session
+— the `agents/{session_id}` writes and `PUT /api/v1/me/agents/{session_id}/state` — to the session the caller's credential proved:
+addressing another session's conversation is `403 SESSION_SCOPE`, naming the session the credential acts for, the route and the session addressed.
+Only a broker-issued token proves a session;
+a cookie, a personal token, a Kubernetes service-account token and the shared token prove none and are untouched, so a person still uploads into the conversation they name.
+
+Both checks are a no-op for a credential that carries no project and proves no session
+— a browser cookie, a personal agent token, a Kubernetes service-account token, the shared token, and an access token the broker scoped to a person rather than to one project.
+That is the rule and not a transitional measure: every caller that exists today writes exactly what it wrote before.
 
 GitHub App credentials come either from the `DISPATCH_APP_*` variables or from `~/.local/share/dispatch/app.json`; the variables take precedence.
 Two of them carry rules beyond their row:
@@ -1064,6 +1122,11 @@ An anchor whose artifact id is not a lower-case document id is left out of the i
 The release before it never reads the index and serves beside it unchanged, except that its sweep still drops the mark of an ask holding both columns (no such row is written today), and rolling Dispatch back past `0148` is an image rollback alone:
 the index is left for the next release that reads it.
 
+Migration `0150_dpop_proofs` creates `dpop_proofs`, the record of every RFC 9449 DPoP proof Dispatch has accepted, and its expiry index.
+A caller presenting an access token the secrets broker issued signs a fresh proof of that token's key for each request (`internal/brokertoken`), and the row keyed on the proof's `jti` and normalized `htu` is what refuses the same proof presented twice;
+the maintenance pass deletes every record past its proof's acceptance window beside the idempotency-key sweep.
+It is a new table that touches no row, which the release before it neither reads nor writes; its census answers `0`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
 On success it backfills each artifact's project and generated `ref_key`.
@@ -1539,11 +1602,11 @@ Each item below names a field of the line, then what it holds.
 
 - `caller_kind`
 
-  How the caller authenticated: `user` (a signed-in person), `session` (the session a bearer named in its `actor`), `token` (a personal agent token with no session named), `service` (a verified service-account token), `shared-token` (`DISPATCH_AGENT_TOKEN` with no session named), or `anonymous` (a public route, a request whose credential was refused, or an `unmatched` path).
+  How the caller authenticated: `user` (a signed-in person), `session` (the session a bearer named in its `actor`, or the one a broker-issued token proved), `token` (a personal agent token with no session named), `service` (a verified service-account token), `broker-token` (an access token the secrets broker issued, on a line no session was named on), `shared-token` (`DISPATCH_AGENT_TOKEN` with no session named), or `anonymous` (a public route, a request whose credential was refused, or an `unmatched` path).
 
 - `caller`
 
-  Who that is: the person's lowercase email, the session id, the personal token's owner, or the service-account subject.
+  Who that is: the person's lowercase email, the session id, the personal token's owner, the service-account subject, or the person a broker-issued token acts for.
   `shared-token` and `anonymous` name nobody.
 
 - `address`
@@ -1577,8 +1640,9 @@ Each item below names a field of the line, then what it holds.
 
 - `credential`
 
-  Only on a `session` line: the credential that named the session, since the session id is the caller's own text.
-  `token:<owner>`, `service:<subject>` or `shared-token`.
+  Only on a `session` line: the credential behind the session.
+  `token:<owner>`, `service:<subject>`, `shared-token` or `broker-token:<person>`.
+  For every one but the last that session id is the caller's own text; under a broker-issued token the credential itself named it.
 
 - `aborted`
 
@@ -1875,10 +1939,12 @@ Each item below names a path with its method and identity, then its purpose.
 
   Everyone who has signed in, as `{users: [{login}]}` sorted by email — the assignee picker's options.
 
-- `/api/v1/whoami` (GET; cookie, trusted header, or bearer)
+- `/api/v1/whoami` (GET; cookie, trusted header, bearer, or a broker-issued DPoP token)
 
-  Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service}` for a bearer (`owner` is a personal token's owner by lowercase email, null for the shared token;
-  `service` is a verified service-account token's Kubernetes subject, null for every other bearer).
+  Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service, session, project}` for every other credential (`owner` is a personal token's owner or a broker-issued token's person, by lowercase email, null for the shared token;
+  `service` is a verified service-account token's Kubernetes subject, null for every other credential;
+  `session` is the session the credential itself proved, which only a broker-issued token does, null otherwise;
+  `project` is the one project key that credential may write, null where it names none).
 
 - `/api/v1/dashboard/builds` (GET; cookie, trusted header, or bearer)
 
@@ -2319,6 +2385,9 @@ Each item below names a path with its method and identity, then its purpose.
   any other file a `file` under its declared type), stored with `session_id` set, `issue_key` null, `project` `""` and `ref_key` `agent/<session_id>/<slug>`, addressed `dispatch://agent/<session_id>/artifact/<slug>`;
   it appends no event, since every event belongs to an issue, a document or a project.
   There is no list route: a conversation's pictures are reached through the references its messages carry, never enumerated.
+  A caller whose credential proves a session of its own — an access token the secrets broker issued, the one that does — uploads only into that session's conversation;
+  any other `session_id` is `403 SESSION_SCOPE`, naming the session the credential acts for and the session addressed.
+  A person's cookie proves no session and uploads into the conversation it names.
   An agent's conversation holds files and images only, so a markdown document (JSON `content` or a `text/markdown` file) is `400 ARTIFACT_INPUT` ("an agent's conversation holds files and images;
   a document belongs to an issue or a project").
   A `session_id` that is empty or holds `/`, `?`, `#`, whitespace, a control character or a character that ends a reference in text (`<>"'` and a backtick, `[`, `]`, `|`) is `400 INVALID_SESSION_ID` on all three agent routes.
@@ -2455,9 +2524,9 @@ Each item below names a status and code, then its meaning.
 - `400 NUL_CHARACTER`
 
   Caller text holds a NUL character (U+0000), which PostgreSQL's text and jsonb cannot store:
-  any string in a JSON body a route decodes, member names included, a multipart upload's field or markdown file, any route's path or query parameter, or the actor a document websocket's bearer names in `X-Dispatch-Actor` (refused before the upgrade).
+  any string in a JSON body a route decodes, member names included, a multipart upload's field or markdown file, or any route's path or query parameter.
   It covers every parameter, field and member a request carries, including ones the route does not read.
-  The message names where it stands (`title`, `options[1].label`, `file`, `path parameter session_id`, `query parameter label`, `X-Dispatch-Actor.id`), with a NUL in a name the caller wrote shown as `\u0000`, and the character's position, counted from 1 in UTF-16 units; nothing is written.
+  The message names where it stands (`title`, `options[1].label`, `file`, `path parameter session_id`, `query parameter label`), with a NUL in a name the caller wrote shown as `\u0000`, and the character's position, counted from 1 in UTF-16 units; nothing is written.
   A NUL a browser edit puts in a live document is written as U+FFFD, which is what CommonMark reads one as, in the document's version and every read, a block's id included, an anchor's quote and an ask block's question and options, and a quote, a `# Title` quote and a `heading:` anchor are matched against that text.
 
 - `400 INVALID_UTF8`

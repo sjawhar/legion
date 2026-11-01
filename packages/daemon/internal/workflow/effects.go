@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"slices"
 	"strings"
@@ -237,22 +238,82 @@ const approvedHeadLabel = "Approved head"
 // ties to it.
 const testerVerdictLabel = "Tester's verdict"
 
-// start starts the phase worker of the issue's current phase, a start stamped with that phase. A
-// start that takes the phase over from a role still at work in it names that role, quiesce, so it
-// waits for that role's turn to end (record.SuperviseRequest's Quiesce); every other start names
-// none. A merger is told the head the review round approved (withApprovedHead), the one head its
-// READY may name, so it never chooses among the pull request's reviews itself. A phase with no
-// worker, and accepting, whose architect admission started with the tree, start nobody.
-func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task string, quiesce claim.Role) error {
+// start starts the phase worker of the issue's current phase, a start stamped with that phase and
+// with the assignment it mints for that role (assign). A merger is told the head the review round
+// approved (withApprovedHead), the one head its READY may name, so it never chooses among the pull
+// request's reviews itself. A phase with no worker, and accepting, whose architect admission
+// started with the tree, start nobody.
+func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task string) error {
 	if role == "" || role == claim.RoleArchitect {
 		return nil
 	}
+	assignment, err := e.assign(ctx, tx, issue.Key, role)
+	if err != nil {
+		return err
+	}
+	return e.started(ctx, tx, issue, role, task, assignment)
+}
+
+// restart starts the phase worker of a phase entry the issue never left: the architect's or the
+// operator's retry of a held phase, which puts the issue back in the phase its worker's claim
+// failed in, with the same work to do. It hands the role the assignment that entry already gave
+// it, minting none, because the entry is the one the worker is still on: a claim whose task went
+// unconfirmed keeps it (the outbox delivers no second copy of a task its claim still works), and
+// a completion of it would otherwise be refused HANDOFF_STALE_ASSIGNMENT against a row naming an
+// assignment nothing ever delivered, for good. Carrying the row's own value rather than nothing
+// keeps the fence live for a worker the retry does start afresh: its task names the entry, so a
+// later entry of the same phase still refuses this one's completion.
+func (e *Engine) restart(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task string) error {
+	if role == "" || role == claim.RoleArchitect {
+		return nil
+	}
+	row, err := e.phaseRow(ctx, tx, issue.Key, role)
+	if err != nil {
+		return err
+	}
+	return e.started(ctx, tx, issue, role, task, row.Assignment)
+}
+
+// started enqueues the start both make, for a role start and restart have already held to one
+// that works a phase.
+func (e *Engine) started(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task, assignment string) error {
 	task, err := withApprovedHead(ctx, e.store, tx, issue.Key, role, task)
 	if err != nil {
 		return err
 	}
 	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: role, Task: task,
-		Generation: issue.Generation, Phase: issue.Phase, Quiesce: quiesce})
+		Generation: issue.Generation, Phase: issue.Phase, Assignment: assignment})
+}
+
+// assign mints the assignment this start hands role on issue, writes it onto the role's phases row
+// and answers it for the start's payload. Both writes are the transition's own transaction, so the
+// row names the new phase's assignment before the outbox can run that start, which is what makes
+// the comparison safe: while a role's turn outlives its phase its claim still serves the earlier
+// assignment (the machine refuses a second delivery while one is pending), and the row already
+// names this one.
+//
+// Only a start that hands a role work it was not already on mints one. A resume (workflow's
+// resume by rule, admission's promotion of a mid-phase child), a production check's look and a
+// held phase's retry (restart) mint none, so none of them moves the row and a worker's in-flight
+// completion is never refused for an assignment it was never given.
+//
+// The token is 26 random base32 characters (crypto/rand.Text), which is more than it needs to be:
+// it is only ever compared with a value the daemon itself wrote, never read from a request — a
+// completion carries no identity at all (api.HandoffCompleteRequest) — so it has to be unique
+// among the assignments of one role, not unguessable. It is minted rather than derived because
+// nothing at hand is unique per phase entry: the issue's generation is one run's whole life, the
+// round counts only returns to implementing, and the start's own outbox row id is not known until
+// the row is written.
+func (e *Engine) assign(ctx context.Context, tx pgx.Tx, issue string, role claim.Role) (string, error) {
+	row, err := e.phaseRow(ctx, tx, issue, role)
+	if err != nil {
+		return "", err
+	}
+	row.Assignment = rand.Text()
+	if err := e.store.PutPhase(ctx, tx, row); err != nil {
+		return "", err
+	}
+	return row.Assignment, nil
 }
 
 // withApprovedHead is a merger's task with the head the issue's review round approved appended

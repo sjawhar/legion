@@ -1,0 +1,15 @@
+kind: Changed
+body: |-
+  A Dispatch document edit repeats less work for the same answer: a tree the edit touches is
+  validated once for the batch's reads that take its validated value rather than once a read,
+  every quote of a batch is resolved against one flattened text of its tree, the document-level
+  blocks a write changed are found in one walk and read by every refusal that needs them, and the
+  quote finder's text is built in buffers of its own size.
+  The reads of a write transaction's fork before and after its write go through the lock-free
+  reader, without ygo's ToDelta, and the renders of the write's own operation take the tree it
+  validated rather than validating it again. A conditional edit encodes its tree once: the token
+  its precondition check computed is the token its batch starts from. Every answer, token,
+  version, anchor and CRDT update is what it was.
+time: 2026-10-29T20:55:00.000000000Z
+custom:
+  Issue: pr2522

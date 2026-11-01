@@ -2,14 +2,12 @@ package docs
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
 	"path"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,7 +18,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
-	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -415,31 +412,11 @@ func (s *Service) authorizeSchemaVersion(room, clientSchemaVersion string) (webs
 	return websocket.ConnectionConfig{ReadOnly: schemaReadOnly(open, clientSchemaVersion)}, nil
 }
 
-// ActorHeader is the header a document websocket's bearer names its session in, as the JSON of a
-// session actor.
-const ActorHeader = "X-Dispatch-Actor"
-
+// requestActor is the person a document connection is: the identity service's answer, and nothing
+// else. The socket once took the shared agent token too, with the session named in a header the
+// caller wrote; that was a second, weaker door into Dispatch, and only the browser - a same-origin
+// cookie - ever connected through it (INFRA-264).
 func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
-	if token, present := auth.BearerToken(r); present {
-		if !auth.MatchesSharedAgentToken(r, token, s.agentTokens) {
-			return model.Actor{}, errors.New("invalid document bearer token")
-		}
-		var supplied model.Actor
-		if err := json.Unmarshal([]byte(r.Header.Get(ActorHeader)), &supplied); err != nil {
-			return model.Actor{}, fmt.Errorf("decode document bearer actor: %w", err)
-		}
-		if supplied.Kind != "session" || strings.TrimSpace(supplied.ID) == "" {
-			return model.Actor{}, errors.New("document bearer requires a session actor")
-		}
-		// Rebuilt field by field, exactly as the HTTP API's bearerSessionActor does:
-		// the header is caller-supplied, and Owner and Service are the server's to
-		// set. Service means "the server verified this Kubernetes subject", so a
-		// shared-token holder copying one into the header would forge a verified
-		// identity onto every document version it writes.
-		accesslog.Note(r.Context(), accesslog.KindSharedToken, "")
-		accesslog.Note(r.Context(), accesslog.KindSession, supplied.ID)
-		return model.Actor{Kind: "session", ID: supplied.ID, Origin: supplied.Origin}, nil
-	}
 	if s.identity == nil {
 		return model.Actor{}, errors.New("document identity required")
 	}

@@ -18,8 +18,8 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
-	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/ratelimit"
 )
 
 // withOAuth wires the OAuth provider on the test server's own database, its device login
@@ -75,7 +75,7 @@ func signedDeviceForm(t *testing.T, ts *testServer) url.Values {
 
 func TestTheOAuthRoutesNeedTheProvider(t *testing.T) {
 	ts := newTestServerWith(t, func(d *api.Deps) { d.OAuth = nil })
-	for _, path := range []string{"/v1/oauth/device_authorization", "/v1/oauth/token"} {
+	for _, path := range []string{"/v1/oauth/device_authorization", "/v1/oauth/token", "/v1/oauth/revoke"} {
 		if status, _, _ := postForm(t, ts.URL+path, deviceForm); status != http.StatusNotFound {
 			t.Errorf("POST %s without a provider = %d, want 404", path, status)
 		}
