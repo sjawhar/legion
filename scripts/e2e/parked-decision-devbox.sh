@@ -32,8 +32,12 @@ Inputs (environment):
   LEGION_E2E_ANTHROPIC_KEY_FILE  a 0600 file that holds an Anthropic key (key-file)
   PARKED_DECISION_EVIDENCE_DIR   the evidence directory (default: a fresh /tmp directory, kept)
   PARKED_DECISION_UNTIL          stop after this checkpoint passes (a development run, not the proof)
-The two Legion GitHub App keys come through the daemon's private_key_command on agent-tier
-secrets. The devbox gh must act as the proof human.
+  LEGION_E2E_IMPLEMENT_APP_ID, LEGION_E2E_IMPLEMENT_APP_KEY_NAME, LEGION_E2E_REVIEW_APP_ID,
+  LEGION_E2E_REVIEW_APP_KEY_NAME, LEGION_E2E_APP_KEY_RUNNER
+                                 Legion's two role Apps (default: this deployment's own, read
+                                 through agent-secrets; lib/github-apps.sh), proved against
+                                 GitHub's GET /app in prerequisites
+The devbox gh must act as the proof human.
 
 Checkpoints, in order:
 EOF
@@ -79,10 +83,11 @@ tmux_server="legion-e2e-pd-$$"
 daemon_pid=
 dispatch_pid=
 listener_pid=
+daemon_keeper_pid=
+dispatch_keeper_pid=
 port_daemon=
 port_listener=
 port_dispatch=
-port_worker_stream=
 port_pg=
 port_nats=
 dispatch_base=
@@ -154,6 +159,8 @@ cleanup() {
   stop_pid "$daemon_pid"
   stop_pid "$dispatch_pid"
   stop_pid "$listener_pid"
+  stop_pid "$daemon_keeper_pid"
+  stop_pid "$dispatch_keeper_pid"
   TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
   docker rm -f "$pg_container" "$nats_container" >/dev/null 2>&1 || true
@@ -186,62 +193,51 @@ done_with() {
   exit 0
 }
 
-# ---- the rig, copied from stage3-devbox-workflow.sh ----------------------------------------------
+# ---- the rig, as stage3-devbox-workflow.sh starts it ------------------------------------------------
+# Each service serves on a port the kernel chose, held from that choice until the service serves on
+# it (lib/rig.sh's start_held). The daemon's and Dispatch's ports are held for the whole run by a
+# keeper (keep_port, start_kept), so legion.yaml can name the daemon's port before it starts, and
+# every poll of a kept port carries a timeout: between two servers it queues a request unanswered.
 start_listener() {
-  local token attempt offset result
+  local token
   token=$(cat "$work/envoy-token")
-  for attempt in 1 2 3 4 5; do
-    pick_port port_listener
-    offset=$(log_size listener)
-    ENVOY_API_TOKEN="$token" PORT="$port_listener" ENVOY_LISTEN_HOST=127.0.0.1 \
-      ENVOY_MACHINE_ID="legion-e2e-pd-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      start_process listener env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-listener"
-    result=0
-    await_start listener "$listener_pid" "$offset" 60 "the Envoy listener to answer /v1/sessions" \
-      curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions" || result=$?
-    [ "$result" != 0 ] || return 0
-    note "the Envoy listener lost port $port_listener to another process (attempt $attempt); picking another"
-  done
-  fail "the Envoy listener lost its picked port five times"
+  ENVOY_API_TOKEN="$token" ENVOY_LISTEN_HOST=127.0.0.1 \
+    ENVOY_MACHINE_ID="legion-e2e-pd-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
+    start_held listener port_listener ENVOY_LISTEN_FD --env 'PORT={port}' -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-listener"
+  await_start listener "$listener_pid" 60 "the Envoy listener to answer /v1/sessions" \
+    curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions"
 }
 
 start_dispatch() {
-  local dispatch_token envoy_token pg_password attempt offset result
+  local dispatch_token envoy_token pg_password
   dispatch_token=$(cat "$work/dispatch-token")
   envoy_token=$(cat "$work/envoy-token")
   pg_password=$(cat "$work/postgres-password")
   mkdir -p "$work/dispatch-home"
   chmod 0700 "$work/dispatch-home"
-  for attempt in 1 2 3 4 5; do
-    pick_port port_dispatch
-    offset=$(log_size dispatch)
-    # HOME and XDG_CONFIG_HOME are the scratch home, so the server reads no envoy.json of the
-    # operator's: make_omp_home exports the operator's XDG_CONFIG_HOME.
-    DATABASE_URL="postgres://legion:$pg_password@127.0.0.1:$port_pg/dispatch?sslmode=disable" \
-      DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" HOME="$work/dispatch-home" \
-      XDG_CONFIG_HOME="$work/dispatch-home/.config" \
-      DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
-      DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
-      DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      ENVOY_URL="http://127.0.0.1:$port_listener" \
-      start_process dispatch env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-dispatch"
-    result=0
-    await_start dispatch "$dispatch_pid" "$offset" 60 "the scratch Dispatch server" \
-      curl -fsS "http://127.0.0.1:$port_dispatch/api/v1" || result=$?
-    dispatch_base="http://127.0.0.1:$port_dispatch"
-    [ "$result" != 0 ] || return 0
-    note "the scratch Dispatch lost port $port_dispatch to another process (attempt $attempt); picking another"
-  done
-  fail "the scratch Dispatch lost its picked port five times"
+  keep_port dispatch_keeper port_dispatch
+  # HOME and XDG_CONFIG_HOME are the scratch home, so the server reads no envoy.json of the
+  # operator's: make_omp_home exports the operator's XDG_CONFIG_HOME. They are the server's alone,
+  # set by its env, not the held-port helper's that runs it.
+  DATABASE_URL="postgres://legion:$pg_password@127.0.0.1:$port_pg/dispatch?sslmode=disable" \
+    DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" \
+    DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
+    DISPATCH_LISTEN_HOST=127.0.0.1 NATS_URLS="nats://127.0.0.1:$port_nats" \
+    ENVOY_URL="http://127.0.0.1:$port_listener" \
+    start_kept dispatch dispatch_keeper DISPATCH_LISTEN_FD \
+    --env 'DISPATCH_PORT={port}' --env 'DISPATCH_SERVER_URL=http://127.0.0.1:{port}' -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
+    HOME="$work/dispatch-home" XDG_CONFIG_HOME="$work/dispatch-home/.config" "$work/envoy-dispatch"
+  await_start dispatch "$dispatch_pid" 60 "the scratch Dispatch server" \
+    curl -fsS --max-time 5 "http://127.0.0.1:$port_dispatch/api/v1"
+  dispatch_base="http://127.0.0.1:$port_dispatch"
 }
 
 write_legion_config() {
   cat >"$work/legion.yaml" <<EOF
 project: $project
 port: $port_daemon
-worker_stream_port: $port_worker_stream
 postgres_dsn: postgres://legion:$(cat "$work/postgres-password")@127.0.0.1:$port_pg/legion?sslmode=disable
 state_dir: $state
 operator_token_file: $work/operator-token
@@ -263,35 +259,22 @@ review_round_cap: 3
 # approval-readmits, and the walk runs only at a controller's start (walk-on-start).
 controller_wake_interval_seconds: 86400
 instructions: $work/instructions.md
-github_apps:
-  implement:
-    app_id: "3202636"
-    private_key_command: "secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- sh -c 'value=\$(printf %s \"\${LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64}\" | tr \"_-\" \"/+\"); case \$((\${#value} % 4)) in 1) value=\${value%?};; 2) value=\"\${value}==\";; 3) value=\"\${value}=\";; esac; printf %s \"\$value\" | base64 -d'"
-  review:
-    app_id: "3202653"
-    private_key_command: "secrets GH_REVIEW_APP_PRIVATE_KEY_B64 -- sh -c 'value=\$(printf %s \"\${GH_REVIEW_APP_PRIVATE_KEY_B64}\" | tr \"_-\" \"/+\"); case \$((\${#value} % 4)) in 1) value=\${value%?};; 2) value=\"\${value}==\";; 3) value=\"\${value}=\";; esac; printf %s \"\$value\" | base64 -d'"
+$(<"$work/github-apps.yaml")
 EOF
 }
 
+# start_daemon starts the Go daemon on the port the keeper boot opened (keep_port daemon_keeper),
+# which legion.yaml already names. Every pane's gh and jj are the daemon's PATH's, so the real
+# binaries' directory goes first (rig, real_bin_path). HOME, OMP_PROFILE and PATH are the daemon's
+# alone, set by its env, not the held-port helper's that runs it, and LEGION_OMP_PATH would outrank
+# omp_invocation's build, so the daemon runs without it.
 start_daemon() {
-  local attempt offset result
-  for attempt in 1 2 3 4 5; do
-    pick_port port_daemon
-    pick_port port_worker_stream
-    write_legion_config
-    offset=$(log_size daemon)
-    HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" env \
-      -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-      -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
-      "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
-    daemon_pid=$!
-    result=0
-    await_start daemon "$daemon_pid" "$offset" 180 "the Go daemon to answer /healthz" \
-      curl -fsS "http://127.0.0.1:$port_daemon/healthz" || result=$?
-    [ "$result" != 0 ] || return 0
-    note "the Go daemon lost port $port_daemon or $port_worker_stream to another process (attempt $attempt); picking again"
-  done
-  fail "the Go daemon lost a picked port five times"
+  start_kept daemon daemon_keeper LEGION_LISTEN_FD -- \
+    env -u LEGION_OMP_PATH -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE \
+    -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" \
+    "$work/legion" start --config "$work/legion.yaml"
+  await_start daemon "$daemon_pid" 180 "the Go daemon to answer /healthz" \
+    curl -fsS --max-time 5 "http://127.0.0.1:$port_daemon/healthz"
 }
 
 claim_session_file() {
@@ -488,7 +471,13 @@ wait_for_run_processes() {
 
 # ---- checkpoints --------------------------------------------------------------------------------------
 begin prerequisites
-for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl python3 tmux bun mise agent-secrets gh shellcheck jj pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+# Legion's two role Apps, this deployment's own unless the App inputs name another's, proved
+# against GitHub here, before the run writes anything (lib/github-apps.sh, as Stage 3 does);
+# legion.yaml's github_apps is the block proved.
+require_app_inputs implement review
+write_github_apps implement review
+read_app_logins
 until_checkpoint=${PARKED_DECISION_UNTIL:-}
 if [ -n "$until_checkpoint" ]; then
   case " $checkpoints " in
@@ -549,14 +538,16 @@ chmod 0600 "$work"/*token "$work"/*-header "$work/postgres-password"
 built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" "$work/envoy-listener" "$work/envoy-dispatch") || fail "lib/built-from.sh could not say what the run built"
 while IFS= read -r line; do note "$line"; done <<<"$built"
 docker ps >/dev/null
-docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \
+# Docker assigns the containers' host ports when it binds them, so neither can lose a race. The
+# Postgres image and its data path are Stage 3's.
+docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
   -e POSTGRES_USER=legion -e POSTGRES_PASSWORD="$(cat "$work/postgres-password")" -e POSTGRES_DB=dispatch \
-  -p "127.0.0.1::5432" mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a >/dev/null
+  -p "127.0.0.1::5432" mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 >/dev/null
 port_pg=$(docker port "$pg_container" 5432/tcp | sed -n '1s/.*://p')
 [ -n "$port_pg" ] || fail "docker assigned Postgres no host port"
 until_true 60 "Postgres to accept TCP connections" docker exec "$pg_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d dispatch
 docker exec "$pg_container" createdb -U legion legion
-docker run -d --name "$nats_container" -p "127.0.0.1::4222" mirror.gcr.io/library/nats:2.10 -js >/dev/null
+docker run -d --name "$nats_container" --cpus 1 --memory 512m -p "127.0.0.1::4222" mirror.gcr.io/library/nats:2.10 -js >/dev/null
 port_nats=$(docker port "$nats_container" 4222/tcp | sed -n '1s/.*://p')
 [ -n "$port_nats" ] || fail "docker assigned NATS no host port"
 until_true 60 "NATS to be ready" sh -c "docker logs '$nats_container' 2>&1 | grep -q 'Server is ready'"
@@ -565,10 +556,10 @@ start_dispatch
 dispatch_human POST projects "$(jq -cn --arg key "$project" --arg name "Parked decision proof $project" '{key:$key,name:$name}')" >/dev/null
 dispatch_human PUT "settings/repo-projects/$repo" "$(jq -cn --arg project "$project" '{project:$project,default:true}')" >/dev/null
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
-envoy_manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy")
-manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion")
 pin=$(<"$root/.omp-pin")
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
+envoy_manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy" --omp "$pin")
+manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion" --omp "$pin")
 cat >"$work/instructions.md" <<'EOF'
 # Parked decision proof instructions
 
@@ -594,8 +585,7 @@ pass
 done_with rig
 
 begin boot
-pick_port port_daemon
-pick_port port_worker_stream
+keep_port daemon_keeper port_daemon
 write_legion_config
 # In the environment start_daemon gives the daemon: boot refuses a first gh on PATH that is a script,
 # such as the devbox's dotfiles shim, and realbin puts the real gh first (lib/rig.sh, real_bin_path).
@@ -859,15 +849,17 @@ tm kill-server >/dev/null 2>&1 || true
 stop_pid "$daemon_pid"
 stop_pid "$dispatch_pid"
 stop_pid "$listener_pid"
+stop_pid "$daemon_keeper_pid"
+stop_pid "$dispatch_keeper_pid"
 TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
-for pid in $daemon_pid $dispatch_pid $listener_pid; do
+for pid in $daemon_pid $dispatch_pid $listener_pid $daemon_keeper_pid $dispatch_keeper_pid; do
   ! kill -0 "$pid" 2>/dev/null || fail "process $pid still runs"
 done
 docker rm -f "$pg_container" "$nats_container" >/dev/null
 for container in "$pg_container" "$nats_container"; do
   ! docker inspect "$container" >/dev/null 2>&1 || fail "the container $container remains"
 done
-wait_for_run_processes
+wait_for_run_processes 600 10
 remove_run_branches
 for issue in $tree1 $tree2 $tree3 $tree4 $tree5; do
   if out=$(timeout 60 gh api "repos/$repo/branches/legion/$issue" 2>&1); then

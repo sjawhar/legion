@@ -2760,7 +2760,8 @@ LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic 
 
 - `LEGION_E2E_MODEL_ROUTE`: `gateway` with `LEGION_E2E_MODEL_GATEWAY_URL` and `hawk-token`, or `key-file` with `LEGION_E2E_ANTHROPIC_KEY_FILE`, as Stage 3 reads them.
 
-- The two Legion GitHub App keys, through the daemon's `private_key_command` on agent-tier `secrets`, as Stage 3.
+- Legion's two role Apps: this deployment's own pair by default, each key read through `agent-secrets`, or another pair through `LEGION_E2E_IMPLEMENT_APP_ID`, `LEGION_E2E_IMPLEMENT_APP_KEY_NAME`, `LEGION_E2E_REVIEW_APP_ID`, `LEGION_E2E_REVIEW_APP_KEY_NAME` and `LEGION_E2E_APP_KEY_RUNNER` ([`lib/github-apps.sh`](#libgithub-appssh)), as Stage 3 reads them.
+  `prerequisites` proves each key is its id's App against GitHub's `GET /app` ([`read_app_logins`](#libworkflowsh)), and `legion.yaml`'s `github_apps` is the block it proved.
 
 - `PARKED_DECISION_EVIDENCE_DIR`: the evidence directory.
   The default is a fresh `/tmp` directory.
@@ -2798,9 +2799,9 @@ The transcript records the duration of each wait.
 
 | checkpoint | what it holds |
 | :--- | :--- |
-| `prerequisites` | The tools, the inputs of the model route, no leftover of an earlier run (`refuse_leftovers legion-e2e-pd`), the proof human, and a read of `sjawhar/legion-smoke`. Then the script unsets the environment. |
-| `rig` | The tokens, Postgres, NATS, the listener, Dispatch, the project and its repository mapping, the isolated profile with this checkout's `pi-envoy` and `pi-legion`, and the model route. |
-| `boot` | `legion start --check-config` passes, the daemon starts, and `legion state` answers. |
+| `prerequisites` | The tools, the two role Apps proved against GitHub's `GET /app` (`read_app_logins`), the inputs of the model route, no leftover of an earlier run (`refuse_leftovers legion-e2e-pd`), the proof human, and a read of `sjawhar/legion-smoke`. Then the script unsets the environment. |
+| `rig` | The tokens, Postgres, NATS, the listener on a port the kernel chose (`start_held`), Dispatch on a port its keeper holds for the run (`keep_port`, `start_kept`), the project and its repository mapping, the isolated profile with this checkout's `pi-envoy` and `pi-legion`, and the model route. |
+| `boot` | The daemon's port is held by its keeper (`keep_port`) and named in `legion.yaml`, `legion start --check-config` passes, the daemon starts on that port's socket (`start_kept`, `LEGION_LISTEN_FD`), and `legion state` answers. |
 | `controller-up` | The first controller starts. `controllerLocator.sessionId` names session 1. The profile holds one session file, and its header names that session. Its first user message is the start message, and an assistant message follows. |
 | `trees-wait-on-a-person` | The person files trees 1, 2, 4 and 5 and sets each to `todo`. Each tree gets to `awaiting_person` with `waitingOn.kind: gate`. |
 | `trees-parked` | `legion status <key> backlog` parks trees 1 and 2. Right after tree 1's park, the script posts the controller's hold mark on tree 1 as session 1 (`Parked by Legion while it waits on: …`), the comment the controller posts when it parks a tree for a hold. Tree 2 gets no mark. The person sets tree 4 to `backlog`, and the stand-in session (`dispatch_agent`) sets tree 5 to `backlog`. Each tree gets to phase `done` with no slot, and its architect gets to `suspended`. A park can come while the architect's last turn still runs, with its suspension held for that turn. A decision made then goes to that live session, and the daemon has nothing to relay, so no check approves a tree before its architect is suspended. The newest `backlog` write is by `session:legion-daemon:<project>` on trees 1 and 2, by `user:smoke` on tree 4, and by `session:stage3-architect-stand-in` on tree 5. Only tree 1 carries the mark. |
