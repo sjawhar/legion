@@ -1124,6 +1124,15 @@ func (s *Postgres) DisarmPending(ctx context.Context, tx pgx.Tx, issue string) (
 	return pending, nil
 }
 
+func (s *Postgres) PersonHandoverPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error) {
+	var pending bool
+	if err := tx.QueryRow(ctx, "select exists (select 1 from outbox where kind = $1 and issue = $2 and payload->>'personHandover' = 'true')",
+		string(OutboxKindDispatchStatus), issue).Scan(&pending); err != nil {
+		return false, fmt.Errorf("read whether %s has a person's handover pending: %w", issue, err)
+	}
+	return pending, nil
+}
+
 const outboxColumns = `id, kind, issue, payload, attempts, next_at, last_error, created_at, lease_token, lease_until`
 
 // readyMergeConflict makes a ready_merge enqueue one durable submission per issue and READY head:

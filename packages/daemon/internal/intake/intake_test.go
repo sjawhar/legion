@@ -276,14 +276,15 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "Dispatch artifact approved",
 			subject: "notifications.dispatch.issue.CAPTURE-4.artifact.approved",
 			file:    "dispatch/artifact-approved.json",
-			want:    DispatchArtifact{Key: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactApproved, Version: 2, Mark: mark(5, "2026-09-23T00:46:26.997872Z")},
+			want: DispatchArtifact{Key: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactApproved, Version: 2,
+				Actor: dispatch.Actor{Kind: "user", ID: "smoke"}, Mark: mark(5, "2026-09-23T00:46:26.997872Z")},
 		},
 		{
 			name:    "Dispatch artifact changes requested",
 			subject: "notifications.dispatch.issue.CAPTURE-3.artifact.changes_requested",
 			file:    "dispatch/artifact-changes-requested.json",
 			want: DispatchArtifact{Key: "CAPTURE-3", ArtifactID: "e7860036-ca1a-4ec6-8bd0-51d5f1b6fbd8", Kind: DispatchArtifactChangesRequested, Version: 2, Reason: "Captured reviewer reason",
-				Mark: mark(7, "2026-09-23T00:45:50.37209Z")},
+				Actor: dispatch.Actor{Kind: "user", ID: "smoke"}, Mark: mark(7, "2026-09-23T00:45:50.37209Z")},
 		},
 		// The ask and claim envelopes below are built by hand from Dispatch's own types
 		// (model.AskEventPayload, model.CommentEventPayload with ask_state and ask_waiting_on, and

@@ -1061,6 +1061,12 @@ type Store interface {
 	// DisarmPending says whether outbox still holds an unfinished auto_merge_disable row of issue:
 	// a finished row is deleted, so any row of the kind is one still to run or retrying.
 	DisarmPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error)
+	// PersonHandoverPending says whether outbox still holds a dispatch_status row of issue that is
+	// a person's handover (StatusWrite.PersonHandover): a finished row is deleted, so any such row
+	// is one still to run or retrying. Admission and the workflow queue no second such row, and no
+	// triage wake, for the issue while one is pending; the issue's other status rows, a hand-over
+	// row among them, are not counted.
+	PersonHandoverPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error)
 	Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error
 	// DueRows is every row of project a lane may run at now — due, under no live lease, in order
 	// behind none of its issue's older rows, and, for a lifecycle row, with no other lifecycle row
