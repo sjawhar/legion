@@ -2,58 +2,35 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-251",
-  "previousHandoff": "dc82a6d201bee42946492c80c61071def9b1aa8d",
-  "round": 26,
-  "headSha": "8b3c87d819aa",
-  "handoffHead": "a71947ddb981c8daf19be12045c47c8082f7aeae",
-  "provider": "Every turn of this round ran on anthropic/claude-opus-5-5, this session's model; no subagent ran. No model ran inside any drive: the agents are test shims.",
+  "previousHandoff": "a54452542a12f764715de0c73d0190660cd526c0",
+  "round": 27,
+  "headSha": "56b6404b40e1",
+  "handoffHead": "5b31b3b7882744746ec35798def091e21065a2e4",
+  "provider": "Every turn of this round ran on anthropic/claude-opus-5-5, this session's model; no subagent ran.",
+  "scope": "The one code commit since round 26, 56b6404b (the reviewer's), changes comments in packages/daemon/internal/workflow/gate.go (every changed line there is a comment; 0 non-comment lines) and the walk step in skills/legion-controller/references/parked-decisions.md. The implementer's round made no code change: its one-App devbox attempt was booted and reverted. So this round checks that the comment and skill change is true and runs the bare gates.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Each of review 5729779186's three items holds, and each new or rewritten test fails when the behaviour it guards is broken (proof[0] to proof[2]). The implementer's live reads hold: INFRA-251's dispatch read shows 'child_of issue dispatch://INFRA-168' under Links:, INFRA-168's primary_artifact_id is a0d2035b-bc98-4453-b451-3c69a07e9aed, and its artifact.approved event carries payload.artifact_id and payload.reason. The skill reference has no generated copy: packages/claude-envoy/legion/skills/legion-controller/references/ holds no parked-decisions.md."
+    "how": "The implementer's boot finding is the daemon's own rule: workflow.go's appLoginsAtBoot refuses one App in both slots ('the workflow needs two different Apps'). The A3/A4 devbox proof therefore needs the review App 5341243's key, which waits on the operator through the architect and controller. That is a prerequisite of acceptance, not a defect of this change."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The controller walk skips only the approval the daemon queues as a handover",
-      "surface": "skills/legion-controller/references/parked-decisions.md, walk step 3, read line by line against workflow.personHandoverQueues and intake.DispatchArtifact.PersonApproval",
-      "command": "read of gate.go personHandoverQueues and intake/facts.go:267-278 beside the walk step",
-      "observed": "The daemon queues when: the approval is a person's (Actor.Person()) and not carried (reason not prefixed CarriedApprovalReasonPrefix = 'Carried forward from the approval of version'); the root has no parent; it is labelled; it is parked in backlog or icebox; the artifact is the root's primary_artifact_id; and its tree is not live. The walk lists labelled roots at backlog or icebox that read_state shows at phase done, counts events 'by a user', and skips an artifact.approved only when there is no child_of under Links:, payload.artifact_id equals primary_artifact_id, and payload.reason does not begin with that same prefix. So each daemon condition has its counterpart. A carried approval and an approval on a root with a Dispatch parent fall through to judging, and the notice paragraph names both as notices that remain. The round-22 drive on the whole daemon agrees: a non-primary document's approval and a child's approval each send one notice, and the queued one sends none.",
-      "headSha": "8b3c87d819aa",
-      "negativeControl": "Not applicable (a reading); the daemon side is driven in proof[3]."
+      "criterion": "The walk now reads the field the daemon reads: the root's parent",
+      "surface": "Dispatch's issue API, live, and the daemon's dispatch client",
+      "command": "curl $DISPATCH_URL/api/v1/issues/INFRA-251 and /INFRA-168 | jq '{key, parent, primary_artifact_id}'; grep the client's Issue struct",
+      "observed": "INFRA-251: parent 'INFRA-168', primary_artifact_id 5493be7d-.... INFRA-168: parent null, primary_artifact_id a0d2035b-.... The daemon's client decodes the same `json:\"parent\"` field (packages/daemon/internal/dispatch/client.go:412, :426), and personHandoverQueues tests view.Parent != nil. The walk's other two conditions (artifact_id == primary_artifact_id; reason not prefixed 'Carried forward from the approval of version') are unchanged from round 26's line-by-line match. 'When that read fails, skip nothing: judge the approval' errs toward a redundant judgement, never a skipped decision. The linked triage.md#triage-a-root step 2 holds the events curl the walk cites (triage.md:32).",
+      "headSha": "56b6404b40e1",
+      "negativeControl": "INFRA-251 itself shows a non-null parent, so its approval would be judged, not skipped."
     },
     {
-      "criterion": "The new recordHandover table test fails with the guard replaced by `if false`; recordHandover and applyArtifact share one check",
-      "surface": "packages/daemon/internal/workflow on the pod's PostgreSQL",
-      "command": "go test -run TestAHandoverApprovalTheGateWouldNotTakeLeavesItAsItWas -v ./internal/workflow/; then with recordHandover's guard replaced by `if false` (reverted with jj restore)",
-      "observed": "As written: PASS, three subtests (an approval older than the gate's latest; an approval a later changes request superseded; an approval under gates.design off). With `if false`, all three FAIL at person_handover_test.go:219, the gate moved, for example LatestVersion 3 with ApprovedVersion set. gate.go:609 (recordHandover) and gate.go:730 (applyArtifact) both call artifactIgnored, the one check. #2619's and round 23's workflow tests pass.",
-      "headSha": "8b3c87d819aa",
-      "negativeControl": "The `if false` run above."
-    },
-    {
-      "criterion": "The rewritten admit assertion fails when a design-approved notice is enqueued",
-      "surface": "packages/daemon/internal/admit",
-      "command": "go test -run TestARootAPersonsApprovalHandsOverIsToldNoStaleApproval -v ./internal/admit/; then with dispatchArtifact falling through to applyArtifact after recordHandover (reverted)",
-      "observed": "As written: PASS. With the fall-through: FAIL at parked_decision_test.go:600, 'design-approved notices for LEGION-ROOT = []record.Notice{{Kind:\"design-approved\", ... Version:3 ...}}'.",
-      "headSha": "8b3c87d819aa",
-      "negativeControl": "The fall-through run above."
-    },
-    {
-      "criterion": "On the whole daemon at this head: the handover, the relay and round 23's fix",
-      "surface": "The whole Legion daemon (startDaemonWithin) on a fresh database of the pod's PostgreSQL and a nats-server; Dispatch events as envelopes; the Dispatch stand-in answers labels, primary_artifact_id and artifacts",
-      "command": "go test -tags e2e -count=1 -run '^(TestTesterHandoverApprovalNoStalePairLive|TestTesterApprovalHandoverLive)$' -v ./internal/daemon/ (throwaway drivers placed for the run, then removed)",
-      "observed": "Both PASS. A person's approval of a parked labelled root's primary document: todo written, 0 notices, and a second approval adds nothing. An unlabelled root's, a non-primary document's and a child's approval: 1 notice each. An answer, a resolution and an agent-turn reply: 1 each. After approving N+1, the start task is empty and readmitted_approvals holds 0 rows. Approving the old version still names the pair.",
-      "headSha": "8b3c87d819aa",
-      "negativeControl": "Rounds 23 and 24's recordHandover controls, on the call this round only refactored."
-    },
-    {
-      "criterion": "Pinned seeds, a bounded sweep, and no tester files on the branch",
-      "surface": "The daemon package; the branch tree",
-      "command": "go test -run TestKeptDecisionsRegressionSeeds ./internal/daemon/; LEGION_KEPT_PROPERTY_RUNS=200 LEGION_KEPT_PROPERTY_STEPS=300 ./daemon26.test; jj file list -r a71947dd 'glob:**/zz_tester_*'",
-      "observed": "Pinned: 39 of 39 PASS. Sweep: 200 of 200 in 903 s. Invariant 0, cleanup 0, connection 0. No zz_tester_* file is on the branch.",
-      "headSha": "8b3c87d819aa",
-      "negativeControl": "The pinned seeds are each a past failure."
+      "criterion": "Bare gates: the code still builds and its handover tests pass; CI at the code head; no tester files on the branch",
+      "surface": "go vet and go test in packages/daemon; GitHub checks",
+      "command": "go vet ./internal/workflow/; go test -run 'PersonsApproval|AHandoverApprovalTheGate|ACarriedCopyOfAParkedRootsGate' ./internal/workflow/; gh api commits/<d94e8bfd>/check-runs; jj file list -r 5b31b3b7 'glob:**/zz_tester_*'",
+      "observed": "vet clean, and the workflow handover tests ok. CI at d94e8bfd (the push carrying 56b6404b): every lane success, ci-ok success, test and lint among them. 5b31b3b7 is a handoff-only push with skip-checks: true, so it ran no CI and that verdict carries to it. No zz_tester_* file on the branch.",
+      "headSha": "56b6404b40e1",
+      "negativeControl": "Not applicable."
     }
   ],
-  "ci": "Head a71947dd, read 2026-11-01T19:47Z: lint, typecheck, pi-legion, pi-envoy, pi-shared, claude-envoy, envoy-client, docs, worker-image, ci-images and ci-filters success; test still running. Not waited on. GitHub: MERGEABLE, BLOCKED."
+  "ci": "d94e8bfd (code 56b6404b): ci-ok success, every lane success. 5b31b3b7: handoff-only with skip-checks, no runs. Read 2026-11-01T22:36Z. GitHub: MERGEABLE, BLOCKED."
 }
