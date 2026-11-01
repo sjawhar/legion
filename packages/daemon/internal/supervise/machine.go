@@ -175,6 +175,18 @@ type Claim struct {
 	// records the daemon's own contract, so a registration that still differs while it equals the
 	// daemon's contract is the one that is charged rather than relaunched again uncharged.
 	PluginRelaunchFor int
+	// ActivityAt is when the claim's session last read what it was doing and reported it
+	// (api's claims/activity route, INFRA-945), zero for a claim that has reported nothing.
+	// ActivityBackground is whether that reading found background work of the session's own
+	// running and ActivityKinds what kinds it named, sorted and de-duplicated by the session;
+	// ActivityNextReminderAt is when the phase reminder armed in that session is due, zero when
+	// no armed reminder was live. The four are written only by that route, never by a machine's
+	// own claim write: a report that arrived since the machine read its claim must not be erased
+	// by the next state it persists.
+	ActivityAt             time.Time
+	ActivityBackground     bool
+	ActivityKinds          []string
+	ActivityNextReminderAt time.Time
 }
 
 // RuleMayResume says whether the rule may resume this suspended claim: every suspension but the

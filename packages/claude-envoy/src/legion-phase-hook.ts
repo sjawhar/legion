@@ -3,6 +3,7 @@ import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import type { LegionState } from "@legion/contracts/legion-api"
 import { messageFor } from "@legion/envoy-client/errors"
+import type { ActivityInput } from "@legion/pi-shared/daemon-client"
 import type { ClaimCapability } from "@legion/pi-shared/legion-phase-ops"
 import {
   createPhaseReminder,
@@ -10,6 +11,11 @@ import {
   type PhaseReminderLog,
 } from "@legion/pi-shared/phase-reminder"
 import { type PhaseStallEntry, phaseStallEntryFrom } from "@legion/pi-shared/phase-stall"
+import {
+  CLAUDE_BACKGROUND_TASK_KIND,
+  sessionActivity,
+  sessionActivityRequest,
+} from "@legion/pi-shared/session-activity"
 import { stallLimits } from "@legion/pi-shared/stall-limits"
 import { workspaceRecreated, workspaceRecreatedNotice } from "@legion/pi-shared/workspace-recreated"
 import { z } from "zod"
@@ -156,6 +162,9 @@ export interface PhaseHookDeps {
   /** The daemon's whole state, for the reminder's record check, aborted with `signal` once the
    * check's bound passes (`PhaseReminderDeps.readState`). */
   readonly readState: (signal: AbortSignal) => Promise<LegionState>
+  /** Sends this session's activity report to the daemon (`LegionDaemonClient.activity`), so the
+   * idle rule can decide whether the pane's pod may be released (INFRA-945). */
+  readonly reportActivity: (input: ActivityInput) => Promise<void>
   /** Writes one line into the session over the bridge's inbox, which turns it into a user turn,
    * and resolves once the bridge has queued it. Undefined for a session outside a Legion pane,
    * where nothing can reach the worker between its turns. */
@@ -390,6 +399,36 @@ export function createPhaseHookEndpoint(deps: PhaseHookDeps): PhaseHookEndpoint 
   reminder.restore(restored.entry)
 
   /**
+   * INFRA-945: what this session is doing, reported to the daemon as each turn settles, so the
+   * idle rule can decide whether the pane's pod may be released. Claude Code's only sight of
+   * background work is the `Stop` hook's `${background_tasks}`, so this host reports at the
+   * settle and nowhere else; the one kind it can name is a Claude Code background task.
+   *
+   * A report that does not reach the daemon is logged and dropped: the turn's reminder is what
+   * the hook owes its worker, and a claim with no report after its last turn is held rather than
+   * released.
+   */
+  const sendActivity = async (claim: ClaimCapability, backgroundWork: boolean): Promise<void> => {
+    const request = sessionActivityRequest({
+      project: configuredValue(deps.env["LEGION_PROJECT"]),
+      claim,
+      report: sessionActivity(
+        backgroundWork ? [CLAUDE_BACKGROUND_TASK_KIND] : [],
+        reminder.phaseWake(),
+      ),
+    })
+    if (request === undefined) return
+    try {
+      await deps.reportActivity(request)
+    } catch (error) {
+      deps.log.warn("legion: this session's activity report did not reach the daemon", {
+        issue: claim.issue,
+        error: messageFor(error),
+      })
+    }
+  }
+
+  /**
    * D29: a worker whose launcher recreated its workspace is told so, as an Oh My Pi one is, over
    * the same inbox the reminders use. Once per launch: the record it is written in is the one the
    * phase and count live in, so a server Claude Code restarts inside the same `claude` process
@@ -458,6 +497,10 @@ export function createPhaseHookEndpoint(deps: PhaseHookDeps): PhaseHookEndpoint 
           const reminded = await reminder.settle(event.lastAssistantMessage ?? "", {
             backgroundWork,
           })
+          // After the settle, so the report carries the wake that settle armed. The daemon
+          // releases no claim whose last report is older than its last turn, so it goes at every
+          // settle, whatever it says.
+          await sendActivity(claim, backgroundWork)
           return reminded === undefined ? {} : { decision: "block", reason: reminded }
         }
         case "StopFailure": {

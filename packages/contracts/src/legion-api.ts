@@ -532,6 +532,35 @@ export const LegionReadyRequest = z.strictObject({
 
 export type LegionReadyRequestBody = z.output<typeof LegionReadyRequest>;
 
+/** `claim.SessionActivity` — what a live role's session is doing, read at `at`: whether work of
+ * its own is running in the background and of what kinds (`async-job`, `subagent`,
+ * `claude-background-task`; sorted and de-duplicated, so a hold's reason reads the same every
+ * time), and whether its phase is open with the moment its next reminder is due, null when no
+ * armed reminder is still live. */
+export const LegionSessionActivity = z.strictObject({
+  at: timestamp,
+  backgroundWork: z.strictObject({ running: z.boolean(), kinds: z.array(nonEmptyString) }),
+  phase: z.strictObject({ open: z.boolean(), nextReminderAt: timestamp.nullable() }),
+});
+
+export type LegionSessionActivityBody = z.output<typeof LegionSessionActivity>;
+
+/** `claim.ActivityRequest`, the body of `POST /legion/v1/claims/activity`: a live role's session
+ * reporting what it is doing, after each of its turns and whenever the report's content changes,
+ * so the daemon can decide whether the session's pod may be released. It is authenticated by the
+ * registration's secret, as `claims/ready` is, and names no generation: it decides nothing about
+ * the claim, and a relaunch mints a secret of its own, so the secret is the fence. A claim with
+ * no report after its last turn is never released, which is what makes a host that cannot report
+ * safe. */
+export const LegionActivityRequest = z.strictObject({
+  claimToken: nonEmptyString,
+  sessionId: nonEmptyString,
+  secret: nonEmptyString,
+  activity: LegionSessionActivity,
+});
+
+export type LegionActivityRequestBody = z.output<typeof LegionActivityRequest>;
+
 /** `api.ControllerRegisterResponse`, for a session that registered as the project's controller
  * (the `bootToken` of `POST /legion/v1/claims/register` is the secret `legion controller start`
  * fetched, or a daemon-launched controller's own boot token): the project's controller role token,

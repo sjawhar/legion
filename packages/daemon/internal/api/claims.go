@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -216,6 +217,63 @@ func (s *server) exit(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		s.claimFailure(w, "exit", req.ClaimToken, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// activity is a live role's session reporting what it is doing, after each of its turns and
+// whenever the report's content changes (INFRA-945), so the idle rule can decide whether the
+// session's pod may be released. It decides nothing about the claim, so it posts no request to
+// the claim's machine: the report is written onto the claim's row alone
+// (store.PutClaimActivity), where a machine's own write neither carries it nor erases it.
+//
+// It refuses exactly as its siblings do — a blank field with the field's name, a claim this
+// daemon does not hold or a wrong secret with claim.InvalidSecret, a stale plugin with the
+// stale-contract 409 — and answers 204, as ready and exit do. A report the daemon cannot write
+// is a 500 the session's next one replaces: a claim with no report after its last turn is never
+// released, so nothing lost here costs anything but a release.
+func (s *server) activity(w http.ResponseWriter, r *http.Request) {
+	var req claim.ActivityRequest
+	if !s.readBody(w, r, &req, s.claimSecretCheck) || !requireFields(w,
+		field{"claimToken", string(req.ClaimToken)}, field{"sessionId", req.SessionID}, field{"secret", req.Secret},
+	) {
+		return
+	}
+	if req.Activity.At.IsZero() {
+		writeJSON(w, http.StatusBadRequest, errorBody("activity.at is required"))
+		return
+	}
+	m, ok := s.authenticated(req.ClaimToken, req.Secret)
+	if !ok {
+		writeJSON(w, claim.InvalidSecret.Status, claim.InvalidSecret)
+		return
+	}
+	if s.refuseIfStaleClaim(w, r, m.Claim()) {
+		return
+	}
+	if s.pool == nil {
+		writeJSON(w, http.StatusInternalServerError, errorBody("the daemon has no store to record session activity in"))
+		return
+	}
+	c := m.Claim()
+	c.ActivityAt = req.Activity.At.UTC()
+	c.ActivityBackground = req.Activity.BackgroundWork.Running
+	c.ActivityKinds = req.Activity.BackgroundWork.Kinds
+	if next := req.Activity.Phase.NextReminderAt; next != nil {
+		c.ActivityNextReminderAt = next.UTC()
+	} else {
+		c.ActivityNextReminderAt = time.Time{}
+	}
+	stored, err := store.PutClaimActivity(r.Context(), s.pool, c)
+	if err != nil {
+		s.log.Error("api: a session's activity report was not recorded", "claim", req.ClaimToken,
+			"session", req.SessionID, "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorBody("record session activity: "+err.Error()))
+		return
+	}
+	if !stored {
+		writeJSON(w, claim.InvalidSecret.Status, claim.InvalidSecret)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

@@ -279,6 +279,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	mux.HandleFunc("POST /legion/v1/claims/register", s.register)
 	mux.HandleFunc("POST /legion/v1/claims/ready", s.ready)
 	mux.HandleFunc("POST /legion/v1/claims/exit", s.exit)
+	mux.HandleFunc("POST /legion/v1/claims/activity", s.activity)
 	mux.HandleFunc("POST /legion/v1/grants", s.grant)
 	mux.HandleFunc("POST /legion/v1/controller/secret", s.controllerSecret)
 	mux.HandleFunc("POST /legion/v1/controller/github-credential", s.controllerGitHubCredential)

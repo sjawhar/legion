@@ -245,7 +245,10 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
   }
   await sessionStart({}, context);
 
-  expect(intervals).toHaveLength(1);
+  // Two managed intervals: the role claimant's own heartbeat, armed first by the claim
+  // bootstrap, and the session activity report every claimed session sends on change
+  // (INFRA-945). The heartbeat is the one this test drives.
+  expect(intervals).toHaveLength(2);
   // Establishing the role claimant registers before the role is applied, then
   // refreshes it after the claim.
   expect(registrations).toHaveLength(2);

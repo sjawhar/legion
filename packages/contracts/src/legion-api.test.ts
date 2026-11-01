@@ -6,6 +6,7 @@ import {
   LEGION_PHASE_BACKWARD_TARGETS,
   LEGION_PHASES,
   LEGION_WORKFLOW_PHASES,
+  LegionActivityRequest,
   LegionChildRequest,
   LegionControllerCredentialResponse,
   LegionControllerGrantRequest,
@@ -662,6 +663,47 @@ test("the ready golden carries the session's capability report", () => {
   const withoutReport = fixture("ready.json") as Record<string, unknown>;
   delete withoutReport.capabilities;
   expect(LegionReadyRequest.safeParse(withoutReport).success).toBeTrue();
+});
+
+// The idle rule reads these four values of a session and nothing else, so each is held here: the
+// moment of the reading, whether work of the session's own was running and what kinds, and the
+// armed wake, which is null when no reminder is armed.
+test("a session's activity report carries its reading, its work and its wake", () => {
+  const report = {
+    claimToken: "legion-legion-legion-208-implementer",
+    sessionId: "ses_implementer_208",
+    secret: "claim-secret",
+    activity: {
+      at: "2026-11-01T12:00:00.000Z",
+      backgroundWork: { running: true, kinds: ["async-job", "subagent"] },
+      phase: { open: true, nextReminderAt: "2026-11-01T12:05:00.000Z" },
+    },
+  };
+  expect(LegionActivityRequest.safeParse(report).success).toBeTrue();
+
+  const quiet = {
+    ...report,
+    activity: {
+      at: report.activity.at,
+      backgroundWork: { running: false, kinds: [] },
+      phase: { open: false, nextReminderAt: null },
+    },
+  };
+  expect(LegionActivityRequest.safeParse(quiet).success).toBeTrue();
+
+  // The wake may be absent only as null, never as a missing key or a bare date, and `at` is an
+  // instant: the daemon stores both as timestamps.
+  const noWakeKey = { ...quiet, activity: { ...quiet.activity, phase: { open: false } } };
+  expect(LegionActivityRequest.safeParse(noWakeKey).success).toBeFalse();
+  const badWake = {
+    ...quiet,
+    activity: { ...quiet.activity, phase: { open: true, nextReminderAt: "2026-11-01" } },
+  };
+  expect(LegionActivityRequest.safeParse(badWake).success).toBeFalse();
+  const badAt = { ...quiet, activity: { ...quiet.activity, at: "now" } };
+  expect(LegionActivityRequest.safeParse(badAt).success).toBeFalse();
+  // No generation: the secret is the whole fence, and an added key is refused.
+  expect(LegionActivityRequest.safeParse({ ...report, generation: 3 }).success).toBeFalse();
 });
 
 test("the state golden shows a claim's capability report beside its locator", () => {
