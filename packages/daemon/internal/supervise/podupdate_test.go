@@ -1229,6 +1229,44 @@ func TestPodUpdateARoundThatEndsUnderATurnReleasesItsWorkerOnceTheTurnIsOver(t *
 	}
 }
 
+// The end can also land in the window between a turn's agent_end and the prompt_result that
+// follows it: Oh My Pi writes the result behind the agent_end of a background turn, and in that
+// gap the claim is idle (not StateWorking) while its prompt is still outstanding (resultPending),
+// holding the round's own confirmed ask. The round's end must be held for that result rather
+// than run on the idle claim: run now, leaveRound would take the confirmed ask back, Pending
+// would stop the carry-on task, and the result that followed would find nothing held — so the
+// worker would be left idle with its round gone and never told. Held instead, the result runs
+// it (promptResulted -> afterTurn) and the worker is released exactly once.
+func TestPodUpdateARoundThatEndsInTheResultPendingWindowReleasesItsWorkerOnceTheResultIsIn(t *testing.T) {
+	h := updateHarness(t, PodUpdateContract)
+	h.reach(StateReady)
+	h.openUpdate(testRound, testReasons)
+	ask := h.wantPrompts(1)[0].DeliveryID
+	h.must(StreamTurnStart{Claim: h.token})
+	h.signalUpdate("c0ffee")
+	// agent_end with no prompt_result behind it (mustQuiet): the claim is idle, its prompt still
+	// outstanding, holding the round's own confirmed ask — the resultPending window.
+	h.mustQuiet(StreamTurnEnd{Claim: h.token})
+	h.wantState(StateIdle)
+
+	// The round's end lands in that window. It is held, not run: the round stays open and the
+	// worker is told nothing yet.
+	h.must(PodUpdateEnded{Claim: h.token, Round: testRound})
+	h.wantRound(testRound)
+	h.wantPrompts(1)
+
+	// The prompt's result arrives; the held end runs from it and releases the worker once.
+	h.must(StreamPromptResult{Claim: h.token, DeliveryID: ask, AgentInvoked: true})
+	h.wantRound("")
+	told := h.wantPrompts(2)[1]
+	if told.Message != podUpdateOverTask {
+		t.Errorf("the task after the round = %q, want the words that end the round for its worker", told.Message)
+	}
+	if got := h.pending().ID; got != told.DeliveryID {
+		t.Errorf("pending delivery = %q, want the task just sent, %q", got, told.DeliveryID)
+	}
+}
+
 // A worker can answer with the round's ask still unconfirmed: the wait for that ask ran out
 // (noTurn), it went back to waiting under an id of its own, and the turn the worker read it in
 // started late, carrying the id it was sent under, so nothing confirmed the delivery. The end
