@@ -1780,7 +1780,8 @@ jobs:
 
   # Builds the documentation site (docs/site) on every pull request and merge group that could
   # change it. A push to main runs no docs job here: docs-pages.yaml builds and publishes main's
-  # site to GitHub Pages (https://sjawhar.github.io/legion/), one push at a time in push order.
+  # site to GitHub Pages, at the address .github/scripts/repo-paths.sh derives from the repository
+  # it runs in (https://sjawhar.github.io/legion/ today), one push at a time in push order.
   # Both callers run the steps of docs-site.yaml, which holds them once. The site's reference
   # pages are generated from packages/ and skills/ at build time, scripts/third-party-notices.ts
   # writes the THIRD_PARTY_NOTICES.txt it publishes, and the built site is checked with the

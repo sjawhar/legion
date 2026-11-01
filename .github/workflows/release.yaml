@@ -359,10 +359,41 @@ jobs:
             packages/pi-envoy/package.json > tmp.json \
             && mv tmp.json packages/pi-envoy/package.json
 
+      - name: Point the manifest at the publishing repository
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          # npm matches a package's repository.url against the repository publishing it, case for
+          # case, and refuses a publish with provenance whose url is not that repository's (npm
+          # docs, "Generating provenance statements", Prerequisites; the registry answers E422
+          # "Error verifying sigstore provenance bundle: Failed to validate repository
+          # information"). The publish job hands npm this job's tarball exactly as packed and
+          # never repacks it, so the field has to be right here, before the pack below.
+          #
+          # The committed manifest is left alone: it holds today's repository, which is true
+          # today, and this step writes whichever repository the job runs in, so moving the
+          # repository to another owner or name needs no commit. Nothing restores it, as with the
+          # rewrites above: this job's tree is discarded.
+          url=$(.github/scripts/repo-paths.sh repository_url)
+          jq --arg u "$url" '.repository.url = $u' \
+            packages/pi-envoy/package.json > tmp.json \
+            && mv tmp.json packages/pi-envoy/package.json
+
       - name: Pack extension
         if: steps.version.outputs.skip != 'true'
         run: rm -f ./*.tgz && bun pm pack
         working-directory: packages/pi-envoy
+
+      - name: Check the packed tarball names the publishing repository
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          # Read repository.url back out of the tarball the publish job will hand npm, not out of
+          # the working tree the step above wrote: npm refuses a publish with provenance whose url
+          # is not the publishing repository's, so this is the check that catches a regression at
+          # the moment it would refuse the publish, here in the build job rather than in the job
+          # holding the credentials.
+          url=$(.github/scripts/repo-paths.sh repository_url)
+          tar -xzOf packages/pi-envoy/*.tgz package/package.json \
+            | jq -e --arg u "$url" '.repository.url == $u'
 
       # The tarball, exactly as packed, for publish.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -434,10 +465,32 @@ jobs:
             packages/pi-legion/package.json > tmp.json \
             && mv tmp.json packages/pi-legion/package.json
 
+      - name: Point the manifest at the publishing repository
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          # As in pi_envoy_build, and for the reason given there: npm refuses a publish with
+          # provenance whose repository.url is not the publishing repository's, case for case, and
+          # the publish job packs nothing of its own. The committed manifest keeps today's
+          # repository; this writes whichever one the job runs in, and this job's tree is
+          # discarded.
+          url=$(.github/scripts/repo-paths.sh repository_url)
+          jq --arg u "$url" '.repository.url = $u' \
+            packages/pi-legion/package.json > tmp.json \
+            && mv tmp.json packages/pi-legion/package.json
+
       - name: Pack extension
         if: steps.version.outputs.skip != 'true'
         run: rm -f ./*.tgz && bun pm pack
         working-directory: packages/pi-legion
+
+      - name: Check the packed tarball names the publishing repository
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          # pi_envoy_build's check, over this package's tarball: the packed manifest, which is
+          # what npm verifies the provenance against, must name the publishing repository.
+          url=$(.github/scripts/repo-paths.sh repository_url)
+          tar -xzOf packages/pi-legion/*.tgz package/package.json \
+            | jq -e --arg u "$url" '.repository.url == $u'
 
       # The tarball, exactly as packed, for publish.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

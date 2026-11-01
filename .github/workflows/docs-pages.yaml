@@ -1,15 +1,15 @@
 name: Docs (main)
 
 # Builds the documentation site (docs/site) on every push to main whose change could change it, and
-# publishes it to GitHub Pages (https://sjawhar.github.io/legion/). The build is docs-site.yaml's,
+# publishes it to GitHub Pages, at the address .github/scripts/repo-paths.sh derives from the
+# repository this runs in (https://sjawhar.github.io/legion/ today). The build is docs-site.yaml's,
 # which holds those steps once. Pull requests and merge groups call the same workflow from
 # ci.yaml's docs job; this workflow is main's half.
 #
 # A `workflow_dispatch` run starts this workflow on any branch. The build job runs as it does on
 # main, with the `upload-pages-artifact` step that no other caller of docs-site.yaml asks for, so
 # a dispatch of a branch proves that step before the merge. The deploy job runs on main alone
-# (`github.ref`), so a dispatch of a branch deploys nothing to
-# https://sjawhar.github.io/legion/.
+# (`github.ref`), so a dispatch of a branch deploys nothing to the live site.
 #
 # A workflow of its own, so deployments happen in push order and the site ends at the newest
 # docs-selecting commit's build. A workflow-level concurrency group takes runs in the order they
