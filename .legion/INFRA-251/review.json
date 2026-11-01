@@ -2,30 +2,32 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-251",
-  "completed": "2026-10-31T12:45:36Z",
+  "previousHandoff": "0d35ace8e6af927699a8e0b14fabeb95fc5e72d2",
+  "headReviewed": "the handoff push above ab06eee9dbde (code head 9dda974d2bc7)",
+  "completed": "2026-11-01T03:16:23Z",
   "decision": "changes_requested",
-  "round": "architect-scoped round on the issue-keyed rule: no tree change loses a decision or makes the only telling go to a tree the issue left; the model reaches those transitions; review 5720641456's three findings pass as tests",
-  "reviewedHead": "the handoff push above b4a4f9420bc1 (code head 6adfab5a3cb6)",
+  "round": "narrowed round: review 5722761728's three findings and two Minors against the ownership rule, the composer lock, spentKept, and the round's tests",
   "critical": 0,
-  "important": 3,
-  "minor": 2,
+  "important": 2,
+  "minor": 5,
   "accepted": [
-    "Every tree change is sound under the issue-keyed rule: hand-over with or without the run, orphan, grandchild in either order, adoption into a running and a non-running tree, re-admission, and close. No move path is left.",
-    "Review 5720641456's three findings exist as tests in admit/lost_kept_decisions_test.go, and each fails on the old behaviour (for the grandchild, the child-first order).",
-    "The catch-up publish's deletes, DropReadmittedApproval and the newer-wins upsert are sound; the issue cascade is unreachable.",
-    "RootHears and RootTask leave main's resume paths unchanged: ResumeAwaitedRoot and a fresh start carry no Kept.",
-    "The architect's ruling stands: a decision told again after a failed confirmation write is accepted, not a finding."
+    "Review 5722761728's three findings are fixed on the ownership rule: a taken-back confirmation puts its marks back (put-back insert), a hold takes only rows its own claim owns, and a release clears only the hold. ClaimKeptDecisions clears the void hold it overrides. Each has a test that fails with only its fix reverted (deep review ran the mutations).",
+    "Every naming path reads through UnclaimedKept's lock and claims all-or-nothing in one transaction under SerializeFacts: admission, QueueCatchUp from ready, HandOverKept, Adopt, spentKept and rootTask.",
+    "Lock order: every writer goes parked_decisions then readmitted_approvals. A deadlock is possible only between two single multi-row statements, and every aborted side retries (fact replay, outbox retry, saved/settle) with at worst a second telling.",
+    "spentKept loses nothing and tells no wrong tree; the DropCatchUps telling-wide lease guard is right."
   ],
   "keyFindings": [
-    {"severity": "important", "file": "packages/daemon/internal/store/kept_decisions.go:67", "description": "The confirmation's write deletes the rows the delivery holds, but the machine takes confirmations back. A turn of the agent's own (an Envoy notice) starts while the root task's prompt is in flight, so turnStarted confirms the task and the rows are deleted. The prompt is then refused 'Agent is already processing', and refused clears ConfirmedAt (supervise/table.go:806). lateRefused, takeBackPending and takesBackConfirmed do the same. On the resend, HeldKeptRefs no longer lists the refs, so rootTask drops them in silence, or retires the task. The architect never read the decision. Fix: put the marks back when a confirmed delivery is written unconfirmed, or tell only when the confirmed turn ends. Model a refusal after a confirmation."},
-    {"severity": "important", "file": "packages/daemon/internal/store/kept_decisions.go:46", "description": "holdKeptDecisions takes every row matching the delivery's (ref, at) on every unconfirmed write of it (queue, ack, narrowing, take-back after a death), whatever claim or hold now counts for the row. The comment says it takes only from the start row that claimed the row, and the approval statement below is limited to the holder's tree. A rewrite of the old tree's delivery after the issue moved takes the row from the new tree's delivery, which then drops it in silence at send time. If the old delivery is then retired unsent, the release leaves the row KEPT with no catch-up. Take only rows claimed by one of this claim's delivered rows or already held by this claim, as the comment says. Model the take-back after a death."},
-    {"severity": "important", "file": "packages/daemon/internal/store/kept_decisions.go:79", "description": "A row can carry a counting claim (claimed_by = r2, a catch-up of its new tree) and a void hold (old tree's claim) at once, because ClaimKeptDecisions leaves held_by_* in place. releaseKeptDecisions, ReleaseHeldDecisions and the second statement of ForgetKeptDecisions clear claimed_by along with the hold. They erase r2's claim, so when a newer catch-up supersedes r2, HandOverKept's ReleaseKeptClaims finds nothing, writes no catch-up, and the row waits KEPT while its tree's architect runs. A hold release must clear only the hold columns, and a claim must clear the void hold it overrides."},
-    {"severity": "minor", "file": "packages/daemon/internal/admit/lost_kept_decisions_test.go:92", "description": "The keptRefs(oldTree) checks at :92, :128, :161 and :247 cannot fail: ParkedDecisions now reads by the issue's current tree, which is never the old one there. Replace each with a check that the row still stands under its issue, or remove it. The first adoption test (:140-165) does not reach 'told at the architect's next ready': the adoption's own catch-up names the decision. Seed a tree whose architect does not run yet, or merge it with the second test."},
-    {"severity": "minor", "file": "packages/daemon/internal/daemon/workflow.go:441", "description": "Stale prose: rootHears' comment says the task's decisions 'were forgotten when the claim queued it (the outbox's settleKept)', and kept_decision_property_test.go:346 names the deleted ReKeepDeliveredDecisions. rootTask's silent-drop comment (:512-516) lists three reasons a ref is no longer held. A confirmation taken back and a hold taken by another delivery are two more, and the fixes above should make those comments true."}
+    {"severity": "important", "file": "CI run 41254193153 (code head 31ac9c55)", "description": "main's required ci-ok is failure because test failed at the code head: intake TestConsumePreparesAnIssueEventsRepositoryBeforeApplyingIt (prepared 3 times, want 2, after a NATS permissions violation on $JS.API.STREAM.MSG.GET) and launcher TestTheContainersStopEndsEveryRoleWithinOneStopGrace (stop took 2.73 s). Neither package's tested behaviour is changed by this branch, so both read as flakes, but a red required check is not approved."},
+    {"severity": "important", "file": "pull request", "description": "GitHub reports #2163 CONFLICTING/DIRTY against main at 03:15Z, so no pull_request run can judge a new head. Forward-merge main, then the new head's CI decides the test failures."},
+    {"severity": "minor", "file": "packages/daemon/internal/record/store.go:776", "description": "The all-or-nothing check cannot catch the race its comment describes: with the lock removed, the second composer's UPDATE re-checks against its old snapshot and claims anyway (deep review's mutation). The lock is what prevents it; say so."},
+    {"severity": "minor", "file": "packages/daemon/internal/store/kept_decisions.go:36", "description": "The put-back runs on every unconfirmed write, not only a taken-back confirmation; the comment and daemon/workflow.go:513 state the narrower condition. Make the comment state what the insert does and why it is safe."},
+    {"severity": "minor", "file": "packages/daemon/internal/store/kept_decisions_test.go:297", "description": "pg_locks is read cluster-wide; filter on the second composer's backend pid. TestAHoldReleaseLeavesAClaimThatCounts' second assertion stays green with the release change reverted; spentKept's claims==0 branch has no test."},
+    {"severity": "minor", "file": "packages/daemon/internal/daemon/notice_exceptions.go:188", "description": "'the decisions wait in the outbox, never in the table alone' is false when the root does not hear (CatchUpTheTreesOwed writes nothing)."},
+    {"severity": "minor", "file": "packages/daemon/internal/workflow/catch_up.go:57", "description": "Still describes the old DropCatchUps rule (one live lease) rather than the telling-wide one."}
   ],
   "notFindings": [
-    "The parked_decisions_issue index duplicates the primary key's leading column; tellKeptDecisions runs four statements for deliveries with empty Kept; the changelog fragment does not say decisions on a member left below a handed child now stay with the closing tree, which the state table and linger.go document. Not faults."
+    "A CHECK constraint for claimed-or-held, one shared helper for supersededKept/spentKept and for the hold-ownership SQL, and moving the UnclaimedKept pairing into EnqueueNaming are maintainability, not faults."
   ],
-  "providers": "Verified from each run's own turns in the session store: DeepReview16, 58 assistant turns, all anthropic / claude-opus-5-5; CodeQuality16, 18 assistant turns, all anthropic / claude-opus-5-5.",
-  "ci": "CI head 5f9c905e (only .legion/INFRA-251/test.json above it), read 2026-10-31T12:45Z: changes and pr-title success; lint, typecheck, test and every package lane queued. A request for changes does not wait on CI."
+  "providers": "Verified from each run's own turns in the session store: DeepReview18, 75 assistant turns, all anthropic / claude-opus-5-5; CodeQuality18, 27 assistant turns, all anthropic / claude-opus-5-5.",
+  "ci": "CI head 31ac9c55 (only .legion/ above it): run 41254193153 completed failure; ci-ok failure, test failure, every other lane success, pr-title success. Read 2026-11-01T03:15Z."
 }
