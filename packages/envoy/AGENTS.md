@@ -2720,7 +2720,7 @@ The fifth is an access token the secrets broker issued, presented under RFC 9449
 the broker is asked what the token is (RFC 7662 introspection, one affirmative answer reused for `brokertoken.AffirmativeCacheTTL`) and the caller is held to the key that token is bound to.
 RFC 9449 Section 7.2 refuses a DPoP-bound token presented under any other scheme, so the scheme alone decides the kind and a `DPoP` presentation is never retried as a bearer:
 it is its own branch (`api.brokerTokenActor`) with its own refusals, `401 BROKER_TOKEN_NOT_ACTIVE`, `401 BROKER_TOKEN_PROOF_INVALID`, `401 BROKER_TOKEN_KEY_MISMATCH`, `401 BROKER_TOKEN_NOT_A_SESSION` for a live token that is no session's credential (`brokertoken.ErrNotASession`:
-the broker's answer names no session or no person, or the token was issued to a client other than `oauthwire.ExchangeClientID`, which a machine login's own access token is
+the broker's answer names no session, or names neither a person nor a service, or the token was issued to a client other than `oauthwire.ExchangeClientID`, which a machine login's own access token is
 — DPoP-bound and perfectly live, and no exchange decided a session for it, so Dispatch acts on none of them rather than taking the session a body names), `429 BROKER_TOKEN_RATE_LIMITED`, and `503 BROKER_UNAVAILABLE` for a broker that answered nothing, which is a 503 for the reason `OIDC_ISSUER_UNAVAILABLE` is.
 None of them repeats the token.
 It is the only credential that proves a session of its own, so its caller writes as that session with no `actor` in the body at all;
@@ -4619,20 +4619,27 @@ unset, it is nil and no service is registered), `BROKER_MINT_TARGETS` (removed;
 startup refuses it because a secret's `kind` tag now selects what the broker mints), `BROKER_SERVICE_LOGINS` (optional;
 whitespace-separated `<service>=system:serviceaccount:<namespace>:<name>` entries, the ServiceAccounts that log in as a service with their own token and that authenticate the `serviceAuth` routes a service calls as itself (`POST /v1/oauth/exchange/pod-sessions`), each account given once and named exactly, keyed by account in `Config.ServiceLogins`;
 read by the same parser as `BROKER_SERVICES` (`parseServiceAccounts`), so a namespace's `default` account is refused, and so is an account `BROKER_SERVICES` binds for a service's pods, since every such pod holds a token for it;
-needs `BROKER_K8S_OIDC_ISSUER`; unset, no service logs in with a token), `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all), `BROKER_GOOGLE_OIDC_AUDIENCE` (optional;
-the audience a Google VM identity token must carry, `Config.GoogleOIDCAudience`;
-its issuer is always `https://accounts.google.com`, the constant `config.GoogleOIDCIssuer`, so there is no issuer variable;
+needs `BROKER_K8S_OIDC_ISSUER`; unset, no service logs in with a token), `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all), `BROKER_GOOGLE_OIDC_ISSUER` (optional;
+the issuer of the Google identity tokens machines present, `Config.GoogleOIDCIssuer`, `https://accounts.google.com` when unset, which is `config.DefaultGoogleOIDCIssuer` and where every real one comes from;
+it is a variable because a dev stack has no Google, `cmd/dev-oidc-issuer` standing in for it on a loopback port, and it is read only where `BROKER_GOOGLE_OIDC_AUDIENCE` is set), `BROKER_GOOGLE_OIDC_AUDIENCE` (optional;
+the audience a machine's Google identity token must carry, `Config.GoogleOIDCAudience`, both at the VM token login and at the RFC 8693 token exchange, where such a token is a subject token;
 it needs `BROKER_VM_SERVICES`, since an audience no VM service is listed for could accept no token;
-unset, `BROKER_VM_SERVICES`, `BROKER_VM_PROJECTS` and `BROKER_VM_INSTANCES` are each refused, naming the variable and this one), `BROKER_VM_SERVICES` (optional;
+unset, `BROKER_VM_SERVICES`, `BROKER_VM_PROJECTS`, `BROKER_VM_INSTANCES` and `BROKER_VM_EXCHANGE_ACCOUNTS` are each refused, naming the variable and this one), `BROKER_VM_SERVICES` (optional;
 whitespace-separated `name=<service account email>` entries, such as `example-service=example-fleet@example-project.iam.gserviceaccount.com`, keyed by account in `Config.VMServicesByAccount`;
 read by its own parser (`parseVMServiceAccounts`), since `parseServiceAccounts` takes only Kubernetes subjects.
 After the same service-name form and refusal of `shared`, `vmAccountRefusal` takes only a user-managed account, `<account id>@<project id>.iam.gserviceaccount.com` in lowercase as a token carries it, and refuses with a message of its own such an address written with capital letters, a project's default account (Compute Engine's `<number>-compute@developer.gserviceaccount.com` or App Engine's `<project id>@appspot.gserviceaccount.com`, which the project's workloads run as by default), and a Google-managed service agent (`service-<number>@…`, or any `gcp-sa-` domain);
 then the refusal of an account given twice, naming both services when they differ, through the helper both parsers share (`bindOnce`);
-every account needs an entry in both settings below), `BROKER_VM_PROJECTS` / `BROKER_VM_INSTANCES` (optional;
+an account the exchange takes wherever it runs is listed here and pinned in neither setting below), `BROKER_VM_PROJECTS` / `BROKER_VM_INSTANCES` (optional;
 whitespace-separated `<service account email>=<project id>` and `<service account email>=<instance-name glob>` entries, keyed by account in `Config.VMProjects` and `Config.VMInstancePatterns`, each account read by `vmAccountRefusal` as above;
 the glob is `path.Match`'s syntax over an instance name's characters (lowercase letters, digits, `-`, and `*`, `?`, `[`, `]`, `^`), so a `/`, a capital, a `.`, a `\` or a `!` is refused;
 an account given twice is refused, and so is an entry naming an account `BROKER_VM_SERVICES` does not list, the first such entry as written;
-an account that setting lists with no project or no glob is refused, naming that account, its entry and the missing setting), `BROKER_EXCHANGE_K8S_AUDIENCE` (optional;
+each pin is optional per account and the two go together, so an account named in one setting and not the other is refused at boot naming both and that account, since half a pin says nothing clear about which machines it means;
+an account pinned in neither takes its machines wherever they run, a token carrying no `google.compute_engine` claims included, which is what a token minted through a workload identity pool and a token from a Kubernetes pod's metadata server both carry, while the VM token login, which has an instance to name, still refuses such a token), `BROKER_VM_EXCHANGE_ACCOUNTS` (optional;
+whitespace-separated `<service account email>=<project>=<person>[=<session>]` entries, the grammar `BROKER_EXCHANGE_ACCOUNTS` uses for a pod, such as `example-fleet@example-project.iam.gserviceaccount.com=EXAMPLE=ada@example.com`;
+the token the exchange mints for a machine of that account may write that one project, acts for that person, and writes under the session the entry fixes, an entry that fixes none requiring the machine to name its own, the session everything after the third `=`;
+each account is named at most once and must be one `BROKER_VM_SERVICES` lists, and an account that setting lists and this one does not gets a token that names its service and no person at all;
+`Config.ExchangeGoogleAccounts` is what the four settings together make, one `exchange.GoogleEntry` per listed account, which is the whole of what the exchange decides a machine's token on;
+unset, every listed account's machines get such a service-only token), `BROKER_EXCHANGE_K8S_AUDIENCE` (optional;
 the audience a pod's projected token must carry to be exchanged for a Dispatch access token
 — its own, beside `BROKER_K8S_OIDC_AUDIENCE`, so neither token is spendable where the other is;
 its issuer is the one cluster the broker is told about, `BROKER_K8S_OIDC_ISSUER`, which it needs;
@@ -4788,9 +4795,10 @@ Read `routes()` for the current, authoritative route list.
 
 The RFC 8693 token exchange is the token endpoint's other grant (`POST /v1/oauth/token`, `oauth.Provider.exchangeGrant`):
 a caller presents the platform identity it already holds and gets back one of the broker's access tokens, which it writes Dispatch with.
-Three subject tokens reach it, each under its own `subject_token_type` (`internal/broker/oauthwire`, the wire contract the broker and its callers share):
+Four subject tokens reach it, each under its own `subject_token_type` (`internal/broker/oauthwire`, the wire contract the broker and its callers share):
 a pod's projected ServiceAccount token (`urn:envoy:params:oauth:token-type:kubernetes-service-account`, minted for `BROKER_EXCHANGE_K8S_AUDIENCE` and verified against `BROKER_K8S_OIDC_ISSUER`, and it must carry the pod it is bound to);
 a continuous-integration workflow run's GitHub token (`urn:envoy:params:oauth:token-type:github-workflow-run`, against `BROKER_EXCHANGE_GITHUB_ISSUER`/`_AUDIENCE`, single use, since a run mints a fresh one per request, while a pod's standing token is exchanged as often as its role needs);
+a machine's Google identity token (`urn:envoy:params:oauth:token-type:google-identity`, minted for `BROKER_GOOGLE_OIDC_AUDIENCE` and verified against `BROKER_GOOGLE_OIDC_ISSUER`, not single use, since a metadata server hands the same token out until it is nearly spent, and admitted an hour of lifetime as a workflow run's is);
 and a dev box session's own machine access token (`urn:ietf:params:oauth:token-type:access_token`), which no entry lists, because the person is the approver its machine login already records.
 A subject token must be signed with one of its issuer's published asymmetric keys
 — `none` and a shared secret are refused before any key is fetched — and its audience is checked by the broker itself, which the library does not do.
@@ -4801,10 +4809,11 @@ the subject token is the credential the request is judged on, and the caller's D
 Any other request — another client presenting nothing, this client on another grant, this client presenting a credential of any kind
 — goes to the library and is answered as it always was.
 `internal/broker/exchange` is the policy half and nothing else (it verifies no token, reads no configuration and takes no clock):
-handed the verified claims, it answers the session the token writes as, the person it acts for, and its project scope
-— `named`, the one project `BROKER_EXCHANGE_ACCOUNTS`/`BROKER_EXCHANGE_WORKFLOWS` fixes, or `person`, every project its person may write, which is what a person's own credential gets.
+handed the verified claims, it answers the session the token writes as, the person it acts for or the service it is, and its project scope
+— `named`, the one project `BROKER_EXCHANGE_ACCOUNTS`/`BROKER_EXCHANGE_WORKFLOWS`/`BROKER_VM_EXCHANGE_ACCOUNTS` fixes, or `person`, every project its person may write, which is what a person's own credential gets and the word a token naming no person at all carries, being held to no one project.
+It is also the one reading of a Google identity token's own claim shapes (`exchange.ReadGoogleIdentity`, `GoogleIdentity`, `ComputeEngine`), which `enroll.GoogleVMVerifier.VerifyGoogle` reads the same token through, so `email`, `email_verified` and the `google.compute_engine` members are spelled once.
 Its refusals are one answer an operator can act on each:
-`ErrNoEntry`, `ErrNoPodBinding`, `ErrSessionMismatch`, `ErrSessionRequired`, `ErrSessionInvalid`, `ErrClaimMissing` and, of a pod-session registration, `ErrSessionFixed`.
+`ErrNoEntry`, `ErrNoPodBinding`, `ErrSessionMismatch`, `ErrSessionRequired`, `ErrSessionInvalid`, `ErrClaimMissing`, `ErrEmailNotVerified` and `ErrNoComputeEngine` and `ErrMachineNotAllowed` of a machine, and, of a pod-session registration, `ErrSessionFixed`.
 The whole exchange runs in one transaction, because the claim on the session name and the token it is claimed for must land together or not at all.
 
 A pod exchanges under a session name only while a registration says that pod may (`oauth_pod_sessions`, migration 0021).
@@ -4836,9 +4845,9 @@ a refusal raised through the library's store hook arrives as `invalid_request`, 
 the broker's tokens carry no claims in their own bytes, so what a token says lives on its stored session and this route is the only way to read it.
 It is an `accountAuth` route — the caller's own ServiceAccount token, which RFC 7662 Section 2.1 allows in place of OAuth client authentication, so the provider's `Introspect` answers it directly rather than authenticating an OAuth client.
 The form's `token` parameter names the token (missing, `400 TOKEN_REQUIRED`), and the answer is `oauthwire.Introspection`, the one declaration the broker serialises and a resource server decodes:
-`active`, and when it is live the `session` the token's writes are recorded as, the `person` it acts for, the `project_scope` (`named` or `person`) and the `project` a named one may write, the `scope`, `exp` and `client_id`, and `jkt`, the thumbprint of the key the token is DPoP-bound to
+`active`, and when it is live the `session` the token's writes are recorded as, the `person` it acts for or the `service` it is (a token names one of the two, the service being the fleet a machine whose entry names no person belongs to), the `project_scope` (`named` or `person`) and the `project` a named one may write, the `scope`, `exp` and `client_id`, and `jkt`, the thumbprint of the key the token is DPoP-bound to
 — which is what makes a stolen token useless, since whoever reads this answer checks the caller's proof against it.
-A machine login's own token carries neither project field, no exchange having decided for it, and names no `session` or `person` either, which is why a resource server that acts as the session its caller proved refuses it rather than admitting it with none (`brokertoken.ErrNotASession`, Dispatch's `401 BROKER_TOKEN_NOT_A_SESSION`).
+A machine login's own token carries neither project field, no exchange having decided for it, and names no `session`, `person` or `service` either, which is why a resource server that acts as the session its caller proved refuses it rather than admitting it with none (`brokertoken.ErrNotASession`, Dispatch's `401 BROKER_TOKEN_NOT_A_SESSION`).
 A token the broker does not know, one it revoked and one that has expired are all `active` false and nothing else (Section 2.2), so an answer discloses nothing to a caller holding a string at random.
 So is any token that is not an access token, a machine login's refresh token among them:
 the answer names no token type, and a refresh token, which outlives the access token issued beside it, answered live would pass for a credential no request can present, so `Introspect` checks the kind the library reports finding rather than trusting the `access_token` hint it passes.

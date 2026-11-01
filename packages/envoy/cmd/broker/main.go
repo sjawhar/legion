@@ -234,15 +234,16 @@ func main() {
 	slog.Info("secret store", "store", cfg.SecretsStore, "credentials", credentials)
 	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: serviceNames(cfg)}
 	// One key source per issuer, read by everything that needs that issuer's keys: the verifiers
-	// discoverVerifiers builds and, for the cluster's issuer, the RFC 8693 exchange below, which
-	// resolves a subject token's own key through the same *oidc.Keys. So the boot makes one
-	// discovery read for the cluster rather than two, one set is held in memory, and a rotation
-	// becomes visible to both at the same moment.
+	// discoverVerifiers builds and, for the cluster's issuer and Google's, the RFC 8693 exchange
+	// below, which resolves a subject token's own key through the same *oidc.Keys. So the boot
+	// makes one discovery read per issuer rather than two, one set is held in memory, and a
+	// rotation becomes visible to both at the same moment.
 	//
 	// Discovery is bounded: an issuer that accepts the connection and never answers refuses the
 	// boot instead of hanging it with no health endpoint serving.
-	pod, vm, k8sKeys, err := discoverVerifiers(ctx, cfg, issuerKeys)
+	discovered, err := discoverVerifiers(ctx, cfg, issuerKeys)
 	fatal(err)
+	pod, vm := discovered.Pod, discovered.VM
 
 	// The context the work that has to outlive the drain runs on: the five-minute policy reload
 	// below and the reread listener under it. ctx is signal.NotifyContext's, which the first
@@ -437,14 +438,20 @@ func main() {
 	// token. Both halves are optional and the grant is composed either way: a broker told about
 	// no issuer accepts no subject token at all, which the line below says once at boot rather
 	// than leaving an operator to read it out of a refusal.
-	exchangePolicy, err := exchange.NewSet(cfg.ExchangeAccounts, cfg.ExchangeWorkflows)
+	exchangePolicy, err := exchange.NewSet(cfg.ExchangeAccounts, cfg.ExchangeWorkflows, cfg.ExchangeGoogleAccounts)
 	fatal(err)
 	exchangeConfig := oauth.ExchangeConfig{Policy: exchangePolicy}
 	if cfg.ExchangeK8sAudience != "" {
 		// The key source the account verifier already reads: a subject token is the same
 		// cluster's projected token, for an audience of its own (BROKER_EXCHANGE_K8S_AUDIENCE),
 		// and BROKER_EXCHANGE_K8S_AUDIENCE needs BROKER_K8S_OIDC_ISSUER, so this is never nil.
-		exchangeConfig.Kubernetes = oauth.IssuerConfig{Issuer: cfg.K8sOIDCIssuer, Audience: cfg.ExchangeK8sAudience, Keys: k8sKeys}
+		exchangeConfig.Kubernetes = oauth.IssuerConfig{Issuer: cfg.K8sOIDCIssuer, Audience: cfg.ExchangeK8sAudience, Keys: discovered.K8sKeys}
+	}
+	if cfg.GoogleOIDCAudience != "" {
+		// The key source the VM verifier already reads, for the same reason the cluster's is
+		// shared: a machine's identity token at the exchange is the token it logs in with, and
+		// BROKER_GOOGLE_OIDC_AUDIENCE is what discovered it, so this is never nil.
+		exchangeConfig.Google = oauth.IssuerConfig{Issuer: cfg.GoogleOIDCIssuer, Audience: cfg.GoogleOIDCAudience, Keys: discovered.GoogleKeys}
 	}
 	if cfg.ExchangeGitHubIssuer != "" {
 		// The GitHub issuer has no second reader, so it keeps a key source of its own, read here
@@ -453,11 +460,11 @@ func main() {
 		fatal(err)
 		exchangeConfig.GitHub = oauth.IssuerConfig{Issuer: cfg.ExchangeGitHubIssuer, Audience: cfg.ExchangeGitHubAudience, Keys: keys}
 	}
-	if cfg.ExchangeK8sAudience == "" && cfg.ExchangeGitHubIssuer == "" {
-		slog.Info("token exchange", "state", "unconfigured", "detail", "no subject token issuer is set, so no pod or workflow run exchanges")
+	if cfg.ExchangeK8sAudience == "" && cfg.ExchangeGitHubIssuer == "" && cfg.GoogleOIDCAudience == "" {
+		slog.Info("token exchange", "state", "unconfigured", "detail", "no subject token issuer is set, so no pod, workflow run or machine exchanges")
 	} else {
 		slog.Info("token exchange", "state", "on", "kubernetes", cfg.ExchangeK8sAudience != "", "github", cfg.ExchangeGitHubIssuer != "",
-			"accounts", len(cfg.ExchangeAccounts), "workflows", len(cfg.ExchangeWorkflows))
+			"accounts", len(cfg.ExchangeAccounts), "workflows", len(cfg.ExchangeWorkflows), "machines", len(cfg.ExchangeGoogleAccounts))
 	}
 	// verification_uri is Dispatch's machine-login page, where the person types the code.
 	provider, err := oauth.New(oauth.Config{
@@ -782,34 +789,54 @@ func serviceNames(cfg config.Config) []string {
 // keysFunc is issuerKeys' shape, a seam for a test that must not reach a real issuer.
 type keysFunc func(ctx context.Context, issuer string) (*oidc.Keys, error)
 
+// verifiers are what one boot's discovery of the token issuers the broker trusts produced: a
+// verifier per issuer and the key set behind each, since the RFC 8693 exchange resolves a subject
+// token's own key itself and must read the very set its verifier reads.
+type verifiers struct {
+	// Pod verifies a pod's enrollment token and a service's login token, nil on a broker told
+	// about no cluster.
+	Pod enroll.PodVerifier
+	// VM verifies a machine's Google identity token, nil on a broker with no Google audience.
+	VM enroll.VMVerifier
+	// K8sKeys is the cluster issuer's published keys, nil where Pod is.
+	K8sKeys *oidc.Keys
+	// GoogleKeys is the Google issuer's published keys, nil where VM is.
+	GoogleKeys *oidc.Keys
+}
+
 // discoverVerifiers reads the key sets of the token issuers the broker trusts (keysFor, issuerKeys
 // in production) and builds a verifier on each: the cluster's (BROKER_K8S_OIDC_ISSUER and
 // BROKER_K8S_OIDC_AUDIENCE), one verifier for both a pod's enrollment token and a service's login
 // token, which are the same cluster's projected tokens for the same audience, whose key set it
-// also answers for the RFC 8693 exchange; and Google's (config.GoogleOIDCIssuer), for a VM's
-// identity token, only when BROKER_GOOGLE_OIDC_AUDIENCE is set, logging one line that names the
-// issuer, the audience and the VM services. With no Google audience it reads and logs nothing
-// about Google, and answers a nil VM verifier, so the broker enrolls no VM and serves no VM login.
-func discoverVerifiers(ctx context.Context, cfg config.Config, keysFor keysFunc) (enroll.PodVerifier, enroll.VMVerifier, *oidc.Keys, error) {
-	var pod enroll.PodVerifier
-	var k8sKeys *oidc.Keys
+// also answers for the RFC 8693 exchange; and Google's (BROKER_GOOGLE_OIDC_ISSUER), for a
+// machine's identity token, only when BROKER_GOOGLE_OIDC_AUDIENCE is set, whose key set it
+// answers for the exchange too, logging one line that names the issuer, the audience, the VM
+// services and how many machine entries the exchange holds. With no Google audience it reads and
+// logs nothing about Google, and answers a nil VM verifier and no Google keys, so the broker
+// enrolls no VM, serves no VM login and registers no Google subject token type.
+func discoverVerifiers(ctx context.Context, cfg config.Config, keysFor keysFunc) (verifiers, error) {
+	var found verifiers
 	if cfg.K8sOIDCIssuer != "" {
-		var err error
-		if k8sKeys, err = keysFor(ctx, cfg.K8sOIDCIssuer); err != nil {
-			return nil, nil, nil, err
+		keys, err := keysFor(ctx, cfg.K8sOIDCIssuer)
+		if err != nil {
+			return verifiers{}, err
 		}
-		pod = enroll.K8sPodVerifier{Verifier: oidc.NewWithKeys(cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience, k8sKeys)}
+		found.K8sKeys = keys
+		found.Pod = enroll.K8sPodVerifier{Verifier: oidc.NewWithKeys(cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience, keys)}
 	}
 	if cfg.GoogleOIDCAudience == "" {
-		return pod, nil, k8sKeys, nil
+		return found, nil
 	}
-	googleKeys, err := keysFor(ctx, config.GoogleOIDCIssuer)
+	googleKeys, err := keysFor(ctx, cfg.GoogleOIDCIssuer)
 	if err != nil {
-		return nil, nil, nil, err
+		return verifiers{}, err
 	}
 	services := slices.Sorted(maps.Values(cfg.VMServicesByAccount))
-	slog.Info("google vm identity", "issuer", config.GoogleOIDCIssuer, "audience", cfg.GoogleOIDCAudience, "services", strings.Join(slices.Compact(services), ","))
-	return pod, enroll.GoogleVMVerifier{Verifier: oidc.NewWithKeys(config.GoogleOIDCIssuer, cfg.GoogleOIDCAudience, googleKeys)}, k8sKeys, nil
+	slog.Info("google vm identity", "issuer", cfg.GoogleOIDCIssuer, "audience", cfg.GoogleOIDCAudience,
+		"services", strings.Join(slices.Compact(services), ","), "fleets", len(cfg.ExchangeGoogleAccounts))
+	found.GoogleKeys = googleKeys
+	found.VM = enroll.GoogleVMVerifier{Verifier: oidc.NewWithKeys(cfg.GoogleOIDCIssuer, cfg.GoogleOIDCAudience, googleKeys)}
+	return found, nil
 }
 
 // issuerKeys reads issuer's published signing keys: the source a token's own key is resolved

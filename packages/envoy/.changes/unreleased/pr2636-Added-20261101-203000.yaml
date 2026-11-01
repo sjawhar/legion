@@ -1,0 +1,18 @@
+kind: Added
+body: |
+  The secrets broker's RFC 8693 token exchange takes a machine's Google identity token as a
+  fourth subject token (`urn:envoy:params:oauth:token-type:google-identity`), checking Google's
+  signature, the issuer, the audience `BROKER_GOOGLE_OIDC_AUDIENCE`, the expiry and
+  `email_verified`. `BROKER_VM_SERVICES` maps the token's `email` to a service;
+  `BROKER_VM_PROJECTS` and `BROKER_VM_INSTANCES` are now optional per account and pin the
+  Compute Engine project and instance names together or not at all, an account pinned in neither
+  taking a token that carries no `google.compute_engine` claims at all; and the new
+  `BROKER_VM_EXCHANGE_ACCOUNTS` (`<service account email>=<project>=<person>[=<session>]`) gives
+  a fleet the person and Dispatch project it writes for. A listed account with no such entry gets
+  a token that names its service and no person, a new kind carried as `service` on the
+  introspection answer and read by `brokertoken.Caller.Service`. The new
+  `BROKER_GOOGLE_OIDC_ISSUER` (default `https://accounts.google.com`) lets a dev stack put
+  `cmd/dev-oidc-issuer` in Google's place.
+time: 2026-11-01T20:30:00.000000000Z
+custom:
+  Issue: pr2636

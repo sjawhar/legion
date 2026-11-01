@@ -423,15 +423,121 @@ func TestLoadReadsTheVMServices(t *testing.T) {
 	if want := map[string]string{exampleVMServiceAccount: "example-vm-*", second: "example-vm-[0-9]*"}; !maps.Equal(cfg.VMInstancePatterns, want) {
 		t.Fatalf("VMInstancePatterns with two accounts = %v, want %v", cfg.VMInstancePatterns, want)
 	}
-	// The second account's missing project or glob is refused naming it, not only the first's.
+	// A second account pinned in one setting and not the other is half a pin, refused naming
+	// both settings and that account, not only the first's.
 	for _, missing := range []string{"BROKER_VM_PROJECTS", "BROKER_VM_INSTANCES"} {
 		e := maps.Clone(two)
 		e[missing] = validVMEnv()[missing]
+		named := "BROKER_VM_INSTANCES"
+		if missing == "BROKER_VM_INSTANCES" {
+			named = "BROKER_VM_PROJECTS"
+		}
 		_, err := Load(env(e))
-		want := "BROKER_VM_SERVICES names " + second + `, got "example-service=` + second + `", but ` + missing + " does not"
+		want := named + " names " + second + " but " + missing + ` does not, got "example-service=` + second + `"`
 		if err == nil || !strings.HasPrefix(err.Error(), want) {
 			t.Errorf("Load with the second account missing from %s = %v, want a refusal starting %q", missing, err, want)
 		}
+	}
+	// The pinned account with no BROKER_VM_EXCHANGE_ACCOUNTS entry is one machine entry of the
+	// exchange: its service and its two pins, and no person, no project and no session.
+	oneEntry, err := Load(env(validVMEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []exchange.GoogleEntry{{
+		Account: exampleVMServiceAccount, Service: "example-service",
+		CloudProject: "example-project", Instance: "example-vm-*",
+	}}
+	if !slices.Equal(oneEntry.ExchangeGoogleAccounts, want) {
+		t.Fatalf("ExchangeGoogleAccounts = %+v, want %+v", oneEntry.ExchangeGoogleAccounts, want)
+	}
+}
+
+// TestTheGoogleIssuerDefaultsToGooglesOwn: BROKER_GOOGLE_OIDC_ISSUER is Google's own issuer when
+// the environment names none, and a dev stack's stand-in when it does, which is the only reason
+// the variable exists.
+func TestTheGoogleIssuerDefaultsToGooglesOwn(t *testing.T) {
+	cfg, err := Load(env(validVMEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GoogleOIDCIssuer != DefaultGoogleOIDCIssuer || DefaultGoogleOIDCIssuer != "https://accounts.google.com" {
+		t.Fatalf("GoogleOIDCIssuer = %q, want %q", cfg.GoogleOIDCIssuer, DefaultGoogleOIDCIssuer)
+	}
+	e := validVMEnv()
+	e["BROKER_GOOGLE_OIDC_ISSUER"] = " http://127.0.0.1:8080\n"
+	if cfg, err = Load(env(e)); err != nil || cfg.GoogleOIDCIssuer != "http://127.0.0.1:8080" {
+		t.Fatalf("GoogleOIDCIssuer with a stand-in issuer = %q, %v; want the issuer with its white space trimmed", cfg.GoogleOIDCIssuer, err)
+	}
+	// With no Google audience the issuer is still answered, since nothing reads it then: it is
+	// the audience that turns Google identity tokens on at all.
+	if cfg, err = Load(env(validEnv())); err != nil || cfg.GoogleOIDCIssuer != DefaultGoogleOIDCIssuer {
+		t.Fatalf("GoogleOIDCIssuer with no Google audience = %q, %v; want the default", cfg.GoogleOIDCIssuer, err)
+	}
+}
+
+// TestTheVMExchangeAccountsGiveAFleetItsPersonAndProject pins BROKER_VM_EXCHANGE_ACCOUNTS: a
+// listed account it names writes that project, acts for that person and may fix its session,
+// while a listed account it does not name is its service and nothing else. Its refusals are each
+// its own: an entry that is not of the form, a blank field, an account no VM service lists, an
+// account named twice, an account no VM setting may name, and the setting with no Google
+// audience.
+func TestTheVMExchangeAccountsGiveAFleetItsPersonAndProject(t *testing.T) {
+	const second = "second-fleet@example-project.iam.gserviceaccount.com"
+	e := validVMEnv()
+	e["BROKER_VM_SERVICES"] += " example-other=" + second
+	e["BROKER_VM_PROJECTS"] += " " + second + "=example-other"
+	e["BROKER_VM_INSTANCES"] += " " + second + "=example-vm-*"
+	e["BROKER_VM_EXCHANGE_ACCOUNTS"] = exampleVMServiceAccount + "=EXAMPLE=ada@example.com=example-fleet-1"
+	cfg, err := Load(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []exchange.GoogleEntry{
+		{
+			Account: exampleVMServiceAccount, Service: "example-service",
+			CloudProject: "example-project", Instance: "example-vm-*",
+			Project: "EXAMPLE", Person: "ada@example.com", Session: "example-fleet-1",
+		},
+		{
+			Account: second, Service: "example-other",
+			CloudProject: "example-other", Instance: "example-vm-*",
+		},
+	}
+	if !slices.Equal(cfg.ExchangeGoogleAccounts, want) {
+		t.Fatalf("ExchangeGoogleAccounts = %+v, want %+v", cfg.ExchangeGoogleAccounts, want)
+	}
+	// An entry that fixes no session: everything after the third = is the session, so there is
+	// none to read.
+	noSession := validVMEnv()
+	noSession["BROKER_VM_EXCHANGE_ACCOUNTS"] = exampleVMServiceAccount + "=EXAMPLE=ada@example.com"
+	cfg, err = Load(env(noSession))
+	if err != nil || len(cfg.ExchangeGoogleAccounts) != 1 || cfg.ExchangeGoogleAccounts[0].Session != "" ||
+		cfg.ExchangeGoogleAccounts[0].Person != "ada@example.com" {
+		t.Fatalf("ExchangeGoogleAccounts with no session fixed = %+v, %v", cfg.ExchangeGoogleAccounts, err)
+	}
+	for _, row := range []struct{ value, want string }{
+		{exampleVMServiceAccount + "=EXAMPLE", "BROKER_VM_EXCHANGE_ACCOUNTS must be <service account email>=<project>=<person>[=<session>] entries"},
+		{exampleVMServiceAccount + "==ada@example.com", "BROKER_VM_EXCHANGE_ACCOUNTS must be <service account email>=<project>=<person>[=<session>] entries"},
+		{exampleVMServiceAccount + "=EXAMPLE=", "BROKER_VM_EXCHANGE_ACCOUNTS must be <service account email>=<project>=<person>[=<session>] entries"},
+		{"not-an-email=EXAMPLE=ada@example.com", "BROKER_VM_EXCHANGE_ACCOUNTS must name user-managed service accounts"},
+		{"system:serviceaccount:example-ns:example-worker=EXAMPLE=ada@example.com", "BROKER_VM_EXCHANGE_ACCOUNTS must name user-managed service accounts"},
+		{exampleVMServiceAccount + "=EXAMPLE=ada@example.com " + exampleVMServiceAccount + "=OTHER=bob@example.com",
+			"BROKER_VM_EXCHANGE_ACCOUNTS names the service account " + exampleVMServiceAccount + " twice"},
+		{second + "=EXAMPLE=ada@example.com", "BROKER_VM_EXCHANGE_ACCOUNTS names " + second},
+	} {
+		bad := validVMEnv()
+		bad["BROKER_VM_EXCHANGE_ACCOUNTS"] = row.value
+		_, err := Load(env(bad))
+		if err == nil || !strings.HasPrefix(err.Error(), row.want) {
+			t.Errorf("Load(BROKER_VM_EXCHANGE_ACCOUNTS=%q) = %v, want a refusal starting %q", row.value, err, row.want)
+		}
+	}
+	withoutAudience := validEnv()
+	withoutAudience["BROKER_VM_EXCHANGE_ACCOUNTS"] = exampleVMServiceAccount + "=EXAMPLE=ada@example.com"
+	_, err = Load(env(withoutAudience))
+	if want := "BROKER_VM_EXCHANGE_ACCOUNTS needs BROKER_GOOGLE_OIDC_AUDIENCE"; err == nil || !strings.HasPrefix(err.Error(), want) {
+		t.Fatalf("Load with the fleet grants and no Google audience = %v, want a refusal starting %q", err, want)
 	}
 }
 
@@ -460,6 +566,7 @@ func TestTheVMSettingsLeaveEveryOtherFieldAlone(t *testing.T) {
 		t.Fatal("the VM settings were not read")
 	}
 	got.GoogleOIDCAudience, got.VMServicesByAccount, got.VMProjects, got.VMInstancePatterns = "", nil, nil, nil
+	got.ExchangeGoogleAccounts = nil
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Config with the VM settings, VM fields cleared = %+v, want it equal to the Config without them, %+v", got, want)
 	}
@@ -532,20 +639,41 @@ func TestAGoogleAudienceWithNoVMServicesIsRefused(t *testing.T) {
 	}
 }
 
-// TestVMServicesNeedAProjectAndAnInstancePattern pins that every VM account needs both its
-// project and its instance pattern, refused naming the account and its entry; that neither setting
-// may name an account no VM service lists (the first such entry as written is the one named), an
-// account twice, or a malformed value; and that an instance glob holds only an instance name's
-// characters and path.Match's.
-func TestVMServicesNeedAProjectAndAnInstancePattern(t *testing.T) {
+// TestAVMAccountIsPinnedToBothOrToNeither pins the rule each pin follows: an account named in
+// BROKER_VM_PROJECTS and in BROKER_VM_INSTANCES is held to that project and those names, an
+// account named in neither takes its machines wherever they run, and an account named in one and
+// not the other is refused at boot naming both settings and the account, since half a pin says
+// nothing clear. It also pins that neither setting may name an account no VM service lists (the
+// first such entry as written is the one named), an account twice, or a malformed value; and that
+// an instance glob holds only an instance name's characters and path.Match's.
+func TestAVMAccountIsPinnedToBothOrToNeither(t *testing.T) {
 	for _, missing := range []string{"BROKER_VM_PROJECTS", "BROKER_VM_INSTANCES"} {
+		named := "BROKER_VM_INSTANCES"
+		if missing == "BROKER_VM_INSTANCES" {
+			named = "BROKER_VM_PROJECTS"
+		}
 		e := validVMEnv()
 		delete(e, missing)
 		_, err := Load(env(e))
-		want := "BROKER_VM_SERVICES names " + exampleVMServiceAccount + `, got "example-service=` + exampleVMServiceAccount + `", but ` + missing + " does not"
+		want := named + " names " + exampleVMServiceAccount + " but " + missing + ` does not, got "example-service=` + exampleVMServiceAccount + `"`
 		if err == nil || !strings.HasPrefix(err.Error(), want) {
 			t.Errorf("Load with %s unset = %v, want a refusal starting %q", missing, err, want)
 		}
+	}
+	// Neither pin: the account is listed, and its entry takes a machine wherever it runs.
+	unpinned := validVMEnv()
+	delete(unpinned, "BROKER_VM_PROJECTS")
+	delete(unpinned, "BROKER_VM_INSTANCES")
+	cfg, err := Load(env(unpinned))
+	if err != nil {
+		t.Fatalf("Load with neither pin = %v, want an unpinned account", err)
+	}
+	if cfg.VMProjects != nil || cfg.VMInstancePatterns != nil {
+		t.Errorf("VMProjects = %v, VMInstancePatterns = %v; want neither with no pin set", cfg.VMProjects, cfg.VMInstancePatterns)
+	}
+	want := []exchange.GoogleEntry{{Account: exampleVMServiceAccount, Service: "example-service"}}
+	if !slices.Equal(cfg.ExchangeGoogleAccounts, want) {
+		t.Errorf("ExchangeGoogleAccounts with neither pin = %+v, want %+v", cfg.ExchangeGoogleAccounts, want)
 	}
 	const other, third = "other-fleet@example-project.iam.gserviceaccount.com", "third-fleet@example-project.iam.gserviceaccount.com"
 	for name, values := range map[string][2]string{
@@ -665,6 +793,9 @@ func TestWithNoGoogleAudienceEveryVMFieldIsEmpty(t *testing.T) {
 	}
 	if cfg.GoogleOIDCAudience != "" || cfg.VMServicesByAccount != nil || cfg.VMProjects != nil || cfg.VMInstancePatterns != nil {
 		t.Fatalf("VM configuration = audience %q, services %v, projects %v, instances %v; want empty with no Google audience", cfg.GoogleOIDCAudience, cfg.VMServicesByAccount, cfg.VMProjects, cfg.VMInstancePatterns)
+	}
+	if cfg.ExchangeGoogleAccounts != nil {
+		t.Fatalf("ExchangeGoogleAccounts = %+v, want none with no Google audience: the exchange then registers no Google subject token type", cfg.ExchangeGoogleAccounts)
 	}
 }
 

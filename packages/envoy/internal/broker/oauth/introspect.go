@@ -54,6 +54,7 @@ func (p *Provider) Introspect(ctx context.Context, token string) (oauthwire.Intr
 	}
 	answer.Session, _ = session.Extra[ClaimSession].(string)
 	answer.Person, _ = session.Extra[ClaimPerson].(string)
+	answer.Service, _ = session.Extra[ClaimService].(string)
 	answer.ProjectScope, _ = session.Extra[ClaimProjectScope].(string)
 	answer.Project, _ = session.Extra[ClaimProject].(string)
 	return answer, nil

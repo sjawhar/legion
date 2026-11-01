@@ -62,8 +62,10 @@ func expiryOf(answer Introspection) time.Time {
 // callerOf is the Caller a live answer names, the one shape both checks hand back. The named
 // scope is read here rather than left to a reader: Project is the project a named-scope answer
 // names, and nothing at all for an answer scoped to its person, who writes wherever they may.
+// The service is carried as the broker answered it, which is set exactly where the person is
+// not (live refuses an answer naming neither).
 func callerOf(answer Introspection) Caller {
-	caller := Caller{Session: answer.Session, Person: answer.Person}
+	caller := Caller{Session: answer.Session, Person: answer.Person, Service: answer.Service}
 	if answer.ProjectScope == ProjectScopeNamed {
 		caller.Project = answer.Project
 	}

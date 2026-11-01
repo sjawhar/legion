@@ -167,11 +167,21 @@ func machineLoginToken(jkt string, life time.Duration) brokertoken.Introspection
 	}
 }
 
+// serviceToken is the answer a token that names a service and no person gets: what the exchange
+// mints for a machine whose entry names no person, which names the fleet its machine belongs to.
+func serviceToken(jkt string, life time.Duration) brokertoken.Introspection {
+	answer := liveToken(jkt, life)
+	answer.Person, answer.Service = "", "example-fleet"
+	answer.ProjectScope, answer.Project = brokertoken.ProjectScopePerson, ""
+	return answer
+}
+
 // TestATokenThatIsNoSessionsCredentialIsRefused: a live, DPoP-bound token the broker issued for
 // something other than acting as a session names no session to record writes as, so it is
 // refused with an outcome of its own rather than handed back as a Caller for whoever mounts
 // this check to fill in. Each leg of the rule is its own token: a machine login's own, one the
-// exchange issued that names no person, one that names a session and a person but comes from
+// exchange issued that names neither a person nor a service, one that names a session and a
+// person but comes from
 // another client, and the three whose project scope this package cannot read — an answer
 // carrying none, one carrying a word it does not know, and one naming a project scope with no
 // project beside it. Those three are refused rather than read as a token that names no project,
@@ -182,8 +192,8 @@ func machineLoginToken(jkt string, life time.Duration) brokertoken.Introspection
 func TestATokenThatIsNoSessionsCredentialIsRefused(t *testing.T) {
 	rig := newRig(t)
 	caller := newSigner(t)
-	noPerson := liveToken(caller.jkt, time.Hour)
-	noPerson.Person = ""
+	noOwner := liveToken(caller.jkt, time.Hour)
+	noOwner.Person = ""
 	anotherClient := liveToken(caller.jkt, time.Hour)
 	anotherClient.ClientID = "agent-secrets-helper"
 	noScope := liveToken(caller.jkt, time.Hour)
@@ -193,12 +203,12 @@ func TestATokenThatIsNoSessionsCredentialIsRefused(t *testing.T) {
 	namedNoProject := liveToken(caller.jkt, time.Hour)
 	namedNoProject.Project = ""
 	for name, answer := range map[string]brokertoken.Introspection{
-		"a machine login's own token":         machineLoginToken(caller.jkt, time.Hour),
-		"a token naming no person":            noPerson,
-		"a token of another client":           anotherClient,
-		"a token naming no project scope":     noScope,
-		"a token of an unknown project scope": unknownScope,
-		"a named scope naming no project":     namedNoProject,
+		"a machine login's own token":                 machineLoginToken(caller.jkt, time.Hour),
+		"a token naming neither a person nor service": noOwner,
+		"a token of another client":                   anotherClient,
+		"a token naming no project scope":             noScope,
+		"a token of an unknown project scope":         unknownScope,
+		"a named scope naming no project":             namedNoProject,
 	} {
 		t.Run(name, func(t *testing.T) {
 			token := "a-token-that-is-" + strings.ReplaceAll(name, " ", "-")
@@ -227,6 +237,31 @@ func TestATokenThatIsNoSessionsCredentialIsRefused(t *testing.T) {
 	rig.broker.Says(sound, liveToken(caller.jkt, time.Hour))
 	if _, err := rig.verifier.Verify(t.Context(), caller.at(resourcePath, sound)); err != nil {
 		t.Fatalf("a session's own token was refused: %v", err)
+	}
+}
+
+// TestATokenNamingAServiceAndNoPersonIsASessionsCredential: a machine whose entry names no
+// person is exchanged a token that names its service instead, and such a token is a session's
+// credential like any other here — it names the session its writes are recorded as, and the
+// service is what whoever mounts this check holds it to. Both checks answer the service, so an
+// open connection resolves to the same caller the request did.
+func TestATokenNamingAServiceAndNoPersonIsASessionsCredential(t *testing.T) {
+	rig := newRig(t)
+	caller := newSigner(t)
+	const token = "a-token-the-exchange-issued-a-machine"
+	rig.broker.Says(token, serviceToken(caller.jkt, time.Hour))
+
+	want := brokertoken.Caller{Session: "ses_a1b2c3", Service: "example-fleet"}
+	decided, err := rig.verifier.Verify(t.Context(), caller.at(resourcePath, token))
+	if err != nil {
+		t.Fatalf("Verify refused a token naming a service and no person: %v", err)
+	}
+	if decided != want {
+		t.Fatalf("Verify = %+v, want %+v: the session and the service, with no person and no project", decided, want)
+	}
+	live, err := rig.verifier.Live(t.Context(), caller.at(resourcePath, token))
+	if err != nil || live != want {
+		t.Fatalf("Live = %+v, %v; want %+v", live, err, want)
 	}
 }
 

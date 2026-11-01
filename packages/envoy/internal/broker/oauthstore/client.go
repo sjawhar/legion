@@ -61,14 +61,15 @@ func machineClient() *oauth2.DefaultRegisteredClient {
 	}
 }
 
-// exchangeClient is the client every exchanging caller presents: a pod, a workflow run, and a dev
+// exchangeClient is the client every exchanging caller presents: a pod, a workflow run, a machine
+// holding its cloud identity token, and a dev
 // box session. It is registered confidential because the library refuses a public client the
 // token-exchange grant, but it presents no client credential at all: the provider's own
 // authentication strategy answers it for a credential-less exchange, and the subject token and
 // the DPoP proof are what the request is judged on. A secret here would be one more shared
 // secret in every pod, which is what this exchange exists to remove.
 //
-// It holds the token-exchange grant and no other, may present exactly the three kinds of subject
+// It holds the token-exchange grant and no other, may present exactly the four kinds of subject
 // token this broker accepts, and may ask for an access token and nothing else: a caller that
 // asked for a JSON Web Token would be asking the broker to sign a claim set of its own, which it
 // does not do here. It permits no actor token — actorTokenTypeNone says how — so no caller may
@@ -83,6 +84,7 @@ func exchangeClient() *oauth2.DefaultRegisteredClient {
 		TokenExchangeSubjectTokenTypes: []string{
 			oauthwire.SubjectTokenTypeKubernetes,
 			oauthwire.SubjectTokenTypeGitHub,
+			oauthwire.SubjectTokenTypeGoogle,
 			oauthwire.SubjectTokenTypeAccessToken,
 		},
 		TokenExchangeRequestTokenTypes: []string{oauthwire.SubjectTokenTypeAccessToken},

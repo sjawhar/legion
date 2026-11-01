@@ -95,7 +95,7 @@ func issuedClaims(t *testing.T) []string {
 		Account: claimsPodAccount,
 		Project: claimsProject,
 		Person:  claimsPerson,
-	}}, nil)
+	}}, nil, nil)
 	if err != nil {
 		t.Fatalf("exchange.NewSet: %v", err)
 	}

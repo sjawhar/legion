@@ -129,7 +129,7 @@ func New(c Config, store *oauthstore.Store) (*Provider, error) {
 	// exchange composes and refuses every caller by name instead of faulting on a map nobody
 	// built.
 	if c.Exchange.Policy == nil {
-		policy, err := exchange.NewSet(nil, nil)
+		policy, err := exchange.NewSet(nil, nil, nil)
 		if err != nil {
 			return nil, fmt.Errorf("oauth: the empty exchange policy: %w", err)
 		}

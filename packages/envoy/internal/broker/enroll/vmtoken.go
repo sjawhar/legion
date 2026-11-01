@@ -2,7 +2,6 @@ package enroll
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -10,6 +9,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 
+	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/oidc"
 )
 
@@ -56,16 +56,29 @@ func vmRuntimeAccount(id string) (account, project string, ok bool) {
 	return id[:at], project, ok
 }
 
-// VMVerifier verifies a VM identity token and returns its verified identity fields. Issues reports,
-// without verifying anything, whether a token names the verifier's issuer, so a token login sends
-// a VM's token to this verifier alone and every other token to the cluster's.
+// VMVerifier verifies a VM identity token and returns its verified identity fields. VerifyGoogle
+// is the same verification without the Compute Engine rules, for the callers that have rules of
+// their own (the token exchange's machine entries, which may pin an instance or take a token
+// minted on none). Issues reports, without verifying anything, whether a token names the
+// verifier's issuer, so a token login sends a VM's token to this verifier alone and every other
+// token to the cluster's.
 type VMVerifier interface {
 	VerifyVM(ctx context.Context, raw string) (VMClaims, error)
+	VerifyGoogle(ctx context.Context, raw string) (GoogleToken, error)
 	Issues(raw string) bool
 }
 
-// GoogleVMVerifier verifies Google Compute Engine identity tokens against one configured OIDC
-// verifier and reads the email and Compute Engine claims from the verified token.
+// GoogleToken is one verified Google identity token: the identity claims it carries
+// (exchange.GoogleIdentity, the one reading of Google's claim shapes) and the times its
+// registered claims give it. IssuedAt is zero when the token has no iat claim.
+type GoogleToken struct {
+	Identity exchange.GoogleIdentity
+	Expiry   time.Time
+	IssuedAt time.Time
+}
+
+// GoogleVMVerifier verifies Google identity tokens against one configured OIDC verifier and reads
+// the email and Compute Engine claims from the verified token.
 type GoogleVMVerifier struct{ Verifier *oidc.Verifier }
 
 // Issues is the OIDC verifier's Issues: whether raw's unverified iss claim names its issuer.
@@ -73,61 +86,62 @@ func (v GoogleVMVerifier) Issues(raw string) bool {
 	return v.Verifier.Issues(raw)
 }
 
-func isVMEmailVerified(value json.RawMessage) bool {
-	var text string
-	return string(value) == "true" || json.Unmarshal(value, &text) == nil && text == "true"
-}
-
-// VerifyVM verifies raw's issuer, audience, signature and expiry before reading its email and
-// Compute Engine claims. Every error is an OIDC verifier error, one of this file's sentinels, a
-// malformed token, or a malformed private claim. The private claims are read without a second
-// verification only after the OIDC verifier has verified this exact token.
-func (v GoogleVMVerifier) VerifyVM(ctx context.Context, raw string) (VMClaims, error) {
+// VerifyGoogle verifies raw's issuer, audience, signature and expiry and reads the identity
+// claims of the verified token: the account, whether the address is verified, and the Compute
+// Engine instance it was minted on when it carries one. It refuses nothing of its own — a token
+// naming no account, an unverified address and a token minted on no instance are each a value it
+// answers, since what each means is its caller's rule (VerifyVM's, and the token exchange's
+// machine entries') — so every error it returns is an OIDC verifier error or a malformed token.
+// The private claims are read without a second verification only after the OIDC verifier has
+// verified this exact token.
+func (v GoogleVMVerifier) VerifyGoogle(ctx context.Context, raw string) (GoogleToken, error) {
 	claims, err := v.Verifier.Verify(ctx, raw)
 	if err != nil {
-		return VMClaims{}, err
+		return GoogleToken{}, err
 	}
 	parsed, err := jwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.RS256, jose.ES256})
 	if err != nil {
-		return VMClaims{}, err
+		return GoogleToken{}, err
 	}
 	var registered jwt.Claims
-	var private struct {
-		Email         string          `json:"email"`
-		EmailVerified json.RawMessage `json:"email_verified"`
-		Google        struct {
-			ComputeEngine struct {
-				ProjectID    string `json:"project_id"`
-				Zone         string `json:"zone"`
-				InstanceName string `json:"instance_name"`
-				InstanceID   string `json:"instance_id"`
-			} `json:"compute_engine"`
-		} `json:"google"`
-	}
+	var private map[string]any
 	if err := parsed.UnsafeClaimsWithoutVerification(&registered, &private); err != nil {
+		return GoogleToken{}, err
+	}
+	token := GoogleToken{Identity: exchange.ReadGoogleIdentity(private), Expiry: claims.Expiry}
+	if registered.IssuedAt != nil {
+		token.IssuedAt = registered.IssuedAt.Time()
+	}
+	return token, nil
+}
+
+// VerifyVM is VerifyGoogle held to what a VM's token login needs: a verified email and the whole
+// Compute Engine identity of the instance the token was minted on, which is what names the VM the
+// login enrolls (VMClaims.RuntimeID). A token carrying none of those claims, or part of them, is
+// ErrVMComputeEngineClaims: this caller has an instance to name and cannot name one from a token
+// that was not minted on one. Every other error is VerifyGoogle's.
+func (v GoogleVMVerifier) VerifyVM(ctx context.Context, raw string) (VMClaims, error) {
+	token, err := v.VerifyGoogle(ctx, raw)
+	if err != nil {
 		return VMClaims{}, err
 	}
-	if private.Email == "" {
+	identity := token.Identity
+	if identity.Account == "" {
 		return VMClaims{}, ErrVMNoEmail
 	}
-	if !isVMEmailVerified(private.EmailVerified) {
+	if !identity.EmailVerified {
 		return VMClaims{}, ErrVMEmailNotVerified
 	}
-	compute := private.Google.ComputeEngine
-	if compute.ProjectID == "" || compute.Zone == "" || compute.InstanceName == "" || compute.InstanceID == "" {
+	if !identity.Compute.Whole() {
 		return VMClaims{}, ErrVMComputeEngineClaims
 	}
-	var issuedAt time.Time
-	if registered.IssuedAt != nil {
-		issuedAt = registered.IssuedAt.Time()
-	}
 	return VMClaims{
-		Account:    private.Email,
-		Project:    compute.ProjectID,
-		Zone:       compute.Zone,
-		Instance:   compute.InstanceName,
-		InstanceID: compute.InstanceID,
-		Expiry:     claims.Expiry,
-		IssuedAt:   issuedAt,
+		Account:    identity.Account,
+		Project:    identity.Compute.Project,
+		Zone:       identity.Compute.Zone,
+		Instance:   identity.Compute.Instance,
+		InstanceID: identity.Compute.InstanceID,
+		Expiry:     token.Expiry,
+		IssuedAt:   token.IssuedAt,
 	}, nil
 }

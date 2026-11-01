@@ -84,7 +84,8 @@ type ExchangeSession struct {
 	*oauth2.DefaultSession
 
 	// SubjectToken is the verified claims of the subject token the exchange was made against: a
-	// pod's service-account token, a workflow run's GitHub token, or a machine access token.
+	// pod's service-account token, a workflow run's GitHub token, a machine's Google identity
+	// token, or a machine access token.
 	SubjectToken map[string]any `json:"subject_token,omitempty"`
 
 	// ActorToken is the verified claims of the actor token of a delegation. The broker's exchange

@@ -51,9 +51,11 @@ const (
 )
 
 // newPolicy builds the exchange's listed identities, failing the test on an entry it refuses.
-func newPolicy(t *testing.T, accounts []exchange.AccountEntry, workflows []exchange.WorkflowEntry) *exchange.Set {
+// machines are the Google accounts a test that drives the machine subject token lists; every
+// other test passes none.
+func newPolicy(t *testing.T, accounts []exchange.AccountEntry, workflows []exchange.WorkflowEntry, machines ...exchange.GoogleEntry) *exchange.Set {
 	t.Helper()
-	set, err := exchange.NewSet(accounts, workflows)
+	set, err := exchange.NewSet(accounts, workflows, machines)
 	if err != nil {
 		t.Fatalf("exchange.NewSet: %v", err)
 	}

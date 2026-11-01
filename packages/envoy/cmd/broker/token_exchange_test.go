@@ -69,6 +69,25 @@ const (
 	// the few seconds the renewal run is started with, so that proof waits seconds, not minutes.
 	longAccessSeconds  = 900
 	shortAccessSeconds = 2
+	// The two fleets the Google half of this test drives, each a placeholder: pinnedFleet's
+	// account is held to one Compute Engine project and one instance-name pattern and is given a
+	// person and a project, so its machines write as that person; poolFleet's is pinned to
+	// nothing and given neither, so its machines are its service and nothing else, which is what
+	// a token minted through a workload identity pool and a token from a pod's metadata server
+	// get. strangerFleet is listed nowhere.
+	pinnedFleetAccount = "example-fleet@example-project.iam.gserviceaccount.com"
+	poolFleetAccount   = "example-pool@example-project.iam.gserviceaccount.com"
+	strangerFleet      = "example-stranger@example-project.iam.gserviceaccount.com"
+	pinnedFleetService = "example-fleet"
+	poolFleetService   = "example-pool"
+	fleetCloudProject  = "example-project"
+	fleetInstanceGlob  = "example-vm-*"
+	fleetInstanceName  = "example-vm-7"
+	fleetProject       = "FLEET"
+	fleetPerson        = "grace@example.com"
+	// machineAudience is what a machine's Google identity token must carry here, its own beside
+	// the two above.
+	machineAudience = "https://broker.example/machines"
 )
 
 // TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt is the live proof of the exchange: the
@@ -375,6 +394,200 @@ func TestAPodWritesOnlyUnderASessionRegisteredForIt(t *testing.T) {
 	})
 }
 
+// TestTheBinaryExchangesAMachinesGoogleIdentityToken is the live proof of the machine grant: the
+// real binary on a fresh schema, with an issuer of this test's own standing in for Google, a
+// machine presenting nothing but its Google identity token and a key of its own is answered a
+// DPoP-bound Dispatch access token; the listed API account reads that token back and finds the
+// person and project its fleet's entry gives it; a fleet listed with no person is answered a
+// token that names its service instead, which a machine carrying no Compute Engine claims at all
+// — a workload identity pool's token, and the one a pod's metadata server answers — also gets;
+// and each way in that must not work is refused with a message of its own. It skips when
+// BROKER_TEST_DATABASE_URL is unset, as every Postgres-backed broker test does.
+func TestTheBinaryExchangesAMachinesGoogleIdentityToken(t *testing.T) {
+	databaseURL := storetest.URL(t)
+	// Three issuers the test controls: the cluster's, GitHub's, and the one standing in for
+	// Google, which BROKER_GOOGLE_OIDC_ISSUER points the broker at.
+	cluster, github, google := oidctest.New(t), oidctest.New(t), oidctest.New(t)
+	github.PublishKey(t, "github-key")
+	clusterKey := cluster.PublishKey(t, "cluster-key")
+	googleKey := google.PublishKey(t, "google-key")
+
+	key := proofKey(t)
+	jkt, err := proof.Thumbprint(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiToken := accountToken(t, cluster, clusterKey, apiAccount)
+
+	broker := startBroker(t, brokerOptions{Env: googleExchangeEnv(t, databaseURL, cluster, github, google, longAccessSeconds)})
+	live := newLiveBroker(broker.Addr, key)
+
+	t.Run("the real binary boots with the machine entries its Google settings make", func(t *testing.T) {
+		boot := broker.Await(t, "token exchange")
+		t.Logf("the broker's own boot lines:\n%s", boot)
+		requireHealthy(t, broker.Addr)
+		for _, want := range []string{
+			"token exchange state=on kubernetes=true github=true accounts=2 workflows=0 machines=2",
+			"google vm identity issuer=" + google.URL() + " audience=" + machineAudience +
+				" services=" + pinnedFleetService + "," + poolFleetService + " fleets=2",
+		} {
+			if !strings.Contains(boot, want) {
+				t.Fatalf("the boot log carries no %q; the binary must report the Google issuer it trusts and the machine entries its settings make:\n%s", want, boot)
+			}
+		}
+	})
+
+	var fleetToken string
+	t.Run("a pinned machine's identity token and a proof of its own key mint an access token", func(t *testing.T) {
+		subject := mintMachineToken(t, google, googleKey, pinnedFleetAccount, machineAudience, true, fleetCloudProject, fleetInstanceName)
+		status, body := live.exchange(t, machineForm(subject, "example-machine-1"))
+		if status != http.StatusOK {
+			t.Fatalf("the exchange of %s's identity token = %d %v, want 200: a listed fleet's machine, presenting its Google identity token with a DPoP proof of its own key and no client credential, is answered a Dispatch access token", pinnedFleetAccount, status, body)
+		}
+		fleetToken, _ = body["access_token"].(string)
+		if fleetToken == "" || body["token_type"] != "DPoP" || body["issued_token_type"] != oauthwire.SubjectTokenTypeAccessToken {
+			t.Fatalf("the exchange answered token_type %v, issued_token_type %v and %d bytes of access token, want a DPoP-bound access token of type %s",
+				body["token_type"], body["issued_token_type"], len(fleetToken), oauthwire.SubjectTokenTypeAccessToken)
+		}
+	})
+
+	t.Run("the listed caller reads it back as the person and project its fleet writes for", func(t *testing.T) {
+		if fleetToken == "" {
+			t.Fatal("the exchange minted no access token, so there is nothing to read back")
+		}
+		status, body := live.introspect(t, fleetToken, apiToken)
+		if status != http.StatusOK || body["active"] != true {
+			t.Fatalf("introspection of the machine's token = %d %v, want 200 with the token live", status, body)
+		}
+		for _, field := range []struct {
+			name      string
+			got, want any
+			proves    string
+		}{
+			{"session", body["session"], "example-machine-1", "the session the machine asked to write under"},
+			{"person", body["person"], fleetPerson, "the person BROKER_VM_EXCHANGE_ACCOUNTS gives that fleet"},
+			{"project", body["project"], fleetProject, "the project that entry gives it"},
+			{"project_scope", body["project_scope"], oauthwire.ProjectScopeNamed, "that the project is the one named project it may write"},
+			{"service", body["service"], nil, "no service, since this token names a person"},
+			{"client_id", body["client_id"], oauthwire.ExchangeClientID, "the client the exchange issued it to"},
+			{"jkt", body["jkt"], jkt, "the thumbprint of this test's own key"},
+		} {
+			if field.got != field.want {
+				t.Errorf("introspection answered %s %v, want %v: the answer must name %s", field.name, field.got, field.want, field.proves)
+			}
+		}
+	})
+
+	t.Run("a fleet listed with no person is answered a token naming its service", func(t *testing.T) {
+		// No Compute Engine claims at all, which is what a token minted through a workload
+		// identity pool carries and what a pod's metadata server answers on Google Kubernetes
+		// Engine; this fleet's entry pins neither a project nor an instance name, so it is taken.
+		subject := mintMachineToken(t, google, googleKey, poolFleetAccount, machineAudience, true, "", "")
+		status, body := live.exchange(t, machineForm(subject, "example-pool-1"))
+		token, _ := body["access_token"].(string)
+		if status != http.StatusOK || token == "" {
+			t.Fatalf("the exchange of %s's identity token = %d %v, want 200: an entry that pins neither a project nor an instance name takes a token carrying no Compute Engine claims", poolFleetAccount, status, body)
+		}
+		status, body = live.introspect(t, token, apiToken)
+		if status != http.StatusOK || body["active"] != true {
+			t.Fatalf("introspection of the service-only token = %d %v, want 200 with the token live", status, body)
+		}
+		for _, field := range []struct {
+			name      string
+			got, want any
+			proves    string
+		}{
+			{"session", body["session"], "example-pool-1", "the session the machine asked to write under"},
+			{"service", body["service"], poolFleetService, "the service BROKER_VM_SERVICES gives that fleet"},
+			{"person", body["person"], nil, "no person, since this fleet's entry names none"},
+			{"project", body["project"], nil, "no project, since a token naming no person names none"},
+			{"project_scope", body["project_scope"], oauthwire.ProjectScopePerson, "that the token is held to no one project"},
+		} {
+			if field.got != field.want {
+				t.Errorf("introspection answered %s %v, want %v: the answer must name %s", field.name, field.got, field.want, field.proves)
+			}
+		}
+	})
+
+	// The negative controls on the machine grant, each the request that works but for one thing.
+	for _, refusal := range []struct {
+		name   string
+		form   url.Values
+		status int
+		code   string
+		says   string
+		proves string
+	}{
+		{
+			name:   "an unlisted service account mints nothing",
+			form:   machineForm(mintMachineToken(t, google, googleKey, strangerFleet, machineAudience, true, fleetCloudProject, fleetInstanceName), "example-unlisted"),
+			status: http.StatusBadRequest, code: "invalid_request",
+			says:   "no entry lists the Google account " + strangerFleet,
+			proves: "a sound, correctly-audienced identity token of an account no VM service lists is refused, naming the account",
+		},
+		{
+			name:   "an email the provider has not verified mints nothing",
+			form:   machineForm(mintMachineToken(t, google, googleKey, pinnedFleetAccount, machineAudience, false, fleetCloudProject, fleetInstanceName), "example-unverified"),
+			status: http.StatusBadRequest, code: "invalid_request",
+			says:   "email_verified is not true",
+			proves: "the broker checks email_verified itself, since a token for an address nobody verified proves no account",
+		},
+		{
+			name:   "a machine with no Compute Engine claims against a pinned entry mints nothing",
+			form:   machineForm(mintMachineToken(t, google, googleKey, pinnedFleetAccount, machineAudience, true, "", ""), "example-unpinned"),
+			status: http.StatusBadRequest, code: "invalid_request",
+			says:   "carrying no Compute Engine identity",
+			proves: "an entry that pins a project and an instance name refuses a token that says nothing at all about where it was minted",
+		},
+		{
+			name:   "a machine of another Compute Engine project mints nothing",
+			form:   machineForm(mintMachineToken(t, google, googleKey, pinnedFleetAccount, machineAudience, true, "other-project", fleetInstanceName), "example-other-project"),
+			status: http.StatusBadRequest, code: "invalid_request",
+			says:   "minted in the project other-project",
+			proves: "the entry's project pin is compared with the token's own google.compute_engine claims",
+		},
+		{
+			name:   "a machine whose instance name the pattern does not match mints nothing",
+			form:   machineForm(mintMachineToken(t, google, googleKey, pinnedFleetAccount, machineAudience, true, fleetCloudProject, "example-other-1"), "example-other-name"),
+			status: http.StatusBadRequest, code: "invalid_request",
+			says:   "minted on the instance example-other-1",
+			proves: "the entry's instance-name pattern is compared with the token's own instance name",
+		},
+		{
+			name:   "a token minted for another audience mints nothing",
+			form:   machineForm(mintMachineToken(t, google, googleKey, pinnedFleetAccount, enrolmentAudience, true, fleetCloudProject, fleetInstanceName), "example-wrong-audience"),
+			status: http.StatusBadRequest, code: "invalid_request",
+			says:   "not minted for " + machineAudience,
+			proves: "the fleet's own token, minted for another audience of this broker, is refused naming the audience the machine grant accepts",
+		},
+		{
+			name:   "a machine naming no session mints nothing",
+			form:   machineForm(mintMachineToken(t, google, googleKey, pinnedFleetAccount, machineAudience, true, fleetCloudProject, fleetInstanceName), ""),
+			status: http.StatusBadRequest, code: "invalid_request",
+			says:   "is listed with no session of its own",
+			proves: "a fleet whose entry fixes no session writes under a name its machine names, so a request naming none is refused",
+		},
+		{
+			name:   "a machine's token presented as a pod's mints nothing",
+			form:   exchangeForm(mintMachineToken(t, google, googleKey, pinnedFleetAccount, machineAudience, true, fleetCloudProject, fleetInstanceName), "example-as-a-pod"),
+			status: http.StatusBadRequest, code: "invalid_request",
+			proves: "each subject token type is checked against its own issuer, so a machine's token is not a pod's",
+		},
+	} {
+		t.Run(refusal.name, func(t *testing.T) {
+			status, body := live.exchange(t, refusal.form)
+			description, _ := body["error_description"].(string)
+			if status != refusal.status || body["error"] != refusal.code || body["access_token"] != nil {
+				t.Fatalf("that exchange = %d %v %q, want %d %s and no access token: %s",
+					status, body["error"], description, refusal.status, refusal.code, refusal.proves)
+			}
+			if refusal.says != "" && !strings.Contains(description, refusal.says) {
+				t.Fatalf("the refusal reads %q, which does not carry %q: %s", description, refusal.says, refusal.proves)
+			}
+		})
+	}
+}
+
 // exchangeEnv is what one broker run of this test needs beyond productionEnv: the fresh schema it
 // migrates and serves from, the cluster issuer with the audience a pod enrols with and the one it
 // exchanges with, the GitHub issuer, the two listed accounts with their projects and persons, the
@@ -402,6 +615,51 @@ func exchangeEnv(t *testing.T, databaseURL string, cluster, github *oidctest.Iss
 		"BROKER_SERVICE_LOGINS=legion-daemon=" + registrarAccount,
 		"BROKER_ACCESS_TOKEN_SECONDS=" + strconv.Itoa(accessSeconds),
 	}
+}
+
+// googleExchangeEnv is exchangeEnv with the Google half configured: the issuer standing in for
+// Google's, the audience a machine's identity token must carry, the two fleets, the pins of the
+// first, and the person and project the first writes for. The second fleet is listed with no pin
+// and no person, which is what mints a token that names its service and nobody.
+func googleExchangeEnv(t *testing.T, databaseURL string, cluster, github, google *oidctest.Issuer, accessSeconds int) []string {
+	t.Helper()
+	return append(exchangeEnv(t, databaseURL, cluster, github, accessSeconds),
+		"BROKER_GOOGLE_OIDC_ISSUER="+google.URL(),
+		"BROKER_GOOGLE_OIDC_AUDIENCE="+machineAudience,
+		"BROKER_VM_SERVICES="+pinnedFleetService+"="+pinnedFleetAccount+" "+poolFleetService+"="+poolFleetAccount,
+		"BROKER_VM_PROJECTS="+pinnedFleetAccount+"="+fleetCloudProject,
+		"BROKER_VM_INSTANCES="+pinnedFleetAccount+"="+fleetInstanceGlob,
+		"BROKER_VM_EXCHANGE_ACCOUNTS="+pinnedFleetAccount+"="+fleetProject+"="+fleetPerson,
+	)
+}
+
+// mintMachineToken is a Google identity token as a machine presents one: the account it was
+// minted for in its `email` claim, whether the address is verified, and the Compute Engine
+// instance it was minted on — none when instance is empty, which is what a token minted through a
+// workload identity pool, and the one a pod's metadata server answers, carry.
+func mintMachineToken(t *testing.T, google *oidctest.Issuer, key *oidctest.Key, account, audience string, verified any, cloudProject, instance string) string {
+	t.Helper()
+	claims := google.Claims(account, audience)
+	claims["email"] = account
+	claims["email_verified"] = verified
+	if instance != "" {
+		claims["google"] = map[string]any{"compute_engine": map[string]any{
+			"project_id":    cloudProject,
+			"zone":          "example-zone-a",
+			"instance_name": instance,
+			"instance_id":   "1234567890",
+		}}
+	}
+	return google.Mint(t, key, claims)
+}
+
+// machineForm is a complete RFC 8693 token exchange request as a machine makes it: the exchange
+// client with no credential of its own, the Google identity token it presents, and the session
+// name it asks to write under.
+func machineForm(subjectToken, session string) url.Values {
+	form := exchangeForm(subjectToken, session)
+	form.Set("subject_token_type", oauthwire.SubjectTokenTypeGoogle)
+	return form
 }
 
 // mintPodToken is a projected service-account token as the cluster's issuer mints one: the account

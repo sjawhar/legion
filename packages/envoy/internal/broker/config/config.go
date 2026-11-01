@@ -34,10 +34,12 @@ import (
 	"github.com/sjawhar/envoy/internal/redact"
 )
 
-// GoogleOIDCIssuer is the issuer of every Google identity token, the one a VM's metadata server
-// has Google sign. Google has one, so no variable names it: BROKER_GOOGLE_OIDC_AUDIENCE configures
-// only the audience.
-const GoogleOIDCIssuer = "https://accounts.google.com"
+// DefaultGoogleOIDCIssuer is the issuer of every Google identity token, the one a machine's
+// metadata server has Google sign, and what BROKER_GOOGLE_OIDC_ISSUER is when the environment
+// names none. The variable exists because a dev stack has no Google: cmd/dev-oidc-issuer stands
+// in for it on a loopback port, so the broker and its machines can be driven end to end on one
+// machine (scripts/dev-stack.sh). A deployment leaves it unset and gets Google.
+const DefaultGoogleOIDCIssuer = "https://accounts.google.com"
 
 type Config struct {
 	// BROKER_LISTEN_ADDR: the host:port the broker listens on.
@@ -162,36 +164,72 @@ type Config struct {
 	K8sOIDCIssuer string
 	// BROKER_K8S_OIDC_AUDIENCE: the audience a pod's projected service-account token must carry.
 	K8sOIDCAudience string
-	// BROKER_GOOGLE_OIDC_AUDIENCE: the audience a Google VM identity token must carry. Its issuer
-	// is always https://accounts.google.com, so no variable names it. Needs BROKER_VM_SERVICES, since
-	// an audience no VM service is listed for could accept no token. Unset, the broker accepts no VM
-	// identity token, and BROKER_VM_SERVICES, BROKER_VM_PROJECTS and BROKER_VM_INSTANCES are refused.
+	// BROKER_GOOGLE_OIDC_ISSUER: the issuer of the Google identity tokens machines present,
+	// https://accounts.google.com when unset, which is where every real one comes from. It is a
+	// variable because a dev stack has no Google: cmd/dev-oidc-issuer stands in for it on a
+	// loopback port, so a broker, its machines and Dispatch can be driven end to end on one
+	// machine with no cloud. Read only where BROKER_GOOGLE_OIDC_AUDIENCE is set, which is what
+	// turns Google identity tokens on at all.
+	GoogleOIDCIssuer string
+	// BROKER_GOOGLE_OIDC_AUDIENCE: the audience a machine's Google identity token must carry,
+	// both at the VM token login and at the RFC 8693 token exchange, where such a token is a
+	// subject token (urn:envoy:params:oauth:token-type:google-identity). Its issuer is
+	// BROKER_GOOGLE_OIDC_ISSUER, Google's own unless a dev stack says otherwise. Needs
+	// BROKER_VM_SERVICES, since an audience no VM service is listed for could accept no token.
+	// Unset, the broker accepts no Google identity token, and BROKER_VM_SERVICES,
+	// BROKER_VM_PROJECTS, BROKER_VM_INSTANCES and BROKER_VM_EXCHANGE_ACCOUNTS are refused.
 	GoogleOIDCAudience string
 	// BROKER_VM_SERVICES: the VM services, whitespace-separated name=<service account email>
 	// entries, such as example-service=example-fleet@example-project.iam.gserviceaccount.com. A name
 	// is lowercase letters, digits and hyphens, at most 64, not shared; the account is a user-managed
 	// Google service account (<account id>@<project id>.iam.gserviceaccount.com, in lowercase, as a
-	// token carries it) that the service's VMs run as, so every VM of that account is one identity. A
+	// token carries it) that the service's machines run as, so every machine of that account is one
+	// identity. A
 	// service may be named for several accounts, one entry each, but each account is given once and
 	// proves exactly one service. A project's default service accounts (Compute Engine's and App
 	// Engine's) and Google-managed service agents are refused: a project's workloads run as the first
 	// by default and Google's own services as the second, so neither proves which VMs are the
-	// service's. Every account needs an entry in BROKER_VM_PROJECTS and in BROKER_VM_INSTANCES. Keyed
+	// service's. An account may be pinned to one Compute Engine project and one instance-name
+	// pattern (BROKER_VM_PROJECTS and BROKER_VM_INSTANCES), or to neither, in which case its
+	// machines are taken wherever they run. Keyed
 	// by account, each answering its service. Needs BROKER_GOOGLE_OIDC_AUDIENCE. Unset, no VM service
 	// is listed.
 	VMServicesByAccount map[string]string
-	// BROKER_VM_PROJECTS: the Google project each VM service's VMs run in, whitespace-separated
-	// <service account email>=<project id> entries, one per account BROKER_VM_SERVICES lists and none
-	// for any other account. Keyed by account. Needs BROKER_GOOGLE_OIDC_AUDIENCE. Unset, it is empty,
-	// so any account BROKER_VM_SERVICES lists is refused for having no project.
+	// BROKER_VM_PROJECTS: the Google Cloud project each pinned account's machines run in,
+	// whitespace-separated <service account email>=<project id> entries, at most one per account
+	// BROKER_VM_SERVICES lists and none for any other account. An account named here is named in
+	// BROKER_VM_INSTANCES too, or the boot is refused: half a pin says nothing clear about which
+	// machines an entry means. Keyed by account. Needs BROKER_GOOGLE_OIDC_AUDIENCE. Unset, it is
+	// empty, so every listed account takes a machine wherever it runs — including one whose token
+	// carries no Compute Engine claims at all, which is what a token minted through a workload
+	// identity pool and a token from a Kubernetes pod's metadata server both carry. The VM token
+	// login, which has an instance to name, still refuses a token carrying none.
 	VMProjects map[string]string
-	// BROKER_VM_INSTANCES: the names each VM service's VMs may have, whitespace-separated
-	// <service account email>=<instance-name glob> entries, one per account BROKER_VM_SERVICES lists
-	// and none for any other account. The glob is Go's path.Match syntax (*, ?, and [...] classes,
-	// negated with ^) over the characters of an instance name, such as example-vm-*. Keyed by
-	// account. Needs BROKER_GOOGLE_OIDC_AUDIENCE. Unset, it is empty, so any account
-	// BROKER_VM_SERVICES lists is refused for having no instance-name glob.
+	// BROKER_VM_INSTANCES: the names each pinned account's machines may have,
+	// whitespace-separated <service account email>=<instance-name glob> entries, at most one per
+	// account BROKER_VM_SERVICES lists and none for any other account. The glob is Go's path.Match
+	// syntax (*, ?, and [...] classes, negated with ^) over the characters of an instance name, such
+	// as example-vm-*. An account named here is named in BROKER_VM_PROJECTS too, or the boot is
+	// refused. Keyed by
+	// account. Needs BROKER_GOOGLE_OIDC_AUDIENCE. Unset, it is empty, so no account is pinned.
 	VMInstancePatterns map[string]string
+	// BROKER_VM_EXCHANGE_ACCOUNTS: the person and the Dispatch project each fleet writes for,
+	// whitespace-separated <service account email>=<project>=<person>[=<session>] entries, the
+	// grammar BROKER_EXCHANGE_ACCOUNTS uses for a pod, such as
+	// example-fleet@example-project.iam.gserviceaccount.com=EXAMPLE=ada@example.com. A token the
+	// exchange mints for a machine of that account may write that one project, acts for that
+	// person, and writes under the session the entry fixes; an entry that fixes none requires the
+	// machine to name its own session. The session is everything after the third "=", so it alone
+	// may carry one. Each account is named at most once and must be one BROKER_VM_SERVICES lists.
+	// An account BROKER_VM_SERVICES lists and this setting does not gets a token that names its
+	// service and no person at all, which a resource server holds to what a service may do. Needs
+	// BROKER_GOOGLE_OIDC_AUDIENCE. Unset, every listed account's machines get such a token.
+	//
+	// The entries this answers are the whole of what the exchange decides a machine's token on:
+	// each one carries its account's service (BROKER_VM_SERVICES), the pins (BROKER_VM_PROJECTS
+	// and BROKER_VM_INSTANCES) and, where this setting names them, the person, the project and
+	// the session.
+	ExchangeGoogleAccounts []exchange.GoogleEntry
 	// BROKER_EXCHANGE_K8S_AUDIENCE: the audience a pod's projected service-account token must
 	// carry to be exchanged (RFC 8693) for a Dispatch access token. Its issuer is the one cluster
 	// the broker is told about, BROKER_K8S_OIDC_ISSUER, which this needs; the audience is its own
@@ -577,6 +615,38 @@ func parseExchangeAccounts(setting, value string) ([]exchange.AccountEntry, erro
 	return entries, nil
 }
 
+// vmExchangeGrant is one BROKER_VM_EXCHANGE_ACCOUNTS entry: the account it names, the Dispatch
+// project its tokens write, the person they act for, the session name it fixes, if any, and its
+// text as the setting gave it.
+type vmExchangeGrant struct{ account, project, person, session, text string }
+
+// parseVMExchangeGrants reads setting's whitespace-separated
+// <service account email>=<project>=<person>[=<session>] entries, the grants
+// BROKER_VM_EXCHANGE_ACCOUNTS gives the accounts BROKER_VM_SERVICES lists, in order. It refuses,
+// naming the entry: one not of that form or with a blank field; an account vmAccountRefusal
+// refuses; and an account named twice, since one account writes as one identity. Whether the
+// account is listed at all is the caller's to refuse, as it is for a project or an instance
+// pattern (vmAccountMap), and exchange.NewSet is the second gate.
+func parseVMExchangeGrants(setting, value string) ([]vmExchangeGrant, error) {
+	var grants []vmExchangeGrant
+	seen := map[string]bool{}
+	for _, text := range strings.Fields(value) {
+		fields, ok := exchangeFields(text, 4)
+		if !ok || fields[0] == "" || fields[1] == "" || fields[2] == "" {
+			return nil, fmt.Errorf("%s must be <service account email>=<project>=<person>[=<session>] entries, the session everything after the third =, got %q", setting, text)
+		}
+		if err := vmAccountRefusal(setting, text, fields[0]); err != nil {
+			return nil, err
+		}
+		if seen[fields[0]] {
+			return nil, fmt.Errorf("%s names the service account %s twice; one account writes as one identity, so name it once", setting, fields[0])
+		}
+		seen[fields[0]] = true
+		grants = append(grants, vmExchangeGrant{account: fields[0], project: fields[1], person: fields[2], session: fields[3], text: text})
+	}
+	return grants, nil
+}
+
 // parseExchangeWorkflows reads setting's whitespace-separated
 // <repository>=<workflow path>=<ref>=<project>=<person>[=<session>] entries, the identities
 // BROKER_EXCHANGE_WORKFLOWS lists, in order. It refuses, naming the entry: one not of that form or
@@ -714,6 +784,7 @@ func Load(getenv func(string) string) (Config, error) {
 		SecretsPrefix:      getenv("BROKER_SECRETS_PREFIX"),
 		K8sOIDCIssuer:      getenv("BROKER_K8S_OIDC_ISSUER"),
 		K8sOIDCAudience:    getenv("BROKER_K8S_OIDC_AUDIENCE"),
+		GoogleOIDCIssuer:   orDefault(strings.TrimSpace(getenv("BROKER_GOOGLE_OIDC_ISSUER")), DefaultGoogleOIDCIssuer),
 		GoogleOIDCAudience: strings.TrimSpace(getenv("BROKER_GOOGLE_OIDC_AUDIENCE")),
 		EnvoyURL:           getenv("BROKER_ENVOY_URL"),
 		TrustedProxyHeader: getenv("BROKER_TRUSTED_PROXY_HEADER"),
@@ -790,9 +861,9 @@ func Load(getenv func(string) string) (Config, error) {
 		cfg.ServiceLogins[entry.subject] = entry.service
 	}
 	if cfg.GoogleOIDCAudience == "" {
-		for _, setting := range []string{"BROKER_VM_SERVICES", "BROKER_VM_PROJECTS", "BROKER_VM_INSTANCES"} {
+		for _, setting := range []string{"BROKER_VM_SERVICES", "BROKER_VM_PROJECTS", "BROKER_VM_INSTANCES", "BROKER_VM_EXCHANGE_ACCOUNTS"} {
 			if strings.TrimSpace(getenv(setting)) != "" {
-				return Config{}, fmt.Errorf("%s needs BROKER_GOOGLE_OIDC_AUDIENCE, whose VM identity tokens it configures", setting)
+				return Config{}, fmt.Errorf("%s needs BROKER_GOOGLE_OIDC_AUDIENCE, whose Google identity tokens it configures", setting)
 			}
 		}
 	}
@@ -823,13 +894,39 @@ func Load(getenv func(string) string) (Config, error) {
 	if cfg.VMInstancePatterns, err = vmAccountMap("BROKER_VM_INSTANCES", instances, cfg.VMServicesByAccount); err != nil {
 		return Config{}, err
 	}
+	grants, err := parseVMExchangeGrants("BROKER_VM_EXCHANGE_ACCOUNTS", getenv("BROKER_VM_EXCHANGE_ACCOUNTS"))
+	if err != nil {
+		return Config{}, err
+	}
+	granted := map[string]vmExchangeGrant{}
+	for _, grant := range grants {
+		if _, listed := cfg.VMServicesByAccount[grant.account]; !listed {
+			return Config{}, fmt.Errorf("BROKER_VM_EXCHANGE_ACCOUNTS names %s, got %q, but BROKER_VM_SERVICES does not list it; a person and a project are given to a listed VM account", grant.account, grant.text)
+		}
+		granted[grant.account] = grant
+	}
 	for _, entry := range vmServices {
-		if _, found := cfg.VMProjects[entry.account]; !found {
-			return Config{}, fmt.Errorf("BROKER_VM_SERVICES names %s, got %q, but BROKER_VM_PROJECTS does not: every VM service needs one project", entry.account, entry.text)
+		// Each pin is optional and the two go together: an account pinned to a project but no
+		// instance name, or the other way round, says nothing clear about which machines it
+		// means, so it is refused here rather than read as either "every instance of that
+		// project" or "that name in any project".
+		project, pinnedProject := cfg.VMProjects[entry.account]
+		instance, pinnedInstance := cfg.VMInstancePatterns[entry.account]
+		if pinnedProject != pinnedInstance {
+			named, missing := "BROKER_VM_PROJECTS", "BROKER_VM_INSTANCES"
+			if pinnedInstance {
+				named, missing = missing, named
+			}
+			return Config{}, fmt.Errorf("%s names %s but %s does not, got %q: an account is pinned to a Compute Engine project and an instance-name pattern together, or to neither, so that which machines it takes is clear", named, entry.account, missing, entry.text)
 		}
-		if _, found := cfg.VMInstancePatterns[entry.account]; !found {
-			return Config{}, fmt.Errorf("BROKER_VM_SERVICES names %s, got %q, but BROKER_VM_INSTANCES does not: every VM service needs one instance-name pattern", entry.account, entry.text)
+		machine := exchange.GoogleEntry{
+			Account: entry.account, Service: entry.service,
+			CloudProject: project, Instance: instance,
 		}
+		if grant, found := granted[entry.account]; found {
+			machine.Project, machine.Person, machine.Session = grant.project, grant.person, grant.session
+		}
+		cfg.ExchangeGoogleAccounts = append(cfg.ExchangeGoogleAccounts, machine)
 	}
 	issuer, audience, err := oidc.ConfigFromEnv(getenv, "BROKER_K8S_OIDC_ISSUER", "BROKER_K8S_OIDC_AUDIENCE")
 	if err != nil {

@@ -30,6 +30,11 @@ const (
 	// presents its GitHub token under, broker-defined for the same reason as
 	// SubjectTokenTypeKubernetes.
 	SubjectTokenTypeGitHub = "urn:envoy:params:oauth:token-type:github-workflow-run"
+	// SubjectTokenTypeGoogle is the subject_token_type a machine presents its Google identity
+	// token under: the token a Compute Engine VM reads from its metadata server, or one minted
+	// for a workload identity pool, which carries the machine's service account in its `email`
+	// claim. Broker-defined for the same reason as SubjectTokenTypeKubernetes.
+	SubjectTokenTypeGoogle = "urn:envoy:params:oauth:token-type:google-identity"
 	// SubjectTokenTypeAccessToken is RFC 8693's own name for an access token: the only kind the
 	// exchange mints, the kind it asks for, and the kind a dev box session presents its machine
 	// login's token as. The library spells it in a package its users cannot import.
@@ -65,6 +70,11 @@ type Introspection struct {
 	Session string `json:"session,omitempty"`
 	// Person is the person the session acts for.
 	Person string `json:"person,omitempty"`
+	// Service is the service a token that names no person was minted for: the fleet its machine
+	// belongs to, as BROKER_VM_SERVICES names it. A token names a person or a service and never
+	// both, so a reader that records who is answerable for a write reads Person, and one that
+	// decides what a machine may reach reads this.
+	Service string `json:"service,omitempty"`
 	// ProjectScope is what Project means: ProjectScopeNamed or ProjectScopePerson. A machine
 	// login's own token, which no exchange decided for, carries neither this nor Project.
 	ProjectScope string `json:"project_scope,omitempty"`

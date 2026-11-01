@@ -46,6 +46,11 @@ const (
 	ClaimSession = "session"
 	// ClaimPerson is the person the session acts for.
 	ClaimPerson = "person"
+	// ClaimService is the service a token that names no person is, and is empty for every token
+	// that names one. It is written always, for the reason ClaimProjectScope is: a reader of the
+	// row never has to take an absent service as either "no service" or "a claim this build of
+	// the broker did not write".
+	ClaimService = "service"
 	// ClaimProjectScope is what ClaimProject means, one of oauthwire.ProjectScopeNamed or
 	// oauthwire.ProjectScopePerson. It is written always, so a reader never has to take an
 	// absent project as either "every project" or "none".
@@ -80,6 +85,10 @@ const (
 	// githubTolerance admits a workflow run's token, which lives minutes, while bounding how
 	// stale an iat the exchange accepts.
 	githubTolerance = time.Hour
+	// googleTolerance admits a machine's Google identity token, which Google mints for an hour
+	// and which its metadata server hands out again until it is nearly spent, so the window has
+	// to cover a whole lifetime as the GitHub one does rather than a fresh token alone.
+	googleTolerance = time.Hour
 )
 
 // KeySource answers the public key a token's header names, which is what the library's
@@ -136,6 +145,9 @@ type ExchangeConfig struct {
 	Kubernetes IssuerConfig
 	// GitHub is the issuer a continuous-integration workflow run's token comes from.
 	GitHub IssuerConfig
+	// Google is the issuer a machine's identity token comes from, Google's own in a deployment
+	// and a stand-in for it on a dev stack.
+	Google IssuerConfig
 }
 
 // validate refuses a configuration the exchange could not serve.
@@ -143,7 +155,10 @@ func (c ExchangeConfig) validate() error {
 	if err := c.Kubernetes.validate("Kubernetes"); err != nil {
 		return err
 	}
-	return c.GitHub.validate("GitHub")
+	if err := c.GitHub.validate("GitHub"); err != nil {
+		return err
+	}
+	return c.Google.validate("Google")
 }
 
 // tokenTypes are the token types the library registers for the exchange, keyed by the exact
@@ -186,17 +201,35 @@ func (c ExchangeConfig) tokenTypes() map[string]oauth2.RFC8693TokenType {
 			},
 		}
 	}
+	if c.Google.configured() {
+		types[oauthwire.SubjectTokenTypeGoogle] = &rfc8693.JWTType{
+			Name:   oauthwire.SubjectTokenTypeGoogle,
+			Issuer: c.Google.Issuer,
+			JWTValidationConfig: rfc8693.JWTValidationConfig{
+				// A machine reads one identity token from its metadata server and is handed the
+				// same token until it is nearly spent, so a machine renewing its access token
+				// presents the one it holds again and single use would refuse every renewal, as
+				// it would a pod's. What keeps such a token from being spendable by anyone who
+				// copied it is the DPoP key the minted token is bound to.
+				ValidateJTI:                false,
+				JWTLifetimeToleranceWindow: googleTolerance,
+				ValidateFunc:               keyFunc(c.Google.Keys),
+			},
+		}
+	}
 	return types
 }
 
 // issuerOf is the configured issuer a subject token type's tokens come from, and false for a type
-// that is not one of the two JWT kinds.
+// that is not one of the three JWT kinds.
 func (c ExchangeConfig) issuerOf(subjectTokenType string) (IssuerConfig, bool) {
 	switch subjectTokenType {
 	case oauthwire.SubjectTokenTypeKubernetes:
 		return c.Kubernetes, true
 	case oauthwire.SubjectTokenTypeGitHub:
 		return c.GitHub, true
+	case oauthwire.SubjectTokenTypeGoogle:
+		return c.Google, true
 	}
 	return IssuerConfig{}, false
 }
@@ -227,7 +260,7 @@ func keyFunc(keys KeySource) jwt.Keyfunc {
 // own step writes: the session name it claims and the token it is claimed for must land together
 // or not at all. The machine access-token subject type takes its decision here, between the
 // library validating the request and the library building the answer, and then holds its launcher
-// credential's row (liveCredential) until the token commits; the two JWT types took their
+// credential's row (liveCredential) until the token commits; the three JWT types took their
 // decision during validation, through Store.ExchangeSubject. Beside liveCredential, and for every
 // type, the registration a pod's session name needs is read before the library builds anything
 // (registeredPodSession). The claim on the session name is made
@@ -331,15 +364,20 @@ func (p *Provider) reserveSessions(ctx context.Context) error {
 
 // decide is the exchange's own decision, and the only one: what the minted token says, and who
 // the session name it says it is writing under belongs to. Both paths into the exchange reach it
-// — the two JWT subject types through Store.ExchangeSubject while the library validates the
+// — the three JWT subject types through Store.ExchangeSubject while the library validates the
 // request, the machine access-token type from exchangeGrant once it has — so one function decides
-// for all three.
+// for all four.
 //
 // In order: the subject token's audience, which the library never checks and which a token minted
-// for another service would fail; the policy's decision, which names the session, the person, the
-// project and the principal; and then the claims themselves, onto the session, where the row the
-// token is stored in carries them and an introspection answers from them, with the principal
-// beside them for claimSession.
+// for another service would fail; the policy's decision, which names the session, the person or
+// the service, the project and the principal; and then the claims themselves, onto the session,
+// where the row the token is stored in carries them and an introspection answers from them, with
+// the principal beside them for claimSession.
+//
+// The subject the library asks for is the principal, which every decision names: a token that
+// names a service and no person has no person to be the subject of, and a subject that is
+// sometimes empty would leave the library's own 'sub' saying nothing. The principal says which
+// listed identity asked, which is what a reader of the stored row wants of a subject.
 //
 // Every refusal is an OAuth error the caller can act on and none repeats the subject token:
 // RFC 8693 Section 2.2.2 makes a subject token that is unacceptable on policy invalid_request.
@@ -362,6 +400,10 @@ func (p *Provider) decide(_ context.Context, request oauth2.Requester, subjectTo
 		if err = p.audience(subjectTokenType, subjectToken); err == nil {
 			claims, err = p.exchange.Policy.Workflow(subjectToken, name)
 		}
+	case oauthwire.SubjectTokenTypeGoogle:
+		if err = p.audience(subjectTokenType, subjectToken); err == nil {
+			claims, err = p.exchange.Policy.Google(subjectToken, name)
+		}
 	case tokenTypeAccessToken:
 		// A machine access token is the broker's own, so there is no issuer to check it against:
 		// the login that was issued it recorded the approver it acts for and the launcher
@@ -377,7 +419,7 @@ func (p *Provider) decide(_ context.Context, request oauth2.Requester, subjectTo
 		// names what to fix, and repeats nothing of the token but the public identity it claimed.
 		return "", oauth2.ErrInvalidRequest.WithHintf("The subject token was refused: %s.", err).WithWrap(err).WithDebugError(err)
 	}
-	session.Subject, session.Username = claims.Person, claims.Person
+	session.Subject, session.Username = claims.Principal, claims.Principal
 	session.Principal, session.Instance = claims.Principal, claims.Instance
 	if session.Extra == nil {
 		// A session read back out of a row that carried no extra claims has none to write on.
@@ -385,6 +427,7 @@ func (p *Provider) decide(_ context.Context, request oauth2.Requester, subjectTo
 	}
 	session.Extra[ClaimSession] = claims.Session
 	session.Extra[ClaimPerson] = claims.Person
+	session.Extra[ClaimService] = claims.Service
 	switch claims.Scope {
 	case exchange.ProjectScopeNamed:
 		session.Extra[ClaimProjectScope] = oauthwire.ProjectScopeNamed
@@ -393,7 +436,7 @@ func (p *Provider) decide(_ context.Context, request oauth2.Requester, subjectTo
 		session.Extra[ClaimProjectScope] = oauthwire.ProjectScopePerson
 		delete(session.Extra, ClaimProject)
 	}
-	return claims.Person, nil
+	return claims.Principal, nil
 }
 
 // claimSession claims the session name decide wrote onto session for the principal it decided,

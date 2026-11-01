@@ -18,13 +18,28 @@ const (
 	ref           = "refs/heads/main"
 	project       = "ACME"
 	person        = "ada@example.com"
-	// fixedSession is the session name the daemon account's entry fixes, and nightlySession the
-	// one the nightly workflow's entry fixes: one name belongs to one principal, so two entries
-	// never fix the same one.
+	// fixedSession is the session name the daemon account's entry fixes, nightlySession the one
+	// the nightly workflow's entry fixes, and machineSession the one the fixed fleet's entry
+	// fixes: one name belongs to one principal, so two entries never fix the same one.
 	fixedSession   = "legion-daemon:ACME"
 	nightlySession = "ci-nightly"
+	machineSession = "example-fleet-1"
 	podUID         = "11111111-2222-3333-4444-555555555555"
 	credentialID   = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+	// The three Google accounts the set lists, each a placeholder: pinnedAccount is held to one
+	// Compute Engine project and one instance-name pattern and writes for a person, poolAccount
+	// is pinned to nothing and names no person, so its machines are its service and nothing
+	// else, and fixedAccount is pinned to nothing and fixes the session its machines write
+	// under. strangerAccount is listed nowhere.
+	pinnedAccount   = "example-fleet@example-project.iam.gserviceaccount.com"
+	poolAccount     = "example-pool@example-project.iam.gserviceaccount.com"
+	fixedAccount    = "example-fixed@example-project.iam.gserviceaccount.com"
+	strangerAccount = "example-stranger@example-project.iam.gserviceaccount.com"
+	cloudProject    = "example-project"
+	instanceGlob    = "example-vm-*"
+	instanceName    = "example-vm-7"
+	pinnedService   = "example-fleet"
+	poolService     = "example-pool"
 )
 
 // The principals the listed entries' session names belong to, as the exchange spells them.
@@ -34,11 +49,16 @@ const (
 	releasePrincipal = "workflow:" + repository + "/" + workflow + "@" + ref
 	nightlyPrincipal = "workflow:" + repository + "/" + nightly + "@" + ref
 	personPrincipal  = "person:" + person
+	pinnedPrincipal  = "google:" + pinnedAccount
+	poolPrincipal    = "google:" + poolAccount
+	fixedPrincipal   = "google:" + fixedAccount
 )
 
 // listed is the set every decision test asks: one account whose sessions name themselves, one
-// account whose session the entry fixes, and the same pair for one workflow of one repository on
-// one ref.
+// account whose session the entry fixes, the same pair for one workflow of one repository on one
+// ref, and three Google accounts — one pinned to a project and an instance-name pattern that
+// writes for a person, one pinned to nothing that names no person, and one that fixes the session
+// its machines write under.
 func listed(t *testing.T) *exchange.Set {
 	t.Helper()
 	set, err := exchange.NewSet(
@@ -49,6 +69,11 @@ func listed(t *testing.T) *exchange.Set {
 		[]exchange.WorkflowEntry{
 			{Repository: repository, Workflow: workflow, Ref: ref, Project: project, Person: person},
 			{Repository: repository, Workflow: nightly, Ref: ref, Project: project, Person: person, Session: nightlySession},
+		},
+		[]exchange.GoogleEntry{
+			{Account: pinnedAccount, Service: pinnedService, CloudProject: cloudProject, Instance: instanceGlob, Project: project, Person: person},
+			{Account: poolAccount, Service: poolService},
+			{Account: fixedAccount, Service: poolService, Session: machineSession},
 		},
 	)
 	if err != nil {
@@ -95,8 +120,15 @@ func TestNewSetRefusesAnEntryItCannotServe(t *testing.T) {
 		change(&entry)
 		return entry
 	}
+	machine := exchange.GoogleEntry{Account: pinnedAccount, Service: pinnedService}
+	withMachine := func(change func(*exchange.GoogleEntry)) exchange.GoogleEntry {
+		entry := machine
+		change(&entry)
+		return entry
+	}
 	for _, c := range []struct {
 		name      string
+		machines  []exchange.GoogleEntry
 		accounts  []exchange.AccountEntry
 		workflows []exchange.WorkflowEntry
 		names     string
@@ -144,9 +176,34 @@ func TestNewSetRefusesAnEntryItCannotServe(t *testing.T) {
 		{name: "a session name an account and a workflow fix",
 			accounts:  []exchange.AccountEntry{with(func(e *exchange.AccountEntry) { e.Session = fixedSession })},
 			workflows: []exchange.WorkflowEntry{withFlow(func(e *exchange.WorkflowEntry) { e.Session = fixedSession })}, names: workerAccount},
+		{name: "a Google account that is not an email address",
+			machines: []exchange.GoogleEntry{withMachine(func(e *exchange.GoogleEntry) { e.Account = "example-fleet" })}, names: "example-fleet"},
+		{name: "a Google account written with capitals, which no token carries",
+			machines: []exchange.GoogleEntry{withMachine(func(e *exchange.GoogleEntry) { e.Account = "Example-Fleet@example-project.iam.gserviceaccount.com" })},
+			names:    "google entry 1"},
+		{name: "a Google account with no service",
+			machines: []exchange.GoogleEntry{withMachine(func(e *exchange.GoogleEntry) { e.Service = " " })}, names: pinnedAccount},
+		{name: "a machine pinned to a project and no instance pattern",
+			machines: []exchange.GoogleEntry{withMachine(func(e *exchange.GoogleEntry) { e.CloudProject = cloudProject })}, names: pinnedAccount},
+		{name: "a machine pinned to an instance pattern and no project",
+			machines: []exchange.GoogleEntry{withMachine(func(e *exchange.GoogleEntry) { e.Instance = instanceGlob })}, names: pinnedAccount},
+		{name: "a machine whose instance pattern is not a pattern",
+			machines: []exchange.GoogleEntry{withMachine(func(e *exchange.GoogleEntry) { e.CloudProject, e.Instance = cloudProject, "example-[vm" })},
+			names:    "example-[vm"},
+		{name: "a machine named a person and no project",
+			machines: []exchange.GoogleEntry{withMachine(func(e *exchange.GoogleEntry) { e.Person = person })}, names: pinnedAccount},
+		{name: "a machine named a project and no person",
+			machines: []exchange.GoogleEntry{withMachine(func(e *exchange.GoogleEntry) { e.Project = project })}, names: pinnedAccount},
+		{name: "a machine whose fixed session carries whitespace",
+			machines: []exchange.GoogleEntry{withMachine(func(e *exchange.GoogleEntry) { e.Session = "example fleet" })}, names: pinnedAccount},
+		{name: "the same Google account twice",
+			machines: []exchange.GoogleEntry{machine, withMachine(func(e *exchange.GoogleEntry) { e.Service = poolService })}, names: "google entry 2"},
+		{name: "a session name a machine and an account fix",
+			accounts: []exchange.AccountEntry{with(func(e *exchange.AccountEntry) { e.Session = fixedSession })},
+			machines: []exchange.GoogleEntry{withMachine(func(e *exchange.GoogleEntry) { e.Session = fixedSession })}, names: pinnedAccount},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			set, err := exchange.NewSet(c.accounts, c.workflows)
+			set, err := exchange.NewSet(c.accounts, c.workflows, c.machines)
 			if err == nil {
 				t.Fatalf("NewSet(%s) = %v, want a refusal", c.name, set)
 			}
@@ -164,6 +221,7 @@ func TestNewSetTakesTheSameAccountAndWorkflowKeyTwiceApart(t *testing.T) {
 			{Repository: repository, Workflow: workflow, Ref: ref, Project: project, Person: person},
 			{Repository: repository, Workflow: workflow, Ref: "refs/heads/release", Project: "OTHER", Person: person},
 		},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("NewSet(one workflow on two refs): %v", err)
@@ -187,6 +245,7 @@ func TestTheReservationsAreTheNamesTheEntriesFix(t *testing.T) {
 	want := []exchange.Reservation{
 		{Session: fixedSession, Principal: daemonPrincipal},
 		{Session: nightlySession, Principal: nightlyPrincipal},
+		{Session: machineSession, Principal: fixedPrincipal},
 	}
 	got := set.Reservations()
 	if !slices.Equal(got, want) {
@@ -484,5 +543,162 @@ func TestSessionAtTheCapIsUsable(t *testing.T) {
 	claims, err := set.Pod(podToken(workerAccount, podUID), name)
 	if err != nil || claims.Session != name {
 		t.Fatalf("Pod(a session of exactly %d bytes) = %+v, %v; want it answered", exchange.MaxSessionBytes, claims, err)
+	}
+}
+
+// googleToken is a Google identity token's claims as the exchange is handed them: the account it
+// was minted for, whether Google holds the address verified, and the Compute Engine instance it
+// was minted on — none when instance is empty, which is what a token minted through a workload
+// identity pool and a pod's own metadata token carry.
+func googleToken(account string, verified any, cloud, instance string) map[string]any {
+	token := map[string]any{"email": account, "email_verified": verified}
+	if instance != "" {
+		token["google"] = map[string]any{"compute_engine": map[string]any{
+			"project_id":    cloud,
+			"zone":          "example-zone-a",
+			"instance_name": instance,
+			"instance_id":   "1234567890",
+		}}
+	}
+	return token
+}
+
+// TestGoogleAnswersTheListedMachine pins what each kind of Google entry answers: a pinned entry
+// that names a person answers that person and its one project, an entry that pins nothing answers
+// its service and no person at all, and a token carrying no Compute Engine claims — a workload
+// identity pool's, and the one a pod's metadata server answers — is taken by an entry that pins
+// nothing. No Google entry ever answers an Instance: nothing registers a machine, so the claim on
+// the session name is what keeps two machines of one account apart.
+func TestGoogleAnswersTheListedMachine(t *testing.T) {
+	set := listed(t)
+	for _, c := range []struct {
+		name    string
+		token   map[string]any
+		session string
+		want    exchange.Claims
+	}{
+		{name: "a pinned machine of the project and a name the pattern matches",
+			token: googleToken(pinnedAccount, true, cloudProject, instanceName), session: "example-machine",
+			want: exchange.Claims{Session: "example-machine", Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Principal: pinnedPrincipal}},
+		{name: "another machine of that account is the same principal",
+			token: googleToken(pinnedAccount, true, cloudProject, "example-vm-8"), session: "example-other",
+			want: exchange.Claims{Session: "example-other", Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Principal: pinnedPrincipal}},
+		{name: "email_verified as the string Google writes on some of its tokens",
+			token: googleToken(pinnedAccount, "true", cloudProject, instanceName), session: "example-machine",
+			want: exchange.Claims{Session: "example-machine", Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Principal: pinnedPrincipal}},
+		{name: "an entry naming no person answers its service and no project",
+			token: googleToken(poolAccount, true, "", ""), session: "example-pool-1",
+			want: exchange.Claims{Session: "example-pool-1", Service: poolService, Scope: exchange.ProjectScopePerson, Principal: poolPrincipal}},
+		{name: "an entry pinning nothing takes a machine that does run on an instance",
+			token: googleToken(poolAccount, true, "other-project", "anything"), session: "example-pool-2",
+			want: exchange.Claims{Session: "example-pool-2", Service: poolService, Scope: exchange.ProjectScopePerson, Principal: poolPrincipal}},
+		{name: "the session the entry fixes, the request naming none",
+			token: googleToken(fixedAccount, true, "", ""), session: "",
+			want: exchange.Claims{Session: machineSession, Service: poolService, Scope: exchange.ProjectScopePerson, Principal: fixedPrincipal}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			claims, err := set.Google(c.token, c.session)
+			if err != nil || claims != c.want {
+				t.Fatalf("Google(%s) = %+v, %v; want %+v", c.name, claims, err, c.want)
+			}
+		})
+	}
+}
+
+func TestGoogleRefusesWhatItCannotDecide(t *testing.T) {
+	set := listed(t)
+	for _, c := range []struct {
+		name    string
+		token   map[string]any
+		session string
+		want    error
+		names   string
+	}{
+		{name: "a token with no email", token: map[string]any{"email_verified": true}, session: "example-machine",
+			want: exchange.ErrClaimMissing, names: "email"},
+		{name: "an email that is not a string", token: map[string]any{"email": 7, "email_verified": true}, session: "example-machine",
+			want: exchange.ErrClaimMissing, names: "email"},
+		{name: "an account no entry lists", token: googleToken(strangerAccount, true, cloudProject, instanceName), session: "example-machine",
+			want: exchange.ErrNoEntry, names: strangerAccount},
+		{name: "an email Google has not verified", token: googleToken(pinnedAccount, false, cloudProject, instanceName), session: "example-machine",
+			want: exchange.ErrEmailNotVerified, names: pinnedAccount},
+		{name: "an email_verified of the string false", token: googleToken(pinnedAccount, "false", cloudProject, instanceName), session: "example-machine",
+			want: exchange.ErrEmailNotVerified, names: pinnedAccount},
+		{name: "a token with no Compute Engine claims against a pinned entry", token: googleToken(pinnedAccount, true, "", ""), session: "example-machine",
+			want: exchange.ErrNoComputeEngine, names: pinnedAccount},
+		{name: "a token with half a Compute Engine identity against a pinned entry",
+			token:   map[string]any{"email": pinnedAccount, "email_verified": true, "google": map[string]any{"compute_engine": map[string]any{"project_id": cloudProject}}},
+			session: "example-machine", want: exchange.ErrNoComputeEngine, names: pinnedAccount},
+		{name: "a machine of another project", token: googleToken(pinnedAccount, true, "other-project", instanceName), session: "example-machine",
+			want: exchange.ErrMachineNotAllowed, names: "other-project"},
+		{name: "an instance name the pattern does not match", token: googleToken(pinnedAccount, true, cloudProject, "example-other-1"), session: "example-machine",
+			want: exchange.ErrMachineNotAllowed, names: "example-other-1"},
+		{name: "no session where the entry fixes none", token: googleToken(pinnedAccount, true, cloudProject, instanceName), session: "",
+			want: exchange.ErrSessionRequired, names: pinnedAccount},
+		{name: "a session the entry does not fix", token: googleToken(fixedAccount, true, "", ""), session: "example-other",
+			want: exchange.ErrSessionMismatch, names: machineSession},
+		{name: "a session carrying whitespace", token: googleToken(pinnedAccount, true, cloudProject, instanceName), session: "example machine",
+			want: exchange.ErrSessionInvalid, names: pinnedAccount},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			claims, err := set.Google(c.token, c.session)
+			if !errors.Is(err, c.want) {
+				t.Fatalf("Google(%s) = %+v, %v; want %v", c.name, claims, err, c.want)
+			}
+			if !strings.Contains(err.Error(), c.names) {
+				t.Errorf("Google(%s) refused with %q, which does not name %q", c.name, err, c.names)
+			}
+		})
+	}
+}
+
+// TestGoogleSaysWhichRefusalItIs: the five refusals a machine can meet are five sentences, each
+// naming what an operator would change. They are compared against one another here, so that
+// collapsing two of them into one message fails.
+func TestGoogleSaysWhichRefusalItIs(t *testing.T) {
+	set := listed(t)
+	said := map[string]string{}
+	for name, token := range map[string]map[string]any{
+		"an account no entry lists":   googleToken(strangerAccount, true, cloudProject, instanceName),
+		"an unverified email":         googleToken(pinnedAccount, false, cloudProject, instanceName),
+		"no Compute Engine claims":    googleToken(pinnedAccount, true, "", ""),
+		"another Compute project":     googleToken(pinnedAccount, true, "other-project", instanceName),
+		"an instance name not listed": googleToken(pinnedAccount, true, cloudProject, "example-other-1"),
+	} {
+		_, err := set.Google(token, "example-machine")
+		if err == nil {
+			t.Fatalf("Google(%s) was answered, want a refusal", name)
+		}
+		said[name] = err.Error()
+	}
+	for name, text := range said {
+		for other, otherText := range said {
+			if name != other && text == otherText {
+				t.Errorf("the refusals of %s and of %s read alike: %q", name, other, text)
+			}
+		}
+	}
+}
+
+// TestReadGoogleIdentityReadsGooglesClaimShapes: the one reading of a Google identity token's own
+// claims, which this package decides on and the broker's VM token verifier reads the same token
+// through. A claim of another shape reads as absent, and a token minted off a Compute Engine
+// instance reads as carrying no instance rather than as a malformed one.
+func TestReadGoogleIdentityReadsGooglesClaimShapes(t *testing.T) {
+	whole := exchange.ReadGoogleIdentity(googleToken(pinnedAccount, true, cloudProject, instanceName))
+	if whole.Account != pinnedAccount || !whole.EmailVerified || !whole.Compute.Whole() || whole.Compute.Empty() {
+		t.Fatalf("ReadGoogleIdentity(a VM's token) = %+v, want the account, a verified email and the whole instance", whole)
+	}
+	if whole.Compute.Project != cloudProject || whole.Compute.Instance != instanceName ||
+		whole.Compute.Zone != "example-zone-a" || whole.Compute.InstanceID != "1234567890" {
+		t.Errorf("ReadGoogleIdentity read the instance as %+v", whole.Compute)
+	}
+	none := exchange.ReadGoogleIdentity(googleToken(poolAccount, "true", "", ""))
+	if none.Account != poolAccount || !none.EmailVerified || !none.Compute.Empty() || none.Compute.Whole() {
+		t.Fatalf("ReadGoogleIdentity(a pool's token) = %+v, want the account, a verified email and no instance", none)
+	}
+	odd := exchange.ReadGoogleIdentity(map[string]any{"email": 7, "email_verified": "yes", "google": "not an object"})
+	if odd != (exchange.GoogleIdentity{}) {
+		t.Errorf("ReadGoogleIdentity(claims of other shapes) = %+v, want every field empty", odd)
 	}
 }

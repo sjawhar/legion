@@ -691,7 +691,10 @@ func TestTheExchangeClientIsConfidentialAndNarrow(t *testing.T) {
 		wantNoMore bool
 	}{
 		{name: "subject token types", got: exchanger.GetSupportedSubjectTokenTypes(),
-			want: []string{oauthwire.SubjectTokenTypeKubernetes, oauthwire.SubjectTokenTypeGitHub, "urn:ietf:params:oauth:token-type:access_token"}},
+			want: []string{
+				oauthwire.SubjectTokenTypeKubernetes, oauthwire.SubjectTokenTypeGitHub,
+				oauthwire.SubjectTokenTypeGoogle, "urn:ietf:params:oauth:token-type:access_token",
+			}},
 		{name: "requested token types", got: exchanger.GetSupportedRequestTokenTypes(),
 			want: []string{"urn:ietf:params:oauth:token-type:access_token"}},
 	} {
@@ -702,7 +705,8 @@ func TestTheExchangeClientIsConfidentialAndNarrow(t *testing.T) {
 		})
 	}
 	for _, actor := range exchanger.GetSupportedActorTokenTypes() {
-		if actor == "urn:ietf:params:oauth:token-type:access_token" || actor == oauthwire.SubjectTokenTypeKubernetes || actor == oauthwire.SubjectTokenTypeGitHub {
+		if actor == "urn:ietf:params:oauth:token-type:access_token" || actor == oauthwire.SubjectTokenTypeKubernetes ||
+			actor == oauthwire.SubjectTokenTypeGitHub || actor == oauthwire.SubjectTokenTypeGoogle {
 			t.Errorf("the exchange client permits %s as an actor token", actor)
 		}
 	}
