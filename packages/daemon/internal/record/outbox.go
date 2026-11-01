@@ -814,7 +814,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 
 // validNoticeKind is every notice kind the daemon publishes, which is also every kind a row may
 // decode as (DecodeOutboxPayload). `ready-refused` is not one of them: READY went with the
-// daemon's merge, so nothing writes the kind, and migration 0077 deletes every row an older
+// daemon's merge, so nothing writes the kind, and migration 20261029120800 deletes every row an older
 // daemon left carrying it, in the same migration that drops the four merge kinds from this list.
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {

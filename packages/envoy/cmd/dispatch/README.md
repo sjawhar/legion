@@ -789,14 +789,36 @@ The pre-deploy census ("Pre-deploy census" below) is unchanged by that rule and 
 it is taken before any migration of the release applies, and a census that refuses fails the deploy before the service moves.
 The rule in brief is `internal/dispatch/store/README.md`, beside the migrations directory rather than in it, since the loader below refuses a set holding a file named anything else.
 
+A migration added from now on is named `<UTC timestamp>_<name>.up.sql`, the timestamp the moment its author created it, `YYYYMMDDHHMMSS` (`date -u +%Y%m%d%H%M%S`), with its census as `<same timestamp>_<name>.census.sql`.
+The numbered versions are the sequence the set grew up with;
+every one of those files keeps the number it landed with, and no number is added again:
+the series closed at `0157_document_edit_notices_notify.up.sql`, which `migrationid` records once for Dispatch, and a set holding a number above it is refused (`migrationid.Check`), so a branch that takes the next number fails on its own, before it merges.
+Two pull requests open at once used to take one number each and collide only when the first merged — nothing conflicts in git — while two timestamps taken a moment apart belong to their own authors.
+The version is the file name's leading digits read as a number, as before, so every timestamp orders after every number and timestamps order among themselves by time.
+A 14-digit version is past what an `integer` column holds, so `schema_migrations.version` is a `bigint`.
+A database created before the change keeps its `integer` column until a boot whose set holds a timestamped migration, which widens it once, in the same locked transaction that creates the table (`createVersionTable`):
+a boot with no timestamped migration leaves it alone, because the release before this change reads `max(version)` uncast and would fail that read once on every connection that prepared it while it still serves.
+So this release is rolled out before any release that carries a timestamped migration:
+a deployment that skips it costs the release it replaces one failed `/healthz` schema read on each connection that prepared the uncast read, which pgx then drops.
+`schema_version` in `/healthz` is still `max(version)`, the highest version applied — which is not proof that every version below it is applied, since a migration can merge below one a database already has.
+The auto-deployer's rollback guard compares the whole set of recorded versions for that reason, rather than `max(version)` (`packages/envoy/deploy/README.md`, "Auto-deployer").
+
+A migration that merges below one a database has already applied still runs there, exactly once, at the next boot:
+the runner applies every version `schema_migrations` does not record, not only those above the highest it does, each in its own transaction with its version row (`TestMigrateAppliesAMigrationThatArrivedBelowOneAlreadyApplied` and the proofs beside it in `internal/dispatch/store/migrate_out_of_order_test.go`).
+Within one boot the runner applies the versions the database lacks in version order, so a fresh database applies the whole set in that order;
+but a deployed database applies a migration when the release carrying it deploys.
+If T2 deploys before T1 merges, that database applies T2 then T1 while a fresh one applies T1 then T2.
+So a migration must not depend on its order relative to one written in a concurrent pull request, another branch open at the same time;
+one that needs another's effect is written after that one has merged.
+
 The runner records a migration by its version alone, so before it touches the database it reads the whole directory (`pgmigrate.Load`) and refuses to start, applying nothing and naming every file concerned, when two migrations share a version (it would apply the first and skip the rest as already applied;
-keep the number on the file that merged to `main` first and renumber the rest), when a file is named other than `<version>_<name>.up.sql`, `<version>_<name>.down.sql` or `<version>_<name>.census.sql` (a `.down.sql` is a rollback script an operator runs by hand, and a `.census.sql` is the migration's census, "Pre-deploy census" below;
-each needs its `.up.sql`), when a census is not one `select` or calls a function it may not (below), when a version is not decimal digits from 1 to 2147483647, and when a file cannot be read.
+keep the version on the file that merged to `main` first, since a database may already have applied it, and give each of the rest the UTC moment it was created), when a file is named other than `<version>_<name>.up.sql`, `<version>_<name>.down.sql` or `<version>_<name>.census.sql` (a `.down.sql` is a rollback script an operator runs by hand, and a `.census.sql` is the migration's census, "Pre-deploy census" below;
+each needs its `.up.sql`), when a census is not one `select` or calls a function it may not (below), when a version is not decimal digits of a positive number the `bigint` column holds, and when a file cannot be read.
 The directory is embedded with `all:`, which keeps a name beginning with `_` or `.`, so such a name is refused like any other.
 An editor's swap file therefore stops a locally built `envoy-dispatch` from booting, and fails the store's tests, until it is removed, and a binary built while it was there keeps refusing to boot until it is rebuilt;
 Vim writes its swap file beside the file it edits by default.
 What no directive embeds, such as a symlink, a `.git` or a hidden name Go's module paths refuse, never reaches the runner, so only the store's tests catch it (`pgmigrate/pgmigratetest.CheckEmbedsEveryFile` names each cause).
-Versions are applied by number, not by file name, and the store's tests require every file on disk to be embedded (`TestEveryMigrationFileIsEmbedded`) and the versions to run 1 to N with no gap (`TestMigrationSetIsNumberedOneToN`), both reading file names alone, so take the next free number on `main`.
+Versions are applied by their number, not by file name, and the store's tests require every file on disk to be embedded (`TestEveryMigrationFileIsEmbedded`) and the identifiers to be the numbered migrations 1 to the number the series closed at (recorded once in `migrationid`), each taken once with none above it, and a real UTC instant above them (`TestMigrationSetTakesNumbersThenTimestamps`, `migrationid.Check`), both reading file names alone.
 
 Every migration's lock waits are bounded at five seconds (`pgmigrate.LockTimeout`, which `pgmigrate.Exec` sets with `set_config(…, true)`, local to the one transaction the runner applies that migration in, after the runner's advisory lock), so a migration queued behind a long transaction gives up instead of holding every read and write of its table behind its request.
 The runner then rolls that transaction back, holds nothing for two seconds (`pgmigrate.LockTimeoutRetryPause`) so the requests queued behind it run, and tries again, up to three attempts (`pgmigrate.LockTimeoutAttempts`, `pgmigrate.RetryLockTimeouts`).
@@ -1346,7 +1368,8 @@ During a roll a close or reopen by a process of the earlier release stays unconv
 
 A migration declares its census in `<version>_<name>.census.sql` beside it:
 one `select` (or `with … select`) answering one integer, how many existing rows the migration would refuse (a validating constraint's violators) or rewrite.
-Every migration from `censusRequiredFrom` (`internal/dispatch/store/store_test.go`) on declares one;
+Every migration from `censusRequiredFrom` (`internal/dispatch/store/store_test.go`, 56) on declares one, which from now on is every migration added:
+a timestamped version is above every number.
 one that cannot refuse or rewrite a row says so with `select 0` and a comment (`0054_message_delivery_acceptance.census.sql`;
 `0053_asks_approval_kind_check.census.sql`, the check's own predicate negated, is the other shape).
 A census is written against the schema just before its migration, and the store's tests run every shipped census at exactly that schema and require it to answer (`TestEveryShippedCensusAnswersAtTheSchemaBeforeItsMigration`).

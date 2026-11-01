@@ -16,9 +16,9 @@ import (
 //
 // The reading after the migration is of the schema whole, because store.Migrate applies every
 // migration there is rather than this one: the three kinds the daemon's own merge wrote
-// (`ready_merge`, `auto_merge_disable`, `merge_queue_publish`) are gone by 0077, which deletes
+// (`ready_merge`, `auto_merge_disable`, `merge_queue_publish`) are gone by 20261029120800, which deletes
 // their rows and rewrites the check without them, and `approval_carry` and `role_message` arrive
-// at 0074 and 0075. So the list below is the end of the schema's own, not 0066's, and what holds
+// at 20261029120500 and 20261029120600. So the list below is the end of the schema's own, not 0066's, and what holds
 // 0066 itself is the refusal above and `phase_ended` being taken here.
 func TestTheOutboxTakesThePhaseEndedKindWith0066(t *testing.T) {
 	ctx := context.Background()
