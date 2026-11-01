@@ -1,0 +1,18 @@
+build: listener and bridge this checkout (1050502b6 plus the working copy); plugins this checkout (1050502b6 plus the working copy); listener grant current
+disruption             kind   event             marker           pi   cc
+a session-restart      issue  comment-1         LDT7882-001Z      1    1
+a session-restart      issue  comment-2         LDT7882-002Z      1    1
+a session-restart      issue  second-comment    LDT7882-003Z      1    1
+a session-restart      agent  dispatch-message  LDT7882-004Z      1    -
+a session-restart      agent  dispatch-message  LDT7882-005Z      -    1
+a session-restart      agent  listener-send     LDT7882-006Z      1    -
+a session-restart      agent  listener-send     LDT7882-007Z      -    1
+a session-restart      role   listener-publish  LDT7882-008Z      1    -
+a session-restart      role   listener-publish  LDT7882-009Z      -    1
+a session-restart      role   core-publish      LDT7882-010Z      1    -
+a session-restart      role   core-publish      LDT7882-011Z      -    1
+(a cell is the count of entries carrying the marker in that session's transcript; "!" marks a count other than expected; "/0" marks an event its publisher refused, expected 0 times; "-" an event not meant for that session)
+issue order compared in pi (2 comments): LDT7882-001Z@seq5:line19 LDT7882-002Z@seq6:line20
+issue order compared in cc (2 comments): LDT7882-001Z@seq5:line59 LDT7882-002Z@seq6:line70
+issue order: every comment of LIVE-1 appears in its stream order in both transcripts
+transcripts: pi /legion/scratch/tmp/infra594/live/upgrade-1050/sessions/pi/sessions/2026-11-01T10-23-07-813Z_01a196a2-6625-7691-b137-18f647b00cf2.jsonl; cc /legion/scratch/tmp/infra594/live/upgrade-1050/sessions/cc/config/projects/-legion-scratch-tmp-infra594-live-upgrade-1050-sessions-cc-cwd/b034d515-88d6-4510-ba2f-369cebd58de7.jsonl
