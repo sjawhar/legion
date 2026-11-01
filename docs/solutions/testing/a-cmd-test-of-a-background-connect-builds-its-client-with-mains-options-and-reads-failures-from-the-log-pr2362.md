@@ -36,4 +36,7 @@ background reconcile, and returns the error from the record the bus logs for a f
 reconnect hooks (`reconcileFailure`); the same mutation now fails three tests. Since INFRA-743
 that record is the WARN `envoy nats reconnect hook failed; it is retried` under `bus.RepairGrace`
 and the ERROR `envoy nats reconnect hooks have not succeeded` at or past it, and the helper reads
-either.
+either. Since sjawhar/legion#2580 a logged failure no longer ends `startDispatchStream`: the bus
+runs the hooks again, so the WARN is a retry and not a refusal, and the helper waits for the
+reconcile. Only a test that expects the servers to refuse its settings reads the first logged
+failure, with `dispatchStart.awaitHookFailure`.

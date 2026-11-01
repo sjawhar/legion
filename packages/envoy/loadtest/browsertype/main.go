@@ -1,7 +1,9 @@
 // Command browsertype types into Dispatch documents as browsers do, so a load test can run
 // concurrent browser edits beside the agents it drives over HTTP. It connects peers to each
-// document's websocket room with an agent bearer and a session actor, and each peer, once it holds
-// the room's document, sends keystroke updates at a set rate: most type one character into an
+// document's websocket room as a person of its own, named in the server's identity header (a
+// server run with DISPATCH_IDENTITY=header:<name> and DISPATCH_IDENTITY_HEADER_TRUSTED=1, as a load
+// test's stack is: the room admits a person alone, never an agent token), and each peer, once it
+// holds the room's document, sends keystroke updates at a set rate: most type one character into an
 // existing paragraph's text, some replace a short range (an insert and a delete in one
 // transaction), some delete a short range. It writes only text inside existing paragraphs, never
 // block structure, so every document stays valid.
@@ -12,7 +14,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -29,9 +30,7 @@ import (
 
 	"github.com/reearth/ygo/crdt"
 	ygsync "github.com/reearth/ygo/sync"
-	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
-	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
@@ -41,8 +40,8 @@ const fragmentName = "prosemirror"
 
 type config struct {
 	baseURL        *url.URL
-	token          string
-	session        string
+	identityHeader string
+	person         string
 	artifacts      []string
 	peers          int
 	rate           float64
@@ -80,15 +79,6 @@ func run(args []string) int {
 	ctx, cancel := context.WithTimeout(ctx, cfg.duration)
 	defer cancel()
 
-	header := http.Header{}
-	header.Set("Authorization", "Bearer "+cfg.token)
-	actor, err := json.Marshal(model.Actor{Kind: "session", ID: cfg.session})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "browsertype: encode the session actor: %v\n", err)
-		return 2
-	}
-	header.Set(docs.ActorHeader, string(actor))
-
 	results := make([]result, len(cfg.artifacts)*cfg.peers)
 	var wg sync.WaitGroup
 	for a, artifact := range cfg.artifacts {
@@ -97,6 +87,9 @@ func run(args []string) int {
 			results[index] = result{artifact: artifact, peer: p}
 			wg.Go(func() {
 				random := rand.New(rand.NewPCG(cfg.seed, uint64(index)))
+				// Each peer is a person of its own, as a browser is: <person>-<peer>.
+				header := http.Header{}
+				header.Set(cfg.identityHeader, fmt.Sprintf("%s-%d", cfg.person, p))
 				typePeer(ctx, cfg, roomURL(cfg.baseURL, artifact), header, random, &results[index])
 			})
 		}
@@ -120,7 +113,7 @@ func run(args []string) int {
 func parseFlags(args []string) (config, error) {
 	flags := flag.NewFlagSet("browsertype", flag.ContinueOnError)
 	flags.Usage = func() {
-		fmt.Fprintf(flags.Output(), "Usage: browsertype -url URL -token-file FILE -session ID (-artifact ID ... | -artifacts-file FILE) [flags]\n\n"+
+		fmt.Fprintf(flags.Output(), "Usage: browsertype -url URL (-artifact ID ... | -artifacts-file FILE) [flags]\n\n"+
 			"Connects -peers browser peers to each document's websocket room and types into its paragraphs at\n"+
 			"-rate keystrokes per second per peer until -duration ends or SIGINT/SIGTERM: about 80%% type one\n"+
 			"letter, 10%% replace a short range in one transaction, 10%% delete a short range. A paragraph whose\n"+
@@ -130,11 +123,11 @@ func parseFlags(args []string) (config, error) {
 		flags.PrintDefaults()
 	}
 	var cfg config
-	var rawURL, tokenFile, artifactsFile string
+	var rawURL, artifactsFile string
 	var artifacts, protect stringList
 	flags.StringVar(&rawURL, "url", "", "Dispatch base URL, http(s)://host:port; peers connect to <url>/ws/doc/<artifact>")
-	flags.StringVar(&tokenFile, "token-file", "", "file holding the agent bearer token (DISPATCH_AGENT_TOKEN); never printed")
-	flags.StringVar(&cfg.session, "session", "", "session id the peers act as, sent as the "+docs.ActorHeader+" header's session actor")
+	flags.StringVar(&cfg.identityHeader, "identity-header", "X-Dispatch-User", "the header the server's DISPATCH_IDENTITY=header:<name> reads a person from")
+	flags.StringVar(&cfg.person, "person", "browsertype", "login prefix of the people the peers are: peer n of every document is <person>-<n>")
 	flags.Var(&artifacts, "artifact", "document artifact id to type into (repeatable)")
 	flags.StringVar(&artifactsFile, "artifacts-file", "", "file of document artifact ids, one per line (blank lines and lines starting with # skipped); adds to -artifact")
 	flags.IntVar(&cfg.peers, "peers", 2, "peers per document")
@@ -155,18 +148,11 @@ func parseFlags(args []string) (config, error) {
 		return config{}, fmt.Errorf("-url must be http(s)://host:port, got %q", rawURL)
 	}
 	cfg.baseURL = base
-	if tokenFile == "" {
-		return config{}, errors.New("-token-file is required")
+	if strings.TrimSpace(cfg.identityHeader) == "" {
+		return config{}, errors.New("-identity-header must name a header")
 	}
-	token, err := os.ReadFile(tokenFile)
-	if err != nil {
-		return config{}, fmt.Errorf("read -token-file: %w", err)
-	}
-	if cfg.token = strings.TrimSpace(string(token)); cfg.token == "" {
-		return config{}, fmt.Errorf("-token-file %s is empty", tokenFile)
-	}
-	if strings.TrimSpace(cfg.session) == "" {
-		return config{}, errors.New("-session is required")
+	if strings.TrimSpace(cfg.person) == "" {
+		return config{}, errors.New("-person must name a login prefix")
 	}
 	cfg.artifacts = artifacts
 	for _, text := range protect {
