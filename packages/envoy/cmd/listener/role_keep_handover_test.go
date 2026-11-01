@@ -567,13 +567,12 @@ func TestADispatchRoleRoutedEventToAnUnheldRoleReachesTheNextHolder(t *testing.T
 	}
 }
 
-// A lane-head read that did not answer says nothing about the role's holder, so the handover
-// reads the lane again after a pause of its own rather than ending there. A handover that ended
-// on the first such read returned nil, so the line every start of a handover writes for one that
-// failed (reportKeptRoleDrain) was never written: the copies on the lane - each with a sender
-// answered 202 kept, and a holder that has just claimed the role - waited for the sweep with
-// nothing above Debug said about them. Only the first resolution of the role's holder is the
-// keep's own no-holder case.
+// A lane-head read that did not answer says nothing about the role's holder, so a handover of a
+// role a session claims reads the lane again after a pause of its own rather than ending there.
+// A handover that ended on the first such read returned nil, so the line every start of a
+// handover writes for one that failed (reportKeptRoleDrain) was never written: the copies on the
+// lane - each with a sender answered 202 kept, and a holder that has just claimed the role -
+// waited for the sweep with nothing above Debug said about them.
 func TestAHandoverRetriesALaneHeadReadThatFailedOnItsFirstPass(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const (
@@ -615,5 +614,186 @@ func TestAHandoverRetriesALaneHeadReadThatFailedOnItsFirstPass(t *testing.T) {
 	const line = "listener kept role drain failed"
 	if said := strings.Count(harness.logs.String(), line); said != 1 {
 		t.Fatalf("the handover is reported %q %d times, want the one line above Debug:\n%s", line, said, harness.logs.String())
+	}
+}
+
+// A keep for a role nobody holds hands that role's lane over itself (keepForNextHolder), and
+// that handover's lane-head read can fail on something no retry ever gets past: a cursor body no
+// read can decode, which any NATS user whose grant covers notifications.> can write. Every failed
+// read used to be retried for the whole of roleKeepHandoverWindow - about twenty-five reads, each
+// writing its own Debug line - for a lane whose role no claim was coming for, while every keep
+// for that role queued one more goroutine on its guard behind the handover already in it. The
+// role's cached claim is what says which of the two it is: no claim names a session here, so this
+// is the keep's own no-holder case and the handover ends on its first read, with nothing above
+// Debug and the copy left where it is.
+func TestAHandoverForAnUnclaimedRoleEndsOnACursorNoReadCanDecode(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const role = "kept-unclaimed-head-read"
+	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "kept-unclaimed-head-read-00")
+	if !keepRoleMessage(harness.client, harness.config.logger, role, item) {
+		t.Fatalf("keep the copy; the listener log says why:\n%s", harness.logs.String())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if _, err := harness.client.PublishCursorAt(ctx, bus.KeptRoleCursorSubject(role), []byte("{"), 0); err != nil {
+		t.Fatalf("write the cursor no read can decode: %v", err)
+	}
+
+	// The keep's own handover runs under roleKeepHandoverWindow; this one is bounded to the
+	// first pauses a retrying handover would spend, so a handover that retries this read fails
+	// the test in seconds rather than running for ten minutes.
+	handoverCtx, cancelHandover := context.WithTimeout(ctx, 3*roleKeepDrainRetryPause)
+	defer cancelHandover()
+	started := time.Now()
+	err := drainKeptRole(handoverCtx, harness.config, role, time.Now)
+	elapsed := time.Since(started)
+
+	if err != nil {
+		t.Fatalf("the handover of unclaimed role %s reported %v, want nothing reported for a lane no claim is coming for:\n%s",
+			role, err, harness.logs.String())
+	}
+	if elapsed >= roleKeepDrainRetryPause {
+		t.Fatalf("the handover of unclaimed role %s took %s, which is the first pause of %s a retry earns or more: an unclaimed role's failed read is the keep's own case, not a read to retry",
+			role, elapsed, roleKeepDrainRetryPause)
+	}
+	// Nothing the handover reports is nothing this line says, which is the one line above Debug
+	// a handover writes (reportKeptRoleDrain).
+	reportKeptRoleDrain(harness.config, role, err)
+	const line = "listener kept role drain failed"
+	if said := strings.Count(harness.logs.String(), line); said != 0 {
+		t.Fatalf("the handover of unclaimed role %s is reported %q %d times, want nothing above Debug:\n%s",
+			role, line, said, harness.logs.String())
+	}
+	// The copy is still kept: the handover walked nothing, so the role's next claim is handed it.
+	if _, ok := readKeptRoleMessage(t, harness.client, role); !ok {
+		t.Fatalf("role %s's kept lane holds nothing, want the copy left for the role's next claim:\n%s", role, harness.logs.String())
+	}
+}
+
+// failFirstGetKV is a session bucket whose first read does not answer and whose reads after it
+// do: one round trip the bus missed, made deterministic.
+type failFirstGetKV struct {
+	natsgo.KeyValue
+	failed *atomic.Bool
+}
+
+func (kv failFirstGetKV) Get(key string) (natsgo.KeyValueEntry, error) {
+	if kv.failed.CompareAndSwap(false, true) {
+		return nil, errors.New("the session bucket's read did not answer")
+	}
+	return kv.KeyValue.Get(key)
+}
+
+// failTheNextSessionRead makes the next bucket read of sessions fail and every read after it
+// answer, by swapping the handle its (stopped) watcher hands out, as countSessionBucketReads
+// swaps it for one that counts. A resolution of a role's holder reads the holder's session that
+// way whenever this listener's cache does not hold it, so the flag it returns reports whether
+// that resolution took the failure.
+func failTheNextSessionRead(t *testing.T, sessions *session.SessionRegistry) *atomic.Bool {
+	t.Helper()
+	failed := &atomic.Bool{}
+	field := reflect.ValueOf(sessions).Elem().FieldByName("watcher")
+	watcher := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
+	failing := bus.KeyValue{KeyValue: failFirstGetKV{KeyValue: watcher.Interface().(*kvwatch.Watcher).KV().KeyValue, failed: failed}}
+	watcher.Set(reflect.ValueOf(kvwatch.New("session registry", failing, func(natsgo.KeyValueEntry) {}, func() {})))
+	return failed
+}
+
+// A resolution of the role's holder that did not answer is a bus that missed a read, not a role
+// nobody holds: resolveRoleHolder answers a role no claim names with roleHolderUnclaimed and no
+// error at all. A claim's handover, whose role was claimed a moment ago, used to end on the first
+// such failure all the same - at Debug, reporting nothing - and the copies it left behind waited
+// for the five-minute sweep, whose own handover could end the same way, until they aged past
+// roleKeepWindow. The role's cached claim names the session that claimed it, so the read is
+// retried and the copy reaches the holder its sender was told it was kept for.
+func TestAHandoverOfAClaimedRoleRetriesAHolderResolutionThatFailed(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const (
+		role   = "kept-holder-read-failed"
+		holder = "ses_kept_holder_read_failed"
+	)
+	lane := newKeptLaneUnderClaim(t, harness, func(int, string, contracts.Envelope) error { return nil })
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := harness.sessions.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("warm the session cache: %v", err)
+	}
+	keys := lane.keep(t, role, "kept-holder-read", 1)
+	// The holder is registered through a session registry of its own, with this listener's cache
+	// no longer watching the bucket, so resolving the role's holder reads the session bucket
+	// itself: the read this test fails once.
+	harness.sessions.StopWatch()
+	writer, err := session.OpenSessionRegistry(harness.client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open the registry that registers the holder: %v", err)
+	}
+	if err := writer.Put(holder, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register %s: %v", holder, err)
+	}
+	if _, err := harness.registry.SetRole(holder, "test-machine", role, false); err != nil {
+		t.Fatalf("claim %s for %s: %v", role, holder, err)
+	}
+	failed := failTheNextSessionRead(t, harness.sessions)
+
+	if err := drainKeptRole(ctx, *lane.deps.delivery, role, time.Now); err != nil {
+		t.Fatalf("hand over role %s's kept lane: %v\n%s", role, err, harness.logs.String())
+	}
+
+	if !failed.Load() {
+		t.Fatalf("the handover of role %s resolved its holder with no bucket read, so no resolution of it failed:\n%s",
+			role, harness.logs.String())
+	}
+	if handed := lane.keys(); !slices.Equal(handed, keys) {
+		t.Fatalf("the handover forwarded %v, want %v: a resolution that did not answer is retried, not read as a role nobody holds:\n%s",
+			handed, keys, harness.logs.String())
+	}
+}
+
+// A keep's handover that finds another handover of the same role already running waits for the
+// guard, and that wait ends with its own context. The window a handover waits in is the whole of
+// its life (roleKeepHandoverWindow): one that has spent it walks nothing whatever the guard is
+// holding, so waiting past it would queue one goroutine per keep behind a handover that is
+// spending its window on a bus which is not answering. Before the guard saw a context this wait
+// was a plain Lock, and only the handover ahead of it could end it.
+func TestAKeptLaneGuardStopsWaitingWhenTheHandoversContextEnds(t *testing.T) {
+	guards := newRoleKeepGuards()
+	const role = "kept-guard-cancel"
+
+	held, taken := guards.hold(context.Background(), role)
+	if !taken {
+		t.Fatalf("the first hold of role %s's guard did not take it", role)
+	}
+	defer held()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	waited := make(chan bool, 1)
+	go func() {
+		release, ok := guards.hold(ctx, role)
+		if ok {
+			release()
+		}
+		waited <- ok
+	}()
+
+	select {
+	case ok := <-waited:
+		t.Fatalf("the second hold answered %v while the first still held the guard, so it never waited", ok)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case ok := <-waited:
+		if ok {
+			t.Fatalf("the cancelled hold of role %s reported that it took the guard, which the first hold still holds", role)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the hold of role %s's guard did not return within 10 s of its context ending", role)
+	}
+
+	// The guard is the first holder's throughout: a release the cancelled wait never made would
+	// free a guard it never took, and the next holder would run beside the first.
+	if _, free := guards.tryHold(role); free {
+		t.Fatalf("role %s's guard is free while its first hold still holds it", role)
 	}
 }

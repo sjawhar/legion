@@ -676,7 +676,11 @@ func TestRoleHolderStateIsNamedByEachRoutesAnswer(t *testing.T) {
 			// product and wrong for a test that is about what each route answers. The guard one
 			// handover of a role takes is held here for the whole subtest, so every handover the
 			// keeps start waits and none resolves a holder while the test is setting one up.
-			defer deps.delivery.roleKeepDrains.hold("reviewer")()
+			release, held := deps.delivery.roleKeepDrains.hold(context.Background(), "reviewer")
+			if !held {
+				t.Fatalf("take the reviewer role's handover guard")
+			}
+			defer release()
 
 			unclaimedRecorder := httptest.NewRecorder()
 			handler.ServeHTTP(unclaimedRecorder, tc.request())
