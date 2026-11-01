@@ -1604,22 +1604,36 @@ its step 4 is not needed, since every issue Sandbox is deleted here.
 
 ### Pinning a release that drops what a running pod still uses
 
-A pod is built whole from the image pinned when it was launched, and nothing relaunches it for an image change alone:
+A pod is built whole from the image pinned when it was launched, and no launch replaces a live pod for an image change alone:
 a release whose daemon stops serving a route, or stops setting a variable, that the previous image's agents call or read leaves every pod still on the earlier image calling this daemon as the older release.
 LEGION-631 is one: it deletes the `/legion/v1/gh-token` and `/legion/v1/git-credential` routes, which a pod's `legion gh` and `legion credential` from the earlier image still call.
-Such a release is pinned only after every tree is drained (step 1 of the runbook above) or every issue pod is relaunched onto the new image.
 The daemon's boot log, and every orphan sweep after it, names each pod still on another image
 — `sandbox runtime: <sandbox> runs image <image>, the configured image is <image>; its agents call
-this daemon as the older release until the pod is relaunched` (`warnImageDrift` in `internal/runtime/sandbox/sandbox.go`)
-— and the daemon replaces such a pod at the next launch of any of its roles (`imageDrift` beside the moved-stream trigger in `relaunch.go`), which interrupts the roles live in it once:
-they end with the pod and resume in the new one, as a moved worker stream already makes them (below).
-The daemon-launched controller's pod is in scope for both the warning and the replacement, which happens only when the controller's process is being started anyway.
+this daemon as the older release until its update round replaces the pod` (`warnImageDrift` in `internal/runtime/sandbox/sandbox.go`).
 The boot action is the log line alone: refusing to adopt a drifted pod would stop observing a live pod and trigger nothing.
 
-A launch replaces a pod other roles of its issue still run in when the pod cannot run the launching role as a pod created now would:
-it runs another image; it holds a worker stream, a secrets broker enrollment or a session database URL key that a pod created now is not handed;
-or a role's launcher Secret no longer binds it.
-The replacement ends those roles' processes wherever their turns stood, and that end is the daemon's act, not theirs (LEGION-729).
+An issue pod on another image is replaced by its own update round (INFRA-484, [The disk dies with its pod](#the-disk-dies-with-its-pod)):
+the orphan sweep reads the image as drift, tasks every worker in the pod to push its work and answer `ready_for_update`, and ends the pod once each has answered.
+So pinning such a release reaches a running issue pod by itself, without stopping a tree, without ending a turn, and without deleting a disk under work nobody pushed.
+A worker whose running plugin predates the contract that added the op is asked all the same:
+its task tells it to push its work and end its turn, and the daemon reads the end of that turn as its answer (`answerByTurnEnd` in `packages/daemon/internal/supervise/table.go`), so its pod is replaced like every other and the worker resumes in its own session on the new image.
+A role on Claude Code, whose plugin is its pod image's own and which no install can move, is carried by that same path and needs no operator step either ("Contract discipline" below).
+What a round still waits on that only a person can clear is a claim no task reaches — a `failed` one, or one an operator's own suspension holds
+— and the daemon reports such a round to the project's controller as `update-stalled`.
+
+The daemon-launched controller's pod is in scope for the warning and in no round:
+it has no issue workspace and nothing to push, so `PodDrift` answers nothing for it (`internal/runtime/sandbox/drift.go`).
+Its pod is replaced by a launch: one that finds it not live — its Sandbox suspended, its pod ended, its init container failed, or its launcher binding lost
+— and, since no round covers it, one that finds it drifted in any way, its image and pod shape included, unless that launch installs a stale-plugin pair (`roundCovers`, `shapeDrift`).
+So an operator moving the controller onto a new image suspends its claim and resumes it (`legion claims suspend`, then `legion claims resume`).
+
+A launch replaces a pod other roles of its issue still run in only when the pod cannot run the launching role as a pod created now would and no worker in it can be asked to push first (`movedInPod`, `internal/runtime/sandbox/addresses.go`):
+it runs the layout before one container, one launcher container per role, or its launchers dial a worker stream other than the one a pod created now is handed and never redial it.
+A pod the launch finds suspended, ended, with a failed init container, with a disk of the shape before the pod-owned disk, or whose launcher Secret no longer binds it is replaced too.
+Everything else a running pod cannot be changed to carry — its image, its pod kind's reservation, the operator's volumes and mounts, the disk size, a role's overlays, the secrets broker's enrollment and the session store
+— is drift, and the update round replaces the pod for it ([The disk dies with its pod](#the-disk-dies-with-its-pod)).
+The launch's replacement ends those roles' processes wherever their turns stood, and that end is the daemon's act, not theirs (LEGION-729);
+a round's replacement runs this same path, but only once no role of the pod is in a turn at all.
 The patch that suspends the pod also names it on the Sandbox, as the `legion.dev/displaced-pod` annotation:
 one merge patch, so a suspension the API server refuses names nothing and every other annotation of the Sandbox stays.
 Once the named pod is being deleted or is gone, the runtime reports each role recorded in it as displaced.
@@ -1631,9 +1645,11 @@ A turn the role was in is lost: its task goes back to waiting and is sent again 
 The annotation lives on the Sandbox, so a daemon restarted mid-replacement reads it as well.
 
 A route change the plugin calls is a contract bump by `version.go`'s rule, and since LEGION-164 a contract bump is brought in place at the daemon's first boot on it, with no pod replacement and no runbook step:
-the boot pass ("Contract discipline" below) relaunches every registered claim whose recorded contract differs from the daemon's through the moved-address relaunch path, logging `supervise: the process speaks another plugin contract; relaunching it onto the current plugin` once per claim, and the relaunched role loads the release's published plugins installed in its pod.
+the boot pass ("Contract discipline" below) brings every registered claim whose recorded contract differs from the daemon's onto the current plugin, and the relaunched role loads the release's published plugins installed in its pod:
+a worker that can answer `ready_for_update` is asked to push its work first and has its process replaced once it has, and one that cannot is relaunched through the moved-address relaunch path, logging `supervise: the process speaks another plugin contract; relaunching it onto the current plugin` once per claim.
 What the text above keeps is the release that changes what the pod's own `legion` binary speaks (the launcher, the shim, `workspace-init`):
-an install refreshes no binary, so only a new image carries that change, and such a release is still pinned only after every tree is drained or every issue pod is relaunched onto the new image.
+an install refreshes no binary, so only a new image carries that change, and the update round above is what carries it
+— each issue pod is replaced once every worker in it has pushed and answered.
 
 **Moving from one container per role to one `roles` container (daemon API contract 39).**
 A release at contract 39 builds an issue pod with one container, `roles`, whose launcher runs every role in multi-role mode, which only an image of that release's `legion` has:
@@ -1788,8 +1804,24 @@ each claim records the contract its process registered with as `pluginContract`.
 A role's `pi-legion` declares the contract it was built against (`legion.daemonApiVersion`, `packages/pi-legion/AGENTS.md`), and the daemon's boot pass (`refreshStalePlugins` in `packages/daemon/internal/daemon/daemon.go`) and its registration path (`internal/supervise/plugin.go`) agree on one rule:
 a registered claim whose recorded contract differs from the daemon's own, or is unrecorded
 — every claim is unrecorded the first time a daemon boots on a release that records contracts at all
-— is relaunched once, uncharged, through the moved-address relaunch path (`interrupted` → `launch`;
-the task of a turn in flight goes back to waiting and is delivered again;
+— runs on this daemon's plugin before it does anything else, and how it gets there is whether its own worker can be asked first.
+
+A claim whose recorded contract is at or above the one that added `ready_for_update` (`supervise.PodUpdateContract`) is given an update round of its own, `plugin:<daemon contract>`:
+the worker is tasked to push its work to the issue branch and answer, and the daemon replaces that one process only once it has (`openPluginUpdate`, and the sweep's `reconcilePluginUpdate` in `packages/daemon/internal/daemon/podupdate.go`).
+The round is that claim's alone and never its pod's, because the relaunch keeps the pod and the disk:
+it costs one interrupted turn rather than a workspace, so holding a contract bump behind every worker of the pod would buy nothing.
+Opening it logs `supervise: the process speaks another plugin contract; its worker is asked to push its work before the process is replaced`, and the round is asked again every `pod_update_retask_hours` and reported `update-stalled` to the controller `pod_update_notice_hours` after it opened.
+
+Three cases keep the immediate relaunch, each costing at most the one turn in flight and no disk:
+a claim whose recorded contract is below that contract, whose plugin has no op to answer with;
+a registration that still differs from the daemon's, whose own agent is refused and whose process exits on that refusal, so no running turn could ever send the signal;
+and the project controller's own claim, whatever contract it records, because the controller's `legion` tool has `read_state` and `set_status` and no `ready_for_update` at all (`packages/pi-legion/src/tools.ts`), so a round over it would wait for an answer no controller turn can give.
+The controller loses nothing by it: its pod holds no issue workspace, so it has nothing to push, and it is the one of the three relaunched where it stands while a turn runs.
+A worker's turn is waited out instead:
+a claim below the contract that is in a turn is left running, its relaunch held until the turn ends (`refreshPlugin` records it, `turnEnded` runs it, both in `packages/daemon/internal/supervise/`), because a worker that cannot be asked to push first is exactly the worker whose unpushed turn the relaunch would throw away.
+The hold logs `supervise: the process speaks another plugin contract; its relaunch waits for the agent's turn to end` once, and goes with the process it was made for if that process dies, is suspended or is retired first.
+Each relaunch is made once, uncharged, through the moved-address relaunch path (`interrupted` → `launch`;
+the task of a turn in flight goes back to waiting and is delivered again, while a turn that was waited out has already retired its own finished task;
 a claim whose suspension is held for its turn is suspended instead of relaunched, and its next resume launches on the current plugin;
 a claim still launching is left to its registration, which decides it the moment it arrives).
 Each relaunch logs one line, exactly `supervise: the process speaks another plugin contract; relaunching it onto the current plugin`, naming `claim`, `incarnation`, `pluginContract` (0 when the claim recorded none), `daemonApiVersion` and `trigger` (`boot`, `registration`, or `sweep`:
@@ -1803,17 +1835,21 @@ the role's shim runs the start wrapper, `/bin/sh -c '<start script>' legion-star
 `--backend=copyfile` because the issue's bun install cache and the generation directory now share the issue's volume, where bun would otherwise hardlink the installed files out of that cache and an in-place edit of either would corrupt the other for the life of the volume) into a fresh generation directory, `$XDG_STATE_HOME/legion-plugins/g<generation>/` (`/legion/scratch/state/<role>/legion-plugins/g<N>/`), checks with a `node -e` snippet that the installed `pi-legion`'s `legion.daemonApiVersion` equals the daemon's own (exiting 1 before `exec`, printing `legion plugins: @sjawhar/pi-legion@<v> declares daemon API contract <got>; this daemon requires <want>` when it does not), and then `exec "$@"`s into Oh My Pi, which starts with `--extension <gen dir>/node_modules/@sjawhar/pi-envoy --extension <gen dir>/node_modules/@sjawhar/pi-legion` in place of `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`.
 A pod replaced for any other reason in the same relaunch
 — a suspended Sandbox, a lost launcher binding, a failed init container, a moved address
-— installs nothing: it comes up on the configured image, whose copies the boot gate already holds to the daemon's contract;
-and a relaunch that is not a stale-plugin one (a death, a moved address) still replaces a pod on another image as the section above says.
+— installs nothing: it comes up on the configured image, whose copies the boot gate already holds to the daemon's contract.
+An issue pod merely running another image is replaced by no relaunch at all, stale-plugin or not:
+it is drift, and the update round replaces it once every worker in it has pushed ("Pinning a release that drops what a running pod still uses" above).
+The controller's pod, which no round covers, is replaced by any relaunch that installs nothing.
 An install failure ends the child before Oh My Pi starts;
 the launcher reports it gone, the daemon charges it as a launch failure, and the claim is retried until the budget ends it in a `worker-died`.
 
 A role on Claude Code installs neither plugin.
 That install is `@sjawhar/pi-legion` and `@sjawhar/pi-envoy` from npm, and a phase worker `worker_backends` puts on `claude` loads neither:
 its plugin is the image's own `/opt/legion/claude-envoy`, which no workflow releases.
-So a stale-plugin relaunch of such a claim carries no plugin install (`stalePluginInstall`, `packages/daemon/internal/daemon/specs.go`);
-the claim still relaunches — its start script installing the pinned Claude Code as every Claude launch's does
-— and comes up on the image's plugin, which the image probe already held to the daemon's contract.
+So a stale-plugin relaunch of such a claim carries no plugin install (`stalePluginInstall`, `packages/daemon/internal/daemon/specs.go`) and could not take the claim onto this daemon's contract at all:
+the process would come up on the same image's plugin, register the same contract again, and be relaunched for it until its launch budget failed it.
+Such a claim is therefore relaunched by nothing:
+no `StalePlugin` is posted for a Claude Code claim below `supervise.PodUpdateContract`, round or no round (`refreshStalePlugins`), and a registration of that claim still on the old contract is accepted, uncharged, rather than relaunched (`staleRegistration`).
+What carries it is the update round over its pod, which asks it like every other worker and takes the end of the turn its task starts as its answer, so the new image reaches it with nothing asked of an operator.
 A plugin-contract change for a Claude Code role is answered by a new image, never by an install, and `legion start --check-config` says so after its plugin line, naming each role this deployment runs on Claude Code:
 `Claude Code runs <roles>, whose plugin is the worker image's: a plugin-contract
 change for such a role is answered by a new image, not by an install.`
@@ -1843,10 +1879,10 @@ the operator's own controller instead gets `…: run legion controller start fro
 Every other undecodable request body is logged `api: refused an undecodable request body` naming the route and the decoder's error.
 A relaunched process that registers still on the old contract is charged as a launch failure (the claim remembers `PluginRelaunchFor`), ending, like any other exhausted budget, in a `worker-died`.
 The contract shows on every claim view — `GET /legion/v1/state`, `legion state --json`, `read_record`'s `pluginContract` field
-— on `legion claims list`'s line (its last column), and on the state's controller locator.
+— on `legion claims list`'s line, whose last two columns are the claim's `updateRound` and the `updateHead` its worker reported (`-` for neither), and on the state's controller locator.
 
 What a contract bump never refreshes is the pod's own `legion` binary:
-the launcher, the shim and `workspace-init` keep running the generation they were started with, so a release that changes the launcher's or the shim's own wire to the daemon is a pod replacement as it always was ("Pinning a release that drops what a running pod still uses" above), never something the contract relaunch fixes in place.
+the launcher, the shim and `workspace-init` keep running the generation they were started with, so a release that changes the launcher's or the shim's own wire to the daemon is a pod replacement, which the update round makes ("Pinning a release that drops what a running pod still uses" above), never something the contract relaunch fixes in place.
 
 ### Configuration
 
@@ -3758,8 +3794,12 @@ Neither holds an issue's clone or workspace.
 
 Every end of an issue pod is therefore the end of that pod's disk, and the ends are these:
 
-- **a launch replaces the pod**, because it cannot run the launching role as a pod created now would:
-  another image, a moved worker stream, a secrets-broker enrollment, session-database key or `role_config_files` mount the pod lacks, a role's launcher Secret that no longer binds it, or a Sandbox of the disk shape before this release ([Pinning a release that drops what a running pod still uses](#pinning-a-release-that-drops-what-a-running-pod-still-uses), [Cutting over to the pod-owned disk](#cutting-over-to-the-pod-owned-disk));
+- **a launch replaces the pod**, because it cannot run the launching role as a pod created now would and no worker in it can be asked to push first:
+  it runs the layout before one container, or its launchers dial a worker stream a pod created now is not handed and never redial it.
+  A pod the launch finds suspended, ended, with a failed init container, with a role's launcher Secret that no longer binds it, or on a Sandbox of the disk shape before this release is replaced too ([Pinning a release that drops what a running pod still uses](#pinning-a-release-that-drops-what-a-running-pod-still-uses), [Cutting over to the pod-owned disk](#cutting-over-to-the-pod-owned-disk));
+
+- **an update round replaces the pod**, once every worker in it has pushed its work and answered (below).
+  A live pod whose configuration has merely drifted is never replaced where it is found, because that would end every role's turn in it and delete the disk with everything unpushed on it;
 
 - **the issue is stopped**: its close as `done`, or a move to `backlog`, `icebox` or `triage`, runs the durable suspend effect, which sets the Sandbox `Suspended`, waits its pod out and deletes the Sandbox with the six role Secrets it owns (`SuspendIssue`, `internal/runtime/sandbox/issue_suspend.go`), logging `sandbox runtime: deleted the closed
   issue's Sandbox and the role Secrets it owned`.
@@ -3775,6 +3815,45 @@ Every end of an issue pod is therefore the end of that pod's disk, and the ends 
   the same name, a new uid, the new pod as its owner.
   Nothing waits for a detach, since the replacement mounts no volume the pod it replaces held, so the `FailedAttachVolume` and `Multi-Attach` events a reattached `ReadWriteOnce` volume used to produce do not arise for an issue's disk.
 
+The update round is how a configuration change reaches a running issue pod without taking the disk out from under it (INFRA-484).
+Every launch records the configuration its pod was built from on the pod template, as the `legion.dev/pod-shape` annotation (`podShape` in `internal/runtime/sandbox/drift.go`, written where the template is built):
+the image every container runs, the pod kind's one reservation, the operator's `runtime.kubernetes.pod` volumes and mounts, and the size of the pod's disk.
+The orphan sweep compares that record with what the runtime would build now, and adds the three facets of the live pod whose worker can still be reached
+— the operator's volume and mount holding the role's overlays, the secrets broker's enrollment, and the session store (`PodDrift`).
+Quantities are compared as amounts, so a disk written `1024Mi` and one written `1Gi` are no drift.
+**A Sandbox whose template carries no such annotation was built before this release and is compared by image alone**, never by its reservation, volumes, mounts or disk:
+nothing recorded what that pod was built from, and a guess would replace pods the operator never changed.
+
+What the sweep then opens is one round per issue, since every role of an issue shares its one pod (`reconcilePodUpdates`, `packages/daemon/internal/daemon/podupdate.go`).
+Every claim of the issue that has a session and has not retired holds the round back, since its agent has run and may hold unpushed work,
+and each one is given a task naming the drift, the round's own id and asking it to push its work to the issue branch and answer `ready_for_update` with that id.
+No claim is left out of a round for the contract its plugin records:
+a worker whose plugin has no such op is asked all the same, and its task tells it to push and end its turn, which the daemon reads as its answer (`answerByTurnEnd`).
+The id is what makes the answer that round's:
+the daemon takes an answer only for the round the claim is in now and refuses any other, naming both ids, so an answer given to a task the worker read before the round changed counts for nothing and the worker is asked again.
+A suspended claim is revived for the task, unless the operator's own suspension holds it, which takes the task on the operator's resume.
+A claim that has not answered is asked again every `pod_update_retask_hours` (a `legion.yaml` key, a decimal number of hours, 1 by default), and never while it holds a task of its own.
+Once every such claim has answered and none is in a turn, the daemon ends the pod (`ReplacePod`), each role in it is reported displaced and resumed uncharged on its own session, and the first of those resumes provisions a fresh pod from the current configuration.
+The replacement asks once more, under the pod's own lock and immediately before it suspends anything, whether it is still due:
+the daemon reads the issue's claims from the store again — which is how a claim created since the sweep read its list, such as the next phase's role launched into the kept pod, is counted — and runs the same waiting and working checks.
+A claim that has not answered, or a turn that started while the replacement waited for the pod's launch turn, aborts it:
+nothing is suspended, the round stays open, and the next sweep decides again.
+Nothing the round decides is held in memory:
+it is all claim columns, so a daemon restart resumes a round where it stood, and each claim shows it as `updateRound` and `updateHead` on every claim view.
+A round that ends having replaced nothing — the drift returned to nothing, because an operator rolled the release back — releases each worker that answered:
+the task the round held back goes, or, when none waits, a short task saying the round is over and that the worker continues its work.
+
+A round that is not finishing is told to the project's controller as an `update-stalled` notice `pod_update_notice_hours` after it opened (a `legion.yaml` key, a decimal number of hours, 4 by default),
+naming the issue, the round, the pod, the drift and every claim it waits on with that claim's state (`skill://legion-controller/references/escalation.md`).
+One round is told once, however many sweeps find it open.
+A round whose workers have all answered is told the same way when it still cannot replace the pod:
+a turn that never ends, or a `ReplacePod` the cluster keeps refusing, each holds every answered worker's next task, and the notice names what it waits on.
+What such a round waits on that only a person can clear is a claim no task reaches — a `failed` one, or one an operator's own suspension holds
+— and the notice marks which claims have answered, so the controller prompts the workers it can and leaves the rest to the operator's own resume.
+A pod that goes before its round is over, replaced where it stood for a failure of its own, has the daemon write on the issue which roles had not answered and that the work they did not push went with the disk.
+What says the pod went is the claims recording another pod in its place.
+While no claim of the issue records a pod at all — every role suspended, or the one live role relaunching — the round waits, because no locator is evidence either way.
+
 What a pod's disk carries is therefore the issue's work in progress and nothing more:
 the clone and the jj workspace, the issue's scratch and caches, uv's Pythons and packages, the workspace's CodeGraph index and each role's state home with Oh My Pi's logs under it.
 None of it reaches the next pod.
@@ -3784,7 +3863,7 @@ the issue's branch on GitHub, `legion/<KEY>`, which every pushed turn is in;
 the issue's record in the daemon's own Postgres; and the repository's cache, which fills the next pod's feed.
 
 A pod's lifetime is not a role's, and this paragraph is the one place that says how they differ.
-A pod is created by a launch — the issue's first, one that finds no live pod (after a suspension, say), or one that must replace the pod (the first end above)
+A pod is created by a launch — the issue's first, one that finds no live pod (after a suspension, say, or after an update round ended the pod), or one that must replace the pod (the first end above)
 — and provisions its workspace from the issue's pushed branch (`legion/<KEY>`, or the repository's default branch when none was pushed) with the same two init containers every new pod runs ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod));
 it then lives until one of the ends above, and its disk dies with it.
 A role launched while that pod is live and nothing above replaces it starts in that pod and provisions nothing:

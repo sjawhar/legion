@@ -567,7 +567,7 @@ func TestClaimsForgetSessionPostsToTheClaimRoute(t *testing.T) {
 	if sent.Session != session {
 		t.Fatalf("forget-session sent %+v, want %s", sent, session)
 	}
-	if want := "legion-legion-legion-208-architect architect LEGION-208 failed 3 " + thisBinarysContract + "\n"; out != want {
+	if want := "legion-legion-legion-208-architect architect LEGION-208 failed 3 " + thisBinarysContract + " - -\n"; out != want {
 		t.Fatalf("forget-session stdout = %q, want %q", out, want)
 	}
 }
