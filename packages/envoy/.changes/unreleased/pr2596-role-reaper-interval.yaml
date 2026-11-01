@@ -1,0 +1,9 @@
+kind: Fixed
+body: |-
+  The role claim reaper runs at `ENVOY_SESSION_REAP_INTERVAL`, the period the session reaper
+  already took, instead of a fixed five minutes. What it waits for is what that reaper decides —
+  a claim is released once its holder is gone, and the session reaper is what finds a holder gone
+  — so a listener told to judge records every ten seconds used to hold a gone holder's role for
+  up to five minutes after it had deleted that holder's record. The default period is unchanged.
+custom:
+  Issue: pr2596

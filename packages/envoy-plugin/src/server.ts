@@ -303,6 +303,31 @@ export default async (input: { serverUrl: URL }) => {
   };
 
   /**
+   * Does the serve still hold this session? `true` when it answers for it, `false` when it
+   * answers 404 — the answer for a session OpenCode has deleted — and `undefined` when the read
+   * did not answer at all, which is no reason to take a registration away.
+   *
+   * OpenCode's `session.deleted` never reaches a plugin's `event` hook: the hook is fed from the
+   * plain bus (`session.status`, `session.idle`, `session.diff`, `message.part.delta`), and the
+   * session aggregate's own events — `session.created`, `session.updated`, `session.deleted` —
+   * are published on a stream it does not carry (OpenCode 1.14.46). A serve that waited for that
+   * event would heartbeat a deleted session's id for the whole live window and then the whole
+   * gone horizon, which is deliveries to a dead id on this port for all of it
+   * (dispatch://INFRA-392), so the heartbeat asks the serve itself instead.
+   */
+  const sessionHeld = async (sessionID: string): Promise<boolean | undefined> => {
+    try {
+      const res = await fetch(`${input.serverUrl.href}session/${sessionID}`, {
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (res.status === 404) return false;
+      return res.ok ? true : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  /**
    * The registration on the wire for each served session. A `DELETE /v1/sessions/<id>` that
    * overtakes one is undone when it lands: the listener writes the record again, and a session
    * nothing heartbeats stays registered — live for the live window, then unresponsive for the
@@ -365,6 +390,25 @@ export default async (input: { serverUrl: URL }) => {
     await client.unregisterSession({ sessionID }).catch(() => {});
   };
 
+  /** Stops heartbeating a session this serve no longer holds and takes its registration out of
+   *  the registry now rather than leaving it to expire: an entry nothing heartbeats reads as live
+   *  for the live window and as unresponsive for the gone horizon after it, which is deliveries
+   *  to a dead session id on this port for the whole of it (dispatch://INFRA-392). The DELETE
+   *  goes out behind that session's own registration. Both ways a session ends on a running serve
+   *  come here: OpenCode's own `session.deleted`, where the host hands it over, and the
+   *  heartbeat's own read of the serve, which is the one that answers for a delete (sessionHeld).
+   */
+  const forgetSession = async (client: EnvoyClient, sessionID: string): Promise<void> => {
+    trackedSessions.delete(sessionID);
+    if (activeSessionID === sessionID) {
+      activeSessionID = null;
+      activeSessionTitle = null;
+    }
+    // Best-effort: drop the session's interests so routing stops.
+    await client.unsubscribe({ sessionID, topics: [] }).catch(() => {});
+    await deregisterSession(client, sessionID);
+  };
+
   // A process registers ONLY the sessions it has actually run (see the busy
   // handler below). It must never claim a route for a session it merely has
   // loaded from shared on-disk state: doing so re-points that session's route
@@ -393,12 +437,29 @@ export default async (input: { serverUrl: URL }) => {
     // Heartbeat: re-subscribe every tracked session to refresh the envoy_sessions
     // TTL (5-min). Refreshes ALL sessions that have been busy in this serve, not
     // just the most recently active one. Interval is env-tunable for tests/tuning.
+    //
+    // It is also where a session OpenCode has deleted is noticed, since the host hands the
+    // plugin no `session.deleted` (sessionHeld): a session the serve no longer answers for is
+    // forgotten and deregistered instead of heartbeated. One pass at a time — a pass that is
+    // still reading the serve when the next tick comes is left to finish.
+    let heartbeating = false;
     const heartbeatTimer = setInterval(() => {
       const port = currentPort();
-      if (!port) return;
-      for (const [sessionID, info] of trackedSessions) {
-        subscribeSession(envoyOn.client, sessionID, info.title, port, info.driving);
-      }
+      if (!port || heartbeating) return;
+      heartbeating = true;
+      void (async () => {
+        try {
+          for (const [sessionID, info] of [...trackedSessions]) {
+            if ((await sessionHeld(sessionID)) === false) {
+              await forgetSession(envoyOn.client, sessionID);
+              continue;
+            }
+            subscribeSession(envoyOn.client, sessionID, info.title, port, info.driving);
+          }
+        } finally {
+          heartbeating = false;
+        }
+      })();
     }, envoyOn.heartbeatMs);
     heartbeatTimer.unref?.();
     // A serve is stopped by a signal, and an `exit` handler may not be asynchronous, so the
@@ -524,21 +585,7 @@ export default async (input: { serverUrl: URL }) => {
         const deletedID =
           (props.sessionID as string | undefined) ??
           (props.info as { id?: string } | undefined)?.id;
-        if (deletedID) {
-          // Stop heartbeating a session that no longer exists, and take its registration out of
-          // the registry now rather than leaving it to expire: an entry nothing heartbeats reads
-          // as live for the live window and as unresponsive for the gone horizon after it, which
-          // is deliveries to a dead session id on this port for the whole of it
-          // (dispatch://INFRA-392). The DELETE goes out behind that session's own registration.
-          trackedSessions.delete(deletedID);
-          if (activeSessionID === deletedID) {
-            activeSessionID = null;
-            activeSessionTitle = null;
-          }
-          // Best-effort: drop the deleted session's interests so routing stops.
-          envoyOn?.client.unsubscribe({ sessionID: deletedID, topics: [] }).catch(() => {});
-          if (envoyOn !== undefined) await deregisterSession(envoyOn.client, deletedID);
-        }
+        if (deletedID && envoyOn !== undefined) await forgetSession(envoyOn.client, deletedID);
       }
     },
     // Cleanup hook (used by tests; production relies on the signal handlers above).

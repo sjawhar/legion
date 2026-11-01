@@ -1190,11 +1190,17 @@ func main() {
 	// maximum age: the window is what makes a session live to every other reader, and with a
 	// maximum age raised past the gone horizon the age would hold a dead holder's claim for an
 	// hour after the reaper had already found it gone.
+	//
+	// The role claim reaper runs at the session reaper's own period, since what it waits for is
+	// what that reaper decides: a claim is released once its holder is gone, and the session
+	// reaper is what finds a holder gone. Left on a period of its own an operator cannot move,
+	// a listener told to judge records every ten seconds would still hold a gone holder's role
+	// for up to five minutes after it had deleted that holder's record.
 	sessionLive, _ := sessions.Windows()
 	kvLoopsCtx, kvLoopsCancel := context.WithCancel(context.Background())
 	kvLoopsDone := []<-chan struct{}{
 		registry.StartReaper(kvLoopsCtx, func(sessionID string) (bool, error) { return sessionMayBeLive(sessions, sessionID) }, 5*time.Minute, store.InterestReapGrace),
-		registry.StartRoleClaimReaper(kvLoopsCtx, func(sessionID string) bool { return roleHolderMayBeLive(logger, sessions, sessionID) }, 5*time.Minute, sessionLive),
+		registry.StartRoleClaimReaper(kvLoopsCtx, func(sessionID string) bool { return roleHolderMayBeLive(logger, sessions, sessionID) }, sessionReapInterval, sessionLive),
 		// The session reaper is the one loop that deletes a session's record, and the one place
 		// the bucket's maximum age is settled while the listener runs (session.ReapSessions).
 		sessions.StartSessionReaper(kvLoopsCtx, sessionReapInterval, session.SessionReaper{

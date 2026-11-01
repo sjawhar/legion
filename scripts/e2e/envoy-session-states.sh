@@ -689,8 +689,15 @@ if [ -n "$needs_claude" ]; then
   bun "$root/packages/claude-envoy/scripts/build.ts" --out "$work/claude-envoy" \
     >"$evidence/logs/build-claude-envoy.log" 2>&1 ||
     fail "packages/claude-envoy did not build; see $evidence/logs/build-claude-envoy.log"
+  # The channel server is given the plugin data directory Claude Code itself hands this plugin's
+  # hooks, `<config>/plugins/data/<plugin name>-inline` for a plugin loaded by `--plugin-dir`.
+  # The hook writes the id Claude Code mints on `/clear` to
+  # `$CLAUDE_PLUGIN_DATA/sessions/<pid>/session-id` and the server polls that file, and Claude
+  # Code sets that variable for a hook itself, so a server told any other directory — including
+  # one named in this launch's own environment, which Claude Code overrides for the hook — never
+  # meets the handoff and never adopts the new id.
   jq -n --arg bun "$(command -v bun)" --arg channel "$work/claude-envoy/dist/envoy-channel.js" \
-    --arg data "$work/claude-config/envoy-plugin-data" \
+    --arg data "$work/claude-config/plugins/data/claude-envoy-inline" \
     '{mcpServers:{legion:{command:$bun,args:[$channel],env:{CLAUDE_PLUGIN_DATA:$data}}}}' >"$work/claude-mcp.json"
   note "Claude Code $installed from $claude_pin, with this checkout's claude-envoy as its one MCP server"
 fi
@@ -999,11 +1006,8 @@ shows_state() {
 
 # ---- Claude Code ----------------------------------------------------------------------------------------
 # Headless in stream-json both ways, the shape a Legion worker's bridge runs it in
-# (claudelaunch.Argv), with this checkout's claude-envoy as its one MCP server. CLAUDE_PLUGIN_DATA
-# is in the launch's own environment, not just the MCP server's: the SessionStart hook writes the
-# id Claude Code mints on `/clear` to `$CLAUDE_PLUGIN_DATA/sessions/<pid>/session-id` and the
-# channel server polls that file, so a hook left on Claude Code's own per-plugin directory and a
-# server told another one never meet and the `/clear` is never adopted.
+# (claudelaunch.Argv), with this checkout's claude-envoy as its one MCP server, and that server
+# told the plugin data directory Claude Code gives this plugin's hooks (see the build above).
 claude_start() { # claude_start SESSION [--resume]
   local session=$1 flag=--session-id
   [ "${2:-}" != --resume ] || flag=--resume
@@ -1012,7 +1016,6 @@ claude_start() { # claude_start SESSION [--resume]
   touch "$work/claude.out"
   own_session "$work/claude.pid" \
     env -i PATH="$PATH" HOME="$work/home" TMPDIR="$work/tmp" CLAUDE_CONFIG_DIR="$work/claude-config" \
-    CLAUDE_PLUGIN_DATA="$work/claude-config/envoy-plugin-data" \
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 ANTHROPIC_BASE_URL="$model_base_url" \
     ANTHROPIC_MODEL="$claude_model" ANTHROPIC_API_KEY="$(cat "$work/model-key")" \
     DISPATCH_URL="$dispatch_url" DISPATCH_TOKEN_FILE="$work/dispatch-token" \
@@ -1458,10 +1461,10 @@ check_gone_only_past_the_horizon() {
   note "SIGKILL-to-gone latency: ${measured_kill_latency}s (gone horizon 90s, a reaper pass every 10s)"
   [ "$measured_kill_latency" -ge 90 ] ||
     refuse "the killed session read gone ${measured_kill_latency}s after the kill, inside its own 90s horizon" || return 1
-  # The role claim reaper has a period of its own, a fixed five minutes that
-  # ENVOY_SESSION_REAP_INTERVAL does not move (StartRoleClaimReaper, cmd/listener/main.go), so the
-  # release waits longer than one of its passes, not the ten seconds the session reaper runs at.
-  wait_until 420 "the role reaper to release the gone holder's claim" \
+  # The role claim reaper runs at this listener's own ENVOY_SESSION_REAP_INTERVAL, the ten
+  # seconds set above (StartRoleClaimReaper, cmd/listener/main.go), so the release is one pass
+  # behind the session reaper's that found the holder gone.
+  wait_until 120 "the role reaper to release the gone holder's claim" \
     role_reason_is "$short_port" "$role" unclaimed || return 1
   note "the role claim was released only once its holder was gone"
   stop_pid "$shortlistener_pid"
@@ -1493,13 +1496,16 @@ check_gone_only_past_the_horizon() {
   claude_turn "Reply with the single word RESUMED." || return 1
   wait_until 240 "the resumed session to get its topics back" topics_hold "$port_a" "$claude_session" "$topic" || return 1
   note "/clear left the old id gone at once, and claude --resume brought its topics back"
-  # Oh My Pi's own /new does the same to the id it leaves.
+  # Oh My Pi's own new session does the same to the id it leaves. It is minted by the
+  # `new_session` request, not by a `/new` typed at the terminal: Oh My Pi's commands are
+  # `/fresh`, `/compact`, `/handoff` and the rest, with no `/new` among them, so typing one left
+  # the session exactly where it was.
   [ -n "$omp_pid" ] || omp_start || return 1
   before_new=$(omp_session_id)
-  omp_typed "/new" >/dev/null || refuse "/new was refused" || return 1
-  wait_until 120 "the session /new left to be gone" state_is "$port_a" "$before_new" unresponsive gone || return 1
+  omp_ask new_session >/dev/null || refuse "new_session was refused" || return 1
+  wait_until 120 "the session new_session left to be gone" state_is "$port_a" "$before_new" unresponsive gone || return 1
   omp_session=$(omp_session_id)
-  note "/new left $before_new gone at once and registered $omp_session"
+  note "new_session left $before_new gone at once and registered $omp_session"
 }
 
 # ---- 7. every plugin shows the state ---------------------------------------------------------------------

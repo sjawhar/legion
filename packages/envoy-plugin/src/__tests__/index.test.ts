@@ -482,8 +482,11 @@ describe("heartbeat refreshes all busy sessions", () => {
           headers: { "Content-Type": "application/json" },
         });
       }
-      // Serve title lookups -> 404 (no title, avoids follow-up subscribe noise)
-      if (url.includes("/session/")) return new Response("not found", { status: 404 });
+      // The serve answers for a session it holds, with no title: the heartbeat reads this to
+      // tell a deleted session from a live one, and a 404 here would mean the serve has lost it.
+      if (url.includes("/session/")) {
+        return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      }
       throw new Error("connection refused");
     }) as typeof fetch;
 
@@ -553,7 +556,10 @@ describe("prunes deleted sessions from the heartbeat", () => {
           headers: { "Content-Type": "application/json" },
         });
       }
-      if (url.includes("/session/")) return new Response("not found", { status: 404 });
+      // Both sessions are still held by the serve; ses_A leaves through session.deleted alone.
+      if (url.includes("/session/")) {
+        return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      }
       throw new Error("connection refused");
     }) as typeof fetch;
 
@@ -588,6 +594,88 @@ describe("prunes deleted sessions from the heartbeat", () => {
       expect(aEnd).toBe(aMark);
       // ses_B is still alive -> heartbeat keeps refreshing it.
       expect(bEnd).toBeGreaterThan(bMark);
+    } finally {
+      dispose?.();
+      globalThis.fetch = originalFetch;
+      process.env.ENVOY_URL = originalEnvoyUrl;
+      if (originalHb === undefined) delete process.env.ENVOY_HEARTBEAT_MS;
+      else process.env.ENVOY_HEARTBEAT_MS = originalHb;
+    }
+  });
+});
+
+// OpenCode hands a plugin no `session.deleted` (its `event` hook carries the plain bus alone), so
+// the heartbeat is what finds a deleted session: the serve answers 404 for it, and its
+// registration is taken out of the registry instead of being heartbeated for the whole live
+// window and the gone horizon after it (dispatch://INFRA-392).
+describe("the heartbeat drops a session the serve no longer holds", () => {
+  it("deregisters it on the serve's 404 and stops re-subscribing it", async () => {
+    const originalEnvoyUrl = process.env.ENVOY_URL;
+    const originalHb = process.env.ENVOY_HEARTBEAT_MS;
+    process.env.ENVOY_URL = "http://127.0.0.1:59999";
+    process.env.ENVOY_HEARTBEAT_MS = "40";
+
+    const subs: string[] = [];
+    const deregistered: string[] = [];
+    const held = new Set(["ses_A", "ses_B"]);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/v1/interests/subscribe") && init?.body) {
+        const body = JSON.parse(init.body as string);
+        subs.push(body.session_id);
+        return new Response(JSON.stringify({ session_id: body.session_id, topics: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/v1/sessions/") && init?.method === "DELETE") {
+        deregistered.push(decodeURIComponent(url.slice(url.lastIndexOf("/") + 1)));
+        return new Response("", { status: 204 });
+      }
+      if (url.includes("/v1/interests/unsubscribe") || url.includes("/v1/sessions")) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/session/")) {
+        const id = url.slice(url.lastIndexOf("/") + 1);
+        return held.has(id)
+          ? new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } })
+          : new Response("not found", { status: 404 });
+      }
+      throw new Error("connection refused");
+    }) as typeof fetch;
+
+    let dispose: (() => void) | undefined;
+    try {
+      const pluginModule = await import("../server");
+      const hooks = await pluginModule.default({
+        serverUrl: new URL("http://127.0.0.1:13381/"),
+      } as never);
+      dispose = (hooks as { dispose?: () => void }).dispose;
+      const busy = (id: string) =>
+        hooks.event({
+          event: {
+            type: "session.status",
+            properties: { sessionID: id, status: { type: "busy" } },
+          },
+        });
+      await busy("ses_A");
+      await busy("ses_B");
+
+      // The serve loses ses_A and tells nobody, as a `DELETE /session/<id>` leaves it.
+      held.delete("ses_A");
+      await new Promise((r) => setTimeout(r, 120));
+      const aMark = subs.filter((s) => s === "ses_A").length;
+      const bMark = subs.filter((s) => s === "ses_B").length;
+      await new Promise((r) => setTimeout(r, 160));
+
+      expect(deregistered).toContain("ses_A");
+      expect(deregistered).not.toContain("ses_B");
+      expect(subs.filter((s) => s === "ses_A").length).toBe(aMark);
+      expect(subs.filter((s) => s === "ses_B").length).toBeGreaterThan(bMark);
     } finally {
       dispose?.();
       globalThis.fetch = originalFetch;
