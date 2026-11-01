@@ -135,7 +135,7 @@ Each item below names a task and where its code is, then notes on it.
 
   Dispatch's and the secrets broker's listeners:
   one LISTEN connection that dials, reports each notification, pings itself when idle, wakes a caller on its own goroutine, and redials on every failure (`Listener`, `Run`, `RedialBackoff`), because a connection waiting for a notification must outlive every failure between it and the server (INFRA-66).
-  Shared the way `internal/pgmigrate` is, since the broker's cross-pod secret-reread fan-out (`internal/broker/reread`) listens on the same kind of connection as Dispatch's delivery hub and event stream relay (`internal/dispatch/api`) and its stale-room evictor (`internal/dispatch/docs`);
+  Shared the way `internal/pgmigrate` is, since the broker's cross-pod secret-reread fan-out (`internal/broker/reread`) listens on the same kind of connection as Dispatch's delivery hub, event stream relay and, under `DISPATCH_TEST_HOOKS` alone, test-hook fan-out (`internal/dispatch/api`, `test_hooks_fanout.go`) and its stale-room evictor (`internal/dispatch/docs`);
   each caller sets `Listener.Owner`, the prefix of the one line the loop logs, and an unset `Owner` logs `dispatch`.
   `Hub` shares one `Listener` among many subscribers and channels: `cmd/dispatch` runs one per process (`dispatch background wakes`) for its woken background loops, and every `Wake` is signalled after each successful LISTEN as well as on each notification, so a subscriber catches up then on what it missed while the listener had no connection (`cmd/dispatch/README.md`, "Background loops")
 
@@ -992,18 +992,18 @@ A handler that must read outside its transaction commits or rolls back first - `
 
 **No Envoy listener call runs with a transaction or a pooled connection held.**
 One caller, one connection bounds how many of the pool's connections a caller takes; this bounds how long it keeps the one it has.
-The listener is a cross-service HTTP call bounded only by its five-second client timeout (`internal/dispatch/envoy/client.go`), and production runs one Dispatch task on a pool of `store.sharedPoolSize` connections, so a call made inside a transaction holds one of them - and the rows it locked - until the listener answers;
-that many concurrent ones empty the pool and stall every unrelated request, which a listener restart alone is enough to cause.
+The listener is a cross-service HTTP call bounded only by its five-second client timeout (`internal/dispatch/envoy/client.go`), and each Dispatch process serves the requests it takes from its own pool of `store.sharedPoolSize` connections, so a call made inside a transaction holds one of them - and the rows it locked, which every other process's requests wait on too - until the listener answers;
+that many concurrent ones empty that process's pool and stall every unrelated request it serves, and the other processes' requests behind those row locks, which a listener restart alone is enough to cause.
 A read (`Session`, `Sessions`, `Role`, `Interest`, `ListInterests`) is resolved first, with nothing held;
 the transaction then re-reads under its own lock whatever the resolution depended on and decides with the resolution only while the locked row still agrees, taking it once more when it does not and answering a conflict after that.
-`api/envoy_resolve.go` owns that loop (`resolveThenLock`, `errStaleResolution`), the delivery read every send resolves through (`resolveDeliveryTarget`) and the settle half (`settleDeliveryAttempt`, `attemptClaim`, `claimLapsed`, `deliveryOutcome`, `receiptError`);
+`api/envoy_resolve.go` owns that loop (`resolveThenLock`, `errStaleResolution`), the delivery read every send resolves through (`resolveDeliveryTarget`), the settle half (`settleDeliveryAttempt`, `attemptClaim`, `claimLapsed`, `deliveryOutcome`, `receiptError`) and the take-over wait between a send and its settle (`takeoverRetry`, `retryableDeliveryFailure`, `listenerTakeoverWindow`);
 its callers are `api/comment_create.go` (the mention and route resolution behind `suppress_route`), `api/comment_delivery.go` and `api/message_delivery.go` (a delivery's recipient, its claim and its settle) and `api/issue_claim.go` (the holder's liveness, on both the claim and the release route).
 Three of those decisions now read one session by id rather than scanning the live list:
 a comment mention's `session:` target, each selected recipient of a broadcast (`resolveBroadcastSessions`, eight reads in flight under one five-second budget) and whether an issue's claim holder is still working (`fetchHolderLiveness`).
 A list is one listener's cache of the session registry, so only the per-session read tells a session that ended from one that cache has not refilled yet, and a read that did not answer never reports the session gone:
 a broadcast and a claim are refused `503
 ENVOY_UNAVAILABLE`, the broadcast with nothing written, while a mention's comment is still created `201` and that mention's delivery is recorded `failed` with the listener's own `envoy
-listener: …` text.
+listener: …` text once the take-over window below has passed.
 A write - `Envoy.Send`, `Unsubscribe` - runs after a commit, never inside:
 the attempt is committed first, sent, and settled by a second short transaction, so a process that dies in between leaves a record of the attempt rather than losing it.
 
@@ -1011,14 +1011,51 @@ Both delivery paths are that pair, and the same claim.
 A comment mention's attempt is the `comment_deliveries` row the creating transaction commits as `pending`;
 the post-commit sender - and every later `POST /api/v1/comments/{id}/deliveries` retry - claims it (`claimed_at`, migration `0046`), resolves, records that resolution on the claimed row, sends, and records `sent` or `failed` with its `comment.delivery` event in a second transaction.
 A targeted message is the same shape on `message_deliveries`, resolved before the claim rather than after it:
-`recordPendingMessageDelivery` claims or opens the attempt and commits it `pending` carrying that resolution, the send follows, and `completeMessageDelivery` settles it with the `message.delivery` event.
+a direct message's attempt 1 is committed `pending` and unclaimed in the transaction that stores the message, naming no session yet (`createStoredMessage`, carrying the requester and the urgency, migration `0158`), as a broadcast recipient's is beside its message, naming its session;
+then `recordPendingMessageDelivery` claims that attempt, or opens one for a Retry, and commits it `pending` carrying the resolution, pinning the session it resolved to a row that named none;
+the send follows, and `completeMessageDelivery` settles it with the `message.delivery` event.
 Either way the pending row names the session its frame is going to before that frame is sent, and each of those statements is its own short transaction or single pooled read, so no step of a delivery holds a connection across another.
+A request's own send runs on `context.WithoutCancel` of the request's context, so a connection cut after the commit (a closed tab, a front-door roll) does not stop it.
+
+**A send that meets a listener take-over waits it out under the attempt it holds.**
+While the active listener pod is replaced its successor refuses connections, answers 503 (its starting gate's `{"error":"service starting"}`), or does not hold the session yet for a few seconds (INFRA-557's take-over target is under 10).
+The listener client reads a 502, 503 or 504 on any route, a role lookup and a send included, as `ErrUnavailable` whatever its body says, keeping the body's reason in the text, and marks it `ErrUnreachable`, as it marks a connection refused, reset or timed out;
+a status the listener chose (a 401 for a token it refuses, a 403, a 500) and an answer that does not decode are `ErrUnavailable` alone, the listener's own answer.
+A try whose outcome is a take-over's - the listener unreachable (`envoy listener: …`, never the `ENVOY_URL is
+not configured` text), a receipt timeout, or `no live session` (`retryableDeliveryFailure`) - is tried again under the same attempt and the same idempotency key, without a new claim:
+the sender resolves again only the recipient the attempt names (its pinned session, rechecked;
+for a row no session is pinned to yet, the message's or the mention's own target, pinning what it finds), renews its claim (`claimed_at = now()`, scoped to the claim it holds, as every settle statement is) before each try, and settles on the claim it renewed last.
+The backoff is 250 ms doubling to 2 s, and no try starts later than `listenerTakeoverWindow` (12 s) after the first;
+the attempt then settles with the last try's outcome exactly as before, so a session that is really gone still reads `failed: no live session`, about 12 seconds after the send.
+Every deployment runs 12 s: only the api package's tests set `Deps.ListenerTakeoverWindow`, their server's default being 750 ms (`testTakeoverWindow`), so a send that runs the window out does not sleep 12 s.
+Any other outcome - a mode the session does not take, a send the listener refused, the listener's own answer (`envoy listener answered: …`) - settles at once.
+Every sender takes this path: a request's own send (whose request therefore answers up to 12 s later), a broadcast worker, a Retry and the delivery sweep.
+A process killed during the wait leaves the attempt pending under the claim it renewed last, which the delivery sweep sends once that claim's lease has passed.
+
+A comment decides before it commits which sessions its other routes skip - the issue's route when a mention resolved to its session (`suppress_route`), and the outbox's session routes for every session a mention resolved to (the payload's mentions) - so a mention resolved only after the commit would reach a session those routes reach too.
+A comment that has such a route (the issue's route is set or its claimant is a session, it replies to a thread, it replies on an ask that has a follower, it is on a document, or its issue's primary document credits a session) therefore resolves its mentions and its route through a take-over before its transaction opens, with nothing held (`resolveCommentDeliveries`, `resolveThroughTakeover`), and its `comment.created` payload records that (`mentions_decide_routes`);
+a comment with none commits at once and its senders wait under their attempts.
+A mention's window starts at that first resolution and its sender carries on in it after the commit (`deliverResolvedCommentMention` takes the pacing as an argument), so a mention whose resolution waited the window out settles with that outcome on its first try.
+Attempt 1 of a mention whose comment records `mentions_decide_routes` keeps that resolution whichever sender finishes it - the creating request, the delivery sweep, or a Retry that takes it after its sender died:
+a pinned session is only rechecked, and a resolve error settles the attempt `failed` with that error, never resolved again, so the route holder does not hear the comment from the route and again from the mention under a key the listener cannot match.
+That once-only guarantee is attempt 1's:
+a person's Retry after attempt 1 has settled opens attempt 2, which resolves the mention afresh and can reach a route holder the route already reached, as a Retry always has - it is the person's explicit resend.
+A comment's lookups run at once, and so do its mentions' sends, so its request waits about one window however many mentions it carries.
 
 A claim outlives its sender by a minute, which Postgres judges (`claimLapsed`) against the `claimed_at` Postgres itself wrote, so no task's clock skew can read a live claim as lapsed or leave a stranded attempt unresumable.
 A retry beside a live claim takes an attempt of its own; one beside an abandoned claim resumes the original attempt under its original number.
 A resumed attempt keeps the recipient it was opened for - a comment attempt its pinned session or its resolve error, a message attempt the session its row names - because that is the session holding the frame;
 a role that has moved since is reached by an attempt of its own rather than by re-pointing this one, and only whether the original recipient can still receive the mode is re-derived.
+A take-over retry of a resumed comment attempt resolves an unpinned row's own target again, as every sender does, unless the attempt keeps the resolution its comment's routes were decided on - only attempt 1 of a comment that records `mentions_decide_routes`, and only when its row recorded a session or a resolve error.
+An attempt after the first, and an attempt-1 row that recorded neither, are resolved again on such a comment too (`deliverResolvedCommentMention`).
 An attempt stranded before anything was resolved has no recipient to keep and is resolved afresh under that same number, never reported undeliverable unsent.
+
+**A stranded attempt is sent without anyone pressing Retry.**
+The delivery sweep (`api/delivery_sweep.go`, `resumeOwedDeliveries`), which every pass of the maintenance loop runs, sends each owed attempt bound to its own number under the rules "The delivery sweep" (below) gives:
+what counts as owed, that no sender opens an attempt of its own, which of two senders sends, and the `DeliveryDuplicateWindow` horizon past which a resend waits for a person's Retry.
+What the message path adds to them is the sent frame's own fields:
+`deliverMessageResuming` sends with the `requested_by` the row recorded - the message's author when the row has none - and with the `urgency` its claim reads off the row (`pendingMessageDelivery`), so a resumed send carries the urgency the person chose rather than none.
+A resumed direct message is more than a minute old, so the session's accept answers `ACCEPT_STALE` and shows it as a card rather than as its user's turn.
 
 The idempotency key carries no attempt number: it is `<message>:<mode>` and `<comment>:<target>:<mode>`, stable across every attempt of that pair.
 The listener prefixes the recipient (`agent.<session>.<key>`) to make the envelope's `dedupe_key`, and the JetStream MsgId appends the topic, so the key's real scope is **(message, mode, recipient session)**, and a retry of a send that already landed repeats the dedupe key of the frame that landed - and nothing else of it, because the listener mints a fresh `event_id` per send.
@@ -1752,10 +1789,11 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   so is `cursor`, which the listing does not page with, since answering it with the first page would hand back rows the caller cannot tell from the ones it asked for (LEGION-406:
   the route ignored all three and answered every row).
   The page is cut after every filter, `route_status` included, which is applied in Go after the query, so `total` is what the filters match.
+  `route_status` is judged against one stored listener answer, the `route_roster` row (migration `0159`, `api/issue_route_status.go`), at most five seconds old by the database's clock and the same on every process, so which process serves a page does not change what the page holds.
   The order ends on the key, the one column no two issues share:
   nothing makes a rank unique (`issues_project_rank` is a plain index, and every project's first issue is `U`), and `created_at` is the creating transaction's start, so without the key consecutive offsets could show a row twice or never even over a listing that holds still.
   A walk of the pages is exact only on an unchanged listing:
-  an issue that enters or leaves what the filters match, or whose status or rank changes, between two reads shifts rows across a page boundary, and one issue is served twice and another never.
+  an issue that enters or leaves what the filters match (a `route_status` filter's by a refreshed listener answer too), or whose status or rank changes, between two reads shifts rows across a page boundary, and one issue is served twice and another never.
   The unpaged array is the only exact set one read gives.
   The `dispatch issues` command always sends `limit` and `offset` (`DispatchClient.listIssuePage`, `packages/envoy-client`) and refuses an array answered to that paged request, which means a Dispatch older than #1612 or a regression of the page.
   So a Dispatch rolled back past #1612, or one that stops paging, fails every `dispatch issues` call with that refusal;
@@ -2172,12 +2210,22 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   the source's previous projection, and every other source's, stays up.
   `graph_edges` gains the `part_of`/`depends_on` arms over node kind `component` (`<project>/<id>`), never rows in `refs`.
 
-- Every sync runs under a two-minute deadline and, in-process, a per-project mutex;
+- Every sync runs under a two-minute deadline.
   `project()` opens with `select … for update` on every source row of the project in id order and `recordFailure()` on its own source row alone, so two server processes never deadlock inside delete+reinsert nor both claim one component id, and a sync whose branch changed or whose source was deleted while it was fetching writes nothing.
+  What orders writes across processes is the source row's version, PostgreSQL's `xmin`, which a sync loads (as text) with the row before its fetch:
+  every write of the row by any build changes it
+  — an importer write, a settings `PUT` even of the same repository and branch (which sets `last_sync_at` back to null, so `last_sync_at` cannot be the version), a toggle
+  — while `select … for update` does not, and `project()` and `recordFailure()` (under the row lock, after the moved check) and the unchanged-head refresh (in its `update … where`) write only while it still holds;
+  otherwise nothing is written and the sync starts again from the load inside its deadline.
+  A re-resolved installation id is written only on the row as loaded (`xmin` unchanged), and the sync carries that write's `xmin` on.
+  Writes are thus ordered by when each sync read the branch head, never by commit date:
+  a process held mid-fetch never records an older head, or a failure it met, over another process's newer import, and a force-push back to an older commit still imports.
+  The per-project mutex only saves duplicate GitHub fetches inside one process.
   A healthy source whose head is the recorded commit only refreshes `last_sync_at` (no fetch, no event);
   a moved head whose subtree sha equals `last_tree_sha` records the commit without re-fetching or re-projecting
   — so a caller looping a sync route is bounded to the head lookups.
-  Triggers: a five-minute ticker in `cmd/dispatch/main.go` (`duty.RunJittered`:
+
+- Triggers: a five-minute ticker in `cmd/dispatch/main.go` (`duty.RunJittered`:
   each wait the interval plus up to a tenth again, drawn afresh every period;
   idle without App credentials) that syncs every enabled source by project and then id, going on past a failure;
   `POST /api/v1/projects/{key}/architecture-sources/{owner}/{repo}/sync` (one source;
@@ -2191,7 +2239,8 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   every other source's components stay, and snapshots remain as history.
   A sync that hits its own two-minute deadline while the caller is still alive is recorded on the row like any other failure (the record write runs on a cancel-free context);
   a caller that has gone away records nothing.
-  The state-change decision behind both events is made from the source's row as read under its lock, so the second of two server processes that fetched the same head (or hit the same failure) stays silent.
+  The state-change decision behind both events is made from the source's row as read under its lock, so the second of two server processes that fetched the same head (or hit the same failure) stays silent;
+  a sync held by a recorded GitHub rate limit fails with text that names the limit by when it was recorded, never by its remaining wait, so one limit is one `sync_failed`.
   A `PUT` that re-saves a source (changing its branch) resets `last_tree_sha` with the other sync columns, so a byte-identical architecture directory on the new branch still re-projects once.
 
 - Issue component attachment (`api/issue_components.go`, migration `0038`):
@@ -3541,7 +3590,7 @@ A single send to one session answers once its own attempt has settled instead (`
 a broadcast is not ordered against a later single send to one of its recipients.
 That delivery is counted in the server's background wait (`detached`, which `waitBackground` waits for before the pool closes), so a shutdown lets it finish instead of ending it with the lifetime `api.Register` takes, which SIGTERM cancels before the HTTP drain.
 A process killed before every recipient settled leaves them owed, for the delivery sweep, or a repeat (below), to resume.
-Each recipient starts with attempt 1, opened pending and unclaimed in the same transaction as its message, which a delivery worker then claims and settles.
+Each recipient starts with attempt 1, opened pending and unclaimed in the same transaction as its message, which a delivery worker then claims and settles, or, when the process stops first, the delivery sweep sends once its row is a minute old (`api/delivery_sweep.go`).
 `GET /api/v1/broadcasts` lists the newest sends with recipient and reply counts, and `GET /api/v1/broadcasts/{id}` reads every recipient's message, attempts and replies in the order the send named them;
 all three routes are human-only, like the one-session route they are built from.
 
@@ -3738,7 +3787,9 @@ a token the issuer never signed, one naming a key id the issuer publishes nothin
   A deferral with a denial (`bus.ErrPublishDenied`) or any other failure of the event is backed off as a failure, its attempt counted;
   a deferral that meets a lost NATS connection (`bus.ErrUnavailable`) or a stopping process is released, not backed off, like any event that met them.
   A comment's edit, resolution and reopening, and every other event, are never left to a mention.
-  One copy is not guaranteed: a receipt timeout records the attempt `failed` though the listener may have delivered the mention, and a first attempt stranded `pending` past the minute may have landed before its sender stopped.
+  One copy is not guaranteed: a receipt timeout records the attempt `failed` though the listener may have delivered the mention;
+  a first attempt stranded `pending` past the minute may have landed before its sender stopped;
+  and a process that stopped between a mention's claim and its send leaves that attempt `pending`, so once its claim lapses the outbox publishes that session's copy and the delivery sweep (`delivery_sweep.go`) sends the mention again.
   Either way the outbox also publishes the session's own-topic copy, so the session receives the comment twice, under different dedupe keys (the mention's delivery and the outbox's event);
   a host treats the second copy as the same comment (same comment id).
   Nor is order: while a `comment.created` is deferred, the same comment's `comment.edited`, `comment.resolved` and `comment.reopened` are events of their own and publish at once, so a claimant, follower, author or route topic can receive the edit before the creation - for as long as the mention's send is undecided, normally a listener receipt timeout and at most about a minute for a stranded attempt, plus `mentionPendingDelay`.
