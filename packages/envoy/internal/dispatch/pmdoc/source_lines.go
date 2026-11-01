@@ -169,10 +169,9 @@ func (l sourceLines) blankLines(from, until ast.Node, blank func([]byte) bool) [
 
 // blanksOutsideCode is blanks less the lines a code block inside within holds: a blank line of code
 // is the code's text, which spaces nothing. Indented code's held lines (codeHeldAttr) are not the
-// code's here, nor the columns of a last line lastLineColumns kept: the refusal that calls it, of
-// a blank line the lines alone do not decide (blankInside), reads them on asHeldBefore's lines as
-// the blank lines they were before the code held them, so it refuses what it refused then. It also
-// refuses a document the reader before PR #2481 misread, whose last whitespace-only line a typed
+// code's here, nor the columns of a last line lastLineColumns kept; sourceLines.blank passes over
+// the held ones for every reader of the source, and the kept last line is no code's, which a
+// document the reader before PR #2481 misread turns on: its last whitespace-only line a typed
 // block's indentation now takes out of its fenced code (typedDirectiveParser.Continue).
 func (l sourceLines) blanksOutsideCode(within ast.Node, blanks []int) []int {
 	code := map[int]bool{}
@@ -296,119 +295,179 @@ func (l sourceLines) blanksThroughOuterQuotes(position, depth int) int {
 	return inner + outer
 }
 
-// asHeldBefore is l reading indented code's held lines as blank, as it read them before the code
-// held them (blanksOutsideCode).
-func (l sourceLines) asHeldBefore() sourceLines {
-	l.held = nil
-	return l
-}
-
 // blank reports whether line is blank as blank reads it and not a line indented code holds.
 func (l sourceLines) blank(line int, blank func([]byte) bool) bool {
 	return !l.held[line] && blank(l.text(line))
 }
 
-// blankInside reports whether a line between typed block directive's opening and closing fences
-// is blank, outside the code it holds; one that runs to its parent's end runs to the next block. A
-// blank line of code is the code's text, as are the blank lines a fenced code block no fence closed
-// takes up to the next block, which space nothing (keepsBlankLinesAfter); indented code's held
-// lines and a last line lastLineColumns kept are read as the blank lines they were before the code
-// held them (asHeldBefore, blanksOutsideCode).
-func (l sourceLines) blankInside(directive *typedDirective) bool {
-	l = l.asHeldBefore()
-	// In a quote, a line blank but for the quote's markers is blank, and a line without them ends
-	// the quote and the typed block with it.
-	blank := whitespaceLine
-	if _, quoted := ancestor[*ast.Blockquote](directive); quoted {
-		blank = quoteBlankLine
-	}
-	if !directive.Closed {
-		return len(l.blanksOutsideCode(directive, l.blankLines(directive, nextBlock(directive), blank))) > 0
-	}
-	return len(l.blanksOutsideCode(directive, l.blanks(l.lineOf(directive.Pos())+1, l.lineOf(directive.closer), blank))) > 0
-}
-
-// typedEndBlankSpreadsItem reports whether the blank lines that end typed block directive, which
-// stands in a list item, are blank lines of that item to the browser editor's parser, which
-// spreads the item by them (typedEndBlankInItem), where goldmark reads them as no block's.
+// typedBlankSpreadsItem reports whether a blank line inside typed block directive, which stands in
+// a list item, is a blank line of that item to the browser editor's parser, which spreads the item
+// by it (typedBlankInItem), where goldmark reads it as no block's.
 //
 // That parser counts a blank line toward a list item's spread where the line stands in the item
-// itself: where no list or quote the item holds is open across it, and where it is not one of the
-// line endings that end the item, which the item drops. A typed block is no such container to it -
-// its content is a document of its own, spliced back into the lines around it - so the blank lines
-// that end one, above its closing fence, are the item's and spread it, however deep in typed
-// blocks they stand, while goldmark reads them as no block's and leaves the item to its looseness,
-// which reads it tight.
+// itself: where no list or quote the item holds is open across it. A typed block is no such
+// container to it - its content is a document of its own, spliced back into the lines around it -
+// so every blank line inside one, wherever it stands in the block and however deep in typed blocks
+// the block stands, is the item's and spreads it, while goldmark reads it as no block's and leaves
+// the item to its looseness, which reads it tight.
 //
-// Three shapes keep those lines from the item, each measured at the fork point and at this head
-// (PR #2507):
+// The block ends where typedBlockEnd ends it: at a closing fence - its own, or that of a typed
+// block around it, since that parser ends a typed block no fence closes with the block around it -
+// or at the next block, or at the end of the source.
 //
-//   - A line the containers around the block do not read as blank is no line of the block's end: in
-//     a quote, one without the quote's markers, which ends the quote and the block with it, and
-//     anywhere, one indented code holds (codeColumns), which is that code's text.
-//   - A block ending in a fenced code block no fence closed takes them as that code's lines
-//     (keepsBlankLinesAfter).
-//   - In a quote, a list the block ends with takes them: that parser ends a list inside a typed
-//     block where the block's content starts on the line that ends it, past the markers of the
-//     quotes around the block, so a blank line of the quote falls inside the list. Outside a quote
-//     there are no markers to step over, the list ends before the line, and the line is the item's.
+// Three shapes keep a line from the item:
 //
-// A block no fence closes that runs to the end of the document needs two such lines rather than
-// one in a quote: that parser ends the block before the last of them, which holds nothing past the
-// quotes' markers, so that line ends the list item and the item drops it. Where a block in the
-// document follows such a block instead, the blank lines before that block end the list item, as
-// this reader reads them too.
-func (l sourceLines) typedEndBlankSpreadsItem(directive *typedDirective) bool {
-	end, closed := len(l.starts), false
-	if ending, ok := fenceEnding(directive); ok {
-		end, closed = l.lineOf(ending.closer), true
-	} else if nextBlock(directive) != nil {
-		return false
-	}
+//   - A line the containers around the block do not read as blank is no blank line of the block:
+//     in a quote, one without the quote's markers, which ends the quote and the block with it,
+//     and anywhere, one a code block holds (blanksOutsideCode), or one indented code holds past
+//     where goldmark ends it (codeColumns), which is that code's text.
+//   - A block inside the block takes it: a fenced code block no fence closed, which that parser
+//     reads the lines after as that code's, a list or a quote open across the line, and, in a
+//     quote, a list the line follows, which that parser ends past the quotes' markers on the line
+//     after it (typedBlankKept).
+//   - The line endings that end the list item, which the item drops: where no fence closes the
+//     block, the last of the blank lines ending it is the item's ending rather than a blank line
+//     of the item, except at the end of a quote-less document and before the list's next item,
+//     where that parser ends the item past them (typedBlankEndNeeds).
+func (l sourceLines) typedBlankSpreadsItem(directive *typedDirective) bool {
+	next := nextBlock(directive)
+	end, byFence := l.typedBlockEnd(directive, next)
 	depth := quoteDepth(directive)
-	blank := whitespaceLine
-	if depth > 0 {
-		blank = quoteBlankLineAt(depth)
+	blank := blankLineAt(depth)
+	first := l.lineOf(startOf(directive)) + 1
+	blanks := l.blanksOutsideCode(directive, l.blanks(first, end, blank))
+	ending := 0
+	for index := len(blanks) - 1; index >= 0 && blanks[index] == end-1-ending; index-- {
+		ending++
 	}
-	first := end
-	for first-1 > l.lineOf(startOf(directive)) && l.blank(first-1, blank) {
-		first--
+	for _, line := range blanks[:len(blanks)-ending] {
+		if !typedBlankKept(directive, l, line) {
+			return true
+		}
 	}
-	if first == end || typedEndKeepsBlankLines(directive, depth) {
+	if ending == 0 || typedBlankKept(directive, l, end-1) {
 		return false
 	}
-	need := 1
-	if depth > 0 && !closed {
-		need = 2
-	}
-	return end-first >= need
+	return ending >= typedBlankEndNeeds(byFence, depth, next)
 }
 
-// typedEndKeepsBlankLines reports whether a block directive ends with takes the blank lines that
-// end directive as its own, so that they are no lines of the list item around it: a fenced code
-// block no fence closed, wherever it stands, and, in depth quotes, a list, which that parser ends
-// past those quotes' markers on the line after it (typedEndBlankSpreadsItem). A typed block no
-// fence closes ends with the block around it, so the list it ends with is the outer block's too.
-func typedEndKeepsBlankLines(directive *typedDirective, depth int) bool {
-	last := directive.LastChild()
-	if last == nil {
-		return false
+// typedBlankInside reports whether any blank line stands inside typed block directive, between
+// its opening line and where its lines end (typedBlockEnd), outside the code it holds. It is
+// what a footnote definition's typed block is judged by, where this reader decides no such line
+// (typedBlankInDefinition).
+func (l sourceLines) typedBlankInside(directive *typedDirective) bool {
+	end, _ := l.typedBlockEnd(directive, nextBlock(directive))
+	first := l.lineOf(startOf(directive)) + 1
+	return len(l.blanksOutsideCode(directive, l.blanks(first, end, blankLineAt(quoteDepth(directive))))) > 0
+}
+
+// typedBlankEndNeeds is how many blank lines ending a typed block in a list item the browser
+// editor's parser reads as blank lines of that item (typedBlankSpreadsItem): one above a closing
+// fence, which is no ending of the item; one where the item ends with the source outside a quote,
+// or where the list's next item follows, which that parser reads past the lines; and two
+// otherwise, the last being the item's own ending, which it drops.
+func typedBlankEndNeeds(byFence bool, depth int, next ast.Node) int {
+	if byFence {
+		return 1
 	}
-	if keepsBlankLinesAfter(last) {
-		return true
+	if _, item := next.(*ast.ListItem); item {
+		return 1
 	}
-	if depth == 0 {
-		return false
+	if next == nil && depth == 0 {
+		return 1
 	}
-	for {
-		inner, ok := last.(*typedDirective)
-		if !ok || inner.Closed || inner.LastChild() == nil {
-			break
+	return 2
+}
+
+// typedBlockEnd is the line typed block directive's lines end before, next being the block that
+// follows it: a closing fence, that of directive or of a typed block around it that next stands
+// past, whichever comes first, else next's line, else the end of the source. byFence is whether a
+// fence decided it.
+func (l sourceLines) typedBlockEnd(directive *typedDirective, next ast.Node) (end int, byFence bool) {
+	end = len(l.starts)
+	if next != nil {
+		end = l.lineOf(startOf(next))
+	}
+	for typed, ok := directive, true; ok; typed, ok = typed.Parent().(*typedDirective) {
+		if typed.Closed && (next == nil || !isAncestor(typed, next)) {
+			if closer := l.lineOf(typed.closer); closer < end {
+				return closer, true
+			}
+			return end, false
 		}
-		last = inner.LastChild()
 	}
-	_, list := last.(*ast.List)
-	return list
+	return end, false
+}
+
+// typedBlankKept reports whether a block inside directive takes the blank line at line as its own,
+// so that it is no line of the list item around it (typedBlankSpreadsItem): a fenced code block no
+// fence closed, which that parser reads the lines after it as, a list or a quote open across the
+// line, and, in a quote, a list the line follows, which that parser ends on the line after it,
+// past the markers of the quotes around the block, so that the line falls inside the list.
+func typedBlankKept(directive *typedDirective, l sourceLines, line int) bool {
+	kept := false
+	quoted := quoteDepth(directive) > 0
+	_ = ast.Walk(directive, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering || kept || node == ast.Node(directive) || l.lineOf(startOf(node)) >= line {
+			return ast.WalkContinue, nil
+		}
+		switch node.(type) {
+		case *ast.List:
+			kept = l.openAcross(node, line) || quoted && l.endsRightBefore(node, line, blankLineAt(quoteDepth(directive)))
+		case *ast.Blockquote:
+			kept = l.openAcross(node, line)
+		case *ast.FencedCodeBlock:
+			kept = keepsBlankLinesAfter(node)
+		}
+		if kept {
+			return ast.WalkStop, nil
+		}
+		return ast.WalkContinue, nil
+	})
+	return kept
+}
+
+// endsRightBefore reports whether container holds the last line before line that is not blank: the
+// blank lines that follow it are the container's, nothing else standing between the two.
+func (l sourceLines) endsRightBefore(container ast.Node, line int, blank func([]byte) bool) bool {
+	content := line - 1
+	for content >= 0 && l.blank(content, blank) {
+		content--
+	}
+	return l.lastLineOf(container) == content
+}
+
+// lastLineOf is the last line of the source a block container holds stands on, container's own
+// first line where it holds none.
+func (l sourceLines) lastLineOf(container ast.Node) int {
+	last := l.lineOf(startOf(container))
+	_ = ast.Walk(container, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if entering && node.Type() == ast.TypeBlock {
+			last = max(last, l.lineOf(startOf(node)))
+			if lines := node.Lines(); lines.Len() > 0 {
+				last = max(last, l.lineOf(lines.At(lines.Len()-1).Start))
+			}
+		}
+		return ast.WalkContinue, nil
+	})
+	return last
+}
+
+// openAcross reports whether container, a list or a quote, is open across line: it holds a block
+// that starts past it, so that parser is still inside it there.
+func (l sourceLines) openAcross(container ast.Node, line int) bool {
+	past := false
+	_ = ast.Walk(container, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering || node == container || node.Type() != ast.TypeBlock {
+			return ast.WalkContinue, nil
+		}
+		if l.lineOf(startOf(node)) > line {
+			past = true
+			return ast.WalkStop, nil
+		}
+		return ast.WalkContinue, nil
+	})
+	return past
 }
 
 // markersOrWhitespace reports whether line holds nothing but whitespace and quote markers.
@@ -434,6 +493,15 @@ func outerBlankLineAt(depth int) func([]byte) bool {
 	return func(line []byte) bool {
 		return whitespaceLine(line) || quoteBlankLine(line) && bytes.Count(line, []byte(">")) < depth
 	}
+}
+
+// blankLineAt is what a blank line is at depth quotes: whitespace alone outside them, and the
+// quotes' markers and whitespace inside them (quoteBlankLineAt).
+func blankLineAt(depth int) func([]byte) bool {
+	if depth == 0 {
+		return whitespaceLine
+	}
+	return quoteBlankLineAt(depth)
 }
 
 // quoteDepth is how many quotes node stands in.

@@ -300,3 +300,44 @@ test("a comment holding a block of HTML draws it as a paragraph, and the Convers
     ).toBeVisible();
   });
 });
+
+// 9. A blank line inside a typed block in a list item is a blank line of the item to the engine,
+// which spaces the item by it; the server's reader read it as no block's and left the item tight,
+// so a document holding one beside a shape only the two read alike was refused outright and a
+// person could not save it. The reader reads the line as the engine does, so the write is stored
+// and the item's two paragraphs draw in the editor and in a comment alike.
+const itemCalloutBlank =
+  '-\n\n- a\n  :::callout{#c1 kind="note" title="T"}\n  one\n\n  two\n  :::\n';
+const calloutParagraphs = ["one", "two"];
+
+test("a blank line inside a typed block in a list item is stored and draws both its paragraphs in the spec editor and in a comment", async ({
+  browser,
+}) => {
+  const { commentId, key } = await seed({
+    body: itemCalloutBlank,
+    spec: itemCalloutBlank,
+    title: "A callout holding a blank line in a list item",
+  });
+  // The write is stored rather than refused, as the rendering the reader writes back shows.
+  expect((await getIssueArtifactText(key, "spec")).markdown).toContain("one");
+
+  await withAlice(browser, async (page) => {
+    await openSpec(page, key, "one");
+    await expect
+      .poll(() =>
+        textsOf(
+          documentEditor(page).locator(
+            '[data-proof-block-type="callout"] [data-proof-block-content] p'
+          )
+        )
+      )
+      .toEqual(calloutParagraphs);
+
+    const { drawn } = await expandComment(page, key, commentId);
+    await expect
+      .poll(() =>
+        textsOf(drawn.locator('[data-proof-block-type="callout"] [data-proof-block-content] p'))
+      )
+      .toEqual(calloutParagraphs);
+  });
+});

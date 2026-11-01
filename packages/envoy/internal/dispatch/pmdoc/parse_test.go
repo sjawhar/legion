@@ -77,7 +77,7 @@ func TestParsePreservesTaskListCheckboxState(t *testing.T) {
 // the mark it is elsewhere, since the browser editor's reader builds the alt as the label closes,
 // before it turns such a span into a mark.
 //
-// Measured with gen/differential.ts against the engine of this head: `![p <!a> q](i.png)` reads
+// Measured with gen/differential.ts against the browser editor's engine: `![p <!a> q](i.png)` reads
 // with alt `p <!a> q`, `![r <b> s](i.png)` with alt `r <b> s`, the same for a comment
 // (`<!-- c -->`), a processing instruction and a CDATA section, and an anchored label with the
 // span's own characters. An alt holding less would have a comment drawing the markdown and the

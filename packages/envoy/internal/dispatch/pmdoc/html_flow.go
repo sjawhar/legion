@@ -101,14 +101,13 @@ const browserBlockHTML = "opens with HTML the browser editor's parser reads as a
 // fence, a rule, a table), which goldmark reads as its own and that parser swallows, and no setext
 // underline, which goldmark takes into the heading and that parser swallows the same way.
 //
-// A block of kind 6 runs to the first blank line the same way, and the exemption covered it until
-// PR #2507, which found it letting a divergent reading through: `- a\n\n  \t<div x\n` is one
-// line, alone before the container's end, whose block that parser draws as a paragraph holding
+// A block of kind 6 runs to the first blank line as kind 7 does, and is not exempt: a tag of a
+// block-level name opens kind 6 however unfinished it is, where kind 7 asks for one whole tag and
+// nothing after it, and it is the unfinished tag the two read apart. `- a\n\n  \t<div x\n` is such
+// a line, alone before the container's end, whose block that parser draws as a paragraph holding
 // the inline HTML `<div x`, while this reader reads the text `<div x` and the writer stores it as
-// `\<div x`, which reads back as text. A tag of a block-level name opens kind 6 however
-// incomplete it is, where kind 7 asks for one whole tag and nothing after it, and it is the
-// unfinished tag the two read apart; the exemption cannot tell it from the whole one, so kind 6
-// is refused like the rest.
+// `\<div x`, which reads back as text. The exemption cannot tell that tag from a whole one, so
+// kind 6 is refused like the rest.
 //
 // A block of kinds 1 to 5 runs to an end marker of its own instead (`</script>`, `-->`, `>`, `?>`,
 // `]]>`) and swallows every line up to it, blank lines among them. Where the marker ends the block

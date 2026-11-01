@@ -133,21 +133,12 @@ func writtenTable(header ...*Node) *Node {
 	}}
 }
 
-// writtenCorpusApart names the corpus documents the concatenation leaves out. Each is read only
-// outside a document holding a shape the browser editor's parser and this one read alike only
-// since this one learned it (browserOnlyShape), because every list whose spacing the lines alone
-// do not decide is refused inside such a document, and the blank lines ending a typed block in a
-// list item these hold are one of those shapes (holdsTypedBlockWithBlankLine). The concatenation
-// is one document and some other corpus document makes it a browser-only one, so these cannot
-// stand in it. That is the rule's own contract rather than a fault of either document, and each
-// is read on its own by the fixtures (testdata/fixtures.json).
-var writtenCorpusApart = map[string]bool{
-	"quoted-item-typed-block-code-ending-in-a-blank-line.md": true,
-	"quoted-item-typed-blocks-ending-in-blank-lines.md":      true,
-}
-
-// writtenCorpus is the markdown of every corpus document but those, concatenated and repeated
-// until it holds at least size bytes.
+// writtenCorpus is the markdown of every corpus document, concatenated and repeated until it
+// holds at least size bytes. Every one of them stands in the concatenation: a list whose spacing
+// the lines alone do not decide is refused inside a document holding a shape the browser editor's
+// parser and this one read alike only since this one learned it (browserOnlyShape), and the
+// concatenation is one such document, so a corpus document whose own spacing that reader cannot
+// decide could not stand in it.
 func writtenCorpus(t *testing.T, size int) string {
 	t.Helper()
 	paths, err := filepath.Glob("testdata/corpus/*.md")
@@ -156,9 +147,6 @@ func writtenCorpus(t *testing.T, size int) string {
 	}
 	var corpus strings.Builder
 	for _, path := range paths {
-		if writtenCorpusApart[filepath.Base(path)] {
-			continue
-		}
 		markdown, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)

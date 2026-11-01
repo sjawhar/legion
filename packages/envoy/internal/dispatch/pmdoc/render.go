@@ -431,8 +431,16 @@ func (r *renderer) block(n *Node, prefix string) {
 			return
 		}
 		r.writeSyntax(fence + n.Type + "{" + attrs + "}\n" + prefix)
+		tight := r.inTightItemBelowQuotes()
 		r.enterTyped(n, prefix, colons)
-		r.blocksNoTrailing(n.Children, prefix)
+		if tight {
+			// A typed block's lines are the list item's, so a tight item's typed block writes its
+			// blocks as the item writes its own (itemBlocks): a blank line between two of them
+			// would be a blank line of the item, which the browser editor reads as spacing it.
+			r.itemBlocks(n.Children, false, prefix, prefix, false)
+		} else {
+			r.blocksNoTrailing(n.Children, prefix)
+		}
 		r.blanksEndingQuotedList(n.Children, prefix, true)
 		r.leave()
 		r.writeSyntax("\n" + prefix + fence)

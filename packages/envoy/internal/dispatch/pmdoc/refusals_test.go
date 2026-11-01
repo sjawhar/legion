@@ -192,19 +192,17 @@ func TestParseInlineReadsHTMLADocumentIsRefusedFor(t *testing.T) {
 	}
 }
 
-// The corpus-errors documents measured for PR #2507, each refused by every reader of caller
-// markdown for the reason named here, so that a reader lifting a refusal for some other reason
-// would still be caught. Two reasons stand behind them. A footnote definition inside a typed block
-// whose delimiter-like line and narrower setext underline the browser editor's parser reads as a
-// table and a heading holds a block other than a paragraph there (typedDefinitionHoldingBlock),
-// which the reader before PR #2507 refused already and this change leaves refused. A line whose
-// tab or closing tag of a raw text name opens a block of HTML for that parser, where goldmark's
-// own patterns read the text of a paragraph, is refused by name (browserBlockHTML, html_flow.go):
-// the Proof schema holds no block of HTML, and that parser drops the one it reads together with
-// the container around it, so no tree the document could be stored as reads back. A line that
-// opens a block of kind 6, a tag of a block-level name however unfinished, is refused with them
-// since round 2 of PR #2507, which found the exemption that passed kinds 6 and 7 letting a
-// divergent reading of an unfinished tag through.
+// The corpus-errors documents, each refused by every reader of caller markdown for the reason
+// named here, so that a reader lifting a refusal for some other reason would still be caught. Two
+// reasons stand behind them. A footnote definition inside a typed block whose delimiter-like line
+// and narrower setext underline the browser editor's parser reads as a table and a heading holds a
+// block other than a paragraph there (typedDefinitionHoldingBlock). A line whose tab or closing
+// tag of a raw text name opens a block of HTML for that parser, where goldmark's own patterns read
+// the text of a paragraph, is refused by name (browserBlockHTML, html_flow.go): the Proof schema
+// holds no block of HTML, and that parser drops the one it reads together with the container
+// around it, so no tree the document could be stored as reads back. A line that opens a block of
+// kind 6, a tag of a block-level name however unfinished, is refused with them, because that tag
+// is one the two parsers read apart.
 func TestCorpusErrorsOfDefinitionsAndBrowserBlockHTMLAreRefused(t *testing.T) {
 	for name, refusal := range map[string]string{
 		"nested-typed-blocks-definition-before-an-indented-underline":                     typedDefinitionHoldingBlock,

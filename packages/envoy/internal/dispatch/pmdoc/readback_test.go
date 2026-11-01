@@ -16,7 +16,6 @@ func TestParseForWriteRefusesADocumentItsRenderingReadsBackOtherwise(t *testing.
 	for _, markdown := range []string{
 		"> [^n]: -\n> -\n",
 		"> [^n]: *\n> 10. text x[^n]\n",
-		"1. [^a1]: :::callout{#c1 kind=\"note\" title=\"\"}\n       ---\n       1\n",
 		"2. [^N]:\n       12. *\n       --\n",
 	} {
 		if _, err := Parse(markdown); err != nil {

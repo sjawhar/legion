@@ -108,6 +108,22 @@ func (r *renderer) inItemBelowQuotes() bool {
 	return false
 }
 
+// inTightItemBelowQuotes reports whether the blocks being written stand, with no quote between, in
+// a list item the writer writes tight (inItemBelowQuotes): a blank line between two of them would
+// be a blank line in that item, which the browser editor reads as spacing it, so they are written
+// on consecutive lines wherever markdown reads them apart there (itemBlocks).
+func (r *renderer) inTightItemBelowQuotes() bool {
+	for index := len(r.scopes) - 1; index >= 0; index-- {
+		switch node := r.scopes[index].node; node.Type {
+		case "blockquote":
+			return false
+		case "list_item":
+			return node.Attrs["spread"] != true
+		}
+	}
+	return false
+}
+
 // emptyCodeWrittenBare reports whether an empty code block is written as its fences alone, with no
 // line between them, where no quote between takes a line holding only the prefix as its own: in a
 // footnote definition, where both parsers keep that line as the code's text, and in a typed block in

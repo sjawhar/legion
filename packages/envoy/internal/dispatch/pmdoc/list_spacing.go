@@ -101,8 +101,8 @@ func goldmarkSpreadsItemsBeforeBlanks(list *ast.List) bool {
 // in a typed block in a footnote definition with a blank line at or after it
 // (typedFootnoteListBlank), where that editor spreads the item a blank line follows and never the
 // list, and goldmark's looseness then reads the list tight, or spreads it, or leaves that item
-// holding one block unspread; and one whose item holds a typed block that a blank line that editor
-// reads as spacing the item ends (typedEndBlankInItem).
+// holding one block unspread; and one whose item holds a typed block with a blank line that
+// editor reads as spacing the item inside it (typedBlankInItem).
 func readExactListSpacing(root ast.Node, lines sourceLines) (refusal string) {
 	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		switch node := node.(type) {
@@ -117,10 +117,11 @@ func readExactListSpacing(root ast.Node, lines sourceLines) (refusal string) {
 				refusal = typedFootnoteListBlank
 				return ast.WalkStop, nil
 			}
-			// A list the lines decide carries that reading already; only one left to goldmark's
-			// looseness, which reads such an item tight, is refused.
-			if reason != "" && typedEndBlankSpreadsATightItem(node, lines) {
-				refusal = typedEndBlankInItem
+			// A list the lines decide carries that reading already; one left to goldmark's
+			// looseness, which reads such an item tight, is refused, and so is the blank line a
+			// footnote definition carries, which this reader does not decide at all.
+			if reason == typedBlankInItem || reason != "" && typedBlankSpreadsATightItem(node, lines) {
+				refusal = typedBlankInItem
 				return ast.WalkStop, nil
 			}
 		}
@@ -217,18 +218,14 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 	directive, typed := ancestor[*typedDirective](list)
 	definition, footnoted := ancestor[*extensionast.Footnote](list)
 	for item := list.FirstChild(); item != nil; item = item.NextSibling() {
-		if holdsTypedBlockWithBlankLine(item, lines) {
-			return "a typed block holding a blank line inside a list item, which the browser editor reads as spacing the item"
+		if typedBlankInDefinition(item, lines) {
+			return typedBlankInItem
 		}
 	}
 	// In a typed block in a footnote definition, whatever quotes or typed blocks stand between, the
 	// browser editor reads a blank line at or after a list as spacing it by what follows.
 	if typed && footnoted && isAncestor(definition, directive) {
-		blank := whitespaceLine
-		if quoted {
-			blank = quoteBlankLineAt(quoteDepth(list))
-		}
-		if lines.blankAtOrAfterTypedList(list, directive, blank) {
+		if lines.blankAtOrAfterTypedList(list, directive, blankLineAt(quoteDepth(list))) {
 			return typedFootnoteListBlank
 		}
 	}
@@ -276,7 +273,7 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 	default:
 		spread := false
 		for item := list.FirstChild().NextSibling(); item != nil; item = item.NextSibling() {
-			spread = spread || blankBefore(item)
+			spread = spread || blankBefore(item) && !endsInOpenTypedBlock(item.PreviousSibling())
 		}
 		setSpread(list, spread, func(item ast.Node) bool { return blankBetweenBlocksBut(item, spreadsNothing, spreadsNothing) }, lines)
 	}
@@ -371,24 +368,18 @@ const typedFootnoteListBlank = "a blank line at or after a list in a typed block
 // (typedFenceKeepsBlankLinesAfter), where they would spread the item (definitionEndSpreadsItem).
 const quotedDefinitionFenceBlank = "blank lines after a list item in a quote ending in a footnote definition whose typed block holds a fenced code block no fence closed, which the browser editor reads as that code's lines and not as spacing the item"
 
-// typedEndBlankInItem is the refusal of the blank lines that end a typed block in a list item,
-// above its closing fence or with the block itself, which the browser editor reads as blank lines
-// of the item and goldmark reads as no block's (typedEndBlankSpreadsItem), measured at the fork
-// point and at this head (PR #2507). That editor spreads the item by them, while goldmark leaves
-// it to its looseness, which reads it tight.
-//
-// A blank line anywhere else in a typed block in a list item is left to that looseness, since the
-// writer writes such a line - a tight item's typed block holding two blocks is written that way -
-// and the documents Dispatch stores were read with it. The writer writes no blank line before a
-// block's closing fence, so no document it wrote holds this shape, and a caller who writes one can
-// write the lines as wide as the indented code they follow, or no blank line where the block ends.
-const typedEndBlankInItem = "a blank line at the end of a typed block in a list item, above its closing fence or with the block itself, which the browser editor reads as a blank line spacing the item"
+// typedBlankInItem is the refusal of a blank line inside a typed block in a list item, which the
+// browser editor reads as a blank line of the item and goldmark reads as no block's
+// (typedBlankSpreadsItem). That editor spreads the item by it, while goldmark leaves the item to
+// its looseness, which reads it tight; where this reader cannot set the item's spread itself, a
+// document holding such a line is refused by this name.
+const typedBlankInItem = "a blank line inside a typed block in a list item, which the browser editor reads as a blank line spacing the item"
 
-// typedEndBlankSpreadsATightItem reports whether an item of list holds a typed block that such a
-// blank line ends (typedBlankUnder) where goldmark's looseness leaves that item unspread: a tight
-// list's item, or one holding a single block (parseList), which is the item the browser editor
-// reads spread.
-func typedEndBlankSpreadsATightItem(list *ast.List, lines sourceLines) bool {
+// typedBlankSpreadsATightItem reports whether an item of list holds a typed block with such a
+// blank line inside it (typedBlankUnder) where goldmark's looseness leaves that item unspread: a
+// tight list's item, or one holding a single block (parseList), which is the item the browser
+// editor reads spread.
+func typedBlankSpreadsATightItem(list *ast.List, lines sourceLines) bool {
 	for item := list.FirstChild(); item != nil; item = item.NextSibling() {
 		if (list.IsTight || item.ChildCount() < 2) && typedBlankUnder(item, lines) {
 			return true
@@ -397,19 +388,41 @@ func typedEndBlankSpreadsATightItem(list *ast.List, lines sourceLines) bool {
 	return false
 }
 
-// typedBlankUnder reports whether container holds a typed block such a blank line ends
-// (typedEndBlankInItem). It looks through the typed blocks and the footnote definitions inside it,
-// whose lines are the list item's own, and through no quote or list, which that parser counts a
-// blank line inside as that quote's or that list's.
+// typedBlankUnder reports whether container holds, among its own blocks or inside a typed block
+// one of them opens, a typed block with such a blank line inside it (typedBlankInItem). It looks
+// through no quote, list or footnote definition: that parser counts a blank line inside a quote
+// or a list as that container's, and the blank lines a definition ends with as the definition's
+// (typedBlankInDefinition).
 func typedBlankUnder(container ast.Node, lines sourceLines) bool {
+	return eachTypedBlockUnder(container, false, lines.typedBlankSpreadsItem)
+}
+
+// typedBlankInDefinition reports whether a footnote definition item holds carries a typed block
+// with such a blank line inside it. That parser reads a definition's own lines as the item's but
+// ends the definition at the blank lines that end it, and the two readings meet in shapes this
+// reader does not decide, so a document holding one is refused (typedBlankInItem).
+func typedBlankInDefinition(item ast.Node, lines sourceLines) bool {
+	for child := item.FirstChild(); child != nil; child = child.NextSibling() {
+		if definition, ok := child.(*extensionast.Footnote); ok && eachTypedBlockUnder(definition, true, lines.typedBlankInside) {
+			return true
+		}
+	}
+	return false
+}
+
+// eachTypedBlockUnder reports whether holds accepts a typed block container holds as its own
+// lines: one of its blocks, or one inside such a typed block, and, where definitions is set, one
+// a footnote definition it holds carries. It looks through no quote or list, whose lines are that
+// quote's or that list's.
+func eachTypedBlockUnder(container ast.Node, definitions bool, holds func(*typedDirective) bool) bool {
 	for child := container.FirstChild(); child != nil; child = child.NextSibling() {
 		switch child := child.(type) {
 		case *typedDirective:
-			if lines.typedEndBlankSpreadsItem(child) || typedBlankUnder(child, lines) {
+			if holds(child) || eachTypedBlockUnder(child, definitions, holds) {
 				return true
 			}
 		case *extensionast.Footnote:
-			if typedBlankUnder(child, lines) {
+			if definitions && eachTypedBlockUnder(child, definitions, holds) {
 				return true
 			}
 		}
@@ -482,15 +495,17 @@ func quotedListSpread(list *ast.List, in quotedList, lines sourceLines) bool {
 	}
 	for item := list.FirstChild(); item.NextSibling() != nil; item = item.NextSibling() {
 		next := item.NextSibling()
-		if blankBefore(next) && !endsWithList(item) && !itemEndsInDefinition(item) && lines.blanksBefore(startOf(next), blank) >= least(item) {
+		if blankBefore(next) && !endsWithList(item) && !endsInOpenTypedBlock(item) && !itemEndsInDefinition(item) &&
+			lines.blanksBefore(startOf(next), blank) >= least(item) {
 			return true
 		}
 	}
 	last := list.LastChild()
 	// The blank lines after a list ending in a fenced code block no fence closed are that block's,
-	// or its quote's, and space no list, and those after one ending in a footnote definition are the
-	// definition's (definitionEndSpreadsItem).
-	if endsWithList(last) || endsInOpenFence(list) || itemEndsInDefinition(last) {
+	// or its quote's, and space no list, those after one ending in a typed block no fence closes
+	// are that block's (endsInOpenTypedBlock), and those after one ending in a footnote definition
+	// are the definition's (definitionEndSpreadsItem).
+	if endsWithList(last) || endsInOpenFence(list) || endsInOpenTypedBlock(last) || itemEndsInDefinition(last) {
 		return false
 	}
 	next := nextBlock(list)
@@ -509,8 +524,13 @@ func quotedListSpread(list *ast.List, in quotedList, lines sourceLines) bool {
 	// The next item of a list around this one, but not past the closing fence of the list's own
 	// typed block: the typed block's content is a document of its own to the browser editor's
 	// parser, which ends at that fence, so blank lines after it are not the list's, and the fence
-	// decides below.
+	// decides below. Where no fence closes that block, it ends with the item the next one follows,
+	// and the last of those lines is that item's own ending, which it drops, so one more spaces
+	// the list (typedBlankEndNeeds).
 	if _, enclosingItem := next.(*ast.ListItem); enclosingItem && (!in.inDirective || !in.directive.Closed || isAncestor(within, next)) {
+		if in.inDirective && !in.directive.Closed {
+			threshold++
+		}
 		return lines.blanksBefore(startOf(next), blank) >= threshold
 	}
 	if next == nil || !isAncestor(within, next) {
@@ -694,30 +714,23 @@ func endsWithList(item ast.Node) bool {
 	return list
 }
 
-// holdsTypedBlockWithBlankLine reports whether container holds a typed block with a blank line
-// inside it, directly or in a footnote definition it holds, whose lines are the container's.
-func holdsTypedBlockWithBlankLine(container ast.Node, lines sourceLines) bool {
-	for child := container.FirstChild(); child != nil; child = child.NextSibling() {
-		switch child := child.(type) {
-		case *typedDirective:
-			if lines.blankInside(child) {
-				return true
-			}
-		case *extensionast.Footnote:
-			if holdsTypedBlockWithBlankLine(child, lines) {
-				return true
-			}
-		}
-	}
-	return false
+// endsInOpenTypedBlock reports whether item ends in a typed block no fence closes, whose content
+// the browser editor's parser reads the blank lines after item as: it ends that block, and the
+// item with it, past them, so they space the item (typedBlankSpreadsItem) and never the list.
+func endsInOpenTypedBlock(item ast.Node) bool {
+	typed, open := item.LastChild().(*typedDirective)
+	return open && !typed.Closed
 }
 
-// setSpread records list's spread and each item's, itemSpread's or, where the item holds a footnote
-// definition whose first line holds nothing, spread (holdsDefinitionOpeningOnALaterLine).
+// setSpread records list's spread and each item's: itemSpread's, or spread where the item holds a
+// footnote definition whose first line holds nothing (holdsDefinitionOpeningOnALaterLine) or a
+// typed block holding a blank line the browser editor reads as the item's (typedBlankUnder).
 func setSpread(list *ast.List, spread bool, itemSpread func(ast.Node) bool, lines sourceLines) {
 	list.SetAttribute(browserSpreadAttr, spread)
 	for item := list.FirstChild(); item != nil; item = item.NextSibling() {
-		item.SetAttribute(browserSpreadAttr, itemSpread(item) || holdsDefinitionOpeningOnALaterLine(item, lines))
+		item.SetAttribute(browserSpreadAttr, itemSpread(item) ||
+			holdsDefinitionOpeningOnALaterLine(item, lines) ||
+			typedBlankUnder(item, lines))
 	}
 }
 

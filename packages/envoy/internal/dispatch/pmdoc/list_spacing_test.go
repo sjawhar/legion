@@ -20,23 +20,6 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 		refused, readable string
 	}{
 		{
-			name:     "a typed block holding a blank line in a list item",
-			refused:  "-\n\n- a\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  one\n\n  two\n  :::\n",
-			readable: "- a\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  one\n\n  two\n  :::\n",
-		},
-		{
-			// A definition nothing refers to gets no backlink from goldmark, and is the same shape.
-			name:     "a typed block holding a blank line in a list item, beside a definition nothing refers to that ends in a list",
-			refused:  "- a\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  one\n\n  two\n  :::\n\n[^u]: - one\n",
-			readable: "- a\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  one\n\n  two\n  :::\n\n[^u]: one\n",
-		},
-		{
-			// A footnote definition's lines are the lines of the item that holds it.
-			name:     "a typed block holding a blank line in a footnote definition a list item holds",
-			refused:  "ref[^n] here.\n\n- [^n]: :::callout{#c1 kind=\"note\" title=\"T\"}\n\n      :::\n",
-			readable: "ref[^n] here.\n\n- [^n]: :::callout{#c1 kind=\"note\" title=\"T\"}\n      :::\n",
-		},
-		{
 			// The typed block's rule holds with a quote inside it: the browser editor reads a blank
 			// line after the list as spacing its last item by what follows.
 			name:     "a blank line after a list in a quote in a typed block in a footnote definition",
@@ -147,10 +130,8 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 // The blank lines that end a typed block in a quoted list item are no blank lines of the item to
 // the browser editor's parser where a list the block ends with takes them - it ends that list past
 // the quotes' markers on the line after it - or where the block, closed by no fence, ends before
-// the last of them, which ends the item (typedEndBlankInItem). Each document below carries the
-// outer item's spread that parser was measured reading for it, in round 2 of PR #2507, which has
-// this reader store them again: the reader before that round refused every one of them, where the
-// merged base stored them and read them as that parser does. The corpus holds them as well, in
+// the last of them, which ends the item (typedBlankInItem). Each document below carries the
+// outer item's spread that parser was measured reading for it. The corpus holds them as well, in
 // quoted-item-typed-blocks-ending-in-blank-lines and
 // quoted-item-typed-block-code-ending-in-a-blank-line, which lock the tree that parser reads;
 // this test names the spread those documents turn on.
@@ -189,7 +170,7 @@ func TestQuotedItemsAreTightWhereTheirTypedBlocksEndInBlankLines(t *testing.T) {
 // how many line endings it crosses walking back from there: an exit after a quote marker leaves
 // the blank line's ending and the item's last line ending behind it, so one blank line spreads the
 // list, and an exit at the start of a line needs two. Each document below carries the spread that
-// parser was measured reading for it (PR #2507), and the list under test is each document's first.
+// parser was measured reading for it, and the list under test is each document's first.
 func TestQuotedListsAreSpreadWhereTheBrowserEditorsExitLands(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -296,22 +277,12 @@ func TestQuotedListsAreSpreadWhereTheBrowserEditorsExitLands(t *testing.T) {
 // would store it are refused by every reader of caller markdown: the blank lines after a quoted item
 // ending in a footnote definition whose typed block holds a fence no fence closed, which that
 // parser reads as the code's; a definition inside a typed block with a list item around it,
-// whose lines and the blank lines next to it that parser counts otherwise; and the blank lines
-// that end a typed block in a list item, which that parser reads as the item's and goldmark as no
-// block's (measured for PR #2507, at the fork point and at this head).
+// whose lines and the blank lines next to it that parser counts otherwise; and a blank line
+// inside a typed block a footnote definition in a list item holds, where that parser's reading of
+// the definition's own end and of the item's blank lines meet and this one decides neither.
 func TestCorpusErrorsOfItemSpreadReadOtherwiseAreRefused(t *testing.T) {
 	for name, refusal := range map[string]string{
-		"item-callout-code-ending-in-a-short-whitespace-line":                                     typedEndBlankInItem,
-		"item-callout-list-ending-in-a-short-whitespace-line":                                     typedEndBlankInItem,
-		"item-unclosed-callout-code-ending-in-a-short-whitespace-line":                            typedEndBlankInItem,
-		"item-callout-paragraph-ending-in-a-blank-line":                                           typedEndBlankInItem,
-		"item-callout-quote-ending-in-a-blank-line":                                               typedEndBlankInItem,
-		"item-unclosed-callout-paragraph-ending-in-a-blank-line":                                  typedEndBlankInItem,
-		"item-nested-callouts-ending-in-a-blank-line":                                             typedEndBlankInItem,
-		"quoted-item-callout-paragraph-ending-in-a-blank-line":                                    typedEndBlankInItem,
-		"quoted-item-unclosed-callout-paragraph-ending-in-two-blank-lines":                        typedEndBlankInItem,
-		"quoted-item-nested-callout-list-ending-in-a-blank-line":                                  typedEndBlankInItem,
-		"twice-quoted-item-callout-fence-ending-in-a-blank-line":                                  typedEndBlankInItem,
+		"item-definition-callout-opening-with-a-blank-line":                                       typedBlankInItem,
 		"quoted-star-item-definition-callout-unclosed-fence-then-blank-lines":                     quotedDefinitionFenceBlank,
 		"quoted-star-item-unspaced-definition-callout-unclosed-fence-then-blank-lines":            quotedDefinitionFenceBlank,
 		"quoted-star-item-definition-unspaced-callout-unclosed-fence-then-blank-lines":            quotedDefinitionFenceBlank,
@@ -355,7 +326,7 @@ func TestCorpusErrorsOfItemSpreadReadOtherwiseAreRefused(t *testing.T) {
 // sjawhar/legion#2403 avoided by refusing every
 // footnote definition in a typed block (INFRA-581).
 // All three are refused today, each as a definition holding a block other than a paragraph
-// (typedDefinitionHoldingBlock, measured over them for PR #2507), so the refusal is pinned by its
+// (typedDefinitionHoldingBlock), so the refusal is pinned by its
 // reason: a reader that lifted it for another reason would still pass. The spread branch stands for
 // the reader that reads one of them instead.
 func TestAListInADefinitionInATypedBlockIsReadSpreadAsTheBrowserReadsItOrRefused(t *testing.T) {
