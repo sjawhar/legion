@@ -2,67 +2,75 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-369",
-  "completed": "2026-10-31T11:00:00Z",
-  "round": "the bare gates after the second forward merge of main (1a9095e6), at code head 20835c4d5d98357bbe87933e851534891c0f1e33",
-  "workspaceRecreated": "This session's workspace was recreated again (LEGION_WORKSPACE_RECREATED=true) and the pod with it. It holds legion/INFRA-369 as pushed. .legion/INFRA-369/ now holds only this round's implement.json, because retro removed the directory at 6b6ba4b51d08 before READY, as the workflow expects: my round-4 test.json is not missing, it was deleted on purpose and is still readable in history at a46a6f82964d1692e557ee590974a51a0f46aa1c. Nothing of mine was lost.",
+  "completed": "2026-11-01T16:30:00Z",
+  "round": "the migration rename, at code head c9518102fd1233bc39acb9197ad82a22ba286712",
+  "workspaceRecreated": "This session's workspace was recreated again (LEGION_WORKSPACE_RECREATED=true). It holds legion/INFRA-369 as pushed, with my round-5 test.json (7804 bytes) present and intact. Nothing of mine was lost.",
   "forwardMerge": {
-    "mergeItself": {
-      "before": "6b6ba4b51d08",
-      "after": "20835c4d5d98357bbe87933e851534891c0f1e33",
-      "fingerprint": "38855df249627b628013d7bbbeccc2fe1b86a8245bd9380c7a2229d348dc337a",
-      "verdict": "unchanged",
-      "how": "I computed it at both and at the current head 4494b7cb and got one number, the implementer's: the merge resolved nothing and changed none of the branch's own lines."
-    },
-    "againstMyLastVerifiedHead": {
-      "from": "7ff8412ea87c50d6cd285bf5d567dbda518ed765",
-      "to": "4494b7cbc4cce2c9217393139141562dc5f7a8f4",
-      "fingerprintBefore": "261412325119208618ac31b25d8555a92ed7a89228e7319720020964c9798fc3",
-      "fingerprintAfter": "38855df249627b628013d7bbbeccc2fe1b86a8245bd9380c7a2229d348dc337a",
-      "verdict": "changed",
-      "filesWhoseDiffMoved": [
-        "packages/envoy/internal/dispatch/api/comment_create.go",
-        "packages/envoy/internal/dispatch/refs/item_block_nodes.go",
-        "packages/envoy/internal/dispatch/store/migrations/0150_ask_blocks.up.sql"
-      ],
-      "judgement": "All three moved in the reviewer's own prose commit f98f46e94faa, which the merge gate lets a reviewer make. I read that commit whole rather than trusting its subject: it changes a Go doc comment on CreateCommentInput.ReplyToBlock, a Go doc comment on itemBlockParent that cited the now-private ItemBlockNode, and the header comment of 0150_ask_blocks.up.sql. No executable Go line and no DDL line moved, so round 4's real-surface verification still describes this head, and the bare gates are the right round."
-    },
-    "scope": "The tree's architect scoped this round to the driver, both browser rows, check-ci-filters.sh and a read of CI. I confirmed the merge's own fingerprint is unchanged and established, against my own last verified head, that the only moved lines are comments before accepting that scope."
+    "from": "448a2f18148b29fb7944a6508044dbefc040e7f3",
+    "to": "65aaf4674c92c82a0383682c117e98aaebc9b135",
+    "fingerprintBefore": "38855df249627b628013d7bbbeccc2fe1b86a8245bd9380c7a2229d348dc337a",
+    "fingerprintAfter": "ed2bc802",
+    "verdict": "changed",
+    "whatMoved": "Fourteen file sections: the four migration files renamed (0150_ask_blocks to 20261101143211_ask_blocks, 0151_asks_block_parts_trigger to 20261101143212_asks_block_parts_trigger, each .up.sql and .census.sql), the three test files and docs/block_index.go that cite the identifiers, and packages/envoy/AGENTS.md with cmd/dispatch/README.md. No file under packages/dispatch/web differs, so the two browser rows' subject is unchanged since 448a2f18, where they passed, and I did not re-run them.",
+    "scope": "The tree's architect scoped this round on 2026-11-01 to the upgrade path through both timestamps, the migrationid test, the driver, check-ci-filters.sh, a check that no open pull request and not main holds either version, and a read of CI."
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "The implement handoff records the merge, the two product commands at the merge head, and a local run of the repository's suites. I re-ran the two product commands myself on a Dispatch stack and database of my own in the rebuilt pod (database dispatch_tester5, port 44821, fake GitHub 50684) and both answered what it records: the acceptance driver exit=0 PASS=171 FAIL=0 SKIP=0, the two browser rows 2 passed. Its second entry is the repository's own suites, which are CI's lanes; I did not re-run them and carry no verdict of theirs, and CI's own read of them is still queued (below)."
+    "how": "Its first entry proves the pair applies from nothing; I proved the harder direction, the upgrade from main's newest version with data already stored, which is where a rename can go wrong. Its second entry is the product, which I re-ran: the acceptance driver on a Dispatch stack and database of my own in the pod (database dispatch_tester6, port 17406, fake GitHub 56457) answered exit=0 PASS=171 FAIL=0 SKIP=0, the counts it records. Its third entry is the repository's suites, which are CI's lanes; of those I ran only the three the architect named, because CI can run nothing on a conflicting head."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The acceptance lines of the issue hold at the merge head: A6, A11/R12, A15, R7, R10 and R11 for ask parts, and the reader-facing change.",
-      "surface": "A real Dispatch stack in the issue's pod — the Go server on PostgreSQL 17 with pgvector, the production SPA bundle and a real Chromium — driven through the real dispatch CLI, HTTP and the browser.",
-      "command": "DISPATCH_URL=http://127.0.0.1:44821 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=50684 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh; then bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/ask-part-references.e2e.ts --reporter=list",
-      "observed": "exit=0, PASS=171 FAIL=0 SKIP=0; 2 passed (the reference opens the ask at that part, and the backlink panel names the ask rather than an artifact).",
-      "headSha": "4494b7cbc4cce2c9217393139141562dc5f7a8f4",
-      "negativeControl": "The driver's own R10 case: GET /api/v1/references?to=<ask>%23b-b9 answers 404 naming the part and the ask while #b-b2 answers 200 with that option's text."
+      "criterion": "A database already at main's newest version, with data in it, upgrades through both timestamped migrations in order and keeps what it held.",
+      "surface": "Go against a real PostgreSQL 17, through the store's own migration runner.",
+      "command": "DISPATCH_TEST_DATABASE_URL=$LEGION_TEST_PG_DSN go test ./internal/dispatch/store/ -run 'TestTheAskBlockMigrationsOweEveryStoredAsk|TestAnOlderBuildsWriteLeavesTheAskBlocksOwed' -count=1 -timeout 20m",
+      "observed": "ok 3.644s. The first row migrates an empty database through beforeAskBlocks = 157, which is main's newest and the number the series closed at, seeds an issue and inserts an ask, migrates through 20261101143211 (the tables alone), inserts a second ask in that window, then migrates to the end: both asks come out with an ask_block_state row that is owed, at revision 0 and next_block 1. So the two timestamps apply after 157 and in their own order, the trigger finds the tables its predecessor made, and rows written before and between them are picked up rather than lost.",
+      "headSha": "65aaf4674c92c82a0383682c117e98aaebc9b135",
+      "negativeControl": "The pair's identifiers are what the row keys on: beforeAskBlocks = 157 and askBlockTables = 20261101143211. Had the rename left a citation behind, migrateThrough would have stopped at a version the set no longer holds and the asks would not have been owed."
     },
     {
-      "criterion": "The merge is a confirmation, not a round: it changed none of the branch's own lines, and what has moved since my last verified head is comment text alone.",
-      "surface": "The workspace's jj history, read with the repository's own fingerprint procedure and then line by line.",
-      "command": "the fingerprint of skill://legion-worker/references/conflicts-and-rewrites.md at 6b6ba4b51d08, 20835c4d, 4494b7cb and 7ff8412e; then each side's diff split per `diff --git` section and compared; then jj diff -r f98f46e94faa --git read whole",
-      "observed": "38855df249627b62… at 6b6ba4b51d08, at 20835c4d and at 4494b7cb — one number, so the merge changed nothing — against 261412325119… at 7ff8412e. Three of the 76 file sections differ between 7ff8412e and this head, and every line the commit that moved them touches is a comment: the doc comment on CreateCommentInput.ReplyToBlock, the doc comment on itemBlockParent, and the header of 0150_ask_blocks.up.sql.",
-      "headSha": "4494b7cbc4cce2c9217393139141562dc5f7a8f4",
-      "negativeControl": "The two fingerprints differ, which is the control for the comparison being sensitive at all: a procedure that hashed nothing would have printed sha256 of empty input (e3b0c442…) on both sides, and a wrong pair of heads would have agreed."
+      "criterion": "The rename is a rename: the two migrations' bodies did not change with their names.",
+      "surface": "The workspace's jj history, file by file.",
+      "command": "for each of the four files, jj file show at 448a2f18 of the old name against jj file show at 65aaf467 of the new name, the difference counted and then counted again with SQL comment lines left out",
+      "observed": "0150_ask_blocks.up.sql 10 lines differ, 0 of them outside a `--` comment; its .census.sql 10 and 0; 0151_asks_block_parts_trigger.up.sql 14 and 0; its .census.sql 6 and 0. Every DDL statement is byte for byte what the reviewer approved. docs/block_index.go, the one production file among the citations, changed two comments and nothing else.",
+      "headSha": "65aaf4674c92c82a0383682c117e98aaebc9b135",
+      "negativeControl": "The comment-inclusive counts are non-zero, so the comparison does see changes: it is the non-comment count that is zero, not the comparison that is blind."
     },
     {
-      "criterion": "The CI selection this branch's files fall under is still complete after the merge.",
-      "surface": "The repository's own gate, run as CI runs it.",
-      "command": "bash .github/scripts/check-ci-filters.sh",
-      "observed": "exit 0: \"every ci.yaml filter matches every file its job reads (28 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)\", 0 uncovered files on each gate.",
-      "headSha": "4494b7cbc4cce2c9217393139141562dc5f7a8f4",
-      "negativeControl": "The check's own failure mode is the control: it fails naming each file a filter misses, and it named none."
+      "criterion": "Neither identifier collides with main or with any other open pull request, and the identifier rule itself holds.",
+      "surface": "main as GitHub serves it, every open pull request's file list, and the repository's own identifier test.",
+      "command": "jj file list -r main@origin over the migrations directory; gh pr list --state open --limit 200 --json number,files filtered to store/migrations/; go test ./migrationid/...",
+      "observed": "main (now 40ee070d) holds neither 20261101143211 nor 20261101143212 and carries no timestamped migration at all; its numbered series ends at 0157. Of 86 open pull requests, 11 touch store/migrations/, and this one alone holds the two identifiers: #2444 holds 20261028195714, #2394 holds 20261101144855, and the other eight add numbers. migrationid's own tests pass.",
+      "headSha": "65aaf4674c92c82a0383682c117e98aaebc9b135",
+      "negativeControl": "The scan does find other timestamps (#2444's and #2394's), so it is not a search that matches nothing; ours are simply not among another branch's."
+    },
+    {
+      "criterion": "The acceptance lines of the issue still hold at the rename head, and the CI selection is still complete.",
+      "surface": "A real Dispatch stack in the issue's pod, through the real dispatch CLI and HTTP, and the repository's own gate.",
+      "command": "DISPATCH_URL=http://127.0.0.1:17406 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=56457 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh; bash .github/scripts/check-ci-filters.sh",
+      "observed": "exit=0, PASS=171 FAIL=0 SKIP=0, the ask-parts section whole; and exit 0 with 28 gates, 0 uncovered files each, and every PUSH_WORKFLOWS on.push.paths equal to its filter.",
+      "headSha": "65aaf4674c92c82a0383682c117e98aaebc9b135",
+      "negativeControl": "The driver's own R10 case: ?to=<ask>%23b-b9 answers 404 naming the part and the ask while #b-b2 answers 200 with that option's text."
     }
   ],
-  "ci": "Read on GitHub at the pull request head 4494b7cbc4cce2c9217393139141562dc5f7a8f4: mergeable MERGEABLE, mergeStateStatus BLOCKED. Run 41194349566 (CI) was queued at 10:58Z, created 10:50Z, with its `changes` job not yet started, so no lane has settled — envoy-go and ci-ok, the two the tree's architect asked to be watched, included; PR Title 41194389834 queued beside it. The merge head 20835c4d itself carries no check run: the handoff push followed it at once and GitHub runs the pull request's checks on its head. I read CI as running and did not wait for it, which skill://legion-worker/references/pr-body.md requires of a tester; a required check settling red after this completion sends the work back from testing on its own, and the reviewer reads the head's checks before it approves. Nothing of CI was re-run here and no CI result is carried into this handoff.",
+  "ci": "No CI exists at this head and none can run: the pull request is CONFLICTING / DIRTY (read 16:22Z), so GitHub computes no merge ref, and GET check-runs answers total_count 0 at both 65aaf4674c92c82a0383682c117e98aaebc9b135 and the code head c9518102fd1233bc39acb9197ad82a22ba286712. The branch's last CI verdict is run 41194349566 at 4494b7cb, and it settled FAILURE on pi-legion, with ci-ok failing behind it. I read that run's job log rather than guessing: the one failing row of 16 is `a card published as soon as the role is claimed comes after the start turn`, in packages/pi-legion/extensions/controller-start-omp.test.ts, at 150102.15 ms, which is a timeout rather than an assertion. That file reaches nothing this pull request changes - its only pi-legion change is a type in scripts/skill-scenarios/seed.ts, which that test does not use - and main's recent ci.yaml runs are green, so the evidence points at a flake and not at this change. It is still an unanswered red: the lane needs a green read at a head CI can run on. I re-ran no CI lane; the three Go tests above are the ones the architect named, run because CI cannot run them here.",
+  "mergeState": {
+    "state": "CONFLICTING / DIRTY at 2026-11-01T16:22Z",
+    "mainAt": "40ee070d61a4",
+    "mainMovedSince": "4644a072706a, by 300 files",
+    "overlapWithThisPullRequest": [
+      "docs/site/src/content/docs/dispatch/for-agents.md",
+      "packages/envoy-client/src/dispatch-execute.ts",
+      "packages/envoy/AGENTS.md",
+      "packages/envoy/cmd/dispatch/AGENTS.md",
+      "packages/envoy/cmd/dispatch/README.md"
+    ],
+    "forTheNextRound": "One of the five is code, packages/envoy-client/src/dispatch-execute.ts, so the next forward merge is not a documentation reflow and the test round after it is not a bare-gates round. I completed this phase as the tree's architect instructed rather than moving the issue back, and recorded the conflict here, in the pull request body and in a message to the architect, so the choice is its own."
+  },
   "observations": [
-    "Commit 4494b7cbc4cce2c9217393139141562dc5f7a8f4 touches only .legion/INFRA-369/implement.json and carries no `skip-checks: true` trailer, so GitHub started a full CI run on the handoff commit instead of letting the code head's verdict carry. It costs one CI pass and stalls nothing — the handoff commit's tree is 20835c4d's plus that one file — but the next handoff-only push should carry the trailer."
+    "TestCensusDoesNotExemptACatalogMigrationAnEventTriggerRunsOn fails against the pod's shared test database with `permission denied to create event trigger (SQLSTATE 42501)` and passes against a superuser Postgres. It needs superuser, which CI has and LEGION_TEST_PG_DSN's login does not; it is not this change's failure and no role should read it as one.",
+    "The handoff's own tricky part says beforeAskBlocks = 157 holds `while ours are the only timestamped migrations in the set`. Two open pull requests already carry timestamps, and #2444's 20261028195714 sorts before ours: were it to land first, 157 would no longer be the last migration that sorts before 20261101143211, and that constant's comment would stop being true. Nothing is wrong at this head; it is a thing to re-read at whichever merge brings another timestamp in."
   ],
   "findings": []
 }
