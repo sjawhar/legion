@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-590",
+  "previousHandoff": "",
+  "completed": "2026-11-01T14:45:00Z",
+  "round": 21,
+  "headReviewed": "2cefa4bcadaff1c5337c7f9125f4e2dbe14b4dac",
+  "reviewedCodeHead": "827ab32f07783d01d398c2f6c86f21c311cb3acf",
+  "reviewerProseCommit": "2cefa4bcadaff1c5337c7f9125f4e2dbe14b4dac (cmd/dispatch/README.md:751, main's #2391 sentence said the outbox scans on a 5 s retry ticker and left the outbox's own listener out of the per-feature listeners; pglisten/listener.go:52 counted four Dispatch call sites where there are five)",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "roundShape": "Full round: merge 827ab32f of main's #2391 resolved nine conflicts, runtime ones in store/pool.go, cmd/dispatch/shutdown.go, main.go, pglisten/listener.go and docs/edit_notices.go.",
+  "ci": "At 827ab32f run 41298106555: lint, typecheck, test, pr-title, envoy-go, envoy-go-race and ci-ok all success. At 2cefa4bc run 41308701089: lint, typecheck, test, pr-title, envoy-go, envoy-go-race success; envoy-smoke failed on the runner's Pulumi docker plugin untar (TestLive*), not this PR; ci-ok pending.",
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at 827ab32f; no code defect, both named the README:751 sentence fixed in 2cefa4bc.",
+  "keyFindings": [
+    {"severity": "important", "file": "PR #2395 (migrations)", "description": "Main's #2411 (4644a07270) merged, and migration versions are now named by UTC timestamp, so this PR's 0158_duty_holds and 0159_outbox_claim must be renamed and main merged forward (architect, 14:30Z). Keep the reviewer's prose commit 2cefa4bc."}
+  ],
+  "verifiedCorrect": [
+    "Shutdown order: documents, background, #2391's intakes, idle, outbox stop and hold release, deregister, pool close; intakeStopBudget 15 s from the signal and outboxStopBudget 25 s from shutdown both inside stopGrace; the outbox releases on its own pool, closed only after waitForOutbox; both sides' shutdown tests intact.",
+    "The outbox keeps its own pglisten.Listener on dispatch_events and dispatch_duty_holds with OnConnected catch-up; it registers nothing on #2391's Hub; permanentListeners 5, connections 92 (TestDispatchConnectionsPerPodIsTheServers ok).",
+    "duty: the PR adds hold.go beside #2391's woken loops with no shared name; edit_notices.go keeps main's RunWoken with the addAuthorRoutes rename.",
+    "Migrations 0158/0159 contiguous after main's 0157, census files present, no stale 0151/0152 duty/outbox reference."
+  ]
+}
