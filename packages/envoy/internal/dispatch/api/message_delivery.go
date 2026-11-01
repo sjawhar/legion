@@ -775,7 +775,10 @@ func (s *server) renewMessageDeliveryClaim(
 		route = "session:" + pending.resolved.attemptSessionID
 	}
 	renewed := pending
-	renewed.resolved = s.resolveMentionTarget(ctx, route, pending.resolved.Delivery, mentionLookupTimeout)
+	// Unbounded, as the message's own resolution above is: only a comment's creation bounds its
+	// lookups at mentionLookupTimeout, because it answers without them. A read cut short here
+	// would leave the attempt unanswered with no resolve error, and this sender settles it.
+	renewed.resolved = s.resolveMentionTarget(ctx, route, pending.resolved.Delivery, 0)
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return pending, false, err
