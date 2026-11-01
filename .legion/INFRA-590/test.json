@@ -2,49 +2,66 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-590",
-  "completed": "2026-11-01T15:10:00Z",
-  "round": 31,
-  "testedHead": "2175cdbaac717bb8cbc8df7f662829cdeaca455b",
-  "previousTestedHead": "827ab32f07783d01d398c2f6c86f21c311cb3acf",
-  "roundShape": "Narrow round, as briefed: main 4644a0727 (#2411, migrations named by UTC timestamp) merged with no conflict; this PR's migrations renamed to 20261101143201_duty_holds and 20261101143203_outbox_claim; plus the reviewer's prose commit 2cefa4bc. round-shape.py v3, 827ab32f07783d01d398c2f6c86f21c311cb3acf -> 2175cdbaac717bb8cbc8df7f662829cdeaca455b, pull request 2395: files whose own diff differs: 14. Its normaliser matches four-digit numbers only, so the renamed migrations show as four files gone and four new; read by hand, the four SQL files are byte-identical to 0158/0159 but one comment (migration 0158 -> 20261101143201_duty_holds). The other six: outbox/batch.go (its comment's migration name, the only runtime change), pglisten/listener.go and cmd/dispatch/README.md (2cefa4bc's one comment line and one README sentence: the outbox's scan is woken, not a 5 s ticker), and AGENTS.md, dispatch-outbox.md and the changelog fragment (the migration names). docs/solutions: this PR's numbering lesson deleted, its hot-table lesson edited for the names. Control: 2678be4b84 -> b5e8445e62 still prints 4 files. Round 30's multiprocess evidence at 827ab32f stands.",
+  "completed": "2026-11-01T20:45:00Z",
+  "round": 32,
+  "testedHead": "7892827c749322488ea2478e4d6ef43ab808d9d0",
+  "previousTestedHead": "2175cdbaac717bb8cbc8df7f662829cdeaca455b",
+  "roundShape": "Full round, as briefed (three merges of main in one push; #2446 rewrote the listener and bus paths this PR changes). round-shape.py v3, 2175cdbaac717bb8cbc8df7f662829cdeaca455b -> 7892827c749322488ea2478e4d6ef43ab808d9d0, pull request 2395: files whose own diff differs: 18. Runtime files among them: cmd/listener/confirmed.go, cmd/listener/delivery.go, cmd/listener/role_holder.go, cmd/listener/role_lane.go, internal/bus/nats.go, internal/dispatch/store/pool.go (comments), internal/pglisten/listener.go (comments), internal/roles/roles.go. The rest are tests (multiprocess_test, api_test, delivery_role_forward_test, delivery_role_supersession_test, main_test, role_lane_test, bus async_error_test and request_core_test) and docs (AGENTS.md, cmd/dispatch/README.md). File set of the PR's diff against its base: 124 files at 2175cdba, 126 at 7892827c; nothing disappeared; the two added are cmd/listener/role_lane.go and role_lane_test.go, main's #2446 files given the MsgId; gh pr diff --name-only lists the same 126; the only changelog file in the set is this PR's own fragment (no consumed fragment re-added). Control: 2678be4b84 -> b5e8445e62 still prints 4 files.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at 2175cdba on the issue volume's superuser Postgres 17 with fresh databases (none recording round 30's 0158/0159), -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB: store's migration and census tests, duty and outbox ok; the head binary migrates a fresh database and upgrades main 4644a0727's database, each timestamped migration applied once; vet and gofmt clean."
+    "how": "Re-ran at 7892827c, -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB, one package at a time, superuser Postgres 17 on the issue volume: store, roles, session, cmd/listener ok; CGO_ENABLED=1 -race on internal/bus and internal/dispatch/outbox ok, no race; multiprocess ok; INFRA-594's live delivery proof PASS; build, vet and gofmt clean; the connection-count test at 92."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Store's migration tests on a fresh database, #2411's naming, embedding and out-of-order tests included",
-      "surface": "packages/envoy/internal/dispatch/store on a freshly created database",
-      "command": "go test -count=1 -v -run 'Migrat|Timestamp|Embed|OutOfOrder|Version|Census' ./internal/dispatch/store/",
-      "observed": "ok 203.5 s; among them TestMigrationSetTakesNumbersThenTimestamps, TestEveryMigrationFileIsEmbedded, TestMigrateAppliesAMigrationThatArrivedBelowOneAlreadyApplied, TestMigrateAppliesBothTimestampedMigrationsOnceOnAFreshDatabase, TestMigrateWidensAnIntegerVersionColumnAndRecordsATimestamp, TestMigrationSetRefusesANewMigrationNumberedAfterTheShippedSet, TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny, TestEveryShippedCensusAnswersAtTheSchemaBeforeItsMigration and TestEveryMigrationFromTheCensusRuleOnDeclaresACensus pass.",
-      "headSha": "2175cdbaac717bb8cbc8df7f662829cdeaca455b",
-      "negativeControl": "TestMigrationSetRefusesANewMigrationNumberedAfterTheShippedSet passes: a new numbered migration after the shipped set is refused, so this PR could not have kept 0158/0159."
+      "criterion": "One resolver: #2446's firstHolder change lives in roles.ResolveHolderFrom, main's readRoleClaim/roleClaimResolver copy is gone, no second freshness rule",
+      "surface": "the code at 7892827c",
+      "command": "rg readRoleClaim|roleClaimResolver|ResolveHolderFrom|CachedRoleHolder|ClaimStaleAfter|Fresh( outside tests",
+      "observed": "No readRoleClaim or roleClaimResolver remains. roles.ResolveHolderFrom (internal/roles/roles.go:158) takes the firstHolder; its readClaim (roles.go:127) reads it on attempt 0 only; ResolveHolder is ResolveHolderFrom with no firstHolder. The listener's lane calls it through resolveRoleHolderFrom (role_holder.go:361) with store.Registry.CachedRoleHolder (delivery.go:444). Freshness is one rule, roles.Fresh (roles.go:114), used by the lane (laneHolderFresh, delivery.go:425; confirmed.go:367) and the outbox (role.go:152).",
+      "headSha": "7892827c749322488ea2478e4d6ef43ab808d9d0",
+      "negativeControl": "none: a read of the code"
     },
     {
-      "criterion": "A fresh database records both timestamps above 157 with duty_holds and the outbox indexes; an upgrade from main 4644a072 applies both once",
-      "surface": "the real envoy-dispatch built at 2175cdba and at main 4644a0727, each started on the database and read through /healthz and psql",
-      "command": "boot.sh head on fresh t590mig31; on fresh t590up31: main 4644a072, then head, then head again, then main again; each reads /healthz schema_version, schema_migrations versions > 150 and its column type, to_regclass('duty_holds'), events indexes like 'events_outbox%', then SIGTERM",
-      "observed": "Fresh, head: listening, schema_version 20261101143203, versions 151-157,20261101143201,20261101143203, column bigint, duty_holds and events_outbox_fresh/owner/retry present. Upgrade: main's release records 151-157, no duty_holds, no outbox indexes; the head then records 20261101143201 and 20261101143203 (2 rows) with duty_holds and the three indexes; a second head boot leaves 2 rows. main's release then boots again on that schema and listens.",
-      "headSha": "2175cdbaac717bb8cbc8df7f662829cdeaca455b",
-      "negativeControl": "main 4644a072's database before the head ran: duty_holds absent and no outbox indexes."
+      "criterion": "The role-forward MsgId rule (the dedupe key when it names its event, else the event_id): a forward retried after a lost reply is stored once; two different events to one holder are stored twice; #2446's stored-copy and relay tests pass unchanged",
+      "surface": "the real envoy-listener built at 7892827c on a real JetStream nats-server; a holder session registered through the listener's subscribe API and holding role t590-msg; a probe (t590msgid) subscribed to its agent subject that withholds the receipt of the first forward of each event_id and answers later ones; envelopes core-published on notifications.role.t590-msg; the stream's stored copies on notifications.agent.ses_msgid read back with an ordered consumer",
+      "command": "case A: a github envelope (dedupe github.guid-1, event ev-A1) published, receipt withheld, published again; case B: a caller-chosen-key envelope (shared-key, event ev-B1) the same; case C: two different events (ev-C1, ev-C2) under one chosen key chosen-c, the listener restarted between them so its in-memory dedupe cache does not decide; then count",
+      "observed": "A: forwarded twice under Nats-Msg-Id 'envoy.role.forward.github.guid-1:notifications.agent.ses_msgid' (first unanswered, second answered), stored once. B: forwarded twice under 'ev-B1:notifications.agent.ses_msgid', stored once. C: ev-C1 and ev-C2 forwarded under 'ev-C1:…' and 'ev-C2:…', both stored. The stream held 4 copies in all: ev-A1, ev-B1, ev-C1, ev-C2. TestARoleForwardIsStoredOnceOnlyWhenItsEnvelopeNamesItsEvent and TestRoleLaneRefusedSharedQueueFallsBackToMachineGroupsAndStoresOneCopy pass, and the listener's relay tests (13) pass.",
+      "headSha": "7892827c749322488ea2478e4d6ef43ab808d9d0",
+      "negativeControl": "Case C: the two events share a dedupe key, so main's pre-merge lane rule (always the dedupe key) would have stored one; the head stored both, each under its own event id."
     },
     {
-      "criterion": "duty and outbox once; vet",
-      "surface": "packages/envoy, -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB, one package at a time",
-      "command": "go test -count=1 ./internal/dispatch/duty/; ./internal/dispatch/outbox/; go vet ./internal/dispatch/... ./cmd/dispatch; gofmt -l internal cmd",
-      "observed": "duty ok 23.1 s, outbox ok 278.8 s; vet and gofmt clean. No -race run this round. Sampled memory peak 3.06 GiB of 19, 326 samples every 2 s (named job mem-sampler-INFRA-590, stopped by proc kill). Leftover check after the kill (ps -eo pid,args | grep -E 'memory.usage_in_bytes|sleep 2|mem-sampler|mem.samples|r31/envoy-dispatch'): printed no lines.",
-      "headSha": "2175cdbaac717bb8cbc8df7f662829cdeaca455b",
+      "criterion": "This PR's MsgId threaded through RequestCoreTo, StartRequestCoreTo, StartRequestStoredTo, PendingForward and forwardAndWait; the window's fence still refuses a send past the hold's deadline",
+      "surface": "internal/bus/nats.go, cmd/listener/confirmed.go and role_lane.go at 7892827c; bus and outbox tests under -race",
+      "command": "read nats.go:1740-1815, confirmed.go:157, role_lane.go:77-115; CGO_ENABLED=1 go test -race -timeout 60m ./internal/bus/ and ./internal/dispatch/outbox/",
+      "observed": "RequestCoreTo, StartRequestCoreTo and StartRequestStoredTo each take msgID and pass it to startForward, which sets the Nats-Msg-Id header only when msgID is not empty; PendingForward carries the outcome; forwardAndWait (confirmed.go:157) takes msgID, the send route passing bus.ForwardMsgID(dedupe key, subject) as before the merge and the lane passing roleForward.msgID. bus -race ok 378.7 s and outbox -race ok 302.1 s, no data race; TestAWindowSendsNothingPastItsDeadline, TestAWindowSendsNoResendOfANotStoredDuplicatePastItsDeadline and the outbox's TestABatchPastThePublisherHoldsDeadlineSendsAndRecordsNothingMore pass.",
+      "headSha": "7892827c749322488ea2478e4d6ef43ab808d9d0",
+      "negativeControl": "TestAWindowSendsNothingPastItsDeadline: a send past the window's deadline is refused."
+    },
+    {
+      "criterion": "Migrations still the two timestamps; store green with main's numbering closed at 0161; connections 92",
+      "surface": "packages/envoy at 7892827c",
+      "command": "ls internal/dispatch/store/migrations; go test ./internal/dispatch/store/; in a scratch copy, go test -run TestDispatchConnectionsPerPodIsTheServers ./gcp/",
+      "observed": "Numbered migrations end at 0161_delivery_run_warnings; timestamped: 20261101143201_duty_holds, 20261101143203_outbox_claim (this PR) and main's 20261101144855_block_pointer_links. store ok 274.3 s. dispatchConnectionsPerPod = 92 and its test passes.",
+      "headSha": "7892827c749322488ea2478e4d6ef43ab808d9d0",
       "negativeControl": "none: suites"
     },
     {
-      "criterion": "Every lane with ci-ok at 2175cdba",
-      "surface": "GitHub check runs",
-      "command": "gh api repos/sjawhar/legion/commits/2175cdbaac717bb8cbc8df7f662829cdeaca455b/check-runs?filter=latest --paginate",
-      "observed": "At 15:08Z, CI run 41318341720 (queued since 14:52:34Z): changes and pr-title success; docs / build in progress; lint, typecheck, test, envoy-go, envoy-go-race and 23 others queued; ci-ok not yet created. Unread: every lane but changes and pr-title. #2395 MERGEABLE.",
-      "headSha": "2175cdbaac717bb8cbc8df7f662829cdeaca455b",
+      "criterion": "Multiprocess once (take-over after SIGKILL, a NATS cut and a silent cut; events once and in order) and INFRA-594's live delivery proof once",
+      "surface": "two real envoy-dispatch processes (multiprocess harness); scripts/e2e/envoy-session-delivery.sh with real Oh My Pi and Claude Code sessions, two listeners and Dispatch built from the checkout",
+      "command": "go test -tags multiprocess ./cmd/dispatch; LEGION_TEST_PG_DSN=<superuser PG on the volume> bash scripts/e2e/envoy-session-delivery.sh (all six windows)",
+      "observed": "multiprocess ok 1386.1 s: take-over 5.918 s after SIGKILL, 3.005 s after a NATS cut, 2.461 s after a silent cut, 5.055 s after SIGSTOP; the resumed process logged the hold lost 29 ms after it resumed; 200/80/60 comments once and in order. Live proof: 'ENVOY SESSION DELIVERY: PASS (every event once, the issue in order)', exit 0; windows a session-restart, b nats-cut, c listener-shared, d listener-dispatch, e dispatch-kill, f none all counted as expected, no cell marked off; the issue's 12 comments in stream order in both transcripts. Evidence kept in $TMPDIR/tester590/r32/e2e.",
+      "headSha": "7892827c749322488ea2478e4d6ef43ab808d9d0",
+      "negativeControl": "Window d: the Dispatch messages Dispatch could not send with its listener down are counted 0/0, as expected."
+    },
+    {
+      "criterion": "Every lane with ci-ok at 7892827c",
+      "surface": "GitHub check runs, CI run 41342322523",
+      "command": "gh api repos/sjawhar/legion/commits/7892827c749322488ea2478e4d6ef43ab808d9d0/check-runs?filter=latest --paginate; the test job's log",
+      "observed": "At 20:38Z: test FAILED (job 124956086378, step 'Test the Go daemon'): packages/daemon/internal/workspace TestFetchKeepsAFeedAfterGitGC/killed_during_repack, 'git gc did not start writing a pack during its repack'. This PR's diff touches no file under packages/daemon (0 of 126), and the same test passes 5 of 5 locally at this head; main's last two CI runs (0642a37a, c77d054d) are green. A timing flake outside the PR's paths; the run is still in progress, so it cannot be re-run yet. lint, pr-title success; envoy-go in progress; typecheck, envoy-go-race queued; ci-ok not yet created. Unread: typecheck, envoy-go, envoy-go-race, ci-ok and every lane still queued or running. #2395 MERGEABLE.",
+      "headSha": "7892827c749322488ea2478e4d6ef43ab808d9d0",
       "negativeControl": "none: a read of CI"
     }
-  ]
+  ],
+  "memory": "Sampled peak 3.78 GiB of 19 over the suites and the live proof, 1661 samples every 2 s (named job mem-sampler-INFRA-590, stopped by proc kill). Leftover check after the kill (ps -eo pid,args | grep -E 'memory.usage_in_bytes|sleep 2|mem-sampler|mem.samples|tester590/r32/|envoy-session-delivery|socat|natsd|envoy-listener|envoy-dispatch'): printed no lines."
 }
