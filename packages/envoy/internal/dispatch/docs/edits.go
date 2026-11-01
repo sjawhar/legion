@@ -1260,6 +1260,16 @@ func invalidSchemaOp(field string, err error) error {
 	return err
 }
 
+// invalidBlockPointerOp reports a batch introducing a block pointer to a block of a type its
+// attribute does not allow (pmdoc.ErrBlockPointer) as an invalid operation on its attributes, as
+// the route's other attribute refusals are.
+func invalidBlockPointerOp(err error) error {
+	if errors.Is(err, pmdoc.ErrBlockPointer) {
+		return &ErrInvalidOp{Field: "attributes", Reason: err.Error()}
+	}
+	return err
+}
+
 func invalidTableIndexOp(err error) error {
 	var invalidIndex *pmdoc.TableIndexError
 	if errors.As(err, &invalidIndex) {

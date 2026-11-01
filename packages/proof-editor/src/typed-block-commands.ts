@@ -1,6 +1,8 @@
+import { blockPointersProblem } from '@legion/contracts';
 import type { Node as ProseMirrorNode, NodeType } from '@milkdown/kit/prose/model';
 import type { EditorState, Transaction } from '@milkdown/kit/prose/state';
 
+import { blockPointerRefusal, findBlock } from './block-pointers.js';
 import type { BlockAttributeSchema, BlockSchema, BlockTypeSchema } from './block-schema.js';
 import { BLOCK_ID_ATTR, blockIdOf } from './editor/schema/block-ids.js';
 
@@ -9,6 +11,9 @@ export type TypedBlockAttributes = Readonly<Record<string, TypedBlockAttributeVa
 
 export interface TypedBlockCommandContext {
   blockSchema?: BlockSchema;
+  /** The open document's unversioned reference, which a `block[]` pointer to one of its own
+   *  blocks names; without it, no pointer is refused for its target's type. */
+  documentRef?: string;
   getState(): EditorState;
   dispatch(transaction: Transaction): void;
 }
@@ -66,6 +71,14 @@ function validateValue(typeName: string, name: string, attribute: BlockAttribute
       if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
         throw new Error(`typed block ${JSON.stringify(typeName)} attribute ${JSON.stringify(name)} must be a string array`);
       }
+      return;
+    case 'block[]': {
+      if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+        throw new Error(`typed block ${JSON.stringify(typeName)} attribute ${JSON.stringify(name)} must be an array of block references`);
+      }
+      const problem = blockPointersProblem(value as readonly string[]);
+      if (problem !== undefined) throw new Error(`typed block ${JSON.stringify(typeName)} attribute ${JSON.stringify(name)}: ${problem}`);
+    }
   }
 }
 
@@ -81,16 +94,6 @@ function clientAttributes(type: BlockTypeSchema, attrs: TypedBlockAttributes | u
   return result;
 }
 
-function findBlock(doc: ProseMirrorNode, id: string): LocatedBlock | null {
-  let found: LocatedBlock | null = null;
-  doc.descendants((node, pos) => {
-    if (blockIdOf(node) !== id) return;
-    found = { node, pos };
-    return false;
-  });
-  return found;
-}
-
 function selectedParagraph(state: EditorState): LocatedBlock | null {
   for (let depth = state.selection.$head.depth; depth > 0; depth -= 1) {
     const node = state.selection.$head.node(depth);
@@ -102,6 +105,19 @@ function selectedParagraph(state: EditorState): LocatedBlock | null {
   return null;
 }
 
+/** Dispatches `tr`, or throws `blockPointerRefusal`'s refusal of the block it leaves, unchanged. */
+function dispatchUnlessRefused(
+  context: TypedBlockCommandContext,
+  tr: Transaction,
+  type: BlockTypeSchema,
+  prior: ProseMirrorNode | null,
+  attrs: Readonly<Record<string, unknown>>,
+): void {
+  const refusal = blockPointerRefusal(tr.doc, type, prior, attrs, context.documentRef);
+  if (refusal !== undefined) throw new Error(refusal);
+  context.dispatch(tr);
+}
+
 function insert(context: TypedBlockCommandContext, schema: BlockSchema, typeName: string, attrs?: TypedBlockAttributes): boolean {
   const state = context.getState();
   const type = findType(schema, typeName);
@@ -110,7 +126,7 @@ function insert(context: TypedBlockCommandContext, schema: BlockSchema, typeName
   if (paragraph === null) throw new Error('editor schema cannot create an empty paragraph');
   const block = typedNode.createAndFill(clientAttributes(type, attrs), paragraph);
   if (block === null) throw new Error(`typed block ${JSON.stringify(typeName)} cannot contain a paragraph body`);
-  context.dispatch(state.tr.replaceSelectionWith(block));
+  dispatchUnlessRefused(context, state.tr.replaceSelectionWith(block), type, null, block.attrs);
   return true;
 }
 
@@ -126,7 +142,7 @@ function retype(context: TypedBlockCommandContext, schema: BlockSchema, blockId:
     ...clientAttributes(type, attrs),
     [BLOCK_ID_ATTR]: blockId,
   }, body);
-  context.dispatch(state.tr.replaceWith(source.pos, source.pos + source.node.nodeSize, replacement));
+  dispatchUnlessRefused(context, state.tr.replaceWith(source.pos, source.pos + source.node.nodeSize, replacement), type, source.node, replacement.attrs);
   return true;
 }
 
@@ -137,7 +153,7 @@ function setAttributes(context: TypedBlockCommandContext, schema: BlockSchema, b
   const type = findType(schema, located.node.type.name);
   const changes = clientAttributes(type, attrs);
   if (Object.keys(changes).length === 0) return true;
-  context.dispatch(state.tr.setNodeMarkup(located.pos, undefined, { ...located.node.attrs, ...changes }, located.node.marks));
+  dispatchUnlessRefused(context, state.tr.setNodeMarkup(located.pos, undefined, { ...located.node.attrs, ...changes }, located.node.marks), type, located.node, changes);
   return true;
 }
 

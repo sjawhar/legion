@@ -4,10 +4,10 @@ name: CI
 # Its first job, `changes`, reads the paths the change touched and selects, through one
 # dorny/paths-filter filter per job, the jobs that read those paths; each job runs only when its
 # filter matches (lint runs on every change, and typecheck and test also run when `changes` itself
-# failed). The last job, `ci-ok`, condenses every job's result into one check, the one main's
-# ruleset requires beside pr-title: it fails when a job `changes` selected did not succeed. The
-# docs site's build on a push to main, and its GitHub Pages deploy, are docs-pages.yaml's, a
-# workflow of its own whose header says why. Its paths are held to the docs filter below.
+# failed). The last job, `ci-ok`, condenses every job's result into one check: it fails when a job
+# `changes` selected did not succeed. Main's ruleset requires ci-ok and pr-title. The docs site's
+# build on a push to main, and its GitHub Pages deploy, are docs-pages.yaml's, a workflow of its own
+# whose header says why. Its paths are held to the docs filter below.
 #
 # A new job joins the router in six places: a filter in `changes` that names every file the job
 # reads, an output of `changes` for that filter, the job's `needs: changes` and an `if:` on that
@@ -583,10 +583,14 @@ jobs:
               - 'skills/dispatch/SKILL.md'
               - 'skills/dispatch-writing-specs/SKILL.md'
               # The Go copies its tests hold the TypeScript to: src/dispatch-href.test.ts:49-53 and
-              # src/dispatch-text-references.test.ts:10-14 read the Go reader's JSON tables, and
-              # scripts/gen-go.test.ts checks both files scripts/gen-go.ts writes are current.
+              # src/dispatch-text-references.test.ts:10-14 read the Go reader's JSON tables,
+              # src/dispatch-block-ref.test.ts reads pmdoc's block pointer and typed block id
+              # tables, and scripts/gen-go.test.ts checks both files scripts/gen-go.ts writes are
+              # current.
               - 'packages/envoy/internal/dispatch/text/testdata/dispatch-href-references.json'
               - 'packages/envoy/internal/dispatch/text/testdata/dispatch-text-references.json'
+              - 'packages/envoy/internal/dispatch/pmdoc/testdata/block-pointer-values.json'
+              - 'packages/envoy/internal/dispatch/pmdoc/testdata/typed-block-id-spellings.json'
               - 'packages/envoy/internal/contracts/generated.go'
               - 'packages/daemon/internal/dispatch/generated.go'
             # The conflict measurement script's lint, typecheck and tests: its own directory (tests
@@ -844,6 +848,14 @@ jobs:
               - 'packages/envoy/internal/dispatch/pmdoc/**'
               - 'packages/envoy/internal/stacktest/*'
               - 'packages/proof-editor/**'
+              # The editor's src/block-pointers.ts (through src/block-schema.ts) imports
+              # @legion/contracts.
+              - 'packages/contracts/src/**'
+              # pmdoc's schema.go and pointers.go import internal/dispatch/model and
+              # internal/dispatch/text, whose tests' testdata the race run reads too.
+              - 'packages/envoy/internal/dispatch/model/*'
+              - 'packages/envoy/internal/dispatch/text/*'
+              - 'packages/envoy/internal/dispatch/text/testdata/**'
             # The API race job. internal/dispatch/api's lock_level_test.go:120-133 walks every
             # non-test .go file under packages/envoy (event_insert_guard_test.go:32 and
             # review_write_guard_test.go:44 use the same walk), so this filter keeps the wide root
@@ -880,6 +892,8 @@ jobs:
               # pmdoc/testdata/fixtures.json.
               - 'packages/envoy/internal/dispatch/pmdoc/schema/**'
               - 'packages/envoy/internal/dispatch/pmdoc/testdata/**'
+              # docs/block_pointer_links_test.go imports pmdoc/pmdoctest.
+              - 'packages/envoy/internal/dispatch/pmdoc/pmdoctest/*'
               - 'packages/envoy/internal/dispatch/refs/*'
               - 'packages/envoy/internal/dispatch/store/*'
               # internal/dispatch/store embeds every migration.
@@ -1475,10 +1489,11 @@ jobs:
       - name: Check the package holds every row of .github/ci-images.yaml
         run: .github/scripts/check-ci-images.sh package
 
-  # lint, typecheck and test keep the names main's ruleset required before ci-ok existed. Each
-  # covers the shipped daemon (packages/daemon, the Go `legion`). Fail-open: when `changes` did not
-  # succeed, typecheck and test run rather than skip, since a skipped job reports success and a
-  # failed selector must never turn a required check into a passing skip.
+  # lint, typecheck and test are jobs ci-ok condenses; their names are no longer checks the ruleset
+  # requires. Each covers the shipped daemon (packages/daemon, the Go `legion`). Fail-open: when
+  # `changes` did not succeed, typecheck and test run rather than skip. ci-ok fails then anyway
+  # (ci-ok.sh), so this buys signal: their results while `changes` is broken, and a green ci-ok after
+  # a re-run of only the failed jobs.
   typecheck:
     needs: changes
     if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.changes.result != 'success' || needs.changes.outputs.typecheck == 'true') }}
@@ -1563,9 +1578,9 @@ jobs:
         run: bun install --frozen-lockfile
 
       # The very command main's Rebuild Claude Envoy plugin workflow runs in its build job, so a pull
-      # request whose source main's push job would refuse fails this required check instead of
-      # merging and then failing every rebuild on main (the claude-envoy job is not required until
-      # ci-ok is). What it builds and checks: packages/claude-envoy/scripts/verify-build.sh.
+      # request whose source main's push job would refuse fails this job, and with it the required
+      # ci-ok, instead of merging and then failing every rebuild on main. What it builds and checks:
+      # packages/claude-envoy/scripts/verify-build.sh.
       - name: Build, check and pack the Claude Code plugin as main's rebuild does
         run: bun run verify-build "$RUNNER_TEMP/claude-envoy-built.tar"
         working-directory: packages/claude-envoy
@@ -3056,10 +3071,11 @@ jobs:
   # envoy-client's stall proxy (test/stall-proxy.ts) on a real natsd and listener, which
   # test/envoy-stack.ts builds with go build from packages/envoy, and holds the client to a
   # reconnect within 60 s: envoy-client's shared connection options on their own, then the real
-  # pi-envoy extension and the real claude-envoy channel server, each showing the message sent
-  # while it was cut off once, replayed. They run only with LEGION_E2E_ENVOY_STACK=1, which only
-  # this job sets, so the envoy-client, pi-envoy and claude-envoy jobs, which set up no Go, skip
-  # them.
+  # pi-envoy extension and the real claude-envoy channel server on consumer delivery, each
+  # subscribing its relay subject again on the new connection, registering a new epoch, and showing
+  # the message sent while it was cut off once. They run only with LEGION_E2E_ENVOY_STACK=1,
+  # which only this job sets, so the envoy-client, pi-envoy and claude-envoy jobs, which set up no
+  # Go, skip them.
   envoy-session-stall:
     needs: changes
     if: needs.changes.outputs.envoy_session_stall == 'true'

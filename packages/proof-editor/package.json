@@ -36,6 +36,7 @@
     "lint": "bunx biome check ."
   },
   "dependencies": {
+    "@legion/contracts": "workspace:*",
     "@milkdown/core": "^7.5.0",
     "@milkdown/ctx": "^7.22.1",
     "@milkdown/kit": "^7.5.0",
