@@ -113,22 +113,23 @@ it, and any other change to the head voids it.
   approval needs the tester's `E2E` line to name the head with only `.legion/<issue>/` changed since. So
   there you fix no prose yourself, and you name each prose finding in a `REQUEST_CHANGES`.
 
-A reviewer's phase ends with its completion, not with its review. Every round writes a handoff
-and takes this order: read CI as above; write, commit and push the handoff; submit the review of
-the head that push made, by its SHA; then complete. A red at the code is a `REQUEST_CHANGES`
-naming the check, never an approval; so is an unmet goal, or a requirement unmet with no act of
-the owner letting it go, naming that. A requirement an open child of the tree carries is pending
-until the parent's last round, a full round for you, named by the forward-merge comment's
-`parent's last round: full test round`. A request for changes does not wait, since it stands
-whatever CI says and the issue leaves reviewing with it. Nor does the approval at a handoff-only
-commit: it ends the round whatever CI says there, since the round reads no CI verdict, and a red
-the daemon reads later — at that commit or above — is the code's red, resuming the implementer
-from wherever the issue is (reviewing, retro or merging) without the reviewer. A head your own
-push changed beyond `.legion/<issue>/` is the exception: the daemon marks it a planned red and
-sends nothing back for it, so wait for its checks yourself (*Fix a prose-only finding yourself*,
-above). The daemon moves the issue once both the decision GitHub reports and your completion are
-in, in either order, so a review without a completion leaves the issue in reviewing until you
-finish.
+A reviewer's phase ends with its completion, not its review. Every round writes a handoff in this
+order: read CI as above; write, commit and push the handoff; submit the review of the head that
+push made, by its SHA; then complete. A red at the code is a `REQUEST_CHANGES` naming the check,
+never an approval; so is an unmet goal, or a requirement unmet with no act of the owner letting
+it go, naming that. A requirement an open child of the tree carries is pending until the parent's
+last round, a full round for you, named by the forward-merge comment's
+`parent's last round: full test round`. One only the deploy can show is met here when the change
+holds what it needs and the plan names the observation, unmet when nobody
+observes it or the plan measures something else, and never pending. A request for changes does not
+wait: it stands whatever CI says and the issue leaves reviewing with it. Nor does the approval at
+a handoff-only commit, since the round reads no CI verdict; a red the daemon reads later, at that
+commit or above, is the code's red and resumes the implementer wherever the issue is, without the
+reviewer. A head your own push changed beyond `.legion/<issue>/` is the exception: the daemon
+marks it a planned red and sends nothing back for it, so wait for its checks yourself (*Fix a
+prose-only finding yourself*, above). The daemon moves the issue once both the decision GitHub
+reports and your completion are in, in either order, so a review without a completion leaves the
+issue in reviewing until you finish.
 
 ## The architect's acceptance
 
@@ -268,34 +269,34 @@ finish.
   a resumed session, is `Production check of <KEY>: <title>.`, naming the repository, the pull
   request, the merge commit, the look's number, its wake (`the merge`, for the first) and whether
   it is the last. The check carries no phase and no handoff: a look ends with `handoff_complete`
-  carrying a `verdict` and a `summary`, no commit, and the daemon refuses a report with no open
-  check (`CHECK_NOT_OPEN`), on an ended look (`CHECK_LOOK_NOT_OPEN`) or with no verdict
+  carrying a `verdict` and a `summary` and no commit, and the daemon refuses a report with no
+  open check (`CHECK_NOT_OPEN`), on an ended look (`CHECK_LOOK_NOT_OPEN`) or with no verdict
   (`CHECK_VERDICT_REQUIRED`).
 - **Each look does three things.** Reach the deploy as the deployment instructions say: where
   they name an agent or role, `envoy_publish` the merge commit to that role's topic with
   `expects_reply: none`. Read whether production carries the merge, and with it every requirement
-  only the deploy can show — read those from the spec version that bound the review and the
-  plan's named observations, and drive each as it names: observing something else is never that
-  requirement observed. Then report one verdict:
-  - `pass`, once you drove the changed path and those requirements in production through the
-    user's own access path and wrote the record: the PR body's `Production:` line,
+  only the deploy can show, from the spec version that bound the review and the plan's named
+  observations: drive each as it names, since observing something else is never that requirement
+  observed. Then report one verdict:
+  - `pass`, once you drove the changed path and those requirements through the user's own access
+    path and wrote the record: the PR body's `Production:` line,
     `<what was checked in production, how, what was observed> — merge commit <sha>; woken by <event>`,
-    and one pull-request comment carrying the Legion footer. A staging pass is not this: staging
+    and one pull-request comment with the Legion footer. A staging pass is not this: staging
     does not run every resource production does.
-  - `pending`, when production does not carry the merge yet (a shared profile still holding the
-    previous release, a deploy nobody has run) or a requirement's observation has not happened
-    yet (nobody has opened the page): the summary names what is missing and the `Production:`
+  - `pending`, when production does not carry the merge yet (a shared profile on the previous
+    release, a deploy nobody has run) or a requirement's observation has not happened (nobody
+    has opened the page): the summary names what is missing and the `Production:`
     line stays `pending deploy of <merge sha>`.
   - `fail`, for a requirement observed as not met, one still unobserved at the last look, or a
     defect: file no issue; take the path `skill://legion-worker/references/findings.md` gives
     it — a clear fix to the controller topic, with its evidence comment on the controller's report
-    issue; anything needing a decision as a `dispatch ask` on that report issue, whose reference
-    you publish to the controller topic. Either names this issue, the pull request, the merge
+    issue; anything needing a decision as a `dispatch ask` there, whose reference you publish to
+    that topic. Either names this issue, the pull request, the merge
     commit, what you drove and what failed, and the `Production:` line and summary name it
     (`dispatch://<REPORT KEY>/ask/<id>`).
 - **Nothing waits in the session for a deploy.** A `pending` ends the look. With no wake queued
-  yet the daemon suspends your claim, session kept, and the issue's Sandbox goes with its pod and
-  disk; with one that arrived while the look was open the next look starts at once on the same
+  the daemon suspends your claim, session kept, and the issue's Sandbox goes with its pod and
+  disk; with one that arrived during the look the next starts at once on that
   pod. Either way the daemon wakes the check (after a suspension on a fresh pod and disk, your
   session resuming with a new check task) on one of these events, named in the woken look's task
   and its `Production:` line so the pull request carries the cause:
@@ -307,8 +308,8 @@ finish.
   a boot on a build containing the merge, `Dispatch serving build <sha> on every server process`
   for Dispatch's `server.started` announcing that, and `Dispatch's build <sha>` for the build the
   daemon read from Dispatch at its boot. Never poll, never wait on a reply, never ask for
-  approval to deploy. Open a `dispatch ask` only where the instructions name nobody for that
-  deploy: the production gap and why it matters, then the required install or restart step, its
+  approval to deploy. Open a `dispatch ask` only where the instructions name nobody: the
+  production gap and why it matters, then the required install or restart step, its
   risk, and outcome-named options; the look still ends `pending`.
 - **The bounds.** A look is bounded at 2 hours; one reporting nothing ends as a `pending`.
   The check is bounded by the project's `production_check_hours` (336, 14 days, by default) from
