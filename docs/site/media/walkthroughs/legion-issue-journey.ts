@@ -99,7 +99,11 @@ const legionIssueJourney: Walkthrough<Seeded> = {
       ],
       open: async (page, seeded) => {
         await page.goto(`/issues/${seeded.next.key}`);
-        await expect(page.getByRole("heading", { level: 1 })).toContainText(DELIVERY_DATE.title);
+        // The title is not the page's only `h1`: the shell's loading skeleton is one, and so is
+        // the rendered spec's own top-level heading. Name the title and scope it to the header.
+        await expect(
+          header(page).getByRole("heading", { level: 1, name: DELIVERY_DATE.title })
+        ).toBeVisible();
       },
       act: async (page, seeded, cue) => {
         await linger(page, 0.5);

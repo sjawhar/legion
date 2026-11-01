@@ -194,7 +194,7 @@ func startScratchDispatchOn(t *testing.T, natsURL string) (string, string) {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatalf("create scratch Dispatch home: %v", err)
 	}
-	token := "scratch-dispatch-agent-token"
+	token := scratchAgentToken
 	// Readiness is a server process starting and migrating a fresh database, whose time is the
 	// machine's load: bounded by the test binary's own deadline rather than a fixed span, so a
 	// slow start is not read as a server that will never answer.

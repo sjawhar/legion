@@ -1,0 +1,24 @@
+kind: Changed
+body: |-
+    Dispatch's change-driven background loops send no statement while nothing is written. The
+    embedding queue (which scanned every 5 s), the reference excerpt reconciliation (every five
+    minutes, and every 2 s while a batch came back full), the suggestion outcome sweep (every
+    minute) and both GitHub intakes' delivery settings (read every 30 s, and by the job intake on
+    every message) now run a pass at start and then only when a Postgres notification says their
+    work may have changed or a due time they asked for comes round, never more often than the timer
+    each replaced. Each process holds one more Postgres connection for this, a shared listener
+    logged as `dispatch background wakes`, with its keep-alive ping; it signals every loop after
+    each LISTEN, so a change made while it was reconnecting is caught up then. The embedding
+    coverage pass and the task progress reconciliation run once at start instead of every 10 and 5
+    minutes: coverage repeats only its identity steps, and only while another embedder identity's
+    rows remain, and task progress retries the rows another writer held for about a minute. The
+    delivery reconcile, the architecture import and the webhook redelivery sweep keep their timers;
+    all three now draw their jitter afresh every period, so two processes' passes drift apart. The
+    `Idempotency-Key` rows past their 24 hours and the deliveries a process that died left owed,
+    which the suggestion outcome sweep's pass carried, keep a once-a-minute leased timer of their
+    own (`api.RunMaintenanceSweep`, still under the `suggestion-outcomes` lease, so one process
+    sweeps per minute however many serve the database): no notification announces an expired key
+    or a dead process's owed delivery (`cmd/dispatch/README.md`, "Background loops").
+time: 2026-10-28T12:35:05.203357249Z
+custom:
+    Issue: pr2391

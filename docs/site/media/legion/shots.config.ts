@@ -52,6 +52,16 @@ const conversation = (journey: LegionJourney) => `/issues/${journey.key}/convers
 /** The issue's event history: what the Conversation leaves out now that it lists conversations. */
 const activity = (journey: LegionJourney) => `/issues/${journey.key}/activity`;
 const turns = (page: Page) => page.getByRole("list", { name: "Conversation turns" });
+/** Waits for the issue's own title in the header. An `h1` on an issue page is not the title alone:
+ *  the shell shows a loading skeleton `h1` before the issue arrives, and a rendered document whose
+ *  text opens on a top-level heading puts that heading on the page as a second one. Naming the
+ *  title and scoping to the header picks the heading the page is identified by, and waits for its
+ *  text rather than for whichever `h1` renders first. */
+async function titled(page: Page, title: string): Promise<void> {
+  await expect(
+    page.getByTestId("issue-header").getByRole("heading", { level: 1, name: title })
+  ).toBeVisible();
+}
 /** The Conversation opens scrolled to what is new since the viewer's last read; this brings the
  *  issue's header, with its status, back to the top of the screen above the newest turns. */
 async function headerOnTop(page: Page): Promise<void> {
@@ -81,7 +91,7 @@ const legion: ShotSet<LegionJourney> = {
       viewport: "desktop",
       theme: "light",
       ready: async (page) => {
-        await expect(page.getByRole("heading", { level: 1 })).toContainText(SAVED_CART.title);
+        await titled(page, SAVED_CART.title);
       },
       steps: async (page) => {
         await page.getByRole("button", { name: "Edit labels" }).click();
@@ -211,7 +221,7 @@ const legion: ShotSet<LegionJourney> = {
         journey.report = (await postDailyReport([{ example: SAVED_CART, issue: journey }])).key;
       },
       ready: async (page) => {
-        await expect(page.getByRole("heading", { level: 1 })).toContainText("Legion daily report");
+        await titled(page, "Legion daily report");
         await expect(page.getByRole("combobox", { name: "Status" })).toHaveValue("icebox");
         await expect(turns(page)).toContainText("Finished:");
       },

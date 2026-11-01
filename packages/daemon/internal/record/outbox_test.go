@@ -23,6 +23,7 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 	now := time.Date(2026, 9, 23, 1, 0, 0, 0, time.UTC)
 	payloads := []OutboxPayload{
 		StatusWrite{Status: "testing", ObservedStatus: "in_progress"},
+		StatusWrite{Status: "todo", ObservedStatus: "triage", PersonHandover: true},
 		MessagePost{Body: "Pull request checks are blocked."},
 		Notice{Kind: "phase-finished", Role: claim.RoleTester, Phase: phase.Testing, Summary: "Tests passed", Verdict: "pass", Version: 4, Reason: ""},
 		ControllerNotice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning, Reason: "escalated"},
@@ -79,6 +80,73 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 				t.Fatalf("payload = %#v, want %#v", got, payload)
 			}
 		})
+	}
+}
+
+// A person's handover is one dispatch_status row marked PersonHandover: while it is pending, the
+// issue has a person's handover pending, and no second row is queued for it. The workflow's other
+// status rows suppress nothing, so a hand-over row (HandOver, also a todo) on another issue, and
+// an unmarked todo on the same issue, count for nothing; a finished row is deleted, so once the
+// marked row is gone nothing is pending.
+func TestPersonHandoverPendingCountsOnlyMarkedStatusRows(t *testing.T) {
+	now := time.Date(2026, 10, 14, 17, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	enqueue := func(issue string, payload OutboxPayload) {
+		t.Helper()
+		row, err := NewOutboxRow(issue, payload, now)
+		if err != nil {
+			t.Fatalf("NewOutboxRow: %v", err)
+		}
+		inTx(t, st, func(tx pgx.Tx) {
+			must(t, records.Enqueue(ctx, tx, row))
+		})
+	}
+	pending := func(issue string) bool {
+		t.Helper()
+		var got bool
+		inTx(t, st, func(tx pgx.Tx) {
+			var err error
+			got, err = records.PersonHandoverPending(ctx, tx, issue)
+			must(t, err)
+		})
+		return got
+	}
+
+	enqueue("LEGION-208", StatusWrite{Status: "todo", ObservedStatus: "triage", PersonHandover: true})
+	enqueue("LEGION-209", StatusWrite{Status: "todo", ObservedStatus: "backlog", HandOver: true, HandOverTree: "LEGION-200", HandOverLinger: 3})
+	enqueue("LEGION-210", StatusWrite{Status: "todo", ObservedStatus: "triage"})
+	enqueue("LEGION-210", ControllerNotice{Kind: TriageNotice})
+
+	if !pending("LEGION-208") {
+		t.Fatalf("PersonHandoverPending(LEGION-208) = false, want true while its marked row is in the outbox")
+	}
+	if pending("LEGION-209") {
+		t.Fatalf("PersonHandoverPending(LEGION-209) = true, want false for an issue whose only pending row is a hand-over")
+	}
+	if pending("LEGION-210") {
+		t.Fatalf("PersonHandoverPending(LEGION-210) = true, want false for an unmarked todo and a triage wake")
+	}
+	if pending("LEGION-211") {
+		t.Fatalf("PersonHandoverPending(LEGION-211) = true, want false for an issue with no row")
+	}
+
+	inTx(t, st, func(tx pgx.Tx) {
+		rows, err := records.DueRows(ctx, tx, "LEGION", "LEGION-208", nil, now)
+		must(t, err)
+		if len(rows) != 1 || rows[0].Kind != OutboxKindDispatchStatus {
+			t.Fatalf("DueRows of LEGION-208 = %#v, want the one marked row", rows)
+		}
+		claimed, ok, err := records.ClaimRow(ctx, tx, rows[0].ID, now, time.Minute)
+		must(t, err)
+		if !ok {
+			t.Fatalf("ClaimRow of the marked row claimed nothing")
+		}
+		must(t, records.FinishOutbox(ctx, tx, claimed.ID, claimed.LeaseToken))
+	})
+	if pending("LEGION-208") {
+		t.Fatalf("PersonHandoverPending(LEGION-208) = true after its row finished, want false")
 	}
 }
 

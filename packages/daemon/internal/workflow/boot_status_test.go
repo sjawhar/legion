@@ -58,29 +58,6 @@ func seedBootTree(t *testing.T, pool *pgxpool.Pool) {
 	seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0, AdmittedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)})
 }
 
-// statusWrites is every status write the daemon has queued for issue, oldest first.
-func statusWrites(t *testing.T, pool *pgxpool.Pool, issue string) []record.StatusWrite {
-	t.Helper()
-	rows, err := pool.Query(t.Context(),
-		"select payload->>'status', payload->>'observedStatus' from outbox where kind = 'dispatch_status' and issue = $1 order by id", issue)
-	if err != nil {
-		t.Fatalf("read the status writes of %s: %v", issue, err)
-	}
-	defer rows.Close()
-	var got []record.StatusWrite
-	for rows.Next() {
-		var write record.StatusWrite
-		if err := rows.Scan(&write.Status, &write.ObservedStatus); err != nil {
-			t.Fatalf("scan a status write of %s: %v", issue, err)
-		}
-		got = append(got, write)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate the status writes of %s: %v", issue, err)
-	}
-	return got
-}
-
 // recordedStatus is the status the record holds for key.
 func recordedStatus(t *testing.T, pool *pgxpool.Pool, key string) string {
 	t.Helper()

@@ -167,6 +167,40 @@ func TestAReopenedPullRequestTakesItsNewHeadAndKeepsItsReview(t *testing.T) {
 	}
 }
 
+// A spec's decisions live in a document of their own beside the spec. That document gets versions
+// of its own as the agents write decisions into it, and none of them is a change to the design a
+// person approved: the design gate is the spec's, and only the spec's own versions and reviews
+// move it. The decisions version here is above the gate's own, the one shape that would close an
+// open gate if the gate took another document's events, so the test holds the behaviour rather
+// than the arithmetic of a version too old to matter.
+func TestDecisionsDocumentLeavesDesignGateOpen(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "U"})
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4})
+	engine := testEngine(config.DesignGateRootIssues, nil)
+
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "approval-4", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 4}, engine, admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact approval 4: %v", err)
+	}
+	approved := recordedGate(t, pool)
+	if approved == nil || approved.ApprovedVersion == nil || *approved.ApprovedVersion != 4 {
+		t.Fatalf("gate after the approval = %#v, want the spec approved at version 4", approved)
+	}
+
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "decisions-version-5", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "decisions-208", Kind: intake.DispatchArtifactVersion, Version: 5}, engine, admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact the decisions document's version: %v", err)
+	}
+
+	gate := recordedGate(t, pool)
+	if gate == nil || gate.ApprovedVersion == nil || *gate.ApprovedVersion != 4 || gate.LatestVersion != 4 {
+		t.Fatalf("gate after the decisions document's version = %#v, want it open at the spec's approved version 4", gate)
+	}
+	if gate.ArtifactID != "artifact-208" {
+		t.Fatalf("gate document = %q, want the spec's", gate.ArtifactID)
+	}
+}
+
 func TestImplementationReachesTestingWhenHandoffAndPullRequestArriveInEitherOrder(t *testing.T) {
 	for _, handoffFirst := range []bool{true, false} {
 		name := "pull-request-first"
