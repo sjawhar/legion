@@ -57,8 +57,8 @@ function Fact({ children, label }: { children: ReactNode; label: string }): Reac
  * with its own Kubernetes token, which no person approves, so a pending service login a broker
  * opened before that is one the broker refuses to approve, and the sentence says so. A pod
  * enrollment's slot (`implementer-g3`) is its own fact, since several slots of one pod share the
- * same enrollment line. `MachineLoginPage` shows this layout before its decision controls, and
- * so does `CredentialRecordPage` for a record the broker names no page for.
+ * same enrollment line. `MachineLoginPage` is the one page that renders this layout, above its
+ * decision controls.
  */
 export function CredentialRecordFacts({ record }: { record: CredentialRecord }): ReactNode {
   const { agents, isError, isPending } = useAgents(

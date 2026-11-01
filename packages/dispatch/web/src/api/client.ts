@@ -1449,10 +1449,6 @@ export class DispatchApiClient {
     );
   }
 
-  getCredentialRecord(recordId: string): Promise<CredentialRecord> {
-    return this.json<CredentialRecord>(`/api/v1/credential-requests/${pathSegment(recordId)}`);
-  }
-
   /** Approve a machine login as the signed-in viewer with the code the viewer typed: Dispatch
    *  names the viewer's own login as the approver, and the broker decides whether that login may.
    *  A secret request is decided only on the secrets broker's own page, so the broker refuses it

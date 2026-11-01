@@ -63,15 +63,13 @@ test("renders every pending credential request, linking a secret row to its brok
 });
 
 // A broker older than its own approval page names none, and an approve_url that is not an
-// absolute http(s) URL is no page to send anyone to: either row keeps the link it had before
-// that page existed, to the record's own Dispatch page, the only place such a request is
-// decided.
-test("a secret row with no usable approve_url links to the record's own Dispatch page", () => {
+// absolute http(s) URL is no page to send anyone to: either row reads as the same summary with
+// no link, since Dispatch decides no secret request of its own any more.
+test("a secret row with no usable approve_url renders its summary with no link", () => {
   for (const approve_url of [undefined, "javascript:alert(1)", "/approve/req-1"]) {
     const view = renderSection({ requests: [pendingSecretRow({ approve_url })], status: "listed" });
     expect(screen.getByText("ANTHROPIC_API_KEY")).toBeDefined();
-    const row = screen.getByRole("link", { name: /Secret request.*ANTHROPIC_API_KEY/s });
-    expect(row.getAttribute("href")).toBe("/credentials/req-1");
+    expect(screen.queryByRole("link", { name: /Secret request.*ANTHROPIC_API_KEY/s })).toBeNull();
     view.unmount();
   }
 });
