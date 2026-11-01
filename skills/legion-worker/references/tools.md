@@ -482,10 +482,10 @@ different question than the one you asked. An empty result is evidence only when
 tool ran: a missing binary, a refused permission, or a truncated search gives you silence that
 reads as a clean answer, so check that the thing you counted had something to count.
 
-- **Check your own output, never the job's phase.** A Kubernetes Job that reports `Succeeded`
-  says its container exited 0, and nothing more: read the artefact your work was to produce, or
-  the log line that proves it ran, before you believe any result. A lane measured this on
-  2026-11-01: two pods running a native toolchain died with `Error: Stack overflow.` after 23
+- **Read the summary your work wrote, never the Job's phase.** A Kubernetes Job that reports
+  `Succeeded` says its container exited 0, and nothing more: read the artefact your work was to
+  produce, or the log line that proves it ran, before you believe any result. A lane measured
+  this on 2026-11-01: two pods running a native toolchain died with `Error: Stack overflow.` after 23
   seconds, and their Job still reported `Succeeded`, because the process they ran (`rocq repl`)
   exits 0 when a command inside it fails. The toolchain is incidental; any interpreter, driver or
   wrapper that swallows an inner failure gives the same clean phase over a silent no-result, and
@@ -524,35 +524,46 @@ reads as a clean answer, so check that the thing you counted had something to co
   `st_dev` and `st_ino`, and refuse when they differ or when the `lstat` says `S_IFLNK`.
   `openat2` is not the alternative there: a lane measured it returning `ENOSYS` under gVisor for
   every flag combination it tried, so the `lstat` and `fstat` comparison above is the portable
-  check rather than a fallback. The transferable question is not which tool to use but whether
-  anything you run calls `openat2` at all: two builds of one tool reporting an identical
-  `--version` behaved differently, and only the package version and the binary's checksum told
-  them apart.
-- **Set `ulimit -s` to exactly 131072 under gVisor, soft and hard, never `unlimited`.** gVisor
-  maps the whole stack at exec and caps it at a constant, `maxStackSize = 128 << 20` in
-  `MapStack` (`pkg/sentry/mm/syscalls.go`), so 128 MiB is the main thread's ceiling and nothing
-  raises it; `RLIM_INFINITY` falls back to the 8 MiB default. A lane measured both on 2026-11-01
-  in pods under gVisor (4.19.0-gvisor), with a C probe and a second probe in another language:
-  under `unlimited`, which `/proc/self/limits` reads back as `unlimited`, the fault came at 7 MiB
-  and 524,150 frames; at 131072 (KiB) both probes reached the ceiling, a fault at 127 MiB and
-  8,388,470 frames. The same probes on an ordinary kernel track the setting as expected, so this
-  is the sandbox and not the probes. 131072 is the number because a larger soft limit buys
-  nothing and costs: glibc sizes a default thread stack from the soft limit, so a tool that
-  creates a thread pool can fail to allocate one. Write it as one command, `ulimit -s 131072`,
-  which sets soft and hard together and is legal whether the pod starts at 8 MiB or at
-  `unlimited`; a two-command form that lowers the hard limit first returns `EINVAL` from a soft
-  `unlimited`, and chained with `&&` it leaves the process at `unlimited`, which is the 8 MiB
-  this item exists to prevent. Both limits matter, since a helper that raises the stack by
-  setting the soft limit to the hard limit otherwise lands on the pod's `unlimited` hard limit
-  and gets 8 MiB, and a tool that checks the limit itself may refuse to start when the hard
-  limit is below its own minimum; the 128 MiB ceiling applies whichever finite value you choose.
-  Then read both back, since the setter's exit code proves nothing:
+  check rather than a fallback. The question is not which tool to use but whether anything you
+  run calls `openat2`, which you can read off the binary (two builds of one tool reporting an
+  identical `--version` differed here, and only the package version and the checksum told them
+  apart):
+
+  ```sh
+  b=$(readlink -f "$(command -v <tool>)")
+  n=$(nm -D --undefined-only "$b" | wc -l)
+  bad=$(nm -D --undefined-only "$b" | grep -c openat2)
+  [ "$n" -gt 0 ] || { echo "no dynamic symbols: static binary or nm failed, use a tracer"; exit 2; }
+  [ "$bad" -eq 0 ] || { echo "this binary calls openat2 and fails under gVisor"; exit 2; }
+  ```
+
+  The total count is the control: a total of zero is a static binary or a failed `nm`, not a
+  clean result. An undefined `openat2` symbol means the binary fails under gVisor; its absence
+  means it is safe.
+- **Set the stack with `ulimit -s 131072` and read both limits back.** The check, not the number,
+  is the durable part:
 
   ```sh
   ulimit -s 131072
   soft=$(ulimit -Ss); hard=$(ulimit -Hs)
-  [ "$soft $hard" = "131072 131072" ] || { echo "stack limit is $soft/$hard, refusing"; exit 2; }
+  [ "$soft $hard" = "131072 131072" ] || { echo "stack is $soft/$hard, refusing"; exit 2; }
   ```
+
+  Never `unlimited`, which reports `unlimited` and gives 8 MiB. One command sets soft and hard
+  together and is legal whether the pod starts at 8 MiB or at `unlimited`; a two-command form
+  that lowers the hard limit first returns `EINVAL` from a soft `unlimited` and, chained with
+  `&&`, leaves the process where it was. Both limits matter: a helper that raises the stack by
+  setting the soft limit to the hard limit otherwise lands on the pod's `unlimited` hard limit
+  and gets 8 MiB, and a tool that checks the limit itself may refuse to start when the hard
+  limit is below its own minimum. The ceiling is 128 MiB whichever finite value you choose —
+  gVisor maps the whole stack at exec and caps it at `maxStackSize = 128 << 20` in `MapStack`
+  (`pkg/sentry/mm/syscalls.go`), with `RLIM_INFINITY` falling back to the 8 MiB default — and a
+  larger soft limit costs rather than buys, since glibc sizes a default thread stack from it and
+  a tool that creates a thread pool can fail to allocate one. A lane measured both on 2026-11-01
+  in pods under gVisor (4.19.0-gvisor), with a C probe and a second probe in another language:
+  under `unlimited` the fault came at 7 MiB and 524,150 frames; at 131072 (KiB) both probes
+  faulted at 127 MiB and 8,388,470 frames. The same probes on an ordinary kernel track the
+  setting as expected, so this is the sandbox and not the probes.
 - **Compare durations within one pod, never across pods.** A gVisor sandbox runs syscall-heavy
   work 2.2 to 3.8 times slower than the same work outside it, and a pod lands on whatever node
   the autoscaler provisions, so two pods are two machines, two sets of neighbours and two
