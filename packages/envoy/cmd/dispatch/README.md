@@ -581,7 +581,7 @@ What the two processes share, and what each keeps to itself:
 
 - No leased background loop runs a pass beside another process's pass of the same loop.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a process whose attempt lands inside another's pass finds it held and logs a skip.
-  The nine timer loops — the delivery reconcile, the architecture import, the webhook redelivery sweep, the outbox's daily document compaction, the block index reconciliation, the term-statistics refresh, the repair of closed and reopened issues' asks, the keyed writes' maintenance sweep (lease `suggestion-outcomes`) and the prune of the registry of live server processes
+  The nine timer loops — the delivery reconcile, the architecture import, the webhook redelivery sweep, the hourly document compaction sweep (lease `document-compaction`, first tick at start, with or without NATS), the block index reconciliation, the term-statistics refresh, the repair of closed and reopened issues' asks, the keyed writes' maintenance sweep (lease `suggestion-outcomes`) and the prune of the registry of live server processes
   — also record each pass in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick lands between another's passes
   — the ordinary case, since each ticker draws its phase at boot and a rolling update starts the second process minutes after the first
   — finds the period already served and logs the same skip: each runs once per period across the processes.
@@ -729,7 +729,7 @@ A process that finds it held tries again
   a key passes its window by the clock alone, and a delivery is owed because the process holding it died, which commits nothing to announce.
   It keeps the lease name the suggestion outcome sweep carried this work under, so during a roll the earlier release's pass and this one still exclude each other on it.
 
-Outside these classes, the outbox still scans on a 5 s retry ticker and compacts daily, the settlement resumption still runs every minute, the block index reconciliation (lease `block-index`) runs every 30 s (every 2 s while a batch is full) and the repair of closed and reopened issues' asks (lease `issue-ask-repair`, Database migrations below) every 10 minutes after its boot pass, each recording its passes in `duty_passes` with its period, and the per-feature listeners (the delivery live hub, the event stream relay, the stale-room evictor) keep their own connections and keep-alive pings.
+Outside these classes, the outbox still scans on a 5 s retry ticker, the document compaction sweep (lease `document-compaction`) runs every hour from a tick at start whether or not NATS is configured, the settlement resumption still runs every minute, the block index reconciliation (lease `block-index`) runs every 30 s (every 2 s while a batch is full) and the repair of closed and reopened issues' asks (lease `issue-ask-repair`, Database migrations below) every 10 minutes after its boot pass, each recording its passes in `duty_passes` with its period, and the per-feature listeners (the delivery live hub, the event stream relay, the stale-room evictor) keep their own connections and keep-alive pings.
 
 **One shared listener per process.**
 Every woken loop waits on one `pglisten.Hub` (owner `dispatch background wakes` in its log lines), which holds one connection from the store's listener pool and LISTENs on every loop's channel.

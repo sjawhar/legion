@@ -25,7 +25,7 @@ func TestMigrate0160NamesEveryDocumentOfMoreThanOneRow(t *testing.T) {
 		insert into issues (key, project_key, number, title, created_by, rank)
 			values ('CORE-1', 'CORE', 1, 'Spec', '{"kind":"user","id":"alice"}', 'U');
 	`); err != nil {
-		t.Fatalf("seed the issue at 0140: %v", err)
+		t.Fatalf("seed the issue at 0159: %v", err)
 	}
 	for slug, rows := range documents {
 		var id string
@@ -40,7 +40,7 @@ func TestMigrate0160NamesEveryDocumentOfMoreThanOneRow(t *testing.T) {
 			)
 			select id::text from a
 		`, slug, rows).Scan(&id); err != nil {
-			t.Fatalf("seed the document of %d rows at 0140: %v", rows, err)
+			t.Fatalf("seed the document of %d rows at 0159: %v", rows, err)
 		}
 		ids[slug] = id
 	}

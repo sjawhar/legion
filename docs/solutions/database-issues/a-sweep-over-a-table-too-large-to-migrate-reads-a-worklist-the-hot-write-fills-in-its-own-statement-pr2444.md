@@ -29,7 +29,7 @@ related_issues:
 
 ## Evidence
 
-- `packages/envoy/internal/dispatch/store/migrations/0141_doc_compaction_owed.up.sql`: the table
+- `packages/envoy/internal/dispatch/store/migrations/0160_doc_compaction_owed.up.sql`: the table
   and its one-time backfill. `docs/persistence.go`: the append's `owed as (insert into
   doc_compaction_owed ...)` CTE. `docs/compaction.go`, `docs/persistence.go` (rebuild, delete)
   and `docs/compaction_sweep.go` remove the row.

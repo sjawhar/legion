@@ -408,7 +408,7 @@ func main() {
 	// whose loops would each run everywhere, so it ends here.
 	//
 	// The loops come in these shapes, so that a database nobody writes costs them nothing except
-	// where GitHub gives them nothing to wake on, and the four timers of the last shape:
+	// where GitHub gives them nothing to wake on, and the five timers of the last shape:
 	//   - woken loops, which run a pass at start and then only when a Postgres notification on the
 	//     shared listener below says their work may have changed, or when a due time their last
 	//     pass asked for comes round: the embedding queue (embedqueue.WakeChannel), the reference
@@ -440,9 +440,10 @@ func main() {
 	//     batch is full), the repair of closed and reopened issues' asks (api.RunIssueAskRepair,
 	//     every 10 minutes on a plain ticker, after the boot's own unleased pass), the prune of
 	//     the server process registry (processes.RunPrune, every minute, which joinRegistry starts
-	//     below) and the keyed writes' maintenance sweep (api.RunMaintenanceSweep, every minute),
-	//     each recording its passes in duty_passes like the timers above; each tick sends its
-	//     statements whether or not anything is owed.
+	//     below), the keyed writes' maintenance sweep (api.RunMaintenanceSweep, every minute) and
+	//     the document compaction sweep (docs.Service.RunCompactionSweep, every hour from a tick at
+	//     start, with or without NATS), each recording its passes in duty_passes like the timers
+	//     above; each tick sends its statements whether or not anything is owed.
 	//
 	// The shared listener is one pglisten.Hub per process, on one held connection of the store's
 	// listener pool, carrying every woken loop's channel. Every wake is registered before it runs

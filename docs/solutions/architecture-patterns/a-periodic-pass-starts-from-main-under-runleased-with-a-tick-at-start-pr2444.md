@@ -23,7 +23,7 @@ Extends docs/solutions/architecture-patterns/a-once-per-period-leased-loop-bucke
   per-process timer whose first tick is one period after boot never fires in a process that
   restarts more often than that period.
 - Add its lease to the leases observed in
-  `TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses`, or say there why it cannot be
+  `TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses`, or say there why it cannot be
   observed.
 
 ## Evidence
