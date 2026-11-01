@@ -265,7 +265,7 @@ The plugin ships eight skills, `claude-envoy:envoy`, `claude-envoy:dispatch`,
 `claude-envoy:dispatch-first`, `claude-envoy:dispatch-writing-specs`, `claude-envoy:asd-ste100`,
 `claude-envoy:following-best-practices`, `claude-envoy:outside-message` and `claude-envoy:plain-words`.
 The first four teach the Envoy tools, the `dispatch` command and how to write a spec; `asd-ste100` gives the
-ASD-STE100 rules for text a person reads; `following-best-practices` has an agent find the standard and world-class answers before a design, and fresh subagents review the proposal before an approval request; `outside-message` holds the steps and the approval before text
+ASD-STE100 rules for text a person reads; `following-best-practices` has an agent find the best practices and the world-class answer before a design, and fresh subagents review the proposal before an approval request; `outside-message` holds the steps and the approval before text
 reaches a person outside the company, and `plain-words` the empty verb phrases to delete from any text a
 person reads.
 `skills/` holds one relative symlink per skill into the repository-root `skills/`, which

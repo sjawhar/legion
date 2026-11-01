@@ -1,5 +1,5 @@
 kind: Changed
-body: '`legion-architect` finds the standard best-practice solution as `skill://following-best-practices` says, instead of restating the method, and the design gate runs that skill''s two approval reviews, standard practice and world-class, after the gap and claim reviews and before `dispatch request-approval`. `plan-reviewer` checks that the spec''s `### Standard answer` entry is there and complete, with both reviews'' verdicts and a fact or cost for each departure; the two reviews judge the design.'
+body: '`legion-architect` follows best practice and designs the world-class answer as `skill://following-best-practices` says, instead of restating the method, and the design gate runs that skill''s two approval reviews, best practice and world-class, after the gap and claim reviews and before `dispatch request-approval`. `plan-reviewer` checks that the spec''s `### Best practice and world-class` entry is there and complete, with both reviews'' verdicts and a fact or cost for each departure; the two reviews judge the design.'
 time: 2026-10-31T23:44:58.000000000Z
 custom:
     Issue: pr2616
