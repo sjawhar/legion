@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-562",
+  "previousHandoff": "9e36ee3e8b849dc005ab394c55bc2eb916782f98",
+  "completed": "2026-11-01T07:58:30Z",
+  "round": 20,
+  "scope": "Narrowed by the INFRA-63 architect: the merge 4a6d06a7 of main d09b46d7 (both sides kept in routes_table.go, server.go, server_test.go and cmd/dispatch/AGENTS.md; migrations renumbered to 0151-0154 above main's 0150_dpop_proofs with the SQL unchanged, no stale reference, and the PR body stating the schema_migrations effect), then ci-ok and pr-title green at 4a6d06a7, naming the run.",
+  "headReviewed": "65a33ea2b347a16cc286269edfd3796e637626fa",
+  "codeHead": "4a6d06a72cc03e18376019573032781ad493a3a1",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "scopeResults": {
+    "merge": "git show --remerge-diff 4a6d06a7: routes_table.go keeps this PR's 'on every process' wording on main's renamed routeRow rows (6 test-hook rows on both sides); server.go's doc keeps the test hooks' listener beside main's DPoP text; server_test.go keeps ListenerTakeoverWindow and TestHookTimeout beside main's BrokerTokens, DashboardEntry and testServerURL; cmd/dispatch/AGENTS.md keeps both sides. With migration numbers masked, the branch's diff against round 19's differs only in main's renames around this PR's unchanged lines.",
+    "migrations": "0151_message_delivery_urgency, 0152_route_roster, 0153_github_rate_limits, 0154_delivery_run_warnings, above main's 0150_dpop_proofs (git ls-tree main@origin c656fc4f); 0 SQL statement lines changed; no reference to this PR's old numbers remains. The PR body lacked the schema_migrations statement; I added it (prose in the body, no commit).",
+    "prBody": "Added: a renumbering changes the version recorded in schema_migrations, so a test or scratch database that ran an earlier build of this branch reads its old 0150 as main's 0150_dpop_proofs and skips that migration; recreate such a database. Production never ran the branch."
+  },
+  "ci": "CI run 41270335139 at head SHA 4a6d06a72cc03e18376019573032781ad493a3a1, attempt 2, success: ci-ok (job 124784811061), lint, typecheck, test, envoy-go; PR Title run success (pr-title job 124741636139). Attempt 1's only red was dispatch's overlapping-marks.e2e.ts:311 (job 124744759459), main's known flaky browser test; rerun once with --failed. The commits above 4a6d06a7 touch only .legion/INFRA-562/.",
+  "threads": "No open thread.",
+  "keyFindings": []
+}
