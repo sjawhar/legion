@@ -173,6 +173,83 @@ A service login a person approved through a device code before this broker keeps
 it expires, at most `BROKER_LAUNCHER_CREDENTIAL_SECONDS` (30 days by default) after its approval:
 nothing refreshes it.
 
+A Google Compute Engine VM logs in and enrolls itself with the identity token its metadata server
+signs for the VM's service account, so it holds no stored credential and no person approves it.
+Four settings turn this on, and the broker refuses to start with only some of them:
+
+- `BROKER_GOOGLE_OIDC_AUDIENCE`: the audience the VMs ask their metadata server for. The issuer is
+  always Google's, `https://accounts.google.com`, which the broker discovers at startup only when
+  this is set; it then logs one `google vm identity` line naming the issuer, the audience and the
+  VM services. Unset, the broker reads and logs nothing about Google, and refuses kind `vm` with
+  `400 INVALID_KIND`.
+- `BROKER_VM_SERVICES`: whitespace-separated `<service>=<service account email>` entries. Use a
+  dedicated user-managed account for each fleet: the broker refuses a project's default Compute
+  Engine or App Engine account, which every workload in the project runs as by default.
+- `BROKER_VM_PROJECTS`: `<service account email>=<project id>`, the one project the fleet's VMs run
+  in.
+- `BROKER_VM_INSTANCES`: `<service account email>=<instance-name glob>`, the names the fleet's VMs
+  have, in Go's `path.Match` syntax.
+
+One fleet's entry, `example-fleet`, whose VMs run as one account in `example-project` and are named
+`example-vm-...`:
+
+```sh
+BROKER_GOOGLE_OIDC_AUDIENCE=example-vm-audience
+BROKER_VM_SERVICES=example-fleet=example-fleet@example-project.iam.gserviceaccount.com
+BROKER_VM_PROJECTS=example-fleet@example-project.iam.gserviceaccount.com=example-project
+BROKER_VM_INSTANCES=example-fleet@example-project.iam.gserviceaccount.com=example-vm-*
+```
+
+A secret whose owner tag is `example-fleet` then goes to the fleet's VMs at once and to no one else.
+The broker refuses a VM's login (`POST /v1/launcher-credentials/token`) whose token is for another
+audience or does not verify, including one whose email is not verified or that has no
+`google.compute_engine` claims (`401 TOKEN_INVALID`); whose token has expired (`401
+TOKEN_EXPIRED`); and whose account is not listed, whose request names another service, whose
+project is another, or whose instance name the glob does not match (`403 ACCOUNT_NOT_LISTED`, each
+naming what did not match). Each VM holds a launcher credential and an enrollment of its own, keyed
+by `<account>@<project>/<zone>/<instance id>`, so one VM's login never moves another's credential,
+and ending one VM's enrollment leaves the others. A VM's credential expires with its token, an hour
+after the token was minted; its enrollment outlives it while it renews. Dispatch's machine-login
+page lists each VM's login, its host `<project>/<zone>/<instance name>` and no approver, and anyone
+signed in may revoke it, which ends that VM's enrollment; the VM logs in again at its next
+`enroll --vm`. A revoke ends the enrollment, not the VM's identity token: someone who copied that
+token off the VM logs in again with it within its hour, under a new machine login, enrolls a key of
+their own and reads what the VM may read. To end a copied token for certain, take the VM out of its
+fleet and wait out the hour, as [a copied VM token](#a-copied-vm-token) says. To stop a fleet
+logging in, remove its entries and redeploy the broker: each VM's
+credential stops authenticating at its next call, and its next login is refused. Narrowing a fleet,
+by changing its project or its instance-name glob, ends every VM it no longer allows at once: from
+its next call the VM has no session identity, so releasing a grant it holds, opening a request and
+renewing are all refused `401` (`ENROLLMENT_NOT_LIVE` for the renewal, on which `agent-secrets
+renew` stops, exit 76), its credential stops authenticating, a person's approval of a request it
+left pending ends that request denied with no grant, its launcher credential no longer
+authenticates, so a new enrollment under it is refused `401 LAUNCHER_INVALID`, and its next login is
+`403 ACCOUNT_NOT_LISTED`. A value the VM already read before the change stays with it: the broker
+cannot take back a secret it released, so rotate any it must no longer hold. Its enrollment row
+ends with its lease.
+
+Whoever can get an identity token for the fleet's account from a VM in that project with a matching
+name logs in as its service. Google Cloud IAM is that boundary: who may run a VM as the account
+(`iam.serviceAccounts.actAs` on it, with `compute.instances.create` in the project), and who may run
+code on a fleet VM, which can fetch the VM's token.
+
+A VM runs, with `AGENT_SECRETS_URL` naming the broker:
+
+```sh
+agent-secrets enroll --vm --service example-fleet --audience example-vm-audience --out /var/lib/agent-secrets
+AGENT_SECRETS_KEY_DIR=/var/lib/agent-secrets agent-secrets --reason "git fetch" GITHUB_TOKEN -- sh -c 'test -n "$GITHUB_TOKEN" && echo "GITHUB_TOKEN is set"'
+```
+
+`enroll --vm` reads the token from
+`http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=<audience>&format=full`
+(`format=full` is what gives the token the VM's project, zone and instance, which the broker
+requires), logs in, enrolls the VM, writes `key.pem` and `enrollment` under `--out`, and prints the
+enrollment id. The directory is the VM's one session identity: keep one per VM. Run again over the
+same directory, it keeps `key.pem`, gets the same live enrollment back and extends its lease, or
+enrolls anew once the old lease has lapsed. Keep the lease alive with `agent-secrets renew --vm`, or
+by running `enroll --vm` again within `BROKER_LEASE_SECONDS`. A new `key.pem` while the VM's
+enrollment is still live is refused `409 ALREADY_ENROLLED` until that lease lapses.
+
 ## Approval sign-in
 
 A person approves or denies a secret request on the broker's own page,
@@ -324,6 +401,7 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
 | Dispatch | Dispatch's server calls the broker's account routes as its own ServiceAccount: it lists the requests and machine logins waiting on the signed-in person, each secret request with its page on the broker (`approve_url`), which its Inbox links to, and relays a person's machine-login decisions and revokes. Set Dispatch's `DISPATCH_AGENT_SECRETS_URL` to the broker's URL and `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` to the path of its projected token for `BROKER_K8S_OIDC_AUDIENCE`, and list that account in the broker's `BROKER_API_ACCOUNTS`. Without the URL, Dispatch hides its credential pages. Deploy a broker with the approval page before a Dispatch whose Inbox links it ([Approval sign-in](#approval-sign-in)). |
 | The sign-in provider | A person's browser signs in to the broker at the provider (Google, under the Workspace's internal consent screen), and the broker reaches its token endpoint and keys over HTTPS at a sign-in, and its discovery document at the first sign-in each process serves (kept once a read succeeds) and at the client check it takes at startup and every hour after. A discovery that could not be read answers the page `503` naming the issuer and logs `approval sign-in: reach the provider`; machines are served as before, and `GET /signin/status` reports `issuer_unreachable` ([What the sign-in is doing](#what-the-sign-in-is-doing)). |
 | Kubernetes (optional) | To enroll pods, and to let a service log in with its token (`BROKER_SERVICE_LOGINS`), `BROKER_K8S_OIDC_ISSUER` and `BROKER_K8S_OIDC_AUDIENCE` name the cluster's service-account token issuer and the audience the pods' and the services' projected tokens carry. The broker fetches the issuer's discovery document at startup and refuses to start if it cannot. |
+| Google Cloud (optional) | To let Compute Engine VMs log in and enroll themselves, `BROKER_GOOGLE_OIDC_AUDIENCE` names the audience of their identity tokens, and `BROKER_VM_SERVICES`, `BROKER_VM_PROJECTS` and `BROKER_VM_INSTANCES` bind each fleet. The broker fetches Google's discovery document at startup and refuses to start if it cannot. |
 | Envoy (optional) | With `BROKER_ENVOY_URL`, the broker tells a waiting agent session, best effort, when its pending request expires. |
 
 ## Network and trust
@@ -743,6 +821,36 @@ hold:
 That release refuses every pod renewal without a token, so it also removes what only the ratchet
 needs: the pod-UID lookup in `Renew` (`podTokenRatcheted`) and its partial index
 `enrollments_pod_token_renewed`.
+
+## A copied VM token
+
+A Google VM's identity token logs in as that VM for up to an hour after it was minted, wherever it
+is presented. A copy's logins show in the audit record as `launcher_credential.token_login` rows
+for the VM's subject from more than one key:
+
+```sql
+select at, detail->>'credential_id' as credential_id, detail->>'key_thumbprint' as key,
+       detail->>'token_expires_at' as token_expires_at
+from audit
+where kind = 'launcher_credential.token_login'
+  and detail->>'subject' = '<account>@<project>/<zone>/<instance id>'
+order by at;
+```
+
+On the VM itself a copy shows as `enroll --vm` runs refused `401 LAUNCHER_INVALID` or `429
+RATE_LIMITED` while nothing else changed. A copy cannot end or take over the VM's live
+enrollment (no machine login ends a VM's enrollment, `403 VM_ENDS_BY_LOGIN_REVOKE`, and a second
+key for a live VM is `409 ALREADY_ENROLLED`), but it can enroll a key of its own while the VM holds
+none. Revoking the VM's login on Dispatch's machine-login page ends every enrollment that login
+made, the VM's and a copy's alike, but not the copied token: within its hour the copy logs in
+again under a new login and enrolls afresh. To end it for certain, take the VM out of the fleet's
+settings and redeploy the broker: change `BROKER_VM_INSTANCES` so the glob no longer matches the
+VM's name, or, for the whole fleet, remove the account's entries from `BROKER_VM_SERVICES`,
+`BROKER_VM_PROJECTS` and `BROKER_VM_INSTANCES`. From then every login and enrollment of that VM,
+the copy's included, is refused at its next call. Find and remove what copied the token before you
+put the VM back: the latest `token_expires_at` above says when the last copied token ends, at most
+an hour after it was minted. Rotate any secret the copy may have read; the broker cannot take back
+a value it released.
 
 ## The audit record
 

@@ -390,6 +390,18 @@ func SessionOnVolume(file, root string) (string, error) {
 	return filepath.Join(root, SessionsSubPath, rest), nil
 }
 
+// SessionFromVolume is the recorded session path a file on a tree or controller
+// volume had under the pod's sessions directory. It is SessionOnVolume's
+// inverse and refuses a file outside the volume's sessions subdirectory.
+func SessionFromVolume(file, root string) (string, error) {
+	sessions := filepath.Join(root, SessionsSubPath)
+	relative, err := filepath.Rel(sessions, filepath.Clean(file))
+	if err != nil || relative == "." || !filepath.IsLocal(relative) {
+		return "", fmt.Errorf("session file %s is not under %s", file, sessions)
+	}
+	return filepath.Join(ompSessionsDir, relative), nil
+}
+
 // agentArgv is the command the shim runs, the launch's own harness: the Claude Code command for a
 // Claude role (claudeArgv), and otherwise the image's Oh My Pi with its two explicit extensions,
 // the Envoy plugin first, `--resume` on the recorded session when resuming, then RPC mode and the

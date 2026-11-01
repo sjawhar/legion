@@ -4,7 +4,7 @@ Docker-first cross-machine notification routing for AI agent sessions.
 
 ## Goals
 
-- Route GitHub, Slack, WhatsApp, and agent-to-agent notifications to the correct opencode session
+- Route GitHub, Slack, WhatsApp, and agent-to-agent notifications to the correct agent session
 - Keep all envoy-owned code and infrastructure in this repo
 - Run every envoy component inside Docker containers
 - Avoid host installs except Docker on remote machines that need it
@@ -21,7 +21,7 @@ This repo owns:
 
 This repo does **not** silently absorb changes to other maintained software.
 
-If envoy needs changes in `opencode`, `@sjawhar/whatsapp-mcp`, or another maintained repo:
+If envoy needs changes in `@sjawhar/whatsapp-mcp` or another maintained repo:
 
 - make that change in the other repo
 - keep it as a separate clear jj change/commit

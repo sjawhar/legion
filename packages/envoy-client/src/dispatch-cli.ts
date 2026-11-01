@@ -58,7 +58,7 @@ const OK = 0;
 const REFUSED = 1;
 const USAGE = 2;
 
-const HOSTS = ["omp", "claude", "opencode"] as const satisfies readonly DispatchHost[];
+const HOSTS = ["omp", "claude"] as const satisfies readonly DispatchHost[];
 
 /** Claude Code reads back at most 30,000 characters of a command's output by default
  *  (`BASH_MAX_OUTPUT_LENGTH`). The whole output stays under this, with room to spare, every line
@@ -254,7 +254,7 @@ export async function runDispatchCli(
     return refuse(
       hostName === undefined
         ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell. From an agent's session, send the command as a bash call. To run dispatch by hand, set DISPATCH_HOST, and set DISPATCH_SESSION_ID to the id of your own session."
-        : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`,
+        : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp or claude.`,
       USAGE,
       parsed.tool
     );

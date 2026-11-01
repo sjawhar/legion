@@ -44674,8 +44674,7 @@ function neutralConfig(env) {
 }
 var HARNESS_DIRECTORY_VARIABLE = {
   omp: "PI_CODING_AGENT_DIR",
-  claude: "CLAUDE_CONFIG_DIR",
-  opencode: "OPENCODE_CONFIG_DIR"
+  claude: "CLAUDE_CONFIG_DIR"
 };
 var PLUGIN_HARNESSES = Object.keys(HARNESS_DIRECTORY_VARIABLE);
 function namedDirectory(harness, env) {
@@ -46644,7 +46643,7 @@ function messageMetadataShape(schema) {
   return {
     in_reply_to: schema.string().optional(),
     supersedes: schema.string().optional(),
-    urgency: schema.enum(URGENCY_VALUES).describe("low | med | high | blocking").optional(),
+    urgency: schema.enum(URGENCY_VALUES).describe("low | med | high | blocking: how soon the recipient should act, shown on its card. It does not deliver the message sooner or ahead of others.").optional(),
     expects_reply: schema.enum(EXPECTS_REPLY_VALUES).describe("none | optional | required").optional(),
     expires_at: schema.number({ int: true }).optional()
   };
@@ -46713,7 +46712,7 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. Any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. Any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish
   },
@@ -51843,7 +51842,7 @@ async function sessionTitle(environment, directory, sources = {}) {
 
 // src/envoy-channel-server.ts
 var CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel";
-var CHANNEL_INSTRUCTIONS = "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay.";
+var CHANNEL_INSTRUCTIONS = "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is how soon the sender asks you to act (it does not change when or in what order deliveries arrive), from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay.";
 var CHANNEL_INBOX_LIMIT = 50;
 var EMPTY_RECEIPT = new Uint8Array;
 var ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/;

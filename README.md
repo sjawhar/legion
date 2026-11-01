@@ -58,8 +58,7 @@ hands to whichever session holds it. Delivery is at least once. Events stay in t
 hours, and the Legion daemon reads them through durable consumers, so an event that arrives while it
 is down is read when it comes back. Agent harnesses connect through the clients in this repository:
 `packages/pi-envoy` for Oh My Pi (with `packages/pi-legion`, the Legion plugin a Legion pane loads
-beside it), `packages/claude-envoy` for Claude Code and `packages/envoy-plugin` for OpenCode, all
-built on `packages/envoy-client`.
+beside it) and `packages/claude-envoy` for Claude Code, both built on `packages/envoy-client`.
 
 [Envoy's documentation](https://sjawhar.github.io/legion/dispatch/envoy/)
 
@@ -122,7 +121,6 @@ bun run docs:dev
 | `packages/pi-legion/` | The Oh My Pi extension a Legion pane loads beside it: the Legion tool and daemon handshake, the agents Legion's workers run with, and the Legion skills. |
 | `packages/pi-shared/` | The private package both Oh My Pi extensions bundle: the in-process interface between them and the modules both use. |
 | `packages/claude-envoy/` | The Claude Code plugin: Envoy events in a Claude Code session, and the `dispatch` command. |
-| `packages/envoy-plugin/` | The OpenCode plugin: the Envoy tools and the `dispatch` command. |
 | `skills/` | The skills Legion's agents load: the architect, the controller, the phase workers, Dispatch, Envoy and the review rubrics. |
 | `deploy/kubernetes/` | Example files for running Legion on Kubernetes: `legion.yaml`, the controller's file, and a model route. |
 | `docs/site/` | The documentation site, in Astro Starlight. |
@@ -171,7 +169,7 @@ dependency's license cannot be determined:
 
 | Artifact | Notices |
 | --- | --- |
-| `@sjawhar/pi-envoy`, `@sjawhar/pi-legion`, `@sjawhar/opencode-legion-envoy` (npm) | `dist/THIRD_PARTY_NOTICES` in the package |
+| `@sjawhar/pi-envoy`, `@sjawhar/pi-legion` (npm) | `dist/THIRD_PARTY_NOTICES` in the package |
 | `packages/claude-envoy` (committed bundle) | `packages/claude-envoy/dist/THIRD_PARTY_NOTICES` |
 | Dispatch web app | `THIRD_PARTY_NOTICES.txt` beside the bundle, served at `/THIRD_PARTY_NOTICES.txt` |
 | Documentation site (GitHub Pages) | [`THIRD_PARTY_NOTICES.txt`](https://sjawhar.github.io/legion/THIRD_PARTY_NOTICES.txt) |
