@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -205,6 +206,17 @@ func logRefusal(name string, urls []string, err error) {
 		slog.String("error", err.Error()))
 }
 
+// handshaking says whether nc is in a reconnect's handshake (CONNECTING) or between its attempts
+// (RECONNECTING), the two states a connection the server closed during that handshake is in when
+// its async error callback runs.
+func handshaking(nc *nats.Conn) bool {
+	if nc == nil {
+		return false
+	}
+	status := nc.Status()
+	return status == nats.CONNECTING || status == nats.RECONNECTING
+}
+
 // serverList is urls as a log line names them: comma-separated, each without its userinfo
 // (natsURLWithoutUserinfo).
 func serverList(urls []string) string {
@@ -291,7 +303,7 @@ func options(name string, urls []string, callbacks connectCallbacks, now func() 
 	// URL's userinfo, a token or a user and password, when the URL carries one. The nkey credential
 	// never reaches a line: options never sees it, since nkeyCredential is applied to the options
 	// value afterwards (connect.go, connectWithContext) and holds a public key and a signer only.
-	opts.ReconnectErrCB = func(_ *nats.Conn, err error) {
+	reconnectAttemptFailed := func(err error) {
 		if !throttle.allow() {
 			return
 		}
@@ -304,6 +316,7 @@ func options(name string, urls []string, callbacks connectCallbacks, now func() 
 			slog.String("servers", serverList(urls)),
 			slog.String("error", text))
 	}
+	opts.ReconnectErrCB = func(_ *nats.Conn, err error) { reconnectAttemptFailed(err) }
 	opts.ReconnectedCB = func(nc *nats.Conn) {
 		note(nc, true)
 		// Each outage reports its own first failed attempt at once, rather than staying silent for
@@ -331,6 +344,22 @@ func options(name string, urls []string, callbacks connectCallbacks, now func() 
 		}
 	}
 	opts.AsyncErrorCB = func(nc *nats.Conn, sub *nats.Subscription, err error) {
+		if sub == nil && errors.Is(err, io.EOF) && handshaking(nc) {
+			// A server that closes the connection during a reconnect's CONNECT and PING handshake
+			// (a server restarting, or one that accepted the dial as it shut down) makes nats.go's
+			// sendConnect report the read's io.EOF here, and nowhere else: the reconnect loop then
+			// tries again without calling ReconnectErrCB (nats.go v1.50.0 nats.go:2930-2938,
+			// 3251-3258). It is a failed reconnect attempt, so it is logged as one, on the same
+			// throttle. Only that report is: the connection is still in that handshake
+			// (CONNECTING) or waiting for the next attempt (RECONNECTING) when the callback runs,
+			// and every other async error, an EOF on a connected connection included, stays an
+			// ERROR.
+			reconnectAttemptFailed(err)
+			if callbacks.asyncErr != nil {
+				callbacks.asyncErr(nc, err)
+			}
+			return
+		}
 		level := slog.LevelError
 		if errors.Is(err, nats.ErrConsumerNotActive) {
 			// Every consumer Envoy runs with idle heartbeats is a KV watcher's ordered consumer,

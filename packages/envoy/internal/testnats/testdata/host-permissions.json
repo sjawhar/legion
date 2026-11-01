@@ -67,6 +67,7 @@
     "allow": [
       "_INBOX.>",
       "notifications.role.> envoy-listener-@MACHINE_ID@",
+      "notifications.role.> envoy-roles",
       "notifications.>",
       "agentstream.*.control"
     ]

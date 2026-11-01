@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
@@ -41,6 +42,12 @@ func vmConfig(t *testing.T, audience string) config.Config {
 		"BROKER_K8S_OIDC_ISSUER":     "https://cluster.example",
 		"BROKER_K8S_OIDC_AUDIENCE":   "example-broker-pod",
 		"BROKER_SERVICES":            "example-service=system:serviceaccount:example:example-sa",
+		// The four the approval page's sign-in needs, which every broker refuses to start
+		// without: this configuration is a whole one, as a deployment's is.
+		"BROKER_SIGNIN_ISSUER":             testSignInIssuer,
+		"BROKER_SIGNIN_CLIENT_ID":          brokertest.SignInClientID,
+		"BROKER_SIGNIN_CLIENT_SECRET_FILE": signInClientSecretFile(t),
+		"BROKER_SIGNIN_DOMAIN":             brokertest.SignInDomain,
 	}
 	if audience != "" {
 		env["BROKER_GOOGLE_OIDC_AUDIENCE"] = audience

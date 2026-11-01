@@ -1,5 +1,53 @@
 # Changelog
 
+## [14.1.0] - 2026-11-01
+
+### Added
+
+- Consumer delivery. While a session's agent subject is open, the plugin subscribes its relay
+  subject, `notifications.envoy.deliver.<session id>`, before it registers, and every registration
+  asks the listener for the session's durable consumer, with an epoch per NATS connection and the
+  resume point it persisted. Answered `consumer`, the session takes its agent subject and every
+  followed topic the stream stores from the listener's relay, in stream order: each frame is
+  answered `received` as it decodes, `progress` every 20 s while Oh My Pi holds its card or turn
+  unwritten, and `done` once Oh My Pi wrote it (the message's `message_end`), or at once for a
+  frame skipped, suppressed, already shown, or rejected (after the rejection reply is posted). A
+  frame the host dropped unwritten (a switch away, an interrupt that withdrew a person's turn) is
+  answered `nak` and comes again. The core copies of those subjects then show nothing and only
+  answer a role lane's receipt, and the replay engine makes no `/v1/replay` call. So a message
+  published while the session was killed, restarting or disconnected, a role message to a role it
+  holds included, is shown once when it is back, for up to 72 hours. A nats.js reconnect begins a
+  new epoch and registers at once, so the listener restarts the relay at the consumer's ack floor;
+  the resume point is kept in the session file (`envoy-consumer-state`), with each topic's follow
+  time whenever it changes, so a resumed session's missing consumer starts where it stopped. A
+  session coming from the previous plugin has no resume point of its own: its first consumer
+  starts at the replay cursors its session file holds, so the messages stored while it was away
+  are shown instead of acked away. A BTW
+  that arrives late (delivered before, or stored before the connection's epoch began) is one inert
+  card and starts no side turn. Answered `core`, or by a listener of an earlier release, delivery
+  works as before (INFRA-594).
+
+### Changed
+
+- A BTW's side turn and every Dispatch reply run off the frame that started them, so the frames
+  after it wait for neither the model call nor the reply, on the core path and the consumer path
+  alike (INFRA-594).
+
+### Fixed
+
+- `envoy_sessions`' `machine` filter finds a session by the listener it registered through as
+  well as by the machine its process runs on: it matched only the latter, so a filter by a hub's
+  machine id (`envoy-hub`, `gke`) listed nothing for the sessions registered through it
+  (INFRA-594).
+
+## [14.0.0] - 2026-11-01
+
+### Changed
+
+- The shipped `dispatch` command accepts only `omp` and `claude` as `DISPATCH_HOST`, and reads
+  `OPENCODE_CONFIG_DIR` no longer; `envoy_publish`'s description no longer names an OpenCode
+  agent as the kind of session a serve port reaches. Legion no longer supports OpenCode.
+
 ## [13.13.1] - 2026-11-01
 
 ### Added

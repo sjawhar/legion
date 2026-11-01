@@ -117,8 +117,10 @@ func (r *SessionRegistry) armExpiryLocked() {
 	r.expiryArmedFor = earliest
 }
 
-// expireDue is the expiry timer's callback. It pops every deadline that has passed and re-arms the
-// timer for the next one.
+// expireDue is the expiry timer's callback. It pops every deadline that has passed, re-arms the
+// timer for the next one, and then calls OnChange's functions for each entry it removed from the
+// cache: a lapse has no watch event, so this and PruneLapsed, which sweeps the cache for the same
+// entries without waiting for the timer, are where the relay hears of one.
 //
 // A live entry's deadline removes the entry only when the cache still holds it with that same
 // expiresAt; a write that replaced it since moved the deadline, and then nothing happens. The
@@ -128,14 +130,15 @@ func (r *SessionRegistry) armExpiryLocked() {
 //
 // A last-seen deadline removes the id's seenLocal record and, when the cache holds no entry for
 // the id, its revision fence in cacheRevisions, so the fence map holds only live ids and ids that
-// left within the retention. Dropping the fence is safe because the retention is never less than
-// one TTL: any revision older than the fence was written before the id left the cache, so its
-// Created() is more than one TTL in the past, and expiryFor gives a late delivery of it a deadline
-// that has already passed. cacheSessionLocked does not insert such a delivery for an id it does
-// not hold, so it neither makes the id live nor brings back a LastSeen answer.
+// left within the retention. It changes no entry, so it reports nothing: a read already answered
+// the id as gone when its entry left. Dropping the fence is safe because the retention is never
+// less than one TTL: any revision older than the fence was written before the id left the cache,
+// so its Created() is more than one TTL in the past, and expiryFor gives a late delivery of it a
+// deadline that has already passed. cacheSessionLocked does not insert such a delivery for an id
+// it does not hold, so it neither makes the id live nor brings back a LastSeen answer.
 func (r *SessionRegistry) expireDue() {
+	var lapsed []string
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.expiryArmedFor = time.Time{}
 	now := time.Now()
 	for len(r.expiries) > 0 && !r.expiries[0].deadline.After(now) {
@@ -150,6 +153,7 @@ func (r *SessionRegistry) expireDue() {
 			}
 			delete(r.cache, id)
 			r.setExpiryLocked(id, expireLastSeen, r.lastSeenUntilLocked(id, cs.expiresAt))
+			lapsed = append(lapsed, id)
 		case expireLastSeen:
 			if at, ok := r.seenLocal[id]; ok {
 				if until := r.seenUntil(at); until.After(now) {
@@ -164,4 +168,6 @@ func (r *SessionRegistry) expireDue() {
 		}
 	}
 	r.armExpiryLocked()
+	r.mu.Unlock()
+	r.notifyChanged(lapsed...)
 }

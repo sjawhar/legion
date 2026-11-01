@@ -324,9 +324,12 @@ func TestListenerReconnectWhileWaitingOutABindingShutsDownAfterForwardingRoles(t
 	relay.arm("", 0)
 	relay.drop()
 	// The lease's own connection goes through the relay too and logs its reconnect under
-	// "envoy-listener-lease"; the role lane rides the main client, whose reconnect line is this.
-	waitFor(t, 10*time.Second, "the listener's main client to reconnect", func() bool {
-		return strings.Contains(listener.Output.String(), `envoy nats reconnected name="envoy-listener `)
+	// "envoy-listener-lease"; the role lane holds a connection of its own (bus.ConnectRoleLane),
+	// which reconnects and sends its subscription again beside the main client's.
+	waitFor(t, 10*time.Second, "the listener's main client and its role lane to reconnect", func() bool {
+		output := listener.Output.String()
+		return strings.Contains(output, `envoy nats reconnected name="envoy-listener `) &&
+			strings.Contains(output, "envoy nats reconnected name=envoy-role-lane ")
 	})
 	output := listener.Output.String()
 	if line := firstErrorLine(output); line != "" {

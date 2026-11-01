@@ -118,11 +118,12 @@ func deliveredSeries(status string) string {
 // about reading through to the bucket, since every warm-cache delivery already pushes.
 func TestAgentDeliveryReadsTheSessionStoreWhileTheCacheIsCold(t *testing.T) {
 	const target = "ses_cold_cache_delivery_target"
-	// The handler runs on this goroutine, so the pushes it makes are recorded without
-	// synchronisation.
-	var pushed []string
+	// Each push to a serving port runs on that session's own worker (servePortWorkers), off this
+	// goroutine, so the pushes are recorded through the shared log (pushLog, main_test.go) and read
+	// back once the handler has waited for them.
+	pushes := &pushLog{}
 	harness := newListenerDeliveryHarness(t, listenerTransport(func(request *http.Request) (*http.Response, error) {
-		pushed = append(pushed, request.URL.String())
+		pushes.record(request.URL.String())
 		return listenerDeliveryResponse(http.StatusNoContent), nil
 	}))
 
@@ -155,6 +156,7 @@ func TestAgentDeliveryReadsTheSessionStoreWhileTheCacheIsCold(t *testing.T) {
 	item := listenerTestEnvelope(contracts.AgentSubject(target), "cold-cache-agent-delivery")
 	harness.handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
 
+	pushed := pushes.all()
 	if len(pushed) != 1 {
 		t.Fatalf("the cold-cache delivery pushed %d times (%v), want exactly one push to the record only the bucket holds:\n%s", len(pushed), pushed, harness.logs.String())
 	}
@@ -321,7 +323,7 @@ func TestUnplaceableAgentDeliveryRetriesThenGivesUp(t *testing.T) {
 		if got := counterValue(t, body, nakedCounter); got != 1 {
 			t.Fatalf("%s = %d, want 1 - a deferred delivery is NAKed back to the stream, not acknowledged:\n%s", nakedCounter, got, body)
 		}
-		for _, status := range []string{"delivered", "skipped", "unplaceable_no_record", "unplaceable_no_push_target", "unplaceable_push_failed"} {
+		for _, status := range []string{"delivered", "skipped", "unplaceable_no_record", "unplaceable_no_push_target"} {
 			if got := counterValue(t, body, deliveredSeries(status)); got != -1 {
 				t.Fatalf("%s = %d while the message is still in the stream, want no series at all - a deferral disposes of nothing:\n%s", deliveredSeries(status), got, body)
 			}
@@ -428,16 +430,16 @@ func TestUnplaceableAgentDeliveryRetriesThenGivesUp(t *testing.T) {
 	})
 }
 
-// The give-up counter separates its three causes, because an operator acts on them differently: a
-// session with no record at all may be one whose registration never landed or one that ended, a
-// record that names nothing to push to is a session that registered before its server bound its
-// serve port, and a push that failed on the wire is a session whose record says where it is and
-// whose process did not answer. None of them is a skip: before this change all of them were
-// counted delivery_status="skipped" and logged "listener agent session not found anywhere", which
-// is indistinguishable from the self-subscribed session that really did receive the message over
-// its own subscription.
+// The give-up counter separates its causes, because an operator acts on them differently: a
+// session with no record at all may be one whose registration never landed or one that ended, and
+// a record that names nothing to push to is a session that registered before its server bound its
+// serve port. Neither is a skip: before this change both were counted delivery_status="skipped"
+// and logged "listener agent session not found anywhere", which is indistinguishable from the
+// self-subscribed session that really did receive the message over its own subscription. A push
+// that fails is no cause here at all: the durable hands every push to a serving-port session to
+// that session's worker, which pushes it until the port accepts it.
 //
-// That fourth outcome is asserted here too, against the same handler: a session with no port that
+// That third outcome is asserted here too, against the same handler: a session with no port that
 // is self-subscribed is delivered - skipped only in the push this listener did not have to make -
 // and must never be counted unplaceable.
 //
@@ -445,21 +447,16 @@ func TestUnplaceableAgentDeliveryRetriesThenGivesUp(t *testing.T) {
 // whole path and not of its last attempt: at a zero window every delivery is given up on its first
 // attempt whatever its reason, so a rig with one proves nothing about which causes are retried.
 // Each cause is deferred first, and only the delivery after the window's one deferral is given up.
-func TestGiveUpCounterSeparatesItsThreeCauses(t *testing.T) {
+func TestGiveUpCounterSeparatesItsCauses(t *testing.T) {
 	const (
 		noRecord       = "ses_cause_no_record"
 		noPushTarget   = "ses_cause_no_push_target"
-		pushFailed     = "ses_cause_push_failed"
 		selfSubscribed = "ses_cause_self_subscribed"
 	)
-	// Only the push-failed session's record names a port, so every push this harness sees is that
-	// session's, and it fails the way an unreachable peer or a restarting session process fails:
-	// on the wire, with no HTTP status at all.
+	// No session here has a port, so nothing this harness runs may push at all.
 	harness := newListenerDeliveryHarness(t, listenerTransport(func(request *http.Request) (*http.Response, error) {
-		if !strings.Contains(request.URL.Path, pushFailed) {
-			t.Errorf("only %s has a port to push to, got a push to %s", pushFailed, request.URL)
-		}
-		return nil, fmt.Errorf("dial tcp: connect: connection refused")
+		t.Errorf("no session here has a port to push to, got a push to %s", request.URL)
+		return nil, fmt.Errorf("unexpected push")
 	}))
 	// No interest is registered for any of these sessions, so each takes the direct path through
 	// the resolved record rather than the interest path, which NAKs its failures itself. The
@@ -467,9 +464,6 @@ func TestGiveUpCounterSeparatesItsThreeCauses(t *testing.T) {
 	// test means it to read.
 	if err := harness.sessions.Put(noPushTarget, session.SessionEntry{MachineID: "test-machine"}); err != nil {
 		t.Fatalf("register the portless session: %v", err)
-	}
-	if err := harness.sessions.Put(pushFailed, session.SessionEntry{Port: 1, MachineID: "test-machine"}); err != nil {
-		t.Fatalf("register the unreachable session: %v", err)
 	}
 	if err := harness.sessions.Put(selfSubscribed, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
 		t.Fatalf("register the self-subscribed session: %v", err)
@@ -481,11 +475,11 @@ func TestGiveUpCounterSeparatesItsThreeCauses(t *testing.T) {
 	}
 
 	// The harness builds its handler at a zero window, so this test builds its own from the
-	// harness's configuration. The four runs share the harness, and so the one metrics registry
+	// harness's configuration. The three runs share the harness, and so the one metrics registry
 	// and the one log an operator would read.
 	cfg := harness.config
 	cfg.unplaceableRetryWindow = oneDeferralWindow
-	for _, target := range []string{noRecord, noPushTarget, pushFailed, selfSubscribed} {
+	for _, target := range []string{noRecord, noPushTarget, selfSubscribed} {
 		startUnplaceableDelivery(t, harness, cfg, target, 0)
 	}
 
@@ -495,7 +489,6 @@ func TestGiveUpCounterSeparatesItsThreeCauses(t *testing.T) {
 	want := map[string]struct{ reason, status string }{
 		noRecord:     {reason: "no_session_record", status: "unplaceable_no_record"},
 		noPushTarget: {reason: "no_push_target", status: "unplaceable_no_push_target"},
-		pushFailed:   {reason: "push_failed", status: "unplaceable_push_failed"},
 	}
 
 	waitFor(t, 20*time.Second, "every unplaceable cause to be deferred", func() bool {
@@ -520,7 +513,7 @@ func TestGiveUpCounterSeparatesItsThreeCauses(t *testing.T) {
 		}
 	}
 	if len(deferred) != len(want) {
-		t.Fatalf("the deferral lines name %v, want one for each of the three retried causes - a cause given up on its first delivery is a cause this listener never waited for:\n%s", deferred, harness.logs.String())
+		t.Fatalf("the deferral lines name %v, want one for each retried cause - a cause given up on its first delivery is a cause this listener never waited for:\n%s", deferred, harness.logs.String())
 	}
 
 	waitFor(t, 25*time.Second, "every deferred cause to be given up", func() bool {
@@ -554,12 +547,13 @@ func TestGiveUpCounterSeparatesItsThreeCauses(t *testing.T) {
 		}
 	}
 	// The boundary: self-subscribed with no port is a delivered outcome - the session reads the
-	// message off its own subscription - and only the push is skipped.
+	// message off its own subscription - and only the push is skipped. The durable acknowledges it
+	// before decoding it (durableNeedsDelivery), counting the skip with no per-message line.
 	if got := counterValue(t, final, deliveredSeries("skipped")); got != 1 {
 		t.Fatalf("%s = %d for a self-subscribed session with no port, want 1 - its message arrives over its own subscription, and nothing else here is a skip:\n%s", deliveredSeries("skipped"), got, final)
 	}
-	if got := len(deliveryRecords(t, logs, "listener agent skipped push")); got != 1 {
-		t.Fatalf("%d skipped-push lines, want exactly one, for the self-subscribed session:\n%s", got, logs)
+	if got := len(deliveryRecords(t, logs, "listener agent skipped push")); got != 0 {
+		t.Fatalf("%d skipped-push lines, want none: the durable acknowledges the self-subscribed session's message before it decodes it:\n%s", got, logs)
 	}
 	if strings.Contains(logs, "listener agent session not found anywhere") {
 		t.Fatalf("a delivery still logs the line that lost these messages, instead of deferring or giving up:\n%s", logs)
@@ -953,33 +947,29 @@ func TestAPushFailureIsDeferredOnceWhereOtherCausesAreDeferredFurther(t *testing
 
 // A give-up whose no_holder notice can never be published is still the message's end: the counter
 // and the give-up line are written, the failed notice is logged exceptionPublishFailedLine, the
-// message is acknowledged, and the session is pushed no more than its allowance however many
-// deliveries of it follow. Before this the give-up published the notice first and, when that
-// failed, NAKed the message and cleared its attempt entry before writing anything: no counter, no
-// give-up line, and a redelivery with neither a dedupe nor an attempt entry, which ran the whole
-// handler again and pushed again, every 30 s, to the durable's MaxDeliver.
+// message is acknowledged, and nothing runs again however many deliveries of it follow. Before
+// this the give-up published the notice first and, when that failed, NAKed the message and cleared
+// its attempt entry before writing anything: no counter, no give-up line, and a redelivery with
+// neither a dedupe nor an attempt entry, which ran the whole handler again, every 30 s, to the
+// durable's MaxDeliver.
 //
 // The notice fails here for good, not for one attempt, by the reviewer's own reachable case: the
 // notice embeds the original payload, so an envelope just under the server's max payload yields a
 // notice past it, which the bus refuses bus.ErrTooLarge every time it is published. The session
-// has a port and refuses every push, so the cause is push_failed, whose allowance is
-// pushFailedDeferrals deferrals and so pushFailedDeferrals+1 pushes.
+// has no record at all, so the cause is no_session_record, and the window buys it one deferral
+// (oneDeferralWindow) and so two deliveries.
 //
 // Two reads prove nothing more follows. The durable is read back: the message must be
 // acknowledged, nothing pending, where the NAK this replaces leaves it pending for a redelivery
 // 30 s on. And the envelope is delivered once more, as the redelivery an ACK lost on the wire
-// would bring: the give-up keeps the attempt entry, so that delivery is an attempt-dedupe skip and
-// pushes nothing, where an entry cleared at the give-up would push a third time.
+// would bring: the give-up keeps the attempt entry, so that delivery is an attempt-dedupe skip,
+// where an entry cleared at the give-up would run the handler again.
 func TestAGiveUpWhoseNoticeCanNeverBePublishedIsStillTerminal(t *testing.T) {
 	const target = "ses_notice_too_large"
-	var pushes atomic.Int32
-	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
-		pushes.Add(1)
-		return nil, fmt.Errorf("dial tcp: connect: connection refused")
+	harness := newListenerDeliveryHarness(t, listenerTransport(func(request *http.Request) (*http.Response, error) {
+		t.Errorf("the session has no record, so nothing may be pushed to it; got a push to %s", request.URL)
+		return nil, fmt.Errorf("unexpected push")
 	}))
-	if err := harness.sessions.Put(target, session.SessionEntry{Port: 1, MachineID: "test-machine"}); err != nil {
-		t.Fatalf("register the unreachable session: %v", err)
-	}
 	item := listenerTestEnvelope(contracts.AgentSubject(target), "unplaceable-"+target)
 	// The payload fills the envelope to 256 bytes under the server's max payload, so the envelope
 	// itself is published and delivered, and the notice - the same payload plus the notice's own
@@ -987,7 +977,7 @@ func TestAGiveUpWhoseNoticeCanNeverBePublishedIsStillTerminal(t *testing.T) {
 	bare := marshalListenerEnvelope(t, item)
 	item.Payload = strings.Repeat("p", int(harness.client.Conn.MaxPayload())-len(bare)-256)
 	cfg := harness.config
-	cfg.unplaceableRetryWindow = defaultUnplaceableRetryWindow
+	cfg.unplaceableRetryWindow = oneDeferralWindow
 	run := startEnvelopeDeliveryThrough(t, harness, jetStreamDeliveryHandler(cfg), target, item, 0)
 
 	waitFor(t, 20*time.Second, "the message to be given up and its notice to fail", func() bool {
@@ -1003,7 +993,7 @@ func TestAGiveUpWhoseNoticeCanNeverBePublishedIsStillTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the durable %s back: %v", run.consumer, err)
 	}
-	if want := uint64(pushFailedDeferrals + 1); info.Delivered.Consumer != want || info.AckFloor.Consumer != want {
+	if want := uint64(2); info.Delivered.Consumer != want || info.AckFloor.Consumer != want {
 		t.Fatalf("the durable delivered %d and acknowledged through %d, want both %d - the delivery that gave the message up acknowledges it, notice or none", info.Delivered.Consumer, info.AckFloor.Consumer, want)
 	}
 
@@ -1012,25 +1002,22 @@ func TestAGiveUpWhoseNoticeCanNeverBePublishedIsStillTerminal(t *testing.T) {
 
 	logs := harness.logs.String()
 	giveUps := deliveryRecords(t, logs, "listener agent delivery given up")
-	if len(giveUps) != 1 || giveUps[0].Reason != "push_failed" || giveUps[0].DeliveryStatus != "unplaceable_push_failed" {
-		t.Fatalf("want exactly one give-up line, naming push_failed and unplaceable_push_failed:\n%s", logs)
+	if len(giveUps) != 1 || giveUps[0].Reason != "no_session_record" || giveUps[0].DeliveryStatus != "unplaceable_no_record" {
+		t.Fatalf("want exactly one give-up line, naming no_session_record and unplaceable_no_record:\n%s", logs)
 	}
 	failures := deliveryRecords(t, logs, exceptionPublishFailedLine)
 	if len(failures) != 1 || failures[0].Topic != item.Topic || !strings.Contains(failures[0].Error, bus.ErrTooLarge.Error()) {
 		t.Fatalf("want exactly one %q line for %s naming %q - the notice was refused, once, and said so:\n%s", exceptionPublishFailedLine, item.Topic, bus.ErrTooLarge, logs)
 	}
 	if skips := deliveryRecords(t, logs, "listener attempt-dedupe skip"); len(skips) != 1 {
-		t.Fatalf("%d attempt-dedupe skips, want the further delivery's one - the given-up message's attempt entry is what keeps it from pushing again:\n%s", len(skips), logs)
-	}
-	if got := pushes.Load(); got != pushFailedDeferrals+1 {
-		t.Fatalf("the session was pushed %d times, want %d - the allowance for a push that may have landed, however many deliveries follow:\n%s", got, pushFailedDeferrals+1, logs)
+		t.Fatalf("%d attempt-dedupe skips, want the further delivery's one - the given-up message's attempt entry is what keeps the handler from running again:\n%s", len(skips), logs)
 	}
 	body := metricsBody(t, harness)
-	if got := counterValue(t, body, deliveredSeries("unplaceable_push_failed")); got != 1 {
-		t.Fatalf("%s = %d, want 1 - the give-up is counted whether or not its notice went out:\n%s", deliveredSeries("unplaceable_push_failed"), got, body)
+	if got := counterValue(t, body, deliveredSeries("unplaceable_no_record")); got != 1 {
+		t.Fatalf("%s = %d, want 1 - the give-up is counted whether or not its notice went out:\n%s", deliveredSeries("unplaceable_no_record"), got, body)
 	}
-	if got := counterValue(t, body, nakedCounter); got != pushFailedDeferrals {
-		t.Fatalf("%s = %d, want %d - the deferral's NAK and nothing for the notice that failed:\n%s", nakedCounter, got, pushFailedDeferrals, body)
+	if got := counterValue(t, body, nakedCounter); got != 1 {
+		t.Fatalf("%s = %d, want 1 - the deferral's NAK and nothing for the notice that failed:\n%s", nakedCounter, got, body)
 	}
 	if message, err := run.exceptions.NextMsg(500 * time.Millisecond); err == nil {
 		t.Fatalf("a notice past the server's max payload was published after all (%d bytes): the run proves nothing about a notice that cannot go out", len(message.Data))
