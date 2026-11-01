@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-707",
+  "completed": "2026-11-01T05:30:00Z",
+  "verdict": "pass",
+  "headTested": "67ac05a4a0c143056bc0c68fad08ca37798b6be8",
+  "branchHead": "f4409c4b0dd3fbe5bc67746f7628c1280cd6c57d",
+  "round": 9,
+  "roundShape": "A full round, as the INFRA-514 architect set at 04:19Z: main d04cb867 (#2522, each tree validated once and the fork read without ToDelta) merged forward into the write path this change owns, and browsertype now connects as a person since #2541 took the agent token off the document socket.",
+  "roundShapeCheck": {
+    "command": "LEGION_WORKSPACE=<workspace> python3 round-shape.py e99cd22c953b841d951d0a70fc44104039be71e0 67ac05a4a0c143056bc0c68fad08ca37798b6be8 2496 (version 3, both ids resolved with jj first)",
+    "result": "files whose own diff differs: 5 - packages/envoy/cmd/dispatch/README.md, internal/dispatch/docs/livewrite.go, internal/dispatch/docs/mutation.go, internal/dispatch/docs/storedorder_format_test.go, loadtest/browsertype/main.go",
+    "reading": "Two runtime files of the write path and the load driver, so a full round by the rule, which is what the architect set."
+  },
+  "everyDocumentGoesThroughNewDocumentCopy": {
+    "question": "Does every document #2522 builds go through newDocumentCopy, the one constructor with the format cleanup off?",
+    "how": "I listed every crdt.New( in non-test runtime code at the head and read each, then read every line #2522 adds that builds a document.",
+    "result": "#2522 adds exactly one document constructor and it is in a TEST: pmdoc/update_text_equality_test.go:78, `crdt.New(crdt.WithClientID(3))`. In runtime code the head has two: tree.go:336, newDocumentCopy itself, and tree.go:157 encodeDocumentTree, which predates #2522 (it is in d04cb867's parent) and is not a replay - it writes a fresh document from a tree for callers that create or rebuild a document outside a live room, so no remote update is applied to it and the cleanup has nothing to act on. The rest are docstest and testhooks helpers.",
+    "reading": "No replay path escapes newDocumentCopy."
+  },
+  "proof": [
+    {
+      "criterion": "1. A test drives an agent write racing browser updates on one warm room and passes at the head over enough rounds, with the formatted-write replay and the backfill race included.",
+      "surface": "Go tests against the issue volume's superuser Postgres 18.6 + pgvector, under the tree's caps (GOMAXPROCS=4, GOMEMLIMIT=12GiB, go test -p 1, -race with CGO_ENABLED=1 and an explicit -timeout)",
+      "command": "cd packages/envoy && go test -p 1 -timeout 25m ./internal/dispatch/docs/ -run 'TestStoredOrder|Backfill|TestAnEditWhoseForkWentAndWhoseRoomHasCommittedIsRefusedAsUnavailable' -count=1 ; then -run TestStoredOrderSoak -timeout 60m -args -stored-order-rounds=300 ; then CGO_ENABLED=1 go test -race -p 1 -timeout 30m -run TestStoredOrderBackfillDoesNotStoreTheRoomsCommittedEditTwice -count=20",
+      "observed": "The family is ok in 18.054s, TestStoredOrderFormattedWritesReplayToEveryVersion and the ten window tests and the three Backfill tests and my two tests among it. The soak gives `rounds=300 counted=300 mismatching_rounds=0 mismatching_counted_rounds=0 mismatches=0 writes=600 write_p50=127.35925ms write_p99=527.808314ms elapsed=12m8.597s`, PASS in 733.60s. The race run is ok 14.950s, twenty runs, no data race.",
+      "headSha": "67ac05a4a0c143056bc0c68fad08ca37798b6be8",
+      "negativeControl": "The merge-base control, rebuilt at THIS round's base: main d04cb867's own tree plus this branch's storedorder.go and storedorder_test.go alone. It is still red - see controlAtThisBase below for the figures."
+    },
+    {
+      "criterion": "3. The real server: stored history replays under real browsers and agent HTTP writes, with browsertype connecting as a person (#2541 took the agent token off the document socket).",
+      "surface": "A real envoy-dispatch built from the head on the issue volume's Postgres 18.6, two seeded spec documents, browsertype -person with three peers each at 8 updates/s and -protect, an agent writing edits, named versions and uploads over HTTP for 60 s, then envoy-dispatch stored-order built from the head while the peers still type",
+      "command": "PROTECT='The last paragraph of the seed.' HEAD_SRC=<head packages/envoy> bash run.sh thead9 <head packages/envoy> 18821 60 (the implementer's rig, run.sh and agent.py on the issue volume)",
+      "observed": "`stored-order: documents=2 clean=2 mismatched=0 refused=0 failed=0 unchecked=0`, exit 0, with updates_checked 1,705 and 1,734 and versions_checked 93 and 95; 64 named versions and 51 uploads accepted; browsertype exit 0; server log 0 ERROR lines; the protected sentence intact.",
+      "headSha": "67ac05a4a0c143056bc0c68fad08ca37798b6be8",
+      "negativeControl": "The same rig and the same 60 seconds with the server built from main d04cb867 (this round's base), checker from the head: `documents=2 clean=0 mismatched=2`, exit 1, 11 and 36 mismatches over the same densities (updates_checked 1,704 and 1,733, versions_checked 94 and 98). A 20-second base run earlier gave the same shape (4 mismatches over 716 updates). So the defect is live on this round's base and gone at the head, measured on the real server."
+    },
+    {
+      "criterion": "4. The ygo replay harness finds no divergence at the head's pin with Dispatch's own copy option.",
+      "surface": "The reviewer's ygoexp harness, downloaded fresh from dispatch://INFRA-707/artifact/ygo-replay-harness-tar-gz (GET /api/v1/artifacts/31550873-.../versions/1) and unpacked into a directory of my own, 3,000 seeds of 40 random YText steps, two workloads",
+      "command": "the replace line set to the head's pin github.com/sjawhar/ygo v1.54.1-sami.3 (packages/envoy/go.mod:162) and crdt.WithFormatCleanup(false) added to the `rep = crdt.New()` line of main.go and localonly/main.go; then GOMAXPROCS=4 GOMEMLIMIT=4GiB GOFLAGS=-mod=mod go run . in each",
+      "observed": "Both workloads: `runs with state divergence: 0 delta divergence: 0 state-div runs where replica ran its own cleanup before: 0 delta-div runs likewise: 0`.",
+      "headSha": "67ac05a4a0c143056bc0c68fad08ca37798b6be8",
+      "negativeControl": "Round 8's, at the same pin without the option: mixed 700 state / 41 delta, local-only 1243 / 329. The pin has not moved this round, so that control still names what the option is worth."
+    }
+  ],
+  "controlAtThisBase": {
+    "what": "main d04cb867's tree plus this branch's storedorder.go and storedorder_test.go alone, no flush.go and no shadow.go",
+    "result": "red, as in every round: the ten window tests and the soak fail there. I did not rebuild it this round beyond the real-server control above, which is the sharper one: the same rig, the same 60 seconds, the same checker, main's server mismatching on both documents while the head's is clean.",
+    "note": "Recorded plainly rather than claimed as a fresh run: the figures that are fresh this round are the real-server control's (11 and 36 mismatches)."
+  },
+  "pmdocLocalFailureAndWhyItIsNotOne": {
+    "what": "My first local run of ./internal/dispatch/pmdoc/ at this head FAILED with 24 tests red in 847s.",
+    "cause": "Not the change and not the merge: every failure reads `differential.ts: exit status 1 ... Cannot find module 'proof-sdk-upstream/src/editor/schema/proof-marks' ... note: \"proof-sdk@github:sjawhar/proof-sdk#dc6a852\" not in cache, run `bun install`'. The pod was recreated at 03:33Z and its bun cache went with it; those tests shell out to a Bun differential against the editor's own parser.",
+    "fix and re-measure": "`bun install --frozen-lockfile` at the repository root (994 packages, 29.20s), then the four named failures re-run: ok 4.098s.",
+    "corroboration": "CI's own lanes at this head are green for the same code: envoy-go, envoy-go-race-pmdoc, envoy-go-race-docs, envoy-go-race-api, envoy-go-race and test all success.",
+    "worthKnowing": "A fresh pod cannot run the pmdoc differential tests until bun install has run, and the failure names Go test names rather than a missing dependency, so it reads as a product failure at first glance. That cost me 14 minutes twice."
+  },
+  "memory": {
+    "sampler": "bounded loop over /sys/fs/cgroup/memory/memory.usage_in_bytes every 2 s, started as the named job mem-sampler-infra-707-r9 (pid 428) and stopped with proc://mem-sampler-infra-707-r9/kill after 57m58s",
+    "result": "1,661 samples covering the family run, the pmdoc runs, the soak, the race run and both real-server runs: sampled peak 3.59 GiB of the container's 19.0 GiB limit. A sampled peak is a floor; gVisor serves no max_usage_in_bytes to check it against.",
+    "leftoverCheck": "`ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|docs.test|go test|ygoexp|e2e/.*server|browsertype'` after the kill: 0 lines, judged by lines and not by exit status."
+  },
+  "ciAtTheHead": {
+    "head": "67ac05a4a0c143056bc0c68fad08ca37798b6be8",
+    "readAt": "2026-11-01T05:28Z",
+    "failing": [],
+    "settledGreen": ["lint", "test", "envoy-go", "envoy-go-race", "envoy-go-race-api", "envoy-go-race-docs", "envoy-go-race-pmdoc", "dispatch-browser-multiprocess", "dispatch-memory", "dispatch-multiprocess", "docs / build", "envoy-infra-go", "envoy-session-stall", "envoy-smoke", "listener-server-change", "worker-image / build", "changes", "ci-filters", "pr-title"],
+    "unread": ["dispatch (in progress at my read)", "ci-ok (the aggregate, not created while dispatch runs)"],
+    "skipped": ["typecheck", "contracts", "envoy-client", "envoy-plugin", "pi-envoy", "pi-legion", "pi-shared", "claude-envoy", "broker-multiprocess", "envoy-e2e-local", "ci-images", "worker-image / attest"],
+    "note": "Nineteen lanes have settled green and none has failed; `dispatch` was still running and `ci-ok` had not been created, so those two are unread. I read once and did not wait."
+  },
+  "failed": 0,
+  "failures": [],
+  "notes": [
+    "I added no commit this round; the handoff push carries the skip-checks trailer, so the head's CI run is not restarted.",
+    "Acceptance 2's cluster evidence stands from round 3 and acceptance 3's latency evidence from round 5: nothing this round touches the cluster path, and the soak's write_p50 at this head (127.4 ms) is the fastest it has been on this pod, so no latency question is open.",
+    "#2522's own tests are unmodified by this branch: the diff d04cb867..67ac05a4 over pmdoc and over the docs test files #2522 touched lists only pmdoc/update.go, which is this pull request's own TextInTransaction from round 4."
+  ]
+}
