@@ -12,8 +12,10 @@ import (
 )
 
 // The file store's two touchpoints on the artifact routes: an upload's object write before the
-// transaction (putUploadedFile) and a version's download (serveFileVersion). storeArtifact and
-// getArtifactVersion (artifacts.go) call them; the rows they read and write are theirs.
+// transaction (putUploadedFile) and a version's read (serveVersionBytes, under the download
+// headers of serveFileVersion or the page headers of serveFilePage). storeArtifact,
+// getArtifactVersion and getArtifactVersionPage (artifacts.go) call them; the rows they read and
+// write are theirs.
 
 // putUploadedFile writes an upload's bytes to the file store under sha before storeArtifact opens
 // its transaction, and answers the request itself when the store refuses. With no store, or for
@@ -37,20 +39,15 @@ func (s *server) putUploadedFile(w http.ResponseWriter, r *http.Request, kind, s
 	return true
 }
 
-// serveFileVersion answers a file version's download from what its row holds: a row holding
-// bytes is served from the row, whatever store is configured; a row the backfill cleared, or that
-// an upload wrote with a store, names its object by hash and is streamed from the store.
-//
-// The headers wait for the object to open, so a store that fails answers 502 and never a 200 cut
-// short; a body that fails after that, or does not hash to the row's hash, aborts the response
-// mid-stream rather than ending it as if whole.
+// serveFileVersion answers a file version's download under the download headers: the file's own
+// stored type, and an attachment the browser saves.
 //
 // A version's bytes never change, so a browser keeps them for a year without asking again: the
 // pictures a conversation shows inline are fetched once. `private`, since the route is
 // authenticated and no shared cache may hold them. A document version is not served here and
 // keeps its headers.
 func (s *server) serveFileVersion(w http.ResponseWriter, r *http.Request, artifactID string, number int, content []byte, contentType, sha *string, size *int64) {
-	headers := func(length int64) {
+	s.serveVersionBytes(w, r, artifactID, number, content, sha, size, func(length int64) {
 		w.Header().Set("Content-Type", cmp.Or(deref(contentType), "application/octet-stream"))
 		if sha != nil {
 			w.Header().Set("ETag", *sha)
@@ -60,7 +57,71 @@ func (s *server) serveFileVersion(w http.ResponseWriter, r *http.Request, artifa
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 		w.WriteHeader(http.StatusOK)
+	})
+}
+
+// pageContentSecurityPolicy is the policy the page route sends with every answer it makes, the
+// inline one and the attachment one. Compare it with the spec (dispatch://INFRA-682/spec) word by
+// word: it is one string and the spec is one line.
+//
+// `sandbox allow-scripts` gives the page an opaque origin. The page is then same-origin with
+// nothing, so it holds no cookie and no storage of Dispatch's, and it keeps script. Each `'none'`
+// shuts one way out of the frame:
+//
+//   - `default-src 'none'` leaves no source for anything the directives after it do not name.
+//   - `connect-src 'none'` stops fetch, XMLHttpRequest, EventSource, WebSocket and sendBeacon, so
+//     the page reports nothing to anyone and asks Dispatch for nothing.
+//   - `frame-src 'none'` stops a nested frame, which would carry a document this policy does not
+//     cover.
+//   - `form-action 'none'` stops a form from posting the reader's data anywhere.
+//   - `base-uri 'none'` stops a `<base>` element from pointing the page's relative addresses at
+//     another host.
+//
+// `frame-ancestors 'self'` lets only Dispatch's own pages frame this one. What is left is what a
+// page that draws needs: its own inline script, style, pictures, media, fonts and workers, from
+// the response itself, from `data:` and from `blob:`.
+const pageContentSecurityPolicy = "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob:; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; worker-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'"
+
+// serveFilePage answers one version of a page file as HTML. It reads the version's bytes the two
+// ways serveFileVersion reads them, from the row or from the file store by hash, and refuses the
+// same way; only the headers differ.
+//
+// The answer is `inline` to a request whose Sec-Fetch-Dest is `iframe`, the frame a view block
+// inserts. Every other request, and a request that sends no Sec-Fetch-Dest, gets `attachment`: a
+// reader who opens the address in a tab saves the file, and the browser runs none of it. `Vary`
+// names the header so no cache gives one of those answers to the other request. `no-cache` makes
+// the browser ask again on each load, under the version's ETag, so a later change to these
+// headers reaches every page.
+func (s *server) serveFilePage(w http.ResponseWriter, r *http.Request, artifactID string, number int, content []byte, sha *string, size *int64) {
+	disposition := "attachment"
+	if r.Header.Get("Sec-Fetch-Dest") == "iframe" {
+		disposition = "inline"
 	}
+	s.serveVersionBytes(w, r, artifactID, number, content, sha, size, func(length int64) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Disposition", disposition)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Cache-Control", "private, no-cache")
+		if sha != nil {
+			w.Header().Set("ETag", *sha)
+		}
+		w.Header().Set("Vary", "Sec-Fetch-Dest")
+		w.Header().Set("Content-Security-Policy", pageContentSecurityPolicy)
+		w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+		w.WriteHeader(http.StatusOK)
+	})
+}
+
+// serveVersionBytes writes a version's bytes under the headers its route sets: a row holding
+// bytes is served from the row, whatever store is configured; a row the backfill cleared, or that
+// an upload wrote with a store, names its object by hash and is streamed from the store.
+//
+// headers is called once, with the body's length, after every refusal has passed and before the
+// first byte. It waits for the object to open, so a store that fails answers 502 and never a 200
+// cut short; a body that fails after that, or does not hash to the row's hash, aborts the
+// response mid-stream rather than ending it as if whole.
+func (s *server) serveVersionBytes(w http.ResponseWriter, r *http.Request, artifactID string, number int, content []byte, sha *string, size *int64, headers func(length int64)) {
 	if content != nil {
 		headers(int64(len(content)))
 		_, _ = w.Write(content)
