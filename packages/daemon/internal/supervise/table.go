@@ -1192,8 +1192,7 @@ func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 //
 // It is what lets a contract change roll with no drain and no operator. The round asks such a
 // claim (askForUpdate), this takes its answer, and the replacement brings it up on the new image
-// in its own session. Before this, the round could never complete over one, and the operator
-// drained the pod by hand.
+// in its own session.
 //
 // Five things must hold, and each is the claim as it stands at the end of this turn rather than
 // when the round opened. The claim is in a round and has not answered it. Its process runs a

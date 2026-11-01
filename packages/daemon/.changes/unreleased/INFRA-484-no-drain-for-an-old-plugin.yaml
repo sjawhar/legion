@@ -5,7 +5,7 @@ body: |-
     like any other, and the task tells it what to do without the operation: push, and end the
     turn. The daemon reads the end of that turn as the answer, records it with no head, replaces
     the pod, and brings the worker back in its own session on the new image. Nothing is written on
-    the issue and the controller is told nothing for that cause, the `update-stalled` notice no
-    longer marks a claim `cannotAnswer`, and the stale-plugin lane relaunches no claim an update
-    round already covers.
+    the issue and the controller is told nothing for that cause. The stale-plugin lane relaunches
+    no Claude Code worker below that contract, and relaunches an Oh My Pi worker below it onto the
+    current plugin only once its turn ends, keeping its pod and disk.
 time: 2026-10-31T22:26:47Z

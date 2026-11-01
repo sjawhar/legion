@@ -4,19 +4,18 @@ import "testing"
 
 // A live claim whose registration declared a plugin contract below PodUpdateContract — a worker
 // started from the image of the release before this one, which is what every roll of this
-// deployment leaves behind for a moment — can never answer an update task: the op list is a closed
-// enum compiled into its plugin. An update round therefore sends it nothing and waits for it, so
-// the only thing that can bring it onto this daemon's plugin is the stale-plugin relaunch, which
-// keeps the pod and the disk and resumes the claim's own session. Once it has registered at this
-// daemon's contract it joins any round as any claim does.
+// deployment leaves behind for a moment — has no ready_for_update op: the op list is a closed enum
+// compiled into its plugin. An update round still asks it, and it answers by ending the turn its
+// task started (answerByTurnEnd). Outside a round, the stale-plugin relaunch is what brings an Oh
+// My Pi worker onto this daemon's plugin; it keeps the pod and the disk and resumes the claim's
+// own session. Once it has registered at this daemon's contract it answers with the op.
 //
-// It is relaunched when it is not in a turn, and not before. A turn in flight belongs to a worker
-// that cannot be asked to push first — that is the whole reason this claim is relaunched rather
-// than tasked — so ending that turn where it stands throws away whatever it had not pushed, which
-// is the harm this issue exists to end. The wait costs nothing: the claim holds no round open,
-// nothing else of its pod is waiting on it, and the turn ends on its own. The machine already
-// waits out a turn this way for a held suspension and for a plugin round's own end
-// (TestPodUpdateEndedInAPluginRoundRelaunchesOnceTheTurnIsOver).
+// It is relaunched when it is not in a turn, and not before. A relaunch ends the process, and the
+// stale-plugin lane asks the worker nothing first, so ending a turn in flight where it stands
+// throws away whatever it had not pushed, which is the harm this issue exists to end. The wait
+// costs nothing: the claim holds no round open, nothing else of its pod is waiting on it, and the
+// turn ends on its own. The machine already waits out a turn this way for a held suspension and
+// for a plugin round's own end (TestPodUpdateEndedInAPluginRoundRelaunchesOnceTheTurnIsOver).
 //
 // Observed live on 2026-10-30: after a daemon boot on a newer contract, an issue's claims came up
 // on the previous image at plugin contract 42, every `legion` tool call failed, and the daemon

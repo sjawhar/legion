@@ -4,7 +4,7 @@ package supervise
 // ready_for_update before the process holding that claim is replaced. These tests pin what the
 // machine does with the round's two events: a round that opens once and asks once, a phase task
 // the round never displaces, a suspended claim revived for the task, a claim asked again after
-// PodUpdateRetask, a claim whose plugin cannot answer and is never asked, the next task held back
+// PodUpdateRetask, a claim below the contract answering by its turn's end, the next task held back
 // from the moment the worker answers, and the round's end — which releases that task for a pod's
 // round, relaunches the process for a claim's own plugin round, and tells a worker whose round
 // ended with nothing replaced to carry on. The round the answer names is here too: an answer for

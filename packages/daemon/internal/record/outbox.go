@@ -212,13 +212,13 @@ type Notice struct {
 // opened over an issue's pod, and why it has not replaced that pod. Round is the round's identity
 // (supervise.Claim.UpdateRound), Pod the pod it was opened over, and Reasons the drift the round
 // was opened for, as the task states it. Waiting is every claim the round is blocked on, so the
-// controller can retry one claim or ask the operator to drain the pod rather than read the whole
-// claims list to find out which worker the round waits on. Each entry says whether that claim has
-// already answered ready_for_update (UpdateWaiting.Answered), which is what tells the controller
-// which claims are its to prompt: its playbook publishes the update task to a claim that has not
-// answered, and that publish starts a turn, which takes the answer back, so a round stuck on a
-// turn or on a replacement the cluster keeps refusing — every claim of which has answered — is
-// one the controller prompts nobody of. The notice's issue is the outbox row's own.
+// controller can retry one claim or ask the operator to act on a failed or suspended one rather
+// than read the whole claims list to find out which worker the round waits on. Each entry says
+// whether that claim has already answered ready_for_update (UpdateWaiting.Answered), which is what
+// tells the controller which claims are its to prompt: its playbook publishes the update task to a
+// claim that has not answered, and that publish starts a turn, which takes the answer back, so a
+// round stuck on a turn or on a replacement the cluster keeps refusing — every claim of which has
+// answered — is one the controller prompts nobody of. The notice's issue is the outbox row's own.
 //
 // Reasons is one string, never a list: a single reason carries ", " inside it already — a moved
 // address reads `<where> <held>, now <handed>`, a pod-shape drift `image <was>, now <now>`, and a

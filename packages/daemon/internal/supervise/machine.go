@@ -527,13 +527,12 @@ type Machine struct {
 	// held is the suspension held for the agent's turn (holdSuspension), nil for none.
 	held *RequestSuspend
 	// staleRelaunch is the stale-plugin relaunch held for the agent's turn to end, naming the pass
-	// that found the claim ("boot", "sweep"); nil for none. A claim whose plugin cannot answer an
-	// update round is relaunched rather than asked, and relaunching it where it stands would end a
-	// turn whose worker cannot be asked to push first, so the relaunch waits for the turn
-	// (refreshPlugin, turnEnded). It is memory only, as the held suspension's deadline timer is:
-	// the daemon's boot pass and every orphan sweep post StalePlugin again for a claim still
-	// stale (refreshStalePlugins in internal/daemon), so a restart that forgets this mark finds
-	// the same claim again, and letGo drops it with the process it was made for.
+	// that found the claim ("boot", "sweep"); nil for none. Relaunching a stale claim where it
+	// stands would end a turn whose worker the stale-plugin lane asked nothing of, so the relaunch
+	// waits for the turn (refreshPlugin, turnEnded). It is memory only, as the held suspension's
+	// deadline timer is: the daemon's boot pass and every orphan sweep post StalePlugin again for
+	// a claim still stale (refreshStalePlugins in internal/daemon), so a restart that forgets this
+	// mark finds the same claim again, and letGo drops it with the process it was made for.
 	staleRelaunch *string
 	// interrupt is the turn this claim was interrupted in for a start that takes over its issue's
 	// phase (Quiesce), nil for none; quiesced is the newest such start that has found the claim out

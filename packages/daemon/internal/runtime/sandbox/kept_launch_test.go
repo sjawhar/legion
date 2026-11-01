@@ -219,9 +219,9 @@ func forgetPodContainers(t *testing.T, g *rig, r *Runtime, name string) {
 // postgres, or one the pod's own launcher writes beside the socket it proxies under cloudsql-iam.
 // A role told the configuration's file instead is told a path its pod has nobody to fill — Oh My
 // Pi refuses to start on an unreadable URL file — so it never registers and never answers the
-// round that is to replace that pod, and only an operator's drain ends the round. The cost of
-// telling it the pod's own store is that it reads the store its pod has until the round replaces
-// the pod, which a role that never started could not do at all.
+// round that is to replace that pod, so the round never ends. The cost of telling it the pod's
+// own store is that it reads the store its pod has until the round replaces the pod, which a role
+// that never started could not do at all.
 func TestARoleStartedInAKeptPodIsToldTheSessionStoreThatPodCarries(t *testing.T) {
 	for name, tc := range map[string]struct {
 		// built is the configuration the pod was created under, now the one the restarted daemon

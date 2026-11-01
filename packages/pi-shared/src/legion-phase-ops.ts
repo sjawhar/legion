@@ -310,9 +310,9 @@ export async function executePhaseOp(
       // the answer for that round alone — an answer for a round its claim has left is refused
       // naming both. The head is the plugin's to resolve, and a branch not yet on the remote is
       // left out. A workspace whose jj cannot answer leaves it out too, and is told so: the round
-      // waits for every claim of the pod and only an operator's drain ends one that waits for
-      // ever, so a worker whose lookup fails must still be able to answer. The daemon verifies no
-      // head, so the missing one costs the record a line and the round nothing.
+      // waits for every claim of the pod, so a worker whose lookup fails must still be able to
+      // answer. The daemon verifies no head, so the missing one costs the record a line and the
+      // round nothing.
       let head = "";
       let failure: string | undefined;
       try {
