@@ -53,7 +53,8 @@ When the gate is armed, run this exact sequence before the tree's work starts:
    against the code, the docs or a read-only command it runs. Each runs as a job of its own, so
    `wait` for its result and read what it found before you act on it. Resolve every finding in the
    root spec. Check with a command each claim either reviewer marks unverified: fix it when it is
-   false, or take it out.
+   false, or take it out. Then run the two reviews in step 2 of `skill://following-best-practices`
+   on the same spec, and fix or record each of their findings as that skill says.
 4. Request approval only once the human has agreed to every point in the spec, because the human
    approves what they already agreed to and a point new in the request has no decision block for
    them to answer: give such a point its own decision block first, or take it out of the spec.

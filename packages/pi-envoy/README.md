@@ -161,8 +161,9 @@ pane that still loads the pre-split package beside the new ones.
 
 The tarball is self-contained: it ships `dist/envoy.js` — bundling every dependency except the OMP
 host packages (`@legion/pi-shared`, `@legion/contracts` and `@legion/envoy-client` are inlined) —
-`dist/THIRD_PARTY_NOTICES`, and the five skills every session with Dispatch reads, `asd-ste100`,
-`dispatch`, `dispatch-first`, `dispatch-writing-specs` and `envoy`, staged from the repository's `skills/` at
+`dist/THIRD_PARTY_NOTICES`, and the eight skills every session with Dispatch reads, `asd-ste100`,
+`dispatch`, `dispatch-first`, `dispatch-writing-specs`, `envoy`, `following-best-practices`,
+`outside-message` and `plain-words`, staged from the repository's `skills/` at
 `dist/skills`. The manifest declares `omp.skills: ["dist/skills"]` alongside `omp.extensions`:
 OMP's own plugin discovery only reads `skill://`-resolvable skills from `<plugin root>/skills` or
 from directories a manifest's `omp.skills` array names, and this package ships skills at

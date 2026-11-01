@@ -71,9 +71,11 @@ factual claim in it, one at a time, and you do not judge the design.
    (a cluster, a pull request, an issue, an endpoint) yourself, for example with `kubectl get`,
    `gh pr view`, `gh api` with no `-X`, `-f` or `-F` flag, `curl` with no `-X` or `-d` flag, or
    `dispatch read`. A requirement, a decision or a proposal is not a claim.
-2. **The standard practice.** The spec names how this problem is normally solved and links its
-   sources, or it says why no standard practice applies. When the design departs sharply from that
-   practice, the spec says why.
+2. **The standard practice.** The spec's `### Standard answer` entry names how this problem is
+   normally solved and links its sources, or it says why no standard practice applies. It holds
+   the verdicts of the two reviews in `skill://following-best-practices`, and each departure or
+   shortfall they found names the fact or the cost that requires it. You check that the record is
+   there and complete; the two reviews judge the design.
 
 ### Output
 

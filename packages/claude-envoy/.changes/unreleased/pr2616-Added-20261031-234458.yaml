@@ -1,0 +1,5 @@
+kind: Added
+body: 'The plugin ships `claude-envoy:following-best-practices`: before a design is chosen, the agent finds the standard answer and the world-class one, and before each approval request two fresh subagents review the proposal, one against standard practice and one for compromises. The Legion architect''s design gate runs those two reviews before an approval request, and `plan-reviewer` checks that the spec records both verdicts.'
+time: 2026-10-31T23:44:58.000000000Z
+custom:
+    Issue: pr2616

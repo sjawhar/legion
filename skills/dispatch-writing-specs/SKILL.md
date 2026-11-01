@@ -9,6 +9,8 @@ description: "Use in a session with Dispatch before you write or change a spec, 
 
 Reach shared understanding with the person at the least cost of their time. A Legion phase worker writes no spec (`skill://legion-worker`).
 
+Before choosing a design or writing options, and before each approval request: `skill://following-best-practices`.
+
 ## The outline
 
 Find the issue's project with `dispatch projects` or `dispatch search`, never the environment. The spec's `##` parts, in order:
@@ -42,7 +44,6 @@ For each spec, ask, comment and message:
 ## Questions
 
 - Name the concrete case first: which machines, files, sessions or people, and the numbers. Then ask the choice in those terms, never "Which option?": a reader cannot work back from a general question to the case.
-- Propose an answer to each point, numbers included, with a reason.
 - A choice inside what the person asked for, or one their messages favour, is settled: decide it.
 - Ask only for the person's authority, taste or risk appetite, when options differ on what they care about.
 - Ask with an [ask block](skill://dispatch/SKILL.md#asks-and-ask-blocks): 2 to 4 options with costs, your recommendation, answerable on a phone.
