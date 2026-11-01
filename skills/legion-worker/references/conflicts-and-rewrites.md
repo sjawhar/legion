@@ -108,6 +108,11 @@ its last submitted review (`gh api --paginate repos/{owner}/{repo}/pulls/{n}/rev
 and the new head; the merger never computes a fingerprint — it quotes the `--summary` lines
 in READY, and the daemon holds the head to retro's commits.
 
+The fingerprint is not the whole check: a file the merge adds only moves the hash, exactly as an ordinary round of work does.
+So beside it, compare the *set* of files the pull request changes against its base, before and after the merge (`gh pr diff <n> --name-only`, or `jj diff --stat` at each of the two heads), and explain every path that appears or disappears.
+Remove a path that belongs to an already-merged pull request.
+The case that named this rule: #2588's forward merge, made after #2446 was squashed into main, re-added changelog fragments under `packages/envoy/.changes/unreleased/` whose entries main's fold had already written into `packages/envoy/CHANGELOG.md` 27.1.0, so the next fold would have written every one of them a second time.
+
 ## Rewriting pushed commits
 
 **Rewriting pushed commits** — a `jj squash --into` a commit already on GitHub, or any other
