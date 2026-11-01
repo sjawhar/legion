@@ -122,10 +122,11 @@ type Runtime interface {
 	// (api's claims/ready-for-update), and only once each has answered is the place replaced
 	// (ReplacePod).
 	//
-	// ErrPodGone is the place the locator records not being there, which is neither drift nor a
-	// failure to ask: nothing can be read of a place that is not there, so nothing says it has
-	// drifted from nothing. Any other error means the runtime itself could not be asked, and is
-	// never a statement that something drifted either.
+	// ErrPodGone is the place the locator records not being there, or being ended for something
+	// other than this round's own replacement, which is neither drift nor a failure to ask:
+	// nothing can be read of a place that is going, so nothing says it has drifted from nothing,
+	// and the round open over it ends. Any other error means the runtime itself could not be
+	// asked, and is never a statement that something drifted either.
 	PodDrift(ctx context.Context, k Known) ([]string, error)
 	// ReplacePod ends the place k's process runs in, once its update round is over, and returns
 	// when the runtime no longer has it. It creates nothing in its stead: every process it ends is
@@ -160,21 +161,23 @@ type Runtime interface {
 // place. A session file missing with the key off is a refusal that does not wrap it.
 var ErrSessionFileMissing = errors.New("the recorded session file is missing")
 
-// ErrPodGone is PodDrift asked about a place that is not there: the Sandbox the locator records
-// is gone, no pod of it is running, or the pod running now is not the one the locator records —
-// the pod was replaced where it stood for a failure of its own, and its disk went with it.
+// ErrPodGone is PodDrift asked about a place that is not there, or on its way out for an act
+// that is not its round's: the Sandbox the locator records is gone, no pod of it is running, the
+// pod running now is not the one the locator records, or the pod is being ended under it — the
+// pod was replaced where it stood for a failure of its own, and its disk went with it.
 //
 // It is why PodDrift says that rather than answering no drift. The two readings are opposite
-// where it matters: drift that cleared is a pod still running that needs no replacement, so the
-// round over it ends and its workers are told to carry on where they are, while a pod that is
-// not there has taken whatever was unpushed on its disk with it, which the round's workers must
-// be told of (internal/daemon's podWentWithoutItsRound). A caller that cannot tell them apart
-// tells an issue nothing of the work it lost and sends the workers already running in the new
-// pod a task saying the daemon replaced nothing under them.
+// where it matters: drift that cleared is a pod still running, which the round open over it
+// replaces as it promised its workers it would, while a pod that is not there has taken whatever
+// was unpushed on its disk with it, which the round's workers must be told of (internal/daemon's
+// podWentWithoutItsRound). A caller that cannot tell them apart tells an issue nothing of the
+// work it lost, and replaces a pod that is already gone.
 //
-// A caller decides no round on it: nothing can be read of a place that is not there, and the
-// claims of the issue record the pod that replaced it one relaunch later, which is the evidence
-// the round ends on (internal/daemon's groupDrift).
+// The round open over such a place ends at the sweep that reads this, with what was lost read
+// from the answers recorded by then (internal/daemon's endRoundOverAGonePod). Waiting instead
+// for the claims to record the pod that replaced this one leaves that round open across the
+// relaunch of every role into the new pod, and each new process's turns and answers are counted
+// against the round of a pod it never ran in.
 var ErrPodGone = errors.New("the pod the locator records is not there")
 
 // IssueSuspender stops an issue's pod once authorize, called under the runtime's issue launch

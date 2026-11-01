@@ -9,6 +9,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -333,9 +334,10 @@ func TestPodDriftIsNothingForTheControllersPod(t *testing.T) {
 // The pod the locator records not being there is said, and never read as a pod that has drifted
 // from nothing: a Sandbox gone and a pod that is not the one the locator records each answer
 // runtime.ErrPodGone, however far the configuration has moved. The daemon's round turns on the
-// difference — a pod that drifted from nothing is still running and its round simply ends, where
-// a pod that is not there took whatever was unpushed on its disk with it, and the workers of its
-// round must be told (internal/daemon's groupDrift).
+// difference — a pod that drifted from nothing is still running, and the round open over it
+// replaces it as it promised its workers it would, where a pod that is not there took whatever
+// was unpushed on its disk with it, and the workers of its round must be told
+// (internal/daemon's groupDrift).
 //
 // A claim running nowhere records no pod at all, so nothing of it is gone and nothing of it has
 // drifted.
@@ -374,6 +376,65 @@ func TestPodDriftSaysThePodTheLocatorRecordsIsNotThere(t *testing.T) {
 	})
 	if drifted, err := r3.PodDrift(gone.ctx, runtime.Known{Claim: goneLoc.Claim, Locator: &goneLoc}); !errors.Is(err, runtime.ErrPodGone) || len(drifted) > 0 {
 		t.Errorf("PodDrift of an absent sandbox = %q, %v; want runtime.ErrPodGone", drifted, err)
+	}
+}
+
+// A pod under a suspended Sandbox is on its way out, and the round over it decides nothing true
+// — unless the suspension is that round's own replacement. ReplacePod suspends the Sandbox and
+// names the displaced pod on it in one write (suspendDisplacing) and then waits the pod out, so
+// between those two the Sandbox is suspended, names this very pod, and the pod is still there:
+// that is the round's own replacement in flight, and it reads as a pod that is there and has not
+// drifted, which is what ends the round as the replacement it is. The same Sandbox suspended by
+// anything else — an operator, a launch replacing the pod, a tree moved on — names another pod
+// or none, and reads runtime.ErrPodGone.
+//
+// The configuration has moved here, so a pod answered for at all answers the moved image: an
+// empty answer is this reading and nothing else.
+func TestPodDriftReadsASuspendedSandboxAsItsOwnReplacementOrAsAGonePod(t *testing.T) {
+	g := newRig(t, nil)
+	// The pod of a suspended Sandbox stays terminating, which is the window every reading below
+	// is taken in: the suspension has landed and the pod has not ended.
+	g.suspendDelay = time.Minute
+	loc := g.spawn(workerSpec(t))
+	name := loc.Sandbox.Name
+	r2 := secondRuntime(t, g, func(o *Options) { o.Image = nextImage })()
+	if drifted := driftOf(t, g.ctx, r2, loc); len(drifted) == 0 {
+		t.Fatal("PodDrift of the running pod is empty, so this case proves nothing: nothing below could be read as the drift that cleared")
+	}
+
+	suspended := func(what string, ok func(*sandbox) bool) {
+		t.Helper()
+		g.eventually("the sandbox store to see "+what, func() bool {
+			s, err := r2.storedSandbox(name)
+			return err == nil && s != nil && s.mode() == modeSuspended && ok(s)
+		})
+		if pod := g.pod(name); pod == nil || string(pod.UID) != loc.Sandbox.PodUID {
+			t.Fatalf("the pod of %s went while it was %s, so this case reads a pod that is gone rather than one on its way out", name, what)
+		}
+	}
+
+	if err := g.r.setMode(g.ctx, g.sandbox(name), modeSuspended); err != nil {
+		t.Fatalf("suspend the sandbox: %v", err)
+	}
+	suspended("it suspended naming no replaced pod", func(s *sandbox) bool { return s.Annotations[displacedAnnotation] == "" })
+	if drifted, err := r2.PodDrift(g.ctx, runtime.Known{Claim: loc.Claim, Locator: &loc}); !errors.Is(err, runtime.ErrPodGone) || len(drifted) > 0 {
+		t.Errorf("PodDrift of a suspended sandbox naming no replaced pod = %q, %v; want runtime.ErrPodGone", drifted, err)
+	}
+
+	if _, err := g.r.suspendDisplacing(g.ctx, g.sandbox(name), "uid-pod-earlier"); err != nil {
+		t.Fatalf("name an earlier pod as the one the daemon replaced: %v", err)
+	}
+	suspended("it naming an earlier replaced pod", func(s *sandbox) bool { return s.Annotations[displacedAnnotation] == "uid-pod-earlier" })
+	if drifted, err := r2.PodDrift(g.ctx, runtime.Known{Claim: loc.Claim, Locator: &loc}); !errors.Is(err, runtime.ErrPodGone) || len(drifted) > 0 {
+		t.Errorf("PodDrift of a suspended sandbox naming another replaced pod = %q, %v; want runtime.ErrPodGone", drifted, err)
+	}
+
+	if _, err := g.r.suspendDisplacing(g.ctx, g.sandbox(name), types.UID(loc.Sandbox.PodUID)); err != nil {
+		t.Fatalf("name the locator's own pod as the one the daemon replaced: %v", err)
+	}
+	suspended("it naming the locator's own pod", func(s *sandbox) bool { return s.Annotations[displacedAnnotation] == loc.Sandbox.PodUID })
+	if drifted := driftOf(t, g.ctx, r2, loc); len(drifted) > 0 {
+		t.Errorf("PodDrift of this round's own replacement in flight = %q, want nothing: the pod is there and the round ends on it", drifted)
 	}
 }
 

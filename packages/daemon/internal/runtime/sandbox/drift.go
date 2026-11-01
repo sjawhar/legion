@@ -211,17 +211,27 @@ func (r *Runtime) shapeDrift(s *sandbox, kind podKind) []string {
 // there is nobody in such a pod to task, so its drift is its launch's to replace rather than a
 // round's.
 //
-// It answers runtime.ErrPodGone where the Sandbox or the pod is absent, or where the pod running
-// now is not the one the locator records: a pod that is not there needs no round, and it has not
-// drifted from nothing either. That is the whole difference between a round that ends over the
-// pod it was opened on and a round whose pod went with the work on its disk, which only the
-// caller can tell its workers of (runtime.ErrPodGone, internal/daemon's groupDrift).
+// It answers runtime.ErrPodGone where the Sandbox or the pod is absent, where the pod running
+// now is not the one the locator records, and where the Sandbox is suspended for anything but
+// this round's own replacement: a pod that is not there, and a pod on its way out, need no round,
+// and neither has drifted from nothing. That is the whole difference between a round that ends
+// over the pod it was opened on and a round whose pod went with the work on its disk, which only
+// the caller can tell its workers of (runtime.ErrPodGone, internal/daemon's groupDrift).
 //
-// The sweep asks this of every claim of the deployment at every tick, so the steady state — a pod
-// built from the configuration the runtime still has — costs one read of the annotation the
-// stored template records against the shape the runtime holds for that kind (r.podShapes), both
-// strings. The Sandbox itself is decoded only where those two differ, which is the pod a round is
-// about to be opened over.
+// The one suspended Sandbox that is not gone is the one this round's own ReplacePod suspended:
+// it names the locator's own pod as the pod it displaced (displacedAnnotation, suspendDisplacing)
+// and it is waiting that pod out. Such a pod is answered for as a pod that is there and has not
+// drifted — no reasons and no error — so a sweep that reads the Sandbox between the suspension
+// and the pod's end ends the round as the replacement it is. Any other suspended Sandbox is some
+// other act's: an operator's suspension, a launch that is replacing the pod, a tree moved on, and
+// nothing the round decides over such a pod is true.
+//
+// The sweep asks this of every claim of the deployment at every tick, so the steady state — a
+// Sandbox running and a pod built from the configuration the runtime still has — costs one read
+// of the operating mode and one of the annotation the stored template records, against the shape
+// the runtime holds for that kind (r.podShapes), all strings of the object this call already
+// holds. The Sandbox itself is decoded only where the two shapes differ, which is the pod a round
+// is about to be opened over.
 func (r *Runtime) PodDrift(_ context.Context, k runtime.Known) ([]string, error) {
 	if err := k.Validate(); err != nil {
 		return nil, fmt.Errorf("sandbox runtime: pod drift: %w", err)
@@ -248,6 +258,15 @@ func (r *Runtime) PodDrift(_ context.Context, k runtime.Known) ([]string, error)
 	pod := r.storedPod(name)
 	if !ownedBy(pod, u.GetUID()) || string(pod.UID) != k.Locator.Sandbox.PodUID {
 		return nil, fmt.Errorf("sandbox runtime: pod drift %s: %w", k.Claim, runtime.ErrPodGone)
+	}
+	if mode, _, _ := unstructured.NestedString(u.Object, "spec", "operatingMode"); mode == modeSuspended {
+		displaced, _, _ := unstructured.NestedString(u.Object, "metadata", "annotations", displacedAnnotation)
+		if displaced != k.Locator.Sandbox.PodUID {
+			return nil, fmt.Errorf("sandbox runtime: pod drift %s: %w", k.Claim, runtime.ErrPodGone)
+		}
+		// This round's own replacement, between its suspension and the pod's end: the pod is
+		// there, and what it was built from is what the replacement is about to build again.
+		return nil, nil
 	}
 	var drifted []string
 	if held, _, _ := unstructured.NestedString(u.Object, "spec", "podTemplate", "metadata", "annotations", podShapeAnnotation); held != r.podShapes[kind] {

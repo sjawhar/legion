@@ -66,11 +66,13 @@ func (s *supervision) reconcilePodUpdates(ctx context.Context, claims []supervis
 //
 // The decisions are taken in this order, and the order is the rule. A pod the group has replaced
 // with another went while its round was open, whatever the runtime says of a pod that is not
-// there. Then the drift: a pod that has drifted from nothing and has no round open over it needs
-// no replacement, and one whose round's own pod is already gone ends that round, which replaces
-// nothing. A round open over the pod the claims still record goes on, drift or no drift: once
-// opened, a round ends only by replacing its pod, or because that pod is gone. Only then is a
-// complete round acted on, and only then is a round opened or kept open.
+// there. Then the drift, which is also what says the pod is not there: a round open over a pod
+// the runtime no longer has ends at that reading, and a pod that has drifted from nothing and
+// has no round open over it needs no replacement, as does one whose round's own pod is already
+// gone, which ends that round over the pod that replaced it. A round open over the pod the
+// claims still record goes on, drift or no drift: once opened, a round ends only by replacing
+// its pod, or because that pod is gone. Only then is a complete round acted on, and only then is
+// a round opened or kept open.
 //
 // A group whose claims record no pod at all decides nothing: not that the pod went, and not that
 // it has drifted from nothing. No locator is no evidence either way — every claim of the issue
@@ -78,9 +80,13 @@ func (s *supervision) reconcilePodUpdates(ctx context.Context, claims []supervis
 // relaunch — and the round waits for a claim to record a pod again. The one thing that says a
 // pod went is a different pod in its place.
 //
-// A group whose claims record a pod the runtime no longer has decides nothing for the same
-// reason, and is left where it stands until those claims record the pod that replaced it
-// (groupDrift, runtime.ErrPodGone).
+// A group whose claims record a pod the runtime no longer has ends the round open over it at
+// that sweep, and decides nothing else (groupDrift, podGone, endRoundOverAGonePod). It is the
+// one place a round ends on something other than its own replacement, and it ends there rather
+// than at the tick that reads the claims recording the pod that replaced this one: inside that
+// window every role is relaunched into the new pod, and each of those processes' turns and
+// answers is counted by its machine against the old pod's round. The issue would then be told
+// work was lost where every worker had answered, or told nothing where work really was lost.
 func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string, group []supervise.Claim, now time.Time) {
 	slices.SortFunc(group, func(a, b supervise.Claim) int { return strings.Compare(string(a.Token), string(b.Token)) })
 	pod, split := groupPod(group)
@@ -112,8 +118,12 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 		s.podWentWithoutItsRound(ctx, issue, group, open, pod)
 		return
 	}
-	reasons, ok := s.groupDrift(ctx, issue, group)
-	if !ok {
+	reasons, reading := s.groupDrift(ctx, issue, group)
+	if reading == podGone {
+		s.endRoundOverAGonePod(ctx, issue, group, open, pod)
+		return
+	}
+	if reading != podRead {
 		return
 	}
 	if len(reasons) == 0 && open != supervise.PodRound(pod) {
@@ -194,10 +204,13 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 // on a pod: it takes that pod's launch turn and then waits the pod out, up to
 // worker_boot_timeout_seconds, while every other issue's round, this tick's stale-plugin re-posts
 // and the orphan reaping behind it wait. The bound costs the round nothing. The suspension that
-// displaces the pod has already landed when it hits. Once that pod is gone, PodDrift answers
-// runtime.ErrPodGone and the sweep decides nothing until the claims record the pod that
-// replaced it, where the round ends; nothing is deleted earlier than it would have been, and the
-// round stays open until then.
+// displaces the pod has already landed when it hits, so the next sweep reads the Sandbox
+// suspended and naming that very pod as the one it displaced, which is this round's own
+// replacement in flight: PodDrift answers for it as it does for a pod that is there and has not
+// drifted, and the round is finished here, where only the pod's end is left to wait for. Once
+// the pod itself is gone, that sweep reads it gone and the round ends there instead, with
+// nothing lost — every claim that blocks the round had answered before this call was made — so
+// nothing is deleted earlier than it would have been.
 func (s *supervision) completePodUpdate(ctx context.Context, issue string, snapshot, live []supervise.Claim, round, pod, reasons string, now time.Time) bool {
 	if waiting := waitingClaims(live, round); len(waiting) > 0 {
 		if len(waitingClaims(snapshot, round)) == 0 {
@@ -417,10 +430,16 @@ func (s *supervision) tellPodlessRound(ctx context.Context, issue string, group 
 	})
 }
 
-// podWentWithoutItsRound is the round's pod replaced before the round could finish: the message
-// the issue's spec requires is written on the issue, naming what was lost, and the round ends.
+// podWentWithoutItsRound is the round's pod gone before the round could finish: the message the
+// issue's spec requires is written on the issue, naming what was lost, and the round ends.
 // Nothing here can bring the work back — the disk went with the pod — so the message is the whole
 // of it.
+//
+// Two readings say the pod went, and each calls this with the claims it decided from. The claims
+// recording a pod other than the round's own is one (reconcileIssuePodUpdate), and the runtime
+// answering that the pod is not there is the other (endRoundOverAGonePod). What was lost is read
+// from the group this is given, so the caller's own reading of the claims is the one the issue
+// is told of and the one the round ends on.
 func (s *supervision) podWentWithoutItsRound(ctx context.Context, issue string, group []supervise.Claim, round, pod string) {
 	lost := waitingClaims(group, round)
 	reasons := roundReasons(group, round)
@@ -431,6 +450,42 @@ func (s *supervision) podWentWithoutItsRound(ctx context.Context, issue string, 
 			"issue", issue, "round", round, "error", err)
 	}
 	s.endPodUpdates(group)
+}
+
+// endRoundOverAGonePod ends the round the sweep has just read the pod of as gone. The report is
+// decided here and the round ends here, at the first sweep that reads it: a round left open over
+// a pod that is not there is relaunched into the pod that replaced it one role at a time, and
+// every turn and every answer of those processes is counted by its machine against the round of
+// a pod they never ran in.
+//
+// What was lost is the claims of the round that had not answered by now, so a round every
+// blocking claim answered lost nothing and is told to nobody: the workers pushed everything they
+// wanted kept before the pod went, and a message naming no role would say an issue lost work it
+// did not lose.
+//
+// Those answers are read from the machines as they stand rather than from the tick's snapshot,
+// and unmasked (noticeGroup): an answer recorded is an answer whatever its machine is deciding
+// now, and what this decides is a report of what is already gone, never the deletion of a disk —
+// which is what the mask exists for (roundGroup).
+//
+// A pod that is not there with no round open over it decides nothing, as a group whose claims
+// record no pod at all does: there is no round to end, the drift of a pod that is not there says
+// nothing, and the next launch into the issue builds a pod from the configuration the runtime
+// has now.
+func (s *supervision) endRoundOverAGonePod(ctx context.Context, issue string, group []supervise.Claim, round, pod string) {
+	if round == "" {
+		s.log.Info("supervise: the pod this issue's claims record is not there, and no update round is open over it; nothing is decided of this issue",
+			"issue", issue, "pod", pod)
+		return
+	}
+	told := s.noticeGroup(group)
+	if len(waitingClaims(told, round)) > 0 {
+		s.podWentWithoutItsRound(ctx, issue, told, round, pod)
+		return
+	}
+	s.log.Info("supervise: the pod of this issue's update round is not there, and every claim of the round had answered; nothing was lost and the round is over",
+		"issue", issue, "round", round, "pod", pod)
+	s.endPodUpdates(told)
 }
 
 // openPodUpdate opens the round, or keeps it open: every claim that blocks it is posted
@@ -632,21 +687,47 @@ func (s *supervision) endPodUpdates(group []supervise.Claim) {
 	}
 }
 
+// podReading is what one sweep could read of the pod the group's claims record, and the one
+// thing that says what the reasons beside it are worth (groupDrift). The three answers are
+// decisions, not degrees of one: a pod that has drifted from nothing is still running and its
+// round replaces it, a pod that cannot be read decides nothing at all, and a pod that is not
+// there has taken its disk with it and ends the round open over it. No two of them may be read
+// from the same empty list of reasons, which is why this is an answer of its own rather than a
+// flag a caller may drop.
+//
+// podUnread is the zero value, so a reading nobody set decides nothing: of the three, it is the
+// only one that is safe to be wrong about.
+type podReading int
+
+const (
+	// podUnread is the runtime refusing the question: an error is never a statement that
+	// something drifted, and a round must neither open nor end on one.
+	podUnread podReading = iota
+	// podRead is the pod being there and read, and only under it do the reasons beside this
+	// reading mean anything: no reason at all is then a pod that has drifted from nothing.
+	podRead
+	// podGone is the pod the claims record not being there (runtime.ErrPodGone): it was replaced
+	// where it stood for a failure of its own, or it is on its way out for an act that is not
+	// this round's, and whatever was unpushed on its disk went with it.
+	podGone
+)
+
 // groupDrift is why the group's pod has drifted: the union of the runtime's PodDrift over every
-// claim of the group that records a process, in the claims' own order and without repeats. It
-// reports false when the runtime could not be asked at all: an error is never a statement that
-// something drifted, and a round must neither open nor end on one.
+// claim of the group that records a process, in the claims' own order and without repeats, with
+// the reading that says what those reasons are worth (podReading).
+//
+// It reads podUnread when the runtime could not be asked at all: an error is never a statement
+// that something drifted, and a round must neither open nor end on one.
 //
 // The pod the claims record not being there is the one error of its own (runtime.ErrPodGone),
-// and it reports false for that too: nothing can be read of a pod that is not there, so this
-// issue decides nothing this tick, as it decides no replacement where its claims record no pod
-// at all (reconcileIssuePodUpdate). Read as a pod that has drifted from nothing, it would carry
-// the round on over a pod that took its workers' unpushed work with it: the round would wait to
-// replace a pod that is not there, and the issue would be told nothing of what was lost. What
-// ends the round instead is the claims recording the pod that replaced this one, one relaunch
-// later, which is what says the pod went (podWentWithoutItsRound). It is no failure, so it is
-// logged as the wait it is.
-func (s *supervision) groupDrift(ctx context.Context, issue string, group []supervise.Claim) ([]string, bool) {
+// and it reads podGone, which is a statement rather than a failure: nothing more can be read of
+// that pod, and the round open over it is over with it (endRoundOverAGonePod). Read as a pod
+// that has drifted from nothing, it would carry the round on over a pod that took its workers'
+// unpushed work with it. Read as nothing at all, it would leave that round open while the
+// displaced path relaunches each role into the pod that replaced this one, and every turn and
+// answer of those processes would be counted against a round their pod never ran in. The caller
+// is what logs it, because the caller is what decides it.
+func (s *supervision) groupDrift(ctx context.Context, issue string, group []supervise.Claim) ([]string, podReading) {
 	var reasons []string
 	for _, c := range group {
 		if c.Locator == nil {
@@ -654,15 +735,13 @@ func (s *supervision) groupDrift(ctx context.Context, issue string, group []supe
 		}
 		drift, err := s.runtime.PodDrift(ctx, runtime.Known{Claim: c.Token, Locator: c.Locator})
 		if errors.Is(err, runtime.ErrPodGone) {
-			s.log.Info("supervise: the pod this issue's claims record is not there; nothing of its update round is decided until they record the pod that replaced it",
-				"issue", issue, "claim", c.Token, "pod", podOf(c.Locator))
-			return nil, false
+			return nil, podGone
 		}
 		if err != nil {
 			if ctx.Err() == nil {
 				s.log.Error("supervise: read whether this issue's pod has drifted", "issue", issue, "claim", c.Token, "error", err)
 			}
-			return nil, false
+			return nil, podUnread
 		}
 		for _, reason := range drift {
 			if !slices.Contains(reasons, reason) {
@@ -670,7 +749,7 @@ func (s *supervision) groupDrift(ctx context.Context, issue string, group []supe
 			}
 		}
 	}
-	return reasons, true
+	return reasons, podRead
 }
 
 // groupPod is the pod every claim of the group that records one runs in, and whether they record

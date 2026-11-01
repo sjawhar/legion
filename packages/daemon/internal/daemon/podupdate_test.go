@@ -716,8 +716,13 @@ func TestPodUpdateReplacesThePodWhenTheDriftClearsUnderAnOpenRound(t *testing.T)
 // init container, a superseded disk — and that deletes the disk with everything unpushed on it.
 // The issue is told so, naming the roles that had not answered, and the round ends.
 //
-// What says the pod went is the pod the claims record now: another one, which the displaced path
-// brought each role back into. A claim that records no pod at all says nothing of the kind.
+// Two things say the pod went, and this is the second of them: the pod the claims record now is
+// another one, which the displaced path brought each role back into. The first is the runtime
+// reading the pod gone, which ends the round at the sweep that reads it
+// (TestPodUpdateEndsTheRoundAtTheFirstReadOfAGonePod). This one is what is left when no sweep
+// saw that: the daemon was down, or the relaunch landed between two ticks, and what the claims
+// record is the whole of the evidence. A claim that records no pod at all says nothing of the
+// kind.
 func TestPodUpdateWritesOnTheIssueWhenThePodWentWithoutItsRound(t *testing.T) {
 	rig := newPodUpdateRig(t, readyWorker(claim.RoleImplementer), readyWorker(claim.RoleTester))
 	rig.drifts(podUpdateDrift)
@@ -783,8 +788,8 @@ func (r *podUpdateRig) settle(role claim.Role) {
 
 // podGone scripts the runtime to answer that the pod the claims of the issue record is not there
 // at all (runtime.ErrPodGone), as the Sandbox runtime answers a pod replaced where it stood for
-// a failure of its own: the pod is gone from the cluster, and the claims go on recording it
-// until the displaced path has relaunched each role into the pod that replaced it.
+// a failure of its own: the pod is gone from the cluster while the claims still record it, which
+// is what every sweep between that pod's end and the relaunch of each role reads.
 func (r *podUpdateRig) podGone() {
 	r.t.Helper()
 	for _, token := range r.tokens {
@@ -794,15 +799,15 @@ func (r *podUpdateRig) podGone() {
 
 // The pod of an open round can go before any claim records another one: it is replaced where it
 // stands for a failure of its own, and the claims record it for as long as the displaced path
-// takes to relaunch each role. The sweep decides nothing of such a round — a pod that is not
-// there has drifted from nothing as little as it has drifted from something — and the round ends
-// one tick later, over the claims that record the pod that replaced it, by telling the issue
-// what the workers that had not answered lost.
+// takes to relaunch each role. The first sweep that reads it gone is where the round ends and
+// where what was lost is decided — the roles that had not answered by then — and the issue is
+// told so there and then.
 //
-// Read as a round whose drift cleared, this would carry the round on over a pod that took the
-// implementer's unpushed work with it: the round would wait to replace a pod that is not there,
-// and the issue would be told nothing of what was lost.
-func TestPodUpdateDecidesNothingWhileTheRoundsPodIsGone(t *testing.T) {
+// Nothing a worker does afterwards changes that report. Each role is relaunched into the pod
+// that replaced this one inside the window a round left open would span, and an answer from one
+// of those processes is an answer about a pod the round never covered: counted, it would say the
+// issue lost nothing where the implementer's unpushed work went with the disk.
+func TestPodUpdateEndsTheRoundAtTheFirstReadOfAGonePod(t *testing.T) {
 	rig := newPodUpdateRig(t, readyWorker(claim.RoleImplementer), readyWorker(claim.RoleTester))
 	rig.drifts(podUpdateDrift)
 
@@ -824,30 +829,14 @@ func TestPodUpdateDecidesNothingWhileTheRoundsPodIsGone(t *testing.T) {
 	rig.podGone()
 	rig.tick()
 
-	rig.settle(claim.RoleTester)
-	if messages := rig.messages(); len(messages) != 0 {
-		t.Fatalf("the issue was written %q over a pod no claim records as replaced yet", messages)
-	}
-	if sent := conn.Prompts()[before:]; len(sent) != 0 {
-		t.Fatalf("the worker that had answered was sent %+v while its round's pod was gone", sent)
-	}
-	for _, role := range []claim.Role{claim.RoleImplementer, claim.RoleTester} {
-		if c := rig.claimOf(role); c.UpdateRound != podUpdateRound {
-			t.Fatalf("%s records round %q, want %s still open: nothing is decided of a pod that is not there", role, c.UpdateRound, podUpdateRound)
-		}
-	}
-	if calls := rig.replacements(); len(calls) != 0 {
-		t.Fatalf("ReplacePod called %d times for a pod that is not there", len(calls))
-	}
-
-	// The displaced path brings each role back, and the pod they record now is what says the pod
-	// of their round went.
-	rig.tickBackIn(podUpdateReplacementPod)
-
-	rig.settle(claim.RoleTester)
+	// The message is written inside the sweep, so it is there when the tick returns; the round
+	// ends through each claim's own machine, which is what the wait below is for.
 	messages := rig.messages()
 	if len(messages) != 1 {
-		t.Fatalf("the issue was written on %d times, want once for the pod that went", len(messages))
+		t.Fatalf("the issue was written on %d times at the sweep that read the pod gone, want once for the pod that went", len(messages))
+	}
+	if !strings.Contains(messages[0], podUpdateRound) {
+		t.Errorf("the message does not name the round %s: %s", podUpdateRound, messages[0])
 	}
 	if !strings.Contains(messages[0], string(claim.RoleImplementer)) {
 		t.Errorf("the message does not name the implementer, which had not answered: %s", messages[0])
@@ -855,11 +844,81 @@ func TestPodUpdateDecidesNothingWhileTheRoundsPodIsGone(t *testing.T) {
 	if strings.Contains(messages[0], string(claim.RoleTester)) {
 		t.Errorf("the message names the tester, which had answered and lost nothing: %s", messages[0])
 	}
+	if calls := rig.replacements(); len(calls) != 0 {
+		t.Fatalf("ReplacePod called %d times for a pod that is not there", len(calls))
+	}
+	for _, role := range []claim.Role{claim.RoleImplementer, claim.RoleTester} {
+		rig.awaitClaim(role, "its round to end at the sweep that read its pod gone",
+			func(c supervise.Claim) bool { return c.UpdateRound == "" })
+	}
+	rig.settle(claim.RoleTester)
 	if sent := conn.Prompts()[before:]; len(sent) != 0 {
 		t.Fatalf("the worker that had answered was sent %+v, want nothing: its pod went, and its launch is what starts it again", sent)
 	}
-	for _, role := range []claim.Role{claim.RoleImplementer, claim.RoleTester} {
-		rig.awaitClaim(role, "its round to end with the pod", func(c supervise.Claim) bool { return c.UpdateRound == "" })
+
+	// The implementer comes back in the pod that replaced the old one and answers the round its
+	// task named. The round ended with the pod it was opened over, so that answer is refused and
+	// the report the gone read decided stands.
+	back := rig.claimOf(claim.RoleImplementer)
+	m, ok := rig.sup.Machine(back.Token)
+	if !ok {
+		t.Fatal("the implementer is not supervised")
+	}
+	if err := m.Handle(rig.ctx, supervise.PodUpdateSignalled{
+		Claim: back.Token, Generation: back.Generation, Session: back.Session, Round: podUpdateRound, Head: "e4f5a6b",
+	}); err == nil {
+		t.Fatal("an answer naming the round of the pod that went was accepted; that round ended with its pod")
+	}
+	rig.tickBackIn(podUpdateReplacementPod)
+
+	if after := rig.messages(); len(after) != 1 {
+		t.Fatalf("the issue was written on %d times once a worker answered in the pod that replaced the round's own, want the one report the gone read decided", len(after))
+	}
+	if c := rig.claimOf(claim.RoleImplementer); c.UpdateSignalledAt != nil {
+		t.Errorf("the implementer records an answer at %s to a round that is over", c.UpdateSignalledAt)
+	}
+}
+
+// The same first read of a gone pod, over a round every worker had already answered: the workers
+// pushed everything they wanted kept before the pod went, so nothing was lost and the issue is
+// told nothing. The round still ends there — its pod is gone, and no replacement it could make
+// would be of that pod — and the operator's side is told nothing either: a round that ends with
+// nothing lost is nobody's business.
+func TestPodUpdateEndsAGonePodsRoundWithNoMessageWhenEveryWorkerAnswered(t *testing.T) {
+	rig := newPodUpdateRig(t, readyWorker(claim.RoleImplementer), readyWorker(claim.RoleTester))
+	rig.drifts(podUpdateDrift)
+
+	rig.tick()
+	roles := []claim.Role{claim.RoleImplementer, claim.RoleTester}
+	for _, role := range roles {
+		rig.awaitRound(role, podUpdateRound)
+		rig.signal(role, "a1b2c3d")
+		// Each answering turn ends, so no claim of the round is working when the pod is read
+		// gone: what ends the round here is the pod, not the completeness the next branch acts
+		// on, and a turn still running would leave the two indistinguishable.
+		token := rig.tokens[role]
+		answered := rig.claimOf(role).Pending.ID
+		rig.handle(role, supervise.StreamTurnStart{Claim: token})
+		rig.endTurn(role, answered)
+		rig.awaitClaim(role, "the round's own ask to retire with its turn",
+			func(c supervise.Claim) bool { return c.Pending == nil })
+	}
+
+	rig.podGone()
+	rig.tick()
+
+	for _, role := range roles {
+		rig.awaitClaim(role, "its round to end at the sweep that read its pod gone",
+			func(c supervise.Claim) bool { return c.UpdateRound == "" })
+	}
+	if messages := rig.messages(); len(messages) != 0 {
+		t.Fatalf("the issue was written %q; every worker of the round had answered, so the pod took nothing unpushed with it", messages)
+	}
+	if notices := rig.notices(); len(notices) != 0 {
+		t.Fatalf("the controller was told %+v of a round that ended with nothing lost", notices)
+	}
+	if calls := rig.replacements(); len(calls) != 0 {
+		t.Fatalf("ReplacePod called %d times for a pod that is not there", len(calls))
 	}
 }
 
