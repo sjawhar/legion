@@ -596,10 +596,14 @@ jobs:
               - 'skills/dispatch/SKILL.md'
               - 'skills/dispatch-writing-specs/SKILL.md'
               # The Go copies its tests hold the TypeScript to: src/dispatch-href.test.ts:49-53 and
-              # src/dispatch-text-references.test.ts:10-14 read the Go reader's JSON tables, and
-              # scripts/gen-go.test.ts checks both files scripts/gen-go.ts writes are current.
+              # src/dispatch-text-references.test.ts:10-14 read the Go reader's JSON tables,
+              # src/dispatch-block-ref.test.ts reads pmdoc's block pointer and typed block id
+              # tables, and scripts/gen-go.test.ts checks both files scripts/gen-go.ts writes are
+              # current.
               - 'packages/envoy/internal/dispatch/text/testdata/dispatch-href-references.json'
               - 'packages/envoy/internal/dispatch/text/testdata/dispatch-text-references.json'
+              - 'packages/envoy/internal/dispatch/pmdoc/testdata/block-pointer-values.json'
+              - 'packages/envoy/internal/dispatch/pmdoc/testdata/typed-block-id-spellings.json'
               - 'packages/envoy/internal/contracts/generated.go'
               - 'packages/daemon/internal/dispatch/generated.go'
             # The conflict measurement script's lint, typecheck and tests: its own directory (tests
@@ -854,6 +858,14 @@ jobs:
               - 'packages/envoy/internal/dispatch/pmdoc/**'
               - 'packages/envoy/internal/stacktest/*'
               - 'packages/proof-editor/**'
+              # The editor's src/block-pointers.ts (through src/block-schema.ts) imports
+              # @legion/contracts.
+              - 'packages/contracts/src/**'
+              # pmdoc's schema.go and pointers.go import internal/dispatch/model and
+              # internal/dispatch/text, whose tests' testdata the race run reads too.
+              - 'packages/envoy/internal/dispatch/model/*'
+              - 'packages/envoy/internal/dispatch/text/*'
+              - 'packages/envoy/internal/dispatch/text/testdata/**'
             # The API race job. internal/dispatch/api's lock_level_test.go:120-133 walks every
             # non-test .go file under packages/envoy (event_insert_guard_test.go:32 and
             # review_write_guard_test.go:44 use the same walk), so this filter keeps the wide root
@@ -890,6 +902,8 @@ jobs:
               # pmdoc/testdata/fixtures.json.
               - 'packages/envoy/internal/dispatch/pmdoc/schema/**'
               - 'packages/envoy/internal/dispatch/pmdoc/testdata/**'
+              # docs/block_pointer_links_test.go imports pmdoc/pmdoctest.
+              - 'packages/envoy/internal/dispatch/pmdoc/pmdoctest/*'
               - 'packages/envoy/internal/dispatch/refs/*'
               - 'packages/envoy/internal/dispatch/store/*'
               # internal/dispatch/store embeds every migration.
