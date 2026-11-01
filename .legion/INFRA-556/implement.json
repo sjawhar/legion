@@ -2,44 +2,46 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-556",
-  "completed": "2026-11-01T05:26:09Z",
-  "round": "review round 10 (changes requested at 9629cc3f): the two intermittent docs tests fixed as test races (2c1d2ec0, cc7905af); one merge of main d09b46d7 after GitHub reported a conflict (d72d8f42), migrations renumbered 0151-0153 above main's 0150_dpop_proofs",
+  "completed": "2026-11-01T15:04:49Z",
+  "round": "tester round 17 send-back (fail at d72d8f42): the connect-append race fixed in every test of this change that reads the stored head after a connect (7351c9c3, 659c9124); one merge of main 5bb22ecb (97e5e32d): one shared listener hub, migrations 0158-0160, 91 connections",
   "proof": [
     {
       "criterion": "Items 1-6 and D10 across two processes, on the tree merged with main: live edits, cursors and presence, close/reopen, ask authors, agent writes, fresh reads, rebuild/resumption/queue, serving-process header, awareness bounds and the removal clock",
       "surface": "two real envoy-dispatch binaries on one Postgres 17 (pgvector), driven over HTTP and /ws/doc",
       "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<database dispatch_test on LEGION_TEST_PG_DSN> go test -tags multiprocess -count=1 -timeout 55m ./cmd/dispatch",
-      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 1292.600s (multiprocess); plain cmd/dispatch ok 346.429s; api room/ask/scope tests ok 229.567s; store ok 266.686s (three superuser-only census tests skipped); infra/gcp connection count ok",
-      "headSha": "d72d8f428b4011f056dc97f44db4ba22ed3d6a2d",
+      "observed": "multiprocess file at 97e5e32d: 140 PASS, 0 --- FAIL (exit 1 only from storetest's non-superuser teardown); pglisten 20 runs + 5 under -race ok; main's background-wake tests ok; store migration guards pass (teardown-only failure lines); infra/gcp TestDispatchConnectionsPerPodIsTheServers ok at 91",
+      "headSha": "97e5e32d76deaf256ea247b5b0a65756ed619915",
       "negativeControl": "At cf17a2e1 TestAReaderLeavingIsRelayedAtItsClientsClockThoughAPurgeRacesTheEncode fails (alice's removal relayed at clock 0); at the test-support commit aa50b68c the seven two-process tests fail on their bugs"
     },
     {
-      "criterion": "The two intermittent docs tests pass the architect's bar: 200 runs at -count=100 -cpu=1,2 and 50 under -race on the pod's test PostgreSQL, and each still fails on the bug it guards",
+      "criterion": "Every test of this change that reads the stored head after a browser connects waits for the connect's own append first; each touched test passes 200 runs and 50 under -race on the pod's Postgres and still fails on the bug it guards",
       "surface": "docs package on real Postgres",
-      "command": "cd packages/envoy && go test -count=100 -cpu=1,2 -run '^(TestARoomIsReloadedOnceAKeystrokeLandsOnAHistoryACompactionFolded|TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenItsAppendReachesTheGateAfter)$' ./internal/dispatch/docs/; CGO_ENABLED=1 go test -race -count=50 -run <same> ./internal/dispatch/docs/",
-      "observed": "folded-history test 200/200 and 50/50 -race; close-margin test 200/200 and 50/50 -race; no data race (the plain run's exit 1 is two storetest teardown drops the non-superuser pod Postgres refuses, no test failure). Interleaving test ok, -race awareness ok 52.658s, every docs test passes",
-      "headSha": "d72d8f428b4011f056dc97f44db4ba22ed3d6a2d",
-      "negativeControl": "closeRoomOnReplacedHistory a no-op: folded-history test fails 10/10; observedBeforeClose forced false: close-margin test fails 5/5; gate opened before the close: fails 5/5 on its premise guard"
+      "command": "cd packages/envoy && go test -count=100 -cpu=1,2 -run '<test>' <pkg>; CGO_ENABLED=1 go test -race -count=50 -run '<test>' <pkg> (multiprocess tests with -tags multiprocess)",
+      "observed": "docs at 97e5e32d: the compaction-folded close test, the closed-issue refusal test, the folded-history reload test and the close-margin test each 200/200 and 50/50 -race; two-process at 659c9124 (test code unchanged by the merge): reopen test, withdraw test, two-editors test each 200/200 and 50/50 -race; no data race; docs package 757 PASS 0 FAIL",
+      "headSha": "97e5e32d76deaf256ea247b5b0a65756ed619915",
+      "negativeControl": "storedHistoryHolds made to refuse: compaction-folded close test fails; closed-issue refusal removed: refusal test fails; keystroke removed: reopen and withdraw tests fail on their content waits, where before the change they passed on the connect's append (1/3 and 3/3)"
     },
     {
       "criterion": "Browser: two people on two processes see each other's typing and cursor within a second on one socket each",
       "surface": "Chromium on main's two-process harness (round-robin proxy, two envoy-dispatch processes, one Postgres)",
       "command": "cd packages/dispatch && DATABASE_URL=<database infra556_e2e on LEGION_TEST_PG_DSN> bun run e2e:multiprocess -- coedit.multiprocess",
-      "observed": "✓ coedit.multiprocess.e2e.ts:143:1 two people on two processes ... (7.9s); 1 passed (11.7s)",
-      "headSha": "d72d8f428b4011f056dc97f44db4ba22ed3d6a2d",
+      "observed": "✓ coedit.multiprocess.e2e.ts:143:1 two people on two processes ... (8.0s); 1 passed (10.6s)",
+      "headSha": "97e5e32d76deaf256ea247b5b0a65756ed619915",
       "negativeControl": "Fails without this change (https://github.com/sjawhar/legion/pull/2414#issuecomment-6464882958)"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/docs/room_behind_head_test.go",
     "packages/envoy/internal/dispatch/docs/issue_open_test.go",
-    "merge: store/migrations 0151-0153 renamed with every reference, routes_table.go and main.go on main's route table, cmd/dispatch/AGENTS.md /ws/doc row, two docs drop the removed X-Dispatch-Actor refusal"
+    "packages/envoy/cmd/dispatch/multiprocess_test.go",
+    "merge: packages/envoy/internal/pglisten/hub.go, hub_test.go, listener.go (one hub); cmd/dispatch/main.go; store/pool.go and infra/gcp/dispatch.go (91); migrations 0158-0160 with every reference; docs"
   ],
   "deviations": [
-    "The pod's test PostgreSQL is not a superuser: main's storetest teardown and three census tests fail there regardless of this change. #2411 and #2387 are still open."
+    "The pod's test PostgreSQL is not a superuser: storetest teardown and three census tests fail there regardless of this change. The two-process pass bars were run at 659c9124; the merge changed none of those tests' code."
   ],
   "openQuestions": [],
   "trickyParts": [
-    "Both flakes were the tests racing a connect-time content-free append; the code kept its promises."
-  ]
+    "Main's #2391 and this change each added a pglisten.Hub; they are one hub now, keeping the dispatch-listener <id> name membership reads.",
+    "The numbering guard refuses a gap, so the migrations take 0158-0160, not the 0162-0164 first named; the architect agreed."
+  ],
+  "previousHandoff": "543698fa42a1a124fb6f47597746eae195d131b6"
 }
