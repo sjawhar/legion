@@ -476,7 +476,9 @@ Some tests fail in a Kubernetes issue pod whatever your change, because of the p
 A tmux pane runs on its host, and none of this holds there. Their proof is CI's run at the head:
 cite that run, and name in your handoff each package the pod could not run. The cases below are
 the known ones, not every one: a failure they do not name is yours to explain. Several of them
-reach any work a pod runs, a test or a tool of your own, not a test suite alone.
+reach any work a pod runs, a test or a tool of your own, not a test suite alone. One rule holds
+them together: set it, read it back, and refuse on a mismatch. A call's exit code answers a
+different question than the one you asked.
 
 - **Check your own output, never the job's phase.** A Kubernetes Job that reports `Succeeded`
   says its container exited 0, and nothing more: read the artefact your work was to produce, or
