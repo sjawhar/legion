@@ -2,184 +2,38 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-598",
-  "completed": "2026-10-31T19:20:51Z",
+  "previousHandoff": "beff7ca3bce27cfbf47b9ec57b17f3dc14edf150",
   "proof": [
     {
-      "criterion": "Review round 7: an unreadable lock makes the watcher and the runner-job wait act on nothing at that poll and keep polling; the guard's note carries the failed read's words; one copy_exec; live.transport never written",
-      "surface": "cluster.sh under cluster.test.sh's fakes (FAKE_LOCK_GET_FAIL_TIMES failing one whole copy_is_ours), the loadgen Go tests, shellcheck and check-ci-images",
-      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 -count=1 ./loadtest/ && bash loadtest/run-step.test.sh && bash loadtest/common.test.sh && timeout 2400 bash loadtest/cluster/cluster.test.sh",
-      "observed": "cluster.test.sh 54 PASS, 0 FAIL: (bb) the watcher records pg_disk and stops the job on a later poll after one whole failed copy_is_ours, and runner_wait stops the job on a later poll and prints timeout; (aa) the note carries 'The connection to the server 10.0.0.1:443 was refused'; (cc) copy_exec takes -t and -i in either order; go test ok incl. TestNewSummaryNamesNoLiveTransport; run-step, common, shellcheck, check-ci-images exit 0; PR MERGEABLE after the push",
-      "headSha": "d9d38377fa58",
-      "negativeControl": "against 183c0d7f's cluster.sh: 'runner_stop's note does not carry what the failed read of the lock said' and 'the disk watcher took 1 poll(s): it stopped watching at the poll whose every read of the lock failed instead of reading again at the next one'"
+      "criterion": "Tester round 11: cluster.test.sh is green over repeated runs under CPU load (the collect assertion and every other position-based read of the shared kubectl.log read the command's own calls by session)",
+      "surface": "cluster.test.sh under four busy loops on this 2-CPU pod, one run at a time",
+      "command": "cd packages/envoy && (4 x 'while :; do :; done' &) && for n in 1..5: timeout 5400 bash loadtest/cluster/cluster.test.sh",
+      "observed": "5 of 5 green at b467bd82: 55 PASS, 0 FAIL each, ended 05:29:46, 06:07:46, 06:46:41, 07:24:57, 08:03:27Z (dispatch://INFRA-598/artifact/cluster-test-under-load-b467bd82-txt); at 78a12fbe four loaded runs were green before the 03:02Z pod restart cut the fifth (cluster-test-under-load-round8-txt)",
+      "headSha": "b467bd82ac56",
+      "negativeControl": "the tester's own loaded runs at d9d38377, before the fix: iter-2 of 3 red with 'collect --run ... read the lock, which names another run'"
     },
     {
-      "criterion": "Tester round 9: cluster.test.sh's new assertions are deterministic under CPU load (test-only change)",
-      "surface": "cluster.test.sh under the tester's loader (4 busy loops on the pod's 2 CPUs), one run at a time on pod legion-infra-infra-598, and GitHub CI's envoy-go at the merged head",
-      "command": "loop of 10: timeout 5400 bash loadtest/cluster/cluster.test.sh with 4 `while :; do :; done` loops beside it (08:28-15:10Z), each result uploaded to dispatch://INFRA-598/artifact/cluster-test-under-load-1f054857-sequential-txt; CI run 41191574478 at 183c0d7f",
-      "observed": "10 of 10 runs exit 0, 52 PASS, 0 FAIL, 2230-3082 s each; sampled memory peak 2.56 GiB over 9696 samples; CI envoy-go pass, its 'One-run-at-a-time test for loadtest/run-step.sh' and 'Test loadtest/cluster/cluster.sh' steps success; lint, typecheck, test, pr-title pass",
-      "headSha": "183c0d7f8d12",
-      "negativeControl": "at 32592e51 under the same kind of load the tester saw 'the bundle streamed into the runner did not go through runner_exec: no lock read came right before it' and 'the heartbeat of a held run patched the lock no more than before (28, was 28)'; an earlier attempt of mine with 5 suites side by side plus 4 loops on 2 CPUs overloaded the pod (each hit its 2 h bound after 19 PASS, 0 FAIL), so the proof ran one suite at a time as the tester did"
-    },
-    {
-      "criterion": "Review round 6: every stop, kill or removal fails closed after a retried lock read; older step directories keep their recorded transport; main merged (AGENTS.md re-layout)",
-      "surface": "cluster.sh under cluster.test.sh's fakes (lock reads failing always, or only once), the loadgen Go tests, and the repository's CI check scripts, at the merged head",
-      "command": "cd packages/envoy && go test -p 2 -parallel 4 -count=1 ./loadtest/ && bash loadtest/run-step.test.sh && bash loadtest/common.test.sh && timeout 1800 bash loadtest/cluster/cluster.test.sh; repo root: shellcheck, check-ci-images.sh tree, check-ci-filters.sh, bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md",
-      "observed": "go test ok (TestTablesReadTheOlderLiveTransport passes); cluster.test.sh 52 PASS, 0 FAIL ((aa): every read failing, runner_stop, runner_step_remove and postgres_exec act on nothing; one failing read, runner_stop acts; (w) waits on exact pids); run-step, common, shellcheck, check-ci-images, check-ci-filters, semantic-line-breaks exit 0",
-      "headSha": "32592e511a29",
-      "negativeControl": "against 6ac30872: 'runner_stop returned 0 although no read of the lock answered'; 'step older-sse, whose summary.json names live.transport alone, reads transport [...] want \"sse\"'"
-    },
-    {
-      "criterion": "Review round 5: main merged with one dashboard transport; collect --run works while another run holds the lock; the daemons write their pidfile before any lock read; every write into the shared pods goes through a guarded helper, typing_start's token write included",
-      "surface": "cluster.sh under cluster.test.sh's fakes (fake lock naming another run, failing lock reads), the loadgen Go tests, and the repository's CI check scripts, at the merged head",
-      "command": "cd packages/envoy && go test -p 2 -parallel 4 -count=1 ./loadtest/ && bash loadtest/run-step.test.sh && bash loadtest/common.test.sh && timeout 1800 bash loadtest/cluster/cluster.test.sh; repo root: shellcheck of cluster.sh, check-ci-images.sh tree, check-ci-filters.sh, check-private-names.sh; diff check https://github.com/sjawhar/legion/pull/2462#issuecomment-6536640777",
-      "observed": "go test ok; run-step and common exit 0; cluster.test.sh 51 PASS, 0 FAIL ((y): the five helpers refuse, typing_start writes no token, collect --run <own run> exits 0 with no lock read; (z): up starts both daemons although every lock read after the lock fails); shellcheck, check-ci-images, check-ci-filters, check-private-names exit 0; no .legion/INFRA-639 in the tree",
-      "headSha": "6ac308721eb5",
-      "negativeControl": "against f7beb833's cluster.sh: 'typing_start wrote this run's agent token into run lt-20261028t080000-beef's runner pod', 'collect --run ... exited 1 while the lock names run ...', 'up exited 1 although only the reads of the lock after it took one failed'"
-    },
-    {
-      "criterion": "Review round 4: no stop, start, write or removal path of cluster.sh acts on another run's copy; heap-missing.txt records the removal's real result",
-      "surface": "cluster.sh under cluster.test.sh's fakes (real processes, a real SIGKILL, the fake lock naming another run), and the repository's CI check scripts",
-      "command": "cd packages/envoy && timeout 1800 bash loadtest/cluster/cluster.test.sh && bash loadtest/run-step.test.sh && bash loadtest/common.test.sh; uvx --from shellcheck-py@0.10.0.1 shellcheck -x packages/envoy/loadtest/cluster/cluster.sh; uv run --no-project --with pyyaml==6.0.2 bash .github/scripts/check-ci-images.sh tree; audit https://github.com/sjawhar/legion/pull/2462#issuecomment-6534359964",
-      "observed": "cluster.test.sh 49 PASS, 0 FAIL: (w) the EXIT trap after the lock moved stops no typing job and removes no token; (x) a failed removal is recorded as failed in heap-missing.txt; (y) with the lock naming another run runner_stop, runner_step_remove, typing_stop and runner_put touch nothing, stop_copy and runner_start refuse, step --run <own run> is refused naming both runs; run-step, common, shellcheck, check-ci-images tree exit 0",
-      "headSha": "f7beb83311be",
-      "negativeControl": "against 7604610d's cluster.sh: 'the EXIT trap of a step that ended because the lock names run lt-20261028t080000-beef stopped the browser typing job typing-pgkill' and 'runner_stop returned 0 although the lock names run lt-20261028t080000-beef'; without runner_put's guard: 'runner_put returned 0 although the lock names run lt-20261028t080000-beef'"
-    },
-    {
-      "criterion": "Review round 3: a SIGKILLed step's runner_wait ends with its step and never stops a later run's job of the same name; runner_copy_back returns 0 or 1 with its own heap note; one failed-kinds text",
-      "surface": "cluster.sh under cluster.test.sh's fakes (real processes, real SIGKILL), and the repository's CI check scripts",
-      "command": "cd packages/envoy && timeout 1800 bash loadtest/cluster/cluster.test.sh && bash loadtest/run-step.test.sh && go test -p 2 -parallel 4 -count=1 ./loadtest/; uv run --no-project --with pyyaml==6.0.2 bash .github/scripts/check-ci-images.sh tree",
-      "observed": "cluster.test.sh 48 PASS, 0 FAIL: case (w) kills the step with SIGKILL and, with no pkill, every process of the step is gone and step-pgkill is never in runner-stops; runner_wait at its deadline with another run's lock stops nothing; case (x) shows both heap.txt notes and heap-missing.txt; run-step, go test, check-ci-images tree all exit 0",
-      "headSha": "7604610db88f",
-      "negativeControl": "against 34d2d17d's cluster.sh case (w) fails: '40 s after the step shell was killed, the step still runs here (... cluster.sh step ... pgkill ...): its wait on the runner job polls on, and at the step's deadline it stops the job step-pgkill'"
-    },
-    {
-      "criterion": "Tester round 4: main's required lint and test checks pass at the code head (check-ci-images tree mode)",
-      "surface": "the repository's own CI check scripts, run in the workspace as CI runs them",
-      "command": "uv run --no-project --with pyyaml==6.0.2 bash .github/scripts/check-ci-images.sh tree; uv run --no-project --with pyyaml==6.0.2 bash .github/scripts/check-ci-images.test.sh",
-      "observed": "tree mode exit 0: '.github/ci-images.yaml holds 12 row(s); 36 reference(s) in 32 file(s) of CI's reach name one of those rows; of 6647 text file(s) swept, the 32 that name mirror.gcr.io are all in the exception list'; its test 'Results: 99 passed, 0 failed'",
-      "headSha": "34d2d17d2a2a",
-      "negativeControl": "at 9e0fc70a tree mode exits 1 with '4 problem(s) between .github/ci-images.yaml and the images CI fetches', naming cluster.sh:204, cluster.test.sh:1700, render-nats.sh:28 and manifests/nats.yaml:6; the check's test then reports 97 passed, 2 failed (the tester's job 124219909613)"
-    },
-    {
-      "criterion": "Review round 2 finding: the disk watcher never outlives its step after a SIGKILL and never stops another run's job",
-      "surface": "GKE namespace loadtest, from this Legion worker pod, Dispatch 9b92ac14",
-      "command": "run lt-20261030t174428-4d16 at 9e0fc70a: up, hold --for 2h, seed, step 1x, `step killed 1 --duration 4m` then kill -9 after 100 s, wait 145 s, then step after, down; log dispatch://INFRA-598/artifact/cluster-load-test-review2-watcher-log-txt; comment https://github.com/sjawhar/legion/pull/2462#issuecomment-6530011758",
-      "observed": "after the kill at 17:59:37 the watcher logged 'step killed: the step that started this disk watcher is gone; it stops, recording nothing and stopping no job'; the killed step's .pg-disk.jsonl stayed at 3 readings over 70 s and no step-failed.json was written; step after exited 0 and was not marked failed",
-      "headSha": "9e0fc70a00cff09bd7873a3a5e3341e92b8c9bce",
-      "negativeControl": "cluster.test.sh case (w) against 3f904713's cluster.sh: 'FAIL: the disk watcher of a killed step stopped the runner job step-pgkill after the kill'"
-    },
-    {
-      "criterion": "Review round 2 findings: classify without a phase, heap.txt-only copy failure, the five minors; CI's envoy-go reaches cluster.test.sh and run-step.test.sh",
-      "surface": "loadgen curves Go tests and cluster.sh under cluster.test.sh's fakes, at the merge with main e65900f4 (#2551, #2552)",
-      "command": "cd packages/envoy && go test -p 2 -parallel 4 -count=1 ./loadtest/ && bash loadtest/run-step.test.sh && bash loadtest/common.test.sh && timeout 1800 bash loadtest/cluster/cluster.test.sh; uv run --with pyyaml bash .github/scripts/check-ci-filters.sh",
-      "observed": "go test ok; run-step and common exit 0; cluster.test.sh 48 PASS, 0 FAIL (cases (w) watcher and (x) heap.txt-only added); check-ci-filters 26 gates; fingerprint 026bd53baa63a433 unchanged across both merges",
-      "headSha": "9e0fc70a00cff09bd7873a3a5e3341e92b8c9bce",
-      "negativeControl": "against 3f904713: TestCurvesNameTheKindOfACopyWithoutAPhase 'kinds: 10x-hour \"grid\", 1x-db4 \"grid\"'; case (x) 'a step whose heap.txt alone did not come back was marked failed'"
-    },
-    {
-      "criterion": "Review round 1 findings 3-5: the sampler stops after an abandoned run; a kept run is held for a bound; a command from another PID namespace is refused",
-      "surface": "GKE namespace loadtest, from this Legion worker pod, Dispatch 9b92ac14",
-      "command": "run lt-20261030t090750-c99b at 0ad03b2b: up, seed, step 1x; `unshare -Urpf --mount-proc bash cluster.sh step ...` and `status`; `step killed` then kill -9 after 90 s; lock heartbeat read twice; `cluster.sh hold --for 30m`; log dispatch://INFRA-598/artifact/cluster-load-test-review1-round3-log-txt; comment https://github.com/sjawhar/legion/pull/2462#issuecomment-6520684501",
-      "observed": "foreign-namespace step exit 1 'only the role that ran up can drive run ...', status exit 0 naming pid:[17] vs pid:[38]; after the SIGKILL the heartbeat stayed at 09:22:53Z, heartbeat.log 'no command of run ... is alive and no hold holds it; stopping', sampler.log 'no heartbeat ... alive for 120 s; stopping every role loop'; hold renewed the lock (09:32:14Z) with no command alive and status showed 'hold: until 2026-10-30T09:59:13Z'",
-      "headSha": "3f904713b327438a91c5ade324ac76fbb4bdd730",
-      "negativeControl": "before 2f6dc193 the sampler ran for ever after a killed run (no stop rule; reviewer's finding), and cluster.test.sh cases (r), (s), (u) fail against 0fc92498's cluster.sh"
-    },
-    {
-      "criterion": "Architect's item: the Postgres volume is sized from measured need, a step fails early on low free space, and the peak is reported",
-      "surface": "GKE namespace loadtest, Dispatch 9b92ac14",
-      "command": "df of /var/lib/postgresql/copy every 30 s through run lt-20261030t090750-c99b (20Gi, seed plus a 20-minute r16-typing replay with eb0fe0be's -protect typing); then run at 3f904713: up --pg-volume 100Gi, seed, step 1x, LOADTEST_PG_DISK_MIN_FREE_PCT=99 step low, down; log dispatch://INFRA-598/artifact/cluster-load-test-review1-round3b-log-txt",
-      "observed": "on 20Gi: 6.2 GiB after seed and templates, peak 9.40 GiB at the end of the typed replay, growing about 0.15 GiB a minute while typing ran, Postgres restarts 0; at 3f904713 the claim reads 100Gi/100Gi, copy-meta postgres.volume '100Gi', step 1x pg-disk.json used_peak 1,375,461,376 of 105,089,261,568 with 8 samples",
-      "headSha": "3f904713b327438a91c5ade324ac76fbb4bdd730",
-      "negativeControl": "step low under a 99% threshold exits 1 before any load: 'step low failed: pg_disk of postgres: ... 96.6 GiB free (98% of it), under the 99% (96.9 GiB) a step needs; up --pg-volume SIZE gives a bigger volume'; INFRA-707's run on the 20Gi claim crashed Postgres with 'No space left on device'"
-    },
-    {
-      "criterion": "Review round 1 findings 1, 2, 7, 8, 9: knees past a failed step, copy-back failure marked, seed counts, kind from the run, random_hex shared",
-      "surface": "loadgen curves (Go tests on fixtures) and cluster.sh under cluster.test.sh's fakes",
-      "command": "cd packages/envoy && go test -p 2 -parallel 4 -count=1 ./loadtest/ && timeout 1500 bash loadtest/cluster/cluster.test.sh",
-      "observed": "go test ok; cluster.test.sh 46 PASS, 0 FAIL, including TestCurvesWalkTheKneesPastAFailedRow (knee at 7x, bracket (3, 7), 5x listed not judged), TestCurvesTakeAStepsKindFromTheRun, case (q) copy_back, and the seed counts assertion",
-      "headSha": "3f904713b327438a91c5ade324ac76fbb4bdd730",
-      "negativeControl": "each new test fails on the code before its fix: KNEES.md 'Knee at 5x (step 5x (failed: sampler_gap))'; '1x-other: kind grid, want db4'; 'holds no step-failed.json reason of kind copy_back'; \"seed's counts query does not count artifact_versions\""
-    },
-    {
-      "criterion": "Tester round 1 failure 2 (plan D5): an abandoned run's lock goes stale, so up names the down command",
-      "surface": "GKE namespace loadtest, from this Legion worker pod",
-      "command": "cluster.sh up --namespace loadtest --storage-class premium-rwo --dispatch-commit 9b92ac14351a926361c982edb7953e0325fab0de --pg-major 18 --production-repo <deployment repo> --stored-order-source 1febe317da128054b6c50e5882cbf8251ae42513 (run lt-20261030t001327-1013), then 150 s with no command of the run alive; kubectl -n loadtest get cm dispatch-loadtest-lock -o jsonpath='{.data.heartbeat}' before and after; then cluster.sh down. Log dispatch://INFRA-598/artifact/cluster-load-test-round2-lt-20261030t002127-32ec-log-txt",
-      "observed": "the lock's heartbeat read 2026-10-30T00:17:29Z at 00:18:18 and still at 00:20:48; logs/heartbeat.log: 'heartbeat: no command of run lt-20261030t001327-1013 is alive; stopping, so the lock ages and goes stale'; the _heartbeat process was gone; cluster.test.sh case (o), unmodified from ff4dcd85, passes (40 PASS, 0 FAIL)",
-      "headSha": "ed2ca0f0bcc80e66c7b252d51fde6f38ebe1aceb",
-      "negativeControl": "before the fix the tester measured the same daemon renewing the lock every 60 s after its run's command was killed (run lt-20261029t215258-9b0d, heartbeat 57 s old 8 min after the kill); case (o) failed at f752782c with 'still runs 5 s after the last command of its run ended'"
-    },
-    {
-      "criterion": "Tester round 1 failure 3: the stored-order counts of a checker that ends its summary with unchecked=N reach stored-order.json and STORED-ORDER.md",
-      "surface": "cluster.sh's stored_order_summary and stored_order_table, sourced by cluster.test.sh; and the live quick run's STORED-ORDER.md",
-      "command": "cd packages/envoy && bash loadtest/cluster/cluster.test.sh (case (p), unmodified from ff4dcd85); quick run lt-20261030t002127-32ec's STORED-ORDER.md",
-      "observed": "case (p) passes: 'documents=5 clean=2 mismatched=1 refused=0 failed=0 unchecked=2' gives unchecked 2 and every count; a line without unchecked gives unchecked null; the live STORED-ORDER.md has Unchecked and Typed unchecked columns (null for checker 1febe317)",
-      "headSha": "ed2ca0f0bcc80e66c7b252d51fde6f38ebe1aceb",
-      "negativeControl": "at f752782c the same line gave every count null (the tester's red output)"
-    },
-    {
-      "criterion": "Tester round 1 failure 1: the head carries a CI verdict; the forward merge resolves main's conflicts and the one command still runs end to end",
-      "surface": "GKE namespace loadtest, Dispatch 9b92ac14, and GitHub CI on the pushed head",
-      "command": "cluster.sh all <the up flags above> --profile quick (run lt-20261030t002127-32ec, 00:21-01:40Z); head pushed with no skip-checks trailer; forward-merge comment https://github.com/sjawhar/legion/pull/2462#issuecomment-6511608021",
-      "observed": "all exit 0, 11 steps, none failed; the seed ran main's seed-refs ('1000 targets, 19471 target versions, references.md on 310 issues citing 51071 targets') then seed-finish; every step chose SSE; stored order clean (10x: 2,310 of 2,310); down printed 'No resources found in loadtest namespace.'. With the reference seed, 9b92ac14's Postgres reaches 3.25 cores at 1x and its 16 at 3x (GET references p50 685 ms at 1x): the knee moves to 2x-3x",
-      "headSha": "ed2ca0f0bcc80e66c7b252d51fde6f38ebe1aceb",
-      "negativeControl": "seedfinish_test.go: a template still holding request_keys rows fails before vacuum and the trigger, naming the count"
-    },
-    {
-      "criterion": "One command stands the copy up at production's sizes in the INFRA-597 namespace, seeds it, runs the steps, collects the tables and profiles, and tears it down",
-      "surface": "GKE namespace loadtest, from this Legion worker pod (kubectl through the legion-worker Role)",
-      "command": "packages/envoy/loadtest/cluster/cluster.sh all --namespace loadtest --storage-class premium-rwo --dispatch-commit 9b92ac14351a926361c982edb7953e0325fab0de --pg-major 18 --production-repo <deployment repo> --stored-order-source 1febe317da128054b6c50e5882cbf8251ae42513 --profile quick (run lt-20261029t203116-a71c, 20:31-21:42Z); log dispatch://INFRA-598/artifact/cluster-load-test-quick-lt-20261029t203116-a71c-log-txt; PR comment https://github.com/sjawhar/legion/pull/2462#issuecomment-6509018534",
-      "observed": "all exit 0; copy-meta.json: Dispatch 16/32Gi, Postgres 16/60Gi (4/15Gi after db-size), listener 500m/512Mi, NATS 3 x 2/4Gi, runner 8/16Gi, every image by digest; 11 steps, none marked failed; every step's dir holds summary.json, TABLES.md, CODEPATHS.md, cpu.pprof, heap.pprof, cgroup.json; stored order clean in every step (1,000/1,000; 1,783/1,783 in each replay); down printed 'No resources found in loadtest namespace.' and the lock ConfigMap is gone",
-      "headSha": "2519ed36c1bfe65fc0264086a1b8fbc6fbd4d717",
-      "negativeControl": "up while another run's lock exists exits 2 naming the holder pod, uid, issue and heartbeat age; --dispatch-commit b295a3fb (no image) exits 1 naming the newest ancestor with one before creating anything; --pg-major 16 while production runs 18 exits 1 naming both (dispatch://INFRA-598/artifact/cluster-load-test-negative-controls-2026-10-28-txt)"
-    },
-    {
-      "criterion": "Steps from 1x to 10x, each at least 10 minutes, plus one hour at 10x, the reads-only control and 1x on the 4 vCPU database, with curves and knees",
-      "surface": "GKE namespace loadtest, full-size copy, Dispatch 9b92ac14",
-      "command": "run lt-20261029t115927-655c (11:59-18:19Z, harness at ac06c36f): up, seed, series --duration 10m (refinement 8.5x, 9.5x), soak --duration 60m, step 10x-typing, replay-prepare, replay r16-typing, db-size 4 15Gi, step 1x-db4, replay r4-typing, collect --upload-issue INFRA-514, down",
-      "observed": "knee 9.5x to 10x: delivery p99 from arrival 863 ms at 37.9 writes/s, 1,004 ms at 39.9; the hour at 10x collapses after minute 20 (pool waiters p50 8,152, lock held 82%, working set +13.5 GiB/h); results dispatch://INFRA-514/artifact/cluster-load-test-2026-10-28-md v4; raw tars on INFRA-514",
-      "headSha": "ac06c36f63c4",
-      "negativeControl": "the Dispatch pod deleted 80 s into step 2x (run lt-20261028t154844-2eba) marks that step failed (restart) and the curves take no number from it"
-    },
-    {
-      "criterion": "The replay of LINUX's 22:55-23:34Z write log for its full 39 minutes on the 16 and 4 vCPU databases, beside the outage, with the residual",
-      "surface": "GKE namespace loadtest, full-size copy, INFRA-639's seed and bundle read from Dispatch",
-      "command": "run lt-20261028t223135-7f42 (harness 0d832115): replay-prepare; replay r16 --from 0 --to 39m; db-size 4 15Gi; replay r4 --from 0 --to 39m; collect --upload-issue INFRA-514; codepaths regenerated at 783dc4b7",
-      "observed": "r16: Dispatch 10.69 cores mean, 7.53 GiB at the end; r4: 10.72 cores, 7.62 GiB; outage 11.1-13.8 cores, 13.8 GiB; residual 0.41-3.11 cores, 6.27 GiB; Postgres 0.44 cores",
-      "headSha": "0d8321157ecb",
-      "negativeControl": "a replay part with one byte changed is refused by the download check (sha256 mismatch, part deleted)"
-    },
-    {
-      "criterion": "loadgen drives a Dispatch from before #2449, which serves no /ws/live, with the dashboard streams of the step's shape",
-      "surface": "GKE namespace loadtest, Dispatch 9b92ac14, the quick run above",
-      "command": "the quick run lt-20261029t203116-a71c; jq .live.transport,.live.live_frames on each step's summary.json; run.log 'config: ... live=2 (sse)'",
-      "observed": "every step chose sse and received frames: 960 at 1x, 96,520 at 10x, 238,060 in the hour, 1,710 in r16; 0 in 10x-reads, which writes no event",
-      "headSha": "2519ed36c1bfe65fc0264086a1b8fbc6fbd4d717",
-      "negativeControl": "TestDecideLiveTransport: a server answering 404 at /ws/live and at /api/v1/events is refused before any load, naming both URLs and both 404s; before 4e33cee7 the same Dispatch got a 404 handshake and the step ran with no dashboard stream and no mark"
+      "criterion": "Architect's round-8 item: browser typing works with browsertype at 67ac05a4 and later against a Dispatch after f93dd689 (#2541): -person, no token write",
+      "surface": "GKE namespace loadtest, from this worker pod; and cluster.test.sh's fakes",
+      "command": "cluster.sh up --namespace loadtest --storage-class premium-rwo --dispatch-commit f93dd6895f3a --pg-major 18 --production-repo <deployment repo> --stored-order-source 67ac05a4 --browsertype-commit 67ac05a4; seed; step 1x-typing 1 --duration 3m --typing --typing-docs 5; down",
+      "observed": "run lt-20261101t042332-f302: browsertype exit 0, 10 peers on 5 documents, sent=27375 skipped=0 errors=0; stored-order over the typed documents 2 clean, 3 mismatched (finding for INFRA-707); down exit 0, namespace empty (dispatch://INFRA-598/artifact/cluster-typing-step-as-people-lt-20261101t042332-f302-log-txt). Fakes: start line names -identity-header X-Dispatch-User -person browsertype and no -token-file/-session; no token written; up refuses a browsertype without -person; 55 PASS",
+      "headSha": "b467bd82ac56",
+      "negativeControl": "live: the same up with --browsertype-commit abd86842 (before 67ac05a4) exits 1 before the lock: 'has no -person flag ... give a commit of INFRA-707's driver at or after 67ac05a4', no lock or pod left; fakes: the new suite against 78a12fbe's cluster.sh fails 'up accepted a browsertype with no -person', and with that case removed the old token write 'sh -c umask 077 && mkdir -p \"$1\" && cat >\"$1/token\"' is refused by the fake"
     }
   ],
   "filesChanged": [
-    "packages/envoy/loadtest/cluster/ (cluster.sh, cluster.test.sh, manifests, render-nats.sh, replay-residual.md)",
-    "packages/envoy/loadtest/: seedfinish.go, cgroup*.go, curves.go, codepaths.go, plandocs.go, pgclock.go, copymeta.go, live.go, sse.go, run.go, sample.go, tables.go and their tests, README.md, stack.sh, run-step.sh",
-    ".github/workflows/ci.yaml (the cluster.test.sh step)",
-    "packages/envoy/AGENTS.md, packages/envoy/go.mod, packages/envoy/go.sum",
-    "packages/envoy/.changes/unreleased/INFRA-598-*.yaml",
-    "packages/envoy/loadtest/copymeta.go, curves.go, tables.go, cgrouptables.go (round: review 1)",
-    "packages/envoy/loadtest/cluster/manifests/postgres.yaml (the volume placeholder)"
+    "packages/envoy/loadtest/cluster/cluster.sh",
+    "packages/envoy/loadtest/cluster/cluster.test.sh",
+    "packages/envoy/loadtest/README.md"
   ],
   "trickyParts": [
-    "#2449 removed Dispatch's SSE endpoint and loadgen's SSE client; the commit this issue measures serves only SSE, so loadgen probes /ws/live once per step and falls back to /api/v1/events on a 404 handshake.",
-    "browsertype typed into the 'Revision token rN' paragraph that loadgen's edits replace, failing every later edit and upload of a typed document; cluster.sh passes -protect 'Revision token' and up refuses a driver without it, before the lock.",
-    "The 5 s sampler's text heap read took 29% of Dispatch's CPU in the replay; it now reads the binary profile off its loop. Results v4 carries only fixed-sampler runs.",
-    "The heartbeat renews the lock only while a registered command of the run is the same live process (pid and /proc start time in <run>/commands/); a script's gap between two commands can stop it, and the next command's ensure_daemons starts it again.",
-    "Main's reference seed (#2469) runs in both stack.sh and cluster.sh seed; its request_keys delete moved into loadgen seed-finish, which both share."
+    "Without the token write, nothing created /work/typing in the runner before kubectl cp of the document list; run_step and run_replay now create it with the runner's other directories (the fake cp does mkdir -p, so only the live step proves it).",
+    "runner_put of the document list is now typing_start's first call that reaches the pod; it dies when the lock names another run, which the guard case asserts."
   ],
   "deviations": [
-    "The reference-seed rerun of the full curves and the hour (results v5) runs after INFRA-707's passes, as the architect decided; this round's 100Gi default rests on a 20-minute typed replay's 9.4 GiB peak, and each step of that rerun records its pg-disk.json peak.",
-    "A typed replay still loses edits where typing changed the logged text (68 named and 44 unnamed edits in the 20-minute r16-typing); the README says typed replays are not compared with the outage.",
-    "The tester's cases (o) and (p) keep their shellcheck notes; CI runs no shellcheck on cluster.test.sh.",
-    "The four cluster files are exceptions under 'a CI job runs it, and it fetches nothing' rather than the architect's suggested 'no CI job runs it' for three of them: envoy-go runs cluster.test.sh, which sources cluster.sh, templates nats.yaml and runs render-nats.sh --pin-from, so 'no CI job runs it' would be false; none of them hands an image to a registry in CI.",
-    "Main's probeDashboard replaced this PR's decideLiveTransport: it falls back to SSE on any dial failure (this PR's only on a 404) and probes even with -live 0; neither was re-added.",
-    "Leftover check before completing: ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|loadruns|cluster.test.sh|while :' printed no lines."
+    "The live typing step ran on Dispatch f93dd6895f3a, the #2541 merge itself: main's tip c656fc4f has no published envoy image, and up named f93dd689 as the newest ancestor with one."
   ],
-  "openQuestions": []
+  "openQuestions": [
+    "The live step's stored-order check found 3 of 5 typed documents mismatched under 1x load with browser typing (evidence kept on this pod under the run's steps/1x-typing/stored-order-evidence); that is INFRA-707's subject, reported to the architect."
+  ]
 }
