@@ -2,24 +2,16 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-593",
-  "completed": "2026-11-01T03:12:19Z",
-  "round": 11,
-  "headReviewed": "e22b1dfa74632c1efaee2314f2c676fe93f6068b",
-  "reviewerCommits": ["3590d0f6cabb724c50146cb2e1e17738520a8ce0"],
-  "decision": "changes_requested",
+  "completed": "2026-11-01T07:33:20Z",
+  "round": 12,
+  "headReviewed": "a50f4960c8a2a66995fa55d81c1c9d850049f187",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "roundShape": "round-shape.py v3, old bad4567067da8a5018852ac68c56f86e83be7494 -> new e22b1dfa74632c1efaee2314f2c676fe93f6068b: 6 files whose own diff differs (AGENTS.md, format_replay_test.go, pending_authors.go, tree.go, websocket.go, websocket_test.go), runtime among them: the merge of #2604, a full round.",
-  "codeVerdict": "Approved apart from the merge below. crdt.WithFormatCleanup(false) is in newCappedDocumentCopy, through which newDocumentCopy and every fold, read-back, documentThrough and validateUpdate build; every other non-test document build or apply is a local commit or the room's own remote apply. One load hook, bootstrapLoadedState: cleanup off before the decode and back on after on every path (defer order with recover verified), never inside a transaction, the server's MaxPendingItems (maxUpdateItems, the cap main refused at before and after #2604), decodeStoredState/invalidOnce, a panic returned as the error that fails the room. #2604's tests unchanged apart from a name; nothing of #2604 lost.",
-  "ci": "At e22b1dfa every lane passed (ci-ok still queued at 23:48 UTC when the reviewer's prose push replaced the run). At 3590d0f6, read 03:11 UTC: ci-ok success, pr-title success, and every lane (lint, typecheck, test, dispatch, dispatch-memory, dispatch-multiprocess, envoy-go, envoy-go-race, -docs, -api, -pmdoc, listener-server-change and the rest) success.",
-  "thermonuclear": "Both run once on the merge of #2604 (3c78856b..e22b1dfa): deep review APPROVE (three minors), code quality prose findings fixed by the reviewer in 3590d0f6; its finding on the new test's setup duplicating #2604's judged not a defect.",
-  "proseFixedByReviewer": "3590d0f6: go.mod names bootstrapLoadedState instead of the deleted applyLoadedState; the changelog fragment and decodeStoredState's comment no longer name v1.54.1-sami.1 (main pins sami.3); the load hook's contract stated once on bootstrapLoadedState, with LoadDoc's, onLoadDocument's and the inline comment pointing at it. PR body: the ygo line and the thermonuclear line.",
-  "keyFindings": [
-    {"severity": "important", "file": "(branch)", "description": "GitHub reports the pull request CONFLICTING with main at 03:11 UTC. Main changed eleven of the PR's files since its fork point, runtime among them (cmd/dispatch/main.go, docs/livewrite.go, mutation.go, service.go, tree.go, websocket.go), so the merge of main is the implementer's and round-shape decides the next round."}
-  ],
-  "notDefects": [
-    "TestACompactionStoresTheRoomsFormattedStateAsTheRoomHoldsIt repeats #2604's test's formatted-history setup: two tests with different assertions sharing a fixture shape; a shared helper would couple a cleanup counter into the compaction test.",
-    "testhooks.go's crdt.New() calls: main's, test-only."
-  ]
+  "roundShape": "round-shape.py v3, old 3590d0f6cabb724c50146cb2e1e17738520a8ce0 (last reviewed code, my prose included) -> new a50f4960c8a2a66995fa55d81c1c9d850049f187: 1 file whose own diff differs, store/doc_compaction_owed_migration_test.go (the migration number 0150 -> 0151 and its constant 149 -> 150); 5 equal only after migration normalisation (the changelog fragment, AGENTS.md, cmd/dispatch/README.md, the two NNNN_doc_compaction_owed files). No runtime file: a confirmation round. Main's 0150 is dpop_proofs; every remaining 0150 mention in the tree is main's.",
+  "ci": "At a50f4960, read 07:33 UTC: ci-ok success, pr-title success, and every lane success (lint, typecheck, test, dispatch, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess, envoy-go, envoy-go-race, -docs, -api, -pmdoc, listener-server-change, envoy-smoke, envoy-e2e-local and the rest). GitHub reports the pull request MERGEABLE.",
+  "threads": "PRRT_kwDORFy7ds6yTMoM answered as accepted and fixed in e22b1dfa (implementer asked to resolve); every other thread ends with my answer and is resolved.",
+  "keyFindings": [],
+  "notDefects": []
 }
