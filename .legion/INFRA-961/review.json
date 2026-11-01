@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-961",
+  "previousHandoff": "",
+  "headReviewed": "ec5105c1063359befc0104c9f0ee1adc55920470",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/infra/gcp/clusteredhub_live_test.go:1204",
+      "description": "The selfElected control is read once, right after the meta wait passes, but nats-server v2.15.1 makes both survivors' /jsz name the new meta leader before that leader writes 'Self is new JetStream cluster metadata leader': switchToLeader sets n.leader at once (raft.go:6307) and the follower takes it from the first append entry (raft.go:4839-4841), while the leader signals leadc only after the peer-state entry is committed and processed (raft.go:6321, 1603-1613), then monitorCluster logs it (jetstream_cluster.go:2512-2515, 10080) and os/exec copies the pipe into cmdtest's LockedBuffer (internal/cmdtest/cmdtest.go:70). Measured: a throwaway probe that polled agreedMetaLeader(survivors) every 1 ms from the kill saw both survivors agree on envoy-nats-1 5.495 s after the kill while its log did not yet hold the line, in 1 of 15 runs (/legion/scratch/tmp/infra961-reviewer/race-probe2.log); 20 ms later it did. So require.Greater can fail at random: a new flake in a test being fixed for flaking. Fix: move the count into the meta wait's within (the file's idiom at :1335, :1351, :1401, :1463) and correct the comment at :1137-1142."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/infra/gcp/clusteredhub_live_test.go:680-684",
+      "description": "stepDownStreamLeader's doc leaves out the first refusal: any server that knows no meta leader answers 503/10008 before the stream checks (jsStreamLeaderStepDownRequest, server/jetstream_api.go:2282-2286)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/infra/gcp/clusteredhub_live_test.go:1183-1185",
+      "description": "The comment says jsMsgGetRequest answers 503/10008 on every server that receives the request, with no condition; it does so only while that server knows no meta leader (server/jetstream_api.go:3922-3926, isLeaderless at server/jetstream_cluster.go:1481-1497)."
+    }
+  ]
+}
