@@ -2,53 +2,58 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-251",
-  "previousHandoff": "51333e60328c80c44419029e599ffed9ce5528a9",
-  "round": 25,
-  "headSha": "42250925f8e9",
-  "handoffHead": "8f5605f93976b81dfb5789996bd888264cbd4b61",
+  "previousHandoff": "dc82a6d201bee42946492c80c61071def9b1aa8d",
+  "round": 26,
+  "headSha": "8b3c87d819aa",
+  "handoffHead": "a71947ddb981c8daf19be12045c47c8082f7aeae",
   "provider": "Every turn of this round ran on anthropic/claude-opus-5-5, this session's model; no subagent ran. No model ran inside any drive: the agents are test shims.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The forward merge bc514a0d brings main's migration loader. At the branch head itself (no trial merge), every store and store/migrations test passes, and so do the DB-backed packages admit, record, supervise and workflow (proof[0]). The oracle change accepts exactly the case the ruling allows and still rejects the rest, shown deterministically and with the allowance made unconditional (proof[1]). The implementer said its throwaway driver of tell() was deleted; mine is outside the tree."
+    "how": "Each of review 5729779186's three items holds, and each new or rewritten test fails when the behaviour it guards is broken (proof[0] to proof[2]). The implementer's live reads hold: INFRA-251's dispatch read shows 'child_of issue dispatch://INFRA-168' under Links:, INFRA-168's primary_artifact_id is a0d2035b-bc98-4453-b451-3c69a07e9aed, and its artifact.approved event carries payload.artifact_id and payload.reason. The skill reference has no generated copy: packages/claude-envoy/legion/skills/legion-controller/references/ holds no parked-decisions.md."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "At the branch head itself, the daemon migrates: fresh and from main's latest; every DB-backed package",
-      "surface": "go test on the pod's PostgreSQL 18.6, in the workspace at 8f5605f9 (code 42250925), with no merge",
-      "command": "go test -count=1 -v ./internal/store/ ./internal/store/migrations/ (with my throwaway TestTesterMigrateFreshAndFrom0067 placed for the run, then removed); go test -count=1 -p 1 ./internal/admit/ ./internal/record/ ./internal/supervise/ ./internal/workflow/",
-      "observed": "store ok (113 s) and store/migrations ok, with 0 FAIL and 0 SQLSTATE 42501. TestMigrateAppliesEveryEmbeddedMigration, the round-24 red, now passes, as do TestTheFirstTimestampedMigrationWidensTheVersionColumn and TestParkedDecisionsArriveWith20261101163106AndGoWithTheirIssue. Fresh migrate: 69 migrations. From 0067: main's latest, since main's .sql set ends at 0067 and the branch adds only its two timestamped files. With a claim and its pending delivery seeded, 2 apply and the claim reads back whole. admit ok (530 s), record ok, supervise ok, workflow ok (554 s), and every seed of the sweep migrated.",
-      "headSha": "42250925f8e9",
-      "negativeControl": "At round 24's head d90356ab the same TestMigrateAppliesEveryEmbeddedMigration failed with the int4 overflow."
+      "criterion": "The controller walk skips only the approval the daemon queues as a handover",
+      "surface": "skills/legion-controller/references/parked-decisions.md, walk step 3, read line by line against workflow.personHandoverQueues and intake.DispatchArtifact.PersonApproval",
+      "command": "read of gate.go personHandoverQueues and intake/facts.go:267-278 beside the walk step",
+      "observed": "The daemon queues when: the approval is a person's (Actor.Person()) and not carried (reason not prefixed CarriedApprovalReasonPrefix = 'Carried forward from the approval of version'); the root has no parent; it is labelled; it is parked in backlog or icebox; the artifact is the root's primary_artifact_id; and its tree is not live. The walk lists labelled roots at backlog or icebox that read_state shows at phase done, counts events 'by a user', and skips an artifact.approved only when there is no child_of under Links:, payload.artifact_id equals primary_artifact_id, and payload.reason does not begin with that same prefix. So each daemon condition has its counterpart. A carried approval and an approval on a root with a Dispatch parent fall through to judging, and the notice paragraph names both as notices that remain. The round-22 drive on the whole daemon agrees: a non-primary document's approval and a child's approval each send one notice, and the queued one sends none.",
+      "headSha": "8b3c87d819aa",
+      "negativeControl": "Not applicable (a reading); the daemon side is driven in proof[3]."
     },
     {
-      "criterion": "The oracle's allowance, both ways: a re-telling after a catch-up whose own telling write failed is accepted, and one with no failed write behind it is still rejected",
-      "surface": "The property model's keptRun.tell, driven by fixed sequences of tellings in a throwaway test (kept at $TMPDIR/tester/zz_tester_oracle_test.go, placed in the package only for the run)",
-      "command": "go test -count=1 -run TestTesterOracle -v ./internal/daemon/; then the same with keptForgetStore.tellingFailed changed to return true for every row (reverted with jj restore)",
-      "observed": "As written, all five cases came out as they must. A failed catch-up 112 then catch-up 115: PASS. Two catch-ups with no failed write: FAIL, 'told 2 times'. A failed write, then 115, then 118: FAIL, 'told 3 times'. A prompt then the machine's retold prompt: PASS. A prompt then an unretold prompt: FAIL. With the allowance unconditional: 'two catch-ups with no failed write' now PASSES when it must fail. The third telling and the unretold prompt stay rejected. Seed 41 is pinned and passes.",
-      "headSha": "42250925f8e9",
-      "negativeControl": "The unconditional allowance above lets the double telling with no failed write through."
+      "criterion": "The new recordHandover table test fails with the guard replaced by `if false`; recordHandover and applyArtifact share one check",
+      "surface": "packages/daemon/internal/workflow on the pod's PostgreSQL",
+      "command": "go test -run TestAHandoverApprovalTheGateWouldNotTakeLeavesItAsItWas -v ./internal/workflow/; then with recordHandover's guard replaced by `if false` (reverted with jj restore)",
+      "observed": "As written: PASS, three subtests (an approval older than the gate's latest; an approval a later changes request superseded; an approval under gates.design off). With `if false`, all three FAIL at person_handover_test.go:219, the gate moved, for example LatestVersion 3 with ApprovedVersion set. gate.go:609 (recordHandover) and gate.go:730 (applyArtifact) both call artifactIgnored, the one check. #2619's and round 23's workflow tests pass.",
+      "headSha": "8b3c87d819aa",
+      "negativeControl": "The `if false` run above."
     },
     {
-      "criterion": "Round 23's fix at this head",
-      "surface": "The whole Legion daemon (startDaemonWithin) on the pod's PostgreSQL and a nats-server; Dispatch events as envelopes; the Dispatch stand-in answers labels, primary_artifact_id and each artifact's issue and latest version",
-      "command": "go test -tags e2e -count=1 -run '^(TestTesterHandoverApprovalNoStalePairLive|TestTesterApprovalHandoverLive)$' -v ./internal/daemon/ (throwaway drivers, placed for the run, then removed)",
-      "observed": "Both PASS. Approved 1, latest 2, a person approves 2: the gate reads 2/2, the root stays done with no start row and its child stays admitted before the echo, and a second approval writes no todo. After the echo, the start task is empty, readmitted_approvals holds 0 rows, and there are 0 parked-decision notices. Approving the old version 1 keeps 1/2, and the start names the pair, correctly. Round 22's approval-and-relay drive passes unchanged.",
-      "headSha": "42250925f8e9",
-      "negativeControl": "Round 24's recordHandover removal brought the stale pair back, on code this round did not move."
+      "criterion": "The rewritten admit assertion fails when a design-approved notice is enqueued",
+      "surface": "packages/daemon/internal/admit",
+      "command": "go test -run TestARootAPersonsApprovalHandsOverIsToldNoStaleApproval -v ./internal/admit/; then with dispatchArtifact falling through to applyArtifact after recordHandover (reverted)",
+      "observed": "As written: PASS. With the fall-through: FAIL at parked_decision_test.go:600, 'design-approved notices for LEGION-ROOT = []record.Notice{{Kind:\"design-approved\", ... Version:3 ...}}'.",
+      "headSha": "8b3c87d819aa",
+      "negativeControl": "The fall-through run above."
+    },
+    {
+      "criterion": "On the whole daemon at this head: the handover, the relay and round 23's fix",
+      "surface": "The whole Legion daemon (startDaemonWithin) on a fresh database of the pod's PostgreSQL and a nats-server; Dispatch events as envelopes; the Dispatch stand-in answers labels, primary_artifact_id and artifacts",
+      "command": "go test -tags e2e -count=1 -run '^(TestTesterHandoverApprovalNoStalePairLive|TestTesterApprovalHandoverLive)$' -v ./internal/daemon/ (throwaway drivers placed for the run, then removed)",
+      "observed": "Both PASS. A person's approval of a parked labelled root's primary document: todo written, 0 notices, and a second approval adds nothing. An unlabelled root's, a non-primary document's and a child's approval: 1 notice each. An answer, a resolution and an agent-turn reply: 1 each. After approving N+1, the start task is empty and readmitted_approvals holds 0 rows. Approving the old version still names the pair.",
+      "headSha": "8b3c87d819aa",
+      "negativeControl": "Rounds 23 and 24's recordHandover controls, on the call this round only refactored."
     },
     {
       "criterion": "Pinned seeds, a bounded sweep, and no tester files on the branch",
       "surface": "The daemon package; the branch tree",
-      "command": "go test -run 'TestKeptDecisionsRegressionSeeds|...' ./internal/daemon/; LEGION_KEPT_PROPERTY_RUNS=300 LEGION_KEPT_PROPERTY_STEPS=300 ./daemon25.test ...; jj file list -r 8f5605f9 'glob:**/zz_tester_*'",
-      "observed": "Pinned: 39 of 39 PASS, seed-41-at-300-steps among them. Sweep: 300 of 300 in 1683 s. Invariant failures 0, cleanup 0, connection 0. No zz_tester_* file is on the branch at 8f5605f9.",
-      "headSha": "42250925f8e9",
+      "command": "go test -run TestKeptDecisionsRegressionSeeds ./internal/daemon/; LEGION_KEPT_PROPERTY_RUNS=200 LEGION_KEPT_PROPERTY_STEPS=300 ./daemon26.test; jj file list -r a71947dd 'glob:**/zz_tester_*'",
+      "observed": "Pinned: 39 of 39 PASS. Sweep: 200 of 200 in 903 s. Invariant 0, cleanup 0, connection 0. No zz_tester_* file is on the branch.",
+      "headSha": "8b3c87d819aa",
       "negativeControl": "The pinned seeds are each a past failure."
     }
   ],
-  "notes": [
-    "A mistake of my own I caught this round: my shell had kept an exported LEGION_TEST_PG_DSN from round 19 (database tester19), so my live drives in rounds 22 and 23 ran on that database, which earlier builds had migrated to the old 68/69 numbering. That was valid for those builds. This round the renamed migrations refused it ('relation parked_decisions already exists'), and I moved to a fresh database. A database an earlier build of this branch migrated cannot take the renamed migrations, but no deployment ran this branch, and main never had 0068 or 0069."
-  ],
-  "ci": "Head 8f5605f9, read 2026-11-01T18:50Z: every lane success, ci-ok success, test and lint among them. main's TestMigrationSetTakesNumbersThenTimestamps is not red here. GitHub: mergeable UNKNOWN."
+  "ci": "Head a71947dd, read 2026-11-01T19:47Z: lint, typecheck, pi-legion, pi-envoy, pi-shared, claude-envoy, envoy-client, docs, worker-image, ci-images and ci-filters success; test still running. Not waited on. GitHub: MERGEABLE, BLOCKED."
 }
