@@ -48,12 +48,44 @@ const databaseName = "dispatch_e2e";
  *  one lane, the harness's psql sessions open their own, and Postgres reserves 3 for superusers:
  *  200 clears all of that with room for a pool that has not closed yet. */
 const maxConnections = 200;
-/** The lane's data dies with the run, so its server trades crash safety for speed. */
+/** A lane's server. Its data dies with the run and its database is 46 MB with a working set of
+ *  one scenario's rows, so each setting here gives up something only a database that outlives
+ *  its run can use. What each costs if the database were real is on its own line. Measured in an
+ *  issue pod over two lanes and 58 rows of `inbox` and `search`, none of them moves the reset's
+ *  own median (51.5 ms before, 52.0 ms after): they take work off a lane's server that this
+ *  pod's two cores were not short of, and the runner's four are. */
 const settings = [
   `max_connections=${maxConnections}`,
+  // Crash safety. Nothing here survives the run, so a cluster that dies loses nothing anyone
+  // reads: a real database would lose committed transactions (`synchronous_commit`) or the
+  // whole cluster (`fsync`, `full_page_writes`) to a power cut.
   "fsync=off",
   "full_page_writes=off",
   "synchronous_commit=off",
+  // The buffer pool, against the image's 128MB. 64MB holds the whole 46 MB lane database, so
+  // nothing this cluster reads can be evicted, and four lanes' pools are 256MB smaller. A real
+  // database would read its working set back from the operating system on every eviction.
+  "shared_buffers=64MB",
+  // Expression JIT. Compiling an expression costs a tenth of a second of pure CPU and earns it
+  // back only over a long scan; no table here is long enough, so a plan whose estimate passes
+  // `jit_above_cost` is an estimate that is wrong. A real database loses that on its analytics.
+  "jit=off",
+  // Parallel query. At this size no plan is expected to take a worker, and this makes that
+  // certain: one gather on one lane is four more processes on a runner whose cores are the
+  // bound. A real database loses parallel scans, joins and aggregates.
+  "max_parallel_workers_per_gather=0",
+  // WAL. `minimal` is the least this cluster can write and still recover its own crash, and it
+  // writes none at all for a bulk load into a relation the same transaction made or truncated.
+  // It rules out replication and point-in-time recovery, which every real deployment is built
+  // on, and so needs `max_wal_senders=0`.
+  "wal_level=minimal",
+  "max_wal_senders=0",
+  // Checkpoints. A lane writes far too little WAL to reach `max_wal_size`, so its only
+  // checkpoints are the timed ones - one every five minutes per lane, each writing every dirty
+  // buffer - and a timer longer than any run leaves none. A real database would face a recovery
+  // that replays an hour of WAL, after a checkpoint that wrote all of it at once.
+  "checkpoint_timeout=60min",
+  "max_wal_size=4GB",
 ];
 /** How long a lane's server may take to answer `select 1`. */
 const readyMs = 120_000;

@@ -2111,10 +2111,39 @@ jobs:
         # lowest value printed at the end: the lanes' Postgres containers run outside this job's
         # cgroup, so /proc/meminfo is the one reading that counts them. The JSON report goes
         # beside the list reporter's output, so a green run reports what it ran too.
+        #
+        # Beside it, the same 5 s tick records where the CPU goes, which is the bound a run of
+        # four lanes on four vCPU hits (INFRA-317): one line per process of a named group, with
+        # the CPU that process has used, read from /proc/<pid>/stat. `pidstat` is not on this
+        # image and `ps -o pcpu` is a process's average over its whole life, not what it spent
+        # since the last tick, so neither answers this; /proc costs one `ps` and one `awk` per
+        # tick. A group's total is the sum of its processes' ticks apart, and the whole reading
+        # of a process this tick first saw, which is what catches a renderer that was started
+        # after the last tick. Nothing is ever counted twice, so the named groups are a floor:
+        # what is lost is a process that lived and died inside one tick, and the last seconds of
+        # one that died between ticks. `everything else` is the machine's own busy time
+        # (/proc/stat) less the named groups, so a reader sees the whole step without
+        # downloading the samples: it holds that loss, the runner's own work, the file-store
+        # container and the sampler itself.
         run: |
           : > e2e/memory-samples.txt
+          : > e2e/cpu-samples.txt
           while :; do
             awk '/^MemAvailable:/ { print $2 }' /proc/meminfo >> e2e/memory-samples.txt
+            ps -eo pid=,args= | awk '
+              function group(args) {
+                if (args ~ /ms-playwright/)     return "browser"
+                if (args ~ /(^|\/)bun( |$)/)    return "bun"
+                if (args ~ /playwright/)        return "runner"
+                if (args ~ /dispatch-e2e( |$)/) return "dispatch"
+                if (args ~ /postgres|psql/)     return "postgres"
+                return ""
+              }
+              BEGIN { while ((getline l < "/proc/stat") > 0) if (l ~ /^cpu /) { split(l, c); print "machine", c[2]+c[3]+c[4]+c[7]+c[8]+c[9]; break } }
+              { g = group($0); if (g == "") next
+                if ((getline l < ("/proc/" $1 "/stat")) <= 0) next
+                close("/proc/" $1 "/stat"); sub(/^[^ ]+ \(.*\) /, "", l); split(l, s)
+                print $1, s[12] + s[13], g }' >> e2e/cpu-samples.txt
             sleep 5
           done &
           sampler=$!
@@ -2128,6 +2157,19 @@ jobs:
           bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --reporter=list,json || status=$?
           kill "$sampler" 2>/dev/null || true
           awk '$1 ~ /^[0-9]+$/ { if (++n == 1 || $1 + 0 < low) low = $1 + 0 } END { if (n) printf "::notice title=dispatch MemAvailable::the lowest MemAvailable during the browser step was %d kB, over %d samples\n", low, n; else print "::warning::the browser step took no MemAvailable sample" }' e2e/memory-samples.txt
+          awk '
+            $1 == "machine" { if (samples++) busy += $2 - was; was = $2; next }
+            ($1, $3) in seen { if ($2 >= seen[$1, $3]) group[$3] += $2 - seen[$1, $3]; seen[$1, $3] = $2; next }
+            { if (samples > 1) group[$3] += $2; seen[$1, $3] = $2 }
+            END {
+              if (!samples) { print "::warning::the browser step took no CPU sample"; exit }
+              split("browser runner dispatch postgres bun", names, " ")
+              for (i = 1; i <= 5; i++) {
+                named += group[names[i]]
+                split_up = split_up sprintf("%s %.0f (%.0f%%), ", names[i], group[names[i]] / 100, busy ? 100 * group[names[i]] / busy : 0)
+              }
+              printf "::notice title=dispatch CPU::the browser step used %.0f CPU-seconds over %d samples: %severything else %.0f (%.0f%%)\n", busy / 100, samples, split_up, (busy - named) / 100, busy ? 100 * (busy - named) / busy : 0
+            }' e2e/cpu-samples.txt
           exit "$status"
         working-directory: packages/dispatch
         # The file store the step above started. Set here, not written to $GITHUB_ENV, which every
@@ -2136,8 +2178,8 @@ jobs:
         env:
           DISPATCH_E2E_FILE_STORE_ENDPOINT: http://127.0.0.1:18333
           DISPATCH_E2E_FILE_STORE_BUCKET: dispatch-e2e-files
-      # Always, not on failure alone: the memory reading is of the run that passed as much as of
-      # the one that did not, and the report says what a green run ran.
+      # Always, not on failure alone: the memory and CPU readings are of the run that passed as
+      # much as of the one that did not, and the report says what a green run ran.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -2145,6 +2187,7 @@ jobs:
           path: |
             packages/dispatch/e2e/report.json
             packages/dispatch/e2e/memory-samples.txt
+            packages/dispatch/e2e/cpu-samples.txt
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:

@@ -200,6 +200,31 @@ settle_delay="${DISPATCH_TEST_SETTLE_DELAY:-250ms}"
 mark_wait="${DISPATCH_TEST_MARK_WAIT:-250ms}"
 unrecorded_mark_ttl="${DISPATCH_TEST_UNRECORDED_MARK_TTL:-4s}"
 
+# Meaning search's embedder, read before the sweep below. The file-store block above gives this
+# process the AWS SDK's own variables so it can reach the lane's S3 server, and Bedrock - the
+# default place DISPATCH_EMBEDDER names - takes those same static keys as its credentials and the
+# region as a real region: every text the embedding queue picks up, and every search query, then
+# makes a real call to bedrock-runtime.<region>.amazonaws.com that AWS refuses 403, retries it,
+# and logs it (merge-base run 41085647285 did that 1,522 times with the canary alone). No row
+# reads a meaning-search result - the suite has no model service, so search answers keyword-only
+# whether the call is made and refused or never made at all - so DISPATCH_TEST_EMBEDDER_OFF=1,
+# under the DISPATCH_TEST_HOOKS=1 below, builds no embedder: the queue's Run returns at once and
+# no query is embedded. A caller that set the variable itself keeps its own value, as it does for
+# the settle delay above, so a run that one day proves the embed path turns it back on with 0.
+embedder_off="${DISPATCH_TEST_EMBEDDER_OFF:-1}"
+
+# The Go runtime's view of the machine, read before the sweep below. Go sizes GOMAXPROCS, and with
+# it the scheduler's threads and the garbage collector's parallelism, from every CPU it can see,
+# and a lane's server sees all of them however many lanes share them: four servers on a four-vCPU
+# runner each run a four-way collector. One core each instead, by integer division with a floor of
+# one. The lanes are e2e/harness-ports.ts's laneCount read in shell: DISPATCH_E2E_LANES, which
+# e2e/run.ts exports for the command it runs, else the DISPATCH_E2E_WORKERS the caller asked for,
+# else one - and e2e/run.ts starts the harness before it exports the first, so a lane's own server
+# is reached by the second. One lane leaves Go's own default, since nproc / 1 is nproc, and
+# two-process mode runs one lane, so its two servers are unchanged too.
+gomaxprocs=$(( $(nproc) / ${DISPATCH_E2E_LANES:-${DISPATCH_E2E_WORKERS:-1}} ))
+[ "$gomaxprocs" -ge 1 ] || gomaxprocs=1
+
 mapfile -t inherited < <(compgen -e)
 for name in "${inherited[@]}"; do
   case "$name" in
@@ -251,6 +276,7 @@ exec "${listen[@]}" env \
   DISPATCH_LISTEN_HOST=127.0.0.1 \
   DISPATCH_NATS_DISABLED=1 \
   "${port_env[@]}" \
+  DISPATCH_TEST_EMBEDDER_OFF="$embedder_off" \
   DISPATCH_TEST_HOOKS=1 \
   DISPATCH_TEST_MARK_WAIT="$mark_wait" \
   DISPATCH_TEST_ROSTER_UNCACHED=1 \
@@ -258,6 +284,7 @@ exec "${listen[@]}" env \
   DISPATCH_TEST_UNRECORDED_MARK_TTL="$unrecorded_mark_ttl" \
   DISPATCH_WEB_DIST="$web_dist" \
   ENVOY_URL="http://127.0.0.1:$fake_envoy_port" \
+  GOMAXPROCS="$gomaxprocs" \
   HOME=/nonexistent \
   XDG_CACHE_HOME=/nonexistent \
   XDG_CONFIG_HOME=/nonexistent \

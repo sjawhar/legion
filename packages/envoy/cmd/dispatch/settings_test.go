@@ -1721,6 +1721,23 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				}
 			})
 		},
+		"DISPATCH_TEST_EMBEDDER_OFF": func(t *testing.T) {
+			// Azure's own environment, the one shape that builds an embedder with no AWS SDK and
+			// no model service reachable, so the switch is what decides and not the credentials.
+			if boot := resolveWith(t, azureEmbedEnvironment(map[string]string{
+				"DISPATCH_TEST_HOOKS":        "1",
+				"DISPATCH_TEST_EMBEDDER_OFF": "1",
+			})); !boot.EmbedderOff {
+				t.Error("DISPATCH_TEST_EMBEDDER_OFF=1: EmbedderOff false")
+			}
+			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_EMBEDDER_OFF": "true"}); boot.EmbedderOff {
+				t.Error("DISPATCH_TEST_EMBEDDER_OFF=true: EmbedderOff true, want only 1 to set it")
+			}
+			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1"}); boot.EmbedderOff {
+				t.Error("unset: EmbedderOff true")
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_EMBEDDER_OFF": "1"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
 	}
 	for _, row := range settings {
 		test, ok := cases[row.Name]

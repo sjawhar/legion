@@ -111,6 +111,10 @@ type bootConfig struct {
 	// rather than share the process's five-second copy; only DISPATCH_TEST_ROSTER_UNCACHED=1, under
 	// the test hooks, sets it.
 	ListenerRosterUncached bool
+	// EmbedderOff builds no embedder, whatever DISPATCH_EMBEDDER and the AWS SDK's own variables
+	// would have built: meaning search answers keyword-only and the embedding queue does nothing.
+	// Only DISPATCH_TEST_EMBEDDER_OFF=1, under the test hooks, sets it.
+	EmbedderOff bool
 	// OIDCIssuer and OIDCAudience configure verification of projected
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
@@ -364,10 +368,18 @@ func main() {
 	// embedder is nil (meaning search off, search answers keyword-only and says so) when Bedrock,
 	// the default place, finds no AWS region/credentials at boot - a CI job or a devbox with no
 	// AWS_REGION set - which newEmbedder logs as a warning rather than a reason to refuse to boot.
-	embedder, err := newEmbedder(ctx, boot.Embedder)
-	if err != nil {
-		slog.Error("dispatch: build the embedder", "error", err)
-		os.Exit(1)
+	// DISPATCH_TEST_EMBEDDER_OFF=1 is the same nil without that check, for a test process that
+	// does have the variables and no model service to spend them on.
+	var embedder embed.Embedder
+	if boot.EmbedderOff {
+		slog.Warn("dispatch: meaning search unavailable", "error", "DISPATCH_TEST_EMBEDDER_OFF=1")
+	} else {
+		client, err := newEmbedder(ctx, boot.Embedder)
+		if err != nil {
+			slog.Error("dispatch: build the embedder", "error", err)
+			os.Exit(1)
+		}
+		embedder = client
 	}
 
 	built := routes.AppContextOptions{
@@ -903,6 +915,12 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_ROSTER_UNCACHED")
 		}
 		boot.ListenerRosterUncached = raw == "1"
+	}
+	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_EMBEDDER_OFF")); raw != "" {
+		if !boot.TestHooksEnabled {
+			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_EMBEDDER_OFF")
+		}
+		boot.EmbedderOff = raw == "1"
 	}
 	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
 	if err := checkSignInSettings(boot, identityMode); err != nil {

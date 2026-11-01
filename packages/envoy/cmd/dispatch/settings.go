@@ -151,6 +151,8 @@ var settings = []setting{
 		Description: "How long a document stays quiet after a person's last settled version before its `artifact.human_edited` notice goes, for an end-to-end test process; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
 	{Name: "DISPATCH_TEST_ROSTER_UNCACHED", Required: "no",
 		Description: "Set to `1` so every read of the listener's session list (an issue's `route_status`, `GET /api/v1/agents`) asks the listener rather than Dispatch's five-second copy, for an end-to-end test process whose fake listener changes between reads. Set only with `DISPATCH_TEST_HOOKS=1`."},
+	{Name: "DISPATCH_TEST_EMBEDDER_OFF", Required: "no",
+		Description: "Set to `1` so the server builds no embedder whatever `DISPATCH_EMBEDDER` and the AWS SDK's own variables would have built: meaning search answers keyword-only and says so, and the embedding queue does nothing, for an end-to-end test process whose AWS variables address a file store rather than a model service. Set only with `DISPATCH_TEST_HOOKS=1`."},
 }
 
 // removedSettings are the variables a release stopped reading, each with what replaced it. None is
