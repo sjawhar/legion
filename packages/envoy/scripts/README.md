@@ -302,10 +302,10 @@ its own `statement_timing_test.go`, all named `TestStatementTimings`: `internal/
 `internal/dispatch/refs` and `internal/dispatch/docs`. The runner takes a named pair of statement
 texts with their arguments, runs `EXPLAIN (ANALYZE, BUFFERS)` of each alternately on one
 connection, reports planning plus execution as the median of runs 2 to 12, prints both plans and
-fails when this branch's median is not below main's. It records the server settings it found and
-the subjects it bound (the largest project, its most heavily linked issue, the most anchored
-document, five sessions, an embedding and three words), each read from the database at run time,
-so a re-seed moves them with it.
+fails when the after text's median is not below the before text's. It records the server settings
+it found and the subjects it bound (the largest project, its most heavily linked issue, the most
+anchored document, five sessions, an embedding and three words), each read from the database at
+run time, so a re-seed moves them with it.
 
 ```bash
 cd packages/envoy && DISPATCH_BENCH_DATABASE_URL=<seeded database> \

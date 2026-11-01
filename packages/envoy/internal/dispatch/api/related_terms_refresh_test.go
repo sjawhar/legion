@@ -748,9 +748,9 @@ from search_term_totals where project_key = $1`
 	}
 }
 
-// searchTermItemsSQL answers exactly what main's text answers over the same rows. Main's text is
-// the oracle held in the test (related_terms_oracle_test.go), not a statement built from this
-// package's own constants, so an edit to the document arm moves one side and not the other.
+// searchTermItemsSQL answers exactly what the released text answers over the same rows. That
+// text is the oracle held in the test (related_terms_oracle_test.go), not a statement built from
+// this package's own constants, so an edit to the document arm moves one side and not the other.
 func TestSearchTermItemsAnswerWhatMainsStatementDoes(t *testing.T) {
 	fixture := newTermFixture(t, "ITEMS")
 	ctx := context.Background()

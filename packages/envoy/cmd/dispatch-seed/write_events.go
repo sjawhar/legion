@@ -31,8 +31,9 @@ var eventColumns = []string{
 
 // eventOwnerShares is how the events are split over the three owners an event can have. An event
 // has at most one (events_one_owner), and `last_seq` on that owner's row must equal the highest
-// seq it carries or the next write to it fails the unique (owner, seq) - which is exactly the
-// five write routes the measurement times (the plan's answer 2).
+// seq it carries or the next write to it fails the unique (owner, seq) - and those next writes
+// are the five write routes the measurement times, so a counter left behind would fail the
+// first write of a measured run rather than time it.
 const (
 	issueEventShare    = 80
 	artifactEventShare = 16

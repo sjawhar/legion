@@ -9,9 +9,8 @@ import (
 
 // vocabulary is the fixed word list every seeded text is drawn from, with the Zipf weight of each
 // word. A text drawn from one flat list puts almost every word in almost every document, which
-// leaves no rare word for a search measurement to use and no selectivity for a plan to turn on
-// (the review's finding 4). A Zipf list gives both: word 1 is in most documents and word 20,000
-// in a handful.
+// leaves no rare word for a search measurement to use and no selectivity for a plan to turn on.
+// A Zipf list gives both: word 1 is in most documents and word 20,000 in a handful.
 type vocabulary struct {
 	words []string
 	// cumulative[i] is the summed weight of words 0..i, and cumulative[len-1] the total, so a
@@ -19,8 +18,10 @@ type vocabulary struct {
 	cumulative []float64
 }
 
-// vocabularySize is the 20,000 words the plan's answer 4 names. zipfExponent 1 is the classic
-// Zipf law: the rank-n word is drawn 1/n as often as the first.
+// vocabularySize is the 20,000 words the three tables below spell. At ten times production's
+// documents, a Zipf list that long still leaves its tail in a handful of them, which is the rare
+// word a search measurement binds. zipfExponent 1 is the classic Zipf law: the rank-n word is
+// drawn 1/n as often as the first.
 const (
 	vocabularySize = 20_000
 	zipfExponent   = 1.0

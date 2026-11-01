@@ -33,11 +33,11 @@ const (
 	documentSearchOldWord = "quagga"
 )
 
-// documentSearchStatement is one of R1's five statements: the package's own text, main's text
-// over the same rows (document_search_oracle_test.go), and the arguments each is run with. sorted
-// says the statement declares no order of its own, so its rows are compared as a set; holds and
-// lacks are what the rows must and must not name, which is what says the comparison decided
-// something rather than comparing two empty answers.
+// documentSearchStatement is one of R1's five statements: the package's own text, the text the
+// release before this change ran over the same rows (document_search_oracle_test.go), and the
+// arguments each is run with. sorted says the statement declares no order of its own, so its
+// rows are compared as a set; holds and lacks are what the rows must and must not name, which
+// is what says the comparison decided something rather than comparing two empty answers.
 type documentSearchStatement struct {
 	name      string
 	statement string
@@ -241,9 +241,10 @@ func TestMainsDocumentArmSearchesNoDocumentSearchIndex(t *testing.T) {
 	}
 }
 
-// A2. Each statement of R1 answers exactly what main's own statement answers over the same rows.
-// The oracle is main's text held in the test, not a statement built from this package's helpers,
-// so an edit that changed what the document arm returns would move one side and not the other.
+// A2. Each statement of R1 answers exactly what the released statement answers over the same
+// rows. The oracle is that released text held in the test, not a statement built from this
+// package's helpers, so an edit that changed what the document arm returns would move one side
+// and not the other.
 func TestEveryDocumentArmAnswersWhatMainsStatementDoes(t *testing.T) {
 	fixture := newDocumentSearchFixture(t)
 	ctx := context.Background()

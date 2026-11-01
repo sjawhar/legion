@@ -103,7 +103,8 @@ func (r *seedRun) rowCounts(ctx context.Context) (map[string]int, error) {
 }
 
 // reportDistributions prints every figure the spec states as a distribution rather than a row
-// count, which is what the review's finding 10 asks for: a row count cannot show any of them.
+// count: a row count cannot show any of them, so without these lines nothing a run prints says
+// whether the data set it wrote has the shape the measurements were designed on.
 func (r *seedRun) reportDistributions(ctx context.Context) error {
 	type reading struct {
 		label string
@@ -244,8 +245,9 @@ func (r *seedRun) reportWords(ctx context.Context) error {
 	return nil
 }
 
-// reportSubjects prints the named rows a measurement binds: the review's finding 9 is that a
-// sibling cannot find them otherwise.
+// reportSubjects prints the named rows a measurement binds. Each is decided by this run's own
+// plan and draw - the largest project, its most linked issue, the rarest word - so a measurement
+// written elsewhere cannot name them by reading the code; it reads them from this report.
 func (r *seedRun) reportSubjects(ctx context.Context) error {
 	plan := r.plan
 	hub := plan.issues[plan.hub]

@@ -26,15 +26,15 @@ const anchoredMarkTimingLimit = 20
 // reads of edits.go (rejectUnindexedTableMarks, rejectLiveTableAnchors) and the two of
 // mutation.go (lockTableAnchorRows). Their gain is their own text and no index this change adds.
 // Both indexes the new texts reach were already there - comments_anchor_artifact is migration
-// 0032 and asks_anchor_artifact_id migration 0148, both below this branch's block, which starts
+// 0032 and asks_anchor_artifact_id migration 0148, both below this change's block, which starts
 // at 0158 - and what each read gained is the uuid comparison beside its text comparison, which
 // is what makes the index eligible at all. One schema therefore holds both sides, and the pair
-// is the committed regression check: main's text cannot use the index, so the day a read loses
-// that comparison its median goes back to main's and the pair fails.
+// is the committed regression check: the before text cannot use the index, so the day a read
+// loses that comparison its median goes back to the before text's and the pair fails.
 //
-// Each pair's main text is the oracle anchor_reads_test.go already holds, read from there rather
-// than copied a second time: two copies of one statement drift apart, and that oracle is what
-// the package's equality test is held to.
+// Each pair's before text is the oracle anchor_reads_test.go already holds - the text the
+// release before this change ran - read from there rather than copied a second time: two copies
+// of one statement drift apart, and that oracle is what the package's equality test is held to.
 func TestStatementTimings(t *testing.T) {
 	runner := benchtime.Open(t, os.Getenv(benchtime.DatabaseURLEnv))
 	document := runner.Subjects().AnchoredDocument

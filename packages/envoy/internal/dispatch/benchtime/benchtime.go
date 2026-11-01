@@ -1,19 +1,23 @@
 // Package benchtime times one Dispatch statement against another on the seeded measurement
 // database that DISPATCH_BENCH_DATABASE_URL names, and binds the rows those statements read.
 //
-// It is INFRA-325's protocol 1, the committed harness: a named pair of statement texts - main's
-// and this branch's - whose difference is SQL text alone, run alternately on one connection,
-// each run's time read as planning plus execution from the EXPLAIN output's own two lines, the
-// median of runs 2 to 12 reported, both plans printed, and the pair failed when this branch's
-// median is not below main's. The details are the measurement: one connection for the whole
-// pair, so the cold cache is paid once and by both sides; alternating runs, so a drift in the
-// machine moves both sides together; the first run discarded, so a cache fill is not counted and
-// eleven readings decide the median; and the plan printed beside the number, because A8 asks for
-// the plan as well as the time.
+// It is INFRA-325's protocol 1, the committed harness: a named pair of statement texts - a
+// before text and an after text - whose difference is SQL text alone, run alternately on one
+// connection, each run's time read as planning plus execution from the EXPLAIN output's own two
+// lines, the median of runs 2 to 12 reported, both plans printed, and the pair failed when the
+// after text's median is not below the before text's. The details are the measurement: one
+// connection for the whole pair, so the cold cache is paid once and by both sides; alternating
+// runs, so a drift in the machine moves both sides together; the first run discarded, so a cache
+// fill is not counted and eleven readings decide the median; and the plan printed beside the
+// number, because A8 asks for the plan as well as the time.
+//
+// A before text is the text the caller measures against: for every pair committed here, the text
+// the release before migration 0158 ran, which each package already holds as its equality oracle.
 //
 // A statement whose gain needs an index or a table this change adds has no such pair: no one
-// schema holds both sides of it. Head measures the head side of those alone, and their before
-// side is the same measurement run against a database migrated from main, which is protocol 2.
+// schema holds both sides of it. Head measures the after side of those alone, and their before
+// side is the same measurement run against a database migrated from the release before this one,
+// whose migrations stop at 0157 where this change's run from 0158 to 0167; that is protocol 2.
 //
 // It is an ordinary package rather than a _test.go file because all three statement-owning
 // packages (api, refs, docs) run it and Go cannot share test-only code across packages, which is
@@ -50,8 +54,9 @@ const (
 )
 
 // Statement is one statement text with the arguments one call binds to it. The two sides of a
-// pair take their own arguments, since main's text and this branch's need not have the same
-// parameter list: the listing's paged text takes a limit and an offset main's did not.
+// pair take their own arguments, since a before text and an after text need not have the same
+// parameter list: the listing's paged text takes a limit and an offset the text it replaced did
+// not.
 type Statement struct {
 	SQL  string
 	Args []any
@@ -112,29 +117,38 @@ func (r *Runner) Subjects() Subjects { return r.subjects }
 // the mark ids of a document, the ask ids of an issue. A caller reads with it, and never writes.
 func (r *Runner) Conn() *pgx.Conn { return r.conn }
 
-// Pair measures main's text against this branch's under protocol 1 and fails when this branch's
-// median is not below main's. Each pair is a subtest of its own, so a pair that does not improve
-// names itself and leaves the rest of the run to report their own numbers.
+// beforeSide and afterSide name the two sides of a pair in every line this package logs and in
+// the error a pair fails with, which points a reader back at those lines by name. They are
+// written once here so the two always read the same.
+const (
+	beforeSide = "the before text"
+	afterSide  = "the after text"
+)
+
+// Pair measures a statement's before text against its after text under protocol 1 and fails when
+// the after text's median is not below the before text's. Each pair is a subtest of its own, so a
+// pair that does not improve names itself and leaves the rest of the run to report their own
+// numbers.
 func (r *Runner) Pair(t *testing.T, name string, before, after Statement) {
 	t.Helper()
 	t.Run(name, func(t *testing.T) {
 		beforeRuns := make([]reading, 0, runs)
 		afterRuns := make([]reading, 0, runs)
 		for range runs {
-			beforeRuns = append(beforeRuns, r.explain(t, "main's text", before))
-			afterRuns = append(afterRuns, r.explain(t, "this branch's text", after))
+			beforeRuns = append(beforeRuns, r.explain(t, beforeSide, before))
+			afterRuns = append(afterRuns, r.explain(t, afterSide, after))
 		}
-		mainSide := median(beforeRuns[discarded:])
-		branchSide := median(afterRuns[discarded:])
-		t.Logf("%s: main's text, planning plus execution %v (median of runs %d to %d), its median run's plan:\n%s",
-			name, mainSide.took, discarded+1, runs, mainSide.plan)
-		t.Logf("%s: this branch's text, planning plus execution %v (median of runs %d to %d), its median run's plan:\n%s",
-			name, branchSide.took, discarded+1, runs, branchSide.plan)
-		if branchSide.took >= mainSide.took {
-			t.Errorf("%s: this branch's median is %v, not below main's %v; "+
-				"both plans are logged above this line, main's under %q and this branch's under %q",
-				name, branchSide.took, mainSide.took,
-				name+": main's text", name+": this branch's text")
+		beforeMedian := median(beforeRuns[discarded:])
+		afterMedian := median(afterRuns[discarded:])
+		t.Logf("%s: %s, planning plus execution %v (median of runs %d to %d), its median run's plan:\n%s",
+			name, beforeSide, beforeMedian.took, discarded+1, runs, beforeMedian.plan)
+		t.Logf("%s: %s, planning plus execution %v (median of runs %d to %d), its median run's plan:\n%s",
+			name, afterSide, afterMedian.took, discarded+1, runs, afterMedian.plan)
+		if afterMedian.took >= beforeMedian.took {
+			t.Errorf("%s: the after text's median is %v, not below the before text's %v; "+
+				"both plans are logged above this line, under %q and %q",
+				name, afterMedian.took, beforeMedian.took,
+				name+": "+beforeSide, name+": "+afterSide)
 		}
 	})
 }
@@ -142,7 +156,8 @@ func (r *Runner) Pair(t *testing.T, name string, before, after Statement) {
 // Head measures the head side of a statement that has no protocol 1 pair, because its gain needs
 // an index or a table this change adds and one schema cannot hold both sides of that. It sets no
 // bound: the before side of such a statement is this same measurement, run against a database
-// migrated from a checkout of main, and seam 7's two-commit run is what puts the two together.
+// migrated from the release before this one, whose migrations stop at 0157, and seam 7's
+// two-commit run is what puts the two together.
 func (r *Runner) Head(t *testing.T, name string, head Statement) {
 	t.Helper()
 	t.Run(name, func(t *testing.T) {

@@ -29,10 +29,12 @@ func (r *seedRun) settleOwedWork(ctx context.Context) error {
 	return r.checkNoOwedWork(ctx)
 }
 
-// owedWorkCounts is the check the review's finding 1 names, with the fifth count the plan's
-// answer 7 adds: a mention whose excerpt_version is below its document's highest version number
-// is one refs.MarkStaleExcerpts re-owes, and the documents with 28 versions make that the common
-// case for a seed that wrote 1.
+// owedWorkCounts is the five counts that must all be zero for the data set to be settled: the
+// documents owed a block index, the bodies owed a grammar pass, the items owed a block index,
+// the mentions owed an excerpt, and the mentions holding an excerpt older than their document's
+// latest version. The fifth is the one a seed has to be told about: a mention whose
+// excerpt_version is below its document's highest version number is one refs.MarkStaleExcerpts
+// re-owes, and the documents with 28 versions make that the common case for a seed that wrote 1.
 const owedWorkCounts = `
 	select (select count(*) from document_block_versions where version is null),
 	       (select count(*) from block_grammar_owed),

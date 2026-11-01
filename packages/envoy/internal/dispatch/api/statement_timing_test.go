@@ -40,8 +40,8 @@ const (
 //     issue's children read. None of them reaches an index or a table this change adds - the
 //     listing and the project list add no migration, agentLastActivity reads
 //     events_session_actor_created_at_idx, which migration 0026 built, and the children read
-//     walks issues_parent_key - so main's text and this branch's are both measurable here, and
-//     the pair is the committed regression check.
+//     walks issues_parent_key - so the before text and the after text are both measurable here,
+//     and the pair is the committed regression check.
 //
 //   - Protocol 2, head text alone: listIssueAsksQueryAll, listIssueRootMessagesQuery and
 //     listArtifactAsksQueryOpen, whose texts this change does not edit at all - their gain is
@@ -52,12 +52,13 @@ const (
 //     document_search (0162), a table that must be absent for the before side and present for
 //     the after. One database cannot be both, so each of these is measured here as its head
 //     side, with its plan, and seam 7's two-commit run takes the before side by running this
-//     same measurement against a database migrated from a checkout of main.
+//     same measurement against a database migrated from the release before this change, whose
+//     migrations stop at 0157.
 //
-// Every pair's main text is an oracle this branch already holds - issue_list_equality_test.go,
-// agent_activity_test.go and issue_children_test.go - read from there rather than copied a
-// second time: two copies of one statement drift apart, and those oracles are what the
-// package's equality tests are held to.
+// Every pair's before text is the text that release runs, which this package already holds as an
+// oracle - issue_list_equality_test.go, agent_activity_test.go and issue_children_test.go - read
+// from there rather than copied a second time: two copies of one statement drift apart, and
+// those oracles are what the package's equality tests are held to.
 func TestStatementTimings(t *testing.T) {
 	runner := benchtime.Open(t, os.Getenv(benchtime.DatabaseURLEnv))
 	subjects := runner.Subjects()
@@ -68,9 +69,10 @@ func TestStatementTimings(t *testing.T) {
 	runner.Pair(t, "the issue list, unpaged",
 		benchtime.Statement{SQL: mainListIssuesQuery, Args: filters},
 		benchtime.Statement{SQL: listIssuesQuery, Args: filters})
-	// The paged read's before side is main's one text: main answered a paged request by reading
-	// every matching issue, resolving all of them and cutting the page in Go, so the push-down
-	// is measured against the read it replaced rather than against itself.
+	// The paged read's before side is the one text the release before this change had: it
+	// answered a paged request by reading every matching issue, resolving all of them and
+	// cutting the page in Go, so the push-down is measured against the read it replaced rather
+	// than against itself.
 	runner.Pair(t, "the issue list, the first page of 20",
 		benchtime.Statement{SQL: mainListIssuesQuery, Args: filters},
 		benchtime.Statement{SQL: listIssuesPageQuery,
@@ -147,10 +149,11 @@ type documentArmStatements struct {
 }
 
 // documentArmSide answers the five statements this database can run, and the label that names
-// the side they are. A database migrated from a checkout of main has no document_search, so it
-// can run only main's text, which is protocol 2's before side; the head's schema runs this
-// branch's. The table is read from the catalogue rather than from a caught error, so a statement
-// that fails for its own reason still fails the run.
+// the side they are. A database migrated from the release before this change has no
+// document_search (migration 0162), so it can run only that release's text, which is protocol
+// 2's before side; a database at this release's schema runs the after text. The table is read
+// from the catalogue rather than from a caught error, so a statement that fails for its own
+// reason still fails the run.
 func documentArmSide(t *testing.T, runner *benchtime.Runner) (documentArmStatements, string) {
 	t.Helper()
 	var present bool
@@ -169,7 +172,7 @@ func documentArmSide(t *testing.T, runner *benchtime.Runner) (documentArmStateme
 			relatedKeywordQuery: mainRelatedKeywordQuery,
 			relatedMeaningQuery: mainRelatedMeaningQuery,
 			relatedProbeSQL:     mainRelatedProbeSQL,
-		}, " (main's text, the before side)"
+		}, " (the before text, the release before this change)"
 	}
 	return documentArmStatements{
 		searchQuery:         searchQuery,
@@ -177,25 +180,26 @@ func documentArmSide(t *testing.T, runner *benchtime.Runner) (documentArmStateme
 		relatedKeywordQuery: relatedKeywordQuery,
 		relatedMeaningQuery: relatedMeaningQuery,
 		relatedProbeSQL:     relatedProbeSQL,
-	}, " (this branch's text, the after side)"
+	}, " (the after text, this release)"
 }
 
 // TestRelatedTermsRefreshTiming is protocol 3, the refresh's own, and it is a Go test rather
 // than a line of seam 7's script because the pass it times is Go: refreshSearchTermStats is
 // unexported in this package, and nothing outside it can run one pass of this build.
 //
-// The refresh has no statement pair. Main's is a per-project ts_stat rebuild and this build's is
-// a drain whose time follows the queue depth, so an empty queue would make it trivially faster.
-// The protocol is therefore the wall time of one whole pass before (main's full rebuild of every
-// project, runMainSearchTermStatsRebuild), the wall time of one whole pass after with no change,
-// and eleven rounds each preceded by a hundred item writes outside the timed part - twenty each
-// of title edits, document versions, comments, asks and messages - with the median of the eleven
-// reported. Each timed pass after must be below the pass before.
+// The refresh has no statement pair. The released refresh is a per-project ts_stat rebuild and
+// this build's is a drain whose time follows the queue depth, so an empty queue would make it
+// trivially faster. The protocol is therefore the wall time of one whole pass before (the
+// released full rebuild of every project, runMainSearchTermStatsRebuild), the wall time of one
+// whole pass after with no change, and eleven rounds each preceded by a hundred item writes
+// outside the timed part - twenty each of title edits, document versions, comments, asks and
+// messages - with the median of the eleven reported. Each timed pass after must be below the
+// pass before.
 //
 // It writes 1,100 items to the database it measures and leaves them there, which is what the
 // protocol asks for: run it after the statement timings, and re-seed before measuring a row
-// count or a checksum. The settling pass between main's rebuild and the first timed pass is
-// untimed on purpose: main's rebuild moves refreshed_at and writes no snapshot, so the pass
+// count or a checksum. The settling pass between the released rebuild and the first timed pass
+// is untimed on purpose: that rebuild moves refreshed_at and writes no snapshot, so the pass
 // after it counts every project in full by this build's own rule, and timing that would measure
 // a first-use full build rather than the steady state.
 func TestRelatedTermsRefreshTiming(t *testing.T) {
@@ -205,10 +209,10 @@ func TestRelatedTermsRefreshTiming(t *testing.T) {
 	projects := refreshTimingProjects(t, database)
 
 	before := mainRefreshPass(t, database, projects)
-	t.Logf("one whole pass, main's full rebuild, %d projects: %v", len(projects), before)
+	t.Logf("one whole pass, the released full rebuild, %d projects: %v", len(projects), before)
 
 	settling, settlingNote := refreshTimingPass(t, database, projects)
-	t.Logf("the settling pass after main's rebuild, untimed by the protocol: %v (%s)", settling, settlingNote)
+	t.Logf("the settling pass after the released rebuild, untimed by the protocol: %v (%s)", settling, settlingNote)
 
 	noChange, noChangeNote := refreshTimingPass(t, database, projects)
 	t.Logf("one whole pass, this build with no change: %v (%s)", noChange, noChangeNote)
@@ -228,11 +232,11 @@ func TestRelatedTermsRefreshTiming(t *testing.T) {
 		len(rounds), median, rounds)
 
 	if noChange >= before {
-		t.Errorf("a pass with no change took %v, not below main's whole pass at %v", noChange, before)
+		t.Errorf("a pass with no change took %v, not below the released whole pass at %v", noChange, before)
 	}
 	for round, took := range rounds {
 		if took >= before {
-			t.Errorf("round %d took %v, not below main's whole pass at %v", round+1, took, before)
+			t.Errorf("round %d took %v, not below the released whole pass at %v", round+1, took, before)
 		}
 	}
 }

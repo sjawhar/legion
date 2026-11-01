@@ -125,6 +125,142 @@ func TestSeedBuildsTermStatisticsOnMainsSchema(t *testing.T) {
 	}
 }
 
+// TestSeedRefusesAFilledDatabaseWithoutMigratingIt holds the seed to refusing a database that
+// already holds rows before it has written anything to it, its migrations included. A
+// --database-url that names a database in use by mistake is the case the order decides: the
+// migrations this release adds (0158 to 0167) have been run by no release, and applying them to
+// somebody else's database is not something the refusal that follows takes back.
+//
+// Each case reads schema_migrations before and after, whole and in order. A database with no
+// Dispatch schema carries no such table, so "it did not change" is "it is still not there": a
+// migrate-first run creates schema_migrations before it applies anything (store.createVersionTable),
+// so it shows there whichever migration it then fails on.
+func TestSeedRefusesAFilledDatabaseWithoutMigratingIt(t *testing.T) {
+	t.Run("a database that is not Dispatch's", func(t *testing.T) {
+		ctx := context.Background()
+		database := storetest.Open(t)
+		// Somebody else's database: no Dispatch schema, no schema_migrations, and a projects
+		// table of its own carrying rows.
+		for _, statement := range []string{
+			`drop schema public cascade`,
+			`create schema public`,
+			`create table projects (key text primary key, owner text not null)`,
+			`insert into projects (key, owner) values ('ledger', 'somebody else')`,
+		} {
+			if _, err := database.Pool.Exec(ctx, statement); err != nil {
+				t.Fatalf("%s: %v", statement, err)
+			}
+		}
+		if before := migrationVersionsOf(t, database); before != nil {
+			t.Fatalf("the database carries schema_migrations %v before the seed was pointed at it", before)
+		}
+
+		err := Seed(ctx, Options{DatabaseURL: databaseURLOf(t, database), Scale: testScale,
+			Migrate: true, Out: io.Discard})
+		assertFilledDatabaseRefusal(t, err, "1 projects rows")
+
+		if after := migrationVersionsOf(t, database); after != nil {
+			t.Errorf("the seed migrated the database it refused: schema_migrations holds %v", after)
+		}
+		var dispatchTable bool
+		if err := database.Pool.QueryRow(ctx, `select to_regclass('issues') is not null`).Scan(&dispatchTable); err != nil {
+			t.Fatalf("look for the issues table: %v", err)
+		}
+		if dispatchTable {
+			t.Error("the seed created Dispatch's issues table in the database it refused")
+		}
+	})
+
+	t.Run("a Dispatch database that already holds rows", func(t *testing.T) {
+		ctx := context.Background()
+		database := storetest.Open(t)
+		if _, err := database.Pool.Exec(ctx, `
+			insert into projects (key, name, next_number, created_at, last_seq)
+			values ('INUSE', 'a database in use', 1, now(), 0)
+		`); err != nil {
+			t.Fatalf("fill the database: %v", err)
+		}
+		before := migrationVersionsOf(t, database)
+		if len(before) == 0 {
+			t.Fatal("the test database records no migration, so its before and after compare nothing")
+		}
+
+		err := Seed(ctx, Options{DatabaseURL: databaseURLOf(t, database), Scale: testScale,
+			Migrate: true, Out: io.Discard})
+		assertFilledDatabaseRefusal(t, err, "1 projects rows")
+
+		if after := migrationVersionsOf(t, database); !slices.Equal(after, before) {
+			t.Errorf("schema_migrations holds %v after the refusal and held %v before it", after, before)
+		}
+	})
+
+	t.Run("an empty database and an empty schema both pass", func(t *testing.T) {
+		ctx := context.Background()
+		database := storetest.Open(t)
+		if err := refuseFilledDatabase(ctx, database); err != nil {
+			t.Errorf("a migrated database holding no row was refused: %v", err)
+		}
+		// And the same database with nothing in it at all, which is what --database-url names
+		// before the seed migrates it.
+		for _, statement := range []string{`drop schema public cascade`, `create schema public`} {
+			if _, err := database.Pool.Exec(ctx, statement); err != nil {
+				t.Fatalf("%s: %v", statement, err)
+			}
+		}
+		if err := refuseFilledDatabase(ctx, database); err != nil {
+			t.Errorf("a database carrying no table at all was refused: %v", err)
+		}
+	})
+}
+
+// databaseURLOf is the URL the store was opened with. Seed takes a URL and opens a pool of its
+// own from it, and what it does between opening one and seeding it is this test's subject, so
+// the test calls Seed rather than seed; storetest hands out the database and not its URL.
+func databaseURLOf(t *testing.T, database *store.Store) string {
+	t.Helper()
+	return database.Pool.Config().ConnString()
+}
+
+// migrationVersionsOf is every version schema_migrations records, in order, and nil when the
+// database carries no such table.
+func migrationVersionsOf(t *testing.T, database *store.Store) []int {
+	t.Helper()
+	ctx := context.Background()
+	var present bool
+	if err := database.Pool.QueryRow(ctx, `select to_regclass('schema_migrations') is not null`).Scan(&present); err != nil {
+		t.Fatalf("look for schema_migrations: %v", err)
+	}
+	if !present {
+		return nil
+	}
+	rows, err := database.Pool.Query(ctx, `select version from schema_migrations order by version`)
+	if err != nil {
+		t.Fatalf("read schema_migrations: %v", err)
+	}
+	versions, err := pgx.CollectRows(rows, pgx.RowTo[int])
+	if err != nil {
+		t.Fatalf("read schema_migrations: %v", err)
+	}
+	return versions
+}
+
+// assertFilledDatabaseRefusal holds err to the refusal refuseFilledDatabase writes, naming what
+// it counted: a run that failed for another reason - a migration it could not apply, say - is not
+// this test passing. It reports rather than stops, so the comparison of schema_migrations that
+// follows it runs and says whether the database was written to as well.
+func assertFilledDatabaseRefusal(t *testing.T, err error, counted string) {
+	t.Helper()
+	if err == nil {
+		t.Error("the seed accepted a database that already holds rows")
+		return
+	}
+	for _, want := range []string{"the database already holds data", counted} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not name %q: %v", want, err)
+		}
+	}
+}
+
 // assertSameRowCounts holds every table of the two databases to the same count. The tables are
 // read from the catalogue rather than listed here, so a table a later migration adds is covered
 // without this test being edited.
@@ -244,10 +380,11 @@ func checksumOf(t *testing.T, database *store.Store, table, query string) string
 	return sum
 }
 
-// assertNoOwedWork is the four-count check the review's finding 1 names, with the fifth count the
-// plan's answer 7 adds. A Dispatch server started on a database that answered anything else would
-// reindex the documents, rebuild the item blocks, count the tasks again and rewrite the excerpts,
-// and a measurement taken across that churn would read two different data sets.
+// assertNoOwedWork holds the seeded database to the five counts settle.go's owedWorkCounts
+// leaves at zero, the stale-excerpt count included. A Dispatch server started on a database that
+// answered anything else would reindex the documents, rebuild the item blocks, count the tasks
+// again and rewrite the excerpts, and a measurement taken across that churn would read two
+// different data sets.
 func assertNoOwedWork(t *testing.T, database *store.Store) {
 	t.Helper()
 	var blocks, grammar, items, excerpts, stale int

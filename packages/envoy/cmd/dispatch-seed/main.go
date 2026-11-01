@@ -28,6 +28,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -81,7 +83,13 @@ type Options struct {
 // subject it wrote. It migrates the database with store.Migrate, the way cmd/dispatch's own
 // subcommands do (openMigrated), rather than by booting a server, whose loops would write to the
 // data set it is building. --no-migrate leaves that to the caller, which is what the two-commit
-// measurement needs: the "before" side migrates from another commit and seeds with this tool.
+// measurement needs: the "before" side migrates from the release before this one and seeds with
+// this tool.
+//
+// The refusal comes before the migration, so a --database-url that names a database in use by
+// mistake is refused with that database as it was found. Migrating it first would apply this
+// release's own schema change - migrations 0158 to 0167, which no release has run yet - to
+// somebody else's database, and a refusal afterwards does not take that back.
 func Seed(ctx context.Context, options Options) error {
 	out := options.Out
 	if out == nil {
@@ -92,13 +100,13 @@ func Seed(ctx context.Context, options Options) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Pool.Close()
+	if err := refuseFilledDatabase(ctx, database); err != nil {
+		return err
+	}
 	if options.Migrate {
 		if err := database.Migrate(ctx); err != nil {
 			return fmt.Errorf("migrate database: %w", err)
 		}
-	}
-	if err := refuseFilledDatabase(ctx, database); err != nil {
-		return err
 	}
 	_, err = seed(ctx, database, options.Scale, out)
 	return err
@@ -118,26 +126,42 @@ func seed(ctx context.Context, database *store.Store, scale float64, out io.Writ
 	return run, nil
 }
 
+// seedTables are the tables the refusal reads: the two every other row of the data set hangs off,
+// and the two the seed writes first, so both a database somebody else is using and a half-written
+// run of this command hold rows in one of them.
+var seedTables = []string{"projects", "issues"}
+
 // refuseFilledDatabase refuses a database that already holds Dispatch data. The seed writes fixed
 // keys, so a second run would fail halfway through on a duplicate key and leave a half-written
 // data set; and a database somebody else filled is not the data set a measurement compares
 // against. It names what it found, so the caller knows which database it pointed at.
+//
+// It runs before this command writes anything, the migration included, so the database it reads
+// may carry no Dispatch schema at all: a table that is not there holds no row, and an empty
+// database and one carrying an empty schema both pass it. Each table's presence is asked of
+// to_regclass first because a count naming a table that does not exist fails the whole statement
+// when Postgres parses it, before any case or coalesce around it decides anything.
 func refuseFilledDatabase(ctx context.Context, database *store.Store) error {
-	var projects, issues int
-	if err := database.Pool.QueryRow(ctx, `
-		select (select count(*) from projects), (select count(*) from issues)
-	`).Scan(&projects, &issues); err != nil {
-		return fmt.Errorf("count the rows already in the database: %w", err)
+	found := make([]string, 0, len(seedTables))
+	for _, table := range seedTables {
+		var present bool
+		if err := database.Pool.QueryRow(ctx, `select to_regclass($1) is not null`, table).Scan(&present); err != nil {
+			return fmt.Errorf("look for the %s table: %w", table, err)
+		}
+		if !present {
+			continue
+		}
+		var rows int
+		if err := database.Pool.QueryRow(ctx,
+			`select count(*) from `+pgx.Identifier{table}.Sanitize()).Scan(&rows); err != nil {
+			return fmt.Errorf("count the rows already in %s: %w", table, err)
+		}
+		if rows > 0 {
+			found = append(found, fmt.Sprintf("%d %s rows", rows, table))
+		}
 	}
-	if projects == 0 && issues == 0 {
+	if len(found) == 0 {
 		return nil
-	}
-	found := make([]string, 0, 2)
-	if projects > 0 {
-		found = append(found, fmt.Sprintf("%d projects rows", projects))
-	}
-	if issues > 0 {
-		found = append(found, fmt.Sprintf("%d issues rows", issues))
 	}
 	return errors.New("the database already holds data (" + strings.Join(found, " and ") +
 		"); dispatch-seed fills an empty database, so drop it and create it again")

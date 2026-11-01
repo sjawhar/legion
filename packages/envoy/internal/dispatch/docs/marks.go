@@ -791,15 +791,16 @@ var (
 )
 
 // anchoredOn is the predicate that finds the rows of the target's table anchored on the document
-// bound to $1: `anchor is not null`, the text comparison main's own anchor reads ran, and the
-// uuid comparison this table's anchor index is built on, in that order.
+// bound to $1: `anchor is not null`, the text comparison the anchor reads of the release before
+// migration 0158 ran, and the uuid comparison this table's anchor index is built on, in that
+// order.
 //
 // `anchor is not null` is the partial predicate of asks_anchor_artifact_id (0148), which Postgres
 // cannot prove from a clause on anchor->>'artifact_id' alone, so without it that index is not
 // eligible at all; ->> is strict, so a row either comparison matches carries a non-null anchor
 // already and no read loses a row to it.
 //
-// The text comparison is what keeps the row set exactly the one main returned, and it is what
+// The text comparison keeps the row set exactly the one that release returned, and it is what
 // docs/write_hold_test.go's counter sees a refresh pass by, so a read that drops it both widens
 // its answer and goes uncounted. A row whose artifact_id is not a lower-case document id - an
 // upper-case spelling of a real id, or, on asks, a value that is no uuid at all - is left out of
@@ -808,7 +809,7 @@ var (
 // side is comments_anchor_artifact's plain (anchor->>'artifact_id')::uuid (0032), which raises
 // 22P02 on an artifact_id that is no uuid where the text comparison returns no row; only that
 // index's own cast keeps such a row out of comments today, and the text comparison is what holds
-// the read to main's answer whatever the table carries.
+// the read to that release's answer whatever the table carries.
 //
 // The uuid comparison is written out as its index's expression, byte for byte, so the read is an
 // index scan rather than a scan of a table holding every ask or comment of the instance. Every

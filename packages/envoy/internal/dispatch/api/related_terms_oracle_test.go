@@ -11,7 +11,7 @@ import (
 // This file is the refresh as main writes it: the oracle of the equality tests in
 // related_terms_refresh_test.go and the old release this change has to meet during a roll.
 //
-// The statements are a literal copy of main's text, nothing built from this package's own
+// The statements are a literal copy of that release's text, nothing built from this package's own
 // constants: an oracle that shared a constant with the statement under test would move with it
 // and the comparison would hold nothing. The cost is that an edit to a part of those statements
 // this change leaves alone has to be copied here too, which is what the equality tests report

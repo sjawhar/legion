@@ -43,9 +43,9 @@ type seedRun struct {
 }
 
 // subjects are the named rows a measurement binds that the run alone knows, which the command
-// prints: a sibling measurement cannot find them by reading the code (the review's finding 9).
-// Every other subject reportSubjects prints it reads from the plan or from the database as it
-// prints it, so it is not held here.
+// prints: they come out of this run's own draw, so no measurement elsewhere can name them by
+// reading the code. Every other subject reportSubjects prints it reads from the plan or from
+// the database as it prints it, so it is not held here.
 type subjects struct {
 	Model          string
 	QueryVectorRow string

@@ -92,7 +92,8 @@ func (r *seedRun) writeDocument(ctx context.Context, tx pgx.Tx, index int) error
 	// ReplaceDocumentCounted stores each mention's excerpt at this version number, which is the
 	// document's highest: refs.MarkStaleExcerpts re-owes a mention whose excerpt_version is
 	// below max(artifact_versions.number), so a seed that wrote 1 would leave every one of the
-	// 28-version documents owed (the plan's answer 7).
+	// 28-version documents owed, which settle.go's owedWorkCounts refuses and a server started
+	// on the data set would rewrite.
 	if _, err := refs.ReplaceDocumentCounted(ctx, tx, document.ID, document.Versions, versionAt,
 		text.Refs(located), moved, refs.MentionExcerpts(latest, blocks, located)); err != nil {
 		return fmt.Errorf("index references: %w", err)
