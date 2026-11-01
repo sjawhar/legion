@@ -1811,6 +1811,52 @@ func (p *dispatchPair) waitStoredPast(t *testing.T, artifactID string, head int6
 	}
 }
 
+// storedText renders the document the store holds: its updates folded in order, which is what
+// every reload of it reads, whatever any room holds.
+func storedText(t *testing.T, pair *dispatchPair, artifactID string) string {
+	t.Helper()
+	rows, err := pair.database.Pool.Query(context.Background(),
+		`select update from doc_updates where artifact_id = $1 order by version`, artifactID)
+	if err != nil {
+		t.Fatalf("read the stored history of %s: %v", artifactID, err)
+	}
+	defer rows.Close()
+	document := crdt.New()
+	for rows.Next() {
+		var update []byte
+		if err := rows.Scan(&update); err != nil {
+			t.Fatalf("scan a stored update of %s: %v", artifactID, err)
+		}
+		if err := crdt.ApplyUpdateV1(document, update, nil); err != nil {
+			t.Fatalf("apply a stored update of %s: %v", artifactID, err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the stored history of %s: %v", artifactID, err)
+	}
+	return renderDocument(document)
+}
+
+// waitStoredHolds waits up to within for the stored document to hold want, and fails the test
+// naming what was to be stored when it does not. It is waitStoredPast for a row that typed
+// something: a browser's connect hands the room the state of its own copy, which the room appends
+// as it does any other update of that browser, so a head read taken right after a connect can be
+// passed by that append alone - this one passes only on the text.
+func (p *dispatchPair) waitStoredHolds(t *testing.T, artifactID, want string, within time.Duration, what string) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		stored := storedText(t, p, artifactID)
+		if strings.Contains(stored, want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s was not stored within %v: the stored document holds no %q, it reads:\n%s", what, within, want, stored)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // typeAtEnd types text at the end of the editor's first paragraph in one keystroke's transaction,
 // on the paragraph's own Yjs text as ProseMirror's binding does, and sends the room the update.
 func typeAtEnd(editor *docstest.Peer, text string) error {
@@ -1975,11 +2021,16 @@ func (p *dispatchPair) keystroke(t *testing.T, artifactID string, typing *typist
 	for attempt := 1; ; attempt++ {
 		if peerEnded(typing.editor) {
 			typing.disconnects = append(typing.disconnects, typing.editor.CloseCode())
+			reconnected := storedHead(t, p, artifactID)
 			editor, err := typing.process.reconnectEditor(t, typing.login, artifactID)
 			if err != nil {
 				return fmt.Errorf("%s: %w", typing.who, err)
 			}
 			typing.editor = editor
+			// The room appends the state the tab sent on reconnecting, content or no content, so
+			// that append is waited for here: left in flight, it would pass the wait below on its
+			// own and the keystroke would be taken for stored.
+			p.waitStoredPast(t, artifactID, reconnected, 10*time.Second, typing.who+"'s reconnected tab's sync update")
 		}
 		before := storedHead(t, p, artifactID)
 		if err := typeAtEnd(typing.editor, typing.text); err != nil {
@@ -2210,8 +2261,8 @@ func TestTwoEditorsOnTwoProcessesSeeEachOthersEditsAndCursorsLive(t *testing.T) 
 			{who: "alice on A", login: "alice", process: pair.a, text: "a"},
 			{who: "bob on B", login: "bob", process: pair.b, text: "b"},
 		}
-		typists[0].editor = pair.a.openEditorAs(t, "alice", artifactID, "x\n")
-		typists[1].editor = pair.b.openEditorAs(t, "bob", artifactID, "x\n")
+		typists[0].editor = pair.openStoredEditor(t, pair.a, "alice", artifactID, "x\n")
+		typists[1].editor = pair.openStoredEditor(t, pair.b, "bob", artifactID, "x\n")
 		const keystrokes = 200
 		var stopped error
 		typed := 0
@@ -2267,8 +2318,8 @@ func TestTwoEditorsOnTwoProcessesSeeEachOthersEditsAndCursorsLive(t *testing.T) 
 			{who: "alice on A", login: "alice", process: pair.a, text: "a"},
 			{who: "bob on B", login: "bob", process: pair.b, text: "b"},
 		}
-		typists[0].editor = pair.a.openEditorAs(t, "alice", artifactID, "x\n")
-		typists[1].editor = pair.b.openEditorAs(t, "bob", artifactID, "x\n")
+		typists[0].editor = pair.openStoredEditor(t, pair.a, "alice", artifactID, "x\n")
+		typists[1].editor = pair.openStoredEditor(t, pair.b, "bob", artifactID, "x\n")
 		for keystroke := range 6 {
 			if err := pair.keystroke(t, artifactID, typists[keystroke%2]); err != nil {
 				t.Fatalf("keystroke %d: %v", keystroke+1, err)
@@ -2383,12 +2434,11 @@ func TestClosingAndReopeningAnIssueChangesEveryProcessesRooms(t *testing.T) {
 		who    string
 		editor *docstest.Peer
 		text   string
-	}{{"alice on A", alice, "a"}, {"bob on B", bob, "b"}} {
-		head := storedHead(t, pair, artifactID)
+	}{{"alice on A", alice, "typed-a"}, {"bob on B", bob, "typed-b"}} {
 		if err := typeAtEnd(edit.editor, edit.text); err != nil {
 			t.Fatalf("%s's keystroke on the reopened issue: %v", edit.who, err)
 		}
-		pair.waitStoredPast(t, artifactID, head, 5*time.Second, edit.who+"'s keystroke on the reopened issue")
+		pair.waitStoredHolds(t, artifactID, edit.text, 5*time.Second, edit.who+"'s keystroke on the reopened issue")
 	}
 }
 
@@ -2476,12 +2526,11 @@ func TestClosingAnIssueOnOneProcessWithdrawsItsAskAndFreezesTheOtherProcessesRoo
 	if scope := authenticateEditor(t, bob); scope != "read-write" {
 		t.Fatalf("bob's tab on B on an open issue was granted %q, want read-write", scope)
 	}
-	head := storedHead(t, pair, artifactID)
 	typed := time.Now()
 	if err := typeAtEnd(bob, " late"); err != nil {
 		t.Fatalf("bob's keystroke before the close: %v", err)
 	}
-	pair.waitStoredPast(t, artifactID, head, 5*time.Second, "bob's keystroke before the close")
+	pair.waitStoredHolds(t, artifactID, "Context late", 5*time.Second, "bob's keystroke before the close")
 	if peerEnded(bob) {
 		t.Fatalf("bob's tab on B was disconnected before the close (close code %d), so the close cannot be shown closing it; %s",
 			bob.CloseCode(), pair.roomCloses(t, artifactID))
@@ -2524,11 +2573,10 @@ func TestClosingAnIssueOnOneProcessWithdrawsItsAskAndFreezesTheOtherProcessesRoo
 	if reopened, err := roomRendering(bob, 5*time.Second); err != nil || !strings.Contains(reopened, `#ship-it urgency="med" multiple="false" state="open"`) {
 		t.Fatalf("B's room of the reopened issue does not hold the decision block open (%v):\n%s", err, reopened)
 	}
-	head = storedHead(t, pair, artifactID)
 	if err := typeAtEnd(bob, " again"); err != nil {
 		t.Fatalf("bob's keystroke on the reopened issue: %v", err)
 	}
-	pair.waitStoredPast(t, artifactID, head, 5*time.Second, "bob's keystroke on the reopened issue")
+	pair.waitStoredHolds(t, artifactID, "Context late again", 5*time.Second, "bob's keystroke on the reopened issue")
 	waitForSettlementOwed(t, pair.database, artifactID, false)
 	if ask := pair.b.readAsk(t, askID); ask.State != "open" {
 		t.Fatalf("the reopened document's settlement left the ask %s, want open", ask.State)
