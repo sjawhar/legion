@@ -2740,7 +2740,8 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   A watcher that ends on its own records the terminal error `/healthz` and self-health read.
   A stopped watcher arms nothing, and one armed while the stop ran is read and dropped until the shutdown ends it (the shutdown bullet below).
   A watcher reporting `consumer not active` during the gap is logged at WARN.
-  Every other async error is an ERROR, `consumer not found` among them:
+  A server that closes a connection during a reconnect's handshake (one restarting) makes nats.go report the read's `EOF` as an async error with no subscription and nothing else, so the bus logs that report, while the connection is still connecting or reconnecting, as the failed reconnect attempt it is, at WARN on the reconnect throttle (`envoy nats reconnect attempt failed`).
+  Every other async error is an ERROR, an `EOF` on a connected connection and `consumer not found` among them:
   the shutdown deletes each watcher's consumer itself before the connection drains, so a delete nats.go's drain reports belongs to a watcher nothing ended, and an ordered consumer nats.go failed to recreate wraps the error.
 
 - Every cache warm-up logs one line when its initial scan ends
