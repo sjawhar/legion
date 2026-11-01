@@ -1,0 +1,279 @@
+import { expect, type Locator, type Page, type TestInfo, test } from "@playwright/test";
+
+import * as C from "../web/src/theme/classes";
+import { oklchToSrgb8 } from "../web/src/theme/contrast";
+import type { Swatch } from "../web/src/theme/palette";
+import { createAsk, createComment, createIssue, createProject } from "./api";
+import { conversationThreadScope } from "./editor";
+import { resetDatabase } from "./seed";
+import { asUser } from "./users";
+
+const session = {
+  actor: { kind: "session" as const, id: "e2e-theme" },
+  as: "agent" as const,
+};
+
+// Chromium serializes `getComputedStyle` colors in the color space they were declared in —
+// Tailwind v4's default palette is `oklch()`, so `backgroundColor`/`color`/`borderBottomColor`
+// come back as e.g. `oklch(0.208 0.042 265.755)`, not `rgb(...)`. Rather than pin that literal
+// string (brittle against browser/Tailwind version formatting changes) or fall back to a
+// lightness-threshold check (accepts any two colors on the right side of the light/dark line,
+// not the *specific* token the component is supposed to render), this converts the actual
+// computed color through the same OKLCH→sRGB math `palette.test.ts` uses to verify contrast,
+// then compares it against the exact expected `classes.ts` `ColorPair` swatch for the
+// element's role and color scheme — an 8-bit RGB triple, exact.
+const OKLCH_PATTERN = /^oklch\(([\d.]+)\s+([\d.]+)\s+([\d.]+)/;
+const RGB_PATTERN = /^rgba?\((\d+),\s*(\d+),\s*(\d+)/;
+
+function toRgbString([r, g, b]: readonly [number, number, number]): string {
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+/** Normalizes a computed color string (`oklch(...)` or `rgb(...)`/`rgba(...)`) to a canonical
+ * `rgb(r, g, b)` 8-bit triple, dropping alpha — none of this suite's assertions target a
+ * translucent element. */
+function normalizeComputedColor(value: string): string {
+  const oklchMatch = OKLCH_PATTERN.exec(value);
+  if (oklchMatch !== null) {
+    const [, l, c, h] = oklchMatch;
+    return toRgbString(oklchToSrgb8({ c: Number(c), h: Number(h), l: Number(l) }));
+  }
+  const rgbMatch = RGB_PATTERN.exec(value);
+  if (rgbMatch !== null) {
+    const [, r, g, b] = rgbMatch;
+    return toRgbString([Number(r), Number(g), Number(b)]);
+  }
+  throw new Error(`could not parse a css color from "${value}"`);
+}
+
+/** The exact 8-bit RGB `classes.ts` expects a `Swatch` to render as. */
+function expectedRgb(swatch: Swatch): string {
+  return toRgbString(oklchToSrgb8(swatch.oklch));
+}
+
+async function expectBackgroundColor(locator: Locator, swatch: Swatch): Promise<void> {
+  const actual = await locator.first().evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(normalizeComputedColor(actual)).toBe(expectedRgb(swatch));
+}
+
+/** Polls, since a link or button eases its `color` over 150ms (styles.css) after a scheme switch. */
+async function expectTextColor(locator: Locator, swatch: Swatch): Promise<void> {
+  await expect
+    .poll(async () =>
+      normalizeComputedColor(await locator.first().evaluate((el) => getComputedStyle(el).color))
+    )
+    .toBe(expectedRgb(swatch));
+}
+
+async function expectBorderColor(locator: Locator, swatch: Swatch): Promise<void> {
+  const actual = await locator.first().evaluate((el) => getComputedStyle(el).borderBottomColor);
+  expect(normalizeComputedColor(actual)).toBe(expectedRgb(swatch));
+}
+
+async function attachScreenshot(page: Page, testInfo: TestInfo, name: string): Promise<void> {
+  const path = testInfo.outputPath(`${name}.png`);
+  await page.screenshot({ path, fullPage: true });
+  await testInfo.attach(name, { contentType: "image/png", path });
+}
+
+test.beforeEach(async () => {
+  await resetDatabase();
+});
+
+test("the inbox renders the dark palette in dark mode and the light palette in light mode", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "Decide the rollout plan.",
+    title: "Needs a decision",
+  });
+  const ask = await createAsk(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "Decide" }, question: "Ship this week?" },
+    session
+  );
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    const card = page.getByTestId(`ask-${ask.id}`);
+
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
+    await expect(card).toBeVisible();
+    await expectBackgroundColor(page.getByTestId("app-shell"), C.CANVAS.light);
+    await expectBackgroundColor(card, C.SURFACE.light);
+    await attachScreenshot(page, testInfo, "inbox-light");
+
+    await page.emulateMedia({ colorScheme: "dark" });
+    await expectBackgroundColor(page.getByTestId("app-shell"), C.CANVAS.dark);
+    await expectTextColor(page.getByTestId("app-shell"), C.TEXT_PRIMARY.dark);
+    await expectBackgroundColor(card, C.SURFACE.dark);
+    await attachScreenshot(page, testInfo, "inbox-dark");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an issue's spec and Conversation tabs render the dark palette in dark mode and the light palette in light mode", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "Decide the rollout plan.",
+    title: "Roll out the new pipeline",
+  });
+  await createComment(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "Decide" }, body: "left a note" },
+    session
+  );
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    const title = page.getByRole("heading", { level: 1, name: issue.title });
+    const header = page.locator("header").first();
+
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.goto(`/issues/${issue.key}/spec`);
+    await expect(title).toBeVisible();
+    await expectTextColor(title, C.TEXT_PRIMARY.light);
+    await attachScreenshot(page, testInfo, "issue-spec-light");
+
+    await page.emulateMedia({ colorScheme: "dark" });
+    await expectTextColor(title, C.TEXT_PRIMARY.dark);
+    await expectBorderColor(header, C.BORDER_DEFAULT.dark);
+    await attachScreenshot(page, testInfo, "issue-spec-dark");
+
+    const dock = page.getByRole("form", { name: "Comment composer" });
+
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.getByRole("tab", { name: "Conversation" }).click();
+    await expect(dock).toBeVisible();
+    await expectBackgroundColor(dock, C.SURFACE.light);
+    await attachScreenshot(page, testInfo, "issue-conversation-light");
+
+    await page.emulateMedia({ colorScheme: "dark" });
+    await expectBackgroundColor(dock, C.SURFACE.dark);
+    await attachScreenshot(page, testInfo, "issue-conversation-dark");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a link in a comment's Markdown body renders the app's link blue in dark mode and in light mode @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Roll out the new pipeline" });
+  const comment = await createComment(
+    issue.key,
+    { body: "See [the plan](https://example.com/plan)." },
+    session
+  );
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    const turn = page.locator(`[data-turn="comment:${comment.id}"]`);
+    // Collapsed, the turn shows the comment as a two-line `MarkdownPreview` with live links;
+    // expanded, it shows the full `MarkdownBody` (in place above the phone breakpoint, in a
+    // full-screen Thread dialog below it). Both are `.dispatch-markdown` bodies whose link is an
+    // `<a>` coloured by Typography's `--tw-prose-links`.
+    const previewLink = turn.locator(".dispatch-markdown").getByRole("link", { name: "the plan" });
+
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(previewLink).toBeVisible();
+    await expectTextColor(previewLink, C.LINK.light);
+
+    await page.emulateMedia({ colorScheme: "dark" });
+    await expectTextColor(previewLink, C.LINK.dark);
+
+    await turn.getByRole("button", { name: "Expand thread" }).click();
+    const thread = conversationThreadScope(page, testInfo.project.name, turn);
+    const bodyLink = thread.locator(".dispatch-markdown").getByRole("link", { name: "the plan" });
+    await expect(bodyLink).toBeVisible();
+    await expectTextColor(bodyLink, C.LINK.dark);
+    await attachScreenshot(page, testInfo, "markdown-link-dark");
+
+    await page.emulateMedia({ colorScheme: "light" });
+    await expectTextColor(bodyLink, C.LINK.light);
+    await attachScreenshot(page, testInfo, "markdown-link-light");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("the margin review sheet renders the dark palette in dark mode on an iPhone viewport @phone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "iphone",
+    "the margin sheet is a bottom sheet only on the iphone project"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "Decide the rollout plan.",
+    title: "Roll out the new pipeline",
+  });
+  await createComment(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "Decide" }, body: "left a note" },
+    session
+  );
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    const sheet = page.getByTestId("margin-sheet");
+
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.goto(`/issues/${issue.key}/spec`);
+    await page.getByRole("button", { name: "Open review panel" }).click();
+    await expect(sheet).toBeVisible();
+    await expectBackgroundColor(sheet, C.SURFACE.light);
+    await attachScreenshot(page, testInfo, "margin-sheet-iphone-light");
+
+    await page.emulateMedia({ colorScheme: "dark" });
+    await expectBackgroundColor(sheet, C.SURFACE.dark);
+    await attachScreenshot(page, testInfo, "margin-sheet-iphone-dark");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("Settings renders the dark palette in dark mode and the light palette in light mode", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    // The mappings table sits in a bordered card `<div>` that is its nearest ancestor `<div>` —
+    // a structural lookup that survives class-name churn in SettingsPage.tsx.
+    const card = page.locator("table").locator("xpath=ancestor::div[1]");
+    const heading = page.getByRole("heading", { name: "Settings" });
+
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.goto("/settings");
+    await expect(heading).toBeVisible();
+    await expectBackgroundColor(card, C.SURFACE.light);
+    await expectTextColor(heading, C.TEXT_PRIMARY.light);
+    await attachScreenshot(page, testInfo, "settings-light");
+
+    await page.emulateMedia({ colorScheme: "dark" });
+    await expectBackgroundColor(card, C.SURFACE.dark);
+    await expectTextColor(heading, C.TEXT_PRIMARY.dark);
+    await attachScreenshot(page, testInfo, "settings-dark");
+  } finally {
+    await alice.close();
+  }
+});

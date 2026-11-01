@@ -1,0 +1,316 @@
+// Package dispatch is the Go daemon's bounded client for Dispatch's native HTTP API.
+package dispatch
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+	"unicode/utf16"
+)
+
+// MessageBodyLength is body's length as Dispatch counts it against MessageBodyLimit: UTF-16 code
+// units, so a character outside the Basic Multilingual Plane counts twice.
+func MessageBodyLength(body string) int {
+	length := 0
+	for _, r := range body {
+		length += utf16.RuneLen(r)
+	}
+	return length
+}
+
+// Client is the Dispatch surface the workflow needs. It deliberately exposes only the reads and
+// writes the daemon owns; callers preserve the order ListIssues returns when deciding admission.
+// BuildCommit is the one read of Dispatch itself rather than of its issues: the build its server
+// fleet serves, as its /healthz reports it, which the boot compares against the open production
+// checks of the repository the daemon is built from.
+type Client interface {
+	ListIssues(ctx context.Context, project string, statuses []string) ([]IssueSummary, error)
+	GetIssue(ctx context.Context, key string) (Issue, error)
+	SetStatus(ctx context.Context, key, status string) (Issue, error)
+	HandOver(ctx context.Context, issue Issue, status string) error
+	PostMessage(ctx context.Context, key, body string) error
+	MessageBodiesSince(ctx context.Context, key string, since time.Time) ([]string, error)
+	// EventsAfter is the issue's event log after a sequence, oldest first, each event as Dispatch
+	// serves it: the boot catch-up's read of what a root's durable stream may not have delivered.
+	EventsAfter(ctx context.Context, key string, after int64) ([]json.RawMessage, error)
+	Approval(ctx context.Context, artifactID string) (Approval, error)
+	BuildCommit(ctx context.Context) (string, error)
+	ListRepoProjects(ctx context.Context) ([]RepoProject, error)
+	// WebhookAppInstalled is whether Dispatch's GitHub App, the one GitHub sends a repository's
+	// webhook events through, is installed on repo (owner/name).
+	WebhookAppInstalled(ctx context.Context, repo string) (bool, error)
+}
+
+// RepoProject is one mapping of a GitHub repository (owner/name) to a Dispatch project, and
+// whether it is that project's default: the repository an issue resolves to when neither it nor
+// any ancestor names one.
+type RepoProject struct {
+	Repo    string
+	Project string
+	Default bool
+}
+
+// LegionLabel is the Dispatch label that hands an issue to Legion. A human sets it from the issue
+// header in the Dispatch dashboard, an agent with Dispatch's issue tools. A label is the mark, and
+// not the issue's route, because a route has Dispatch publish every event of the issue to the
+// route's topic, while a label only marks it.
+const LegionLabel = "legion"
+
+// CarriesLegionLabel says whether labels include LegionLabel. Dispatch keeps a label's case as it
+// was typed and holds labels differing only in case as one label, so the match ignores case.
+func CarriesLegionLabel(labels []string) bool {
+	for _, label := range labels {
+		if strings.EqualFold(label, LegionLabel) {
+			return true
+		}
+	}
+	return false
+}
+
+// IssueSummary is one issue from Dispatch's project list. Rank is Dispatch's fractional key;
+// callers preserve the list's order when filtering. HandedOver is resolved once here, at the
+// client boundary, from the raw labels Dispatch's list route answers: every other reader of an
+// IssueSummary acts on this bool, never on a label list of its own.
+type IssueSummary struct {
+	Key        string
+	Title      string
+	Status     string
+	Parent     *string
+	Rank       string
+	HandedOver bool
+	// LastSeq is how far Dispatch's own event log for the issue has run. A record whose applied
+	// sequence is behind it has events still to come on the stream, which carry the actor this
+	// snapshot does not.
+	LastSeq int64
+	// ResolvedRepo is the repository (owner/name) Dispatch resolves the issue to: its own, else its
+	// nearest ancestor's, else its project's default; empty when it resolves to none.
+	ResolvedRepo string
+	// BlockedBy is the keys of the issues, in this issue's own project, that this issue waits on,
+	// in the order Dispatch lists them; none when it waits on nothing.
+	BlockedBy []string
+	// ClaimedBy is who Dispatch shows holding the issue's claim, as Claim.Holder writes it, or
+	// empty for nobody. ClaimUnread says Dispatch showed a claim naming no actor: neither nobody
+	// nor anyone the daemon can name, so the read says nothing of the claim.
+	ClaimedBy   string
+	ClaimUnread bool
+}
+
+// Issue is the summary as an Issue, for a reader that has only Dispatch's listing of the issue:
+// every field the listing carries, the claim from its holder (Claim.Holder's `<kind>:<id>`). A
+// summary carries no project, no labels beyond the hand-over and no primary document, so those are
+// empty.
+func (s IssueSummary) Issue() Issue {
+	var claim *Claim
+	if kind, id, ok := strings.Cut(s.ClaimedBy, ":"); ok {
+		claim = &Claim{Kind: kind, ID: id}
+	}
+	return Issue{Key: s.Key, Title: s.Title, Status: s.Status, Parent: s.Parent, Rank: s.Rank, HandedOver: s.HandedOver,
+		LastSeq: s.LastSeq, ResolvedRepo: s.ResolvedRepo, BlockedBy: s.BlockedBy, Claim: claim, ClaimUnread: s.ClaimUnread}
+}
+
+// Issue is the workflow data from Dispatch's issue-detail route. HandedOver is resolved here, at
+// the client boundary, as IssueSummary's is. Labels remain available to readers, while HandOver
+// adds LegionLabel through Dispatch's additive labels_add update rather than rewriting them.
+type Issue struct {
+	Key               string
+	Project           string
+	Title             string
+	Status            string
+	Parent            *string
+	Rank              string
+	Labels            []string
+	HandedOver        bool
+	PrimaryArtifactID string
+	LastSeq           int64
+	// ResolvedRepo is IssueSummary.ResolvedRepo.
+	ResolvedRepo string
+	// BlockedBy is IssueSummary.BlockedBy.
+	BlockedBy []string
+	// Claim is the issue's claim Dispatch shows, nil for none; ClaimUnread is IssueSummary's.
+	Claim       *Claim
+	ClaimUnread bool
+}
+
+// Claim is the actor Dispatch records as an issue's holder: a session or a person.
+type Claim struct {
+	Kind string
+	ID   string
+}
+
+// Holder is the claim as the daemon keeps it, `<kind>:<id>`, or empty for no claim.
+func (c *Claim) Holder() string {
+	if c == nil {
+		return ""
+	}
+	return c.Kind + ":" + c.ID
+}
+
+// Actor is who Dispatch names as having made a change: Kind `user` is a person, `session` an agent
+// session, and `system` Dispatch itself (its document settlement among them). Every Dispatch event
+// carries one.
+type Actor struct {
+	Kind string
+	ID   string
+}
+
+// Person says whether the actor is a person.
+func (a Actor) Person() bool { return a.Kind == "user" }
+
+// SettlementActor is Dispatch's document settlement, which closes an ask whose decision block left
+// its document in its own name (Dispatch's docs.SettlementActor).
+var SettlementActor = Actor{Kind: "system", ID: "document-settlement"}
+
+// Approval is the current approval state Dispatch derives for a document, and the issue carrying
+// the document (empty for a project document). While an approval request is open (State
+// `awaiting`), AskID names it and WaitingOn is whose reply it needs next, `human` or `agent`; both
+// are empty in every other state. At and Seq identify the document's latest review,
+// whatever State shows: At is Dispatch's time of it (its `created_at`, which its artifact.* event
+// shares, since one transaction writes both), and Seq that event's sequence on the issue. Each is
+// zero when Dispatch gave none: At when the document has no review, Seq also for a review Dispatch
+// recorded before it kept the sequence, and from a Dispatch that predates it.
+type Approval struct {
+	IssueKey      string
+	State         string
+	LatestVersion int
+	Version       *int
+	Reason        *string
+	AskID         string
+	WaitingOn     string
+	At            time.Time
+	Seq           int64
+}
+
+// ApprovedLatest is the version Dispatch shows approved when that approval is of its latest
+// version, and 0 otherwise.
+func (a Approval) ApprovedLatest() int {
+	if a.State == "approved" && a.Version != nil && *a.Version == a.LatestVersion {
+		return *a.Version
+	}
+	return 0
+}
+
+// ChangesRequestedLatest is the version of the changes request Dispatch shows on its latest version
+// and the request's reason, or 0 when the latest version has none: a newer version superseded it,
+// the latest review approves, or an approval request is open again.
+func (a Approval) ChangesRequestedLatest() (int, string) {
+	if a.State != "changes_requested" || a.Version == nil || *a.Version != a.LatestVersion {
+		return 0, ""
+	}
+	reason := "Dispatch reports changes requested"
+	if a.Reason != nil && *a.Reason != "" {
+		reason = *a.Reason
+	}
+	return *a.Version, reason
+}
+
+// Error is a non-success response from Dispatch. Code is empty only when the response did not
+// carry Dispatch's normal error body.
+type Error struct {
+	Status  int
+	Code    string
+	Message string
+}
+
+// Missing says whether a Dispatch call failed because what it asked for is not there, as against
+// a call that failed: the one answer a handler turns into its own 404 rather than a 502.
+func Missing(err error) bool {
+	var refusal *Error
+	return errors.As(err, &refusal) && refusal.Status == http.StatusNotFound
+}
+
+// ParentContended is the code Dispatch answers an issue PATCH with when a concurrent reparent
+// moved the issue's parent at every attempt to lock it, applying nothing
+// (packages/envoy/internal/dispatch/api/issue_parent.go:99, parentContended). No mechanism shares
+// a value between this module and Dispatch's, so the two spellings change together.
+const ParentContended = "PARENT_CONTENDED"
+
+// PermanentRefusal is a write Dispatch will refuse the same way however many times it is made:
+// the issue is gone, or what it carries is something Dispatch will not take. Only a refusal
+// Dispatch itself made counts, which is a 4xx carrying one of its error codes.
+//
+// Everything else is an outage a caller rides out: every 5xx, every transport failure, "come back
+// later" (408, 429), a codeless 4xx from whatever sits in front of Dispatch, a credential answer
+// (401, 403), and 409 PARENT_CONTENDED. A revoked or expired token says nothing about the write —
+// an operator restores it and the same body is taken — so reading one as permanent would drop the
+// write for good. PARENT_CONTENDED is an issue PATCH that found its parent moved by a concurrent
+// reparent at every attempt to lock it, so nothing was applied and the same body is taken once the
+// reparents stop. So is an older Dispatch's refusal of a field this daemon added (newerFields): it
+// ends when Dispatch is upgraded, so the two deploy in either order.
+func PermanentRefusal(err error) (*Error, bool) {
+	var refusal *Error
+	if !errors.As(err, &refusal) {
+		return nil, false
+	}
+	switch {
+	case refusal.Code == "ISSUE_CHANGED",
+		refusal.Code == "",
+		refusal.Status < 400 || refusal.Status >= 500,
+		refusal.Status == http.StatusRequestTimeout,
+		refusal.Status == http.StatusTooManyRequests,
+		refusal.Status == http.StatusUnauthorized,
+		refusal.Status == http.StatusForbidden,
+		refusal.Status == http.StatusConflict && refusal.Code == ParentContended,
+		refusal.Status == http.StatusBadRequest && refusal.Code == "INVALID_JSON" && unknownNewerField(refusal.Message):
+		return nil, false
+	}
+	return refusal, true
+}
+
+// newerFields are the request fields this daemon sends that a Dispatch one release older does not
+// know: a hand-over's labels_add and expected_sequence. That Dispatch's decoder refuses an unknown
+// field by name; any other malformed body stays a permanent refusal.
+var newerFields = []string{"labels_add", "expected_sequence"}
+
+func unknownNewerField(message string) bool {
+	for _, field := range newerFields {
+		if strings.Contains(message, `unknown field "`+field+`"`) {
+			return true
+		}
+	}
+	return false
+}
+
+// TransientError wraps a Dispatch request failure that is a transport problem — no response at
+// all (a dial refused or reset, a lookup that resolved nothing yet, the request's own bounded
+// timeout firing before an answer came back) or the response cut off before its body was fully
+// read — rather than anything Dispatch itself answered. request wraps every such failure in it
+// (client.go), the way appauth.TransientError wraps GitHub's, so a caller can tell "Dispatch
+// never answered" from "Dispatch answered and refused" without inspecting the wrapped error's
+// own type. A certificate the client does not trust is deliberately not wrapped: request types
+// that shape out on purpose, since no wait fixes a bad certificate.
+type TransientError struct{ Err error }
+
+func (e *TransientError) Error() string { return e.Err.Error() }
+func (e *TransientError) Unwrap() error { return e.Err }
+
+// Unreachable reports whether err means Dispatch is not reachable yet, the same outage
+// PermanentRefusal already rides out rather than drops a queued write over: a TransientError (no
+// answer came back at all), or an *Error whose refusal PermanentRefusal does not call permanent —
+// every 5xx, a codeless 4xx, 408, 429, 409 PARENT_CONTENDED, and a credential answer (401, 403;
+// the Dispatch token (dispatch_token_file) is read once at boot, so a corrected file takes a
+// restart to take effect, same as a queued write already accepts). Anything else — a genuine coded
+// refusal PermanentRefusal does call permanent, or an error that is neither a TransientError nor
+// a Dispatch *Error at all, such as a 200 response whose body is not the JSON it promised — is not
+// an outage this waits out.
+func Unreachable(err error) bool {
+	var transient *TransientError
+	if errors.As(err, &transient) {
+		return true
+	}
+	var refusal *Error
+	if !errors.As(err, &refusal) {
+		return false
+	}
+	_, permanent := PermanentRefusal(err)
+	return !permanent
+}
+
+func (e *Error) Error() string {
+	if e.Code == "" {
+		return e.Message
+	}
+	return e.Code + ": " + e.Message
+}

@@ -1,0 +1,437 @@
+import { type ReactNode, type RefObject, useRef } from "react";
+
+import type { Artifact, Ask, Event } from "../../api/types";
+import { QueryError } from "../../components/QueryError";
+import {
+  activeTabIndicatorBorder,
+  activeTabIndicatorText,
+  backdrop50,
+  borderDefault,
+  card,
+  dragHandleBg,
+  textMutedOnSurface,
+  textPrimaryOnSurface,
+  textSecondaryOnSurface,
+} from "../../theme/classes";
+import type { ComposerKind } from "../conversation/composer-model";
+import type { SaveCommentEdit } from "../conversation/send-request";
+import {
+  COMPACT_VIEWPORT_QUERY,
+  PHONE_VIEWPORT_QUERY,
+  useDialog,
+  useMediaQuery,
+} from "../shell/useDialog";
+import { CommentsTab, type MarginComposer, MarginComposerSlot } from "./CommentsTab";
+import { marginReplySendKey } from "./margin-context";
+import { PinnedTab } from "./PinnedTab";
+import { ThreadCard } from "./ThreadCard";
+import type { CommentActionFailure } from "./useCommentActionQueue";
+import type {
+  MarginItemAction,
+  MarginOwner,
+  MarginTab,
+  MarkPlacement,
+  PinnedConversationCard,
+  Thread,
+} from "./useMarginItems";
+
+export interface MarginSheetModel {
+  actions: {
+    /** The composer's Close, Escape and Discard: the open compose ends unsaved, and a refusal the
+     *  store holds for the document goes, its mark with it. */
+    closeComposer: (composer: MarginComposer) => void;
+    onAction: (id: string, action: MarginItemAction) => void;
+    onComposerKindChange: (kind: ComposerKind) => string | undefined;
+    onEdit: SaveCommentEdit;
+    onRetryAction: () => void;
+    onUnpin: (eventId: number) => void;
+    onUnpinConversation: (id: string) => void;
+    onRetryAnsweredAsk: (() => void) | undefined;
+    onRetryComments: () => void;
+    onRetryIssue: () => void;
+    onToggleThread: (key: string) => void;
+    onEditingChange: (id: string | undefined) => void;
+    onToggleResolved: () => void;
+  };
+  /** The composer on the open document, if the reader has one there. */
+  composer: MarginComposer | undefined;
+  items: {
+    actionFailure: CommentActionFailure | undefined;
+    answeredAsksPending: boolean;
+    asksPending: boolean;
+    commentsError: boolean;
+    commentsPending: boolean;
+    historicalAsks: Ask[];
+    marginRef: RefObject<HTMLElement | null>;
+    isClosed: boolean;
+    issueError: boolean;
+    owner: MarginOwner | undefined;
+    issuePending: boolean;
+    needsYou: Ask[];
+    onSelectCard: (id: string, blockID?: string) => void;
+    openAskCount: number;
+    pendingActionIds: ReadonlySet<string>;
+    pinned: Event[];
+    pinnedConversations: PinnedConversationCard[];
+    pinnedIds: string[];
+    resolvedThreads: Thread[];
+    /** Retracted and withdrawn asks hidden behind the same toggle as resolved threads. */
+    foldedAskCount: number;
+    threads: Thread[];
+    viewerLogin: string;
+    visibleArtifact: Artifact | undefined;
+  };
+  placement: {
+    blockPlacements: ReadonlyMap<string, MarkPlacement>;
+    markPlacements: ReadonlyMap<string, MarkPlacement>;
+  };
+  selection: {
+    expandedThreadKey: string | undefined;
+    editingCommentId: string | undefined;
+    savingCommentEditId: string | undefined;
+    hoveredItemId: string | undefined;
+    hoveredMarkId: string | undefined;
+    selectedItemId: string | undefined;
+    showResolved: boolean;
+  };
+  sheet: {
+    /** Back and Escape: refused while the thread's reply is out, until the send's deadline. Past
+     *  it they close the thread and the reply keeps its send; otherwise they drop the reply, its
+     *  draft and a refusal with it, as a Conversation phone thread's do. */
+    closeThread: () => void;
+    expanded: boolean;
+    /** That reply is out: Back holds. */
+    replySending: boolean;
+    thread: Thread | undefined;
+    toggle: (expanded?: boolean) => void;
+  };
+  filter: {
+    blockId: string | undefined;
+    clear(): void;
+  };
+  tab: {
+    set: (tab: MarginTab) => void;
+    value: MarginTab;
+  };
+}
+
+interface MarginSheetProps {
+  /** The desktop margin is collapsed to its rail: the sheet stays mounted, hidden, holding only
+   *  its composer. */
+  collapsed?: boolean;
+  desktopControl?: ReactNode;
+  model: MarginSheetModel;
+}
+
+export function MarginSheet({
+  collapsed = false,
+  desktopControl,
+  model,
+}: MarginSheetProps): ReactNode {
+  const {
+    actions,
+    composer,
+    items: {
+      actionFailure,
+      answeredAsksPending,
+      asksPending,
+      commentsError,
+      commentsPending,
+      historicalAsks,
+      marginRef,
+      isClosed,
+      issueError,
+      owner,
+      issuePending,
+      openAskCount,
+      pendingActionIds,
+      pinned,
+      pinnedConversations,
+      pinnedIds,
+      needsYou,
+      onSelectCard,
+      resolvedThreads,
+      foldedAskCount,
+      threads,
+      viewerLogin,
+      visibleArtifact,
+    },
+    filter,
+    placement,
+    selection,
+    sheet,
+    tab,
+  } = model;
+  const isCompactViewport = useMediaQuery(COMPACT_VIEWPORT_QUERY);
+  const isPhoneViewport = useMediaQuery(PHONE_VIEWPORT_QUERY);
+  const sheetDragOrigin = useRef<number | undefined>(undefined);
+  const sheetDragMoved = useRef(false);
+  const dialog = useDialog<HTMLElement>({
+    onClose: () => sheet.toggle(false),
+    open: sheet.expanded && isCompactViewport,
+  });
+
+  const reviewToggleLabel = `${sheet.expanded ? "Close" : "Open"} review panel (${openAskCount} open ${
+    openAskCount === 1 ? "ask" : "asks"
+  })`;
+  const phoneThread = sheet.thread;
+  if (phoneThread !== undefined && visibleArtifact === undefined) {
+    throw new Error("A phone margin thread requires its visible artifact.");
+  }
+  const threadDialog = useDialog<HTMLElement>({
+    onClose: sheet.closeThread,
+    open: isPhoneViewport && phoneThread !== undefined,
+  });
+  // What the margin's own tabs give way to: the rail it collapses to, or a phone margin thread.
+  const covered = collapsed || (isPhoneViewport && phoneThread !== undefined);
+
+  return (
+    <>
+      {sheet.expanded && isCompactViewport ? (
+        <div
+          aria-hidden="true"
+          className={`fixed inset-0 z-[9] ${backdrop50}`}
+          onClick={() => sheet.toggle(false)}
+        />
+      ) : null}
+      {/* biome-ignore lint/a11y/useAriaPropsSupportedByRole: aria-modal only applies while the compact review sheet is an open dialog */}
+      <aside
+        aria-label={isCompactViewport ? "Review panel" : "Review margin"}
+        aria-modal={sheet.expanded && isCompactViewport ? true : undefined}
+        className={`fixed inset-x-0 bottom-0 ${sheet.expanded && isCompactViewport ? "z-30" : "z-10"} border-t shadow-[0_-8px_24px_rgba(15,23,42,0.08)] ${card} ${
+          owner === undefined
+            ? "hidden"
+            : sheet.expanded
+              ? "max-h-[85dvh] overflow-y-auto p-4"
+              : "h-16 overflow-hidden"
+        } xl:sticky xl:top-0 xl:block xl:h-dvh xl:max-h-dvh xl:w-full xl:overflow-y-auto xl:border-t-0 xl:border-l xl:p-4 xl:shadow-none`}
+        data-expanded={sheet.expanded ? "true" : "false"}
+        data-testid="margin-sheet"
+        id="review-margin"
+        ref={(element) => {
+          dialog.containerRef.current = element;
+          marginRef.current = element;
+        }}
+        role={sheet.expanded && isCompactViewport ? "dialog" : undefined}
+      >
+        {isCompactViewport ? (
+          <>
+            <div
+              aria-hidden="true"
+              className={`mx-auto mb-1 h-1 w-10 rounded-full ${dragHandleBg}`}
+            />
+            <button
+              aria-expanded={sheet.expanded}
+              aria-label={reviewToggleLabel}
+              className={`flex h-16 w-full items-center justify-between px-4 text-left text-sm font-semibold ${textPrimaryOnSurface}`}
+              onClick={() => {
+                if (sheetDragMoved.current) {
+                  sheetDragMoved.current = false;
+                  return;
+                }
+                sheet.toggle();
+              }}
+              onPointerDown={(event) => {
+                sheetDragOrigin.current = event.clientY;
+              }}
+              onPointerUp={(event) => {
+                const origin = sheetDragOrigin.current;
+                sheetDragOrigin.current = undefined;
+                if (origin === undefined || Math.abs(event.clientY - origin) < 12) {
+                  return;
+                }
+                sheetDragMoved.current = true;
+                sheet.toggle(event.clientY < origin);
+              }}
+              type="button"
+            >
+              <span>Review ({openAskCount})</span>
+            </button>
+          </>
+        ) : null}
+        {/* The tabs and what they show. Mounted under a phone margin thread and under the
+            collapsed rail too, holding only the composer then, so an unsent draft survives
+            whatever the margin shows over it; a send it has out, and that send's refusal, are the
+            held-send store's, and survive anything. */}
+        <div
+          className={sheet.expanded ? "px-4 pb-4 xl:px-0 xl:pb-0" : "hidden xl:block"}
+          hidden={covered}
+        >
+          {covered ? null : (
+            <>
+              <div className={`flex items-center justify-between border-b ${borderDefault}`}>
+                <div className="flex" role="tablist">
+                  {(owner?.kind === "document"
+                    ? (["comments"] as MarginTab[])
+                    : owner?.kind === "issue"
+                      ? (["comments", "pinned"] as MarginTab[])
+                      : []
+                  ).map((name) => (
+                    <button
+                      aria-selected={tab.value === name}
+                      className={
+                        tab.value === name
+                          ? `min-h-11 border-b-2 px-3 py-2 text-sm font-semibold ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
+                          : `min-h-11 px-3 py-2 text-sm ${textSecondaryOnSurface}`
+                      }
+                      key={name}
+                      onClick={() => tab.set(name)}
+                      role="tab"
+                      type="button"
+                    >
+                      {name === "comments" ? "Comments" : "Pinned"}
+                    </button>
+                  ))}
+                </div>
+                {desktopControl === undefined ? null : (
+                  <span className="hidden xl:block">{desktopControl}</span>
+                )}
+              </div>
+              {owner === undefined ? (
+                <p className={`pt-3 text-sm ${textMutedOnSurface}`}>
+                  Open an issue or document to review its margin.
+                </p>
+              ) : null}
+              {owner?.kind === "issue" && visibleArtifact === undefined && issuePending ? (
+                <p className={`pt-3 text-sm ${textMutedOnSurface}`}>Loading margin…</p>
+              ) : null}
+              {owner?.kind === "issue" && visibleArtifact === undefined && issueError ? (
+                <div className="pt-3">
+                  <QueryError
+                    message="Could not load this issue's margin."
+                    onRetry={actions.onRetryIssue}
+                  />
+                </div>
+              ) : null}
+              {tab.value === "pinned" && owner?.kind === "issue" ? (
+                <PinnedTab
+                  conversations={pinnedConversations}
+                  events={pinned}
+                  onUnpin={actions.onUnpin}
+                  onUnpinConversation={actions.onUnpinConversation}
+                  pinnedIds={pinnedIds}
+                />
+              ) : null}
+              {filter.blockId === undefined ? null : (
+                <div
+                  className={`mt-3 flex items-center justify-between gap-2 text-sm ${textMutedOnSurface}`}
+                >
+                  <span>References for this block</span>
+                  <button
+                    className={`min-h-11 font-medium ${textPrimaryOnSurface}`}
+                    onClick={filter.clear}
+                    type="button"
+                  >
+                    Clear filter
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+          {composer === undefined ? null : (
+            <MarginComposerSlot
+              composer={composer}
+              hidden={tab.value !== "comments"}
+              isClosed={isClosed}
+              key={composer.anchor.artifact}
+              onClose={actions.closeComposer}
+              onKindChange={actions.onComposerKindChange}
+              onScreen={
+                !covered && tab.value === "comments" && (sheet.expanded || !isCompactViewport)
+              }
+            />
+          )}
+          {tab.value === "comments" &&
+          !covered &&
+          owner !== undefined &&
+          visibleArtifact !== undefined ? (
+            <CommentsTab
+              actionFailure={actionFailure}
+              answeredAsksPending={answeredAsksPending}
+              artifactSlug={visibleArtifact.slug}
+              asksPending={asksPending}
+              commentsError={commentsError}
+              commentsPending={commentsPending}
+              expandedThreadKey={selection.expandedThreadKey}
+              editingCommentId={selection.editingCommentId}
+              savingCommentEditId={selection.savingCommentEditId}
+              onEditingChange={actions.onEditingChange}
+              historicalAsks={historicalAsks}
+              hoveredItemId={selection.hoveredItemId}
+              hoveredMarkId={selection.hoveredMarkId}
+              isClosed={isClosed}
+              owner={owner}
+              markPlacements={placement.markPlacements}
+              blockPlacements={placement.blockPlacements}
+              needsYou={needsYou}
+              onAction={actions.onAction}
+              onEdit={actions.onEdit}
+              onRetryAction={actions.onRetryAction}
+              onRetryAnsweredAsk={actions.onRetryAnsweredAsk}
+              onRetryComments={actions.onRetryComments}
+              onSelectCard={onSelectCard}
+              onToggleResolved={actions.onToggleResolved}
+              onToggleThread={actions.onToggleThread}
+              pendingActionIds={pendingActionIds}
+              resolvedThreads={resolvedThreads}
+              foldedAskCount={foldedAskCount}
+              selectedItemId={selection.selectedItemId}
+              showResolved={selection.showResolved}
+              threads={threads}
+              viewerLogin={viewerLogin}
+            />
+          ) : null}
+        </div>
+        {isPhoneViewport &&
+        phoneThread !== undefined &&
+        owner !== undefined &&
+        visibleArtifact !== undefined ? (
+          <section
+            aria-label="Thread"
+            aria-modal="true"
+            className={`fixed inset-0 z-20 flex flex-col ${card}`}
+            role="dialog"
+            ref={threadDialog.containerRef}
+          >
+            <header className={`flex items-center border-b px-4 py-3 ${borderDefault}`}>
+              <button
+                className={`min-h-11 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 ${textPrimaryOnSurface}`}
+                disabled={sheet.replySending}
+                onClick={sheet.closeThread}
+                type="button"
+              >
+                Back
+              </button>
+            </header>
+            <div className="min-h-0 flex-1 overflow-y-auto px-4">
+              <ThreadCard
+                actionFailure={actionFailure?.id === phoneThread.key ? actionFailure : undefined}
+                artifactSlug={visibleArtifact.slug}
+                className="min-h-full pb-32"
+                composerClassName={`fixed inset-x-0 bottom-0 z-10 border-t px-4 pt-4 pb-2 ${card} ${borderDefault}`}
+                expanded
+                hovered={selection.hoveredMarkId === phoneThread.anchor?.mark_id}
+                editingCommentId={selection.editingCommentId}
+                savingCommentEditId={selection.savingCommentEditId}
+                onEditingChange={actions.onEditingChange}
+                isClosed={isClosed}
+                onAction={actions.onAction}
+                onEdit={actions.onEdit}
+                onRetryAction={actions.onRetryAction}
+                onSelect={() =>
+                  onSelectCard(phoneThread.key, phoneThread.anchor?.block_id ?? undefined)
+                }
+                onToggle={sheet.closeThread}
+                owner={owner}
+                pendingAction={pendingActionIds.has(phoneThread.key)}
+                replyMutationKey={marginReplySendKey(phoneThread.key)}
+                thread={phoneThread}
+                viewerLogin={viewerLogin}
+              />
+            </div>
+          </section>
+        ) : null}
+      </aside>
+    </>
+  );
+}

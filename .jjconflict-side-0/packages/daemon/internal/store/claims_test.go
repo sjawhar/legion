@@ -1,0 +1,601 @@
+package store
+
+import (
+	"context"
+	"math"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
+)
+
+// at is a time Postgres stores exactly: timestamptz keeps microseconds.
+func at(minute int) time.Time {
+	return time.Date(2026, 9, 22, 18, minute, 7, 123456000, time.UTC)
+}
+
+func tmuxClaim(token claim.Token) supervise.Claim {
+	return supervise.Claim{
+		Token:       token,
+		Project:     "legion",
+		Tree:        "LEGION-208",
+		Issue:       "LEGION-209",
+		Role:        claim.RoleImplementer,
+		Generation:  4,
+		Session:     "ses_implementer",
+		SessionFile: "/state/sessions/implementer.jsonl",
+		Locator: &runtime.Locator{
+			Runtime:     runtime.RuntimeTmux,
+			Claim:       token,
+			Incarnation: "31001:900001",
+			Tmux:        &runtime.TmuxLocator{Window: "@3", Pane: "%41"},
+		},
+		State:           supervise.StateIdle,
+		Budgets:         supervise.Budgets{LaunchFailures: 1, Deaths: 2, PromptFailures: 2, PromptRetires: 1},
+		BootTokenHash:   supervise.HashBootToken("boot-" + string(token)),
+		CapabilityHash:  []byte{0xca, 0xfe, 0x01},
+		UncertainStreak: 3,
+		// The two columns a restart reads to fence a stop and to attribute a completion: a daemon
+		// that rebuilt this claim without them would suspend a run that had already replaced the
+		// one its stop names, and refuse the completion of the worker it is waiting on.
+		LastStartRow:      7,
+		ServingGeneration: 4,
+	}
+}
+
+// sameClaim compares two claims field by field, with the delivery's times compared as instants:
+// Postgres hands a timestamptz back in the session's zone, not the one it was written in.
+func sameClaim(t *testing.T, got, want supervise.Claim) {
+	t.Helper()
+	gotPending, wantPending := got.Pending, want.Pending
+	got.Pending, want.Pending = nil, nil
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("claim read back differs:\n got %+v\nwant %+v", got, want)
+	}
+	if (gotPending == nil) != (wantPending == nil) {
+		t.Fatalf("pending delivery read back = %+v, want %+v", gotPending, wantPending)
+	}
+	if gotPending == nil {
+		return
+	}
+	// Every field but the times is compared whole, so a field added to the delivery is read back
+	// or this fails; the times are compared below as instants.
+	untimed := func(d supervise.Delivery) supervise.Delivery {
+		d.QueuedAt, d.DeliveredAt, d.ConfirmedAt = time.Time{}, time.Time{}, time.Time{}
+		return d
+	}
+	if !reflect.DeepEqual(untimed(*gotPending), untimed(*wantPending)) {
+		t.Errorf("pending delivery read back = %+v, want %+v", *gotPending, *wantPending)
+	}
+	for _, field := range []struct {
+		name      string
+		got, want time.Time
+	}{
+		{"QueuedAt", gotPending.QueuedAt, wantPending.QueuedAt},
+		{"DeliveredAt", gotPending.DeliveredAt, wantPending.DeliveredAt},
+		{"ConfirmedAt", gotPending.ConfirmedAt, wantPending.ConfirmedAt},
+	} {
+		if !field.got.Equal(field.want) {
+			t.Errorf("pending delivery %s = %v, want %v", field.name, field.got, field.want)
+		}
+	}
+}
+
+func onlyClaim(t *testing.T, store *Store) supervise.Claim {
+	t.Helper()
+	claims, err := store.Claims(context.Background())
+	if err != nil {
+		t.Fatalf("claims: %v", err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("claims = %d rows, want 1: %+v", len(claims), claims)
+	}
+	return claims[0]
+}
+
+func TestAClaimRoundTripsWithItsLocatorAndDelivery(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	want := tmuxClaim("legion-LEGION-209-implementer")
+	want.Pending = &supervise.Delivery{
+		ID:          "delivery-1",
+		Task:        "implement the plan",
+		Phase:       phase.Implementing,
+		Generation:  4,
+		QueuedAt:    at(1),
+		DeliveredAt: at(2),
+		Interrupted: true,
+		// The prompt that set the mark, since re-queued under delivery-1: a restart judges a late
+		// refusal against it.
+		MarkedBy: "delivery-0",
+	}
+
+	if err := store.PutClaim(ctx, want); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	if err := store.PutDelivery(ctx, want.Token, *want.Pending); err != nil {
+		t.Fatalf("put delivery: %v", err)
+	}
+
+	sameClaim(t, onlyClaim(t, store), want)
+}
+
+// A task is queued uninterrupted, and a death marks it interrupted by writing the same delivery
+// again: the mark only ever reaches the store through the upsert's update. It has to survive that
+// write, or a restart re-sends the task without the sentence saying its turn was interrupted.
+func TestARePutDeliveryCarriesItsInterruption(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	c := tmuxClaim("legion-LEGION-209-implementer")
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	queued := supervise.Delivery{ID: "delivery-1", Task: "implement the plan", Phase: phase.Implementing, Generation: 4, QueuedAt: at(1)}
+	if err := store.PutDelivery(ctx, c.Token, queued); err != nil {
+		t.Fatalf("queue the delivery: %v", err)
+	}
+	interrupted := queued
+	interrupted.ID, interrupted.Interrupted = "delivery-2", true
+	if err := store.PutDelivery(ctx, c.Token, interrupted); err != nil {
+		t.Fatalf("mark it interrupted: %v", err)
+	}
+
+	if got := onlyClaim(t, store).Pending; got == nil || got.ID != "delivery-2" || !got.Interrupted {
+		t.Fatalf("delivery read back = %+v, want the re-put delivery, interrupted", got)
+	}
+}
+
+// The phase a task was queued for is what says the task is still the work to do, and it has to
+// survive the path that rewrites the delivery: a prompt refused or unanswered is re-put under a
+// new id, and a restart then reads the delivery back from this table. A phase lost on either side
+// of that round trip brings back the drop this column exists to make: the daemon would send a
+// finished phase's task to a worker that had moved on, silently, after every restart.
+func TestARePutDeliveryKeepsThePhaseItWasQueuedFor(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	c := tmuxClaim("legion-LEGION-211-implementer")
+	queued := supervise.Delivery{ID: "outbox:42", Task: "Continue. Phase: implementing.", Phase: phase.Implementing, QueuedAt: at(1)}
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	if err := store.PutDelivery(ctx, c.Token, queued); err != nil {
+		t.Fatalf("put delivery: %v", err)
+	}
+
+	// What promptFailed does: the same task under a new id, unconfirmed.
+	rotated := queued
+	rotated.ID = "S4YXQ2F7TDNX"
+	if err := store.PutDelivery(ctx, c.Token, rotated); err != nil {
+		t.Fatalf("re-put the delivery under its new id: %v", err)
+	}
+
+	read := onlyClaim(t, store)
+	if read.Pending == nil {
+		t.Fatal("the restarted daemon read no pending delivery")
+	}
+	if read.Pending.ID != rotated.ID || read.Pending.Phase != phase.Implementing {
+		t.Fatalf("delivery read back = %+v, want %s queued for %s", read.Pending, rotated.ID, phase.Implementing)
+	}
+}
+
+func TestAClaimWithNothingOptionalRoundTripsAsNothing(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	want := supervise.Claim{
+		Token:   "legion-LEGION-210-architect",
+		Project: "legion",
+		Tree:    "LEGION-210",
+		Issue:   "LEGION-210",
+		Role:    claim.RoleArchitect,
+		State:   supervise.StateQueued,
+	}
+
+	if err := store.PutClaim(ctx, want); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+
+	sameClaim(t, onlyClaim(t, store), want)
+}
+
+func TestPutClaimOverwritesTheClaimItNames(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	first := tmuxClaim("legion-LEGION-209-tester")
+	if err := store.PutClaim(ctx, first); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+
+	second := first
+	second.Generation = 5
+	second.State = supervise.StateSuspended
+	second.Locator = nil
+	second.Budgets = supervise.Budgets{}
+	second.UncertainStreak = 0
+	if err := store.PutClaim(ctx, second); err != nil {
+		t.Fatalf("put claim again: %v", err)
+	}
+
+	sameClaim(t, onlyClaim(t, store), second)
+}
+
+// A claim's plugin contract and the daemon contract its last stale relaunch was made for are
+// their own columns, round-tripping independently of the locator and budgets LEGION-164 adds no
+// relation to.
+func TestAClaimsPluginContractRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	want := tmuxClaim("legion-LEGION-209-pluginholder")
+	want.PluginContract = 23
+	want.PluginRelaunchFor = 24
+	if err := store.PutClaim(ctx, want); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	sameClaim(t, onlyClaim(t, store), want)
+
+	want.PluginContract = 24
+	want.PluginRelaunchFor = 0
+	if err := store.PutClaim(ctx, want); err != nil {
+		t.Fatalf("put claim again: %v", err)
+	}
+	sameClaim(t, onlyClaim(t, store), want)
+}
+
+// A locator is checked where it is read back: a row nothing could act on is refused by name rather
+// than loaded as a process the daemon believes in.
+func TestClaimsRefusesAStoredLocatorThatDoesNotValidate(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	stored := tmuxClaim("legion-LEGION-209-reviewer")
+	if err := store.PutClaim(ctx, stored); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	if _, err := store.pool.Exec(ctx,
+		`update claims set locator = '{"runtime":"tmux","claim":"legion-LEGION-209-reviewer","incarnation":"1:2"}' where token = $1`,
+		string(stored.Token),
+	); err != nil {
+		t.Fatalf("write a locator with no tmux member: %v", err)
+	}
+
+	_, err := store.Claims(ctx)
+	if err == nil {
+		t.Fatal("claims loaded a locator with no tmux member")
+	}
+	for _, want := range []string{"legion-LEGION-209-reviewer", "no tmux member"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal does not name %q: %v", want, err)
+		}
+	}
+}
+
+func TestClaimByBootTokenHashFindsTheClaimCarryingIt(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	implementer := tmuxClaim("legion-LEGION-209-implementer")
+	tester := tmuxClaim("legion-LEGION-209-tester")
+	for _, c := range []supervise.Claim{implementer, tester} {
+		if err := store.PutClaim(ctx, c); err != nil {
+			t.Fatalf("put claim %s: %v", c.Token, err)
+		}
+	}
+
+	got, ok, err := store.ClaimByBootTokenHash(ctx, supervise.HashBootToken("boot-legion-LEGION-209-tester"))
+	if err != nil {
+		t.Fatalf("claim by boot token hash: %v", err)
+	}
+	if !ok {
+		t.Fatal("no claim found for the tester's boot token hash")
+	}
+	sameClaim(t, got, tester)
+
+	_, ok, err = store.ClaimByBootTokenHash(ctx, supervise.HashBootToken("a token no launch minted"))
+	if err != nil {
+		t.Fatalf("claim by an unknown boot token hash: %v", err)
+	}
+	if ok {
+		t.Error("an unknown boot token hash found a claim")
+	}
+}
+
+func TestADeliveryIsPutConfirmedAndRetired(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	c := tmuxClaim("legion-LEGION-209-merger")
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	delivery := supervise.Delivery{ID: "delivery-7", Task: "merge-ready check", QueuedAt: at(3)}
+	if err := store.PutDelivery(ctx, c.Token, delivery); err != nil {
+		t.Fatalf("put delivery: %v", err)
+	}
+	c.Pending = &delivery
+	sameClaim(t, onlyClaim(t, store), c)
+
+	delivery.DeliveredAt = at(4)
+	delivery.ConfirmedAt = at(5)
+	if err := store.PutDelivery(ctx, c.Token, delivery); err != nil {
+		t.Fatalf("put the confirmed delivery: %v", err)
+	}
+	c.Pending = &delivery
+	sameClaim(t, onlyClaim(t, store), c)
+
+	c.Pending = nil
+	if err := store.RetireDelivery(ctx, c, delivery.ID); err != nil {
+		t.Fatalf("retire delivery: %v", err)
+	}
+	sameClaim(t, onlyClaim(t, store), c)
+}
+
+// Retiring is fenced on the delivery id: a caller retiring a delivery the claim no longer holds
+// is told so, and the delivery the claim does hold stays.
+func TestRetireDeliveryRefusesADeliveryTheClaimDoesNotHold(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	c := tmuxClaim("legion-LEGION-209-planner")
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	delivery := supervise.Delivery{ID: "delivery-new", Task: "plan it", QueuedAt: at(6)}
+	if err := store.PutDelivery(ctx, c.Token, delivery); err != nil {
+		t.Fatalf("put delivery: %v", err)
+	}
+
+	// The claim the refused retire carries is rolled back with it: the delivery and the run the
+	// claim serves move together or not at all.
+	stale := c
+	stale.ServingGeneration = 99
+	err := store.RetireDelivery(ctx, stale, "delivery-old")
+	if err == nil {
+		t.Fatal("retired a delivery the claim does not hold")
+	}
+	if !strings.Contains(err.Error(), "delivery-old") {
+		t.Errorf("refusal does not name the delivery it refused: %v", err)
+	}
+	c.Pending = &delivery
+	sameClaim(t, onlyClaim(t, store), c)
+}
+
+func TestPutDeliveryRefusesAClaimTheStoreDoesNotHold(t *testing.T) {
+	store := migratedStore(t)
+	err := store.PutDelivery(context.Background(), "legion-LEGION-404-tester",
+		supervise.Delivery{ID: "delivery-1", Task: "t", QueuedAt: at(7)})
+	if err == nil {
+		t.Fatal("put a delivery for a claim the store does not hold")
+	}
+}
+
+// A confirmation writes the claim and its delivery together. The delivery write failing must take
+// the claim's with it: a stored claim recorded as working whose delivery never landed is a task
+// the shim has already answered and nothing sends again.
+func TestPutClaimAndDeliveryWritesBothOrNeither(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	c := tmuxClaim("legion-LEGION-212-tester")
+	c.State = supervise.StateIdle
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+
+	working := c
+	working.State = supervise.StateWorking
+	// A generation no bigint holds: the delivery's write is refused, inside the transaction that
+	// carries the claim's.
+	confirmed := supervise.Delivery{ID: "delivery-1", Task: "test it", QueuedAt: at(1),
+		DeliveredAt: at(2), ConfirmedAt: at(3), Generation: math.MaxUint64}
+	if err := store.PutClaimAndDelivery(ctx, working, confirmed); err == nil {
+		t.Fatal("wrote a delivery whose generation no bigint holds")
+	}
+
+	stored := onlyClaim(t, store)
+	if stored.State != supervise.StateIdle || stored.Pending != nil {
+		t.Fatalf("claim read back = %s with pending %+v, want the idle row it was, unchanged",
+			stored.State, stored.Pending)
+	}
+}
+
+func TestAClaimsEnrollmentRoundTrips(t *testing.T) {
+	s := migratedStore(t)
+	ctx := context.Background()
+	c := supervise.Claim{
+		Token: "legion-LEGION-209-implementer", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-209",
+		Role: claim.RoleImplementer, Generation: 3, State: supervise.StateRegistered,
+		Locator: &runtime.Locator{Runtime: runtime.RuntimeSandbox, Claim: "legion-LEGION-209-implementer", Incarnation: "pod-uid-3/3",
+			Sandbox: &runtime.SandboxLocator{Namespace: "legion", Name: "legion-legion-209", PodUID: "pod-uid-3", Container: "roles", Generation: 3}},
+		Enrollment: &supervise.Enrollment{ID: "enr-1", Incarnation: "pod-uid-3/3"},
+	}
+	if err := s.PutClaim(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := s.Claims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || claims[0].Enrollment == nil || *claims[0].Enrollment != *c.Enrollment {
+		t.Fatalf("read back %+v", claims)
+	}
+	c.Enrollment = nil
+	if err := s.PutClaim(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	claims, _ = s.Claims(ctx)
+	if claims[0].Enrollment != nil {
+		t.Fatalf("a cleared enrollment read back as %+v", claims[0].Enrollment)
+	}
+}
+
+func TestAnEnrollmentWithoutAnIncarnationIsRefusedByTheSchema(t *testing.T) {
+	s := migratedStore(t)
+	c := supervise.Claim{Token: "legion-LEGION-209-tester", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-209",
+		Role: claim.RoleTester, State: supervise.StateQueued, Enrollment: &supervise.Enrollment{ID: "enr-1"}}
+	if err := s.PutClaim(context.Background(), c); err == nil {
+		t.Fatal("an enrollment naming no incarnation was stored")
+	}
+}
+
+// Who suspended a claim round-trips with it, and the schema refuses a source it does not know:
+// the daemon's resume by rule reads the column after a restart, and a value it cannot read would
+// be a claim nobody can say whether to resume.
+func TestASuspendedClaimsSourceRoundTripsAndTheSchemaRefusesAnUnknownOne(t *testing.T) {
+	s := migratedStore(t)
+	ctx := context.Background()
+	for _, by := range []supervise.SuspendSource{supervise.SuspendedByOperator, supervise.SuspendedByDaemon, supervise.SuspendedByExit, ""} {
+		c := supervise.Claim{Token: "legion-LEGION-209-tester", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-209",
+			Role: claim.RoleTester, Generation: 2, State: supervise.StateSuspended, Session: "ses_tester", SuspendedBy: by}
+		if err := s.PutClaim(ctx, c); err != nil {
+			t.Fatalf("put a claim suspended by %q: %v", by, err)
+		}
+		claims, err := s.Claims(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(claims) != 1 || claims[0].SuspendedBy != by {
+			t.Fatalf("a claim suspended by %q read back as %+v", by, claims)
+		}
+	}
+	c := supervise.Claim{Token: "legion-LEGION-209-tester", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-209",
+		Role: claim.RoleTester, State: supervise.StateSuspended, SuspendedBy: "someone"}
+	if err := s.PutClaim(ctx, c); err == nil {
+		t.Fatal("a claim suspended by an unknown source was stored")
+	}
+}
+
+// The project controller's claim, which the daemon launches under `controller: daemon`, is a row
+// like any claim's: on the role `controller`, with no issue and no tree, so its boot token resolves
+// a shim's hello and a registration as any launch's does.
+func TestTheControllersClaimRoundTripsWithNoIssueAndNoTree(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	want := supervise.Claim{
+		Token:         claim.ControllerToken("legion"),
+		Project:       "legion",
+		Role:          claim.RoleController,
+		Generation:    2,
+		State:         supervise.StateLaunching,
+		BootTokenHash: []byte("boot-token-hash"),
+	}
+	if err := store.PutClaim(ctx, want); err != nil {
+		t.Fatalf("put the controller's claim: %v", err)
+	}
+	sameClaim(t, onlyClaim(t, store), want)
+	found, ok, err := store.ClaimByBootTokenHash(ctx, []byte("boot-token-hash"))
+	if err != nil || !ok || found.Token != want.Token {
+		t.Fatalf("ClaimByBootTokenHash = %+v, %t, %v; want the controller's claim", found, ok, err)
+	}
+}
+
+// The schema holds the controller's shape both ways: the controller role on no issue and no tree,
+// and no other role there, so neither a controller claim on an issue nor a worker claim with no
+// issue is ever stored.
+func TestTheSchemaRefusesAControllerClaimOnAnIssueAndAWorkflowClaimOnNone(t *testing.T) {
+	s := migratedStore(t)
+	for _, c := range []supervise.Claim{
+		{Token: "legion-legion-controller", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-208", Role: claim.RoleController, State: supervise.StateQueued},
+		{Token: "legion-legion-architect", Project: "legion", Role: claim.RoleArchitect, State: supervise.StateQueued},
+	} {
+		if err := s.PutClaim(context.Background(), c); err == nil {
+			t.Errorf("stored %s on role %s with issue %q and tree %q", c.Token, c.Role, c.Issue, c.Tree)
+		}
+	}
+}
+
+// IssueRunsElsewhere names a claim of the issue in another tree that may hold a process: one in a
+// state supervise's RunsNothing does not hold, or one that still records a locator. Every claim
+// state is walked against RunsNothing, so the query and the machine read one set; a launch whose
+// outcome is uncertain and a suspended claim that still records a locator are named. A claim of the
+// asking tree or of another issue is not.
+func TestIssueRunsElsewhereNamesOnlyAClaimOfAnotherTreeThatHoldsAProcess(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	elsewhere := func(tree string) string {
+		t.Helper()
+		got, err := store.IssueRunsElsewhere(ctx, "legion", "LEGION-209", tree)
+		if err != nil {
+			t.Fatalf("IssueRunsElsewhere(LEGION-209, %s): %v", tree, err)
+		}
+		return got
+	}
+	implementer := tmuxClaim("legion-LEGION-209-implementer")
+	locator := implementer.Locator
+	put := func(state supervise.ClaimState, withLocator bool) {
+		t.Helper()
+		implementer.State, implementer.Locator = state, nil
+		if withLocator {
+			implementer.Locator = locator
+		}
+		if err := store.PutClaim(ctx, implementer); err != nil {
+			t.Fatalf("put %s %s: %v", implementer.Token, state, err)
+		}
+	}
+	all := []supervise.ClaimState{supervise.StateQueued, supervise.StateLaunchUncertain, supervise.StateLaunching, supervise.StateShimConnected,
+		supervise.StateRegistered, supervise.StateReady, supervise.StateWorking, supervise.StateIdle, supervise.StateSuspended,
+		supervise.StateFailed, supervise.StateRetired}
+	for _, state := range all {
+		put(state, false)
+		named := elsewhere("LEGION-209") == "legion-LEGION-209-implementer:"+string(state)
+		if runs := !(supervise.Claim{State: state}).RunsNothing(); named != runs {
+			t.Errorf("a %s claim of tree LEGION-208 without a locator: named %t, want %t, as RunsNothing says", state, named, runs)
+		}
+	}
+	for _, tc := range []struct {
+		name        string
+		state       supervise.ClaimState
+		withLocator bool
+	}{
+		{"a launch whose outcome is uncertain", supervise.StateLaunchUncertain, false},
+		{"a suspended claim that still records a locator", supervise.StateSuspended, true},
+		{"an idle claim with its locator", supervise.StateIdle, true},
+	} {
+		put(tc.state, tc.withLocator)
+		if got, want := elsewhere("LEGION-209"), "legion-LEGION-209-implementer:"+string(tc.state); got != want {
+			t.Errorf("%s of tree LEGION-208: IssueRunsElsewhere = %q, want %q", tc.name, got, want)
+		}
+		if got := elsewhere("LEGION-208"); got != "" {
+			t.Errorf("%s, asked by the claim's own tree: IssueRunsElsewhere = %q, want none", tc.name, got)
+		}
+	}
+	other := tmuxClaim("legion-LEGION-210-implementer")
+	other.Issue = "LEGION-210"
+	put(supervise.StateSuspended, false)
+	if err := store.PutClaim(ctx, other); err != nil {
+		t.Fatalf("put %s: %v", other.Token, err)
+	}
+	if got := elsewhere("LEGION-209"); got != "" {
+		t.Fatalf("only another issue's claim runs: IssueRunsElsewhere = %q, want none", got)
+	}
+}
+
+// ClaimUnretired is true for a stored claim in every state but retired, the set the orphan sweep
+// is told of (the daemon's knownClaims), and false for a retired claim and for a token no claim
+// holds.
+func TestClaimUnretiredIsEveryStoredStateButRetired(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	controller := tmuxClaim(claim.ControllerToken("legion"))
+	controller.Tree, controller.Issue, controller.Role, controller.Locator = "", "", claim.RoleController, nil
+	unretired := func() bool {
+		t.Helper()
+		got, err := store.ClaimUnretired(ctx, controller.Token)
+		if err != nil {
+			t.Fatalf("ClaimUnretired(%s): %v", controller.Token, err)
+		}
+		return got
+	}
+	if unretired() {
+		t.Fatalf("ClaimUnretired(%s) with no claim stored = true, want false", controller.Token)
+	}
+	for _, state := range []supervise.ClaimState{supervise.StateQueued, supervise.StateLaunchUncertain, supervise.StateLaunching,
+		supervise.StateShimConnected, supervise.StateRegistered, supervise.StateReady, supervise.StateWorking, supervise.StateIdle,
+		supervise.StateSuspended, supervise.StateFailed, supervise.StateRetired} {
+		controller.State = state
+		if err := store.PutClaim(ctx, controller); err != nil {
+			t.Fatalf("put %s %s: %v", controller.Token, state, err)
+		}
+		if got, want := unretired(), state != supervise.StateRetired; got != want {
+			t.Errorf("ClaimUnretired of a %s claim = %t, want %t", state, got, want)
+		}
+	}
+}

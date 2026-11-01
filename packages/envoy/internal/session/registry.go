@@ -49,6 +49,14 @@ type SessionEntry struct {
 	// build; both empty for a session whose plugin predates the fields.
 	Plugin        string `json:"plugin,omitempty"`
 	PluginVersion string `json:"plugin_version,omitempty"`
+	// ClientInstanceID identifies the client instance that registered this session: one Oh My
+	// Pi Envoy extension instance, one Claude Code channel-server process, each minting the id
+	// at its own start and sending it on every registration. A soft claim that names this
+	// session as its predecessor takes the role only when the claimant carries the same id, or
+	// when either side carries none: the same conversation continues inside the instance that
+	// held it, while another instance's live session keeps its role however it is named. Empty
+	// for a client that predates the field.
+	ClientInstanceID string `json:"client_instance_id,omitempty"`
 }
 
 // HostOrMachine is the session's real machine for display: Host when the registering plugin
@@ -452,7 +460,134 @@ func (r *SessionRegistry) Delete(ctx context.Context, sessionID string) error {
 	if err != nil {
 		return err
 	}
-	revision = max(revision, read)
+	r.reconcileDeleted(ctx, kv, sessionID, max(revision, read))
+	return nil
+}
+
+// DeleteOutcome is what DeleteIfInstance did with the entry it was asked to remove, and what
+// DELETE /v1/sessions/<session_id> words for the client that named its instance. The two outcomes
+// that keep the entry are told apart because they are separate facts: one says another client
+// instance's registration is stored under that session id, the other that the stored value kept
+// changing under the conditional delete, which says nothing about whose registration is stored
+// now. One "kept" answer for both would make the route's reason false for whichever case it did
+// not describe.
+type DeleteOutcome uint8
+
+const (
+	// EntryUnanswered goes with an error: a bucket call did not answer, so nothing is known
+	// about the entry. It is the zero value, so a caller that reads the outcome without the
+	// error never reads a delete that did not happen as one that did.
+	EntryUnanswered DeleteOutcome = iota
+	// EntryDeleted: the entry is gone, which a key that was already absent counts as, since
+	// Delete is idempotent.
+	EntryDeleted
+	// EntryKeptForAnotherInstance: the stored entry carries another client instance's id, so
+	// it is another process's registration and this caller does not remove it.
+	EntryKeptForAnotherInstance
+	// EntryKeptAfterLostRace: the entry matched, and both conditional deletes lost to a write
+	// that landed between the read and the delete — most often the deleting instance's own
+	// heartbeat. The entry stayed, and whose registration it holds now is exactly what this
+	// call did not learn.
+	EntryKeptAfterLostRace
+)
+
+// String names the outcome, for the log line or test failure that reports one.
+func (o DeleteOutcome) String() string {
+	switch o {
+	case EntryDeleted:
+		return "deleted"
+	case EntryKeptForAnotherInstance:
+		return "kept for another client instance"
+	case EntryKeptAfterLostRace:
+		return "kept after a lost compare-and-swap"
+	default:
+		return "unanswered"
+	}
+}
+
+// DeleteIfInstance deletes sessionID's entry only while that entry carries instanceID or carries
+// no client instance id at all (InstanceMatches), and reports what it did, each bucket call
+// waiting no longer than ctx (bus.Bounded). It is the deregistration of a caller that names its
+// own client instance: a Claude Code /clear handoff deletes the session it is handing off from
+// before it claims that session's role, and must not delete the live entry another process wrote
+// after it resumed the same session id. A caller that names no instance id compares nothing and
+// calls Delete instead.
+//
+// The comparison holds at the revision it deletes: the entry is read for its value and its
+// revision together, and the delete names that revision (nats.LastRevision), so a registration
+// that landed in between is kept rather than deleted on the strength of a value that is no longer
+// stored. JetStream refuses that delete with wrong last sequence (10071, which nats.go names
+// nats.ErrKeyExists), and the whole sequence runs once more: the common cause is the deleting
+// instance's own heartbeat landing between the read and the delete, and answering "kept" for it
+// would leave the predecessor's entry alive and turn the role claim that follows into a 409 for
+// no reason. A second lost compare-and-swap answers EntryKeptAfterLostRace and no error, the
+// outcome that says the entry stayed without claiming another instance owns it.
+//
+// EntryDeleted and no error means the entry is gone; either kept outcome and no error means the
+// entry stayed, and the caller keeps whatever it names; an error means the bucket did not answer,
+// ctx's end among them, and the outcome is EntryUnanswered. The cache follows the bucket
+// afterwards exactly as it does after Delete. A delete ctx abandoned may still land after this
+// answer, and that is safe: it deletes only the revision it compared.
+func (r *SessionRegistry) DeleteIfInstance(ctx context.Context, sessionID, instanceID string) (DeleteOutcome, error) {
+	kv := r.watcher.KV()
+	for attempt := 0; ; attempt++ {
+		entry, answered, err := bus.Bounded(ctx, func() (nats.KeyValueEntry, error) { return kv.Get(sessionID) })
+		if !answered {
+			return EntryUnanswered, fmt.Errorf("read session %s from the bucket: %w", sessionID, err)
+		}
+		if errors.Is(err, nats.ErrKeyNotFound) {
+			return EntryDeleted, nil
+		}
+		if err != nil {
+			return EntryUnanswered, err
+		}
+		revision := entry.Revision()
+		var stored SessionEntry
+		if err := json.Unmarshal(entry.Value(), &stored); err != nil {
+			// A value this build cannot read names no instance, so it belongs to none: it is
+			// deleted as an entry that carries no id is, and the deregistration is not blocked
+			// by a record no reader can act on. What json.Unmarshal decoded before the error
+			// is dropped for that reason: on a type error it still fills every field it could
+			// read, wherever the bad field sits, so a value carrying a client instance id would
+			// otherwise be compared against that id and kept — the opposite of what this branch
+			// decides.
+			stored = SessionEntry{}
+			r.logger().Warn("session registry deleting a malformed value for a named client instance",
+				slog.String("key", entry.Key()),
+				slog.Uint64("revision", revision),
+				slog.String("error", err.Error()),
+			)
+		}
+		if !InstanceMatches(stored.ClientInstanceID, instanceID) {
+			return EntryKeptForAnotherInstance, nil
+		}
+		_, answered, err = bus.Bounded(ctx, func() (struct{}, error) {
+			return struct{}{}, kv.Delete(sessionID, nats.LastRevision(revision))
+		})
+		if !answered {
+			return EntryUnanswered, fmt.Errorf("delete session %s from the bucket at revision %d: %w", sessionID, revision, err)
+		}
+		if errors.Is(err, nats.ErrKeyExists) {
+			if attempt == 0 {
+				continue
+			}
+			return EntryKeptAfterLostRace, nil
+		}
+		if err != nil {
+			return EntryUnanswered, err
+		}
+		r.reconcileDeleted(ctx, kv, sessionID, max(r.cachedRevision(sessionID), revision))
+		return EntryDeleted, nil
+	}
+}
+
+// reconcileDeleted brings the cache up to what the bucket holds for sessionID after a delete this
+// registry made: the key's history has the last word, so a registration that landed since the
+// delete is cached rather than dropped, and a value this build cannot read is evicted and logged.
+// A history that does not answer leaves the fence revision+1 behind instead, above the revision
+// the delete acted on, so the watcher's own in-flight update for an older revision cannot restore
+// the entry. revision is the newest revision the caller knows of for the key.
+func (r *SessionRegistry) reconcileDeleted(ctx context.Context, kv bus.KeyValue, sessionID string, revision uint64) {
 	// A history that does not answer falls back to the fence below: the delete itself answered.
 	entries, _, err := bus.Bounded(ctx, func() ([]nats.KeyValueEntry, error) { return kv.History(sessionID) })
 	if err == nil && len(entries) > 0 {
@@ -461,7 +596,7 @@ func (r *SessionRegistry) Delete(ctx context.Context, sessionID string) error {
 		defer r.mu.Unlock()
 		if latest.Operation() == nats.KeyValueDelete || latest.Operation() == nats.KeyValuePurge {
 			r.evictCachedSessionLocked(sessionID, latest.Revision())
-			return nil
+			return
 		}
 		var item SessionEntry
 		if err := json.Unmarshal(latest.Value(), &item); err != nil {
@@ -471,15 +606,14 @@ func (r *SessionRegistry) Delete(ctx context.Context, sessionID string) error {
 				slog.Uint64("revision", latest.Revision()),
 				slog.String("error", err.Error()),
 			)
-			return nil
+			return
 		}
 		r.cacheSessionLocked(sessionID, item, r.expiryFor(latest.Created(), item.UpdatedAt), latest.Revision())
-		return nil
+		return
 	}
 	r.mu.Lock()
 	r.evictCachedSessionLocked(sessionID, revision+1)
 	r.mu.Unlock()
-	return nil
 }
 
 // ListEntry is a single entry from List(), keyed by session ID.

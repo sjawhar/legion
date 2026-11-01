@@ -1,0 +1,172 @@
+{
+  "name": "@legion/envoy-client",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    "./askgate-marker": {
+      "types": "./src/askgate-marker.ts",
+      "bun": "./src/askgate-marker.ts",
+      "default": "./dist/askgate-marker.js"
+    },
+    "./askgate-new-asks": {
+      "types": "./src/askgate-new-asks.ts",
+      "bun": "./src/askgate-new-asks.ts",
+      "default": "./dist/askgate-new-asks.js"
+    },
+    "./delivery": {
+      "types": "./src/delivery.ts",
+      "bun": "./src/delivery.ts",
+      "default": "./dist/delivery.js"
+    },
+    "./dispatch-config": {
+      "types": "./src/dispatch-config.ts",
+      "bun": "./src/dispatch-config.ts",
+      "default": "./dist/dispatch-config.js"
+    },
+    "./dispatch-execute": {
+      "types": "./src/dispatch-execute.ts",
+      "bun": "./src/dispatch-execute.ts",
+      "default": "./dist/dispatch-execute.js"
+    },
+    "./dispatch-http": {
+      "types": "./src/dispatch-http.ts",
+      "bun": "./src/dispatch-http.ts",
+      "default": "./dist/dispatch-http.js"
+    },
+    "./dispatch-cwd": {
+      "types": "./src/dispatch-cwd.ts",
+      "bun": "./src/dispatch-cwd.ts",
+      "default": "./dist/dispatch-cwd.js"
+    },
+    "./dispatch-cli": {
+      "types": "./src/dispatch-cli.ts",
+      "bun": "./src/dispatch-cli.ts",
+      "default": "./dist/dispatch-cli.js"
+    },
+    "./dispatch-command": {
+      "types": "./src/dispatch-command.ts",
+      "bun": "./src/dispatch-command.ts",
+      "default": "./dist/dispatch-command.js"
+    },
+    "./dispatch-subscribe": {
+      "types": "./src/dispatch-subscribe.ts",
+      "bun": "./src/dispatch-subscribe.ts",
+      "default": "./dist/dispatch-subscribe.js"
+    },
+    "./dispatch-session-directory": {
+      "types": "./src/dispatch-session-directory.ts",
+      "bun": "./src/dispatch-session-directory.ts",
+      "default": "./dist/dispatch-session-directory.js"
+    },
+    "./dispatch-session-state": {
+      "types": "./src/dispatch-session-state.ts",
+      "bun": "./src/dispatch-session-state.ts",
+      "default": "./dist/dispatch-session-state.js"
+    },
+    "./dispatch-picture-tools": {
+      "types": "./src/dispatch-picture-tools.ts",
+      "bun": "./src/dispatch-picture-tools.ts",
+      "default": "./dist/dispatch-picture-tools.js"
+    },
+    "./dispatch-pictures": {
+      "types": "./src/dispatch-pictures.ts",
+      "bun": "./src/dispatch-pictures.ts",
+      "default": "./dist/dispatch-pictures.js"
+    },
+    "./dispatch-first": {
+      "types": "./src/dispatch-first.ts",
+      "bun": "./src/dispatch-first.ts",
+      "default": "./dist/dispatch-first.js"
+    },
+    "./envoy-config": {
+      "types": "./src/envoy-config.ts",
+      "bun": "./src/envoy-config.ts",
+      "default": "./dist/envoy-config.js"
+    },
+    "./envoy-settings": {
+      "types": "./src/envoy-settings.ts",
+      "bun": "./src/envoy-settings.ts",
+      "default": "./dist/envoy-settings.js"
+    },
+    "./errors": {
+      "types": "./src/errors.ts",
+      "bun": "./src/errors.ts",
+      "default": "./dist/errors.js"
+    },
+    "./machine": {
+      "types": "./src/machine.ts",
+      "bun": "./src/machine.ts",
+      "default": "./dist/machine.js"
+    },
+    "./nats-connection": {
+      "types": "./src/nats-connection.ts",
+      "bun": "./src/nats-connection.ts",
+      "default": "./dist/nats-connection.js"
+    },
+    "./replay": {
+      "types": "./src/replay.ts",
+      "bun": "./src/replay.ts",
+      "default": "./dist/replay.js"
+    },
+    "./secret-file": {
+      "types": "./src/secret-file.ts",
+      "bun": "./src/secret-file.ts",
+      "default": "./dist/secret-file.js"
+    },
+    "./session-answers": {
+      "types": "./src/session-answers.ts",
+      "bun": "./src/session-answers.ts",
+      "default": "./dist/session-answers.js"
+    },
+    "./session-settings": {
+      "types": "./src/session-settings.ts",
+      "bun": "./src/session-settings.ts",
+      "default": "./dist/session-settings.js"
+    },
+    "./slack-post": {
+      "types": "./src/slack-post.ts",
+      "bun": "./src/slack-post.ts",
+      "default": "./dist/slack-post.js"
+    },
+    "./test/envoy-stack": {
+      "types": "./test/envoy-stack.ts",
+      "bun": "./test/envoy-stack.ts"
+    },
+    "./test/stall-proxy": {
+      "types": "./test/stall-proxy.ts",
+      "bun": "./test/stall-proxy.ts"
+    },
+    "./test/stall-scenario": {
+      "types": "./test/stall-scenario.ts",
+      "bun": "./test/stall-scenario.ts"
+    },
+    "./tool-contract": {
+      "types": "./src/tool-contract.ts",
+      "bun": "./src/tool-contract.ts",
+      "default": "./dist/tool-contract.js"
+    },
+    "./transport": {
+      "types": "./src/transport.ts",
+      "bun": "./src/transport.ts",
+      "default": "./dist/transport.js"
+    }
+  },
+  "scripts": {
+    "build": "bun build src/askgate-marker.ts src/askgate-new-asks.ts src/delivery.ts src/dispatch-cli.ts src/dispatch-command.ts src/dispatch-config.ts src/dispatch-cwd.ts src/dispatch-execute.ts src/dispatch-first.ts src/dispatch-http.ts src/dispatch-picture-tools.ts src/dispatch-pictures.ts src/dispatch-session-directory.ts src/dispatch-session-state.ts src/dispatch-subscribe.ts src/envoy-config.ts src/envoy-settings.ts src/errors.ts src/machine.ts src/nats-connection.ts src/replay.ts src/secret-file.ts src/session-answers.ts src/session-settings.ts src/slack-post.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
+    "typecheck": "bunx tsc --noEmit",
+    "test": "bun test",
+    "lint": "bunx biome check src/ bin/ test/"
+  },
+  "dependencies": {
+    "@legion/contracts": "workspace:*",
+    "@toon-format/toon": "^4.1.1",
+    "nats": "^2.29.2",
+    "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
+    "@types/bun": "latest",
+    "typescript": "^5.3.0"
+  }
+}

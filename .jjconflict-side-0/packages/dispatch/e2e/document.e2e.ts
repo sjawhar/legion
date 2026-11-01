@@ -1,0 +1,306 @@
+import { expect, type Page, test } from "@playwright/test";
+
+import {
+  createProject,
+  createProjectDocument,
+  getArtifact,
+  getAsk,
+  getProjectArtifact,
+} from "./api";
+import {
+  barAction,
+  connectedDot,
+  documentEditor,
+  markSpan,
+  selectEditorText,
+  typeAtEnd,
+} from "./editor";
+import { resetDatabase } from "./seed";
+import { assertPageFits, assertWhole } from "./unclipped";
+import { asUser } from "./users";
+
+async function setDocumentSheet(page: Page, project: string, open: boolean): Promise<void> {
+  if (project !== "iphone") {
+    return;
+  }
+  const thread = page.getByRole("dialog", { name: "Thread" });
+  if (!open && (await thread.count()) > 0) {
+    await thread.getByRole("button", { name: "Back" }).click();
+  }
+  const sheet = page.getByTestId("margin-sheet");
+  if ((await sheet.getAttribute("data-expanded")) !== String(open)) {
+    await page
+      .getByRole("button", { name: open ? /Open review panel/ : /Close review panel/ })
+      .click();
+  }
+  await expect(sheet).toHaveAttribute("data-expanded", String(open));
+}
+test.beforeEach(async () => {
+  await resetDatabase();
+});
+
+test("documentCollaborationLive", async ({ browser }, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+
+  try {
+    const alicePage = await alice.newPage();
+    await alicePage.goto("/projects/CORE/documents");
+    await alicePage.getByRole("button", { name: "New document" }).click();
+    await alicePage.getByRole("textbox", { name: "Title" }).fill("Design notes");
+    await alicePage.getByRole("button", { name: "Create" }).click();
+    await expect(alicePage).toHaveURL("/projects/CORE/documents/design-notes");
+
+    const artifact = await getProjectArtifact("CORE", "design-notes");
+    const bobPage = await bob.newPage();
+    await bobPage.goto("/projects/CORE/documents/design-notes");
+    await expect(documentEditor(alicePage)).toContainText("Design notes");
+    await expect(documentEditor(bobPage)).toContainText("Design notes");
+    await expect(connectedDot(alicePage)).toHaveText("connected");
+    await expect(connectedDot(bobPage)).toHaveText("connected");
+
+    await typeAtEnd(alicePage, "Alice wrote this.");
+    await expect(documentEditor(bobPage)).toContainText("Alice wrote this.");
+    await alicePage.reload();
+    await expect(documentEditor(alicePage)).toContainText("Alice wrote this.");
+    await expect
+      .poll(() => getArtifact(artifact.id).then((current) => current.versions.length))
+      .toBeGreaterThan(1);
+    const versionCount = await getArtifact(artifact.id).then((current) => current.versions.length);
+    await expect(
+      alicePage.getByRole("combobox", { name: "Version" }).locator("option")
+    ).toHaveCount(versionCount + 1);
+    await alicePage.screenshot({
+      path: testInfo.outputPath("project-document-live.png"),
+      fullPage: true,
+    });
+  } finally {
+    await bob.close();
+    await alice.close();
+  }
+});
+
+test("picking a file on the Documents tab uploads it at once and lists it", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    let uploads = 0;
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        request.url().endsWith("/api/v1/projects/CORE/artifacts")
+      ) {
+        uploads += 1;
+      }
+    });
+    await page.goto("/projects/CORE/documents");
+    await expect(page.getByRole("button", { name: "New document" })).toBeVisible();
+
+    await page.getByLabel("Upload artifact").setInputFiles({
+      buffer: Buffer.from("# Review notes\n\nPicked, not staged.\n"),
+      mimeType: "text/markdown",
+      name: "review-notes.md",
+    });
+    await expect(page.getByRole("link", { name: "review-notes.md", exact: true })).toBeVisible();
+    expect(uploads).toBe(1);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("comment, suggest, and ask anchor marks on a project document; accept edits the text; the ask flows through the Inbox @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const created = await createProjectDocument("CORE", {
+    content: "# Design notes\n\nComment target.\n\nSuggestion target.\n\nAsk target.\n",
+    name: "Design notes",
+  });
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+  const path = "/projects/CORE/documents/design-notes";
+
+  try {
+    const alicePage = await alice.newPage();
+    const bobPage = await bob.newPage();
+    await Promise.all([alicePage.goto(path), bobPage.goto(path)]);
+    await expect(documentEditor(alicePage)).toContainText("Comment target.");
+    await expect(documentEditor(bobPage)).toContainText("Comment target.");
+
+    await selectEditorText(alicePage, "Comment target");
+    await barAction(alicePage, "Comment");
+    const commentComposer = alicePage.getByRole("form", { name: "Comment composer" });
+    await commentComposer.getByLabel("Comment").fill("This needs an explanation.");
+    await commentComposer.getByRole("button", { exact: true, name: "Send" }).click();
+    const commentCard = alicePage.locator("[data-margin-item]", {
+      hasText: "This needs an explanation.",
+    });
+    await expect(commentCard).toBeVisible();
+    await expect(
+      documentEditor(alicePage).locator("span[data-proof][data-id]", { hasText: "Comment target" })
+    ).toBeVisible();
+    await expect(
+      documentEditor(bobPage).locator("span[data-proof][data-id]", { hasText: "Comment target" })
+    ).toBeVisible();
+    await setDocumentSheet(alicePage, testInfo.project.name, false);
+    await selectEditorText(alicePage, "Suggestion target");
+    await barAction(alicePage, "Suggest");
+    const suggestionComposer = alicePage.getByRole("form", { name: "Comment composer" });
+    await suggestionComposer.getByLabel("Replacement").fill("Accepted text");
+    await suggestionComposer.getByRole("button", { exact: true, name: "Send" }).click();
+    const suggestionCard = alicePage
+      .locator("[data-margin-item]", {
+        has: alicePage.locator("ins", { hasText: "Accepted text" }),
+      })
+      .last();
+    await expect(suggestionCard).toBeVisible();
+    await expect(suggestionCard).toHaveAttribute("aria-expanded", "false");
+    await suggestionCard.getByRole("button", { name: "Accept suggestion" }).click();
+    await expect(documentEditor(alicePage)).toContainText("Accepted text");
+    await expect(documentEditor(bobPage)).toContainText("Accepted text");
+    await expect
+      .poll(() =>
+        getArtifact(created.artifact.id).then((artifact) =>
+          artifact.versions.some(({ named }) => named)
+        )
+      )
+      .toBe(true);
+
+    await setDocumentSheet(alicePage, testInfo.project.name, false);
+    await selectEditorText(alicePage, "Ask target");
+    await barAction(alicePage, "Ask");
+    const askComposer = alicePage.getByRole("form", { name: "Comment composer" });
+    await askComposer.getByLabel("Question").fill("Should we publish this?");
+    await askComposer.locator('button[type="submit"]').click();
+    const askCard = alicePage.locator("[data-margin-item]", { hasText: "Should we publish this?" });
+    await expect(askCard).toBeVisible();
+    const askId = await askCard.getAttribute("data-margin-item");
+    if (askId === null) {
+      throw new Error("Document ask did not receive a margin id.");
+    }
+    const ask = await getAsk(askId);
+    if (ask.ask.anchor === null) {
+      throw new Error("Document ask did not retain its anchor.");
+    }
+    await expect(markSpan(bobPage, ask.ask.anchor.mark_id)).toContainText(ask.ask.anchor.quote);
+    // A document has no assignee, so its question is in nobody's own list: the Inbox reaches it
+    // under the Unassigned filter.
+    await bobPage.goto("/?assignee=unassigned");
+    const inboxDocument = bobPage.getByRole("link", { name: /CORE.*Design notes/ });
+    await expect(inboxDocument).toBeVisible();
+    const inboxAsk = bobPage.getByTestId(`ask-${askId}`);
+    await inboxAsk.getByLabel("Your answer").fill("Yes, publish it.");
+    await inboxAsk.getByRole("button", { name: "Answer" }).click();
+    await expect
+      .poll(() => getAsk(askId))
+      .toMatchObject({
+        ask: { answer: { text: "Yes, publish it.", user: "bob" }, state: "answered" },
+      });
+    await expect(inboxAsk).toHaveCount(0);
+    await bobPage.goto(path);
+    await setDocumentSheet(bobPage, testInfo.project.name, true);
+    await expect(bobPage.getByText("Yes, publish it.")).toBeVisible();
+    await bobPage.screenshot({
+      path: testInfo.outputPath("project-document-margin.png"),
+      fullPage: true,
+    });
+  } finally {
+    await bob.close();
+    await alice.close();
+  }
+});
+
+// The connection dot belongs to the version actions it sits after. At 390 px the Version picker,
+// Name version and the dot are 8 px wider than the header card, and the dot alone would wrap onto a
+// line of its own under the picker; at 320 px a version view's two buttons and the dot are wider
+// than the card, and a group that could not wrap pushed the dot past its edge.
+async function expectDotBeside(page: Page, neighbour: string): Promise<void> {
+  const header = page.getByTestId("artifact-header");
+  const dot = connectedDot(header);
+  await expect(dot).toHaveText("connected");
+  const beside = await header.getByRole("button", { name: neighbour }).boundingBox();
+  const dotBox = await dot.boundingBox();
+  const card = await header.boundingBox();
+  if (beside === null || dotBox === null || card === null) {
+    throw new Error("the version actions are not visible");
+  }
+  const dotMiddle = dotBox.y + dotBox.height / 2;
+  expect(dotMiddle).toBeGreaterThan(beside.y);
+  expect(dotMiddle).toBeLessThan(beside.y + beside.height);
+  expect(dotBox.x).toBeGreaterThan(beside.x + beside.width);
+  expect(dotBox.x + dotBox.width).toBeLessThanOrEqual(card.x + card.width);
+}
+
+test("a document's connection dot stays on the line with its version actions @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await createProjectDocument("CORE", {
+    content: "# Ask blocks design\n\nThe ask is a node.\n",
+    name: "ask-blocks-design.md",
+  });
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  const path = "/projects/CORE/documents/ask-blocks-design-md";
+  try {
+    if (testInfo.project.name === "chromium") {
+      await page.setViewportSize({ height: 900, width: 1280 });
+      await page.goto(path);
+      await expectDotBeside(page, "Name version");
+      return;
+    }
+    await page.goto(path);
+    await expectDotBeside(page, "Name version");
+    await page.setViewportSize({ height: 800, width: 320 });
+    await expectDotBeside(page, "Name version");
+    await page.goto(`${path}?version=1`);
+    await expectDotBeside(page, "Diff vs current");
+  } finally {
+    await context.close();
+  }
+});
+
+test("a document's whole title wraps at every width, whether prose or one unbroken word @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  // Five repeats of a 48-character sentence, cut to exactly 200: the length the spec names. It
+  // ends mid-sentence on a letter, so the server trims nothing and the page shows all 200.
+  const title200 = "Dispatch cuts off titles that are far too long. ".repeat(5).slice(0, 200);
+  const prose = await createProjectDocument("CORE", { content: "# Body\n", name: title200 });
+  expect(prose.artifact.name).toHaveLength(200);
+  // A single unbroken 100-character string: no space for the browser to break on, so wrapping
+  // depends on `break-words` rather than the ordinary word-wrap every other title gets for
+  // free - and, on this header, on `min-w-0` directly on the heading itself: a flex item's
+  // automatic minimum-content width ignores `break-words` (CSS sizing excludes
+  // `overflow-wrap: break-word` from that calculation, unlike `anywhere`), so without its own
+  // `min-w-0` the heading still claimed its full unbroken width and widened the page.
+  const title100 = "supercalifragilisticexpialidocious".repeat(3).slice(0, 100);
+  expect(title100).toHaveLength(100);
+  expect(title100).not.toContain(" ");
+  const oneWord = await createProjectDocument("CORE", { content: "# Body\n", name: title100 });
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    for (const doc of [prose, oneWord]) {
+      await page.goto(`/projects/CORE/documents/${doc.artifact.slug}`);
+      const heading = page.getByTestId("artifact-header").getByRole("heading", { level: 2 });
+      await expect(heading).toHaveText(doc.artifact.name);
+      // Whole means nothing between the title and the document clips it: no clamp, ellipsis, or
+      // box shorter or narrower than the text it holds, at the width this project renders.
+      await assertWhole(heading);
+      // The one unbroken word wraps rather than pushing the page wider than the viewport.
+      await assertPageFits(page);
+      await page.screenshot({
+        path: testInfo.outputPath(`document-title-${doc.artifact.slug}-whole.png`),
+        fullPage: true,
+      });
+    }
+  } finally {
+    await context.close();
+  }
+});

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-314",
+  "completed": "2026-11-01T02:21:23Z",
+  "round": 5,
+  "previousHandoff": "d1336f49d069936b1dfe3db2fd590f7808b22d2c",
+  "reviewedCodeHead": "130911b16c93",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "scope": "The architect sent the issue back after retro (Envoy 513203f9) for one gap: the CI read model had to name internal/broker/approval, which cmd/broker-refgen now parses. This round reviews only that delta, and the approval at d1336f49 is not reopened.",
+  "evidence": "130911b16c93 adds internal/broker/approval to BROKER_REFGEN_DIRS, which feeds the readAPI rule for cmd/broker-refgen/auth_test.go. It adds the matching static read to the docs job, citing routes.go:34 (pageAnswerers) and :664 (g.in). It also names the sixth directory in the ci.yaml docs-filter comment. I ran `bash .github/scripts/check-ci-filters.sh` at the head: exit 0, 28 gates. The tester measured that the gate's verdicts do not change with this edit, because the docs filter's approval glob is already required by the binary build. So the change makes the model say what refgen reads. It changes no gate.",
+  "thermonuclear": "Not run: this round's delta is two CI-model files of three lines, the architect narrowed the round, and the reviewer read the delta in full.",
+  "ci": "Required checks at CI head e9aad7922ae1 (the implement handoff push, which carried no skip-checks trailer): ci-ok completed success at 2026-11-01T02:20:42Z (CI run 41250354696, every job success or skipped), and pr-title completed success. The compare from e9aad7922ae1 to 405f9059c298 changes only .legion/INFRA-314/ (1 file).",
+  "keyFindings": []
+}

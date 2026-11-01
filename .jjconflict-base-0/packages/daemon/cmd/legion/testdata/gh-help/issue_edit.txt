@@ -1,0 +1,64 @@
+Edit one or more issues within the same repository.
+
+Editing issues' projects requires authorization with the `project` scope.
+To authorize, run `gh auth refresh -s project`.
+
+The `--add-assignee` and `--remove-assignee` flags both support
+the following special values:
+- `@me`: assign or unassign yourself
+- `@copilot`: assign or unassign Copilot (not supported on GitHub Enterprise Server)
+
+
+USAGE
+  gh issue edit {<numbers> | <urls>} [flags]
+
+FLAGS
+      --add-assignee login         Add assigned users by their login. Use "@me" to assign yourself, or "@copilot" to assign Copilot.
+      --add-blocked-by number      Add 'blocked by' relationships by issue number or URL
+      --add-blocking number        Add 'blocking' relationships by issue number or URL
+      --add-label name             Add labels by name
+      --add-project title          Add the issue to projects by title
+      --add-sub-issue number       Add sub-issues by number or URL
+  -b, --body string                Set the new body.
+  -F, --body-file file             Read body text from file (use "-" to read from standard input)
+  -m, --milestone name             Edit the milestone the issue belongs to by name
+      --parent number              Set the parent issue by number or URL
+      --remove-assignee login      Remove assigned users by their login. Use "@me" to unassign yourself, or "@copilot" to unassign Copilot.
+      --remove-blocked-by number   Remove 'blocked by' relationships by issue number or URL
+      --remove-blocking number     Remove 'blocking' relationships by issue number or URL
+      --remove-label name          Remove labels by name
+      --remove-milestone           Remove the milestone association from the issue
+      --remove-parent              Remove the parent issue
+      --remove-project title       Remove the issue from projects by title
+      --remove-sub-issue number    Remove sub-issues by number or URL
+      --remove-type                Remove the issue type from the issue
+  -t, --title string               Set the new title.
+      --type name                  Set the issue type by name
+
+INHERITED FLAGS
+      --help                     Show help for command
+  -R, --repo [HOST/]OWNER/REPO   Select another repository using the [HOST/]OWNER/REPO format
+
+EXAMPLES
+  $ gh issue edit 23 --title "I found a bug" --body "Nothing works"
+  $ gh issue edit 23 --add-label "bug,help wanted" --remove-label "core"
+  $ gh issue edit 23 --add-assignee "@me" --remove-assignee monalisa,hubot
+  $ gh issue edit 23 --add-assignee "@copilot"
+  $ gh issue edit 23 --add-project "Roadmap" --remove-project v1,v2
+  $ gh issue edit 23 --milestone "Version 1"
+  $ gh issue edit 23 --remove-milestone
+  $ gh issue edit 23 --body-file body.txt
+  $ gh issue edit 23 34 --add-label "help wanted"
+  $ gh issue edit 23 --type Bug
+  $ gh issue edit 23 --remove-type
+  $ gh issue edit 23 --parent 100
+  $ gh issue edit 23 --remove-parent
+  $ gh issue edit 100 --add-sub-issue 123,124
+  $ gh issue edit 123 --add-blocked-by 200 --add-blocking 300,301
+
+LEARN MORE
+  Use `gh <command> <subcommand> --help` for more information about a command.
+  Read the manual at https://cli.github.com/manual
+  Learn about exit codes using `gh help exit-codes`
+  Learn about accessibility experiences using `gh help accessibility`
+

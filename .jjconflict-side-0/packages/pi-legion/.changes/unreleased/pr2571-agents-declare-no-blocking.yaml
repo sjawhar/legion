@@ -1,0 +1,10 @@
+kind: Removed
+body: |-
+    No agent the plugin ships declares `blocking` any more: `deep-worker`, `plan-gap-analyst` and
+    `plan-reviewer` drop `blocking: true`, so a Legion pod with async jobs and bash
+    auto-background on runs each of them as a background task. A caller that must have a result
+    before its next step waits for it in its own prompt, and the shipped-agents test now holds
+    every agent file to declaring no `blocking` field, true or false.
+time: 2026-10-30T09:00:00Z
+custom:
+    Issue: pr2571

@@ -1,0 +1,162 @@
+import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
+
+import { agentStateRequest } from "../../api/client";
+import { userAgentStateQuery } from "../../api/queries";
+import type {
+  Message,
+  MessageRead,
+  UserAgentState,
+  UserAgentStateInput,
+  UserAgentStates,
+} from "../../api/types";
+import { compareTimestamps } from "../../lib/timestamps";
+import { useSendMarkOnce } from "../writes/useSendMarkOnce";
+
+/** The badge an unread count wears wherever it shows: the navigation, the compact header, and
+ *  the agent's row. */
+export function unreadRepliesLabel(count: number): string {
+  return count === 1 ? "New reply 1" : `New replies ${count}`;
+}
+
+/** Every session's unread replies to the viewer's direct messages, summed. An API older than the
+ *  count answers a state without it, which counts as none. */
+export function totalUnreadReplies(states: UserAgentStates | undefined): number {
+  return Object.values(states ?? {}).reduce(
+    (total, state) => total + (state.unread_replies ?? 0),
+    0
+  );
+}
+
+/** The newest reply `sessionId` wrote anywhere in `exchanges`, by its own (the server's)
+ *  timestamp. */
+function newestSessionReply(
+  exchanges: readonly MessageRead[],
+  sessionId: string
+): string | undefined {
+  let newest: string | undefined;
+  for (const read of exchanges) {
+    for (const reply of read.replies) {
+      // A session id and a person's email are disjoint namespaces, so the id test implies the kind.
+      // The server's rule tests the kind and this one tests the id; a reader restoring the
+      // symmetry by dropping the other side's clause would break it.
+      if (reply.author.id !== sessionId) continue;
+      if (newest === undefined || compareTimestamps(reply.created_at, newest) > 0) {
+        newest = reply.created_at;
+      }
+    }
+  }
+  return newest;
+}
+
+/**
+ * The conversations the server marked unread when this view last opened, by root message id. The
+ * server's own flag is the only unread verdict a view renders (`unreadDirectRepliesCTE` is where
+ * it is defined), and it is frozen here from one open to the next: the view's own read mark clears
+ * the flag a moment later, and an exchange shown because it held an unread reply has to stay shown
+ * while the viewer reads it. An agent row keeps its list mounted while it is collapsed, so each
+ * open freezes afresh, as a new mount would. Undefined until the conversations have loaded.
+ */
+export function useUnreadAtOpen(
+  exchanges: readonly MessageRead[] | undefined,
+  open: boolean
+): ReadonlySet<string> | undefined {
+  const [frozen, setFrozen] = useState<{
+    readonly open: boolean;
+    readonly unread: ReadonlySet<string> | undefined;
+  }>({ open, unread: undefined });
+  let next = frozen;
+  if (next.open !== open) next = { open, unread: open ? undefined : next.unread };
+  if (next.unread === undefined && exchanges !== undefined && open) {
+    next = {
+      open,
+      unread: new Set(
+        exchanges.filter((read) => read.unread === true).map((read) => read.message.id)
+      ),
+    };
+  }
+  if (next !== frozen) setFrozen(next);
+  return next.unread;
+}
+
+/** Puts the session's state a PUT answered with into the viewer's shared agent-state query, so
+ *  every badge and row reads it at once. */
+export function storeAgentState(
+  queryClient: QueryClient,
+  sessionId: string,
+  next: UserAgentState
+): void {
+  queryClient.setQueryData<UserAgentStates>(userAgentStateQuery().queryKey, (current) => ({
+    ...current,
+    [sessionId]: next,
+  }));
+}
+
+/**
+ * The write both read hooks make: `input(value)` for `sessionId`, once per `dedupeKey(value)`,
+ * whenever the server counts one of the session's replies unread, with the answer put into the
+ * shared agent-state query. The send-once rule, its retries and what a final failure forgets are
+ * `useSendMarkOnce`'s; a change in the unread count wakes it, so a mark that failed for good is
+ * sent again then, rather than the badge staying up until the session replies once more.
+ */
+function useSendReadMark<V>(
+  sessionId: string,
+  value: V | undefined,
+  dedupeKey: (value: V) => string,
+  input: (value: V) => UserAgentStateInput
+): void {
+  const queryClient = useQueryClient();
+  const unread = useQuery(userAgentStateQuery()).data?.[sessionId]?.unread_replies ?? 0;
+  useSendMarkOnce({
+    mark: value === undefined ? undefined : { key: dedupeKey(value), value: input(value) },
+    onSuccess: (next) => storeAgentState(queryClient, sessionId, next),
+    request: (body: UserAgentStateInput) => agentStateRequest(sessionId, body),
+    shouldSend: unread !== 0,
+    target: `read:agent:${sessionId}`,
+    wake: unread,
+  });
+}
+
+const ownString = (value: string): string => value;
+
+const readThrough = (newest: string): UserAgentStateInput => ({ read_through: newest });
+
+const joinedIds = (ids: readonly string[]): string => ids.join(" ");
+
+const readReplies = (ids: readonly string[]): UserAgentStateInput => ({ read_replies: ids });
+
+/**
+ * Records that the viewer has read a session's conversation, through the newest reply the
+ * session wrote in `exchanges`, whenever the server counts one unread. Call it only where the
+ * whole conversation is on screen: the expanded agent row and the live view. The mark is the
+ * reply's own timestamp (the server's clock), so a browser clock that is off cannot leave a reply
+ * unread or mark one read before it arrived.
+ */
+export function useMarkRepliesRead(
+  sessionId: string,
+  exchanges: readonly MessageRead[] | undefined
+): void {
+  useSendReadMark(
+    sessionId,
+    newestSessionReply(exchanges ?? [], sessionId),
+    ownString,
+    readThrough
+  );
+}
+
+/**
+ * Records that the viewer has read the replies `sessionId` wrote among `replies`, by their ids,
+ * whenever the server counts one of the session's replies unread. Call it where a view shows only
+ * some of a session's replies, as the broadcast page shows each recipient's reply to that
+ * broadcast alone: unlike `useMarkRepliesRead`'s mark, which covers every reply up to a moment,
+ * this marks nothing else, so the session's older reply to another message, and any reply after
+ * these, stay unread until a view shows them.
+ */
+export function useMarkShownRepliesRead(sessionId: string, replies: readonly Message[]): void {
+  // The server's own test for an id it takes (`putUserAgentState`): a message whose author is the
+  // session, by kind and id. It refuses the whole write over one id that fails it.
+  const shown = replies
+    .filter((reply) => reply.author.kind === "session" && reply.author.id === sessionId)
+    .map((reply) => reply.id);
+  useSendReadMark(sessionId, shown.length === 0 ? undefined : shown, joinedIds, readReplies);
+}

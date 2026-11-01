@@ -1,0 +1,124 @@
+import type { ReactNode } from "react";
+
+import type { CredentialRecord } from "../../api/types";
+import {
+  quoteAccentBorder,
+  quoteBodyText,
+  textMutedOnCanvas,
+  textPrimaryOnCanvas,
+} from "../../theme/classes";
+import { useAgents } from "../conversation/useAgents";
+import { Timestamp } from "../refs/Timestamp";
+import { CredentialSessionLines } from "./CredentialSessionLines";
+import { machineName } from "./machineLogins";
+import { credentialSessionNamesAnyone } from "./session";
+
+const LIFETIME_UNITS: ReadonlyArray<{ seconds: number; unit: string }> = [
+  { seconds: 86400, unit: "day" },
+  { seconds: 3600, unit: "hour" },
+  { seconds: 60, unit: "minute" },
+];
+
+/** Formats a lifetime in whole units ("15 minutes", "2 hours") rather than a raw second count, and
+ *  no lifetime as the grant's actual end: its session's. */
+function formatLifetime(seconds: number | null): string {
+  if (seconds === null) {
+    return "Until the session ends";
+  }
+  for (const { seconds: unitSeconds, unit } of LIFETIME_UNITS) {
+    if (seconds >= unitSeconds) {
+      const count = Math.round(seconds / unitSeconds);
+      return `${count} ${unit}${count === 1 ? "" : "s"}`;
+    }
+  }
+  return `${seconds} second${seconds === 1 ? "" : "s"}`;
+}
+
+/** The approver a record names when any signed-in person may decide it: a shared secret's request,
+ *  and a service's machine login. */
+const ANYONE_APPROVER = "anyone";
+
+/** One label and value; the value wraps inside its grid cell, so a 64-hex policy version or a long
+ *  host name never runs into the fact beside it or widens a narrow page. */
+function Fact({ children, label }: { children: ReactNode; label: string }): ReactNode {
+  return (
+    <div>
+      <dt className={textMutedOnCanvas}>{label}</dt>
+      <dd className={`break-words font-medium ${textPrimaryOnCanvas}`}>{children}</dd>
+    </div>
+  );
+}
+
+/**
+ * The broker's facts about a credential record, then the agent's stated reason as plain text
+ * (no markdown pipeline - a `<blockquote>` with `whitespace-pre-wrap` renders it verbatim), then,
+ * for a pending machine (`launcher_credential`) record, the sentence explaining what approving it
+ * grants: a person's machine starts agent sessions as them. A service (the Legion daemon) logs in
+ * with its own Kubernetes token, which no person approves, so a pending service login a broker
+ * opened before that is one the broker refuses to approve, and the sentence says so. A pod
+ * enrollment's slot (`implementer-g3`) is its own fact, since several slots of one pod share the
+ * same enrollment line. `MachineLoginPage` shows this layout before its decision controls, and
+ * so does `CredentialRecordPage` for a record the broker names no page for.
+ */
+export function CredentialRecordFacts({ record }: { record: CredentialRecord }): ReactNode {
+  const { agents, isError, isPending } = useAgents(
+    credentialSessionNamesAnyone(record.session),
+    true
+  );
+  return (
+    <div className="space-y-4">
+      <dl className="grid grid-cols-2 gap-3 text-sm">
+        <Fact label="Kind">
+          {record.kind === "launcher_credential" ? "Machine login" : "Secret request"}
+        </Fact>
+        <Fact label="Identifiers">{record.identifiers.join(", ")}</Fact>
+        <Fact label="Enrollment">
+          {record.enrollment === null
+            ? "—"
+            : `${record.enrollment.kind} · ${record.enrollment.runtime_id} · ${record.enrollment.operator || "—"}`}
+        </Fact>
+        {record.enrollment?.slot ? <Fact label="Worker slot">{record.enrollment.slot}</Fact> : null}
+        <Fact label="Session">
+          <div className="flex flex-col gap-1">
+            <CredentialSessionLines
+              agents={agents}
+              isError={isError}
+              isPending={isPending}
+              session={record.session}
+            />
+          </div>
+        </Fact>
+        <Fact label="Lifetime">{formatLifetime(record.lifetime_seconds)}</Fact>
+        <Fact label="Requested">
+          <Timestamp at={record.requested_at} />
+        </Fact>
+        <Fact label="Expires">
+          <Timestamp at={record.expires_at} />
+        </Fact>
+        <Fact label="Policy version">{record.rules_version}</Fact>
+        <Fact label="Approver">
+          {record.approver === ANYONE_APPROVER ? "Anyone signed in to Dispatch" : record.approver}
+        </Fact>
+      </dl>
+      {record.reason === "" ? null : (
+        <div>
+          <h2 className={`text-sm font-semibold ${textMutedOnCanvas}`}>
+            The agent's stated reason
+          </h2>
+          <blockquote
+            className={`mt-1 border-l-2 pl-3 text-sm whitespace-pre-wrap ${quoteAccentBorder} ${quoteBodyText}`}
+          >
+            {record.reason}
+          </blockquote>
+        </div>
+      )}
+      {record.kind === "launcher_credential" && record.state === "pending" ? (
+        <p className={`text-sm font-medium ${textPrimaryOnCanvas}`}>
+          {record.service
+            ? `${machineName({ host: record.identifiers[0], service: record.service })} is a service's login from before services logged in with their own Kubernetes token, and no one can approve it any more: deny it, or let it expire.`
+            : `Approving lets ${machineName({ host: record.identifiers[0], service: null })} start agent sessions as you.`}
+        </p>
+      ) : null}
+    </div>
+  );
+}

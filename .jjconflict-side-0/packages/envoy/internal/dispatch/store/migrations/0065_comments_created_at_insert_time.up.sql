@@ -1,0 +1,12 @@
+-- 0065_comments_created_at_insert_time.up.sql
+-- A comment's created_at is when its insert ran. Every comment insert first takes the issue or
+-- document owner row, so the clock at the insert orders an owner's comments as they commit, and an
+-- ask's newest reply, which decides whose turn the ask is (api/ask_rows.go), is the one that
+-- committed last. now(), the old default, is the transaction's start: a reply that began first but
+-- waited for the owner row sorted before one that committed while it waited.
+--
+-- The default covers every insert that names no created_at: both server routes, and an older
+-- binary still serving during the rollout. Existing rows keep their values. Changing a default
+-- writes the catalog only, under comments' ACCESS EXCLUSIVE lock, and this migration locks no other
+-- table, so it waits behind a comment write but never while holding a lock that write needs.
+alter table comments alter column created_at set default clock_timestamp();

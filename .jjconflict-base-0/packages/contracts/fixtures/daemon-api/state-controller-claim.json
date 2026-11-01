@@ -1,0 +1,169 @@
+{
+  "daemon": {
+    "project": "LEGION",
+    "schemaVersion": 35,
+    "boots": 2,
+    "firstBootAt": "2026-10-06T17:02:11Z",
+    "startedAt": "2026-10-06T18:01:11Z"
+  },
+  "admission": {
+    "cap": 2,
+    "active": [
+      "LEGION-208"
+    ],
+    "waiting": [
+      "LEGION-210",
+      "LEGION-211"
+    ],
+    "blocked": [
+      {
+        "issue": "LEGION-209",
+        "blockedBy": [
+          "LEGION-300"
+        ]
+      },
+      {
+        "issue": "LEGION-210",
+        "blockedBy": [
+          "LEGION-301"
+        ]
+      }
+    ]
+  },
+  "issues": {
+    "LEGION-208": {
+      "key": "LEGION-208",
+      "generation": 1,
+      "phase": "admitted",
+      "status": "in_progress",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "architect": {
+        "session": "ses_architect_208",
+        "state": "ready",
+        "locator": {
+          "runtime": "sandbox",
+          "claim": "legion-legion-legion-208-architect",
+          "incarnation": "4b7e1c2a-0d93-4f6e-8a51-3c2f9e7d1b04/1",
+          "sandbox": {
+            "namespace": "legion",
+            "name": "legion-legion-legion-208",
+            "podUid": "4b7e1c2a-0d93-4f6e-8a51-3c2f9e7d1b04",
+            "container": "roles",
+            "generation": 1
+          }
+        },
+        "capabilities": {
+          "measuredAt": "2026-10-06T18:02:56Z",
+          "incarnation": "4b7e1c2a-0d93-4f6e-8a51-3c2f9e7d1b04/1",
+          "ok": [
+            "subagents",
+            "web-search",
+            "mcp",
+            "repository-extensions",
+            "dispatch-envoy-tools"
+          ],
+          "open": [
+            {
+              "name": "github",
+              "detail": "gh api user: HTTP 401: Bad credentials"
+            }
+          ]
+        },
+        "pluginContract": 0
+      },
+      "workers": {},
+      "slot": {
+        "index": 0,
+        "admittedAt": "2026-10-06T18:02:11Z"
+      }
+    },
+    "LEGION-209": {
+      "key": "LEGION-209",
+      "generation": 1,
+      "phase": "admitted",
+      "status": "todo",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "workers": {}
+    },
+    "LEGION-210": {
+      "key": "LEGION-210",
+      "generation": 1,
+      "phase": "admitted",
+      "status": "todo",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "workers": {}
+    },
+    "LEGION-211": {
+      "key": "LEGION-211",
+      "generation": 2,
+      "phase": "implementing",
+      "status": "todo",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "workers": {}
+    }
+  },
+  "pendingStatusWrites": [],
+  "heldOutboxRows": [],
+  "strandedClaims": [],
+  "controllerLocator": {
+    "runtime": "kubernetes",
+    "external": true,
+    "sessionId": "ses_controller",
+    "registeredAt": "2026-10-06T18:01:41Z",
+    "pluginContract": 0
+  },
+  "capabilities": [],
+  "repositories": {
+    "owners": [],
+    "mapped": [],
+    "refused": [],
+    "withoutWebhookApp": [],
+    "caches": []
+  },
+  "settings": {
+    "project": "LEGION",
+    "port": 13370,
+    "bind": "127.0.0.1",
+    "state_dir": "/var/lib/legion",
+    "runtime": {
+      "name": "tmux"
+    },
+    "admission_cap": 2,
+    "daemon_url": "http://127.0.0.1:13370",
+    "worker_stream_port": 13371,
+    "omp_launch_prefix": [],
+    "provider_keys": [],
+    "worker_boot_timeout_seconds": 120,
+    "worker_rpc_timeout_seconds": 5,
+    "worker_stop_timeout_seconds": 10,
+    "tree_stop_timeout_seconds": 60,
+    "slow_command_timeout_seconds": 300,
+    "probe_interval_seconds": 30,
+    "controller_wake_interval_seconds": 3600,
+    "worker_boot_registration_deadline_intervals": 3,
+    "launch_failure_limit": 3,
+    "prompt_failure_limit": 3,
+    "prompt_retire_limit": 2,
+    "envoy_url": "http://127.0.0.1:9020",
+    "nats_urls": [],
+    "projects": {},
+    "gates": {
+      "design": "root-issues"
+    },
+    "linger_hours": 72,
+    "production_check_hours": 336,
+    "review_round_cap": 3,
+    "max_fix_attempts": 3,
+    "controller": "operator",
+    "capabilities": {
+      "decided": {}
+    },
+    "worker_backends": {},
+    "role_config_files": {}
+  },
+  "consumers": []
+}

@@ -1,0 +1,153 @@
+---
+title: Quickstart
+description: An agent session uses a secret with one command; the approver decides it on the broker's own page; the command runs with the value in its environment.
+sidebar:
+  order: 1
+---
+
+This page follows one secret from the agent that asks for it, through the person who approves it,
+back to the command that uses it. It assumes the machine is already logged in to the broker and the
+agent session is registered; on a machine you set up yourself, [log the machine
+in](/legion/broker/guides/log-a-machine-in/) first and start each agent with
+`agent-secrets register --wait 10 --exec -- <agent>`.
+
+No broker yet? [Run the local stack](/legion/broker/guides/run-locally/) and log its helper in, as
+that page shows. Its two secrets are `ada@example.com`'s: `DEMO_READ_TOKEN` at the agent tier,
+which her own sessions get without asking, and `DEMO_API_KEY` at the human tier, which she
+approves. It has no Dispatch: step 2's Inbox row is absent there, and the page a person approves
+on is the one `agent-secrets` prints, as [approving without
+Dispatch](/legion/broker/guides/approve-a-request/#without-dispatch) shows. Every terminal output
+below is from that stack, with the record id in the approval link written as `<record>`.
+
+## 1. The agent asks
+
+An agent names the secrets a command needs and lets `agent-secrets` run the command with them in
+its environment. `agent-secrets` itself never prints a value, but the command is the agent's choice
+and can (the `printenv` below does), so a session holding a grant can read the value: approve a
+secret only for a session you would trust with the value itself.
+
+```sh
+agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
+```
+
+- `DEMO_API_KEY` is the secret's name, and the name of the environment variable the command gets it
+  in. Name several to get several.
+- `--reason` is what the approver reads. Say what the command is for.
+- Everything after `--` is the command.
+
+When the secret's owner and tier grant it automatically, the command runs at once. One line on
+standard error names the secrets it put in the command's environment and where they came from -
+the broker `AGENT_SECRETS_URL` names, and the kind of store that broker keeps them in - never a
+value:
+
+```console
+$ agent-secrets DEMO_READ_TOKEN -- printenv DEMO_READ_TOKEN
+agent-secrets: DEMO_READ_TOKEN from the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
+demo-read-token-value
+```
+
+That line is why a reader never has to guess which store answered: another secrets CLI on the same
+machine can hold a different value under the same name, and every `agent-secrets` answer and
+refusal names its own broker and the kind of its store. These lines land in the agent's own
+output, which is often quoted, so none names the broker's host or the store's account, region or
+project; `agent-secrets secret show`, which a person runs under their own cloud sign-in, names the
+account or project.
+
+When it needs a person's approval, `agent-secrets` says so, with the request's id, where it was
+made, who approves it, and the page on the secrets broker where they decide it, and waits (up to
+30 minutes; set `--wait` to a duration such as `5m` to change that) while the approver decides:
+
+```console
+$ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
+agent-secrets: request 0eaf43c4-dea5-4d41-8798-c25f6be7d811 to the broker AGENT_SECRETS_URL names (AWS Secrets Manager) is waiting for approval; waiting up to 30m0s
+agent-secrets: waiting for ada@example.com to approve it on the secrets broker: http://127.0.0.1:62083/approve/<record>
+```
+
+The approver is the one the broker recorded when the agent asked: the secret's owner, or, for a
+shared secret, anyone signed in to the broker. Tell that person, not whoever you believe owns the
+secret: a request goes to whomever its owner tag named at the moment it was made.
+`agent-secrets request` and `agent-secrets status` print the same `waiting for …` line while the
+request waits. If that person's approval on the broker's page leaves the request `still pending; it
+was not decided`, something changed after the request was made
+([Approvals](/legion/broker/concepts/#approvals) says what each change does).
+Usually the secret's owner changed: run `agent-secrets cancel <request id>` and ask again, and the
+new request goes to the current owner. If instead the session's operator withheld one of the names,
+the request waits on anyone, and the broker still serves that name to the session, the operator can
+approve it, so ask them. Otherwise no one can approve it: cancel it and request the names
+separately, one request per approver, leaving out any name the broker no longer serves ([approving
+a request](/legion/broker/guides/approve-a-request/#decide-it) says what each line that page
+prints means).
+
+## 2. The approver decides on the broker's page
+
+The approver (here `ada@example.com`, the secret's owner and the operator of the machine the agent
+runs on) opens that page. A secret request is decided there and nowhere else: a person signs in to
+the broker itself with their Workspace account, which asks nothing of someone already signed in to
+it, and lands back on the request. Where there is a Dispatch, the same page is one click away: the
+request is at the top of their **Inbox**, under **Credential requests**, as a **Secret request**
+row naming `DEMO_API_KEY` and when it was asked, and that row is a link to it.
+
+The page prints the broker's own record of the request:
+
+| Field | What it shows |
+| --- | --- |
+| Secrets | The secrets asked for: `DEMO_API_KEY` |
+| Requested by (verified by the broker) | The enrollment asking, as kind, operator and runtime id: `session · example-host-build:2150654:335907311 · ada@example.com` |
+| Reason | The `--reason` the agent gave: Deploy the example service |
+| Lasts once approved | How long a grant would last: until the session ends, or the `--ttl` the agent asked for |
+| Requested, Expires | When it was asked, and when it [expires](/legion/broker/concepts/#approvals) undecided |
+| Approver | `ada@example.com` |
+| State | pending, or how it was decided, by whom and when |
+
+and two buttons, **Approve** and **Deny**. The broker records the decision under the email the
+approver signed in to the broker as; [approving a request](/legion/broker/guides/approve-a-request/)
+covers the page in full.
+
+## 3. The command runs
+
+Once approved, the waiting `agent-secrets` collects the grant and replaces itself with the command,
+`DEMO_API_KEY` set in its environment. This command prints only the value's length:
+
+```console
+$ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- sh -c 'echo "deploying with a ${#DEMO_API_KEY}-character key"'
+agent-secrets: DEMO_API_KEY from the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
+deploying with a 18-character key
+```
+
+The grant outlives the command: it lasts until the session ends, unless the agent asked for less
+with `--ttl`. Meanwhile the same session asking for exactly the same secrets gets it again without
+asking anyone; `agent-secrets self` lists the session's live grants, and the broker and kind of
+store they are at:
+
+```console
+$ agent-secrets self
+enrollment_id: 2b8627f4-9a2a-4c12-85bf-910144bc0b5c
+kind: session
+operator: ada@example.com
+lease_expires_at: 2026-10-03T03:36:40Z
+source: the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
+grant: f5167d29-1789-4719-8e8c-9aec6f1229e7 (request ce11549a-ab03-4a13-95cf-896961c36fc0, until this session ends)
+grant: be34ed2a-78e2-4457-9a75-71283a87c16b (request 7db349e6-ad3c-4f40-86d7-c6a38e899306, until this session ends)
+```
+
+## When the answer is no
+
+From a session with no live grant of `DEMO_API_KEY` (a new session, or one that ran
+`agent-secrets revoke <grant id>`), the same command asks again. When the approver clicks **Deny**
+on that page, nothing runs and `agent-secrets` exits 77:
+
+```console
+$ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
+agent-secrets: request 2375f92d-bab0-4123-a0cb-d139c98de73c to the broker AGENT_SECRETS_URL names (AWS Secrets Manager) was denied
+```
+
+A request still undecided when `--wait` runs out exits 75 and runs nothing; a name the broker does
+not serve is refused at once, naming the broker it asked:
+
+```console
+$ agent-secrets NO_SUCH_SECRET -- true
+agent-secrets: no agent secret has this name (UNKNOWN_SECRET); asked the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
+```
+
+[Troubleshooting](/legion/broker/guides/troubleshooting/) lists every refusal and what to do about
+it, and [Concepts](/legion/broker/concepts/) explains sessions, owner and tier, and grants.

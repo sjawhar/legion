@@ -1,0 +1,950 @@
+package githubapp
+
+import (
+	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"sort"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
+)
+
+func testKeyPEM(t *testing.T) (*rsa.PrivateKey, string) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate fixture key: %v", err)
+	}
+	encoded := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	return key, string(encoded)
+}
+
+// fakeGitHub is an httptest GitHub App API: one installation per seeded
+// repository, token minting, the repository read the minted token proves, and
+// the commit/tree/blob reads the architecture importer walks.
+type fakeGitHub struct {
+	t *testing.T
+	// installations maps "owner/repo" to its Contents permission; a missing
+	// repo answers 404.
+	installations  map[string]string
+	installationID int64
+	tokenMints     int
+	tokenExpiresAt time.Time
+	publicKey      *rsa.PublicKey
+	clientID       string
+	// commits maps a branch name to its commit sha; a missing branch answers missingBranchStatus.
+	// The commits route answers as GitHub does: the bare sha for Accept:
+	// application/vnd.github.sha, the commit's JSON otherwise.
+	commits map[string]string
+	// missingBranchStatus is the status a branch absent from commits answers: 422 is GitHub's
+	// answer for a branch that does not exist, with GitHub's body; anything else (0 included) is
+	// 404 with no body.
+	missingBranchStatus int
+	// largeCommits names the branches whose JSON answer carries a file list that pushes it past
+	// 1 MiB, as a large commit's does on GitHub.
+	largeCommits map[string]bool
+	// ignoresSHAMediaType answers the commits route's JSON whatever Accept asks for.
+	ignoresSHAMediaType bool
+	// files maps a repository path to its content; a subtree read lists the
+	// paths directly inside the requested directory and each blob is served
+	// under sha "blob-<path>".
+	files map[string]string
+	// modes overrides an entry's mode (default 100644): 120000 is a symlink.
+	modes map[string]string
+	// sizes overrides an entry's listed size (default the content length).
+	sizes map[string]int64
+	// repoEntries pads the whole-repository tree (a read without ":dir") with
+	// this many entries outside the architecture directory.
+	repoEntries int
+	// truncated makes the tree read answer truncated=true.
+	truncated bool
+	// missingBlobs answer 404 by path, simulating a blob vanishing mid-fetch.
+	missingBlobs map[string]bool
+	// treeReads counts tree reads, by "sha:dir".
+	treeReads []string
+	// graphQLResponse is served verbatim (as JSON) to every POST /graphql request.
+	graphQLResponse any
+	// lastGraphQLQuery/lastGraphQLVariables record the most recent GraphQL request's body, for a
+	// test to assert against.
+	lastGraphQLQuery     string
+	lastGraphQLVariables map[string]any
+	// actionsPermissions/pullRequestsPermissions map "owner/repo" to that permission, for
+	// DeliveryPermissions' tests; a repo absent from one of these maps gets "" (no permission).
+	actionsPermissions      map[string]string
+	pullRequestsPermissions map[string]string
+	// appInstallations, when non-nil, backs GET /app/installations, paginated at 100 per page; a
+	// nil value answers an empty list. appInstallationsCalls counts every call made, and
+	// appInstallationsRateLimitOnCall (1-indexed, 0 means never) makes that numbered call answer a
+	// 403 secondary rate limit instead of a real page.
+	appInstallations                []map[string]any
+	appInstallationsCalls           int
+	appInstallationsRateLimitOnCall int
+}
+
+func (f *fakeGitHub) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/{owner}/{repo}/installation", func(w http.ResponseWriter, r *http.Request) {
+		f.verifyAppJWT(r)
+		name := r.PathValue("owner") + "/" + r.PathValue("repo")
+		contents, ok := f.installations[name]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		permissions := map[string]string{}
+		if contents != "" {
+			permissions["contents"] = contents
+		}
+		if actions := f.actionsPermissions[name]; actions != "" {
+			permissions["actions"] = actions
+		}
+		if pullRequests := f.pullRequestsPermissions[name]; pullRequests != "" {
+			permissions["pull_requests"] = pullRequests
+		}
+		response := map[string]any{
+			"id":          f.installationID,
+			"app_slug":    "dispatch-test",
+			"permissions": permissions,
+		}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			f.t.Errorf("encode installation: %v", err)
+		}
+	})
+	mux.HandleFunc("POST /app/installations/{id}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
+		f.verifyAppJWT(r)
+		f.tokenMints++
+		w.WriteHeader(http.StatusCreated)
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"token":      fmt.Sprintf("ghs_fake_%d_%d", f.installationID, f.tokenMints),
+			"expires_at": f.tokenExpiresAt.Format(time.RFC3339),
+		}); err != nil {
+			f.t.Errorf("encode token: %v", err)
+		}
+	})
+	mux.HandleFunc("GET /app/installations", func(w http.ResponseWriter, r *http.Request) {
+		f.verifyAppJWT(r)
+		f.appInstallationsCalls++
+		if f.appInstallationsRateLimitOnCall != 0 && f.appInstallationsCalls == f.appInstallationsRateLimitOnCall {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+			return
+		}
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page < 1 {
+			page = 1
+		}
+		const perPage = 100
+		start, end := (page-1)*perPage, page*perPage
+		if start > len(f.appInstallations) {
+			start = len(f.appInstallations)
+		}
+		if end > len(f.appInstallations) {
+			end = len(f.appInstallations)
+		}
+		if err := json.NewEncoder(w).Encode(f.appInstallations[start:end]); err != nil {
+			f.t.Errorf("encode installations: %v", err)
+		}
+	})
+	mux.HandleFunc("GET /repos/{owner}/{repo}", func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ghs_fake_") {
+			f.t.Errorf("repository read used %q, want an installation token", r.Header.Get("Authorization"))
+		}
+		if _, ok := f.installations[r.PathValue("owner")+"/"+r.PathValue("repo")]; !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		fmt.Fprintf(w, `{"full_name":%q}`, r.PathValue("owner")+"/"+r.PathValue("repo"))
+	})
+	requireInstallationToken := func(r *http.Request) {
+		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ghs_fake_") {
+			f.t.Errorf("%s used %q, want an installation token", r.URL.Path, r.Header.Get("Authorization"))
+		}
+	}
+	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{branch}", func(w http.ResponseWriter, r *http.Request) {
+		requireInstallationToken(r)
+		branch := r.PathValue("branch")
+		sha, ok := f.commits[branch]
+		if !ok {
+			if f.missingBranchStatus == http.StatusUnprocessableEntity {
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				fmt.Fprintf(w, `{"message":"No commit found for SHA: %s","documentation_url":"https://docs.github.com/rest/commits/commits#get-a-commit","status":"422"}`, branch)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("Accept") == "application/vnd.github.sha" && !f.ignoresSHAMediaType {
+			w.Header().Set("Content-Type", "application/vnd.github.sha")
+			fmt.Fprint(w, sha)
+			return
+		}
+		commit := map[string]any{"sha": sha}
+		if f.largeCommits[branch] {
+			// 300 files of ~4 KiB patch each: about 1.2 MiB of JSON.
+			patch := strings.Repeat("+a line this commit adds to the file, as its diff shows it\n", 70)
+			files := make([]map[string]any, 300)
+			for i := range files {
+				files[i] = map[string]any{"filename": fmt.Sprintf("file-%03d.txt", i), "status": "added", "patch": patch}
+			}
+			commit["files"] = files
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if err := json.NewEncoder(w).Encode(commit); err != nil {
+			f.t.Errorf("encode commit: %v", err)
+		}
+	})
+	mux.HandleFunc("GET /repos/{owner}/{repo}/git/trees/{ref}", func(w http.ResponseWriter, r *http.Request) {
+		requireInstallationToken(r)
+		if r.URL.RawQuery != "" {
+			f.t.Errorf("tree read carries a query: %s", r.URL.RawQuery)
+		}
+		ref := r.PathValue("ref")
+		f.treeReads = append(f.treeReads, ref)
+		sha, dir, ok := strings.Cut(ref, ":")
+		if !ok {
+			// The whole-repository tree, GitHub-shaped (~258 bytes an entry):
+			// repoEntries of padding plus every seeded file. An importer never
+			// asks for it; the size is what a recursive read would have paid.
+			fmt.Fprintf(w, `{"sha":%q,"truncated":%t,"tree":[`, "tree-"+sha, f.truncated)
+			for i := range f.repoEntries {
+				if i > 0 {
+					fmt.Fprint(w, ",")
+				}
+				blob := fmt.Sprintf("%040d", i)
+				fmt.Fprintf(w, `{"path":"packages/dispatch/web/src/features/issue/file-%d.tsx","mode":"100644","type":"blob","sha":%q,"size":%d,"url":"https://api.github.com/repos/legion/arch/git/blobs/%s"}`, i, blob, 7*i, blob)
+			}
+			for path := range f.files {
+				fmt.Fprintf(w, `,{"path":%q,"mode":"100644","type":"blob","sha":%q,"size":%d}`, path, "blob-"+path, len(f.files[path]))
+			}
+			fmt.Fprint(w, `]}`)
+			return
+		}
+		entries := []map[string]any{}
+		prefix := dir + "/"
+		names := []string{}
+		for path := range f.files {
+			if strings.HasPrefix(path, prefix) {
+				names = append(names, strings.TrimPrefix(path, prefix))
+			}
+		}
+		if len(names) == 0 {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"message":"Not Found"}`)
+			return
+		}
+		sort.Strings(names)
+		digest := sha256.New()
+		seenDirs := map[string]bool{}
+		for _, name := range names {
+			path := prefix + name
+			if first, _, nested := strings.Cut(name, "/"); nested {
+				// A nested path shows up as its top-level directory entry once.
+				if !seenDirs[first] {
+					seenDirs[first] = true
+					entries = append(entries, map[string]any{
+						"path": first, "mode": "040000", "type": "tree", "sha": "tree-" + prefix + first,
+					})
+				}
+				continue
+			}
+			mode := f.modes[path]
+			if mode == "" {
+				mode = "100644"
+			}
+			size, ok := f.sizes[path]
+			if !ok {
+				size = int64(len(f.files[path]))
+			}
+			fmt.Fprintf(digest, "%s %s %s\n", mode, name, f.files[path])
+			entries = append(entries, map[string]any{
+				"path": name, "mode": mode, "type": "blob", "sha": "blob-" + path, "size": size,
+			})
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"sha": "tree-" + sha + "-" + fmt.Sprintf("%x", digest.Sum(nil))[:12], "truncated": f.truncated, "tree": entries,
+		}); err != nil {
+			f.t.Errorf("encode tree: %v", err)
+		}
+	})
+	mux.HandleFunc("GET /repos/{owner}/{repo}/git/blobs/{sha}", func(w http.ResponseWriter, r *http.Request) {
+		requireInstallationToken(r)
+		path := strings.TrimPrefix(r.PathValue("sha"), "blob-")
+		content, ok := f.files[path]
+		if !ok || f.missingBlobs[path] {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		// GitHub wraps blob base64 at 60 columns.
+		encoded := base64.StdEncoding.EncodeToString([]byte(content))
+		var wrapped strings.Builder
+		for len(encoded) > 60 {
+			wrapped.WriteString(encoded[:60] + "\n")
+			encoded = encoded[60:]
+		}
+		wrapped.WriteString(encoded + "\n")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"content": wrapped.String(), "encoding": "base64", "size": len(content),
+		}); err != nil {
+			f.t.Errorf("encode blob: %v", err)
+		}
+	})
+	mux.HandleFunc("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
+		requireInstallationToken(r)
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			f.t.Errorf("GraphQL request Content-Type = %q, want application/json", ct)
+		}
+		var decoded struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&decoded); err != nil {
+			f.t.Errorf("decode GraphQL request body: %v", err)
+		}
+		f.lastGraphQLQuery = decoded.Query
+		f.lastGraphQLVariables = decoded.Variables
+		if err := json.NewEncoder(w).Encode(f.graphQLResponse); err != nil {
+			f.t.Errorf("encode GraphQL response: %v", err)
+		}
+	})
+	return mux
+}
+
+// verifyAppJWT checks the Authorization JWT verifies against the fixture
+// public key and carries the claims GitHub requires.
+func (f *fakeGitHub) verifyAppJWT(r *http.Request) {
+	f.t.Helper()
+	raw, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok {
+		f.t.Errorf("app endpoint called with Authorization %q, want a bearer JWT", r.Header.Get("Authorization"))
+		return
+	}
+	parts := strings.Split(raw, ".")
+	if len(parts) != 3 {
+		f.t.Errorf("JWT has %d segments, want 3", len(parts))
+		return
+	}
+	headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		f.t.Errorf("decode JWT header: %v", err)
+		return
+	}
+	var header struct {
+		Alg string `json:"alg"`
+		Typ string `json:"typ"`
+	}
+	if err := json.Unmarshal(headerJSON, &header); err != nil || header.Alg != "RS256" || header.Typ != "JWT" {
+		f.t.Errorf("JWT header %s, want RS256/JWT", headerJSON)
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		f.t.Errorf("decode JWT signature: %v", err)
+		return
+	}
+	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
+	if err := rsa.VerifyPKCS1v15(f.publicKey, crypto.SHA256, digest[:], signature); err != nil {
+		f.t.Errorf("JWT signature does not verify against the fixture key: %v", err)
+	}
+	claimsJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		f.t.Errorf("decode JWT claims: %v", err)
+		return
+	}
+	var claims struct {
+		Iss string `json:"iss"`
+		Iat int64  `json:"iat"`
+		Exp int64  `json:"exp"`
+	}
+	if err := json.Unmarshal(claimsJSON, &claims); err != nil {
+		f.t.Errorf("parse JWT claims: %v", err)
+		return
+	}
+	if claims.Iss != f.clientID {
+		f.t.Errorf("JWT iss %q, want client ID %q", claims.Iss, f.clientID)
+	}
+	now := time.Now().Unix()
+	if claims.Iat > now-30 {
+		f.t.Errorf("JWT iat %d is not backdated (now %d)", claims.Iat, now)
+	}
+	if claims.Exp <= now || claims.Exp > now+10*60 {
+		f.t.Errorf("JWT exp %d outside (now, now+10m] (now %d)", claims.Exp, now)
+	}
+}
+
+func newTestClient(t *testing.T, fake *fakeGitHub) *Client {
+	t.Helper()
+	key, pemText := testKeyPEM(t)
+	fake.publicKey = &key.PublicKey
+	fake.clientID = "Iv1.testclient"
+	server := httptest.NewServer(fake.handler())
+	t.Cleanup(server.Close)
+	client, err := New(&auth.AppConfig{ClientID: "Iv1.testclient", PEM: pemText}, server.URL)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if client == nil {
+		t.Fatal("new client: got nil for a configured app")
+	}
+	return client
+}
+
+func TestReadRejectsAResponseLargerThanTheLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, strings.Repeat("x", responseLimit+1))
+	}))
+	t.Cleanup(server.Close)
+	_, pemText := testKeyPEM(t)
+	client, err := New(&auth.AppConfig{ClientID: "Iv1.testclient", PEM: pemText}, server.URL)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	body, status, header, err := client.Read(context.Background(), "installation-token", "/repos/acme/web/pulls/7")
+	if err == nil || !strings.Contains(err.Error(), "GET "+server.URL+"/repos/acme/web/pulls/7: ") ||
+		!strings.Contains(err.Error(), "1048576-byte limit") {
+		t.Fatalf("Read: err = %v, want a response-limit error naming the method and path", err)
+	}
+	var tooLarge *ResponseTooLargeError
+	if !errors.As(err, &tooLarge) || tooLarge.Limit != responseLimit {
+		t.Fatalf("Read: err = %v, want a *ResponseTooLargeError with limit %d", err, responseLimit)
+	}
+	if body != nil || status != 0 || header != nil {
+		t.Fatalf("Read: body=%d status=%d header=%v, want no truncated response", len(body), status, header)
+	}
+}
+
+func TestReadAcceptsAResponseAtTheLimit(t *testing.T) {
+	want := strings.Repeat("x", responseLimit)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, want)
+	}))
+	t.Cleanup(server.Close)
+	_, pemText := testKeyPEM(t)
+	client, err := New(&auth.AppConfig{ClientID: "Iv1.testclient", PEM: pemText}, server.URL)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	body, status, _, err := client.Read(context.Background(), "installation-token", "/repos/acme/web/pulls/7")
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if status != http.StatusOK || string(body) != want {
+		t.Fatalf("Read: status=%d body length=%d, want 200 and %d bytes", status, len(body), len(want))
+	}
+}
+
+func TestGraphQLPostsQueryAndVariablesWithAnInstallationToken(t *testing.T) {
+	fake := &fakeGitHub{t: t}
+	fake.graphQLResponse = map[string]any{"data": map[string]any{"ok": true}}
+	client, token := newReaderFixture(t, fake)
+
+	body, status, _, err := client.GraphQL(context.Background(), token, "query($q: String!) { search(query: $q, type: ISSUE, first: 1) { issueCount } }", map[string]any{"q": "repo:acme/widgets is:pr"})
+	if err != nil {
+		t.Fatalf("GraphQL: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("GraphQL: status = %d, want 200", status)
+	}
+	var decoded struct {
+		Data struct {
+			OK bool `json:"ok"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil || !decoded.Data.OK {
+		t.Fatalf("GraphQL response = %s, want {\"data\":{\"ok\":true}}: %v", body, err)
+	}
+	if !strings.Contains(fake.lastGraphQLQuery, "search(query: $q") {
+		t.Errorf("fake received query = %q, want it to carry the search() call", fake.lastGraphQLQuery)
+	}
+	if fake.lastGraphQLVariables["q"] != "repo:acme/widgets is:pr" {
+		t.Errorf("fake received variables = %v, want q = %q", fake.lastGraphQLVariables, "repo:acme/widgets is:pr")
+	}
+}
+
+func TestGraphQLWithoutAnAppKeyIsErrNoAppKey(t *testing.T) {
+	var client *Client
+	if _, _, _, err := client.GraphQL(context.Background(), "token", "query { viewer { login } }", nil); !errors.Is(err, ErrNoAppKey) {
+		t.Fatalf("GraphQL on a nil client: err = %v, want ErrNoAppKey", err)
+	}
+}
+
+func TestCheckSourceVerifiesJWTAndResolvesInstallation(t *testing.T) {
+	fake := &fakeGitHub{
+		t:              t,
+		installations:  map[string]string{"legion/arch": "write"},
+		installationID: 4242,
+		tokenExpiresAt: time.Now().Add(time.Hour),
+	}
+	client := newTestClient(t, fake)
+	source, err := client.CheckSource(context.Background(), "legion", "arch")
+	if err != nil {
+		t.Fatalf("check source: %v", err)
+	}
+	if source.InstallationID != 4242 || source.AppSlug != "dispatch-test" {
+		t.Fatalf("source: got %+v", source)
+	}
+}
+
+func TestInstallationMissingIsErrNoInstallation(t *testing.T) {
+	fake := &fakeGitHub{t: t, installations: map[string]string{}, tokenExpiresAt: time.Now().Add(time.Hour)}
+	client := newTestClient(t, fake)
+	_, err := client.CheckSource(context.Background(), "legion", "missing")
+	if !errors.Is(err, ErrNoInstallation) {
+		t.Fatalf("missing installation: got %v, want ErrNoInstallation", err)
+	}
+	if !strings.Contains(err.Error(), "legion/missing") {
+		t.Fatalf("error does not name the repository: %v", err)
+	}
+}
+
+func TestContentsPermissionGatesTheCheck(t *testing.T) {
+	for _, test := range []struct {
+		contents string
+		wantErr  bool
+	}{
+		{contents: "read"},
+		{contents: "write"},
+		{contents: "none", wantErr: true},
+		{contents: "", wantErr: true},
+	} {
+		t.Run("contents="+test.contents, func(t *testing.T) {
+			fake := &fakeGitHub{
+				t:              t,
+				installations:  map[string]string{"legion/arch": test.contents},
+				installationID: 7,
+				tokenExpiresAt: time.Now().Add(time.Hour),
+			}
+			client := newTestClient(t, fake)
+			_, err := client.CheckSource(context.Background(), "legion", "arch")
+			if test.wantErr {
+				if !errors.Is(err, ErrNoContentsRead) {
+					t.Fatalf("contents %q: got %v, want ErrNoContentsRead", test.contents, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("contents %q: %v", test.contents, err)
+			}
+		})
+	}
+}
+
+func TestDeliveryPermissionsGatesActionsAndPullRequests(t *testing.T) {
+	for _, test := range []struct {
+		name                   string
+		actionsPermission      string
+		pullRequestsPermission string
+		wantErr                error
+	}{
+		{name: "both granted", actionsPermission: "read", pullRequestsPermission: "read"},
+		{name: "write satisfies read", actionsPermission: "write", pullRequestsPermission: "write"},
+		{name: "actions missing", actionsPermission: "", pullRequestsPermission: "read", wantErr: ErrNoActionsRead},
+		{name: "actions none", actionsPermission: "none", pullRequestsPermission: "read", wantErr: ErrNoActionsRead},
+		{name: "neither granted, actions checked first", actionsPermission: "", pullRequestsPermission: "", wantErr: ErrNoActionsRead},
+		{name: "pull requests missing", actionsPermission: "read", pullRequestsPermission: "", wantErr: ErrNoPullRequestsRead},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakeGitHub{
+				t:                       t,
+				installations:           map[string]string{"legion/delivery": "read"},
+				actionsPermissions:      map[string]string{"legion/delivery": test.actionsPermission},
+				pullRequestsPermissions: map[string]string{"legion/delivery": test.pullRequestsPermission},
+				installationID:          11,
+				tokenExpiresAt:          time.Now().Add(time.Hour),
+			}
+			client := newTestClient(t, fake)
+			_, err := client.DeliveryPermissions(context.Background(), "legion", "delivery")
+			if test.wantErr != nil {
+				if !errors.Is(err, test.wantErr) {
+					t.Fatalf("got %v, want %v", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestTokenCachesUntilNearExpiry(t *testing.T) {
+	fake := &fakeGitHub{
+		t:              t,
+		installations:  map[string]string{"legion/arch": "read"},
+		installationID: 9,
+		tokenExpiresAt: time.Now().Add(time.Hour),
+	}
+	client := newTestClient(t, fake)
+	first, err := client.Token(context.Background(), 9)
+	if err != nil {
+		t.Fatalf("first token: %v", err)
+	}
+	second, err := client.Token(context.Background(), 9)
+	if err != nil {
+		t.Fatalf("second token: %v", err)
+	}
+	if fake.tokenMints != 1 {
+		t.Fatalf("token mints: got %d, want 1 (second call served from cache)", fake.tokenMints)
+	}
+	if first != second {
+		t.Fatalf("cached token changed: %q then %q", first, second)
+	}
+
+	// Within five minutes of expiry the cache no longer serves the token: age the
+	// cached entry rather than the clock so the re-mint's JWT stays verifiable.
+	client.mu.Lock()
+	client.tokens[9] = cachedToken{token: first, expires: client.now().Add(4 * time.Minute)}
+	client.mu.Unlock()
+	if _, err := client.Token(context.Background(), 9); err != nil {
+		t.Fatalf("re-mint near expiry: %v", err)
+	}
+	if fake.tokenMints != 2 {
+		t.Fatalf("token mints after expiry: got %d, want 2", fake.tokenMints)
+	}
+}
+
+func TestNilClientAnswersErrNoAppKey(t *testing.T) {
+	client, err := New(nil, "")
+	if err != nil || client != nil {
+		t.Fatalf("New(nil): got (%v, %v), want (nil, nil)", client, err)
+	}
+	client, err = New(&auth.AppConfig{ClientID: "Iv1.x"}, "")
+	if err != nil || client != nil {
+		t.Fatalf("New(no PEM): got (%v, %v), want (nil, nil)", client, err)
+	}
+	if _, err := client.CheckSource(context.Background(), "legion", "arch"); !errors.Is(err, ErrNoAppKey) {
+		t.Fatalf("nil client check: got %v, want ErrNoAppKey", err)
+	}
+}
+
+func TestNewRejectsMalformedKey(t *testing.T) {
+	if _, err := New(&auth.AppConfig{ClientID: "Iv1.x", PEM: "not a key"}, ""); err == nil {
+		t.Fatal("malformed PEM accepted")
+	}
+}
+
+// mainCommit is the head of the fixture repository's main branch.
+const mainCommit = "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ff"
+
+func newReaderFixture(t *testing.T, fake *fakeGitHub) (*Client, string) {
+	t.Helper()
+	fake.installations = map[string]string{"legion/arch": "read"}
+	fake.installationID = 7
+	fake.tokenExpiresAt = time.Now().Add(time.Hour)
+	if fake.commits == nil {
+		fake.commits = map[string]string{"main": mainCommit}
+	}
+	client := newTestClient(t, fake)
+	token, err := client.Token(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("mint token: %v", err)
+	}
+	return client, token
+}
+
+func TestRefResolvesTheBranchCommit(t *testing.T) {
+	fake := &fakeGitHub{t: t}
+	client, token := newReaderFixture(t, fake)
+
+	sha, err := client.Ref(context.Background(), token, "legion", "arch", "main")
+	if err != nil || sha != mainCommit {
+		t.Fatalf("ref: sha=%q err=%v", sha, err)
+	}
+
+	if _, err := client.Ref(context.Background(), token, "legion", "arch", "gone"); !errors.Is(err, ErrNoBranch) {
+		t.Fatalf("missing branch: err=%v, want ErrNoBranch", err)
+	}
+}
+
+// GitHub answers a branch that does not exist with 422 and a repository the installation cannot
+// see with 404; Ref answers ErrNoBranch and no SHA for both.
+func TestRefMissingBranchIsErrNoBranch(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+	}{
+		{name: "404 not found", status: http.StatusNotFound},
+		{name: "422 no commit found", status: http.StatusUnprocessableEntity},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeGitHub{t: t, missingBranchStatus: tc.status}
+			client, token := newReaderFixture(t, fake)
+			sha, err := client.Ref(context.Background(), token, "legion", "arch", "gone")
+			if !errors.Is(err, ErrNoBranch) {
+				t.Fatalf("missing branch answered %d: err=%v, want ErrNoBranch", tc.status, err)
+			}
+			if sha != "" {
+				t.Fatalf("missing branch answered %d: sha=%q, want none", tc.status, sha)
+			}
+		})
+	}
+}
+
+// A commit whose JSON answer lists enough changed files to pass the 1 MiB response cap still
+// resolves: Ref never reads that answer.
+func TestRefReadsTheHeadOfALargeCommit(t *testing.T) {
+	const large = "dddddddddddddddddddddddddddddddddddddddd"
+	fake := &fakeGitHub{
+		t:            t,
+		commits:      map[string]string{"main": mainCommit, "big/change": large},
+		largeCommits: map[string]bool{"big/change": true},
+	}
+	client, token := newReaderFixture(t, fake)
+
+	// The commit's JSON answer, which this fake serves as GitHub does, does not fit the cap.
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/repos/legion/arch/commits/big%2Fchange", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Accept", "application/vnd.github+json")
+	fake.handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || recorder.Body.Len() <= responseLimit {
+		t.Fatalf("large commit's JSON answer is %d bytes (status %d), want more than the %d cap", recorder.Body.Len(), recorder.Code, responseLimit)
+	}
+
+	sha, err := client.Ref(context.Background(), token, "legion", "arch", "big/change")
+	if err != nil {
+		t.Fatalf("Ref: %v", err)
+	}
+	if sha != large {
+		t.Fatalf("Ref = %q, want %q", sha, large)
+	}
+}
+
+// An answer that is not one commit SHA -- GitHub (or a proxy) ignoring the media type and
+// answering the commit's JSON, or any other body -- is an error that quotes nothing of the body
+// and is not ErrNoBranch, so the import keeps the model it has.
+func TestRefRefusesAnAnswerThatIsNotACommitSHA(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fake *fakeGitHub
+		body []string
+	}{
+		{
+			name: "the commit's JSON",
+			fake: &fakeGitHub{ignoresSHAMediaType: true},
+			body: []string{mainCommit, `"sha"`, "{"},
+		},
+		{
+			name: "a body that is no SHA",
+			fake: &fakeGitHub{commits: map[string]string{"main": "not-a-sha"}},
+			body: []string{"not-a-sha"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.fake.t = t
+			client, token := newReaderFixture(t, tc.fake)
+			sha, err := client.Ref(context.Background(), token, "legion", "arch", "main")
+			if err == nil {
+				t.Fatalf("Ref = %q, want an error", sha)
+			}
+			if errors.Is(err, ErrNoBranch) {
+				t.Fatalf("Ref error %q is ErrNoBranch, want a failed read", err)
+			}
+			for _, text := range tc.body {
+				if strings.Contains(err.Error(), text) {
+					t.Fatalf("Ref error %q quotes the body's %q", err, text)
+				}
+			}
+			if !strings.Contains(err.Error(), "legion/arch@main") {
+				t.Fatalf("Ref error %q names no branch", err)
+			}
+		})
+	}
+}
+
+// readDir lists then reads: the two calls a sync makes.
+func readDir(t *testing.T, client *Client, token string) (Dir, map[string][]byte, error) {
+	t.Helper()
+	listing, err := client.Dir(context.Background(), token, "legion", "arch", "c0ffee", ".dispatch/architecture")
+	if err != nil {
+		return listing, nil, err
+	}
+	files, err := client.DirFiles(context.Background(), token, "legion", "arch", listing)
+	return listing, files, err
+}
+
+func TestDirFilesReadsEveryRegularMarkdownFileInTheDirectory(t *testing.T) {
+	fake := &fakeGitHub{
+		t: t,
+		files: map[string]string{
+			".dispatch/architecture/api.md":      "the api\n",
+			".dispatch/architecture/store.md":    "the store\n",
+			".dispatch/architecture/tool.md":     "executable bit\n",
+			".dispatch/architecture/link.md":     "../../README.md",
+			".dispatch/architecture/notes.txt":   "not markdown",
+			".dispatch/architecture/sub/deep.md": "not a direct child",
+			"README.md":                          "not in the directory",
+			".dispatch/architecture-adjacent.md": "prefix sibling, not inside the directory",
+		},
+		modes: map[string]string{
+			".dispatch/architecture/tool.md": "100755",
+			".dispatch/architecture/link.md": "120000",
+		},
+	}
+	client, token := newReaderFixture(t, fake)
+
+	listing, files, err := readDir(t, client, token)
+	if err != nil {
+		t.Fatalf("dir files: %v", err)
+	}
+	want := map[string][]byte{"api.md": []byte("the api\n"), "store.md": []byte("the store\n"), "tool.md": []byte("executable bit\n")}
+	if !reflect.DeepEqual(files, want) {
+		t.Fatalf("files = %#v, want %#v (a symlink is not a component)", files, want)
+	}
+	if listing.SHA == "" {
+		t.Fatal("listing carries no subtree sha")
+	}
+	if !reflect.DeepEqual(fake.treeReads, []string{"c0ffee:.dispatch/architecture"}) {
+		t.Fatalf("tree reads = %#v, want the one subtree read", fake.treeReads)
+	}
+}
+
+// The listing is the subtree alone: a repository whose recursive tree would
+// blow past the 1 MiB response cap (4,000+ entries at GitHub's ~258 B each)
+// still syncs, because the importer never asks for that tree.
+func TestDirListsTheSubtreeNotTheRepository(t *testing.T) {
+	fake := &fakeGitHub{
+		t:           t,
+		files:       map[string]string{".dispatch/architecture/api.md": "the api\n"},
+		repoEntries: 6000,
+	}
+	client, token := newReaderFixture(t, fake)
+
+	// The whole-repository tree this fake would answer does not fit the cap.
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/repos/legion/arch/git/trees/c0ffee", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	fake.handler().ServeHTTP(recorder, request)
+	if recorder.Body.Len() <= responseLimit {
+		t.Fatalf("whole-repository tree is %d bytes, want more than the %d cap", recorder.Body.Len(), responseLimit)
+	}
+	fake.treeReads = nil
+
+	_, files, err := readDir(t, client, token)
+	if err != nil || len(files) != 1 {
+		t.Fatalf("subtree read: files=%v err=%v", files, err)
+	}
+	if !reflect.DeepEqual(fake.treeReads, []string{"c0ffee:.dispatch/architecture"}) {
+		t.Fatalf("tree reads = %#v, want only the subtree", fake.treeReads)
+	}
+}
+
+func TestDirMissingDirectoryIsAnEmptyListing(t *testing.T) {
+	fake := &fakeGitHub{t: t, files: map[string]string{"README.md": "no architecture dir"}}
+	client, token := newReaderFixture(t, fake)
+
+	listing, files, err := readDir(t, client, token)
+	if err != nil || len(files) != 0 || listing.SHA != "" || len(listing.Files) != 0 {
+		t.Fatalf("missing directory: listing=%+v files=%v err=%v, want empty and no error", listing, files, err)
+	}
+}
+
+func TestDirTruncatedTreeIsTyped(t *testing.T) {
+	fake := &fakeGitHub{t: t, truncated: true, files: map[string]string{".dispatch/architecture/api.md": "x"}}
+	client, token := newReaderFixture(t, fake)
+
+	if _, _, err := readDir(t, client, token); !errors.Is(err, ErrTreeTruncated) {
+		t.Fatalf("truncated tree: err=%v, want ErrTreeTruncated", err)
+	}
+}
+
+func TestDirFilesBlobVanishingMidFetchFailsTheWholeRead(t *testing.T) {
+	fake := &fakeGitHub{
+		t: t,
+		files: map[string]string{
+			".dispatch/architecture/api.md":   "the api\n",
+			".dispatch/architecture/store.md": "the store\n",
+		},
+		missingBlobs: map[string]bool{".dispatch/architecture/api.md": true, ".dispatch/architecture/store.md": true},
+	}
+	client, token := newReaderFixture(t, fake)
+
+	if _, _, err := readDir(t, client, token); err == nil || !strings.Contains(err.Error(), "status 404") {
+		t.Fatalf("vanished blob: err=%v, want a 404 failure", err)
+	}
+}
+
+// A file at the cap reads whole (base64 wrapping does not eat into the
+// limit); one byte over is refused by its listed size before any blob read.
+func TestDirFilesEnforceMaxFileSize(t *testing.T) {
+	atCap := strings.Repeat("x", MaxFileSize)
+	fake := &fakeGitHub{t: t, files: map[string]string{".dispatch/architecture/big.md": atCap}}
+	client, token := newReaderFixture(t, fake)
+	_, files, err := readDir(t, client, token)
+	if err != nil || len(files["big.md"]) != MaxFileSize {
+		t.Fatalf("file at the cap: len=%d err=%v", len(files["big.md"]), err)
+	}
+
+	fake.sizes = map[string]int64{".dispatch/architecture/big.md": MaxFileSize + 1}
+	fake.missingBlobs = map[string]bool{".dispatch/architecture/big.md": true}
+	_, _, err = readDir(t, client, token)
+	if !errors.Is(err, ErrFileTooLarge) || !strings.Contains(err.Error(), ".dispatch/architecture/big.md") {
+		t.Fatalf("oversized listing: err=%v, want ErrFileTooLarge naming the file, refused before the blob read", err)
+	}
+}
+
+// TestListInstallationsPaginatesCachesAndDetectsARateLimit covers Qual's finding that
+// ListInstallations had no direct unit test: pagination (more than one page of 100), the
+// installationsCacheTTL cache (a second call within the TTL makes no further request), and a 403
+// secondary-rate-limit response surfacing as a *RateLimitError via CheckResponse.
+func TestListInstallationsPaginatesCachesAndDetectsARateLimit(t *testing.T) {
+	fake := &fakeGitHub{t: t, installationID: 1, tokenExpiresAt: time.Now().Add(time.Hour)}
+	for i := range 150 {
+		fake.appInstallations = append(fake.appInstallations, map[string]any{
+			"id": int64(i + 1), "app_slug": "dispatch-test",
+			"account":     map[string]any{"login": fmt.Sprintf("account-%d", i+1)},
+			"permissions": map[string]string{"contents": "read"},
+		})
+	}
+	client := newTestClient(t, fake)
+
+	installations, err := client.ListInstallations(context.Background())
+	if err != nil {
+		t.Fatalf("ListInstallations: %v", err)
+	}
+	if len(installations) != 150 {
+		t.Fatalf("len(installations) = %d, want 150 (pagination across 2 pages of 100)", len(installations))
+	}
+	if fake.appInstallationsCalls != 2 {
+		t.Fatalf("GET /app/installations calls = %d, want 2", fake.appInstallationsCalls)
+	}
+	if installations[0].AccountLogin != "account-1" || installations[149].AccountLogin != "account-150" {
+		t.Fatalf("installations[0].AccountLogin=%q installations[149].AccountLogin=%q, want account-1/account-150", installations[0].AccountLogin, installations[149].AccountLogin)
+	}
+
+	// A second call within installationsCacheTTL makes no further request.
+	if _, err := client.ListInstallations(context.Background()); err != nil {
+		t.Fatalf("ListInstallations (cached): %v", err)
+	}
+	if fake.appInstallationsCalls != 2 {
+		t.Fatalf("GET /app/installations calls after a cached call = %d, want still 2", fake.appInstallationsCalls)
+	}
+
+	// A fresh client (so the cache starts empty) hitting a rate limit on its first call surfaces
+	// a *RateLimitError.
+	rateLimited := &fakeGitHub{t: t, installationID: 1, tokenExpiresAt: time.Now().Add(time.Hour), appInstallationsRateLimitOnCall: 1}
+	rateLimitedClient := newTestClient(t, rateLimited)
+	_, err = rateLimitedClient.ListInstallations(context.Background())
+	var limited *RateLimitError
+	if !errors.As(err, &limited) {
+		t.Fatalf("ListInstallations with a 403 rate limit: err = %v, want a *RateLimitError", err)
+	}
+}

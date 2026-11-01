@@ -1,0 +1,734 @@
+package api
+
+import (
+	"bytes"
+	"encoding/json"
+	"flag"
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
+	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
+)
+
+var updateGolden = flag.Bool("update", false, "rewrite the golden fixtures this package pins")
+
+// goldenPath is the cross-language pin: Go writes the wire shape, and
+// `packages/contracts/src/legion-api.test.ts` parses it through the strict zod schema the
+// plugin reads with. Go is the source of truth; the fixture is how the schema is held to it.
+func goldenPath(name string) string {
+	return filepath.Join("..", "..", "..", "contracts", "fixtures", "daemon-api", name)
+}
+
+// settingsFixtureFile is the maximal kubernetes legion.yaml the state golden and the settings tests
+// share: every key the loader models is set, and every value a credential, its source or its file
+// could be is a planted fixture a test can look for in the wire bytes (a PEM that is no key, a DSN
+// password that opens nothing, `*_file` paths, the kubeconfig, the session DSN secret's key, each
+// provider key's store key, the pod's env values, volume, Secret and ServiceAccount names, userinfo
+// on `envoy_url` and the first `nats_urls` entry, which the settings mask, and userinfo and a query
+// on `plugins.pi_envoy`'s tarball URL, which the settings mask and drop while `pi_legion` pins the
+// version form). Every path the settings emit (`state_dir`, `instructions`) is a fixed absolute
+// literal, so the golden does not churn with the temporary directory the file is written under.
+// Hosts are placeholders.
+const settingsFixtureFile = `project: LEGION
+port: 13370
+bind: 0.0.0.0
+advertise_host: legion-daemon.internal.example
+postgres_dsn: postgres://legion:fixture-dsn-password@postgres.internal.example:5432/legion
+state_dir: /var/lib/legion
+admission_cap: 4
+daemon_url: http://legion-daemon.internal.example:13370
+worker_stream_port: 13371
+provider_keys: {ANTHROPIC_API_KEY: ANTHROPIC_API_KEY_FIXTURE, GEMINI_API_KEY: GEMINI_API_KEY_FIXTURE}
+instructions: /etc/legion/deployment-instructions.md
+worker_boot_timeout_seconds: 180
+worker_boot_registration_deadline_intervals: 2
+worker_rpc_timeout_seconds: 8
+worker_stop_timeout_seconds: 30
+tree_stop_timeout_seconds: 90
+slow_command_timeout_seconds: 600
+probe_interval_seconds: 20
+controller_wake_interval_seconds: 1800
+launch_failure_limit: 4
+prompt_failure_limit: 5
+prompt_retire_limit: 3
+operator_token_file: /var/run/legion/OPERATOR_TOKEN
+envoy_url: http://legion:fixture-envoy-password@envoy-listener.internal.example:9020
+nats_urls: [nats://legion:fixture-nats-password@nats.internal.example:4222, nats://nats-2.internal.example:4222]
+envoy_token_file: /var/run/legion/ENVOY_TOKEN
+nats_nkey_seed_file: /var/run/legion/NATS_NKEY_SEED
+nats_daemon_nkey_seed_file: /var/run/legion/NATS_DAEMON_NKEY_SEED
+dispatch_url: https://dispatch.internal.example
+dispatch_token_file: /var/run/legion/DISPATCH_TOKEN
+projects:
+  LEGION:
+    slack_channels: [C0123ABCD, C0123ABCE]
+    deploys:
+      - {repo: sjawhar/legion, workflow: .github/workflows/release.yaml, step: Apply}
+  WIDGETS:
+    merge_queue_role: merge-queue
+    merge:
+      by_hand: ['^deploy/', '\.sql$']
+gates:
+  design: root-issues
+github_apps:
+  implement:
+    app_id: "1001"
+    private_key: |
+      -----BEGIN PRIVATE KEY-----
+      fixture
+      -----END PRIVATE KEY-----
+    installations: {sjawhar: "2001", acme: "2002"}
+  review:
+    app_id: "1002"
+    private_key: |
+      -----BEGIN PRIVATE KEY-----
+      fixture
+      -----END PRIVATE KEY-----
+    installations: {sjawhar: "2003"}
+linger_hours: 1.5
+production_check_hours: 240
+review_round_cap: 4
+max_fix_attempts: 5
+controller: daemon
+worker_backends: {tester: omp}
+capabilities:
+  decided:
+    pool-capacity: "the pool is sized by hand for the admission cap"
+runtime:
+  kubernetes:
+    namespace: legion
+    image: ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    storage_class: gp3
+    issue_volume: 30Gi
+    kubeconfig: /etc/legion/kubeconfig
+    context: legion-daemon@fixture-cluster
+    session_store: postgres
+    session_dsn_secret: SESSION_DSN_FIXTURE
+    scheduling:
+      node_selector: {node.kubernetes.io/instance-type: m7i.xlarge}
+      tolerations:
+        - {key: dedicated, operator: Equal, value: legion, effect: NoSchedule}
+        - {key: spot, operator: Exists, effect: NoExecute}
+      priority_class: legion-workers
+    resources:
+      issue: {cpu: 4, memory: 24Gi}
+      controller: {cpu: 2, cpu_request: 1, memory: 6Gi, memory_request: 4Gi}
+    pod:
+      env: {PI_CONFIG_FILES: /etc/legion-operator/overlay.yml, OPERATOR_FIXTURE_FLAG: operator-fixture-value}
+      service_account: fixture-operator-account
+      volumes:
+        - name: operator-creds
+          secret: {name: fixture-operator-creds}
+      volume_mounts:
+        - {volume: operator-creds, mount_path: /etc/legion-operator/creds}
+    agent_secrets:
+      url: https://agent-secrets.internal.example
+      token_file: /var/run/secrets/agent-secrets/token
+      audience: fixture-broker-audience
+      token_expiry_seconds: 1800
+    plugins:
+      pi_legion: 10.4.0
+      pi_envoy: https://legion:fixture-plugin-password@plugins.internal.example/pi-envoy-10.4.0.tgz?token=fixture-plugin-token
+    setup: [/bin/sh, -c, 'echo fixture-setup']
+    repository_cache:
+      volume: 40Gi
+      refresh_minutes: 15
+      retain_hours: 48
+      resources: {cpu: 500m, memory: 1Gi}
+`
+
+// minimalSettingsFile is the smallest tmux legion.yaml that loads: every other setting is a
+// default, which is what the Stage 3 and operator-claim goldens and the defaults test show.
+const minimalSettingsFile = `project: DEMO
+postgres_dsn: postgres://legion:fixture-dsn-password@127.0.0.1:5432/legion
+state_dir: /var/lib/legion
+`
+
+// loadSettingsFile writes body as a legion.yaml under t.TempDir() and loads it as the daemon does,
+// reading no environment, so the resolved values are the file's and the defaults alone.
+func loadSettingsFile(t *testing.T, body string) config.Config {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "legion.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write legion.yaml: %v", err)
+	}
+	cfg, err := config.Load(path, func(string) string { return "" })
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	return cfg
+}
+
+// settingsFixtureConfig is settingsFixtureFile loaded.
+func settingsFixtureConfig(t *testing.T) config.Config {
+	t.Helper()
+	return loadSettingsFile(t, settingsFixtureFile)
+}
+
+// minimalSettingsConfig is minimalSettingsFile loaded.
+func minimalSettingsConfig(t *testing.T) config.Config {
+	t.Helper()
+	return loadSettingsFile(t, minimalSettingsFile)
+}
+
+// populatedState carries every optional the state shape has, so the fixture pins the full shape
+// rather than Stage 1's empty record.
+func populatedState(t *testing.T) State {
+	t.Helper()
+	approvedVersion := 6
+	waitedSince := time.Date(2026, 9, 22, 8, 5, 0, 0, time.UTC)
+	answeredAt := time.Date(2026, 9, 22, 9, 21, 0, 0, time.UTC)
+	return State{
+		Daemon: DaemonInfo{
+			Project:       "legion",
+			SchemaVersion: 1,
+			Boots:         4,
+			FirstBootAt:   time.Date(2026, 9, 18, 14, 3, 27, 0, time.UTC),
+			StartedAt:     time.Date(2026, 9, 22, 9, 15, 2, 0, time.UTC),
+		},
+		Admission: Admission{
+			Cap:     2,
+			Active:  []string{"LEGION-208", "LEGION-210"},
+			Waiting: []string{"LEGION-211"},
+			// LEGION-211 is the waiting root admission skips, so it is in `waiting` too;
+			// LEGION-209 is a child of LEGION-208's tree the workflow holds at `admitted`, which
+			// no waiting line carries. Both are listed, by issue key, with what each waits on —
+			// LEGION-213 among them a key the daemon has no record of, which counts as unfinished.
+			Blocked: []BlockedIssue{
+				{Issue: "LEGION-209", BlockedBy: []string{"LEGION-210", "LEGION-213"}},
+				{Issue: "LEGION-211", BlockedBy: []string{"LEGION-210"}},
+			},
+		},
+		Issues: map[string]Issue{
+			"LEGION-208": {
+				Key:           "LEGION-208",
+				Generation:    3,
+				Phase:         phase.Implementing,
+				Status:        "in_progress",
+				Repo:          "acme/widgets",
+				DefaultBranch: "main",
+				Architect: &ClaimView{
+					Session: "ses_architect_208",
+					State:   "ready",
+					Locator: &runtime.Locator{
+						Runtime:     runtime.RuntimeTmux,
+						Claim:       "legion-legion-legion-208-architect",
+						Incarnation: "31881:9442101",
+						Tmux:        &runtime.TmuxLocator{Window: "@4", Pane: "%12"},
+					},
+				},
+				Workers: map[claim.Role]PhaseView{
+					claim.RolePlanner: {
+						Claim: ClaimView{
+							Session: "ses_planner_208",
+							State:   "suspended",
+							Locator: &runtime.Locator{
+								Runtime:     runtime.RuntimeSandbox,
+								Claim:       "legion-legion-legion-208-planner",
+								Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/2",
+								Sandbox: &runtime.SandboxLocator{
+									Namespace: "legion", Name: "legion-legion-legion-208", PodUID: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+									Container: "roles", Generation: 2,
+								},
+							},
+						},
+						HandoffCommit: "9f2c1d7a4b6e8c3f5a90d2e14b7c6f8a3d5e0b21",
+						Rounds:        0,
+					},
+					claim.RoleImplementer: {
+						Claim: ClaimView{
+							Session: "ses_implementer_208",
+							State:   "working",
+							Locator: &runtime.Locator{
+								Runtime:     runtime.RuntimeSandbox,
+								Claim:       "legion-legion-legion-208-implementer",
+								Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/5",
+								Sandbox: &runtime.SandboxLocator{
+									Namespace: "legion", Name: "legion-legion-legion-208", PodUID: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+									Container: "roles", Generation: 5,
+								},
+							},
+							// The session's capability report (LEGION-663), from the process the locator
+							// names: two rows it proved and one it did not, with the fact its check found.
+							Capabilities: &CapabilityReportView{
+								MeasuredAt:  time.Date(2026, 9, 22, 9, 17, 3, 0, time.UTC),
+								Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/5",
+								OK:          []string{"subagents", "dispatch-envoy-tools"},
+								Open:        []CapabilityGap{{Name: "github", Detail: "gh api user: HTTP 401: Bad credentials"}},
+							},
+						},
+						HandoffCommit: "",
+						Rounds:        2,
+					},
+				},
+				PullRequest: &PullRequestView{
+					Repo:           "acme/widgets",
+					Number:         1247,
+					Head:           "5b3d9e2c8f1a47d06b2e5c9f3a8d1e4b7c0f6a29",
+					State:          "open",
+					ChecksVerdict:  "pending",
+					ReviewDecision: "changes_requested",
+					FixAttempts:    1,
+				},
+				DesignGate: &GateView{
+					ArtifactID:      "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093",
+					CurrentVersion:  7,
+					ApprovedVersion: &approvedVersion,
+				},
+				Slot: &SlotView{
+					Index:      0,
+					AdmittedAt: time.Date(2026, 9, 21, 18, 42, 11, 0, time.UTC),
+				},
+			},
+			"LEGION-210": {
+				Key:           "LEGION-210",
+				Generation:    1,
+				Phase:         phase.Held,
+				Status:        "in_progress",
+				Repo:          "zeta/tools",
+				DefaultBranch: "release/v7.1",
+				HoldReason:    "escalated",
+				Workers: map[claim.Role]PhaseView{
+					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_210", State: "failed"}, Rounds: 1},
+				},
+			},
+			// LEGION-212's architect asked a person a question and handed the turn back, which gave
+			// its slot up; the person has answered the question.
+			"LEGION-212": {
+				Key:           "LEGION-212",
+				Generation:    1,
+				Phase:         phase.AwaitingPerson,
+				Status:        "in_progress",
+				Repo:          "acme/widgets",
+				DefaultBranch: "main",
+				Workers:       map[claim.Role]PhaseView{},
+				WaitingOn: &WaitingOnView{
+					Kind:       "ask",
+					Ask:        "9a8fd348-55d5-4d72-a793-3cd037f75f13",
+					Since:      &waitedSince,
+					AnsweredAt: &answeredAt,
+					AnsweredBy: record.AnsweredByAsk,
+				},
+			},
+			// LEGION-207 merged and closed; its production check is open at its second look, woken by
+			// Dispatch's issue.deployed, its implementer working that look in the kept pod.
+			"LEGION-207": {
+				Key:           "LEGION-207",
+				Generation:    2,
+				Phase:         phase.Done,
+				Status:        "done",
+				Repo:          "acme/widgets",
+				DefaultBranch: "main",
+				Workers: map[claim.Role]PhaseView{
+					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_207", State: "working"}, HandoffCommit: "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40", Rounds: 1},
+				},
+				PullRequest: &PullRequestView{
+					Repo:           "acme/widgets",
+					Number:         1239,
+					Head:           "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40",
+					State:          "merged",
+					ReviewDecision: "approved",
+				},
+				Check: &CheckView{
+					Repo:        "acme/widgets",
+					PullRequest: 1239,
+					MergeCommit: "3e9c0a7b5d2f4e8a1c6b9d0f2a4e7c5b8d1f3a60",
+					OpenedAt:    time.Date(2026, 9, 22, 8, 40, 12, 0, time.UTC),
+					Looks:       2,
+					LookOpen:    true,
+					LastWake:    &CheckWakeView{Kind: "issue.deployed", Detail: "run 38230245571 completed 2026-09-22T09:10:44Z", At: time.Date(2026, 9, 22, 9, 10, 51, 0, time.UTC)},
+					NextWakeAt:  time.Date(2026, 10, 6, 8, 40, 12, 0, time.UTC),
+				},
+			},
+		},
+		// LEGION-208's lifecycle lane is running row 801; the supervise row queued after it came due
+		// two and a half minutes ago and waits behind it (record.Store.HeldRows).
+		HeldOutboxRows: []HeldOutboxRow{{ID: 802, Kind: "supervise", Issue: "LEGION-208", WaitedSeconds: 150, WaitsOn: 801}},
+		// LEGION-210's implementer failed while implementing: its issue is held from that phase,
+		// and nothing retries the claim until its architect retries the phase.
+		StrandedClaims: []StrandedClaim{{Issue: "LEGION-210", Role: claim.RoleImplementer, State: "failed"}},
+		ControllerLocator: &ControllerLocator{
+			Runtime:      "kubernetes",
+			External:     true,
+			SessionID:    "ses_controller",
+			RegisteredAt: time.Date(2026, 9, 22, 9, 16, 40, 0, time.UTC),
+		},
+		AgentSecretsLogin: &AgentSecretsLoginView{State: "issued"},
+		// A kubernetes deployment whose image passed the probe, with the broker gap decided and
+		// one role unreserved, and no session's report yet, so the fixture carries a decided row and
+		// an open row beside the present, unchecked and withheld ones, rendered by the report
+		// itself: a wording change there rewrites the fixture rather than leaving the pinned words
+		// stale.
+		Capabilities: CapabilityStatesOf(capabilities.Deployment{
+			Runtime: "kubernetes", Probed: true, ModelFallback: "on",
+			Decided:        map[capabilities.Name]string{capabilities.Secrets: "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"},
+			UnreservedPods: []capabilities.Pod{capabilities.PodIssue},
+		}.Report()),
+		// The project maps three repositories of two owners; the review App is not installed on one,
+		// which the daemon leaves out. acme/widgets' cache is Ready and its last health read
+		// answered, zeta/tools' could not be read, and acme/legacy, mapped no longer, keeps its cache
+		// until its retention ends.
+		Repositories: RepositoriesView{
+			Owners: []string{"acme", "zeta"},
+			Mapped: []MappedRepositoryView{
+				{Repo: "acme/widgets", Default: true, Cache: &CacheView{
+					Repo: "acme/widgets", Sandbox: "legion-legion-cache-acme-widgets-d782c874", State: "ready", Ready: true, Address: "http://legion-legion-cache-acme-widgets-d782c874.legion.svc:8418",
+					Head: "34a7ac80e9c3389ffbc1bbeece371ccacc043992", LastFetchAt: time.Date(2026, 10, 16, 19, 20, 30, 0, time.UTC), Bytes: 6612345678,
+				}},
+				{Repo: "zeta/tools", Cache: &CacheView{
+					Repo: "zeta/tools", Sandbox: "legion-legion-cache-zeta-tools-1b2c3d4e", State: "failing",
+					Reason: "container cache CrashLoopBackOff: back-off 5m0s restarting failed container (restarted 4 times)",
+				}},
+			},
+			Refused: []RefusedRepositoryView{{Repo: "acme/gadgets", Reason: "the review App is not installed on acme/gadgets"}},
+			// Dispatch's GitHub App is not installed on zeta/tools, which is served all the same.
+			WithoutWebhookApp: []WebhookAppGapView{{Repo: "zeta/tools", Reason: "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes"}},
+			Caches: []CacheView{{
+				Repo: "acme/legacy", Sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d", State: "starting", RetainedUntil: time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC),
+			}},
+		},
+		// The resolved maximal kubernetes file, so the fixture pins every key `settings` can carry.
+		Settings: SettingsOf(settingsFixtureConfig(t)),
+		// The Dispatch consumer is caught up; the Dispatch-server consumer's info read ran out of the
+		// bound; the GitHub consumer has 412 messages waiting and has handled none for over a
+		// minute.
+		Consumers: ConsumerLagViewsOf([]intake.ConsumerLag{
+			{Name: "legion-go-LEGION-dispatch", LastHandledAt: time.Date(2026, 9, 22, 9, 17, 50, 0, time.UTC)},
+			{Name: "legion-go-LEGION-dispatch-server", Unavailable: "read the consumer's info: context deadline exceeded"},
+			{
+				Name: "legion-go-LEGION-github", Waiting: 412, OldestAt: time.Date(2026, 9, 22, 9, 5, 34, 0, time.UTC), OldestAge: 754 * time.Second,
+				LastHandledAt: time.Date(2026, 9, 22, 9, 16, 41, 0, time.UTC), Stalled: true,
+			},
+		}),
+	}
+}
+
+func TestStateGolden(t *testing.T) {
+	golden(t, "state.json", populatedState(t))
+}
+
+func TestStateStage3Golden(t *testing.T) {
+	golden(t, "state-stage3.json", State{
+		Daemon: DaemonInfo{
+			Project:       "LEGION",
+			SchemaVersion: 3,
+			Boots:         5,
+			FirstBootAt:   time.Date(2026, 9, 18, 14, 3, 27, 0, time.UTC),
+			StartedAt:     time.Date(2026, 9, 22, 17, 30, 0, 0, time.UTC),
+		},
+		Admission: Admission{Cap: 2, Active: []string{"LEGION-208"}, Waiting: []string{"LEGION-209"}},
+		Issues: map[string]Issue{
+			"LEGION-208": {
+				Key:           "LEGION-208",
+				Generation:    4,
+				Phase:         phase.Reviewing,
+				Status:        "needs_review",
+				Repo:          "sjawhar/legion-smoke",
+				DefaultBranch: "main",
+				Workers:       map[claim.Role]PhaseView{},
+			},
+		},
+		PendingStatusWrites: []PendingStatusWrite{{
+			Issue:     "LEGION-208",
+			Payload:   json.RawMessage(`{"status":"needs_review"}`),
+			Attempts:  2,
+			NextAt:    time.Date(2026, 9, 22, 17, 32, 0, 0, time.UTC),
+			LastError: "Dispatch unavailable",
+		}},
+		Settings: SettingsOf(minimalSettingsConfig(t)),
+	})
+}
+
+// An operator's claim on an issue the workflow does not record is listed for the claim's sake,
+// and says so rather than leaving its phase and status empty: an empty phase refused the whole
+// document at every strict client, over a row that is a legitimate state. internal/projection's
+// own test holds the producer to these values.
+func TestStateOperatorClaimGolden(t *testing.T) {
+	golden(t, "state-operator-claim.json", State{
+		Daemon: DaemonInfo{
+			Project:       "AC91849371",
+			SchemaVersion: 3,
+			Boots:         1,
+			FirstBootAt:   time.Date(2026, 9, 25, 5, 50, 0, 0, time.UTC),
+			StartedAt:     time.Date(2026, 9, 25, 5, 50, 0, 0, time.UTC),
+		},
+		Admission: Admission{Cap: 2, Active: []string{}, Waiting: []string{}},
+		Issues: map[string]Issue{
+			"AC91849371-900": {
+				Key:     "AC91849371-900",
+				Phase:   Unrecorded,
+				Status:  string(Unrecorded),
+				Workers: map[claim.Role]PhaseView{},
+				Architect: &ClaimView{
+					Session: "01a0d71d-aace-7448-a0d4-e401d736438f",
+					State:   "idle",
+					Locator: &runtime.Locator{
+						Runtime:     "tmux",
+						Claim:       "legion-ac91849371-ac91849371-900-architect",
+						Incarnation: "1618075:268131172",
+						Tmux:        &runtime.TmuxLocator{Window: "@1", Pane: "%1"},
+					},
+				},
+			},
+		},
+		PendingStatusWrites: []PendingStatusWrite{},
+		Settings:            SettingsOf(minimalSettingsConfig(t)),
+	})
+}
+
+// golden pins one response's wire shape: Go writes it (`-update`), and
+// `packages/contracts/src/legion-api.test.ts` parses it through the strict schema of the
+// response it is. A fixture that differs from what Go now writes is stale.
+func golden(t *testing.T, name string, value any) {
+	t.Helper()
+	encoded, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal %s: %v", name, err)
+	}
+	encoded = append(encoded, '\n')
+
+	path := goldenPath(name)
+	if *updateGolden {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("create fixture directory: %v", err)
+		}
+		if err := os.WriteFile(path, encoded, 0o644); err != nil {
+			t.Fatalf("write golden: %v", err)
+		}
+		return
+	}
+
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read golden (run `go test ./internal/api/ -update`): %v", err)
+	}
+	if !bytes.Equal(encoded, want) {
+		t.Fatalf("%s is stale\n got: %s\nwant: %s", name, encoded, want)
+	}
+}
+
+// The register response is what the plugin reads its claim, its secret and the task agents its
+// role's prompts dispatch from.
+func TestRegisterResponseGolden(t *testing.T) {
+	golden(t, "register.json", claim.RegisterResponse{
+		ClaimToken:   "legion-legion-legion-208-architect",
+		Tree:         "LEGION-208",
+		Issue:        "LEGION-208",
+		Role:         claim.RoleArchitect,
+		Generation:   3,
+		Secret:       "U3VwZXJ2aXNlZEJ5TGVnaW9u",
+		PromptAgents: []string{"deep-worker", "oracle", "plan-gap-analyst", "plan-reviewer", "thermonuclear-code-quality", "thermonuclear-deep-review"},
+	})
+}
+
+// The ready request is what the plugin posts once its session can be prompted, with the capability
+// report the session measured while it booted (LEGION-663): the one request body of the claim
+// routes the contract pins, since the report is the one with a shape of its own.
+func TestReadyRequestGolden(t *testing.T) {
+	golden(t, "ready.json", claim.ReadyRequest{
+		ClaimToken: "legion-legion-legion-208-implementer",
+		SessionID:  "ses_implementer_208",
+		Secret:     "U3VwZXJ2aXNlZEJ5TGVnaW9u",
+		Generation: 5,
+		Capabilities: &claim.CapabilityReport{
+			MeasuredAt: time.Date(2026, 10, 10, 2, 18, 59, 0, time.UTC),
+			ElapsedMs:  1200,
+			Rows: []claim.CapabilityRow{
+				{Name: "subagents", OK: true, Detail: "6 task agents discovered: deep-worker, oracle, plan-gap-analyst, plan-reviewer, thermonuclear-code-quality, thermonuclear-deep-review"},
+				{Name: "dispatch-envoy-tools", OK: true, Detail: "dispatch read LEGION-208 answered; envoy_whoami is active"},
+				{Name: "github", OK: false, Detail: "gh api user: HTTP 401: Bad credentials"},
+			},
+		},
+	})
+}
+
+// A session's report shows on its claim as the names it proved and the gaps it did not, each side
+// in the report's order, and both sides are arrays on the wire even when empty: a session that
+// proved every row has `"open": []`, not `null`, under the plugin's strict reader.
+func TestCapabilityReportViewPartitionsTheRowsAndNeverMarshalsNull(t *testing.T) {
+	measured := time.Date(2026, 10, 10, 2, 18, 59, 0, time.UTC)
+	report := capabilities.Report{
+		Claim: "legion-legion-legion-208-implementer", Generation: 5, MeasuredAt: measured,
+		Locator: runtime.Locator{Runtime: runtime.RuntimeSandbox, Claim: "legion-legion-legion-208-implementer", Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/5"},
+		Rows: []capabilities.Row{
+			{Name: capabilities.Subagents, OK: true, Detail: "6 task agents discovered"},
+			{Name: capabilities.WebSearch, Detail: "web_search is not an active tool"},
+			{Name: capabilities.MCP, OK: true, Detail: "no MCP server is configured"},
+			{Name: capabilities.GitHub, Detail: "gh api user: HTTP 401: Bad credentials"},
+		},
+	}
+	want := &CapabilityReportView{
+		MeasuredAt:  measured,
+		Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/5",
+		OK:          []string{"subagents", "mcp"},
+		Open: []CapabilityGap{
+			{Name: "web-search", Detail: "web_search is not an active tool"},
+			{Name: "github", Detail: "gh api user: HTTP 401: Bad credentials"},
+		},
+	}
+	if got := CapabilityReportViewOf(report); !reflect.DeepEqual(got, want) {
+		t.Fatalf("CapabilityReportViewOf = %#v, want %#v", got, want)
+	}
+
+	allOK := CapabilityReportViewOf(capabilities.Report{Rows: []capabilities.Row{{Name: capabilities.Subagents, OK: true}}})
+	encoded, err := json.Marshal(allOK)
+	if err != nil {
+		t.Fatalf("marshal the view: %v", err)
+	}
+	if !bytes.Contains(encoded, []byte(`"open":[]`)) {
+		t.Fatalf("view = %s, want an empty open array", encoded)
+	}
+	noneOK := CapabilityReportViewOf(capabilities.Report{Rows: []capabilities.Row{{Name: capabilities.Subagents, Detail: "no task agent discovered"}}})
+	if encoded, err = json.Marshal(noneOK); err != nil {
+		t.Fatalf("marshal the view: %v", err)
+	}
+	if !bytes.Contains(encoded, []byte(`"ok":[]`)) {
+		t.Fatalf("view = %s, want an empty ok array", encoded)
+	}
+}
+
+// A session that registered with the controller capability learns the project's controller token
+// and role, the capability's generation, and its registration's secret — no tree and no issue.
+func TestControllerRegisterResponseGolden(t *testing.T) {
+	golden(t, "register-controller.json", ControllerRegisterResponse{
+		ClaimToken: "legion-legion-controller",
+		Role:       claim.RoleController,
+		Generation: 2,
+		Secret:     "Q29udHJvbGxlZEJ5TGVnaW9u",
+	})
+}
+
+// What `legion controller start` fetches with the operator's bearer.
+func TestControllerSecretResponseGolden(t *testing.T) {
+	golden(t, "controller-secret.json", ControllerSecretResponse{Secret: "Q2FwYWJpbGl0eUZvclRoZUNvbnRyb2xsZXI", DesignGate: config.DesignGateRootIssues})
+}
+
+// What `legion controller start` fetches for the review App's read-only tokens, one per owner,
+// each rendered as the two files `gh` reads.
+func TestControllerCredentialResponseGolden(t *testing.T) {
+	expiresAt := time.Date(2026, 9, 22, 10, 15, 2, 0, time.UTC)
+	acme := ghconfig.Render("ghs_placeholder_acme_token", "review", expiresAt)
+	sjawhar := ghconfig.Render("ghs_placeholder_sjawhar_token", "review", expiresAt)
+	golden(t, "controller-github-credential.json", ControllerCredentialResponse{
+		Owners: map[string]ControllerOwnerCredential{
+			"acme":    {Hosts: acme.Hosts, Config: acme.Config},
+			"sjawhar": {Hosts: sjawhar.Hosts, Config: sjawhar.Config},
+		},
+		Default:   "acme",
+		App:       "review",
+		ExpiresAt: expiresAt.UTC().Format(timeFormat),
+	})
+}
+
+// Every refusal a route answers is one sentence under `error`.
+func TestErrorResponseGolden(t *testing.T) {
+	golden(t, "error.json", claim.SameAgentRefusal)
+}
+
+// operatorClaim carries every optional an operator's view of a claim has.
+func operatorClaim() OperatorClaim {
+	delivered := time.Date(2026, 9, 22, 9, 31, 4, 0, time.UTC)
+	return OperatorClaim{
+		Token:       "legion-legion-legion-209-implementer",
+		Tree:        "LEGION-208",
+		Issue:       "LEGION-209",
+		Role:        claim.RoleImplementer,
+		Generation:  2,
+		State:       "working",
+		Session:     "ses_implementer_209",
+		SessionFile: "/srv/legion/state/home/.omp/agent/sessions/ses_implementer_209.jsonl",
+		Locator: &runtime.Locator{
+			Runtime:     runtime.RuntimeTmux,
+			Claim:       "legion-legion-legion-209-implementer",
+			Incarnation: "40217:9551230",
+			Tmux:        &runtime.TmuxLocator{Window: "@7", Pane: "%23"},
+		},
+		Budgets:         BudgetsView{LaunchFailures: 1, Deaths: 1, PromptFailures: 0, PromptRetires: 0},
+		UncertainStreak: 0,
+		Pending: &DeliveryView{
+			ID:          "OVXA3ZC6BPIKTOQHKXHRZ7TYVB",
+			Task:        "Implement the plan in .legion/plan.json.",
+			QueuedAt:    time.Date(2026, 9, 22, 9, 30, 58, 0, time.UTC),
+			DeliveredAt: &delivered,
+			ConfirmedAt: &delivered,
+			Interrupted: true,
+		},
+		SuspensionHeld: true,
+	}
+}
+
+// What the spawn, deliver, suspend, resume, and stop routes answer.
+func TestOperatorClaimGolden(t *testing.T) {
+	golden(t, "operator-claim.json", operatorClaim())
+}
+
+func TestForgetSessionOperatorClaimGolden(t *testing.T) {
+	golden(t, "operator-forget-session.json", OperatorClaim{
+		Token:                "legion-legion-legion-208-architect",
+		Tree:                 "LEGION-208",
+		Issue:                "LEGION-208",
+		Role:                 claim.RoleArchitect,
+		Generation:           4,
+		State:                "failed",
+		ForgottenSession:     "ses_architect",
+		ForgottenSessionFile: "/sessions/ses_architect.jsonl",
+		Budgets:              BudgetsView{LaunchFailures: 3},
+		UncertainStreak:      0,
+		PluginContract:       38,
+	})
+}
+
+// What the list route answers: a queued claim carries no locator and no delivery yet.
+func TestOperatorClaimsGolden(t *testing.T) {
+	golden(t, "operator-claims.json", OperatorClaims{Claims: []OperatorClaim{
+		{
+			Token:      "legion-legion-legion-208-architect",
+			Tree:       "LEGION-208",
+			Issue:      "LEGION-208",
+			Role:       claim.RoleArchitect,
+			Generation: 0,
+			State:      "queued",
+		},
+		operatorClaim(),
+	}})
+}
+
+// An issue the daemon has admitted but not yet given a worker still has to answer the plugin's
+// strict reader: `workers` is an object, never `null`.
+func TestIssueWithoutWorkersMarshalsAnEmptyObject(t *testing.T) {
+	encoded, err := json.Marshal(Issue{Key: "LEGION-209", Phase: phase.Held})
+	if err != nil {
+		t.Fatalf("marshal issue: %v", err)
+	}
+	if !bytes.Contains(encoded, []byte(`"workers":{}`)) {
+		t.Fatalf("issue = %s, want an empty workers object", encoded)
+	}
+}
+
+// Every Task 3.10 route has a fixture. The TypeScript Go-daemon client parses these exact
+// responses, so adding a route cannot quietly leave its wire shape undocumented.
+func TestTask310RouteGoldens(t *testing.T) {
+	golden(t, "grant.json", GrantResponse{
+		GrantID: "grant-for-one-command", ExpiresAt: "2026-09-23T12:01:00Z",
+	})
+	golden(t, "handoff-complete.json", HandoffCompleteResponse{Note: "pull request #312 is already merged, so READY was published without reading its head's handoffs"})
+	golden(t, "issue-status.json", IssueStatusResponse{})
+	golden(t, "gate-register.json", GateRegisterResponse{})
+	golden(t, "wave-release.json", WaveReleaseResponse{Released: []string{"LEGION-209"}})
+	golden(t, "phase-backward.json", PhaseBackwardResponse{})
+	golden(t, "phase-retry.json", PhaseRetryResponse{})
+	golden(t, "signoff.json", SignOffResponse{})
+	golden(t, "root-close.json", EmptyResponse{})
+	golden(t, "child-park.json", EmptyResponse{})
+	golden(t, "child-rerun.json", EmptyResponse{})
+}

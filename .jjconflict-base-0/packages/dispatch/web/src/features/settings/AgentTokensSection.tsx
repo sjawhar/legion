@@ -1,0 +1,399 @@
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { type FormEvent, type ReactNode, useState } from "react";
+
+import { api } from "../../api/client";
+import type { AgentToken, CreatedAgentToken } from "../../api/types";
+import { QueryError } from "../../components/QueryError";
+import { useCopyFeedback } from "../../hooks/useCopyFeedback";
+import { compareTimestamps } from "../../lib/timestamps";
+import {
+  borderDefault,
+  card,
+  dangerHoverText,
+  dangerText,
+  inputClasses,
+  primaryButtonBg,
+  primaryButtonHoverBg,
+  successText,
+  surfaceMutedBg,
+  textMutedOnCanvas,
+  textMutedOnSurface,
+  textPrimaryOnCanvas,
+  textPrimaryOnSurface,
+  textSecondaryOnCanvas,
+  textSecondaryOnSurface,
+} from "../../theme/classes";
+import { Timestamp } from "../refs/Timestamp";
+import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
+import {
+  settingsSubmitButton,
+  settingsTableHead,
+  settingsTableRow,
+  settingsTableWrapper,
+} from "./classes";
+
+const agentTokensQueryKey = ["agent-tokens"] as const;
+
+/** A mint Dispatch made and lost the answer to: the label it was pressed with, the tokens already
+ *  listed under any label when it was pressed (`before`), and whether the token list has been read
+ *  again since. */
+interface LostMint {
+  readonly label: string;
+  readonly before: readonly string[];
+  readonly listed: boolean;
+}
+
+/** The live tokens labelled `label` that were not listed at the press, newest first: the tokens
+ *  the lost mint can be. Read by id rather than by time, since the browser's clock and the
+ *  database's need not agree. */
+function lostTokens(
+  tokens: readonly AgentToken[] | undefined,
+  { before, label }: LostMint
+): AgentToken[] {
+  return (tokens ?? [])
+    .filter(
+      (token) => token.name === label && token.revoked_at === null && !before.includes(token.id)
+    )
+    .sort((a, b) => compareTimestamps(b.created_at, a.created_at));
+}
+
+export function AgentTokensSection(): ReactNode {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState("");
+  const [shownToken, setShownToken] = useState<CreatedAgentToken>();
+  /** When the token list was last read again after a mint whose answer was lost. */
+  const [rereadAt, setRereadAt] = useState<number | undefined>(undefined);
+  const { copy, reset: resetCopyStatus, status: copyStatus } = useCopyFeedback();
+  const tokens = useQuery({ queryKey: agentTokensQueryKey, queryFn: () => api.listAgentTokens() });
+  // The form shows a refused mint beside the name it was refused over.
+  const createToken = useKeyedWrite({
+    inline: true,
+    label: (input: { name: string; before: readonly string[] }) => `New agent token ${input.name}`,
+    write: ({ name: label }, bounds) => api.createAgentToken({ name: label }, bounds),
+    onSuccess: (created) => {
+      setName("");
+      if (created === null) {
+        // Minted, and its value - shown once only - is gone with the answer
+        // (`createToken.unanswered`): the token is listed once the list is read again, and the
+        // reader can replace it.
+        setShownToken(undefined);
+        void queryClient
+          .invalidateQueries({ queryKey: agentTokensQueryKey })
+          .then(() => setRereadAt(Date.now()));
+        return;
+      }
+      const { token, ...safeToken } = created;
+      queryClient.setQueryData<AgentToken[]>(agentTokensQueryKey, (current = []) => [
+        safeToken,
+        ...current,
+      ]);
+      setShownToken(created);
+      resetCopyStatus();
+    },
+  });
+  const revokeToken = useKeyedWrite({
+    label: (id: string) => `Agent token ${id} revoked`,
+    write: (id: string, bounds) => api.revokeAgentToken(id, bounds),
+    onSuccess: (_result, id) => {
+      queryClient.setQueryData<AgentToken[]>(agentTokensQueryKey, (current = []) =>
+        current.map((token) =>
+          token.id === id ? { ...token, revoked_at: new Date().toISOString() } : token
+        )
+      );
+    },
+  });
+  /** Every token the page lists now, read at a press. */
+  const listedIds = () => (tokens.data ?? []).map((token) => token.id);
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    // An emptied form - a mint that landed - sends nothing, whatever submits it.
+    if (name.trim() === "") return;
+    createToken.mutate({ before: listedIds(), name });
+  };
+  /** A mint whose value was lost with its answer, until the next mint or the reader writes
+   *  another label: the press's label and listed tokens, and whether the list has been read
+   *  again since it landed. */
+  const unanswered = createToken.unanswered;
+  const lost: LostMint | null =
+    unanswered === undefined
+      ? null
+      : {
+          before: unanswered.variables.before,
+          label: unanswered.variables.name,
+          listed: rereadAt !== undefined && rereadAt >= unanswered.at,
+        };
+  const candidates = lost === null ? [] : lostTokens(tokens.data, lost);
+  /** Revokes `token` - once the reader confirms it, by its label and when it was made - and then
+   *  mints another under its label. */
+  const replaceLost = (token: AgentToken) => {
+    const made = new Date(token.created_at).toLocaleString();
+    if (
+      !window.confirm(
+        `Revoke “${token.name}”, created ${made}? Agents using it stop working at once, and a new token “${token.name}” is minted in its place.`
+      )
+    ) {
+      return;
+    }
+    revokeToken.mutate(token.id, {
+      onSuccess: () => createToken.mutate({ before: listedIds(), name: token.name }),
+    });
+  };
+  const replacing = revokeToken.isPending || createToken.isPending;
+  const copyToken = () => {
+    if (shownToken === undefined) {
+      return;
+    }
+    copy(shownToken.token);
+  };
+  const revoke = (token: AgentToken) => {
+    if (
+      window.confirm(`Revoke ${token.name}? Agents using this token will stop working immediately.`)
+    ) {
+      revokeToken.mutate(token.id);
+    }
+  };
+
+  return (
+    <section aria-labelledby="agent-tokens-heading">
+      <h2 className={`text-xl font-semibold ${textPrimaryOnCanvas}`} id="agent-tokens-heading">
+        Agent tokens
+      </h2>
+      <p className={`mt-1 text-sm ${textSecondaryOnCanvas}`}>
+        Create a token for an agent you run. Its writes are attributed to you.
+      </p>
+
+      {tokens.isPending ? (
+        <p className={`mt-6 ${textMutedOnCanvas}`}>Loading agent tokens…</p>
+      ) : null}
+      {tokens.isError ? (
+        <div className="mt-6">
+          <QueryError
+            message="Couldn't load agent tokens."
+            onRetry={() => void tokens.refetch()}
+            retrying={tokens.isFetching}
+          />
+        </div>
+      ) : null}
+      {tokens.isSuccess ? (
+        <div className={settingsTableWrapper}>
+          <table className="w-full text-left text-sm">
+            <thead className={settingsTableHead}>
+              <tr>
+                <th className="px-4 py-3 font-semibold" scope="col">
+                  Name
+                </th>
+                <th className="px-4 py-3 font-semibold" scope="col">
+                  Token
+                </th>
+                <th className="px-4 py-3 font-semibold" scope="col">
+                  Created
+                </th>
+                <th className="px-4 py-3 font-semibold" scope="col">
+                  Last used
+                </th>
+                <th className="px-4 py-3" scope="col">
+                  <span className="sr-only">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {tokens.data.length === 0 ? (
+                <tr>
+                  <td className={`px-4 py-5 ${textMutedOnSurface}`} colSpan={5}>
+                    No agent tokens yet.
+                  </td>
+                </tr>
+              ) : (
+                tokens.data.map((token) => (
+                  <tr className={settingsTableRow} key={token.id}>
+                    <td className={`px-4 py-3 font-medium ${textPrimaryOnSurface}`}>
+                      {token.name}
+                    </td>
+                    <td className={`px-4 py-3 font-mono ${textSecondaryOnSurface}`}>
+                      {`dsp_${token.prefix}…`}
+                    </td>
+                    <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>
+                      <Timestamp at={token.created_at} />
+                    </td>
+                    <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>
+                      {token.last_used_at === null ? (
+                        "Never used"
+                      ) : (
+                        <Timestamp at={token.last_used_at} />
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      {token.revoked_at === null ? (
+                        <button
+                          aria-label={`Revoke ${token.name}`}
+                          className={`min-h-11 px-2 font-medium disabled:cursor-not-allowed disabled:opacity-50 ${dangerText} ${dangerHoverText}`}
+                          disabled={revokeToken.isPending}
+                          onClick={() => revoke(token)}
+                          type="button"
+                        >
+                          Revoke
+                        </button>
+                      ) : (
+                        <span className={textMutedOnSurface}>Revoked</span>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+
+      <form
+        className={`mt-6 flex flex-col gap-3 rounded-xl border p-4 sm:flex-row sm:items-end ${borderDefault}`}
+        onSubmit={submit}
+      >
+        <label
+          className={`grid flex-1 gap-1 text-sm font-medium ${textSecondaryOnCanvas}`}
+          htmlFor="agent-token-name"
+        >
+          Token label
+          <input
+            className={`min-h-11 rounded-md px-3 py-2 ${inputClasses(false)} ${textPrimaryOnSurface}`}
+            id="agent-token-name"
+            onChange={(event) => {
+              createToken.forgetUnanswered();
+              setName(event.target.value);
+            }}
+            placeholder="Architect"
+            required
+            value={name}
+          />
+        </label>
+        <button className={settingsSubmitButton} disabled={createToken.isPending} type="submit">
+          New token
+        </button>
+      </form>
+      {lost === null ? null : (
+        <div className="mt-4 space-y-2">
+          <LandedWithoutAnswer what={`Token “${lost.label}”`}>
+            Its value is shown only once and was lost with the answer, so revoke it and mint
+            another.
+          </LandedWithoutAnswer>
+          {!lost.listed ? (
+            <p className={`text-sm ${textMutedOnCanvas}`} role="status">
+              Looking for it…
+            </p>
+          ) : candidates.length === 0 ? (
+            <p className={`text-sm ${textSecondaryOnCanvas}`} role="status">
+              No live token “{lost.label}” made since you pressed New token is listed, so none was
+              revoked.
+            </p>
+          ) : candidates.length === 1 ? (
+            <button
+              className={settingsSubmitButton}
+              disabled={replacing}
+              onClick={() => candidates[0] !== undefined && replaceLost(candidates[0])}
+              type="button"
+            >
+              Revoke it and mint another
+            </button>
+          ) : (
+            <>
+              <p className={`text-sm ${textSecondaryOnCanvas}`}>
+                {candidates.length} live tokens “{lost.label}” were made since you pressed New
+                token. Pick the one to revoke:
+              </p>
+              <ul className="space-y-2">
+                {candidates.map((token) => (
+                  <li key={token.id}>
+                    <button
+                      className={settingsSubmitButton}
+                      disabled={replacing}
+                      onClick={() => replaceLost(token)}
+                      type="button"
+                    >
+                      Revoke the one created {new Date(token.created_at).toLocaleString()}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+      )}
+      {createToken.isError ? (
+        <div className="mt-4">
+          <QueryError
+            message="Couldn't create the agent token."
+            onRetry={() =>
+              createToken.mutate(createToken.variables ?? { name, pressedAt: Date.now() })
+            }
+            retrying={createToken.isPending}
+          />
+        </div>
+      ) : null}
+      {shownToken === undefined ? null : (
+        <div className={`mt-4 rounded-xl border p-4 ${card}`} role="status">
+          <p className={`font-medium ${textPrimaryOnSurface}`}>
+            Copy this token now. It will not be shown again.
+          </p>
+          <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center">
+            <code
+              className={`break-all rounded-md px-3 py-2 select-text ${surfaceMutedBg} ${textPrimaryOnSurface}`}
+            >
+              {shownToken.token}
+            </code>
+            <button
+              className={`min-h-11 rounded-md px-4 py-2 font-medium ${primaryButtonBg} ${primaryButtonHoverBg}`}
+              onClick={copyToken}
+              type="button"
+            >
+              Copy token
+            </button>
+          </div>
+          {copyStatus === "idle" ? null : (
+            <p
+              aria-live="polite"
+              className={`mt-2 text-sm ${copyStatus === "copied" ? successText : dangerText}`}
+            >
+              {copyStatus === "copied" ? "Copied" : "Copy failed - select the text"}
+            </p>
+          )}
+          <p className={`mt-4 text-sm ${textSecondaryOnSurface}`}>
+            Put this in <code>~/.config/legion/envoy.json</code>:
+          </p>
+          <pre
+            className={`mt-2 overflow-x-auto rounded-md p-3 text-sm ${surfaceMutedBg} ${textPrimaryOnSurface}`}
+          >
+            <code>
+              {JSON.stringify(
+                {
+                  dispatch: {
+                    enabled: true,
+                    serverUrl: window.location.origin,
+                    token: shownToken.token,
+                  },
+                },
+                null,
+                2
+              )}
+            </code>
+          </pre>
+          <p className={`mt-2 text-sm ${textSecondaryOnSurface}`}>
+            If the file exists, replace its <code>dispatch</code> section with this one and keep the
+            rest. A session under a named omp profile, or with <code>CLAUDE_CONFIG_DIR</code> or{" "}
+            <code>OPENCODE_CONFIG_DIR</code> set, reads the <code>envoy.json</code> in that
+            directory instead; any other session reads the file <code>ENVOY_CONFIG_FILE</code> names
+            when it is set.
+          </p>
+          <p className={`mt-4 text-sm ${textSecondaryOnSurface}`}>
+            Or set these environment variables:
+          </p>
+          <pre
+            className={`mt-2 overflow-x-auto rounded-md p-3 text-sm ${surfaceMutedBg} ${textPrimaryOnSurface}`}
+          >
+            <code>{`DISPATCH_URL=${window.location.origin}\nDISPATCH_TOKEN=${shownToken.token}`}</code>
+          </pre>
+        </div>
+      )}
+    </section>
+  );
+}

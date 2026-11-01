@@ -1,0 +1,322 @@
+package sandbox
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/claudelaunch"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/launcher"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
+)
+
+// A launcher is accepted only with its own role's current token, from the pod its Secret is bound
+// to, and only while that pod is the issue Sandbox's controller-owned pod: another role's token, a
+// token of an earlier pod, or a pod the binding does not name controls nothing.
+func TestTheLauncherResolverAcceptsOnlyTheBoundRoleOfTheCurrentPod(t *testing.T) {
+	g := newRig(t, nil)
+	loc := g.spawn(workerSpec(t))
+	name := loc.Sandbox.Name
+	token := func(role claim.Role) string {
+		return string(g.secret(roleSecretName(name, role)).Data[LauncherTokenFile])
+	}
+	accept := g.r.LauncherResolver()
+	valid := shimwire.LauncherHello{Token: token(claim.RoleTester), Sandbox: name, Role: string(claim.RoleTester), PodUID: loc.Sandbox.PodUID, LauncherID: "l-1"}
+	if handler, reason := accept(valid); handler == nil {
+		t.Fatalf("the tester's own launcher was refused: %s", reason)
+	}
+	for label, edit := range map[string]func(*shimwire.LauncherHello){
+		"another role's token":            func(h *shimwire.LauncherHello) { h.Token = token(claim.RoleArchitect) },
+		"another role with this token":    func(h *shimwire.LauncherHello) { h.Role = string(claim.RoleArchitect) },
+		"a pod the binding does not name": func(h *shimwire.LauncherHello) { h.PodUID = "uid-pod-elsewhere" },
+		"another issue's Sandbox":         func(h *shimwire.LauncherHello) { h.Sandbox = "legion-legion-legion-209" },
+		"a role Legion does not have":     func(h *shimwire.LauncherHello) { h.Role = "operator" },
+	} {
+		t.Run(label, func(t *testing.T) {
+			hello := valid
+			edit(&hello)
+			if handler, reason := accept(hello); handler != nil || reason == "" {
+				t.Fatalf("accepted %+v (reason %q)", hello, reason)
+			}
+		})
+	}
+}
+
+// conflictSecretUpdates makes the next updates of the Secret named name fail as a conflict, up to
+// times of them, each one after between has rewritten the Secret in the tracker as the write that
+// won the race would have; it counts the conflicts served.
+func conflictSecretUpdates(g *rig, name string, times int32, between func(*corev1.Secret)) *atomic.Int32 {
+	var served atomic.Int32
+	g.kube.PrependReactor("update", "secrets", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if a.(k8stesting.UpdateAction).GetObject().(*corev1.Secret).Name != name || served.Load() >= times {
+			return false, nil, nil
+		}
+		served.Add(1)
+		editSecret(g, name, between)
+		return true, nil, apierrors.NewConflict(corev1.Resource("secrets"), name, errors.New("the object has been modified"))
+	})
+	return &served
+}
+
+// A binding write the API server refuses as a conflict — the gh-credential refresher rewrote the
+// role's Secret between the binding's read and its write — is retried once over a fresh read: the
+// launch passes, the Secret binds the new pod and keeps the refresher's gh files, and the pod's
+// launcher is accepted.
+func TestABindingWriteRefusedAsAConflictIsRetriedOnceOverAFreshRead(t *testing.T) {
+	g := newRig(t, nil)
+	spec := workerSpec(t)
+	secret := roleSecretName(SandboxName(spec.Claim), claim.RoleTester)
+	refreshed := ghconfig.Hosts("ghs_refreshed_lease")
+	served := conflictSecretUpdates(g, secret, 1, func(s *corev1.Secret) { s.Data[GitHubHostsKey("sjawhar")] = []byte(refreshed) })
+
+	loc := g.spawn(spec)
+
+	if served.Load() != 1 {
+		t.Fatalf("the conflict reactor served %d conflicts, want the one", served.Load())
+	}
+	after := g.secret(secret)
+	if after.Annotations[launcherPodUIDAnnotation] != loc.Sandbox.PodUID {
+		t.Errorf("the Secret binds pod %q, want the new pod %q", after.Annotations[launcherPodUIDAnnotation], loc.Sandbox.PodUID)
+	}
+	if string(after.Data[GitHubHostsKey("sjawhar")]) != refreshed {
+		t.Errorf("the retry wrote over the gh files written between read and write: %q", after.Data[GitHubHostsKey("sjawhar")])
+	}
+	hello := shimwire.LauncherHello{Token: string(after.Data[LauncherTokenFile]), Sandbox: loc.Sandbox.Name, Role: string(claim.RoleTester), PodUID: loc.Sandbox.PodUID, LauncherID: "l-1"}
+	if handler, reason := g.r.LauncherResolver()(hello); handler == nil {
+		t.Errorf("the bound pod's launcher was refused: %s", reason)
+	}
+}
+
+// A binding write that conflicts again on its retry fails the launch with the conflict, as any other
+// write failure does: the bind is retried once, not until it lands.
+func TestABindingWriteConflictedTwiceFailsTheLaunch(t *testing.T) {
+	g := newRig(t, nil)
+	spec := workerSpec(t)
+	secret := roleSecretName(SandboxName(spec.Claim), claim.RoleTester)
+	served := conflictSecretUpdates(g, secret, 2, func(s *corev1.Secret) {
+		s.Data[GitHubHostsKey("sjawhar")] = []byte(ghconfig.Hosts("ghs_refreshed_lease"))
+	})
+	g.launcher(spec.Claim)
+
+	err := failedLaunch(t, g, spec)
+
+	if err == nil || !strings.Contains(err.Error(), "bind its role launchers to the new pod") || !apierrors.IsConflict(err) {
+		t.Fatalf("Spawn = %v, want the launch failed on the binding's conflict", err)
+	}
+	if served.Load() != 2 {
+		t.Fatalf("the conflict reactor served %d conflicts, want the write and its one retry", served.Load())
+	}
+}
+
+// A launcher's own hello is accepted even when the runtime's configured project
+// (Options.Project, the legion.dev/project label's value) carries characters a claim token
+// drops: ProjectToken strips everything outside [a-z0-9] (LEGION-565's claim.ProjectToken), and
+// a project naming a claim or a Sandbox must go through it first. A deployment's own project
+// name may carry such characters (claim.ProjectToken's doc: "sjawhar/legion" names the same role
+// topics under either daemon), and Stage 4a's root-ready configures Options.Project with the
+// run's own dashed label while its claim tokens use the stripped form the same way, which is
+// this test's scenario (LEGION-462 e2e: scripts/e2e/stage4a-sandbox-runtime.sh's root-ready).
+func TestALauncherHelloIsAcceptedWhenTheConfiguredProjectCarriesCharactersAClaimTokenDrops(t *testing.T) {
+	dashed := "s4a-dashed-project"
+	normalized, err := claim.ProjectToken(dashed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := newRig(t, nil, withOptions(func(o *Options) { o.Project = dashed }))
+	token, err := claim.NewToken(normalized, testTree, claim.RoleArchitect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := testSpec(t, token, claim.RoleArchitect, testTree)
+	spec.Project = normalized
+	loc := g.spawn(spec)
+	name := loc.Sandbox.Name
+	hello := shimwire.LauncherHello{
+		Token:      string(g.secret(roleSecretName(name, claim.RoleArchitect)).Data[LauncherTokenFile]),
+		Sandbox:    name,
+		Role:       string(claim.RoleArchitect),
+		PodUID:     loc.Sandbox.PodUID,
+		LauncherID: "l-1",
+	}
+	if handler, reason := g.r.LauncherResolver()(hello); handler == nil {
+		t.Fatalf("the architect's own launcher, of a project whose label carries characters its claim token drops, was refused: %s", reason)
+	}
+}
+
+// A start of a new generation while the role's launcher still runs an earlier one stops the
+// earlier one first: two generations of one role never run side by side in the issue pod.
+func TestANewGenerationStopsTheEarlierOneFirst(t *testing.T) {
+	g := newRig(t, nil)
+	g.spawn(workerSpec(t))
+	spec := workerSpec(t)
+	spec.Generation, spec.BootToken = 2, "boot-g2"
+	g.spawn(spec)
+	var got []string
+	for _, frame := range g.sent(workerToken) {
+		switch command := frame.(type) {
+		case shimwire.LauncherStart:
+			got = append(got, fmt.Sprintf("start %d", command.Generation))
+		case shimwire.LauncherStop:
+			got = append(got, fmt.Sprintf("stop %d", command.Generation))
+		}
+	}
+	if strings.Join(got, ", ") != "start 1, stop 1, start 2" {
+		t.Fatalf("the tester's launcher was sent %v, want generation 1 stopped before 2 starts", got)
+	}
+}
+
+// Every role's launcher token projection, private credential directory, state directory,
+// agent-secrets key directory and gh volume are mounted once, in the pod's one container under that
+// role's own directory of RolesDir, which only that role's namespace binds back (`legion launcher
+// role-init`); no init container mounts any of them, so neither can read a role's credentials, the
+// GitHub App token in its gh files included. The issue's checkout, tree and sessions are what roles
+// share. The gh volume projects each owner's two gh keys of the role Secret as the files gh reads,
+// <owner>/hosts.yml and <owner>/config.yml, and the launcher volume the launcher token alone; the
+// launching role's agent is told, in its start command, the default owner's directory as
+// GH_CONFIG_DIR, the volume as LEGION_GH_OWNERS_DIR and the image's real gh as LEGION_GH_PATH.
+func TestEveryRolesPrivateVolumesMountInItsContainerAlone(t *testing.T) {
+	opts := goldenOptions()
+	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := launchOf(t, r, rootSpec(t))
+	pod := r.podTemplate(l).Spec
+	containers := append(slices.Clone(pod.InitContainers), pod.Containers...)
+	for _, role := range claim.Roles {
+		for volume, dir := range map[string]string{
+			roleVolume("launcher", role): launcher.RoleLauncherDir, roleVolume("private", role): launcher.RolePrivateDir, roleVolume(stateVolume, role): launcher.RoleStateDir,
+			roleVolume(agentSecretsKeyVolume, role): launcher.RoleAgentSecretsDir, roleVolume("gh", role): launcher.RoleGHDir,
+		} {
+			var mountedAt []string
+			for _, c := range containers {
+				for _, m := range c.VolumeMounts {
+					if m.Name == volume {
+						mountedAt = append(mountedAt, c.Name+":"+m.MountPath)
+					}
+				}
+			}
+			if want := workerContainer + ":" + roleDir(role) + "/" + dir; len(mountedAt) != 1 || mountedAt[0] != want {
+				t.Errorf("%s is mounted at %v, want %s alone", volume, mountedAt, want)
+			}
+		}
+	}
+	volumes := map[string]corev1.Volume{}
+	for _, v := range pod.Volumes {
+		volumes[v.Name] = v
+	}
+	for _, role := range claim.Roles {
+		token := volumes[roleVolume("launcher", role)].Secret
+		if token == nil || len(token.Items) != 1 || token.Items[0].Key != LauncherTokenFile {
+			t.Errorf("%s's launcher volume projects %+v, want only the launcher token", role, token)
+		}
+		gh := volumes[roleVolume("gh", role)].Secret
+		var want []corev1.KeyToPath
+		for _, owner := range staticOwners {
+			want = append(want, corev1.KeyToPath{Key: GitHubHostsKey(owner), Path: owner + "/" + ghconfig.HostsFile},
+				corev1.KeyToPath{Key: GitHubConfigKey(owner), Path: owner + "/" + ghconfig.ConfigFile})
+		}
+		if gh == nil || gh.SecretName != roleSecretName(l.name, role) || !slices.Equal(gh.Items, want) || gh.DefaultMode == nil || *gh.DefaultMode != 0o440 {
+			t.Errorf("%s's gh volume projects %+v, want %s's %+v, read-only", role, gh, roleSecretName(l.name, role), want)
+		}
+		mount := mountHolding(containerNamed(t, pod, workerContainer), roleDir(role)+"/"+launcher.RoleGHDir)
+		if mount == nil || mount.Name != roleVolume("gh", role) || !mount.ReadOnly {
+			t.Errorf("the container mounts %+v at %s's gh directory, want its gh volume read-only", mount, role)
+		}
+	}
+	start := map[string]string{}
+	for _, entry := range launcherCommand(l, r).Env {
+		name, value, _ := strings.Cut(entry, "=")
+		start[name] = value
+	}
+	for name, want := range map[string]string{
+		"GH_CONFIG_DIR": GHConfigDir + "/sjawhar", "LEGION_GH_OWNERS_DIR": GHConfigDir, "LEGION_GH_PATH": opts.Tools.GH,
+	} {
+		if start[name] != want {
+			t.Errorf("the launching role's agent is told %s=%q, want %q", name, start[name], want)
+		}
+	}
+}
+
+func TestRejectedLauncherHellosDoNotSpendKubernetesRequests(t *testing.T) {
+	g := newRig(t, nil)
+	loc := g.spawn(workerSpec(t))
+	accept := g.r.LauncherResolver()
+	g.kube.ClearActions()
+	for range 20 {
+		for _, name := range []string{loc.Sandbox.Name, "unknown-sandbox"} {
+			if handler, reason := accept(shimwire.LauncherHello{
+				Token: "wrong-token", Sandbox: name, Role: "tester", PodUID: loc.Sandbox.PodUID, LauncherID: "attacker",
+			}); handler != nil || reason == "" {
+				t.Fatal("unauthenticated launcher was accepted")
+			}
+		}
+	}
+	for _, action := range g.kube.Actions() {
+		if action.GetVerb() == "get" && action.GetResource().Resource == "secrets" {
+			t.Fatal("unauthenticated launcher hello issued a Kubernetes Secret GET")
+		}
+	}
+}
+
+// A Claude Code launch's start command carries one file beside its credentials: the MCP document
+// its agent command reads, naming the image's bun and the claude-envoy server it runs, with the
+// plugin's data under the role's own Claude Code directory. It travels in Files and not in the
+// spec's secrets, which would point a `<NAME>_FILE` variable at it and be refused for its name
+// besides. An Oh My Pi launch carries no such file.
+func TestAClaudeLaunchCarriesItsMCPDocumentAsALauncherFile(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := claudeWorkerSpec(t)
+	start := launcherCommand(launchOf(t, r, spec), r)
+	raw, carried := start.Files[claudeMCPFile]
+	if !carried {
+		t.Fatalf("the start command carries the files %v, want %s among them", slices.Sorted(maps.Keys(start.Files)), claudeMCPFile)
+	}
+	var document struct {
+		MCPServers map[string]struct {
+			Command string
+			Args    []string
+			Env     map[string]string
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(raw), &document); err != nil {
+		t.Fatalf("the MCP document %q: %v", raw, err)
+	}
+	server, named := document.MCPServers[claudelaunch.MCPServer]
+	if !named || server.Command != "/usr/local/bin/bun" ||
+		!slices.Equal(server.Args, []string{"/opt/legion/claude-envoy/dist/envoy-channel.js"}) ||
+		server.Env["CLAUDE_PLUGIN_DATA"] != claudeConfigDir(spec.Role)+"/envoy-plugin-data" {
+		t.Errorf("the MCP document is %q, want the image's bun running the claude-envoy server with its data under %s", raw, claudeConfigDir(spec.Role))
+	}
+	if got := slices.Index(start.Argv, "--mcp-config"); got < 0 || start.Argv[got+1] != generationDir(spec.Generation)+"/"+claudeMCPFile {
+		t.Errorf("the start command's argv %q does not read the document where the launcher writes it", start.Argv)
+	}
+	// Had the document travelled in spec.Secrets, the worker would be told a `<NAME>_FILE`
+	// pointer at it (mainEnvironment), and ValidateSpawnSpec would refuse the name besides.
+	for _, pair := range start.Env {
+		if name, value, _ := strings.Cut(pair, "="); value == generationDir(spec.Generation)+"/"+claudeMCPFile {
+			t.Errorf("the worker is told %s=%s, the pointer every launch secret gets", name, value)
+		}
+	}
+	omp := launcherCommand(launchOf(t, r, workerSpec(t)), r)
+	if _, carried := omp.Files[claudeMCPFile]; carried {
+		t.Errorf("an Oh My Pi launch carries %s: %v", claudeMCPFile, slices.Sorted(maps.Keys(omp.Files)))
+	}
+}

@@ -1,0 +1,9 @@
+---
+title: Claude Code plugin
+parent: legion
+depends_on: [envoy-client, contracts]
+paths: [packages/claude-envoy]
+---
+The Claude Code channel plugin that delivers Envoy and Dispatch traffic into Claude Code sessions. Its `dist/` bundles the envoy-client `dispatch` command, so a change there, such as `dispatch search` printing each ask hit's answer state, reaches Claude Code only with `dist/` rebuilt. It dials NATS with the client's shared connection options (a ping every 10 s, so a frozen path is left within 30 s), runs the catch-up of missed messages (`POST /v1/replay`) on each reconnect, and registers as `plugin` `@sjawhar/claude-envoy` with the install's commit (the version directory Claude Code's plugin cache holds it under) as `plugin_version`, or `source` outside the plugin cache. Its session hooks add context at every session start, resume, compaction and subagent start: the session's open asks, the `dispatch-first` skill, and what people wrote to the session in the last 72 hours, read from Dispatch's `GET /api/v1/agents/{session_id}/answers` through `@legion/envoy-client/session-answers` within 800 ms of the hook's start, a subagent reading its parent's. A test runs the Claude Code release `.claude-code-pin` pins against a stand-in model and Dispatch.
+
+The channel-server process mints one client instance id when it starts and sends it on every registration and on each deregistration, so a `/clear` handoff removes the old session's registry entry only while that entry is still this process's. Its role claims are soft and name the session they continue, and the listener grants one only when that predecessor has no live entry, when its live entry carries this process's instance id, or when either side carries no instance id. A refusal that names the predecessor itself keeps that session's role record, because the record belongs to the live holder. A refusal naming any other session removes it.

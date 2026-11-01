@@ -1,0 +1,20 @@
+-- 0052_broadcast_recipient_order.up.sql
+-- Each message of one broadcast receives the zero-based position it occupied after Dispatch
+-- resolved the sender's requested sessions. The broadcast reader can therefore return recipient
+-- cards in the order the human named them, rather than falling back to message UUIDs that happen
+-- to sort differently.
+--
+-- The column stays nullable during a rolling deploy. An old Dispatch server can still create
+-- broadcast messages while this migration is live, and it does not write a position; readers put
+-- those legacy rows after positioned ones and retain their created_at and id fallback order. The
+-- original request order was never stored for those rows, so there is nothing to backfill.
+--
+-- The migration builds no index, so it takes no write lock for the length of an index build: the
+-- runner applies each file in one transaction, and an ordinary index build on the hot messages
+-- table would hold writes until that transaction commits. The ADD COLUMN is metadata-only, but it
+-- still takes a brief ACCESS EXCLUSIVE lock on messages, and every read and write of messages
+-- queues behind the request for it while it waits. The runner bounds that wait at
+-- pgmigrate.LockTimeout (five seconds) on every migration it applies, so a migration queued
+-- behind a long transaction on messages fails the deploy, naming the lock, instead of holding
+-- every caller of messages behind it for as long as that transaction lives.
+alter table messages add column broadcast_position integer;

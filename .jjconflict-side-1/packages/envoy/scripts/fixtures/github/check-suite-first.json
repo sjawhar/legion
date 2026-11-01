@@ -1,0 +1,17 @@
+{
+  "action": "completed",
+  "check_suite": {
+    "id": 1001,
+    "status": "completed",
+    "conclusion": "success",
+    "head_sha": "1111111111111111111111111111111111111111",
+    "app": { "id": 1 },
+    "pull_requests": [{ "number": 42 }]
+  },
+  "sender": { "login": "octocat", "type": "User" },
+  "repository": {
+    "name": "example-repo",
+    "full_name": "example-org/example-repo",
+    "owner": { "login": "example-org" }
+  }
+}

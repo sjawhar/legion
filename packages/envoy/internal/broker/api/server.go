@@ -21,18 +21,20 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/proof"
-	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/ratelimit"
 )
 
 type Deps struct {
 	PublicURL string
 	// APIAccounts is BROKER_API_ACCOUNTS: the ServiceAccount subject of each listed caller of the
-	// routes accountAuth authenticates, answering the caller's name. A subject it does not name
-	// is refused, so an account taken off it stops calling as soon as the broker reads it again.
-	APIAccounts map[string]string
+	// routes accountAuth authenticates, answering that caller — its name and the powers its name
+	// carries (AccountFor, which is the only way to build one). A subject it does not name is
+	// refused, so an account taken off it stops calling as soon as the broker reads it again, and
+	// a listed caller reaches only the routes whose power it holds.
+	APIAccounts map[string]Account
 	// AccountTokens verifies those callers' projected ServiceAccount tokens, against the same
 	// Kubernetes issuer and audience a pod enrolls with (cmd/broker passes the one verifier it
 	// builds). Nil is a broker that trusts no Kubernetes issuer, where every such route refuses
@@ -89,7 +91,8 @@ type Deps struct {
 	// balancer. See limits.go's clientAddress.
 	TrustedProxyHeader string
 	// OAuth is the machine login's OAuth provider and the token exchange. POST
-	// /v1/oauth/device_authorization, POST /v1/oauth/token and POST /v1/oauth/introspect are
+	// /v1/oauth/device_authorization, POST /v1/oauth/token, POST /v1/oauth/introspect, POST
+	// /v1/oauth/revoke and POST /v1/oauth/exchange/pod-sessions are
 	// mounted only when it is set, with DeviceLogin and both TokenHooks, which it then requires
 	// (Register panics without them).
 	OAuth *oauth.Provider
@@ -177,7 +180,7 @@ func Register(mux *http.ServeMux, deps Deps) {
 			continue
 		}
 		mux.HandleFunc(route.Method+" "+route.Pattern, func(w http.ResponseWriter, r *http.Request) {
-			who, ok := s.authenticate(w, r, route.Handler.auth)
+			who, ok := s.authenticate(w, r, route)
 			if !ok {
 				return
 			}
@@ -196,13 +199,17 @@ const (
 	signInRoutes   = "/signin/"
 )
 
-// authenticate proves who r comes from, as auth requires, or writes the refusal. A bad or missing
-// credential is a 401; a store that cannot answer is a 503 naming it, never mistaken for a bad
-// credential. A route a ServiceAccount token authenticates first spends its source address's
-// bucket (DefaultAccountLimit), a refusal being 429 RATE_LIMITED with Retry-After, so a flood of
-// forged tokens past that bucket costs no verification and no fetch of the issuer's keys. The
+// authenticate proves who r comes from, as route's authentication requires, or writes the
+// refusal. A bad or missing credential is a 401; a store that cannot answer is a 503 naming it,
+// never mistaken for a bad credential. A route a ServiceAccount token authenticates — one a
+// listed caller's token does (accountAuth) and one a service's own login token does
+// (serviceAuth) — first spends its source address's bucket (DefaultAccountLimit), a refusal
+// being 429 RATE_LIMITED with Retry-After, so a flood of forged tokens past that bucket costs no
+// verification and no fetch of the issuer's keys; a listed caller must then hold the power its
+// row declares, and a service's token must name an account BROKER_SERVICE_LOGINS lists. The
 // approval page's routes spend that same bucket, for the same reason: see the authSignIn case.
-func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth routeAuth) (caller, bool) {
+func (s *server) authenticate(w http.ResponseWriter, r *http.Request, route apiRoute) (caller, bool) {
+	auth := route.Handler.auth
 	switch auth {
 	case authNone:
 		return caller{}, true
@@ -210,7 +217,25 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth route
 		if s.refuseAccountAddress(w, r) {
 			return caller{}, false
 		}
-		return s.accountCaller(w, r)
+		who, ok := s.accountCaller(w, r)
+		if !ok {
+			return caller{}, false
+		}
+		// Being listed is not being allowed: the caller's name answers which powers it holds and
+		// this row declares the one it needs, so a caller listed for introspection alone never
+		// relays a person's decision. ACCOUNT_NOT_LISTED and this are different facts — an
+		// account the broker does not know at all, and a known caller reaching past its own
+		// routes — so each has its own code. The refusal names the caller and the route, and
+		// nothing of the token presented.
+		if refuseWithoutPower(w, who.account, route.Handler.power, route.Method+" "+route.Pattern) {
+			return caller{}, false
+		}
+		return who, true
+	case authService:
+		if s.refuseAccountAddress(w, r) {
+			return caller{}, false
+		}
+		return s.serviceCaller(w, r)
 	case authSignIn:
 		// The page's routes and the sign-in's spend the bucket the account class spends, so no
 		// caller drives them unmetered either. GET /approve/{record} with no session does one
@@ -224,7 +249,7 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth route
 		// 429, under the page's headers, since a browser is told nothing about a ServiceAccount
 		// token: only the Retry-After is the one refuseAccountAddress would have written.
 		if !s.accountAddressAllows(r) {
-			s.deps.Approval.WriteRateLimited(w, retryAfterSeconds(s.accountLimiter.Every()))
+			s.deps.Approval.WriteRateLimited(w, ratelimit.RetryAfterSeconds(s.accountLimiter.Every()))
 			return caller{}, false
 		}
 		session, ok := s.deps.Approval.Authenticate(w, r)
@@ -258,6 +283,19 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth route
 	return caller{}, false
 }
 
+// refuseWithoutPower writes 403 ACCOUNT_LACKS_POWER and reports true when the listed caller who
+// does not hold needs, the power route declares ("POST /v1/oauth/revoke", the method and the
+// pattern the broker mounted). authenticate calls it for every accountAuth row before the
+// handler runs, and decideRecord for the two rows whose handler authenticates its own caller
+// (accountAuthAfterRecordKind), so one refusal serves both.
+func refuseWithoutPower(w http.ResponseWriter, who Account, needs power, route string) bool {
+	if who.may(needs) {
+		return false
+	}
+	writeError(w, http.StatusForbidden, "ACCOUNT_LACKS_POWER", fmt.Sprintf("the caller %q may not call %s", who.Name, route))
+	return true
+}
+
 // sessionCaller authenticates a session proof for authenticate, answering a proof whose
 // enrollment is no longer live with notLiveCode and notLiveMessage: PROOF_INVALID on every
 // session route but renew, which alone answers ENROLLMENT_NOT_LIVE so a pod renewer can stop.
@@ -283,13 +321,14 @@ func (s *server) sessionCaller(w http.ResponseWriter, r *http.Request, notLiveCo
 }
 
 // accountCaller authenticates a listed caller's own projected ServiceAccount token for
-// authenticate, the credential accountAuth's routes take. It is the check a service's token login
-// makes (machine.Service.VerifyServiceToken), against the same verifier and with the same
-// taxonomy: a broker that trusts no Kubernetes issuer, a token that has expired, one that does
-// not verify, one that lives longer than machine.MaxTokenLoginLifetime from its issue (so a
-// copied token is spendable for at most an hour), and an account BROKER_API_ACCOUNTS does not
-// name. Only the last is a 403: the credential is sound and it is the broker's list that refuses.
-// No refusal repeats the token.
+// authenticate, the credential accountAuth's routes take, and answers the caller the list names
+// it: its name and its powers, which authenticate then checks against the route's. It is the
+// check a service's token login makes (machine.Service.VerifyServiceToken), against the same
+// verifier and with the same taxonomy: a broker that trusts no Kubernetes issuer, a token that
+// has expired, one that does not verify, one that lives longer than
+// machine.MaxTokenLoginLifetime from its issue (so a copied token is spendable for at most an
+// hour), and an account BROKER_API_ACCOUNTS does not name. Only the last is a 403: the
+// credential is sound and it is the broker's list that refuses. No refusal repeats the token.
 func (s *server) accountCaller(w http.ResponseWriter, r *http.Request) (caller, bool) {
 	if s.deps.AccountTokens == nil {
 		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKENS_OFF", "this broker trusts no Kubernetes token issuer, so no caller authenticates with a ServiceAccount token")
@@ -310,12 +349,43 @@ func (s *server) accountCaller(w http.ResponseWriter, r *http.Request) (caller, 
 		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_TOO_LONG_LIVED", "the ServiceAccount token lives longer than an hour from its issue")
 		return caller{}, false
 	}
-	name, listed := s.deps.APIAccounts[claims.Subject]
+	account, listed := s.deps.APIAccounts[claims.Subject]
 	if !listed {
 		writeError(w, http.StatusForbidden, "ACCOUNT_NOT_LISTED", "this ServiceAccount is not in BROKER_API_ACCOUNTS")
 		return caller{}, false
 	}
-	return caller{account: name}, true
+	return caller{account: account}, true
+}
+
+// serviceCaller authenticates a service's own projected ServiceAccount token for authenticate,
+// the credential serviceAuth's routes take, and answers the service BROKER_SERVICE_LOGINS lets
+// that account log in as. It is the token login's own check
+// (machine.Service.VerifyServiceToken), so a route of this class and a token login accept exactly
+// the same credential: the same verifier, the same hour-from-issue bound on a copied token, and
+// the same list. An account that list does not name is 403 ACCOUNT_NOT_LISTED, the credential
+// being sound and the broker's list refusing; a broker that trusts no Kubernetes token issuer
+// answers 401 ACCOUNT_TOKENS_OFF, as this class's routes then authenticate no one. No refusal
+// repeats the token.
+func (s *server) serviceCaller(w http.ResponseWriter, r *http.Request) (caller, bool) {
+	account, err := s.deps.MachineLogin.VerifyServiceToken(r.Context(), bearer(r))
+	switch {
+	case errors.Is(err, machine.ErrTokenLoginsOff):
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKENS_OFF", "this broker trusts no Kubernetes token issuer, so no service authenticates with a ServiceAccount token")
+		return caller{}, false
+	case errors.Is(err, machine.ErrTokenExpired):
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_EXPIRED", "the ServiceAccount token has expired")
+		return caller{}, false
+	case errors.Is(err, machine.ErrTokenTooLongLived):
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_TOO_LONG_LIVED", "the ServiceAccount token lives longer than an hour from its issue")
+		return caller{}, false
+	case errors.Is(err, machine.ErrAccountNotListed):
+		writeError(w, http.StatusForbidden, "ACCOUNT_NOT_LISTED", "this ServiceAccount is not in BROKER_SERVICE_LOGINS")
+		return caller{}, false
+	case err != nil:
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_INVALID", "the ServiceAccount token does not verify")
+		return caller{}, false
+	}
+	return caller{service: account.Service}, true
 }
 
 // proofSubject verifies r's Proof header and returns who it authenticates, unwrapped: authLauncher

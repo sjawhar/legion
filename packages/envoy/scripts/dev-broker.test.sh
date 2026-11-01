@@ -342,13 +342,14 @@ assert_instance_isolated() {
   fi
   printf 'PASS: %s points its broker at its own database\n' "$label"
   # Its broker trusts the issuer this instance started, lists the dev account as the caller
-  # "dispatch" and the worker account at the exchange, and the caller token devrelay is told to read
-  # is the one that issuer wrote for the listed account.
+  # "dispatch" and the listener account as the caller "listener" (introspection alone) and the
+  # worker account at the exchange, and the caller token devrelay is told to read is the one that
+  # issuer wrote for the listed account.
   local issuer token_file
   issuer="$(grep -o 'issuer listening url=http://127\.0\.0\.1:[0-9]\+' "$log_file" | head -n1 | cut -d= -f2- || true)"
-  if [[ -z "$issuer" ]] || ! grep -qF "fake broker: issuer=${issuer} callers=dispatch=system:serviceaccount:example-ns:example-dispatch exchange=system:serviceaccount:example-ns:example-worker=EXAMPLE=ada@example.com" "$log_file"; then
+  if [[ -z "$issuer" ]] || ! grep -qF "fake broker: issuer=${issuer} callers=dispatch=system:serviceaccount:example-ns:example-dispatch listener=system:serviceaccount:example-ns:example-listener exchange=system:serviceaccount:example-ns:example-worker=EXAMPLE=ada@example.com" "$log_file"; then
     cat "$log_file" >&2
-    echo "FAIL: $label's broker does not trust its own issuer (${issuer:-none logged}) with the dev caller and the exchange account listed" >&2
+    echo "FAIL: $label's broker does not trust its own issuer (${issuer:-none logged}) with both dev callers and the exchange account listed" >&2
     exit 1
   fi
   token_file="$(grep -o 'AGENT_SECRETS_ACCOUNT_TOKEN_FILE=[^ ]*' "$log_file" | head -n1 | cut -d= -f2- || true)"

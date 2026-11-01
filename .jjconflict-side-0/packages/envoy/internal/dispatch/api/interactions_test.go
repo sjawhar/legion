@@ -1,0 +1,2636 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/reearth/ygo/crdt"
+	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+)
+
+func newInteractionHandler(t *testing.T, makeDocs func(*store.Store) docs.API) (http.Handler, *store.Store) {
+	t.Helper()
+	database := storetest.Open(t)
+	var docsAPI docs.API
+	if makeDocs != nil {
+		docsAPI = makeDocs(database)
+	}
+	seedPeople(t, database, "alice", "bob")
+	deps, err := NewDeps(DepsInput{
+		Store:       database,
+		Identity:    headerIdentity(database),
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
+		Docs:        docsAPI,
+		ServerURL:   "https://dispatch.example",
+	})
+	if err != nil {
+		t.Fatalf("new API dependencies: %v", err)
+	}
+	mux := http.NewServeMux()
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
+	return mux, database
+}
+
+// replaceDocumentText replaces a document's text as an upload of a new version does: inside a
+// transaction joined with Docs.Join, the only way a document write runs, committed when the
+// replacement succeeds. It returns ReplaceText's own error, which tests assert on.
+func replaceDocumentText(database *store.Store, documentService docs.API, artifactID, markdown string, actor model.Actor) (string, error) {
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := documentService.Join(ctx, tx)
+	defer ledger.Discard()
+	canonical, err := documentService.ReplaceText(joined, artifactID, markdown, actor)
+	if err != nil {
+		return "", err
+	}
+	return canonical, ledger.Commit(ctx)
+}
+
+func sessionRequest(t *testing.T, handler http.Handler, method, target string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("encode session request: %v", err)
+	}
+	request := httptest.NewRequest(method, target, bytes.NewReader(data))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer agent-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+func createInteractionIssue(t *testing.T, handler http.Handler, project, title, spec string) struct {
+	Key               string `json:"key"`
+	PrimaryArtifactID string `json:"primary_artifact_id"`
+} {
+	t.Helper()
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": project, "name": project + " project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": project, "title": title, "spec": spec,
+	}, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", response.Code, response.Body.String())
+	}
+	return decodeBody[struct {
+		Key               string `json:"key"`
+		PrimaryArtifactID string `json:"primary_artifact_id"`
+	}](t, response)
+}
+
+func sessionActor() map[string]any {
+	return map[string]any{"kind": "session", "id": "session-0123456789abcdef"}
+}
+
+type scheduleTrackingDocs struct {
+	docs.API
+	schedules int
+}
+
+func (d *scheduleTrackingDocs) ScheduleSettlement(artifactID string) {
+	d.schedules++
+	d.API.ScheduleSettlement(artifactID)
+}
+
+type firstReplaceGate struct {
+	docs.API
+	firstEntered  chan struct{}
+	releaseFirst  chan struct{}
+	secondEntered chan struct{}
+	first         sync.Once
+	second        sync.Once
+}
+
+func (g *firstReplaceGate) AcceptSuggestion(ctx context.Context, artifactID, markID, replacement string, actor model.Actor) error {
+	first := false
+	g.first.Do(func() {
+		first = true
+		close(g.firstEntered)
+	})
+	if first {
+		<-g.releaseFirst
+	} else {
+		g.second.Do(func() { close(g.secondEntered) })
+	}
+	return g.API.AcceptSuggestion(ctx, artifactID, markID, replacement, actor)
+}
+
+func waitForSecondReplacementOrCommentLock(t *testing.T, database *store.Store, secondReplacement <-chan struct{}) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case <-secondReplacement:
+			return
+		default:
+		}
+		var waiting int
+		if err := database.Pool.QueryRow(context.Background(), `
+			select count(*) from pg_stat_activity
+			where datname = current_database() and wait_event_type = 'Lock'
+		`).Scan(&waiting); err != nil {
+			t.Fatalf("inspect database locks: %v", err)
+		}
+		if waiting > 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("second accept did not reach document service or wait for the comment lock")
+}
+
+func TestAskWithoutOptionsEmitsEmptyOptionsArray(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Options", "A spec")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "No options provided", "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated || !strings.Contains(created.Body.String(), `"options":[]`) {
+		t.Fatalf("create ask without options: status=%d body=%s", created.Code, created.Body.String())
+	}
+	ask := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, created)
+
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask.ID, nil, "alice")
+	if read.Code != http.StatusOK || !strings.Contains(read.Body.String(), `"options":[]`) {
+		t.Fatalf("read ask without options: status=%d body=%s", read.Code, read.Body.String())
+	}
+
+	inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
+	if inbox.Code != http.StatusOK || !strings.Contains(inbox.Body.String(), `"options":[]`) {
+		t.Fatalf("inbox ask without options: status=%d body=%s", inbox.Code, inbox.Body.String())
+	}
+}
+
+func TestAnchoredAskAnswerAndInbox(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Anchored ask", "The quick brown fox")
+	input := map[string]any{
+		"question": "Which colour?",
+		"options":  []map[string]string{{"label": "brown"}, {"label": "red"}},
+		"anchor":   map[string]any{"artifact": "spec", "quote": "brown"},
+		"actor":    sessionActor(),
+	}
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", input)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create anchored ask: status=%d body=%s", created.Code, created.Body.String())
+	}
+	ask := decodeBody[struct {
+		ID     string       `json:"id"`
+		State  string       `json:"state"`
+		Anchor model.Anchor `json:"anchor"`
+	}](t, created)
+	if ask.State != "open" || ask.Anchor.MarkID != ask.ID || ask.Anchor.Quote != "brown" || ask.Anchor.Version != 1 {
+		t.Fatalf("anchored ask = %#v; want open brown mark at version 1", ask)
+	}
+
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask.ID, nil, "alice")
+	if read.Code != http.StatusOK || !strings.Contains(read.Body.String(), `"question":"Which colour?"`) {
+		t.Fatalf("read ask: status=%d body=%s", read.Code, read.Body.String())
+	}
+
+	second := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "A second open ask", "actor": sessionActor(),
+	})
+	if second.Code != http.StatusCreated {
+		t.Fatalf("create second ask: status=%d body=%s", second.Code, second.Body.String())
+	}
+	inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
+	if inbox.Code != http.StatusOK || strings.Count(inbox.Body.String(), `"state":"open"`) != 2 {
+		t.Fatalf("open asks were superseded or missing from inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
+	}
+
+	forbidden := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{
+		"selected": []string{"brown"}, "actor": sessionActor(),
+	})
+	if forbidden.Code != http.StatusForbidden || !strings.Contains(forbidden.Body.String(), `"code":"HUMAN_ONLY"`) {
+		t.Fatalf("session answer: status=%d body=%s", forbidden.Code, forbidden.Body.String())
+	}
+
+	answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{
+		"selected": []string{"brown"}, "text": "Use the existing text.",
+	}, "alice")
+	if answered.Code != http.StatusOK {
+		t.Fatalf("answer ask: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	answer := decodeBody[struct {
+		State  string `json:"state"`
+		Answer struct {
+			User     string   `json:"user"`
+			Selected []string `json:"selected"`
+		} `json:"answer"`
+	}](t, answered)
+	if answer.State != "answered" || answer.Answer.User != "alice" || len(answer.Answer.Selected) != 1 || answer.Answer.Selected[0] != "brown" {
+		t.Fatalf("answered ask = %#v", answer)
+	}
+	log := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if log.Code != http.StatusOK || !strings.Contains(log.Body.String(), `"type":"ask.answered"`) || !strings.Contains(log.Body.String(), `"notify":true`) {
+		t.Fatalf("answered ask event: status=%d body=%s", log.Code, log.Body.String())
+	}
+
+	closed := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{
+		"selected": []string{"brown"},
+	}, "alice")
+	if closed.Code != http.StatusConflict || !strings.Contains(closed.Body.String(), `"code":"ASK_CLOSED"`) {
+		t.Fatalf("answer closed ask: status=%d body=%s", closed.Code, closed.Body.String())
+	}
+}
+
+func TestListIssueAsksFiltersByState(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Ask states", "The quick brown fox")
+	otherIssue := createInteractionIssue(t, handler, "OTHER", "Unrelated issue", "A spec")
+
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"anchor":   map[string]any{"artifact": "spec", "quote": "quick"},
+		"question": "Keep this answer?",
+		"actor":    sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create answered ask: status=%d body=%s", created.Code, created.Body.String())
+	}
+	answeredAsk := decodeBody[model.Ask](t, created)
+
+	open := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"anchor":   map[string]any{"artifact": "spec", "quote": "fox"},
+		"question": "Keep this open?",
+		"actor":    sessionActor(),
+	})
+	if open.Code != http.StatusCreated {
+		t.Fatalf("create open ask: status=%d body=%s", open.Code, open.Body.String())
+	}
+	openAsk := decodeBody[model.Ask](t, open)
+
+	resolved := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Still worth asking?", "actor": sessionActor(),
+	})
+	if resolved.Code != http.StatusCreated {
+		t.Fatalf("create resolved ask: status=%d body=%s", resolved.Code, resolved.Body.String())
+	}
+	resolvedAsk := decodeBody[model.Ask](t, resolved)
+
+	otherOpen := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+otherIssue.Key+"/asks", map[string]any{
+		"question": "Unrelated to the first issue?", "actor": sessionActor(),
+	})
+	if otherOpen.Code != http.StatusCreated {
+		t.Fatalf("create ask on other issue: status=%d body=%s", otherOpen.Code, otherOpen.Body.String())
+	}
+
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+answeredAsk.ID+"/answer", map[string]any{
+		"text": "Yes.",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("answer ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+resolvedAsk.ID+"/resolve", map[string]any{
+		"kind": "retracted", "reason": "No longer relevant.", "actor": sessionActor(),
+	}); response.Code != http.StatusOK {
+		t.Fatalf("resolve ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	assertAsks := func(target, login string, want ...string) []model.Ask {
+		t.Helper()
+		var response *httptest.ResponseRecorder
+		if login == "" {
+			response = sessionRequest(t, handler, http.MethodGet, target, nil)
+		} else {
+			response = dispatchRequest(t, handler, http.MethodGet, target, nil, login)
+		}
+		if response.Code != http.StatusOK {
+			t.Fatalf("list asks %s: status=%d body=%s", target, response.Code, response.Body.String())
+		}
+		got := decodeBody[[]model.Ask](t, response)
+		if len(got) != len(want) {
+			t.Fatalf("list asks %s = %#v, want %d asks", target, got, len(want))
+		}
+		byID := make(map[string]model.Ask, len(got))
+		for _, ask := range got {
+			byID[ask.ID] = ask
+		}
+		for _, id := range want {
+			if _, ok := byID[id]; !ok {
+				t.Fatalf("list asks %s = %#v, want to contain %q", target, got, id)
+			}
+		}
+		return got
+	}
+
+	all := assertAsks("/api/v1/issues/"+issue.Key+"/asks?state=all", "bob", answeredAsk.ID, openAsk.ID, resolvedAsk.ID)
+	for _, ask := range all {
+		if ask.ID == answeredAsk.ID && (ask.State != "answered" || ask.Answer == nil || ask.Anchor == nil) {
+			t.Fatalf("answered anchored ask = %#v, want persisted answer and anchor", ask)
+		}
+		if ask.ID == resolvedAsk.ID && (ask.State != "resolved" || ask.Resolution == nil) {
+			t.Fatalf("resolved ask = %#v, want persisted resolution", ask)
+		}
+	}
+	// state=open and state=answered match only that exact state - a resolved ask is neither.
+	assertAsks("/api/v1/issues/"+issue.Key+"/asks?state=open", "bob", openAsk.ID)
+	assertAsks("/api/v1/issues/"+issue.Key+"/asks?state=answered", "bob", answeredAsk.ID)
+	// A bearer session (no human login) can read the list too.
+	assertAsks("/api/v1/issues/"+issue.Key+"/asks?state=all", "", answeredAsk.ID, openAsk.ID, resolvedAsk.ID)
+
+	invalid := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/asks?state=bogus", nil, "bob")
+	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), `"code":"INVALID_ASK_STATE"`) {
+		t.Fatalf("list asks with invalid state: status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+}
+
+func TestAnswerAskLocksIssueBeforeAskRow(t *testing.T) {
+	// The seeded spec's settlement would lock the issue row this test holds; keep it
+	// out of the lock queue so the counted waiter is the answer handler.
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	issue := createInteractionIssue(t, handler, "TEST", "Answer lock order", "A spec")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Can this be answered?", "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create ask: status=%d body=%s", created.Code, created.Body.String())
+	}
+	ask := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, created)
+
+	edit, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin edit transaction: %v", err)
+	}
+	defer func() { _ = edit.Rollback(context.Background()) }()
+	var lockedKey string
+	if err := edit.QueryRow(context.Background(), `select key from issues where key = $1 for update`, issue.Key).Scan(&lockedKey); err != nil {
+		t.Fatalf("lock issue for edit: %v", err)
+	}
+	responses := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{
+			"text": "Yes.",
+		}, "alice")
+	}()
+	waitForDatabaseLocks(t, edit, 1)
+	if _, err := edit.Exec(context.Background(), `update asks set anchor = anchor where id = $1`, ask.ID); err != nil {
+		t.Fatalf("edit anchors while answer awaits issue lock: %v", err)
+	}
+	if err := edit.Commit(context.Background()); err != nil {
+		t.Fatalf("commit edit transaction: %v", err)
+	}
+	response := awaitResponse(t, responses)
+	if response.Code != http.StatusOK {
+		t.Fatalf("answer after edit: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestClosedIssueAsksCannotBeAnsweredOrShown(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Closed ask", "A spec")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Will this close?", "actor": sessionActor(),
+	})
+	ask := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, created)
+	closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice")
+	if closed.Code != http.StatusOK {
+		t.Fatalf("close issue: status=%d body=%s", closed.Code, closed.Body.String())
+	}
+	// The close withdrew the ask; an answer on the closed issue is still refused, and leaves the
+	// close's record as it was.
+	requireWithdrawn(t, handler, issue.Key, ask.ID, model.Actor{Kind: "user", ID: "alice"})
+	answer := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{}, "alice")
+	if answer.Code != http.StatusConflict || !strings.Contains(answer.Body.String(), `"code":"ISSUE_CLOSED"`) {
+		t.Fatalf("answer ask on closed issue: status=%d body=%s", answer.Code, answer.Body.String())
+	}
+	requireWithdrawn(t, handler, issue.Key, ask.ID, model.Actor{Kind: "user", ID: "alice"})
+	inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox?project=TEST", nil, "alice")
+	if inbox.Code != http.StatusOK || strings.Contains(inbox.Body.String(), ask.ID) {
+		t.Fatalf("closed issue ask appeared in inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
+	}
+}
+
+func TestAskAnchorAmbiguityAndOccurrence(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Ambiguous ask", "the quick the fox")
+
+	notFound := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Missing text", "anchor": map[string]any{"artifact": "spec", "quote": "missing"}, "actor": sessionActor(),
+	})
+	if notFound.Code != http.StatusNotFound || !strings.Contains(notFound.Body.String(), `"code":"TARGET_NOT_FOUND"`) {
+		t.Fatalf("missing anchor target: status=%d body=%s", notFound.Code, notFound.Body.String())
+	}
+	ambiguous := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Which the?", "anchor": map[string]any{"artifact": "spec", "quote": "the"}, "actor": sessionActor(),
+	})
+	if ambiguous.Code != http.StatusConflict || !strings.Contains(ambiguous.Body.String(), `"code":"TARGET_AMBIGUOUS"`) || strings.Count(ambiguous.Body.String(), `"from"`) != 2 {
+		t.Fatalf("ambiguous ask: status=%d body=%s", ambiguous.Code, ambiguous.Body.String())
+	}
+
+	disambiguated := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "The second one.", "anchor": map[string]any{"artifact": "spec", "quote": "the", "occurrence": 1}, "actor": sessionActor(),
+	})
+	if disambiguated.Code != http.StatusCreated {
+		t.Fatalf("disambiguated ask: status=%d body=%s", disambiguated.Code, disambiguated.Body.String())
+	}
+	ask := decodeBody[struct {
+		Anchor model.Anchor `json:"anchor"`
+	}](t, disambiguated)
+	if ask.Anchor.MarkID == "" || ask.Anchor.Quote != "the" {
+		t.Fatalf("disambiguated anchor = %#v; want the on a document mark", ask.Anchor)
+	}
+}
+
+func TestInteractionCapsAndAnswerValidation(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Caps", "A spec")
+	// A whole-cap question is accepted, since a question names its concrete case; one past it is
+	// refused by name.
+	atCap := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": strings.Repeat("a", contracts.AskQuestionMax), "actor": sessionActor(),
+	})
+	if atCap.Code != http.StatusCreated {
+		t.Fatalf("question at the cap: status=%d body=%s", atCap.Code, atCap.Body.String())
+	}
+	tooLong := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": strings.Repeat("a", contracts.AskQuestionMax+1), "actor": sessionActor(),
+	})
+	overCap := fmt.Sprintf("question is 1 characters over the %d-character limit (%d/%d)", contracts.AskQuestionMax, contracts.AskQuestionMax+1, contracts.AskQuestionMax)
+	if tooLong.Code != http.StatusBadRequest || !strings.Contains(tooLong.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(tooLong.Body.String(), overCap) {
+		t.Fatalf("question cap: status=%d body=%s", tooLong.Code, tooLong.Body.String())
+	}
+	tooManyOptions := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Options", "options": []map[string]string{{"label": "1"}, {"label": "2"}, {"label": "3"}, {"label": "4"}, {"label": "5"}, {"label": "6"}, {"label": "7"}, {"label": "8"}, {"label": "9"}}, "actor": sessionActor(),
+	})
+	if tooManyOptions.Code != http.StatusBadRequest || !strings.Contains(tooManyOptions.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(tooManyOptions.Body.String(), "options is 1 over the 8-item limit (9/8)") {
+		t.Fatalf("options cap: status=%d body=%s", tooManyOptions.Code, tooManyOptions.Body.String())
+	}
+	blankOption := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Blank option", "options": []map[string]string{{"label": " "}}, "actor": sessionActor(),
+	})
+	if blankOption.Code != http.StatusBadRequest || !strings.Contains(blankOption.Body.String(), `"code":"INVALID_ASK"`) {
+		t.Fatalf("blank option label: status=%d body=%s", blankOption.Code, blankOption.Body.String())
+	}
+	duplicateOption := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Duplicate option", "options": []map[string]string{{"label": "yes"}, {"label": "yes"}}, "actor": sessionActor(),
+	})
+	if duplicateOption.Code != http.StatusBadRequest || !strings.Contains(duplicateOption.Body.String(), `"code":"INVALID_ASK"`) {
+		t.Fatalf("duplicate option label: status=%d body=%s", duplicateOption.Code, duplicateOption.Body.String())
+	}
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Pick", "options": []map[string]string{{"label": "yes"}}, "actor": sessionActor(),
+	})
+	ask := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, created)
+	invalidAnswer := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{"selected": []string{"no"}}, "alice")
+	if invalidAnswer.Code != http.StatusBadRequest {
+		t.Fatalf("invalid selected answer: status=%d body=%s", invalidAnswer.Code, invalidAnswer.Body.String())
+	}
+	emptyRequiredOptionAnswer := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{"selected": []string{}}, "alice")
+	if emptyRequiredOptionAnswer.Code != http.StatusBadRequest || !strings.Contains(emptyRequiredOptionAnswer.Body.String(), `"code":"INVALID_ANSWER"`) {
+		t.Fatalf("empty required-option answer: status=%d body=%s", emptyRequiredOptionAnswer.Code, emptyRequiredOptionAnswer.Body.String())
+	}
+
+	blankRequiredOptionTextAnswer := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{"selected": []string{}, "text": "   "}, "alice")
+	if blankRequiredOptionTextAnswer.Code != http.StatusBadRequest || !strings.Contains(blankRequiredOptionTextAnswer.Body.String(), `"code":"INVALID_ANSWER"`) {
+		t.Fatalf("blank required-option text answer: status=%d body=%s", blankRequiredOptionTextAnswer.Code, blankRequiredOptionTextAnswer.Body.String())
+	}
+
+	noOptionSingle := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Choose only one", "actor": sessionActor(),
+	})
+	noOptionAsk := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, noOptionSingle)
+	multipleSelected := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+noOptionAsk.ID+"/answer", map[string]any{
+		"selected": []string{"first", "second"},
+	}, "alice")
+	if multipleSelected.Code != http.StatusBadRequest || !strings.Contains(multipleSelected.Body.String(), `"code":"INVALID_ANSWER"`) {
+		t.Fatalf("multiple answers for single-select ask: status=%d body=%s", multipleSelected.Code, multipleSelected.Body.String())
+	}
+	emptyAnswer := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+noOptionAsk.ID+"/answer", map[string]any{"selected": []string{}}, "alice")
+	if emptyAnswer.Code != http.StatusBadRequest || !strings.Contains(emptyAnswer.Body.String(), `"code":"INVALID_ANSWER"`) {
+		t.Fatalf("empty answer: status=%d body=%s", emptyAnswer.Code, emptyAnswer.Body.String())
+	}
+
+	blankTextAnswer := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+noOptionAsk.ID+"/answer", map[string]any{"selected": []string{}, "text": "   "}, "alice")
+	if blankTextAnswer.Code != http.StatusBadRequest || !strings.Contains(blankTextAnswer.Body.String(), `"code":"INVALID_ANSWER"`) {
+		t.Fatalf("blank text answer: status=%d body=%s", blankTextAnswer.Code, blankTextAnswer.Body.String())
+	}
+
+	overCapBody := strings.Repeat("a", contracts.DispatchBodyMax+1)
+	tooLongComment := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": overCapBody, "actor": sessionActor(),
+	})
+	assertCapExceeded(t, "comment cap", tooLongComment, "body", contracts.DispatchBodyMax+1, contracts.DispatchBodyMax, "")
+	tooLongMessage := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": overCapBody, "actor": sessionActor(),
+	})
+	assertCapExceeded(t, "message cap", tooLongMessage, "body", contracts.DispatchBodyMax+1, contracts.DispatchBodyMax, "")
+}
+
+func TestAskAnswerAcceptsFreeTextAloneOrWithSelection(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Free text answers", "A spec")
+
+	newAsk := func(question string) string {
+		created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+			"question": question, "options": []map[string]string{{"label": "yes"}, {"label": "no"}}, "actor": sessionActor(),
+		})
+		if created.Code != http.StatusCreated {
+			t.Fatalf("create ask %q: status=%d body=%s", question, created.Code, created.Body.String())
+		}
+		ask := decodeBody[struct {
+			ID string `json:"id"`
+		}](t, created)
+		return ask.ID
+	}
+	answerOf := func(response *httptest.ResponseRecorder) struct {
+		Selected []string `json:"selected"`
+		Text     *string  `json:"text"`
+	} {
+		return decodeBody[struct {
+			Answer struct {
+				Selected []string `json:"selected"`
+				Text     *string  `json:"text"`
+			} `json:"answer"`
+		}](t, response).Answer
+	}
+
+	textOnlyID := newAsk("Text only")
+	textOnly := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+textOnlyID+"/answer", map[string]any{
+		"selected": []string{}, "text": "Neither; let's do a third thing.",
+	}, "alice")
+	if textOnly.Code != http.StatusOK {
+		t.Fatalf("text-only answer: status=%d body=%s", textOnly.Code, textOnly.Body.String())
+	}
+	if answer := answerOf(textOnly); len(answer.Selected) != 0 || answer.Text == nil || *answer.Text != "Neither; let's do a third thing." {
+		t.Fatalf("text-only answer = %#v", answer)
+	}
+
+	selectionOnlyID := newAsk("Selection only")
+	selectionOnly := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+selectionOnlyID+"/answer", map[string]any{
+		"selected": []string{"yes"},
+	}, "alice")
+	if selectionOnly.Code != http.StatusOK {
+		t.Fatalf("selection-only answer: status=%d body=%s", selectionOnly.Code, selectionOnly.Body.String())
+	}
+	if answer := answerOf(selectionOnly); len(answer.Selected) != 1 || answer.Selected[0] != "yes" || answer.Text != nil {
+		t.Fatalf("selection-only answer = %#v", answer)
+	}
+
+	bothID := newAsk("Selection and text")
+	both := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+bothID+"/answer", map[string]any{
+		"selected": []string{"no"}, "text": "Going with no, and here's why.",
+	}, "alice")
+	if both.Code != http.StatusOK {
+		t.Fatalf("selection+text answer: status=%d body=%s", both.Code, both.Body.String())
+	}
+	if answer := answerOf(both); len(answer.Selected) != 1 || answer.Selected[0] != "no" || answer.Text == nil || *answer.Text != "Going with no, and here's why." {
+		t.Fatalf("selection+text answer = %#v", answer)
+	}
+
+	invalidLabelID := newAsk("Invalid label stays rejected")
+	rejected := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+invalidLabelID+"/answer", map[string]any{
+		"selected": []string{"maybe"},
+	}, "alice")
+	if rejected.Code != http.StatusBadRequest || !strings.Contains(rejected.Body.String(), `"code":"INVALID_ANSWER"`) {
+		t.Fatalf("invalid selected label still rejected: status=%d body=%s", rejected.Code, rejected.Body.String())
+	}
+}
+
+func TestAnchorsCaptureAnUnnamedVersionWhenLiveTextChanged(t *testing.T) {
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() {
+			if err := documentService.Shutdown(context.Background()); err != nil {
+				t.Errorf("shutdown document service: %v", err)
+			}
+		})
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Dirty document", "The quick brown fox")
+	if _, err := replaceDocumentText(database, documentService, issue.PrimaryArtifactID, "The clever brown fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("change live document: %v", err)
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Why brown?", "anchor": map[string]any{"artifact": "spec", "quote": "brown"},
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create ask against changed document: status=%d body=%s", created.Code, created.Body.String())
+	}
+	ask := decodeBody[struct {
+		Anchor model.Anchor `json:"anchor"`
+	}](t, created)
+	if ask.Anchor.Version != 2 || ask.Anchor.MarkID == "" || ask.Anchor.Quote != "brown" {
+		t.Fatalf("anchor against changed document = %#v; want brown mark at version 2", ask.Anchor)
+	}
+	version := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions/2", nil, "alice")
+	if version.Code != http.StatusOK || !strings.Contains(version.Body.String(), `"markdown":"The clever brown fox\n"`) || !strings.Contains(version.Body.String(), `"named":false`) {
+		t.Fatalf("unnamed anchor version: status=%d body=%s", version.Code, version.Body.String())
+	}
+	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	var log []struct {
+		Type   string `json:"type"`
+		Notify bool   `json:"notify"`
+	}
+
+	if err := json.NewDecoder(events.Body).Decode(&log); err != nil {
+		t.Fatalf("decode dirty document events: %v", err)
+	}
+	if len(log) != 3 || log[1].Type != "artifact.version" || log[1].Notify || log[2].Type != "ask.opened" || !log[2].Notify {
+		t.Fatalf("dirty document events = %#v; want non-notifying unnamed artifact.version before notifying ask.opened", log)
+	}
+}
+
+func TestDocumentEditMapsMissingAndAmbiguousTargets(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Document edits", "same same")
+	ambiguous := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "replace", "find": "same", "with": "changed"}},
+	}, "alice")
+	if ambiguous.Code != http.StatusConflict || !strings.Contains(ambiguous.Body.String(), `"code":"TARGET_AMBIGUOUS"`) {
+		t.Fatalf("ambiguous edit: status=%d body=%s", ambiguous.Code, ambiguous.Body.String())
+	}
+	missing := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "replace", "find": "missing", "with": "changed"}},
+	}, "alice")
+	if missing.Code != http.StatusNotFound || !strings.Contains(missing.Body.String(), `"code":"TARGET_NOT_FOUND"`) {
+		t.Fatalf("missing edit: status=%d body=%s", missing.Code, missing.Body.String())
+	}
+	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice")
+	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), `"markdown":"same same\n"`) {
+		t.Fatalf("failed edit changed document: status=%d body=%s", text.Code, text.Body.String())
+	}
+}
+
+func TestDocumentEditExtendsTableAfterCellAnchor(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Table document edit", "| Key | Value |\n| --- | --- |\n| A10 | old |\n")
+	edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{
+			"op":       "insert",
+			"after":    "A10",
+			"markdown": "| A11 | new |",
+		}},
+	}, "alice")
+	if edited.Code != http.StatusOK {
+		t.Fatalf("insert table row: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice")
+	if text.Code != http.StatusOK {
+		t.Fatalf("read edited table: status=%d body=%s", text.Code, text.Body.String())
+	}
+	got := decodeBody[struct {
+		Markdown string `json:"markdown"`
+	}](t, text)
+	const want = "| Key | Value |\n| --- | --- |\n| A10 | old |\n| A11 | new |\n"
+	if got.Markdown != want {
+		t.Fatalf("table row insertion = %q, want %q", got.Markdown, want)
+	}
+}
+
+func TestDocumentEditInsertsParagraphAfterTableContainingCellAnchor(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Table paragraph insertion", "| Key | Value |\n| --- | --- |\n| A10 | old |\n\nAfter.\n")
+	edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{
+			"op":       "insert",
+			"after":    "A10",
+			"markdown": "Inserted paragraph",
+		}},
+	}, "alice")
+	if edited.Code != http.StatusOK {
+		t.Fatalf("insert paragraph: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice")
+	if text.Code != http.StatusOK {
+		t.Fatalf("read edited table: status=%d body=%s", text.Code, text.Body.String())
+	}
+	got := decodeBody[struct {
+		Markdown string `json:"markdown"`
+	}](t, text)
+	const want = "| Key | Value |\n| --- | --- |\n| A10 | old |\n\nInserted paragraph\n\nAfter.\n"
+	if got.Markdown != want {
+		t.Fatalf("paragraph insertion = %q, want %q", got.Markdown, want)
+	}
+}
+
+func TestDocumentEditRejectsTableRowWiderThanContainingTable(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Table width", "| Key | Value |\n| --- | --- |\n| A10 | old |\n")
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{
+			"op":       "insert",
+			"after":    "A10",
+			"markdown": "| A11 | new | extra |",
+		}},
+	}, "alice")
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"TABLE_WIDTH"`) {
+		t.Fatalf("wide table row: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestDocumentEditRejectsTargetSpanningTextblocks(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Target spans textblocks", "one\n\ntwo\n")
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{
+			"op":   "replace",
+			"find": "one two",
+			"with": "changed",
+		}},
+	}, "alice")
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"TARGET_SPANS_BLOCKS"`) {
+		t.Fatalf("spanning target: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestDocumentEditWithoutSummaryWritesUnnamedVersionAndEvent(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Unnamed document edit", "before")
+	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "replace", "find": "before", "with": "after"}}, "actor": sessionActor(),
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("edit document without summary: status=%d body=%s", response.Code, response.Body.String())
+	}
+	var versions int
+	var unnamed bool
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*), coalesce(bool_and(not named), false)
+		from artifact_versions where artifact_id = $1 and number = 2
+	`, issue.PrimaryArtifactID).Scan(&versions, &unnamed); err != nil {
+		t.Fatalf("count unnamed versions: %v", err)
+	}
+	if versions != 1 || !unnamed {
+		t.Fatalf("summary-less edit versions = %d unnamed=%t, want one unnamed version", versions, unnamed)
+	}
+	var events int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from events where issue_key = $1 and type = 'artifact.version'
+	`, issue.Key).Scan(&events); err != nil {
+		t.Fatalf("count unnamed version events: %v", err)
+	}
+	if events != 1 {
+		t.Fatalf("summary-less edit artifact.version events = %d, want 1", events)
+	}
+}
+
+func TestAnchorsKeepCleanDocumentAtExistingVersion(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Clean document", "The quick brown fox")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Why brown?", "anchor": map[string]any{"artifact": "spec", "quote": "brown"}, "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create ask against unchanged document: status=%d body=%s", created.Code, created.Body.String())
+	}
+	version := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions/2", nil, "alice")
+	if version.Code != http.StatusNotFound {
+		t.Fatalf("unexpected snapshot for unchanged document: status=%d body=%s", version.Code, version.Body.String())
+	}
+	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	var cleanLog []struct {
+		Type string `json:"type"`
+	}
+	if err := json.NewDecoder(events.Body).Decode(&cleanLog); err != nil {
+		t.Fatalf("decode clean document events: %v", err)
+	}
+	if len(cleanLog) != 2 || cleanLog[0].Type != "issue.created" || cleanLog[1].Type != "ask.opened" {
+		t.Fatalf("clean document events = %#v; want issue.created then ask.opened", cleanLog)
+	}
+}
+func TestCommentsSuggestionsAndArtifactFilter(t *testing.T) {
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Comments", "The quick brown fox")
+	first := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Why brown?", "anchor": map[string]any{"artifact": "spec", "quote": "brown"}, "actor": sessionActor(),
+	})
+	if first.Code != http.StatusCreated {
+		t.Fatalf("create anchored comment: status=%d body=%s", first.Code, first.Body.String())
+	}
+	comment := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, first)
+	reply := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Because that is the selected word.", "reply_to": comment.ID,
+	}, "alice")
+	if reply.Code != http.StatusCreated || !strings.Contains(reply.Body.String(), `"reply_to":"`+comment.ID+`"`) {
+		t.Fatalf("create reply: status=%d body=%s", reply.Code, reply.Body.String())
+	}
+	floating := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]string{"body": "Floating comment"}, "alice")
+
+	resolved := sessionRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/resolve", map[string]any{"actor": sessionActor()})
+	if resolved.Code != http.StatusOK || !strings.Contains(resolved.Body.String(), `"resolved":true`) {
+		t.Fatalf("session resolves comment: status=%d body=%s", resolved.Code, resolved.Body.String())
+	}
+	if projection := loadMarkProjection(t, database, issue.PrimaryArtifactID, comment.ID); projection["resolved"] != true || len(projection["replies"].([]any)) != 1 {
+		t.Fatalf("resolved comment projection = %#v, want resolved with one reply", projection)
+	}
+	if floating.Code != http.StatusCreated {
+		t.Fatalf("create floating comment: status=%d body=%s", floating.Code, floating.Body.String())
+	}
+
+	filtered := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/comments?artifact="+issue.PrimaryArtifactID, nil, "alice")
+	if filtered.Code != http.StatusOK {
+		t.Fatalf("filter anchored comments: status=%d body=%s", filtered.Code, filtered.Body.String())
+	}
+	var anchored []model.Comment
+	if err := json.NewDecoder(filtered.Body).Decode(&anchored); err != nil {
+		t.Fatalf("decode filtered comments: %v", err)
+	}
+	if len(anchored) != 1 || anchored[0].ID != comment.ID {
+		t.Fatalf("filtered comments = %#v; want only %s", anchored, comment.ID)
+	}
+
+	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Use red.", "anchor": map[string]any{"artifact": "spec", "quote": "brown"}, "suggestion": map[string]string{"replace_with": "red"}, "actor": sessionActor(),
+	})
+	if suggestion.Code != http.StatusCreated {
+		t.Fatalf("create suggestion: status=%d body=%s", suggestion.Code, suggestion.Body.String())
+	}
+	suggested := decodeBody[model.Comment](t, suggestion)
+	rejected := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+suggested.ID+"/reject", map[string]any{}, "alice")
+	if rejected.Code != http.StatusOK || !strings.Contains(rejected.Body.String(), `"resolved":true`) || !strings.Contains(rejected.Body.String(), `"accepted":false`) {
+		t.Fatalf("reject suggestion: status=%d body=%s", rejected.Code, rejected.Body.String())
+	}
+	rejectedStored := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+suggested.ID, nil, "alice")
+	if rejectedStored.Code != http.StatusOK {
+		t.Fatalf("read rejected suggestion: status=%d body=%s", rejectedStored.Code, rejectedStored.Body.String())
+	}
+	if stored := decodeBody[struct {
+		Comment model.Comment `json:"comment"`
+	}](t, rejectedStored).Comment; stored.Anchor == nil || stored.Anchor.Orphaned {
+		t.Fatalf("rejected suggestion anchor = %#v, want retained non-orphaned anchor", stored.Anchor)
+	}
+	if markdown, err := documentService.Text(context.Background(), issue.PrimaryArtifactID); err != nil || markdown != "The quick brown fox\n" {
+		t.Fatalf("rejected suggestion text = %q (%v), want unchanged document", markdown, err)
+	}
+	if projection := loadMarkProjection(t, database, issue.PrimaryArtifactID, suggested.ID); projection["status"] != "rejected" {
+		t.Fatalf("rejected suggestion projection = %#v", projection)
+	}
+
+	floatingSuggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "An unanchored suggestion can be rejected.", "suggestion": map[string]string{"replace_with": "ignored"}, "actor": sessionActor(),
+	})
+	if floatingSuggestion.Code != http.StatusCreated {
+		t.Fatalf("create floating suggestion: status=%d body=%s", floatingSuggestion.Code, floatingSuggestion.Body.String())
+	}
+	floatingValue := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, floatingSuggestion)
+	floatingRejected := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+floatingValue.ID+"/reject", map[string]any{}, "alice")
+	if floatingRejected.Code != http.StatusOK || !strings.Contains(floatingRejected.Body.String(), `"accepted":false`) {
+		t.Fatalf("reject floating suggestion: status=%d body=%s", floatingRejected.Code, floatingRejected.Body.String())
+	}
+}
+
+func TestSuggestionAcceptAppliesLiveDocument(t *testing.T) {
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+		t.Cleanup(func() {
+			if err := documentService.Shutdown(context.Background()); err != nil {
+				t.Errorf("shutdown document service: %v", err)
+			}
+		})
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Accept suggestion", "The quick brown fox")
+
+	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Use red.", "anchor": map[string]any{"artifact": "spec", "quote": "brown"}, "suggestion": map[string]string{"replace_with": "red"}, "actor": sessionActor(),
+	})
+	comment := decodeBody[model.Comment](t, suggestion)
+	forbidden := sessionRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{"actor": sessionActor()})
+	if forbidden.Code != http.StatusForbidden || !strings.Contains(forbidden.Body.String(), `"code":"HUMAN_ONLY"`) {
+		t.Fatalf("session accepts suggestion: status=%d body=%s", forbidden.Code, forbidden.Body.String())
+	}
+	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+	if accepted.Code != http.StatusOK || !strings.Contains(accepted.Body.String(), `"resolved":true`) || !strings.Contains(accepted.Body.String(), `"accepted":true`) {
+		t.Fatalf("accept suggestion: status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+	acceptedStored := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+	if acceptedStored.Code != http.StatusOK {
+		t.Fatalf("read accepted suggestion: status=%d body=%s", acceptedStored.Code, acceptedStored.Body.String())
+	}
+	if stored := decodeBody[struct {
+		Comment model.Comment `json:"comment"`
+	}](t, acceptedStored).Comment; stored.Anchor == nil || stored.Anchor.Orphaned {
+		t.Fatalf("accepted suggestion anchor = %#v, want retained non-orphaned anchor", stored.Anchor)
+	}
+	markdown, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
+	if err != nil {
+		t.Fatalf("read accepted document: %v", err)
+	}
+	if markdown != "The quick red fox\n" {
+		t.Fatalf("accepted document = %q; want replacement applied", markdown)
+	}
+	if _, err := documentService.VerifyMark(context.Background(), issue.PrimaryArtifactID, docs.MarkSuggestion, comment.Anchor.MarkID); !errors.Is(err, docs.ErrAnchorMissing) {
+		t.Fatalf("accepted suggestion mark = %v, want missing", err)
+	}
+	if projection := loadMarkProjection(t, database, issue.PrimaryArtifactID, comment.ID); projection["status"] != "accepted" {
+		t.Fatalf("accepted suggestion projection = %#v", projection)
+	}
+	repeated := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+	if repeated.Code != http.StatusConflict || !strings.Contains(repeated.Body.String(), `"code":"ALREADY_ACTIONED"`) {
+		t.Fatalf("repeat accept: status=%d body=%s", repeated.Code, repeated.Body.String())
+	}
+}
+
+func TestSuggestionAcceptEmitsAnchorRefreshEventsForChangedOpenRows(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+		t.Cleanup(func() {
+			if err := documentService.Shutdown(context.Background()); err != nil {
+				t.Errorf("shutdown document service: %v", err)
+			}
+		})
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Cascade anchor events", "The quick brown fox")
+
+	earlier := decodeBody[model.Comment](t, sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Earlier suggestion.", "anchor": map[string]any{"artifact": "spec", "quote": "fox"}, "suggestion": map[string]string{"replace_with": "cat"}, "actor": sessionActor(),
+	}))
+	unchangedComment := decodeBody[model.Comment](t, sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Unchanged comment.", "anchor": map[string]any{"artifact": "spec", "quote": "quick"}, "actor": sessionActor(),
+	}))
+	later := decodeBody[model.Comment](t, sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Later suggestion.", "anchor": map[string]any{"artifact": "spec", "quote": "brown fox"}, "suggestion": map[string]string{"replace_with": "brown dog"}, "actor": sessionActor(),
+	}))
+	ask := decodeBody[model.Ask](t, sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "What about fox?", "anchor": map[string]any{"artifact": "spec", "quote": "fox"}, "actor": sessionActor(),
+	}))
+	unchangedAsk := decodeBody[model.Ask](t, sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "What about quick?", "anchor": map[string]any{"artifact": "spec", "quote": "quick"}, "actor": sessionActor(),
+	}))
+
+	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+later.ID+"/accept", map[string]any{}, "alice")
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("accept competing suggestion: status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+
+	type eventRow struct {
+		Seq       int             `json:"seq"`
+		Type      string          `json:"type"`
+		Actor     model.Actor     `json:"actor"`
+		Notify    bool            `json:"notify"`
+		CreatedAt time.Time       `json:"created_at"`
+		Payload   json.RawMessage `json:"payload"`
+	}
+	rows := decodeBody[[]eventRow](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice"))
+	var refreshedComments []struct {
+		Event eventRow
+		model.CommentEventPayload
+	}
+	var refreshedAsks []struct {
+		Event eventRow
+		model.Ask
+	}
+	acceptedSuggestionSeq := 0
+	for _, row := range rows {
+		switch row.Type {
+		case "comment.anchor_refreshed":
+			var payload model.CommentEventPayload
+			if err := json.Unmarshal(row.Payload, &payload); err != nil {
+				t.Fatalf("decode comment.anchor_refreshed payload: %v", err)
+			}
+			refreshedComments = append(refreshedComments, struct {
+				Event eventRow
+				model.CommentEventPayload
+			}{Event: row, CommentEventPayload: payload})
+		case "ask.anchor_refreshed":
+			var payload model.Ask
+			if err := json.Unmarshal(row.Payload, &payload); err != nil {
+				t.Fatalf("decode ask.anchor_refreshed payload: %v", err)
+			}
+			refreshedAsks = append(refreshedAsks, struct {
+				Event eventRow
+				model.Ask
+			}{Event: row, Ask: payload})
+		case "suggestion.accepted":
+			acceptedSuggestionSeq = row.Seq
+		}
+	}
+
+	if len(refreshedComments) != 1 {
+		t.Fatalf("comment.anchor_refreshed events = %#v, want exactly one", refreshedComments)
+	}
+	commentEvent := refreshedComments[0]
+	if commentEvent.ID != earlier.ID || commentEvent.Anchor == nil ||
+		commentEvent.Anchor.ArtifactID != issue.PrimaryArtifactID || commentEvent.Anchor.Quote != "fox" ||
+		commentEvent.Anchor.Version != 1 || !commentEvent.Anchor.Orphaned || commentEvent.Body != earlier.Body ||
+		commentEvent.ReplyTo != nil || commentEvent.AskID != nil || commentEvent.Resolved ||
+		commentEvent.ResolvedBy != nil || commentEvent.ResolvedAt != nil || commentEvent.EditedAt != nil ||
+		commentEvent.Suggestion == nil || commentEvent.Suggestion.ReplaceWith != "cat" ||
+		!commentEvent.CreatedAt.Equal(earlier.CreatedAt) || commentEvent.Mentions == nil ||
+		commentEvent.Deliveries == nil || len(commentEvent.Mentions) != 0 || len(commentEvent.Deliveries) != 0 ||
+		commentEvent.ArtifactName != "spec.md" || commentEvent.ProjectKey != "TEST" ||
+		commentEvent.ArtifactSlug != "spec" ||
+		commentEvent.Event.Actor != (model.Actor{Kind: "user", ID: "alice"}) ||
+		commentEvent.Event.Notify || commentEvent.Event.CreatedAt.IsZero() || commentEvent.Event.Seq == 0 ||
+		acceptedSuggestionSeq == 0 || commentEvent.Event.Seq >= acceptedSuggestionSeq {
+		t.Fatalf("comment.anchor_refreshed payload = %#v, want full orphaned earlier-comment payload", commentEvent)
+	}
+	if commentEvent.ID == unchangedComment.ID {
+		t.Fatalf("unchanged comment emitted comment.anchor_refreshed: %#v", commentEvent)
+	}
+
+	if len(refreshedAsks) != 1 {
+		t.Fatalf("ask.anchor_refreshed events = %#v, want exactly one", refreshedAsks)
+	}
+	askEvent := refreshedAsks[0]
+	if askEvent.ID != ask.ID || askEvent.Anchor == nil || askEvent.Anchor.ArtifactID != issue.PrimaryArtifactID ||
+		askEvent.Anchor.Quote != "fox" || askEvent.Anchor.Version != 1 || !askEvent.Anchor.Orphaned ||
+		askEvent.Question != ask.Question || askEvent.Kind != "question" || askEvent.State != "open" ||
+		askEvent.Answer != nil || askEvent.Resolution != nil || askEvent.BlockID != nil ||
+		askEvent.BlockArtifactID != nil || askEvent.AnchorArtifact == nil ||
+		askEvent.AnchorArtifact.Project != "TEST" || askEvent.AnchorArtifact.Slug != "spec" ||
+		askEvent.AnchorArtifact.Name != "spec.md" || !askEvent.AnchorArtifact.Primary ||
+		askEvent.OpenedEventID == nil || !askEvent.CreatedAt.Equal(ask.CreatedAt) ||
+		askEvent.Event.Actor != (model.Actor{Kind: "user", ID: "alice"}) || askEvent.Event.Notify ||
+		askEvent.Event.CreatedAt.IsZero() || askEvent.Event.Seq == 0 || askEvent.Event.Seq >= acceptedSuggestionSeq ||
+		askEvent.Event.Seq == commentEvent.Event.Seq {
+		t.Fatalf("ask.anchor_refreshed payload = %#v, want full orphaned ask payload", askEvent)
+	}
+	if askEvent.ID == unchangedAsk.ID {
+		t.Fatalf("unchanged ask emitted ask.anchor_refreshed: %#v", askEvent)
+	}
+}
+
+// TestSuggestionAcceptRefreshesLegacyAskAnchorWithoutOpenedEvent: a legacy open anchored ask whose
+// ask.opened event has been pruned is still readable through GET /api/v1/asks/{id}
+// (attachOpenedEventIDs falls back across ask.opened/answered/resolved/edited), and the
+// anchor-refresh cascade must find it the same way: a stricter ask.opened-only lookup there would
+// abort the whole document mutation with a load error when that row's anchor needs refreshing.
+// Both paths share attachOpenedEventIDs's fallback (events.OpenedEventIDs).
+func TestSuggestionAcceptRefreshesLegacyAskAnchorWithoutOpenedEvent(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Legacy ask fallback", "The quick brown fox")
+
+	ask := decodeBody[model.Ask](t, sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "What about fox?", "anchor": map[string]any{"artifact": "spec", "quote": "fox"}, "actor": sessionActor(),
+	}))
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+ask.ID, map[string]any{
+		"question": "What about the fox now?", "actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit ask: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	if _, err := database.Pool.Exec(context.Background(), `
+		delete from events where type = 'ask.opened' and payload->>'id' = $1
+	`, ask.ID); err != nil {
+		t.Fatalf("delete ask.opened event: %v", err)
+	}
+
+	// The read API serves this legacy row through the same fallback.
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask.ID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read legacy ask: status=%d body=%s", read.Code, read.Body.String())
+	}
+
+	later := decodeBody[model.Comment](t, sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body":       "Later suggestion.",
+		"anchor":     map[string]any{"artifact": "spec", "quote": "brown fox"},
+		"suggestion": map[string]string{"replace_with": "brown dog"},
+		"actor":      sessionActor(),
+	}))
+	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+later.ID+"/accept", map[string]any{}, "alice")
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("accept with legacy ask event fallback: status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+
+	rows := decodeBody[[]struct {
+		Type    string `json:"type"`
+		Payload struct {
+			ID            string `json:"id"`
+			OpenedEventID *int64 `json:"opened_event_id"`
+			Anchor        struct {
+				Orphaned bool `json:"orphaned"`
+			} `json:"anchor"`
+		} `json:"payload"`
+	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice"))
+	var refreshed *struct {
+		ID            string
+		OpenedEventID *int64
+		Orphaned      bool
+	}
+	for _, row := range rows {
+		if row.Type == "ask.anchor_refreshed" && row.Payload.ID == ask.ID {
+			refreshed = &struct {
+				ID            string
+				OpenedEventID *int64
+				Orphaned      bool
+			}{row.Payload.ID, row.Payload.OpenedEventID, row.Payload.Anchor.Orphaned}
+		}
+	}
+	if refreshed == nil || !refreshed.Orphaned || refreshed.OpenedEventID == nil {
+		t.Fatalf("ask.anchor_refreshed for legacy ask = %#v, want an orphaned refresh with a fallback opened_event_id", refreshed)
+	}
+}
+
+func TestAcceptOrphanedSuggestionIs409(t *testing.T) {
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Orphaned suggestion", "The quick brown fox")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Use red.", "anchor": map[string]any{"artifact": "spec", "quote": "brown"}, "suggestion": map[string]string{"replace_with": "red"}, "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, created)
+	if _, err := replaceDocumentText(database, documentService, issue.PrimaryArtifactID, "The quick fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("delete suggestion mark text: %v", err)
+	}
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+
+	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+	if accepted.Code != http.StatusConflict || !strings.Contains(accepted.Body.String(), `"code":"ANCHOR_ORPHANED"`) {
+		t.Fatalf("accept orphaned suggestion: status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read orphaned suggestion: status=%d body=%s", read.Code, read.Body.String())
+	}
+	loaded := decodeBody[struct {
+		Comment model.Comment `json:"comment"`
+	}](t, read)
+	if loaded.Comment.Anchor == nil || !loaded.Comment.Anchor.Orphaned {
+		t.Fatalf("orphaned suggestion = %#v, want orphaned anchor", loaded.Comment)
+	}
+}
+
+// An orphaned suggestion can be neither accepted nor rejected (the mark is gone), so Resolve
+// is the one way to close it; the resolve branch must tolerate the missing mark the way
+// accept and reject already do.
+func TestResolveOrphanedSuggestionSucceeds(t *testing.T) {
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Orphaned suggestion", "The quick brown fox")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Use red.", "anchor": map[string]any{"artifact": "spec", "quote": "brown"}, "suggestion": map[string]string{"replace_with": "red"}, "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, created)
+	if _, err := replaceDocumentText(database, documentService, issue.PrimaryArtifactID, "The quick fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("delete suggestion mark text: %v", err)
+	}
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+
+	resolved := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/resolve", map[string]any{}, "alice")
+	if resolved.Code != http.StatusOK {
+		t.Fatalf("resolve orphaned suggestion: status=%d body=%s", resolved.Code, resolved.Body.String())
+	}
+	loaded := decodeBody[model.Comment](t, resolved)
+	if !loaded.Resolved || loaded.ResolvedBy == nil || loaded.ResolvedBy.ID != "alice" {
+		t.Fatalf("resolved orphaned suggestion = %#v, want resolved by alice", loaded)
+	}
+	if loaded.Suggestion == nil || loaded.Suggestion.Accepted != nil {
+		t.Fatalf("resolved orphaned suggestion disposition = %#v, want undecided", loaded.Suggestion)
+	}
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read resolved suggestion: status=%d body=%s", read.Code, read.Body.String())
+	}
+	reloaded := decodeBody[struct {
+		Comment model.Comment `json:"comment"`
+	}](t, read)
+	if !reloaded.Comment.Resolved {
+		t.Fatalf("reloaded orphaned suggestion = %#v, want resolved", reloaded.Comment)
+	}
+}
+
+// A resolved orphaned suggestion reopens like any resolved thread; the missing mark is not fatal.
+func TestReopenOrphanedSuggestionSucceeds(t *testing.T) {
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Orphaned suggestion", "The quick brown fox")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Use red.", "anchor": map[string]any{"artifact": "spec", "quote": "brown"}, "suggestion": map[string]string{"replace_with": "red"}, "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, created)
+	if _, err := replaceDocumentText(database, documentService, issue.PrimaryArtifactID, "The quick fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("delete suggestion mark text: %v", err)
+	}
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+	resolved := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/resolve", map[string]any{}, "alice")
+	if resolved.Code != http.StatusOK {
+		t.Fatalf("resolve orphaned suggestion: status=%d body=%s", resolved.Code, resolved.Body.String())
+	}
+
+	reopened := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/reopen", map[string]any{}, "alice")
+	if reopened.Code != http.StatusOK {
+		t.Fatalf("reopen orphaned suggestion: status=%d body=%s", reopened.Code, reopened.Body.String())
+	}
+	loaded := decodeBody[model.Comment](t, reopened)
+	if loaded.Resolved || loaded.ResolvedBy != nil || loaded.ResolvedAt != nil {
+		t.Fatalf("reopened orphaned suggestion = %#v, want open", loaded)
+	}
+	if loaded.Suggestion == nil || loaded.Suggestion.Accepted != nil {
+		t.Fatalf("reopened orphaned suggestion disposition = %#v, want undecided", loaded.Suggestion)
+	}
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read reopened suggestion: status=%d body=%s", read.Code, read.Body.String())
+	}
+	reloaded := decodeBody[struct {
+		Comment model.Comment `json:"comment"`
+	}](t, read)
+	if reloaded.Comment.Resolved || reloaded.Comment.Anchor == nil || !reloaded.Comment.Anchor.Orphaned {
+		t.Fatalf("reloaded reopened suggestion = %#v, want open with orphaned anchor", reloaded.Comment)
+	}
+}
+
+func waitForArtifactVersion(t *testing.T, handler http.Handler, artifactID string, number int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		version := dispatchRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/v1/artifacts/%s/versions/%d", artifactID, number), nil, "alice")
+		if version.Code == http.StatusOK {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("artifact version %d did not settle", number)
+}
+
+func TestSuggestionAcceptClearsPendingAuthorBeforeNextVersion(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Accepted author", "before")
+	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Replace before.", "anchor": map[string]any{"artifact": "spec", "quote": "before"},
+		"suggestion": map[string]string{"replace_with": "after"}, "actor": sessionActor(),
+	})
+	if suggestion.Code != http.StatusCreated {
+		t.Fatalf("create suggestion: status=%d body=%s", suggestion.Code, suggestion.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, suggestion)
+	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("accept suggestion: status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+
+	next := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops":     []map[string]string{{"op": "replace", "find": "after", "with": "next"}},
+		"summary": "Next version",
+		"actor":   sessionActor(),
+	})
+	if next.Code != http.StatusOK {
+		t.Fatalf("create next version: status=%d body=%s", next.Code, next.Body.String())
+	}
+	result := decodeBody[struct {
+		Version *model.Version `json:"version"`
+	}](t, next)
+	if result.Version == nil || len(result.Version.Authors) != 1 || result.Version.Authors[0] != (model.Actor{Kind: "session", ID: "session-0123456789abcdef"}) {
+		t.Fatalf("next version authors = %#v, want only the next session editor", result.Version)
+	}
+}
+
+// An upload's version takes its author sequence at the upload write's room read, so a browser edit
+// made after that read stays pending until a later version holds and credits it (LEGION-503).
+func TestAnUploadKeepsTheCreditOfAnEditItsUploaderMakesWhileItWrites(t *testing.T) {
+	documentService, handler, database := browserDocumentService(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Upload timing", "First.\n\nSecond.\n")
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	peer := connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)
+	t.Cleanup(peer.close)
+
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin upload transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := documentService.Join(ctx, tx)
+	defer ledger.Discard()
+	uploaded, err := documentService.ReplaceText(joined, issue.PrimaryArtifactID, "First.\n\nSecond, uploaded.\n", alice)
+	if err != nil {
+		t.Fatalf("replace the document with the upload: %v", err)
+	}
+	peer.appendParagraph(t, "Third, alice.")
+	peer.barrier(t)
+	var nextNumber int
+	if err := tx.QueryRow(ctx, `select coalesce(max(number), 0) + 1 from artifact_versions where artifact_id = $1`, issue.PrimaryArtifactID).Scan(&nextNumber); err != nil {
+		t.Fatalf("read next upload version number: %v", err)
+	}
+	uploadVersion, err := writeDocumentVersion(ctx, tx, issue.PrimaryArtifactID, nextNumber, uploaded, []model.Actor{alice}, nil)
+	if err != nil {
+		t.Fatalf("write the upload version: %v", err)
+	}
+	ledger.WroteVersion(issue.PrimaryArtifactID, uploadVersion)
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit upload transaction: %v", err)
+	}
+	peer.closeAndWait(t)
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, nextNumber+1)
+	version := decodeBody[model.Version](t, dispatchRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/v1/artifacts/%s/versions/%d", issue.PrimaryArtifactID, nextNumber+1), nil, "alice"))
+	if len(version.Authors) != 1 || version.Authors[0] != alice {
+		t.Fatalf("version %d authors = %#v, want alice, whose browser edit it holds", nextNumber+1, version.Authors)
+	}
+}
+
+// An upload that changes the document clears every credit pending at its write's room read, so no
+// later version credits an edit the upload was written over, whether its replacement dropped that
+// edit or kept it. An upload that changes nothing clears nothing (LEGION-503).
+func TestAnUploadClearsPendingCreditOnlyWhenItChangesTheDocument(t *testing.T) {
+	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	for _, test := range []struct {
+		name        string
+		replacement string
+		find        string
+		want        []model.Actor
+	}{
+		// Bob's replacement drops Alice's paragraph: no version may credit an edit none holds.
+		{name: "a replacement that drops her edit", replacement: "after\n", find: "after", want: []model.Actor{session}},
+		// Bob's replacement keeps Alice's paragraph and adds his own. It changed the document, so it
+		// clears every credit pending at its room read, hers included (Deep's probe C).
+		{name: "a replacement that keeps her edit", replacement: "before\n\nAlice wrote this.\n\nBob's own.\n", find: "before", want: []model.Actor{session}},
+		// Bob uploads the live text unchanged. His write changed nothing, so it clears nothing, and
+		// the next version credits Alice (Deep's probe D).
+		{name: "an unchanged re-upload", replacement: "before\n\nAlice wrote this.\n", find: "before", want: []model.Actor{session, alice}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			documentService, handler, _ := browserDocumentService(t)
+			issue := createInteractionIssue(t, handler, "TEST", "Overwritten author", "before")
+			path := "/api/v1/issues/" + issue.Key + "/artifacts"
+			upload := func(content string) {
+				t.Helper()
+				if response := dispatchRequest(t, handler, http.MethodPost, path, map[string]string{
+					"name": "notes.md", "content": content,
+				}, "bob"); response.Code != http.StatusCreated {
+					t.Fatalf("bob uploads %q: status=%d body=%s", content, response.Code, response.Body.String())
+				}
+			}
+			upload("before\n")
+			var notes model.Artifact
+			for _, artifact := range decodeBody[[]model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, path, nil, "alice")) {
+				if artifact.Name == "notes.md" {
+					notes = artifact
+				}
+			}
+			if notes.ID == "" {
+				t.Fatal("uploaded document is missing")
+			}
+			browser := connectBrowserPeer(t, documentService, notes.ID)
+			t.Cleanup(browser.close)
+			browser.appendParagraph(t, "Alice wrote this.")
+			browser.barrier(t)
+			upload(test.replacement)
+
+			next := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+notes.ID+"/edits", map[string]any{
+				"ops":     []map[string]string{{"op": "replace", "find": test.find, "with": "next"}},
+				"summary": "Next version",
+				"actor":   sessionActor(),
+			})
+			if next.Code != http.StatusOK {
+				t.Fatalf("create next version: status=%d body=%s", next.Code, next.Body.String())
+			}
+			version := decodeBody[struct {
+				Version *model.Version `json:"version"`
+			}](t, next).Version
+			if version == nil || !slices.Equal(version.Authors, test.want) {
+				t.Fatalf("next version = %#v, want authors %v", version, test.want)
+			}
+		})
+	}
+}
+
+// An upload's version credits its uploader and holds the upload's write to the document, and the
+// uploader's browser edits it is written over, so the next version, a session's named edit,
+// credits that session alone (LEGION-503).
+func TestUploadClearsItsUploaderBeforeNextVersion(t *testing.T) {
+	documentService, handler, _ := browserDocumentService(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Uploaded author", "before")
+	path := "/api/v1/issues/" + issue.Key + "/artifacts"
+	upload := func(content string) {
+		t.Helper()
+		if response := dispatchRequest(t, handler, http.MethodPost, path, map[string]string{
+			"name": "notes.md", "content": content,
+		}, "alice"); response.Code != http.StatusCreated {
+			t.Fatalf("upload %q: status=%d body=%s", content, response.Code, response.Body.String())
+		}
+	}
+	upload("before\n")
+	listed := dispatchRequest(t, handler, http.MethodGet, path, nil, "alice")
+	var notes model.Artifact
+	for _, artifact := range decodeBody[[]model.Artifact](t, listed) {
+		if artifact.Name == "notes.md" {
+			notes = artifact
+		}
+	}
+	if notes.ID == "" {
+		t.Fatalf("uploaded document missing from %s", listed.Body.String())
+	}
+	// alice types in her browser before she uploads again: the room credits her with it.
+	browser := connectBrowserPeer(t, documentService, notes.ID)
+	t.Cleanup(browser.close)
+	browser.appendParagraph(t, "Typed in the browser.")
+	browser.barrier(t)
+	upload("after\n")
+
+	next := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+notes.ID+"/edits", map[string]any{
+		"ops":     []map[string]string{{"op": "replace", "find": "after", "with": "next"}},
+		"summary": "Next version",
+		"actor":   sessionActor(),
+	})
+	if next.Code != http.StatusOK {
+		t.Fatalf("create next version: status=%d body=%s", next.Code, next.Body.String())
+	}
+	result := decodeBody[struct {
+		Version *model.Version `json:"version"`
+	}](t, next)
+	if result.Version == nil || len(result.Version.Authors) != 1 || result.Version.Authors[0] != (model.Actor{Kind: "session", ID: "session-0123456789abcdef"}) {
+		t.Fatalf("next version = %#v, want one crediting only the next session editor", result.Version)
+	}
+}
+
+func TestConcurrentSuggestionAcceptAppliesReplacementExactlyOnce(t *testing.T) {
+	var documentService *docs.Service
+	var gate *firstReplaceGate
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		gate = &firstReplaceGate{
+			API: documentService, firstEntered: make(chan struct{}), releaseFirst: make(chan struct{}), secondEntered: make(chan struct{}),
+		}
+		return gate
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Concurrent accepts", "foo")
+	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Replace foo.", "anchor": map[string]any{"artifact": "spec", "quote": "foo"},
+		"suggestion": map[string]string{"replace_with": "foo2"}, "actor": sessionActor(),
+	})
+	commentID := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, suggestion).ID
+
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+commentID+"/accept", map[string]any{}, "alice")
+	}()
+	select {
+	case <-gate.firstEntered:
+	case <-time.After(time.Second):
+		t.Fatal("first acceptance did not reach the document replacement")
+	}
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+commentID+"/accept", map[string]any{}, "alice")
+	}()
+	waitForSecondReplacementOrCommentLock(t, database, gate.secondEntered)
+	close(gate.releaseFirst)
+
+	var success, conflict int
+	for range 2 {
+		select {
+		case response := <-responses:
+			switch response.Code {
+			case http.StatusOK:
+				success++
+			case http.StatusConflict:
+				if strings.Contains(response.Body.String(), `"code":"ALREADY_ACTIONED"`) {
+					conflict++
+				}
+			}
+		case <-time.After(time.Second):
+			t.Fatal("concurrent acceptance did not complete")
+		}
+	}
+	if success != 1 || conflict != 1 {
+		t.Fatalf("acceptance statuses = success:%d conflict:%d, want one each", success, conflict)
+	}
+	markdown, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
+	if err != nil {
+		t.Fatalf("read document after concurrent acceptance: %v", err)
+	}
+	if markdown != "foo2\n" {
+		t.Fatalf("document after concurrent acceptance = %q, want foo2", markdown)
+	}
+}
+
+func TestSuggestionAcceptChecksClosureBeforeApplyingReplacement(t *testing.T) {
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Closed suggestion", "foo")
+	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Replace foo.", "anchor": map[string]any{"artifact": "spec", "quote": "foo"},
+		"suggestion": map[string]string{"replace_with": "foo2"}, "actor": sessionActor(),
+	})
+	commentID := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, suggestion).ID
+
+	blocker, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin issue blocker: %v", err)
+	}
+	defer blocker.Rollback(context.Background())
+	if _, err := blocker.Exec(context.Background(), `select 1 from issues where key = $1 for update`, issue.Key); err != nil {
+		t.Fatalf("lock issue: %v", err)
+	}
+	responses := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+commentID+"/accept", map[string]any{}, "alice")
+	}()
+	waitForDatabaseLocks(t, blocker, 1)
+	if _, err := blocker.Exec(context.Background(), `update issues set status = 'done', closed_at = now() where key = $1`, issue.Key); err != nil {
+		t.Fatalf("close locked issue: %v", err)
+	}
+	if err := blocker.Commit(context.Background()); err != nil {
+		t.Fatalf("commit closed issue: %v", err)
+	}
+	response := <-responses
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"ISSUE_CLOSED"`) {
+		t.Fatalf("accept suggestion after close: status=%d body=%s", response.Code, response.Body.String())
+	}
+	markdown, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
+	if err != nil {
+		t.Fatalf("read closed document: %v", err)
+	}
+	if markdown != "foo\n" {
+		t.Fatalf("closed suggestion changed document to %q, want foo", markdown)
+	}
+}
+
+func TestInboxOrdersOpenAsksAcrossIssues(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	first := createInteractionIssue(t, handler, "TEST", "First", "first")
+	firstAsk := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+first.Key+"/asks", map[string]any{"question": "First question", "actor": sessionActor()})
+	if firstAsk.Code != http.StatusCreated {
+		t.Fatalf("create first ask: status=%d body=%s", firstAsk.Code, firstAsk.Body.String())
+	}
+	firstAskBody := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, firstAsk)
+	if _, err := database.Pool.Exec(context.Background(), `update asks set created_at = created_at - interval '1 minute' where id = $1`, firstAskBody.ID); err != nil {
+		t.Fatalf("move first ask earlier: %v", err)
+	}
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{"project": "TEST", "title": "Second", "spec": "second"}, "alice")
+	second := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, response)
+	secondAsk := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+second.Key+"/asks", map[string]any{"question": "Second question", "actor": sessionActor()})
+	if secondAsk.Code != http.StatusCreated {
+		t.Fatalf("create second ask: status=%d body=%s", secondAsk.Code, secondAsk.Body.String())
+	}
+	inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox?project=TEST", nil, "alice")
+	if inbox.Code != http.StatusOK {
+		t.Fatalf("read inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
+	}
+	var asks []struct {
+		Question string `json:"question"`
+		Issue    struct {
+			Key   string `json:"key"`
+			Title string `json:"title"`
+		} `json:"issue"`
+	}
+	if err := json.NewDecoder(inbox.Body).Decode(&asks); err != nil {
+		t.Fatalf("decode inbox: %v", err)
+	}
+	if len(asks) != 2 || asks[0].Question != "Second question" || asks[0].Issue.Key != second.Key || asks[0].Issue.Title != "Second" {
+		t.Fatalf("inbox ordering and embedded issue = %#v", asks)
+	}
+}
+
+func TestReferencesAndSessionMessageNotify(t *testing.T) {
+	handler, database := newInteractionHandler(t, nil)
+	issue := createInteractionIssue(t, handler, "TEST", "References", "The quick brown fox")
+	ask := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{"question": "Ask target dispatch://" + issue.Key + "/spec", "actor": sessionActor()})
+	askValue := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, ask)
+	body := "see dispatch://" + issue.Key + "/spec and https://dispatch.example/issues/" + issue.Key + "/asks/" + askValue.ID
+	comment := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{"body": body, "actor": sessionActor()})
+	commentValue := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, comment)
+	rows, err := database.Pool.Query(context.Background(), `select to_kind, to_id from refs where from_kind = 'comment' and from_id = $1 order by to_kind`, commentValue.ID)
+	if err != nil {
+		t.Fatalf("read comment refs: %v", err)
+	}
+	defer rows.Close()
+	targets := map[string]string{}
+	for rows.Next() {
+		var kind, id string
+		if err := rows.Scan(&kind, &id); err != nil {
+			t.Fatalf("scan comment ref: %v", err)
+		}
+		targets[kind] = id
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate comment refs: %v", err)
+	}
+	if len(targets) != 2 || targets["artifact"] != issue.Key+"/spec" || targets["ask"] != askValue.ID {
+		t.Fatalf("comment reference targets = %#v", targets)
+	}
+	artifact := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/references", nil, "alice")
+	if artifact.Code != http.StatusOK || !strings.Contains(artifact.Body.String(), `"referenced_by"`) || !strings.Contains(artifact.Body.String(), `"kind":"comment"`) || !strings.Contains(artifact.Body.String(), commentValue.ID) {
+		t.Fatalf("artifact references: status=%d body=%s", artifact.Code, artifact.Body.String())
+	}
+	message := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "A session message referencing dispatch://" + issue.Key + "/spec", "actor": sessionActor(),
+	})
+	if message.Code != http.StatusCreated {
+		t.Fatalf("session message: status=%d body=%s", message.Code, message.Body.String())
+	}
+	if !strings.Contains(message.Body.String(), `"body":"A session message`) {
+		t.Fatalf("session message response: %s", message.Body.String())
+	}
+
+	var artifactRefSources int
+	if err := database.Pool.QueryRow(context.Background(), `select count(*) from refs where to_kind = 'artifact' and to_id = $1`, issue.Key+"/spec").Scan(&artifactRefSources); err != nil {
+		t.Fatalf("count artifact reference sources: %v", err)
+	}
+	if artifactRefSources != 3 {
+		t.Fatalf("artifact reference sources = %d; want ask, comment, and message", artifactRefSources)
+	}
+	log := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if log.Code != http.StatusOK || !strings.Contains(log.Body.String(), `"type":"message.created"`) || !strings.Contains(log.Body.String(), `"notify":false`) {
+		t.Fatalf("session message event: status=%d body=%s", log.Code, log.Body.String())
+	}
+}
+
+func TestCommentReplyMustBelongToItsIssue(t *testing.T) {
+	handler := newTestHandler(t)
+	first := createInteractionIssue(t, handler, "TEST", "First", "first")
+	comment := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+first.Key+"/comments", map[string]any{"body": "First", "actor": sessionActor()})
+	firstComment := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, comment)
+	secondResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{"project": "TEST", "title": "Second", "spec": "second"}, "alice")
+	second := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, secondResponse)
+	invalid := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+second.Key+"/comments", map[string]string{"body": "Wrong issue", "reply_to": firstComment.ID}, "alice")
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("cross-issue reply: status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+}
+
+func TestAskThreadRepliesStoredAndReturnedInOrder(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Ask thread", "before")
+	askResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Which approach?", "actor": sessionActor(),
+	})
+	if askResponse.Code != http.StatusCreated {
+		t.Fatalf("create ask: status=%d body=%s", askResponse.Code, askResponse.Body.String())
+	}
+	ask := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, askResponse)
+
+	reply := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "I think option A.", "ask_id": ask.ID,
+	}, "alice")
+	if reply.Code != http.StatusCreated {
+		t.Fatalf("reply to ask: status=%d body=%s", reply.Code, reply.Body.String())
+	}
+	firstReply := decodeBody[model.Comment](t, reply)
+	if firstReply.AskID == nil || *firstReply.AskID != ask.ID {
+		t.Fatalf("reply ask_id = %#v, want %q", firstReply.AskID, ask.ID)
+	}
+
+	log := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if !strings.Contains(log.Body.String(), `"ask_question":"Which approach?"`) {
+		t.Fatalf("comment.created event log = %s, want ask_question in the payload", log.Body.String())
+	}
+	// A human reply while the ask is still open is a clarification request; the
+	// payload says so through the ask's state at posting time.
+	if !strings.Contains(log.Body.String(), `"ask_state":"open"`) {
+		t.Fatalf("comment.created event log = %s, want ask_state open in the payload", log.Body.String())
+	}
+
+	nestedReply := model.Comment{
+		IssueKey: new(issue.Key),
+		Author:   model.Actor{Kind: "session", ID: "session-0123456789abcdef"},
+		Body:     "Why option A?",
+		ReplyTo:  &firstReply.ID,
+	}
+	author, err := json.Marshal(nestedReply.Author)
+	if err != nil {
+		t.Fatalf("encode nested ask reply author: %v", err)
+	}
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into comments (issue_key, author, body, reply_to)
+		values ($1, $2, $3, $4)
+		returning id::text, created_at
+	`, nestedReply.IssueKey, author, nestedReply.Body, nestedReply.ReplyTo).Scan(&nestedReply.ID, &nestedReply.CreatedAt); err != nil {
+		t.Fatalf("seed nested ask reply: %v", err)
+	}
+
+	second := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Because it's simpler.", "ask_id": ask.ID,
+	}, "alice")
+	if second.Code != http.StatusCreated {
+		t.Fatalf("second reply to ask: status=%d body=%s", second.Code, second.Body.String())
+	}
+	secondReply := decodeBody[model.Comment](t, second)
+
+	base := time.Date(2026, time.September, 9, 12, 0, 0, 0, time.UTC)
+	for index, comment := range []model.Comment{firstReply, nestedReply, secondReply} {
+		if _, err := database.Pool.Exec(context.Background(), `
+			update comments set created_at = $2 where id = $1
+		`, comment.ID, base.Add(time.Duration(index)*time.Second)); err != nil {
+			t.Fatalf("set reply timestamp: %v", err)
+		}
+	}
+
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask.ID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read ask thread: status=%d body=%s", read.Code, read.Body.String())
+	}
+	thread := decodeBody[struct {
+		Ask     model.Ask       `json:"ask"`
+		Replies []model.Comment `json:"replies"`
+	}](t, read)
+	if thread.Ask.ID != ask.ID {
+		t.Fatalf("thread ask = %q, want %q", thread.Ask.ID, ask.ID)
+	}
+	if len(thread.Replies) != 3 {
+		t.Fatalf("thread replies = %#v, want three replies", thread.Replies)
+	}
+	for index, want := range []string{firstReply.ID, nestedReply.ID, secondReply.ID} {
+		if thread.Replies[index].ID != want {
+			t.Fatalf("thread reply %d = %q, want %q", index, thread.Replies[index].ID, want)
+		}
+	}
+}
+
+func TestAskReplyMustBelongToItsIssue(t *testing.T) {
+	handler := newTestHandler(t)
+	first := createInteractionIssue(t, handler, "TEST", "First", "first")
+	askResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+first.Key+"/asks", map[string]any{
+		"question": "Ship it?", "actor": sessionActor(),
+	})
+	ask := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, askResponse)
+	second := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Second", "spec": "second",
+	}, "alice")
+	secondIssue := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, second)
+
+	invalid := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+secondIssue.Key+"/comments", map[string]string{
+		"body": "Wrong issue", "ask_id": ask.ID,
+	}, "alice")
+	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), `"code":"INVALID_COMMENT"`) {
+		t.Fatalf("cross-issue ask reply: status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+
+	both := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+first.Key+"/comments", map[string]any{
+		"body": "Ambiguous parent", "ask_id": ask.ID, "reply_to": ask.ID,
+	}, "alice")
+	if both.Code != http.StatusBadRequest || !strings.Contains(both.Body.String(), `"code":"INVALID_COMMENT"`) {
+		t.Fatalf("reply_to and ask_id together: status=%d body=%s", both.Code, both.Body.String())
+	}
+}
+
+func TestAskReplyOnClosedIssueIsRefused(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Closing soon", "before")
+	askResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Ship it?", "actor": sessionActor(),
+	})
+	ask := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, askResponse)
+	closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice")
+	if closed.Code != http.StatusOK {
+		t.Fatalf("close issue: status=%d body=%s", closed.Code, closed.Body.String())
+	}
+	reply := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Too late?", "ask_id": ask.ID,
+	}, "alice")
+	if reply.Code != http.StatusConflict || !strings.Contains(reply.Body.String(), `"code":"ISSUE_CLOSED"`) {
+		t.Fatalf("reply on closed issue: status=%d body=%s", reply.Code, reply.Body.String())
+	}
+}
+
+func TestDoneIssueRejectsEveryMutation(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Done issue", "before")
+	ask := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Open ask", "actor": sessionActor(),
+	})
+	askID := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, ask).ID
+	comment := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Open comment", "actor": sessionActor(),
+	})
+	commentID := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, comment).ID
+	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Replace before.", "anchor": map[string]any{"artifact": "spec", "quote": "before"},
+		"suggestion": map[string]string{"replace_with": "after"}, "actor": sessionActor(),
+	})
+	suggestionID := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, suggestion).ID
+	secondSuggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Reject this.", "suggestion": map[string]string{"replace_with": "ignored"}, "actor": sessionActor(),
+	})
+	secondSuggestionID := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, secondSuggestion).ID
+	issueDetail := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key, nil, "alice")
+	artifactList := decodeBody[struct {
+		Artifacts []struct {
+			ID   string `json:"id"`
+			Slug string `json:"slug"`
+		} `json:"artifacts"`
+	}](t, issueDetail)
+	var primarySlug string
+	for _, artifact := range artifactList.Artifacts {
+		if artifact.ID == issue.PrimaryArtifactID {
+			primarySlug = artifact.Slug
+			break
+		}
+	}
+	if primarySlug == "" {
+		t.Fatal("resolve primary artifact slug")
+	}
+
+	closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice")
+	var closedIssue struct {
+		Status   string     `json:"status"`
+		ClosedAt *time.Time `json:"closed_at"`
+	}
+	if closed.Code != http.StatusOK {
+		t.Fatalf("set done: status=%d body=%s", closed.Code, closed.Body.String())
+	}
+	closedIssue = decodeBody[struct {
+		Status   string     `json:"status"`
+		ClosedAt *time.Time `json:"closed_at"`
+	}](t, closed)
+	if closedIssue.Status != "done" || closedIssue.ClosedAt == nil {
+		t.Fatalf("done issue = %#v, want status done with closed_at", closedIssue)
+	}
+	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if !strings.Contains(events.Body.String(), `"type":"issue.closed"`) {
+		t.Fatalf("done event log = %s, want issue.closed", events.Body.String())
+	}
+
+	assertClosed := func(name string, response *httptest.ResponseRecorder) {
+		t.Helper()
+		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"ISSUE_CLOSED"`) {
+			t.Fatalf("%s after done: status=%d body=%s", name, response.Code, response.Body.String())
+		}
+	}
+	assertClosed("issue title", dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"title": "Nope"}, "alice"))
+	assertClosed("ask", sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Later ask", "actor": sessionActor(),
+	}))
+	// The close withdrew the open ask; its answer is refused with the rest.
+	requireWithdrawn(t, handler, issue.Key, askID, model.Actor{Kind: "user", ID: "alice"})
+	assertClosed("ask answer", dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{}, "alice"))
+	assertClosed("ask resolution", sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/resolve", map[string]any{
+		"kind": "retracted", "reason": "Later retraction.", "actor": sessionActor(),
+	}))
+	assertClosed("comment", sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Later comment", "actor": sessionActor(),
+	}))
+	assertClosed("comment resolution", sessionRequest(t, handler, http.MethodPost, "/api/v1/comments/"+commentID+"/resolve", map[string]any{
+		"actor": sessionActor(),
+	}))
+	assertClosed("suggestion acceptance", dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+suggestionID+"/accept", map[string]any{}, "alice"))
+	assertClosed("suggestion rejection", dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+secondSuggestionID+"/reject", map[string]any{}, "alice"))
+	assertClosed("message", sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "Later message", "actor": sessionActor(),
+	}))
+	assertClosed("upload", multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "later.md",
+	}, "later.md", "text/markdown", []byte("later"), "alice"))
+	assertClosed("document edit", sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "replace", "find": "before", "with": "after"}}, "actor": sessionActor(),
+	}))
+	assertClosed("named version", sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions", map[string]any{
+		"summary": "checkpoint", "actor": sessionActor(),
+	}))
+	assertClosed("document edit (slug)", sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts/"+primarySlug+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "replace", "find": "before", "with": "after"}}, "actor": sessionActor(),
+	}))
+	assertClosed("named version (slug)", sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts/"+primarySlug+"/versions", map[string]any{
+		"summary": "checkpoint", "actor": sessionActor(),
+	}))
+
+	reopened := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "todo"}, "alice")
+	if reopened.Code != http.StatusOK || strings.Contains(reopened.Body.String(), `"closed_at":`) && !strings.Contains(reopened.Body.String(), `"closed_at":null`) {
+		t.Fatalf("reopen done issue: status=%d body=%s", reopened.Code, reopened.Body.String())
+	}
+	if restored := readBlockAsk(t, handler, askID); restored.State != "open" || restored.Resolution != nil {
+		t.Fatalf("withdrawn ask after reopen = %s %#v, want open again", restored.State, restored.Resolution)
+	}
+	if created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Reopened ask", "actor": sessionActor(),
+	}); created.Code != http.StatusCreated {
+		t.Fatalf("ask after reopen: status=%d body=%s", created.Code, created.Body.String())
+	}
+	if invalid := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "closed"}, "alice"); invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), `"code":"INVALID_STATUS"`) {
+		t.Fatalf("closed is not a valid lifecycle status: status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+}
+
+func TestEditArtifactCreatesNamedVersion(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Edit version", "before")
+	edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops":     []map[string]string{{"op": "replace", "find": "before", "with": "after"}},
+		"summary": "Change opening",
+		"actor":   sessionActor(),
+	})
+	var result struct {
+		Applied int           `json:"applied"`
+		Version model.Version `json:"version"`
+		Token   string        `json:"token"`
+	}
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit document: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	result = decodeBody[struct {
+		Applied int           `json:"applied"`
+		Version model.Version `json:"version"`
+		Token   string        `json:"token"`
+	}](t, edited)
+	if result.Applied != 1 || !result.Version.Named || result.Version.Summary == nil || *result.Version.Summary != "Change opening" {
+		t.Fatalf("edit result = %#v, want named version with summary", result)
+	}
+	if current := readDocumentPrecondition(t, handler, issue.PrimaryArtifactID); result.Token != current.Token {
+		t.Fatalf("edit token = %q, want the document's own token %q", result.Token, current.Token)
+	}
+	unchanged := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{}, "actor": sessionActor(),
+	})
+	if unchanged.Code != http.StatusOK || !strings.Contains(unchanged.Body.String(), `"applied":0`) || !strings.Contains(unchanged.Body.String(), `"version":null`) {
+		t.Fatalf("empty edit result: status=%d body=%s", unchanged.Code, unchanged.Body.String())
+	}
+	// A batch with no operation still reports the document as it stands, so the caller's next
+	// guarded edit has its precondition.
+	if empty := decodeBody[struct {
+		Token string `json:"token"`
+	}](t, unchanged); empty.Token != result.Token {
+		t.Fatalf("empty edit token = %q, want the unchanged document's token %q", empty.Token, result.Token)
+	}
+}
+
+func TestEmptyArtifactEditDoesNotScheduleSettlement(t *testing.T) {
+	var tracked *scheduleTrackingDocs
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		service := docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+		tracked = &scheduleTrackingDocs{API: service}
+		return tracked
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Empty edit", "before")
+	tracked.schedules = 0
+	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{}, "actor": sessionActor(),
+	})
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"applied":0`) {
+		t.Fatalf("empty edit: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if tracked.schedules != 0 {
+		t.Fatalf("empty edit scheduled %d settlements, want none", tracked.schedules)
+	}
+}
+
+func TestEditArtifactWithoutSummaryReturnsUnnamedVersion(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Unversioned edit", "before")
+	edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops":   []map[string]string{{"op": "replace", "find": "before", "with": "after"}},
+		"actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit document: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	result := decodeBody[struct {
+		Applied int            `json:"applied"`
+		Version *model.Version `json:"version"`
+	}](t, edited)
+	if result.Applied != 1 || result.Version == nil || result.Version.Named || result.Version.Summary != nil {
+		t.Fatalf("edit result = %#v, want one applied operation and an unnamed version", result)
+	}
+}
+
+// A batch that changes nothing mints nothing and says so, with or without a summary: a `summary`
+// that reached NamedVersion unconditionally would version a byte-identical document.
+func TestEditArtifactThatChangesNothingMintsNoVersionAndSaysSo(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		request map[string]any
+	}{
+		{name: "with a summary", request: map[string]any{
+			"ops":     []map[string]string{{"op": "replace", "find": "before", "with": "before"}},
+			"summary": "Record the decision",
+			"actor":   sessionActor(),
+		}},
+		{name: "without a summary", request: map[string]any{
+			"ops":   []map[string]string{{"op": "replace", "find": "before", "with": "before"}},
+			"actor": sessionActor(),
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handler := newTestHandler(t)
+			issue := createInteractionIssue(t, handler, "TEST", "Unchanged edit", "before")
+			edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", test.request)
+			if edited.Code != http.StatusOK {
+				t.Fatalf("edit document: status=%d body=%s", edited.Code, edited.Body.String())
+			}
+			result := decodeBody[struct {
+				Applied      int            `json:"applied"`
+				Version      *model.Version `json:"version"`
+				Changed      bool           `json:"changed"`
+				UnchangedOps []int          `json:"unchanged_ops"`
+			}](t, edited)
+			if result.Applied != 1 || result.Version != nil || result.Changed {
+				t.Fatalf("unchanged edit = %#v, want one applied operation, no version, changed=false", result)
+			}
+			if len(result.UnchangedOps) != 1 || result.UnchangedOps[0] != 0 {
+				t.Fatalf("unchanged operations = %v, want [0]", result.UnchangedOps)
+			}
+			read := sessionRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil)
+			artifact := decodeBody[model.Artifact](t, read)
+			if len(artifact.Versions) != 1 {
+				t.Fatalf("versions after an unchanged edit = %d, want the creating version only", len(artifact.Versions))
+			}
+		})
+	}
+}
+
+func TestArtifactTextReportsTheLatestVersion(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Text version", "before")
+	readVersion := func() *int {
+		t.Helper()
+		response := sessionRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("read text: status=%d body=%s", response.Code, response.Body.String())
+		}
+		return decodeBody[struct {
+			Version *int `json:"version"`
+		}](t, response).Version
+	}
+	if got := readVersion(); got == nil || *got != 1 {
+		t.Fatalf("text version after creation = %v, want 1", got)
+	}
+	if edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops":   []map[string]string{{"op": "replace", "find": "before", "with": "after"}},
+		"actor": sessionActor(),
+	}); edited.Code != http.StatusOK {
+		t.Fatalf("edit document: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	if got := readVersion(); got == nil || *got != 2 {
+		t.Fatalf("text version after an edit = %v, want 2", got)
+	}
+}
+
+// The route renders INVALID_OP and TARGET_AMBIGUOUS from the typed error, not the wrapped chain,
+// so a refusal inside a multi-operation batch has to reach the response still naming its operation.
+func TestDocumentEditRefusalsReachTheResponseNamingTheirOperation(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Refusal shapes", "Body.\n\n- Retracted\n\nShared line.\n\nShared line.\n")
+	for _, test := range []struct {
+		name   string
+		ops    []map[string]any
+		status int
+		code   string
+		wants  []string
+	}{
+		{
+			name: "a marker refusal in operation 1",
+			ops: []map[string]any{
+				{"op": "replace", "find": "Body.", "with": "Body!"},
+				{"op": "replace", "find": "Retracted", "with": "- Retracted later"},
+			},
+			status: http.StatusBadRequest,
+			code:   "INVALID_OP",
+			wants:  []string{"operation 1", `"- "`, "omit the marker"},
+		},
+		{
+			name: "an ambiguous quote in operation 1",
+			ops: []map[string]any{
+				{"op": "replace", "find": "Body.", "with": "Body!"},
+				{"op": "replace", "find": "Shared line.", "with": "Changed."},
+			},
+			status: http.StatusConflict,
+			code:   "TARGET_AMBIGUOUS",
+			wants:  []string{"operation 1", `"Shared line."`, "occurrence"},
+		},
+		{
+			name: "a quote spanning two blocks in operation 0",
+			ops: []map[string]any{
+				{"op": "replace", "find": "Body. Retracted", "with": "Changed."},
+			},
+			status: http.StatusBadRequest,
+			code:   "TARGET_SPANS_BLOCKS",
+			wants:  []string{"operation 0", `"Body. Retracted"`},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+				"ops": test.ops, "actor": sessionActor(),
+			})
+			body := decodeBody[struct {
+				Code       string            `json:"code"`
+				Error      string            `json:"error"`
+				Candidates []json.RawMessage `json:"candidates"`
+			}](t, response)
+			if response.Code != test.status || body.Code != test.code {
+				t.Fatalf("refusal: status=%d code=%q error=%q", response.Code, body.Code, body.Error)
+			}
+			for _, want := range test.wants {
+				if !strings.Contains(body.Error, want) {
+					t.Fatalf("refusal = %q, want it to name %q", body.Error, want)
+				}
+			}
+			if strings.Contains(body.Error, "pmdoc") {
+				t.Fatalf("refusal = %q, want no internal package name", body.Error)
+			}
+			if test.code == "TARGET_AMBIGUOUS" && len(body.Candidates) != 2 {
+				t.Fatalf("ambiguous candidates = %d, want the two matches", len(body.Candidates))
+			}
+		})
+	}
+}
+
+func TestDoneIssueAllowsOnlyAStatusReopen(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Strict reopen", "before")
+	if closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice"); closed.Code != http.StatusOK {
+		t.Fatalf("set done: status=%d body=%s", closed.Code, closed.Body.String())
+	}
+	combined := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+		"status": "todo", "title": "Reopened with a change",
+	}, "alice")
+	if combined.Code != http.StatusConflict || !strings.Contains(combined.Body.String(), `"code":"ISSUE_CLOSED"`) {
+		t.Fatalf("combined reopen and mutation: status=%d body=%s, want ISSUE_CLOSED", combined.Code, combined.Body.String())
+	}
+}
+
+func TestNamedArtifactVersionEventCarriesUnifiedDiff(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Version diff", "before")
+	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops":     []map[string]string{{"op": "replace", "find": "before", "with": "after"}},
+		"summary": "Change opening",
+		"actor":   sessionActor(),
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("write named version: status=%d body=%s", response.Code, response.Body.String())
+	}
+	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if events.Code != http.StatusOK {
+		t.Fatalf("list version events: status=%d body=%s", events.Code, events.Body.String())
+	}
+	var log []struct {
+		Type    string          `json:"type"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.NewDecoder(events.Body).Decode(&log); err != nil {
+		t.Fatalf("decode version events: %v", err)
+	}
+	for _, event := range log {
+		if event.Type != "artifact.version" {
+			continue
+		}
+		var payload struct {
+			Diff *string `json:"diff"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode version event payload: %v", err)
+		}
+		want := "--- previous\n+++ current\n@@ -1 +1 @@\n-before\n+after\n"
+		if payload.Diff == nil || *payload.Diff != want {
+			t.Fatalf("version diff = %#v, want %q", payload.Diff, want)
+		}
+		return
+	}
+	t.Fatalf("artifact.version event not found in %#v", log)
+}
+
+func TestSuggestionAllowsEmptyBodyWithoutRelaxingCommentValidation(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Empty suggestion", "before")
+	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"suggestion": map[string]string{"replace_with": "after"},
+		"actor":      sessionActor(),
+	})
+	if suggestion.Code != http.StatusCreated {
+		t.Fatalf("create empty-body suggestion: status=%d body=%s", suggestion.Code, suggestion.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, suggestion)
+	if comment.Body != "" {
+		t.Fatalf("empty-body suggestion body = %q, want empty", comment.Body)
+	}
+	ordinary := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": " ", "actor": sessionActor(),
+	})
+	if ordinary.Code != http.StatusBadRequest || !strings.Contains(ordinary.Body.String(), `"code":"INVALID_COMMENT"`) {
+		t.Fatalf("empty ordinary comment: status=%d body=%s", ordinary.Code, ordinary.Body.String())
+	}
+}
+
+func TestGetCommentReturnsReplyChain(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Comment thread", "before")
+	createComment := func(body string, replyTo *string) model.Comment {
+		t.Helper()
+		input := map[string]any{"body": body, "actor": sessionActor()}
+		if replyTo != nil {
+			input["reply_to"] = *replyTo
+		}
+		response := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", input)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create comment %q: status=%d body=%s", body, response.Code, response.Body.String())
+		}
+		return decodeBody[model.Comment](t, response)
+	}
+	root := createComment("root", nil)
+	first := createComment("first reply", &root.ID)
+	nested := model.Comment{
+		IssueKey: new(issue.Key),
+		Author:   model.Actor{Kind: "session", ID: "session-0123456789abcdef"},
+		Body:     "nested reply",
+		ReplyTo:  &first.ID,
+	}
+	author, err := json.Marshal(nested.Author)
+	if err != nil {
+		t.Fatalf("encode nested reply author: %v", err)
+	}
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into comments (issue_key, author, body, reply_to)
+		values ($1, $2, $3, $4)
+		returning id::text, created_at
+	`, nested.IssueKey, author, nested.Body, nested.ReplyTo).Scan(&nested.ID, &nested.CreatedAt); err != nil {
+		t.Fatalf("seed nested reply: %v", err)
+	}
+	second := createComment("second reply", &root.ID)
+	base := time.Date(2026, time.September, 9, 12, 0, 0, 0, time.UTC)
+	for index, comment := range []model.Comment{root, first, nested, second} {
+		if _, err := database.Pool.Exec(context.Background(), `
+			update comments set created_at = $2 where id = $1
+		`, comment.ID, base.Add(time.Duration(index)*time.Second)); err != nil {
+			t.Fatalf("set comment timestamp: %v", err)
+		}
+	}
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+root.ID, nil, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("read comment thread: status=%d body=%s", response.Code, response.Body.String())
+	}
+	thread := decodeBody[struct {
+		Comment model.Comment   `json:"comment"`
+		Replies []model.Comment `json:"replies"`
+	}](t, response)
+	if thread.Comment.ID != root.ID {
+		t.Fatalf("thread root = %q, want %q", thread.Comment.ID, root.ID)
+	}
+	if len(thread.Replies) != 3 {
+		t.Fatalf("thread replies = %#v, want three replies", thread.Replies)
+	}
+	for index, want := range []string{first.ID, nested.ID, second.ID} {
+		if thread.Replies[index].ID != want {
+			t.Fatalf("thread reply %d = %q, want %q", index, thread.Replies[index].ID, want)
+		}
+	}
+}
+
+func TestGetCommentReturnsNotFound(t *testing.T) {
+	handler := newTestHandler(t)
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/00000000-0000-0000-0000-000000000000", nil, "alice")
+	if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"code":"NOT_FOUND"`) {
+		t.Fatalf("read absent comment: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+// loadMarkProjection waits for the mark to reach the persisted document: the API answers once
+// the live document carries the mark, and persistence follows on its own schedule.
+func loadMarkProjection(t *testing.T, database *store.Store, artifactID, markID string) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		projection, found := findMarkProjection(t, database, artifactID, markID)
+		if found {
+			return projection
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("mark projection %q is missing", markID)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// awaitMarkProjection waits for the mark's durable record. A document's updates do not all
+// reach Postgres inside the request that caused them: a server-side mark written outside a
+// transaction persists on the document service's own queue, and a Yjs update that depends on
+// one still in flight stays pending in a freshly loaded document until it lands. Reading the
+// instant a request returns is therefore a race with that queue, not a statement about the
+// write - the record either appears here or the caller's assertion fails on the empty result.
+func awaitMarkProjection(t *testing.T, database *store.Store, artifactID, markID string) (map[string]any, bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		projection, found := findMarkProjection(t, database, artifactID, markID)
+		if found || time.Now().After(deadline) {
+			return projection, found
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func findMarkProjection(t *testing.T, database *store.Store, artifactID, markID string) (map[string]any, bool) {
+	t.Helper()
+	loaded, err := docs.NewPgVersioned(database).Load(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("load persisted document: %v", err)
+	}
+	document := crdt.New()
+	if err := crdt.ApplyUpdateV1(document, loaded.Update, nil); err != nil {
+		t.Fatalf("decode persisted document: %v", err)
+	}
+	value, found := document.GetMap("marks").Get(markID)
+	if !found {
+		return nil, false
+	}
+	projection, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("mark projection = %#v, want object", value)
+	}
+	return projection, true
+}
+
+func TestResolveAskRemovesItFromInboxAndKeepsTheThread(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Retracted decision", "A spec")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Should this remain open?", "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create ask: status=%d body=%s", created.Code, created.Body.String())
+	}
+	ask := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, created)
+
+	resolver := map[string]any{"kind": "session", "id": "session-handoff"}
+	resolved := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/resolve", map[string]any{
+		"kind": "retracted", "reason": "A newer question supersedes this one.", "actor": resolver,
+	})
+	if resolved.Code != http.StatusOK {
+		t.Fatalf("resolve ask: status=%d body=%s", resolved.Code, resolved.Body.String())
+	}
+	resolution := decodeBody[struct {
+		State      string `json:"state"`
+		Resolution struct {
+			Kind   string      `json:"kind"`
+			Reason string      `json:"reason"`
+			Actor  model.Actor `json:"actor"`
+		} `json:"resolution"`
+	}](t, resolved)
+	if resolution.State != "resolved" || resolution.Resolution.Kind != "retracted" || resolution.Resolution.Reason != "A newer question supersedes this one." || resolution.Resolution.Actor.Kind != "session" || resolution.Resolution.Actor.ID != "session-handoff" {
+		t.Fatalf("resolved ask = %#v", resolution)
+	}
+
+	inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
+	if inbox.Code != http.StatusOK || strings.Contains(inbox.Body.String(), ask.ID) {
+		t.Fatalf("resolved ask remained in inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
+	}
+	listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues", nil, "alice")
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"open_asks":0`) {
+		t.Fatalf("resolved ask remained in issue count: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	thread := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask.ID, nil, "alice")
+	if thread.Code != http.StatusOK || !strings.Contains(thread.Body.String(), `"state":"resolved"`) || !strings.Contains(thread.Body.String(), `"reason":"A newer question supersedes this one."`) {
+		t.Fatalf("resolved ask thread = status=%d body=%s", thread.Code, thread.Body.String())
+	}
+	log := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if log.Code != http.StatusOK || !strings.Contains(log.Body.String(), `"type":"ask.resolved"`) || !strings.Contains(log.Body.String(), `"notify":false`) {
+		t.Fatalf("resolved ask event = status=%d body=%s", log.Code, log.Body.String())
+	}
+}
+
+func TestResolveAskRejectsAnsweredAsksAndAnswerRejectsResolvedAsks(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Closed decisions", "A spec")
+	answered := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Should this be answered?", "actor": sessionActor(),
+	})
+	if answered.Code != http.StatusCreated {
+		t.Fatalf("create answered ask: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	answeredAsk := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, answered)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+answeredAsk.ID+"/answer", map[string]any{"text": "Already decided."}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("answer ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+answeredAsk.ID+"/resolve", map[string]any{
+		"kind": "resolved", "reason": "No longer relevant.", "actor": sessionActor(),
+	}); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"ASK_ANSWERED"`) {
+		t.Fatalf("resolve answered ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+answeredAsk.ID, nil, "alice"); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"answered"`) || !strings.Contains(response.Body.String(), `"text":"Already decided."`) {
+		t.Fatalf("answered ask after failed resolve: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	open := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Should this be retracted?", "actor": sessionActor(),
+	})
+	if open.Code != http.StatusCreated {
+		t.Fatalf("create resolvable ask: status=%d body=%s", open.Code, open.Body.String())
+	}
+	resolvedAsk := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, open)
+	if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+resolvedAsk.ID+"/resolve", map[string]any{
+		"kind": "resolved", "reason": "Found the answer.", "actor": sessionActor(),
+	}); response.Code != http.StatusOK {
+		t.Fatalf("resolve ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+resolvedAsk.ID+"/resolve", map[string]any{
+		"kind": "retracted", "reason": "Superseded after all.", "actor": sessionActor(),
+	}); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"ASK_RESOLVED"`) {
+		t.Fatalf("resolve resolved ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+resolvedAsk.ID+"/answer", map[string]any{"text": "Too late."}, "alice"); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"ASK_RESOLVED"`) {
+		t.Fatalf("answer resolved ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestResolveAskRejectsInvalidInputAndClosedIssues(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/00000000-0000-0000-0000-000000000000/resolve", map[string]any{
+		"kind": "resolved", "reason": "Found the answer.", "actor": sessionActor(),
+	}); response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"code":"NOT_FOUND"`) {
+		t.Fatalf("resolve missing ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	issue := createInteractionIssue(t, handler, "TEST", "Resolution validation", "A spec")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Can this be resolved?", "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create ask: status=%d body=%s", created.Code, created.Body.String())
+	}
+	ask := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, created)
+	for _, invalid := range []struct {
+		input   map[string]any
+		message string
+	}{
+		{input: map[string]any{"kind": "closed", "reason": "No."}, message: `resolution kind must be \"retracted\" or \"resolved\", not \"closed\"`},
+		{input: map[string]any{"kind": "resolved", "reason": "   "}, message: "resolution requires a kind and reason"},
+		// Withdrawn is the record an issue's close writes, never a caller's.
+		{input: map[string]any{"kind": "withdrawn", "reason": "Withdrawn by the close of " + issue.Key + "."}, message: `resolution kind must be \"retracted\" or \"resolved\", not \"withdrawn\"`},
+	} {
+		invalid.input["actor"] = sessionActor()
+		response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/resolve", invalid.input)
+		if body := response.Body.String(); response.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_RESOLUTION"`) || !strings.Contains(body, invalid.message) {
+			t.Fatalf("invalid resolution %#v: status=%d body=%s, want 400 INVALID_RESOLUTION saying %s", invalid.input, response.Code, body, invalid.message)
+		}
+	}
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("close issue: status=%d body=%s", response.Code, response.Body.String())
+	}
+	// The close withdrew the ask, and its record stays the close's.
+	requireWithdrawn(t, handler, issue.Key, ask.ID, model.Actor{Kind: "user", ID: "alice"})
+	if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/resolve", map[string]any{
+		"kind": "resolved", "reason": "Found the answer.", "actor": sessionActor(),
+	}); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"ISSUE_CLOSED"`) {
+		t.Fatalf("resolve ask on closed issue: status=%d body=%s", response.Code, response.Body.String())
+	}
+	requireWithdrawn(t, handler, issue.Key, ask.ID, model.Actor{Kind: "user", ID: "alice"})
+}
+
+func TestInboxGroupsAsksWaitingOnTheirAskerAfterThoseNeedingAHuman(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Inbox turns", "spec")
+	open := func(question string) string {
+		response := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+			"question": question, "actor": sessionActor(),
+		})
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create ask %q: status=%d body=%s", question, response.Code, response.Body.String())
+		}
+		return decodeBody[struct {
+			ID string `json:"id"`
+		}](t, response).ID
+	}
+	// Oldest first: clarifying (human replied last), fresh (no replies), answeredBack (agent replied last).
+	clarifying := open("Clarifying")
+	fresh := open("Fresh")
+	answeredBack := open("Answered back")
+	for index, id := range []string{clarifying, fresh, answeredBack} {
+		if _, err := database.Pool.Exec(context.Background(), `update asks set created_at = created_at - ($2::int * interval '1 minute') where id = $1`, id, 3-index); err != nil {
+			t.Fatalf("stagger ask %q: %v", id, err)
+		}
+	}
+	human := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "What do you mean?", "ask_id": clarifying,
+	}, "alice")
+	if human.Code != http.StatusCreated {
+		t.Fatalf("human reply: status=%d body=%s", human.Code, human.Body.String())
+	}
+	humanOnAnswered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Which one?", "ask_id": answeredBack,
+	}, "alice")
+	if humanOnAnswered.Code != http.StatusCreated {
+		t.Fatalf("human reply on answered back: status=%d body=%s", humanOnAnswered.Code, humanOnAnswered.Body.String())
+	}
+	agent := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "The second one.", "ask_id": answeredBack, "actor": sessionActor(),
+	})
+	if agent.Code != http.StatusCreated {
+		t.Fatalf("agent reply: status=%d body=%s", agent.Code, agent.Body.String())
+	}
+
+	inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox?project=TEST", nil, "alice")
+	if inbox.Code != http.StatusOK {
+		t.Fatalf("read inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
+	}
+	var rows []struct {
+		Question  string `json:"question"`
+		LastReply *struct {
+			Author struct {
+				Kind string `json:"kind"`
+			} `json:"author"`
+			CreatedAt string `json:"created_at"`
+		} `json:"last_reply"`
+	}
+	if err := json.NewDecoder(inbox.Body).Decode(&rows); err != nil {
+		t.Fatalf("decode inbox: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("inbox rows = %#v, want three", rows)
+	}
+	// The agent's reply is the newest activity, so that ask leads Needs you; the
+	// untouched ask follows; the ask the human replied to last waits on its asker.
+	if rows[0].Question != "Answered back" || rows[0].LastReply == nil || rows[0].LastReply.Author.Kind != "session" {
+		t.Fatalf("first row = %#v, want the agent-replied ask with a session last_reply", rows[0])
+	}
+	if rows[1].Question != "Fresh" || rows[1].LastReply != nil {
+		t.Fatalf("second row = %#v, want the unreplied ask with a null last_reply", rows[1])
+	}
+	if rows[2].Question != "Clarifying" || rows[2].LastReply == nil || rows[2].LastReply.Author.Kind != "user" {
+		t.Fatalf("third row = %#v, want the human-replied ask with a user last_reply", rows[2])
+	}
+}

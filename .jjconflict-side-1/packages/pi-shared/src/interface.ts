@@ -1,0 +1,162 @@
+import { logger } from "@oh-my-pi/pi-utils";
+import type { SessionUserTurns } from "./injected-user-turns";
+import type { LegionRoleClaimBridge } from "./role-claim-bridge";
+
+/**
+ * The in-process interface between the Envoy plugin (`@sjawhar/pi-envoy`, which owns the
+ * listener registration, the role heartbeat and the Dispatch tools) and the Legion plugin
+ * (`@sjawhar/pi-legion`, which claims roles and reads what Envoy delivered). Each plugin bundles
+ * its own copy of this module, so nothing here is shared by import: the one object lives on
+ * `globalThis` under a `Symbol.for` key both copies compute, and `ENVOY_PLUGIN_INTERFACE_VERSION`
+ * says which shape a copy expects. Any change to `EnvoyPluginInterface`'s shape, or to what either
+ * side reads from it, bumps the version; both plugins release from the same commit.
+ *
+ * The object holds process-wide state only — arrays, a map, a record holder — and never a function
+ * bound to one extension instance: Oh My Pi re-binds every extension factory for each in-process
+ * `task` subagent, so a per-instance callback stored here would be the last instance's, not the
+ * pane's (docs/solutions/envoy/heartbeat-role-reassertion-and-regain-hooks.md).
+ */
+export const ENVOY_PLUGIN_INTERFACE_VERSION = 5;
+export const ENVOY_PLUGIN_INTERFACE_KEY = Symbol.for("legion.pi-shared.envoy-plugin-interface");
+/** Set by the Legion entry's factory to `{ from: import.meta.url, envoyInterface: <version> }`;
+ * the daemon's boot gate reads it from `globalThis` to prove the Legion plugin loaded. */
+export const LEGION_PLUGIN_LOADED_KEY = Symbol.for("legion.pi-legion.loaded");
+/** The pre-split package's Legion marker; its presence means @sjawhar/pi-legion-envoy is loaded. */
+export const LEGACY_LEGION_LOADED_KEY = Symbol.for("legion.pi-envoy.legion-loaded");
+/** The marker an `envoy-message` the Envoy extension wrote into its own session carries; it is
+ * defined in a leaf module (`./envoy-notice`) because the phase-stall check reads it and is
+ * bundled by a host with no Oh My Pi, which this module's logger would drag in. */
+export { LOCAL_ENVOY_NOTICE } from "./envoy-notice";
+
+export interface EnvoyPluginInterface {
+  readonly version: number;
+  /** `import.meta.url` of each Envoy entry that published, in publish order; empty until one does. */
+  readonly publishers: string[];
+  /** The role-claim bridge: Envoy's bound instances, the sessions Legion drives, the regain hook. */
+  readonly roleClaim: LegionRoleClaimBridge;
+  /** The user turns Envoy sent into each session, which both entries match user messages against. */
+  readonly injectedUserTurns: Map<string, SessionUserTurns>;
+  /** The transcript of the session this process bootstrapped as its Legion identity. */
+  readonly bootstrappedSession: { file: string | undefined };
+  /**
+   * The session whose first turn is the Legion controller's start turn, and when its start was
+   * sent (ms since epoch), `sentAt` undefined while the start is due but not sent yet; undefined
+   * while there is none. The operator-launched controller marks its session with the start unsent
+   * at `session_start`, since it claims and sends only from `/legion-controller-start`, which Oh My
+   * Pi runs after its startup. Any claim that sends the operator's controller its start message to
+   * an idle session marks it sent right before the send, and the daemon-launched controller marks
+   * it sent right before `claims/ready`, after which the daemon sends its start prompt. A start
+   * message queued as a follow-up behind a turn the operator already started marks nothing, since
+   * that session's first run has already started and its `agent_start` cleared an unsent mark. It
+   * is cleared once that session's first run starts or the session shuts down, and an unsent mark
+   * once the start command's claim fails before the send or hands over to a new session. The Envoy
+   * entry reads it (`packages/pi-envoy/src/card-wake.ts`): while it names the Envoy entry's own
+   * live session, sent less than 30 s ago, or unsent and first read by that entry less than 30 s
+   * ago, a card that arrived while that session started takes no turn, and its wake waits for the
+   * start turn.
+   */
+  startupTurn: { readonly session: string; readonly sentAt: number | undefined } | undefined;
+}
+
+type EnvoyPluginInterfaceReading =
+  | { readonly kind: "present"; readonly iface: EnvoyPluginInterface }
+  | { readonly kind: "absent" }
+  | {
+      readonly kind: "mismatch";
+      readonly found: number;
+      readonly expected: number;
+      readonly from: string;
+    };
+
+interface GlobalEnvoyPluginInterfaceStore {
+  [key: symbol]: EnvoyPluginInterface | undefined;
+}
+
+const store = globalThis as typeof globalThis & GlobalEnvoyPluginInterfaceStore;
+
+// This module instance warns about a version clash once: every later publish from it would name
+// the same two versions and the same two entries.
+let mismatchWarned = false;
+
+/**
+ * The one interface object, created at this build's version by whoever touches it first. A
+ * consumer that runs before the Envoy entry publishes gets the same object the publisher later
+ * joins, so neither side depends on factory order. An object at another version is returned as it
+ * is: a consumer never fails on a version, so a non-Legion session with a mismatched pair keeps
+ * working; the Legion entry decides through `readEnvoyPluginInterface`.
+ */
+export function envoyPluginInterface(): EnvoyPluginInterface {
+  const existing = store[ENVOY_PLUGIN_INTERFACE_KEY];
+  if (existing !== undefined) return existing;
+  const created: EnvoyPluginInterface = {
+    version: ENVOY_PLUGIN_INTERFACE_VERSION,
+    publishers: [],
+    roleClaim: {
+      instances: [],
+      managedSessions: new Set(),
+      regained: undefined,
+      slackRoleOwned: false,
+    },
+    injectedUserTurns: new Map(),
+    bootstrappedSession: { file: undefined },
+    startupTurn: undefined,
+  };
+  store[ENVOY_PLUGIN_INTERFACE_KEY] = created;
+  return created;
+}
+
+/**
+ * Records the Envoy entry at `from` as a publisher of the interface and returns the object it
+ * should push its instance onto. A second entry at the same version joins (a subagent's re-bound
+ * instance, or a second copy of the plugin); an entry is recorded once however many times Oh My Pi
+ * re-binds it. An entry at another version than the object already
+ * holds publishes nothing: the first publisher wins, this one warns once and gets `undefined`,
+ * which keeps a dev checkout usable where the root manifest's source entry loads beside the
+ * installed bundle.
+ */
+export function publishEnvoyPluginInterface(from: string): EnvoyPluginInterface | undefined {
+  const iface = envoyPluginInterface();
+  if (iface.version !== ENVOY_PLUGIN_INTERFACE_VERSION) {
+    if (!mismatchWarned) {
+      mismatchWarned = true;
+      logger.warn(
+        `Envoy plugin interface version ${iface.version} is already published by ${iface.publishers[0] ?? "no Envoy entry (a consumer created it)"}; the Envoy entry at ${from} speaks version ${ENVOY_PLUGIN_INTERFACE_VERSION} and publishes nothing`,
+        {
+          found: iface.version,
+          expected: ENVOY_PLUGIN_INTERFACE_VERSION,
+          publishers: iface.publishers,
+          from,
+        }
+      );
+    }
+    return undefined;
+  }
+  if (!iface.publishers.includes(from)) iface.publishers.push(from);
+  return iface;
+}
+
+/**
+ * What a Legion entry finds: `absent` when no Envoy entry has published (the object may exist,
+ * created by a consumer), `mismatch` when the publishers speak another version (with the first
+ * publisher's URL), else `present`.
+ */
+export function readEnvoyPluginInterface(): EnvoyPluginInterfaceReading {
+  const iface = store[ENVOY_PLUGIN_INTERFACE_KEY];
+  const from = iface?.publishers[0];
+  if (iface === undefined || from === undefined) return { kind: "absent" };
+  if (iface.version !== ENVOY_PLUGIN_INTERFACE_VERSION) {
+    return {
+      kind: "mismatch",
+      found: iface.version,
+      expected: ENVOY_PLUGIN_INTERFACE_VERSION,
+      from,
+    };
+  }
+  return { kind: "present", iface };
+}
+
+/** Test seam: `bun test` runs every file in one process, and the object is process-wide. */
+export function resetEnvoyPluginInterfaceForTests(): void {
+  delete store[ENVOY_PLUGIN_INTERFACE_KEY];
+  mismatchWarned = false;
+}

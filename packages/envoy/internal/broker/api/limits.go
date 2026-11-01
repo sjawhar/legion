@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sjawhar/envoy/internal/broker/ratelimit"
+	"github.com/sjawhar/envoy/internal/ratelimit"
 )
 
 // LauncherLimits bounds POST /v1/oauth/device_authorization and POST
@@ -62,8 +62,8 @@ var DefaultTokenLimit = ratelimit.Limit{Every: 500 * time.Millisecond, Burst: 60
 
 // DefaultAccountLimit bounds, per source address, every route a caller's ServiceAccount token
 // authenticates, the approval page's own routes and the public GET /signin/status, in one bucket
-// they all share: the nine Dispatch's server relays a person's pages and decisions through, the
-// two decide routes among them, which spend it in their own handler
+// they all share: the ten Dispatch's server relays a person's pages and decisions through, POST
+// /v1/oauth/revoke among them and the two decide routes, which spend it in their own handler
 // (accountAuthAfterRecordKind, decideRecord), POST /v1/oauth/introspect, the page's routes a
 // sign-in authenticates, which spend it in authenticate's authSignIn case, and GET
 // /signin/status, which spends it in its own handler. It is a burst of 200 and fifty a second,
@@ -220,8 +220,8 @@ func RereadLimitFor(overall ratelimit.Limit) ratelimit.Limit {
 // served the original call already paid for it - which is what makes the arithmetic above the
 // whole of the fleet's store traffic rather than a lower bound on it. A caller that does meet
 // this bucket is told to come back in one second (Retry-After follows Every,
-// retryAfterSeconds), and its write stands in the store either way; only the narrowing of who
-// may read it waits for the next token.
+// ratelimit.RetryAfterSeconds), and its write stands in the store either way; only the
+// narrowing of who may read it waits for the next token.
 var DefaultRereadOverallLimit = ratelimit.Limit{Every: time.Second, Burst: 10}
 
 // GCPRereadOverallLimit is DefaultRereadOverallLimit for the Google Secret Manager store, which
@@ -371,14 +371,9 @@ func (s *server) refuseReread(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // refuseWithRetryAfter answers 429 RATE_LIMITED with the Retry-After a bucket refilled one every
-// every names (retryAfterSeconds).
+// every names (ratelimit.RetryAfterSeconds, the one rounding every bucket of that package's
+// refusals carries).
 func refuseWithRetryAfter(w http.ResponseWriter, every time.Duration, msg string) {
-	w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(every)))
+	w.Header().Set("Retry-After", strconv.Itoa(ratelimit.RetryAfterSeconds(every)))
 	writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", msg)
-}
-
-// retryAfterSeconds is the Retry-After a bucket refilled one every every names: whole seconds
-// rounded up, and never 0, which would invite an immediate retry the bucket would refuse again.
-func retryAfterSeconds(every time.Duration) int {
-	return max(int((every+time.Second-1)/time.Second), 1)
 }

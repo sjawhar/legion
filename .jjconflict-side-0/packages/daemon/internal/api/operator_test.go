@@ -1,0 +1,1240 @@
+package api
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
+)
+
+const architectToken = claim.Token("legion-legion-legion-208-architect")
+
+func spawnBody() SpawnRequest {
+	return SpawnRequest{Tree: "LEGION-208", Issue: "LEGION-208", Role: claim.RoleArchitect, Prompt: "Reply ready and wait."}
+}
+
+// Every operator route compares the bearer in constant time and answers 403 to anything else —
+// no bearer, another scheme, the wrong token — before it reads a body or touches a claim.
+func TestOperatorRoutesRefuseAnythingButTheOperatorBearer(t *testing.T) {
+	h := newHarness(t)
+	routes := []struct{ method, target string }{
+		{http.MethodPost, "/legion/v1/operator/claims"},
+		{http.MethodGet, "/legion/v1/operator/claims"},
+		{http.MethodPost, "/legion/v1/operator/claims/" + string(architectToken) + "/deliver"},
+		{http.MethodPost, "/legion/v1/operator/claims/" + string(architectToken) + "/suspend"},
+		{http.MethodPost, "/legion/v1/operator/claims/" + string(architectToken) + "/resume"},
+		{http.MethodPost, "/legion/v1/operator/claims/" + string(architectToken) + "/stop"},
+		{http.MethodPost, "/legion/v1/operator/claims/" + string(architectToken) + "/retry"},
+		{http.MethodPost, "/legion/v1/operator/claims/" + string(architectToken) + "/forget-session"},
+		{http.MethodPost, "/legion/v1/operator/claims/" + string(architectToken) + "/close"},
+	}
+	for _, route := range routes {
+		for name, header := range map[string]http.Header{
+			"no bearer":       nil,
+			"another scheme":  {"Authorization": {"Basic " + testOperatorToken}},
+			"the wrong token": {"Authorization": {"Bearer not-the-operator"}},
+			"a prefix of it":  {"Authorization": {"Bearer " + testOperatorToken[:5]}},
+			"an empty bearer": {"Authorization": {"Bearer "}},
+		} {
+			t.Run(route.method+" "+route.target+"/"+name, func(t *testing.T) {
+				wantRefusal(t, h.request(route.method, route.target, spawnBody(), header), http.StatusForbidden,
+					"Invalid operator token")
+			})
+		}
+	}
+	if calls := h.runtime.Calls(); len(calls) != 0 {
+		t.Fatalf("refused operator requests reached the runtime: %v", h.runtime.Methods())
+	}
+}
+
+// A daemon that holds no operator token refuses every operator request, the empty bearer
+// included: nothing compares equal to a token that is not there.
+func TestOperatorRoutesAreClosedWithoutAnOperatorToken(t *testing.T) {
+	h := newHarness(t)
+	h.handler = NewServer("127.0.0.1", 8437, Options{Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject}).Handler
+
+	for _, header := range []http.Header{nil, {"Authorization": {"Bearer "}}} {
+		wantRefusal(t, h.request(http.MethodGet, "/legion/v1/operator/claims", nil, header), http.StatusForbidden,
+			"Invalid operator token")
+	}
+}
+
+// The spawn surface: a claim named by its issue and role, its role prompt kept by the daemon, its
+// first task queued before the agent is ready, and its first launch made before the answer.
+func TestSpawnCreatesTheClaimQueuesItsTaskAndLaunchesIt(t *testing.T) {
+	h := newHarness(t)
+	body := spawnBody()
+	body.Task = "Say hello."
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", body)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("spawn = %d, want 201; body %s", recorder.Code, recorder.Body)
+	}
+	var got OperatorClaim
+	decodeInto(t, recorder, &got)
+	if got.Token != architectToken || got.Tree != "LEGION-208" || got.Issue != "LEGION-208" ||
+		got.Role != claim.RoleArchitect || got.Generation != 1 || got.State != string(supervise.StateLaunching) {
+		t.Fatalf("spawn answered %+v, want the architect claim launched at generation 1", got)
+	}
+	if got.Locator == nil || got.Locator.Claim != architectToken {
+		t.Fatalf("spawn answered locator %+v, want the launch's", got.Locator)
+	}
+	if got.Pending == nil || got.Pending.Task != "Say hello." || got.Pending.DeliveredAt != nil {
+		t.Fatalf("spawn answered pending %+v, want the task queued and not yet sent", got.Pending)
+	}
+	spawns := h.runtime.CallsOf("Spawn")
+	if len(spawns) != 1 || spawns[0].Spec.Claim != architectToken || spawns[0].Spec.Project != testProject {
+		t.Fatalf("spawns = %+v, want one launch of %s in project %s", spawns, architectToken, testProject)
+	}
+	if h.supervisor.prompts[architectToken] != body.Prompt {
+		t.Errorf("the role prompt handed to the supervisor = %q, want %q", h.supervisor.prompts[architectToken], body.Prompt)
+	}
+	if stored := h.stored(architectToken); stored.State != supervise.StateLaunching || stored.Pending == nil {
+		t.Errorf("stored %+v, want the launched claim with its task", stored)
+	}
+}
+
+// Prompt is optional: its absence leaves the daemon to compose the shared role prompt and Go
+// workflow addition for the selected role.
+func TestSpawnWithoutPromptLeavesRoleCompositionToTheDaemon(t *testing.T) {
+	h := newHarness(t)
+	body := spawnBody()
+	body.Prompt = ""
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", body)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("spawn = %d, want 201; body %s", recorder.Code, recorder.Body)
+	}
+	if got := h.supervisor.prompts[architectToken]; got != "" {
+		t.Errorf("the role prompt override = %q, want none", got)
+	}
+}
+
+func TestSpawnRefusesARequestItCannotName(t *testing.T) {
+	h := newHarness(t)
+	for _, testCase := range []struct {
+		name, wantMessage string
+		mutate            func(*SpawnRequest)
+	}{
+		{"no tree", "tree is required", func(r *SpawnRequest) { r.Tree = "" }},
+		{"an issue that is not a key", `issue "legion-208" is not an issue key`, func(r *SpawnRequest) { r.Issue = "legion-208" }},
+		{"a tree that is not a key", `tree "208" is not an issue key`, func(r *SpawnRequest) { r.Tree = "208" }},
+		{"a role no agent holds", `role "controller" is not a role`, func(r *SpawnRequest) { r.Role = "controller" }},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			body := spawnBody()
+			testCase.mutate(&body)
+			recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", body)
+			wantRefusal(t, recorder, http.StatusBadRequest, testCase.wantMessage)
+		})
+	}
+	if calls := h.runtime.Calls(); len(calls) != 0 {
+		t.Fatalf("a refused spawn reached the runtime: %v", h.runtime.Methods())
+	}
+}
+
+// A spawn of a claim that exists is the machine's to judge: one already launched refuses, and
+// the refusal launches nothing.
+func TestSpawnOfALaunchedClaimIsRefused(t *testing.T) {
+	h := newHarness(t)
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody()); recorder.Code != http.StatusCreated {
+		t.Fatalf("first spawn = %d; body %s", recorder.Code, recorder.Body)
+	}
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody()), http.StatusConflict,
+		"spawn refused: the claim is launching (the claim is already launched)")
+	if spawns := h.runtime.CallsOf("Spawn"); len(spawns) != 1 {
+		t.Fatalf("spawns = %d, want the refused one to launch nothing", len(spawns))
+	}
+}
+
+func TestDeliverQueuesATaskOnTheClaim(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/deliver",
+		DeliverRequest{Task: "Review the plan."})
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("deliver = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	var got OperatorClaim
+	decodeInto(t, recorder, &got)
+	if got.Pending == nil || got.Pending.Task != "Review the plan." {
+		t.Fatalf("deliver answered pending %+v, want the task", got.Pending)
+	}
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/deliver",
+		DeliverRequest{Task: "Another."}), http.StatusConflict,
+		"deliver refused: a delivery is already pending")
+	recorder = h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/deliver", DeliverRequest{})
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "task is required") {
+		t.Fatalf("deliver of no task = %d %s, want 400 naming task", recorder.Code, recorder.Body)
+	}
+}
+
+// suspend, resume, and stop are the machine's requests: each answers the claim as the request
+// left it, the machine's refusal when its state does not allow the request, and 404 for a claim
+// the daemon does not hold. The tree's root claim ends only when its tree closes, so the operator's
+// stop of it is refused, names suspend, and, since no workflow issue backs this tree, names the
+// close that ends it; a worker's claim it stops.
+func TestSuspendResumeAndStopDriveTheClaimsMachine(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	route := func(token claim.Token, action string) string {
+		return "/legion/v1/operator/claims/" + string(token) + "/" + action
+	}
+
+	// An operator suspend that races a rule-resuming launch is retained through the launch instead
+	// of being refused: once the agent is ready it is suspended before it can take work.
+	recorder := h.operator(http.MethodPost, route(architectToken, "suspend"), nil)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("suspend during launch = %d, want 202; body %s", recorder.Code, recorder.Body)
+	}
+	var held OperatorClaim
+	decodeInto(t, recorder, &held)
+	if !held.SuspensionHeld {
+		t.Fatalf("suspend during launch answered %+v, want the operator's suspension held", held)
+	}
+
+	h.ready(architectToken, "ses_architect", 1)
+
+	worker := spawnBody()
+	worker.Issue, worker.Role = "LEGION-209", claim.RoleImplementer
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", worker)
+	workerToken, err := claim.NewToken("legion", worker.Issue, worker.Role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := []struct {
+		token  claim.Token
+		action string
+		want   supervise.ClaimState
+		method string
+	}{
+		{architectToken, "suspend", supervise.StateSuspended, "Suspend"},
+		{architectToken, "resume", supervise.StateLaunching, "Resume"},
+		{workerToken, "stop", supervise.StateRetired, "Release"},
+	}
+	for _, step := range steps {
+		recorder := h.operator(http.MethodPost, route(step.token, step.action), nil)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s = %d, want 200; body %s", step.action, recorder.Code, recorder.Body)
+		}
+		var got OperatorClaim
+		decodeInto(t, recorder, &got)
+		if got.State != string(step.want) {
+			t.Fatalf("%s answered state %s, want %s", step.action, got.State, step.want)
+		}
+		if len(h.runtime.CallsOf(step.method)) != 1 {
+			t.Fatalf("after %s the runtime saw %v, want one %s", step.action, h.runtime.Methods(), step.method)
+		}
+	}
+	if releases := h.runtime.CallsOf("Release"); releases[0].Released.Claim != workerToken {
+		t.Errorf("released %s, want %s", releases[0].Released.Claim, workerToken)
+	}
+	wantRefusal(t, h.operator(http.MethodPost, route(architectToken, "stop"), nil), http.StatusConflict,
+		"stop refused: the tree's root claim ends only when its tree closes; suspend it to stop its process once its agent has registered; no workflow issue backs its tree, so legion claims close ends it")
+	if releases := h.runtime.CallsOf("Release"); len(releases) != 1 {
+		t.Errorf("the refused stop of the root reached the runtime: %+v", releases)
+	}
+	wantRefusal(t, h.operator(http.MethodPost, route(workerToken, "resume"), nil), http.StatusConflict,
+		"resume refused: the claim is retired (the claim is retired)")
+
+	for _, action := range []string{"deliver", "suspend", "resume", "stop", "retry", "close"} {
+		wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/legion-legion-legion-1-tester/"+action,
+			DeliverRequest{Task: "x"}), http.StatusNotFound, "no claim legion-legion-legion-1-tester")
+	}
+}
+
+// A claim whose process is found gone while the runtime refuses every relaunch spends its launch
+// budget and fails, and nothing of the workflow brings back a root architect that failed mid-tree.
+// The operator's retry relaunches it on the session it kept, with fresh budgets, and it comes up
+// as that session again (LEGION-725).
+func TestTheOperatorsRetryRelaunchesAFailedClaimOnItsKeptSessionWithFreshBudgets(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.ready(architectToken, "ses_architect", 1)
+	refused := fake.SpawnResult{Err: errors.New("the runtime refused the relaunch")}
+	h.runtime.ScriptResume(refused, refused)
+	machine, _ := h.supervisor.Machine(architectToken)
+	gone := runtime.Observation{Locator: *machine.Claim().Locator, Kind: runtime.Gone}
+	if err := machine.Handle(h.ctx, supervise.RuntimeObservation{Observation: gone}); err == nil {
+		t.Fatal("the relaunches the runtime refused answered no error")
+	}
+	failed := h.stored(architectToken)
+	if failed.State != supervise.StateFailed || failed.Budgets.LaunchFailures != 3 || failed.SessionFile != "/sessions/ses_architect.jsonl" {
+		t.Fatalf("stored %+v, want the architect failed with its launch budget spent and its session file kept", failed)
+	}
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/retry", nil)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("retry of the failed claim = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	var got OperatorClaim
+	decodeInto(t, recorder, &got)
+	if got.State != string(supervise.StateLaunching) || got.Generation != failed.Generation+1 ||
+		got.Budgets != (BudgetsView{}) || got.SessionFile != failed.SessionFile {
+		t.Fatalf("retry answered %+v, want the claim launching at generation %d with fresh budgets on %s",
+			got, failed.Generation+1, failed.SessionFile)
+	}
+	resumes := h.runtime.CallsOf("Resume")
+	if last := resumes[len(resumes)-1]; last.Spec.ResumeSessionFile != failed.SessionFile || last.Spec.Generation != got.Generation {
+		t.Fatalf("the retry's launch resumed %q at generation %d, want %q at %d",
+			last.Spec.ResumeSessionFile, last.Spec.Generation, failed.SessionFile, got.Generation)
+	}
+
+	h.ready(architectToken, "ses_architect", got.Generation)
+
+	live := h.stored(architectToken)
+	if live.State != supervise.StateReady || live.Session != "ses_architect" || live.SessionFile != failed.SessionFile ||
+		live.Budgets != (supervise.Budgets{}) {
+		t.Fatalf("stored %+v, want the architect ready on its kept session with fresh budgets", live)
+	}
+}
+
+// A failed claim whose recorded session cannot be resumed can be made launchable without retaining
+// a resume path that fails every attempt. The operator then retries its architect claim, which must
+// spawn a fresh session rather than resume the abandoned one.
+func TestForgetSessionLetsTheOperatorRetryAFailedArchitectWithAFreshSpawn(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.ready(architectToken, "ses_architect", 1)
+	refused := fake.SpawnResult{Err: errors.New("the session table holds no such session")}
+	h.runtime.ScriptResume(refused, refused)
+	machine, _ := h.supervisor.Machine(architectToken)
+	if err := machine.Handle(h.ctx, supervise.RuntimeObservation{Observation: runtime.Observation{
+		Locator: *machine.Claim().Locator, Kind: runtime.Gone,
+	}}); err == nil {
+		t.Fatal("the missing-session relaunches answered no error")
+	}
+	if failed := h.stored(architectToken); failed.State != supervise.StateFailed || failed.SessionFile == "" {
+		t.Fatalf("failed claim = %+v, want failed with its session recorded", failed)
+	}
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/forget-session",
+		map[string]string{"session": "ses_architect"})
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("forget-session = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	var forgotten OperatorClaim
+	decodeInto(t, recorder, &forgotten)
+	if forgotten.State != string(supervise.StateFailed) || forgotten.Session != "" || forgotten.SessionFile != "" ||
+		forgotten.ForgottenSession != "ses_architect" || forgotten.ForgottenSessionFile != "/sessions/ses_architect.jsonl" {
+		t.Fatalf("forget-session answered %+v, want the failed claim with its recorded session reported and cleared", forgotten)
+	}
+	if stored := h.stored(architectToken); stored.Session != "" || stored.SessionFile != "" {
+		t.Fatalf("stored claim after forget-session = %+v, want no recorded session", stored)
+	}
+
+	retried := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/retry", nil)
+	if retried.Code != http.StatusOK {
+		t.Fatalf("retry after forget-session = %d, want 200; body %s", retried.Code, retried.Body)
+	}
+	if spawns := h.runtime.CallsOf("Spawn"); len(spawns) != 2 || spawns[1].Spec.ResumeSessionFile != "" {
+		t.Fatalf("spawns after retry = %+v, want the retry to spawn a fresh session", spawns)
+	}
+}
+
+// Forgetting a different session is refused, naming the session the claim actually records so the
+// operator cannot clear a newly registered session by mistake.
+func TestForgetSessionRefusesASessionMismatch(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.ready(architectToken, "ses_architect", 1)
+	refused := fake.SpawnResult{Err: errors.New("the runtime refused the relaunch")}
+	h.runtime.ScriptResume(refused, refused)
+	machine, _ := h.supervisor.Machine(architectToken)
+	if err := machine.Handle(h.ctx, supervise.RuntimeObservation{Observation: runtime.Observation{
+		Locator: *machine.Claim().Locator, Kind: runtime.Gone,
+	}}); err == nil {
+		t.Fatal("the relaunches the runtime refused answered no error")
+	}
+	before := h.stored(architectToken)
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/forget-session",
+		map[string]string{"session": "ses_other"}), http.StatusConflict,
+		"forget-session refused: legion-legion-legion-208-architect records session ses_architect; pass --session ses_architect to start fresh")
+
+	after := h.stored(architectToken)
+	if after.Session != before.Session || after.SessionFile != before.SessionFile || after.State != before.State {
+		t.Fatalf("forget-session moved the claim: %+v -> %+v", before, after)
+	}
+}
+
+// An operator may deliberately start fresh from a session the database still holds, but only after
+// the process is stopped and only by naming that exact session. The pending task survives to the
+// fresh launch.
+func TestForgetSessionWithExplicitSessionResumesASuspendedClaimFresh(t *testing.T) {
+	h := newHarness(t)
+	body := spawnBody()
+	body.Task = "Continue the review."
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", body); recorder.Code != http.StatusCreated {
+		t.Fatalf("spawn = %d, want 201; body %s", recorder.Code, recorder.Body)
+	}
+	conn := fake.NewConn()
+	h.conns.Register(architectToken, conn)
+	h.ready(architectToken, "ses_architect", 1)
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/suspend", nil); recorder.Code != http.StatusOK {
+		t.Fatalf("suspend = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/forget-session",
+		map[string]string{"session": "ses_architect"})
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("forget-session = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	var forgotten OperatorClaim
+	decodeInto(t, recorder, &forgotten)
+	if forgotten.State != string(supervise.StateSuspended) || forgotten.Session != "" || forgotten.SessionFile != "" ||
+		forgotten.Pending == nil || forgotten.Pending.Task != body.Task {
+		t.Fatalf("forget-session answered %+v, want the suspended claim with its task and no session", forgotten)
+	}
+	resumed := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/resume", nil)
+	if resumed.Code != http.StatusOK {
+		t.Fatalf("resume = %d, want 200; body %s", resumed.Code, resumed.Body)
+	}
+	var launched OperatorClaim
+	decodeInto(t, resumed, &launched)
+	if launched.State != string(supervise.StateLaunching) || launched.Pending == nil || launched.Pending.Task != body.Task {
+		t.Fatalf("resume answered %+v, want the fresh launch carrying its pending task", launched)
+	}
+	if spawns := h.runtime.CallsOf("Spawn"); len(spawns) != 2 || spawns[1].Spec.ResumeSessionFile != "" {
+		t.Fatalf("spawns = %+v, want the resumed claim to spawn fresh", spawns)
+	}
+}
+
+func TestForgetSessionRefusesAStillLiveClaimEvenWithAnExplicitSession(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.ready(architectToken, "ses_architect", 1)
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/forget-session",
+		map[string]string{"session": "ses_architect"}), http.StatusConflict,
+		"forget-session refused: legion-legion-legion-208-architect is ready; suspend, fail, or retire it before starting fresh")
+}
+
+// The operator's retry is for a failed claim alone. A live claim has not failed, a suspended one is
+// resumed, and a retired one runs again only when the workflow starts it: each is refused, naming
+// its state, and left as it was.
+func TestTheOperatorsRetryOfAClaimThatHasNotFailedIsRefused(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.ready(architectToken, "ses_architect", 1)
+	worker := spawnBody()
+	worker.Issue, worker.Role = "LEGION-209", claim.RoleImplementer
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", worker)
+	workerToken, err := claim.NewToken(testProject, worker.Issue, worker.Role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := func(token claim.Token, action string) string {
+		return "/legion/v1/operator/claims/" + string(token) + "/" + action
+	}
+
+	for _, step := range []struct {
+		state   supervise.ClaimState
+		token   claim.Token
+		reach   string
+		refusal string
+	}{
+		{supervise.StateReady, architectToken, "", "retry refused: the claim is ready (the claim has not failed)"},
+		{supervise.StateSuspended, architectToken, "suspend", "retry refused: the claim is suspended (a suspended claim is resumed, not retried)"},
+		{supervise.StateRetired, workerToken, "stop", "retry refused: the claim is retired (a retired claim runs again only when the workflow starts it)"},
+	} {
+		if step.reach != "" {
+			if recorder := h.operator(http.MethodPost, route(step.token, step.reach), nil); recorder.Code != http.StatusOK {
+				t.Fatalf("%s %s = %d; body %s", step.reach, step.token, recorder.Code, recorder.Body)
+			}
+		}
+		before, calls := h.stored(step.token), len(h.runtime.Calls())
+		if before.State != step.state {
+			t.Fatalf("%s is %s, want %s before its retry", step.token, before.State, step.state)
+		}
+
+		wantRefusal(t, h.operator(http.MethodPost, route(step.token, "retry"), nil), http.StatusConflict, step.refusal)
+
+		after := h.stored(step.token)
+		if after.State != before.State || after.Generation != before.Generation || after.Budgets != before.Budgets ||
+			after.SessionFile != before.SessionFile {
+			t.Errorf("the refused retry moved %s: %+v -> %+v", step.token, before, after)
+		}
+		if got := h.runtime.Calls()[calls:]; len(got) != 0 {
+			t.Errorf("the refused retry of the %s claim asked the runtime %+v", step.state, got)
+		}
+	}
+}
+
+// The operator's retry is an architect's alone: a failed phase worker is retried by its architect's
+// retry_or_escalate while its issue is held, and by the next start of its role otherwise, so the
+// operator's retry of one is refused, naming who retries it, and the worker stays failed.
+func TestTheOperatorsRetryOfAFailedPhaseWorkerIsRefused(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	refused := fake.SpawnResult{Err: errors.New("the runtime refused the launch")}
+	h.runtime.ScriptSpawn(refused, refused, refused)
+	worker := spawnBody()
+	worker.Issue, worker.Role = "LEGION-209", claim.RoleImplementer
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", worker); recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("spawn of a worker whose every launch the runtime refused = %d, want 500; body %s", recorder.Code, recorder.Body)
+	}
+	workerToken, err := claim.NewToken(testProject, worker.Issue, worker.Role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, calls := h.stored(workerToken), len(h.runtime.Calls())
+	if before.State != supervise.StateFailed {
+		t.Fatalf("the worker is %s, want failed before its retry", before.State)
+	}
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", nil), http.StatusConflict,
+		"retry refused: the operator's retry relaunches only an architect; a phase worker is retried by its architect's retry_or_escalate while its issue is held, and by the next start of its role otherwise")
+
+	after := h.stored(workerToken)
+	if after.State != before.State || after.Generation != before.Generation || after.Budgets != before.Budgets {
+		t.Errorf("the refused retry moved the worker: %+v -> %+v", before, after)
+	}
+	if got := h.runtime.Calls()[calls:]; len(got) != 0 {
+		t.Errorf("the refused retry asked the runtime %+v", got)
+	}
+}
+
+// heldRetrier stands in for the workflow's retry_or_escalate: a retry decision on a held issue
+// restores the phase it was held from, unless lingers says the tree lingers, where the workflow
+// does nothing. Every fact is recorded first.
+type heldRetrier struct {
+	factRecorder
+	lingers bool
+}
+
+func (r *heldRetrier) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
+	result, err := r.factRecorder.Apply(ctx, tx, fact)
+	retry, ok := fact.(intake.RetryOrEscalate)
+	if err != nil || result.Refusal != nil || !ok || retry.Decision != intake.RetryDecision || r.lingers {
+		return result, err
+	}
+	records := record.NewStore()
+	issue, err := records.Issue(ctx, tx, retry.Issue)
+	if err != nil || issue == nil || issue.Phase != phase.Held || issue.Hold == nil {
+		return result, err
+	}
+	issue.Phase, issue.Hold = issue.Hold.From, nil
+	return result, records.PutIssue(ctx, tx, *issue)
+}
+
+// heldIssue records LEGION-209, a child of LEGION-208, held from the phase from.
+func heldIssue(t *testing.T, h *harness, from phase.Phase) {
+	t.Helper()
+	parent := "LEGION-208"
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		return record.NewStore().PutIssue(context.Background(), tx, record.Issue{
+			Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject,
+			Title: "LEGION-209", Parent: &parent, Phase: phase.Held, Hold: &record.Hold{From: from}, Generation: 1, Status: "in_progress",
+		})
+	}); err != nil {
+		t.Fatalf("seed the held issue: %v", err)
+	}
+}
+
+// failedImplementer is the harness with the operator's server applying facts to handler, a root,
+// and LEGION-209's implementer failed: the runtime refused every launch of it.
+func failedImplementer(t *testing.T, handler intake.Handler) (*harness, claim.Token) {
+	t.Helper()
+	h := newHarness(t)
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: h.store,
+		Pool: h.store.Pool(), Record: record.NewStore(), Releaser: h.runtime, Trees: h.store, Handlers: []intake.Handler{handler}, RoleFor: workflow.RoleFor,
+	}).Handler
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	refused := fake.SpawnResult{Err: errors.New("the runtime refused the launch")}
+	h.runtime.ScriptSpawn(refused, refused, refused)
+	worker := spawnBody()
+	worker.Issue, worker.Role = "LEGION-209", claim.RoleImplementer
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", worker); recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("spawn of a worker whose every launch the runtime refused = %d, want 500; body %s", recorder.Code, recorder.Body)
+	}
+	token, err := claim.NewToken(testProject, worker.Issue, worker.Role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h, token
+}
+
+// A failed phase worker whose issue the workflow holds for its own role — its working role failed —
+// is retried by the operator as its architect's retry_or_escalate retries it: the route applies the
+// held phase's retry (intake.RetryOrEscalate, decision retry), whose start relaunches the role, and
+// answers 202 with the claim as it is until that start runs, asking the runtime nothing itself. A
+// refusal of the fact is the route's answer. `legion claims retry --failed` relies on this to
+// relaunch every claim a runtime failed to launch once the cause is gone.
+func TestTheOperatorsRetryOfAFailedPhaseWorkerOnAHeldIssueRetriesThePhase(t *testing.T) {
+	facts := &heldRetrier{}
+	h, workerToken := failedImplementer(t, facts)
+	heldIssue(t, h, phase.Implementing)
+	calls := len(h.runtime.Calls())
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", nil)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("retry of a failed worker on a held issue = %d, want 202; body %s", recorder.Code, recorder.Body)
+	}
+	var got OperatorClaim
+	decodeInto(t, recorder, &got)
+	if got.Token != workerToken || got.State != string(supervise.StateFailed) {
+		t.Errorf("retry answered %+v, want the worker as it is until the phase's start runs", got)
+	}
+	applied := facts.recorded()
+	if len(applied) != 1 {
+		t.Fatalf("the retry applied %d facts, want the held phase's retry alone: %#v", len(applied), applied)
+	}
+	if fact, ok := applied[0].(intake.RetryOrEscalate); !ok || fact.Issue != "LEGION-209" || fact.Decision != intake.RetryDecision {
+		t.Errorf("the retry applied %#v, want RetryOrEscalate{LEGION-209, retry}", applied[0])
+	}
+	if got := h.runtime.Calls()[calls:]; len(got) != 0 {
+		t.Errorf("the route asked the runtime %+v itself, want the phase's start to", got)
+	}
+
+	heldIssue(t, h, phase.Implementing)
+	facts.refusal = &intake.Refusal{Status: http.StatusConflict, Message: "LEGION-209 is not held"}
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", nil), http.StatusConflict, "LEGION-209 is not held")
+}
+
+// A retry the workflow applies but that leaves the issue held relaunched nothing — a lingering
+// tree's members stay where they stood — so the operator is answered 409 naming the issue, the
+// phase and the claim, never 202.
+func TestTheOperatorsRetryOfAHeldPhaseThatStaysHeldIsRefused(t *testing.T) {
+	facts := &heldRetrier{lingers: true}
+	h, workerToken := failedImplementer(t, facts)
+	heldIssue(t, h, phase.Implementing)
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", nil), http.StatusConflict,
+		"LEGION-209 is still held after the retry of its phase implementing, so nothing relaunched "+string(workerToken)+": its tree lingers, and a lingering tree's members stay where they stood")
+	if applied := facts.recorded(); len(applied) != 1 {
+		t.Errorf("the retry applied %#v, want the held phase's retry alone", applied)
+	}
+}
+
+// A failed phase worker whose issue is held for another role's phase is not the held phase's
+// worker: retrying the phase would relaunch that other role under this claim's name. The route
+// applies nothing and the machine refuses it, as for a phase worker whose issue holds no phase.
+func TestTheOperatorsRetryOfAFailedPhaseWorkerHeldForAnotherRoleIsRefused(t *testing.T) {
+	facts := &heldRetrier{}
+	h, workerToken := failedImplementer(t, facts)
+	heldIssue(t, h, phase.Testing)
+	calls := len(h.runtime.Calls())
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", nil), http.StatusConflict,
+		"retry refused: the operator's retry relaunches only an architect; a phase worker is retried by its architect's retry_or_escalate while its issue is held, and by the next start of its role otherwise")
+	if applied := facts.recorded(); len(applied) != 0 {
+		t.Errorf("the retry applied %#v, want nothing: the issue is held for the tester", applied)
+	}
+	if got := h.runtime.Calls()[calls:]; len(got) != 0 {
+		t.Errorf("the refused retry asked the runtime %+v", got)
+	}
+}
+
+// A registered agent holds a secret that authenticates its requests, and no timer runs on it until
+// it is ready; the operator's suspend is what stops the tree's root there, so it is accepted, and
+// the suspension revokes the secret.
+func TestTheOperatorSuspendsARegisteredRootAndRevokesItsSecret(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	registered := h.registered(h.bootToken(architectToken), "ses_architect")
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/suspend", nil)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("suspend of the registered root = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	var got OperatorClaim
+	decodeInto(t, recorder, &got)
+	if got.State != string(supervise.StateSuspended) || got.Session != "ses_architect" {
+		t.Fatalf("suspend answered %+v, want the root suspended with its session kept", got)
+	}
+	wantRefusal(t, h.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
+		ClaimToken: architectToken, SessionID: "ses_architect", Secret: registered.Secret, Generation: 1,
+	}, nil), http.StatusForbidden, claim.InvalidSecret.Message)
+}
+
+// An operator's suspend of an agent in a turn is held for the turn's end (supervise.ErrSuspendHeld),
+// so the turn is not cut off: the route answers 202 with the claim still working, the claims list
+// shows the suspension held — what `legion claims suspend` waits on — and the claim is suspended
+// once its turn ends, the list then showing no hold.
+func TestTheOperatorsSuspendOfAnAgentInATurnWaitsForTheTurnToEnd(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.ready(architectToken, "ses_architect", 1)
+	machine, ok := h.supervisor.Machine(architectToken)
+	if !ok {
+		t.Fatal("no machine for the architect")
+	}
+	if err := machine.Handle(h.ctx, supervise.StreamTurnStart{Claim: architectToken}); err != nil {
+		t.Fatalf("start a turn: %v", err)
+	}
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/suspend", nil)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("suspend mid-turn = %d, want 202; body %s", recorder.Code, recorder.Body)
+	}
+	var got OperatorClaim
+	decodeInto(t, recorder, &got)
+	if got.State != string(supervise.StateWorking) || !got.SuspensionHeld || len(h.runtime.CallsOf("Suspend")) != 0 {
+		t.Fatalf("suspend mid-turn answered %+v with %d suspensions, want the claim still working, its suspension held, none yet", got, len(h.runtime.CallsOf("Suspend")))
+	}
+	listed := func() OperatorClaim {
+		t.Helper()
+		recorder := h.operator(http.MethodGet, "/legion/v1/operator/claims", nil)
+		var list OperatorClaims
+		decodeInto(t, recorder, &list)
+		if recorder.Code != http.StatusOK || len(list.Claims) != 1 {
+			t.Fatalf("list = %d %+v, want the one claim", recorder.Code, list.Claims)
+		}
+		return list.Claims[0]
+	}
+	if seen := listed(); seen.State != string(supervise.StateWorking) || !seen.SuspensionHeld {
+		t.Fatalf("while the turn runs the list shows %+v, want the claim working with its suspension held", seen)
+	}
+	if err := machine.Handle(h.ctx, supervise.StreamTurnEnd{Claim: architectToken}); err != nil {
+		t.Fatalf("end the turn: %v", err)
+	}
+	if seen := listed(); seen.State != string(supervise.StateSuspended) || seen.SuspensionHeld || len(h.runtime.CallsOf("Suspend")) != 1 {
+		t.Fatalf("after the turn the list shows %+v with %d suspensions, want it suspended once and no hold", seen, len(h.runtime.CallsOf("Suspend")))
+	}
+}
+
+// A tree no workflow issue backs — one the operator spawned — has no linger to close it, so the
+// operator closes it: close ends the tree's root claim, here its only claim, whatever its state, as
+// the workflow's tree_close does. Its Sandbox and tree volume would otherwise outlive every use
+// under a sandbox.
+func TestTheOperatorClosesATreeNoWorkflowIssueBacks(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		reach func(h *harness)
+	}{
+		{"launching", func(*harness) {}},
+		{"already retired", func(h *harness) {
+			// The operator asked for an outcome that holds; a retry after a timeout is not a
+			// failure, and nothing is released twice.
+			if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil); recorder.Code != http.StatusOK {
+				t.Fatalf("first close = %d; body %s", recorder.Code, recorder.Body)
+			}
+		}},
+		{"suspended", func(h *harness) {
+			h.registered(h.bootToken(architectToken), "ses_architect")
+			if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/suspend", nil); recorder.Code != http.StatusOK {
+				t.Fatalf("suspend = %d; body %s", recorder.Code, recorder.Body)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+			tc.reach(h)
+
+			recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("close = %d, want 200; body %s", recorder.Code, recorder.Body)
+			}
+			var got OperatorClaim
+			decodeInto(t, recorder, &got)
+			if got.State != string(supervise.StateRetired) {
+				t.Fatalf("close answered state %s, want retired", got.State)
+			}
+			if releases := h.runtime.CallsOf("Release"); len(releases) != 1 || releases[0].Released.Claim != architectToken {
+				t.Fatalf("releases = %+v, want the root released once", releases)
+			}
+		})
+	}
+}
+
+// A tree without a workflow issue has no outbox row. Once every claim stopped, the operator route
+// reserves the tree's cleanup, has the runtime release the tree and confirms the reservation; it
+// never invents a workflow record merely to get cleanup.
+func TestOperatorCloseReleasesTheTreeAndConfirmsItsCleanupWithoutAWorkflowRecord(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("close = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	if cleanups := h.runtime.CallsOf("CleanupTree"); len(cleanups) != 1 || cleanups[0].Tree != "LEGION-208" {
+		t.Fatalf("tree releases = %+v, want LEGION-208 released once", cleanups)
+	}
+	if started, confirmed := h.treeCleanup("LEGION-208"); !started || !confirmed {
+		t.Fatalf("tree cleanup started %t, confirmed %t; want it confirmed", started, confirmed)
+	}
+}
+
+// A failed release is not a successful close: the route tells the operator its durable cleanup is
+// pending, the reservation stays unconfirmed, and the same close asked again resumes it.
+func TestOperatorCloseSurfacesAFailedReleaseAndItsRetryResumesIt(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.runtime.FailCleanupTree(errors.New("foreground Sandbox delete conflicted"))
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+	if recorder.Code != http.StatusInternalServerError || !strings.Contains(recorder.Body.String(), "durable resource cleanup is pending") {
+		t.Fatalf("close after a failed release = %d %s, want 500 naming durable cleanup pending", recorder.Code, recorder.Body)
+	}
+	if started, confirmed := h.treeCleanup("LEGION-208"); !started || confirmed {
+		t.Fatalf("after the failed release: cleanup started %t, confirmed %t; want reserved and unconfirmed", started, confirmed)
+	}
+	h.runtime.FailCleanupTree(nil)
+	recorder = h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("retried close = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	if started, confirmed := h.treeCleanup("LEGION-208"); !started || !confirmed {
+		t.Fatalf("after the retried close: cleanup started %t, confirmed %t; want it confirmed", started, confirmed)
+	}
+}
+
+// While the tree's cleanup is reserved, nothing of the tree is admitted or launched: a new operator
+// root is refused naming the cleanup, and a worker of the tree is never stored.
+func TestOperatorSpawnsWaitForTheirTreesReservedCleanup(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.runtime.FailCleanupTree(errors.New("foreground Sandbox delete conflicted"))
+	h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+	spawns := len(h.runtime.CallsOf("Spawn"))
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "waiting for durable cleanup") {
+		t.Fatalf("root spawn during the reserved cleanup = %d %s, want 409 naming the cleanup", recorder.Code, recorder.Body)
+	}
+	worker := SpawnRequest{Tree: "LEGION-208", Issue: "LEGION-209", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."}
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", worker); recorder.Code/100 == 2 {
+		t.Fatalf("worker spawn during the reserved cleanup = %d, want it refused; body %s", recorder.Code, recorder.Body)
+	}
+	if now := len(h.runtime.CallsOf("Spawn")); now != spawns {
+		t.Fatalf("spawns during the reserved cleanup = %d, want none", now-spawns)
+	}
+	var stored int
+	if err := h.store.Pool().QueryRow(h.ctx, `select count(*) from claims where token = 'legion-legion-legion-209-implementer'`).Scan(&stored); err != nil || stored != 0 {
+		t.Fatalf("the refused worker left %d claim rows (err %v)", stored, err)
+	}
+}
+
+// Only a reserved cleanup is the wait a 409 names. A root the operator cannot open for another
+// reason, here a tree whose lifecycle the workflow holds, is that failure, not "waiting for durable
+// cleanup": nothing the operator waits on would ever let it through.
+func TestOperatorSpawnOfATreeTheWorkflowHoldsIsNotAWaitForCleanup(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.store.OpenTreeLifecycle(h.ctx, testProject, "LEGION-208", treelifecycle.AuthorityWorkflow); err != nil {
+		t.Fatal(err)
+	}
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	if recorder.Code != http.StatusInternalServerError || strings.Contains(recorder.Body.String(), "waiting for durable cleanup") ||
+		!strings.Contains(recorder.Body.String(), "current authority is workflow") {
+		t.Fatalf("operator root spawn of a workflow tree = %d %s, want 500 naming the workflow's authority", recorder.Code, recorder.Body)
+	}
+	if spawns := h.runtime.CallsOf("Spawn"); len(spawns) != 0 {
+		t.Fatalf("spawns = %d, want none", len(spawns))
+	}
+}
+
+// A close asked again after its tree's cleanup confirmed reserves nothing and releases nothing: it
+// answers as the finished close it is.
+func TestOperatorCloseAfterConfirmedCleanupAnswersWithoutCleaning(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	for range 2 {
+		if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil); recorder.Code != http.StatusOK {
+			t.Fatalf("close = %d, want 200; body %s", recorder.Code, recorder.Body)
+		}
+	}
+	if cleanups := h.runtime.CallsOf("CleanupTree"); len(cleanups) != 1 {
+		t.Fatalf("tree releases = %d, want the first close's one", len(cleanups))
+	}
+}
+
+// The operator's close is the whole tree's, as the workflow's tree_close is: the root claim first,
+// whose close asks whether the tree may be closed, then every other claim of the tree, whatever its
+// state. A worker left running would stay on a tree volume that is being deleted. Another tree's
+// claims are left alone.
+func TestTheOperatorsCloseStopsEveryClaimOfTheTree(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	for _, spawn := range []SpawnRequest{
+		{Tree: "LEGION-208", Issue: "LEGION-209", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."},
+		{Tree: "LEGION-208", Issue: "LEGION-210", Role: claim.RoleTester, Prompt: "Reply ready and wait."},
+		{Tree: "LEGION-300", Issue: "LEGION-300", Role: claim.RoleArchitect, Prompt: "Reply ready and wait."},
+		{Tree: "LEGION-300", Issue: "LEGION-301", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."},
+	} {
+		if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", spawn); recorder.Code != http.StatusCreated {
+			t.Fatalf("spawn %s %s = %d; body %s", spawn.Issue, spawn.Role, recorder.Code, recorder.Body)
+		}
+	}
+	h.registered(h.bootToken("legion-legion-legion-210-tester"), "ses_tester")
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("close = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	var released []claim.Token
+	for _, call := range h.runtime.CallsOf("Release") {
+		released = append(released, call.Released.Claim)
+	}
+	if len(released) != 3 || released[0] != architectToken {
+		t.Fatalf("released %v, want the root first and then the tree's two workers", released)
+	}
+	for _, token := range []claim.Token{architectToken, "legion-legion-legion-209-implementer", "legion-legion-legion-210-tester"} {
+		if state := h.stored(token).State; state != supervise.StateRetired {
+			t.Errorf("%s is %s after its tree closed, want retired", token, state)
+		}
+	}
+	for _, token := range []claim.Token{"legion-legion-legion-300-architect", "legion-legion-legion-301-implementer"} {
+		if state := h.stored(token).State; state == supervise.StateRetired {
+			t.Errorf("%s, of another tree, was retired by this tree's close", token)
+		}
+	}
+}
+
+// A worker whose stop fails is named with its reason, the root stays closed, and the other workers
+// are still stopped: the close does not end at the first failure. Asking again once the fault clears
+// is the recovery. The retired root takes its "already retired" row, and the workers' stops go
+// through.
+func TestTheOperatorsCloseNamesTheWorkersItCouldNotStop(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	workers := []claim.Token{"legion-legion-legion-209-implementer", "legion-legion-legion-210-tester"}
+	for _, spawn := range []SpawnRequest{
+		{Tree: "LEGION-208", Issue: "LEGION-209", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."},
+		{Tree: "LEGION-208", Issue: "LEGION-210", Role: claim.RoleTester, Prompt: "Reply ready and wait."},
+	} {
+		if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", spawn); recorder.Code != http.StatusCreated {
+			t.Fatalf("spawn %s %s = %d; body %s", spawn.Issue, spawn.Role, recorder.Code, recorder.Body)
+		}
+	}
+	for _, worker := range workers {
+		h.runtime.FailReleaseOf(worker, errors.New("the API server timed out"))
+	}
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("close = %d, want 500; body %s", recorder.Code, recorder.Body)
+	}
+	for _, want := range []string{"closed LEGION-208's root claim " + string(architectToken), string(workers[0]), string(workers[1]), "the API server timed out", "legion claims stop"} {
+		if !strings.Contains(recorder.Body.String(), want) {
+			t.Errorf("the refusal %s does not say %q", recorder.Body, want)
+		}
+	}
+	if state := h.stored(architectToken).State; state != supervise.StateRetired {
+		t.Errorf("the root is %s, want it closed", state)
+	}
+	for _, worker := range workers {
+		if state := h.stored(worker).State; state == supervise.StateRetired {
+			t.Errorf("%s retired although its stop failed", worker)
+		}
+		h.runtime.FailReleaseOf(worker, nil)
+	}
+
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil); recorder.Code != http.StatusOK {
+		t.Fatalf("the second close = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	for _, worker := range workers {
+		if state := h.stored(worker).State; state != supervise.StateRetired {
+			t.Errorf("%s is %s after the second close, want retired", worker, state)
+		}
+	}
+}
+
+// A claim of the tree the daemon supervises no machine for cannot be stopped, so the close does not
+// answer 200 over it: it is named with that reason, and with the restart that makes it stoppable,
+// since the stop route answers 404 for it, beside the closed root.
+func TestTheOperatorsCloseNamesAClaimItSupervisesNoMachineFor(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	worker := spawnBody()
+	worker.Issue, worker.Role = "LEGION-209", claim.RoleImplementer
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", worker)
+	h.supervisor.mu.Lock()
+	delete(h.supervisor.machines, "legion-legion-legion-209-implementer")
+	h.supervisor.mu.Unlock()
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("close = %d, want 500; body %s", recorder.Code, recorder.Body)
+	}
+	for _, want := range []string{"legion-legion-legion-209-implementer (the daemon supervises no machine for it", "until the daemon restarts"} {
+		if !strings.Contains(recorder.Body.String(), want) {
+			t.Errorf("the refusal %s does not say %q", recorder.Body, want)
+		}
+	}
+	if state := h.stored(architectToken).State; state != supervise.StateRetired {
+		t.Errorf("the root is %s, want it closed", state)
+	}
+}
+
+// The operator closes only a tree no workflow issue backs, and only through its root claim: a
+// workflow issue's tree closes when its linger expires, and a worker's claim is stopped. Each
+// refusal changes nothing.
+func TestTheOperatorsCloseRefusesAWorkflowTreeAndAWorker(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	worker := spawnBody()
+	worker.Issue, worker.Role = "LEGION-209", claim.RoleImplementer
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", worker)
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/legion-legion-legion-209-implementer/close", nil),
+		http.StatusConflict, "close refused: legion-legion-legion-209-implementer is not its tree's root claim; stop it instead")
+
+	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil),
+		http.StatusConflict, "close refused: LEGION-208 is a workflow issue's tree, which closes when its linger expires")
+
+	if releases := h.runtime.CallsOf("Release"); len(releases) != 0 {
+		t.Errorf("a refused close reached the runtime: %+v", releases)
+	}
+	for _, token := range []claim.Token{architectToken, "legion-legion-legion-209-implementer"} {
+		if state := h.stored(token).State; state != supervise.StateLaunching {
+			t.Errorf("%s is %s after a refused close, want it left launching", token, state)
+		}
+	}
+}
+
+// A close names a claim, and only a tree's root claim closes its tree. A worker's claim that has
+// already retired is still not one: answering it as the close that succeeded ran the tree's
+// fan-out from a claim that never held the tree, stopping the tree's live workers and leaving the
+// root alone. The refusal a live worker gets is the one a retired worker gets.
+func TestAClosedWorkersRetiredClaimStillRefusesAndStopsNothing(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	worker := spawnBody()
+	worker.Issue, worker.Role = "LEGION-209", claim.RoleImplementer
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", worker)
+	tester := spawnBody()
+	tester.Issue, tester.Role = "LEGION-210", claim.RoleTester
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", tester)
+	const implementer = claim.Token("legion-legion-legion-209-implementer")
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(implementer)+"/stop", nil); recorder.Code != http.StatusOK {
+		t.Fatalf("stop = %d; body %s", recorder.Code, recorder.Body)
+	}
+	if state := h.stored(implementer).State; state != supervise.StateRetired {
+		t.Fatalf("the stopped implementer is %s, want retired", state)
+	}
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(implementer)+"/close", nil),
+		http.StatusConflict, "close refused: legion-legion-legion-209-implementer is not its tree's root claim; stop it instead")
+
+	if state := h.stored("legion-legion-legion-210-tester").State; state == supervise.StateRetired {
+		t.Error("the tree's tester was retired by a close of a retired worker's claim")
+	}
+	if state := h.stored(architectToken).State; state != supervise.StateLaunching {
+		t.Errorf("the root is %s after the refused close, want it left launching", state)
+	}
+}
+
+// A workflow issue's tree closes when its linger expires, whatever state its root claim is in: a
+// root that has already retired is not a way past TreeClosable.
+func TestACloseOfARetiredRootStillAsksWhetherAWorkflowIssueBacksTheTree(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil); recorder.Code != http.StatusOK {
+		t.Fatalf("first close = %d; body %s", recorder.Code, recorder.Body)
+	}
+	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "U"})
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil),
+		http.StatusConflict, "close refused: LEGION-208 is a workflow issue's tree, which closes when its linger expires")
+}
+
+func TestListAnswersEveryClaim(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	worker := spawnBody()
+	worker.Issue, worker.Role = "LEGION-209", claim.RoleImplementer
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", worker)
+
+	recorder := h.operator(http.MethodGet, "/legion/v1/operator/claims", nil)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("list = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	var got OperatorClaims
+	decodeInto(t, recorder, &got)
+	want := []string{string(architectToken), "legion-legion-legion-209-implementer"}
+	if tokens := sortedTokens(got.Claims); !slices.Equal(tokens, want) {
+		t.Fatalf("list answered %v, want %v", tokens, want)
+	}
+}
+
+// The list shows what supervision has counted against a claim and how its task will be sent: the
+// deaths its agent has had with work outstanding, and that a death interrupted its task, which is
+// sent behind the sentence saying so.
+func TestListShowsAClaimsDeathsAndItsInterruptedTask(t *testing.T) {
+	h := newHarness(t)
+	token := claim.Token("legion-legion-legion-209-implementer")
+	if err := h.store.PutClaim(h.ctx, supervise.Claim{Token: token, Project: testProject, Tree: "LEGION-208", Issue: "LEGION-209",
+		Role: claim.RoleImplementer, State: supervise.StateLaunching, Budgets: supervise.Budgets{Deaths: 2}}); err != nil {
+		t.Fatalf("put the claim: %v", err)
+	}
+	if err := h.store.PutDelivery(h.ctx, token, supervise.Delivery{ID: "delivery-1", Task: "implement the plan",
+		QueuedAt: time.Date(2026, 9, 26, 7, 0, 0, 0, time.UTC), Interrupted: true}); err != nil {
+		t.Fatalf("put the delivery: %v", err)
+	}
+
+	recorder := h.operator(http.MethodGet, "/legion/v1/operator/claims", nil)
+
+	var got OperatorClaims
+	decodeInto(t, recorder, &got)
+	if len(got.Claims) != 1 || got.Claims[0].Budgets.Deaths != 2 || got.Claims[0].Pending == nil || !got.Claims[0].Pending.Interrupted {
+		t.Fatalf("list answered %+v, want the claim with 2 deaths and its task interrupted", got.Claims)
+	}
+}
+
+func TestListOfNoClaimsIsAnEmptyArray(t *testing.T) {
+	h := newHarness(t)
+	recorder := h.operator(http.MethodGet, "/legion/v1/operator/claims", nil)
+	if got := strings.TrimSpace(recorder.Body.String()); recorder.Code != http.StatusOK || got != `{"claims":[]}` {
+		t.Fatalf("list = %d %s, want 200 {\"claims\":[]}", recorder.Code, got)
+	}
+}
+
+func TestForgetSessionRequiresTheRecordedSession(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.ready(architectToken, "ses_architect", 1)
+	before := h.stored(architectToken)
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/forget-session", map[string]string{}),
+		http.StatusBadRequest, "session is required")
+
+	if after := h.stored(architectToken); after.Session != before.Session || after.SessionFile != before.SessionFile || after.State != before.State {
+		t.Fatalf("forget-session without session moved the claim: %+v -> %+v", before, after)
+	}
+}
+
+func TestForgetSessionRechecksItsSessionInsideTheMachine(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.ready(architectToken, "ses_architect", 1)
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/suspend", nil); recorder.Code != http.StatusOK {
+		t.Fatalf("suspend = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+
+	snapshotted, resumeForget := make(chan struct{}), make(chan struct{})
+	testServer := &server{
+		supervisor: h.supervisor,
+		project:    testProject,
+		stopping:   context.Background(),
+		drained:    context.Background(),
+		decisions:  NewRouteDecisions(),
+		beforeForgetSessionHandle: func() {
+			close(snapshotted)
+			<-resumeForget
+		},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/forget-session", testServer.forgetSession)
+	h.handler = mux
+	response := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response <- h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/forget-session",
+			map[string]string{"session": "ses_architect"})
+	}()
+	select {
+	case <-snapshotted:
+	case recorder := <-response:
+		t.Fatalf("forget-session completed before its snapshot hook: %d %s", recorder.Code, recorder.Body)
+	case <-time.After(time.Second):
+		t.Fatal("forget-session did not reach its snapshot hook")
+	}
+
+	machine, _ := h.supervisor.Machine(architectToken)
+	if err := machine.Handle(h.ctx, supervise.RequestForgetSession{Claim: architectToken, Session: "ses_architect"}); err != nil {
+		t.Fatalf("first forget after snapshot: %v", err)
+	}
+	if err := machine.Handle(h.ctx, supervise.RequestResume{Claim: architectToken}); err != nil {
+		t.Fatalf("resume after first forget: %v", err)
+	}
+	generation := machine.Claim().Generation
+	if err := machine.Handle(h.ctx, supervise.RequestRegister{
+		Claim: architectToken, Generation: generation, Session: "ses_replacement", SessionFile: "/sessions/ses_replacement.jsonl",
+		PluginContract: DaemonAPIVersion,
+	}); err != nil {
+		t.Fatalf("register replacement session: %v", err)
+	}
+	if err := machine.Handle(h.ctx, supervise.RequestReady{Claim: architectToken, Generation: generation, Session: "ses_replacement"}); err != nil {
+		t.Fatalf("ready replacement session: %v", err)
+	}
+	if err := machine.Handle(h.ctx, supervise.RequestSuspend{Claim: architectToken, By: supervise.SuspendedByOperator}); err != nil {
+		t.Fatalf("suspend replacement session: %v", err)
+	}
+	close(resumeForget)
+
+	wantRefusal(t, <-response, http.StatusConflict,
+		"forget-session refused: legion-legion-legion-208-architect records session ses_replacement; pass --session ses_replacement to start fresh")
+	if got := h.stored(architectToken); got.State != supervise.StateSuspended || got.Session != "ses_replacement" || got.SessionFile != "/sessions/ses_replacement.jsonl" {
+		t.Fatalf("paused forget changed the replacement claim to %+v", got)
+	}
+}
+
+func TestForgetSessionRefusesDaemonStopAfterPreflight(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.ready(architectToken, "ses_architect", 1)
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/suspend", nil); recorder.Code != http.StatusOK {
+		t.Fatalf("suspend = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	stopping, beginStop := context.WithCancel(context.Background())
+	snapshotted, resumeForget := make(chan struct{}), make(chan struct{})
+	testServer := &server{
+		log:        slog.Default(),
+		supervisor: h.supervisor,
+		project:    testProject,
+		stopping:   stopping,
+		drained:    context.Background(),
+		decisions:  NewRouteDecisions(),
+		beforeForgetSessionHandle: func() {
+			close(snapshotted)
+			<-resumeForget
+		},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/forget-session", testServer.forgetSession)
+	h.handler = mux
+	response := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response <- h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/forget-session",
+			map[string]string{"session": "ses_architect"})
+	}()
+	select {
+	case <-snapshotted:
+	case recorder := <-response:
+		t.Fatalf("forget-session completed before its snapshot hook: %d %s", recorder.Code, recorder.Body)
+	case <-time.After(time.Second):
+		t.Fatal("forget-session did not reach its snapshot hook")
+	}
+	beginStop()
+	close(resumeForget)
+
+	wantRefusal(t, <-response, http.StatusServiceUnavailable, "forget-session refused: the daemon is stopping; ask again once it is back")
+	if got := h.stored(architectToken); got.State != supervise.StateSuspended || got.Session != "ses_architect" || got.SessionFile != "/sessions/ses_architect.jsonl" {
+		t.Fatalf("stopped forget changed the claim to %+v", got)
+	}
+}

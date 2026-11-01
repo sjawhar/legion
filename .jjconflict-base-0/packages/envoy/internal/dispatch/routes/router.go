@@ -1,0 +1,973 @@
+// Package routes assembles the Dispatch HTTP server routes.
+//
+// Authenticated people use a signed cookie issued when they sign in through a Cognito sign-in
+// pool or with Google directly. Test and local harnesses can inject header identity. The web
+// app's GitHub reads go to GitHub as the GitHub App.
+package routes
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"html"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+	"unicode"
+
+	"golang.org/x/sync/semaphore"
+	"golang.org/x/sync/singleflight"
+
+	"github.com/sjawhar/envoy/internal/brokertoken"
+	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
+	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
+	"github.com/sjawhar/envoy/internal/dispatch/api"
+	"github.com/sjawhar/envoy/internal/dispatch/architecture"
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapi"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
+	"github.com/sjawhar/envoy/internal/dispatch/identity"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
+	"github.com/sjawhar/envoy/internal/oidc"
+)
+
+// AppContext holds shared dependencies for the HTTP handlers. All fields are
+// read-only after BuildAppContext returns; per-request state lives on
+// *router.
+type AppContext struct {
+	SigningKey     auth.SigningKeys
+	WebDistDir     string
+	AssetStore     AssetStore
+	Sessions       auth.SessionStore
+	People         auth.PeopleStore
+	Identity       identity.Identity
+	Store          *store.Store
+	DefaultProject string
+	ServerURL      string
+	// SignIn is the sign-in issuer's authorization code flow and SignInRule who it admits: the
+	// members of a Cognito pool's group, or the people of a Google Workspace domain. A nil SignIn
+	// is a test/local header-identity or dev sign-in server, whose /auth/start and /auth/callback
+	// answer 503.
+	SignIn     *oidc.CodeFlow
+	SignInRule identity.SignInRule
+	// InsecureCookie drops the Secure attribute from every cookie the router sets, for browsers
+	// reaching Dispatch over plain http (cmd/dispatch: DISPATCH_INSECURE_COOKIE).
+	InsecureCookie bool
+	apiDeps        api.Deps
+	// lifetime is AppContextOptions.Lifetime, which New passes to api.Register.
+	lifetime context.Context
+	// devSignInHost is the dashboard origin's host:port when the dev sign-in route is mounted,
+	// and empty otherwise. Only BuildAppContext sets it, from DevSignInOrigin, so no caller can
+	// turn the route on without the origin check.
+	devSignInHost string
+	// eventHead reads the event_head GET /auth/whoami answers: nil for a context with a Store, whose
+	// router reads it through the API server it registers (api.Background's EventHead, an id at or
+	// below which every event is final), and, for a context with no Store, nothing, since it has no
+	// event log to read (whoami then answers 503). A test sets it to answer a head of its own.
+	eventHead func(context.Context) (int64, error)
+}
+
+// AppContextOptions is the explicit-injection bundle main.go assembles
+// after deciding which storage / config sources to use. The router takes
+// what it's given; selection logic stays in cmd/dispatch/main.go.
+type AppContextOptions struct {
+	SigningKey auth.SigningKeys
+	WebDistDir string
+	AssetStore AssetStore
+	// DashboardEntry is the entry chunk of the dashboard build at WebDistDir, which main read
+	// when it published the build (dashboard.Publish); "" when it serves none. See
+	// api.DepsInput.
+	DashboardEntry string
+	Sessions       auth.SessionStore
+	People         auth.PeopleStore
+	Identity       identity.Identity
+	SignIn         *oidc.CodeFlow
+	SignInRule     identity.SignInRule
+	Store          *store.Store
+	AgentTokens    *auth.SharedAgentTokens
+	DefaultProject string
+	ServerURL      string
+	InsecureCookie bool
+	EnvoyURL       string
+	// EnvoyToken is the bearer every Envoy listener call sends (cmd/dispatch: ENVOY_TOKEN); empty
+	// sends none.
+	EnvoyToken string
+	Docs       docs.API
+	// Embedder embeds a search request's query for meaning search (LEGION-549); nil turns it off.
+	Embedder      embed.Embedder
+	Events        *events.Broker
+	App           *auth.AppConfig
+	GitHubAPIBase string
+	OIDC          api.ServiceTokenVerifier
+	// BrokerTokens decides a caller presenting an access token the secrets broker issued, under
+	// the DPoP scheme; nil where no broker is configured. cmd/dispatch builds it
+	// (brokerTokenVerifier). See api.DepsInput.
+	BrokerTokens *brokertoken.Verifier
+	AgentStream  agentstream.Source
+	// Lifetime is the process context the API's background work runs on, which New passes to
+	// api.Register as its lifetime; required, since api.Register refuses a nil one.
+	Lifetime context.Context
+	// AgentSecretsURL/AgentSecretsTokenFile configure the credential-request UI's secrets broker
+	// client; empty URL means the feature is off. See api.DepsInput.
+	AgentSecretsURL       string
+	AgentSecretsTokenFile string
+	// Files is the uploaded-file store main built from DISPATCH_FILE_STORE_BUCKET; nil keeps
+	// files in Postgres. See api.DepsInput.
+	Files            files.Store
+	TestHooksEnabled bool
+	// ListenerRosterUncached is for end-to-end test processes only (cmd/dispatch:
+	// DISPATCH_TEST_ROSTER_UNCACHED); see api.DepsInput.
+	ListenerRosterUncached bool
+	// DevSignIn mounts GET /auth/_dev/signin, which issues the session cookie for any person
+	// named with no sign-in issuer exchange, and makes the whole router refuse a request whose Host
+	// is not the dashboard origin. cmd/dispatch sets it from DISPATCH_DEV_SIGNIN behind its boot
+	// fence; BuildAppContext refuses it for a non-loopback ServerURL.
+	DevSignIn bool
+}
+
+// BuildAppContext bundles the shared HTTP-handler state.
+func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
+	if opts.SigningKey.Empty() {
+		return nil, fmt.Errorf("BuildAppContext: SigningKey required")
+	}
+	if opts.People == nil {
+		return nil, fmt.Errorf("BuildAppContext: People store required")
+	}
+	if opts.SignIn != nil && opts.SignInRule == nil {
+		return nil, fmt.Errorf("BuildAppContext: SignIn requires a SignInRule")
+	}
+	if opts.Identity == nil {
+		return nil, fmt.Errorf("BuildAppContext: Identity required")
+	}
+	var devSignInHost string
+	if opts.DevSignIn {
+		if opts.Sessions == nil {
+			return nil, fmt.Errorf("BuildAppContext: DevSignIn requires a Sessions store")
+		}
+		host, err := DevSignInOrigin(opts.ServerURL)
+		if err != nil {
+			return nil, fmt.Errorf("BuildAppContext: %w", err)
+		}
+		devSignInHost = host
+	}
+	apiDeps, err := api.NewDeps(api.DepsInput{
+		Store:                  opts.Store,
+		Identity:               opts.Identity,
+		AgentTokens:            opts.AgentTokens,
+		DefaultProject:         opts.DefaultProject,
+		ServerURL:              opts.ServerURL,
+		EnvoyURL:               opts.EnvoyURL,
+		EnvoyToken:             opts.EnvoyToken,
+		Docs:                   opts.Docs,
+		Embedder:               opts.Embedder,
+		Events:                 opts.Events,
+		App:                    opts.App,
+		GitHubAPIBase:          opts.GitHubAPIBase,
+		OIDC:                   opts.OIDC,
+		BrokerTokens:           opts.BrokerTokens,
+		AgentStream:            opts.AgentStream,
+		AgentSecretsURL:        opts.AgentSecretsURL,
+		AgentSecretsTokenFile:  opts.AgentSecretsTokenFile,
+		Files:                  opts.Files,
+		TestHooksEnabled:       opts.TestHooksEnabled,
+		ListenerRosterUncached: opts.ListenerRosterUncached,
+		DashboardEntry:         opts.DashboardEntry,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("BuildAppContext: %w", err)
+	}
+	// A context with a Store reads its head through the API server New registers (api.Background's
+	// EventHead), which holds the event horizon it is read from.
+	var eventHead func(context.Context) (int64, error)
+	if apiDeps.Store == nil {
+		eventHead = func(context.Context) (int64, error) { return 0, errNoEventLog }
+	}
+	return &AppContext{
+		SigningKey:     opts.SigningKey,
+		WebDistDir:     opts.WebDistDir,
+		AssetStore:     opts.AssetStore,
+		Sessions:       opts.Sessions,
+		People:         opts.People,
+		Identity:       opts.Identity,
+		Store:          opts.Store,
+		DefaultProject: opts.DefaultProject,
+		ServerURL:      strings.TrimSuffix(opts.ServerURL, "/"),
+		SignIn:         opts.SignIn,
+		SignInRule:     opts.SignInRule,
+		InsecureCookie: opts.InsecureCookie,
+		devSignInHost:  devSignInHost,
+		apiDeps:        apiDeps,
+		eventHead:      eventHead,
+		lifetime:       opts.Lifetime,
+	}, nil
+}
+
+// errNoEventLog is what a context built with no Store answers for the event log's head.
+var errNoEventLog = errors.New("this server holds no store, so no event log to read the head of")
+
+// Architecture is the shared architecture importer the HTTP routes use, so the
+// server's five-minute sync ticker drives the same serialized Sync the Refresh
+// route and the sync tool do.
+func (ctx *AppContext) Architecture() *architecture.Importer {
+	return ctx.apiDeps.Architecture
+}
+
+// GitHub is the shared GitHub App client the HTTP routes use (the architecture importer, the
+// REST proxy and the Settings access checks), so LEGION-567's delivery intake and reconcile sign
+// their own calls as the same App rather than loading credentials a second time.
+func (ctx *AppContext) GitHub() *githubapp.Client {
+	return ctx.apiDeps.GitHub
+}
+
+// oauthStateTTL is how long a sign-in may take between /auth/start and the issuer's callback.
+const oauthStateTTL = oauthStateMaxAge * time.Second
+
+type router struct {
+	ctx *AppContext
+	// retainedHeld counts the bytes of store reads held by responses in flight, and by the reads
+	// abandoned requests left running, up to maxRetainedBytesHeld (serveRetainedAsset).
+	retainedHeld *semaphore.Weighted
+	// assets keeps what the asset store answered, for every request of the process
+	// (serveRetainedAsset).
+	assets *assetCache
+	// eventHead is what GET /auth/whoami answers as event_head: the context's own (AppContext's
+	// eventHead) when it names one, else the registered API server's (api.Background's EventHead).
+	eventHead func(context.Context) (int64, error)
+}
+
+// New returns an http.Handler that serves all dispatch routes, and the API server's background
+// work (api.Background): its Wait returns once every keyed write's handler and every delivery a
+// request left running past its answer has settled, and the delivery hub, every live socket and
+// their subscriptions, and the event stream relay have ended after the process lifetime is
+// cancelled; its ResumeDeliveries is the delivery sweep's pass the maintenance loop runs.
+func New(ctx *AppContext) (http.Handler, api.Background) {
+	r := &router{
+		ctx:          ctx,
+		retainedHeld: semaphore.NewWeighted(maxRetainedBytesHeld),
+		assets:       newAssetCache(maxCachedAssetBytes),
+	}
+	mux := http.NewServeMux()
+	// Every route the server itself answers writes one access-log line (accesslog.Handler); the
+	// dashboard's own files, served by staticHandler, write none.
+	mux.HandleFunc("GET /auth/start", accesslog.HandlerFunc("/auth/start", r.authStart))
+	mux.HandleFunc("GET /auth/callback", accesslog.HandlerFunc("/auth/callback", r.authCallback))
+	mux.HandleFunc("POST /auth/logout", accesslog.HandlerFunc("/auth/logout", r.authLogout))
+	mux.HandleFunc("GET /auth/whoami", accesslog.HandlerFunc("/auth/whoami", r.authWhoami))
+	mux.HandleFunc(githubapi.Prefix, accesslog.HandlerFunc(githubapi.Prefix, r.apiGithubRest))
+	background := api.Register(mux, r.ctx.lifetime, r.ctx.apiDeps)
+	r.eventHead = ctx.eventHead
+	if r.eventHead == nil {
+		r.eventHead = background.EventHead
+	}
+	mux.HandleFunc("/", r.staticHandler)
+	if ctx.devSignInHost == "" {
+		return r.enforceCookieOrigin(mux), background
+	}
+	mux.HandleFunc("GET /auth/_dev/signin", accesslog.HandlerFunc("/auth/_dev/signin", r.authDevSignIn))
+	return requireHost(ctx.devSignInHost, r.enforceCookieOrigin(mux)), background
+}
+
+// ───── auth ─────────────────────────────────────────────────────────────────
+
+// authStart sends the browser to the issuer to sign in. The sign-in in flight (its state, nonce,
+// the page it returns to and when it lapses) travels in the browser's dispatch_oauth_state cookie,
+// signed under a key derived from the current signing key (signOAuthState), and no process keeps
+// it: whichever process holding that key the issuer's redirect reaches completes the sign-in. An
+// issuer not yet discovered is answered 503 SIGNIN_UNAVAILABLE, with no state cookie set.
+func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
+	if r.ctx.SignIn == nil {
+		signInUnconfigured(w)
+		return
+	}
+	state, err := randomToken()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "state")
+		return
+	}
+	nonce, err := randomToken()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "state")
+		return
+	}
+	authURL, err := r.ctx.SignIn.AuthURL(req.Context(), callbackURL(r.ctx.ServerURL, req), state, nonce)
+	if err != nil {
+		// AuthURL fails only while the issuer is not discovered (oidc.ErrIssuerUnavailable).
+		slog.Warn("dispatch: sign-in not started: the sign-in issuer is not discovered", "error", err)
+		identity.WriteError(w, fmt.Errorf("%w: %w", identity.ErrSignInUnavailable, err))
+		return
+	}
+	value, err := signOAuthState(r.ctx.SigningKey, oauthState{
+		State: state,
+		Nonce: nonce,
+		Next:  signInNext(req.URL.Query().Get("next")),
+		Exp:   time.Now().Add(oauthStateTTL).Unix(),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "state")
+		return
+	}
+	http.SetCookie(w, oauthStateCookieFor(value, oauthStateMaxAge, !r.ctx.InsecureCookie))
+	http.Redirect(w, req, authURL, http.StatusFound)
+}
+
+// authCallback completes a sign-in the issuer redirected back: it exchanges the code for the
+// person's ID token and signs in only a person SignInRule admits (SignInRule.Person), keeping the
+// issuer's refresh token to confirm that hourly. Under a group the person is named by the email
+// their pool username carries; under a domain, by the email of a Google account of the domain,
+// and the account's subject is recorded with the sign-in, which ends the address's sessions when
+// another account held it (auth.PeopleStore.SignInSubject).
+//
+// The sign-in must be one this browser started: its state cookie verifies under a key of the set,
+// has not lapsed, and names the state the issuer returned in the URL. Nothing records that a
+// state was used, yet each completes at most once: the callback clears the cookie before anything
+// else, the issuer's authorization code is single-use, and Exchange accepts only an ID token
+// carrying the nonce the cookie bound the sign-in to. An exchange that meets an issuer this
+// process has not discovered (another process started the sign-in) is answered 503
+// SIGNIN_UNAVAILABLE; any other failed exchange 502.
+func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
+	if r.ctx.SignIn == nil {
+		signInUnconfigured(w)
+		return
+	}
+	code, state, err := auth.ParseCallback(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	http.SetCookie(w, oauthStateCookieFor("", -1, !r.ctx.InsecureCookie))
+	cookie, err := req.Cookie(oauthStateCookie)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid or expired state — start over at /auth/start")
+		return
+	}
+	pending, ok := verifyOAuthState(r.ctx.SigningKey, cookie.Value, time.Now())
+	if !ok || subtle.ConstantTimeCompare([]byte(state), []byte(pending.State)) != 1 {
+		writeError(w, http.StatusBadRequest, "invalid or expired state — start over at /auth/start")
+		return
+	}
+	session, err := r.ctx.SignIn.Exchange(req.Context(), callbackURL(r.ctx.ServerURL, req), code, pending.Nonce)
+	if errors.Is(err, oidc.ErrIssuerUnavailable) {
+		slog.Warn("dispatch: sign-in code exchange failed: the sign-in issuer is not discovered", "error", err)
+		identity.WriteError(w, fmt.Errorf("%w: %w", identity.ErrSignInUnavailable, err))
+		return
+	}
+	if err != nil {
+		slog.Warn("dispatch: sign-in code exchange failed", "error", err)
+		writeError(w, http.StatusBadGateway, "sign-in failed: "+err.Error())
+		return
+	}
+	email, err := r.ctx.SignInRule.Person(session.Claims)
+	if err != nil {
+		slog.Warn("dispatch: sign-in refused", append(r.ctx.SignInRule.RefusalLogFields(session.Claims), "reason", err)...)
+		writeSignInRefusedPage(w, email, err)
+		return
+	}
+	subject := r.ctx.SignInRule.Subject(session.Claims)
+	if err := r.ctx.SignInRule.WriteSignIn(req.Context(), r.ctx.People, email, subject, session.RefreshToken); err != nil {
+		slog.Error("dispatch: record sign-in failed", "email", email, "error", err)
+		writeError(w, http.StatusInternalServerError, "record sign-in")
+		return
+	}
+	if !r.issueSession(w, req, email, subject) {
+		return
+	}
+	accesslog.Note(req.Context(), accesslog.KindUser, email)
+	http.Redirect(w, req, sanitizeNext(pending.Next), http.StatusFound)
+}
+
+// issueSession ensures the person's session generation and sets the session cookie a sign-in
+// issues, answering 500 when the generation cannot be recorded. authCallback and authDevSignIn
+// both mint through it, so a local dev sign-in carries exactly the cookie an issuer sign-in does.
+//
+// subject is the account a sign-in under SignInRule just recorded, empty for a rule that records
+// none. After the generation is read, SignInRule.ConfirmCookie confirms the address's row still
+// names subject: another account's sign-in that commits before that read has already ended the
+// address's sessions and taken the address, and one that commits after it advances the
+// generation past the one the cookie carries. So a cookie is issued only when the read generation
+// predates any such sign-in; otherwise the answer is 409 and no cookie. A nil SignInRule (no
+// sign-in issuer configured at all) has nothing to confirm.
+func (r *router) issueSession(w http.ResponseWriter, req *http.Request, email, subject string) bool {
+	generation := int64(0)
+	if r.ctx.Sessions != nil {
+		var err error
+		generation, err = r.ctx.Sessions.EnsureSession(req.Context(), email)
+		if err != nil {
+			slog.Error("dispatch: ensure session generation failed", "email", email, "error", err)
+			writeError(w, http.StatusInternalServerError, "session generation")
+			return false
+		}
+	}
+	if r.ctx.SignInRule != nil {
+		if err := r.ctx.SignInRule.ConfirmCookie(req.Context(), r.ctx.People, email, subject); err != nil {
+			if errors.Is(err, identity.ErrSignInSuperseded) {
+				slog.Warn("dispatch: sign-in superseded: another Google account signed in to the address before its cookie", "email", email)
+				writeCodeError(w, http.StatusConflict, "another Google account signed in to this address meanwhile; start over at /auth/start", "SIGNIN_SUPERSEDED")
+				return false
+			}
+			slog.Error("dispatch: read the account the sign-in recorded failed", "email", email, "error", err)
+			writeError(w, http.StatusInternalServerError, "record sign-in")
+			return false
+		}
+	}
+	w.Header().Add("Set-Cookie", auth.IssueSessionCookie(email, generation, r.ctx.SigningKey, !r.ctx.InsecureCookie))
+	return true
+}
+
+func (r *router) authLogout(w http.ResponseWriter, req *http.Request) {
+	email, ok := r.login(w, req)
+	if !ok {
+		return
+	}
+	if r.ctx.Sessions != nil {
+		if err := r.ctx.Sessions.RevokeSessions(req.Context(), email); err != nil {
+			slog.Warn("dispatch: revoke sessions failed", "email", email, "error", err)
+			writeError(w, http.StatusInternalServerError, "revoke session")
+			return
+		}
+	}
+	if err := r.ctx.People.End(req.Context(), email); err != nil {
+		slog.Warn("dispatch: forget the sign-in's refresh token failed", "email", email, "error", err)
+	}
+	w.Header().Set("Set-Cookie", auth.ClearSessionCookie(!r.ctx.InsecureCookie))
+	api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// whoamiAnswer is what GET /auth/whoami answers a signed-in person, the Go mirror of
+// packages/contracts' AuthenticatedUser. Its fields are in their keys' order, which is the order the
+// answer's JSON has always carried them in.
+type whoamiAnswer struct {
+	EventHead string `json:"event_head"`
+	Kind      string `json:"kind"`
+	Login     string `json:"login"`
+}
+
+// authWhoami answers the signed-in person and event_head, the decimal id at or below which every
+// event is final (api.Background's EventHead), read after the sign-in check and before the answer
+// is written. The page starts every read
+// the event feed keeps current only once whoami has answered, and resumes its first events
+// subscription from event_head, so a change committed while it loads is replayed rather than
+// missed. A head it cannot answer is a 503, never a whoami without it: a page that took a missing
+// head for an older server's answer would start its feed at the server's head and could miss such a
+// change. EVENT_HEAD_UNAVAILABLE says only that no event id is proven final yet
+// (api.ErrEventHeadUnproven: an event insert open since before every mark, with no horizon proven
+// or persisted), which ends on its own and which the page asks again for as long as it lasts.
+// Every other failure (the database or the horizon's pool not answering) is
+// EVENT_HEAD_READ_FAILED, which the page retries a few times and then shows as an error.
+func (r *router) authWhoami(w http.ResponseWriter, req *http.Request) {
+	email, ok := r.login(w, req)
+	if !ok {
+		return
+	}
+	head, err := r.eventHead(req.Context())
+	if err != nil {
+		// A read the page's own leaving cut short says nothing of the database.
+		if req.Context().Err() == nil {
+			slog.Warn("dispatch: whoami could not read the event log's head", "error", err)
+		}
+		if errors.Is(err, api.ErrEventHeadUnproven) {
+			writeCodeError(w, http.StatusServiceUnavailable, "no event id is proven final yet; ask again", "EVENT_HEAD_UNAVAILABLE")
+			return
+		}
+		writeCodeError(w, http.StatusServiceUnavailable, "the event log's head could not be read", "EVENT_HEAD_READ_FAILED")
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, whoamiAnswer{EventHead: strconv.FormatInt(head, 10), Kind: "user", Login: email})
+}
+
+// apiGithubRest serves the web app's GitHub reads to a person, as the GitHub App.
+func (r *router) apiGithubRest(w http.ResponseWriter, req *http.Request) {
+	if _, ok := r.login(w, req); !ok {
+		return
+	}
+	githubapi.ProxyREST(w, req, r.ctx.apiDeps.GitHub)
+}
+
+// login is the signed-in person the request's cookie names, and the caller its access-log line
+// names: the /auth routes and the GitHub proxy resolve their caller here and nowhere else.
+func (r *router) login(w http.ResponseWriter, req *http.Request) (string, bool) {
+	login, err := r.ctx.Identity.Login(req)
+	if err != nil {
+		identity.WriteError(w, err)
+		return "", false
+	}
+	accesslog.Note(req.Context(), accesslog.KindUser, login)
+	return login, true
+}
+
+func signInUnconfigured(w http.ResponseWriter) {
+	writeCodeError(w, http.StatusServiceUnavailable, "Google sign-in is not configured on this server (DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET, one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN)", "SIGNIN_UNCONFIGURED")
+}
+
+// ───── static ───────────────────────────────────────────────────────────────
+
+// serverRoots are the path roots the server itself answers: an unmatched path under one of them
+// is a real JSON 404, decided before any dashboard lookup, never the SPA shell. "/v1" is
+// reserved because it is the API path typed without its "/api" prefix — an API client's mistake
+// that must be answered as one.
+var serverRoots = []string{"/api", "/v1", "/auth", "/ws", "/healthz"}
+
+// unmatchedRoute is the access-log route of a request under serverRoots that no route answers.
+const unmatchedRoute = "unmatched"
+
+// assetRoots hold Vite's content-hashed build output: a file there never changes under its name,
+// because a changed file is written under a new one.
+var assetRoots = []string{"/assets"}
+
+const (
+	// pageCacheControl makes a browser revalidate a page before it runs it. A page names the
+	// hashed assets of the build that wrote it, and one kept by heuristic freshness from a
+	// Last-Modified would, after a deploy, ask for assets the server no longer has.
+	pageCacheControl = "no-cache"
+	// assetCacheControl lets a browser keep a hashed asset for a year without asking.
+	assetCacheControl = "public, max-age=31536000, immutable"
+)
+
+func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
+	requestedPath := req.URL.Path
+	// A rooted clean holds no `..`, so every path joined under the dist directory below stays in it.
+	normalized := filepath.Clean("/" + requestedPath)
+	if isReservedPath(normalized, serverRoots) {
+		// An unknown API path writes its access-log line too, so a client calling a route that
+		// does not exist is visible beside the callers of the routes that do.
+		accesslog.HandlerFunc(unmatchedRoute, func(w http.ResponseWriter, req *http.Request) {
+			api.WriteJSON(w, http.StatusNotFound, map[string]string{
+				"code":  "NOT_FOUND",
+				"error": "no route for " + req.Method + " " + req.URL.Path,
+				"hint":  "GET /api/v1 lists every route",
+			})
+		})(w, req)
+		return
+	}
+	if r.ctx.WebDistDir == "" {
+		writeError(w, http.StatusNotFound, "dashboard build not found")
+		return
+	}
+	if normalized == "/" {
+		normalized = "/index.html"
+	}
+	if normalized == "/favicon.ico" {
+		faviconPath := filepath.Join(r.ctx.WebDistDir, "favicon.svg")
+		if info, err := os.Stat(faviconPath); err == nil && !info.IsDir() {
+			serveFile(w, req, faviconPath)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	candidate := filepath.Join(r.ctx.WebDistDir, normalized)
+	info, err := os.Stat(candidate)
+	if err == nil && !info.IsDir() {
+		if filepath.Ext(candidate) == ".html" {
+			servePage(w, req, candidate)
+			return
+		}
+		if isReservedPath(normalized, assetRoots) {
+			// A 304 keeps it, and net/http drops it from an error it answers instead (a file
+			// removed after its stat), so a failure is never kept for an asset's year.
+			w.Header().Set("Cache-Control", assetCacheControl)
+		}
+		serveFile(w, req, candidate)
+		return
+	}
+	if err != nil && !isMissingFile(err) {
+		writeError(w, http.StatusInternalServerError, "stat failed")
+		return
+	}
+	// The store's key is a Postgres text parameter, which cannot carry a NUL byte or invalid UTF-8
+	// (a path such as /assets/%ff.js): asking it would take a reservation and answer a store
+	// failure for a name no build can hold, so such a path is a plain miss.
+	if isRetainedAssetPath(normalized) && r.ctx.AssetStore != nil && text.Storable(normalized) {
+		r.serveRetainedAsset(w, req, strings.TrimPrefix(normalized, "/"))
+		return
+	}
+	if !isBrowserRoute(normalized) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	servePage(w, req, filepath.Join(r.ctx.WebDistDir, "index.html"))
+}
+
+// isMissingFile reports whether os.Stat's err means no file is there: the path does not exist,
+// or the path itself is one no file can have — a NUL byte in it (EINVAL), a name too long
+// (ENAMETOOLONG), or a file where a directory must be (ENOTDIR). Those are a request's own
+// spelling, answered as a miss; any other error (EACCES, EIO) is the filesystem failing.
+func isMissingFile(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.EINVAL) ||
+		errors.Is(err, syscall.ENAMETOOLONG) || errors.Is(err, syscall.ENOTDIR)
+}
+
+// isRetainedAssetPath reports whether normalized names a file below an asset root: the only paths
+// the asset store is asked for, never a page or an asset root itself.
+func isRetainedAssetPath(normalized string) bool {
+	return isReservedPath(normalized, assetRoots) && !slices.Contains(assetRoots, normalized)
+}
+
+// serveRetainedAsset answers a local asset miss — a file of another build than this process's —
+// from the asset store, through the process's cache of what the store has answered (r.assets). A
+// cached object is served at once, with no reservation below: it is in memory whichever request
+// holds it. On a miss the whole object is read under retainedAssetFetchTimeout before anything is
+// written, so a slow or failed read is an uncached 502 and never a 200 carrying the immutable
+// header; the browser's download of the bytes read is not bounded by that timeout. A read that
+// instead runs out of that shared bound (errors.Is(err, context.DeadlineExceeded), most often
+// because most of it was already spent waiting for memory-cap room) is answered the same way the
+// cap's own refusal is, a 503, not a 502 store failure: the store was never actually unhealthy,
+// only asked too late to answer in time.
+//
+// An object stays in memory until its client has read it, so the bytes misses hold at once are
+// capped at maxRetainedBytesHeld. Before asking the store a miss reserves the most one object can
+// hold, waiting within the same bound for earlier requests to give theirs back, so a burst of a
+// stale tab's chunks is served in turn and a request that cannot reserve in time is a 503 that
+// asks the store nothing. A request whose context ends because its client went away, while still
+// queued for that room or while waiting for the store's answer (a navigation cancels the chunks
+// still loading), logs nothing more than a debug line and writes no response, since neither the
+// cap nor the store was the reason and nobody is left to answer. Once the object is read the
+// request keeps only its size until its response is written or its client goes away. A request
+// that stops waiting for the store's answer (its client went away, or its bound ran out) leaves
+// the read running for the requests after it (readRetainedAsset), and its reservation outlives
+// the request until that read ends: a client that abandons each request the moment it reaches
+// the store cannot hold more store reads at once than the cap has room for.
+func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, key string) {
+	if asset, ok := r.assets.get(key); ok {
+		writeRetainedAsset(w, req, key, asset)
+		return
+	}
+	ctx, cancel := context.WithTimeout(req.Context(), retainedAssetFetchTimeout)
+	defer cancel()
+	if err := r.retainedHeld.Acquire(ctx, MaxRetainedAssetSize); err != nil {
+		if errors.Is(err, context.Canceled) {
+			slog.Debug("dispatch: retained asset request canceled while queued for the memory cap", "key", key)
+			return
+		}
+		refuseRetainedAssetAtCap(w, key)
+		return
+	}
+	held := MaxRetainedAssetSize
+	// Release reads held when the handler returns: the object's size once it is read, or nothing
+	// once the reservation is handed to a read the request stopped waiting for.
+	defer func() { r.retainedHeld.Release(held) }()
+
+	asset, pending, err := r.readRetainedAsset(ctx, key)
+	if pending != nil {
+		go func(held int64) {
+			<-pending
+			r.retainedHeld.Release(held)
+		}(held)
+		held = 0
+	}
+	// The read itself runs on a context no request cancels (readRetainedAsset), so a cancellation
+	// is this request's own client going away.
+	if errors.Is(err, context.Canceled) {
+		slog.Debug("dispatch: retained asset request canceled while the store read it", "key", key)
+		return
+	}
+	if errors.Is(err, ErrAssetNotFound) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		refuseRetainedAssetAtCap(w, key)
+		return
+	}
+	if err != nil {
+		slog.Error("dispatch: retained asset store failed", "key", key, "error", err)
+		writeError(w, http.StatusBadGateway, "retained asset store unavailable")
+		return
+	}
+	r.retainedHeld.Release(held - int64(len(asset)))
+	held = int64(len(asset))
+	writeRetainedAsset(w, req, key, asset)
+}
+
+// readRetainedAsset reads key from the asset store into the cache, once however many requests
+// miss it at the same moment: the first starts the read and the rest wait for its answer, each
+// within its own ctx. The read is bounded by retainedAssetFetchTimeout from its start and not by
+// the first request's context, so that request's client going away fails none of the others. A
+// failed read caches nothing, and the next miss asks the store again. When ctx ends before the
+// read answers, it returns ctx's error and the channel the read will still answer on, so the
+// caller can keep the read's reservation until it does; it returns no channel otherwise.
+func (r *router) readRetainedAsset(ctx context.Context, key string) ([]byte, <-chan singleflight.Result, error) {
+	read := r.assets.reads.DoChan(key, func() (any, error) {
+		// A read that finished between this request's cache miss and its flight answers it.
+		if asset, ok := r.assets.get(key); ok {
+			return asset, nil
+		}
+		readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), retainedAssetFetchTimeout)
+		defer cancel()
+		asset, err := r.ctx.AssetStore.GetAsset(readCtx, key)
+		if err != nil {
+			return nil, err
+		}
+		r.assets.put(key, asset)
+		return asset, nil
+	})
+	select {
+	case result := <-read:
+		if result.Err != nil {
+			return nil, nil, result.Err
+		}
+		return result.Val.([]byte), nil, nil
+	case <-ctx.Done():
+		return nil, read, ctx.Err()
+	}
+}
+
+// writeRetainedAsset answers a whole object the asset store holds. Its key names content-hashed
+// build output, so the browser may keep it for a year.
+func writeRetainedAsset(w http.ResponseWriter, req *http.Request, key string, asset []byte) {
+	w.Header().Set("Cache-Control", assetCacheControl)
+	w.Header().Set("Content-Type", contentType(key))
+	http.ServeContent(w, req, key, time.Time{}, bytes.NewReader(asset))
+}
+
+// refuseRetainedAssetAtCap answers the shared 503 a request past its fetch bound gets, whether the
+// bound ran out waiting for memory-cap room or inside the store call itself: both are the same
+// "try again shortly" condition from the client's side, never a store failure to alarm an operator
+// over.
+func refuseRetainedAssetAtCap(w http.ResponseWriter, key string) {
+	slog.Warn("dispatch: retained asset refused at the memory cap", "key", key, "cap_bytes", maxRetainedBytesHeld)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Retry-After", "1")
+	writeError(w, http.StatusServiceUnavailable, "retained assets are at their memory cap; retry")
+}
+
+// isBrowserRoute reports whether an unmatched, non-static path should fall
+// back to the SPA shell so the client router can render its own view
+// (including its own not-found page). The built dashboard's asset root and
+// anything that looks like a missing static asset must stay a real 404
+// instead, so asset clients never get an HTML body where they expected a file.
+func isBrowserRoute(normalized string) bool {
+	if isReservedPath(normalized, assetRoots) {
+		return false
+	}
+	// Issue routes carry user-controlled segments (artifact slugs, ask/comment
+	// ids) that may legitimately contain a dot, so the file-extension
+	// heuristic below must never apply to them.
+	if normalized == "/issues" || strings.HasPrefix(normalized, "/issues/") {
+		return true
+	}
+	return !strings.Contains(filepath.Base(normalized), ".")
+}
+
+// isReservedPath reports whether normalized is exactly one of roots or a
+// subpath of one — never a mere string-prefix match, so a root like "/api"
+// does not also claim an unrelated path like "/apix".
+func isReservedPath(normalized string, roots []string) bool {
+	for _, root := range roots {
+		if normalized == root || strings.HasPrefix(normalized, root+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// servePage serves an HTML page that the browser must revalidate, validated by its content and
+// never by its modification time. The servers behind one load balancer can hold different builds
+// whose pages' times say nothing about which build wrote them (a rollback serves the older file),
+// so a revalidation answered by If-Modified-Since could keep one build's page in front of another
+// build's assets. The page carries an ETag of its bytes and no Last-Modified, so a browser holding
+// another build's page, or one cached before this, gets the page this server has.
+func servePage(w http.ResponseWriter, req *http.Request, path string) {
+	page, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		writeError(w, http.StatusNotFound, "dashboard build not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read failed")
+		return
+	}
+	w.Header().Set("Content-Type", contentType(path))
+	w.Header().Set("Cache-Control", pageCacheControl)
+	w.Header().Set("ETag", `"`+pageTag(page)+`"`)
+	http.ServeContent(w, req, path, time.Time{}, bytes.NewReader(page))
+}
+
+// pageTag names a page by its bytes: lowercase hex of the first 16 bytes of their SHA-256. It is
+// servePage's ETag value and DashboardBuild's name for the build.
+func pageTag(page []byte) string {
+	sum := sha256.Sum256(page)
+	return hex.EncodeToString(sum[:16])
+}
+
+// DashboardBuild names the dashboard build served from webDistDir (processes.Instance): the
+// pageTag of its index.html, the page every dashboard route answers, so two processes report one
+// build exactly when they answer one page with one ETag. It is "" when there is no dashboard to
+// serve: no directory, no index.html, or one this process cannot read.
+func DashboardBuild(webDistDir string) string {
+	if webDistDir == "" {
+		return ""
+	}
+	page, err := os.ReadFile(filepath.Join(webDistDir, "index.html"))
+	if err != nil {
+		return ""
+	}
+	return pageTag(page)
+}
+
+func serveFile(w http.ResponseWriter, req *http.Request, path string) {
+	w.Header().Set("Content-Type", contentType(path))
+	http.ServeFile(w, req, path)
+}
+
+func contentType(path string) string {
+	switch filepath.Ext(path) {
+	case ".html":
+		return "text/html; charset=utf-8"
+	case ".js":
+		return "text/javascript; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".svg":
+		return "image/svg+xml"
+	case ".txt":
+		return "text/plain; charset=utf-8"
+	case ".png":
+		return "image/png"
+	case ".json":
+		return "application/json; charset=utf-8"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+// ───── helpers ──────────────────────────────────────────────────────────────
+
+// callbackURL uses Dispatch's configured canonical public origin whenever it
+// is available. A backend request's Host and TLS state are used only for
+// unconfigured local deployments; forwarded headers are deliberately ignored.
+func callbackURL(serverURL string, req *http.Request) string {
+	return publicOrigin(serverURL, req) + "/auth/callback"
+}
+
+func publicOrigin(serverURL string, req *http.Request) string {
+	if parsed, err := url.Parse(serverURL); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		return fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host)
+	}
+	scheme := "http"
+	if req.TLS != nil {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://%s", scheme, req.Host)
+}
+
+func (r *router) enforceCookieOrigin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if !unsafeMethod(req.Method) || strings.TrimSpace(req.Header.Get("Authorization")) != "" || !auth.HasSessionCookie(req) {
+			next.ServeHTTP(w, req)
+			return
+		}
+		if origin := req.Header.Get("Origin"); origin != "" && origin == publicOrigin(r.ctx.ServerURL, req) {
+			next.ServeHTTP(w, req)
+			return
+		}
+		if req.Header.Get("Origin") == "" && req.Header.Get("Sec-Fetch-Site") == "same-origin" {
+			next.ServeHTTP(w, req)
+			return
+		}
+		writeError(w, http.StatusForbidden, "invalid request origin")
+	})
+}
+
+func unsafeMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+// sanitizeNext restricts post-login redirect targets to local paths. An
+// open-redirect bug here would let a phishing site bounce victims back to
+// their own page after passing through our domain.
+func sanitizeNext(raw string) string {
+	if raw == "" || strings.Contains(raw, "\\") || strings.IndexFunc(raw, unicode.IsControl) >= 0 {
+		return "/"
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || !strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(parsed.Path, "//") {
+		return "/"
+	}
+	path, err := url.PathUnescape(parsed.EscapedPath())
+	if err != nil || strings.Contains(path, "\\") || strings.IndexFunc(path, unicode.IsControl) >= 0 {
+		return "/"
+	}
+	return raw
+}
+
+func oauthStateCookieFor(value string, maxAge int, secure bool) *http.Cookie {
+	return &http.Cookie{
+		Name:     oauthStateCookie,
+		Value:    value,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   maxAge,
+	}
+}
+
+func writeError(w http.ResponseWriter, status int, message string) {
+	api.WriteJSON(w, status, map[string]string{"error": message})
+}
+
+func writeCodeError(w http.ResponseWriter, status int, message, code string) {
+	api.WriteJSON(w, status, map[string]string{"error": message, "code": code})
+}
+
+// writeSignInRefusedPage answers the sign-in callback, a top-level browser navigation back from
+// the issuer where JSON would be unreadable, for a person the issuer vouched for but Dispatch does
+// not admit, with the reason: one outside the group or the domain, or whose email Google has not
+// verified, each named by email; a Google sign-in that carries no email; or a sign-in that names
+// nobody by email.
+func writeSignInRefusedPage(w http.ResponseWriter, email string, reason error) {
+	message := "This sign-in does not name a person by email. Sign in again, or with a different account."
+	switch {
+	case errors.Is(reason, identity.ErrNotMember):
+		message = html.EscapeString(email) + " is not in the group that may use Dispatch. Ask an administrator to add you, then sign in again."
+	case errors.Is(reason, identity.ErrNotInDomain):
+		message = html.EscapeString(email) + " is not in the domain that may use Dispatch. Sign in with your Google Workspace account."
+	case errors.Is(reason, identity.ErrEmailNotVerified):
+		message = html.EscapeString(email) + ": email not verified. Google has not verified this account's email address, so Dispatch cannot name you by it."
+	case errors.Is(reason, identity.ErrNoEmail):
+		message = "No email: this sign-in carries no email address Dispatch can name you by. Sign in with your Google Workspace account."
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusForbidden)
+	fmt.Fprintf(w, `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Dispatch: sign-in refused</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem">
+<h1>Sign-in refused</h1>
+<p>%s</p>
+<p><a href="/auth/start">Sign in with a different account</a></p>
+</body></html>
+`, message)
+}
+
+func randomToken() (string, error) {
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}

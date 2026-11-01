@@ -75,11 +75,14 @@ func readRoutes(src *source, funcs map[string]*ast.FuncDecl) ([]route, error) {
 			return nil, fmt.Errorf("%s: a route's pattern is a string literal", src.at(row))
 		}
 		call, ok := row.Elts[2].(*ast.CallExpr)
-		if !ok || len(call.Args) != 1 {
+		if !ok || len(call.Args) == 0 {
 			return nil, fmt.Errorf("%s: a route's handler is adapter((*server).handler) or adapter((*pkg.Type).handler)", src.at(row))
 		}
+		// The handler is the adapter's last argument: the two account adapters take the power
+		// the row declares before it (routes_table.go), and every other adapter takes the
+		// handler alone.
 		wrapper, ok := call.Fun.(*ast.Ident)
-		handler, ok2 := call.Args[0].(*ast.SelectorExpr)
+		handler, ok2 := call.Args[len(call.Args)-1].(*ast.SelectorExpr)
 		if !ok || !ok2 {
 			return nil, fmt.Errorf("%s: a route's handler is adapter((*server).handler) or adapter((*pkg.Type).handler)", src.at(row))
 		}
@@ -138,6 +141,7 @@ var credentialLabels = map[string]string{
 	"launcherAuth":               "Machine credential",
 	"accountAuth":                "Caller ServiceAccount token",
 	"accountAuthAfterRecordKind": "Caller ServiceAccount token, checked by the handler",
+	"serviceAuth":                "Service login ServiceAccount token",
 	"signInAuth":                 "Broker sign-in session",
 }
 

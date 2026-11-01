@@ -19,7 +19,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/capabilities/capabilitiestest"
-	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
 
@@ -558,8 +557,8 @@ func TestProbeImageWithAProviderEnvDirExportsTheKeysAsTheShimDoes(t *testing.T) 
 }
 
 // With --pod-safety, as the daemon's probe Sandbox runs it, every probe runs Oh My Pi on the pod's
-// baseline, as a pod's shim starts it: the turn-scoping overlay written and named first in
-// PI_CONFIG_FILES, ahead of the operator's, and OMP_SESSION_STORAGE set to file where the pod
+// baseline, as a pod's shim starts it: PI_CONFIG_FILES the operator's own, which the baseline
+// leaves alone, and OMP_SESSION_STORAGE set to file where the pod
 // leaves it unset. Without it, as the image's build runs it, the probes run on the environment as
 // it is. The session-storage probe exports its own OMP_SESSION_STORAGE over either, on its one
 // run, so that value is counted once and the baseline's (or none) on every other run.
@@ -577,7 +576,7 @@ func TestProbeImageWithPodSafetyProbesOnThePodsBaseline(t *testing.T) {
 		overlays *regexp.Regexp
 		sessions string
 	}{
-		"--pod-safety": {img.flags("--pod-safety"), regexp.MustCompile(`^/\S+/` + regexp.QuoteMeta(podsafety.TurnScopeFile+":"+operator) + ` written$`), "file"},
+		"--pod-safety": {img.flags("--pod-safety"), regexp.MustCompile(`^` + regexp.QuoteMeta(operator) + ` absent$`), "file"},
 		"bare":         {img.flags(), regexp.MustCompile(`^` + regexp.QuoteMeta(operator) + ` absent$`), "unset"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -612,8 +611,8 @@ func TestProbeImageWithPodSafetyProbesOnThePodsBaseline(t *testing.T) {
 }
 
 // With --role-config-files, as the daemon's probe Sandbox passes it for each role role_config_files
-// names, the probe reads that role's PI_CONFIG_FILES as the role's Oh My Pi starts on it — the pod
-// baseline's turn-scoping overlay, the operator's, then the role's own — and runs Oh My Pi on each
+// names, the probe reads that role's PI_CONFIG_FILES as the role's Oh My Pi starts on it — the
+// operator's overlays, then the role's own — and runs Oh My Pi on each
 // of the role's files alone and then on the whole list, once each; an empty entry of the operator's
 // value is skipped, as Oh My Pi skips it. A file it names that the probe cannot read, or Oh My Pi
 // exiting non-zero on it, exits 1 after the capability table with the line the daemon refuses its
@@ -628,6 +627,10 @@ func TestProbeImageReadsEachRolesOwnOverlaysAsTheRoleStarts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Restored by t.Setenv's cleanup; unset so what every probe run below reads as its session
+	// store is the baseline's own `file`, never a store the environment this test runs in names.
+	t.Setenv("OMP_SESSION_STORAGE", "")
+	os.Unsetenv("OMP_SESSION_STORAGE")
 	for name, value := range map[string]string{"the operator's overlay": operator, "with a trailing empty entry": operator + ":"} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("PI_CONFIG_FILES", value)
@@ -642,7 +645,7 @@ func TestProbeImageReadsEachRolesOwnOverlaysAsTheRoleStarts(t *testing.T) {
 				t.Fatal(err)
 			}
 			for what, run := range map[string]*regexp.Regexp{
-				"the implementer's PI_CONFIG_FILES": regexp.MustCompile(`(?m)^/\S+/` + regexp.QuoteMeta(podsafety.TurnScopeFile+":"+operator+":"+fallback) + ` written file$`),
+				"the implementer's PI_CONFIG_FILES": regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(operator+":"+fallback) + ` written file$`),
 				"the implementer's file alone":      regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(fallback) + ` written file$`),
 			} {
 				if got := len(run.FindAllString(string(raw), -1)); got != 1 {

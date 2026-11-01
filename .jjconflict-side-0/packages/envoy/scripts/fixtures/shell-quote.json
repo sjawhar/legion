@@ -1,0 +1,20 @@
+[
+  { "word": "9021", "quoted": "9021" },
+  { "word": "postgres://u@127.0.0.1:5432/d", "quoted": "postgres://u@127.0.0.1:5432/d" },
+  {
+    "word": "6383303ba5ac:/var/lib/postgresql/data",
+    "quoted": "6383303ba5ac:/var/lib/postgresql/data"
+  },
+  { "word": "", "quoted": "''" },
+  { "word": "/srv/My Data", "quoted": "'/srv/My Data'" },
+  { "word": "it's", "quoted": "'it'\\''s'" },
+  { "word": "/srv/My Data/it's", "quoted": "'/srv/My Data/it'\\''s'" },
+  { "word": "''", "quoted": "''\\'''\\'''" },
+  { "word": "$HOME", "quoted": "'$HOME'" },
+  {
+    "word": "postgres://u@127.0.0.1/d?sslmode=disable&x=1",
+    "quoted": "'postgres://u@127.0.0.1/d?sslmode=disable&x=1'"
+  },
+  { "word": "POSTGRES_PASSWORD=dispatch", "quoted": "POSTGRES_PASSWORD=dispatch" },
+  { "word": "*", "quoted": "'*'" }
+]

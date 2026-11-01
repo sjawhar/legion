@@ -1,0 +1,74 @@
+---
+title: "A port held in an issue pod is a sibling role's harness: move your run with every harness port variable and your own database, and never stop the holder"
+category: legion
+tags:
+  - legion-worker
+  - issue-pod
+  - dispatch-e2e
+  - harness-ports
+  - postgres
+  - playwright
+date: 2026-10-12
+status: active
+module: packages/dispatch/e2e
+related_issues:
+  - "LEGION-695"
+  - "sjawhar/legion#1928"
+---
+
+# A port held in an issue pod is a sibling role's harness: move your run with every harness port variable and your own database, and never stop the holder
+
+**Update (2026-10-26, INFRA-253): the harness has no fixed ports any more.** `bun run e2e`, CI's
+browser step, `bun run dispatch:local` and the docs media harness start every harness server
+through `packages/dispatch/e2e/harness-start.ts` on a port the OS chooses and holds until the
+server serves, and Playwright runs through `e2e/run.ts`, which exports those ports; the config's
+port probe and the defaults 8777 and 9021-9024 are gone. Two roles' harnesses in one pod no
+longer meet on a port, so the port moves below are unneeded. A port variable set by hand is
+still used as given and fails with `address already in use` when taken; the rule never to stop or
+reuse a sibling's server stands. What follows is the record as it was written.
+
+Extends `packages/dispatch/AGENTS.md` ("`e2e/harness-ports.ts` resolves …", the port-probe
+paragraphs), whose remedy for a taken harness port is "stop whatever listens there, or move a
+local run to free ports and its own `DATABASE_URL`". In a Legion issue pod only the second half
+applies:
+
+- Every role of an issue (planner, implementer, tester, reviewer, merger, architect) runs in its
+  own container of one pod, and the containers share one network namespace. A `bun run
+  dispatch:local` or a Playwright run the tester left listening on `8777` and `9021-9026` is
+  invisible to your `ps` and is not yours to stop: it is that role's proof surface, possibly
+  mid-run.
+- Read the Playwright config's port refusal, or `local-instance.ts`'s `already in use`, as that
+  sibling, and run yours with `DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`, `FAKE_GITHUB_PORT`,
+  `PLAIN_HTTP_PORT`, `FAKE_BROKER_PORT`, `DEV_OIDC_ISSUER_PORT` and `REAL_BROKER_PORT` (the last
+  two since INFRA-314) on free ports **and** a `DATABASE_URL` of your own
+  (`DISPATCH_E2E_REUSE_SERVERS=1` against the sibling's server truncates your database under a
+  server that holds another and fails every row with `409 PROJECT_EXISTS`). Name the ports and
+  the database in your proof so the next role can tell the two instances apart.
+- The pod has no Docker and no Postgres; a role that needs the harness builds one under `/tmp`
+  from Debian packages (`apt-get download` with a user-writable `Dir::State`/`Dir::Cache`,
+  `dpkg-deb -x`, `initdb --auth=trust`, `postgres -p <port> -h 127.0.0.1 -k /tmp/pgsock`,
+  `create extension vector`) and leaves it running for the roles after it, recording the
+  `LD_LIBRARY_PATH`, `PATH` and `DATABASE_URL` it needs in the handoff's `trickyParts`. Two roles
+  each built one (55432 and 55433): the first role's note is what spares the next the build.
+  **Note 2026-10-25 (INFRA-221):** the `/tmp` placement is replaced: build the root on the
+  issue's volume, as
+  `docs/solutions/testing/a-browser-harness-in-an-issue-pod-lives-on-the-issue-volume-INFRA-43.md`
+  does. `/tmp` is a directory on the container's own filesystem, so a build there fails the first
+  condition of `skills/legion-worker/references/tools.md`, "The test: where it lands, and what it
+  leaves resolving". The hand-over stands: what crosses to the next role is a **note, not an
+  environment**, which that role reads from the `trickyParts` and sets for its own harness
+  commands. Keep it in the handoff rather than in a shell every later command inherits.
+- Stop your own `dispatch:local` before you complete, so its ports are free for the next role; a
+  Postgres you built stays up.
+
+## Evidence (LEGION-695, sjawhar/legion#1928)
+
+The implementer's round-1 runs used the default ports; by round 2 `playwright.config.ts` refused
+them (`already in use`), with no process visible in the container — the tester's `dispatch:local`
+on 8777 with its own Postgres on 55433/`dispatch_tester`. A `DISPATCH_E2E_REUSE_SERVERS=1` attempt
+against it failed all ten rows with `POST /api/v1/projects failed: 409 PROJECT_EXISTS`, since
+`resetDatabase()` truncated the implementer's database while that server served another. Every
+later run and proof used `DISPATCH_E2E_PORT=18777 FAKE_ENVOY_PORT=19021 FAKE_GITHUB_PORT=19022
+PLAIN_HTTP_PORT=19023 FAKE_BROKER_PORT=19024` with `DATABASE_URL` on the implementer's Postgres at
+55432 (`dispatch_e2e` for the suite, `dispatch_local` for `dispatch:local`), named in the PR body's
+`E2E (implementer)` lines (`.legion/LEGION-695/implement.json`, round-2 `trickyParts`).

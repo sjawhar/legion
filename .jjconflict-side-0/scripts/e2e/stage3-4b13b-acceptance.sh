@@ -1,0 +1,1252 @@
+#!/usr/bin/env bash
+# Live acceptance for LEGION-208 task 4b.13b (PR sjawhar/legion#1333). It stands up the Stage 3 rig
+# (scratch Postgres, NATS, Envoy listener, native Dispatch, the subscribe-only GitHub bridge, the
+# branch plugin in an isolated OMP profile, the Go daemon built from ACCEPT_ROOT) exactly as
+# scripts/e2e/stage3-devbox-workflow.sh does, sourcing that checkout's lib/rig.sh and
+# lib/workflow.sh, and drives real agents through:
+#   - prompts.New rewriting a stale Go prompt part at boot and leaving identical ones untouched;
+#   - the refused root stop naming `legion claims close` only for a tree no workflow issue backs;
+#   - the phase reminder: a planner whose turn ends with its phase open is reminded, and the
+#     tool's handoff_complete closes the phase, with no reminder after it;
+#   - park_child / rerun_child with their refusals, and the Dispatch writes' actor;
+#   - phase-finished carrying the worker's summary and verdict;
+#   - the daemon posting the merger's READY packet (direct, and stored across a refused gate), and
+#     publishing it to merge_queue_role (a live holder, and no holder);
+#   - pr-merged / pr-closed-unmerged, and an issue whose PR merged early skipping READY.
+# Nothing here merges into sjawhar/legion-smoke's main: each proof PR is retargeted to a scratch base
+# branch before any merge, and the scratch base is deleted at the end.
+#
+# Run it as `bash scripts/e2e/stage3-4b13b-acceptance.sh` from the operator's own Oh My Pi session,
+# with the Stage 3 proof's two required inputs, LEGION_E2E_MODEL_GATEWAY_URL and SMOKE_UPSTREAM_NATS
+# (scripts/e2e/README.md; Legion's two role Apps are this deployment's own unless the four
+# LEGION_E2E_*_APP_* inputs name another's, lib/github-apps.sh), and three of its own, since it
+# creates no Docker container:
+# ACCEPT_PG_CONTAINER and ACCEPT_PG_PORT name a running Postgres container (user postgres, password
+# ci) in which the daemon and Dispatch take their own databases, and ACCEPT_NATS_BIN a nats-server
+# binary it runs natively. Its GitHub writes are the Stage 3 proof human's, the devbox gh acting as
+# the sjawhar-agent App, so the session is not a Legion pane and carries no personal GH_TOKEN:
+# `prerequisites` refuses to start otherwise (require_proof_human, lib/workflow.sh). The binary
+# under test is stamped (vcs.revision and main.revision) and the run's scratch workspace is always
+# kept; phase workers, which act on the daemon's assignment alone when no instruction reaches them,
+# are instructed by a background watcher the moment each assignment arrives, and the script asserts
+# what the daemon did rather than the order it expected.
+set -Eeuo pipefail
+
+root=${ACCEPT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
+# The key command's record is read with this script's own reader, and an agent's tool calls with this
+# script's own lib/omp-tool-calls.jq: an ACCEPT_ROOT from before either has none to run.
+script_lib=$(cd "$(dirname "$0")" && pwd)/lib
+unserved_reader=$script_lib/model-gateway-unserved.sh
+base_rev=${ACCEPT_BASE_REV:-5ca2e53c}
+stamp=$(date +%s)
+work=$(mktemp -d /tmp/legion-accept4b13b.XXXXXXXX)
+evidence=${ACCEPT_EVIDENCE_DIR:-$work/evidence}
+# Refused before anything is written into the evidence directory or any trap is set
+# (lib/model-gateway-unserved.sh --fresh).
+if ! reason=$(bash "$unserved_reader" --fresh "$evidence"); then
+  echo "FAIL setup: $reason" >&2
+  rmdir "$work"
+  exit 1
+fi
+mkdir -p "$evidence/logs" "$evidence/transcripts"
+# Every line of the run also goes to $evidence/transcript.log (lib/transcript.sh), so the driver and
+# its cleanup, which closes the proof's pull requests, never fail on a write whoever is reading. The
+# evidence is under $work by default, and the sweeps in services-stopped and cleanup SIGKILL every
+# process whose command line names $work (run_processes, lib/rig.sh), so the tee gets the transcript
+# as fd 8, never by path. The tee keeps the copy it forked with, and the driver closes its own so
+# nothing it starts inherits it. The lib is this script's own, not ACCEPT_ROOT's.
+exec 8>>"$evidence/transcript.log"
+# shellcheck source-path=SCRIPTDIR source=lib/transcript.sh
+. "$(dirname "$0")/lib/transcript.sh"
+transcript_to /dev/fd/8
+exec 8>&-
+ok=
+check=setup
+TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
+project="AC$(( ($$ + stamp) % 100000000 ))"
+project=${project:0:10}
+ptoken=${project,,}
+profile="legion-accept4b13b-$$-$stamp"
+state="$work/state"
+# The HOME the run's Oh My Pi processes run under, so its profile lives in the work directory
+# (make_omp_home, lib/omp-home.sh).
+omp_home="$work/omp-home"
+profile_agent="$omp_home/.omp/profiles/$profile/agent"
+repo="sjawhar/legion-smoke"
+scratch_base="l208-4b13b-accept-$stamp"
+merge_base="$scratch_base-merge"
+# The shared Postgres container: this run only creates and reads its own two databases in it and
+# never removes it.
+pg_container=${ACCEPT_PG_CONTAINER:?ACCEPT_PG_CONTAINER names the running Postgres container the run takes its databases in}
+port_pg=${ACCEPT_PG_PORT:?ACCEPT_PG_PORT is the host port of that container}
+pg_user=postgres
+legion_db="legion_$ptoken" dispatch_db="dispatch_$ptoken"
+nats_bin=${ACCEPT_NATS_BIN:?ACCEPT_NATS_BIN is the nats-server binary the run starts}
+daemon_pid='' dispatch_pid='' listener_pid='' bridge_pid='' watcher_pid='' nats_pid='' daemon_keeper_pid=''
+port_daemon='' port_listener='' port_dispatch='' port_nats=''
+# timeout_hook names a function lib/rig.sh's until_true runs when a wait times out.
+# shellcheck disable=SC2034
+timeout_hook=''
+prod_baseline='' prod_dispatch_url=''
+prod_token=''
+prod_envoy_url=${STAGE3_PRODUCTION_ENVOY_URL:-http://127.0.0.1:9020}
+audited=
+soft_failures="$evidence/soft-failures.txt"
+: >"$soft_failures"
+
+begin() { check=$1; TZ=UTC printf -v check_started '%(%FT%TZ)T' -1; printf '== %s  (%s)\n' "$check" "$(date -u +%T)"; }
+note() { printf '   %s\n' "$*"; }
+pass() { printf 'ok %s\n' "$check"; }
+fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
+# soft records a failed assertion and lets the run go on, so one run yields every observation; the
+# run ends non-zero naming each one. It remembers the first soft-failing check and when it began,
+# for a soft ending's notes.
+first_soft_check=
+first_soft_since=
+soft() {
+  printf 'SOFT-FAIL %s: %s\n' "$check" "$*" | tee -a "$soft_failures" >&2
+  [ -n "$first_soft_check" ] || { first_soft_check=$check first_soft_since=$check_started; }
+}
+# shellcheck source=/dev/null
+. "$root/scripts/e2e/lib/rig.sh"
+# shellcheck source=/dev/null
+. "$root/scripts/e2e/lib/omp-home.sh"
+# shellcheck source=/dev/null
+. "$root/scripts/e2e/lib/workflow.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/operator-dispatch.sh
+. "$root/scripts/e2e/lib/operator-dispatch.sh"
+# Nothing the run starts inherits the operator's production bearer (lib/operator-dispatch.sh).
+operator_dispatch_hold_token
+# The daemon's database is this run's own in the shared Postgres container, read with the host psql.
+db_value() { PGPASSWORD=$(cat "$work/postgres-password") psql -h 127.0.0.1 -p "$port_pg" -U "$pg_user" -d "$legion_db" -tAc "$1"; }
+
+collect_transcripts() {
+  local sessions="$profile_agent/sessions"
+  [ -d "$sessions" ] || return 0
+  cp -a "$sessions/." "$evidence/transcripts/" 2>/dev/null || true
+}
+
+cleanup() {
+  local status=$? p
+  set +e
+  # Teardown is best effort, and errexit off does not turn the ERR trap off: a command that fails
+  # here is a warning about the teardown, never a check's FAIL line, and the run's exit status is
+  # left as the checks set it. The warning names the line alone: inside a trap BASH_COMMAND is the
+  # command the trap interrupted, not the cleanup command that failed.
+  trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
+  if [ -z "${ok:-}" ] && [ -z "$audited" ] && [ -n "$prod_baseline" ]; then
+    printf 'production audit after failure:\n' >&2
+    production_audit >&2
+  fi
+  # A pass has already captured both in services-stopped and stopped the daemon; a redirection to
+  # the stopped daemon would truncate them.
+  if [ -n "${daemon_pid:-}" ]; then
+    daemon_state >"$evidence/final-state.json" 2>/dev/null
+    "$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" >"$evidence/final-claims.json" 2>/dev/null
+  fi
+  stop_pid "$watcher_pid"
+  stop_pid "$daemon_pid"
+  stop_pid "$dispatch_pid"
+  stop_pid "$listener_pid"
+  stop_pid "$bridge_pid"
+  stop_pid "$nats_pid"
+  stop_pid "$daemon_keeper_pid"
+  stop_pid "${instructor_pid:-}"
+  TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
+  for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
+  collect_transcripts
+  rm -rf "$work/model-gateway-cache" || true
+  github_cleanup
+  printf "the run's scratch workspace, kept for review, is %s\n" "$work" >&2
+  printf "the run's evidence is %s\n" "$evidence" >&2
+  # A diagnostic for a failed run, hard or soft: it never sets the status. A hard failure's notes
+  # are for its check. A run that ends on its soft failures sets ok after its last check, once every
+  # pane has stopped, so its notes are for its first soft-failing check, from that check's start. A
+  # run that sets ok with no soft failure and still exits non-zero (its PASS line could not be
+  # written) failed no check, and gets none. A hangup, an interrupt or a termination (129, 130,
+  # 143, as trapped below) stopped the run and gets none.
+  if [ "$status" != 0 ] && [[ ! $status =~ ^(129|130|143)$ ]]; then
+    local since=$check_started failed=$check
+    [ -z "${ok:-}" ] || { since=$first_soft_since failed=$first_soft_check; }
+    [ -z "$failed" ] || bash "$unserved_reader" --notes "$evidence/model-gateway" "$since" "$failed" >&2 || true
+  fi
+  return 0
+}
+# github_cleanup closes every proof PR still open, deletes every proof head branch, and deletes the
+# scratch base. Nothing here touches the smoke main, and nothing runs unless require_proof_human
+# passed: a refused run's gh acts as someone else.
+github_cleanup() {
+  local n b
+  [ -n "$proof_human" ] || return 0
+  [ -n "${main_sha:-}" ] || return 0
+  for n in $(gh -R "$repo" pr list --state open --limit 100 --json number,headRefName \
+    --jq ".[] | select(.headRefName | startswith(\"legion/$project-\")) | .number" 2>/dev/null); do
+    gh -R "$repo" pr close "$n" >/dev/null 2>&1 || true
+  done
+  for b in $(gh api "repos/$repo/git/matching-refs/heads/legion/$project-" --jq '.[].ref' 2>/dev/null); do
+    gh api -X DELETE "repos/$repo/git/$b" >/dev/null 2>&1 || true
+  done
+  gh api -X DELETE "repos/$repo/git/refs/heads/$scratch_base" >/dev/null 2>&1 || true
+  gh api -X DELETE "repos/$repo/git/refs/heads/$merge_base" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+trap 'printf "FAIL %s: line %s exited %s: %s\n" "$check" "$LINENO" "$?" "$BASH_COMMAND" >&2' ERR
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# ---- the rig: copied from stage3-devbox-workflow.sh ------------------------------------------------
+# Each service serves on a port the kernel chose, held from that choice until the service serves on
+# it (lib/rig.sh's start_held); the daemon's, which its restart keeps, by a keeper for the whole run.
+start_listener() {
+  local token
+  token=$(cat "$work/envoy-token")
+  # shellcheck disable=SC2154 # require_app_inputs sets it; this file sources its libs as source=/dev/null
+  ENVOY_API_TOKEN="$token" ENVOY_LISTEN_HOST=127.0.0.1 \
+    ENVOY_MACHINE_ID="legion-accept4b13b-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
+    start_held listener port_listener ENVOY_LISTEN_FD --env 'PORT={port}' -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-listener"
+  await_start listener "$listener_pid" 60 "the Envoy listener to answer /v1/sessions" \
+    curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions"
+}
+
+start_dispatch() {
+  local dispatch_token envoy_token pg_password
+  dispatch_token=$(cat "$work/dispatch-token")
+  envoy_token=$(cat "$work/envoy-token")
+  pg_password=$(cat "$work/postgres-password")
+  mkdir -p "$work/dispatch-home"
+  chmod 0700 "$work/dispatch-home"
+  # HOME and XDG_CONFIG_HOME are the scratch home, so the server reads no envoy.json of the
+  # operator's: make_omp_home exports the operator's XDG_CONFIG_HOME. They are the server's alone,
+  # set by its env, not the held-port helper's that runs it.
+  DATABASE_URL="postgres://$pg_user:$pg_password@127.0.0.1:$port_pg/$dispatch_db?sslmode=disable" \
+    DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" \
+    DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
+    DISPATCH_LISTEN_HOST=127.0.0.1 NATS_URLS="nats://127.0.0.1:$port_nats" \
+    ENVOY_URL="http://127.0.0.1:$port_listener" \
+    start_held dispatch port_dispatch DISPATCH_LISTEN_FD \
+    --env 'DISPATCH_PORT={port}' --env 'DISPATCH_SERVER_URL=http://127.0.0.1:{port}' -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
+    HOME="$work/dispatch-home" XDG_CONFIG_HOME="$work/dispatch-home/.config" "$work/envoy-dispatch"
+  await_start dispatch "$dispatch_pid" 60 "the scratch Dispatch server" \
+    curl -fsS "http://127.0.0.1:$port_dispatch/api/v1"
+}
+
+# The one difference from Stage 3's configuration: admission_cap 3 (three roots) and a merge queue
+# role on the project, so the daemon's READY publish is exercised.
+write_legion_config() {
+  cat >"$work/legion.yaml" <<EOF
+project: $project
+port: $port_daemon
+postgres_dsn: postgres://$pg_user:$(cat "$work/postgres-password")@127.0.0.1:$port_pg/$legion_db?sslmode=disable
+state_dir: $state
+operator_token_file: $work/operator-token
+omp_invocation: mise x $pin -- omp
+envoy_url: http://127.0.0.1:$port_listener
+envoy_token_file: $work/envoy-token
+nats_urls:
+  - nats://127.0.0.1:$port_nats
+dispatch_url: http://127.0.0.1:$port_dispatch
+dispatch_token_file: $work/dispatch-token
+projects:
+  $project: { merge_queue_role: merge-queue }
+gates:
+  design: root-issues
+admission_cap: 3
+review_round_cap: 3
+instructions: $work/instructions.md
+$(<"$work/github-apps.yaml")
+EOF
+}
+
+# start_daemon [keep] — keep restarts the Go daemon on the port every pane already names. Its port
+# is kept for the run, so each poll of it carries a timeout: between two daemons a request waits
+# unanswered instead of being refused.
+start_daemon() {
+  local keep=${1:-}
+  if [ -z "$keep" ]; then
+    keep_port daemon_keeper port_daemon
+    write_legion_config
+  fi
+  # HOME, OMP_PROFILE and PATH are the daemon's alone, set by its env, not the held-port helper's
+  # that runs it.
+  start_kept daemon daemon_keeper LEGION_LISTEN_FD -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE \
+    -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" HOME="$omp_home" OMP_PROFILE="$profile" \
+    PATH="$(dirname "$real_gh"):$work/realtmux:$PATH" "$work/legion" start --config "$work/legion.yaml"
+  await_start daemon "$daemon_pid" 180 "the Go daemon to answer /healthz" \
+    curl -fsS --max-time 5 "http://127.0.0.1:$port_daemon/healthz"
+}
+stop_daemon() { kill -TERM "$daemon_pid" 2>/dev/null || true; stop_pid "$daemon_pid"; daemon_pid=; }
+
+claim_session_file() {
+  local issue=$1 role=$2
+  "$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" |
+    jq -er --arg issue "$issue" --arg role "$role" \
+      '[.claims[] | select(.issue == $issue and .role == $role and .sessionFile != null and .sessionFile != "")] | last | .sessionFile'
+}
+claim_session_text() { local f; f=$(claim_session_file "$1" "$2") || return 1; cat -- "$f"; }
+workspace_jj() { local issue=$1; shift; jj -R "$state/workspaces/$repo/${issue,,}" "$@"; }
+
+omp_descendant() {
+  local queue=("$1") pid children
+  while [ "${#queue[@]}" -gt 0 ]; do
+    pid=${queue[0]}
+    queue=("${queue[@]:1}")
+    if [ "$(basename "$(tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null | sed -n 1p)")" = omp ]; then
+      printf '%s\n' "$pid"
+      return 0
+    fi
+    children=$(cat /proc/"$pid"/task/*/children 2>/dev/null || true)
+    for child in $children; do queue+=("$child"); done
+  done
+  return 1
+}
+claim_pane_pid() {
+  daemon_state | jq -er --arg issue "$1" --arg role "$2" \
+    '(if $role == "architect" then .issues[$issue].architect else .issues[$issue].workers[$role].claim end).locator.incarnation | split(":")[0]'
+}
+pane_value() { tr '\0' '\n' <"/proc/$1/environ" | sed -n "s/^$2=//p"; }
+endpoint_mismatch() {
+  local omp=$1 name want got
+  for name in DISPATCH_URL DISPATCH_TOKEN_FILE ENVOY_URL ENVOY_NATS_URL; do
+    case "$name" in
+      DISPATCH_URL) want="http://127.0.0.1:$port_dispatch" ;;
+      DISPATCH_TOKEN_FILE) want="$state/secrets/dispatch-token" ;;
+      ENVOY_URL) want="http://127.0.0.1:$port_listener" ;;
+      ENVOY_NATS_URL) want="nats://127.0.0.1:$port_nats" ;;
+    esac
+    got=$(pane_value "$omp" "$name")
+    if [ "$got" != "$want" ]; then printf '%s=%s, want %s\n' "$name" "${got:-<unset>}" "$want"; return 0; fi
+  done
+  if grep -qz '^ANTHROPIC_API_KEY=' "/proc/$omp/environ" 2>/dev/null; then printf 'ANTHROPIC_API_KEY set, want unset\n'; return 0; fi
+  return 1
+}
+assert_claim_endpoints() {
+  local issue=$1 role=$2 pane_pid omp mismatch
+  pane_pid=$(claim_pane_pid "$issue" "$role") || fail "$role pane on $issue has no process locator"
+  omp=$(omp_descendant "$pane_pid") || fail "$role pane on $issue (pid $pane_pid) has no OMP process"
+  if mismatch=$(endpoint_mismatch "$omp"); then fail "ABORT: $role pane on $issue (OMP pid $omp) has $mismatch"; fi
+}
+pane_watcher() {
+  local claims inc issue role omp mismatch
+  trap - EXIT ERR
+  set +e
+  while :; do
+    if claims=$("$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" 2>/dev/null); then
+      while IFS=$'\t' read -r inc issue role; do
+        grep -qF "$inc " "$evidence/pane-endpoints-checked.txt" 2>/dev/null && continue
+        omp=$(omp_descendant "${inc%%:*}") || continue
+        if mismatch=$(endpoint_mismatch "$omp"); then
+          printf '%s pane on %s (incarnation %s, OMP pid %s) has %s\n' "$role" "$issue" "$inc" "$omp" "$mismatch" >"$evidence/pane-endpoint-violation.txt"
+          TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
+          return 0
+        fi
+        printf '%s %s %s %s %s\n' "$inc" "$issue" "$role" "$omp" "$(date -u +%FT%T.%3NZ)" >>"$evidence/pane-endpoints-checked.txt"
+      done < <(jq -r '.claims[] | select(.locator != null) | [.locator.incarnation, .issue, .role] | @tsv' <<<"$claims")
+    fi
+    sleep 0.2
+  done
+}
+unchecked_launches() {
+  local inc
+  for inc in $(jq -R -r 'fromjson? | select(.msg == "supervise: launched") | .incarnation' "$evidence/logs/daemon.log"); do
+    grep -qF "$inc " "$evidence/pane-endpoints-checked.txt" || printf '%s\n' "$inc"
+  done
+}
+no_unchecked_launches() { [ -z "$(unchecked_launches)" ]; }
+report_unchecked_launches() { note "launched panes never endpoint-checked: $(unchecked_launches | tr '\n' ' ')"; }
+
+rig_sessions_json() {
+  jq -R -s -c 'split("\n") | map(fromjson? | select(.msg == "api: claim registered") | .session) | unique' "$evidence/logs/daemon.log"
+}
+production_audit() {
+  local sessions bearer events envoy found=0
+  audited=1
+  sessions=$(rig_sessions_json)
+  printf '%s\n' "$sessions" >"$evidence/rig-sessions.json"
+  envoy=$(curl -fsS --max-time 10 "$prod_envoy_url/v1/sessions" |
+    jq -c --argjson ids "$sessions" --arg work "$work" '[.[] | select((.session_id as $s | $ids | index($s)) or ((.dir // "") | startswith($work)))]')
+  printf '%s\n' "$envoy" >"$evidence/production-envoy-rig-sessions.json"
+  if [ "$envoy" != "[]" ]; then printf 'production Envoy listener holds rig sessions: %s\n' "$envoy"; found=1; fi
+  if [ "$prod_baseline" = none ]; then printf 'no user-level Dispatch configuration\n'; return "$found"; fi
+  bearer=$work/production-dispatch-bearer
+  (umask 077 && printf '%s\n' "$prod_token" >"$bearer")
+  # A refusal of the feed is printed on stderr; the replay's close, resubscribe and duplicate lines
+  # carry no event and are not counted, so an event a redial repeats counts once. The probe takes
+  # its cursor from Dispatch's own events_start, so a --since the server clamps to its head leaves
+  # the events after that head counted, not written off as duplicates.
+  bun "$root/scripts/e2e/lib/dispatch-live-events.ts" \
+    --url "$prod_dispatch_url" --bearer-file "$bearer" --since "$((prod_baseline - 1))" --timeout 25 \
+    >"$work/production-events.jsonl" || true
+  rm -f "$bearer"
+  events=$(jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson baseline "$prod_baseline" '
+    [.[] | .event | select(. != null)] |
+    {control: any(.[]; .id == $baseline), count: length,
+     rig: [.[] | select((.actor.id as $a | $ids | index($a)) or (tostring | contains($project))) | {id, issue_key, type, actor: .actor.id, created_at}]}' "$work/production-events.jsonl")
+  printf '%s\n' "$events" >"$evidence/production-dispatch-audit.json"
+  if ! jq -e '.control' >/dev/null <<<"$events"; then printf 'production Dispatch replay did not return its baseline event %s\n' "$prod_baseline"; return 1; fi
+  if ! jq -e '.rig == []' >/dev/null <<<"$events"; then printf 'production Dispatch has rig-authored events: %s\n' "$(jq -c .rig <<<"$events")"; found=1; fi
+  printf 'production audit: %s events replayed since %s, rig events %s, rig Envoy sessions %s\n' \
+    "$(jq -r .count <<<"$events")" "$prod_baseline" "$(jq -c .rig <<<"$events")" "$envoy"
+  return "$found"
+}
+
+# ---- this acceptance's own vocabulary ---------------------------------------------------------------
+claims() { local sub=$1; shift; "$work/legion" claims "$sub" --config "$work/legion.yaml" --operator-token-file "$work/operator-token" "$@"; }
+claim_json() { claims list --json | jq -ce --arg t "$1" '.claims[] | select(.token == $t)'; }
+claim_is() { claim_json "$1" | jq -e "$2" >/dev/null; }
+token_session_file() { claim_json "$1" | jq -er '.sessionFile // empty | select(. != "")'; }
+envoy_role_holder() { curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/roles/$1" | jq -er .holder; }
+role_unheld() { ! envoy_role_holder "$1" >/dev/null 2>&1; }
+role_held_by() { [ "$(envoy_role_holder "$1" 2>/dev/null)" = "$2" ]; }
+token_session() { claim_json "$1" | jq -er '.session // empty | select(. != "")'; }
+
+# The reminder the phase stall sends (packages/pi-shared/src/phase-stall.ts REMINDER), which now
+# comes at the end of every turn a phase stays open through; this check reads the first of them.
+followup_needle="Your turn ended with your Legion phase still open"
+
+# tool_outcomes FILE: every tool result in an OMP session file, joined to the call that produced it.
+tool_outcomes() {
+  jq -s -c '
+    ([.[] | select(.type == "message" and .message.role == "assistant") | .message.content[]?
+      | select(.type == "toolCall") | {key: .id, value: {name, arguments}}] | from_entries) as $calls
+    | [.[] | select(.type == "message" and .message.role == "toolResult")
+        | {id: .message.toolCallId, tool: .message.toolName, isError: .message.isError,
+           text: ([.message.content[]? | select(.type == "text") | .text] | join("\n")),
+           call: $calls[.message.toolCallId]}]' "$1"
+}
+
+# ---- driving several issues at once ------------------------------------------------------------------
+declare -A gate_artifacts pr_of
+# gate_send ISSUE records the root's primary artifact and waits for its architect to register the
+# gate on its own, from the daemon's catch-up notice (architect_registers_gate); nobody prompts it.
+gate_send() {
+  local issue=$1
+  gate_artifacts[$issue]=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
+  architect_registers_gate "$issue" "$issue"
+}
+# gate_finish ISSUE: the root waits on a person at its closed gate without a slot while its
+# architect stays live (await_gate_wait); the proof human approves, the root takes a slot back
+# (await_answered_slot), and only then reaches planning. admission_cap 3 is the run's three roots
+# (the child takes none), so the slots every waiting root gave back stand free and the answered root takes one at once.
+gate_finish() {
+  local issue=$1 artifact=${gate_artifacts[$1]}
+  until_true 600 "$issue architect to register primary artifact $artifact" sh -c \
+    "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$issue' --arg artifact '$artifact' '.issues[\$issue].designGate.artifactId == \$artifact and .issues[\$issue].designGate.currentVersion > 0'"
+  await_gate_wait "$issue" "$issue"
+  dispatch_human POST "artifacts/$artifact/reviews" '{"state":"approved"}' >/dev/null
+  await_answered_slot "$issue" "$issue"
+  wait_for_phase "$issue" planning
+  wait_for_worker "$issue" planner
+}
+pr_open_for() { gh -R "$repo" pr list --head "legion/$1" --state open --json number | jq -e 'length == 1' >/dev/null; }
+# retarget_pr ISSUE: the proof PR moves to the scratch base, so no merge ever reaches smoke main.
+retarget_pr() {
+  local issue=$1 n base
+  until_true 1200 "$issue implementer pull request" pr_open_for "$issue"
+  n=$(gh -R "$repo" pr list --head "legion/$issue" --state open --json number --jq '.[0].number')
+  pr_of[$issue]=$n
+  base=$(gh -R "$repo" pr view "$n" --json baseRefName --jq .baseRefName)
+  [ "$base" = "$scratch_base" ] || gh -R "$repo" pr edit "$n" --base "$scratch_base" >/dev/null
+  [ "$(gh -R "$repo" pr view "$n" --json baseRefName --jq .baseRefName)" = "$scratch_base" ] || fail "$repo#$n did not retarget to $scratch_base"
+  note "$issue opened $repo#$n; its base read $base here, and is $scratch_base"
+}
+# reviewer_approved N prints each commit the review App (role_app reviewer) approved on pull
+# request N, and fails when it approved none.
+reviewer_approved() {
+  local approved app
+  app=$(role_app reviewer) || return 1
+  approved=$(gh api --paginate "repos/$repo/pulls/$1/reviews" --jq ".[] | select(.user.login == \"$app\" and .state == \"APPROVED\") | .commit_id") || return 1
+  [ -n "$approved" ] && printf '%s\n' "$approved"
+}
+
+# ---- the instructor: every routine phase worker is instructed the moment its assignment arrives -----
+# Phase workers act on the daemon's assignment alone when no instruction reaches them promptly (a
+# later root can reach testing while the script still holds an earlier root's planner), so the
+# routine roles are not instructed in script order but by this watcher, as soon as each one's
+# assignment is in its session: implementers (their pull request opened against the scratch base,
+# never main), testers, reviewers, retro, and a hold for each merger until its READY scenario is set
+# up. It also retargets any proof pull request whose base is not the scratch base, and logs it.
+# Planners and architects are instructed by the script, where each scenario needs them.
+assigned_in() { jq -e -s --arg a "Issue: $2. Phase: $3." 'any(.[]; .type == "message" and .message.role == "user" and ([.message.content[]? | .text? // empty] | join(" ") | contains($a)))' "$1" >/dev/null; }
+instruction_for() {
+  local issue=$1 role=$2 phase=$3
+  case "$role:$phase" in
+    implementer:implementing) printf '%s' "Acceptance implementation operation: make the smallest one-file change described by this issue in your $repo workspace, commit it on legion/$issue, and open its pull request with base branch $scratch_base (pass --base $scratch_base to gh pr create; this proof's pull requests never target main). Record the required implementation proof and handoff, then call the legion tool's handoff_complete. Do not merge." ;;
+    tester:testing) printf '%s' "Acceptance test operation: inspect the implementer's actual one-file change and this issue's pull request, run a focused observable check, record the required test handoff with verdict pass, then call the legion tool's handoff_complete with verdict pass and a summary that begins 'TESTER-SUMMARY $issue:'." ;;
+    reviewer:reviewing) printf '%s' "Acceptance final review: use the bash tool to submit APPROVE on this issue's pull request (head legion/$issue) in $repo at its current head as $(role_app reviewer), then complete the reviewer handoff. This exact smoke instruction takes precedence over waiting for another review round." ;;
+    implementer:retro) printf '%s' "Acceptance retro: write the required retro handoff for this issue's pull request and complete the phase. Do not change the approved implementation." ;;
+    merger:merging) printf '%s' "Acceptance hold: this is a proof run. Do not verify, build or send READY yet, and do not call handoff_complete. Reply with the single line 'holding' and wait for the next targeted instruction, which says exactly what to do." ;;
+  esac
+}
+instructor() {
+  local issue spec role phase f key tick=0 n st cl cur live watched
+  trap - EXIT ERR
+  set +e
+  mkdir -p "$evidence/instructed"
+  while :; do
+    # One state read and one claims read per pass, so the watcher adds two daemon calls every two
+    # seconds, not one per issue and role.
+    if ! st=$(daemon_state 2>/dev/null) || ! cl=$(claims list --json 2>/dev/null); then sleep 2; continue; fi
+    mapfile -t watched <"$work/instructor-issues"
+    for issue in "${watched[@]}"; do
+      cur=$(jq -r --arg i "$issue" '.issues[$i].phase // ""' <<<"$st")
+      for spec in implementer:implementing tester:testing reviewer:reviewing implementer:retro merger:merging; do
+        role=${spec%%:*} phase=${spec#*:}
+        [ "$cur" = "$phase" ] || continue
+        live=$(jq -r --arg i "$issue" --arg r "$role" '.issues[$i].workers[$r].claim as $c
+          | (($c.session // "") != "" and (($c.state // "") | IN("ready", "working", "idle")))' <<<"$st")
+        [ "$live" = true ] || continue
+        f=$(jq -r --arg i "$issue" --arg r "$role" '[.claims[] | select(.issue == $i and .role == $r and (.sessionFile // "") != "")] | last | .sessionFile // ""' <<<"$cl")
+        [ -n "$f" ] || continue
+        key="$evidence/instructed/$issue.$role.$phase.$(basename "$f" .jsonl)"
+        [ ! -e "$key" ] || continue
+        assigned_in "$f" "$issue" "$phase" || continue
+        if send_agent "$issue" "$role" "$(instruction_for "$issue" "$role" "$phase")" >>"$evidence/instructor.log" 2>&1 </dev/null; then
+          printf '%s %s %s %s\n' "$(date -u +%FT%T.%3NZ)" "$issue" "$role" "$phase" | tee "$key" >>"$evidence/instructor.log"
+        fi
+      done
+    done
+    if [ $((tick++ % 4)) = 0 ]; then
+      for n in $(gh -R "$repo" pr list --state open --limit 100 --json number,headRefName,baseRefName \
+        --jq ".[] | select((.headRefName | startswith(\"legion/$project-\")) and .baseRefName != \"$scratch_base\" and .baseRefName != \"$merge_base\") | .number" 2>/dev/null); do
+        gh -R "$repo" pr edit "$n" --base "$scratch_base" >/dev/null 2>&1 &&
+          printf '%s retargeted %s#%s to %s\n' "$(date -u +%FT%T.%3NZ)" "$repo" "$n" "$scratch_base" >>"$evidence/retargets.log"
+      done
+    fi
+    sleep 2
+  done
+}
+phase_rank() {
+  case "$1" in
+    admitted) echo 0 ;; planning) echo 1 ;; implementing) echo 2 ;; testing) echo 3 ;; reviewing) echo 4 ;;
+    accepting) echo 5 ;; retro) echo 6 ;; merging) echo 7 ;; awaiting_merge) echo 8 ;; done) echo 9 ;; *) echo -1 ;;
+  esac
+}
+phase_at_least() { local p; p=$(daemon_state | jq -r --arg i "$1" '.issues[$i].phase') || return 1; [ "$(phase_rank "$p")" -ge "$(phase_rank "$2")" ]; }
+wait_for_phase_at_least() { until_true "${3:-$phase_seconds}" "$1 to reach $2 or later" phase_at_least "$1" "$2"; }
+instructed() { compgen -G "$evidence/instructed/$1.$2.$3.*" >/dev/null; }
+dispatch_messages() { dispatch_events "$1" | jq -c '[.[] | select(.type == "message.created") | {seq, actor: .actor.id, body: .payload.body}]'; }
+ready_messages() { dispatch_messages "$1" | jq -c '[.[] | select(.body | startswith("READY"))]'; }
+no_holder_messages() { dispatch_messages "$1" | jq -c '[.[] | select(.body | startswith("merge queue role merge-queue had no live holder"))]'; }
+merger_summary() {
+  local f
+  f=$(claim_session_file "$1" merger) || return 1
+  jq -s -r '[.[] | select(.type == "message" and .message.role == "assistant") | .message.content[]?
+    | select(.type == "toolCall" and .name == "legion" and .arguments.op == "handoff_complete") | .arguments.summary] | last // empty' "$f"
+}
+# merger_self_posted ISSUE: the merger's own tool calls that would post or publish READY itself,
+# made any of the ways lib/omp-tool-calls.jq's calls counts (the tool, a write to its xd:// device,
+# eval code calling tool.<name>(...), or eval code calling the generic tool.write(...) naming that
+# device): any envoy_publish, and a bash call that runs `dispatch message` (runs_dispatch) with a
+# body (--body, or --body-file - with a here-document) opening READY.
+merger_self_posted() {
+  local f
+  f=$(claim_session_file "$1" merger) || return 1
+  jq -s -c -L "$script_lib" 'include "omp-tool-calls";
+    [.[] | select(.type == "message" and .message.role == "assistant") | .message.content[]?
+    | select(calls("envoy_publish") or (runs_dispatch("message") and (bash_command
+        | test("--body(=|\\s+)\\\\?[\u0027\"]?\\s*READY|--body-file(=|\\s+)-[^\\n]*\\n\\s*READY"))))
+    | {name, arguments}]' "$f"
+}
+notices_at_least() { [ "$(notice_deliveries "$1" "$2" "$3")" -ge "$4" ]; }
+# phase_finished_line ISSUE PHASE: the architect's delivered phase-finished notice for PHASE.
+phase_finished_line() { notice_line "$1" architect "$(notice_needle phase-finished "$1")" | grep -F -- "phase: $2" | head -1 || true; }
+phase_finished_seen() { [ -n "$(phase_finished_line "$1" "$2")" ]; }
+ready_count_at_least() { [ "$(ready_messages "$1" | jq length)" -ge "$2" ]; }
+no_holder_count_at_least() { [ "$(no_holder_messages "$1" | jq length)" -ge "$2" ]; }
+# session_holds FILEFN TEXT: the session FILEFN prints holds TEXT.
+session_file_holds() { local f; f=$($1) || return 1; grep -qF -- "$2" "$f"; }
+# until_true_quiet SECONDS COMMAND...: until_true that returns 1 on a timeout instead of failing.
+until_true_quiet() {
+  local limit=$1 i
+  shift
+  for ((i = 0; i < limit * 2; i++)); do
+    [ ! -s "$evidence/pane-endpoint-violation.txt" ] || fail "ABORT: $(cat "$evidence/pane-endpoint-violation.txt")"
+    if "$@" >/dev/null 2>&1; then return 0; fi
+    sleep 0.5
+  done
+  return 1
+}
+
+begin prerequisites
+for tool in go psql jq curl python3 tmux bun mise secrets agent-secrets gh jj hawk-token; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+# Legion's two role Apps, this deployment's own unless the App inputs name another's, proved
+# against GitHub here, before the run writes anything (lib/github-apps.sh, which the lib sourced
+# from ACCEPT_ROOT must carry).
+declare -F require_app_inputs >/dev/null ||
+  fail "ACCEPT_ROOT's scripts/e2e/lib/workflow.sh ($root) predates lib/github-apps.sh: point ACCEPT_ROOT at a checkout that has it"
+require_app_inputs implement review
+write_github_apps implement review
+read_app_logins
+[ -x "$nats_bin" ] || fail "no native nats-server at $nats_bin"
+# The suspension waits are bounded by lib/workflow.sh's turn budget, and the lib sourced is ACCEPT_ROOT's.
+[ -n "${phase_seconds:-}" ] || fail "ACCEPT_ROOT's scripts/e2e/lib/workflow.sh ($root) predates phase_seconds: point ACCEPT_ROOT at a checkout that has it"
+# The services serve on held ports (start_held, keep_port), which ACCEPT_ROOT's lib/rig.sh and its
+# binaries must both provide.
+declare -F start_held >/dev/null || fail "ACCEPT_ROOT's scripts/e2e/lib/rig.sh ($root) predates start_held: point ACCEPT_ROOT at a checkout that has it"
+real_gh=$(mise which gh) || fail "mise has no gh"
+# The real tmux comes after the real gh on the daemon's PATH: the tmux runtime runs tmux with the
+# pane allow-list alone, where a shimmed tmux, run from a directory under the operator's real
+# HOME, finds that HOME's mise config untrusted and exits 1 (lib/rig.sh, real_bin_path).
+real_tmux=$(mise which tmux) || fail "mise has no tmux"
+mkdir -p "$work/realtmux"
+ln -sfn "$real_tmux" "$work/realtmux/tmux"
+require_proof_human
+gh api "repos/$repo" --jq .name >/dev/null || fail "the devbox's ordinary gh cannot read $repo"
+head_commit=$(jj -R "$root" log -r @- --no-graph -T commit_id)
+note "head under test: $head_commit ($(jj -R "$root" log -r @- --no-graph -T 'description.first_line()'))"
+[ -z "$(jj -R "$root" diff -r @ --summary)" ] || fail "the working copy at $root carries uncommitted changes"
+printf '%s\n' "$head_commit" >"$evidence/head.txt"
+mkdir -p "$state" "$work/xdg" "$work/tmux"
+chmod 0700 "$state" "$work/xdg" "$work/tmux"
+make_omp_home "$omp_home"
+key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
+  fail "the agents' model route through the Hawk model gateway could not be installed"
+note "the agents' model route keyed by $key_command"
+export XDG_STATE_HOME="$work/xdg"
+export TMUX_TMPDIR="$work/tmux"
+pass
+
+begin rig
+# The bridge dials the production Envoy NATS by the operator's fully-qualified name for it, never a
+# bare alias a resolver's search domain would complete (stage3-devbox-workflow.sh's rule and
+# pattern). The value is never printed.
+upstream_nats=${SMOKE_UPSTREAM_NATS:-}
+[ -n "$upstream_nats" ] || fail "SMOKE_UPSTREAM_NATS is unset: the production Envoy NATS the GitHub bridge subscribes on, by its fully-qualified name"
+nats_url='^([A-Za-z][A-Za-z0-9+.-]*://)?([^@/?#,[:space:]]+@)?[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+(:[0-9]+)?/?$'
+[[ "$upstream_nats" =~ $nats_url ]] || fail "SMOKE_UPSTREAM_NATS is not one NATS URL naming a fully-qualified host"
+(umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/envoy-token" &&
+  printf 'Authorization: Bearer %s\n' "$(cat "$work/envoy-token")" >"$work/envoy-auth-header" &&
+  head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/dispatch-token" &&
+  head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/operator-token" &&
+  printf 'ci' >"$work/postgres-password")
+chmod 0600 "$work"/*token "$work/envoy-auth-header" "$work/postgres-password"
+(cd "$root/packages/daemon" && go build -ldflags "-X main.revision=$head_commit" -o "$work/legion" ./cmd/legion)
+(cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener && go build -o "$work/envoy-dispatch" ./cmd/dispatch)
+{
+  printf 'head under test %s\n' "$head_commit"
+  printf 'legion version: %s\n' "$("$work/legion" version)"
+  go version -m "$work/legion" | grep -E 'vcs\.|^\s+mod\s'
+  sha256sum "$work/legion" "$work/envoy-listener" "$work/envoy-dispatch" "$nats_bin"
+  "$nats_bin" --version
+} >"$evidence/binary-stamp.txt"
+vcs_rev=$(go version -m "$work/legion" | sed -n 's/^[[:space:]]*build[[:space:]]*vcs\.revision=//p')
+[ "$vcs_rev" = "$head_commit" ] || fail "the daemon binary's vcs.revision is '$vcs_rev', want $head_commit"
+"$work/legion" version | grep -qF "commit $head_commit" || fail "the daemon binary's main.revision is not $head_commit"
+note "daemon binary stamped vcs.revision=$vcs_rev, $(go version -m "$work/legion" | sed -n 's/^[[:space:]]*build[[:space:]]*//p' | { grep vcs.modified || true; }); $evidence/binary-stamp.txt"
+PGPASSWORD=ci psql -h 127.0.0.1 -p "$port_pg" -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 -qc "create database $legion_db" -c "create database $dispatch_db" ||
+  fail "could not create $legion_db and $dispatch_db in the shared Postgres $pg_container on port $port_pg"
+mkdir -p "$work/nats-store"
+# The port is the kernel's own pick (`-p -1`), read back from the line the server logs once it
+# listens (lib/rig.sh's report_port).
+start_process nats "$nats_bin" -js -a 127.0.0.1 -p -1 -sd "$work/nats-store"
+await_start nats "$nats_pid" 60 "NATS to be ready" grep -q 'Server is ready' "$evidence/logs/nats.log"
+port_nats=$(report_port "$evidence/logs/nats.log" 'Listening for client connections on [^ ]*:') ||
+  fail "the nats-server logged no client port; see $evidence/logs/nats.log"
+start_listener
+start_dispatch
+dispatch_human POST projects "$(jq -cn --arg key "$project" --arg name "4b.13b acceptance $project" '{key:$key,name:$name}')" >/dev/null
+dispatch_human PUT "settings/repo-projects/$repo" "$(jq -cn --arg project "$project" '{project:$project,default:true}')" >/dev/null
+SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://127.0.0.1:$port_nats" \
+  SMOKE_UPSTREAM_NATS="$upstream_nats" \
+  start_process bridge env -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
+    bun run "$root/scripts/e2e/lib/envoy-bridge.ts"
+until_true 90 "the GitHub ingress bridge to report ready" grep -q 'BRIDGE READY' "$evidence/logs/bridge.log"
+(cd "$root" && bun install --frozen-lockfile >/dev/null)
+envoy_manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy")
+manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion")
+pin=$(<"$root/.omp-pin")
+mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
+cat >"$work/instructions.md" <<'EOF'
+# Acceptance proof instructions
+
+This is a throwaway workflow proof. A tree's root architect starts its tree from the daemon's
+`catch-up` notice as its role says: it writes the spec in the issue's own primary document,
+requests the spec's approval when the design gate policy arms the gate, and registers the gate,
+then waits. Apart from that, do not act until a human Dispatch message targeted at your own session
+gives the next exact proof operation; it arrives in your session as a message to you. A message you
+only find by reading the issue (its events, a search) was sent to another session, even on your
+issue, and any other notice is not an instruction: neither is yours to act on. Follow your
+instruction precisely, use the Go-daemon Legion tools and handoffs, and do not create work outside
+the issue's smoke branch.
+EOF
+main_sha=$(gh api "repos/$repo/git/ref/heads/main" --jq .object.sha)
+gh api "repos/$repo/git/refs" -f ref="refs/heads/$scratch_base" -f sha="$main_sha" >/dev/null
+note "scratch base $repo:$scratch_base at main $main_sha"
+start_daemon
+note "project $project, profile $profile, plugins $(jq -r '.name + "@" + .version' "$envoy_manifest") and $(jq -r '.name + "@" + .version' "$manifest"), ports NATS $port_nats Dispatch $port_dispatch daemon $port_daemon listener $port_listener"
+pane_watcher &
+watcher_pid=$!
+production_baseline
+note "production Dispatch audit baseline: event ${prod_baseline}"
+pass
+
+
+# ---- 1. prompts.New: a stale Go part is rewritten at boot; an identical one is left untouched ------
+begin prompts-rewritten-on-boot
+pdir="$state/prompts/go"
+parts=()
+for part in "$root/packages/daemon/internal/prompts/go/"*.md; do parts+=("$(basename "$part")"); done
+for f in "${parts[@]}"; do
+  cmp -s "$pdir/$f" "$root/packages/daemon/internal/prompts/go/$f" || fail "$pdir/$f is not the head's embedded $f"
+done
+note "all ${#parts[@]} Go prompt parts in $pdir equal the head's packages/daemon/internal/prompts/go/* (${parts[*]})"
+# The daemon's package directory was renamed after the default base revision, so the base's
+# merger.md is found at whichever package path that revision has, and must be exactly one. jj
+# prints the paths it lists relative to the working directory, hence the listing from the root.
+base_merger=$(cd "$root" && jj file list -r "$base_rev" 'root-glob:"packages/*/internal/prompts/go/merger.md"')
+[ -n "$base_merger" ] && [ "$(wc -l <<<"$base_merger")" = 1 ] || fail "the base revision $base_rev holds '$base_merger' for packages/*/internal/prompts/go/merger.md, want exactly one file"
+jj -R "$root" file show -r "$base_rev" "root:$base_merger" >"$evidence/merger.base.md"
+[ -s "$evidence/merger.base.md" ] || fail "the base revision's merger.md read back empty"
+cmp -s "$evidence/merger.base.md" "$pdir/merger.md" && fail "the base merger.md equals the head's; nothing to prove"
+stat -c '%n %.9Y' "$pdir"/*.md >"$evidence/prompts-mtime-before.txt"
+cp "$evidence/merger.base.md" "$pdir/merger.md"
+# negative control: the stale part is observably different before the restart
+cmp -s "$pdir/merger.md" "$root/packages/daemon/internal/prompts/go/merger.md" && fail "the planted stale merger.md equals the embedded one"
+note "planted the base ($base_rev) merger.md: $(grep -c 'publish READY yourself' "$pdir/merger.md" || true) line(s) telling the merger it publishes nothing and to send ready:true, $(wc -c <"$pdir/merger.md") bytes"
+sleep 1.1
+stop_daemon
+start_daemon keep
+cmp -s "$pdir/merger.md" "$root/packages/daemon/internal/prompts/go/merger.md" || fail "the restarted daemon left the stale merger.md in place"
+stat -c '%n %.9Y' "$pdir"/*.md >"$evidence/prompts-mtime-after.txt"
+unchanged=$(join <(sort "$evidence/prompts-mtime-before.txt") <(sort "$evidence/prompts-mtime-after.txt") | awk '$2 == $3' | wc -l)
+changed=$(join <(sort "$evidence/prompts-mtime-before.txt") <(sort "$evidence/prompts-mtime-after.txt") | awk '$2 != $3 {print $1}')
+[ "$unchanged" = "$(( ${#parts[@]} - 1 ))" ] && [ "$(basename "$changed")" = merger.md ] || fail "rewritten parts: '$changed' ($unchanged untouched), want merger.md alone"
+note "the restart rewrote merger.md alone back to the embedded text; the $unchanged identical parts kept their mtimes"
+pass
+
+# ---- 2. the merge queue holder and the refused root stops -------------------------------------------
+begin merge-queue-holder
+holder_tree="${project}-900"
+# The holder is no workflow issue, so no outbox row provisions its workspace. The tmux runtime needs
+# the directory, and a delivery first adopts the working copy for the role's App (jj metaedit), so it
+# is a jj repository of its own; the holder never touches the smoke repository.
+holder_dir="$state/workspaces/$repo/${holder_tree,,}"
+mkdir -p "$holder_dir" || fail "could not create the holder's jj workspace"
+jj git init "$holder_dir" >/dev/null 2>&1 || fail "could not create the holder's jj workspace"
+holder=$(claims spawn --json --tree "$holder_tree" --issue "$holder_tree" --role architect \
+  --task "Acceptance operation: call your envoy_role_set tool with role merge-queue now, so this session holds the merge-queue role. Then reply with the single line 'holding merge-queue' and wait. Do nothing else." | jq -er .token)
+claim_registered() { claim_is "$1" '(.session // "") != ""'; }
+until_true 600 "holder claim $holder to register" claim_registered "$holder"
+holder_session=$(token_session "$holder")
+until_true 600 "the holder session to claim merge-queue" role_held_by merge-queue "$holder_session"
+note "holder claim $holder (session $holder_session, a tree no workflow issue backs) holds merge-queue"
+pass
+
+begin root-stop-refusal-names-close-only-without-a-workflow-issue
+if refusal=$(claims stop --claim "$holder" 2>&1 >/dev/null); then fail "the stop of root claim $holder was accepted"; fi
+printf '%s\n' "$refusal" >"$evidence/stop-refusal-holder.txt"
+case "$refusal" in
+  *"stop refused: the tree's root claim ends only when its tree closes; suspend it to stop its process; no workflow issue backs its tree, so legion claims close ends it"*) note "no-workflow tree: $refusal" ;;
+  *) soft "the no-workflow root's stop refusal lacks the close clause: $refusal" ;;
+esac
+claim_is "$holder" '.state == "ready" or .state == "idle" or .state == "working"' || soft "the refused stop moved $holder"
+pass
+
+begin admission
+root1=$(new_issue "Primary READY and phase-stall profile")
+root2=$(new_issue "Early merge sentinel")
+root3=$(new_issue "Gated READY compass")
+set_status "$root1" todo
+set_status "$root2" todo
+set_status "$root3" todo
+until_true 240 "three roots admitted" sh -c \
+  "'$work/legion' state --json --port '$port_daemon' | jq -e --arg a '$root1' --arg b '$root2' --arg c '$root3' '(.admission.active | sort) == ([\$a,\$b,\$c] | sort)'"
+child=$(new_issue "Parked child leaf" "$root1")
+set_status "$child" todo
+until_true 180 "$child recorded under $root1" sh -c \
+  "'$work/legion' state --json --port '$port_daemon' | jq -e --arg c '$child' '.issues[\$c].phase == \"admitted\"'"
+note "roots $root1 $root2 $root3; child $child admitted under $root1"
+for issue in "$root1" "$root2" "$root3"; do wait_for_architect "$issue"; done
+printf '%s\n' "$root1" "$root2" "$root3" "$child" >"$work/instructor-issues"
+instructor &
+instructor_pid=$!
+note "the instructor watches $root1 $root2 $root3 $child"
+pass
+
+begin root-stop-refusal-with-a-workflow-issue
+root1_arch=$(claim_token "$root1" architect)
+if refusal=$(claims stop --claim "$root1_arch" 2>&1 >/dev/null); then fail "the stop of root claim $root1_arch was accepted"; fi
+printf '%s\n' "$refusal" >"$evidence/stop-refusal-root1.txt"
+case "$refusal" in
+  *"legion claims close"*) soft "a workflow issue's root stop refusal names legion claims close: $refusal" ;;
+  *"stop refused: the tree's root claim ends only when its tree closes; suspend it to stop its process"*) note "workflow tree (negative control): $refusal" ;;
+  *) soft "unexpected root stop refusal for $root1: $refusal" ;;
+esac
+pass
+
+begin gates
+for issue in "$root1" "$root2" "$root3"; do gate_send "$issue"; done
+root1_architect_file() { claim_session_file "$root1" architect; }
+root1_planner_file() { claim_session_file "$root1" planner; }
+# assignment_delivered ISSUE ROLE: the daemon's assignment (a user message) reached the worker and
+# armed its phase stall. Each planner is instructed as soon as its assignment is in its session, so
+# no instruction races the assignment (an instruction sent earlier could reach a planner before
+# its assignment) and no planner is left to act on the assignment alone (waiting for an idle turn
+# instead let planners complete planning unprompted before any instruction reached them).
+assignment_delivered() {
+  local f
+  f=$(claim_session_file "$1" "$2") || return 1
+  jq -e -s 'any(.[]; .type == "message" and .message.role == "user")' "$f" >/dev/null &&
+    grep -qF '"customType":"legion-phase-stall"' "$f"
+}
+gate_finish "$root1"
+until_true 600 "the daemon's assignment to arm $root1's planner stall" assignment_delivered "$root1" planner
+note "root1 planner stall entries at its assignment: $({ grep -F '"customType":"legion-phase-stall"' "$(root1_planner_file)" || true; } | jq -r .data.state | tr '\n' ' ')"
+marker_plan="PHASE-STALL-PLANNER-$stamp"
+send_agent "$root1" planner "Acceptance planning operation ($marker_plan): write the required plan handoff file, commit it and push the issue branch as your instructions require, then end your turn WITHOUT calling the legion tool's handoff_complete: reply with one line saying the handoff is committed and pushed, and wait. Do not call handoff_complete in this turn, and do not begin any line with WAITING."
+gate_finish "$root2"
+until_true 600 "the daemon's assignment to arm $root2's planner stall" assignment_delivered "$root2" planner
+send_agent "$root2" planner "Acceptance planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
+gate_finish "$root3"
+until_true 600 "the daemon's assignment to arm $root3's planner stall" assignment_delivered "$root3" planner
+send_agent "$root3" planner "Acceptance planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
+wait_for_phase "$child" planning
+wait_for_worker "$child" planner
+note "three gates approved; $child entered planning with $root1's open gate"
+pass
+
+# ---- 3. the phase-stall follow-up ----------------------------------------------------------------------
+
+begin phase-stall-follow-up
+db_value "select coalesce(handoff_commit, '') || '|' || coalesce(summary, '') from phases where issue = '$root1' and role = 'planner'" >"$evidence/phase-stall-planner-row-before-follow-up.txt" || true
+note "planner phase row before the follow-up: '$(cat "$evidence/phase-stall-planner-row-before-follow-up.txt")' (no row, or an empty handoff: nothing completed)"
+# The planner's turn ended with its phase open, so the reminder comes; the rig's
+# instructions let it answer WAITING. Once the reminder is in its session, it is given 60 s to
+# complete on its own, then told to.
+followup_seen() { grep -qF -- "$followup_needle" "$(root1_planner_file)"; }
+until_true 600 "the phase stall's follow-up to reach $root1's planner" followup_seen
+if ! until_true_quiet 60 issue_phase "$root1" implementing; then
+  note "the planner did not complete within 60 s of the follow-up; telling it to"
+  send_agent "$root1" planner "Acceptance planning operation: now call the legion tool's handoff_complete with a concise summary."
+  until_true 900 "$root1's planner to complete after being told to" phase_at_least "$root1" implementing
+fi
+f=$(root1_planner_file)
+jq -s -c --arg followup "$followup_needle" --arg marker "$marker_plan" '
+  to_entries | map(.key as $i | .value as $e |
+    if ($e.type == "custom" and $e.customType == "legion-phase-stall") then {i: $i, kind: "stall", state: $e.data.state}
+    elif ($e.type == "message" and $e.message.role == "toolResult") then
+      if $e.message.toolName == "legion" then
+        {i: $i, kind: "legion-result", isError: $e.message.isError, text: (([$e.message.content[]? | select(.type == "text") | .text] | join("\n")) | .[0:240])}
+      else empty end
+    elif ($e.type == "message" and $e.message.role == "assistant") then
+      [$e.message.content[]? | select(.type == "toolCall" and .name == "legion") | .arguments.op] as $ops
+      | if ($ops | length) > 0 then {i: $i, kind: "legion-call", ops: $ops} else empty end
+    elif (($e | tostring) | contains($followup)) then {i: $i, kind: "followup", type: $e.type, customType: ($e.customType // $e.message.role // null)}
+    elif (($e | tostring) | contains($marker)) then {i: $i, kind: "instruction", type: $e.type}
+    else empty end)' "$f" >"$evidence/phase-stall-timeline.json"
+# The predicate: Oh My Pi appends the re-arming `open` for an arriving Envoy message before that
+# message's own entry, so the stall state at the instruction is the last one before the entry
+# carrying the marker.
+jq '
+  ([.[] | select(.kind == "instruction")] | first | .i) as $instr
+  | ([.[] | select(.kind == "stall" and .i < $instr)] | last | .state) as $stall_at
+  | ([.[] | select(.kind == "followup" and .i > $instr)] | first | .i) as $follow
+  | ([.[] | select(.kind == "legion-call" and (.ops | index("handoff_complete")) and .i > $follow)] | first | .i) as $call
+  | ([.[] | select(.kind == "legion-result" and .isError == false and .i > $call)] | first | .i) as $done
+  | {stall_at_instruction: $stall_at, instruction: $instr, follow: $follow, call: $call, done: $done,
+     closed_after_call: any(.[]; .kind == "stall" and .state == "closed" and .i > $call),
+     followups_after_done: (if $done == null then null else [.[] | select(.kind == "followup" and .i > $done)] | length end)}' \
+  "$evidence/phase-stall-timeline.json" >"$evidence/phase-stall-verdict.json"
+if jq -e '.stall_at_instruction == "open" and .instruction != null and .follow != null and .call != null and .done != null
+    and .closed_after_call and .followups_after_done == 0' "$evidence/phase-stall-verdict.json" >/dev/null; then
+  note "stall: open at the instruction → the turn ends with the phase open → the follow-up → the tool's handoff_complete → closed; no follow-up after it: $(jq -c . "$evidence/phase-stall-verdict.json")"
+else
+  soft "the planner's stall timeline fails the follow-up predicate: $(jq -c . "$evidence/phase-stall-verdict.json")"
+fi
+state_file phase-stall-after-tool-complete
+wait_for_phase_at_least "$root2" implementing 900
+wait_for_phase_at_least "$root3" implementing 900
+pass
+
+# ---- 4. park_child / rerun_child ----------------------------------------------------------------------
+begin park-child
+child_planner_before=$(daemon_state | jq -c --arg c "$child" '.issues[$c] | {generation, phase, planner: .workers.planner.claim.state}')
+send_agent "$root1" architect "Acceptance child operations, one legion tool call at a time, reporting each result verbatim before the next. (1) Call park_child with issue $root1. (2) Call rerun_child with issue $child. (3) Now take child $child out of the workflow, with the legion operation your instructions name for that. Then wait."
+until_true 600 "$child to be backlog in Dispatch" dispatch_status_is "$child" backlog
+until_true 300 "$child to leave the workflow" issue_phase "$child" "done"
+# The park suspends the child's planner once its turn ends and names no deadline
+# (packages/daemon/internal/supervise/suspend.go, holdSuspension), so the wait is the proof's turn
+# budget, phase_seconds (lib/workflow.sh); a timeout prints the planner's claim as legion claims shows it.
+child_planner_unsuspended() {
+  note "$child's planner in legion claims list: $(claims list --json | jq -c --arg i "$child" '[.claims[] | select(.issue == $i and .role == "planner")
+    | {state, suspensionHeld: (.suspensionHeld // false), suspendedBy: (.suspendedBy // null), pending: (.pending.phase // null)}]')"
+}
+timeout_hook=child_planner_unsuspended
+until_true "$phase_seconds" "$child's planner to be suspended" issue_worker_state "$child" planner suspended
+# shellcheck disable=SC2034
+timeout_hook=''
+until_true 300 "the child-status notice for $child" notice_delivered "$root1" architect "$(notice_needle child-status "$child")"
+state_file park-child
+dispatch_events "$child" >"$evidence/child-events-after-park.json"
+f=$(root1_architect_file)
+tool_outcomes "$f" | jq -c '[.[] | select(.tool == "legion" and (.call.arguments.op | IN("park_child", "rerun_child")))]' >"$evidence/architect-child-ops.json"
+jq -e --arg r "$root1" 'any(.[]; .call.arguments.op == "park_child" and .call.arguments.issue == $r and .isError and (.text | contains("CHILD_REQUIRED") or contains("tree root")))' "$evidence/architect-child-ops.json" >/dev/null ||
+  soft "park_child on the root was not refused as CHILD_REQUIRED: $(cat "$evidence/architect-child-ops.json")"
+jq -e --arg c "$child" 'any(.[]; .call.arguments.op == "rerun_child" and .call.arguments.issue == $c and .isError and (.text | contains("CHILD_RUNNING") or contains("park_child takes it out")))' "$evidence/architect-child-ops.json" >/dev/null ||
+  soft "rerun_child on the running child was not refused as CHILD_RUNNING: $(cat "$evidence/architect-child-ops.json")"
+jq -e --arg c "$child" 'any(.[]; .call.arguments.op == "park_child" and .call.arguments.issue == $c and (.isError | not))' "$evidence/architect-child-ops.json" >/dev/null ||
+  soft "the architect did not choose park_child for 'take the child out of the workflow'"
+park_actor=$(jq -r '[.[] | select(.type == "issue.updated" and .payload.status == "backlog")] | last | .actor.id' "$evidence/child-events-after-park.json")
+[ "$park_actor" = "legion-daemon:$project" ] || soft "the backlog write's actor is $park_actor, want legion-daemon:$project"
+note "architect refusals: $(jq -r '[.[] | select(.isError) | "\(.call.arguments.op) \(.call.arguments.issue): \(.text | .[0:110])"] | join(" | ")' "$evidence/architect-child-ops.json")"
+note "park: $child backlog in Dispatch by $park_actor, phase done, planner suspended (before: $child_planner_before); child-status reached $root1's architect"
+sleep 20
+dispatch_status_is "$child" backlog >/dev/null || soft "$child's backlog was undone"
+pass
+
+begin rerun-child
+gen_before=$(daemon_state | jq -r --arg c "$child" '.issues[$c].generation')
+send_agent "$root1" architect "Acceptance child operation: now run child $child again from planning, with the legion operation your instructions name for that. Report the result verbatim, then wait."
+until_true 600 "$child to be todo in Dispatch" dispatch_status_is "$child" todo
+until_true 300 "$child to run again from planning" issue_phase "$child" planning
+until_true 300 "$child's planner live again" issue_worker_live "$child" planner
+gen_after=$(daemon_state | jq -r --arg c "$child" '.issues[$c].generation')
+[ "$gen_after" -gt "$gen_before" ] || soft "$child's generation did not advance on rerun ($gen_before → $gen_after)"
+until_true 300 "the second child-status notice for $child" notices_at_least "$root1" architect "$(notice_needle child-status "$child")" 2
+dispatch_events "$child" >"$evidence/child-events-after-rerun.json"
+rerun_actor=$(jq -r '[.[] | select(.type == "issue.updated" and .payload.status == "todo")] | last | .actor.id' "$evidence/child-events-after-rerun.json")
+[ "$rerun_actor" = "legion-daemon:$project" ] || soft "the todo write's actor is $rerun_actor, want legion-daemon:$project"
+f=$(root1_architect_file)
+tool_outcomes "$f" | jq -c '[.[] | select(.tool == "legion" and (.call.arguments.op | IN("park_child", "rerun_child")))]' >"$evidence/architect-child-ops.json"
+jq -e --arg c "$child" '[.[] | select(.call.arguments.op == "rerun_child" and .call.arguments.issue == $c and (.isError | not))] | length >= 1' "$evidence/architect-child-ops.json" >/dev/null ||
+  soft "the architect did not choose rerun_child for 'run the child again'"
+state_file rerun-child
+note "rerun: $child todo by $rerun_actor, generation $gen_before → $gen_after, planning with its planner live; child-status notices on $root1's architect: $(notice_deliveries "$root1" architect "$(notice_needle child-status "$child")")"
+pass
+
+begin rerun-a-closed-child
+child2=$(new_issue "Closed child leaf" "$root1")
+printf '%s\n' "$child2" >>"$work/instructor-issues"
+set_status "$child2" todo
+wait_for_phase "$child2" planning
+wait_for_worker "$child2" planner
+# The proof human closes the child: the workflow's leave parks it as the merge's close does (phase done,
+# Dispatch status done), and rerun_child must reopen a closed Dispatch issue.
+set_status "$child2" "done"
+until_true 300 "$child2 to leave the workflow" issue_phase "$child2" "done"
+until_true 300 "the child-closed notice for $child2" notice_delivered "$root1" architect "$(notice_needle child-closed "$child2")"
+gen_before=$(daemon_state | jq -r --arg c "$child2" '.issues[$c].generation')
+send_agent "$root1" architect "Acceptance child operation: child $child2 is closed (done). Run it again from planning, with the legion operation your instructions name for that. Report the result verbatim, then wait."
+until_true 600 "$child2 to be todo in Dispatch" dispatch_status_is "$child2" todo
+until_true 300 "$child2 to run again from planning" issue_phase "$child2" planning
+until_true 300 "$child2's planner live again" issue_worker_live "$child2" planner
+gen_after=$(daemon_state | jq -r --arg c "$child2" '.issues[$c].generation')
+[ "$gen_after" -gt "$gen_before" ] || soft "$child2's generation did not advance on rerun ($gen_before → $gen_after)"
+dispatch_events "$child2" >"$evidence/closed-child-events.json"
+rerun_actor=$(jq -r '[.[] | select(.type == "issue.updated" and .payload.status == "todo")] | last | .actor.id' "$evidence/closed-child-events.json")
+[ "$rerun_actor" = "legion-daemon:$project" ] || soft "the reopening todo write's actor is $rerun_actor, want legion-daemon:$project"
+f=$(root1_architect_file)
+tool_outcomes "$f" | jq -c '[.[] | select(.tool == "legion" and (.call.arguments.op | IN("park_child", "rerun_child")))]' >"$evidence/architect-child-ops-closed.json"
+jq -e --arg c "$child2" 'any(.[]; .call.arguments.op == "rerun_child" and .call.arguments.issue == $c and (.isError | not))' "$evidence/architect-child-ops-closed.json" >/dev/null ||
+  soft "the architect did not rerun the closed child with rerun_child"
+state_file closed-child-rerun
+note "closed $child2 (done) → child-closed → the architect's rerun_child reopened it: todo by $rerun_actor, generation $gen_before → $gen_after, planning with its planner live"
+set_status "$child2" backlog
+note "the proof human parked $child2 (backlog) so it takes no further turns"
+pass
+
+# ---- 5. implementation, the closed-unmerged PR, testing ------------------------------------------------
+begin implementers
+# The instructor tells each implementer, on its assignment, to open its pull request against the
+# scratch base; this section asserts what happened, in whatever order the agents did it.
+if issue_phase "$child" planning >/dev/null 2>&1; then
+  send_agent "$child" planner "Acceptance planning operation: write the required plan handoff for a one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
+fi
+for issue in "$root1" "$root2" "$root3"; do retarget_pr "$issue"; done
+wait_for_phase_at_least "$child" implementing 900
+for issue in "$root1" "$root2" "$root3"; do wait_for_phase_at_least "$issue" testing 1500; done
+note "instructed so far: $(cut -d' ' -f2- "$evidence"/instructed/* 2>/dev/null | tr '\n' ';')"
+note "proof pull requests the watcher found on a base other than $scratch_base: $(cat "$evidence/retargets.log" 2>/dev/null | grep -c retargeted || true)"
+pass
+
+begin pr-closed-unmerged
+retarget_pr "$child"
+gh -R "$repo" pr close "${pr_of[$child]}" >/dev/null
+until_true 300 "the pr-closed-unmerged notice for $child on $root1's architect" notice_delivered "$root1" architect "$(notice_needle pr-closed-unmerged "$child")"
+sleep 30
+n=$(notice_deliveries "$root1" architect "$(notice_needle pr-closed-unmerged "$child")")
+[ "$n" = 1 ] || soft "$root1's architect received $n pr-closed-unmerged notices for $child, want 1"
+notice_line "$root1" architect "$(notice_needle pr-closed-unmerged "$child")" | head -1 >"$evidence/notice-pr-closed-unmerged.jsonl"
+note "closed $repo#${pr_of[$child]} unmerged; $root1's architect got pr-closed-unmerged for $child $n time(s)"
+set_status "$child" backlog
+note "the proof human parked $child (backlog) so it takes no further turns"
+pass
+
+begin testers
+for issue in "$root1" "$root2" "$root3"; do wait_for_phase_at_least "$issue" reviewing 1200; done
+pass
+
+begin phase-finished-carries-summary-and-verdict
+until_true 300 "the tester's phase-finished notice on $root1's architect" phase_finished_seen "$root1" testing
+tester_line=$(phase_finished_line "$root1" testing)
+planner_line=$(phase_finished_line "$root1" planning)
+printf '%s\n' "$tester_line" >"$evidence/notice-phase-finished-tester.jsonl"
+printf '%s\n' "$planner_line" >"$evidence/notice-phase-finished-planner.jsonl"
+grep -qF 'verdict: pass' <<<"$tester_line" || soft "the tester's phase-finished notice carries no 'verdict: pass'"
+tester_own=$(jq -s -r '[.[] | select(.type == "message" and .message.role == "assistant") | .message.content[]? | select(.type == "toolCall" and .name == "legion" and .arguments.op == "handoff_complete") | .arguments.summary] | last // ""' "$(claim_session_file "$root1" tester)" | head -1 | cut -c1-60)
+printf '%s\n' "$tester_own" >"$evidence/tester-own-summary-head-$root1.txt"
+{ [ -n "$tester_own" ] && grep -qF -- "$tester_own" <<<"$tester_line"; } || soft "the tester's phase-finished notice does not carry the summary the tester sent ('$tester_own')"
+instructed "$root1" tester testing || note "$root1's tester was not instructed before it completed; its summary is its own"
+[ -n "$planner_line" ] || soft "no planning phase-finished notice reached $root1's architect"
+grep -qF 'verdict:' <<<"$planner_line" && soft "the planner's phase-finished notice carries a verdict"
+note "tester notice: $({ grep -o 'summary: \\"TESTER-SUMMARY[^\\]*' <<<"$tester_line" || true; } | head -1) / $(grep -o 'verdict: [a-z]*' <<<"$tester_line" || true)"
+note "planner notice (control): verdict line absent: $(grep -c 'verdict:' <<<"$planner_line" || true)"
+pass
+
+begin reviewers
+# A review ends when its reviewer completes it: the reviewer approves the head it has, then commits
+# and pushes its handoff, so the pull request's head moves past the approved commit before the issue
+# leaves reviewing, and the retro's handoff moves it again. Whether that approval still stands for
+# the head the round ends on is the daemon's judgement (classify.ApprovalStands), recorded on the
+# round as its decision; the proof checks the review App approved and the daemon ended the round on
+# that approval, which moves the issue to accepting, where no worker runs: the tree's architect
+# accepts with the legion tool's sign_off (→ retro), told here by the proof, since it acts on no
+# notice under the rig's instructions.
+reviewed_through() {
+  reviewer_approved "${pr_of[$1]}" >/dev/null && phase_at_least "$1" accepting &&
+    daemon_state | jq -e --arg i "$1" '.issues[$i].pullRequest.reviewDecision == "approved"' >/dev/null
+}
+review_app=$(role_app reviewer)
+for issue in "$root1" "$root2" "$root3"; do
+  until_true 900 "$repo#${pr_of[$issue]} approved by $review_app, and $issue past reviewing on that approval" reviewed_through "$issue"
+  note "$issue: $review_app approved $({ reviewer_approved "${pr_of[$issue]}" || true; } | cut -c1-8 | tr '\n' ' '); the head is now $(gh api "repos/$repo/pulls/${pr_of[$issue]}" --jq .head.sha | cut -c1-8)"
+  if issue_phase "$issue" accepting >/dev/null; then
+    send_agent "$issue" architect "Acceptance sign-off: the reviewer approved pull request #${pr_of[$issue]} and $issue is in accepting; accept it with the legion tool's sign_off for $issue now, report the result verbatim, then wait."
+  fi
+  wait_for_phase_at_least "$issue" retro 600
+  note "$issue: the architect's sign_off at accepting moved it to retro"
+done
+pass
+
+begin retros
+# The instructor holds each merger at its assignment; the READY scenarios below need all three in
+# merging, held.
+merging_and_held() { issue_phase "$1" merging && instructed "$1" merger merging; }
+for issue in "$root1" "$root2" "$root3"; do until_true 1800 "$issue in merging with its merger held" merging_and_held "$issue"; done
+note "each merger held at its assignment: $({ grep ' merger merging' "$evidence/instructor.log" || true; } | tr '\n' ';')"
+pass
+
+# ---- 6. an early merge: pr-merged, and no READY for a merged PR ----------------------------------------
+begin early-merge-skips-ready
+# "Early" is $root2's own workflow phase (merging, its merger held since retros above, never
+# released here), not GitHub's own merge computation: $root2's pull request targets
+# $scratch_base, which carries no ruleset, so merge_when_clean's wait here is only for GitHub to
+# finish computing this head's own mergeability (mergeStateStatus settles off its own UNKNOWN
+# moments after a push; nothing here is gated on a required check). CLEAN still means more than
+# "no ruleset is blocking it": GitHub's UNSTABLE is "mergeable despite a non-passing commit
+# status", so waiting for CLEAN rather than settling for UNSTABLE also confirms every check on
+# this head actually passed — which matters here, since $root2's retro push (this check's own
+# last push to it) runs the project's full CI. Nothing but the merger's own handoff_complete moves
+# $root2 toward a READY, which stays impossible for as long as it is held. The merge still lands
+# before any READY exists.
+merge_when_clean "$repo" "${pr_of[$root2]}" --squash --delete-branch
+until_true 300 "the pr-merged notice on $root2's architect" notice_delivered "$root2" architect "$(notice_needle pr-merged "$root2")"
+issue_phase "$root2" merging >/dev/null || soft "$root2 left merging on the early merge"
+notice_line "$root2" architect "$(notice_needle pr-merged "$root2")" | head -1 >"$evidence/notice-pr-merged.jsonl"
+send_agent "$root2" merger "Acceptance READY operation: the proof human has already merged pull request #${pr_of[$root2]}. Build your READY packet exactly as your instructions describe anyway and end this phase with the legion tool: op handoff_complete, ready true, and the packet as the summary. Then wait."
+# The merger's READY on an already-merged pull request reaches awaiting_merge with nothing to merge,
+# and the merge closes the issue at once: done, no READY posted.
+wait_for_phase "$root2" "done" 600
+sleep 30
+ready_messages "$root2" >"$evidence/ready-messages-$root2.json"
+[ "$(jq length "$evidence/ready-messages-$root2.json")" = 0 ] || soft "a READY was posted for $root2 whose PR had merged: $(cat "$evidence/ready-messages-$root2.json")"
+n=$(notice_deliveries "$root2" architect "$(notice_needle pr-merged "$root2")")
+c=$(notice_deliveries "$root2" architect "$(notice_needle pr-closed-unmerged "$root2")")
+[ "$n" = 1 ] || soft "$root2's architect got $n pr-merged notices, want 1"
+[ "$c" = 0 ] || soft "$root2's merged PR also produced $c pr-closed-unmerged notices"
+note "merged $repo#${pr_of[$root2]} in merging: pr-merged $n, pr-closed-unmerged $c (control); the merger's READY moved $root2 straight to done, the merge's close, with $(jq length "$evidence/ready-messages-$root2.json") READY messages posted"
+pass
+
+# ---- 7a. the merger's pane: no grant file, and no `legion` run from bash ----------------------------
+# utf16_len: stdin's length in UTF-16 code units, as Dispatch's len16 and MessageBodyLength count it.
+utf16_len() { python3 -c 'import sys; print(len(sys.stdin.read().encode("utf-16-le")) // 2)'; }
+cap_refusals() { tool_outcomes "$1" | jq -c '[.[] | select(.tool == "legion" and (.text | contains("READY_PACKET_TOO_LONG")))]'; }
+begin merger-pane-mints-no-grant
+# This check replaced ready-cap-refused-at-the-boundary, which drove the daemon's completion route
+# from this shell with a grant the merger's bash hook had minted into the pane's LEGION_GRANT_FILE
+# before a `legion state --json` command. Neither exists (LEGION-631): the `legion` tool mints its
+# grants in-process for its own daemon calls, no pane carries a grant file, no agent runs `legion`
+# from bash, and the CLI has no `handoff complete`. The READY cap at its exact boundary
+# (record.MessagePostLimit, one unit over) is the daemon's own test now (internal/api
+# handoff_test.go, the READY one unit over the limit, refused naming <limit+1>/<limit>), on the
+# Dispatch cap internal/daemon/outbox_scratch_dispatch_test.go measures; the merger's own over-cap
+# packet, refused READY_PACKET_TOO_LONG through the tool, is counted in
+# ready-posted-and-published-to-holder below. What stands here is the absence: the merger's pane
+# environment names no grant, its gh reads the role's files under GH_CONFIG_DIR, and no bash
+# command the merger has run invokes `legion`.
+merger_omp=$(omp_descendant "$(claim_pane_pid "$root1" merger)") || fail "$root1's merger pane has no OMP process"
+for absent in LEGION_GRANT_FILE LEGION_GRANT; do
+  ! tr '\0' '\n' <"/proc/$merger_omp/environ" | grep -q "^$absent=" || fail "$root1's merger pane still carries $absent"
+done
+merger_gh_dir=$(pane_value "$merger_omp" GH_CONFIG_DIR)
+[[ $merger_gh_dir == *-merger-gh/* && $(pane_value "$merger_omp" LEGION_GH_OWNERS_DIR) == "${merger_gh_dir%/*}" ]] ||
+  fail "$root1's merger pane carries GH_CONFIG_DIR=$merger_gh_dir, want an owner's directory of its claim's gh bundle (LEGION_GH_OWNERS_DIR)"
+f=$(claim_session_file "$root1" merger)
+# A bash command invokes `legion` when a word of it is legion or ends in /legion (never a word that
+# only contains it, such as legion-worker).
+jq -R -s -r '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "assistant")
+  | .message.content[]? | select(.type == "toolCall" and .name == "bash") | .arguments.command // ""
+  | select(test("(^|[^A-Za-z0-9_/-])(\\S*/)?legion([^A-Za-z0-9_-]|$)"))] | .[]' "$f" >"$evidence/merger-legion-commands.txt"
+[ ! -s "$evidence/merger-legion-commands.txt" ] || soft "$root1's merger ran legion from bash: $(tr '\n' ' ' <"$evidence/merger-legion-commands.txt" | cut -c1-300)"
+note "$root1's merger pane (OMP $merger_omp) carries no LEGION_GRANT_FILE or LEGION_GRANT, GH_CONFIG_DIR=$merger_gh_dir, and its session holds $(wc -l <"$evidence/merger-legion-commands.txt") bash commands invoking legion"
+pass
+
+# ---- 7. the daemon posts READY (direct) and publishes it to a live holder -----------------------------
+begin ready-posted-and-published-to-holder
+# The holder claimed merge-queue an hour of agent turns ago. Losing it is recorded and repaired
+# rather than ending the run, so the sections after this one are still measured.
+if ! role_held_by merge-queue "$holder_session"; then
+  soft "the holder no longer held merge-queue at the READY section (holder: $(envoy_role_holder merge-queue 2>/dev/null || echo none))"
+  claims deliver --claim "$holder" --task "Acceptance operation: call your envoy_role_set tool with role merge-queue now, then reply 'holding merge-queue' and wait." >/dev/null
+  until_true 300 "the holder session to claim merge-queue again" role_held_by merge-queue "$holder_session"
+fi
+[ "$(ready_messages "$root1" | jq length)" = 0 ] || soft "$root1 already had a READY message before its merger's completion"
+send_agent "$root1" merger "Acceptance READY operation: verify the merge gate as your instructions describe. Then, as a deliberate proof of the READY packet's length limit, first end the phase with the legion tool (op handoff_complete, ready true) using as the summary your READY packet followed by the pull request body quoted in full and then a padding paragraph of at least 2,500 characters; that first call is expected to be refused. Then do exactly what the refusal tells you, and end this phase with the legion tool: op handoff_complete, ready true, and a packet built exactly as your instructions describe as the summary. Then wait."
+wait_for_phase "$root1" awaiting_merge 900
+until_true 180 "the daemon's READY message on $root1" ready_count_at_least "$root1" 1
+sleep 20
+ready_messages "$root1" >"$evidence/ready-messages-$root1.json"
+packet=$(merger_summary "$root1")
+printf '%s\n' "$packet" >"$evidence/merger-summary-$root1.txt"
+[ "$(jq length "$evidence/ready-messages-$root1.json")" = 1 ] || soft "$root1 has $(jq length "$evidence/ready-messages-$root1.json") READY messages, want 1"
+jq -e --arg p "$packet" --arg d "legion-daemon:$project" '(.[0].body | sub("\n\n<!-- legion-outbox:[0-9]+ -->$"; "")) == $p and .[0].actor == $d' "$evidence/ready-messages-$root1.json" >/dev/null ||
+  soft "$root1's READY message is not the merger's packet verbatim by $project's daemon: $(jq -c '.[0] | {actor, body: (.body | .[0:120])}' "$evidence/ready-messages-$root1.json") vs summary '${packet:0:120}'"
+merger_self_posted "$root1" >"$evidence/merger-self-posts-$root1.json"
+[ "$(jq length "$evidence/merger-self-posts-$root1.json")" = 0 ] || soft "$root1's merger posted or published READY itself: $(cat "$evidence/merger-self-posts-$root1.json")"
+holder_file() { token_session_file "$holder"; }
+first_line=$(head -1 <<<"$packet")
+until_true 180 "the merge-queue holder to receive $root1's READY" session_file_holds holder_file "$first_line"
+grep -F '"customType":"envoy-message"' "$(holder_file)" | grep -F -- "$first_line" | head -1 >"$evidence/holder-ready-delivery.jsonl"
+[ -s "$evidence/holder-ready-delivery.jsonl" ] || soft "the holder saw the READY line, but not as an Envoy delivery"
+[ "$(no_holder_messages "$root1" | jq length)" = 0 ] || soft "$root1 was told merge-queue had no holder while one held it"
+note "READY on $root1 by $(jq -r '.[0].actor' "$evidence/ready-messages-$root1.json"): '$first_line' — the merger's summary verbatim; the merger itself posted/published nothing; the holder session received it as an Envoy delivery"
+f=$(claim_session_file "$root1" merger)
+cap_refusals "$f" >"$evidence/ready-cap-merger-refusals-$root1.json"
+posted_len=$(jq -j '.[0].body' "$evidence/ready-messages-$root1.json" | utf16_len)
+note "the merger's own over-cap attempt: $(jq length "$evidence/ready-cap-merger-refusals-$root1.json") READY_PACKET_TOO_LONG refusal(s) ($(jq -r '[.[].text | .[0:150]] | join(" | ")' "$evidence/ready-cap-merger-refusals-$root1.json")); the posted packet is $posted_len UTF-16 units"
+[ "$posted_len" -le 31956 ] || soft "$root1's posted READY is $posted_len units, over record.MessagePostLimit (31956)"
+# The tool's path through the READY cap, as measured: the census's claim that both completion
+# callers met the refusal live rests on this count, so it is a file, not only a log line.
+jq -n --arg issue "$root1" --argjson refusals "$(jq length "$evidence/ready-cap-merger-refusals-$root1.json")" --argjson posted "$posted_len" \
+  '{issue: $issue, tool_refusals: $refusals, posted_utf16: $posted}' >"$evidence/ready-cap-tool-path-$root1.json"
+pass
+
+begin merge-at-awaiting-merge-gives-no-pr-merged
+# The early-merge section merged $root2's pull request into the scratch base, and both proof pull
+# requests branched from the same main commit, so $root1's may no longer merge there cleanly (their
+# retro learnings, for one). It merges into a base of its own, cut from that main commit.
+gh api "repos/$repo/git/refs" -f ref="refs/heads/$merge_base" -f sha="$main_sha" >/dev/null
+gh -R "$repo" pr edit "${pr_of[$root1]}" --base "$merge_base" >/dev/null
+note "$repo#${pr_of[$root1]} retargeted to its own base $merge_base at main $main_sha"
+merge_when_clean "$repo" "${pr_of[$root1]}" --squash --delete-branch
+# A merge at awaiting_merge closes the issue: done, with no pr-merged notice (the close tells a root's
+# architect nothing; it suspends it with the rest of its tree).
+wait_for_phase "$root1" "done" 600
+sleep 60
+n=$(notice_deliveries "$root1" architect "$(notice_needle pr-merged "$root1")")
+[ "$n" = 0 ] || soft "a merge at awaiting_merge still told $root1's architect pr-merged ($n)"
+note "merged $repo#${pr_of[$root1]} at awaiting_merge: $root1 → done, the merge's close, pr-merged notices $n (negative control)"
+pass
+
+# ---- 8. READY stored across a refused gate, posted at the approval, with no merge queue holder ------
+begin gated-ready-posted-with-no-holder
+claims deliver --claim "$holder" --task "Acceptance operation: call your envoy_role_set tool with role mq-released-$ptoken now, then reply 'released' and wait." >/dev/null
+until_true 300 "merge-queue to have no holder" role_unheld merge-queue
+note "the holder released merge-queue (GET /v1/roles/merge-queue: no holder)"
+dispatch_human POST "issues/$root3/artifacts" \
+  "$(jq -cn --arg name spec.md --arg content "# Acceptance smoke\n\nThe human revised this proof specification before READY.\n" '{name:$name,content:$content,summary:"4b.13b gate re-close"}')" >/dev/null
+until_true 180 "the new primary spec version to close $root3's gate" sh -c \
+  "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$root3' '.issues[\$issue].designGate.currentVersion > .issues[\$issue].designGate.approvedVersion'"
+send_agent "$root3" merger "Acceptance READY operation: verify the merge gate as your instructions describe, build your READY packet exactly as they describe, and end this phase with the legion tool: op handoff_complete, ready true, and the packet as the summary. If it is refused, record its exact refusal and wait; do not retry it."
+until_true 600 "$root3's merger to observe the READY refusal" session_contains "$root3" merger "READY refused: approve design version"
+sleep 20
+ready_messages "$root3" >"$evidence/ready-messages-$root3-while-refused.json"
+[ "$(jq length "$evidence/ready-messages-$root3-while-refused.json")" = 0 ] || soft "a READY was posted for $root3 while its gate refused it"
+db_value "select summary from phases where issue = '$root3' and role = 'merger'" >"$evidence/merger-stored-summary-$root3.txt"
+[ -s "$evidence/merger-stored-summary-$root3.txt" ] || soft "$root3's refused READY packet is not stored on the merger's phase row"
+issue_phase "$root3" merging >/dev/null || soft "$root3 left merging on a refused READY"
+note "READY refused at the new spec version; no READY message posted (negative control); packet stored on the merger's row ($(wc -c <"$evidence/merger-stored-summary-$root3.txt") bytes)"
+artifact3=${gate_artifacts[$root3]}
+dispatch_human POST "artifacts/$artifact3/reviews" '{"state":"approved"}' >/dev/null
+wait_for_phase "$root3" awaiting_merge 600
+until_true 180 "the daemon's READY message on $root3" ready_count_at_least "$root3" 1
+until_true 180 "the no-holder message on $root3" no_holder_count_at_least "$root3" 1
+sleep 20
+ready_messages "$root3" >"$evidence/ready-messages-$root3.json"
+no_holder_messages "$root3" >"$evidence/no-holder-messages-$root3.json"
+packet3=$(merger_summary "$root3")
+printf '%s\n' "$packet3" >"$evidence/merger-summary-$root3.txt"
+jq -e --arg p "$packet3" --arg d "legion-daemon:$project" 'length == 1 and (.[0].body | sub("\n\n<!-- legion-outbox:[0-9]+ -->$"; "")) == $p and .[0].actor == $d' "$evidence/ready-messages-$root3.json" >/dev/null ||
+  soft "$root3's READY after approval is not exactly one daemon message holding the stored packet: $(jq -c '[.[] | {actor, body: (.body | .[0:100])}]' "$evidence/ready-messages-$root3.json")"
+jq -e --arg d "legion-daemon:$project" 'length == 1 and .[0].actor == $d' "$evidence/no-holder-messages-$root3.json" >/dev/null ||
+  soft "$root3 did not get exactly one daemon no-holder message: $(cat "$evidence/no-holder-messages-$root3.json")"
+merger_self_posted "$root3" >"$evidence/merger-self-posts-$root3.json"
+[ "$(jq length "$evidence/merger-self-posts-$root3.json")" = 0 ] || soft "$root3's merger posted or published READY itself"
+note "approval advanced $root3 to awaiting_merge and the daemon posted the stored packet: '$(head -1 <<<"$packet3")'; then: '$(jq -r '.[0].body' "$evidence/no-holder-messages-$root3.json")'"
+posted_len3=$(jq -j '.[0].body' "$evidence/ready-messages-$root3.json" | utf16_len)
+[ "$posted_len3" -le 31956 ] || soft "$root3's posted READY is $posted_len3 units, over record.MessagePostLimit (31956)"
+cap_refusals "$(claim_session_file "$root3" merger)" >"$evidence/ready-cap-merger-refusals-$root3.json"
+jq -n --arg issue "$root3" --argjson refusals "$(jq length "$evidence/ready-cap-merger-refusals-$root3.json")" --argjson posted "$posted_len3" \
+  '{issue: $issue, tool_refusals: $refusals, posted_utf16: $posted}' >"$evidence/ready-cap-tool-path-$root3.json"
+note "$root3's posted READY is $posted_len3 UTF-16 units; its merger met $(jq length "$evidence/ready-cap-merger-refusals-$root3.json") READY_PACKET_TOO_LONG refusal(s)"
+pass
+
+begin production-untouched
+claims list --json >"$evidence/claims.json"
+timeout_hook=report_unchecked_launches
+until_true 60 "every launched pane to be endpoint-checked" no_unchecked_launches
+# shellcheck disable=SC2034
+timeout_hook=''
+note "$(wc -l <"$evidence/pane-endpoints-checked.txt") launched panes endpoint-checked when their OMP started"
+cap_exceeded=$(grep -c 'CAP_EXCEEDED' "$evidence/logs/daemon.log" || true)
+printf '%s\n' "$cap_exceeded" >"$evidence/daemon-log-cap-exceeded-count.txt"
+[ "$cap_exceeded" = 0 ] || soft "the daemon log carries $cap_exceeded CAP_EXCEEDED line(s): Dispatch refused a message the daemon sent"
+note "daemon log CAP_EXCEEDED lines: $cap_exceeded (before the READY cap, the daemon logged the READY packet's refusal on every outbox attempt)"
+production_audit || fail "the rig touched production; see $evidence/production-dispatch-audit.json"
+pass
+
+begin services-stopped
+daemon_state >"$evidence/final-state.json"
+"$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" >"$evidence/final-claims.json"
+stop_pid "$watcher_pid"; watcher_pid=
+stop_pid "$daemon_pid"; daemon_pid=
+stop_pid "$daemon_keeper_pid"; daemon_keeper_pid=
+stop_dispatch() { stop_pid "$dispatch_pid"; dispatch_pid=; }
+stop_dispatch
+stop_pid "$listener_pid"; listener_pid=
+stop_pid "$bridge_pid"; bridge_pid=
+stop_pid "${instructor_pid:-}"; instructor_pid=
+TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
+stop_pid "$nats_pid"; nats_pid=
+for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
+[ -z "$(run_processes)" ] || fail "a proof process remains"
+pass
+
+begin model-turns-through-the-gateway
+route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$profile_agent/sessions" \
+  --control "$evidence/model-route-control") || fail "an agent turn left the gateway route"
+note "$route"
+collect_transcripts
+pass
+
+begin profile-stays-in-the-run
+# Every session the run's agents wrote is under the run's own home, inside its work directory, and
+# the operator's profile root holds none of the run's profile (make_omp_home, lib/omp-home.sh).
+[ -d "$profile_agent/sessions" ] || fail "no agent session directory at $profile_agent/sessions"
+sessions=$(find "$profile_agent/sessions" -name '*.jsonl' -type f | wc -l)
+[ "$sessions" -gt 0 ] || fail "no agent session under $profile_agent/sessions"
+[ ! -e "$HOME/.omp/profiles/$profile" ] || fail "the run wrote the operator's profile root: $HOME/.omp/profiles/$profile exists"
+note "$sessions agent session files under $profile_agent/sessions; $HOME/.omp/profiles/$profile does not exist"
+pass
+
+ok=1
+if [ -s "$soft_failures" ]; then
+  printf 'acceptance 4b.13b: FAIL — %s soft failure(s):\n' "$(wc -l <"$soft_failures")"
+  cat "$soft_failures"
+  exit 1
+fi
+echo "acceptance 4b.13b: PASS at $head_commit"

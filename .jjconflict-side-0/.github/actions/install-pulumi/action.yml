@@ -1,0 +1,15 @@
+name: Install the Pulumi CLI
+description: >-
+  Installs the Pulumi CLI v3.268.0 the envoy-infra plugin is tested and released with, checked
+  against its SHA-256 before it is unpacked, and puts it on PATH for the job's later steps.
+runs:
+  using: composite
+  steps:
+    - name: Install the Pulumi CLI
+      shell: bash
+      run: |
+        tarball="$RUNNER_TEMP/pulumi-v3.268.0-linux-x64.tar.gz"
+        curl -fsSL -o "$tarball" https://get.pulumi.com/releases/sdk/pulumi-v3.268.0-linux-x64.tar.gz
+        echo "903cafeaa9f6327e4bf53a8b7b99ae660f26198acfa804a2f982bf5de3f1de0b  $tarball" | sha256sum -c -
+        tar -xzf "$tarball" -C "$RUNNER_TEMP"
+        echo "$RUNNER_TEMP/pulumi" >> "$GITHUB_PATH"

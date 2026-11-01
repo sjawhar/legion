@@ -1,0 +1,627 @@
+package pmdoc
+
+import (
+	_ "embed"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+	"sort"
+	"strings"
+)
+
+type Attrs map[string]any
+
+type Mark struct {
+	Type  string
+	Attrs Attrs
+}
+
+type Node struct {
+	Type     string
+	Attrs    Attrs
+	Text     string
+	Marks    []Mark
+	Children []*Node
+}
+
+var ErrSchema = errors.New("outside Proof schema")
+
+// ErrBlockHTML is the refusal of HTML that markdown reads as a block: the Proof schema carries
+// inline HTML only.
+var ErrBlockHTML = fmt.Errorf("%w: block HTML is not accepted by Proof", ErrSchema)
+
+var nodeTypes = map[string]bool{
+	"doc": true, "paragraph": true, "heading": true, "blockquote": true, "bullet_list": true,
+	"ordered_list": true, "list_item": true, "code_block": true, "hr": true, "hardbreak": true,
+	"image": true, "html": true, "table": true, "table_header_row": true, "table_row": true,
+	"table_cell": true, "table_header": true, "footnote_definition": true,
+	"footnote_reference": true, "frontmatter": true, "text": true,
+}
+
+var markTypes = map[string]bool{
+	"strong": true, "emphasis": true, "inlineCode": true, "link": true, "strike_through": true,
+	"proofSuggestion": true, "proofComment": true, "proofFlagged": true, "proofApproved": true,
+	"proofAuthored": true, "dispatchAsk": true,
+}
+
+// sortMarks puts marks in one order whatever order they arrive in: by type, then, for two marks of
+// one type (the record marks, which may overlap: anchorMarkTypes), by id, and by their attributes
+// only when the ids tie. Every positional comparison of two mark sets (marksEqual, run joining)
+// relies on it.
+func sortMarks(marks []Mark) {
+	sort.Slice(marks, func(i, j int) bool { return markLess(marks[i], marks[j]) })
+}
+
+func markLess(left, right Mark) bool {
+	if left.Type != right.Type {
+		return left.Type < right.Type
+	}
+	leftID, _ := left.Attrs["id"].(string)
+	rightID, _ := right.Attrs["id"].(string)
+	if leftID != rightID {
+		return leftID < rightID
+	}
+	leftJSON, _ := json.Marshal(canonicalAttrs(left.Attrs))
+	rightJSON, _ := json.Marshal(canonicalAttrs(right.Attrs))
+	return string(leftJSON) < string(rightJSON)
+}
+
+func marksEqual(left, right []Mark) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i].Type != right[i].Type || !attrsEqual(left[i].Attrs, right[i].Attrs) {
+			return false
+		}
+	}
+	return true
+}
+
+func sortNodeMarks(n *Node) {
+	sortMarks(n.Marks)
+	for _, child := range n.Children {
+		sortNodeMarks(child)
+	}
+}
+
+// yattrToMarkName is the mark type stored under the Y.Text attribute key name: a record mark's key
+// carries a `--` and an 8-character digest after its type (markAttributeKey), which it drops, and
+// any other key is the type itself. It runs for every attribute key of every Y.Text run read, so
+// it checks the key's bytes rather than matching the pattern it stands for, `^(.*)--[a-zA-Z0-9+/=]{8}$`,
+// whose `.` matches no newline.
+func yattrToMarkName(name string) string {
+	const suffix = len("--") + 8
+	if len(name) < suffix || name[len(name)-suffix:len(name)-8] != "--" {
+		return name
+	}
+	for index := len(name) - 8; index < len(name); index++ {
+		if !isMarkKeyDigestByte(name[index]) {
+			return name
+		}
+	}
+	if prefix := name[:len(name)-suffix]; !strings.Contains(prefix, "\n") {
+		return prefix
+	}
+	return name
+}
+
+// isMarkKeyDigestByte reports whether b may stand in a record mark key's digest: a standard base64
+// character.
+func isMarkKeyDigestByte(b byte) bool {
+	return isASCIIAlphaNumeric(b) || b == '+' || b == '/' || b == '='
+}
+
+func (n *Node) Validate() error {
+	return validateNode(n, 0)
+}
+
+func validateNode(n *Node, depth int) error {
+	if n == nil {
+		return fmt.Errorf("%w: nil node", ErrSchema)
+	}
+	if err := treeDepthError(depth); err != nil {
+		return err
+	}
+	if !nodeTypes[n.Type] {
+		if _, typed := typedBlock(n.Type); !typed {
+			return fmt.Errorf("%w: node %q", ErrSchema, n.Type)
+		}
+	}
+	if n.Type != "text" && len(n.Marks) != 0 {
+		return fmt.Errorf("%w: node %q cannot have marks", ErrSchema, n.Type)
+	}
+	for _, m := range n.Marks {
+		if !markTypes[m.Type] {
+			return fmt.Errorf("%w: mark %q", ErrSchema, m.Type)
+		}
+		if err := attrNestingError("mark", m.Type, m.Attrs, maxMarkAttrNesting); err != nil {
+			return err
+		}
+	}
+	if err := attrNestingError("node", n.Type, n.Attrs, maxNodeAttrNesting); err != nil {
+		return err
+	}
+	for _, child := range n.Children {
+		if err := validateNode(child, depth+1); err != nil {
+			return err
+		}
+	}
+
+	switch n.Type {
+	case "doc", "blockquote", "footnote_definition":
+		if len(n.Children) == 0 || !childrenAreBlocks(n.Children) {
+			return fmt.Errorf("%w: %s requires block children", ErrSchema, n.Type)
+		}
+	case "paragraph", "heading":
+		if !childrenAreInline(n.Children) {
+			return fmt.Errorf("%w: %s requires inline children", ErrSchema, n.Type)
+		}
+	case "bullet_list", "ordered_list":
+		if len(n.Children) == 0 || !childrenAre(n.Children, "list_item") {
+			return fmt.Errorf("%w: %s requires list items", ErrSchema, n.Type)
+		}
+	case "list_item":
+		if len(n.Children) == 0 || n.Children[0].Type != "paragraph" || !childrenAreBlocks(n.Children[1:]) {
+			return fmt.Errorf("%w: list item requires a paragraph followed by blocks", ErrSchema)
+		}
+	case "code_block":
+		if !childrenAre(n.Children, "text") {
+			return fmt.Errorf("%w: code block requires text children", ErrSchema)
+		}
+		for _, child := range n.Children {
+			for _, mark := range child.Marks {
+				if mark.Type != "proofAuthored" && mark.Type != "proofSuggestion" && mark.Type != "proofComment" && mark.Type != "proofFlagged" && mark.Type != "proofApproved" {
+					return fmt.Errorf("%w: code block cannot contain mark %q", ErrSchema, mark.Type)
+				}
+			}
+		}
+	case "table":
+		if len(n.Children) < 2 || n.Children[0].Type != "table_header_row" || !childrenAre(n.Children[1:], "table_row") {
+			return fmt.Errorf("%w: table requires a header row followed by rows", ErrSchema)
+		}
+	case "table_header_row":
+		if !childrenAre(n.Children, "table_header") {
+			return fmt.Errorf("%w: table header row requires header cells", ErrSchema)
+		}
+	case "table_row":
+		if !childrenAre(n.Children, "table_cell") {
+			return fmt.Errorf("%w: table row requires cells", ErrSchema)
+		}
+	case "table_header", "table_cell":
+		if !childrenAre(n.Children, "paragraph") || len(n.Children) != 1 {
+			return fmt.Errorf("%w: %s requires one paragraph", ErrSchema, n.Type)
+		}
+	case "frontmatter":
+		if !childrenAre(n.Children, "text") {
+			return fmt.Errorf("%w: frontmatter requires text children", ErrSchema)
+		}
+	case "text", "hr", "hardbreak", "image", "html", "footnote_reference":
+		if len(n.Children) != 0 {
+			return fmt.Errorf("%w: %s cannot have children", ErrSchema, n.Type)
+		}
+	default:
+		if typ, typed := typedBlock(n.Type); typed {
+			return validateTypedBlock(n, typ)
+		}
+	}
+	return nil
+}
+
+// undeclaredAttributes is the refusal for a typed block holding attributes its schema does not
+// declare, naming every one of them in sorted order, or nil when it declares them all.
+func undeclaredAttributes(typeName string, attrs Attrs, declared map[string]BlockAttributeSchema) error {
+	var names []string
+	for name := range attrs {
+		if _, ok := declared[name]; !ok && name != BlockIDAttr {
+			names = append(names, name)
+		}
+	}
+	switch len(names) {
+	case 0:
+		return nil
+	case 1:
+		return fmt.Errorf("%w: typed block %q does not declare attribute %q", ErrSchema, typeName, names[0])
+	}
+	sort.Strings(names)
+	for index, name := range names {
+		names[index] = fmt.Sprintf("%q", name)
+	}
+	return fmt.Errorf("%w: typed block %q does not declare attributes %s", ErrSchema, typeName, strings.Join(names, ", "))
+}
+
+func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
+	switch typ.Content {
+	case BlockContentParagraphs:
+		if len(n.Children) == 0 || !childrenAre(n.Children, "paragraph") {
+			return fmt.Errorf("%w: typed block %q content %q requires one or more paragraphs", ErrSchema, n.Type, typ.Content)
+		}
+	case BlockContentBlocks:
+		if len(n.Children) == 0 || !childrenAreBlocks(n.Children) {
+			return fmt.Errorf("%w: typed block %q content %q requires one or more blocks", ErrSchema, n.Type, typ.Content)
+		}
+	case BlockContentParagraphsOptionalBulletList:
+		// Concurrent browser edits can leave an ask holding blocks off its content rule (two
+		// bullet lists, a paragraph after its list), and the browser keeps it. Retain that
+		// structurally valid body so settlement can mark it `invalid`; uploads and edits refuse
+		// an ask they write that breaks the rule (AskContentError).
+		if n.Type == "ask" {
+			if len(n.Children) == 0 || !childrenAreBlocks(n.Children) {
+				return fmt.Errorf("%w: typed block %q requires block children", ErrSchema, n.Type)
+			}
+			break
+		}
+		if askContentBreak(n.Children) != "" {
+			return fmt.Errorf("%w: typed block %q content %q requires paragraphs followed by an optional bullet list", ErrSchema, n.Type, typ.Content)
+		}
+	default:
+		return fmt.Errorf("%w: typed block %q has unsupported content rule %q", ErrSchema, n.Type, typ.Content)
+	}
+	if err := undeclaredAttributes(n.Type, n.Attrs, typ.Attributes); err != nil {
+		return err
+	}
+	for name, value := range n.Attrs {
+		if name == BlockIDAttr {
+			if _, ok := value.(string); !ok {
+				return fmt.Errorf("%w: typed block %q blockId must be a string", ErrSchema, n.Type)
+			}
+			continue
+		}
+		definition := typ.Attributes[name]
+		if value == nil && definition.Default == nil {
+			continue
+		}
+		if err := validateAttributeValue(definition, value); err != nil {
+			return fmt.Errorf("%w: typed block %q attribute %q: %v", ErrSchema, n.Type, name, err)
+		}
+	}
+	for name, definition := range typ.Attributes {
+		if definition.Default == nil {
+			continue
+		}
+		if _, present := n.Attrs[name]; !present {
+			return fmt.Errorf("%w: typed block %q is missing attribute %q", ErrSchema, n.Type, name)
+		}
+	}
+	return nil
+}
+
+// AskContentError reports the first ask block in node that breaks its content rule, paragraph+
+// bullet_list? - one or more paragraphs, then at most one bullet list, last - or nil. Validate
+// lets an ask hold other blocks, since concurrent browser edits can leave one there, the browser
+// keeps it, and settlement marks the ask `invalid`; markdown written in whole is held to the rule,
+// as the browser editor's parser holds it.
+func AskContentError(node *Node) error {
+	var found error
+	walk(node, func(ask *Node, _ []int, _, _ int) bool {
+		if found != nil {
+			return false
+		}
+		if ask.Type != "ask" {
+			return true
+		}
+		broken := askContentBreak(ask.Children)
+		if broken == "" {
+			return true
+		}
+		id, _ := ask.Attrs[BlockIDAttr].(string)
+		found = fmt.Errorf("ask block %q%s holds %s where its content rule, %s, allows one or more paragraphs and then at most one bullet list, last", id, askQuestionOpening(ask), broken, BlockContentParagraphsOptionalBulletList)
+		return false
+	})
+	return found
+}
+
+// askQuestionOpening is `, asking "<its question's opening words>"`, or "" for an ask that opens
+// with no question. A refusal names an ask by its block id, which the parser makes up when the
+// markdown gives none, so the question is how its author knows which ask is meant.
+func askQuestionOpening(ask *Node) string {
+	if len(ask.Children) == 0 || ask.Children[0] == nil || ask.Children[0].Type != "paragraph" {
+		return ""
+	}
+	question := openingWords(oneLineText(ask.Children[0]))
+	if question == "" {
+		return ""
+	}
+	return fmt.Sprintf(", asking %q,", question)
+}
+
+// openingWords is text's first 40 characters, cut short with an ellipsis where it runs on: how a
+// refusal names a block whose author has only its text to find it by.
+func openingWords(text string) string {
+	const opening = 40
+	runes := []rune(text)
+	if len(runes) <= opening {
+		return text
+	}
+	return strings.TrimRight(string(runes[:opening]), " ") + "…"
+}
+
+// askContentBreak names the first child that breaks the content rule paragraph+ bullet_list? -
+// one or more paragraphs, then at most one bullet list, last - or is "" when the children keep it.
+func askContentBreak(children []*Node) string {
+	if len(children) == 0 {
+		return "nothing"
+	}
+	for index, child := range children {
+		switch {
+		case child == nil:
+			return "a missing block"
+		case index == 0 && child.Type != "paragraph":
+			return blockName(child.Type) + " before its question"
+		case child.Type == "paragraph" && index > 0 && children[index-1].Type == "bullet_list":
+			return "a paragraph after its options"
+		case child.Type == "bullet_list" && index > 0 && children[index-1].Type == "bullet_list":
+			return "a second bullet list"
+		case child.Type != "paragraph" && child.Type != "bullet_list":
+			return blockName(child.Type)
+		}
+	}
+	return ""
+}
+
+// blockName is a block type as a reader names it, with its article: "a code block", "an
+// ordered list", "a horizontal rule".
+func blockName(nodeType string) string {
+	name := blockNoun(nodeType)
+	if strings.ContainsRune("aeiou", rune(name[0])) {
+		return "an " + name
+	}
+	return "a " + name
+}
+
+func blockNoun(nodeType string) string {
+	if nodeType == "hr" {
+		return "horizontal rule"
+	}
+	return strings.ReplaceAll(nodeType, "_", " ")
+}
+
+// BlockNames names blocks in order as a reader names them, a run of one type counted: "a bullet
+// list", "two paragraphs", "a horizontal rule and a heading".
+func BlockNames(blocks []*Node) string {
+	var names []string
+	for start := 0; start < len(blocks); {
+		end := start + 1
+		for end < len(blocks) && blocks[end].Type == blocks[start].Type {
+			end++
+		}
+		if count := end - start; count > 1 {
+			names = append(names, fmt.Sprintf("%s %ss", countWord(count), blockNoun(blocks[start].Type)))
+		} else {
+			names = append(names, blockName(blocks[start].Type))
+		}
+		start = end
+	}
+	if len(names) < 2 {
+		return strings.Join(names, "")
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+}
+
+func countWord(count int) string {
+	if words := []string{"two", "three", "four", "five", "six", "seven", "eight", "nine"}; count-2 < len(words) {
+		return words[count-2]
+	}
+	return fmt.Sprint(count)
+}
+
+func childrenAre(children []*Node, typeName string) bool {
+	for _, child := range children {
+		if child == nil || child.Type != typeName {
+			return false
+		}
+	}
+	return true
+}
+
+func childrenAreBlocks(children []*Node) bool {
+	for _, child := range children {
+		if child == nil || !isBlockNodeType(child.Type) {
+			return false
+		}
+	}
+	return true
+}
+
+func childrenAreInline(children []*Node) bool {
+	for _, child := range children {
+		if child == nil || !isInlineNodeType(child.Type) {
+			return false
+		}
+	}
+	return true
+}
+
+// blockNodeTypesJSON lists the block node types besides the typed blocks. The proof editor's
+// schema drift test reads the same file, so the editor's `block` group and this set stay equal.
+//
+//go:embed schema/block-node-types.json
+var blockNodeTypesJSON []byte
+
+var blockNodeTypes = func() map[string]struct{} {
+	var names []string
+	if err := json.Unmarshal(blockNodeTypesJSON, &names); err != nil {
+		panic(fmt.Sprintf("pmdoc: decode embedded block node types: %v", err))
+	}
+	if len(names) == 0 {
+		panic("pmdoc: embedded block node types are empty")
+	}
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		set[name] = struct{}{}
+	}
+	return set
+}()
+
+func isBlockNodeType(typeName string) bool {
+	if _, ok := blockNodeTypes[typeName]; ok {
+		return true
+	}
+	_, typed := typedBlock(typeName)
+	return typed
+}
+
+func isInlineNodeType(typeName string) bool {
+	switch typeName {
+	case "text", "hardbreak", "image", "html", "footnote_reference":
+		return true
+	default:
+		return false
+	}
+}
+
+// Equal compares document content and structure while ignoring block identity.
+func (n *Node) Equal(o *Node) bool {
+	return equalNode(n, o, func(_ string, a, b Attrs) bool { return attrsEqualButBlockID(a, b) })
+}
+
+// EqualWithBlockIDs compares document content, structure, and block identity.
+func (n *Node) EqualWithBlockIDs(o *Node) bool {
+	return equalNode(n, o, func(_ string, a, b Attrs) bool { return attrsEqual(a, b) })
+}
+
+// EqualOutsideServerState compares document content, structure and block identity as
+// EqualWithBlockIDs does, but for the attributes of a typed block that the server keeps (the
+// schema's server attributes) other than an ask's answer (IsAnswerAttribute): an ask's state, who
+// answered it and when, and whether it reads. No caller writes those, they say what the server
+// knows about the block's own text, and each is a word or a timestamp beside it.
+func (n *Node) EqualOutsideServerState(o *Node) bool {
+	return equalNode(n, o, attrsEqualOutsideServerState)
+}
+
+// IsAnswerAttribute reports whether name is a server attribute of an ask that holds the answer
+// itself rather than what the server knows of it: the answer's own words, and the options it
+// selects. The server keeps both in agreement with the ask, but both are caller text - a selection
+// copies the asker's option labels, and renders each escaped, a `<` as seven bytes, so one choice
+// of a 1,000,000-character label made a 1 MB document 8 MB. So a write that changes either is
+// weighed as caller text is (EqualOutsideServerState), and where the document has no room for
+// them the server records the answer on the ask and leaves both out of the block.
+func IsAnswerAttribute(name string) bool {
+	return name == "answer" || name == "selected"
+}
+
+func attrsEqualOutsideServerState(nodeType string, a, b Attrs) bool {
+	typ, typed := typedBlock(nodeType)
+	if !typed {
+		return attrsEqual(a, b)
+	}
+	return attrsEqualBut(a, b, func(name string) bool { return !IsAnswerAttribute(name) && typ.Attributes[name].Server })
+}
+
+// equalNode compares n and o, their content and structure, holding each node's attributes to
+// attrs, which is given the node's type.
+func equalNode(n, o *Node, attrs func(nodeType string, a, b Attrs) bool) bool {
+	if n == nil || o == nil {
+		return n == o
+	}
+	if n.Type != o.Type || n.Text != o.Text || !attrs(n.Type, n.Attrs, o.Attrs) || len(n.Marks) != len(o.Marks) || len(n.Children) != len(o.Children) {
+		return false
+	}
+	for i := range n.Marks {
+		if n.Marks[i].Type != o.Marks[i].Type || !attrsEqual(n.Marks[i].Attrs, o.Marks[i].Attrs) {
+			return false
+		}
+	}
+	for i := range n.Children {
+		if !equalNode(n.Children[i], o.Children[i], attrs) {
+			return false
+		}
+	}
+	return true
+}
+
+// attrsEqualButBlockID is attrsEqual over every attribute but the block id.
+func attrsEqualButBlockID(a, b Attrs) bool {
+	return attrsEqualBut(a, b, func(name string) bool { return name == BlockIDAttr })
+}
+
+// attrsEqual treats nil and empty as equal and compares values by JSON semantics.
+func attrsEqual(a, b Attrs) bool {
+	return attrsEqualBut(a, b, func(string) bool { return false })
+}
+
+// attrsEqualBut is attrsEqual over the attributes ignored does not name.
+func attrsEqualBut(a, b Attrs, ignored func(name string) bool) bool {
+	for key, av := range a {
+		if ignored(key) {
+			continue
+		}
+		bv, ok := b[key]
+		if !ok {
+			if av == nil {
+				continue
+			}
+			return false
+		}
+		if !reflect.DeepEqual(normalizeJSON(av), normalizeJSON(bv)) {
+			return false
+		}
+	}
+	for key, bv := range b {
+		if ignored(key) {
+			continue
+		}
+		if _, ok := a[key]; !ok && bv != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeJSON makes equivalent wire representations compare equal.
+func normalizeJSON(v any) any {
+	switch x := v.(type) {
+	case int:
+		return float64(x)
+	case int64:
+		return float64(x)
+	case float32:
+		return float64(x)
+	case []string:
+		out := make([]any, len(x))
+		for index := range x {
+			out[index] = x[index]
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for index := range x {
+			out[index] = normalizeJSON(x[index])
+		}
+		return out
+	default:
+		return x
+	}
+}
+
+type jsonNode struct {
+	Type    string      `json:"type"`
+	Attrs   Attrs       `json:"attrs,omitempty"`
+	Content []*jsonNode `json:"content,omitempty"`
+	Text    string      `json:"text,omitempty"`
+	Marks   []jsonMark  `json:"marks,omitempty"`
+}
+
+type jsonMark struct {
+	Type  string `json:"type"`
+	Attrs Attrs  `json:"attrs,omitempty"`
+}
+
+func (n *Node) toJSON() *jsonNode {
+	j := &jsonNode{Type: n.Type, Attrs: n.Attrs, Text: n.Text}
+	for _, m := range n.Marks {
+		j.Marks = append(j.Marks, jsonMark{Type: m.Type, Attrs: m.Attrs})
+	}
+	for _, c := range n.Children {
+		j.Content = append(j.Content, c.toJSON())
+	}
+	return j
+}
+
+func (n *Node) JSON() ([]byte, error) {
+	if err := n.Validate(); err != nil {
+		return nil, err
+	}
+	return json.Marshal(n.toJSON())
+}

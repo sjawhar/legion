@@ -44,8 +44,8 @@ BROKER_SECRETS_KMS_KEY_ARN=arn:aws:kms:<region>:<account>:key/<key id>
 AWS_REGION=<region>
 ```
 
-`BROKER_API_ACCOUNTS` lists the callers of the broker's account routes, here Dispatch's server as
-the caller `dispatch`, each by its own Kubernetes ServiceAccount: a caller presents its projected
+`BROKER_API_ACCOUNTS` lists the callers of the broker's named-caller routes, here Dispatch's server
+as the caller `dispatch`, each by its own Kubernetes ServiceAccount: a caller presents its projected
 token for `BROKER_K8S_OIDC_AUDIENCE`, which the broker verifies against `BROKER_K8S_OIDC_ISSUER`,
 so the list needs that pair. No secret is shared between the broker and Dispatch. A token that
 lives longer than an hour from its issue is refused, and an account the list does not name is
@@ -56,6 +56,16 @@ relays a person's machine-login decisions and revokes; it decides no secret requ
 The four `BROKER_SIGNIN_*` settings are required, and a broker started without one of them exits
 naming the missing ones. They are the page where a person approves a secret request, signed in to
 the broker itself ([Approval sign-in](#approval-sign-in)).
+
+A caller's **name** decides which of those routes its account reaches, so listing an account is
+not one authority but a choice between them. The broker knows two names: `dispatch`, which reaches
+every one of them — the approval, denial, revocation and listing routes Dispatch's server calls,
+`POST /v1/oauth/revoke`, and `POST /v1/oauth/introspect` — and `listener`, which reaches
+`POST /v1/oauth/introspect` alone, for a resource server such as the Envoy listener that reads one
+of the broker's access tokens back and relays nobody's decision. A listed caller on a route its
+name does not carry is answered `403 ACCOUNT_LACKS_POWER`, naming the caller and the route, and an
+entry naming a caller the broker does not know refuses the start, naming that name and the names
+it knows, so a typo cannot quietly produce a caller that reaches nothing.
 
 `BROKER_SECRETS_STORE` picks the secret store: `aws-secrets-manager`, the default when it is unset,
 as above, or `gcp-secret-manager`, which takes the Google Cloud forms of the namespace and the key
@@ -133,6 +143,15 @@ every pod it enrolled at once; the daemon then logs in again with its token unde
 which enrolls the pods it launches next, while a pod already running stays without secrets until it
 is replaced. To stop a daemon logging in, remove its entry and redeploy the broker: its credential
 stops authenticating at its next call, and its next login is refused.
+
+An account on that list also registers which pod may write under which session name
+(`POST /v1/oauth/exchange/pod-sessions`), which is how a deployment's daemon tells the broker that
+a pod it has just started owns an issue's session. That is a second authority the list carries, so
+a ServiceAccount is on it because the deployment runs that daemon, never because something needs a
+credential: a listed account can register any pod of any account the token exchange serves, and a
+daemon that stops registering costs its pods their writes within the registration's own retention
+(24 hours past the last write). Do not list such an account in `BROKER_API_ACCOUNTS` as well: that
+is the separate list of the callers that relay a person's decisions and read tokens back.
 
 Whoever can get a token for a listed account logs in as its service. Kubernetes access control on
 the daemon's namespace is that boundary: anyone who may create pods there naming the account,
@@ -324,10 +343,12 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
   sign-in and to the requests its page printed, so a page on another origin, Dispatch's included,
   cannot make one even when both are under one parent domain. The page runs no script and cannot be
   framed.
-- A listed caller's ServiceAccount token can approve a machine login and revoke grants and machine
-  logins in any person's name: the broker takes the person the caller names on its word for those.
-  It cannot decide a secret request. List Dispatch's own account and nothing else, never one an
-  agent's pod runs as.
+- A caller listed as `dispatch` holds an approval credential: its ServiceAccount token can approve
+  a machine login and revoke grants and machine logins in any person's name, the broker recording
+  whichever approver that caller names, so whoever holds that account's token can decide those as
+  anyone. It cannot decide a secret request. List Dispatch's own account under that name and
+  nothing else, never one an agent's pod runs as. An account listed as `listener` reads tokens
+  back and decides nothing, which is the whole of what that name carries.
 - Behind a reverse proxy, set `BROKER_TRUSTED_PROXY_HEADER` so the machine-login, token-endpoint
   and secret-reread rate limiters see each caller's address rather than the proxy's. The token
   endpoint (`POST /v1/oauth/token`) has its own per-address bucket in each process, a burst of 60

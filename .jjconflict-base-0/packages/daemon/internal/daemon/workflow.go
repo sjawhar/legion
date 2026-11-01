@@ -1,0 +1,1129 @@
+package daemon
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"maps"
+	"slices"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+	"golang.org/x/sync/errgroup"
+
+	"github.com/sjawhar/legion/daemon/internal/admit"
+	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/blockers"
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/credential"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/natsauth"
+	"github.com/sjawhar/legion/daemon/internal/notify"
+	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
+)
+
+// workflowRuntime is the daemon-owned integration surface around the pure transition engine.
+// It is absent for Stage 2 configurations, whose unchanged supervision proof deliberately has no
+// Dispatch, Apps, or Envoy stream configured.
+type workflowRuntime struct {
+	pool      *pgxpool.Pool
+	records   record.Store
+	engine    *workflow.Engine
+	admission *admit.Admission
+	handlers  []intake.Handler
+	dispatch  dispatch.Client
+	tokens    appauth.Tokens
+	// forget drops the token source's cached leases for an App and owner, a token GitHub refused
+	// (tokenRefused).
+	forget          appauth.Forgetter
+	grants          *credential.Grants
+	projectID       string
+	dispatchProject string
+	stateDir        string
+	log             *slog.Logger
+	conn            *nats.Conn
+	consumers       *intake.Consumers
+	outbox          *outbox
+	// outboxWake is the outbox as the records' wake reaches it (wakeOutbox): the records are built
+	// at open, before the outbox exists, and the facts the boot applies before attach write rows
+	// through them, so the wake forwards to whatever attach has stored, and to nothing before
+	// then — the outbox's boot sweep finds every row written before it ran.
+	outboxWake atomic.Pointer[outbox]
+	// bootID disambiguates this boot's synthetic Dispatch consumer position facts from another
+	// boot's, or another project's daemon: processed_events is keyed only on (source, event_id),
+	// shared by every project's daemon in the database, and a stream recreated by a later boot
+	// would otherwise repeat the same (ack floor, idle) pairs and have its own releases swallowed
+	// as duplicates of the previous boot's.
+	bootID string
+	// caughtUp names each root (key and generation) the boot's catch-up finished, so a retry of the
+	// catch-up resumes after it rather than reading it again (catchUpAwaiting), and the reconcile's
+	// retry does not hold it again (holdForCatchUp). The boot alone writes it, from its one
+	// readiness goroutine.
+	caughtUp map[string]struct{}
+	// catchUpRootTimeout bounds the boot's catch-up of one root; zero means bootTimeout. A test
+	// shortens it.
+	catchUpRootTimeout time.Duration
+	// catchUpRetryDelay is the wait between two reads of one root Dispatch refused with an error it
+	// may stop giving; zero means catchUpRetryDelay's default. A test shortens it.
+	catchUpRetryDelay time.Duration
+	// holdPollInterval is pollHoldRelease's ticker period; zero means the production default. A
+	// test shortens it to bound how long a release takes to observe.
+	holdPollInterval time.Duration
+	// controllerWake is tickController's period (`controller_wake_interval_seconds`); zero, in a
+	// test that builds the runtime by hand, means the configuration's default hour.
+	controllerWake time.Duration
+	// controllerFirstWake replaces firstControllerTick in a test; zero is the production delay.
+	controllerFirstWake time.Duration
+	// holdWarnAfter and holdWarnEvery bound the watchdog log a hold that never releases gets: zero
+	// means the production defaults. A test shortens both to bound how long the warning takes to
+	// observe.
+	holdWarnAfter, holdWarnEvery time.Duration
+	// reconnectPollInterval and reconnectWarnEvery bound reconnectWatchdog's ticker and how often
+	// it logs while NATS has not reconnected: zero means the production defaults. A test
+	// shortens both to bound how long the warning takes to observe.
+	reconnectPollInterval, reconnectWarnEvery time.Duration
+	// githubAPI is the GitHub REST root the workflow calls: watchRequiredChecks reads under it, and
+	// the outbox's issue_branch rows create branches under it. Empty, in production, is
+	// https://api.github.com, and a test points it at a stand-in.
+	githubAPI string
+	// defaultBranches is each repository as GitHub names it and its default branch, read under
+	// githubAPI and kept defaultBranchTTL: what an issue's record takes its repository and default
+	// branch from when it is first recorded (ResolveRepository), and what the mapping serves each
+	// repository as (nameAccepted).
+	defaultBranches *defaultBranches
+	// repositories is the project's repository mapping as the daemon serves it (loadMapping at
+	// boot, refreshMapping on a mapping change); installs answers each App's installation on a
+	// mapped repository; mappingMu serializes the mapping's re-reads; mappingChanged carries a
+	// request for a read to refreshOnMappingChange, one waiting at most. mappingRequested counts
+	// the reads asked for (requestMappingRead) and mappingApplied is the last request a finished
+	// read covers; awaiting is each held admission event's request (awaitMappingRead), by issue key
+	// and then the sequence it was delivered at, under awaitingMu. recovering is each repository,
+	// lowercased, a read of the mapping stopped leaving out for a failed installation read whose
+	// issues are still to recover from Dispatch's listing (markRecovered, recoverRepositories),
+	// under recoveringMu. silenced is, by the same repository, each issue whose apply said nothing
+	// because the repository was unread (noteUnread), which the repository's recovery takes into its
+	// scope whatever the issue resolves to by then; releaseWaits is, by repository, each child a
+	// release_children left unrecorded on it (awaitRecovery), whose tree's architect the recovery
+	// tells of each it did not record; recoveryHeldSince is when a recovery's listing was first
+	// found held with waits to tell (zero for none), so a hold past recoveryHoldBound tells them.
+	// recheckAfter is refreshOnMappingChange's wait before a read of its own, time.After when nil;
+	// a test sees each wait through it.
+	repositories      *repositories
+	installs          appauth.Installations
+	mappingMu         sync.Mutex
+	mappingChanged    chan struct{}
+	mappingRequested  atomic.Uint64
+	mappingApplied    atomic.Uint64
+	awaitingMu        sync.Mutex
+	awaiting          map[string]map[int64]uint64
+	recoveringMu      sync.Mutex
+	recovering        map[string]bool
+	silenced          map[string]map[string]bool
+	releaseWaits      map[string]map[string]releaseWait
+	recoveryHeldSince time.Time
+	recheckAfter      func(time.Duration) <-chan time.Time
+	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
+	// review it submits decides a round by that login and the reviewer's recorded session
+	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.
+	reviewAppLogin string
+	// reviewAppID is the review App's id as the configuration names it (github_apps.review.app_id,
+	// the id GitHub's GET /app answers for it): a check run named tester or architect counts as a
+	// Legion verdict only when that App created it, as Envoy's listener counts it (readSettlement).
+	reviewAppID string
+	// build is the daemon's own build (Build): what the boot fact carries as the revision it
+	// compares the open production checks against, and the guard on whether Dispatch's build is
+	// read and compared too.
+	build Build
+	// permissions holds, by repository and login, until when reviewerCanWrite's read of GitHub
+	// stands as no write access; permissionTTL is how long one stands, zero, in production, being
+	// reviewPermissionTTL, and a test shortens it. limitedUntil is when GitHub's last rate limit
+	// stops asking to be left alone: while it stands, no read is made.
+	permissionsMu sync.Mutex
+	permissions   map[permissionKey]time.Time
+	permissionTTL time.Duration
+	limitedUntil  time.Time
+	// refusedReviews is every review, by GitHub's review id, whose author the pass's read of a pull
+	// request's reviews found the workflow does not let decide (reviewToApply), so this process
+	// judges each such review once, as a webhook's review is judged once when it is delivered: an
+	// account given write access later never turns a review the read refused into a decision. It is
+	// held in memory only, so a restart's first pass judges again with the permission GitHub gives
+	// then. Only the pass touches it.
+	refusedReviews map[int64]bool
+	// uncarried is every comparison of an approved head with a recorded head, by repository, pull
+	// request and the two heads, that GitHub answered and that does not carry the approval
+	// (readApprovalCarry), so the pass does not ask again: the compare of two fixed commits never
+	// changes its answer. It is held in memory only; a restart's first pass asks again. Only the
+	// pass touches it.
+	uncarried map[string]bool
+	// failed carries the first supervision terminal fact that could not be applied. serve stops
+	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
+	// the fact the failed callback lost.
+	failed chan error
+	// readied is the architects claimReady recorded whose waiting notices releaseReadied has not
+	// released yet; readyWake, holding at most one wake, tells it there are some.
+	readyMu   sync.Mutex
+	readied   map[claim.Token]bool
+	readyWake chan struct{}
+}
+
+// readyReleaseTimeout bounds one release of ready architects' waiting notices
+// (outbox.releaseWaiting): a read of a project's waiting notices and their trees, then one update,
+// each well under a second. A release that runs this long holds a database that stopped answering;
+// it is logged, and the notices it would have released still go on their schedule.
+const readyReleaseTimeout = 30 * time.Second
+
+// appMintAttempt bounds one attempt at the boot's App tokens, both Apps' mints: installation
+// discovery, the exchange and the bot identity lookups each answer in well under a second, so an
+// attempt that runs this long holds a request GitHub never answered.
+var appMintAttempt = 15 * time.Second
+
+// appMintRetry is the wait between attempts that failed transiently: 5 s doubling to 30 s, five
+// attempts. At worst the boot waits 2 min 20 s (five 15 s attempts and 65 s between them) before it
+// refuses, naming the last failure. The API listens only after the mint, so /healthz is refused
+// meanwhile; the rest of a boot takes a second or two, which leaves a boot that passes on the last
+// attempt inside the 180 s Stage 3 gives a daemon to answer /healthz.
+var appMintRetry = bootprobe.Retry{Initial: 5 * time.Second, Max: 30 * time.Second, Attempts: 5}
+
+// appTransient is a failure GitHub reports as its own trouble (appauth.TransientError).
+func appTransient(err error) bool {
+	var transient *appauth.TransientError
+	return errors.As(err, &transient)
+}
+
+// appLoginsAtBoot reads each App's bot login under its own JWT (appauth.Logins), which needs no
+// installation, so a daemon serving no repository yet still knows the review App's login, as one
+// attempt run again after a failure GitHub reports as its own trouble (appauth.TransientError); any
+// other failure is refused at once. It returns the review App's login: the engine judges a push by
+// its pusher against it, so one App configured for both roles would make every implementer push the
+// review App's and count no fix attempt, and is refused, as is a review App that names no login.
+func appLoginsAtBoot(ctx context.Context, apps appauth.Logins, log *slog.Logger) (string, error) {
+	logins := map[appauth.AppRole]string{}
+	err := bootprobe.Run(ctx, "GitHub App logins read", appMintRetry, log, readinessAttempt(func(ctx context.Context) error {
+		for _, role := range appauth.Roles {
+			login, err := apps.AppLogin(ctx, role)
+			if err != nil {
+				return err
+			}
+			logins[role] = login
+		}
+		return nil
+	}, appMintAttempt, appTransient))
+	if err != nil {
+		return "", err
+	}
+	if logins[appauth.Review] == "" || logins[appauth.Review] == logins[appauth.Implement] {
+		return "", fmt.Errorf("the review App names bot login %q and the implement App %q; the workflow needs two different Apps", logins[appauth.Review], logins[appauth.Implement])
+	}
+	return logins[appauth.Review], nil
+}
+
+// mintAtBoot mints the implement and then the review App token for owner, as one attempt run again
+// after a failure GitHub reports as its own trouble (appauth.TransientError); any other failure is
+// refused at once. The token manager keeps a lease it minted, so an attempt after the implement
+// token passed asks GitHub only for the review token.
+func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *slog.Logger) error {
+	return bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, readinessAttempt(func(ctx context.Context) error {
+		for _, role := range appauth.Roles {
+			if _, err := tokens.Token(ctx, role, owner); err != nil {
+				return fmt.Errorf("mint %s GitHub App token at boot: %w", role, err)
+			}
+		}
+		return nil
+	}, appMintAttempt, appTransient))
+}
+
+// openWorkflow opens the workflow in the order a refusal names its cause: the configuration, the
+// Dispatch bearer prepare read, the project's repository mapping from Dispatch (each repository
+// checked for both GitHub Apps) into repos, the mapping every role's gh bundle reads its owners
+// from, the Apps' logins, the App tokens minted for every served owner, then the fill of any record
+// written before the record carried its repository. build is the daemon's own build (Build), which
+// the engine and the boot fact compare against the open production checks.
+func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string, build Build) (*workflowRuntime, error) {
+	if cfg.DispatchURL == "" {
+		return nil, nil
+	}
+	log.Info("legion workflow boot stage", "stage", "config")
+	tokens := suppliedTokens
+	if tokens == nil {
+		tokens = appauth.New(cfg.GitHubApps, appauth.Options{})
+	}
+	installs, ok := tokens.(appauth.Installations)
+	if !ok {
+		return nil, fmt.Errorf("the GitHub App token source answers no App installation, which the repository mapping is checked against")
+	}
+	logins, ok := tokens.(appauth.Logins)
+	if !ok {
+		return nil, fmt.Errorf("the GitHub App token source answers no App login, which the workflow judges pushes and reviews by")
+	}
+	forget, ok := tokens.(appauth.Forgetter)
+	if !ok {
+		return nil, fmt.Errorf("the GitHub App token source cannot drop a token GitHub refused, which a review's reads mint again")
+	}
+	w := &workflowRuntime{
+		tokens: tokens, forget: forget, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: repos, build: build,
+		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
+		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1),
+		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI, reviewAppID: cfg.GitHubApps.Review.AppID,
+		defaultBranches: newDefaultBranches(tokens, githubAPI, defaultBranchTTL, time.Now),
+	}
+	log.Info("legion workflow boot stage", "stage", "dispatch")
+	if err := w.loadMapping(ctx); err != nil {
+		return nil, err
+	}
+	reviewAppLogin, err := appLoginsAtBoot(ctx, logins, log)
+	if err != nil {
+		return nil, err
+	}
+	for _, owner := range w.repositories.Owners() {
+		if err := mintAtBoot(ctx, tokens, owner, log); err != nil {
+			return nil, err
+		}
+	}
+	log.Info("legion workflow boot stage", "stage", "appauth")
+	if err := w.nameMapping(ctx); err != nil {
+		return nil, err
+	}
+	// The database is shared by every project's daemon: the workflow reads this project's issues.
+	// The rows the workflow writes through these records wake the outbox's lanes (projectRecords),
+	// through the runtime, since the outbox itself is built later (attach).
+	w.records = projectRecords{Store: record.NewStore(), project: cfg.Project, wake: w.wakeOutbox, log: log}
+	engineCfg := engineConfig(cfg, reviewAppLogin, build)
+	engineCfg.Repositories, engineCfg.NoteUnread = w, w.noteUnread
+	w.engine = workflow.New(w.records, engineCfg, log)
+	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
+	// The mirror runs before both deciders, and that order is load-bearing. The engine decides
+	// whether to start a child and admission whether to admit a root inside this same
+	// transaction, from the mirror's rows, so the row an event carries must already be written
+	// when they look. Neither could write it itself: the engine returns early on an event whose
+	// sequence or status it has already seen (Engine.dispatchIssue), which is exactly the
+	// blocked-by-only edit this mirror exists for, and admission runs second in any case.
+	w.handlers, w.reviewAppLogin = []intake.Handler{blockers.NewMirror(w.records, cfg.Project), w.engine, w.admission}, reviewAppLogin
+	w.pool = st.Pool()
+	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, cfg.StateDir, w.defaultBranches, log); err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+// wakeOutbox is the records' wake (projectRecords.wake): it reaches the outbox attach stored, and
+// nothing before attach.
+func (w *workflowRuntime) wakeOutbox(issue string, kind record.OutboxKind) {
+	if r := w.outboxWake.Load(); r != nil {
+		r.wake(issue, kind)
+	}
+}
+
+// engineConfig is the workflow engine's configuration from the daemon's, the review App's bot
+// login from its boot lease and the daemon's own build: its own project's merge_queue_role is the
+// role the merger's READY is published to, its own project's deploys are the workflows whose runs
+// wake its production checks, and the repository the binary is built from is the one whose open
+// production checks a build is compared against — only for a release build, one with a revision,
+// since nothing else names a commit a merge could be in; a build with none compares nothing,
+// Dispatch's announcement that every server process serves a build (server.started) included.
+func engineConfig(cfg config.Config, reviewAppLogin string, build Build) workflow.Config {
+	project := cfg.Projects[cfg.Project]
+	engine := workflow.Config{
+		Project: cfg.Project, DesignGate: cfg.Gates.Design, ReviewRoundCap: cfg.ReviewRoundCap,
+		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger, ProductionCheckBound: cfg.ProductionCheckBound,
+		ReviewAppLogin: reviewAppLogin, MergeQueueRole: project.MergeQueueRole, Deploys: project.Deploys,
+	}
+	if build.Revision != "" {
+		engine.BuiltFrom = build.Repository
+	}
+	return engine
+}
+
+// connect opens Envoy's JetStream and this project's durable consumers, so a missing
+// notification stream refuses boot rather than leaving a daemon that reads no events. Boot runs it
+// before reconcile, whose Dispatch listing covers only what precedes a consumer created now. It
+// connects as nc, the user readBoot chose (natsConnection), and logs what the server reports about
+// the connection: every permission it refuses at error, every disconnect at warn and every
+// reconnect at info (natsauth.LogEvents), under natsauth.ReconnectForever so a reconnect never
+// gives up: a NATS outage mid-run never closes the connection for good. A failed attempt here
+// closes whatever it opened and clears it, so a later call — this one retried after an unreachable
+// NATS — starts clean rather than leaking the connection this one could not finish setting up.
+// Close comes before natsauth.WithLastError on both failure paths, never after: WithLastError only
+// looks once the connection reports itself closed, and Close does not clear what the connection
+// last recorded.
+func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc natsConnection) error {
+	conn, err := natsauth.Connect(cfg.NatsURLs, nc.seed, natsauth.LogEvents(w.log), natsauth.ReconnectForever())
+	if err != nil {
+		return fmt.Errorf("connect Envoy NATS: %w", err)
+	}
+	w.conn = conn
+	js, err := jetstream.New(conn)
+	if err != nil {
+		conn.Close()
+		w.conn = nil
+		return fmt.Errorf("open Envoy JetStream: %w", natsauth.WithLastError(err, conn))
+	}
+	w.log.Info("legion workflow boot stage", "stage", "intake")
+	heard, err := w.heardAtBoot(ctx)
+	if err != nil {
+		conn.Close()
+		w.conn = nil
+		return err
+	}
+	w.consumers, err = intake.OpenConsumers(ctx, js, w.pool, intake.ConsumerSpec{
+		Project: cfg.Project, Repositories: heard, Deploys: cfg.Projects[cfg.Project].Deploys, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
+		ReviewPermission: w.reviewerCanWrite, ReviewBody: w.reviewBody,
+		RepositoryMapping: w.mappingChange, PrepareRepository: w.prepareRepository,
+	})
+	if err != nil {
+		conn.Close()
+		w.conn = nil
+		return natsauth.WithLastError(err, conn)
+	}
+	w.bootID = fmt.Sprintf("%d", time.Now().UnixNano())
+	return nil
+}
+
+// phaseHolds answers supervise's Deps.PhaseHolds from the issue record: a task carries the phase
+// and the run (generation) it was queued for, so once the issue is in another phase, or on another
+// run, a delivery still queued for that one is finished work and is dropped rather than sent. The
+// phase is compared, not the role that works it: one role runs several phases — the implementer
+// runs implementing, retro and the production check — and a task written for the first is not the
+// work of the third. The run is compared because a re-admission can restart the issue in the phase
+// it stood in: an operator suspension keeps a claim's queued task (supervise's settle), so without
+// it the operator's resume would send the run that is over's task into the new run, ahead of the
+// new run's own. A task of no run (generation 0) is held to its phase alone.
+//
+// A delivery of no phase holds here. Only the workflow names one, so an operator's delivery made
+// by hand through the API is not dropped for the phase its issue is in: the operator asked for
+// it, was answered 200, and dropping it would make the work silently not happen. An architect's
+// task belongs to no phase and names none for the same reason. This predicate is not the only
+// way a delivery ends: a suspension retires an unconfirmed one that names a phase, the phase it
+// is ending (supervise's settle).
+//
+// Nothing else on the delivery would answer this: the id is rotated by a prompt retry, and the
+// task text is the workflow's prose. The phase is typed data, persisted with the delivery, and no
+// path rewrites it.
+//
+// A claim on an issue the daemon does not record holds too. The workflow never deletes an issue,
+// so there is no record only for a claim the workflow never made — the operator's own spawn, whose
+// issue key need not be an issue key at all.
+func (w *workflowRuntime) phaseHolds(ctx context.Context, key string, queuedFor phase.Phase, generation uint64) (bool, error) {
+	issue, err := w.recordedIssue(ctx, key)
+	if err != nil {
+		return false, fmt.Errorf("read %s for the phase of its task: %w", key, err)
+	}
+	if issue == nil {
+		return true, nil
+	}
+	return issue.Phase == queuedFor && (generation == 0 || generation == issue.Generation), nil
+}
+
+// treeClosable answers supervise's Deps.TreeClosable: a tree a workflow issue backs closes when
+// its linger expires, never on an operator's close of its root claim. The machine asks it where
+// the close is decided rather than a round trip before it, for the operator's own close and for a
+// refused stop of the tree's root, whose refusal then names that close. The workflow's linger
+// close is never asked: it holds that same issue record, so asking would refuse exactly the
+// closes the workflow is entitled to make. It is not a lock on what it reads: admission and the
+// engine commit issue records in their own transactions and take no machine lock, so one can
+// still land between this answer and the retire.
+func (w *workflowRuntime) treeClosable(ctx context.Context, c supervise.Claim) (bool, error) {
+	issue, err := w.recordedIssue(ctx, c.Tree)
+	if err != nil {
+		return false, fmt.Errorf("read whether a workflow issue backs tree %s: %w", c.Tree, err)
+	}
+	return issue == nil, nil
+}
+
+// recordedIssue reads one issue in a transaction of its own, which is what both supervisor
+// predicates need: the machine asks them while holding its own lock, and neither answer may take
+// a lock of the daemon's.
+func (w *workflowRuntime) recordedIssue(ctx context.Context, key string) (*record.Issue, error) {
+	var issue *record.Issue
+	err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
+		var err error
+		issue, err = w.records.Issue(ctx, tx, key)
+		return err
+	})
+	return issue, err
+}
+
+// reconcile takes Dispatch's bounded boot read to admission. Only admission acts on a snapshot:
+// a move a human made while the daemon was down carries its own event, which the durable stream
+// consumer still holds and delivers with the actor that made it, so nothing here re-derives one.
+// The listing is read first, then the notification stream's own current position (target), then
+// the Dispatch consumer's own: a message published between the listing and target would land in
+// the listing but go uncounted by target, and reading the consumer's position last catches it up
+// as far as this call can before deciding what a record behind target must still wait for.
+//
+// The listing reads every status, not only the workflow's own (todo through retro): Dispatch
+// already returns its complete project list in one call (HTTPClient.ListIssues filters it
+// client-side, at no extra request cost), and a key currently out of that window — moved to
+// backlog, or never past triage — while the daemon was down still needs to be held exactly like
+// one still in it, so a replayed event that predates the move it fell out on cannot be admitted
+// before the move's own event ever arrives.
+func (w *workflowRuntime) reconcile(ctx context.Context) error {
+	issues, err := w.dispatch.ListIssues(ctx, w.dispatchProject, nil)
+	if err != nil {
+		return fmt.Errorf("list Dispatch issues for admission: %w", err)
+	}
+	return w.reconcileListing(ctx, issues, nil, true)
+}
+
+// reconcileListing applies issues, a Dispatch listing of the project, as reconcile says: the
+// boot's whole listing (keep nil, boot set, which also holds the roots the boot's catch-up reads
+// out of admission's decision), or a recovery's (recoverRepositories), scoped to the summaries
+// keep keeps, judged against every record, while every summary of the listing is still the walk
+// each chain is read up.
+func (w *workflowRuntime) reconcileListing(ctx context.Context, issues []dispatch.IssueSummary, keep func(records map[string]*record.Issue, summary dispatch.IssueSummary) bool, boot bool) error {
+	// The transaction performs no I/O: what admission reads of a todo issue's repository, and the
+	// Dispatch chain above its parent, are read now, up one walk over the whole listing
+	// (listingAncestry); each listed issue's fact carries that chain to admission.
+	var records map[string]*record.Issue
+	var walk ancestry
+	var err error
+	if keep != nil {
+		if records, walk, err = w.listingAncestry(ctx, issues); err != nil {
+			return err
+		}
+	}
+	scope := make([]dispatch.IssueSummary, 0, len(issues))
+	listed := make([]intake.DispatchIssue, 0, len(issues))
+	for _, summary := range issues {
+		if keep != nil && !keep(records, summary) {
+			continue
+		}
+		fact := intake.ListedIssue(summary)
+		if summary.Status == "todo" {
+			if walk == nil {
+				if records, walk, err = w.listingAncestry(ctx, issues); err != nil {
+					return err
+				}
+			}
+			prepared, err := w.prepareListed(ctx, records, walk, fact)
+			if err != nil {
+				return fmt.Errorf("prepare the repository of %s for admission: %w", summary.Key, err)
+			}
+			fact.Ancestry = prepared.Ancestry
+		}
+		scope = append(scope, summary)
+		listed = append(listed, fact)
+	}
+	target, err := w.consumers.DispatchTarget(ctx)
+	if err != nil {
+		return fmt.Errorf("read notification stream target: %w", err)
+	}
+	position, err := w.consumers.DispatchPosition(ctx)
+	if err != nil {
+		return fmt.Errorf("read Dispatch consumer position: %w", err)
+	}
+	// The reconcile is its own transaction, so it owns the commit hooks its admission and workflow
+	// changes register (intake.OnCommit), as ApplyFact does for a fact, and it records issues, so it
+	// takes the lock every fact applies under: a mapping refresh never unsubscribes a repository it
+	// is recording an issue on.
+	scoped, committed := intake.WithCommitHooks(ctx)
+	if err := pgx.BeginFunc(scoped, w.pool, func(tx pgx.Tx) error {
+		if err := intake.SerializeFacts(scoped, tx); err != nil {
+			return fmt.Errorf("serialize the reconcile with every fact: %w", err)
+		}
+		// The mirror takes every summary, before admission decides anything from it — including a
+		// summary admission defers to the Dispatch consumer: a deferred key's listed status is
+		// still the freshest thing the daemon holds about it, and the sequence fence keeps an
+		// event already applied from being written back over.
+		if err := blockers.Reconcile(scoped, tx, w.records, w.dispatchProject, scope); err != nil {
+			return err
+		}
+		// Every root the boot's catch-up will read is held out of the decision whether it waits on
+		// a person before admission's pass here, until its catch-up has applied what Dispatch
+		// recorded while the daemon was down (catchUpAwaiting).
+		if boot {
+			if err := w.holdForCatchUp(scoped, tx); err != nil {
+				return err
+			}
+		}
+		return w.admission.Reconcile(scoped, tx, listed, target, position)
+	}); err != nil {
+		return fmt.Errorf("reconcile admission: %w", err)
+	}
+	committed()
+	return nil
+}
+
+// identity is the bot a role's commits are authored by: its App's, from the lease the token
+// source mints for owner, the owner of the repository the role works (the identity is fetched once
+// per App and cached).
+func (w *workflowRuntime) identity(ctx context.Context, role claim.Role, owner string) (runtime.GitIdentity, error) {
+	lease, err := w.tokens.Token(ctx, appauth.AppRoleFor(role), owner)
+	if err != nil {
+		return runtime.GitIdentity{}, fmt.Errorf("mint the %s App lease for %s on %s: %w", appauth.AppRoleFor(role), role, owner, err)
+	}
+	return lease.Identity, nil
+}
+
+// ensureWorkspace provisions an issue's workspace on the daemon's host when a launch finds it
+// missing or not checked out (outbox.ensureWorkspace), through the outbox, which orders every
+// provision of the shared clones (provisionLocks). The outbox exists from attach on, and attach
+// runs before supervision restores or launches any claim.
+func (w *workflowRuntime) ensureWorkspace(ctx context.Context, issue string, repo ghrepo.Repository, defaultBranch string) error {
+	if w.outbox == nil {
+		return fmt.Errorf("provision the workspace of %s: the workflow's outbox is not attached yet", issue)
+	}
+	return w.outbox.ensureWorkspace(ctx, issue, repo, defaultBranch)
+}
+
+func (w *workflowRuntime) attach(supervision *supervision) {
+	w.log.Info("legion workflow boot stage", "stage", "outbox")
+	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
+		supervision.supervisor.store, w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
+		supervision.plan.tools, w.log)
+	w.outboxWake.Store(w.outbox)
+	supervision.supervisor.OnTerminal(w.terminal)
+}
+
+// replayTerminal applies the ready or failure fact of every stored claim in either state that no
+// daemon applied: one whose live apply (terminal) failed, or whose fact a daemon's stop cut off
+// after the claim's state was written. Nearly all were applied when they happened, and ApplyFact
+// would take the fact lock only to find so, so the replay reads which are applied in one query
+// (intake.Applied) and applies only the rest, one at a time as every fact applies.
+//
+// The read and each fact get budget of their own, on ctx, the daemon's lifetime, rather than one
+// budget shared by the whole replay. A fact may wait its turn on the lock behind a live one (a
+// restored claim's failure, a daemon of another project on the same database), so a replay of
+// hundreds of facts takes as long as they take, and the boot never exits on their count; a
+// Postgres that never answers still ends the boot within one budget, and the daemon's stop ends
+// the replay. supervision.start runs it before any hello is admitted.
+func (w *workflowRuntime) replayTerminal(ctx context.Context, claims []supervise.Claim, budget time.Duration) error {
+	var terminal []supervise.Claim
+	var ids []string
+	for _, c := range claims {
+		if (c.State != supervise.StateReady && c.State != supervise.StateFailed) || c.Role == claim.RoleController {
+			continue
+		}
+		terminal = append(terminal, c)
+		ids = append(ids, terminalEventID(c, c.State))
+	}
+	read, cancel := context.WithTimeout(ctx, budget)
+	applied, err := intake.Applied(read, w.pool, terminalSource, ids)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("replay the stored claims' terminal facts: %w", err)
+	}
+	var unapplied []supervise.Claim
+	for i, c := range terminal {
+		if !applied[ids[i]] {
+			unapplied = append(unapplied, c)
+		}
+	}
+	if len(unapplied) > 0 {
+		w.log.Info("legion daemon is replaying the terminal facts no daemon applied", "count", len(unapplied), "terminalClaims", len(terminal))
+	}
+	for _, c := range unapplied {
+		fact, cancel := context.WithTimeout(ctx, budget)
+		err := w.applyTerminal(fact, c, c.State)
+		cancel()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Each retry of the boot fact waits twice the last, from bootRetryFirst to at most bootRetryMax.
+const (
+	bootRetryFirst = time.Second
+	bootRetryMax   = 30 * time.Second
+)
+
+// runBooted applies this boot's fact (booted) beside the serving API, retrying every failure — a
+// timeout included — on a backoff, each logged at ERROR, until it lands or the daemon stops. The
+// fact is keyed by the boot, so a retry after a commit whose answer was lost is a duplicate, not a
+// second census. Only the daemon's stop leaves it unapplied, and the next boot applies its own.
+func (w *workflowRuntime) runBooted(ctx context.Context, bootID int64) {
+	retryUntilApplied(ctx, w.log, bootRetryFirst, bootRetryMax, func(ctx context.Context) error { return w.booted(ctx, bootID) })
+}
+
+// retryUntilApplied runs apply until it succeeds or ctx ends, waiting first, then twice as long up
+// to most, between attempts, and logging each failure at ERROR. A failure once ctx has ended is the
+// stop, and logs nothing.
+func retryUntilApplied(ctx context.Context, log *slog.Logger, first, most time.Duration, apply func(context.Context) error) {
+	wait := first
+	for attempt := 1; ; attempt++ {
+		err := apply(ctx)
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		log.Error("legion daemon could not apply its boot; retrying", "attempt", attempt, "retryIn", wait, "error", err)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		wait = min(2*wait, most)
+	}
+}
+
+// booted tells the workflow of this boot (intake.DaemonBooted), once every stored claim has its
+// machine and the terminal facts are replayed: it starts, through the outbox's start, every claim
+// that owns its issue's current phase and that the daemon or its own exit suspended, and it
+// compares two builds against the open production checks of the repository the daemon is built
+// from: this binary's own revision, and the build Dispatch's server fleet serves
+// (dispatchBuild), read only when the daemon has a revision to compare — a build with none
+// compares nothing — and a Dispatch client to ask.
+func (w *workflowRuntime) booted(ctx context.Context, bootID int64) error {
+	fact := intake.DaemonBooted{Boot: bootID, Revision: w.build.Revision}
+	if w.build.Revision != "" && w.dispatch != nil {
+		fact.DispatchBuild = w.dispatchBuild(ctx)
+	}
+	if _, err := intake.ApplyFact(ctx, w.pool, "daemon", fmt.Sprintf("boot:%s:%d", w.dispatchProject, bootID), fact, w.handlers...); err != nil {
+		return fmt.Errorf("apply the boot of %s: %w", w.dispatchProject, err)
+	}
+	return nil
+}
+
+// dispatchBuild is the build every Dispatch server process serves, as Dispatch last announced it
+// (dispatch.Client.BuildCommit), "" when it reports none or could not be asked: the boot never
+// fails on it, since a Dispatch unreachable, or answering 503 while its database is down, is
+// logged and compared with nothing, and Dispatch's announcement on the bus reports the same build
+// (intake.ServerStarted).
+func (w *workflowRuntime) dispatchBuild(ctx context.Context) string {
+	commit, err := w.dispatch.BuildCommit(ctx)
+	if err != nil {
+		w.log.Warn("legion daemon could not read Dispatch's build commit; the boot compares none", "error", err)
+		return ""
+	}
+	return commit
+}
+
+func (w *workflowRuntime) terminal(c supervise.Claim, state supervise.ClaimState) {
+	if err := w.applyTerminal(context.Background(), c, state); err != nil {
+		w.log.Error("apply supervision terminal fact", "claim", c.Token, "state", state, "error", err)
+		select {
+		case w.failed <- err:
+		default:
+		}
+	}
+}
+
+// applyTerminal applies a claim's ready or failure as a workflow fact. The daemon's own controller
+// (`controller: daemon`) holds a claim on no issue, so neither is a workflow fact for it: its
+// relaunch is the controller keeper's (controllerKeeper).
+func (w *workflowRuntime) applyTerminal(ctx context.Context, c supervise.Claim, state supervise.ClaimState) error {
+	if c.Role == claim.RoleController {
+		return nil
+	}
+	var fact intake.Fact
+	switch state {
+	case supervise.StateReady:
+		fact = intake.ClaimReady{Issue: c.Issue, Role: c.Role, Launch: c.Generation}
+	case supervise.StateFailed:
+		fact = intake.ClaimFailed{Issue: c.Issue, Role: c.Role, Reason: c.Failure}
+	default:
+		return fmt.Errorf("claim %s has non-terminal workflow state %s", c.Token, state)
+	}
+	_, err := intake.ApplyFact(ctx, w.pool, terminalSource, terminalEventID(c, state), fact, w.handlers...)
+	if err != nil {
+		return fmt.Errorf("apply %s for %s: %w", state, c.Token, err)
+	}
+	return nil
+}
+
+// terminalSource is the source a claim's ready or failure fact is applied under, and
+// terminalEventID its event: one per launch (the claim's generation) and state, so the live apply
+// and every boot's replay of the same terminal state are one fact.
+const terminalSource = "supervise"
+
+func terminalEventID(c supervise.Claim, state supervise.ClaimState) string {
+	return fmt.Sprintf("supervise:%s:%d:%s", c.Token, c.Generation, state)
+}
+
+// run drains intake and the outbox until ctx ends. Intake ending, or a terminal fact that could not
+// be applied, returns its error so serve stops the daemon: a daemon that answers its API while it
+// reads no events or has lost a held or worker-died fact looks healthy and does nothing.
+func (w *workflowRuntime) run(ctx context.Context) error {
+	group, running := errgroup.WithContext(ctx)
+	group.Go(func() error {
+		if err := w.consumers.Run(running, w.handlers...); err != nil {
+			// A terminal close's cause is the connection's alone (natsauth.WithLastError).
+			return fmt.Errorf("workflow intake stopped: %w", natsauth.WithLastError(err, w.conn))
+		}
+		return nil
+	})
+	group.Go(func() error {
+		w.outbox.Run(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.pollHoldRelease(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.refreshOnMappingChange(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.reconnectWatchdog(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.tickController(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.watchRequiredChecks(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.releaseReadied(running)
+		return nil
+	})
+	group.Go(func() error {
+		// A notice the listener accepted but could not forward is queued again (outbox.rehold).
+		sub, err := subscribeNoticeExceptions(w.conn, func(data []byte) {
+			if err := w.outbox.rehold(running, data); err != nil {
+				w.log.Error("role-lane exception not re-held", "error", err)
+			}
+		})
+		if err != nil {
+			return err
+		}
+		<-running.Done()
+		return sub.Unsubscribe()
+	})
+	group.Go(func() error {
+		select {
+		case err := <-w.failed:
+			return fmt.Errorf("workflow supervision fact: %w", err)
+		case <-running.Done():
+			return nil
+		}
+	})
+	return group.Wait()
+}
+
+// defaultHoldPollInterval is pollHoldRelease's production ticker period.
+const defaultHoldPollInterval = 2 * time.Second
+
+// defaultHoldWarnAfter and defaultHoldWarnEvery bound the watchdog log a hold that has not
+// released gets: a Dispatch event whose transaction always fails (an unmet precondition, a
+// programming bug) pins the ack floor forever, since the consumer sets no MaxDeliver to ever give
+// up on it, and nothing else says why a labeled root is waiting.
+const (
+	defaultHoldWarnAfter = 2 * time.Minute
+	defaultHoldWarnEvery = 5 * time.Minute
+)
+
+// positionReader is pollHoldRelease's only dependency on the Dispatch consumer: reading its
+// current position. A test substitutes one that fails on demand to prove the poll logs and
+// retries rather than silently ending the hold.
+type positionReader interface {
+	DispatchPosition(ctx context.Context) (intake.DispatchConsumerPosition, error)
+}
+
+// pollHoldRelease is the boot-owned release: while
+// admission holds anything back, it re-reads the Dispatch consumer's own position on a ticker and
+// applies each changed reading as a synthetic fact, independent of any message delivery. A quiet
+// stream after its last backlog message delivers nothing further to trigger a release the old
+// per-delivery hook depended on, and Ack() does not wait for the server: a position read taken
+// immediately after a delivery's own ack can still see the previous one. This ticker is what
+// eventually observes the ack once JetStream has applied it, bounded by its own period, and what
+// closes a hold nothing will ever redeliver — the recreated-consumer and outbox-lag cases alike.
+// A failed read or a failed apply is logged and retried on the next tick — last only adopts a
+// position once ApplyFact for it has actually committed, so an unchanged reading after either
+// kind of failure is retried rather than skipped as already seen; the hold never ends on the
+// strength of an error.
+// The event id folds in the project and this boot (bootID): processed_events is one table
+// shared by every project's daemon, and a stream a later boot recreates would otherwise repeat an
+// earlier boot's (ack floor, idle) pairs and have its own release swallowed as a duplicate of one
+// that ran under the old boot. It folds in the hold too, admission's count of its holds and the
+// target the hold waits for: a repository's recovery can hold again in the same boot (the boot's
+// hold is not the only one), and its release can read the same (ack floor, idle) as an earlier
+// hold's, which would otherwise be applied as that earlier release's duplicate, or skipped as
+// the reading last applied, and the hold never released.
+func (w *workflowRuntime) pollHoldRelease(ctx context.Context) {
+	w.pollHoldReleaseWith(ctx, w.consumers)
+}
+
+func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positionReader) {
+	interval := w.holdPollInterval
+	if interval <= 0 {
+		interval = defaultHoldPollInterval
+	}
+	warnAfter, warnEvery := w.holdWarnAfter, w.holdWarnEvery
+	if warnAfter <= 0 {
+		warnAfter = defaultHoldWarnAfter
+	}
+	if warnEvery <= 0 {
+		warnEvery = defaultHoldWarnEvery
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var last intake.DispatchConsumerPosition
+	var lastHold uint64
+	haveLast := false
+	var heldSince, warnedAt time.Time
+	wasHeld := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if !w.admission.Held() {
+			haveLast, heldSince, warnedAt = false, time.Time{}, time.Time{}
+			if wasHeld {
+				// The hold just cleared: a record a held key's own recording put down between an
+				// earlier release's commit and its commit hook (which cleared pending) may still be
+				// sitting in the waiting line, held back by that same release's own promote, which
+				// ran before pending was actually cleared. One more pass, now that pending is
+				// provably empty, promotes it without waiting on an unrelated fact to notice. A
+				// fresh, never-reused event id (a closing pass never repeats a boot's own position
+				// reading) keeps ApplyFact from treating it as the duplicate of whatever position
+				// last released the hold. A failure is retried on the poll's own schedule, same as
+				// a failed position apply: wasHeld only clears once the pass actually succeeds.
+				if err := w.promoteAfterHoldClears(ctx); err != nil {
+					w.log.Warn("apply the post-release promote failed", "error", err)
+					continue
+				}
+			}
+			wasHeld = false
+			continue
+		}
+		wasHeld = true
+		if heldSince.IsZero() {
+			heldSince = time.Now()
+		}
+		position, err := reader.DispatchPosition(ctx)
+		if err != nil {
+			w.log.Error("read Dispatch consumer position for a held release", "error", err)
+			continue
+		}
+		// This never releases on the strength of the timer — only a Reached position does that,
+		// through the ApplyFact below — so a stuck hold stays stuck, but an operator now sees why:
+		// the target it is waiting for and its current ack floor. Not the stream sequence stuck
+		// behind that floor: the notification stream also carries GitHub subjects interleaved with
+		// Dispatch's, so ack_floor+1 can name a message that has nothing to do with this hold.
+		if waiting := time.Since(heldSince); waiting >= warnAfter && time.Since(warnedAt) >= warnEvery {
+			warnedAt = time.Now()
+			w.log.Warn("admission: a hold has not released", "waiting", waiting.Round(time.Second),
+				"target", w.admission.Target(), "ack_floor", position.AckFloorStream)
+		}
+		hold := w.admission.Holds()
+		if haveLast && position == last && hold == lastHold {
+			continue
+		}
+		eventID := fmt.Sprintf("dispatch-position:%s:%s:%d:%d:%d:%t", w.dispatchProject, w.bootID, hold, w.admission.Target(), position.AckFloorStream, position.Idle)
+		if _, err := intake.ApplyFact(ctx, w.pool, "dispatch", eventID, position, w.handlers...); err != nil {
+			w.log.Warn("apply Dispatch consumer position failed", "error", err)
+			continue
+		}
+		last, lastHold, haveLast = position, hold, true
+	}
+}
+
+// defaultReconnectPollInterval is reconnectWatchdog's ticker period.
+const defaultReconnectPollInterval = 10 * time.Second
+
+// defaultReconnectWarnEvery bounds how often reconnectWatchdog logs while NATS has not
+// reconnected. natsauth.ReconnectForever never gives up, and natsauth.LogEvents logs a
+// disconnect and a reconnect once each, so a non-auth failure that keeps repeating — a server
+// that accepts the TCP connection but never completes the protocol handshake, say — retries
+// silently behind that one "NATS connection lost" line, in RECONNECTING, with nothing further to
+// say so. A fatal server -ERR or a repeated authorization failure still closes the connection
+// and exits loud (natsauth.LogEvents' ClosedCB, workflow.connect's own failure path); this
+// watchdog covers only the case ReconnectForever otherwise leaves silent: forever retrying,
+// never closing, never reconnecting.
+const defaultReconnectWarnEvery = 3 * time.Minute
+
+// connStatus is reconnectWatchdog's only dependency on *nats.Conn: a test substitutes a fake that
+// reports disconnected, with a LastError, on demand.
+type connStatus interface {
+	IsConnected() bool
+	LastError() error
+}
+
+// reconnectWatchdog logs a warn once the downtime since conn last connected reaches
+// reconnectWarnEvery, and every reconnectWarnEvery after that while conn stays disconnected —
+// never on the first poll that merely finds it down, which would log a downtime near zero and
+// make this almost as noisy as nats.go's own reconnect wait. Each warn names the downtime so far
+// and conn's own LastError, usually empty during a plain refused dial (nats.go clears its own
+// last-seen error on every failed attempt) and naming the failure's own cause while a handshake
+// keeps failing (nats.go leaves that one in place across attempts), so an operator reading the
+// log sees that NATS has been down, for how long, and why when nats.go has anything to say,
+// instead of just the one disconnect line a reconnect that keeps failing never reaches a
+// reconnected or a closed line to follow.
+func (w *workflowRuntime) reconnectWatchdog(ctx context.Context) {
+	w.reconnectWatchdogWith(ctx, w.conn)
+}
+
+func (w *workflowRuntime) reconnectWatchdogWith(ctx context.Context, conn connStatus) {
+	interval := w.reconnectPollInterval
+	if interval <= 0 {
+		interval = defaultReconnectPollInterval
+	}
+	warnEvery := w.reconnectWarnEvery
+	if warnEvery <= 0 {
+		warnEvery = defaultReconnectWarnEvery
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var disconnectedSince, warnedAt time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if conn.IsConnected() {
+			disconnectedSince, warnedAt = time.Time{}, time.Time{}
+			continue
+		}
+		if disconnectedSince.IsZero() {
+			disconnectedSince = time.Now()
+		}
+		downtime := time.Since(disconnectedSince)
+		if downtime < warnEvery || (!warnedAt.IsZero() && time.Since(warnedAt) < warnEvery) {
+			continue
+		}
+		w.log.Warn("NATS has not reconnected", "downtime", downtime.Round(time.Second).String(), "error", conn.LastError())
+		warnedAt = time.Now()
+	}
+}
+
+// firstControllerTick is how soon after the runtime starts it applies its first ControllerTick:
+// a daemon restarted more often than the interval would otherwise never tick at all. A runtime's
+// controllerFirstWake, set only by a test, replaces it.
+const firstControllerTick = time.Minute
+
+// tickController applies a ControllerTick fact once shortly after the runtime starts
+// (firstControllerTick, or the interval when that is shorter) and then every controllerWake, so
+// admission wakes the controller even when no event arrives: the last tree finishing, a tree
+// waiting on a refused root claim, or a quiet day would otherwise leave the controller idle and the
+// daily report unposted until the next wake. Each tick's event id is its
+// own (the project, this boot, and the tick's time), since processed_events is shared by every
+// project's daemon. A failed apply is logged, and the next tick tries again.
+func (w *workflowRuntime) tickController(ctx context.Context) {
+	interval := w.controllerWake
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	delay := firstControllerTick
+	if w.controllerFirstWake > 0 {
+		delay = w.controllerFirstWake
+	}
+	first := time.NewTimer(min(delay, interval))
+	defer first.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case at := <-first.C:
+		w.applyControllerTick(ctx, at)
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case at := <-ticker.C:
+			w.applyControllerTick(ctx, at)
+		}
+	}
+}
+
+// promoteAfterHoldClears applies one synthetic DispatchConsumerPosition fact, its event id never
+// reused, once nothing is held: Admission.Apply routes any DispatchConsumerPosition straight to
+// release, which — with pending now provably empty — promotes exactly as a normal promote() would,
+// picking up any candidate a held key's own recording left waiting behind it. The position's
+// own values do not matter here: caughtUp is false whenever pending is empty, so release only
+// reaches its own promoteHolds call, never re-applies a summary.
+func (w *workflowRuntime) promoteAfterHoldClears(ctx context.Context) error {
+	eventID := fmt.Sprintf("dispatch-position:%s:%s:closing:%d", w.dispatchProject, w.bootID, time.Now().UnixNano())
+	_, err := intake.ApplyFact(ctx, w.pool, "dispatch", eventID, intake.DispatchConsumerPosition{}, w.handlers...)
+	return err
+}
+
+// claimReady records an architect whose claim is ready, for releaseReadied to release the notices
+// waiting for a later attempt that it owns (outbox.releaseWaiting): a relaunched architect is told
+// what it missed at once, ahead of what follows. The ready route calls it before it answers the
+// agent, so it only records the claim and wakes the release.
+func (w *workflowRuntime) claimReady(c supervise.Claim) {
+	if c.Role != claim.RoleArchitect {
+		return
+	}
+	w.readyMu.Lock()
+	w.readied[c.Token] = true
+	w.readyMu.Unlock()
+	select {
+	case w.readyWake <- struct{}{}:
+	default:
+	}
+}
+
+// taskConfirmed applies the fact that a role's agent took the work the daemon gave it
+// (supervise's Deps.TaskConfirmed): admission decides on it whether a root whose architect owed
+// that task now waits on a person (workflow's ReconcileAwaiting), which otherwise waits for the
+// next tick. The machine calls it inside its own decision, so the fact is applied on a goroutine
+// of its own, bounded like a terminal fact; a failure is logged and not the daemon's end, since
+// the tick decides the same thing again.
+func (w *workflowRuntime) taskConfirmed(c supervise.Claim) {
+	if c.Issue == "" || c.Role == claim.RoleController {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), readyReleaseTimeout)
+		defer cancel()
+		fact := intake.TaskConfirmed{Issue: c.Issue, Role: c.Role, Generation: c.Generation}
+		id := fmt.Sprintf("task-confirmed:%s:%d", c.Token, c.Generation)
+		if p := c.Pending; p != nil {
+			id = fmt.Sprintf("task-confirmed:%s:%s", c.Token, p.ID)
+		}
+		if _, err := intake.ApplyFact(ctx, w.pool, "supervise", id, fact, w.handlers...); err != nil {
+			w.log.Warn("apply the confirmation of a task", "claim", c.Token, "error", err)
+		}
+	}()
+}
+
+// releaseReadied releases, until ctx ends, the waiting notices of the architects claimReady
+// recorded: each wake takes every architect recorded since the last one, in one release.
+func (w *workflowRuntime) releaseReadied(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.readyWake:
+		}
+		w.readyMu.Lock()
+		architects := slices.Collect(maps.Keys(w.readied))
+		clear(w.readied)
+		w.readyMu.Unlock()
+		if len(architects) == 0 {
+			continue
+		}
+		release, cancel := context.WithTimeout(ctx, readyReleaseTimeout)
+		err := w.outbox.releaseWaiting(release, architects...)
+		cancel()
+		if err != nil && ctx.Err() == nil {
+			w.log.Error("release the notices waiting for ready architects", "architects", architects, "error", err)
+		}
+	}
+}
+
+func (w *workflowRuntime) stop() {
+	if w == nil {
+		return
+	}
+	if w.conn != nil {
+		w.conn.Close()
+	}
+}

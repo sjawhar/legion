@@ -1,0 +1,178 @@
+import { expect, type Page, test } from "@playwright/test";
+
+import { type FakeSession, setLiveSessions, setSessionSendStatus } from "./agents";
+import { createIssue, createProject, listComments } from "./api";
+import { resetDatabase } from "./seed";
+import { asUser } from "./users";
+
+const planner: FakeSession = {
+  capabilities: ["aside", "btw"],
+  dir: "/w/legion",
+  last_seen: 1_700_000_000_000,
+  machine_id: "e2e",
+  roles: [],
+  session_id: "s1",
+  title: "planner",
+};
+
+async function post(page: Page): Promise<Record<string, unknown>> {
+  const response = page.waitForResponse(
+    (candidate) =>
+      candidate.request().method() === "POST" &&
+      /\/api\/v1\/issues\/[^/]+\/comments$/.test(candidate.url())
+  );
+  await page
+    .getByRole("form", { name: "Comment composer" })
+    .getByRole("button", { name: "Send" })
+    .click();
+  return (await response).request().postDataJSON() as Record<string, unknown>;
+}
+
+async function selectMention(page: Page, text: string, option = "planner"): Promise<void> {
+  const field = page.getByRole("form", { name: "Comment composer" }).getByLabel("Comment");
+  await field.fill(text);
+  await page
+    .getByRole("listbox", { name: "Mention suggestions" })
+    .getByRole("option", { name: option })
+    .click();
+}
+
+test.beforeEach(async () => {
+  await resetDatabase();
+});
+
+test("/btw with a surviving mention strips its token and sends one comment-level mode", async ({
+  browser,
+}) => {
+  await setLiveSessions([planner]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "BTW comment" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await selectMention(page, "/btw @");
+    expect(await post(page)).toEqual({
+      body: "@planner",
+      delivery: "btw",
+      mentions: [{ target: "session:s1" }],
+    });
+    await expect
+      .poll(() => listComments(issue.key))
+      .toMatchObject([{ body: "@planner", mentions: [{ target: "session:s1" }] }]);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("/btw without a surviving mention remains verbatim and never sends delivery", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Plain BTW comment" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await page
+      .getByRole("form", { name: "Comment composer" })
+      .getByLabel("Comment")
+      .fill("/btw hello");
+    expect(await post(page)).toEqual({ body: "/btw hello" });
+    await expect
+      .poll(() => listComments(issue.key))
+      .toMatchObject([{ body: "/btw hello", deliveries: [], mentions: [] }]);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an unsupported selected mode warns but does not prevent Send", async ({ browser }) => {
+  const offline: FakeSession = { ...planner, capabilities: [], session_id: "s2", title: "worker" };
+  await setLiveSessions([offline]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Unadvertised delivery" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await selectMention(page, "/aside @", "worker");
+    await expect(
+      page.getByText("worker advertises no delivery mode, so sending it records a failed attempt.")
+    ).toBeVisible();
+    await setSessionSendStatus("s2", 404);
+    expect(await post(page)).toEqual({
+      body: "@worker",
+      delivery: "aside",
+      mentions: [{ target: "session:s2" }],
+    });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("/btw with nothing after it keeps an agent's direct composer from sending, and Send says why on screen", async ({
+  browser,
+}) => {
+  // No `last_seen`: the fixture stamps one, so the session lists as live rather than inactive.
+  const worker: FakeSession = {
+    capabilities: ["aside", "btw", "steer"],
+    dir: "/w/legion",
+    machine_id: "e2e",
+    roles: [],
+    session_id: "s3",
+    title: "worker",
+  };
+  await setLiveSessions([worker]);
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    const posts: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "POST" && request.url().includes("/api/v1/agents/")) {
+        posts.push(request.url());
+      }
+    });
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    await agents.getByRole("button", { name: /^No Dispatch activity/ }).click();
+    const card = agents
+      .locator("article")
+      .filter({ has: page.getByRole("heading", { level: 2, name: "worker" }) });
+    await card.getByRole("button", { exact: true, name: "worker" }).click();
+    const field = card.getByRole("textbox", { name: "Comment" });
+    const send = card.getByRole("button", { exact: true, name: "Send" });
+    const hint = card.getByText("Ctrl/Cmd+Enter to send · Enter for a new line", { exact: true });
+    const reason = card.getByText("Type the message after /btw.", { exact: true });
+
+    // The box holds text, and the command strips to an empty message: Send refuses, and says why.
+    await field.fill("/btw ");
+    await expect(send).toBeDisabled();
+    await expect(send).toHaveAccessibleDescription("Type the message after /btw.");
+    await expect(send).toHaveAttribute("title", "Type the message after /btw.");
+    // The reason is on screen, in the hint's place, for a reader with no pointer to hover Send
+    // with. `toBeVisible` passes for an `sr-only` line, a 1 px box, so its height is the check.
+    await expect(hint).toHaveCount(0);
+    await expect(reason).toBeVisible();
+    expect((await reason.boundingBox())?.height ?? 0).toBeGreaterThan(8);
+    // A keyboard reaches it, so the reason does too: Tab from the message lands on Send.
+    await field.press("Tab");
+    await expect(send).toBeFocused();
+    await send.click({ force: true });
+    await field.press("Control+Enter");
+    await page.waitForTimeout(500);
+    expect(posts).toEqual([]);
+
+    await field.fill("/btw status?");
+    await expect(send).toBeEnabled();
+    await expect(send).not.toHaveAttribute("aria-describedby");
+    await expect(reason).toHaveCount(0);
+    await expect(hint).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});

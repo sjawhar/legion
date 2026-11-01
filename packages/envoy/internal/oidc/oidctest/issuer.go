@@ -71,6 +71,7 @@ type Issuer struct {
 	discoveryRequests int
 	served            []jose.JSONWebKey
 	jwksRequests      int
+	keysStatus        int
 	keysDelay         time.Duration
 	omitCodeFlow      bool
 	omitRevocation    bool
@@ -243,6 +244,17 @@ func (i *Issuer) DelayKeys(d time.Duration) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.keysDelay = d
+}
+
+// FailKeys makes the key-set endpoint answer with an HTTP status instead of
+// the set; a status of 0 makes it answer the set again. It is an issuer whose
+// JWKS cannot be read while its discovery document still reads, the outage a
+// verifier reports as the issuer being unavailable rather than as a bad
+// signature.
+func (i *Issuer) FailKeys(status int) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.keysStatus = status
 }
 
 // JWKSFetches counts key-set reads, so a test can prove a refresh happened.
@@ -746,10 +758,14 @@ func (i *Issuer) handleKeys(w http.ResponseWriter, _ *http.Request) {
 	i.mu.Lock()
 	i.jwksRequests++
 	set := jose.JSONWebKeySet{Keys: append([]jose.JSONWebKey(nil), i.served...)}
-	delay := i.keysDelay
+	delay, status := i.keysDelay, i.keysStatus
 	i.mu.Unlock()
 	if delay > 0 {
 		time.Sleep(delay)
+	}
+	if status != 0 {
+		http.Error(w, "key set unavailable", status)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(set)

@@ -1,0 +1,51 @@
+-- 0080_delivery_pull_requests.up.sql
+-- LEGION-567: one row per population pull request (LEGION-294's rule: authored by one of
+-- delivery_settings.population_authors, merged, not in an excluded repository, not a task PR).
+-- (repo, number) is the PR's identity, matching "owner/repo#N" everywhere else in Dispatch.
+--
+-- GitHub's pull_request webhook payload (envoy's internal/contracts normalize.go) carries no
+-- created_at, merged_at, additions or deletions, so a row the live intake consumer writes
+-- straight from a merged-PR event cannot have them yet: those four columns are nullable and
+-- partial is true until the completing GitHub fetch (or, failing that, the next reconcile pass)
+-- fills them in. The partial index lets that pass find incomplete rows without scanning the
+-- table.
+--
+-- issue_key is a soft reference (on delete set null, matching issue_components' pattern in 0038):
+-- a PR can name an issue that is later deleted, and the link should not take the PR row with it.
+--
+-- unfetchable_at/unfetchable_reason mark a partial row the completing fetch can never finish: a
+-- 404 or 410 from GitHub (the pull request or its repository no longer exists, or no longer
+-- reaches this token) is a permanent condition, not a transient one, so retrying it every
+-- five-minute pass forever would be pointless. Both null while a row is fetchable (every normal
+-- row, partial or complete); reconcile's completing fetch sets them on a 404/410 and the partial
+-- index below then excludes the row from the next pass's work; any later successful fetch of the
+-- same pull request (a live webhook retry, a later reconcile pass once the repository or PR
+-- becomes reachable again) clears both back to null through the same upsert every other write
+-- goes through.
+create table delivery_pull_requests (
+  repo text not null,
+  number integer not null,
+  title text not null,
+  url text not null,
+  author text not null,
+  created_at timestamptz,
+  merged_at timestamptz,
+  first_commit_at timestamptz,
+  merge_commit_sha text,
+  additions integer,
+  deletions integer,
+  rework boolean not null default false,
+  issue_key text references issues(key) on delete set null,
+  sessions text[] not null default '{}',
+  partial boolean not null default false,
+  unfetchable_at timestamptz,
+  unfetchable_reason text,
+  updated_at timestamptz not null default now(),
+  primary key (repo, number)
+);
+
+create index delivery_pull_requests_merged_at on delivery_pull_requests (merged_at) where merged_at is not null;
+create index delivery_pull_requests_partial on delivery_pull_requests (repo, number) where partial and unfetchable_at is null;
+-- CountUnfetchablePullRequests runs on every GET /api/v1/delivery/timeline; without this, it is a
+-- full table scan on every request.
+create index delivery_pull_requests_unfetchable on delivery_pull_requests (repo, number) where unfetchable_at is not null;

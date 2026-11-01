@@ -1,0 +1,143 @@
+import type { Event } from "../../api/types";
+import { capabilityLabel } from "../conversation/delivery";
+import { type AgentPart, askResolutionParts } from "../refs/AgentName";
+
+/** An event's line in the Pinned tab, as `AgentPart`s: an agent it names keeps its identity
+ *  until `EventBody` draws it through `AgentName`. */
+export function eventDescription(event: Event): AgentPart[] {
+  const description = describe(event);
+  return typeof description === "string" ? [description] : description;
+}
+
+function describe(event: Event): string | AgentPart[] {
+  switch (event.type) {
+    case "project.created":
+      return `Project created: ${event.payload.name}`;
+    case "project.updated":
+      return `Project updated: ${event.payload.name}`;
+    case "settings.repo_project.updated":
+      return `${event.payload.deleted ? "Repository mapping removed" : "Repository mapping updated"}: ${event.payload.mapping.repo}`;
+    case "settings.project_default_assignee.updated":
+      return event.payload.assignee === null
+        ? `Default assignee cleared: ${event.payload.project}`
+        : `Default assignee updated: ${event.payload.project} → ${event.payload.assignee}`;
+    case "settings.architecture_source.updated":
+      return `${event.payload.deleted ? "Architecture source removed" : "Architecture source updated"}: ${event.payload.source.repo}`;
+    // An event retained from before a project had several sources names no repository and
+    // keeps its original wording.
+    case "architecture.synced": {
+      const count = `${event.payload.components} component${event.payload.components === 1 ? "" : "s"} at ${event.payload.commit.slice(0, 12)}`;
+      return event.payload.repo === undefined
+        ? `Architecture synced: ${count}`
+        : `Architecture synced from ${event.payload.repo}: ${count}`;
+    }
+    case "architecture.sync_failed":
+      return event.payload.repo === undefined
+        ? `Architecture sync failed: ${event.payload.error}`
+        : `Architecture sync from ${event.payload.repo} failed: ${event.payload.error}`;
+    case "user_state.updated":
+      return "User state updated";
+    case "user_agent_state.updated":
+      return "Agent conversation state updated";
+    case "user_thread_state.updated":
+      return "Thread read";
+    case "ask.resolved":
+      return askResolutionParts(event.payload.resolution);
+    case "ask.answered":
+      return event.payload.previous_answer === undefined
+        ? `Ask answered: ${event.payload.question}`
+        : `Answer changed: ${event.payload.question}`;
+    case "ask.edited":
+      return `Ask edited: ${event.payload.question}`;
+    case "ask.handed_back":
+      return `Ask handed back: ${event.payload.question}`;
+    case "comment.resolved":
+      return "Comment resolved";
+    case "comment.reopened":
+      return "Comment reopened";
+    case "comment.edited":
+      return "Comment edited";
+    case "message.created":
+    case "message.answered":
+      return event.payload.body;
+    case "message.delivery":
+      // A duplicate attempt reached the listener and the stream stored nothing new; its state is
+      // still `sent`, so reporting the state alone would read as a fresh delivery.
+      return event.payload.duplicate === true
+        ? `Message already delivered: ${capabilityLabel(event.payload.delivery)}`
+        : `Message ${event.payload.state}: ${capabilityLabel(event.payload.delivery)}`;
+    case "message.accepted":
+      return "Message taken as the session's own turn";
+    case "ask.opened":
+      return `Ask opened: ${event.payload.question}`;
+    case "ask.anchor_refreshed":
+      return event.payload.anchor?.orphaned
+        ? "Ask lost its quote"
+        : "Ask re-anchored after an edit";
+    case "comment.created":
+    case "comment.answered":
+      return event.payload.body;
+    case "comment.anchor_refreshed":
+      return event.payload.anchor?.orphaned
+        ? "Comment lost its quote"
+        : "Comment re-anchored after an edit";
+    case "comment.delivery":
+      // Same rule as message.delivery above.
+      return event.payload.duplicate === true
+        ? `Comment already delivered: ${capabilityLabel(event.payload.delivery)}`
+        : `Comment ${event.payload.state}: ${capabilityLabel(event.payload.delivery)}`;
+    case "issue.created":
+      return "Issue created";
+    case "issue.updated":
+      return "Issue updated";
+    case "issue.closed":
+      return "Issue closed";
+    case "issue.claimed":
+      return event.payload.previous_claim === undefined
+        ? "Issue claimed"
+        : ["Claim taken from ", { actor: event.payload.previous_claim.actor }];
+    case "issue.released":
+      return event.payload.reason === "closed" ? "Claim released on close" : "Claim released";
+    case "issue.deployed":
+      return `Deployed by run ${event.payload.run_id}`;
+    case "artifact.created":
+      return `Added ${event.payload.artifact.name}`;
+    case "artifact.approved":
+      return `Approved v${event.payload.version}`;
+    case "artifact.changes_requested":
+      return `Changes requested on v${event.payload.version}`;
+    case "artifact.version":
+      return `Saved ${event.payload.name} v${event.payload.version.number}`;
+    case "artifact.human_edited":
+      return `Edited ${event.payload.name} v${event.payload.from_version} to v${event.payload.to_version}`;
+    case "suggestion.accepted":
+      return "Suggestion accepted";
+    case "suggestion.rejected":
+      return "Suggestion rejected";
+    case "child.status":
+      return "Child status changed";
+    case "child.added":
+      return `Added child ${event.payload.child_key}`;
+    case "child.removed":
+      return `Removed child ${event.payload.child_key}`;
+    case "subscription.remove_requested":
+      return [
+        "Unsubscribe requested for ",
+        { sessionId: event.payload.session_id, storedTitle: undefined },
+      ];
+    case "subscription.removed":
+      return ["Unsubscribed ", { sessionId: event.payload.session_id, storedTitle: undefined }];
+    case "ask.follower_added":
+      return [{ sessionId: event.payload.session_id, storedTitle: undefined }, " follows an ask"];
+    case "ask.follower_removed":
+      return [
+        { sessionId: event.payload.session_id, storedTitle: undefined },
+        " unfollowed an ask",
+      ];
+    case "block.repaired":
+      return `Repaired block ${event.payload.block_id}`;
+    case "block.invalid":
+      return `marked decision ${event.payload.block_id} malformed: ${event.payload.reason}`;
+  }
+  return event satisfies never;
+}

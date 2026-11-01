@@ -1,0 +1,276 @@
+// credential_requests.go relays Dispatch's credential pages to the secrets broker (its account
+// routes). Dispatch lists the credential requests waiting on the signed-in person, each secret
+// request carrying the broker's approve_url, the page where that person, signed in to the broker,
+// decides it; it relays a machine login's approve or deny with the code the person typed; and it
+// relays a person's revoke of a grant or a machine login. Every handler does the same five things:
+// require a human caller, require the broker to be configured, resolve or read its input, call
+// the matching agentsecrets.Client method, and forward the broker's exact status and body — the
+// broker decides. The pending list alone answers null rather than 404 FEATURE_OFF without a broker.
+// The one thing Dispatch supplies is who acts: a machine login's approve and deny, a revoke and the
+// machine-login list send the login requireHuman resolved, in Dispatch's canonical lowercase form,
+// as the approver, which the broker takes on Dispatch's word, and never forward the browser's body,
+// so nothing a browser sends can name the approver.
+package api
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+
+	"github.com/sjawhar/envoy/internal/dispatch/agentsecrets"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+)
+
+// requireAgentSecrets answers 404 FEATURE_OFF when this Dispatch has no broker configured
+// (DISPATCH_AGENT_SECRETS_URL unset); every credential-request route but the pending list needs it
+// after requireHuman.
+func (s *server) requireAgentSecrets(w http.ResponseWriter) (*agentsecrets.Client, bool) {
+	if s.deps.AgentSecrets == nil {
+		writeError(w, "FEATURE_OFF", http.StatusNotFound, "agent-secrets is not configured on this Dispatch")
+		return nil, false
+	}
+	return s.deps.AgentSecrets, true
+}
+
+// relayBrokerResponse writes the broker's answer verbatim: its raw JSON body on success, its
+// exact status and body for a *agentsecrets.Error (the browser must see the broker's own status
+// and code, e.g. 409 RECORD_TERMINAL — Dispatch never re-wraps it), 500
+// AGENT_SECRETS_ACCOUNT_TOKEN_UNREADABLE for a call that stopped at Dispatch's own ServiceAccount
+// token, or 503 AGENT_SECRETS_UNAVAILABLE for anything else (a transport failure). The token
+// gets its own code because the broker was never asked: the fix is in Dispatch's deployment, and
+// the log line naming the file is the operator's only pointer to it.
+func relayBrokerResponse(w http.ResponseWriter, body json.RawMessage, err error) {
+	if err != nil {
+		var brokerErr *agentsecrets.Error
+		if errors.As(err, &brokerErr) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(brokerErr.Status)
+			_, _ = w.Write(brokerErr.Body)
+			return
+		}
+		var tokenErr *agentsecrets.AccountTokenError
+		if errors.As(err, &tokenErr) {
+			slog.Error("dispatch: cannot read its ServiceAccount token for the secrets broker", "path", tokenErr.Path, "error", tokenErr.Err)
+			writeError(w, "AGENT_SECRETS_ACCOUNT_TOKEN_UNREADABLE", http.StatusInternalServerError, "Dispatch cannot read its own ServiceAccount token for the secrets broker")
+			return
+		}
+		writeError(w, "AGENT_SECRETS_UNAVAILABLE", http.StatusServiceUnavailable, "the secrets broker is unreachable")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
+}
+
+// resolveApproverMe reads ?approver=, which the UI only ever sends as the literal string "me" —
+// it asks for the viewer's own list, never a login it names itself — and resolves it to the
+// caller's canonical login. Anything else is refused before it ever reaches the broker.
+func resolveApproverMe(w http.ResponseWriter, r *http.Request, actor model.Actor) (string, bool) {
+	if approver := r.URL.Query().Get("approver"); approver != "me" {
+		writeError(w, "APPROVER_ME_ONLY", http.StatusBadRequest, `approver must be the literal value "me"`)
+		return "", false
+	}
+	return model.CanonicalLogin(actor.ID), true
+}
+
+// readRelayBody reads a mutation's body verbatim, capped like every other JSON mutation, and
+// hands it to the broker unparsed: Dispatch relays, it does not model these shapes. A string the
+// body holds that carries U+0000 is refused as decodeJSON refuses one: the broker reads these
+// strings against PostgreSQL too (a machine login's typed code is a query's parameter there), and
+// Dispatch is these routes' only caller.
+func (s *server) readRelayBody(w http.ResponseWriter, r *http.Request) (json.RawMessage, bool) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxJSONRequestBytes))
+	if err != nil {
+		writeError(w, "REQUEST_TOO_LARGE", http.StatusRequestEntityTooLarge, "request body exceeds the size limit")
+		return nil, false
+	}
+	if refusal := unstorableJSON("", body); refusal != nil {
+		s.writeHandlerError(w, refusal)
+		return nil, false
+	}
+	return json.RawMessage(body), true
+}
+
+// decisionFor builds the broker's decision body for an approve or deny: the approver is the
+// caller's canonical login, and the one field read from the browser's body is a machine login's
+// typed code. Any other field the browser sends, an approver among them, is ignored, never
+// forwarded. An empty body is a decision with no code.
+func (s *server) decisionFor(w http.ResponseWriter, r *http.Request, actor model.Actor) (agentsecrets.Decision, bool) {
+	body, ok := s.readRelayBody(w, r)
+	if !ok {
+		return agentsecrets.Decision{}, false
+	}
+	var input struct {
+		Code *string `json:"code"`
+	}
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &input); err != nil {
+			writeError(w, "INVALID_DECISION", http.StatusBadRequest, "request body must be a JSON object")
+			return agentsecrets.Decision{}, false
+		}
+	}
+	return agentsecrets.Decision{Approver: model.CanonicalLogin(actor.ID), Code: input.Code}, true
+}
+
+// --- GET /api/v1/credential-requests, GET .../{id} ---
+
+// listCredentialPending answers the viewer's pending list, or null when this Dispatch has no broker.
+// Every page reads this list (the Needs-you badge counts it), and a deployment without a broker is
+// an ordinary one, so "no broker" is an answer here rather than the 404 FEATURE_OFF the other
+// credential routes give: a 404 made every page of such a deployment log a failed request.
+func (s *server) listCredentialPending(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	login, ok := resolveApproverMe(w, r, actor)
+	if !ok {
+		return
+	}
+	if s.deps.AgentSecrets == nil {
+		WriteJSON(w, http.StatusOK, nil)
+		return
+	}
+	body, err := s.deps.AgentSecrets.Pending(r.Context(), login)
+	relayBrokerResponse(w, body, err)
+}
+
+func (s *server) getCredentialRecord(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireHuman(w, r); !ok {
+		return
+	}
+	client, ok := s.requireAgentSecrets(w)
+	if !ok {
+		return
+	}
+	body, err := client.Record(r.Context(), r.PathValue("id"))
+	relayBrokerResponse(w, body, err)
+}
+
+// --- POST .../{id}/approve, .../{id}/deny, .../machine-lookup ---
+
+// approveCredentialRecord and denyCredentialRecord decide a machine login, whose decision carries
+// the code the person typed. A secret request is decided on the broker's own page alone: the broker
+// answers either route for one 403 DECIDE_ON_BROKER_PAGE with its approve_url, relayed verbatim like
+// every answer.
+func (s *server) approveCredentialRecord(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	client, ok := s.requireAgentSecrets(w)
+	if !ok {
+		return
+	}
+	decision, ok := s.decisionFor(w, r, actor)
+	if !ok {
+		return
+	}
+	body, err := client.Approve(r.Context(), r.PathValue("id"), decision)
+	relayBrokerResponse(w, body, err)
+}
+
+func (s *server) denyCredentialRecord(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	client, ok := s.requireAgentSecrets(w)
+	if !ok {
+		return
+	}
+	decision, ok := s.decisionFor(w, r, actor)
+	if !ok {
+		return
+	}
+	body, err := client.Deny(r.Context(), r.PathValue("id"), decision)
+	relayBrokerResponse(w, body, err)
+}
+
+func (s *server) lookupMachineCredential(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireHuman(w, r); !ok {
+		return
+	}
+	client, ok := s.requireAgentSecrets(w)
+	if !ok {
+		return
+	}
+	relayBody, ok := s.readRelayBody(w, r)
+	if !ok {
+		return
+	}
+	body, err := client.MachineLookup(r.Context(), relayBody)
+	relayBrokerResponse(w, body, err)
+}
+
+// --- GET /api/v1/credential-grants, POST .../{id}/revoke ---
+
+func (s *server) listCredentialGrants(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	client, ok := s.requireAgentSecrets(w)
+	if !ok {
+		return
+	}
+	login, ok := resolveApproverMe(w, r, actor)
+	if !ok {
+		return
+	}
+	body, err := client.Grants(r.Context(), login)
+	relayBrokerResponse(w, body, err)
+}
+
+// revokeCredentialGrant ends a grant as the caller: the broker allows it only when the caller's
+// login is the grant's approver or its enrollment's operator. The browser's body carries nothing
+// Dispatch reads.
+func (s *server) revokeCredentialGrant(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	client, ok := s.requireAgentSecrets(w)
+	if !ok {
+		return
+	}
+	body, err := client.RevokeByApprover(r.Context(), r.PathValue("id"), model.CanonicalLogin(actor.ID))
+	relayBrokerResponse(w, body, err)
+}
+
+// --- GET /api/v1/machine-logins, POST .../{id}/revoke ---
+
+// listMachineLogins answers the machine logins the caller may revoke that can still reach a
+// secret: every service's login, whoever approved it, and the caller's own machines', an expired
+// one whose sessions still run among them. Dispatch names the caller, so no one lists another
+// person's machines.
+func (s *server) listMachineLogins(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	client, ok := s.requireAgentSecrets(w)
+	if !ok {
+		return
+	}
+	body, err := client.MachineLogins(r.Context(), model.CanonicalLogin(actor.ID))
+	relayBrokerResponse(w, body, err)
+}
+
+// revokeMachineLogin ends a machine login, expired or not, and with it every session that login
+// enrolled (a service's login: every pod it started): the broker allows it for a service's login
+// from anyone signed in, and for a person's machine login only when the caller is the person who
+// approved it. The browser's body carries nothing Dispatch reads.
+func (s *server) revokeMachineLogin(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	client, ok := s.requireAgentSecrets(w)
+	if !ok {
+		return
+	}
+	body, err := client.RevokeMachineLogin(r.Context(), r.PathValue("id"), model.CanonicalLogin(actor.ID))
+	relayBrokerResponse(w, body, err)
+}

@@ -30,7 +30,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/oidc"
@@ -67,11 +66,29 @@ func mustRead(name string) []byte {
 	return b
 }
 
+// SignIn is the broker's own OpenID Connect client, through which a person signs in to its
+// approval page. config.Load reads it from the BROKER_SIGNIN_* settings; it is declared here,
+// beside the page it configures, because config reads the broker's caller table from
+// internal/broker/api, whose route rows name this package's methods.
+type SignIn struct {
+	// Issuer is the provider's issuer URL, whose discovery document the sign-in reads.
+	Issuer string
+	// ClientID is the broker's client at Issuer.
+	ClientID string
+	// ClientSecret is that client's secret, read from BROKER_SIGNIN_CLIENT_SECRET_FILE. No error
+	// config.Load answers carries it.
+	ClientSecret string
+	// Domain is the Google Workspace domain a signing-in person's ID token names in its hd claim.
+	Domain string
+	// SessionLifetime is how long a sign-in's session lasts from the moment it is made.
+	SessionLifetime time.Duration
+}
+
 // Config is what the page is built from.
 type Config struct {
 	// SignIn is the broker's own OpenID Connect client (BROKER_SIGNIN_*), which config.Load
 	// requires, so a page is never built without one.
-	SignIn config.SignIn
+	SignIn SignIn
 	// PublicURL is BROKER_PUBLIC_URL as the broker resolved it: the one origin every POST must
 	// come from, and the base of the sign-in's redirect URI, <PublicURL>/signin/callback.
 	PublicURL string

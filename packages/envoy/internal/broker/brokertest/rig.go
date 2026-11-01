@@ -59,6 +59,15 @@ const APIAccount = "system:serviceaccount:example-ns:example-dispatch"
 // APICaller is the name that account calls as, the one the broker logs when it acts.
 const APICaller = "dispatch"
 
+// ListenerAccount is the second ServiceAccount every Rig's BROKER_API_ACCOUNTS names, as the
+// caller "listener": the Envoy listener, which reads one of the broker's access tokens back
+// through introspection and relays no person's decision. A Rig lists it so a test can drive a
+// listed caller reaching past its own routes, which is 403 ACCOUNT_LACKS_POWER.
+const ListenerAccount = "system:serviceaccount:example-ns:example-listener"
+
+// ListenerCaller is the name that second account calls as.
+const ListenerCaller = "listener"
+
 // The one account every Rig's BROKER_EXCHANGE_ACCOUNTS lists and what a pod running as it may
 // write: ExchangeSession is the session name the entry fixes, so a token minted for that pod
 // carries it and a request naming any other is refused.
@@ -98,7 +107,10 @@ type Rig struct {
 	// server calls (UI). It is minted once, for an hour, so a test may send it from a goroutine
 	// of its own where failing t is not allowed.
 	UIToken string
-	Store   *store.Store
+	// ListenerToken is ListenerAccount's own token, minted the same way: a listed caller that may
+	// introspect and nothing else, for a test driving what a caller's powers refuse.
+	ListenerToken string
+	Store         *store.Store
 	// Secrets is the secrets.Local standing in for Secrets Manager, which a test writes to as a
 	// person would, before asking the broker to reread a secret.
 	Secrets *secrets.Local
@@ -193,8 +205,11 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	}
 
 	api.Register(mux, api.Deps{
-		PublicURL:   srv.URL,
-		APIAccounts: map[string]string{APIAccount: APICaller},
+		PublicURL: srv.URL,
+		APIAccounts: map[string]api.Account{
+			APIAccount:      Caller(t, APICaller),
+			ListenerAccount: Caller(t, ListenerCaller),
+		},
 		// The one verifier serves both, as the broker's own wiring does: a pod enrolling and a
 		// listed caller present tokens of the same issuer for the same audience.
 		AccountTokens: enroll.K8sPodVerifier{Verifier: podVerifier},
@@ -218,7 +233,20 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 		serviceLogins: serviceLogins,
 	}
 	rig.UIToken = rig.MintAccountToken(t, APIAccount, time.Hour)
+	rig.ListenerToken = rig.MintAccountToken(t, ListenerAccount, time.Hour)
 	return rig
+}
+
+// Caller is the account a caller name carries, for an api.Deps a test wires itself as well as for
+// the Rig's own: the broker's boot reads BROKER_API_ACCOUNTS this way, and a name its table does
+// not know fails t here exactly as it would refuse that boot.
+func Caller(t *testing.T, name string) api.Account {
+	t.Helper()
+	account, known := api.AccountFor(name)
+	if !known {
+		t.Fatalf("api.AccountFor(%q): the broker knows no caller of that name", name)
+	}
+	return account
 }
 
 // MachineLoginURL is the rig broker's machine-login page, the device grant's verification_uri.

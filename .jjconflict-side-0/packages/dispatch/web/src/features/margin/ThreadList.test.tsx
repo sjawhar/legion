@@ -1,0 +1,314 @@
+import { expect, spyOn, test } from "bun:test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import type { ComponentProps } from "react";
+import { MemoryRouter } from "react-router-dom";
+
+import { commentDeliveryFields } from "../../__tests__/comment-fixture";
+import type { Comment } from "../../api/types";
+import { ThreadList } from "./ThreadList";
+import type { Thread } from "./useMarginItems";
+
+function comment(id: string, body: string, resolved = false): Comment {
+  return {
+    anchor: {
+      artifact_id: "artifact-1",
+      block_id: `${id}-block`,
+      mark_id: `${id}-mark`,
+      orphaned: false,
+      quote: "selected text",
+      version: 1,
+    },
+    ask_id: null,
+    turn: null,
+    author: { id: "alice", kind: "user" },
+    body,
+    created_at: "2026-09-10T00:00:00Z",
+    edited_at: null,
+    id,
+    issue_key: "CORE-1",
+    reply_to: null,
+    resolved,
+    resolved_at: resolved ? "2026-09-10T00:02:00Z" : null,
+    resolved_by: resolved ? { id: "alice", kind: "user" } : null,
+    suggestion: null,
+    ...commentDeliveryFields(),
+  };
+}
+
+function thread(id: string, resolved = false): Thread {
+  const root = comment(id, `Comment ${id}`, resolved);
+  return {
+    anchor: root.anchor,
+    key: root.id,
+    lastReplyAt: undefined,
+    replies: [],
+    resolved,
+    root: { comment: root, kind: "comment" },
+  };
+}
+function list(overrides: Partial<ComponentProps<typeof ThreadList>> = {}) {
+  const open = thread("open");
+  const resolved = thread("resolved", true);
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  return (
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <ThreadList
+          editingCommentId={undefined}
+          savingCommentEditId={undefined}
+          onEditingChange={() => {}}
+          actionFailure={undefined}
+          artifactSlug="spec"
+          expandedThreadKey={open.key}
+          hoveredMarkId="open-mark"
+          hoveredItemId={undefined}
+          isClosed={false}
+          owner={{ key: "CORE-1", kind: "issue" }}
+          blockPlacements={new Map()}
+          markPlacements={new Map([["open-mark", { pos: 5, top: 180 }]])}
+          onAction={() => {}}
+          onEdit={async () => undefined}
+          onRetryAction={() => {}}
+          onSelect={() => {}}
+          onToggle={() => {}}
+          onToggleResolved={() => {}}
+          pendingActionIds={new Set()}
+          resolvedThreads={[resolved]}
+          foldedAskCount={0}
+          showResolved={false}
+          threads={[open]}
+          viewerLogin="alice"
+          {...overrides}
+        />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+}
+
+function renderList(
+  overrides: Partial<ComponentProps<typeof ThreadList>> = {},
+  container?: HTMLElement
+) {
+  return render(list(overrides), container === undefined ? undefined : { container });
+}
+
+test("an anchored thread aligns to its mark and marks the hovered card", () => {
+  const view = renderList();
+  try {
+    const card = screen.getByTestId("margin-comment-open");
+    expect(card.parentElement?.style.top).toBe("180px");
+    expect(card.getAttribute("data-hovered")).toBe("true");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("Resolved (N) reveals resolved threads only when the toggle is on", () => {
+  let showResolved = false;
+  const view = renderList({
+    onToggleResolved: () => {
+      showResolved = true;
+    },
+  });
+  try {
+    expect(screen.queryByRole("region", { name: "Resolved" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Resolved (1)" }));
+    expect(showResolved).toBe(true);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a toggled resolved section contains resolved comment threads", () => {
+  const view = renderList({ showResolved: true });
+  try {
+    expect(screen.getByRole("region", { name: "Resolved" })).not.toBeNull();
+    expect(screen.getByTestId("margin-comment-resolved")).not.toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an anchored card keeps its identity when its mark placement arrives after the first render", () => {
+  // Placements are measured after the document renders. A card that changed section - and so
+  // React parent - once its placement landed would be remounted, and an editor open on it would
+  // lose its draft. Membership comes from the anchor; placement only positions the card.
+  const view = renderList({ markPlacements: new Map() });
+  try {
+    const before = screen.getByTestId("margin-comment-open");
+    expect(screen.getByRole("region", { name: "Anchored comments" }).contains(before)).toBe(true);
+    view.rerender(
+      <MemoryRouter>
+        <QueryClientProvider
+          client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+        >
+          <ThreadList
+            editingCommentId={undefined}
+            savingCommentEditId={undefined}
+            onEditingChange={() => {}}
+            actionFailure={undefined}
+            artifactSlug="spec"
+            expandedThreadKey="open"
+            hoveredMarkId={undefined}
+            hoveredItemId={undefined}
+            isClosed={false}
+            owner={{ key: "CORE-1", kind: "issue" }}
+            blockPlacements={new Map()}
+            markPlacements={new Map([["open-mark", { pos: 5, top: 180 }]])}
+            onAction={() => {}}
+            onEdit={async () => undefined}
+            onRetryAction={() => {}}
+            onSelect={() => {}}
+            onToggle={() => {}}
+            onToggleResolved={() => {}}
+            pendingActionIds={new Set()}
+            resolvedThreads={[]}
+            foldedAskCount={0}
+            showResolved={false}
+            threads={[thread("open")]}
+            viewerLogin="alice"
+          />
+        </QueryClientProvider>
+      </MemoryRouter>
+    );
+    const after = screen.getByTestId("margin-comment-open");
+    expect(after).toBe(before);
+    expect(after.parentElement?.style.top).toBe("180px");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an orphaned block anchor stays aligned to its block", () => {
+  const orphan = thread("orphan");
+  if (orphan.anchor === null) throw new Error("fixture thread has an anchor");
+  const root = {
+    ...orphan.root.comment,
+    anchor: { ...orphan.anchor, block_id: "block-1", orphaned: true },
+  };
+  const view = renderList({
+    blockPlacements: new Map([["block-1", { pos: 5, top: 240 }]]),
+    markPlacements: new Map(),
+    threads: [{ ...orphan, anchor: root.anchor, root: { comment: root, kind: "comment" } }],
+  });
+  try {
+    const card = screen.getByTestId("margin-comment-orphan");
+    expect(screen.getByRole("region", { name: "Anchored comments" }).contains(card)).toBe(true);
+    expect(card.parentElement?.style.top).toBe("240px");
+  } finally {
+    view.unmount();
+  }
+});
+test("a legacy orphan without a block anchor flows in Discussion", () => {
+  const orphan = thread("orphan");
+  if (orphan.anchor === null) throw new Error("fixture thread has an anchor");
+  const root = {
+    ...orphan.root.comment,
+    anchor: { ...orphan.anchor, block_id: null, orphaned: true },
+  };
+  const view = renderList({
+    markPlacements: new Map(),
+    threads: [{ ...orphan, anchor: root.anchor, root: { comment: root, kind: "comment" } }],
+    expandedThreadKey: "orphan",
+  });
+  try {
+    expect(
+      screen
+        .getByRole("region", { name: "Discussion" })
+        .contains(screen.getByTestId("margin-comment-orphan"))
+    ).toBe(true);
+    expect(screen.queryByRole("region", { name: "Anchored comments" })).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a saving card is busy but every card's actions stay clickable", () => {
+  const suggestion = (id: string, replaceWith: string): Thread => {
+    const base = thread(id);
+    const root = {
+      ...base.root.comment,
+      suggestion: { accepted: null, replace_with: replaceWith },
+    };
+    return { ...base, root: { comment: root, kind: "comment" } };
+  };
+  const first = suggestion("first", "swift");
+  const second = suggestion("second", "red");
+  const actions: [string, string][] = [];
+  const view = renderList({
+    expandedThreadKey: first.key,
+    markPlacements: new Map([
+      ["first-mark", { pos: 5, top: 100 }],
+      ["second-mark", { pos: 12, top: 180 }],
+    ]),
+    onAction: (id, action) => {
+      actions.push([id, action]);
+    },
+    pendingActionIds: new Set([first.key]),
+    threads: [first, second],
+  });
+  try {
+    const firstCard = screen.getByTestId("margin-comment-first");
+    const secondCard = screen.getByTestId("margin-comment-second");
+    expect(firstCard.getAttribute("aria-busy")).toBe("true");
+    expect(secondCard.getAttribute("aria-busy")).toBeNull();
+    expect(within(firstCard).queryByRole("status")).not.toBeNull();
+    // A disabled button would drop the focus it holds and swallow the click; the margin queues
+    // the click instead, so the buttons stay live while a save is in flight.
+    for (const card of [firstCard, secondCard]) {
+      for (const name of ["Accept suggestion", "Reject suggestion"]) {
+        expect((within(card).getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(
+          false
+        );
+      }
+    }
+    fireEvent.click(within(secondCard).getByRole("button", { name: "Accept suggestion" }));
+    expect(actions).toEqual([["second", "accept"]]);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an anchored card's placement ignores the margin's own scroll", () => {
+  // A card's `top` is an offset inside the anchored region, and the region rides the margin's
+  // scroll. Measuring the mark against the region where it currently sits folds that scroll in:
+  // the margin scrolls a linked card into view, the next relayout places the card that much
+  // lower, the column grows, and the next correction scrolls further still - 5,721 px to 12,351
+  // over eight arriving asks with the document motionless (LEGION-215).
+  const regionOrigin = 100;
+  const markTop = 400;
+  const scrollport = document.createElement("div");
+  document.body.append(scrollport);
+  const mark = document.createElement("span");
+  mark.setAttribute("data-id", "open-mark");
+  document.body.append(mark);
+  const rect = spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (
+    this: Element
+  ): DOMRect {
+    const top =
+      this === mark
+        ? markTop
+        : this.getAttribute("aria-label") === "Anchored comments"
+          ? regionOrigin - scrollport.scrollTop
+          : 0;
+    return { bottom: top, height: 0, left: 0, right: 0, top, width: 0, x: 0, y: top } as DOMRect;
+  });
+
+  const view = renderList({}, scrollport);
+  try {
+    expect(screen.getByTestId("margin-comment-open").parentElement?.style.top).toBe("300px");
+
+    scrollport.scrollTop = 800;
+    view.rerender(list({ markPlacements: new Map([["open-mark", { pos: 5, top: 180 }]]) }));
+
+    expect(screen.getByTestId("margin-comment-open").parentElement?.style.top).toBe("300px");
+  } finally {
+    view.unmount();
+    rect.mockRestore();
+    mark.remove();
+    scrollport.remove();
+  }
+});

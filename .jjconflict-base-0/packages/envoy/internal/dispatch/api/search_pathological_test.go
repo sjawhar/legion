@@ -1,0 +1,355 @@
+package api
+
+import (
+	"fmt"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/cputest"
+)
+
+// Saving a document takes time linear in a pathological run over the tested ladder sizes
+// (LEGION-465). Before the fix Postgres's search indexing read a run of `a_` or `q_` in quadratic
+// time, and pmdoc parsed `a_b*` in nearly quadratic time. On one loaded machine, before the fix
+// and after it at the same moment, 64 KiB of `a_` saved in 46 s and 0.3 s, 128 KiB of `a_b*` in
+// 33 s and 1.3-2.1 s, an issue titled with 32 KiB of `q_` in 12 s and 0.06-0.17 s, and the
+// duplicate check against a 16 KiB title took 18-21 s and 0.12-0.31 s. Times after the fix follow
+// the runner's load, so no wall-clock bound holds on every runner; each save is timed at growing
+// sizes instead, and its growth is bounded (growsLinearly).
+//
+// A ladder's first size is small enough that the request's own cost is most of its time, about
+// the same before the fix and after (1 KiB of `a_`: 39-48 ms before, 51-61 ms after); its second
+// is where the code before the fix is many times slower, so that code fails the first step by
+// several times the bound. Written as paragraph text, the larger runs make more elements than one
+// write may (TestUploadRefusesADocumentTooLargeToStore), so each run is a code block's text: the
+// document stores it whole and search indexes it whole, which is where the time went, and pmdoc's
+// linear-time test holds the parser on the same runs. The `)_` ladder stops at 256 KiB, as before
+// the element limit. `)_` saved in linear time before the fix too and is held to the same growth.
+//
+// A comment, a comment edit, a message and a broadcast hold up to contracts.DispatchBodyMax
+// characters - 32,000 since INFRA-45, sixteen times the 2,000 that was too short for a ladder to
+// tell the code before the fix from the code after it, whose removed timings measured a
+// 2,000-character `a_` comment at 51 ms before the fix and 56 ms after. The raised cap is
+// laddered here ("comment a_"), a full-cap `a_` comment being the longest pathological text a
+// caller can write outside a document; growsLinearly is what holds it, so a write that stops
+// being bounded at the cap fails this test rather than waiting for a reader to notice. An ask
+// question is capped at 2,000 (contracts.AskQuestionMax) and an issue title at 1,000
+// (contracts.IssueTitleMax), both too short to ladder; the title's ladders, and the duplicate
+// check's against a stored title, went with the title cap
+// (TestIssueTitlesAreCappedOnCreateAndRetitle). Every one of these texts
+// is indexed through the search_text the document ladders time.
+//
+// Settlement is held off. A document's settlement holds its issue's row while it renders, so a
+// save timed while one ran would count the wait for it; and the test server's shutdown, which
+// would otherwise spend its drain budget settling 1 MiB documents, finds no document loaded and
+// leaves each to resume.
+func TestSavingAPathologicalBodyIsBounded(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	issue := createArtifactIssue(t, handler)
+	documents := 0
+	for _, test := range []struct {
+		shape string
+		sizes []int
+	}{
+		{"a_", []int{1 << 10, 64 << 10, 1 << 20}},
+		{"a_b*", []int{2 << 10, 128 << 10, 1 << 20}},
+		{")_", []int{256, 16 << 10, 256 << 10}},
+	} {
+		t.Run("document "+test.shape, func(t *testing.T) {
+			growsLinearly(t, "saving a document of `"+test.shape+"`", test.sizes, func(size int) time.Duration {
+				documents++
+				const fence = "```\n"
+				body := fence + strings.Repeat(test.shape, (size-2*len(fence)-1)/len(test.shape)) + "\n" + fence
+				started := time.Now()
+				response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+					"name": fmt.Sprintf("pathological-%d.md", documents),
+				}, "body.md", "text/markdown", []byte(body), "alice")
+				elapsed := time.Since(started)
+				if response.Code != http.StatusCreated {
+					t.Fatalf("upload %s of %q: status=%d body=%.200s", sizeText(size), test.shape, response.Code, response.Body.String())
+				}
+				return elapsed
+			})
+		})
+	}
+	// A comment's whole body is one search_text run, as a document's is, so the same pathological
+	// shape is timed at the cap a caller may send, in three rungs derived from it: the cap is a
+	// thirty-second of the largest document rung, enough of a span for a ladder since INFRA-45.
+	t.Run("comment a_", func(t *testing.T) {
+		const shape = "a_"
+		sizes := []int{contracts.DispatchBodyMax / 32, contracts.DispatchBodyMax / 4, contracts.DispatchBodyMax}
+		growsLinearly(t, "writing a comment of `"+shape+"`", sizes, func(size int) time.Duration {
+			body := strings.Repeat(shape, size/len(shape))
+			started := time.Now()
+			response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+				"body": body,
+			}, "alice")
+			elapsed := time.Since(started)
+			if response.Code != http.StatusCreated {
+				t.Fatalf("comment of %s of %q: status=%d body=%.200s", sizeText(size), shape, response.Code, response.Body.String())
+			}
+			return elapsed
+		})
+	})
+	// Replacing a document of many short blocks with as many others, every block changing type,
+	// takes time linear in its blocks (LEGION-465): pmdoc wrote each new block at its own index,
+	// walking the document to it, so the replacement grew with the square of its blocks. A quote of
+	// n headings replaced with a quote of n rules took 34 ms of server CPU at 682 blocks and 10.5 s
+	// at 21,844, the most one write's element limit allows of it, before the fix, and 27 ms and
+	// 1.5 s after it, on one machine at a load of 309 to 343. Replaced blocks that stand apart, kept
+	// blocks between them, still cost a walk each in ygo (pmdoc's TestUpdateIsLinearInTheBlockCount).
+	// Each rung is timed in this process's CPU (cputest.Process), since a rung's wall time at these
+	// sizes is mostly the request's own cost and the runner's load, over as many replacements, each
+	// of a document of its own, as the clock needs to resolve their time (cputest.Measure). No test
+	// in this package calls t.Parallel.
+	t.Run("replacing many blocks", func(t *testing.T) {
+		const from, to = "> #\n", "> ***\n"
+		growsLinearly(t, "replacing a quote of headings with a quote of rules", []int{682 * len(to), 5_461 * len(to), 21_844 * len(to)}, func(size int) time.Duration {
+			blocks := size / len(to)
+			headings, rules := []byte(strings.Repeat(from, blocks)), []byte(strings.Repeat(to, blocks))
+			upload := func(name string, body []byte) {
+				response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": name}, "body.md", "text/markdown", body, "alice")
+				if response.Code != http.StatusCreated {
+					t.Fatalf("upload %d blocks of %q: status=%d body=%.200s", blocks, body[:len(from)], response.Code, response.Body.String())
+				}
+			}
+			took, _ := cputest.Measure(func(runs int) (time.Duration, error) { // this batch has no error to report
+				names := make([]string, runs)
+				for i := range names {
+					documents++
+					names[i] = fmt.Sprintf("many-blocks-%d.md", documents)
+					upload(names[i], headings)
+				}
+				before := cputest.Process()
+				for _, name := range names {
+					upload(name, rules)
+				}
+				return cputest.Process() - before, nil
+			})
+			return took
+		})
+	})
+}
+
+// TestGrowsLinearlyRejectsQuadraticFinalRung proves the final-rung bound stays anchored to the
+// first rung, even when a prior rung fills the permitted per-step growth. The helper must fail for
+// both an ordinary first sample and one artificial slow first sample.
+func TestGrowsLinearlyRejectsQuadraticFinalRung(t *testing.T) {
+	for _, slowFirstSample := range []bool{false, true} {
+		t.Run(fmt.Sprintf("slow first sample %t", slowFirstSample), func(t *testing.T) {
+			command := exec.Command(os.Args[0], "-test.run=^TestGrowsLinearlyRejectsQuadraticFinalRungHelper$")
+			command.Env = append(os.Environ(), fmt.Sprintf("GROWS_LINEARLY_SLOW_FIRST=%t", slowFirstSample))
+			output, err := command.CombinedOutput()
+			if err == nil {
+				t.Fatalf("quadratic final rung passed:\n%s", output)
+			}
+			if !strings.Contains(string(output), "at "+sizeText(quadraticFinalRung)) {
+				t.Fatalf("quadratic final rung failed unexpectedly:\n%s", output)
+			}
+		})
+	}
+}
+
+// quadraticFinalRung is the last size of the helper's ladder, the rung whose time grows
+// quadratically and fails the bound.
+const quadraticFinalRung = 64
+
+func TestGrowsLinearlyRejectsQuadraticFinalRungHelper(t *testing.T) {
+	slowFirstValue, helper := os.LookupEnv("GROWS_LINEARLY_SLOW_FIRST")
+	if !helper {
+		t.Skip("subprocess helper")
+	}
+	slowFirstSample := slowFirstValue == "true"
+	firstSamples := 0
+	growsLinearly(t, "a quadratic final rung", []int{1, 8, quadraticFinalRung}, func(size int) time.Duration {
+		switch size {
+		case 1:
+			firstSamples++
+			if slowFirstSample && firstSamples == 1 {
+				return 50 * time.Millisecond
+			}
+			return time.Millisecond
+		case 8:
+			return 32 * time.Millisecond
+		case quadraticFinalRung:
+			return time.Duration(size*size/4) * time.Millisecond
+		default:
+			t.Fatalf("unexpected size %d", size)
+			return 0
+		}
+	})
+}
+
+// growthAllowance is the permitted variation in time per input byte from the first rung. A linear
+// save takes no more time per input byte as it grows, so each later rung may take four times the
+// first rung's time per byte. Quadratic growth exceeds that headroom across this ladder's input
+// ratios.
+const growthAllowance = 4
+
+// growsLinearly times a three-rung ladder and compares each later rung with the first. The first
+// size, where the request's own cost is most of the time, is timed three times before the second
+// size and three times after it, and the fastest of the six kept: the first save's warm-up does
+// not count as that cost, and a load spike inflates it only if it lasts all six first-rung saves.
+// A rung over the bound is timed again and keeps the faster time, so a one-save load spike is not
+// read as growth.
+func growsLinearly(t *testing.T, what string, sizes []int, timed func(size int) time.Duration) {
+	t.Helper()
+	firstSize, secondSize, thirdSize := sizes[0], sizes[1], sizes[2]
+	first := func() time.Duration { return min(timed(firstSize), timed(firstSize), timed(firstSize)) }
+	firstTook := first()
+
+	secondTook := timed(secondSize)
+	firstTook = min(firstTook, first())
+	checkLinearGrowth(t, what, firstSize, firstTook, secondSize, secondTook, timed)
+
+	thirdTook := timed(thirdSize)
+	checkLinearGrowth(t, what, firstSize, firstTook, thirdSize, thirdTook, timed)
+}
+
+func checkLinearGrowth(t *testing.T, what string, firstSize int, firstTook time.Duration, size int, took time.Duration, timed func(size int) time.Duration) {
+	t.Helper()
+	growth := size / firstSize
+	bound := time.Duration(growthAllowance*growth) * firstTook
+	if took > bound {
+		t.Logf("%s: %s at %s against %s at %s is over the bound; timing it again", what, took.Round(time.Millisecond), sizeText(size), firstTook.Round(time.Millisecond), sizeText(firstSize))
+		took = min(took, timed(size))
+	}
+	ratio := float64(took) / float64(firstTook)
+	if took > bound {
+		t.Fatalf("%s took %s at %s, %.0f times the %s it took at %s: the input grew %d times, and a save linear in it may grow %d times at most (growthAllowance)",
+			what, took.Round(time.Millisecond), sizeText(size), ratio, firstTook.Round(time.Millisecond), sizeText(firstSize), growth, growthAllowance*growth)
+	}
+	t.Logf("%s: %s at %s, %s at %s, %.1f times for an input %d times larger (at most %d)", what, firstTook.Round(time.Millisecond), sizeText(firstSize), took.Round(time.Millisecond), sizeText(size), ratio, growth, growthAllowance*growth)
+}
+
+func sizeText(size int) string {
+	switch {
+	case size >= 1<<20 && size%(1<<20) == 0:
+		return fmt.Sprintf("%d MiB", size>>20)
+	case size >= 1<<10:
+		return fmt.Sprintf("%d KiB", size>>10)
+	}
+	return fmt.Sprintf("%d B", size)
+}
+
+// Ordinary text searches as it did before search_text: a title, a document, a comment, an ask
+// with its answer and a message are each found by a word they hold, with the same snippet marks,
+// and a word joined to others by underscores is still found by itself.
+func TestSearchFindsOrdinaryAndUnderscoredTextAfterSearchText(t *testing.T) {
+	handler := newTestHandler(t)
+	corpus := seedSearchCorpus(t, handler)
+	for _, test := range []struct{ query, kind, id string }{
+		{"astrolabe", "document", corpus.primaryArtifactID},
+		{"sextant", "comment", corpus.commentID},
+		{"alidade", "ask", corpus.askID},
+		{"compass calibration", "message", corpus.messageID},
+		{"navigation instruments", "issue", corpus.issueKey},
+	} {
+		results := searchResponse(t, handler, "q="+url.QueryEscape(test.query)).Results
+		found := false
+		for _, result := range results {
+			if result.Kind == test.kind && result.ID == test.id {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("search %q: no %s %s among %d results", test.query, test.kind, test.id, len(results))
+		}
+	}
+	message := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+corpus.issueKey+"/messages", map[string]any{
+		"body": "set LEGION_E2E_MODEL_GATEWAY_URL and the pod_safety_overlay_name_for_each_role_in_the_bundle_of_prompts_the_daemon_snapshots_at_boot_time first",
+	}, "alice")
+	if message.Code != http.StatusCreated {
+		t.Fatalf("create underscored message: status=%d body=%s", message.Code, message.Body.String())
+	}
+	for _, query := range []string{"legion_e2e_model_gateway_url", "gateway", "snapshots", "boot"} {
+		results := searchResponse(t, handler, "q="+url.QueryEscape(query)).Results
+		found := false
+		for _, result := range results {
+			if result.Kind == "message" && strings.Contains(result.Snippet, "<mark>") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("search %q: the underscored message was not found with a marked snippet", query)
+		}
+	}
+}
+
+// A document whose markdown makes more elements than one write may - 1 MiB of `)_`, 262,144
+// italic spans, held a gigabyte while it was saved (LEGION-481) - is refused as too large to store,
+// naming the limit, on a new document (SeedText) and on a replacement (ReplaceText), never a 500.
+func TestUploadRefusesADocumentTooLargeToStore(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createArtifactIssue(t, handler)
+	body := strings.Repeat(")_", (1<<20)/2)
+	// A new document (SeedText): refused, and nothing is created.
+	response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "too-large.md"}, "body.md", "text/markdown", []byte(body), "alice")
+	if !refusedTooLarge(t, response) || !strings.Contains(response.Body.String(), "more than 65536 elements") {
+		t.Fatalf("seed of a document too large to store: status=%d body=%.400s, want 413 CAP_EXCEEDED naming the 65536-element limit, as the document service words it", response.Code, response.Body.String())
+	}
+	if listing := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/artifacts", nil, "alice"); strings.Contains(listing.Body.String(), "too-large") {
+		t.Fatalf("the refused seed left an artifact behind: %.300s", listing.Body.String())
+	}
+	// A replacement of a stored document (ReplaceText): refused the same way, and the document keeps
+	// its version.
+	if first := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "notes.md"}, "body.md", "text/markdown", []byte("# Notes\n"), "alice"); first.Code != http.StatusCreated {
+		t.Fatalf("seed notes.md: status=%d body=%.300s", first.Code, first.Body.String())
+	}
+	response = multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "notes.md"}, "body.md", "text/markdown", []byte(body), "alice")
+	if !refusedTooLarge(t, response) || !strings.Contains(response.Body.String(), "more than 65536 elements") {
+		t.Fatalf("replacement by a document too large to store: status=%d body=%.400s, want 413 CAP_EXCEEDED naming the 65536-element limit, as the document service words it", response.Code, response.Body.String())
+	}
+	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/artifacts/notes-md/text", nil, "alice")
+	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), `"markdown":"# Notes\n"`) {
+		t.Fatalf("notes.md after the refused replacement: status=%d body=%.300s, want its first version", text.Code, text.Body.String())
+	}
+}
+
+// Every route that writes a caller's markdown refuses markdown past the element limit as 413
+// CAP_EXCEEDED naming the limit, and writes nothing: a spec at issue creation, an issue's and a
+// project's document upload as JSON, and an edit's insert and replace.
+func TestEveryMarkdownWriteRefusesMarkdownPastTheElementLimit(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Element limit", "Before.\n")
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "DOCS", "name": "Docs"}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	heavy := strings.Repeat(")_", 200_000)
+	for _, write := range []struct {
+		name, path string
+		body       any
+	}{
+		{"a spec at issue creation", "/api/v1/issues", map[string]string{"project": "TEST", "title": "Too heavy", "spec": heavy}},
+		{"an issue's document upload", "/api/v1/issues/" + issue.Key + "/artifacts", map[string]string{"name": "heavy.md", "content": heavy}},
+		{"a project's document upload", "/api/v1/projects/DOCS/artifacts", map[string]string{"name": "heavy.md", "content": heavy}},
+		{"an edit's insert", "/api/v1/artifacts/" + issue.PrimaryArtifactID + "/edits", map[string]any{
+			"ops": []map[string]string{{"op": "insert", "after": "end", "markdown": heavy}},
+		}},
+		{"an edit's replace", "/api/v1/artifacts/" + issue.PrimaryArtifactID + "/edits", map[string]any{
+			"ops": []map[string]string{{"op": "replace", "find": "Before.", "with": heavy}},
+		}},
+	} {
+		response := dispatchRequest(t, handler, http.MethodPost, write.path, write.body, "alice")
+		if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(response.Body.String(), "more than 65536 elements") {
+			t.Errorf("%s past the element limit: status=%d body=%.300s, want 413 CAP_EXCEEDED naming the limit", write.name, response.Code, response.Body.String())
+		}
+	}
+	if listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=TEST", nil, "alice"); strings.Contains(listed.Body.String(), "Too heavy") {
+		t.Errorf("the refused issue was created: %.300s", listed.Body.String())
+	}
+	for _, path := range []string{"/api/v1/issues/" + issue.Key + "/artifacts", "/api/v1/projects/DOCS/artifacts"} {
+		if listed := dispatchRequest(t, handler, http.MethodGet, path, nil, "alice"); strings.Contains(listed.Body.String(), "heavy") {
+			t.Errorf("a refused upload left a document behind at %s: %.300s", path, listed.Body.String())
+		}
+	}
+	if text := documentMarkdown(t, handler, issue.PrimaryArtifactID); text != "Before.\n" {
+		t.Errorf("the spec after the refused edits = %q, want it unchanged", text)
+	}
+}

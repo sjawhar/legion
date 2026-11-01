@@ -1,0 +1,41 @@
+name: CI (closed pull request)
+
+# Cancels a closed pull request's CI run (ci.yaml) still waiting or running, every job in it
+# included: the worker-image build its worker-image job calls, too. This workflow joins ci.yaml's
+# concurrency group, ci-<pull request number>, with cancel-in-progress, so that CI run ends
+# `cancelled`, and its ci-ok with it, which neither GitHub nor the Legion daemon counts as passing:
+# it fails closed, never a skipped pass. No paths filter, because ci.yaml has none.
+#
+# The group is set at workflow level, and the one job is always skipped. A run whose jobs all skip
+# still enters its workflow's group when GitHub creates it, and cancels the older run there. So a
+# close takes no runner and posts no required check: main's ruleset requires ci-ok and pr-title,
+# and this job is cancel-ci.
+#
+# It is a workflow of its own because a `closed` run inside ci.yaml would post skipped jobs, which
+# GitHub and the Legion daemon count as passing, at a head another run tested, and so could turn a
+# failure there green.
+#
+# The quick-reopen race: when a pull request is reopened within about a minute of its close, GitHub
+# can create this closed run after the reopened pull request's CI run. This run then cancels it,
+# so ci-ok ends `cancelled` and fails closed. To refresh a pull request's runs, push, or wait a
+# minute between close and reopen. If ci-ok shows cancelled after a quick reopen, push or reopen
+# again.
+on:
+  pull_request:
+    types: [closed]
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# The job reads and writes nothing.
+permissions: {}
+
+jobs:
+  cancel-ci:
+    if: ${{ false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Do nothing; joining the group is what cancels the CI run
+        run: "true"

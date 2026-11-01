@@ -1,0 +1,21 @@
+{
+  "topic": "notifications.github.sjawhar.legion.workflow.release_yaml.completed",
+  "payload_summary": "workflow Release Packages main run 40203304600 completed/success",
+  "payload": {
+    "action": "completed",
+    "branch": "main",
+    "conclusion": "success",
+    "head_branch": "main",
+    "head_sha": "d7026876b8c8cd3e34937e5dbc76d719b09a4549",
+    "kind": "workflow",
+    "path": ".github/workflows/release.yaml",
+    "repo": "sjawhar/legion",
+    "run_attempt": "1",
+    "run_id": "40203304600",
+    "run_started_at": "2026-10-25T14:40:04Z",
+    "status": "completed",
+    "updated_at": "2026-10-25T15:06:28Z",
+    "url": "https://github.com/sjawhar/legion/actions/runs/40203304600",
+    "workflow": "Release Packages"
+  }
+}

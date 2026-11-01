@@ -1,0 +1,14 @@
+{
+  "type": "freshness",
+  "freshness": {
+    "last_event_at": "2026-10-02T23:59:00Z",
+    "last_reconcile_at": "2026-10-02T21:59:00Z",
+    "last_error": null,
+    "unfetchable_count": 0
+  },
+  "stale": [
+    "prs",
+    "runs",
+    "ci"
+  ]
+}

@@ -1,0 +1,443 @@
+import { expect, type Locator, test } from "@playwright/test";
+
+import {
+  createAsk,
+  createComment,
+  createIssue,
+  createIssueArtifact,
+  createProject,
+  createProjectDocument,
+  getIssue,
+  patchIssue,
+  putIssueState,
+} from "./api";
+import { filterPicker, pickFilterOption } from "./filters";
+import { resetDatabase } from "./seed";
+import { assertPageFits } from "./unclipped";
+import { asUser } from "./users";
+
+const session = { actor: { id: "e2e-project", kind: "session" as const }, as: "agent" as const };
+
+async function expectTouchTarget(locator: Locator): Promise<void> {
+  const box = await locator.boundingBox();
+  expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+}
+
+test.beforeEach(async () => {
+  await resetDatabase();
+});
+
+test("project page groups issues by status in board order; filters narrow issues; documents stay scoped to the project @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const triage = await createIssue({ project: "CORE", title: "Triage work" });
+  const icebox = await createIssue({ project: "CORE", title: "Icebox work" });
+  const backlog = await createIssue({ project: "CORE", title: "Backlog work" });
+  const parent = await createIssue({ project: "CORE", title: "Parent work" });
+  await createIssueArtifact(parent.key, {
+    content: "# Issue-only document\n",
+    name: "Issue-only document",
+  });
+  const needsYou = await createIssue({ project: "CORE", title: "Needs attention" });
+  const unread = await createIssue({ project: "CORE", title: "Unread work" });
+  const child = await createIssue({ parent: parent.key, project: "CORE", title: "Child work" });
+  const done = await createIssue({ project: "CORE", title: "Done work" });
+  await patchIssue(triage.key, { status: "triage" });
+  await patchIssue(icebox.key, { status: "icebox" });
+  await patchIssue(backlog.key, { status: "backlog" });
+  await patchIssue(parent.key, { status: "todo" });
+  await patchIssue(needsYou.key, { labels: ["frontend"], status: "todo" });
+  await patchIssue(unread.key, { labels: ["backend"], status: "in_progress" });
+  await patchIssue(child.key, { status: "testing" });
+  await patchIssue(done.key, { status: "done" });
+  await createAsk(needsYou.key, { question: "Does this need review?" }, session);
+  // The negative control for the header's pill: another person's question in this same project.
+  const bobs = await createIssue({ project: "CORE", title: "Bob's work" }, { login: "bob" });
+  await patchIssue(bobs.key, { status: "in_progress" });
+  await createAsk(bobs.key, { question: "Does Bob need to answer this?" }, session);
+  for (const issue of [triage, icebox, backlog, parent, needsYou, child, done]) {
+    const latest = await getIssue(issue.key);
+    await putIssueState(issue.key, { last_read_seq: latest.last_seq });
+  }
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  if (testInfo.project.name === "chromium") {
+    await page.setViewportSize({ width: 1280, height: 800 });
+  }
+
+  try {
+    await page.goto("/projects/CORE");
+    await expect(page).toHaveTitle("CORE · Core · Dispatch");
+    await expect(page.getByRole("heading", { name: "Core" })).toBeVisible();
+    // The pill counts this project's questions waiting on the reader themselves: one, Bob's
+    // not among them.
+    const blockedOnYou = page.getByRole("link", { name: "Blocked on you · 1" });
+    await expect(blockedOnYou).toHaveAttribute("href", "/");
+    if (testInfo.project.name === "chromium") {
+      // The filter strip is the first content row under the dense header; the issue list
+      // follows it. Density contract: that first row starts within 120px of the top.
+      const filterStrip = page.getByRole("button", { name: /Filters · \d+ active/ });
+      const stripBox = await filterStrip.boundingBox();
+      const issueList = page.getByRole("region", { name: "Project issues" });
+      const issueListBox = await issueList.boundingBox();
+      if (stripBox === null || issueListBox === null) {
+        throw new Error("project issue list is not visible");
+      }
+      expect(stripBox.y).toBeLessThanOrEqual(120);
+      expect(issueListBox.y).toBeLessThanOrEqual(stripBox.y + stripBox.height + 24);
+      const blockerBox = await blockedOnYou.boundingBox();
+      const mainBox = await page.getByTestId("main-content").boundingBox();
+      if (blockerBox === null || mainBox === null) {
+        throw new Error("project header is not visible");
+      }
+      expect(blockerBox.x + blockerBox.width).toBeLessThanOrEqual(mainBox.x + mainBox.width);
+    }
+    await expect(page.getByRole("tab", { name: "Issues" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+    await expect(page.locator("details > summary")).toHaveText([
+      "Triage (1)",
+      "Icebox (1)",
+      "Backlog (1)",
+      "Todo (2)",
+      "In progress (2)",
+      "Testing (1)",
+      "Done (1)",
+    ]);
+    await expect(page.getByRole("group", { name: "Done (1)" })).not.toHaveAttribute("open", "");
+    await expect(
+      page
+        .getByRole("listitem", { name: /CORE-.*Child work/ })
+        .getByRole("link", { name: parent.key })
+    ).toHaveAttribute("href", `/issues/${parent.key}`);
+
+    // Status is a multi-select: one status narrows, a second widens (OR), each is a chip. Rows
+    // and chips read the display label; the URL keeps the key.
+    await page.getByRole("button", { name: "Filters · 0 active" }).click();
+    await pickFilterOption(page, "Status", "Testing");
+    await expect(page).toHaveURL(/\?status=testing$/);
+    await expect(page.getByText("Child work")).toBeVisible();
+    await expect(page.getByText("Triage work")).toHaveCount(0);
+    await pickFilterOption(page, "Status", "Triage");
+    await expect(page).toHaveURL(/\?status=testing&status=triage$/);
+    await expect(page.getByText("Triage work")).toBeVisible();
+    await expect(page.getByText("Backlog work")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Filters · 2 active" })).toBeVisible();
+    await page.getByRole("button", { name: "Remove Status: Testing filter" }).click();
+    await expect(page.getByText("Child work")).toHaveCount(0);
+    await page.getByRole("button", { name: "Remove Status: Triage filter" }).click();
+    await expect(page.getByText("Backlog work")).toBeVisible();
+
+    // Removing the last filter leaves the strip open under the user; only they close it.
+    await expect(page.getByRole("button", { name: "Filters · 0 active" })).toHaveAttribute(
+      "aria-expanded",
+      "true"
+    );
+    await page.getByRole("button", { exact: true, name: "Needs you" }).click();
+    await expect(page.getByText("Needs attention")).toBeVisible();
+    await expect(page.getByText("Triage work")).toHaveCount(0);
+    await page.getByRole("button", { exact: true, name: "Needs you" }).click();
+
+    await page.getByRole("button", { exact: true, name: "Unread" }).click();
+    await expect(page.getByText("Unread work")).toBeVisible();
+    await expect(page.getByText("Needs attention")).toHaveCount(0);
+    await page.getByRole("button", { exact: true, name: "Unread" }).click();
+
+    await pickFilterOption(page, "Labels", "frontend");
+    await expect(page.getByText("Needs attention")).toBeVisible();
+    await expect(page.getByText("Unread work")).toHaveCount(0);
+    await page.getByRole("searchbox", { name: "Search issues" }).fill("attention");
+    await expect(page.getByText("Needs attention")).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("project-issues.png"), fullPage: true });
+
+    await page.getByRole("tab", { name: "Documents" }).click();
+    await expect(page).toHaveURL("/projects/CORE/documents");
+    await page.getByRole("button", { name: "New document" }).click();
+    await page.getByRole("textbox", { name: "Title" }).fill("Design notes");
+    await page.getByRole("button", { name: "Create" }).click();
+    await expect(page).toHaveURL("/projects/CORE/documents/design-notes");
+    await expect(page.getByRole("textbox", { name: "Document editor" })).toContainText(
+      "Design notes"
+    );
+    await page.goto("/projects/CORE/documents");
+    await expect(page.getByRole("link", { name: "Design notes", exact: true })).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("project-documents.png"), fullPage: true });
+    await expect(page.getByText("Issue-only document", { exact: true })).toHaveCount(0);
+
+    if (testInfo.project.name === "iphone") {
+      await assertPageFits(page);
+      await expectTouchTarget(page.getByRole("tab", { name: "Issues" }));
+      await expectTouchTarget(page.getByRole("button", { name: "New document" }));
+      await expectTouchTarget(page.getByRole("button", { name: /Drop a file here/ }));
+      await page.getByRole("tab", { name: "Issues" }).click();
+      await page.getByRole("button", { name: "Filters · 0 active" }).click();
+      await expectTouchTarget(filterPicker(page, "Status"));
+      await expectTouchTarget(filterPicker(page, "Labels"));
+      await expectTouchTarget(page.getByRole("button", { exact: true, name: "Needs you" }));
+      await expectTouchTarget(page.getByRole("button", { name: "Unread" }));
+      await filterPicker(page, "Status").click();
+      await expectTouchTarget(page.getByRole("option", { exact: true, name: "Todo" }));
+      await page.keyboard.press("Escape");
+      await assertPageFits(page);
+    }
+  } finally {
+    await context.close();
+  }
+});
+
+// The search filter holds up to 1,000 characters, and its chip stays inside its row: that text
+// on one line makes the page 7,535 px wide at 1280, and a phone zooms out until it is 1,560 px.
+test("a 1,000-character search filter's chip ends in an ellipsis inside its row @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await createIssue({ project: "CORE", title: "Core work" });
+  const query = "x".repeat(1_000);
+  const label = `Search: ${query}`;
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  if (testInfo.project.name === "chromium") {
+    await page.setViewportSize({ height: 800, width: 1280 });
+  }
+
+  try {
+    await page.goto(`/projects/CORE/issues?q=${query}`);
+    const chip = page.getByRole("button", { name: `Remove ${label} filter` });
+    await expect(chip).toBeVisible();
+    await assertPageFits(page);
+    const text = await chip.getByTitle(label).evaluate((node) => ({
+      clipped: node.scrollWidth > node.clientWidth,
+      textOverflow: getComputedStyle(node).textOverflow,
+    }));
+    expect(text).toEqual({ clipped: true, textOverflow: "ellipsis" });
+  } finally {
+    await alice.close();
+  }
+});
+
+// Clearing the box takes the active count to 0, and the strip stays open through it: the input
+// being typed in stays on screen and focused, so the next key lands in it.
+test("clearing the issue search keeps the strip open and the next keystroke in the search box", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await createIssue({ project: "CORE", title: "Core work" });
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  try {
+    await page.goto("/projects/CORE/issues");
+    await page.getByRole("button", { name: "Filters · 0 active" }).click();
+    const search = page.getByRole("searchbox", { name: "Search issues" });
+    await search.click();
+    await page.keyboard.type("core");
+    await expect(page).toHaveURL(/\/projects\/CORE\/issues\?q=core$/);
+    await page.keyboard.press("ControlOrMeta+A");
+    await page.keyboard.press("Backspace");
+    await expect(page).toHaveURL(/\/projects\/CORE\/issues$/);
+    await expect(page.getByRole("button", { name: "Filters · 0 active" })).toHaveAttribute(
+      "aria-expanded",
+      "true"
+    );
+    await expect(search).toBeFocused();
+    await page.keyboard.type("w");
+    await expect(search).toHaveValue("w");
+    await expect(page).toHaveURL(/\/projects\/CORE\/issues\?q=w$/);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an issue's Artifacts tab lists its reference closure and a document page lists its referrers", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Reference source" });
+  const related = await createIssue({ project: "CORE", title: "Referenced artifact" });
+  await createIssueArtifact(issue.key, {
+    content: "See dispatch://CORE/artifact/design-notes",
+    name: "Source doc",
+  });
+  await createIssueArtifact(related.key, { content: "diagram", name: "Diagram" });
+  await createProjectDocument("CORE", {
+    content: `See dispatch://${related.key}/artifact/diagram`,
+    name: "Design notes",
+  });
+  await createComment(issue.key, { body: "See dispatch://CORE/artifact/design-notes" }, session);
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await page.goto(`/issues/${issue.key}/artifacts`);
+    await page.getByText(/References \(\d+\)/).click();
+    const references = page.getByRole("region", { name: "References" });
+    await expect(references.getByRole("link", { name: "Design notes" })).toHaveAttribute(
+      "href",
+      "/projects/CORE/documents/design-notes"
+    );
+    await expect(references).toContainText("via artifact");
+    await expect(references).toContainText("depth 1");
+    await expect(references).toContainText("depth 2");
+    const tabs = page.getByRole("main").getByRole("tab");
+    await expect(tabs).toHaveCount(5);
+    for (const [index, name] of [
+      "Spec",
+      "Conversation",
+      "Children",
+      "Artifacts (2)",
+      "Activity",
+    ].entries()) {
+      await expect(tabs.nth(index)).toHaveAccessibleName(name);
+    }
+    await expect(page.getByRole("button", { name: /make primary/i })).toHaveCount(0);
+    await page.getByRole("link", { name: "Design notes" }).click();
+    await expect(page).toHaveURL("/projects/CORE/documents/design-notes");
+    await expect(page.getByRole("region", { name: "Referenced by" })).toContainText(
+      `Comment · ${issue.key}`
+    );
+    // A document mention deep-links to the block that carries it.
+    await expect(page.getByRole("link", { name: `Artifact · ${issue.key}` })).toHaveAttribute(
+      "href",
+      new RegExp(`^/issues/${issue.key}/artifacts/source-doc#b-`)
+    );
+    await page.screenshot({
+      path: testInfo.outputPath("project-document-references.png"),
+      fullPage: true,
+    });
+  } finally {
+    await context.close();
+  }
+});
+
+// The status bands are collapsible and the header is one strip. Both regressed once while this
+// surface was being polished: a `flex` summary loses the native disclosure marker, and a title
+// allowed to grow pushed the project key hundreds of pixels from a short name.
+test("status bands stay expandable and the project key sits beside its name @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const open = await createIssue({ project: "CORE", title: "Still open" });
+  await patchIssue(open.key, { status: "in_progress" });
+  const shipped = await createIssue({ project: "CORE", title: "Already shipped" });
+  await patchIssue(shipped.key, { status: "done" });
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  const width = testInfo.project.name === "chromium" ? 1280 : 390;
+  if (testInfo.project.name === "chromium") {
+    await page.setViewportSize({ height: 900, width });
+  }
+
+  try {
+    await page.goto("/projects/CORE/issues");
+
+    // Done is collapsed, announced as expandable, and opens.
+    const done = page.locator("details").filter({ hasText: "Done (1)" }).first();
+    await expect(done).toBeVisible();
+    expect(await done.evaluate((node) => (node as HTMLDetailsElement).open)).toBe(false);
+    const summary = done.locator("summary");
+    // `display: flex` on a summary removes the marker; a list-item box is what draws it.
+    const display = await summary.evaluate((node) => getComputedStyle(node).display);
+    expect(display).toBe("list-item");
+    await expect(page.getByRole("link", { name: /Already shipped/ })).toHaveCount(0);
+    await summary.click();
+    expect(await done.evaluate((node) => (node as HTMLDetailsElement).open)).toBe(true);
+    await expect(page.getByRole("link", { name: /Already shipped/ })).toHaveCount(1);
+
+    // The key pill sits beside the name, not across the row from it.
+    const heading = page.getByRole("heading", { level: 1, name: "Core" });
+    const pill = page.getByRole("link", { exact: true, name: "CORE" });
+    // The rendered text's own right edge, not the heading's box: a heading allowed to grow
+    // keeps its text at the left and stretches the box, so the box edge stays beside the pill
+    // while the name sits hundreds of pixels away from it.
+    const textRight = await heading.evaluate((node) => {
+      const range = node.ownerDocument.createRange();
+      range.selectNodeContents(node);
+      return range.getBoundingClientRect().right;
+    });
+    const pillBox = await pill.boundingBox();
+    if (pillBox === null) {
+      throw new Error("project header is not visible");
+    }
+    const gap = pillBox.x - textRight;
+    expect(gap).toBeGreaterThanOrEqual(0);
+    // Below `md` the name, key and blocker pill share the first row by design, the name taking
+    // the space the other two leave; the key beside the name is the one-strip desktop layout.
+    if (testInfo.project.name === "chromium") {
+      expect(gap).toBeLessThanOrEqual(24);
+    }
+    // The full name is available even when the heading truncates.
+    await expect(heading).toHaveAttribute("title", "Core");
+  } finally {
+    await alice.close();
+  }
+});
+
+// A row's key and title are one reference. Below 1280 px every link is an inline-flex box, which
+// would make the key and the title two flex columns: the key would break mid-key (`CORE-` over
+// `1`) and a long title would wrap in whatever the key and the timestamp left, about 130 px on a
+// phone.
+test("a list row keeps its key whole and gives the title the row's width @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    title:
+      "Smoke rig checkpoints 5 and 7 assert the retired commit-identity and handoff-cleanup design: implementer+ses_identity, Legion-Session trailer, and the reviewer App authoring the .legion/ deletion",
+  });
+  await patchIssue(issue.key, { labels: ["smoke"], priority: 2, status: "todo" });
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  if (testInfo.project.name === "chromium") {
+    await page.setViewportSize({ height: 900, width: 1280 });
+  }
+
+  try {
+    await page.goto("/projects/CORE/issues");
+    const row = page.getByRole("listitem", { name: new RegExp(`^${issue.key} `) });
+    await expect(row).toBeVisible();
+    const layout = await row.evaluate((node) => {
+      const link = node.querySelector("a");
+      const key = link?.querySelector(".font-semibold");
+      const title = key?.nextElementSibling;
+      const time = node.querySelector("time");
+      if (!link || !key || !title || !time) {
+        throw new Error("the row has no key, title or timestamp");
+      }
+      const rects = (element: Element) => {
+        const range = node.ownerDocument.createRange();
+        range.selectNodeContents(element);
+        return [...range.getClientRects()];
+      };
+      const titleRects = rects(title);
+      const timeBox = time.getBoundingClientRect();
+      return {
+        keyLines: new Set(rects(key).map((rect) => Math.round(rect.top))).size,
+        rowWidth: node.getBoundingClientRect().width,
+        titleOverlapsTime: titleRects.some(
+          (rect) =>
+            rect.right > timeBox.left &&
+            rect.left < timeBox.right &&
+            rect.bottom > timeBox.top &&
+            rect.top < timeBox.bottom
+        ),
+        titleWidth:
+          Math.max(...titleRects.map((rect) => rect.right)) -
+          Math.min(...titleRects.map((rect) => rect.left)),
+      };
+    });
+    expect(layout.keyLines).toBe(1);
+    expect(layout.titleOverlapsTime).toBe(false);
+    // The title wraps across the row, not in a column beside the key and the timestamp.
+    expect(layout.titleWidth).toBeGreaterThanOrEqual(layout.rowWidth * 0.8);
+    await assertPageFits(page);
+  } finally {
+    await alice.close();
+  }
+});

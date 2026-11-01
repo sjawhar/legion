@@ -1,0 +1,154 @@
+---
+title: How Legion, Dispatch and the broker fit together
+description: What each component is for, who uses it, and how an issue travels from a person's idea to merged, checked code.
+sidebar:
+  label: How it fits together
+---
+
+Four components share the work. **Dispatch** holds the record: the issues, their documents, and
+every decision a person makes about them. **Legion** works the issues handed to it by running coding
+agents. The **Secrets Broker** gives those agents credentials, with a person's approval, on the
+broker's own page that Dispatch's Inbox links to, when the secret's owner and tier require one.
+**Envoy** carries events between them.
+
+```mermaid
+flowchart TB
+  people([People])
+  github[(GitHub)]
+  subgraph dispatch [Dispatch]
+    record[Issues and documents]
+    inbox[Inbox]
+  end
+  envoy{{Envoy}}
+  subgraph legion [Legion]
+    coordinator[Coordinator]
+    agents[Agents]
+  end
+  subgraph secrets [Secrets Broker]
+    broker[Requests and grants]
+    approve[Approval page]
+  end
+
+  people -->|file issues, answer asks, approve specs| dispatch
+  people -->|approve secret requests| approve
+  people -->|merge| github
+  dispatch -->|events| envoy
+  github -->|pull request and CI events| envoy
+  envoy -->|events| coordinator
+  envoy -->|messages| agents
+  coordinator -->|runs| agents
+  agents -->|specs, comments, asks, status| dispatch
+  agents -->|pull requests| github
+  agents -->|request a secret| broker
+  broker -->|pending requests, each linking its page| inbox
+  inbox -->|link| approve
+```
+
+## Dispatch: the record of work and decisions
+
+Dispatch is a web dashboard and an HTTP API over one store of projects and issues. Each issue has a
+lifecycle status, from Triage, Icebox, Backlog and Todo through In Progress, Testing, Needs Review
+and Retro to Done.
+
+An issue carries documents, the first of which is its spec. People and agents comment on a
+document, suggest exact replacements for its text, and ask questions. An **ask** is a decision put
+to a named person: it waits in that person's **Inbox** until they answer it, and an approval request
+is an ask whose answer approves a document at one version or requests changes with a reason.
+
+People use the dashboard: they file issues, answer asks, approve specs and watch the agents working
+on the **Agents** page. Agents use the `dispatch` command and the API to write specs, post comments and
+messages, open asks and move issues. Dispatch publishes its issue, document and project events on
+Envoy, so nothing that reacts to Dispatch has to poll it.
+
+## Legion: the coordinator and its agents
+
+Legion's coordinator works only the issues handed to it, which are the ones carrying the Dispatch
+label `legion`. That lets Legion share a project with people and other agents. A person sets the
+label from the issue header, or asks Legion's own **controller** agent to set it for them; the
+controller never hands over work on its own. An agent that finds a problem outside its own issue
+files no issue: a defect with a clear fix in code its own tree touches or depends on is fixed in that tree's
+pull request, any other goes to the controller, which gives it to the tree that owns that code and
+files it for Legion only when none does, and a
+problem that needs a decision goes to a person in a Dispatch ask.
+
+Each admitted issue gets an **architect**, which owns the issue's tree. It writes the spec, splits
+large work into child issues, and runs each change through phase workers in turn: a **planner**, an
+**implementer**, a **tester** and a **reviewer**, then a **merger**. Every agent works in a
+workspace of its own, and every phase commits a structured handoff under `.legion/` on the issue
+branch, which is what a restarted agent recovers from. The coordinator writes the issue's status
+back to Dispatch as the work moves (In Progress, Testing, Needs Review, Retro).
+
+Two decisions stay with people:
+
+- **The design gate.** Before implementation starts, a person approves the root issue's spec at a
+  specific version in Dispatch. A later version of the spec closes the gate again until someone
+  approves it, unless that version is the person's own answer to a decision block and the answer is
+  the whole change since the version they approved: then Dispatch records their approval at the new
+  version and the gate reopens. The gate is on by default; a deployment can turn it off.
+- **The merge.** The merger sends `READY`. The daemon accepts it on the approved head, posts it on
+  the Dispatch issue, and submits the pull request for merge. The repository's own rules decide
+  whether and when it lands, so a check it requires, a review a person must give, or a by-hand
+  merge, stays theirs.
+
+The coordinator runs its agents as Oh My Pi sessions, either in tmux panes on one host or as Agent
+Sandbox pods in a Kubernetes cluster.
+
+## Secrets Broker: credentials a person approved
+
+An agent that needs a secret, such as a token for a service its task touches, asks the broker for
+it by name. The agent's session or pod first enrolls with the broker under a signing key of its own,
+so every request is signed by the session making it. Two tags on each secret, its owner and its
+tier, then decide whether to grant the request automatically (the owner's own sessions asking for
+an agent-tier secret), send it to a person for approval (its owner, or anyone for a shared
+human-tier secret), or refuse it.
+
+A secret request appears in that person's Dispatch Inbox, labelled as a secret request, as a link
+to its page on the broker. The person opens it, signs in to the broker with their Workspace account
+if their last sign-in there has lapsed, reads the request the broker prints from its own record,
+the reason the agent gave included, and approves or denies it on that page, which the broker
+accepts only from its own origin. No route Dispatch or any other service calls decides a secret
+request. A machine login, labelled as one, is approved in Dispatch by typing the code the machine
+shows, and Dispatch relays that decision, and a person's revoke of a grant or a machine login, under
+the signed-in person's identity. The broker holds no Dispatch credential: Dispatch reads the pending
+requests from the broker. A grant lasts until its session ends, or for the shorter lifetime its request named,
+and `agent-secrets NAME -- <command>` runs a command with the granted value in that command's
+environment rather than printing it. People create and change the secrets themselves, in the
+broker's own store (AWS Secrets Manager or GCP Secret Manager) under their own cloud sign-in, with
+`agent-secrets secret`, which has the broker serve each change at once.
+
+## Envoy: the events between them
+
+Envoy is the event transport, built on NATS JetStream. Dispatch publishes each issue's events to a
+topic of the form `notifications.dispatch.issue.<KEY>.<event>`, and Envoy turns GitHub's webhooks
+into events on topics for each repository and pull request. Legion's coordinator reads both streams
+with durable consumers, so an event that arrives while it is down is read when it comes back.
+
+Envoy also delivers messages to agent sessions directly: a message to one session, to whichever
+session holds a role, or a broadcast a person sends from the Dispatch Agents page. An Oh My Pi or
+Claude Code session whose connection drops gets what was sent to it, and what was published on
+the issue topics it follows, from the stream when it reconnects, for up to 72 hours; a role's
+messages are live only. Envoy decides only where an event goes; what to do about it is the
+coordinator's and the agents' business.
+
+## An issue, start to finish
+
+1. Someone files an issue in a Dispatch project. It starts in Triage.
+2. When it is ready, a person moves it to Todo with the `legion` label, or asks the controller to.
+3. The coordinator admits it and starts its architect, which writes the spec.
+4. The architect requests approval. The request reaches the approver's Inbox, they approve that
+   version, and Dispatch publishes the approval on Envoy. The coordinator opens the design gate.
+5. The planner, implementer, tester and reviewer take the change in turn. A review that requests
+   changes sends it back to the implementer, and through the tester again.
+6. Once the reviewer approves, the architect reads the evidence and accepts the change (or sends
+   it back), and the retrospective runs. The merger then sends `READY`, which the daemon accepts
+   on the approved head plus retro's notes, and posts on the issue.
+7. The daemon submits the pull request for merge, and it lands under the repository's own rules.
+   The merge closes the issue: it is Done.
+8. After the close, once the deploy carries the merge, the implementer drives the change in
+   production and records what it observed on the pull request. Dispatch's `issue.deployed` event
+   wakes it for that look, as does each run of the repository's deploy workflow on its default
+   branch whose deploy step succeeded after the merge, when the project's `legion.yaml` names that
+   workflow.
+
+Read on in [Legion](/legion/legion/), [Dispatch](/legion/dispatch/) and the
+[Secrets Broker](/legion/broker/).

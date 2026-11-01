@@ -182,12 +182,12 @@ type decisionResponse struct {
 	State string `json:"state"`
 }
 
-func (s *server) approveRecord(w http.ResponseWriter, r *http.Request) {
-	s.decideRecord(w, r, true)
+func (s *server) approveRecord(w http.ResponseWriter, r *http.Request, needs power) {
+	s.decideRecord(w, r, true, needs)
 }
 
-func (s *server) denyRecord(w http.ResponseWriter, r *http.Request) {
-	s.decideRecord(w, r, false)
+func (s *server) denyRecord(w http.ResponseWriter, r *http.Request, needs power) {
+	s.decideRecord(w, r, false, needs)
 }
 
 // decideRecord refuses a secret request for every caller and decides a machine login for a
@@ -200,13 +200,15 @@ func (s *server) denyRecord(w http.ResponseWriter, r *http.Request) {
 // caller turned away with 401 or ACCOUNT_NOT_LISTED would be told the wrong thing to do. Nothing
 // is written and no body is read for that refusal. Every other record is then authenticated
 // exactly as the other account routes are (accountCaller: the ServiceAccount token and
-// BROKER_API_ACCOUNTS), and only afterwards does a record id no record has answer 404. So an
+// BROKER_API_ACCOUNTS), and the caller's name must carry needs, the power its row declares, as
+// authenticate requires of every other route a listed caller's token authenticates
+// (refuseWithoutPower); only afterwards does a record id no record has answer 404. So an
 // unauthenticated caller does read one thing from the two answers apart: an id that names a
 // secret request answers 403 where an id no record has answers 401. A record id is a SHA-256
 // hash, so a caller that can name one already holds it, and the shared bucket bounds the asking
 // anyway. A machine login's decision is logged with the caller that relayed it and the
 // approver it named, the record of who acted, since that name is the caller's to state.
-func (s *server) decideRecord(w http.ResponseWriter, r *http.Request, approve bool) {
+func (s *server) decideRecord(w http.ResponseWriter, r *http.Request, approve bool, needs power) {
 	recordID, ok := pathRecordID(w, r, "record", "RECORD_ID_INPUT")
 	if !ok {
 		return
@@ -225,6 +227,9 @@ func (s *server) decideRecord(w http.ResponseWriter, r *http.Request, approve bo
 	if !ok {
 		return
 	}
+	if refuseWithoutPower(w, who.account, needs, r.Pattern) {
+		return
+	}
 	switch {
 	case errors.Is(kindErr, pgx.ErrNoRows):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such credential request")
@@ -240,7 +245,7 @@ func (s *server) decideRecord(w http.ResponseWriter, r *http.Request, approve bo
 	if !requireApprover(w, body.Approver) {
 		return
 	}
-	slog.Info("decision relayed", "caller", who.account, "approver", body.Approver, "record", recordID, "approve", approve)
+	slog.Info("decision relayed", "caller", who.account.Name, "approver", body.Approver, "record", recordID, "approve", approve)
 	s.decideMachineLogin(w, r, recordID, approve, body)
 }
 

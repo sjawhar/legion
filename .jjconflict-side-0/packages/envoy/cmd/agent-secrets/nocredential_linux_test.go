@@ -1,0 +1,168 @@
+// packages/envoy/cmd/agent-secrets/nocredential_linux_test.go
+//go:build linux
+
+// A machine session on a helper that holds no launcher credential has no broker identity: a helper
+// never logged in, or whose login lapsed or was refused, enrolls no one until the operator logs the machine in, so
+// identity sends its callers to their other backend, and every command that meets the helper's
+// NO_CREDENTIAL answer says so in one line. Linux-only for the real helper's pidfd pinning.
+package main
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/sjawhar/envoy/internal/broker/helper"
+)
+
+const notLoggedInNotice = "agent-secrets: this machine is not logged in to the secrets broker; not an agent session (run: agent-secrets machine login)\n"
+
+// runInSession runs `agent-secrets register --exec -- binary args...` against the helper at sock,
+// so the command runs as a freshly registered machine session, and returns its exit code and output.
+func runInSession(t *testing.T, binary, sock string, args ...string) (code int, stdout, stderr string) {
+	t.Helper()
+	cmd := exec.Command(binary, append([]string{"register", "--exec", "--", binary}, args...)...)
+	cmd.Env = append(os.Environ(), "AGENT_SECRETS_HELPER_SOCK="+sock, "AGENT_SECRETS_KEY_DIR=",
+		"AGENT_SECRETS_URL=http://127.0.0.1:1", "XDG_RUNTIME_DIR="+t.TempDir(), "HOME="+t.TempDir())
+	var out, errOut strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+	_ = cmd.Run()
+	return cmd.ProcessState.ExitCode(), out.String(), errOut.String()
+}
+
+// TestIdentityOnAHelperWithoutALauncherCredential: a registered session whose helper was never
+// logged in is not an agent session. identity exits 1 with the notice, where a helper still
+// enrolling with a credential gets exit 0 (TestIdentityWhileAHelperWithACredentialEnrolls).
+func TestIdentityOnAHelperWithoutALauncherCredential(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	sock := realHelper(t)
+	code, stdout, stderr := runInSession(t, binary, sock, "identity")
+	if code != 1 || stdout != "" || stderr != notLoggedInNotice {
+		t.Fatalf("identity in a registered session on a helper with no credential: exit %d, stdout %q, stderr %q; want 1, nothing, %q", code, stdout, stderr, notLoggedInNotice)
+	}
+}
+
+// TestRegisterWaitReturnsAtOnceWithoutALauncherCredential runs `register --wait 10 --exec` against
+// the real helper while it holds no launcher credential: its enroll loop cannot succeed, so the
+// helper answers at once instead of holding the launch for the full wait. The launch still execs,
+// warning that the machine is not logged in, what the session's secrets calls do until it is, and
+// the login command. The bound only rules out the 10 s wait.
+func TestRegisterWaitReturnsAtOnceWithoutALauncherCredential(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	sock := realHelper(t)
+	cmd := exec.Command(binary, "register", "--wait", "10", "--exec", "--", "sh", "-c", "echo ran")
+	cmd.Env = append(os.Environ(), "AGENT_SECRETS_HELPER_SOCK="+sock, "AGENT_SECRETS_KEY_DIR=")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	start := time.Now()
+	out, err := cmd.Output()
+	elapsed := time.Since(start)
+	if err != nil || strings.TrimSpace(string(out)) != "ran" {
+		t.Fatalf("the command must still run: %q %v (stderr %q)", out, err, stderr.String())
+	}
+	const warning = "agent-secrets register: this machine is not logged in to the secrets broker; launching anyway, and until it is (run: agent-secrets machine login) this session's agent-secrets calls fail\n"
+	if stderr.String() != warning {
+		t.Fatalf("stderr %q, want the no-credential warning %q", stderr.String(), warning)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("register --wait 10 took %s with no credential; it must not wait", elapsed)
+	}
+	t.Logf("register --wait 10 with no credential returned in %s", elapsed)
+}
+
+// TestIdentityWhileAHelperWithACredentialEnrolls: once the helper holds a launcher credential, a
+// registered session it has not enrolled yet is an agent session (NOT_ENROLLED), and identity
+// exits 0 silently. The broker here issues the machine login and refuses every enrollment, so the
+// session stays unenrolled for the whole test.
+func TestIdentityWhileAHelperWithACredentialEnrolls(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/oauth/device_authorization", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"device_code": "device-1", "user_code": "ABCD-EFGH", "verification_uri": "https://s", "expires_in": 900, "interval": 1})
+	})
+	mux.HandleFunc("POST /v1/oauth/token", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"access_token": "access-1", "token_type": "DPoP", "expires_in": 900, "refresh_token": "refresh-1",
+			"credential_id": "cred-1", "credential_expires_at": time.Now().Add(7 * 24 * time.Hour).UTC().Format(time.RFC3339)})
+	})
+	mux.HandleFunc("POST /v1/enrollments", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"code":"DATABASE","error":"postgres unreachable"}`))
+	})
+	broker := httptest.NewServer(mux)
+	defer broker.Close()
+
+	binary := buildAgentSecrets(t)
+	srv, sock := serveRealHelper(t, broker.URL, "ada@example.com")
+	if _, err := srv.Broker.Login(context.Background(), srv.Hostname); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !srv.Broker.HasCredential() && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !srv.Broker.HasCredential() {
+		t.Fatal("the helper never installed the issued launcher credential")
+	}
+	code, stdout, stderr := runInSession(t, binary, sock, "identity")
+	if code != 0 || stdout != "" || stderr != "" {
+		t.Fatalf("identity in a registered, enrolling session on a logged-in helper: exit %d, stdout %q, stderr %q; want 0 and nothing", code, stdout, stderr)
+	}
+}
+
+// TestCommandsOnAHelperWithoutALauncherCredentialPrintTheNotice: every command that asks the helper
+// to sign, for a proof or for a request object, fails with identity's line rather than the
+// helper's raw code.
+func TestCommandsOnAHelperWithoutALauncherCredentialPrintTheNotice(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	sock := realHelper(t)
+	for _, args := range [][]string{
+		{"SOME_KEY", "--reason", "test", "--", "true"},
+		{"request", "SOME_KEY", "--reason", "test"},
+		{"self"},
+		{"sign", "--method", "GET", "--url", "https://broker.internal.example/v1/enrollments/self"},
+	} {
+		code, stdout, stderr := runInSession(t, binary, sock, args...)
+		if code != 1 || stdout != "" || stderr != notLoggedInNotice {
+			t.Errorf("agent-secrets %s: exit %d, stdout %q, stderr %q; want 1, nothing, %q", strings.Join(args, " "), code, stdout, stderr, notLoggedInNotice)
+		}
+	}
+}
+
+// TestLoginStatusSaysWhyTheHelperDroppedItsCredential: the helper drops its launcher credential
+// when the broker refuses it (401 LAUNCHER_INVALID, which the broker answers for a clock step or an
+// AGENT_SECRETS_URL mismatch as well as an expired or revoked credential) or when it reaches the
+// expiry the broker named, and such a credential must not be reported as a login that merely
+// expired unapproved. login-status keeps the word the dotfiles launcher gate matches, "expired",
+// and says on stderr the cause the helper names (credential_dropped), in the words of the helper's
+// own journal line. A helper from before credential_dropped sets login_refused alone, and only for
+// a broker refusal, so that reads as one; with neither, "expired" is a login nobody approved.
+func TestLoginStatusSaysWhyTheHelperDroppedItsCredential(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	for _, tc := range []struct {
+		name    string
+		refused bool
+		dropped string
+		want    string
+	}{
+		{"dropped at its expiry", true, "the launcher credential reached its expiry", "the launcher credential reached its expiry; run: agent-secrets machine login"},
+		{"refused, from a helper before credential_dropped", true, "", "the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets machine login"},
+		{"a login nobody approved", false, "", "the most recent machine login expired before anyone approved it; run: agent-secrets machine login"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sock := filepath.Join(shortTempDir(t), "h.sock")
+			fakeHelperAt(t, sock, helper.Response{OK: true, LoginState: "expired", LoginRefused: tc.refused, CredentialDropped: tc.dropped})
+			stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
+				[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "machine", "login-status")
+			want := "agent-secrets machine login-status: " + tc.want + "\n"
+			if exit != 1 || stdout != "expired\n" || stderr != want {
+				t.Fatalf("exit %d, stdout %q, stderr %q; want 1, %q, %q", exit, stdout, stderr, "expired\n", want)
+			}
+		})
+	}
+}

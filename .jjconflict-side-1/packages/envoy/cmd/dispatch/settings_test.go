@@ -1,0 +1,1822 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	natsgo "github.com/nats-io/nats.go"
+
+	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/cmdtest"
+	"github.com/sjawhar/envoy/internal/dispatch/api"
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/config"
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
+	"github.com/sjawhar/envoy/internal/dispatch/routes"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/githubappjwt"
+	"github.com/sjawhar/envoy/internal/logtest"
+	"github.com/sjawhar/envoy/internal/oidc/oidctest"
+	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/sjawhar/envoy/internal/testsocks5"
+)
+
+// storetestImport is the one package under internal/dispatch that reads the process environment
+// for itself: the Postgres fixture of Dispatch's tests (DISPATCH_TEST_DATABASE_URL), which only
+// test files may import.
+const storetestImport = "github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+
+// environmentReaders are the functions that read the process environment, by package.
+var environmentReaders = map[string][]string{
+	"os":      {"Getenv", "LookupEnv", "Environ", "ExpandEnv"},
+	"syscall": {"Getenv", "Environ"},
+}
+
+// environmentReads walks the non-test Go files under roots and returns each reference to an
+// environment reader as "<path> <package>.<name>", whatever name the file imports the package
+// under, and each dot import of a reader's package as "<path> import . <package>": with the
+// package's names unqualified, a read cannot be told from a call to the file's own function, so
+// the import is the finding. It also returns the files that import storetest.
+func environmentReads(roots ...string) (reads, storetestImporters []string, err error) {
+	fileSet := token.NewFileSet()
+	for _, root := range roots {
+		err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() {
+				if entry.Name() == "testdata" || entry.Name() == "node_modules" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			file, err := parser.ParseFile(fileSet, path, nil, parser.SkipObjectResolution)
+			if err != nil {
+				return err
+			}
+			fixture := strings.Contains(filepath.ToSlash(path), "store/storetest/")
+			// The name each environment-reading package has in this file.
+			packages := map[string]string{}
+			for _, spec := range file.Imports {
+				importPath, _ := strconv.Unquote(spec.Path.Value)
+				if importPath == storetestImport {
+					storetestImporters = append(storetestImporters, path)
+				}
+				if _, reads := environmentReaders[importPath]; !reads {
+					continue
+				}
+				name := importPath
+				if spec.Name != nil {
+					name = spec.Name.Name
+				}
+				if name == "." && !fixture {
+					reads = append(reads, filepath.ToSlash(path)+" import . "+importPath)
+				}
+				packages[name] = importPath
+			}
+			if fixture {
+				return nil
+			}
+			ast.Inspect(file, func(node ast.Node) bool {
+				selector, ok := node.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				pkg, ok := selector.X.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				if importPath, ok := packages[pkg.Name]; ok && slices.Contains(environmentReaders[importPath], selector.Sel.Name) {
+					position := fileSet.Position(selector.Pos())
+					reads = append(reads, filepath.ToSlash(position.Filename)+" "+importPath+"."+selector.Sel.Name)
+				}
+				return true
+			})
+			return nil
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("walk %s: %w", root, err)
+		}
+	}
+	return reads, storetestImporters, nil
+}
+
+// Dispatch reads its environment in one place: processSettings, over the settings table. Any
+// other reference to the process environment under cmd/dispatch or internal/dispatch is a reader
+// the table, `envoy-dispatch settings` and the generated configuration reference do not list.
+func TestNoReaderBypassesTheSettingsTable(t *testing.T) {
+	reads, storetestImporters, err := environmentReads(".", filepath.Join("..", "..", "internal", "dispatch"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"settings.go os.LookupEnv"}; !slices.Equal(reads, want) {
+		t.Errorf("environment reads outside the settings table: %q, want only %q (processSettings). Add the variable as a row of the settings table (cmd/dispatch/settings.go) and hand its reader the value", reads, want)
+	}
+	if len(storetestImporters) > 0 {
+		t.Errorf("non-test files import %s, which reads DISPATCH_TEST_DATABASE_URL outside the settings table: %q", storetestImport, storetestImporters)
+	}
+}
+
+// The guard sees a read however the file imports its package: under another name, or with no
+// name at all, where the read is a bare Getenv.
+func TestTheGuardSeesAReadUnderAnyImportName(t *testing.T) {
+	for name, probe := range map[string]string{
+		"an aliased import":       "package auth\n\nimport environment \"os\"\n\nfunc acceptProbe() string { return environment.Getenv(\"DISPATCH_ACCEPT_PROBE\") }\n",
+		"a dot import":            "package auth\n\nimport . \"os\"\n\nfunc acceptProbe() string { return Getenv(\"DISPATCH_ACCEPT_PROBE\") }\n",
+		"a dot import of syscall": "package auth\n\nimport . \"syscall\"\n\nfunc acceptProbe() []string { return Environ() }\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeFile(t, filepath.Join("auth", "probe.go"), probe)
+			reads, _, err := environmentReads(filepath.Dir(path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(reads) != 1 || !strings.HasPrefix(reads[0], filepath.ToSlash(path)+" ") {
+				t.Errorf("environment reads %q, want the one in %s", reads, path)
+			}
+		})
+	}
+}
+
+func TestSettingsTableNamesEachVariableOnce(t *testing.T) {
+	name := regexp.MustCompile(`^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$`)
+	seen := map[string]bool{}
+	for _, row := range settings {
+		variables := []string{row.Name}
+		if row.File {
+			variables = append(variables, row.fileVariable())
+		}
+		for _, variable := range variables {
+			if seen[variable] {
+				t.Errorf("%s is in the settings table twice", variable)
+			}
+			seen[variable] = true
+		}
+		if !name.MatchString(row.Name) {
+			t.Errorf("%q is not an environment variable name", row.Name)
+		}
+		if row.Required != "yes" && row.Required != "no" && !strings.HasPrefix(row.Required, "when ") {
+			t.Errorf("%s: Required %q, want yes, no, or when <condition>", row.Name, row.Required)
+		}
+		if row.Description == "" || strings.Contains(row.Description, "\n") {
+			t.Errorf("%s: Description %q, want one line", row.Name, row.Description)
+		}
+	}
+	// A removed setting refuses startup, so it can never also be a row the server reads.
+	for _, removed := range removedSettings {
+		if seen[removed.Name] {
+			t.Errorf("%s is both a settings row and a removed setting", removed.Name)
+		}
+		if !name.MatchString(removed.Name) || removed.Replacement == "" {
+			t.Errorf("removed setting %+v, want a variable name and what replaced it", removed)
+		}
+	}
+}
+
+// `envoy-dispatch settings` is what the docs site's configuration reference is generated from, so
+// it carries every row whole: the _FILE form by name, and null where a row has no default.
+func TestSettingsSubcommandPrintsEveryRow(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runSubcommand(context.Background(), []string{"settings"}, envGetter(nil), &stdout, &stderr); code != 0 {
+		t.Fatalf("envoy-dispatch settings: exit %d, stderr %q", code, stderr.String())
+	}
+	var printed struct {
+		Settings []settingEntry `json:"settings"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &printed); err != nil {
+		t.Fatalf("decode %s: %v", stdout.String(), err)
+	}
+	if len(printed.Settings) != len(settings) {
+		t.Fatalf("printed %d settings, want the table's %d", len(printed.Settings), len(settings))
+	}
+	for index, row := range settings {
+		entry := printed.Settings[index]
+		file, defaultValue := "", ""
+		if entry.File != nil {
+			file = *entry.File
+		}
+		if entry.Default != nil {
+			defaultValue = *entry.Default
+		}
+		wantFile := ""
+		if row.File {
+			wantFile = row.Name + "_FILE"
+		}
+		if entry.Name != row.Name || file != wantFile || (entry.File != nil) != row.File || defaultValue != row.Default ||
+			(entry.Default != nil) != (row.Default != "") || entry.Required != row.Required || entry.Description != row.Description {
+			t.Errorf("printed %+v (file %q, default %q), want row %+v", entry, file, defaultValue, row)
+		}
+	}
+}
+
+func TestSettingValuesRefuseAVariableTheTableDoesNotList(t *testing.T) {
+	defer func() {
+		if recovered := recover(); recovered == nil || !strings.Contains(recovered.(string), "DISPATCH_NOT_A_SETTING") {
+			t.Fatalf("recovered %v, want a panic naming DISPATCH_NOT_A_SETTING", recovered)
+		}
+	}()
+	envGetter(map[string]string{"DISPATCH_NOT_A_SETTING": "x"}).get("DISPATCH_NOT_A_SETTING")
+}
+
+// bootEnvironment is an environment resolveBootConfig accepts, with overrides applied; an override
+// of "" leaves the variable empty. It is a production cookie server: signInEnvironment's.
+func bootEnvironment(overrides map[string]string) settingValues {
+	return envGetter(signInEnvironment(overrides))
+}
+
+func resolveWith(t *testing.T, overrides map[string]string) bootConfig {
+	t.Helper()
+	boot, err := resolveBootConfig(bootEnvironment(overrides))
+	if err != nil {
+		t.Fatalf("resolveBootConfig(%v): %v", overrides, err)
+	}
+	return boot
+}
+
+func refusedWith(t *testing.T, overrides map[string]string, naming string) {
+	t.Helper()
+	if _, err := resolveBootConfig(bootEnvironment(overrides)); err == nil || !strings.Contains(err.Error(), naming) {
+		t.Errorf("resolveBootConfig(%v): err = %v, want a refusal naming %s", overrides, err, naming)
+	}
+}
+
+// writeFile writes contents under a test directory and returns its path.
+func writeFile(t *testing.T, name, contents string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// envoyJSONHome is a home directory whose user envoy.json names a dashboard origin and NATS
+// servers, for the settings that override it.
+func envoyJSONHome(t *testing.T) string {
+	t.Helper()
+	path := writeFile(t, filepath.Join(".config", "legion", "envoy.json"),
+		`{"envoy": {"natsUrls": ["nats://from-envoy-json:4222"]}, "dispatch": {"serverUrl": "https://from-envoy-json.example"}}`)
+	return filepath.Dir(filepath.Dir(filepath.Dir(path)))
+}
+
+// routerFor is the router main serves for boot, built through appContextOptions as main builds it.
+// built is what main makes from the rest of the configuration, holding what a case's requests reach
+// (the GitHub App, the store, the dashboard origin) and nil elsewhere.
+func routerFor(t *testing.T, boot bootConfig, built routes.AppContextOptions) http.Handler {
+	t.Helper()
+	built.Lifetime = t.Context()
+	appCtx, err := appContextFor(boot, built)
+	if err != nil {
+		t.Fatalf("build the router: %v", err)
+	}
+	handler, background := routes.New(appCtx)
+	t.Cleanup(background.Wait)
+	return handler
+}
+
+// testSigningKey is the one-key set appContextFor gives the router.
+var testSigningKey = auth.SingleSigningKey("signing-key")
+
+// appContextFor is routes.BuildAppContext as main calls it, with the signing key, the session store
+// and the request identity main builds for boot (requestIdentityFor) filled in, so a request
+// carrying signedIn's cookie is that person's. built.People is a store with no database unless the
+// case's requests record people (dev sign-in, a pool sign-in, header identity).
+func appContextFor(boot bootConfig, built routes.AppContextOptions) (*routes.AppContext, error) {
+	built.SigningKey = testSigningKey
+	if built.People == nil {
+		built.People = store.NewPgPeopleStore(nil, built.SigningKey, nil)
+	}
+	built.Sessions = currentSessions{}
+	built.Identity = requestIdentityFor(boot, built.SigningKey, built.People, built.Sessions, built.SignIn)
+	return routes.BuildAppContext(appContextOptions(boot, built))
+}
+
+// testPeople is a people store over a fresh test database, with the pool it writes through, so a
+// test can date a confirmation back in SQL (ageConfirmation): the store dates every confirmation
+// by the database's clock.
+type testPeople struct {
+	*store.PgPeopleStore
+	pool *store.Pool
+}
+
+// peopleStore is a people store over a fresh test database, for a case whose requests record people,
+// sealing refresh tokens under the signing key appContextFor gives the router, as main does.
+func peopleStore(t *testing.T) testPeople {
+	t.Helper()
+	pool := storetest.Open(t).Pool
+	return testPeople{PgPeopleStore: store.NewPgPeopleStore(pool, testSigningKey, nil), pool: pool}
+}
+
+// currentSessions is a session store holding every login's session at generation 0, as a fresh
+// database holds it after the login's first sign-in.
+type currentSessions struct{}
+
+func (currentSessions) EnsureSession(context.Context, string) (int64, error) { return 0, nil }
+
+func (currentSessions) CurrentSessionGeneration(context.Context, string) (int64, bool, error) {
+	return 0, true, nil
+}
+
+func (currentSessions) RevokeSessions(context.Context, string) error { return nil }
+
+// signedIn adds to request the session cookie a sign-in as login sets.
+func signedIn(t *testing.T, request *http.Request, login string) *http.Request {
+	t.Helper()
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie(login, 0, testSigningKey, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(cookie)
+	return request
+}
+
+// devSignIn answers GET /auth/_dev/signin?login=<login> as a browser on this machine sends it to
+// the dashboard origin, from the router main serves for boot.
+func devSignIn(t *testing.T, boot bootConfig, login string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, devSignInOrigin+"/auth/_dev/signin?login="+url.QueryEscape(login), nil)
+	request.RemoteAddr = "127.0.0.1:40000"
+	response := httptest.NewRecorder()
+	routerFor(t, boot, routes.AppContextOptions{ServerURL: devSignInOrigin, People: peopleStore(t)}).ServeHTTP(response, request)
+	return response
+}
+
+// signInPool is a sign-in pool on this machine with Dispatch's app client, clientID and
+// clientSecret, the one DISPATCH_SIGNIN_ISSUER names in a case.
+func signInPool(t *testing.T, clientID, clientSecret string) *oidctest.Issuer {
+	t.Helper()
+	pool := oidctest.New(t)
+	pool.EnableCodeFlow(pool.PublishKey(t, "signing-key"), clientID, clientSecret)
+	return pool
+}
+
+// signInRouter is the router main serves for boot over people, with the sign-in pool's code flow
+// main builds from boot's DISPATCH_SIGNIN_* settings (signInFlow), and a store of its own, whose
+// event log's head GET /auth/whoami answers.
+func signInRouter(t *testing.T, boot bootConfig, people auth.PeopleStore) http.Handler {
+	t.Helper()
+	flow := signInFlow(boot)
+	if flow == nil {
+		t.Fatalf("boot configures no sign-in pool: %+v", boot)
+	}
+	return routerFor(t, boot, routes.AppContextOptions{SignIn: flow, People: people, Store: storetest.Open(t)})
+}
+
+// startSignIn answers GET /auth/start from handler: the redirect to the pool's authorization
+// endpoint, with the state cookie.
+func startSignIn(t *testing.T, handler http.Handler) *httptest.ResponseRecorder {
+	t.Helper()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
+	if response.Code != http.StatusFound {
+		t.Fatalf("GET /auth/start: %d %s, want a redirect to the sign-in pool", response.Code, response.Body.String())
+	}
+	return response
+}
+
+// poolSignIn runs a whole sign-in through handler, a router signInRouter built, against pool: start,
+// the pool's sign-in as a person the federated provider names alice@example.com in groups, and the
+// callback, whose answer it returns.
+func poolSignIn(t *testing.T, handler http.Handler, pool *oidctest.Issuer, groups ...string) *httptest.ResponseRecorder {
+	t.Helper()
+	return codeFlowSignIn(t, handler, pool, map[string]any{
+		"sub":              "person-subject",
+		"cognito:username": "ExampleIdP_alice@example.com",
+		"cognito:groups":   groups,
+		"identities":       []map[string]any{{"providerName": "ExampleIdP"}},
+	})
+}
+
+// googleSignIn runs a whole sign-in through handler against issuer standing in for Google, as a
+// verified account alice@example.com whose Workspace domain is hd.
+func googleSignIn(t *testing.T, handler http.Handler, issuer *oidctest.Issuer, hd string) *httptest.ResponseRecorder {
+	t.Helper()
+	return codeFlowSignIn(t, handler, issuer, map[string]any{
+		"sub":            "google-subject",
+		"email":          "alice@example.com",
+		"email_verified": true,
+		"hd":             hd,
+	})
+}
+
+// codeFlowSignIn runs a whole sign-in through handler against issuer as the person claims names:
+// start, the issuer's sign-in, and the callback, whose answer it returns.
+func codeFlowSignIn(t *testing.T, handler http.Handler, issuer *oidctest.Issuer, claims map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	issuer.SignInAs(claims)
+	start := startSignIn(t, handler)
+	code, state := issuer.Authorize(t, start.Header().Get("Location"))
+	callback := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/callback?code="+url.QueryEscape(code)+"&state="+url.QueryEscape(state), nil)
+	for _, cookie := range start.Result().Cookies() {
+		callback.AddCookie(cookie)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, callback)
+	return response
+}
+
+// whoamiAfter answers GET /auth/whoami from handler carrying the session cookie signIn set.
+func whoamiAfter(handler http.Handler, signIn *httptest.ResponseRecorder) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/whoami", nil)
+	for _, cookie := range signIn.Result().Cookies() {
+		if cookie.Name == "dsession" {
+			request.AddCookie(cookie)
+		}
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+// ageConfirmation dates email's last confirmation two hours back by the database's clock, so their
+// next request finds it older than the hour.
+func ageConfirmation(t *testing.T, people testPeople, email string) {
+	t.Helper()
+	membership, found, err := people.Membership(context.Background(), email)
+	if err != nil || !found || membership.RefreshToken == "" {
+		t.Fatalf("the membership of %s: %+v, found %t, %v; want a refresh token", email, membership, found, err)
+	}
+	if _, err := people.pool.Exec(context.Background(), `update people set confirmed_at = now() - interval '2 hours' where email = $1`, email); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// sessionCookieSet reports whether response set Dispatch's session cookie.
+func sessionCookieSet(response *httptest.ResponseRecorder) bool {
+	return slices.ContainsFunc(response.Result().Cookies(), func(cookie *http.Cookie) bool { return cookie.Name == "dsession" && cookie.Value != "" })
+}
+
+// errorCode is the code of a JSON error response.
+func errorCode(response *httptest.ResponseRecorder) string {
+	var body struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(response.Body.Bytes(), &body)
+	return body.Code
+}
+
+// Every setting reaches its reader through the table, as it resolved before the table existed:
+// each case hands its variable to the reader main hands it to, through the settings read alone,
+// never the process environment, so a reader that reads around the table fails its case.
+func TestEverySettingReachesItsReader(t *testing.T) {
+	appJSON := func(t *testing.T) string {
+		return filepath.Dir(writeFile(t, "app.json", `{"clientId":"Iv1.file"}`))
+	}
+	loadApp := func(t *testing.T, values map[string]string) (string, string, error) {
+		t.Helper()
+		app, source, err := loadAppCredentials(envGetter(values), appJSON(t))
+		if err != nil {
+			return "", "", err
+		}
+		return app.ClientID, source.String(), nil
+	}
+	envoyJSON := func(t *testing.T, values map[string]string) (*config.EnvoyConfig, error) {
+		t.Helper()
+		return loadEnvoyConfig(envGetter(values), config.LoadOptions{CWD: t.TempDir(), HomeDir: envoyJSONHome(t)})
+	}
+	natsConnect := func(values map[string]string, url string) error {
+		client, err := bus.Connect([]string{url}, bus.WithEnvironment(envGetter(values).lookup))
+		if err == nil {
+			client.Close()
+		}
+		return err
+	}
+	// A URL nothing listens on: every case below fails before it dials, on the setting it names.
+	const localNATS = "nats://127.0.0.1:1"
+
+	// brokerReceived is the call the secrets broker DISPATCH_AGENT_SECRETS_URL names receives, as
+	// "<method> <request URI> <Authorization>", when a signed-in human lists the credential
+	// requests awaiting them, with token in the file DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE
+	// names.
+	brokerReceived := func(t *testing.T, token string) string {
+		t.Helper()
+		received := make(chan string, 1)
+		broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			received <- r.Method + " " + r.URL.RequestURI() + " " + r.Header.Get("Authorization")
+			_, _ = w.Write([]byte(`{"requests":[]}`))
+		}))
+		defer broker.Close()
+		boot := resolveWith(t, map[string]string{
+			"DISPATCH_AGENT_SECRETS_URL":                broker.URL,
+			"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": writeFile(t, "account-token", token),
+		})
+		request := signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/credential-requests?approver=me", nil), "alice")
+		response := httptest.NewRecorder()
+		routerFor(t, boot, routes.AppContextOptions{}).ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET /api/v1/credential-requests: %d %s", response.Code, response.Body.String())
+		}
+		select {
+		case got := <-received:
+			return got
+		default:
+			t.Fatal("GET /api/v1/credential-requests answered without calling the broker")
+			return ""
+		}
+	}
+
+	cases := map[string]func(t *testing.T){
+		"DATABASE_URL": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DATABASE_URL": " postgres://from-the-table "}); boot.DatabaseURL != "postgres://from-the-table" {
+				t.Errorf("DatabaseURL = %q", boot.DatabaseURL)
+			}
+			refusedWith(t, map[string]string{"DATABASE_URL": ""}, "DATABASE_URL")
+			var stdout, stderr bytes.Buffer
+			unreachable := map[string]string{"DATABASE_URL": "postgres://nobody@127.0.0.1:1/none?sslmode=disable&connect_timeout=1"}
+			if code := runSubcommand(context.Background(), []string{"census"}, envGetter(unreachable), &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "census: connect") {
+				t.Errorf("census with an unreachable DATABASE_URL: exit %d, stderr %q, want a connect failure", code, stderr.String())
+			}
+		},
+		"DISPATCH_AGENT_TOKEN": func(t *testing.T) {
+			refusedWith(t, map[string]string{"DISPATCH_AGENT_TOKEN": ""}, "DISPATCH_AGENT_TOKEN required")
+			refusedWith(t, map[string]string{"DISPATCH_AGENT_TOKEN": " \n "}, "DISPATCH_AGENT_TOKEN required")
+			// A refusal names the entry by its position and never by its value: the boot log
+			// carries it.
+			for setting, naming := range map[string]string{
+				"new-token  old-token":          "DISPATCH_AGENT_TOKEN entry 2 of 3 is empty",
+				"new-token\r\nold-token":        "DISPATCH_AGENT_TOKEN entry 2 of 3 is empty",
+				"new-token old-token new-token": "DISPATCH_AGENT_TOKEN entry 3 of 3 repeats entry 1",
+			} {
+				_, err := resolveBootConfig(bootEnvironment(map[string]string{"DISPATCH_AGENT_TOKEN": setting}))
+				if err == nil || !strings.Contains(err.Error(), naming) || strings.Contains(err.Error(), "new-token") || strings.Contains(err.Error(), "old-token") {
+					t.Errorf("DISPATCH_AGENT_TOKEN=%q: err = %v, want a refusal naming %q and no value", setting, err, naming)
+				}
+			}
+			// One value is the shared token as it always was, the whitespace around it trimmed:
+			// the router takes that bearer as the shared token, and looks any other up as a
+			// personal token, which the store does not hold.
+			t.Run("one value", func(t *testing.T) {
+				handler := routerFor(t, resolveWith(t, map[string]string{"DISPATCH_AGENT_TOKEN": " table-token "}), routes.AppContextOptions{Store: storetest.Open(t)})
+				if response := whoamiAs(handler, "table-token", ""); !answersSharedToken(response) {
+					t.Errorf("DISPATCH_AGENT_TOKEN=' table-token ': GET /api/v1/whoami with table-token answered %d %s, want 200 naming the shared token (an agent with no owner)", response.Code, response.Body.String())
+				}
+				if response := whoamiAs(handler, "other-token", ""); response.Code != http.StatusUnauthorized {
+					t.Errorf("DISPATCH_AGENT_TOKEN=' table-token ': GET /api/v1/whoami with other-token answered %d %s, want 401", response.Code, response.Body.String())
+				}
+			})
+			t.Run("several values", sharedAgentTokenListReachesTheAPI)
+		},
+		"DISPATCH_IDENTITY": func(t *testing.T) {
+			header, err := resolveBootConfig(envGetter(headerIdentityEnvironment(map[string]string{"DISPATCH_IDENTITY": " header:X-Dispatch-User "})))
+			if err != nil || header.IdentityHeader != "X-Dispatch-User" {
+				t.Errorf("header: IdentityHeader = %q, %v", header.IdentityHeader, err)
+			}
+			if boot := resolveWith(t, nil); boot.IdentityHeader != "" {
+				t.Errorf("unset: IdentityHeader = %q, want cookie identity", boot.IdentityHeader)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_IDENTITY": "basic"}, "DISPATCH_IDENTITY")
+			// The identity main builds for the router: a header server names the person the
+			// header names, lowercased, and records them.
+			t.Run("router", func(t *testing.T) {
+				request := httptest.NewRequest(http.MethodGet, "/auth/whoami", nil)
+				request.Header.Set("X-Dispatch-User", "Alice@Example.com")
+				response := httptest.NewRecorder()
+				routerFor(t, header, routes.AppContextOptions{People: peopleStore(t), Store: storetest.Open(t)}).ServeHTTP(response, request)
+				if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"login":"alice@example.com"`) {
+					t.Errorf("DISPATCH_IDENTITY=header:X-Dispatch-User: GET /auth/whoami answered %d %s, want alice@example.com", response.Code, response.Body.String())
+				}
+			})
+		},
+		"DISPATCH_SIGNIN_ISSUER": func(t *testing.T) {
+			pool := signInPool(t, "dispatch-client", "client-secret")
+			boot := resolveWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": " " + pool.URL() + " "})
+			if boot.SignInIssuer != pool.URL() {
+				t.Errorf("SignInIssuer = %q", boot.SignInIssuer)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": ""}, "DISPATCH_SIGNIN_ISSUER missing")
+			// The pool main builds the code flow for: /auth/start sends the browser to its
+			// authorization endpoint. A pool whose discovery fails does not stop the router being
+			// built: /auth/start answers 503 SIGNIN_UNAVAILABLE until the pool answers.
+			t.Run("router", func(t *testing.T) {
+				if location := startSignIn(t, signInRouter(t, boot, peopleStore(t))).Header().Get("Location"); !strings.HasPrefix(location, pool.URL()+"/") {
+					t.Errorf("DISPATCH_SIGNIN_ISSUER=%s: GET /auth/start redirected to %q, want the pool's authorization endpoint", pool.URL(), location)
+				}
+				pool.FailDiscovery(http.StatusServiceUnavailable)
+				response := httptest.NewRecorder()
+				signInRouter(t, boot, peopleStore(t)).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
+				if response.Code != http.StatusServiceUnavailable || errorCode(response) != "SIGNIN_UNAVAILABLE" {
+					t.Errorf("a pool whose discovery fails: GET /auth/start answered %d %s, want 503 SIGNIN_UNAVAILABLE", response.Code, response.Body.String())
+				}
+			})
+		},
+		"DISPATCH_SIGNIN_CLIENT_ID": func(t *testing.T) {
+			pool := signInPool(t, "table-client", "client-secret")
+			boot := resolveWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": pool.URL(), "DISPATCH_SIGNIN_CLIENT_ID": " table-client "})
+			if boot.SignInClientID != "table-client" {
+				t.Errorf("SignInClientID = %q", boot.SignInClientID)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_CLIENT_ID": ""}, "DISPATCH_SIGNIN_CLIENT_ID missing")
+			// The client the router's sign-in names to the pool.
+			t.Run("router", func(t *testing.T) {
+				location, err := url.Parse(startSignIn(t, signInRouter(t, boot, peopleStore(t))).Header().Get("Location"))
+				if err != nil || location.Query().Get("client_id") != "table-client" {
+					t.Errorf("DISPATCH_SIGNIN_CLIENT_ID=table-client: GET /auth/start redirected to %v (%v), want client_id table-client", location, err)
+				}
+			})
+		},
+		"DISPATCH_SIGNIN_CLIENT_SECRET": func(t *testing.T) {
+			pool := signInPool(t, "dispatch-client", "table-secret")
+			boot := resolveWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": pool.URL(), "DISPATCH_SIGNIN_CLIENT_SECRET": " table-secret "})
+			if boot.SignInClientSecret != "table-secret" {
+				t.Errorf("SignInClientSecret = %q", boot.SignInClientSecret)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_CLIENT_SECRET": ""}, "DISPATCH_SIGNIN_CLIENT_SECRET missing")
+			// The secret the router's code exchange authenticates with: the pool refuses any other.
+			t.Run("router", func(t *testing.T) {
+				if response := poolSignIn(t, signInRouter(t, boot, peopleStore(t)), pool, "dispatch-members"); response.Code != http.StatusFound || !sessionCookieSet(response) {
+					t.Errorf("DISPATCH_SIGNIN_CLIENT_SECRET=table-secret: the callback answered %d %s, want a signed-in redirect", response.Code, response.Body.String())
+				}
+				wrong := resolveWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": pool.URL(), "DISPATCH_SIGNIN_CLIENT_SECRET": "another-secret"})
+				if response := poolSignIn(t, signInRouter(t, wrong, peopleStore(t)), pool, "dispatch-members"); response.Code != http.StatusBadGateway || sessionCookieSet(response) {
+					t.Errorf("a secret the pool does not hold: the callback answered %d %s, want 502 and no session", response.Code, response.Body.String())
+				}
+			})
+		},
+		"DISPATCH_SIGNIN_GROUP": func(t *testing.T) {
+			pool := signInPool(t, "dispatch-client", "client-secret")
+			boot := resolveWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": pool.URL(), "DISPATCH_SIGNIN_GROUP": " table-group "})
+			if boot.SignInGroup != "table-group" {
+				t.Errorf("SignInGroup = %q", boot.SignInGroup)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_GROUP": ""}, "DISPATCH_SIGNIN_GROUP and DISPATCH_SIGNIN_DOMAIN missing")
+			// The group the router's sign-in admits: a member signs in, anyone else is refused. Past
+			// the hour, the membership check main attaches to cookie identity renews the member's
+			// sign-in with the pool against the same group, and signs out a person the pool no
+			// longer puts in it.
+			t.Run("router", func(t *testing.T) {
+				people := peopleStore(t)
+				handler := signInRouter(t, boot, people)
+				member := poolSignIn(t, handler, pool, "other-group", "table-group")
+				if member.Code != http.StatusFound || !sessionCookieSet(member) {
+					t.Fatalf("a member of table-group: the callback answered %d %s, want a signed-in redirect", member.Code, member.Body.String())
+				}
+				if response := poolSignIn(t, handler, pool, "dispatch-members"); response.Code != http.StatusForbidden || sessionCookieSet(response) {
+					t.Errorf("a person outside table-group: the callback answered %d %s, want 403 and no session", response.Code, response.Body.String())
+				}
+				ageConfirmation(t, people, "alice@example.com")
+				if response := whoamiAfter(handler, member); response.Code != http.StatusOK || pool.Refreshes() != 1 {
+					t.Errorf("a member of table-group past the hour: whoami answered %d %s after %d refreshes, want 200 after one refresh", response.Code, response.Body.String(), pool.Refreshes())
+				}
+				ageConfirmation(t, people, "alice@example.com")
+				pool.UpdateGrants(func(claims map[string]any) { claims["cognito:groups"] = []string{"other-group"} })
+				if response := whoamiAfter(handler, member); response.Code != http.StatusUnauthorized {
+					t.Errorf("a member the pool dropped from table-group, past the hour: whoami answered %d %s, want 401", response.Code, response.Body.String())
+				}
+			})
+		},
+		"DISPATCH_SIGNIN_DOMAIN": func(t *testing.T) {
+			google := map[string]string{"DISPATCH_SIGNIN_ISSUER": "https://accounts.google.com", "DISPATCH_SIGNIN_GROUP": ""}
+			domain := func(value string) map[string]string {
+				overrides := map[string]string{"DISPATCH_SIGNIN_DOMAIN": value}
+				for name, value := range google {
+					overrides[name] = value
+				}
+				return overrides
+			}
+			boot := resolveWith(t, domain(" example.com "))
+			if boot.SignInDomain != "example.com" || boot.SignInGroup != "" {
+				t.Errorf("SignInDomain = %q, SignInGroup = %q", boot.SignInDomain, boot.SignInGroup)
+			}
+			refusedWith(t, domain("Example.com"), "DISPATCH_SIGNIN_DOMAIN must be a lowercase domain name such as example.com; got a value of 11 characters")
+			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_DOMAIN": "example.com"}, "DISPATCH_SIGNIN_GROUP and DISPATCH_SIGNIN_DOMAIN are both set")
+			// The domain the code flow main discovers names to Google and the router's sign-in
+			// admits, against a fake issuer in Google's place so no test calls Google: the domain
+			// resolved under Google's issuer. An account of the domain signs in, anyone else is
+			// refused, and past the hour the membership check main attaches to cookie identity
+			// renews the member's sign-in against the same domain, and signs out an account that
+			// left it.
+			pool := signInPool(t, "dispatch-client", "client-secret")
+			boot.SignInIssuer = pool.URL()
+			t.Run("router", func(t *testing.T) {
+				people := peopleStore(t)
+				handler := signInRouter(t, boot, people)
+				location, err := url.Parse(startSignIn(t, handler).Header().Get("Location"))
+				if err != nil || location.Query().Get("hd") != "example.com" || location.Query().Get("access_type") != "offline" {
+					t.Errorf("DISPATCH_SIGNIN_DOMAIN=example.com: GET /auth/start redirected to %v (%v), want hd example.com with offline access", location, err)
+				}
+				member := googleSignIn(t, handler, pool, "example.com")
+				if member.Code != http.StatusFound || !sessionCookieSet(member) {
+					t.Fatalf("an account of example.com: the callback answered %d %s, want a signed-in redirect", member.Code, member.Body.String())
+				}
+				if response := googleSignIn(t, handler, pool, "other.example"); response.Code != http.StatusForbidden || sessionCookieSet(response) {
+					t.Errorf("an account of other.example: the callback answered %d %s, want 403 and no session", response.Code, response.Body.String())
+				}
+				ageConfirmation(t, people, "alice@example.com")
+				if response := whoamiAfter(handler, member); response.Code != http.StatusOK || pool.Refreshes() != 1 {
+					t.Errorf("an account of example.com past the hour: whoami answered %d %s after %d refreshes, want 200 after one refresh", response.Code, response.Body.String(), pool.Refreshes())
+				}
+				ageConfirmation(t, people, "alice@example.com")
+				pool.UpdateGrants(func(claims map[string]any) { claims["hd"] = "other.example" })
+				if response := whoamiAfter(handler, member); response.Code != http.StatusUnauthorized {
+					t.Errorf("an account that left example.com, past the hour: whoami answered %d %s, want 401", response.Code, response.Body.String())
+				}
+			})
+		},
+		"DISPATCH_IDENTITY_HEADER_TRUSTED": func(t *testing.T) {
+			for _, value := range []string{"", "true"} {
+				if _, err := resolveBootConfig(envGetter(headerIdentityEnvironment(map[string]string{"DISPATCH_IDENTITY_HEADER_TRUSTED": value}))); err == nil || !strings.Contains(err.Error(), "DISPATCH_IDENTITY_HEADER_TRUSTED=1") {
+					t.Errorf("header identity with DISPATCH_IDENTITY_HEADER_TRUSTED=%q: err = %v, want a refusal naming it", value, err)
+				}
+			}
+			if _, err := resolveBootConfig(envGetter(headerIdentityEnvironment(nil))); err != nil {
+				t.Errorf("header identity with DISPATCH_IDENTITY_HEADER_TRUSTED=1: %v", err)
+			}
+		},
+		"DISPATCH_LISTEN_HOST": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_LISTEN_HOST": "[::1]"}); boot.ListenAddr != "[::1]:8766" {
+				t.Errorf("ListenAddr = %q", boot.ListenAddr)
+			}
+			if boot := resolveWith(t, nil); boot.ListenAddr != ":8766" {
+				t.Errorf("unset: ListenAddr = %q, want every interface", boot.ListenAddr)
+			}
+		},
+		"DISPATCH_PORT": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_PORT": "9123"}); boot.ListenAddr != ":9123" {
+				t.Errorf("ListenAddr = %q", boot.ListenAddr)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_PORT": "0"}, "DISPATCH_PORT")
+		},
+		"DISPATCH_LISTEN_FD": func(t *testing.T) {
+			descriptor, address := listeningFD(t, "tcp4", "127.0.0.1:0")
+			port := strconv.Itoa(address.Port)
+			// Unset, the server binds the address the other two settings build.
+			if boot := resolveWith(t, nil); boot.ListenSocket != nil {
+				t.Errorf("unset: ListenSocket = %v, want none", boot.ListenSocket)
+			}
+			// Set, the server serves on the socket at its own address, with neither other setting
+			// set, with both naming that address, or with both empty, which is unset: an empty
+			// DISPATCH_LISTEN_HOST does not ask for every interface of a socket on one address.
+			for _, overrides := range []map[string]string{
+				{"DISPATCH_LISTEN_FD": descriptor},
+				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": "127.0.0.1", "DISPATCH_PORT": port},
+				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": " [127.0.0.1] ", "DISPATCH_PORT": " " + port + " "},
+				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": "", "DISPATCH_PORT": ""},
+				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": " ", "DISPATCH_PORT": " "},
+			} {
+				boot := resolveWith(t, overrides)
+				if boot.ListenSocket == nil || boot.ListenAddr != address.String() || boot.ListenSocket.Addr().String() != address.String() {
+					t.Errorf("%v: ListenAddr = %q, ListenSocket = %v; want the socket on %s", overrides, boot.ListenAddr, boot.ListenSocket, address)
+				}
+			}
+			// A setting that names another address than the socket's is refused, naming the
+			// setting and the socket; so is port 0, which never names a socket's port.
+			otherPort := strconv.Itoa(address.Port%65535 + 1)
+			for name, value := range map[string]string{
+				"DISPATCH_PORT":        otherPort,
+				"DISPATCH_LISTEN_HOST": "127.0.0.2",
+			} {
+				_, err := resolveBootConfig(bootEnvironment(map[string]string{"DISPATCH_LISTEN_FD": descriptor, name: value}))
+				if err == nil || !strings.Contains(err.Error(), name+"="+value) || !strings.Contains(err.Error(), "DISPATCH_LISTEN_FD="+descriptor) {
+					t.Errorf("%s=%s with the socket on %s: err = %v, want a refusal naming both", name, value, address, err)
+				}
+			}
+			refusedWith(t, map[string]string{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_PORT": "0"}, "DISPATCH_PORT=0")
+			// A descriptor that is not a listening socket is refused, and nothing is bound in its
+			// place.
+			notASocket, err := os.Open(os.DevNull)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer notASocket.Close()
+			refusedWith(t, map[string]string{"DISPATCH_LISTEN_FD": strconv.Itoa(int(notASocket.Fd()))}, "DISPATCH_LISTEN_FD")
+		},
+		"DISPATCH_PPROF_PORT": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_PPROF_PORT": "6060"}); boot.PprofAddr != "127.0.0.1:6060" {
+				t.Errorf("PprofAddr = %q, want 127.0.0.1:6060", boot.PprofAddr)
+			}
+			if boot := resolveWith(t, nil); boot.PprofAddr != "" {
+				t.Errorf("unset: PprofAddr = %q, want none", boot.PprofAddr)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_PPROF_PORT": "0"}, "DISPATCH_PPROF_PORT")
+		},
+		"DISPATCH_SERVER_URL": func(t *testing.T) {
+			if cfg, err := envoyJSON(t, map[string]string{"DISPATCH_SERVER_URL": "https://from-the-table.example"}); err != nil || cfg.Dispatch.ServerURL != "https://from-the-table.example" {
+				t.Errorf("set: %+v, %v; want the variable over envoy.json", cfg, err)
+			}
+			if cfg, err := envoyJSON(t, nil); err != nil || cfg.Dispatch.ServerURL != "https://from-envoy-json.example" {
+				t.Errorf("unset: %+v, %v; want envoy.json's", cfg, err)
+			}
+			if _, err := envoyJSON(t, map[string]string{"DISPATCH_SERVER_URL": ""}); err == nil || !strings.Contains(err.Error(), "DISPATCH_SERVER_URL") {
+				t.Errorf("set but empty: err = %v, want a refusal naming DISPATCH_SERVER_URL", err)
+			}
+		},
+		"NATS_URLS": func(t *testing.T) {
+			if cfg, err := envoyJSON(t, map[string]string{"NATS_URLS": "nats://one:4222, nats://two:4222"}); err != nil || !slices.Equal(cfg.Envoy.NatsURLs, []string{"nats://one:4222", "nats://two:4222"}) {
+				t.Errorf("set: %+v, %v; want the variable over envoy.json", cfg, err)
+			}
+			if cfg, err := envoyJSON(t, nil); err != nil || !slices.Equal(cfg.Envoy.NatsURLs, []string{"nats://from-envoy-json:4222"}) {
+				t.Errorf("unset: %+v, %v; want envoy.json's envoy.natsUrls", cfg, err)
+			}
+			if _, err := envoyJSON(t, map[string]string{"NATS_URLS": ""}); err == nil || !strings.Contains(err.Error(), "NATS_URLS") {
+				t.Errorf("set but empty: err = %v, want a refusal naming NATS_URLS", err)
+			}
+		},
+		"XDG_CONFIG_HOME": func(t *testing.T) {
+			configHome := filepath.Dir(filepath.Dir(writeFile(t, filepath.Join("legion", "envoy.json"),
+				`{"envoy": {"natsUrls": ["nats://from-config-home:4222"]}, "dispatch": {"serverUrl": "https://from-config-home.example"}}`)))
+			if cfg, err := envoyJSON(t, map[string]string{"XDG_CONFIG_HOME": configHome}); err != nil || cfg.Dispatch.ServerURL != "https://from-config-home.example" || !slices.Equal(cfg.Envoy.NatsURLs, []string{"nats://from-config-home:4222"}) {
+				t.Errorf("set: %+v, %v; want %s/legion/envoy.json's", cfg, err, configHome)
+			}
+			for name, values := range map[string]map[string]string{"unset": nil, "set but empty": {"XDG_CONFIG_HOME": ""}} {
+				if cfg, err := envoyJSON(t, values); err != nil || cfg.Dispatch.ServerURL != "https://from-envoy-json.example" {
+					t.Errorf("%s: %+v, %v; want ~/.config/legion/envoy.json's", name, cfg, err)
+				}
+			}
+			if _, err := envoyJSON(t, map[string]string{"XDG_CONFIG_HOME": "relative"}); err == nil || err.Error() != `XDG_CONFIG_HOME is "relative", which is not an absolute path` {
+				t.Errorf("relative: err = %v, want a refusal naming XDG_CONFIG_HOME and its value", err)
+			}
+		},
+		"ENVOY_ALLOW_REMOTE_NATS": func(t *testing.T) {
+			const remote = "nats://nats.example:4222"
+			if err := natsConnect(nil, remote); !errors.Is(err, bus.ErrRemoteNATS) {
+				t.Errorf("unset: connect %s = %v, want a refusal", remote, err)
+			}
+			// Allowed, the connect goes on to the credential, which here fails before any dial.
+			if err := natsConnect(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1", "NATS_NKEY_SEED": "not a seed"}, remote); err == nil || errors.Is(err, bus.ErrRemoteNATS) || !strings.Contains(err.Error(), "NATS_NKEY_SEED") {
+				t.Errorf("ENVOY_ALLOW_REMOTE_NATS=1: connect %s = %v, want it past the refusal", remote, err)
+			}
+			if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1"})); err == nil || !strings.Contains(err.Error(), "ENVOY_ALLOW_REMOTE_NATS") {
+				t.Errorf("dev sign-in with ENVOY_ALLOW_REMOTE_NATS=1: err = %v, want a refusal naming it", err)
+			}
+		},
+		"ENVOY_NATS_SOCKS5_PROXY": func(t *testing.T) {
+			// With the reach opted in, the refusal is the address check's: a URL is not host:port.
+			if err := natsConnect(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1", "ENVOY_NATS_SOCKS5_PROXY": "socks5://127.0.0.1:1055"}, localNATS); err == nil || errors.Is(err, bus.ErrRemoteNATS) || !strings.Contains(err.Error(), "ENVOY_NATS_SOCKS5_PROXY") || !strings.Contains(err.Error(), "is a URL") {
+				t.Errorf("ENVOY_NATS_SOCKS5_PROXY=socks5://127.0.0.1:1055: err = %v, want the address refused as a URL, naming the setting", err)
+			}
+			// The connect dials the proxy and hands it localNATS's address. This proxy refuses
+			// every request (connection refused), so the connect makes the bus's ten attempts a
+			// second apart, about ten seconds, and fails.
+			proxy := testsocks5.StartRefusing(t, 0x05)
+			if err := natsConnect(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1", "ENVOY_NATS_SOCKS5_PROXY": proxy.Addr}, localNATS); err == nil {
+				t.Errorf("ENVOY_NATS_SOCKS5_PROXY=%s: a connect through a proxy that refuses it succeeded", proxy.Addr)
+			}
+			got := proxy.Requests()
+			if len(got) == 0 {
+				t.Errorf("ENVOY_NATS_SOCKS5_PROXY=%s: the proxy received no request", proxy.Addr)
+			}
+			for _, request := range got {
+				if request != (testsocks5.Request{AddressType: 0x01, Address: "127.0.0.1:1"}) {
+					t.Errorf("ENVOY_NATS_SOCKS5_PROXY=%s: the proxy received %+v, want every request for 127.0.0.1:1 as an IPv4 address (type 1)", proxy.Addr, got)
+					break
+				}
+			}
+		},
+		"ENVOY_NATS_REPLICAS": func(t *testing.T) {
+			if boot := resolveWith(t, nil); boot.NATSReplicas != 1 {
+				t.Errorf("unset: NATSReplicas = %d, want 1", boot.NATSReplicas)
+			}
+			if boot := resolveWith(t, map[string]string{"ENVOY_NATS_REPLICAS": " 3 "}); boot.NATSReplicas != 3 {
+				t.Errorf("NATSReplicas = %d, want 3", boot.NATSReplicas)
+			}
+			for _, value := range []string{"0", "-1", "6", "x"} {
+				refusedWith(t, map[string]string{"ENVOY_NATS_REPLICAS": value}, fmt.Sprintf("invalid ENVOY_NATS_REPLICAS %q", value))
+			}
+			// Its three readers, on a single server, which refuses a create at more than one copy
+			// and names the setting: the stream main's publisher reconciles
+			// (dispatchStreamOptions) on its first connection, in the background, so the refusal
+			// reaches the reconnect hook's logged error (dispatchStart.awaitHookFailure), the
+			// webhook sweeper's bucket (webhookSweeper's Open) and the bucket redeliver-webhooks
+			// opens. stream_replicas_test.go raises the same on a cluster.
+			_, url := testnats.Start(t)
+			three := map[string]string{"ENVOY_NATS_REPLICAS": "3"}
+			refused := connectDispatchStream(t, []string{url}, three)
+			refusal := refused.awaitHookFailure(t)
+			refused.client.Close()
+			if !strings.Contains(refusal.Error, "ENVOY_NATS_REPLICAS=3: ") {
+				t.Errorf("the stream at ENVOY_NATS_REPLICAS=3 on one server: logged %q, want the server's refusal naming the setting", refusal.Error)
+			}
+			conn := testnats.Connect(t, url)
+			t.Cleanup(conn.Close)
+			js, err := conn.JetStream()
+			if err != nil {
+				t.Fatalf("open JetStream: %v", err)
+			}
+			if info, err := js.StreamInfo(bus.Stream); !errors.Is(err, natsgo.ErrStreamNotFound) {
+				t.Errorf("after the refused start at ENVOY_NATS_REPLICAS=3 the stream is %+v (%v), want none created", info, err)
+			}
+			client := startDispatchStream(t, []string{url}, nil)
+			key, pemText := githubapptest.Key(t)
+			app := &auth.AppConfig{ClientID: replicasTestClientID, PEM: pemText}
+			sweeper, err := webhookSweeper(client, app, "", resolveWith(t, three).NATSReplicas)
+			if err != nil {
+				t.Fatalf("build the webhook sweeper: %v", err)
+			}
+			if _, err := sweeper.Open(); err == nil || !strings.Contains(err.Error(), "ENVOY_NATS_REPLICAS=3: ") {
+				t.Errorf("the redelivery bucket at ENVOY_NATS_REPLICAS=3 on one server: err = %v, want the server's refusal naming the setting", err)
+			}
+			github := githubapptest.NewWebhook(t, &key.PublicKey, replicasTestClientID, nil)
+			for value, want := range map[string]string{"3": "ENVOY_NATS_REPLICAS=3: ", "6": `invalid ENVOY_NATS_REPLICAS "6"`} {
+				var stdout, stderr bytes.Buffer
+				code := runSubcommand(context.Background(), []string{"redeliver-webhooks", "--since", "1h", "--dry-run"}, envGetter(map[string]string{
+					"NATS_URLS":                url,
+					"XDG_CONFIG_HOME":          t.TempDir(),
+					"DISPATCH_APP_CLIENT_ID":   replicasTestClientID,
+					"DISPATCH_APP_PEM_B64":     pemText,
+					"DISPATCH_GITHUB_API_BASE": github.URL(),
+					"ENVOY_NATS_REPLICAS":      value,
+				}), &stdout, &stderr)
+				if code != 1 || !strings.Contains(stdout.String(), want) {
+					t.Errorf("redeliver-webhooks with ENVOY_NATS_REPLICAS=%s on one server: exit %d, stdout %q; want 1 and %q", value, code, stdout.String(), want)
+				}
+			}
+		},
+		"ENVOY_STREAM_MAX_BYTES": func(t *testing.T) {
+			if boot := resolveWith(t, nil); boot.StreamMaxBytes != 0 {
+				t.Errorf("unset: StreamMaxBytes = %d, want 0, no limit set", boot.StreamMaxBytes)
+			}
+			if boot := resolveWith(t, map[string]string{"ENVOY_STREAM_MAX_BYTES": " 1048576 "}); boot.StreamMaxBytes != 1<<20 {
+				t.Errorf("StreamMaxBytes = %d, want %d", boot.StreamMaxBytes, 1<<20)
+			}
+			for _, value := range []string{"0", "-5", "x"} {
+				refusedWith(t, map[string]string{"ENVOY_STREAM_MAX_BYTES": value}, fmt.Sprintf("invalid ENVOY_STREAM_MAX_BYTES %q", value))
+			}
+			// Its reader: the stream main's publisher creates (dispatchStreamOptions) holds the
+			// limit and refuses new messages once full.
+			_, url := testnats.Start(t)
+			client := startDispatchStream(t, []string{url}, map[string]string{"ENVOY_STREAM_MAX_BYTES": "1048576"})
+			info, err := client.JS().StreamInfo(bus.Stream)
+			if err != nil || info.Config.MaxBytes != 1<<20 || info.Config.Discard != natsgo.DiscardNew {
+				t.Errorf("stream = %+v, %v; want a byte limit of %d discarding new", info, err, 1<<20)
+			}
+		},
+		"NATS_NKEY_SEED": func(t *testing.T) {
+			if err := natsConnect(map[string]string{"NATS_NKEY_SEED": "not a seed"}, localNATS); err == nil || !strings.Contains(err.Error(), "NATS_NKEY_SEED does not hold a valid nkey seed") {
+				t.Errorf("NATS_NKEY_SEED: err = %v, want the seed refused", err)
+			}
+			file := writeFile(t, "seed", "  not a seed either\n")
+			if err := natsConnect(map[string]string{"NATS_NKEY_SEED_FILE": file, "NATS_NKEY_SEED": "not a seed"}, localNATS); err == nil || !strings.Contains(err.Error(), "NATS_NKEY_SEED_FILE ("+file+")") {
+				t.Errorf("both set: err = %v, want the file to win", err)
+			}
+			if err := natsConnect(map[string]string{"NATS_NKEY_SEED_FILE": ""}, localNATS); err == nil || !strings.Contains(err.Error(), "NATS_NKEY_SEED_FILE is set but empty") {
+				t.Errorf("NATS_NKEY_SEED_FILE set but empty: err = %v, want it refused", err)
+			}
+		},
+		"DISPATCH_NATS_DISABLED": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_NATS_DISABLED": "1"}); !boot.NATSDisabled {
+				t.Error("DISPATCH_NATS_DISABLED=1: NATS on")
+			}
+			if boot := resolveWith(t, map[string]string{"DISPATCH_NATS_DISABLED": "true"}); boot.NATSDisabled {
+				t.Error("DISPATCH_NATS_DISABLED=true: NATS off, want only 1 to turn it off")
+			}
+		},
+		"ENVOY_URL": func(t *testing.T) {
+			if boot := resolveWith(t, nil); boot.EnvoyURL != "http://127.0.0.1:9020" {
+				t.Errorf("unset: EnvoyURL = %q", boot.EnvoyURL)
+			}
+			if boot := resolveWith(t, map[string]string{"ENVOY_URL": "http://listener.example:9020/"}); boot.EnvoyURL != "http://listener.example:9020" {
+				t.Errorf("EnvoyURL = %q", boot.EnvoyURL)
+			}
+			refusedWith(t, map[string]string{"ENVOY_URL": "listener.example:9020"}, "ENVOY_URL")
+		},
+		"ENVOY_TOKEN": func(t *testing.T) {
+			// The bearer the Envoy listener receives when a signed-in human's GET /api/v1/agents
+			// reads its sessions.
+			sent := func(overrides map[string]string) string {
+				t.Helper()
+				authorization := make(chan string, 1)
+				listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					authorization <- r.Header.Get("Authorization")
+					_, _ = w.Write([]byte("[]"))
+				}))
+				defer listener.Close()
+				overrides["ENVOY_URL"] = listener.URL
+				request := signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil), "alice")
+				response := httptest.NewRecorder()
+				routerFor(t, resolveWith(t, overrides), routes.AppContextOptions{}).ServeHTTP(response, request)
+				if response.Code != http.StatusOK {
+					t.Fatalf("GET /api/v1/agents: %d %s", response.Code, response.Body.String())
+				}
+				select {
+				case got := <-authorization:
+					return got
+				default:
+					t.Fatal("GET /api/v1/agents answered without calling the listener")
+					return ""
+				}
+			}
+			if got := sent(map[string]string{"ENVOY_TOKEN": "listener-token"}); got != "Bearer listener-token" {
+				t.Errorf("ENVOY_TOKEN=listener-token: the listener received Authorization %q", got)
+			}
+			if got := sent(map[string]string{}); got != "" {
+				t.Errorf("unset: the listener received Authorization %q, want none", got)
+			}
+		},
+		"DISPATCH_REPO_PROJECTS": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_REPO_PROJECTS": " acme/widgets=WID "}); boot.RepoProjects != "acme/widgets=WID" {
+				t.Errorf("RepoProjects = %q", boot.RepoProjects)
+			}
+			// Its one reader is api.SeedRepoProjects, which main runs before it builds the router: a
+			// malformed mapping is refused there, naming the variable, before anything is written.
+			if err := api.SeedRepoProjects(context.Background(), nil, nil, resolveWith(t, map[string]string{"DISPATCH_REPO_PROJECTS": "acme/widgets"}).RepoProjects); err == nil || !strings.Contains(err.Error(), "DISPATCH_REPO_PROJECTS") {
+				t.Errorf("DISPATCH_REPO_PROJECTS=acme/widgets: seeding the repository mappings: err = %v, want a refusal naming DISPATCH_REPO_PROJECTS", err)
+			}
+		},
+		"DISPATCH_DEFAULT_PROJECT": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_DEFAULT_PROJECT": " WID "}); boot.DefaultProject != "WID" {
+				t.Errorf("DefaultProject = %q", boot.DefaultProject)
+			}
+			// The project the router files an external issue in when no mapping names its
+			// repository: a create naming another project is refused naming that one, and with
+			// no default the repository is unmapped.
+			t.Run("router", func(t *testing.T) {
+				database := storetest.Open(t)
+				create := func(overrides map[string]string) *httptest.ResponseRecorder {
+					t.Helper()
+					request := httptest.NewRequest(http.MethodPost, "/api/v1/issues", strings.NewReader(`{"external":"acme/unmapped#7","project":"OTHER","actor":{"kind":"session","id":"settings-test"}}`))
+					request.Header.Set("Authorization", "Bearer agent-token")
+					request.Header.Set("Content-Type", "application/json")
+					response := httptest.NewRecorder()
+					routerFor(t, resolveWith(t, overrides), routes.AppContextOptions{Store: database}).ServeHTTP(response, request)
+					return response
+				}
+				if response := create(map[string]string{"DISPATCH_DEFAULT_PROJECT": "WID"}); errorCode(response) != "EXTERNAL_PROJECT_MISMATCH" || !strings.Contains(response.Body.String(), "project WID") {
+					t.Errorf("DISPATCH_DEFAULT_PROJECT=WID: POST /api/v1/issues answered %d %s, want the unmapped repository's project to be WID", response.Code, response.Body.String())
+				}
+				if response := create(nil); errorCode(response) != "PROJECT_UNMAPPED" {
+					t.Errorf("unset: POST /api/v1/issues answered %d %s, want PROJECT_UNMAPPED", response.Code, response.Body.String())
+				}
+			})
+		},
+		"DISPATCH_APP_CLIENT_ID": func(t *testing.T) {
+			if clientID, source, err := loadApp(t, map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env"}); err != nil || clientID != "Iv1.env" || source != "env" {
+				t.Errorf("set: client %q from %q, %v; want the variable over app.json", clientID, source, err)
+			}
+			if clientID, source, err := loadApp(t, nil); err != nil || clientID != "Iv1.file" || !strings.HasPrefix(source, "file:") {
+				t.Errorf("unset: client %q from %q, %v; want app.json's", clientID, source, err)
+			}
+		},
+		"DISPATCH_APP_PEM_B64": func(t *testing.T) {
+			// The variable holds the App's PEM as GKE Secret Sync copies it from Secret Manager,
+			// or the base64 of that PEM; a key that does not parse is refused at load, naming the
+			// variable and the form it came in, and never quoting the value.
+			key, pkcs1 := githubapptest.Key(t)
+			pkcs8Bytes, err := x509.MarshalPKCS8PrivateKey(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pkcs8 := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8Bytes}))
+			encoded := base64.StdEncoding.EncodeToString([]byte(pkcs1))
+			var wrapped strings.Builder // base64 as the base64 command prints it: 76 columns a line
+			for rest := encoded; rest != ""; {
+				line := rest[:min(76, len(rest))]
+				rest = rest[len(line):]
+				wrapped.WriteString(line + "\n")
+			}
+			const garbageArmour = "-----BEGIN RSA PRIVATE KEY-----\nbm90IGEga2V5\n-----END RSA PRIVATE KEY-----\n"
+			load := func(value string) (*auth.AppConfig, error) {
+				values := map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_PEM_B64": value}
+				app, _, err := loadAppCredentials(envGetter(values), t.TempDir())
+				return app, err
+			}
+			for _, tc := range []struct {
+				name, value string
+				want        string   // the PEM the App holds, when it loads
+				refusal     []string // what the error names, when it is refused
+			}{
+				{name: "a plain PEM", value: pkcs1, want: pkcs1},
+				{name: "base64 of the PEM", value: encoded, want: pkcs1},
+				{name: "base64 wrapped at 76 columns", value: wrapped.String(), want: pkcs1},
+				{name: "a PKCS8 plain PEM", value: pkcs8, want: pkcs8},
+				{name: "not base64", value: "not base64!", refusal: []string{"DISPATCH_APP_PEM_B64"}},
+				{name: "base64 of no key", value: base64.StdEncoding.EncodeToString([]byte("app private key")), refusal: []string{"DISPATCH_APP_PEM_B64", "base64 of a PEM"}},
+				{name: "PEM armour around garbage", value: garbageArmour, refusal: []string{"DISPATCH_APP_PEM_B64", "plain PEM"}},
+				{name: "empty or unset"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					app, err := load(tc.value)
+					if tc.refusal == nil {
+						if err != nil || app == nil || app.PEM != tc.want {
+							t.Fatalf("err = %v, App loaded %t, PEM as given %t; want an App holding the case's PEM", err, app != nil, app != nil && app.PEM == tc.want)
+						}
+						if tc.want != "" {
+							if _, err := githubappjwt.ParseKey(app.PEM); err != nil {
+								t.Errorf("the App's PEM does not parse: %v", err)
+							}
+						}
+						return
+					}
+					if err == nil {
+						t.Fatalf("app %+v; want a refusal naming %q", app, tc.refusal)
+					}
+					for _, want := range tc.refusal {
+						if !strings.Contains(err.Error(), want) {
+							t.Errorf("err = %v, want it to name %q", err, want)
+						}
+					}
+					// No part of the value or of the key reaches the message: neither whole,
+					// nor any of their lines.
+					for _, text := range []string{tc.value, pkcs1, pkcs8, encoded} {
+						for _, part := range append([]string{text}, strings.Split(text, "\n")...) {
+							if part = strings.TrimSpace(part); part != "" && strings.Contains(err.Error(), part) {
+								t.Errorf("err = %v quotes %q", err, part)
+							}
+						}
+					}
+				})
+			}
+		},
+		"DISPATCH_APP_ID": func(t *testing.T) {
+			app, _, err := loadAppCredentials(envGetter(map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_ID": "4242"}), t.TempDir())
+			if err != nil || app.ID != 4242 {
+				t.Errorf("app %+v, %v", app, err)
+			}
+			if _, _, err := loadApp(t, map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_ID": "app"}); err == nil || !strings.Contains(err.Error(), "DISPATCH_APP_ID") {
+				t.Errorf("not an integer: err = %v, want a refusal naming DISPATCH_APP_ID", err)
+			}
+		},
+		"DISPATCH_APP_SLUG": func(t *testing.T) {
+			app, _, err := loadAppCredentials(envGetter(map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_SLUG": "table-slug"}), t.TempDir())
+			if err != nil || app.Slug != "table-slug" {
+				t.Errorf("app %+v, %v", app, err)
+			}
+		},
+		"DISPATCH_APP_NAME": func(t *testing.T) {
+			app, _, err := loadAppCredentials(envGetter(map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_NAME": "Table App"}), t.TempDir())
+			if err != nil || app.Name != "Table App" {
+				t.Errorf("app %+v, %v", app, err)
+			}
+		},
+		"DISPATCH_GITHUB_API_BASE": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_GITHUB_API_BASE": " http://127.0.0.1:9022 "}); boot.GitHubAPIBase != "http://127.0.0.1:9022" {
+				t.Errorf("GitHubAPIBase = %q", boot.GitHubAPIBase)
+			}
+			// The origin the router's App calls go to: a sync of a project's architecture source
+			// first looks up the App's installation on the repository there.
+			t.Run("router", func(t *testing.T) {
+				database := storetest.Open(t)
+				if _, err := database.Pool.Exec(context.Background(), `
+					insert into projects (key, name) values ('ARCH', 'ARCH');
+					insert into architecture_sources (project_key, repo, branch, installation_id, created_by)
+					values ('ARCH', 'acme/arch', 'main', 1, '{"kind":"session","id":"test"}');
+				`); err != nil {
+					t.Fatalf("seed the architecture source: %v", err)
+				}
+				key, err := rsa.GenerateKey(rand.Reader, 2048)
+				if err != nil {
+					t.Fatal(err)
+				}
+				app := &auth.AppConfig{ClientID: "Iv1.env", PEM: string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))}
+				called := make(chan string, 1)
+				github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					select {
+					case called <- r.Method + " " + r.URL.Path:
+					default:
+					}
+					w.WriteHeader(http.StatusNotFound)
+				}))
+				defer github.Close()
+				request := httptest.NewRequest(http.MethodPost, "/api/v1/projects/ARCH/architecture-sources/acme/arch/sync", nil)
+				request.Header.Set("Authorization", "Bearer agent-token")
+				response := httptest.NewRecorder()
+				routerFor(t, resolveWith(t, map[string]string{"DISPATCH_GITHUB_API_BASE": github.URL}), routes.AppContextOptions{App: app, Store: database}).ServeHTTP(response, request)
+				select {
+				case got := <-called:
+					if got != "GET /repos/acme/arch/installation" {
+						t.Errorf("the GitHub API DISPATCH_GITHUB_API_BASE names received %s, want the App's installation lookup", got)
+					}
+				default:
+					t.Errorf("the sync answered %d %s, and the GitHub API DISPATCH_GITHUB_API_BASE names received no call", response.Code, response.Body.String())
+				}
+			})
+		},
+		"DISPATCH_SIGNING_KEY": func(t *testing.T) {
+			dataDir := t.TempDir()
+			fingerprints := func(setting string) []string {
+				t.Helper()
+				keys, err := auth.ParseSigningKeys(setting)
+				if err != nil {
+					t.Fatalf("ParseSigningKeys(%q): %v", setting, err)
+				}
+				return keys.Fingerprints()
+			}
+			for _, setting := range []string{"table-key", "new-key table-key", "new-key\ntable-key\n"} {
+				key, err := sessionSigningKey(resolveWith(t, map[string]string{"DISPATCH_SIGNING_KEY": setting}), dataDir)
+				if want := fingerprints(setting); err != nil || !slices.Equal(key.Fingerprints(), want) {
+					t.Errorf("set to %q: keys %q, %v; want %q", setting, key.Fingerprints(), err, want)
+				}
+			}
+			for setting, naming := range map[string]string{"new-key  table-key": "entry 2 of 3 is empty", "table-key new-key table-key": "entry 3 of 3 repeats entry 1"} {
+				_, err := resolveBootConfig(bootEnvironment(map[string]string{"DISPATCH_SIGNING_KEY": setting}))
+				if err == nil || !strings.Contains(err.Error(), "DISPATCH_SIGNING_KEY") || !strings.Contains(err.Error(), naming) {
+					t.Errorf("set to %q: err = %v, want a refusal naming DISPATCH_SIGNING_KEY and %q", setting, err, naming)
+				} else if strings.Contains(err.Error(), "table-key") || strings.Contains(err.Error(), "new-key") {
+					t.Errorf("set to %q: the refusal %q names a key", setting, err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(dataDir, "signing-key")); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("set: the data dir's signing-key file was touched (%v)", err)
+			}
+			first, err := sessionSigningKey(resolveWith(t, nil), dataDir)
+			if err != nil || len(first.Fingerprints()) != 1 {
+				t.Fatalf("unset: keys %q, %v; want the file's one key", first.Fingerprints(), err)
+			}
+			if again, err := sessionSigningKey(resolveWith(t, nil), dataDir); err != nil || !slices.Equal(again.Fingerprints(), first.Fingerprints()) {
+				t.Errorf("unset again: keys %q, %v; want the file's %q", again.Fingerprints(), err, first.Fingerprints())
+			}
+			if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_SIGNING_KEY": "table-key"})); err == nil || !strings.Contains(err.Error(), "DISPATCH_SIGNING_KEY") {
+				t.Errorf("dev sign-in with a key: err = %v, want a refusal naming DISPATCH_SIGNING_KEY", err)
+			}
+			// The people store main builds (openPeople) seals under the keys main signs cookies with:
+			// with a new key put first, it still opens a refresh token sealed under the key before.
+			t.Run("people store", func(t *testing.T) {
+				database := storetest.Open(t)
+				if err := store.NewPgPeopleStore(database.Pool, auth.SingleSigningKey("table-key"), nil).SignIn(context.Background(), "alice@example.com", "refresh-sealed"); err != nil {
+					t.Fatal(err)
+				}
+				people, key, err := openPeople(resolveWith(t, map[string]string{"DISPATCH_SIGNING_KEY": "new-key table-key"}), t.TempDir(), database.Pool, nil)
+				if want := fingerprints("new-key table-key"); err != nil || !slices.Equal(key.Fingerprints(), want) {
+					t.Fatalf("openPeople: keys %q, %v; want %q", key.Fingerprints(), err, want)
+				}
+				if membership, _, err := people.Membership(context.Background(), "alice@example.com"); err != nil || membership.RefreshToken != "refresh-sealed" {
+					t.Errorf("the people store main builds read %#v, %v; want the token sealed under the earlier key", membership, err)
+				}
+			})
+			// Unset, with an empty signing-key file in the data dir, the boot exits 1 naming the
+			// file, before the people store would panic on the empty key set.
+			t.Run("an empty signing-key file", func(t *testing.T) {
+				database := storetest.Open(t)
+				home := t.TempDir()
+				keyFile := filepath.Join(home, ".local", "share", "dispatch", "signing-key")
+				if err := os.MkdirAll(filepath.Dir(keyFile), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(keyFile, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				process := startDispatchProcessWith(t, database.Pool.Config().ConnString(), dispatchOptions{Env: map[string]string{"HOME": home}})
+				process.WaitExit(t, "its start with an empty signing-key file")
+				output := process.Output.String()
+				if code := process.Cmd.ProcessState.ExitCode(); code != 1 {
+					t.Errorf("the boot with an empty signing-key file exited %d, want 1:\n%s", code, output)
+				}
+				if !strings.Contains(output, `msg="dispatch: load signing key"`) || !strings.Contains(output, keyFile) || !strings.Contains(output, "is empty") {
+					t.Errorf("the boot with an empty signing-key file did not refuse it by name (%s):\n%s", keyFile, output)
+				}
+				if strings.Contains(output, "panic") {
+					t.Errorf("the boot with an empty signing-key file panicked:\n%s", output)
+				}
+			})
+			// The key the router's sign-in seals the pool's refresh token under (main hands it to the
+			// people store): the row holds the sealed form, and past the hour the membership check
+			// opens it and renews the sign-in with the pool. A people store under another key, which
+			// is what a rotated key leaves the stored rows to, opens none, even with the membership
+			// confirmed minutes ago: the person is asked to sign in again without the pool being
+			// asked, and the sign-in that follows works as before. The cookie's own key is the same in
+			// both routers here, so the refusal is the refresh token's.
+			t.Run("router", func(t *testing.T) {
+				pool := signInPool(t, "dispatch-client", "client-secret")
+				boot := resolveWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": pool.URL()})
+				database := storetest.Open(t)
+				ageConfirmation := func() {
+					t.Helper()
+					if _, err := database.Pool.Exec(context.Background(), `update people set confirmed_at = now() - interval '2 hours' where confirmed_at is not null`); err != nil {
+						t.Fatal(err)
+					}
+				}
+				whoami := func(handler http.Handler, signedIn *httptest.ResponseRecorder) *httptest.ResponseRecorder {
+					request := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/whoami", nil)
+					for _, cookie := range signedIn.Result().Cookies() {
+						if cookie.Name == "dsession" {
+							request.AddCookie(cookie)
+						}
+					}
+					response := httptest.NewRecorder()
+					handler.ServeHTTP(response, request)
+					return response
+				}
+				handler := signInRouter(t, boot, store.NewPgPeopleStore(database.Pool, testSigningKey, nil))
+				member := poolSignIn(t, handler, pool, "dispatch-members")
+				if member.Code != http.StatusFound || !sessionCookieSet(member) {
+					t.Fatalf("sign-in: the callback answered %d %s, want a signed-in redirect", member.Code, member.Body.String())
+				}
+				var stored string
+				if err := database.Pool.QueryRow(context.Background(), `select refresh_token from people where email = 'alice@example.com'`).Scan(&stored); err != nil {
+					t.Fatal(err)
+				}
+				if !strings.HasPrefix(stored, "v1:") {
+					t.Errorf("the sign-in stored the refresh token as %q, want it sealed in the v1: format", stored)
+				}
+				ageConfirmation()
+				if response := whoami(handler, member); response.Code != http.StatusOK || pool.Refreshes() != 1 {
+					t.Errorf("past the hour: whoami answered %d %s after %d refreshes, want 200 after one refresh with the opened token", response.Code, response.Body.String(), pool.Refreshes())
+				}
+				// The refresh just confirmed the membership; the rotated store opens none of it all the same.
+				rotated := signInRouter(t, boot, store.NewPgPeopleStore(database.Pool, auth.SingleSigningKey("rotated-signing-key"), nil))
+				if response := whoami(rotated, member); response.Code != http.StatusUnauthorized || errorCode(response) != "NO_IDENTITY" || pool.Refreshes() != 1 {
+					t.Errorf("a refresh token sealed under another key: whoami answered %d %s after %d refreshes, want 401 NO_IDENTITY with the pool not asked", response.Code, response.Body.String(), pool.Refreshes())
+				}
+				again := poolSignIn(t, rotated, pool, "dispatch-members")
+				if again.Code != http.StatusFound || !sessionCookieSet(again) {
+					t.Fatalf("signing in again: the callback answered %d %s, want a signed-in redirect", again.Code, again.Body.String())
+				}
+				ageConfirmation()
+				if response := whoami(rotated, again); response.Code != http.StatusOK || pool.Refreshes() != 2 {
+					t.Errorf("signed in again, past the hour: whoami answered %d %s after %d refreshes, want 200 after a second refresh", response.Code, response.Body.String(), pool.Refreshes())
+				}
+			})
+		},
+		"DISPATCH_INSECURE_COOKIE": func(t *testing.T) {
+			// The flag as the router's cookies carry it: the state cookie GET /auth/start sets.
+			pool := signInPool(t, "dispatch-client", "client-secret")
+			for value, insecure := range map[string]bool{"": false, "1": true, "false": true} {
+				response := startSignIn(t, signInRouter(t, resolveWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": pool.URL(), "DISPATCH_INSECURE_COOKIE": value}), peopleStore(t)))
+				cookies := response.Result().Cookies()
+				if len(cookies) != 1 || cookies[0].Secure == insecure {
+					t.Errorf("DISPATCH_INSECURE_COOKIE=%q: /auth/start set %v, want one state cookie with Secure %t", value, cookies, !insecure)
+				}
+			}
+		},
+		"DISPATCH_OIDC_ISSUER": func(t *testing.T) {
+			boot := resolveWith(t, map[string]string{"DISPATCH_OIDC_ISSUER": "https://issuer.example", "DISPATCH_OIDC_AUDIENCE": "dispatch"})
+			if boot.OIDCIssuer != "https://issuer.example" {
+				t.Errorf("OIDCIssuer = %q", boot.OIDCIssuer)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_OIDC_AUDIENCE": "dispatch"}, "DISPATCH_OIDC_ISSUER")
+		},
+		"DISPATCH_OIDC_AUDIENCE": func(t *testing.T) {
+			boot := resolveWith(t, map[string]string{"DISPATCH_OIDC_ISSUER": "https://issuer.example", "DISPATCH_OIDC_AUDIENCE": "dispatch"})
+			if boot.OIDCAudience != "dispatch" {
+				t.Errorf("OIDCAudience = %q", boot.OIDCAudience)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_OIDC_ISSUER": "https://issuer.example"}, "DISPATCH_OIDC_AUDIENCE")
+		},
+		"DISPATCH_AGENT_SECRETS_URL": func(t *testing.T) {
+			tokenFile := writeFile(t, "account-token", "account-token")
+			if boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_URL": "https://broker.example/", "DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": tokenFile}); boot.AgentSecretsURL != "https://broker.example" {
+				t.Errorf("AgentSecretsURL = %q", boot.AgentSecretsURL)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_URL": "https://broker.example/v1", "DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": tokenFile}, "DISPATCH_AGENT_SECRETS_URL")
+			// The broker the router relays credential requests to; without one it has none, and the
+			// pending list answers null.
+			t.Run("router", func(t *testing.T) {
+				if got := brokerReceived(t, "account-token"); !strings.HasPrefix(got, "GET /v1/pending?approver=alice ") {
+					t.Errorf("the broker DISPATCH_AGENT_SECRETS_URL names received %q, want alice's pending list", got)
+				}
+				request := signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/credential-requests?approver=me", nil), "alice")
+				response := httptest.NewRecorder()
+				routerFor(t, resolveWith(t, nil), routes.AppContextOptions{}).ServeHTTP(response, request)
+				if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != "null" {
+					t.Errorf("unset: GET /api/v1/credential-requests answered %d %s, want 200 null", response.Code, response.Body.String())
+				}
+			})
+		},
+		"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": func(t *testing.T) {
+			broker := map[string]string{"DISPATCH_AGENT_SECRETS_URL": "https://broker.example"}
+			refusedWith(t, broker, "DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE")
+			broker["DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE"] = " /var/run/secrets/broker/token "
+			if boot := resolveWith(t, broker); boot.AgentSecretsTokenFile != "/var/run/secrets/broker/token" {
+				t.Errorf("AgentSecretsTokenFile = %q, want the trimmed path", boot.AgentSecretsTokenFile)
+			}
+			// The path is never read at boot: the client reads it on each call, since the kubelet
+			// rewrites a projected token in place.
+			missing := filepath.Join(t.TempDir(), "missing")
+			if boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_URL": "https://broker.example", "DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": missing}); boot.AgentSecretsTokenFile != missing {
+				t.Errorf("AgentSecretsTokenFile = %q, want the path a boot does not read", boot.AgentSecretsTokenFile)
+			}
+			// Without a broker URL nothing is required and no client is built.
+			if boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": missing}); boot.AgentSecretsTokenFile != "" {
+				t.Errorf("no broker: AgentSecretsTokenFile = %q", boot.AgentSecretsTokenFile)
+			}
+			// The bearer the broker receives on the router's relay: the file's trimmed contents.
+			t.Run("router", func(t *testing.T) {
+				if got := brokerReceived(t, " account-token\n"); !strings.HasSuffix(got, " Bearer account-token") {
+					t.Errorf("the broker received %q, want Authorization Bearer account-token", got)
+				}
+			})
+		},
+		"DISPATCH_EMBEDDER": func(t *testing.T) {
+			if boot := resolveWith(t, nil); boot.Embedder.Place != embed.PlaceBedrock {
+				t.Errorf("unset: Embedder.Place = %q, want bedrock", boot.Embedder.Place)
+			}
+			if boot := resolveWith(t, map[string]string{"DISPATCH_EMBEDDER": "bedrock"}); boot.Embedder.Place != embed.PlaceBedrock {
+				t.Errorf("bedrock: Embedder.Place = %q", boot.Embedder.Place)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_EMBEDDER": "cohere"}, `DISPATCH_EMBEDDER="cohere" (expected bedrock or azure)`)
+			// The place newEmbedder builds: Azure's client, named by the endpoint's host.
+			if embedder := azureEmbedderFor(t, nil); !strings.HasPrefix(embedder.Identity(), "azure:") {
+				t.Errorf("DISPATCH_EMBEDDER=azure built %s, want an Azure identity", embedder.Identity())
+			}
+		},
+		"DISPATCH_AZURE_EMBED_ENDPOINT": func(t *testing.T) {
+			boot := resolveWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": " https://Embed.Example/models/ "}))
+			if boot.Embedder.AzureEndpoint != "https://Embed.Example/models/" {
+				t.Errorf("AzureEndpoint = %q, want the trimmed URL", boot.Embedder.AzureEndpoint)
+			}
+			if embedder := azureEmbedderFor(t, map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": "https://Embed.Example/models/"}); embedder.Identity() != "azure:embed.example/embed-v-4-0" {
+				t.Errorf("Identity() = %q, want the endpoint's host", embedder.Identity())
+			}
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": ""}), "DISPATCH_AZURE_EMBED_ENDPOINT is required")
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": "http://embed.example/models"}), "DISPATCH_AZURE_EMBED_ENDPOINT=")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": "https://embed.example/models"}, "DISPATCH_AZURE_EMBED_ENDPOINT set, but DISPATCH_EMBEDDER is unset")
+		},
+		"DISPATCH_AZURE_EMBED_DEPLOYMENT": func(t *testing.T) {
+			if boot := resolveWith(t, azureEmbedEnvironment(nil)); boot.Embedder.AzureDeployment != "embed-v-4-0" {
+				t.Errorf("unset: AzureDeployment = %q, want embed-v-4-0", boot.Embedder.AzureDeployment)
+			}
+			if embedder := azureEmbedderFor(t, map[string]string{"DISPATCH_AZURE_EMBED_DEPLOYMENT": " cohere-embed "}); embedder.Identity() != "azure:embed.example/cohere-embed" {
+				t.Errorf("Identity() = %q, want the trimmed deployment", embedder.Identity())
+			}
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_DEPLOYMENT": "cohere-embed"}, "DISPATCH_AZURE_EMBED_DEPLOYMENT set, but DISPATCH_EMBEDDER is unset")
+		},
+		"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": func(t *testing.T) {
+			if embedder := azureEmbedderFor(t, map[string]string{"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": " 90000 "}); embedder.Limits().BackgroundTokensPerMinute != 60_000 {
+				t.Errorf("BackgroundTokensPerMinute = %d, want two thirds of 90,000", embedder.Limits().BackgroundTokensPerMinute)
+			}
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": ""}), "DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE is required")
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": "0"}), `DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE="0"`)
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": "90000"}, "DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE set, but DISPATCH_EMBEDDER is unset")
+		},
+		"DISPATCH_AZURE_EMBED_KEY": func(t *testing.T) {
+			if boot := resolveWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY": " bare-key "})); boot.Embedder.AzureKey != "bare-key" {
+				t.Errorf("bare: AzureKey = %q", boot.Embedder.AzureKey)
+			}
+			file := writeFile(t, "azure-key", "  file-key\n")
+			if boot := resolveWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": file})); boot.Embedder.AzureKey != "file-key" {
+				t.Errorf("both: AzureKey = %q, want the file's", boot.Embedder.AzureKey)
+			}
+			if boot := resolveWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY": "", "DISPATCH_AZURE_EMBED_KEY_FILE": file})); boot.Embedder.AzureKey != "file-key" {
+				t.Errorf("file alone: AzureKey = %q, want the file's", boot.Embedder.AzureKey)
+			}
+			// An unreadable or blank file refuses, naming both variables, rather than falling back to
+			// the bare key.
+			missing := filepath.Join(t.TempDir(), "missing")
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": missing}),
+				"DISPATCH_AZURE_EMBED_KEY_FILE names "+missing+", which could not be read, and DISPATCH_AZURE_EMBED_KEY is not read in its place")
+			blank := writeFile(t, "blank", "\n")
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": blank}),
+				"DISPATCH_AZURE_EMBED_KEY_FILE names "+blank+", which is empty, and DISPATCH_AZURE_EMBED_KEY is not read in its place")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_KEY": "bare-key"}, "DISPATCH_AZURE_EMBED_KEY set, but DISPATCH_EMBEDDER is unset")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": file}, "DISPATCH_AZURE_EMBED_KEY_FILE set, but DISPATCH_EMBEDDER is unset")
+			if _, ok := azureEmbedderFor(t, map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": file}).(*embed.AzureClient); !ok {
+				t.Error("the key form built no Azure client")
+			}
+		},
+		"DISPATCH_AZURE_TENANT_ID": func(t *testing.T) {
+			if boot := resolveWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_TENANT_ID": " tenant "}))); boot.Embedder.AzureTenantID != "tenant" {
+				t.Errorf("AzureTenantID = %q", boot.Embedder.AzureTenantID)
+			}
+			refusedWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_TENANT_ID": ""})), "DISPATCH_AZURE_TENANT_ID missing")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_TENANT_ID": "tenant"}, "DISPATCH_AZURE_TENANT_ID set, but DISPATCH_EMBEDDER is unset")
+			if embedder := azureEmbedderFor(t, azureKeyless); embedder.Identity() != "azure:embed.example/embed-v-4-0" {
+				t.Errorf("keyless: Identity() = %q", embedder.Identity())
+			}
+		},
+		"DISPATCH_AZURE_CLIENT_ID": func(t *testing.T) {
+			if boot := resolveWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_CLIENT_ID": " client "}))); boot.Embedder.AzureClientID != "client" {
+				t.Errorf("AzureClientID = %q", boot.Embedder.AzureClientID)
+			}
+			refusedWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_CLIENT_ID": ""})), "DISPATCH_AZURE_CLIENT_ID missing")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_CLIENT_ID": "client"}, "DISPATCH_AZURE_CLIENT_ID set, but DISPATCH_EMBEDDER is unset")
+		},
+		"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": func(t *testing.T) {
+			// A path, read at each exchange, not at boot: a file that is not there yet boots.
+			missing := filepath.Join(t.TempDir(), "token")
+			if boot := resolveWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": " " + missing + " "}))); boot.Embedder.AzureTokenFile != missing {
+				t.Errorf("AzureTokenFile = %q, want %q", boot.Embedder.AzureTokenFile, missing)
+			}
+			refusedWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": ""})), "DISPATCH_AZURE_FEDERATED_TOKEN_FILE missing")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": missing}, "DISPATCH_AZURE_FEDERATED_TOKEN_FILE set, but DISPATCH_EMBEDDER is unset")
+		},
+		"DISPATCH_WEB_DIST": func(t *testing.T) {
+			if dir, err := defaultWebDistDir(resolveWith(t, map[string]string{"DISPATCH_WEB_DIST": "/srv/dispatch/dist"}).WebDist); err != nil || dir != "/srv/dispatch/dist" {
+				t.Errorf("web dist = %q, %v", dir, err)
+			}
+		},
+		"DISPATCH_FILE_STORE_BUCKET": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_FILE_STORE_BUCKET": " example-files-bucket "}); boot.FileStoreBucket != "example-files-bucket" {
+				t.Errorf("FileStoreBucket = %q, want the trimmed bucket name", boot.FileStoreBucket)
+			}
+			// Unset, the store is a nil interface: every upload keeps its bytes in Postgres.
+			if store, err := openFileStore(context.Background(), resolveWith(t, map[string]string{"DISPATCH_FILE_STORE_BUCKET": ""})); err != nil || store != nil {
+				t.Errorf("openFileStore with no bucket = %v, %v, want nil, nil", store, err)
+			}
+			// backfill-files reads it too, trimmed, and refuses to run without it before it opens the
+			// database.
+			var stdout, stderr bytes.Buffer
+			if code := runSubcommand(context.Background(), []string{"backfill-files"}, envGetter(map[string]string{"DISPATCH_FILE_STORE_BUCKET": " "}), &stdout, &stderr); code != 1 || !strings.Contains(stdout.String()+stderr.String(), "DISPATCH_FILE_STORE_BUCKET") {
+				t.Errorf("backfill-files with no bucket: exit %d, output %q, want a refusal naming DISPATCH_FILE_STORE_BUCKET", code, stdout.String()+stderr.String())
+			}
+		},
+		"DISPATCH_DEV_SIGNIN": func(t *testing.T) {
+			if boot, err := resolveBootConfig(devSignInEnvironment(nil)); err != nil || !boot.DevSignIn {
+				t.Errorf("DISPATCH_DEV_SIGNIN=1: DevSignIn %t, %v", boot.DevSignIn, err)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_DEV_SIGNIN": "yes"}, "DISPATCH_DEV_SIGNIN")
+			// The route the flag mounts: a sign-in as any email sets its session cookie, and
+			// without the flag the route is not there.
+			t.Run("router", func(t *testing.T) {
+				for value, want := range map[string]int{"1": http.StatusFound, "": http.StatusNotFound} {
+					boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_SIGNIN": value}))
+					if err != nil {
+						t.Fatal(err)
+					}
+					response := devSignIn(t, boot, "alice@example.com")
+					cookieSet := sessionCookieSet(response)
+					if response.Code != want || cookieSet != (want == http.StatusFound) {
+						t.Errorf("DISPATCH_DEV_SIGNIN=%q: dev sign-in answered %d %s (session cookie set: %t), want %d", value, response.Code, response.Body.String(), cookieSet, want)
+					}
+				}
+			})
+		},
+		"DISPATCH_DEV_SIGNIN_SHARED_KEY": func(t *testing.T) {
+			// Without dev sign-in nothing would sign with it, so a boot that sets it is refused.
+			refusedWith(t, map[string]string{"DISPATCH_DEV_SIGNIN_SHARED_KEY": "harness-secret"}, "DISPATCH_DEV_SIGNIN_SHARED_KEY")
+			// The key set one dev-sign-in process signs cookies with, each in a data dir of its own:
+			// always one key, so the registry of live server processes compares one fingerprint.
+			devKey := func(t *testing.T, shared string) auth.SigningKeys {
+				t.Helper()
+				boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_SIGNIN_SHARED_KEY": shared}))
+				if err != nil {
+					t.Fatalf("dev sign-in with DISPATCH_DEV_SIGNIN_SHARED_KEY=%q: %v", shared, err)
+				}
+				keys, err := sessionSigningKey(boot, t.TempDir())
+				if err != nil || len(keys.Fingerprints()) != 1 {
+					t.Fatalf("DISPATCH_DEV_SIGNIN_SHARED_KEY=%q: %d keys, %v; want one", shared, len(keys.Fingerprints()), err)
+				}
+				return keys
+			}
+			cookieOf := func(t *testing.T, login string, keys auth.SigningKeys) string {
+				t.Helper()
+				cookie, err := http.ParseSetCookie(auth.IssueSessionCookie(login, 0, keys, false))
+				if err != nil {
+					t.Fatal(err)
+				}
+				return cookie.Value
+			}
+			// Two processes of one harness: a session minted on A authenticates on B.
+			a, b := devKey(t, "harness-secret"), devKey(t, "harness-secret")
+			if session, ok := auth.VerifySession(cookieOf(t, "alice@example.com", a), b); !ok || session.Login != "alice@example.com" {
+				t.Errorf("a cookie process A minted verified on process B as %#v, %t; want alice@example.com", session, ok)
+			}
+			// The value is never the key itself: a production DISPATCH_SIGNING_KEY pasted here mints
+			// nothing its own server accepts, and that server's cookies sign no one in here.
+			production := auth.SingleSigningKey("harness-secret")
+			if slices.Equal(a.Fingerprints(), production.Fingerprints()) {
+				t.Error("dev sign-in signs with DISPATCH_DEV_SIGNIN_SHARED_KEY's own value")
+			}
+			if _, ok := auth.VerifySession(cookieOf(t, "alice@example.com", a), production); ok {
+				t.Error("a production server keyed with the shared value accepted a dev sign-in cookie")
+			}
+			if _, ok := auth.VerifySession(cookieOf(t, "alice@example.com", production), a); ok {
+				t.Error("a dev-sign-in process accepted a cookie signed with the shared value itself")
+			}
+			// Another harness's value is another key, and with none each process keeps its own.
+			if slices.Equal(devKey(t, "another-harness").Fingerprints(), a.Fingerprints()) {
+				t.Error("two shared values derived one key")
+			}
+			if slices.Equal(devKey(t, "").Fingerprints(), devKey(t, "").Fingerprints()) {
+				t.Error("two dev-sign-in processes with no shared value signed with one key")
+			}
+		},
+		"DISPATCH_TEST_HOOKS": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1"}); !boot.TestHooksEnabled {
+				t.Error("DISPATCH_TEST_HOOKS=1: hooks off")
+			}
+			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "true"}); boot.TestHooksEnabled {
+				t.Error("DISPATCH_TEST_HOOKS=true: hooks on, want only 1 to mount them")
+			}
+			// The routes the flag mounts: the e2e harness's hooks that close every open live socket, as
+			// a restart (1012) or the socket's age (4001) does.
+			t.Run("router", func(t *testing.T) {
+				for _, hook := range []string{"/api/v1/live/_test/disconnect", "/api/v1/live/_test/rotate"} {
+					for value, want := range map[string]int{"1": http.StatusOK, "": http.StatusNotFound} {
+						request := signedIn(t, httptest.NewRequest(http.MethodPost, hook, nil), "alice")
+						request.Header.Set("Sec-Fetch-Site", "same-origin")
+						response := httptest.NewRecorder()
+						routerFor(t, resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": value}), routes.AppContextOptions{}).ServeHTTP(response, request)
+						if response.Code != want {
+							t.Errorf("DISPATCH_TEST_HOOKS=%q: POST %s answered %d %s, want %d", value, hook, response.Code, response.Body.String(), want)
+						}
+					}
+				}
+			})
+		},
+		"DISPATCH_TEST_SETTLE_DELAY": func(t *testing.T) {
+			const longDelay = 30 * time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":        "1",
+				"DISPATCH_TEST_SETTLE_DELAY": longDelay.String(),
+			})
+			if boot.SettleDelay != longDelay {
+				t.Errorf("DISPATCH_TEST_SETTLE_DELAY: SettleDelay = %v, want %v", boot.SettleDelay, longDelay)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_SETTLE_DELAY": invalid},
+					fmt.Sprintf("DISPATCH_TEST_SETTLE_DELAY=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_SETTLE_DELAY": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
+		"DISPATCH_TEST_EDIT_NOTICE_QUIET": func(t *testing.T) {
+			const shortQuiet = 3 * time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":             "1",
+				"DISPATCH_TEST_EDIT_NOTICE_QUIET": shortQuiet.String(),
+			})
+			if boot.EditNoticeQuiet != shortQuiet {
+				t.Errorf("DISPATCH_TEST_EDIT_NOTICE_QUIET: EditNoticeQuiet = %v, want %v", boot.EditNoticeQuiet, shortQuiet)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_EDIT_NOTICE_QUIET": invalid},
+					fmt.Sprintf("DISPATCH_TEST_EDIT_NOTICE_QUIET=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_EDIT_NOTICE_QUIET": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
+		"DISPATCH_TEST_ROSTER_UNCACHED": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_ROSTER_UNCACHED": "1"}); !boot.ListenerRosterUncached {
+				t.Error("DISPATCH_TEST_ROSTER_UNCACHED=1: ListenerRosterUncached false")
+			}
+			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_ROSTER_UNCACHED": "true"}); boot.ListenerRosterUncached {
+				t.Error("DISPATCH_TEST_ROSTER_UNCACHED=true: ListenerRosterUncached true, want only 1 to set it")
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_ROSTER_UNCACHED": "1"}, "DISPATCH_TEST_HOOKS=1 required")
+			// Its reader: two agents lists within the copy's five seconds ask the listener twice
+			// with the copy off, once with it on.
+			t.Run("router", func(t *testing.T) {
+				for value, want := range map[string]int32{"1": 2, "": 1} {
+					var calls atomic.Int32
+					listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						calls.Add(1)
+						_, _ = w.Write([]byte("[]"))
+					}))
+					t.Cleanup(listener.Close)
+					router := routerFor(t, resolveWith(t, map[string]string{
+						"DISPATCH_TEST_HOOKS":           "1",
+						"DISPATCH_TEST_ROSTER_UNCACHED": value,
+						"ENVOY_URL":                     listener.URL,
+					}), routes.AppContextOptions{})
+					for range 2 {
+						response := httptest.NewRecorder()
+						router.ServeHTTP(response, signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil), "alice"))
+						if response.Code != http.StatusOK {
+							t.Fatalf("DISPATCH_TEST_ROSTER_UNCACHED=%q: GET /api/v1/agents: %d %s", value, response.Code, response.Body.String())
+						}
+					}
+					if got := calls.Load(); got != want {
+						t.Errorf("DISPATCH_TEST_ROSTER_UNCACHED=%q: two GET /api/v1/agents called the listener %d times, want %d", value, got, want)
+					}
+				}
+			})
+		},
+	}
+	for _, row := range settings {
+		test, ok := cases[row.Name]
+		if !ok {
+			t.Errorf("%s has no case here: add one that hands it to its reader through the table", row.Name)
+			continue
+		}
+		t.Run(row.Name, test)
+		delete(cases, row.Name)
+	}
+	for name := range cases {
+		t.Errorf("a case for %s, which the settings table does not list", name)
+	}
+}
+
+// whoamiAs is GET /api/v1/whoami from handler with token as the bearer, from behind a load
+// balancer that saw the caller at the end of forwardedFor when it is not empty.
+func whoamiAs(handler http.Handler, token, forwardedFor string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	if forwardedFor != "" {
+		request.Header.Set("X-Forwarded-For", forwardedFor)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+// answersSharedToken reports whether a whoami response names the shared token: an agent with no
+// owner.
+func answersSharedToken(response *httptest.ResponseRecorder) bool {
+	var caller struct {
+		Kind  string  `json:"kind"`
+		Owner *string `json:"owner"`
+	}
+	return response.Code == http.StatusOK && json.Unmarshal(response.Body.Bytes(), &caller) == nil &&
+		caller.Kind == "agent" && caller.Owner == nil
+}
+
+// With DISPATCH_AGENT_TOKEN holding several values, the server main builds from the setting
+// accepts every one on the HTTP API and refuses a value the setting does not list. A request that
+// authenticates with a value after the first is logged once per address and User-Agent, with the
+// load balancer's address and never a token.
+func sharedAgentTokenListReachesTheAPI(t *testing.T) {
+	// The server's request goroutines write the log while the test reads it.
+	var logged cmdtest.LockedBuffer
+	logtest.SetDefault(t, slog.NewJSONHandler(&logged, nil))
+	previousTokenLines := func() []map[string]any {
+		t.Helper()
+		var lines []map[string]any
+		for _, line := range strings.Split(logged.String(), "\n") {
+			var decoded map[string]any
+			if json.Unmarshal([]byte(line), &decoded) == nil && decoded["msg"] == "dispatch: request authenticated with a previous shared agent token" {
+				lines = append(lines, decoded)
+			}
+		}
+		return lines
+	}
+
+	boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_TOKEN": "new-token\nold-token"})
+	handler := routerFor(t, boot, routes.AppContextOptions{Store: storetest.Open(t)})
+
+	for _, token := range []string{"new-token", "old-token"} {
+		if response := whoamiAs(handler, token, "198.51.100.9, 203.0.113.7"); !answersSharedToken(response) {
+			t.Errorf("GET /api/v1/whoami with %s answered %d %s, want 200 naming the shared token", token, response.Code, response.Body.String())
+		}
+	}
+	if response := whoamiAs(handler, "third-token", "203.0.113.7"); response.Code != http.StatusUnauthorized {
+		t.Errorf("GET /api/v1/whoami with a value the setting does not list answered %d %s, want 401", response.Code, response.Body.String())
+	}
+
+	// Again within the window from the same caller: nothing more is logged.
+	whoamiAs(handler, "old-token", "203.0.113.7")
+	lines := previousTokenLines()
+	if len(lines) != 1 {
+		t.Fatalf("previous-token log lines = %v, want one for the API caller", lines)
+	}
+	for key, value := range map[string]any{"entry": float64(2), "address": "203.0.113.7", "path": "/api/v1/whoami"} {
+		if lines[0][key] != value {
+			t.Errorf("the previous-token log line's %s = %v, want %v (line %v)", key, lines[0][key], value, lines[0])
+		}
+	}
+	for _, token := range []string{"new-token", "old-token", "third-token"} {
+		if strings.Contains(logged.String(), token) {
+			t.Errorf("the log holds the token %q", token)
+		}
+	}
+}
+
+// TestACredentialPageWithAnUnreadableAccountTokenDoesNotBlameTheBroker: Dispatch's boot no longer
+// reads the file DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE names, so a wrong path or an empty file
+// boots, and only the first credential page finds it out. That call never reaches the broker, so
+// the answer must not be AGENT_SECRETS_UNAVAILABLE, the code that tells an operator the broker is
+// unreachable: what is wrong is Dispatch's own credential, which the operator fixes in Dispatch's
+// deployment, not in the broker's.
+func TestACredentialPageWithAnUnreadableAccountTokenDoesNotBlameTheBroker(t *testing.T) {
+	for name, tokenFile := range map[string]string{
+		"a path that does not exist": filepath.Join(t.TempDir(), "missing"),
+		"an empty file":              writeFile(t, "account-token", "\n"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			called := false
+			broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				called = true
+				_, _ = w.Write([]byte(`{"requests":[]}`))
+			}))
+			defer broker.Close()
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_AGENT_SECRETS_URL":                broker.URL,
+				"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": tokenFile,
+			})
+			request := signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/credential-requests?approver=me", nil), "alice")
+			response := httptest.NewRecorder()
+			routerFor(t, boot, routes.AppContextOptions{}).ServeHTTP(response, request)
+			if called {
+				t.Fatal("the broker was called with no token Dispatch could read")
+			}
+			var answer struct {
+				Code string `json:"code"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &answer); err != nil {
+				t.Fatalf("GET /api/v1/credential-requests answered %d %s, which is not a JSON error", response.Code, response.Body.String())
+			}
+			if answer.Code == "AGENT_SECRETS_UNAVAILABLE" {
+				t.Fatalf("GET /api/v1/credential-requests = %d %s: the broker was never called, so the answer must name Dispatch's own unreadable ServiceAccount token, not an unreachable broker", response.Code, response.Body.String())
+			}
+		})
+	}
+}

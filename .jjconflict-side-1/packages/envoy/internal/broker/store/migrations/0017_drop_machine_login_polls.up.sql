@@ -1,0 +1,20 @@
+-- packages/envoy/internal/broker/store/migrations/0017_drop_machine_login_polls.up.sql
+-- A person's machine logs in through the OAuth device grant alone (machine.Service.LoginDevice),
+-- whose machine polls with its device code. The earlier login, POST /v1/launcher-credentials and
+-- its poll GET /v1/launcher-credentials/{pending}, is gone, and with it the table that mapped a
+-- poll's pending id to its record.
+--
+-- A broker of the release before this one still boots on the dropped table, during a rollout or
+-- after a rollback: its runner applies only the versions it has not recorded and reads no other,
+-- and it reads and writes machine_login_polls on those two routes alone, which then answer 500.
+-- No client calls them: every helper from legion-envoy 14 logs in through the device grant, and
+-- the Legion daemon through POST /v1/launcher-credentials/token. A record either route opened and
+-- left pending is still decided by its code through Dispatch; it has no device code, so its
+-- machine learns nothing of the decision and logs in again through the device grant.
+--
+-- The drop takes ACCESS EXCLUSIVE on machine_login_polls and, to drop its foreign key, on
+-- credential_requests, which every request, decision and machine login reads. Both hold for the
+-- catalog change alone, no row is read or written, and the runner's lock timeout bounds the wait
+-- for a transaction already holding credential_requests, so requests queue behind it for at most
+-- that long at the broker's boot.
+drop table machine_login_polls;

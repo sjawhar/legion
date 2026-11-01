@@ -1,0 +1,820 @@
+package session_test
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/sjawhar/envoy/internal/contracts"
+	session "github.com/sjawhar/envoy/internal/session"
+	"github.com/sjawhar/envoy/internal/store"
+)
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func newTestEnvelope(source, topic, summary string) contracts.Envelope {
+	return contracts.Envelope{
+		EventID:        "test-event-1",
+		Source:         source,
+		SourceSession:  "ses_sender",
+		SourceEventID:  "test-source-1",
+		Topic:          topic,
+		DedupeKey:      "test-dedupe-1",
+		IssuedAt:       time.Now().UnixMilli(),
+		PayloadSummary: summary,
+		TraceID:        "test-trace-1",
+	}
+}
+
+func mockPort(url string) int {
+	port := 0
+	fmt.Sscanf(url, "http://127.0.0.1:%d", &port)
+	if port == 0 {
+		fmt.Sscanf(url, "http://[::1]:%d", &port)
+	}
+	return port
+}
+
+func newKVDeliverer(t *testing.T) (*session.SessionRegistry, session.Deliverer) {
+	t.Helper()
+	client := session.SetupNATS(t)
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("failed to open session registry: %v", err)
+	}
+	return sessions, session.Deliverer{
+		HostBridge:   "127.0.0.1",
+		RequestLimit: 5 * time.Second,
+	}
+}
+
+// deliverThroughEntry delivers the way the listener does: the caller resolves the target's record
+// (resolvedEntry) and hands it to the Deliverer, which reads no registry of its own.
+func deliverThroughEntry(t *testing.T, deliverer session.Deliverer, sessions *session.SessionRegistry, item contracts.Envelope, interest store.Interest) error {
+	t.Helper()
+	_, err := deliverer.DeliverWithResultForEntry(item, interest, resolvedEntry(t, sessions, interest.SessionID))
+	return err
+}
+
+func TestDeliver_ExactlyOnce(t *testing.T) {
+	var deliveryCount atomic.Int32
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deliveryCount.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer mock.Close()
+
+	port := mockPort(mock.URL)
+	if port == 0 {
+		t.Fatalf("could not parse mock port from %s", mock.URL)
+	}
+
+	sessions, deliverer := newKVDeliverer(t)
+	if err := sessions.Put("ses_target", session.SessionEntry{Port: port, Dir: "/test"}); err != nil {
+		t.Fatalf("failed to register session: %v", err)
+	}
+	interest := store.Interest{SessionID: "ses_target", Dir: "/test"}
+	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
+
+	err := deliverThroughEntry(t, deliverer, sessions, item, interest)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	if count := deliveryCount.Load(); count != 1 {
+		t.Fatalf("expected exactly 1 delivery, got %d", count)
+	}
+}
+
+func TestDeliver_NoRegistryEntry(t *testing.T) {
+	sessions, deliverer := newKVDeliverer(t)
+	interest := store.Interest{SessionID: "ses_ghost", Dir: "/test", MachineID: "m"}
+	item := newTestEnvelope("agent", "notifications.agent.ses_ghost", "test message")
+
+	err := deliverThroughEntry(t, deliverer, sessions, item, interest)
+	if err == nil {
+		t.Fatal("expected error for missing session, got nil")
+	}
+}
+
+func TestDeliver_SkipsPush_whenSelfSubscribedSessionHasNoPort(t *testing.T) {
+	// Given
+	var requests atomic.Int32
+	sessions, deliverer := newKVDeliverer(t)
+	deliverer.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return nil, errors.New("unexpected prompt_async request")
+	})}
+	var entry session.SessionEntry
+	if err := json.Unmarshal([]byte(`{"self_subscribed":true}`), &entry); err != nil {
+		t.Fatalf("decode self-subscribed session entry: %v", err)
+	}
+	if err := sessions.Put("ses_omp", entry); err != nil {
+		t.Fatalf("register self-subscribed session: %v", err)
+	}
+
+	// When
+	err := deliverThroughEntry(t, deliverer, sessions,
+		newTestEnvelope("agent", "notifications.agent.ses_omp", "test message"),
+		store.Interest{SessionID: "ses_omp"},
+	)
+
+	// Then
+	if err != nil {
+		t.Fatalf("expected self-subscribed portless delivery to succeed, got %v", err)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("expected no prompt_async request, got %d", got)
+	}
+}
+
+func TestDeliver_ReturnsError_whenSessionHasNoPortAndIsNotSelfSubscribed(t *testing.T) {
+	// Given
+	sessions, deliverer := newKVDeliverer(t)
+	if err := sessions.Put("ses_portless", session.SessionEntry{}); err != nil {
+		t.Fatalf("register portless session: %v", err)
+	}
+
+	// When
+	err := deliverThroughEntry(t, deliverer, sessions,
+		newTestEnvelope("agent", "notifications.agent.ses_portless", "test message"),
+		store.Interest{SessionID: "ses_portless"},
+	)
+
+	// Then
+	if !errors.Is(err, session.ErrNoPushTarget) {
+		t.Fatalf("expected ErrNoPushTarget for a registered session with no port, got %v", err)
+	}
+}
+
+func TestDeliver_UsesPort_whenSelfSubscribedSessionAlsoHasOne(t *testing.T) {
+	// Given
+	var requests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+
+	sessions, deliverer := newKVDeliverer(t)
+	if err := sessions.Put("ses_portful", session.SessionEntry{
+		Port:           mockPort(target.URL),
+		SelfSubscribed: true,
+	}); err != nil {
+		t.Fatalf("register self-subscribed session with port: %v", err)
+	}
+
+	// When
+	err := deliverThroughEntry(t, deliverer, sessions,
+		newTestEnvelope("agent", "notifications.agent.ses_portful", "test message"),
+		store.Interest{SessionID: "ses_portful"},
+	)
+
+	// Then
+	if err != nil {
+		t.Fatalf("expected portful self-subscribed delivery to succeed, got %v", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("expected one prompt_async request, got %d", got)
+	}
+}
+
+func TestSessionRegistry_PortlessSelfSubscribedClaimPreservesLivePortfulRoute(t *testing.T) {
+	for _, driving := range []bool{false, true} {
+		t.Run(fmt.Sprintf("incumbent driving %t", driving), func(t *testing.T) {
+			// Given
+			var requests atomic.Int32
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer target.Close()
+
+			sessions, deliverer := newKVDeliverer(t)
+			port := mockPort(target.URL)
+			if err := sessions.Put("ses_oc", session.SessionEntry{Port: port, Driving: driving}); err != nil {
+				t.Fatalf("register portful session: %v", err)
+			}
+
+			// When
+			if err := sessions.Put("ses_oc", session.SessionEntry{SelfSubscribed: true}); err != nil {
+				t.Fatalf("register portless self-subscribed session: %v", err)
+			}
+			err := deliverThroughEntry(t, deliverer, sessions,
+				newTestEnvelope("agent", "notifications.agent.ses_oc", "test message"),
+				store.Interest{SessionID: "ses_oc"},
+			)
+
+			// Then
+			entry, getErr := sessions.Get("ses_oc")
+			if getErr != nil {
+				t.Fatalf("get preserved session route: %v", getErr)
+			}
+			if entry.Port != port {
+				t.Fatalf("expected portful route %d to survive, got %+v", port, entry)
+			}
+			if err != nil {
+				t.Fatalf("expected preserved route to deliver, got %v", err)
+			}
+			if got := requests.Load(); got != 1 {
+				t.Fatalf("expected one prompt_async request, got %d", got)
+			}
+		})
+	}
+}
+
+func TestDeliver_PromptAsyncBody(t *testing.T) {
+	var receivedBody []byte
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/session/ses_target/prompt_async" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected method: %s", r.Method)
+		}
+		buf := make([]byte, 4096)
+		n, _ := r.Body.Read(buf)
+		receivedBody = buf[:n]
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer mock.Close()
+
+	port := mockPort(mock.URL)
+	sessions, deliverer := newKVDeliverer(t)
+	if err := sessions.Put("ses_target", session.SessionEntry{Port: port, Dir: "/test"}); err != nil {
+		t.Fatalf("failed to register session: %v", err)
+	}
+	// An agent-to-agent message: the only kind whose sender has an inbox to
+	// reply into, so the only kind that renders a reply instruction.
+	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test payload")
+	item.SourceSession = "ses_sender_123"
+
+	err := deliverThroughEntry(t, deliverer, sessions, item, store.Interest{SessionID: "ses_target", Dir: "/test"})
+	if err != nil {
+		t.Fatalf("delivery failed: %v", err)
+	}
+
+	var body struct {
+		Parts []map[string]string `json:"parts"`
+	}
+	if err := json.Unmarshal(receivedBody, &body); err != nil {
+		t.Fatalf("failed to parse body: %v (raw: %s)", err, string(receivedBody))
+	}
+
+	if len(body.Parts) != 1 {
+		t.Fatalf("expected 1 part, got %d", len(body.Parts))
+	}
+
+	text := body.Parts[0]["text"]
+	if text == "" {
+		t.Fatal("notification text is empty")
+	}
+	for _, want := range []string{"[NOTIFICATION to you from ses_sender_123]", "test payload", "notifications.agent.ses_target"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("notification text missing %q: %s", want, text)
+		}
+	}
+	replyInstruction := `Reply With: envoy_send(session_id="ses_sender_123", message="...")`
+	if !strings.Contains(text, replyInstruction) {
+		t.Errorf("notification text missing reply instruction: %s", text)
+	}
+}
+
+func TestText_WithSourceSession(t *testing.T) {
+	deliverer := session.Deliverer{}
+	item := contracts.Envelope{
+		EventID:        "evt-1",
+		Source:         "agent",
+		SourceSession:  "ses_abc",
+		Topic:          "notifications.agent.ses_target",
+		PayloadSummary: "hello world",
+	}
+	got := deliverer.Text(item)
+	want := "[NOTIFICATION to you from ses_abc]\nAt: 1970-01-01T00:00:00Z\nEvent ID: evt-1\nReply With: envoy_send(session_id=\"ses_abc\", message=\"...\")\nSummary: hello world\n\nTopic: notifications.agent.ses_target"
+	if got != want {
+		t.Errorf("Text() mismatch\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestText_WithoutSourceSession(t *testing.T) {
+	deliverer := session.Deliverer{}
+	item := contracts.Envelope{
+		EventID:        "evt-2",
+		Source:         "slack",
+		SourceSession:  "",
+		Topic:          "notifications.slack.T1.C1.mention",
+		PayloadSummary: "no sender",
+	}
+	got := deliverer.Text(item)
+	want := "[NOTIFICATION from slack]\nAt: 1970-01-01T00:00:00Z\nEvent ID: evt-2\nSummary: no sender\n\nTopic: notifications.slack.T1.C1.mention"
+	if got != want {
+		t.Errorf("Text() mismatch\ngot:  %q\nwant: %q", got, want)
+	}
+	if strings.Contains(got, "envoy_send") {
+		t.Error("Text() should NOT contain reply instruction when SourceSession is empty")
+	}
+}
+
+func TestText_HumanHasNoReplyHint(t *testing.T) {
+	deliverer := session.Deliverer{}
+	item := contracts.Envelope{
+		EventID:        "evt-human",
+		Source:         "human",
+		Topic:          "notifications.agent.ses_target",
+		PayloadSummary: "please review this",
+	}
+
+	got := deliverer.Text(item)
+	want := "[NOTIFICATION to you from human]\nAt: 1970-01-01T00:00:00Z\nEvent ID: evt-human\nSummary: please review this\n\nTopic: notifications.agent.ses_target"
+	if got != want {
+		t.Errorf("Text() mismatch\ngot:  %q\nwant: %q", got, want)
+	}
+	if strings.Contains(got, "envoy_send") {
+		t.Error("human notification should not contain reply instruction")
+	}
+}
+
+// A human sending from a harness's shell may name a source session for
+// attribution; that is not an inbox, so no reply hint is offered.
+func TestText_HumanWithSourceSessionHasNoReplyHint(t *testing.T) {
+	deliverer := session.Deliverer{}
+	item := contracts.Envelope{
+		EventID:        "evt-human-2",
+		Source:         "human",
+		SourceSession:  "ses_shell",
+		Topic:          "notifications.agent.ses_target",
+		PayloadSummary: "please review this",
+	}
+
+	got := deliverer.Text(item)
+	if !strings.HasPrefix(got, "[NOTIFICATION to you from ses_shell]\n") {
+		t.Errorf("Text() header = %q, want it to name the source session", got)
+	}
+	if strings.Contains(got, "envoy_send") {
+		t.Errorf("human notification with a source session must not carry a reply instruction: %q", got)
+	}
+}
+
+func TestText_RendersSummaryAndPayload(t *testing.T) {
+	deliverer := session.Deliverer{}
+	item := contracts.Envelope{
+		EventID:        "evt-3",
+		Source:         "github",
+		SourceSession:  "",
+		Topic:          "notifications.github.example-org.example-repo.issue.42.comment",
+		PayloadSummary: "truncated summary",
+		Payload:        "full payload content that is much longer",
+	}
+	got := deliverer.Text(item)
+	for _, want := range []string{"Summary: truncated summary", "Message:\nfull payload content that is much longer"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Text() missing %q: %s", want, got)
+		}
+	}
+}
+
+func TestText_FallsBackToSummaryWhenPayloadEmpty(t *testing.T) {
+	deliverer := session.Deliverer{}
+	item := contracts.Envelope{
+		EventID:        "evt-4",
+		Source:         "github",
+		SourceSession:  "",
+		Topic:          "notifications.github.sjawhar.legion.push",
+		PayloadSummary: "summary only",
+		Payload:        "",
+	}
+	got := deliverer.Text(item)
+	if !strings.Contains(got, "summary only") {
+		t.Errorf("Text() should fall back to PayloadSummary when Payload is empty, got: %s", got)
+	}
+}
+
+// The payload_summary here is the literal first line of the payload, so it is
+// a truncation (with no ellipsis needed) of the message body: Summary is
+// omitted and only Message carries the text.
+func TestText_OmitsSummaryWhenItDuplicatesPayloadHead(t *testing.T) {
+	deliverer := session.Deliverer{}
+	expiresAt := int64(1788757200000)
+	payload := "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
+	item := contracts.Envelope{
+		EventID:        "evt-1",
+		Source:         "agent",
+		SourceSession:  "ses_sender",
+		Topic:          "notifications.agent.ses_target",
+		IssuedAt:       1788756072000,
+		ExpiresAt:      &expiresAt,
+		PayloadSummary: "First paragraph.",
+		Payload:        payload,
+		InReplyTo:      "evt-parent",
+		Supersedes:     "evt-old",
+		Urgency:        "high",
+		ExpectsReply:   "required",
+		Sender: &contracts.EnvelopeSender{
+			SessionID: "ses_sender",
+			Title:     "Deploy coordinator",
+			Roles:     []string{"reviewer"},
+		},
+	}
+
+	got := deliverer.Text(item)
+	t.Logf("rendered Deliverer.Text block:\n%s", got)
+	want := `[NOTIFICATION to you from ses_sender (Deploy coordinator)]
+At: 2026-09-07T04:41:12Z
+Event ID: evt-1
+By: 2026-09-07T05:00:00Z
+Urgency: high
+Expects Reply: required
+In Reply To: evt-parent
+Supersedes: evt-old
+Reply With: envoy_send(session_id="ses_sender", message="...")
+Reply Role: envoy_publish(topic="notifications.role.reviewer", message="...")
+Message:
+First paragraph.
+
+Second paragraph.
+
+Third paragraph.
+
+Topic: notifications.agent.ses_target`
+	if got != want {
+		t.Fatalf("Text() mismatch\ngot:\n%s\nwant:\n%s", got, want)
+	}
+	if strings.Count(got, payload) != 1 {
+		t.Fatalf("full payload appears %d times, want once: %s", strings.Count(got, payload), got)
+	}
+	if strings.Contains(got, "Summary:") {
+		t.Fatalf("Text() should omit the redundant Summary line: %s", got)
+	}
+}
+
+// PayloadSummary is the 160-rune-capped, ellipsis-terminated truncation that
+// OneLineSummary produces for a long first line; Payload is the full message
+// starting with that same text. Summary duplicates the head of Message, so it
+// is omitted.
+func TestText_OmitsEllipsisTruncatedSummaryWhenItDuplicatesPayloadHead(t *testing.T) {
+	deliverer := session.Deliverer{}
+	head := strings.Repeat("A", 159)
+	payload := head + "B long first line continues past the cap.\n\nSecond paragraph."
+	item := contracts.Envelope{
+		EventID:        "evt-2",
+		Source:         "agent",
+		SourceSession:  "ses_sender",
+		Topic:          "notifications.agent.ses_target",
+		IssuedAt:       1788756072000,
+		PayloadSummary: head + "…",
+		Payload:        payload,
+	}
+
+	got := deliverer.Text(item)
+	if strings.Contains(got, "Summary:") {
+		t.Fatalf("Text() should omit the ellipsis-truncated Summary line: %s", got)
+	}
+	want := "Message:\n" + payload
+	if !strings.Contains(got, want) {
+		t.Fatalf("Text() missing full payload as Message: %s", got)
+	}
+}
+
+func TestDeliver_NoAgentField(t *testing.T) {
+	var receivedBody []byte
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 4096)
+		n, _ := r.Body.Read(buf)
+		receivedBody = buf[:n]
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer mock.Close()
+
+	port := mockPort(mock.URL)
+	sessions, deliverer := newKVDeliverer(t)
+	if err := sessions.Put("ses_target", session.SessionEntry{Port: port, Dir: "/test"}); err != nil {
+		t.Fatalf("failed to register session: %v", err)
+	}
+	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test")
+
+	deliverThroughEntry(t, deliverer, sessions, item, store.Interest{SessionID: "ses_target", Dir: "/test"})
+
+	// The prompt body must NOT contain an "agent" field — that would override the session's agent
+	if strings.Contains(string(receivedBody), `"agent"`) {
+		t.Errorf("prompt body must not contain agent field: %s", string(receivedBody))
+	}
+}
+
+func TestDeliver_PromptAsyncFailure(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer mock.Close()
+
+	port := mockPort(mock.URL)
+	sessions, deliverer := newKVDeliverer(t)
+	if err := sessions.Put("ses_target", session.SessionEntry{Port: port, Dir: "/test"}); err != nil {
+		t.Fatalf("failed to register session: %v", err)
+	}
+	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test")
+
+	err := deliverThroughEntry(t, deliverer, sessions, item, store.Interest{SessionID: "ses_target", Dir: "/test"})
+	if err == nil {
+		t.Fatal("expected error for 500 response, got nil")
+	}
+}
+
+func TestDeliver_KVRegistryUsed(t *testing.T) {
+	var kvDeliveries atomic.Int32
+	kvMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		kvDeliveries.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer kvMock.Close()
+	kvPort := mockPort(kvMock.URL)
+
+	client := session.SetupNATS(t)
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("failed to open session registry: %v", err)
+	}
+	sessions.Put("ses_target", session.SessionEntry{Port: kvPort, MachineID: "test", Dir: "/test"})
+
+	deliverer := session.Deliverer{
+		MachineID:    "test",
+		HostBridge:   "127.0.0.1",
+		RequestLimit: 5 * time.Second,
+	}
+	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
+	interest := store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "test"}
+
+	err = deliverThroughEntry(t, deliverer, sessions, item, interest)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if kvDeliveries.Load() != 1 {
+		t.Fatalf("expected 1 delivery to KV port, got %d", kvDeliveries.Load())
+	}
+}
+
+// TestDeliver_SessionAddress pins the owner rule: the URL a delivery requests for a session
+// registered with each combination of stored subscription, owning listener, recorded host and host
+// bridge. The owner is the listener the stored subscription names (the interest's MachineID, the
+// one its topics are fanned out on), else the one the session registered through (the entry's
+// MachineID); a session neither names counts as this listener's. A listener delivers only to a
+// session it owns. A session registered through this listener goes through the bridge, else its
+// recorded host, else host.docker.internal. One that re-registered through another listener but
+// records this listener's machine id as its host (compared case-insensitively) stayed on this
+// machine, so it goes through the bridge, else its recorded host; any other one that re-registered
+// through another listener runs on that listener's machine, so it goes to its recorded host, else
+// that listener's machine id.
+// Another listener's session is that listener's to deliver, so this one refuses it with
+// ErrWrongMachine and requests nothing: every listener on the bus reads each inbox message, and a
+// second one that delivered would deliver it twice.
+func TestDeliver_SessionAddress(t *testing.T) {
+	sessions, deliverer := newKVDeliverer(t)
+	deliverer.MachineID = "local-machine"
+
+	tests := []struct {
+		name string
+		// interest is the stored subscription's MachineID; empty when none names an owner.
+		interest string
+		bridge   string
+		entry    session.SessionEntry
+		want     string
+		wantErr  error
+	}{
+		{
+			name:   "own machine with a bridge goes through the bridge, not the recorded host",
+			bridge: "127.0.0.1",
+			entry:  session.SessionEntry{MachineID: "local-machine", Host: "example-host"},
+			want:   "http://127.0.0.1:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:   "a session with no owning listener counts as this machine's",
+			bridge: "127.0.0.1",
+			entry:  session.SessionEntry{Host: "example-host"},
+			want:   "http://127.0.0.1:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:  "own machine without a bridge goes to the recorded host",
+			entry: session.SessionEntry{MachineID: "local-machine", Host: "example-host"},
+			want:  "http://example-host:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:  "own machine without a bridge or a recorded host goes to the docker host",
+			entry: session.SessionEntry{MachineID: "local-machine"},
+			want:  "http://host.docker.internal:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:  "an IPv6 recorded host is bracketed",
+			entry: session.SessionEntry{MachineID: "local-machine", Host: "fd00::1"},
+			want:  "http://[fd00::1]:4096/session/ses_target/prompt_async",
+		},
+		{
+			// Replaces the contract TestDeliver_CrossMachineUsesRemoteHost and TestTsnetAwareDelivery
+			// pinned, that another machine's session was dialled at its machine id.
+			name:    "another machine's session with a recorded host is its owner's to deliver, not dialled at its host or machine id",
+			bridge:  "127.0.0.1",
+			entry:   session.SessionEntry{MachineID: "remote-machine", Host: "example-host-b"},
+			wantErr: session.ErrWrongMachine,
+		},
+		{
+			name:    "another machine's session without a recorded host is its owner's to deliver, not dialled at its machine id",
+			entry:   session.SessionEntry{MachineID: "remote-machine"},
+			wantErr: session.ErrWrongMachine,
+		},
+		{
+			// A session that re-registered through another listener keeps its stored subscription's
+			// MachineID, and only that listener matches its topics.
+			name:     "a session whose stored subscription names this machine is its own, though it registered through another",
+			interest: "local-machine",
+			entry:    session.SessionEntry{MachineID: "remote-machine", Host: "example-host-b"},
+			want:     "http://example-host-b:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:     "a session whose stored subscription names another machine is that machine's, though it registered through this one",
+			interest: "remote-machine",
+			entry:    session.SessionEntry{MachineID: "local-machine", Host: "example-host"},
+			wantErr:  session.ErrWrongMachine,
+		},
+		{
+			// The bridge reaches this listener's own machine; the session runs on the machine it
+			// re-registered through.
+			name:     "a session this machine owns that re-registered through another goes to its recorded host, not the bridge",
+			interest: "local-machine",
+			bridge:   "127.0.0.1",
+			entry:    session.SessionEntry{MachineID: "remote-machine", Host: "example-host-b"},
+			want:     "http://example-host-b:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:     "a session this machine owns that re-registered through another with no recorded host goes to that machine's id, not the bridge",
+			interest: "local-machine",
+			bridge:   "127.0.0.1",
+			entry:    session.SessionEntry{MachineID: "remote-machine"},
+			want:     "http://remote-machine:4096/session/ses_target/prompt_async",
+		},
+		{
+			// A plugin records its own machine id as Host, so a session that stayed on this machine
+			// names this machine, though it re-registered through another listener.
+			name:     "a session this machine owns that re-registered through another but records this machine as its host goes through the bridge",
+			interest: "local-machine",
+			bridge:   "127.0.0.1",
+			entry:    session.SessionEntry{MachineID: "remote-machine", Host: "local-machine"},
+			want:     "http://127.0.0.1:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:     "a session this machine owns that records this machine as its host in other letter case goes through the bridge",
+			interest: "local-machine",
+			bridge:   "127.0.0.1",
+			entry:    session.SessionEntry{MachineID: "remote-machine", Host: "LOCAL-Machine"},
+			want:     "http://127.0.0.1:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:     "a session this machine owns that records this machine as its host goes to that host without a bridge",
+			interest: "local-machine",
+			entry:    session.SessionEntry{MachineID: "remote-machine", Host: "local-machine"},
+			want:     "http://local-machine:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:     "a session whose stored subscription names another machine is that machine's, though its entry names no listener",
+			interest: "remote-machine",
+			bridge:   "127.0.0.1",
+			entry:    session.SessionEntry{Host: "example-host"},
+			wantErr:  session.ErrWrongMachine,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests []string
+			deliverer.HostBridge = tt.bridge
+			deliverer.HTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				requests = append(requests, req.URL.String())
+				return &http.Response{
+					StatusCode: http.StatusNoContent,
+					Body:       http.NoBody,
+					Header:     make(http.Header),
+				}, nil
+			})}
+			entry := tt.entry
+			entry.Port = 4096
+			entry.Dir = "/test"
+			if err := sessions.Put("ses_target", entry); err != nil {
+				t.Fatalf("failed to register session: %v", err)
+			}
+
+			err := deliverThroughEntry(t, deliverer, sessions,
+				newTestEnvelope("agent", "notifications.agent.ses_target", "test message"),
+				store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: tt.interest},
+			)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("DeliverWithResultForEntry() = %v, want %v", err, tt.wantErr)
+				}
+				if len(requests) != 0 {
+					t.Fatalf("requested %q, want no request", requests)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DeliverWithResultForEntry() = %v, want nil", err)
+			}
+			if len(requests) != 1 || requests[0] != tt.want {
+				t.Fatalf("requested %q, want exactly [%q]", requests, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidHost(t *testing.T) {
+	tests := []struct {
+		host string
+		want bool
+	}{
+		{"example-host", true},
+		{"a_b.internal.example", true},
+		{"10.0.0.5", true},
+		{"fd00::1", true},
+		{strings.Repeat("a", 253), true},
+		{"", false},
+		{"a b", false},
+		{"a:80", false},
+		{"a/b", false},
+		{"a@b", false},
+		{"[::1]", false},
+		{"a?b", false},
+		{"a#b", false},
+		{"a%b", false},
+		{"a\nb", false},
+		{"a\n", false},
+		{"-a", false},
+		{strings.Repeat("a", 254), false},
+	}
+	for _, tt := range tests {
+		if got := session.ValidHost(tt.host); got != tt.want {
+			t.Errorf("ValidHost(%q) = %v, want %v", tt.host, got, tt.want)
+		}
+	}
+}
+
+func TestDefaultClientFallback(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer slow.Close()
+
+	port := mockPort(slow.URL)
+	sessions, deliverer := newKVDeliverer(t)
+	if err := sessions.Put("ses_target", session.SessionEntry{Port: port, MachineID: "local-machine", Dir: "/test"}); err != nil {
+		t.Fatalf("failed to register local session: %v", err)
+	}
+	deliverer.MachineID = "local-machine"
+	deliverer.RequestLimit = 10 * time.Millisecond
+	deliverer.HTTPClient = nil
+
+	started := time.Now()
+	err := deliverThroughEntry(t, deliverer, sessions,
+		newTestEnvelope("agent", "notifications.agent.ses_target", "test message"),
+		store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "local-machine"},
+	)
+	if err == nil {
+		t.Fatal("expected fallback HTTP client timeout, got nil")
+	}
+	if !strings.Contains(err.Error(), "Client.Timeout") {
+		t.Fatalf("expected fallback client timeout error, got %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("expected timeout-driven fallback client, request took %v", elapsed)
+	}
+}
+func TestTextNotesForeignSessionNamedInBody(t *testing.T) {
+	deliverer := session.Deliverer{}
+	const (
+		source    = "01a01234-5678-7abc-8def-0123456789ab"
+		recipient = "01a04321-8765-7cba-8fed-ba9876543210"
+		foreign   = "01a0beef-1234-7abc-8def-0123456789ab"
+	)
+	item := contracts.Envelope{
+		EventID:        "evt-foreign",
+		Source:         "agent",
+		SourceSession:  source,
+		Topic:          contracts.AgentSubject(recipient),
+		PayloadSummary: "please inspect " + foreign,
+		Payload:        "please inspect " + foreign,
+	}
+
+	got := deliverer.Text(item)
+	want := "Note: body names session " + foreign + "; the sender is " + source
+	if !strings.Contains(got, want) {
+		t.Fatalf("Text() missing foreign-session note %q:\n%s", want, got)
+	}
+}

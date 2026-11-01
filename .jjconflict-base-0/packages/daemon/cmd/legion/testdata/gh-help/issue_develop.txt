@@ -1,0 +1,43 @@
+Manage linked branches for an issue.
+
+When using the `--base` flag, the new development branch will be created from the specified
+remote branch. The new branch will be configured as the base branch for pull requests created using
+`gh pr create`.
+
+
+USAGE
+  gh issue develop {<number> | <url>} [flags]
+
+FLAGS
+  -b, --base string          Name of the remote branch you want to make your new branch from
+      --branch-repo string   Name or URL of the repository where you want to create your new branch
+  -c, --checkout             Checkout the branch after creating it
+  -l, --list                 List linked branches for the issue
+  -n, --name string          Name of the branch to create
+
+INHERITED FLAGS
+      --help                     Show help for command
+  -R, --repo [HOST/]OWNER/REPO   Select another repository using the [HOST/]OWNER/REPO format
+
+EXAMPLES
+  # List branches for issue 123
+  $ gh issue develop --list 123
+  
+  # List branches for issue 123 in repo cli/cli
+  $ gh issue develop --list --repo cli/cli 123
+  
+  # Create a branch for issue 123 based on the my-feature branch
+  $ gh issue develop 123 --base my-feature
+  
+  # Create a branch for issue 123 and check it out
+  $ gh issue develop 123 --checkout
+  
+  # Create a branch in repo monalisa/cli for issue 123 in repo cli/cli
+  $ gh issue develop 123 --repo cli/cli --branch-repo monalisa/cli
+
+LEARN MORE
+  Use `gh <command> <subcommand> --help` for more information about a command.
+  Read the manual at https://cli.github.com/manual
+  Learn about exit codes using `gh help exit-codes`
+  Learn about accessibility experiences using `gh help accessibility`
+

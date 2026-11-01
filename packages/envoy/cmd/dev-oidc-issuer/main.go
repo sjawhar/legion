@@ -11,9 +11,12 @@
 //	dev-oidc-issuer [--token <audience>=<service account>=<file> ...]
 //	                [--code-flow <client id>=<client secret file> ... [--sign-in-as <email> [--sign-in-group <group>]]]
 //
-// Each token is bound to a pod of its own (kubernetes.io → pod → uid), kept across rewrites as a
-// pod keeps its uid, so a file serves a pod's enrolment and its token exchange as well as a listed
-// caller.
+// Each service account's tokens are bound to one pod of its own (kubernetes.io → pod → uid), kept
+// across rewrites as a pod keeps its uid, so a file serves a pod's enrolment and its token
+// exchange as well as a listed caller. Two --token files for one account name one pod, as a pod's
+// projected tokens for two audiences do, so a registration made with the one file (POST
+// /v1/oauth/exchange/pod-sessions, which takes the broker's own audience) names the pod the other
+// exchanges as.
 //
 // --code-flow serves the authorization code flow for one confidential client, whose secret is the
 // file's content less surrounding whitespace: the values DISPATCH_SIGNIN_CLIENT_ID and
@@ -289,9 +292,14 @@ func serve(ctx context.Context, specs []tokenSpec, flow codeFlow, lifetime time.
 		issuer.Handle("POST /_dev/sign-in-as", signInAsHandler(issuer))
 	}
 	issuer.Handle("POST /_dev/mint", mintHandler(issuer, key, p, lifetime))
-	// Each token's pod, a random UUID as the API server assigns a pod's uid.
-	for i := range specs {
-		specs[i].podUID = uuid.NewString()
+	// Each account's pod, a random UUID as the API server assigns a pod's uid, shared by every
+	// token of that account: one pod carries one projected token per audience.
+	uids := map[string]string{}
+	for i, spec := range specs {
+		if _, known := uids[spec.account]; !known {
+			uids[spec.account] = uuid.NewString()
+		}
+		specs[i].podUID = uids[spec.account]
 	}
 	writeAll := func() error {
 		for _, spec := range specs {

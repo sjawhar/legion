@@ -1,0 +1,56 @@
+{
+  "name": "legion",
+  "omp": {
+    "extensions": [
+      "./packages/pi-envoy/extensions/envoy.ts"
+    ]
+  },
+  "version": "0.16.1",
+  "license": "Apache-2.0",
+  "type": "module",
+  "description": "Autonomous development swarm using Oh My Pi agents",
+  "private": true,
+  "scripts": {
+    "dispatch:local": "cd packages/dispatch && bun run dispatch:local",
+    "docs:dev": "cd docs/site && bun run dev",
+    "docs:build": "cd docs/site && bun run build",
+    "docs:media": "bun docs/site/media/shots.ts"
+  },
+  "workspaces": [
+    "packages/contracts",
+    "packages/envoy-client",
+    "packages/pi-envoy",
+    "packages/pi-legion",
+    "packages/pi-shared",
+    "packages/envoy-plugin",
+    "packages/claude-envoy",
+    "packages/proof-editor",
+    "packages/dispatch",
+    "packages/envoy/internal/dispatch/pmdoc/gen",
+    "docs/site"
+  ],
+  "dependencies": {
+    "@toon-format/toon": "^4.1.1",
+    "nats": "^2.29.2",
+    "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
+    "@types/bun": "latest",
+    "@types/spdx-expression-parse": "3.0.0",
+    "mdast-util-from-markdown": "2.0.3",
+    "mdast-util-frontmatter": "2.0.1",
+    "mdast-util-gfm": "3.1.0",
+    "micromark-extension-frontmatter": "2.0.0",
+    "micromark-extension-gfm": "3.0.0",
+    "spdx-expression-parse": "3.0.1",
+    "spdx-license-list": "6.12.0",
+    "typescript": "^5.3.0"
+  },
+  "patchedDependencies": {
+    "@milkdown/preset-gfm@7.22.1": "patches/@milkdown%2Fpreset-gfm@7.22.1.patch",
+    "@milkdown/plugin-clipboard@7.22.1": "patches/@milkdown%2Fplugin-clipboard@7.22.1.patch",
+    "prosemirror-tables@1.8.5": "patches/prosemirror-tables@1.8.5.patch",
+    "nats@2.29.3": "patches/nats@2.29.3.patch"
+  }
+}

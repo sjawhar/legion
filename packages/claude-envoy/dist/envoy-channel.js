@@ -37251,7 +37251,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_whoami",
     example: {},
-    description: "Who Dispatch takes this session for: {session, owner}. owner is the lowercase email of the person whose personal token you run under (the first choice of assignee for issues you create), or null under the shared token, in which case a create with no assignee falls back to the parent's assignee and then to the project's default assignee.",
+    description: "Who Dispatch takes this session for: {session, owner, service, project}. session is the session Dispatch records your writes as. It is the session your credential proved, and the tool says so when that is not the session you run in. owner is the lowercase email of the person you act for, and is the first choice of assignee for issues you create. owner is null under the shared token. With a null owner, a create with no assignee falls back to the parent's assignee and then to the project's default assignee. service is the subject of the verified service-account token that authenticated you, or null. project is the one project key your credential may write, or null when it names none.",
     arguments: () => ({}),
     strict: true
   }
@@ -43331,10 +43331,16 @@ async function executeDispatchTool(input) {
     const identity = await client.whoami();
     const owner = identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
     const service = identity.kind === "agent" ? identity.service ?? null : null;
+    const proved = identity.kind === "agent" ? identity.session ?? null : null;
+    const project = identity.kind === "agent" ? identity.project ?? null : null;
+    const session = proved ?? sessionId;
     const unowned = "no owner, so an issue you create without an assignee takes its parent's assignee, else the project's default assignee, else nobody.";
+    const acting = owner !== null ? `Session ${session} acts for ${owner}: issues you create without an assignee are assigned to ${owner}.` : service !== null ? `Session ${session} runs as service ${serviceSubjectLabel(service)}: ${unowned}` : `Session ${session} runs under the shared token: ${unowned}`;
+    const elsewhere = proved !== null && proved !== sessionId ? ` Your credential names session ${proved}, which is not this host session (${sessionId}): Dispatch records every write you make as ${proved}.` : "";
+    const writable = project !== null ? ` It may write project ${project} and no other.` : "";
     return {
-      text: owner !== null ? `Session ${sessionId} acts for ${owner}: issues you create without an assignee are assigned to ${owner}.` : service !== null ? `Session ${sessionId} runs as service ${serviceSubjectLabel(service)}: ${unowned}` : `Session ${sessionId} runs under the shared token: ${unowned}`,
-      details: { session: sessionId, owner, service }
+      text: acting + elsewhere + writable,
+      details: { session, owner, service, project }
     };
   }
   const args = checked.args;
@@ -45191,6 +45197,9 @@ function mergeInterestSources(registryTopics, liveTopics) {
   }
   return interests;
 }
+function newClientInstanceID() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 function expandSubscriptionTopics(topics) {
   const expanded = new Set;
   for (const topic of topics) {
@@ -45285,6 +45294,7 @@ function createEnvoyClient(config) {
       ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
       driving: input.driving,
       ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
+      ...input.clientInstanceID === undefined ? {} : { client_instance_id: input.clientInstanceID },
       host: machineID(),
       plugin: input.plugin.name,
       plugin_version: input.plugin.version
@@ -45328,8 +45338,11 @@ function createEnvoyClient(config) {
         ...response.holder === undefined ? {} : { holder: response.holder }
       };
     },
-    unregisterSession: async (sessionID) => {
-      await request(`/v1/sessions/${encodeURIComponent(sessionID)}`, { method: "DELETE" });
+    unregisterSession: async (input) => {
+      const query = input.clientInstanceID === undefined ? "" : `?client_instance_id=${encodeURIComponent(input.clientInstanceID)}`;
+      await request(`/v1/sessions/${encodeURIComponent(input.sessionID)}${query}`, {
+        method: "DELETE"
+      });
     },
     setRole: async (input) => {
       const soft = input.soft === true;
@@ -47077,6 +47090,8 @@ var LegionOperatorClaimResponse = strictObject({
   state: _enum2(LEGION_CLAIM_STATES),
   session: string2(),
   sessionFile: string2(),
+  forgottenSession: nonEmptyString.optional(),
+  forgottenSessionFile: nonEmptyString.optional(),
   locator: legionLocator.optional(),
   budgets: strictObject({
     launchFailures: number2().int().nonnegative(),
@@ -52122,6 +52137,7 @@ async function startChannelSession(options) {
       capabilities: options.capabilities,
       driving: false,
       selfSubscribed: true,
+      clientInstanceID: options.clientInstanceID,
       plugin: { name, version: options.pluginVersion }
     });
   };
@@ -52137,7 +52153,8 @@ async function startChannelSession(options) {
       previousSessionID: persisted.session_id
     });
     if (!claim.claimed) {
-      await rm2(previousFile, { force: true });
+      if (claim.holder !== persisted.session_id)
+        await rm2(previousFile, { force: true });
       return;
     }
     heldRole = persisted.role;
@@ -52223,7 +52240,10 @@ async function startChannelSession(options) {
     forwarder.follow(nextSubject);
     try {
       await withTimeout(options.connection.flush(), options.handoffFlushTimeoutMs ?? HANDOFF_FLUSH_TIMEOUT_MS, "flushing NATS");
-      await options.client.unregisterSession(previous);
+      await options.client.unregisterSession({
+        sessionID: previous,
+        clientInstanceID: options.clientInstanceID
+      });
     } catch (error) {
       forwarder.unfollow([nextSubject]);
       throw error;
@@ -52417,7 +52437,10 @@ async function startChannelSession(options) {
       if (handoffFile !== undefined)
         unwatchFile(handoffFile, handoffFileChanged);
       await forwarder.close();
-      await serialized(() => options.client.unregisterSession(identity.id)).catch((error) => {
+      await serialized(() => options.client.unregisterSession({
+        sessionID: identity.id,
+        clientInstanceID: options.clientInstanceID
+      })).catch((error) => {
         process.stderr.write(`envoy-channel: session deregistration failed \u2014 ${messageFor(error)}
 `);
       });
@@ -52590,6 +52613,7 @@ async function runEnvoyChannelServer() {
     fetch: globalThis.fetch,
     token: envoy.token
   });
+  const clientInstanceID = newClientInstanceID();
   let runtime;
   let claim;
   const daemon = pane === undefined ? undefined : createLegionDaemonClient(pane.daemonUrl);
@@ -52685,6 +52709,7 @@ async function runEnvoyChannelServer() {
         heartbeatMs: envoy.heartbeatMs,
         configFile,
         stateDirectory,
+        clientInstanceID,
         title,
         pluginVersion: installedPluginVersion(bundlePath) ?? "source",
         ...stamping ? { stampTitle } : {},

@@ -1,0 +1,807 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/* A screen too narrow or too short for a wide sticky panel: a phone in either orientation, or a
+   tablet-width window below `md`. The Agents broadcast composer compacts under it (and further
+   under `short`, where two stacked rows of controls would still take half the height). The
+   height clause is what catches a phone in landscape. `short` is registered after
+   `narrow-or-short`, so its utilities win where both match. */
+@custom-variant narrow-or-short {
+  @media (max-width: 767px), (max-height: 500px) {
+    @slot;
+  }
+}
+
+@custom-variant short {
+  @media (max-height: 500px) {
+    @slot;
+  }
+}
+
+/* A control that cannot be pressed: `disabled`, or refused with `aria-disabled` so it stays in the
+   tab order and its reason reaches a keyboard (`components/RefusableButton.tsx`). The button
+   composites in `theme/classes.ts` paint both through this one state, so a hover written
+   `not-refused:hover:` never lights a refused button, and no look has to be stated twice. */
+@custom-variant refused (&:is(:disabled, [aria-disabled="true"]));
+
+/* Dispatch has no theme toggle: every surface follows the OS `prefers-color-scheme`, which is
+   exactly Tailwind v4's default `dark:` variant (a `@media (prefers-color-scheme: dark)` query,
+   built into `@import "tailwindcss"` with no `@custom-variant` override here). Components import
+   named color composites from `web/src/theme/classes.ts`; this pre-hydration fallback is outside
+   that mechanism and stays in exact sync with the canvas/primary-text swatches so the document
+   edge does not flash the wrong scheme before React mounts. */
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  color: #0f172b; /* slate-900 */
+  background: #f8fafc; /* slate-50 */
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #f1f5f9; /* slate-100 */
+    background: #020618; /* slate-950 */
+  }
+}
+
+body {
+  margin: 0;
+}
+
+button,
+a {
+  transition:
+    color 150ms ease,
+    background-color 150ms ease,
+    border-color 150ms ease;
+}
+
+/* Compact layouts reserve vertical space for the fixed review sheet. Keep controls touch-sized
+   through tablet widths so the sheet remains directly operable. */
+@media (max-width: 1279px) {
+  input,
+  select,
+  textarea {
+    font-size: 1rem;
+  }
+}
+
+@media (max-width: 1279px) {
+  html {
+    scroll-padding-bottom: 5rem;
+  }
+  button,
+  a:not(.prose a):not(.dispatch-inline-link),
+  input:not([type="checkbox"]):not([type="radio"]),
+  select,
+  textarea {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  button,
+  a:not(.prose a):not(.dispatch-inline-link) {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  /* An anchor inside a sentence keeps its line box: a 44px control box there is blank space in
+     the middle of a line. Vertical padding grows its hit box instead, at no layout cost,
+     because padding on an inline element does not move the line. Dispatch's own inline links
+     (`view`, a components line, a backlink) sit on their own row at 12px, where 6px is what
+     reaches the 24px of WCAG 2.5.8. Both 2.5.8 and 2.5.5 exempt a link inside a sentence in
+     any case.
+
+     A markdown link's padding is sized from its own line pitch, since a `.dispatch-markdown`
+     inherits its text size and line height from its call site. `1lh` is the link's computed
+     line height and `1.2em` stands for the height of its font's text box (ascent plus
+     descent): half of what that leaves of the line goes above and below the link, and its
+     padded box then stops at least as far short of the text of the line above as the padding
+     itself, for any font whose text box is at most 1.2em. A pitch tighter than 1.2em (a large
+     heading) gets no padding, since `calc()` clamps a negative padding to 0: its lines leave
+     no gap to fill.
+
+     Measured in Chromium at 390px with DejaVu Sans, whose text box is 19px at 16px, 18px at
+     15px and 14px at 12px (padding / clearance from the lower link's padded box to the upper
+     link's text): a message turn, 16px on 24px lines, 2.4px / 2.6px; an Inbox ask card
+     (`AskCard.tsx`), 15px on 24.375px, 3.2px / 3.2px; an agent-view message body (`text-sm`),
+     14px on 20px, 1.6px / 2.4px; a document in the editor (`.milkdown p` in proof-editor's
+     `lib.css`, line height 1.6), 16px on 25.6px, 3.2px / 3.4px; an agent turn's reasoning
+     (`AgentThread.tsx`, `text-xs`), 12px on 16px, 0.8px / 1.2px. A fixed 3px there measured
+     -1px, reaching into the letters of the line above, and a fixed 4px on a message turn
+     measured a clearance of 1px (INFRA-95).
+
+     No fallback declaration: Tailwind v4's browser floor supports `lh`, and a browser
+     without it drops the declaration and gives the link no padding, which never overlaps.
+     A font whose text box is r em tall leaves a clearance of
+     (line-height - (2r - 1.2) * font-size) / 2, so it reaches into the line above wherever
+     (2r - 1.2) * font-size > line-height. Segoe UI (`system-ui` on Windows, in a window
+     narrower than 1280px) has r = 1.33 by its published metrics, ascent 2210 plus descent 514
+     of 2048 units per em, not measured here; at each pitch above that gives: reasoning,
+     12px on 16px, -0.76px (overlaps); an agent-view message body, 14px on 20px, -0.22px
+     (overlaps); a message turn, 16px on 24px, 0.32px; a document, 16px on 25.6px, 1.12px; an
+     Inbox ask card, 15px on 24.375px, 1.24px. */
+  .prose a {
+    padding-block: calc((1lh - 1.2em) / 2);
+  }
+
+  .dispatch-inline-link {
+    padding-block: 6px;
+  }
+
+  label:has(input[type="checkbox"]),
+  label:has(input[type="radio"]) {
+    min-height: 44px;
+  }
+}
+
+.dispatch-doc .proof-editor {
+  --bg-color: transparent;
+  --text-color: currentColor;
+  --font-family: inherit;
+  --code-bg: #f1f5f9; /* slate-100 */
+  --pre-bg: #0f172b; /* slate-900 */
+  --pre-color: #f1f5f9; /* slate-100 */
+  --blockquote-border: #cad5e2; /* slate-300 */
+  --blockquote-color: #45556c; /* slate-600 */
+}
+
+@media (prefers-color-scheme: dark) {
+  .dispatch-doc .proof-editor {
+    --code-bg: #1d293d; /* slate-800 */
+    --pre-bg: #020618; /* slate-950 */
+    --pre-color: #f1f5f9; /* slate-100 */
+    --blockquote-border: #45556c; /* slate-600 */
+    --blockquote-color: #cad5e2; /* slate-300 */
+  }
+}
+
+/* Tailwind preflight collapses table borders and zeroes cell padding, and the editor library
+   ships no table rules of its own, so a Markdown table renders as run-together text without
+   these. */
+.dispatch-doc .milkdown table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.dispatch-doc .milkdown th,
+.dispatch-doc .milkdown td {
+  border: 1px solid #cad5e2; /* slate-300 */
+  padding: 0.375rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.dispatch-doc .milkdown :is(th, td)[data-proof-text-align="center"] {
+  text-align: center;
+}
+
+.dispatch-doc .milkdown :is(th, td)[data-proof-text-align="right"] {
+  text-align: right;
+}
+
+.dispatch-doc .milkdown th {
+  font-weight: 600;
+  background-color: #f8fafc; /* slate-50 */
+}
+
+.dispatch-doc .milkdown th > p,
+.dispatch-doc .milkdown td > p {
+  margin: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .dispatch-doc .milkdown th,
+  .dispatch-doc .milkdown td {
+    border-color: #45556c; /* slate-600 */
+  }
+
+  .dispatch-doc .milkdown th {
+    background-color: #1d293d; /* slate-800 */
+  }
+}
+
+/* The library mounts the editor with Tailwind Typography's `prose`, whose 65ch cap left the
+   document at ~600px inside a column twice as wide; the column is the measure here. */
+.dispatch-doc .milkdown .editor {
+  min-height: 24rem;
+  max-width: none;
+}
+
+/* A document's own headings are content, not the page's identity. `@legion/proof-editor` sizes
+   `h1` at 2em, so an issue specification that opens with a heading repeating the issue title
+   printed that title twice, the second time at nearly twice the size of the page title 40px
+   above it, and wrapped it over three lines on a phone before a reader met a sentence of the
+   document. The scale starts one step below the page title's own 22px and descends from
+   there, so the page's identity outranks its document's heading rather than tying with it. The
+   library's stylesheet is unlayered, so the override has to outrank `.milkdown h1` (0,1,1);
+   `.dispatch-doc .milkdown h1` (0,2,1) does. */
+.dispatch-doc .milkdown h1 {
+  font-size: 1.25rem;
+  line-height: 1.3;
+}
+
+.dispatch-doc .milkdown h2 {
+  font-size: 1.125rem;
+  line-height: 1.4;
+}
+
+.dispatch-doc .milkdown h3 {
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+.dispatch-doc .dispatch-mark-active,
+.dispatch-doc .dispatch-block-active {
+  box-shadow: inset 0 -2px 0 #0084d1; /* sky-600 */
+}
+
+@media (prefers-color-scheme: dark) {
+  .dispatch-doc .dispatch-mark-active,
+  .dispatch-doc .dispatch-block-active {
+    box-shadow: inset 0 -2px 0 #00bcff; /* sky-400 */
+  }
+}
+
+/* Proof's mark decorations are document DOM. Class rules avoid Dark Reader rewriting inline
+   colours into ProseMirror-observed attribute mutations. */
+.dispatch-doc .mark-comment {
+  background-color: color-mix(in oklab, var(--color-amber-300) 30%, transparent);
+  border-bottom: 2px solid var(--color-amber-300);
+}
+
+.dispatch-doc .mark-comment.mark-active {
+  background-color: color-mix(in oklab, var(--color-amber-300) 50%, transparent);
+  border-bottom-color: var(--color-amber-400);
+}
+
+.dispatch-doc .mark-compose-anchor {
+  background-color: color-mix(in oklab, var(--color-amber-300) 22%, transparent);
+  border-bottom: 2px dashed var(--color-amber-500);
+}
+
+.dispatch-doc .mark-insert {
+  background-color: color-mix(in oklab, var(--color-green-500) 25%, transparent);
+  border-bottom: 2px solid var(--color-green-500);
+}
+
+.dispatch-doc .mark-delete {
+  background-color: color-mix(in oklab, var(--color-red-500) 20%, transparent);
+  color: var(--color-slate-500);
+  text-decoration: line-through;
+}
+
+.dispatch-doc[data-read-only="true"] .dispatch-action-bar {
+  display: none;
+}
+
+/* A typed block's header is a label, not a dump. No stylesheet targeted it, so the block's
+   name and its attributes rendered as bare prose lines down the page (#1434/#1452, LEGION-67).
+   The name is the eyebrow role, a `kind` is a badge beside it, a `title` is the header's text,
+   and any remaining author-written attribute is a quiet inline pair. The rules apply in a
+   document and in a Markdown body (`.dispatch-markdown`: a comment, ask or message, where
+   `MarkdownBody` draws a typed block the same way). The scope outranks the unlayered library
+   typography in a document, the way the decision block's own rules below do, and in a body
+   the Typography rules, whose `.prose :where(…)` selectors carry one class to this scope's two.
+   Colours are the palette swatches their comments name; the pin test holds them to it. */
+:is(.dispatch-doc, .dispatch-markdown) [data-proof-block-summary] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+:is(.dispatch-doc, .dispatch-markdown) [data-proof-block-name] {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1rem;
+  letter-spacing: 0.025em;
+  text-transform: uppercase;
+  color: #62748e; /* slate-500 */
+}
+
+:is(.dispatch-doc, .dispatch-markdown) [data-proof-block-badge] {
+  border-radius: 9999px;
+  padding: 0 0.5rem;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.25rem;
+  background-color: #f1f5f9; /* slate-100 */
+  color: #45556c; /* slate-600 */
+}
+
+/* The block's own leading text, so it takes the primary-body role: 15px medium, the same as
+   an ask's question and the document's prose, rather than a size of its own. */
+:is(.dispatch-doc, .dispatch-markdown) [data-proof-block-title] {
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.625;
+  color: #0f172b; /* slate-900 */
+}
+
+:is(.dispatch-doc, .dispatch-markdown) [data-proof-block-attributes] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 0.5rem;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1rem;
+  color: #62748e; /* slate-500 */
+}
+
+:is(.dispatch-doc, .dispatch-markdown) [data-proof-block-attributes] dt {
+  font-weight: 600;
+}
+
+:is(.dispatch-doc, .dispatch-markdown) [data-proof-block-attributes] dt::after {
+  content: ":";
+}
+
+:is(.dispatch-doc, .dispatch-markdown) [data-proof-block-attributes] dd {
+  margin: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :is(.dispatch-doc, .dispatch-markdown) [data-proof-block-name],
+  :is(.dispatch-doc, .dispatch-markdown) [data-proof-block-attributes] {
+    color: #90a1b9; /* slate-400 */
+  }
+
+  :is(.dispatch-doc, .dispatch-markdown) [data-proof-block-badge] {
+    background-color: #1d293d; /* slate-800 */
+    color: #90a1b9; /* slate-400 */
+  }
+
+  :is(.dispatch-doc, .dispatch-markdown) [data-proof-block-title] {
+    color: #f1f5f9; /* slate-100 */
+  }
+}
+
+/* A decision block is a card inside prose. Its first/last child would otherwise carry the
+   prose paragraph margins into the card (a 20px gap under a 12px header). The repeated attribute
+   selector lifts these rules to (0,5,0): a decision inside a reply drawn in another decision's
+   footer thread is also matched by the footer's `prose-sm` rules below — `[data-dispatch-ask-footer]
+   .dispatch-markdown :is(p, ul, ol, blockquote, pre)` (0,4,1) and `[data-dispatch-ask-footer] li
+   .dispatch-markdown :is(ul, ol)` (0,4,2) — and these must outrank both so the nested card's
+   question and source list sit flush too. They touch only a hole's own first/last child, so a
+   reply's own paragraphs and lists keep the footer's spacing. */
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  > [data-proof-block-content][data-proof-block-content]
+  > :first-child {
+  margin-top: 0;
+}
+
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  > [data-proof-block-content][data-proof-block-content]
+  > :last-child {
+  margin-bottom: 0;
+}
+
+/* The block's header and footer slots hold the app's own ask card (`features/doc/AskBlockCard.tsx`
+   hosts `AskCard` there), which sets its type with utilities. `@legion/proof-editor`'s stylesheet
+   is unlayered, so its element typography (`.milkdown h1-h3 / p / ul, ol / li / code / pre /
+   blockquote / a / hr`, written for the document's content) reaches the slots and outranks every
+   layered utility there — Tailwind's `space-y-*` is a `margin-block-end` on each child, which
+   `.milkdown li { margin-bottom }` would beat. Importing the library into a cascade layer is not an
+   option here: the editor root carries `prose` (a utilities-layer rule), and layering the library
+   below utilities would restyle every document. So, inside the slots only, the declarations the
+   library makes on those elements are rolled back with `revert-layer`: the cascade falls through to
+   the layered author styles (preflight, the card's utilities, `prose`), exactly as in the Inbox,
+   and the card's own spacing and type survive intact. The selector must outrank `.milkdown x`
+   (0,1,1) for the rollback to be the cascaded value; the property list is the union of what
+   those library rules set. */
+.dispatch-doc .proof-typed-block-ask
+  :is([data-dispatch-ask-header], [data-dispatch-ask-footer])
+  :is(h1, h2, h3, h4, h5, h6, p, ul, ol, li, code, pre, blockquote, a, hr) {
+  background: revert-layer;
+  border: revert-layer;
+  border-radius: revert-layer;
+  color: revert-layer;
+  font-family: revert-layer;
+  font-size: revert-layer;
+  font-weight: revert-layer;
+  line-height: revert-layer;
+  margin: revert-layer;
+  overflow-x: revert-layer;
+  padding: revert-layer;
+  text-align: revert-layer;
+  text-decoration: revert-layer;
+}
+
+/* The card's rows render a decision's options, so the source `- Option: description` list would
+   show every option twice. The list is the only place a human edits the options, so it appears
+   only on the block the caret is inside (`askBlockEditingPlugin` in `features/doc/ask-block.ts`
+   marks it `data-dispatch-ask-editing`) — click into the question to reveal it — and never where
+   nothing can be edited (a read-only render) or once the decision is no longer open. In a body
+   the list folds only where the app mounts the card's rows (`useRenderedMarkdown` sets
+   `data-dispatch-ask-options`), and it never shows, since nothing there is edited. The child
+   combinators keep an outer decision's rules to its own list, off the list of a typed block nested
+   inside it; a decision inside a reply or answer note its card renders is matched by these rules
+   itself, through that reply's or note's own `.dispatch-markdown` body. */
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask[data-dispatch-ask-options="rows"]
+  > [data-proof-block-content]
+  > ul {
+  display: none;
+  margin-top: 0.5rem;
+  font-size: 0.875rem;
+  opacity: 0.7;
+}
+
+.dispatch-doc:not([data-read-only="true"])
+  .proof-typed-block-ask[data-dispatch-ask-options="rows"][data-dispatch-ask-state="open"][data-dispatch-ask-editing="true"]
+  > [data-proof-block-content]
+  > ul {
+  display: block;
+}
+
+/* A malformed decision shows its source list, the only place its options show. A blank item in
+   that list (`-` alone: an empty item, an empty paragraph, or the editor's trailing break) is no
+   option, so it shows no bullet where nothing is edited: in a body (`.dispatch-markdown`, a reply
+   under a document's decision included) and in a read-only document. In an editable document the
+   blank item is where the caret is, the option a human is typing (Enter after the question, then
+   `- `), so it shows there and the typed text lands in it. The child combinators keep an outer
+   decision's rule to its own list, off the list of a typed block nested inside it; a decision
+   inside a reply or answer note its card renders is matched by the rule itself, through that
+   reply's or note's own `.dispatch-markdown` body. */
+:is(.dispatch-markdown, .dispatch-doc[data-read-only="true"])
+  .proof-typed-block-ask[data-dispatch-ask-malformed="true"]
+  > [data-proof-block-content]
+  > :is(ul, ol)
+  > li:is(:empty, :has(> p:empty), :has(> p > br:only-child)) {
+  display: none;
+}
+
+/* On touch screens the library docks the selection bar at the viewport bottom.
+   An expanded margin sheet owns that space, so it suppresses the bar. */
+@media (max-width: 1279px) {
+  body:has([data-testid="margin-sheet"][data-expanded="true"])
+    .dispatch-action-bar[data-touch="true"] {
+    display: none;
+  }
+}
+
+::highlight(dispatch-search) {
+  background-color: #fee685; /* amber-200 */
+  color: #0f172b; /* slate-900 */
+}
+
+@media (prefers-color-scheme: dark) {
+  ::highlight(dispatch-search) {
+    background-color: #973c00; /* amber-800 */
+    color: #f1f5f9; /* slate-100 */
+  }
+}
+
+/* MarkdownBody (features/refs/MarkdownBody.tsx) renders every Markdown-bearing field - ask
+   questions and answers, options, comments, replies, and messages - through Tailwind
+   Typography's `prose`. Its fixed slate palette, fixed font size, and page-scale heading sizes
+   are built for a full document, not a card's own text (or, for the `inline` variant, a
+   `text-xs` metadata line like a resolution reason), so `.dispatch-markdown` overrides
+   body/heading/bold/quote/lead/caption text and font size to inherit from the surrounding
+   element and caps headings to a bold version of that inherited size; code keeps its own
+   accent color and links keep the app's link blue (sky-700, sky-400 in dark) rather than
+   prose's own near-black default. */
+.dispatch-markdown {
+  font-size: inherit;
+  line-height: inherit;
+  --tw-prose-body: inherit;
+  --tw-prose-headings: inherit;
+  --tw-prose-lead: inherit;
+  --tw-prose-bold: inherit;
+  --tw-prose-quotes: inherit;
+  --tw-prose-captions: inherit;
+  --tw-prose-links: #0069a8; /* sky-700 */
+  --tw-prose-invert-body: inherit;
+  --tw-prose-invert-headings: inherit;
+  --tw-prose-invert-lead: inherit;
+  --tw-prose-invert-bold: inherit;
+  --tw-prose-invert-quotes: inherit;
+  --tw-prose-invert-captions: inherit;
+  --tw-prose-invert-links: #00bcff; /* sky-400 */
+}
+
+/* `dark:prose-invert` would flip links by setting `--tw-prose-links` to the invert value, but it
+   does so inside a Tailwind cascade layer, and the unlayered rule above always beats a layered
+   one, so without this the links stay sky-700 on a dark card. */
+@media (prefers-color-scheme: dark) {
+  .dispatch-markdown {
+    --tw-prose-links: var(--tw-prose-invert-links);
+  }
+}
+
+.dispatch-markdown :where(h1, h2, h3, h4, h5, h6) {
+  font-size: inherit;
+  font-weight: 600;
+}
+
+/* A `MarkdownPreview` sits inside a control (a link, a search option, a card's toggle), so its
+   links are inert spans (`data-markdown-link`) rather than nested `<a>`s; they keep Typography's
+   own `a` look so a reference still reads as one. */
+.dispatch-markdown [data-markdown-link] {
+  color: var(--tw-prose-links);
+  font-weight: 500;
+  text-decoration: underline;
+}
+
+/* A body's drawn Mermaid diagram (features/refs/mermaid-diagrams.ts). The SVG's inline style reads
+   `--bg:var(--bg-color);--fg:var(--text-color)`, and custom properties inherit into the preview's
+   shadow root, so these give it the values documents use: no fill behind it, and the card's own
+   text colour, which follows dark mode. They sit on the figure, never on `.dispatch-markdown`,
+   which also sits inside documents (the ask block's footer), where the editor's own values rule.
+   The preview scrolls sideways when the diagram is wider than the body. */
+.dispatch-mermaid {
+  --bg-color: transparent;
+  --text-color: currentColor;
+  margin-block: 1em;
+  margin-inline: 0;
+}
+
+.dispatch-mermaid-preview {
+  overflow-x: auto;
+}
+
+.dispatch-mermaid-source > summary {
+  cursor: pointer;
+}
+
+/* A task item in a `MarkdownBody` (`- [x] done`) shows the disabled checkbox
+   `features/refs/task-checkboxes.ts` draws in place of its bullet; a plain item in the same list
+   keeps its bullet. The box is sized in `em` of the surrounding text (`font-size: inherit` undoes
+   the 1rem the compact layouts above give every `input`), centred on the first line of the item,
+   and pulled back by its negative start margin into the space the bullet stood in. With its end
+   margin the item's words then start where a plain item's do: `prose-sm` indents an item's text
+   2em, its `ul`/`ol` padding plus its `li` padding, and the ask footer's rules below keep that
+   sum. No ask-footer twin is needed: the footer's `li` rule sets only margin and padding, and its
+   `ul` list-style-type reaches the item by inheritance, which the item's own `list-style`
+   overrides. The box is read-only, so it takes no pointer events: a click on it lands on the list
+   item beneath, as a click on the item's text does (in a margin thread it selects the card), and
+   never toggles it.
+   The box is drawn here (`appearance: none`) rather than by the browser, which paints a disabled
+   native box pale grey, its tick hard to see on a light card. It stays a native disabled
+   checkbox (role, checked state, no tab stop); only its look changes. An unticked box is an empty
+   outline in a muted mix of the text colour; a ticked one is filled in the app's link blue
+   (`--tw-prose-links`, so it follows the scheme as the links do: sky-700 in light, sky-400 in
+   dark) with the tick cut out of the fill by a mask. The tick is a hole showing the card behind
+   the box, so it contrasts with the fill in either scheme with no colour of its own (the mask's
+   SVG paints only mask alpha). It is a mask, not a pseudo-element, since Firefox draws none on an
+   `input`; `opacity: 1` keeps any engine from dimming the disabled box.
+   Under forced colors (Windows High Contrast) the browser forces the fill to the system
+   background, which would leave a ticked box looking like an unticked one, so there the system
+   draws the box (`appearance: auto`, no mask). */
+.dispatch-markdown li[data-item-type="task"] {
+  list-style: none;
+}
+
+.dispatch-markdown [data-markdown-task-checkbox] {
+  appearance: none;
+  background-color: transparent;
+  block-size: 0.9375em;
+  border: 1px solid color-mix(in srgb, currentColor 55%, transparent);
+  border-radius: 0.1875em;
+  font-size: inherit;
+  inline-size: 0.9375em;
+  margin-block: 0;
+  margin-inline: -1.375em 0.4375em;
+  opacity: 1;
+  pointer-events: none;
+  vertical-align: middle;
+}
+
+.dispatch-markdown [data-markdown-task-checkbox]:checked {
+  background-color: var(--tw-prose-links);
+  border-color: var(--tw-prose-links);
+  mask:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cmask id='tick'%3E%3Crect width='16' height='16' fill='white'/%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='black' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/mask%3E%3Crect width='16' height='16' fill='white' mask='url(%23tick)'/%3E%3C/svg%3E")
+    center / 100% 100% no-repeat;
+}
+
+@media (forced-colors: active) {
+  .dispatch-markdown [data-markdown-task-checkbox] {
+    appearance: auto;
+  }
+
+  .dispatch-markdown [data-markdown-task-checkbox]:checked {
+    mask: none;
+  }
+}
+
+/* The block's slots are `not-prose` (`AskBlockView`): the editor root is `prose`, and the card
+   hosted in the slots must not be typeset as document text. Tailwind Typography cannot re-enter
+   `prose` inside `not-prose`, so a `MarkdownBody` in the footer (a reply, the answer note, an
+   Other answer, a previous question) would render with preflight's bare defaults. These are the
+   `prose-sm` essentials it loses, at `prose-sm`'s values, scoped to the block's footer. Body text
+   takes the surrounding colour as it does in the Inbox: there `--tw-prose-body: inherit` has no
+   ancestor value to inherit, so `prose`'s `color` falls back to the parent's; here the editor
+   root's `prose` supplies one (gray-700), so the colour is inherited explicitly. The rest of the
+   palette comes from the `--tw-prose-*` variables `.dispatch-markdown` and `prose-invert` set on
+   the element, and from the editor root for the ones they leave alone (pre, quote border). A
+   card inside a Markdown body has `not-prose` slots too, so the footer's `MarkdownBody` (an
+   option's description, a reply) loses `prose-sm` the same way there. */
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown {
+  color: inherit;
+}
+
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  :is(p, ul, ol, blockquote, pre) {
+  margin-block: 1.1428571em;
+}
+
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  :is(ul, ol) {
+  padding-inline-start: 1.5714286em;
+}
+
+/* `prose-sm` tightens a list nested in a list; a reply's body sits inside the thread's `<ul>`,
+   so a list in a reply is spaced this way in the Inbox. */
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  li
+  .dispatch-markdown
+  :is(ul, ol) {
+  margin-block: 0.5714286em;
+}
+
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  ul {
+  list-style-type: disc;
+}
+
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  ol {
+  list-style-type: decimal;
+}
+
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  li {
+  margin-block: 0.2857143em;
+  padding-inline-start: 0.4285714em;
+}
+
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  li::marker {
+  color: var(--tw-prose-bullets);
+}
+
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  > :first-child {
+  margin-top: 0;
+}
+
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  > :last-child {
+  margin-bottom: 0;
+}
+
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  a {
+  color: var(--tw-prose-links);
+  font-weight: 500;
+  text-decoration: underline;
+}
+
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  :is(strong, code) {
+  font-weight: 600;
+}
+
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  code {
+  font-size: 0.8571429em;
+}
+
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  pre {
+  background-color: var(--tw-prose-pre-bg);
+  border-radius: 0.25rem;
+  color: var(--tw-prose-pre-code);
+  font-size: 0.8571429em;
+  line-height: 1.6666667;
+  margin-block: 1.6666667em;
+  overflow-x: auto;
+  padding: 0.6666667em 1em;
+}
+
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  pre
+  code {
+  background: none;
+  color: inherit;
+  font-weight: inherit;
+  padding: 0;
+}
+
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  blockquote {
+  border-inline-start: 0.25rem solid var(--tw-prose-quote-borders);
+  font-style: italic;
+  font-weight: 500;
+  margin-block: 1.3333333em;
+  padding-inline-start: 1.1111111em;
+  quotes: "\201C" "\201D" "\2018" "\2019";
+}
+
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  blockquote
+  p:first-of-type::before {
+  content: open-quote;
+}
+
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  blockquote
+  p:last-of-type::after {
+  content: close-quote;
+}
+
+/* Tailwind Typography's default `code` styling wraps every inline code span in a literal
+   backtick via `code::before`/`code::after { content: "\`" }` - visible (and reported as a
+   bug) in both `.dispatch-markdown` (MarkdownBody, above) and `.dispatch-doc` (the live Proof
+   editor, which mounts its content with the library's own `prose` class): a rendered
+   `` `code` `` span shows the surrounding backtick characters twice over, once from the
+   Markdown source already being parsed into a real `<code>` element and once from this pseudo
+   content. Both surfaces already give inline code its own font/background via the library's or
+   Typography's `code` styling, so only the pseudo-content needs suppressing. */
+.dispatch-markdown code::before,
+.dispatch-markdown code::after,
+.dispatch-doc code::before,
+.dispatch-doc code::after {
+  content: none;
+}

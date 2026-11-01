@@ -1,0 +1,619 @@
+// Package api is the broker's HTTP surface: routes_table.go lists every route with the
+// authentication it needs, and this file authenticates callers and writes responses.
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/sjawhar/envoy/internal/broker/approval"
+	"github.com/sjawhar/envoy/internal/broker/enroll"
+	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/oauth"
+	"github.com/sjawhar/envoy/internal/broker/policy"
+	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/broker/requests"
+	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/ratelimit"
+)
+
+type Deps struct {
+	PublicURL string
+	// APIAccounts is BROKER_API_ACCOUNTS: the ServiceAccount subject of each listed caller of the
+	// routes accountAuth authenticates, answering that caller — its name and the powers its name
+	// carries (AccountFor, which is the only way to build one). A subject it does not name is
+	// refused, so an account taken off it stops calling as soon as the broker reads it again, and
+	// a listed caller reaches only the routes whose power it holds.
+	APIAccounts map[string]Account
+	// AccountTokens verifies those callers' projected ServiceAccount tokens, against the same
+	// Kubernetes issuer and audience a pod enrolls with (cmd/broker passes the one verifier it
+	// builds). Nil is a broker that trusts no Kubernetes issuer, where every such route refuses
+	// every caller.
+	AccountTokens enroll.PodVerifier
+	Enroll        *enroll.Service
+	Machine       *requests.Machine
+	MachineLogin  *machine.Service
+	Proof         *proof.Verifier
+	// Policy is the live agent-secret policy, which POST /v1/secrets/{name}/reread rereads one
+	// name of (policy.Current.RefreshOne).
+	Policy *policy.Current
+	// NotifyReread tells every other pod serving this database to reread name, the fan-out
+	// internal/broker/reread's Notifier sends over Postgres LISTEN/NOTIFY; nil means no fan-out,
+	// which is a single-pod broker and every test that wires none. POST
+	// /v1/secrets/{name}/reread is its one call site (rereadSecret), which explains there both
+	// when it is called and why it is called from the route rather than from RefreshOne.
+	//
+	// It reports nothing, because the handler has nothing to do with a failure: the local reread
+	// has already succeeded and its answer stands, so whether a failed fan-out is logged, and at
+	// what level, belongs to the function cmd/broker supplies.
+	NotifyReread func(ctx context.Context, name string)
+	// SecretsPrefix is BROKER_SECRETS_PREFIX, the namespace GET /v1/settings answers.
+	SecretsPrefix string
+	// SecretsStore is BROKER_SECRETS_STORE, the store GET /v1/settings names: secrets.StoreAWS or
+	// secrets.StoreGCP.
+	SecretsStore string
+	// SecretsKMSKey is the agent-secrets key GET /v1/settings answers: the AWS store's key ARN
+	// (BROKER_SECRETS_KMS_KEY_ARN), with its region and account, or the GCP store's Cloud KMS key
+	// name (BROKER_SECRETS_KMS_KEY_NAME).
+	SecretsKMSKey string
+	// LauncherLimits bounds POST /v1/oauth/device_authorization and POST
+	// /v1/launcher-credentials/token; nil means DefaultLauncherLimits.
+	LauncherLimits *LauncherLimits
+	// RereadLimit bounds POST /v1/secrets/{name}/reread per source address; nil means
+	// RereadLimitFor of the shared bucket this process mounted - RereadOverallLimit, or
+	// DefaultRereadOverallLimit when that is nil too - so that an address's own rate is ordered
+	// against the bucket this process actually has rather than against a constant derived from a
+	// bucket it may never mount.
+	RereadLimit *ratelimit.Limit
+	// RereadOverallLimit bounds that route across every caller at once; nil means
+	// DefaultRereadOverallLimit.
+	RereadOverallLimit *ratelimit.Limit
+	// TokenLimit bounds POST /v1/oauth/token per source address; nil means DefaultTokenLimit.
+	TokenLimit *ratelimit.Limit
+	// AccountLimit bounds every route accountAuth authenticates per source address, in one bucket
+	// the whole class shares and spent before the caller's token is verified, and with it the
+	// approval page's routes and the sign-in's (authenticate, signInStatus); nil means
+	// DefaultAccountLimit.
+	AccountLimit *ratelimit.Limit
+	// TrustedProxyHeader names a request header (e.g. "X-Forwarded-For") the rate limiters'
+	// per-address buckets trust for the real client address; empty means keying on r.RemoteAddr,
+	// correct only when the broker is reached directly rather than through a reverse proxy or load
+	// balancer. See limits.go's clientAddress.
+	TrustedProxyHeader string
+	// OAuth is the machine login's OAuth provider and the token exchange. POST
+	// /v1/oauth/device_authorization, POST /v1/oauth/token, POST /v1/oauth/introspect, POST
+	// /v1/oauth/revoke and POST /v1/oauth/exchange/pod-sessions are
+	// mounted only when it is set, with DeviceLogin and both TokenHooks, which it then requires
+	// (Register panics without them).
+	OAuth *oauth.Provider
+	// DeviceLogin opens a device login's record from the device authorization request's form and
+	// the user code the provider minted, in the provider's transaction (oauthstore.TxFrom on ctx);
+	// an error refuses the request (deviceLoginRefusal maps it to the broker's code).
+	DeviceLogin func(ctx context.Context, form url.Values, userCode string) error
+	// TokenHooks are the broker's steps around each token the provider issues.
+	TokenHooks oauth.TokenHooks
+	// Approval is the broker's own approval page and its sign-in (internal/broker/approval),
+	// which cmd/broker always builds, since config.Load requires BROKER_SIGNIN_*. Its routes,
+	// every one under /approve and /signin/, are mounted only when it is set, which leaves them
+	// off the mux of a test rig that wires no page.
+	Approval *approval.Page
+	// Draining reports whether this process has begun stopping, which GET /healthz answers 503
+	// SHUTTING_DOWN for while every other route goes on being served; nil means it never does.
+	//
+	// This is how a pod stops being sent traffic before it stops accepting it. Kubernetes removes
+	// a terminating pod from its Service's EndpointSlice concurrently with the kubelet beginning
+	// termination, not before it, so a pod that simply closed its listener at SIGTERM would be
+	// refusing connections that were still being routed to it. Failing the health check is what
+	// makes a readiness probe, and anything else reading readiness, stop choosing this pod, which
+	// is why the drain has to show up here rather than in the listener. nil is every caller that
+	// never stops in the first place - brokertest and the in-process rigs - for which the broker
+	// is never draining.
+	Draining func() bool
+}
+
+type server struct {
+	deps            Deps
+	launcherLimiter *launcherLimiter
+	// rereadLimiter is RereadLimit applied per source address (clientAddress), and rereadOverall
+	// RereadOverallLimit over one bucket every caller shares; refuseReread takes from both or
+	// neither.
+	rereadLimiter *ratelimit.Keyed
+	rereadOverall *ratelimit.Bucket
+	// tokenLimiter is TokenLimit applied per source address (clientAddress), over its route's own
+	// bucket, and accountLimiter AccountLimit, over the bucket every accountAuth route and every
+	// route of the approval page share.
+	tokenLimiter   *ratelimit.Keyed
+	accountLimiter *ratelimit.Keyed
+}
+
+func Register(mux *http.ServeMux, deps Deps) {
+	if deps.OAuth != nil && (deps.MachineLogin == nil || deps.DeviceLogin == nil || deps.TokenHooks.Before == nil || deps.TokenHooks.After == nil) {
+		panic("api: Deps.OAuth needs MachineLogin, DeviceLogin and both TokenHooks")
+	}
+	limits := DefaultLauncherLimits
+	if deps.LauncherLimits != nil {
+		limits = *deps.LauncherLimits
+	}
+	rereadOverall := DefaultRereadOverallLimit
+	if deps.RereadOverallLimit != nil {
+		rereadOverall = *deps.RereadOverallLimit
+	}
+	// Derived from the shared bucket resolved just above, and only when the caller named no
+	// bucket of its own: a caller that passes one - the rows that drive the per-address bucket
+	// on its own - keeps what it passed, exactly as every other optional dep here is defaulted
+	// rather than overridden.
+	reread := RereadLimitFor(rereadOverall)
+	if deps.RereadLimit != nil {
+		reread = *deps.RereadLimit
+	}
+	token := DefaultTokenLimit
+	if deps.TokenLimit != nil {
+		token = *deps.TokenLimit
+	}
+	account := DefaultAccountLimit
+	if deps.AccountLimit != nil {
+		account = *deps.AccountLimit
+	}
+	s := &server{
+		deps:            deps,
+		launcherLimiter: newLauncherLimiter(limits, deps.TrustedProxyHeader),
+		rereadLimiter:   ratelimit.NewKeyed(reread),
+		rereadOverall:   ratelimit.NewBucket(rereadOverall),
+		tokenLimiter:    ratelimit.NewKeyed(token),
+		accountLimiter:  ratelimit.NewKeyed(account),
+	}
+	for _, route := range routes() {
+		if deps.OAuth == nil && strings.HasPrefix(route.Pattern, oauthRoutes) {
+			continue
+		}
+		if deps.Approval == nil && (strings.HasPrefix(route.Pattern, approvalRoutes) || strings.HasPrefix(route.Pattern, signInRoutes)) {
+			continue
+		}
+		mux.HandleFunc(route.Method+" "+route.Pattern, func(w http.ResponseWriter, r *http.Request) {
+			who, ok := s.authenticate(w, r, route)
+			if !ok {
+				return
+			}
+			route.Handler.serve(s, w, r, who)
+		})
+	}
+}
+
+// oauthRoutes prefixes the routes the OAuth provider serves, which Register mounts only with one.
+const oauthRoutes = "/v1/oauth/"
+
+// approvalRoutes and signInRoutes prefix the approval page's routes, which Register mounts only
+// with the page: every broker has one, and a rig that wires none serves those paths not at all.
+const (
+	approvalRoutes = "/approve"
+	signInRoutes   = "/signin/"
+)
+
+// authenticate proves who r comes from, as route's authentication requires, or writes the
+// refusal. A bad or missing credential is a 401; a store that cannot answer is a 503 naming it,
+// never mistaken for a bad credential. A route a ServiceAccount token authenticates — one a
+// listed caller's token does (accountAuth) and one a service's own login token does
+// (serviceAuth) — first spends its source address's bucket (DefaultAccountLimit), a refusal
+// being 429 RATE_LIMITED with Retry-After, so a flood of forged tokens past that bucket costs no
+// verification and no fetch of the issuer's keys; a listed caller must then hold the power its
+// row declares, and a service's token must name an account BROKER_SERVICE_LOGINS lists. The
+// approval page's routes spend that same bucket, for the same reason: see the authSignIn case.
+func (s *server) authenticate(w http.ResponseWriter, r *http.Request, route apiRoute) (caller, bool) {
+	auth := route.Handler.auth
+	switch auth {
+	case authNone:
+		return caller{}, true
+	case authAccount:
+		if s.refuseAccountAddress(w, r) {
+			return caller{}, false
+		}
+		who, ok := s.accountCaller(w, r)
+		if !ok {
+			return caller{}, false
+		}
+		// Being listed is not being allowed: the caller's name answers which powers it holds and
+		// this row declares the one it needs, so a caller listed for introspection alone never
+		// relays a person's decision. ACCOUNT_NOT_LISTED and this are different facts — an
+		// account the broker does not know at all, and a known caller reaching past its own
+		// routes — so each has its own code. The refusal names the caller and the route, and
+		// nothing of the token presented.
+		if refuseWithoutPower(w, who.account, route.Handler.power, route.Method+" "+route.Pattern) {
+			return caller{}, false
+		}
+		return who, true
+	case authService:
+		if s.refuseAccountAddress(w, r) {
+			return caller{}, false
+		}
+		return s.serviceCaller(w, r)
+	case authSignIn:
+		// The page's routes and the sign-in's spend the bucket the account class spends, so no
+		// caller drives them unmetered either. GET /approve/{record} with no session does one
+		// record read and hands the caller a valid __Host-broker-signin cookie; GET
+		// /signin/callback with that cookie's own state makes the broker send a token request to
+		// its sign-in provider, with the broker's client credentials, and write the failed
+		// sign-in row; and POST /approve and POST /signin/logout each read and write a session's
+		// row. GET /signin/status spends it in its own handler, being public, and the page's
+		// stylesheet spends nothing: it is bytes of the binary, and every page is read under it.
+		// The spend comes before the page reads anything, and its refusal is the page's own
+		// 429, under the page's headers, since a browser is told nothing about a ServiceAccount
+		// token: only the Retry-After is the one refuseAccountAddress would have written.
+		if !s.accountAddressAllows(r) {
+			s.deps.Approval.WriteRateLimited(w, ratelimit.RetryAfterSeconds(s.accountLimiter.Every()))
+			return caller{}, false
+		}
+		session, ok := s.deps.Approval.Authenticate(w, r)
+		return caller{signIn: session}, ok
+	case authLauncher:
+		subject, err := s.proofSubject(r)
+		switch {
+		case errors.Is(err, proof.ErrInvalid), errors.Is(err, proof.ErrNotLive):
+			writeError(w, http.StatusUnauthorized, "LAUNCHER_INVALID", "the launcher credential is not valid")
+			return caller{}, false
+		case err != nil:
+			writeUnavailable(w, "DATABASE_UNAVAILABLE", "verify launcher proof", err)
+			return caller{}, false
+		}
+		if subject.LauncherID == "" {
+			writeError(w, http.StatusUnauthorized, "LAUNCHER_INVALID", "this route needs a launcher proof, not a session proof")
+			return caller{}, false
+		}
+		cred, err := s.deps.Enroll.Credential(r.Context(), subject.LauncherID)
+		if err != nil {
+			writeUnavailable(w, "DATABASE_UNAVAILABLE", "read launcher credential", err)
+			return caller{}, false
+		}
+		return caller{launcher: cred}, true
+	case authProof:
+		return s.sessionCaller(w, r, "PROOF_INVALID", "proof invalid: not live")
+	case authRenewProof:
+		return s.sessionCaller(w, r, "ENROLLMENT_NOT_LIVE", "enrollment is not live")
+	}
+	writeInternal(w, "authenticate", fmt.Errorf("route has unknown authentication %d", auth))
+	return caller{}, false
+}
+
+// refuseWithoutPower writes 403 ACCOUNT_LACKS_POWER and reports true when the listed caller who
+// does not hold needs, the power route declares ("POST /v1/oauth/revoke", the method and the
+// pattern the broker mounted). authenticate calls it for every accountAuth row before the
+// handler runs, and decideRecord for the two rows whose handler authenticates its own caller
+// (accountAuthAfterRecordKind), so one refusal serves both.
+func refuseWithoutPower(w http.ResponseWriter, who Account, needs power, route string) bool {
+	if who.may(needs) {
+		return false
+	}
+	writeError(w, http.StatusForbidden, "ACCOUNT_LACKS_POWER", fmt.Sprintf("the caller %q may not call %s", who.Name, route))
+	return true
+}
+
+// sessionCaller authenticates a session proof for authenticate, answering a proof whose
+// enrollment is no longer live with notLiveCode and notLiveMessage: PROOF_INVALID on every
+// session route but renew, which alone answers ENROLLMENT_NOT_LIVE so a pod renewer can stop.
+// Every other bad proof is PROOF_INVALID on both.
+func (s *server) sessionCaller(w http.ResponseWriter, r *http.Request, notLiveCode, notLiveMessage string) (caller, bool) {
+	subject, err := s.proofSubject(r)
+	switch {
+	case errors.Is(err, proof.ErrNotLive):
+		writeError(w, http.StatusUnauthorized, notLiveCode, notLiveMessage)
+		return caller{}, false
+	case errors.Is(err, proof.ErrInvalid):
+		writeError(w, http.StatusUnauthorized, "PROOF_INVALID", err.Error())
+		return caller{}, false
+	case err != nil:
+		writeUnavailable(w, "DATABASE_UNAVAILABLE", "verify proof", err)
+		return caller{}, false
+	}
+	if subject.EnrollmentID == "" {
+		writeError(w, http.StatusUnauthorized, "PROOF_INVALID", "this route needs a session proof, not a launcher proof")
+		return caller{}, false
+	}
+	return caller{enrollment: subject.EnrollmentID}, true
+}
+
+// accountCaller authenticates a listed caller's own projected ServiceAccount token for
+// authenticate, the credential accountAuth's routes take, and answers the caller the list names
+// it: its name and its powers, which authenticate then checks against the route's. It is the
+// check a service's token login makes (machine.Service.VerifyServiceToken), against the same
+// verifier and with the same taxonomy: a broker that trusts no Kubernetes issuer, a token that
+// has expired, one that does not verify, one that lives longer than
+// machine.MaxTokenLoginLifetime from its issue (so a copied token is spendable for at most an
+// hour), and an account BROKER_API_ACCOUNTS does not name. Only the last is a 403: the
+// credential is sound and it is the broker's list that refuses. No refusal repeats the token.
+func (s *server) accountCaller(w http.ResponseWriter, r *http.Request) (caller, bool) {
+	if s.deps.AccountTokens == nil {
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKENS_OFF", "this broker trusts no Kubernetes token issuer, so no caller authenticates with a ServiceAccount token")
+		return caller{}, false
+	}
+	claims, err := s.deps.AccountTokens.VerifyAccount(r.Context(), bearer(r))
+	switch {
+	case errors.Is(err, oidc.ErrExpired):
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_EXPIRED", "the ServiceAccount token has expired")
+		return caller{}, false
+	case err != nil:
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_INVALID", "the ServiceAccount token does not verify")
+		return caller{}, false
+	case claims.IssuedAt.IsZero():
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_TOO_LONG_LIVED", "the ServiceAccount token names no issue time (iat)")
+		return caller{}, false
+	case claims.Expiry.Sub(claims.IssuedAt) > machine.MaxTokenLoginLifetime+s.deps.Proof.Skew:
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_TOO_LONG_LIVED", "the ServiceAccount token lives longer than an hour from its issue")
+		return caller{}, false
+	}
+	account, listed := s.deps.APIAccounts[claims.Subject]
+	if !listed {
+		writeError(w, http.StatusForbidden, "ACCOUNT_NOT_LISTED", "this ServiceAccount is not in BROKER_API_ACCOUNTS")
+		return caller{}, false
+	}
+	return caller{account: account}, true
+}
+
+// serviceCaller authenticates a service's own projected ServiceAccount token for authenticate,
+// the credential serviceAuth's routes take, and answers the service BROKER_SERVICE_LOGINS lets
+// that account log in as. It is the token login's own check
+// (machine.Service.VerifyServiceToken), so a route of this class and a token login accept exactly
+// the same credential: the same verifier, the same hour-from-issue bound on a copied token, and
+// the same list. An account that list does not name is 403 ACCOUNT_NOT_LISTED, the credential
+// being sound and the broker's list refusing; a broker that trusts no Kubernetes token issuer
+// answers 401 ACCOUNT_TOKENS_OFF, as this class's routes then authenticate no one. No refusal
+// repeats the token.
+func (s *server) serviceCaller(w http.ResponseWriter, r *http.Request) (caller, bool) {
+	account, err := s.deps.MachineLogin.VerifyServiceToken(r.Context(), bearer(r))
+	switch {
+	case errors.Is(err, machine.ErrTokenLoginsOff):
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKENS_OFF", "this broker trusts no Kubernetes token issuer, so no service authenticates with a ServiceAccount token")
+		return caller{}, false
+	case errors.Is(err, machine.ErrTokenExpired):
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_EXPIRED", "the ServiceAccount token has expired")
+		return caller{}, false
+	case errors.Is(err, machine.ErrTokenTooLongLived):
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_TOO_LONG_LIVED", "the ServiceAccount token lives longer than an hour from its issue")
+		return caller{}, false
+	case errors.Is(err, machine.ErrAccountNotListed):
+		writeError(w, http.StatusForbidden, "ACCOUNT_NOT_LISTED", "this ServiceAccount is not in BROKER_SERVICE_LOGINS")
+		return caller{}, false
+	case err != nil:
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_INVALID", "the ServiceAccount token does not verify")
+		return caller{}, false
+	}
+	return caller{service: account.Service}, true
+}
+
+// proofSubject verifies r's Proof header and returns who it authenticates, unwrapped: authLauncher
+// and authProof each translate a failure into their own vocabulary (LAUNCHER_INVALID vs
+// PROOF_INVALID), so this reports
+// only the raw error.
+func (s *server) proofSubject(r *http.Request) (proof.Subject, error) {
+	return s.deps.Proof.Verify(r.Context(), r.Header.Get("Proof"), r.Method, s.deps.PublicURL+r.URL.Path, time.Now())
+}
+
+func bearer(r *http.Request) string {
+	return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+}
+
+// maxJSONBodyBytes caps every JSON request body the broker reads, as Dispatch's own decodeJSON does.
+const maxJSONBodyBytes = 1 << 20
+
+// readJSON decodes r's body as exactly one JSON value into v: at most maxJSONBodyBytes (413
+// REQUEST_TOO_LARGE), no field v does not declare and nothing after the value (400 with
+// invalidCode). It writes the refusal itself and reports whether decoding succeeded.
+func readJSON(w http.ResponseWriter, r *http.Request, v any, invalidCode string) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	err := decoder.Decode(v)
+	if err == nil && decoder.More() {
+		err = errors.New("body must contain one JSON value")
+	}
+	var tooLarge *http.MaxBytesError
+	switch {
+	case err == nil:
+		return true
+	case errors.As(err, &tooLarge):
+		writeError(w, http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", fmt.Sprintf("request body exceeds %d bytes", maxJSONBodyBytes))
+	default:
+		writeError(w, http.StatusBadRequest, invalidCode, "body must be one valid JSON object: "+err.Error())
+	}
+	return false
+}
+
+// pathUUID reads the {name} path segment as a UUID, or refuses it with 400 code: an id that is not
+// a UUID names nothing, and must never reach a uuid column as a Postgres type error.
+func pathUUID(w http.ResponseWriter, r *http.Request, name, code, what string) (string, bool) {
+	id := r.PathValue(name)
+	if _, err := uuid.Parse(id); err != nil {
+		writeError(w, http.StatusBadRequest, code, what+" ids are UUIDs")
+		return "", false
+	}
+	return id, true
+}
+
+// pathRecordID reads the {name} path segment as a credential-request record id, or refuses it
+// with 400 code: record ids are lowercase-hex sha256 hashes (record.ValidID), so pathUUID's check
+// would wrongly reject every valid one.
+func pathRecordID(w http.ResponseWriter, r *http.Request, name, code string) (string, bool) {
+	id := r.PathValue(name)
+	if !record.ValidID(id) {
+		writeError(w, http.StatusBadRequest, code, "record ids are lowercase-hex sha256 hashes")
+		return "", false
+	}
+	return id, true
+}
+
+// requireApprover refuses an approver login that canonicalizes to nothing with 400
+// APPROVER_REQUIRED: every UI route names the human it acts for, whether a decision's or a
+// revoke's approver field or a list's ?approver= query.
+func requireApprover(w http.ResponseWriter, login string) bool {
+	if record.CanonicalLogin(login) == "" {
+		writeError(w, http.StatusBadRequest, "APPROVER_REQUIRED", "approver is required")
+		return false
+	}
+	return true
+}
+
+func writeError(w http.ResponseWriter, status int, code, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"code": code, "error": msg})
+}
+
+// pageRefusal is the body of a refusal that names the approval page where a person decides the
+// record instead, beside the code and error every refusal carries.
+type pageRefusal struct {
+	// The refusal's code.
+	Code string `json:"code"`
+	// What was refused, naming the page.
+	Error string `json:"error"`
+	// The record's page on the broker's own approval page, <BROKER_PUBLIC_URL>/approve/<record>.
+	ApproveURL string `json:"approve_url"`
+}
+
+// writePageRefusal is writeError for a refusal naming the record's approval page, approveURL,
+// which its body carries as approve_url (pageRefusal) for a caller to link.
+func writePageRefusal(w http.ResponseWriter, status int, code, msg, approveURL string) {
+	writeJSON(w, status, pageRefusal{Code: code, Error: msg, ApproveURL: approveURL})
+}
+
+// approveURL is recordID's page on the broker's own approval page (GET /approve/{record}), on the
+// public URL the broker resolved at boot: the one place a person signed in to the broker decides
+// a secret request, which every answer naming a pending one links.
+func (s *server) approveURL(recordID string) string {
+	return s.deps.PublicURL + "/approve/" + recordID
+}
+
+// pendingApproveURL is approveURL for a request's record while the request waits on it, and ""
+// for a request granted or denied at once (no record), and once it is no longer pending.
+func (s *server) pendingApproveURL(state string, recordID *string) string {
+	if state != "pending" || recordID == nil {
+		return ""
+	}
+	return s.approveURL(*recordID)
+}
+
+// writeInternal logs a failed operation with its error and answers 500 INTERNAL naming the
+// operation. Errors on these paths carry no secret values; the log line is the only place the
+// cause of a 500 is recorded.
+func writeInternal(w http.ResponseWriter, op string, err error) {
+	slog.Error("broker: "+op+" failed", "error", err)
+	writeError(w, http.StatusInternalServerError, "INTERNAL", op+" failed")
+}
+
+// writeUnavailable logs a dependency that could not answer and answers 503 with code naming it.
+func writeUnavailable(w http.ResponseWriter, code, op string, err error) {
+	slog.Error("broker: "+op+" failed", "error", err)
+	writeError(w, http.StatusServiceUnavailable, code, op+" failed: a dependency the broker needs is unavailable")
+}
+
+// writeJSON answers status with v, which is one of this package's named response types: the
+// broker's generated HTTP reference (cmd/broker-refgen) documents each route's answer
+// from that type's fields and refuses a value it cannot name.
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+// stateResponse is what a denial, a cancel or a revoke answers.
+type stateResponse struct {
+	// The state the call left the request, record or grant in: "denied", "cancelled" or "revoked".
+	State string `json:"state"`
+}
+
+// healthResponse is GET /healthz's answer while the broker is not draining and can reach
+// Postgres. Neither refusal has a type of its own: both are the ordinary broker error object
+// writeError writes, so this stays the route's one named response type.
+type healthResponse struct {
+	// "ok".
+	Status string `json:"status"`
+}
+
+func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
+	// A draining pod fails its health check before anything else, the Postgres ping included: the
+	// answer has to flip the moment the process begins stopping, whatever the database is doing,
+	// because this is what takes the pod out of its Service's endpoints while it goes on serving
+	// the requests already routed to it. The refusal is an ordinary broker error object rather
+	// than a healthResponse with some other status, so a caller reads the same {code, error}
+	// shape every other refusal has.
+	if s.deps.Draining != nil && s.deps.Draining() {
+		writeError(w, http.StatusServiceUnavailable, "SHUTTING_DOWN", "the broker is shutting down and is no longer taking new traffic")
+		return
+	}
+	if err := s.deps.Enroll.Store.Pool.Ping(r.Context()); err != nil {
+		writeUnavailable(w, "DATABASE_UNAVAILABLE", "ping Postgres", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
+}
+
+// signInStatusResponse is GET /signin/status's answer, the broker's one signin_status row as it
+// stands. Every field is null for a fact that has never happened, so a reader never has to tell
+// a zero time from a real one, and no field holds free text: the two words that are not times
+// come from closed sets Postgres itself holds the broker to.
+type signInStatusResponse struct {
+	// What the last check of the broker's client at its sign-in provider found: "ready" (the
+	// provider accepted the client), "client_rejected" (it refused it, so nobody can sign in)
+	// or "issuer_unreachable" (it could not be asked, which says nothing about the client).
+	ClientCheck *string `json:"client_check"`
+	// When that check was taken (RFC 3339).
+	ClientCheckedAt *time.Time `json:"client_checked_at"`
+	// When a sign-in last completed.
+	LastSignInAt *time.Time `json:"last_sign_in_at"`
+	// When a sign-in last failed at the token exchange or at the ID-token check.
+	LastFailedSignInAt *time.Time `json:"last_failed_sign_in_at"`
+	// Why that sign-in failed, one of invalid_client, unauthorized_client,
+	// redirect_uri_mismatch, invalid_grant, issuer_unreachable, bad_issuer, bad_audience,
+	// bad_signature, bad_nonce, not_in_domain and email_not_verified.
+	LastFailedSignInReason *string `json:"last_failed_sign_in_reason"`
+	// When a decision was last made on the approval page.
+	LastDecisionAt *time.Time `json:"last_decision_at"`
+}
+
+// signInStatus answers the broker's sign-in status to any caller. It is read from Postgres on
+// every call rather than from this process's memory, so every replica and every restart answers
+// the same thing. It spends its source address's bucket first, the one the approval page's
+// routes and the routes a ServiceAccount token authenticates share (accountAddressAllows,
+// DefaultAccountLimit), so no caller drives this read unmetered; the route takes no credential,
+// so nothing else bounds it. Being JSON and public, it refuses in JSON, but names the address
+// rather than the ServiceAccount token refuseAccountAddress names: this caller sent none.
+func (s *server) signInStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.accountAddressAllows(r) {
+		refuseWithRetryAfter(w, s.accountLimiter.Every(), "too many requests from this address; try again later")
+		return
+	}
+	status, err := s.deps.Enroll.Store.SignInStatus(r.Context())
+	if err != nil {
+		writeUnavailable(w, "DATABASE_UNAVAILABLE", "read the sign-in status", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, signInStatusResponse{
+		ClientCheck:            status.ClientCheckState,
+		ClientCheckedAt:        status.ClientCheckedAt,
+		LastSignInAt:           status.LastSignInAt,
+		LastFailedSignInAt:     status.LastFailedSignInAt,
+		LastFailedSignInReason: status.LastFailedSignInReason,
+		LastDecisionAt:         status.LastDecisionAt,
+	})
+}
+
+// approvalStylesheet serves the approval page's stylesheet (approval.ServeStylesheet) with no
+// credential, since every page it dresses is read before anyone has signed in.
+func (s *server) approvalStylesheet(w http.ResponseWriter, r *http.Request) {
+	approval.ServeStylesheet(w, r)
+}
+
+// strPtr is nil for "" and &s otherwise, for an optional wire field that is null rather than "".
+func strPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}

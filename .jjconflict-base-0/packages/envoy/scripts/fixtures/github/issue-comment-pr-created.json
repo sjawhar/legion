@@ -1,0 +1,22 @@
+{
+  "action": "created",
+  "issue": {
+    "number": 42,
+    "title": "Add local acceptance driver",
+    "html_url": "https://example.invalid/example-org/example-repo/pull/42",
+    "pull_request": {
+      "url": "https://example.invalid/example-org/example-repo/pulls/42"
+    }
+  },
+  "comment": {
+    "body": "Please review the pull request.",
+    "html_url": "https://example.invalid/example-org/example-repo/pull/42#issuecomment-42",
+    "user": { "login": "octocat" }
+  },
+  "sender": { "login": "octocat", "type": "User" },
+  "repository": {
+    "name": "example-repo",
+    "full_name": "example-org/example-repo",
+    "owner": { "login": "example-org" }
+  }
+}

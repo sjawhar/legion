@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "entries": {
+    "packages/daemon/src/daemon": ["daemon/hot-reload-registry-coordination.md"],
+    "packages/daemon/src/daemon/runtime": ["daemon/hot-reload-registry-coordination.md"],
+    "packages/daemon/src/cli": ["daemon/hot-reload-registry-coordination.md"],
+    "tag:hot-reload": ["daemon/hot-reload-registry-coordination.md"],
+    "tag:registry": ["daemon/hot-reload-registry-coordination.md"],
+    "tag:testing": ["daemon/hot-reload-registry-coordination.md"],
+    "tag:integration-testing": ["daemon/hot-reload-registry-coordination.md"],
+    "tag:mocks": ["daemon/hot-reload-registry-coordination.md"],
+    "tag:process-coordination": ["daemon/hot-reload-registry-coordination.md"],
+    "tag:shutdown": ["daemon/hot-reload-registry-coordination.md"]
+  }
+}

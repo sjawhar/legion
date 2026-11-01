@@ -43,7 +43,6 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/proof"
-	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 	"github.com/sjawhar/envoy/internal/broker/reread"
@@ -51,6 +50,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/wake"
 	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/ratelimit"
 	"github.com/sjawhar/envoy/internal/redact"
 )
 
@@ -234,14 +234,21 @@ func main() {
 	slog.Info("secret store", "store", cfg.SecretsStore, "credentials", credentials)
 	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: slices.Compact(slices.Sorted(maps.Values(cfg.ServicesByAccount)))}
 	var pod enroll.PodVerifier
+	// One key source per issuer, read by everything that needs that issuer's keys: this verifier
+	// and, for the cluster's issuer, the RFC 8693 exchange below, which resolves a subject
+	// token's own key through the same *oidc.Keys. So the boot makes one discovery read for the
+	// cluster rather than two, one set is held in memory, and a rotation becomes visible to both
+	// at the same moment.
+	//
 	// Discovery is bounded: an issuer that accepts the connection and never answers refuses the
 	// boot instead of hanging it with no health endpoint serving.
-	verifier, err := oidc.Discover(ctx, cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience, oidc.DiscoveryTimeout)
-	fatal(err)
-	if verifier != nil {
+	var k8sKeys *oidc.Keys
+	if cfg.K8sOIDCIssuer != "" {
+		k8sKeys, err = issuerKeys(ctx, cfg.K8sOIDCIssuer)
+		fatal(err)
 		// One verifier for both: a pod's enrollment token and a service's login token are the same
 		// cluster's projected tokens, for the same audience.
-		pod = enroll.K8sPodVerifier{Verifier: verifier}
+		pod = enroll.K8sPodVerifier{Verifier: oidc.NewWithKeys(cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience, k8sKeys)}
 	}
 
 	// The context the work that has to outlive the drain runs on: the five-minute policy reload
@@ -438,12 +445,15 @@ func main() {
 	fatal(err)
 	exchangeConfig := oauth.ExchangeConfig{Policy: exchangePolicy}
 	if cfg.ExchangeK8sAudience != "" {
-		keys, err := exchangeKeys(serving, cfg.K8sOIDCIssuer)
-		fatal(err)
-		exchangeConfig.Kubernetes = oauth.IssuerConfig{Issuer: cfg.K8sOIDCIssuer, Audience: cfg.ExchangeK8sAudience, Keys: keys}
+		// The key source the account verifier already reads: a subject token is the same
+		// cluster's projected token, for an audience of its own (BROKER_EXCHANGE_K8S_AUDIENCE),
+		// and BROKER_EXCHANGE_K8S_AUDIENCE needs BROKER_K8S_OIDC_ISSUER, so this is never nil.
+		exchangeConfig.Kubernetes = oauth.IssuerConfig{Issuer: cfg.K8sOIDCIssuer, Audience: cfg.ExchangeK8sAudience, Keys: k8sKeys}
 	}
 	if cfg.ExchangeGitHubIssuer != "" {
-		keys, err := exchangeKeys(serving, cfg.ExchangeGitHubIssuer)
+		// The GitHub issuer has no second reader, so it keeps a key source of its own, read here
+		// rather than at the boot's start: nothing before the bind needs it.
+		keys, err := issuerKeys(serving, cfg.ExchangeGitHubIssuer)
 		fatal(err)
 		exchangeConfig.GitHub = oauth.IssuerConfig{Issuer: cfg.ExchangeGitHubIssuer, Audience: cfg.ExchangeGitHubAudience, Keys: keys}
 	}
@@ -760,11 +770,13 @@ func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Curre
 	return m
 }
 
-// exchangeKeys reads issuer's published signing keys, the source the RFC 8693 exchange resolves a
-// subject token's own key against. It takes the same boot deadline discovery does: an issuer that
-// accepts the connection and never answers refuses the boot rather than hanging it with no health
-// endpoint serving. No key is fetched here; the first subject token reads the set.
-func exchangeKeys(ctx context.Context, issuer string) (*oidc.Keys, error) {
+// issuerKeys reads issuer's published signing keys: the source a token's own key is resolved
+// against, both for the verifier that answers whether a projected service-account token verifies
+// and for the RFC 8693 exchange, which needs the key itself. It takes the same boot deadline
+// discovery does: an issuer that accepts the connection and never answers refuses the boot rather
+// than hanging it with no health endpoint serving. No key is fetched here; the first token read
+// reads the set.
+func issuerKeys(ctx context.Context, issuer string) (*oidc.Keys, error) {
 	discovery, cancel := context.WithTimeout(ctx, oidc.DiscoveryTimeout)
 	defer cancel()
 	return oidc.NewKeys(discovery, issuer)

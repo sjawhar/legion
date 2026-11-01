@@ -1,0 +1,1530 @@
+#!/usr/bin/env bash
+# Stage 3's devbox gate for the Go coordinator. It drives the durable workflow through the real
+# surfaces: a scratch Dispatch, real Envoy/NATS, the Go daemon, real OMP panes, and GitHub's
+# sjawhar/legion-smoke sandbox. Its host-side rig helpers and the workflow's vocabulary are the
+# shared lib/rig.sh and lib/workflow.sh; the small scratch-service rig below is this run's own, so
+# its lifecycle belongs to this run.
+#
+# Run it as `bash scripts/e2e/stage3-devbox-workflow.sh` with three required inputs:
+# LEGION_E2E_MODEL_ROUTE (`gateway`, `key-file` or `box-login`), SMOKE_UPSTREAM_NATS (the production
+# Envoy NATS the GitHub bridge subscribes on, by its fully-qualified name), and, depending on the
+# route:
+#   - `gateway`: LEGION_E2E_MODEL_GATEWAY_URL, the model gateway's Anthropic endpoint. It needs
+#     agent-tier secrets and the operator's own hawk login, with the keyring holding it unlocked:
+#     the agents' model is Anthropic through the Hawk model gateway
+#     (lib/install-model-gateway.sh), and no Anthropic key reaches a pane.
+#   - `key-file`: LEGION_E2E_ANTHROPIC_KEY_FILE, a 0600 file holding a plaintext Anthropic key, for
+#     a devbox with no Hawk gateway at all (lib/install-key-file-model-route.sh). No Anthropic key
+#     reaches a pane here either — only the key command, baked in at install time, ever reads the
+#     file.
+#   - `box-login`: nothing more. The operator's own stored Oh My Pi login, for a devbox whose
+#     operator lets Legion's test runs use it (lib/install-box-login-route.sh): the profile's
+#     agent.db is a symlink to the operator's, no key or gateway is involved, and nothing reads the
+#     credential. The panes run the operator's own Oh My Pi build (its global mise pin, refused
+#     unless it carries the refresh-race fix) instead of .omp-pin, and one box-login proof runs at
+#     a time on the box (lib/box-login.sh); its teardown stops panes with SIGTERM and a grace before
+#     any SIGKILL and removes the profile's link to the operator's database on every exit.
+# The proof human's reviews and merge are the devbox's ordinary gh (the dotfiles shim, acting as the
+# sjawhar-agent App), never a Legion App, so run the script from the operator's own Oh My Pi
+# session, not a Legion pane, with no personal GH_TOKEN in its environment: `prerequisites` refuses
+# to start otherwise (require_proof_human, lib/workflow.sh).
+# Legion's two role Apps are this deployment's own by default, and four inputs for another
+# deployment's: LEGION_E2E_IMPLEMENT_APP_ID and LEGION_E2E_REVIEW_APP_ID, each App's numeric id, and
+# LEGION_E2E_IMPLEMENT_APP_KEY_NAME and LEGION_E2E_REVIEW_APP_KEY_NAME, the secrets broker keys holding
+# their private keys (lib/github-apps.sh). `prerequisites` proves each key is its id's App before the
+# run writes anything, whichever pair it took. The App private keys are resolved through
+# private_key_command by the daemon, and by lib/app-logins.ts once to prove each App and read its bot
+# login from GitHub (read_app_logins, lib/workflow.sh); they never enter this shell, a pane, an argv,
+# or this transcript.
+set -Eeuo pipefail
+
+root=$(cd "$(dirname "$0")/../.." && pwd)
+# The model route first, and under box-login the one-at-a-time lock (lib/box-login.sh), before the
+# run makes its work or evidence directory or anything else: a run the lock refuses leaves nothing
+# behind.
+# shellcheck source-path=SCRIPTDIR source=lib/box-login.sh
+. "$root/scripts/e2e/lib/box-login.sh"
+model_route=${LEGION_E2E_MODEL_ROUTE:-}
+case "$model_route" in
+gateway | key-file | box-login) ;;
+*)
+  echo "FAIL setup: LEGION_E2E_MODEL_ROUTE must be gateway, key-file or box-login, not '$model_route'" >&2
+  exit 1
+  ;;
+esac
+# The daemon prefers LEGION_OMP_PATH to omp_invocation (packages/daemon/internal/omplaunch). The
+# daemon here runs without it (start_daemon), and under box-login a caller that sets it is refused
+# outright: a build named there could lack the refresh-race fix and still open the operator's
+# login database.
+if [ "$model_route" = box-login ] && [ -n "${LEGION_OMP_PATH:-}" ]; then
+  echo "FAIL setup: LEGION_OMP_PATH is set ($LEGION_OMP_PATH); under LEGION_E2E_MODEL_ROUTE=box-login the panes run the operator's own Oh My Pi build alone, so unset LEGION_OMP_PATH" >&2
+  exit 1
+fi
+if [ "$model_route" = box-login ] && ! take_box_login_lock; then
+  echo "FAIL setup: another box-login proof is running on this box (the holder is named above)" >&2
+  exit 1
+fi
+work=$(mktemp -d "/tmp/legion-e2e3.$$.XXXXXXXX")
+# Evidence survives every outcome: logs, captured state, negative controls, the production audit,
+# and every agent transcript. Cleanup stops processes; removes containers, sockets, and profiles; and
+# closes the run's own pull requests on the smoke repository, deleting their branches.
+evidence=${STAGE3_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e3-evidence.XXXXXXXX)}
+# Refused before anything is written into the evidence directory or any trap is set
+# (lib/model-gateway-unserved.sh --fresh).
+if ! reason=$(bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --fresh "$evidence"); then
+  echo "FAIL setup: $reason" >&2
+  rmdir "$work"
+  exit 1
+fi
+mkdir -p "$evidence/logs" "$evidence/transcripts"
+# Every line of the run also goes to $evidence/transcript.log (lib/transcript.sh), so the driver and
+# its cleanup, which closes the run's pull requests, never fail on a write whoever is reading.
+# shellcheck source-path=SCRIPTDIR source=lib/transcript.sh
+. "$root/scripts/e2e/lib/transcript.sh"
+transcript_to "$evidence/transcript.log"
+ok=
+check=setup
+TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
+project="S3$(( ($$ + $(date +%s)) % 100000000 ))"
+project=${project:0:10}
+ptoken=${project,,}
+profile="legion-e2e3-$$-$(date +%s)"
+state="$work/state"
+# The HOME the run's Oh My Pi processes run under, so its profile lives in the work directory
+# (make_omp_home, lib/omp-home.sh).
+omp_home="$work/omp-home"
+profile_agent="$omp_home/.omp/profiles/$profile/agent"
+# The operator's real home, captured before any command runs under the run's own: the box-login
+# route links to the login under it (lib/install-box-login-route.sh --operator-home).
+operator_home=$HOME
+repo="sjawhar/legion-smoke"
+# Anthropic through the configured route: the Google provider answered long workflow turns with
+# empty responses (finishReason STOP with no content), so no Gemini-backed implementer could finish.
+pg_container="legion-e2e3-pg-$$"
+nats_container="legion-e2e3-nats-$$"
+daemon_pid=
+dispatch_pid=
+listener_pid=
+daemon_keeper_pid=
+dispatch_keeper_pid=
+bridge_pid=
+watcher_pid=
+port_daemon=
+port_listener=
+port_dispatch=
+dispatch_base=
+dispatch_actor=
+# The person every proof-human Dispatch write is: the X-Dispatch-User the scratch Dispatch trusts
+# (dispatch-human-header), and so the actor of each review it records in his name.
+proof_human_user=smoke
+port_pg=
+port_nats=
+pr_number=
+smoke_file=
+timeout_hook=
+gate_artifact=
+gate_version=
+prod_baseline=
+prod_dispatch_url=
+prod_token=
+prod_envoy_url=${STAGE3_PRODUCTION_ENVOY_URL:-http://127.0.0.1:9020}
+audited=
+
+begin() { check=$1; TZ=UTC printf -v check_started '%(%FT%TZ)T' -1; printf '== %s\n' "$check"; }
+note() { printf '   %s\n' "$*"; }
+pass() { printf 'ok %s\n' "$check"; }
+fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
+# shellcheck source-path=SCRIPTDIR source=lib/rig.sh
+. "$root/scripts/e2e/lib/rig.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/omp-home.sh
+. "$root/scripts/e2e/lib/omp-home.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/workflow.sh
+. "$root/scripts/e2e/lib/workflow.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
+. "$root/scripts/e2e/lib/leftovers.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/operator-dispatch.sh
+. "$root/scripts/e2e/lib/operator-dispatch.sh"
+# Nothing the run starts inherits the operator's production bearer (lib/operator-dispatch.sh).
+operator_dispatch_hold_token
+
+# collect_transcripts copies every OMP session the rig's profile wrote into the evidence directory
+# before the isolated profile is removed.
+collect_transcripts() {
+  local sessions="$profile_agent/sessions"
+  [ -d "$sessions" ] || return 0
+  cp -a "$sessions/." "$evidence/transcripts/" 2>/dev/null || true
+}
+
+cleanup() {
+  local status=$? p audit_failed=
+  # A second Ctrl-C, TERM or HUP must not end the teardown part way: its own signal traps would
+  # exit from inside this one, leaving panes running and, under box-login, the profile's link to
+  # the operator's login in a kept workspace. Every wait below is bounded, so ignoring them costs
+  # at most those bounds (lib/teardown.sh and stage4b-sandbox-tree.sh do the same).
+  trap '' HUP INT TERM
+  set +e
+  # Teardown is best effort, and errexit off does not turn the ERR trap off: a command that fails
+  # here is a warning about the teardown, never a check's FAIL line, and the run's exit status is
+  # left as the checks set it. The warning names the line alone: inside a trap BASH_COMMAND is the
+  # command the trap interrupted, not the cleanup command that failed.
+  trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
+  # First, before anything slower (the production audit, closing pull requests) can hang or be
+  # SIGKILLed mid-teardown: the key-file route's own key command, which bakes in --key-file's
+  # resolved path, must never survive this script on any exit, so it is never conditioned on how
+  # the rest of cleanup goes.
+  rm -rf "$work/model-gateway-key" || true
+  if [ -z "${ok:-}" ] && [ -z "$audited" ] && [ -n "$prod_baseline" ]; then
+    printf 'production audit after failure:\n' >&2
+    production_audit >&2 || audit_failed=1
+  fi
+  stop_tree "$watcher_pid"
+  stop_pid "$daemon_pid"
+  stop_pid "$dispatch_pid"
+  stop_pid "$listener_pid"
+  stop_pid "$daemon_keeper_pid"
+  stop_pid "$dispatch_keeper_pid"
+  stop_pid "$bridge_pid"
+  # Under box-login the panes share the operator's login database: each gets SIGTERM and up to
+  # box_login_stop_grace seconds to finish a token refresh before anything is killed, and the
+  # profile's link to that database goes (the link alone) once they are gone, before transcripts
+  # are kept, so a kept workspace holds no live path to the login (lib/box-login.sh). The panes
+  # stay up through the production audit above, which reads their sessions on production Envoy.
+  # The other routes keep the SIGKILL below.
+  if [ "$model_route" = box-login ]; then
+    # shellcheck disable=SC2046 # one pid per word
+    stop_box_login_processes $(run_processes)
+    unlink_box_login_db "$profile_agent"
+  fi
+  TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
+  for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
+  docker rm -f -v "$pg_container" "$nats_container" >/dev/null 2>&1 || true
+  collect_transcripts
+  close_unpassed_run_pull_requests
+  rm -rf "$work/model-gateway-cache" || true
+  if [ -n "${ok:-}" ]; then
+    rm -rf "$work" || true
+  else
+    printf "the run's scratch workspace is %s\n" "$work" >&2
+  fi
+  printf "the run's evidence is %s\n" "$evidence" >&2
+  # A diagnostic for a failed run: it never sets the status. A hangup, an interrupt or a termination
+  # (129, 130, 143, as trapped below) stopped the run and gets none.
+  [ -n "${ok:-}" ] || [[ $status =~ ^(129|130|143)$ ]] ||
+    bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" >&2 || true
+  # smoke-main-clean begins only once every checkpoint before it has passed, and it touches nothing
+  # but the smoke repository and its main's lock: its failure is the fixture's teardown, not the
+  # workflow under test, and the run's last line says so. Not when a production guard tripped during
+  # it, though: a pane endpoint violation (which aborts its wait) or an audit above that found rig
+  # writes or could not tell, which at this checkpoint is the run's first. Then the ordinary failure
+  # stands. The status stays the failure's either way, since the checkpoints after it never ran.
+  [ -n "${ok:-}" ] || [ "$check" != smoke-main-clean ] || [ -n "$audit_failed" ] ||
+    [ -s "$evidence/pane-endpoint-violation.txt" ] || [[ $status =~ ^(129|130|143)$ ]] ||
+    printf 'stage 3 e2e: FAIL (fixture teardown, check smoke-main-clean): every checkpoint before it passed, the workflow under test through its daemon merge, the close it made and the production check'"'"'s first look included; only the cleanup of %s main failed, and the checkpoints after it did not run\n' "$repo" >&2
+  return 0
+}
+trap cleanup EXIT
+trap 'printf "FAIL %s: line %s exited %s: %s\n" "$check" "$LINENO" "$?" "$BASH_COMMAND" >&2' ERR
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# The host helpers below own only this run's isolated resources. Each service serves on a port the
+# kernel chose, held from that choice until the service serves on it (lib/rig.sh's start_held). The
+# daemon and Dispatch restart on their ports, which the rest of the rig already names, so a keeper
+# holds each of those for the whole run (keep_port, start_kept), and every poll of them carries a
+# timeout: between two servers a kept port queues a request unanswered instead of refusing it.
+start_listener() {
+  local token
+  token=$(cat "$work/envoy-token")
+  ENVOY_API_TOKEN="$token" ENVOY_LISTEN_HOST=127.0.0.1 \
+    ENVOY_MACHINE_ID="legion-e2e3-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
+    start_held listener port_listener ENVOY_LISTEN_FD --env 'PORT={port}' -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-listener"
+  await_start listener "$listener_pid" 60 "the Envoy listener to answer /v1/sessions" \
+    curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions"
+}
+
+# start_dispatch [keep] — keep restarts the scratch Dispatch on the port the daemon already names.
+start_dispatch() {
+  local keep=${1:-} dispatch_token envoy_token pg_password
+  dispatch_token=$(cat "$work/dispatch-token")
+  envoy_token=$(cat "$work/envoy-token")
+  pg_password=$(cat "$work/postgres-password")
+  mkdir -p "$work/dispatch-home"
+  chmod 0700 "$work/dispatch-home"
+  [ -n "$keep" ] || keep_port dispatch_keeper port_dispatch
+  # HOME and XDG_CONFIG_HOME are the scratch home, so the server reads no envoy.json of the
+  # operator's: make_omp_home exports the operator's XDG_CONFIG_HOME. They are the server's alone,
+  # set by its env, not the held-port helper's that runs it.
+  DATABASE_URL="postgres://legion:$pg_password@127.0.0.1:$port_pg/dispatch?sslmode=disable" \
+    DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" \
+    DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
+    DISPATCH_LISTEN_HOST=127.0.0.1 NATS_URLS="nats://127.0.0.1:$port_nats" \
+    ENVOY_URL="http://127.0.0.1:$port_listener" \
+    start_kept dispatch dispatch_keeper DISPATCH_LISTEN_FD \
+    --env 'DISPATCH_PORT={port}' --env 'DISPATCH_SERVER_URL=http://127.0.0.1:{port}' -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
+    HOME="$work/dispatch-home" XDG_CONFIG_HOME="$work/dispatch-home/.config" "$work/envoy-dispatch"
+  await_start dispatch "$dispatch_pid" 60 "the scratch Dispatch server" \
+    curl -fsS --max-time 5 "http://127.0.0.1:$port_dispatch/api/v1"
+  dispatch_base="http://127.0.0.1:$port_dispatch"
+}
+
+write_legion_config() {
+  cat >"$work/legion.yaml" <<EOF
+project: $project
+port: $port_daemon
+postgres_dsn: postgres://legion:$(cat "$work/postgres-password")@127.0.0.1:$port_pg/legion?sslmode=disable
+state_dir: $state
+operator_token_file: $work/operator-token
+omp_invocation: mise x $pin -- omp
+envoy_url: http://127.0.0.1:$port_listener
+envoy_token_file: $work/envoy-token
+nats_urls:
+  - nats://127.0.0.1:$port_nats
+dispatch_url: http://127.0.0.1:$port_dispatch
+dispatch_token_file: $work/dispatch-token
+# The project's repository is Dispatch's mapping (the PUT below makes $repo its default), not a key of
+# legion.yaml.
+projects:
+  $project: {}
+gates:
+  design: root-issues
+admission_cap: 2
+review_round_cap: 3
+# The production check's bound (14 days by default) must come due inside the run, since its wake,
+# the check's last look, is production-check-bound's proof; and after the first look's report, since
+# a look open at the bound defers the bound by the look's own two-hour bound: 15 minutes, against a
+# look that took up to 10 minutes from the proof's instruction to its report in acceptance runs.
+# linger_hours keeps its default (72 h): the tree's close at its expiry is Stage 4b's proof.
+production_check_hours: 0.25
+instructions: $work/instructions.md
+$(<"$work/github-apps.yaml")
+EOF
+}
+
+# start_daemon [keep] — keep restarts the Go daemon on the port every pane already names.
+start_daemon() {
+  local keep=${1:-}
+  if [ -z "$keep" ]; then
+    keep_port daemon_keeper port_daemon
+    write_legion_config
+  fi
+  # Every pane's gh and jj are the daemon's PATH's (the pane inherits it, environment.go's
+  # paneEnvAllowList), so the real binaries' directory goes first, ahead of this box's own
+  # shims for both (prerequisites, real_bin_path). HOME, OMP_PROFILE and PATH are the daemon's
+  # alone, set by its env, not the held-port helper's that runs it. LEGION_OMP_PATH would outrank
+  # omp_invocation's build (packages/daemon/internal/omplaunch), so the daemon runs without it, as
+  # Stage 2's does, and daemon_runs_the_pinned_omp checks the binary it resolved, in the part of the
+  # daemon's log this start writes (from offset).
+  local offset=0
+  [ ! -f "$evidence/logs/daemon.log" ] || offset=$(wc -c <"$evidence/logs/daemon.log")
+  start_kept daemon daemon_keeper LEGION_LISTEN_FD -- \
+    env -u LEGION_OMP_PATH -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE \
+    -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" \
+    "$work/legion" start --config "$work/legion.yaml"
+  await_start daemon "$daemon_pid" 180 "the Go daemon to answer /healthz" \
+    curl -fsS --max-time 5 "http://127.0.0.1:$port_daemon/healthz"
+  daemon_runs_the_pinned_omp "$offset"
+}
+
+# daemon_runs_the_pinned_omp OFFSET fails the current check unless the daemon start whose log
+# begins at byte OFFSET resolved its boot probes and panes to $pin's own bin/omp: the one build the
+# plugin installs ran, and under box-login the operator's own build, never one LEGION_OMP_PATH or a
+# wrapper on PATH put in its place (Stage 2 checks the same).
+daemon_runs_the_pinned_omp() {
+  local expected
+  expected=$(readlink -f "$(mise where "$pin")/bin/omp")
+  tail -c +"$(($1 + 1))" "$evidence/logs/daemon.log" | jq -R -e --arg binary "$expected" '
+    fromjson? | select(.msg == "legion daemon resolved OMP invocation for boot probes and panes" and (.invocation | contains($binary)))
+  ' >/dev/null || fail "the daemon did not log $expected, $pin's own omp, as the binary for its boot probes and panes ($evidence/logs/daemon.log)"
+  note "the daemon resolved $pin's own omp, $expected, for its boot probes and panes"
+}
+
+stop_dispatch() {
+  stop_pid "$dispatch_pid"
+  dispatch_pid=
+}
+
+issue_worker_pane() {
+  daemon_state | jq -er --arg issue "$1" --arg role "$2" '.issues[$issue].workers[$role].claim.locator.tmux.pane'
+}
+# The state projection intentionally omits the internal tree key; the record itself is the
+# observable source for this admission invariant.
+child_is_slotless() {
+  local child=$1 root_issue_key=$2 tree
+  daemon_state | jq -e --arg child "$child" \
+    '(.admission.active | length) == 2 and .issues[$child].key == $child and .issues[$child].phase == "admitted" and .issues[$child].slot == null' >/dev/null || return 1
+  tree=$(docker exec "$pg_container" psql -U legion -d legion -tAc "select tree from issues where key = '$child'")
+  [ "$tree" = "$root_issue_key" ]
+}
+
+# On an admission timeout, preserve the three views that disagree: daemon projection, durable
+# record, and Dispatch's own issue events. The generic failure keeps the work directory.
+admission_diagnostics() {
+  daemon_state >"$evidence/admission-timeout-state.json" 2>&1
+  docker exec "$pg_container" psql -U legion -d legion -tAc \
+    "select key, tree, parent, phase, status, rank from issues order by key" >"$evidence/admission-timeout-records.txt" 2>&1
+  dispatch_get "issues/$child_issue/events" >"$evidence/admission-timeout-child-events.json" 2>&1
+  note "admission diagnostics: $evidence/admission-timeout-state.json, $evidence/admission-timeout-records.txt, $evidence/admission-timeout-child-events.json"
+}
+
+# ---- the runtime seam: a pane's session file and its issue's workspace live on this host --------
+claim_session_file() {
+  local issue=$1 role=$2
+  "$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" |
+    jq -er --arg issue "$issue" --arg role "$role" \
+      '[.claims[] | select(.issue == $issue and .role == $role and .sessionFile != null and .sessionFile != "")] | last | .sessionFile'
+}
+claim_session_text() {
+  local f
+  f=$(claim_session_file "$1" "$2") || return 1
+  cat -- "$f"
+}
+workspace_jj() {
+  local issue=$1
+  shift
+  jj -R "$state/workspaces/$repo/${issue,,}" "$@"
+}
+
+# ---- the production guards -------------------------------------------------------------------
+# A pane that can reach the operator's Dispatch or Envoy is not a scratch pane. Every registered
+# pane's OMP environment must name this rig's servers before the proof sends it an instruction.
+omp_descendant() {
+  local queue=("$1") pid children
+  while [ "${#queue[@]}" -gt 0 ]; do
+    pid=${queue[0]}
+    queue=("${queue[@]:1}")
+    if [ "$(basename "$(tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null | sed -n 1p)")" = omp ]; then
+      printf '%s\n' "$pid"
+      return 0
+    fi
+    children=$(cat /proc/"$pid"/task/*/children 2>/dev/null || true)
+    for child in $children; do queue+=("$child"); done
+  done
+  return 1
+}
+claim_pane_pid() {
+  daemon_state | jq -er --arg issue "$1" --arg role "$2" \
+    '(if $role == "architect" then .issues[$issue].architect else .issues[$issue].workers[$role].claim end).locator.incarnation | split(":")[0]'
+}
+pane_value() { tr '\0' '\n' <"/proc/$1/environ" | sed -n "s/^$2=//p"; }
+# endpoint_mismatch OMP_PID prints the first rig endpoint the OMP process does not carry, or the
+# ANTHROPIC_API_KEY it must not carry: the agents' model is the configured route's, and a key in
+# OMP's environment would take the turn off that route.
+endpoint_mismatch() {
+  local omp=$1 name want got
+  for name in DISPATCH_URL DISPATCH_TOKEN_FILE ENVOY_URL ENVOY_NATS_URL; do
+    case "$name" in
+      DISPATCH_URL) want="http://127.0.0.1:$port_dispatch" ;;
+      DISPATCH_TOKEN_FILE) want="$state/secrets/dispatch-token" ;;
+      ENVOY_URL) want="http://127.0.0.1:$port_listener" ;;
+      ENVOY_NATS_URL) want="nats://127.0.0.1:$port_nats" ;;
+    esac
+    got=$(pane_value "$omp" "$name")
+    if [ "$got" != "$want" ]; then
+      printf '%s=%s, want %s\n' "$name" "${got:-<unset>}" "$want"
+      return 0
+    fi
+  done
+  if grep -qz '^ANTHROPIC_API_KEY=' "/proc/$omp/environ" 2>/dev/null; then
+    printf 'ANTHROPIC_API_KEY set, want unset\n'
+    return 0
+  fi
+  return 1
+}
+assert_claim_endpoints() {
+  local issue=$1 role=$2 pane_pid omp mismatch
+  pane_pid=$(claim_pane_pid "$issue" "$role") || fail "$role pane on $issue has no process locator"
+  omp=$(omp_descendant "$pane_pid") || fail "$role pane on $issue (pid $pane_pid) has no OMP process"
+  if mismatch=$(endpoint_mismatch "$omp"); then
+    fail "ABORT: $role pane on $issue (OMP pid $omp) has $mismatch"
+  fi
+}
+# pane_watcher checks every pane the daemon launches — including those it starts on its own —
+# as soon as its OMP process exists, which is before the plugin registers and before any turn.
+# A mismatch is recorded, the private tmux server is killed so no agent can act, and the next
+# bounded wait aborts naming the pane.
+pane_watcher() {
+  local claims inc issue role omp mismatch
+  trap - EXIT ERR
+  set +e
+  while kill -0 "$$" 2>/dev/null; do
+    if claims=$("$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" 2>/dev/null); then
+      while IFS=$'\t' read -r inc issue role; do
+        grep -qF "$inc " "$evidence/pane-endpoints-checked.txt" 2>/dev/null && continue
+        omp=$(omp_descendant "${inc%%:*}") || continue
+        if mismatch=$(endpoint_mismatch "$omp"); then
+          printf '%s pane on %s (incarnation %s, OMP pid %s) has %s\n' "$role" "$issue" "$inc" "$omp" "$mismatch" \
+            >"$evidence/pane-endpoint-violation.txt"
+          TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
+          return 0
+        fi
+        printf '%s %s %s %s %s\n' "$inc" "$issue" "$role" "$omp" "$(date -u +%FT%T.%3NZ)" >>"$evidence/pane-endpoints-checked.txt"
+      done < <(jq -r '.claims[] | select(.locator != null) | [.locator.incarnation, .issue, .role] | @tsv' <<<"$claims")
+    fi
+    sleep 0.2
+  done
+}
+# unchecked_launches prints every incarnation the daemon launched that the watcher has not checked.
+unchecked_launches() {
+  local inc
+  for inc in $(jq -R -r 'fromjson? | select(.msg == "supervise: launched") | .incarnation' "$evidence/logs/daemon.log"); do
+    grep -qF "$inc " "$evidence/pane-endpoints-checked.txt" || printf '%s\n' "$inc"
+  done
+}
+# every_launch_checked fails naming any incarnation the daemon launched that the watcher never saw.
+# The watcher checks a pane once its OMP process exists, so a launch made moments before this check
+# is given a bounded wait to be seen.
+every_launch_checked() {
+  timeout_hook=report_unchecked_launches
+  until_true 60 "every launched pane to be endpoint-checked" no_unchecked_launches
+  timeout_hook=
+}
+no_unchecked_launches() { [ -z "$(unchecked_launches)" ]; }
+report_unchecked_launches() { note "launched panes never endpoint-checked: $(unchecked_launches | tr '\n' ' ')"; }
+
+rig_sessions_json() {
+  jq -R -s -c 'split("\n") | map(fromjson? | select(.msg == "api: claim registered") | .session) | unique' \
+    "$evidence/logs/daemon.log"
+}
+# production_audit replays production Dispatch events since the baseline and fails on any event a
+# rig session authored, any event naming this rig's project key, and any rig session on the
+# production Envoy listener. The baseline event itself is the positive control that the replay ran.
+production_audit() {
+  local sessions bearer events envoy found=0
+  audited=1
+  sessions=$(rig_sessions_json)
+  printf '%s\n' "$sessions" >"$evidence/rig-sessions.json"
+  envoy=$(curl -fsS --max-time 10 "$prod_envoy_url/v1/sessions") || { printf 'could not read %s/v1/sessions\n' "$prod_envoy_url"; return 1; }
+  envoy=$(jq -c --argjson ids "$sessions" --arg work "$work" '[.[] | select((.session_id as $s | $ids | index($s)) or ((.dir // "") | startswith($work)))]' <<<"$envoy")
+  printf '%s\n' "$envoy" >"$evidence/production-envoy-rig-sessions.json"
+  if [ "$envoy" != "[]" ]; then
+    printf 'production Envoy listener holds rig sessions: %s\n' "$envoy"
+    found=1
+  fi
+  if [ "$prod_baseline" = none ]; then
+    printf 'no user-level Dispatch configuration exists, so no production Dispatch fallback was possible\n'
+    return "$found"
+  fi
+  bearer=$work/production-dispatch-bearer
+  (umask 077 && printf '%s\n' "$prod_token" >"$bearer")
+  # A refusal of the feed is printed on stderr; the replay's close, resubscribe and duplicate lines
+  # carry no event and are not counted, so an event a redial repeats counts once. The probe takes
+  # its cursor from Dispatch's own events_start, so a --since the server clamps to its head leaves
+  # the events after that head counted, not written off as duplicates.
+  bun "$root/scripts/e2e/lib/dispatch-live-events.ts" \
+    --url "$prod_dispatch_url" --bearer-file "$bearer" --since "$((prod_baseline - 1))" --timeout 25 \
+    >"$work/production-events.jsonl" || true
+  rm -f "$bearer"
+  events=$(jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson baseline "$prod_baseline" '
+    [.[] | .event | select(. != null)] |
+    {control: any(.[]; .id == $baseline), count: length,
+     rig: [.[] | select((.actor.id as $a | $ids | index($a)) or (tostring | contains($project)))
+       | {id, issue_key, type, actor: .actor.id, created_at}]}' "$work/production-events.jsonl")
+  printf '%s\n' "$events" >"$evidence/production-dispatch-audit.json"
+  if ! jq -e '.control' >/dev/null <<<"$events"; then
+    printf 'production Dispatch replay did not return its baseline event %s\n' "$prod_baseline"
+    return 1
+  fi
+  if ! jq -e '.rig == []' >/dev/null <<<"$events"; then
+    printf 'production Dispatch has rig-authored events: %s\n' "$(jq -c .rig <<<"$events")"
+    found=1
+  fi
+  printf 'production audit: %s events replayed since %s, rig events %s, rig Envoy sessions %s\n' \
+    "$(jq -r .count <<<"$events")" "$prod_baseline" "$(jq -c .rig <<<"$events")" "$envoy"
+  return "$found"
+}
+
+# held_kill_ready ISSUE SEEN: the implementer's current incarnation is one the proof has not
+# killed yet and the pane watcher has already endpoint-checked, so killing it loses no evidence.
+held_kill_ready() {
+  local inc
+  inc=$(claim_incarnation "$1" implementer) || return 1
+  case "$2" in *" $inc "*) return 1 ;; esac
+  grep -qF "$inc " "$evidence/pane-endpoints-checked.txt"
+}
+held_or_relaunched() {
+  issue_phase "$1" held && return 0
+  local inc
+  inc=$(claim_incarnation "$1" implementer) || return 1
+  [ "$inc" != "$2" ]
+}
+assert_held_snapshot() {
+  local file=$1
+  jq -e --arg issue "$held_issue" '
+    .issues[$issue].phase == "held" and .issues[$issue].workers.implementer.claim.state == "failed"
+  ' "$file" >/dev/null
+}
+assert_ready_gate_closed() {
+  local file=$1
+  jq -e --arg issue "$root_issue" '
+    .issues[$issue].phase == "merging" and .issues[$issue].designGate.currentVersion > .issues[$issue].designGate.approvedVersion
+  ' "$file" >/dev/null
+}
+# await_tree_suspended ISSUE WHAT waits for ISSUE's tree architect to be suspended once its tree
+# lingers. The daemon holds that suspension for the architect's turn and names it no deadline
+# (packages/daemon/internal/supervise/suspend.go, holdSuspension), so the wait's bound is the
+# proof's turn budget, phase_seconds. A timeout prints the claim as `legion claims list` shows it:
+# working with its suspension held is a turn still running; idle and held, a stop the runtime keeps
+# refusing; neither suspended nor held, no suspension held for it (a start dropped the hold, or a
+# daemon restart forgot it before the outbox asked again).
+suspension_issue=
+await_tree_suspended() {
+  suspension_issue=$1
+  timeout_hook=report_architect_suspension
+  until_true "$phase_seconds" "$2" tree_suspended "$1"
+  timeout_hook=
+}
+report_architect_suspension() {
+  note "the architect of $suspension_issue in legion claims list: $("$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" |
+    jq -c --arg issue "$suspension_issue" '[.claims[] | select(.issue == $issue and .role == "architect")
+      | {state, suspensionHeld: (.suspensionHeld // false), suspendedBy: (.suspendedBy // null), pending: (.pending.id // null)}]')"
+}
+# The design gate in the daemon's state: closed while the spec's current version is past the one a
+# human approved, open while the approved version is the current one; design_gate_version ISSUE
+# prints the spec version the gate currently names.
+design_gate_closed() {
+  daemon_state | jq -e --arg issue "$1" '.issues[$issue].designGate.currentVersion > .issues[$issue].designGate.approvedVersion' >/dev/null
+}
+design_gate_open() {
+  daemon_state | jq -e --arg issue "$1" '.issues[$issue].designGate.approvedVersion == .issues[$issue].designGate.currentVersion' >/dev/null
+}
+design_gate_version() { daemon_state | jq -er --arg issue "$1" '.issues[$issue].designGate.currentVersion'; }
+# spec_event ISSUE TYPE VERSION: the issue's Dispatch event log carries the TYPE event
+# (artifact.version or artifact.approved) naming the spec ($artifact_id) at VERSION; spec_event_in
+# TYPE VERSION reads a saved log on stdin. The spec is not the issue's only document (the planner's
+# plan is another), so the event is matched by artifact as well as by version: the number an
+# artifact.approved payload carries bare and an artifact.version payload as its version record's.
+spec_event() { dispatch_events "$1" | spec_event_in "$2" "$3"; }
+spec_event_in() {
+  jq -e --arg type "$1" --argjson version "$2" --arg artifact "$artifact_id" '
+    any(.[]; .type == $type and .payload.artifact_id == $artifact
+      and (.payload.version | if type == "object" then .number else . end) == $version)
+  ' >/dev/null
+}
+# The decision block the proof inserts into the spec as an architect would (skills/dispatch/
+# SKILL.md, "Asks and ask blocks"), and its question, by which the ask settlement indexes
+# from it is found.
+carry_question='Stage 3 proof question: keep or drop the smoke paragraph?'
+carry_block=$(printf ':::ask{urgency="high" multiple="false"}\n%s\n\n- Keep: the paragraph stays.\n- Drop: the paragraph goes.\n:::\n' "$carry_question")
+# spec_block_ask ISSUE prints the id of the open ask Dispatch's settlement indexed from the proof's
+# decision block (the ask with that block's question and a block_id), and fails while there is none.
+spec_block_ask() {
+  dispatch_get "issues/$1/asks?state=open" |
+    jq -er --arg question "$carry_question" 'first(.[] | select(.block_id != null and .question == $question)) | .id'
+}
+# approval_requests_in counts the approval requests ever opened on an issue in the event log it
+# reads on stdin: the ask.opened events whose ask is an approval, not a question.
+approval_requests_in() { jq '[.[] | select(.type == "ask.opened" and .payload.kind == "approval")] | length'; }
+
+begin prerequisites
+refuse_leftovers legion-e2e3
+for tool in go docker jq curl python3 tmux bun mise secrets agent-secrets gh shellcheck jj pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+# Legion's two role Apps, this deployment's own unless the App inputs name another's, proved
+# against GitHub here, before the run writes anything (lib/github-apps.sh); legion.yaml's
+# github_apps is the block proved.
+require_app_inputs implement review
+write_github_apps implement review
+read_app_logins
+# STAGE3_FROM is a development aid for iterating on the later scenarios against a fresh rig; a run
+# with it set is never the proof and never prints PASS. `held` skips the first issue's workflow:
+# the proof human closes that root, freeing its admission slot as the merge's close would, and the
+# credential and idle-read checks read STAGE3_PR (default: the newest smoke pull request) in place
+# of its pull request. `restart` also skips the held-worker scenario. STAGE3_UNTIL is the other
+# development aid: `prerequisites` stops once this checkpoint has passed, before the rig exists, and
+# `rework` drives the first issue through its review rounds and the final review, to the reviewer's
+# approval and the issue in accepting, then skips every later scenario.
+from=${STAGE3_FROM:-}
+case "$from" in
+  "" | held | restart) ;;
+  *) fail "STAGE3_FROM must be held or restart, not $from" ;;
+esac
+until=${STAGE3_UNTIL:-}
+case "$until" in
+  "" | prerequisites | rework) ;;
+  *) fail "STAGE3_UNTIL must be prerequisites or rework, not $until" ;;
+esac
+[ -z "$from" ] || [ -z "$until" ] || fail "set STAGE3_FROM or STAGE3_UNTIL, not both"
+[ "$model_route" != gateway ] || command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
+# The bridge dials the production Envoy NATS by the operator's fully-qualified name for it, never
+# a bare alias a resolver's search domain would complete. The value is never printed.
+upstream_nats=${SMOKE_UPSTREAM_NATS:-}
+upstream_nats=${upstream_nats#"${upstream_nats%%[![:space:]]*}"}
+upstream_nats=${upstream_nats%"${upstream_nats##*[![:space:]]}"}
+[ -n "$upstream_nats" ] ||
+  fail "SMOKE_UPSTREAM_NATS is unset: the production Envoy NATS the GitHub bridge subscribes on, by its fully-qualified name (the nats:// URL the operator's envoy.json names as envoy.natsUrls)"
+# One URL: optional scheme and user info, a host with a dot, optional port, nothing after it (the
+# client dials what follows the last "://"); scripts/e2e/lib/envoy-bridge.ts holds the same
+# pattern.
+nats_url='^([A-Za-z][A-Za-z0-9+.-]*://)?([^@/?#,[:space:]]+@)?[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+(:[0-9]+)?/?$'
+[[ "$upstream_nats" =~ $nats_url ]] ||
+  fail "SMOKE_UPSTREAM_NATS is not one NATS URL naming a fully-qualified host: a bare alias resolves through whatever search domain the box has; name the production Envoy NATS as the operator's envoy.json does (envoy.natsUrls, nats://<host>.<tailnet>.ts.net:4222)"
+development=${from:+from $from}${until:+until $until}
+# Every pane's gh and jj are whatever the daemon's PATH gives, since every pane inherits it
+# (paneEnvAllowList, packages/daemon/internal/runtime/tmux/environment.go, includes PATH). This
+# box's own gh and jj resolve through the dotfiles+mise shim chain, which a pane's own relocated
+# HOME breaks (real_bin_path, lib/rig.sh); the proof starts the daemon with both tools' real
+# binaries first on its PATH (start_daemon) instead. real_gh is also in-agent-credentials' own
+# negative control and note below.
+real_gh=$(mise which gh) || fail "mise has no gh"
+realbin=$(real_bin_path "$work/realbin" gh jj tmux)
+require_proof_human
+gh repo view "$repo" --json name >/dev/null || fail "the devbox's ordinary gh cannot read $repo"
+mkdir -p "$evidence/logs" "$state" "$work/xdg" "$work/tmux"
+chmod 0700 "$state" "$work/xdg" "$work/tmux"
+make_omp_home "$omp_home"
+# The model route, installed while this shell still holds the operator's HOME and XDG directories
+# (the gateway route's key command runs hawk-token under them; the key-file route's needs none of
+# it, but is installed the same way, here, for one setup step regardless of route). The gateway
+# route's first mint is its preflight: a locked keyring stops the run here, by name. The key-file
+# route's own preflight read stops the run here just as loudly if the file cannot be read. The key
+# command's log is evidence either way. The box-login route has no key command: it links the
+# profile to the operator's login database, names the operator's own Oh My Pi build (which the
+# panes then run instead of .omp-pin), and records both in $evidence/model-gateway/box-login.route.
+key_command=
+box_pin=
+case "$model_route" in
+gateway)
+  key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
+    fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
+  ;;
+key-file)
+  key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
+  [ -n "$key_file" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
+  key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$key_file") ||
+    fail "the agents' model route through the key file could not be installed (the reason is above)"
+  ;;
+box-login)
+  box_pin=$(bash "$root/scripts/e2e/lib/install-box-login-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --operator-home "$operator_home") ||
+    fail "the agents' model route on the operator's own Oh My Pi login could not be installed (the reason is above)"
+  ;;
+esac
+# The call record (.log/.calls) always sits under $evidence/model-gateway, beside $key_command
+# itself for the gateway route; the key-file route's own $key_command lives under its own
+# --key-dir instead, under $work, which cleanup removes unconditionally, so the record is
+# addressed separately. The box-login route keeps no call record.
+key_record=${key_command:+$evidence/model-gateway/$(basename "$key_command")}
+pinned=$(sed -n 's/^  default: //p' "$profile_agent/config.yml")
+[ -n "$pinned" ] || fail "the profile's config.yml names no default model role: $profile_agent/config.yml"
+if [ -n "$key_command" ]; then
+  note "the agents' model route: $pinned through $model_route, keyed by $key_command"
+else
+  note "the agents' model route: $pinned through $model_route, the operator's own stored Oh My Pi login (no key), on $box_pin"
+fi
+export XDG_STATE_HOME="$work/xdg"
+export TMUX_TMPDIR="$work/tmux"
+pass
+if [ "$until" = prerequisites ]; then
+  ok=1
+  echo "stage 3 e2e: development run $development finished (not the proof)"
+  exit 0
+fi
+
+begin rig
+(umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/envoy-token" &&
+  printf 'Authorization: Bearer %s\n' "$(cat "$work/envoy-token")" >"$work/envoy-auth-header" &&
+  head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/dispatch-token" &&
+  printf 'Authorization: Bearer %s\n' "$(cat "$work/dispatch-token")" >"$work/dispatch-auth-header" &&
+  printf 'X-Dispatch-User: %s\n' "$proof_human_user" >"$work/dispatch-human-header" &&
+  head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/operator-token" &&
+  head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/postgres-password")
+chmod 0600 "$work"/*token "$work"/*-header "$work/postgres-password"
+(cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
+(cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener && go build -o "$work/envoy-dispatch" ./cmd/dispatch)
+built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" "$work/envoy-listener" "$work/envoy-dispatch") || fail "lib/built-from.sh could not say what the run built"
+while IFS= read -r line; do note "$line"; done <<<"$built"
+docker ps >/dev/null
+# Docker assigns the containers' host ports when it binds them, so neither can lose a race.
+docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
+  -e POSTGRES_USER=legion -e POSTGRES_PASSWORD="$(cat "$work/postgres-password")" -e POSTGRES_DB=dispatch \
+  -p "127.0.0.1::5432" mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 >/dev/null
+port_pg=$(docker port "$pg_container" 5432/tcp | sed -n '1s/.*://p')
+[ -n "$port_pg" ] || fail "docker assigned Postgres no host port"
+until_true 60 "Postgres to accept TCP connections" docker exec "$pg_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d dispatch
+docker exec "$pg_container" createdb -U legion legion
+docker run -d --name "$nats_container" --cpus 1 --memory 512m -p "127.0.0.1::4222" nats:2.10 -js >/dev/null
+port_nats=$(docker port "$nats_container" 4222/tcp | sed -n '1s/.*://p')
+[ -n "$port_nats" ] || fail "docker assigned NATS no host port"
+until_true 60 "NATS to be ready" sh -c "docker logs '$nats_container' 2>&1 | grep -q 'Server is ready'"
+start_listener
+start_dispatch
+dispatch_human POST projects "$(jq -cn --arg key "$project" --arg name "Stage 3 proof $project" '{key:$key,name:$name}')" >/dev/null
+dispatch_human PUT "settings/repo-projects/$repo" "$(jq -cn --arg project "$project" '{project:$project,default:true}')" >/dev/null
+# This is the production Envoy ingress bridge, subscribe-only from its perspective. GitHub events
+# are observed, never manufactured, and only the smoke repository is forwarded to this run's NATS.
+SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://127.0.0.1:$port_nats" \
+  SMOKE_UPSTREAM_NATS="$upstream_nats" \
+  start_process bridge env -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
+    bun run "$root/scripts/e2e/lib/envoy-bridge.ts"
+until_true 90 "the GitHub ingress bridge to report ready" grep -q 'BRIDGE READY' "$evidence/logs/bridge.log"
+(cd "$root" && bun install --frozen-lockfile >/dev/null)
+# The repository's pin, or under box-login the operator's own build: panes sharing the operator's
+# login must refresh it with the refresh-race fix (lib/install-box-login-route.sh). Resolved before
+# the plugin installs, which run the same build as the daemon and panes, never .omp-pin behind its
+# back: under box-login the profile's agent.db is the operator's login database.
+pin=${box_pin:-$(<"$root/.omp-pin")}
+mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
+envoy_manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy" --omp "$pin")
+manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion" --omp "$pin")
+cat >"$work/instructions.md" <<'EOF'
+# Stage 3 proof instructions
+
+This is a throwaway workflow proof. A tree's root architect starts its tree from the daemon's
+`catch-up` notice as its role says: it writes the spec in the issue's own primary document,
+requests the spec's approval when the design gate policy arms the gate, and registers the gate,
+then waits. Apart from that, do not act until a human Dispatch message targeted at your own session
+gives the next exact proof operation; it arrives in your session as a message to you. A message you
+only find by reading the issue (its events, a search) was sent to another session, even on your
+issue, and any other notice is not an instruction: neither is yours to act on. One task waits for
+no message: a production check's (its first line `Production check of <key>: …`, handed to the
+implementer once the merge closed its issue), since a closed issue takes no Dispatch write, so none
+can reach it. Act on that task as it is written: this proof has no production and no deploy role,
+so the look leaves `Production: pending deploy of <merge commit>` on the pull request's body (on the
+last look, writes on the pull request that the check did not run because production did not carry
+the merge within the bound) and reports verdict pending with the legion tool's handoff_complete,
+committing nothing. Follow each instruction precisely, use the Go-daemon Legion tools and handoffs,
+and do not create work outside the issue's smoke branch.
+EOF
+start_daemon
+note "project $project, profile $profile, plugins $(jq -r '.name + "@" + .version' "$envoy_manifest") and $(jq -r '.name + "@" + .version' "$manifest"), NATS/Dispatch/daemon ports $port_nats/$port_dispatch/$port_daemon"
+pane_watcher &
+watcher_pid=$!
+production_baseline
+note "production Dispatch audit baseline: event ${prod_baseline} on ${prod_dispatch_url:-<no user-level Dispatch>}"
+pass
+
+begin admission
+root_issue=$(new_issue "Primary durable workflow profile")
+held_issue=$(new_issue "Budget exhaustion sentinel")
+nochange_issue=$(new_issue "No-change close at the design gate")
+restart_issue=$(new_issue "Restart outbox compass")
+set_status "$root_issue" todo
+set_status "$held_issue" todo
+set_status "$nochange_issue" todo
+set_status "$restart_issue" todo
+until_true 180 "two roots admitted and two waiting in Dispatch rank order" sh -c \
+  "'$work/legion' state --json --port '$port_daemon' | jq -e --arg a '$root_issue' --arg b '$held_issue' --arg c '$nochange_issue' --arg d '$restart_issue' '.admission.cap == 2 and .admission.active == [\$a,\$b] and .admission.waiting == [\$c,\$d]'"
+child_issue=$(new_issue "Dependent admission leaf" "$root_issue")
+set_status "$child_issue" todo
+timeout_hook=admission_diagnostics
+until_true 120 "the child to join its first tree without taking a slot" child_is_slotless "$child_issue" "$root_issue"
+timeout_hook=
+state_file admission
+note "active roots: $(jq -c .admission.active "$evidence/admission.json"); waiting: $(jq -c .admission.waiting "$evidence/admission.json"); child $child_issue remains slotless under $root_issue"
+# The slotless check is everything this child was filed for, so the proof human takes it out of
+# the workflow at once: a child still in the workflow would keep the first root's close waiting
+# after its merge, and the first root is accepted below, in retro-handoff.
+set_status "$child_issue" backlog
+until_true 300 "$child_issue to leave the workflow" issue_phase "$child_issue" "done"
+note "the proof human parked $child_issue (backlog): it takes no further turns and holds no issue above it"
+pass
+
+begin panes-pinned-to-the-rig-before-any-agent-turn
+# The two admitted architects are the only panes before any phase worker: each takes its first turn
+# from the daemon's catch-up notice, not from the proof. Every later pane is checked when it
+# registers and again before each instruction. An architect whose root already waits on a person
+# (it registered its closed gate and stays live) was checked by the pane watcher at its launch.
+wait_for_architect "$root_issue"
+wait_for_architect "$held_issue"
+note "$(wc -l <"$evidence/pane-endpoints-checked.txt") pane checks: DISPATCH_URL=http://127.0.0.1:$port_dispatch, DISPATCH_TOKEN_FILE=$state/secrets/dispatch-token, ENVOY_URL=http://127.0.0.1:$port_listener, ENVOY_NATS_URL=nats://127.0.0.1:$port_nats"
+pass
+
+# The first issue end to end: the gate, every phase, three review rounds, the architect's acceptance,
+# the READY gate, the daemon's merge, which closes the issue, and the production check after the
+# close, through the bound's last look.
+primary_issue() {
+  begin primary-architect-posts-and-registers-spec
+  # Every root's architect registers a closed gate on its own and gives its slot back, so the slot
+  # the root left at registration went to a waiting root (no-change, restart), and the approved root
+  # takes one back only once one of those registers its own gate in turn: the bound is twice
+  # architect_registers_gate's 900 s for that registration. admission_cap stays 2: admission order
+  # and the slotless child above are proved against it, and every root of the run gives its slot
+  # back at its registration, so the slot always comes back within that bound.
+  drive_gate "$root_issue" "Stage 3 proof gate operation" 1800
+  artifact_id=$gate_artifact
+  note "architect registered $artifact_id version $gate_version and $root_issue waited on the person without a slot; the human's approval answered it, the root took a slot back, and the daemon moved it to planning"
+  pass
+
+  begin primary-planner-handoff
+  send_agent "$root_issue" planner "Stage 3 proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
+  wait_for_phase "$root_issue" implementing
+  assert_handoff_committer "$root_issue" planner planning 0
+  wait_for_worker "$root_issue" implementer
+  pass
+
+  begin primary-implementer-pull-request-and-handoff
+  send_agent "$root_issue" implementer "Stage 3 proof implementation operation: make the smallest one-file change described by this issue in your $repo workspace, commit it on legion/$root_issue, open its pull request, record the required implementation proof and handoff, then call the legion tool's handoff_complete. Do not merge."
+  until_true 900 "implementer pull request on legion/$root_issue" sh -c \
+    "gh -R '$repo' pr list --head 'legion/$root_issue' --state open --json number | jq -e 'length == 1' >/dev/null"
+  pr_number=$(gh -R "$repo" pr list --head "legion/$root_issue" --state open --json number --jq '.[0].number')
+  # Each pane commits as its role's App: the planner's handoff as the review App's bot, the
+  # implementer's change as the implement App's (role_app), author and committer alike.
+  authors=$(gh api "repos/$repo/pulls/$pr_number/commits" --jq '[.[] | .commit.author.name + "|" + .commit.committer.name] | unique | join(",")')
+  want_authors=$(jq -nr --arg implementer "$(role_app implementer)" --arg planner "$(role_app planner)" \
+    '[$implementer + "|" + $implementer, $planner + "|" + $planner] | unique | join(",")')
+  [ "$authors" = "$want_authors" ] ||
+    fail "$repo#$pr_number commits are authored|committed by $authors, want the implementer's and planner's App bots for both: $want_authors"
+  wait_for_phase "$root_issue" testing
+  assert_round_handoff "$root_issue" 0
+  assert_handoff_committer "$root_issue" implementer implementing 0
+  # The spec's one-file change: the file every review round's correction must land in.
+  smoke_file=$(pull_request_product_files)
+  if [ -z "$smoke_file" ] || [ "$(wc -l <<<"$smoke_file")" != 1 ]; then
+    fail "$repo#$pr_number changes product files '$(tr '\n' ' ' <<<"$smoke_file")', want the spec's one file"
+  fi
+  wait_for_worker "$root_issue" tester
+  note "implementer opened $repo#$pr_number on legion/$root_issue changing $smoke_file, its commits authored and committed by the implementer and planner App bots, and its handoff advanced the daemon to testing"
+  pass
+
+  begin primary-tester-pass
+  send_agent "$root_issue" tester "Stage 3 proof test operation: inspect the implementer's actual one-file change and pull request #$pr_number, run a focused observable check, record the required test handoff with verdict pass, then call the legion tool's handoff_complete with verdict pass."
+  wait_for_phase "$root_issue" reviewing
+  assert_handoff_committer "$root_issue" tester testing 0
+  wait_for_worker "$root_issue" reviewer
+  pass
+
+  # Three real GitHub changes-requested reviews, each posted by the reviewer pane and ended by its
+  # completion, exercise the round counter, the return to implementing, and the third `pr-blocked`
+  # publication. Every recovery repeats the real workers.
+  for round in 1 2 3; do
+    begin "review-round-$round-changes-requested"
+    # A review that names no correction leaves the implementer nothing it may change under a spec
+    # that pins the smoke line: it deliberated past the wait or escalated to a human. Each round
+    # names one concrete correction the spec permits.
+    review_note=""
+    if [ "$round" = 2 ]; then
+      # Round 1 left the bot's thread answered and resolved by the implementer: the reviewer, the
+      # independent party, adjudicates the finding now, with its reply, and names the thread to the
+      # implementer as accepted (already resolved, the implementer having closed it first).
+      review_note="A bot's review thread on the pull request asks whether the file change is needed, and the implementer answered it: judge the answer, reply on that thread in your own words, and name its thread id to the implementer as accepted, as your role says for a bot's thread (the change is needed: the spec asks for it)."
+    fi
+    request_changes_as_reviewer "$root_issue" "$round" "Stage 3 proof review, round $round: append the line \`$(round_line "$round")\` to the end of the same file this pull request changes, below the lines already there, and change nothing else. The spec permits one more line in that file for a review round, so this correction is in scope." "$review_note"
+    # The round ends when the reviewer completes it: its review, its handoff commit, its completion.
+    wait_for_phase "$root_issue" implementing 1200
+    assert_handoff_committer "$root_issue" reviewer reviewing "$round"
+    assert_review_of_own_handoff "$root_issue" "$round" CHANGES_REQUESTED
+    until_true 180 "round $round to write in_progress on the Dispatch board" dispatch_status_is "$root_issue" in_progress
+    wait_for_worker "$root_issue" implementer
+    if [ "$round" = 3 ]; then
+      until_true 180 "the third review round to post pr-blocked" review_cap_posted "$root_issue"
+      until_true 180 "the architect to receive the pr-blocked notice" notice_delivered "$root_issue" architect "$(notice_needle pr-blocked "$root_issue")"
+      note "round three returned to in_progress and posted pr-blocked to Dispatch and the architect topic"
+      pass
+      break
+    fi
+    bot_note=""
+    if [ "$round" = 1 ]; then
+      # A CI bot's review thread: the proof human is a GitHub App, a bot account that is none of
+      # Legion's role Apps. The implementer answers it as any thread it answers and resolves it
+      # with its own gh (the pull request author's resolveReviewThread); the reviewer adjudicates
+      # the finding in round 2.
+      bot_thread=$(post_bot_thread 2>"$work/bot-thread.err") ||
+        fail "the proof human could not open a bot review thread on pull request #$pr_number: $(cat "$work/bot-thread.err")"
+      bot_note=" A bot also left one review thread on the pull request asking whether the file change is needed: answer it and resolve it as your role says for a thread you answer (it is needed: the spec asks for it), before you complete."
+    fi
+    send_agent "$root_issue" implementer "Stage 3 proof correction round $round: make the correction the review names (append the line \`$(round_line "$round")\` to the file this pull request changes), push it to the existing pull request #$pr_number, write the implementation handoff, then call the legion tool's handoff_complete: a push alone does not finish this round.$bot_note"
+    # A correction round runs the implementer's whole loop (the edit, the push, the handoff commit,
+    # the completion) as the retro does, and took past 600 s in acceptance runs: 1200 s.
+    wait_for_phase "$root_issue" testing 1200
+    until_true 120 "round $round's correction on pull request #$pr_number" round_correction_pushed "$round"
+    if [ "$round" = 1 ]; then
+      until_true 120 "the implementer's answer on the bot's review thread, and its own resolution of it" bot_thread_resolved "$bot_thread" implementer
+      note "the implementer answered the bot's review thread $bot_thread and resolved it with its own gh"
+    fi
+    if [ "$round" = 2 ]; then
+      until_true 120 "the Legion reviewer's reply on the bot's review thread, the thread resolved" bot_thread_resolved "$bot_thread" reviewer
+      note "the bot's review thread $bot_thread carries the Legion reviewer's reply and is resolved: the reviewer adjudicated it and named it to the implementer"
+    fi
+    assert_round_handoff "$root_issue" "$round"
+    assert_handoff_committer "$root_issue" implementer implementing "$round"
+    wait_for_worker "$root_issue" tester
+    send_agent "$root_issue" tester "Stage 3 proof retest round $round: verify the correction on pull request #$pr_number, write the tester handoff with verdict pass, and complete the phase."
+    wait_for_phase "$root_issue" reviewing
+    assert_handoff_committer "$root_issue" tester testing "$round"
+    wait_for_worker "$root_issue" reviewer
+    pass
+  done
+
+  begin final-review-cycle
+  send_agent "$root_issue" implementer "Stage 3 proof final correction: make the correction the round 3 review names (append the line \`$(round_line 3)\` to the file this pull request changes), push it to pull request #$pr_number, write the implementation handoff, then call the legion tool's handoff_complete: a push alone does not finish this round."
+  # The same whole correction loop as each review round: 1200 s.
+  wait_for_phase "$root_issue" testing 1200
+  until_true 120 "round 3's correction on pull request #$pr_number" round_correction_pushed 3
+  assert_round_handoff "$root_issue" 3
+  assert_handoff_committer "$root_issue" implementer implementing 3
+  wait_for_worker "$root_issue" tester
+  send_agent "$root_issue" tester "Stage 3 proof final test: verify pull request #$pr_number, record the tester pass handoff, then complete it."
+  wait_for_phase "$root_issue" reviewing
+  assert_handoff_committer "$root_issue" tester testing 3
+  wait_for_worker "$root_issue" reviewer
+  # The acceptance's negative control, at the one point the issue stands still in reviewing: the
+  # tester's completion started the reviewer, which waits for the proof's instruction, so a sign_off
+  # sent now meets the daemon's one rule for it, accepted in accepting alone, and is refused
+  # (SIGNOFF_OUTSIDE_ACCEPTING), read in the architect's session by the refusal's own sentence, and
+  # moves nothing.
+  send_agent "$root_issue" architect "Stage 3 proof acceptance control: $root_issue is still in reviewing, before the reviewer's decision; call the legion tool's sign_off for $root_issue now anyway, record its exact refusal, and then wait: do not retry it."
+  until_true 180 "the architect to observe the SIGNOFF_OUTSIDE_ACCEPTING refusal" session_contains "$root_issue" architect "$root_issue is in phase reviewing, not accepting; this sign-off changed nothing"
+  issue_phase "$root_issue" reviewing >/dev/null || fail "$root_issue left reviewing on a sign_off sent before the reviewer's decision"
+  note "a sign_off in reviewing was refused SIGNOFF_OUTSIDE_ACCEPTING and moved nothing (negative control)"
+  approve_as_reviewer "$root_issue"
+  # The approval moves the issue to accepting, where no worker starts and the board keeps
+  # needs_review: the tree's architect, told by the reviewer's phase-finished notice, accepts with
+  # sign_off (retro-handoff) or sends the issue back. The wait is for accepting itself, read within
+  # a poll of the reviewer's completion; the architect acts on no notice under the proof's
+  # instructions, so the issue stands there until the proof's prompt.
+  until_true 600 "$root_issue to leave reviewing for accepting" issue_phase "$root_issue" accepting
+  state_file accepting
+  until_true 180 "the architect to receive the reviewer's phase-finished notice, its acceptance cue" notice_delivered "$root_issue" architect \
+    "$(notice_needle phase-finished "$root_issue")"'\n  message:\n    kind: phase-finished\n    role: reviewer\n    phase: reviewing'
+  # No worker starts at accepting: the implementer's claim holds no retro task (a start row's task
+  # is the claim's `pending` until the turn it started ends), and the daemon queued no status write.
+  pending_phase=$(claim_pending_phase "$root_issue" implementer)
+  [ "$pending_phase" != retro ] || fail "the implementer of $root_issue holds a retro task at accepting: the approval started a worker"
+  jq -e --arg issue "$root_issue" '[.pendingStatusWrites[]? | select(.issue == $issue)] | length == 0' "$evidence/accepting.json" >/dev/null ||
+    fail "a status write is pending for $root_issue at accepting, which writes none: $(jq -c --arg issue "$root_issue" '[.pendingStatusWrites[]? | select(.issue == $issue)]' "$evidence/accepting.json")"
+  dispatch_status_is "$root_issue" needs_review >/dev/null ||
+    fail "the board shows $root_issue $(dispatch_get "issues/$root_issue" | jq -r .status) at accepting, want needs_review, which the move to accepting leaves alone"
+  assert_handoff_committer "$root_issue" reviewer reviewing 3
+  assert_review_of_own_handoff "$root_issue" 3 APPROVED
+  note "the reviewer's approval moved $root_issue to accepting: no worker started (the implementer's claim holds ${pending_phase:+a $pending_phase task, }no retro task), the board still needs_review with no status write pending, and the architect holds the reviewer's phase-finished notice"
+  pass
+  [ "$until" != rework ] || return 0
+
+  begin retro-handoff
+  # The architect's acceptance: at accepting its sign_off moves the issue to retro, the daemon's
+  # one status write there (retro), and starts the implementer's retro. The prompt is the proof's
+  # instruction to accept; what the architect reads before it is its own instructions'.
+  send_agent "$root_issue" architect "Stage 3 proof acceptance: the reviewer approved pull request #$pr_number and $root_issue is in accepting; read the evidence as your instructions say and accept it with the legion tool's sign_off for $root_issue now."
+  wait_for_phase "$root_issue" retro 600
+  phase_change_logged "$root_issue" accepting retro sign_off ||
+    fail "the daemon log has no \"workflow: phase changed\" line moving $root_issue from accepting to retro on sign_off"
+  until_true 60 "the daemon's retro status on the Dispatch board" dispatch_status_is "$root_issue" retro
+  note "the architect's sign_off at accepting moved $root_issue to retro (workflow: phase changed from=accepting to=retro trigger=sign_off) and the board to retro"
+  # The sign-off starts the implementer's retro, whose task names the phase; the resumed implementer
+  # may finish it before the proof's instruction reaches it, so the prompt goes only while the
+  # issue sits in retro.
+  if issue_phase "$root_issue" retro >/dev/null; then
+    wait_for_worker "$root_issue" implementer
+    send_agent "$root_issue" implementer "Stage 3 proof retro: write the required retro handoff for pull request #$pr_number and complete the phase. Do not change the approved implementation."
+  fi
+  # The retro skill's fresh-eyes review is a mandatory subagent (4 min 12 s in one acceptance run),
+  # and the retro then commits, pushes, and edits the pull request body: a retro took 5 to 10
+  # minutes, so this wait allows 1200 s.
+  wait_for_phase "$root_issue" merging 1200
+  retro_reported "$root_issue" || fail "$root_issue reached merging with no implementer retro completion recorded"
+  wait_for_worker "$root_issue" merger
+  note "the implementer's retro completion advanced $root_issue to merging"
+  pass
+
+  begin ready-gated-on-new-spec-version
+  # A named primary-artifact upload creates version two and emits artifact.version. The gate must
+  # close on it, and this first closing is the gate-state negative control for the approval carry
+  # below: a human's whole-document upload is nobody's answer to a decision block, so Dispatch
+  # carries no approval to it (no artifact.approved names its version, no review is pinned to it)
+  # and only the human's own review reopens the gate. No READY is held yet, so that reopening
+  # releases nothing: a merging stint has one refusal-and-release cycle (a held READY is accepted at
+  # the first reopening, the daemon's advancePendingReady), and this proof spends it on the carry.
+  dispatch_human POST "issues/$root_issue/artifacts" \
+    "$(jq -cn --arg name spec.md --arg content "# Stage 3 smoke\n\nThe human revised this proof specification before READY.\n" '{name:$name,content:$content,summary:"Stage 3 gate re-close"}')" >/dev/null
+  until_true 120 "the human's new primary spec version to close the gate" design_gate_closed "$root_issue"
+  uploaded_version=$(design_gate_version "$root_issue")
+  until_true 60 "the artifact.version event naming spec version $uploaded_version on $root_issue" spec_event "$root_issue" artifact.version "$uploaded_version"
+  dispatch_events "$root_issue" >"$evidence/ready-gate-upload-events.json"
+  if spec_event_in artifact.approved "$uploaded_version" <"$evidence/ready-gate-upload-events.json"; then
+    fail "an artifact.approved event names spec version $uploaded_version, the human's whole-document upload, which answers no decision block"
+  fi
+  dispatch_get "artifacts/$artifact_id/reviews" >"$evidence/ready-gate-upload-reviews.json"
+  if jq -e --argjson version "$uploaded_version" 'any(.[]; .version == $version)' "$evidence/ready-gate-upload-reviews.json" >/dev/null; then
+    fail "a review is pinned to spec version $uploaded_version before anyone reviewed it"
+  fi
+  dispatch_human POST "artifacts/$artifact_id/reviews" '{"state":"approved"}' >/dev/null
+  until_true 120 "the human's review of spec version $uploaded_version to reopen the gate" design_gate_open "$root_issue"
+  note "the gate closed on spec version $uploaded_version, a whole-document upload, with no approval carried to it, and the human's own review reopened it"
+  # The decision block an architect would write, inserted at the end of the spec in a stand-in
+  # session's name through the edits route (dispatch_agent): its version closes the gate again, and
+  # that version is the one the merger's READY meets.
+  dispatch_agent POST "artifacts/$artifact_id/edits" \
+    "$(jq -cn --arg markdown "$carry_block" '{ops: [{op: "insert", after: "end", markdown: $markdown}]}')" >/dev/null
+  until_true 120 "the decision block's spec version to close the gate" design_gate_closed "$root_issue"
+  state_file ready-refused
+  send_agent "$root_issue" merger "Stage 3 proof READY operation: call the legion tool's handoff_complete with summary 'stage 3 ready gate proof' and ready true now. Record its exact refusal and then wait; do not retry it."
+  until_true 180 "merger to observe the READY 409 refusal naming the new version" session_contains "$root_issue" merger "READY refused: approve design version"
+  assert_ready_gate_closed "$evidence/ready-refused.json" || fail "the versioned design gate did not close before READY"
+  jq '.issues["'"$root_issue"'"].designGate.currentVersion = .issues["'"$root_issue"'"].designGate.approvedVersion' \
+    "$evidence/ready-refused.json" >"$evidence/ready-open-negative.json"
+  expect_failure ready-gate-not-reclosed assert_ready_gate_closed "$evidence/ready-open-negative.json"
+  assert_ready_gate_closed "$evidence/ready-refused.json" || fail "the READY gate did not restore after its negative control"
+  new_version=$(design_gate_version "$root_issue")
+  # The carry: the proof human answers the block, and nothing else changed since the version he
+  # approved, so Dispatch records his approval of the version the answer settles into itself. No
+  # review goes through the reviews route from here to awaiting_merge; the daemon's gate reopens on
+  # the carried artifact.approved, which releases the held READY.
+  until_true 60 "settlement to index the decision block as an open ask on $root_issue" spec_block_ask "$root_issue"
+  block_ask=$(spec_block_ask "$root_issue")
+  approval_requests_before=$(dispatch_events "$root_issue" | approval_requests_in)
+  dispatch_human POST "asks/$block_ask/answer" '{"selected":["Keep"],"expected_edited_at":null}' >/dev/null
+  wait_for_phase "$root_issue" awaiting_merge
+  carried_version=$((new_version + 1))
+  daemon_state | jq -e --arg issue "$root_issue" --argjson version "$carried_version" \
+    '.issues[$issue].designGate.approvedVersion == $version and .issues[$issue].designGate.currentVersion == $version' >/dev/null ||
+    fail "the daemon's gate is $(daemon_state | jq -c --arg issue "$root_issue" '.issues[$issue].designGate'), want spec version $carried_version, the answer's, approved and current"
+  # The newest review is the carry: pinned to the answer's version, in the proof human's own name,
+  # answering no approval request, with the carry's reason.
+  dispatch_get "artifacts/$artifact_id/reviews" >"$evidence/ready-gate-carry-reviews.json"
+  carried_review=$(jq -c '.[0]' "$evidence/ready-gate-carry-reviews.json")
+  jq -e --argjson version "$carried_version" --arg user "$proof_human_user" \
+    '.version == $version and .state == "approved" and .actor.kind == "user" and .actor.id == $user and .ask_id == null and ((.reason // "") | length > 0)' \
+    <<<"$carried_review" >/dev/null ||
+    fail "the newest review of $artifact_id is $carried_review, want the proof human's (user $proof_human_user) carried approval of version $carried_version with a reason and no ask"
+  dispatch_events "$root_issue" >"$evidence/ready-gate-carry-events.json"
+  approval_requests_after=$(approval_requests_in <"$evidence/ready-gate-carry-events.json")
+  [ "$approval_requests_after" = "$approval_requests_before" ] ||
+    fail "the carry opened an approval request on $root_issue: $approval_requests_before opened before the answer, $approval_requests_after after"
+  spec_event_in artifact.approved "$carried_version" <"$evidence/ready-gate-carry-events.json" ||
+    fail "no artifact.approved event names spec version $carried_version, the carried approval"
+  note "READY refused at unapproved spec version $new_version, the stand-in architect's decision block; the human's answer carried his approval of version $uploaded_version forward to version $carried_version (review by user $proof_human_user, reason $(jq -r .reason <<<"$carried_review")), no approval request was opened, and the carried approval advanced awaiting_merge without another READY"
+  pass
+
+  begin daemon-merge
+  # The daemon submits the merge of the READY head itself once it accepts READY, as the implement
+  # App. sjawhar/legion-smoke allows no auto-merge, so the daemon merges it once GitHub reports it
+  # mergeable under the `gate` ruleset; await_ready_merge only reads the pull request and never
+  # merges it by hand, so a merge here is the daemon's. The smoke main is held from here until
+  # smoke-main-clean has emptied it (hold_smoke_main), on an open descriptor: start no background
+  # child before release_smoke_main, or it inherits the descriptor and holds the smoke main past
+  # this run's window.
+  hold_smoke_main
+  await_ready_merge "$repo" "$pr_number" --delete-branch
+  # The merge closes the issue: awaiting_merge and a merged pull request write done, the daemon's
+  # one status write after retro. A root's close frees its slot and lingers the tree, every member's
+  # claims suspended, and opens the production check on the merge commit, whose first look the
+  # daemon hands the implementer in its live pane: its claim alone comes back, resumed on its kept
+  # session, while the other five stay suspended.
+  wait_for_phase "$root_issue" "done" 300
+  phase_change_logged "$root_issue" awaiting_merge "done" pull_request_merged ||
+    fail "the daemon log has no \"workflow: phase changed\" line moving $root_issue from awaiting_merge to done on pull_request_merged"
+  until_true 60 "the daemon's done status on the Dispatch board" dispatch_status_is "$root_issue" "done"
+  check_opened_on "$root_issue" "$merge_when_clean_commit" ||
+    fail "$root_issue's production check reads $(daemon_state | jq -c --arg issue "$root_issue" '.issues[$issue].check'), want it open on merge commit $merge_when_clean_commit at its first look, woken by the merge"
+  state_file check-opened
+  await_tree_suspended "$root_issue" "the lingering tree's architect to be suspended"
+  # The implementer is live at its first look, the five other claims suspended; an implementer that
+  # reported the look before this read is suspended again already, which the next wait judges.
+  first_look_handed() { claim_states_are "$root_issue" "ready working idle" suspended || check_look_reported "$root_issue" 1; }
+  until_true 300 "the close to leave the implementer live at its first look, the five other claims of $root_issue suspended" first_look_handed
+  first_look_claims=$(issue_claim_states "$root_issue" | paste -sd ',' -)
+  # The first look. The task the daemon handed the implementer is the whole instruction: the proof
+  # sends it nothing, since the issue is closed and a closed issue takes no Dispatch write (409
+  # ISSUE_CLOSED), and the fixture's instructions say a check task waits for no message. The smoke
+  # repository is neither the deploy repository nor a Legion production, so the look's verdict is
+  # pending: the check stays open with its first look reported, and the daemon suspends the
+  # implementer's claim, session kept, until the next wake. Its report is the observation, read from
+  # the daemon's state below.
+  # A look took up to 10 minutes from its task to its report in acceptance runs.
+  until_true 600 "the implementer's pending report on the first look of $root_issue's production check" check_look_reported "$root_issue" 1
+  until_true 300 "the pending report to suspend the implementer's claim beside the five suspended claims of $root_issue" claim_states_are "$root_issue" suspended suspended
+  [ -n "$(issue_worker_session "$root_issue" implementer)" ] || fail "the implementer's claim lost its session at its suspension between looks"
+  state_file check-look-1
+  note "$repo#$pr_number merged by $merge_when_clean_by at $merge_when_clean_commit, which closed $root_issue (phase changed awaiting_merge → done on pull_request_merged; the board done) and opened its production check on that commit; the close suspended the architect, planner, tester, reviewer and merger and handed the implementer the first look in its live pane (claims at the look: $first_look_claims); its pending report left the check open ($(jq -c --arg issue "$root_issue" '.issues[$issue].check | {looks, lookOpen, lastWake: .lastWake.kind, nextWakeAt}' "$evidence/check-look-1.json")) and suspended its claim, session kept"
+  pass
+
+  begin smoke-main-clean
+  clean_smoke_main
+  leftovers=$(smoke_main_leftovers)
+  [ -z "$leftovers" ] || fail "$repo main still carries proof leftovers: $(tr '\n' ' ' <<<"$leftovers")"
+  note "$repo main carries no .legion/ handoff and no docs/solutions/ learning"
+  release_smoke_main
+  pass
+
+  begin production-check-bound
+  # The check's bound (production_check_hours 0.25: 15 minutes after the close) is its last wake: the
+  # daemon starts the last look, the implementer's pane comes back on its kept session, told look 2,
+  # woken by the bound, the last look. The wait runs from here, after the first look's report and
+  # the smoke main's cleanup: what remains of the 15 minutes, and a bound deferred by a look still
+  # open when it came due (by the look's own two-hour bound) fails here by name rather than hanging.
+  # The last look's pending closes the check as not_run: the implementer's claim is retired, its
+  # session dropped (issue_close), and the state omits the check.
+  until_true 900 "the bound to wake the last look of $root_issue's production check" last_look_started "$root_issue"
+  state_file check-look-2
+  # The daemon's task names the last look and its rule (write on the pull request that the check
+  # did not run within the bound, report pending), and the proof sends the closed issue nothing: the
+  # close of the check is the observation.
+  until_true 600 "the last look's pending report to close $root_issue's production check" check_closed "$root_issue"
+  check_look_logged "$root_issue" 2 bound ||
+    fail "the daemon log records no look 2 of $root_issue's production check woken by the bound as the last look: $(jq -R -c 'fromjson? | select(.msg == "workflow: production check look started")' "$evidence/logs/daemon.log" | tail -2 | tr '\n' ' ')"
+  check_closed_as "$root_issue" not_run ||
+    fail "the daemon log records no close of $root_issue's production check as not_run: $(jq -R -c 'fromjson? | select(.msg == "workflow: production check closed")' "$evidence/logs/daemon.log" | tail -1)"
+  until_true 120 "the check's close to retire the implementer's claim beside the five suspended claims of $root_issue" claim_states_are "$root_issue" retired suspended
+  state_file check-closed
+  note "the bound woke look 2 of $root_issue's production check (the state at the wake: $(jq -c --arg issue "$root_issue" '.issues[$issue].check | if . == null then "already closed" else {looks, lookOpen, lastWake: .lastWake.kind, last} end' "$evidence/check-look-2.json"); the daemon log: look 2, cause bound, last); its pending closed the check as not_run, the state omits it, and the implementer's claim is retired while the five others stay suspended: $(issue_claim_states "$root_issue" | paste -sd ',' -)"
+  pass
+}
+
+held_worker() {
+  begin held-after-launch-budget
+  # The second admitted root is driven just far enough to own a real implementer pane. A launch that
+  # never becomes ready spends the claim's launch budget (three) and a ready agent resets it, so the
+  # first kill takes the ready implementer and every later kill takes the relaunch as soon as the pane
+  # watcher has checked it, until the claim fails and the issue is held. Its architect registered its
+  # closed gate early in the run, so the root has waited on a person since, without a slot; the first
+  # root's close freed one, which it takes back once the human approves.
+  drive_gate "$held_issue" "Stage 3 held-worker proof"
+  send_agent "$held_issue" planner "Stage 3 held-worker proof: write a minimal plan handoff and complete planning."
+  wait_for_phase "$held_issue" implementing
+  wait_for_worker "$held_issue" implementer
+  killed=" "
+  kills=0
+  until issue_phase "$held_issue" held >/dev/null 2>&1; do
+    [ "$kills" -lt 8 ] || fail "$held_issue was not held after $kills killed implementer launches"
+    until_true 240 "a new implementer launch on $held_issue checked by the pane watcher" held_kill_ready "$held_issue" "$killed"
+    inc=$(claim_incarnation "$held_issue" implementer)
+    pane=$(issue_worker_pane "$held_issue" implementer)
+    TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-pane -t "$pane"
+    killed="$killed$inc "
+    kills=$((kills + 1))
+    note "killed implementer launch $kills (incarnation $inc, pane $pane)"
+    until_true 240 "$held_issue to be held or its implementer relaunched after kill $kills" held_or_relaunched "$held_issue" "$inc"
+  done
+  until_true 180 "the held tree architect to receive worker-died" notice_delivered "$held_issue" architect "$(notice_needle worker-died "$held_issue")"
+  state_file held
+  worker_died=$(notice_deliveries "$held_issue" architect "$(notice_needle worker-died "$held_issue")")
+  [ "$worker_died" = 1 ] || fail "$held_issue's architect received $worker_died worker-died notices, want exactly one"
+  relaunched=$(launches_after_failure "$(claim_token "$held_issue" implementer)")
+  [ "$relaunched" = 0 ] || fail "the daemon launched the held implementer $relaunched times after failing it (-1: no failure logged)"
+  assert_held_snapshot "$evidence/held.json" || fail "worker stayed relaunched instead of held after its launch budget"
+  jq --arg issue "$held_issue" '.issues[$issue].phase = "implementing" | .issues[$issue].workers.implementer.claim.state = "ready"' \
+    "$evidence/held.json" >"$evidence/held-relaunch-negative.json"
+  expect_failure held-relaunches-after-budget assert_held_snapshot "$evidence/held-relaunch-negative.json"
+  assert_held_snapshot "$evidence/held.json" || fail "held assertion did not restore after its negative control"
+  note "$kills killed implementer launches spent the launch budget; $held_issue is held with no relaunch, and exactly one worker-died reached its architect"
+  pass
+
+  begin held-phase-retry-relaunches
+  # The architect's retry of the held phase is the decision a failed claim waits for: the phase
+  # returns and the same session relaunches with fresh budgets.
+  send_agent "$held_issue" architect "Stage 3 held-worker proof: the implementer of $held_issue is held after its launch budget. Use the Go-daemon retry_or_escalate operation for $held_issue with decision retry now, then wait."
+  wait_for_phase "$held_issue" implementing 240
+  until_true 300 "the retried implementer to relaunch and register" issue_worker_live "$held_issue" implementer
+  inc=$(claim_incarnation "$held_issue" implementer)
+  case "$killed" in *" $inc "*) fail "the retried implementer still reports killed incarnation $inc" ;; esac
+  note "the architect's retry returned $held_issue to implementing and relaunched its implementer (incarnation $inc, session kept)"
+  pass
+}
+
+if [ -z "$from" ]; then
+  primary_issue
+else
+  begin "development-run-from-$from"
+  # The proof human closes the first root, which frees its admission slot as the merge's close would.
+  set_status "$root_issue" "done"
+  await_tree_suspended "$root_issue" "the closed tree's architect to be suspended"
+  pr_number=${STAGE3_PR:-$(gh -R "$repo" pr list --state all --limit 1 --json number --jq '.[0].number')}
+  [ -n "$pr_number" ] || fail "no smoke pull request for the credential check; set STAGE3_PR"
+  note "STAGE3_FROM=$from is a development run, never the proof: $root_issue closed by the proof human, credential check against $repo#$pr_number"
+  pass
+fi
+
+# no_change_close: a root whose human decides at the design gate that no change is needed. The
+# no-change root took the slot the first or held root gave back at its registration early in the
+# run, its architect registered its own closed gate, and it has waited on a person since, without a
+# slot while its architect stays live. The human requests changes saying no change is needed: that
+# answers the wait, and the root takes a slot back at admitted (the held root holds the other one),
+# its architect receives a task naming the changes request. close_root is refused while a root is
+# not at admitted holding its slot, so the proof waits for both before it tells the architect to end
+# the tree itself. The daemon posts the architect's reason on the issue before it writes done, and
+# the freed slot goes to the next answered or waiting root with no human status write. Each step of
+# the tree's close is one journal line.
+no_change_close() {
+  begin architect-closes-a-no-change-root
+  local artifact reason token
+  architect_registers_gate "$nochange_issue" "Stage 3 no-change proof"
+  await_gate_wait "$nochange_issue" "Stage 3 no-change proof"
+  artifact=$(daemon_state | jq -er --arg issue "$nochange_issue" '.issues[$issue].designGate.artifactId')
+  reason="No change is needed: $repo already has what this issue asks for. Close this issue without a change."
+  dispatch_human POST "artifacts/$artifact/reviews" "$(jq -cn --arg reason "$reason" '{state: "changes_requested", reason: $reason}')" >/dev/null
+  await_answered_slot "$nochange_issue" "Stage 3 no-change proof"
+  wait_for_phase "$nochange_issue" admitted 60
+  until_true 300 "the live no-change architect to receive its task once its root holds its slot" issue_worker_live "$nochange_issue" architect
+  send_agent "$nochange_issue" architect "Stage 3 no-change proof: the human reviewing your spec requested changes: \"$reason\" End your tree as your role says, and change nothing else."
+  until_true 600 "the no-change root to be done in Dispatch" dispatch_status_is "$nochange_issue" "done"
+  dispatch_events "$nochange_issue" >"$evidence/nochange-events.json"
+  jq -e '(map(select(.type == "message.created" and (.payload.body | contains("Closed by its architect before its first phase:")))) | first | .seq) as $message
+    | (map(select(.type == "issue.closed")) | first | .seq) as $closed
+    | $message != null and $closed != null and $message < $closed' "$evidence/nochange-events.json" >/dev/null ||
+    fail "the architect's reason was not posted on $nochange_issue before its close; see $evidence/nochange-events.json"
+  jq -e --arg daemon "legion-daemon:$project" '[.[] | select(.type | IN("issue.updated", "issue.closed")) | select(.payload.status | IN("in_progress", "done"))]
+    | (map(.payload.status) | unique) == ["done", "in_progress"] and all(.actor.id == $daemon)' "$evidence/nochange-events.json" >/dev/null ||
+    fail "a status write on $nochange_issue was not the daemon's; see $evidence/nochange-events.json"
+  session_contains "$nochange_issue" architect '"close_root"' || fail "the architect of $nochange_issue did not call close_root"
+  token=$(claim_token "$nochange_issue" architect)
+  await_tree_suspended "$nochange_issue" "the no-change tree's architect to be suspended"
+  # daemon.log carries the daemon's stderr too, so each line is parsed on its own, as every other
+  # reader of it does: one line that is not JSON must not end the run. The root gives its slot back
+  # twice: once when it waits on the person at its gate, once at its close.
+  jq -R -c --arg issue "$nochange_issue" --arg token "$token" 'fromjson? | select(
+      (.msg == "workflow: root waits on a person and returns its admission slot" and .issue == $issue)
+      or (.msg == "workflow: design gate changes requested" and .issue == $issue)
+      or (.msg == "workflow: issue left the workflow" and .issue == $issue)
+      or (.msg == "workflow: tree lingers" and .tree == $issue)
+      or (.msg == "admission: slot released" and .issue == $issue)
+      or (.msg == "admission: slot taken" and .issue == $issue)
+      or (.msg == "supervise: suspended" and .claim == $token))
+    | {msg, issue, tree, status, reason, slots, cap}' "$evidence/logs/daemon.log" >"$evidence/nochange-journal.txt"
+  for line in "root waits on a person and returns its admission slot" "design gate changes requested" "issue left the workflow" "tree lingers" "admission: slot released" "supervise: suspended"; do
+    grep -qF "$line\"" "$evidence/nochange-journal.txt" || fail "the journal has no \"$line\" line for $nochange_issue; see $evidence/nochange-journal.txt"
+  done
+  [ "$(grep -cF '"admission: slot released"' "$evidence/nochange-journal.txt")" -ge 2 ] ||
+    fail "the journal of $nochange_issue lacks a slot release at the wait and another at the close; see $evidence/nochange-journal.txt"
+  [ "$(grep -cF '"admission: slot taken"' "$evidence/nochange-journal.txt")" -ge 2 ] ||
+    fail "the journal of $nochange_issue lacks its first admission and its return after the person's answer; see $evidence/nochange-journal.txt"
+  grep -F '"workflow: issue left the workflow"' "$evidence/nochange-journal.txt" | grep -qF '"status":"done"' ||
+    fail "the close line of $nochange_issue does not name done"
+  grep -F '"supervise: suspended"' "$evidence/nochange-journal.txt" | grep -qF "\"reason\":\"the tree of $nochange_issue lingers\"" ||
+    fail "the architect's suspension line does not name the linger as its reason"
+  note "$nochange_issue: the architect called close_root; its reason was posted before the close, every status write was the daemon's, and the journal has: $(jq -r .msg "$evidence/nochange-journal.txt" | sort -u | tr '\n' ';')"
+  pass
+}
+
+# restart_scenarios: the restart mid-implementer, the in-agent credentials, and the pending status
+# write, all on the fourth root.
+restart_scenarios() {
+  begin restart-mid-implementer
+  # The fourth root took a slot another root gave back early in the run, its architect registered
+  # its closed gate, and it has waited on a person since, without a slot. The no-change root's close
+  # freed a slot, so once the human approves, it takes that slot back with no human status write;
+  # this validates the answered root's return before exercising the mid-phase restart.
+  drive_gate "$restart_issue" "Stage 3 restart proof"
+  send_agent "$restart_issue" planner "Stage 3 restart proof: write the minimal planner handoff and complete planning."
+  wait_for_phase "$restart_issue" implementing
+  wait_for_worker "$restart_issue" implementer
+  # The same session in the same process incarnation is what "no phase restarted" means; the claim's
+  # turn state (working, idle) may change across the restart as the agent finishes a turn.
+  before_restart=$(daemon_state | jq -c --arg issue "$restart_issue" '.issues[$issue].workers.implementer.claim | {session, incarnation: (.locator.incarnation // "")}')
+  kill -TERM "$daemon_pid"
+  stop_pid "$daemon_pid"
+  daemon_pid=
+  # While the daemon is down, a human board write becomes a durable Dispatch event that the restored
+  # consumer must process. It changes only the board status; no phase is manually advanced. It is
+  # needs_review, never testing: the daemon writes no status the record already shows, so a human
+  # testing here would leave the pending-status-write check below nothing to write.
+  set_status "$restart_issue" needs_review
+  start_daemon keep
+  until_true 180 "the Dispatch status written during downtime to be consumed" sh -c \
+    "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$restart_issue' '.issues[\$issue].status == \"needs_review\"'"
+  after_restart=$(daemon_state | jq -c --arg issue "$restart_issue" '.issues[$issue].workers.implementer.claim | {session, incarnation: (.locator.incarnation // "")}')
+  [ "$before_restart" = "$after_restart" ] || fail "restart relaunched the active implementer: $before_restart → $after_restart"
+  issue_worker_live "$restart_issue" implementer >/dev/null || fail "the implementer claim is not live after the restart"
+  issue_phase "$restart_issue" implementing >/dev/null || fail "$restart_issue left implementing across the restart"
+  note "daemon restart kept the implementer's session and incarnation $after_restart and consumed the human Dispatch status written while down"
+  pass
+
+  begin in-agent-credentials
+  # One bash command on purpose. The pane's gh is the launcher directory's wrapper (`legion gh`),
+  # which runs the real gh the pane is told (LEGION_GH_PATH: $realbin's own gh, a symlink to mise's
+  # real gh and the first gh on the daemon's own PATH — real_bin_path, lib/rig.sh; the daemon's own
+  # resolveTools walks its own PATH the same way a pane's command -v would, and returns that
+  # symlink's own path, never its resolved target) with GH_CONFIG_DIR at the directory of the
+  # owner the command names in the claim's gh bundle (LEGION_GH_OWNERS_DIR), which the daemon
+  # writes: the repository's owner's, with the role's App token; no grant is in the path of a
+  # GitHub call, and GH_TOKEN is set empty so nothing outranks the file. Each output carries a
+  # marker the instruction itself cannot produce (the instruction holds the unexpanded command), so
+  # only the pane's own bash tool output satisfies a check.
+  send_agent "$restart_issue" implementer "Stage 3 credential proof: run exactly this in your bash tool and include its exact output: echo \"CRED-GH=\$(command -v gh)\"; echo \"CRED-REAL=\$LEGION_GH_PATH\"; echo \"CRED-DIR=\$GH_CONFIG_DIR\"; echo \"CRED-OWNERS=\$(ls \"\$LEGION_GH_OWNERS_DIR\" | tr '\\n' ' ')\"; echo \"CRED-TOKEN=\${GH_TOKEN-unset}.\"; echo \"CRED-VIEWER=\$(gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login)\"; echo \"CRED-PR=\$(gh pr view $pr_number --repo $repo --json url --jq .url)\". Wait after reporting."
+  owner=$(tr '[:upper:]' '[:lower:]' <<<"${repo%%/*}")
+  until_true 240 "the real Go pane bash tool to resolve the launcher directory's gh wrapper" session_contains "$restart_issue" implementer "CRED-GH=$state/bin/gh"
+  until_true 240 "the implementer pane to name the real gh its wrapper runs" session_contains "$restart_issue" implementer "CRED-REAL=$realbin/gh"
+  until_true 240 "the implementer pane to name its claim's gh directory" session_contains "$restart_issue" implementer "CRED-DIR=$state/secrets/"
+  until_true 240 "the implementer pane to list the bundle's one owner" session_contains "$restart_issue" implementer "CRED-OWNERS=$owner "
+  until_true 240 "the implementer pane to carry an empty GH_TOKEN" session_contains "$restart_issue" implementer "CRED-TOKEN=."
+  implement_app=$(role_app implementer)
+  until_true 240 "the implementer pane to authenticate as its App, $implement_app" session_contains "$restart_issue" implementer "CRED-VIEWER=$implement_app"
+  until_true 240 "the implementer pane to read the pull request" session_contains "$restart_issue" implementer "CRED-PR=https://github.com/$repo/pull/$pr_number"
+  # The directory the agent printed is the one its OMP process was launched with: its repository's
+  # owner's directory of the bundle named for its claim, which holds the two gh files the daemon
+  # writes for the pane alone, and nothing else beside it.
+  cred_pane_pid=$(claim_pane_pid "$restart_issue" implementer) || fail "the implementer pane on $restart_issue has no process locator"
+  cred_omp=$(omp_descendant "$cred_pane_pid") || fail "the implementer pane on $restart_issue has no OMP process"
+  cred_root=$(pane_value "$cred_omp" LEGION_GH_OWNERS_DIR)
+  cred_dir=$(pane_value "$cred_omp" GH_CONFIG_DIR)
+  [[ $cred_root == "$state/secrets/"*-implementer-gh ]] || fail "the implementer's OMP carries LEGION_GH_OWNERS_DIR=$cred_root, want the claim's bundle under $state/secrets"
+  [ "$cred_dir" = "$cred_root/$owner" ] || fail "the implementer's OMP carries GH_CONFIG_DIR=$cred_dir, want $owner's directory of $cred_root"
+  [ "$(pane_value "$cred_omp" LEGION_GH_PATH)" = "$realbin/gh" ] || fail "the implementer's OMP carries LEGION_GH_PATH=$(pane_value "$cred_omp" LEGION_GH_PATH), want $realbin/gh"
+  session_contains "$restart_issue" implementer "CRED-DIR=$cred_dir" || fail "the implementer's bash printed another GH_CONFIG_DIR than its OMP carries ($cred_dir)"
+  for dir in "$cred_root" "$cred_dir"; do
+    [ "$(stat -c %a "$dir")" = 700 ] || fail "$dir is mode $(stat -c %a "$dir"), want 700"
+  done
+  [ "$(find "$cred_root" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ')" = "$owner " ] || fail "$cred_root holds $(find "$cred_root" -mindepth 1 -maxdepth 1 -printf '%f\n' | tr '\n' ' '), want $owner's directory alone"
+  [ "$(find "$cred_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ')" = "config.yml hosts.yml " ] || fail "$cred_dir holds $(find "$cred_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | tr '\n' ' '), want config.yml and hosts.yml alone"
+  [ "$(stat -c %a "$cred_dir/hosts.yml")" = 600 ] || fail "$cred_dir/hosts.yml is mode $(stat -c %a "$cred_dir/hosts.yml"), want 600"
+  jq -R -s -e '[split("\n")[] | fromjson? | select(.msg == "tmux runtime: github credential written" and .role == "implementer")] | length > 0' <"$evidence/logs/daemon.log" >/dev/null ||
+    fail "the daemon log has no 'github credential written' line for an implementer pane"
+  # git pushes through the shared clone's helper, `legion git-credential`, which the path of the
+  # repository git asks about routes to its owner's directory (credential.useHttpPath).
+  clone="$state/repos/github.com/$repo"
+  [ "$(git --git-dir="$clone/.git" config --get-all credential.helper | tail -1)" = '!legion git-credential' ] ||
+    fail "the shared clone's credential.helper is $(git --git-dir="$clone/.git" config --get-all credential.helper | tr '\n' ' '), want !legion git-credential last"
+  [ "$(git --git-dir="$clone/.git" config credential.useHttpPath)" = true ] || fail "the shared clone does not set credential.useHttpPath"
+  # Negative control: a directory with no gh files is no credential — the same gh with it set is
+  # refused by gh itself, naming GH_TOKEN, so the pane's identity comes from the daemon's files and
+  # nothing else on this box.
+  if GH_CONFIG_DIR="$work/empty-gh" GH_TOKEN='' GITHUB_TOKEN='' GH_HOST='' "$real_gh" api graphql -f query='{viewer{login}}' >/dev/null 2>"$evidence/cred-negative.txt"; then
+    fail "gh with an empty GH_CONFIG_DIR and no token still answered"
+  fi
+  grep -q GH_TOKEN "$evidence/cred-negative.txt" || fail "gh with an empty GH_CONFIG_DIR failed without naming GH_TOKEN: $(cat "$evidence/cred-negative.txt")"
+  note "real implementer pane ran $state/bin/gh, the wrapper, over $realbin/gh (-> $real_gh) with GH_CONFIG_DIR=$cred_dir ($owner's directory of $cred_root; 0700, config.yml and hosts.yml 0600) and an empty GH_TOKEN, authenticated as $implement_app, and viewed pull request #$pr_number; the shared clone's helper is !legion git-credential with credential.useHttpPath"
+  pass
+
+  begin pending-dispatch-status-write
+  # The active implementer opens a second sandbox PR and writes its handoff while Dispatch is up, and
+  # completes the phase only once it sees Dispatch gone: every instruction reaches a pane through
+  # Dispatch, so none can follow the stop. testing's status write is then durably pending rather than
+  # silently lost, and the board (left at the human's needs_review) catches up once Dispatch returns.
+  # The agent's check carries a timeout: Dispatch's port is kept (start_dispatch), so while it is down
+  # a request waits unanswered, and the timeout is what fails.
+  send_agent "$restart_issue" implementer "Stage 3 outbox proof: make the smallest one-file smoke change for this issue, commit it and open pull request legion/$restart_issue in $repo, and write the implementation handoff. Before you call the legion tool's handoff_complete, wait for the proof to stop the Dispatch server: run curl -fsS --max-time 5 \"\$DISPATCH_URL/api/v1\" every 5 seconds until it fails (for up to 15 minutes), and only once it has failed call the legion tool's handoff_complete. Do not post anything to Dispatch."
+  until_true 900 "restart-tree pull request to open" sh -c \
+    "gh -R '$repo' pr list --head 'legion/$restart_issue' --state open --json number | jq -e 'length == 1' >/dev/null"
+  stop_dispatch
+  until_true 600 "the stopped Dispatch server to leave testing status pending" sh -c \
+    "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$restart_issue' '.issues[\$issue].phase == \"testing\" and any(.pendingStatusWrites[]; .issue == \$issue)'"
+  state_file pending-status-write
+  start_dispatch keep
+  until_true 180 "the restarted scratch Dispatch board to catch up" dispatch_status_is "$restart_issue" testing
+  note "testing transition survived Dispatch downtime as a pending status write and the board caught up after Dispatch returned"
+  pass
+}
+
+# The first issue's whole history is the durable proof of writers: a development run never drove
+# it, so it has no history to check.
+status_actors() {
+  begin status-actors-are-daemon-only
+  # The Go client attributes its status writes to the stable daemon session, while the proof
+  # human's own writes are never lifecycle writes.
+  dispatch_events "$root_issue" >"$evidence/root-events.json"
+  assert_status_actors "$evidence/root-events.json" || fail "a lifecycle status was not written by legion-daemon:$project"
+  # The control re-attributes exactly one write, the first move to testing, to an agent session.
+  jq '(map(select(.type == "issue.updated" and .payload.status == "testing")) | first | .seq) as $seq
+    | map(if .seq == $seq then .actor.id = "agent-wrote-status" else . end)' \
+    "$evidence/root-events.json" >"$evidence/status-agent-negative.json"
+  expect_failure status-actor-check assert_status_actors "$evidence/status-agent-negative.json"
+  assert_status_actors "$evidence/root-events.json" || fail "status actor assertion did not restore after its negative control"
+  note "every lifecycle transition on $root_issue ($(jq -r '[.[] | select(.type | IN("issue.updated", "issue.closed")) | .payload.status] | join(" ")' "$evidence/root-events.json")) records actor legion-daemon:$project; one agent-attributed write was rejected"
+  pass
+}
+# Every workflow notice is for the architect that owns its issue, on that architect's role topic:
+# the run's pr-blocked, the reviewer's phase-finished at its approval (the architect's acceptance
+# cue) and worker-died reach their architects (checked where each is written), and no phase-worker
+# session of the run receives any notice.
+notices_reach_architects_alone() {
+  begin notices-reach-architects-alone
+  local sessions="$profile_agent/sessions" negative="$work/worker-notice-negative" worker
+  worker_sessions "$sessions" >"$evidence/worker-sessions.txt"
+  worker_notices "$sessions" >"$evidence/worker-notices.txt"
+  [ -s "$evidence/worker-notices.txt" ] && fail "phase-worker sessions received workflow notices: $(head -3 "$evidence/worker-notices.txt" | tr '\n' ';')"
+  worker=$(head -1 "$evidence/worker-sessions.txt" | cut -f1)
+  [ -n "$worker" ] || fail "no phase-worker session under $sessions to control the check with"
+  mkdir -p "$negative"
+  cp -- "$worker" "$negative/"
+  jq -cn --arg issue "$root_issue" '{type: "custom_message", customType: "envoy-message", content: ("envoy:\n  summary: pr-blocked on " + $issue + "\n")}' >>"$negative/${worker##*/}"
+  expect_failure worker-notice assert_no_worker_notices "$negative"
+  assert_no_worker_notices "$sessions" || fail "the worker-notice assertion did not restore after its negative control"
+  note "$(wc -l <"$evidence/worker-sessions.txt") phase-worker sessions, none holding a workflow notice"
+  pass
+}
+if [ -z "$until" ]; then
+  [ "$from" = restart ] || held_worker
+  no_change_close
+  restart_scenarios
+  [ -n "$from" ] || status_actors
+  notices_reach_architects_alone
+fi
+
+begin production-untouched
+"$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" >"$evidence/claims.json"
+every_launch_checked
+note "$(wc -l <"$evidence/pane-endpoints-checked.txt") launched panes endpoint-checked when their OMP started, before registration"
+if ! production_audit; then
+  fail "the rig touched production, or the audit could not check it; the reason is above (see $evidence/production-dispatch-audit.json and $evidence/production-envoy-rig-sessions.json, when the audit got far enough to write either)"
+fi
+pass
+
+begin services-stopped
+# Stop the remaining services explicitly and prove every one is gone, so no agent can take another
+# turn: an idle agent takes one on the next event the daemon delivers, until the daemon stops.
+stop_tree "$watcher_pid"; watcher_pid=
+stop_pid "$daemon_pid"; daemon_pid=
+stop_dispatch
+stop_pid "$listener_pid"; listener_pid=
+stop_pid "$daemon_keeper_pid"; daemon_keeper_pid=
+stop_pid "$dispatch_keeper_pid"; dispatch_keeper_pid=
+stop_pid "$bridge_pid"; bridge_pid=
+# Under box-login the panes get SIGTERM and a bounded grace before the kills below, as cleanup
+# gives them (lib/box-login.sh); the profile's link to the operator's database goes with them.
+if [ "$model_route" = box-login ]; then
+  # shellcheck disable=SC2046 # one pid per word
+  stop_box_login_processes $(run_processes)
+  unlink_box_login_db "$profile_agent"
+fi
+TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
+docker rm -f -v "$pg_container" "$nats_container" >/dev/null 2>&1 || true
+for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
+[ "$(docker ps -aq --filter "name=^/$pg_container$" --filter "name=^/$nats_container$")" = "" ] || fail "a proof container remains"
+TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" has-session 2>/dev/null && fail "the proof tmux server remains"
+[ -z "$(run_processes)" ] || fail "a proof process remains"
+note "the watcher, the daemon and Dispatch with their port keepers, the listener, bridge, private tmux server and every proof process stopped; both containers removed"
+pass
+
+begin model-turns-through-the-route
+# Every agent turn of the run, in every session of the isolated profile, each subagent's included,
+# was served by the anthropic provider, the route's; and the same check refuses a copy of one
+# captured session with a turn rewritten as Bedrock's, kept in the evidence. It reads the profile
+# only now, with every agent process gone, and before the profile is copied and removed.
+route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$profile_agent/sessions" \
+  --control "$evidence/model-route-control") || fail "an agent turn left the configured route, or the check proved nothing (the reason is above)"
+note "$route"
+if [ -n "$key_command" ]; then
+  note "the key command ran $(grep -c ' invoked by pid ' "$key_record.log" || true) times and served $(grep -c $'\tserved\t' "$key_record.calls" || true) ($key_record.log, $key_record.calls)"
+else
+  note "the route is the operator's own Oh My Pi login, no key command ($evidence/model-gateway/box-login.route)"
+fi
+# The kept transcripts must hold exactly the turns, sessions and subagents the check read, so a turn
+# taken after the read, or a session the copy lost, fails here rather than passing unseen.
+collect_transcripts
+kept=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$evidence/transcripts" \
+  --control "$work/model-route-control-kept") || fail "the kept transcripts in $evidence/transcripts fail the route check (the reason is above)"
+[ "${kept%%, every one*}" = "${route%%, every one*}" ] ||
+  fail "the check read ${route%%, every one*}, but the kept transcripts in $evidence/transcripts hold ${kept%%, every one*}"
+note "the kept transcripts hold the same: ${kept%%, every one*}"
+pass
+
+begin cleanup-is-complete
+# The proof opens a pull request for every proof it drives and merges only the one the human-merge
+# check merges, so every run leaves branches and open pull requests on the smoke repository (the
+# held-worker and outbox proofs', at least). They outlive the run and pile up there; smoke-main-clean
+# reads only main's tree, so it never sees them. This run's own are closed here (run_pull_requests
+# names them), and the EXIT trap closes them for a run that fails or is interrupted.
+closed=$(close_run_pull_requests) || fail "closing this run's pull requests on $repo: $closed"
+open=$(run_pull_requests) || fail "list the open pull requests on $repo (gh's reason is on stderr)"
+[ -z "$open" ] || fail "this run's pull requests are still open on $repo: $(printf '%s' "$open" | tr '\n' ' ')"
+note "${closed:-no pull request of this run was open on $repo}"
+
+# The isolated OMP profile and the scratch work directory go last, once the transcripts are kept.
+[ ! -e "$HOME/.omp/profiles/$profile" ] || fail "the run wrote the operator's profile root: $HOME/.omp/profiles/$profile exists"
+rm -rf "$omp_home"
+[ ! -e "$omp_home" ] || fail "the isolated OMP profile remains under $omp_home"
+transcripts=$(find "$evidence/transcripts" -name '*.jsonl' -type f | wc -l)
+[ "$transcripts" -gt 0 ] || fail "no agent transcript reached $evidence/transcripts"
+[ -s "$evidence/logs/daemon.log" ] || fail "the daemon log is missing from $evidence/logs"
+rm -rf "$work"
+[ ! -e "$work" ] || fail "the scratch work directory $work remains"
+note "no proof container, process, tmux server, OMP profile, or work directory ($work, which held the agents' workspaces) remains; the scratch Dispatch database lived in the removed Postgres container"
+note "evidence kept at $evidence: $transcripts agent transcripts, daemon, Dispatch, listener, and bridge logs, state captures, negative controls, and the production audit"
+pass
+
+ok=1
+if [ -n "$development" ]; then
+  echo "stage 3 e2e: development run $development finished (not the proof)"
+else
+  echo "stage 3 e2e: PASS"
+fi

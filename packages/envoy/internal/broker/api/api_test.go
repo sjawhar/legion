@@ -34,7 +34,6 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
-	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
@@ -42,6 +41,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
+	"github.com/sjawhar/envoy/internal/ratelimit"
 )
 
 const (
@@ -142,7 +142,7 @@ func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 
 	deps := api.Deps{
 		PublicURL:     srv.URL,
-		APIAccounts:   map[string]string{dispatchAccount: dispatchCaller},
+		APIAccounts:   map[string]api.Account{dispatchAccount: brokertest.Caller(t, dispatchCaller)},
 		AccountTokens: enroll.K8sPodVerifier{Verifier: podVerifier},
 		Enroll:        enr, Machine: reqMachine, MachineLogin: mach,
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
