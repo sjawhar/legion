@@ -611,8 +611,9 @@ func answerAll(deliveries []delivery, err error) {
 // answered after all.
 //
 // Which turn a delivery belongs to is decided by the queue as this result reads it, and by
-// nothing else. A delivery already queued is sent as the next step of this turn, so a refusal
-// before it is not that turn's outcome; one that arrives after this result starts a turn of its
+// nothing else. In a turn the bridge stepped, a delivery already queued is sent as the next step
+// of this turn, so a refusal before it is not that turn's outcome; in a self-started turn, or for a
+// delivery that arrives after this result, the delivery starts a turn of its
 // own, and the refused turn is reported as it ended. A delivery in flight — written to the inbox
 // and not yet taken from the loop's channel — is therefore the second case, deliberately: the
 // bridge reports the turn it actually ended rather than waiting to see whether something more is
