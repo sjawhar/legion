@@ -1,5 +1,5 @@
--- 0157_document_search_backfill.up.sql
--- Fills 0155's document_search for every document already stored: the latest version of each
+-- 0164_document_search_backfill.up.sql
+-- Fills 0162's document_search for every document already stored: the latest version of each
 -- artifact that carries markdown, which is the version search reads.
 --
 -- It reads artifact_versions and writes no row of it, so the pre-deploy census does not size that
@@ -8,10 +8,10 @@
 -- an ACCESS EXCLUSIVE holder, and `distinct on` walks
 -- artifact_versions_artifact_id_number_key in order rather than sorting the table.
 --
--- `markdown is not null` is 0156's trigger's own guard: a version with no markdown has a null
+-- `markdown is not null` is 0163's trigger's own guard: a version with no markdown has a null
 -- search vector and is no document to search.
 --
--- The same write guard as that trigger, because 0156 applies before this migration: a version
+-- The same write guard as that trigger, because 0163 applies before this migration: a version
 -- written between the two is already here, with a number at least as high as the one this read
 -- finds, and must not be replaced by an older one.
 insert into document_search (artifact_id, number, created_at, search)

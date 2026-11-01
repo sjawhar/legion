@@ -17,7 +17,7 @@ import (
 
 // auditedRead is one of the three reads the index audit of 2026-10-25 named: the statement, the
 // statement main runs, the relation whose read was unindexed, the index that serves it after
-// migrations 0152 to 0154, whether its owner is an issue or a document, and the parameter type
+// migrations 0159 to 0161, whether its owner is an issue or a document, and the parameter type
 // and literal its prepared form is explained with.
 type auditedRead struct {
 	name      string
@@ -163,7 +163,7 @@ func auditedReadPlan(t *testing.T, ctx context.Context, connection *pgxpool.Conn
 	return explaintest.OnePlan(t, raw)
 }
 
-// Migration 0154 drops asks_open_artifact, so no schema this build migrates carries it. The plan
+// Migration 0161 drops asks_open_artifact, so no schema this build migrates carries it. The plan
 // test above is what says the drop costs nothing: a document's open asks are read through
 // asks_artifact_id.
 func TestTheUnusedOpenArtifactAskIndexIsDropped(t *testing.T) {
@@ -175,7 +175,7 @@ func TestTheUnusedOpenArtifactAskIndexIsDropped(t *testing.T) {
 		t.Fatalf("read pg_indexes: %v", err)
 	}
 	if remaining != 0 {
-		t.Fatalf("pg_indexes lists asks_open_artifact %d times, want none after migration 0154", remaining)
+		t.Fatalf("pg_indexes lists asks_open_artifact %d times, want none after migration 0161", remaining)
 	}
 }
 

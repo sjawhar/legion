@@ -1,11 +1,11 @@
--- 0158_search_term_queue.up.sql
+-- 0165_search_term_queue.up.sql
 -- The items whose search text has changed since each project's word counts were last written,
 -- which the related-terms refresh applies instead of counting every item of every project again
 -- (api/related_terms.go). In the 24 hours to 2026-10-30 that refresh used 1,882 s of database
 -- time, 20% of Dispatch's total, because ts_stat read every issue, document, comment, ask and
 -- message of every project every 10 minutes while a handful of them had changed.
 --
--- 0160's triggers write one row here for each insert, each delete, and each update of the columns
+-- 0167's triggers write one row here for each insert, each delete, and each update of the columns
 -- an item's search vector is built from (0057-0061). A refresh pass reads the rows its own
 -- snapshot sees, applies them to search_term_stats and search_term_totals, and deletes exactly
 -- those.

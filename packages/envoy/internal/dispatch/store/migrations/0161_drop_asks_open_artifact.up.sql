@@ -1,4 +1,4 @@
--- 0154_drop_asks_open_artifact.up.sql
+-- 0161_drop_asks_open_artifact.up.sql
 -- asks_open_artifact, `asks (artifact_id) where state = 'open' and artifact_id is not null`
 -- (0009), was built for the one read that lists a document's open asks
 -- (api/asks.go listArtifactAsksQueryOpen). That read uses asks_artifact_id (0032) instead, which

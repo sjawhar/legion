@@ -14,9 +14,9 @@ import (
 // The three migrations of the document-search table, read from the store's own directory rather
 // than copied here, so this test applies the text that ships.
 const (
-	documentSearchTableMigration    = "0155_document_search.up.sql"
-	documentSearchTriggerMigration  = "0156_artifact_versions_document_search_trigger.up.sql"
-	documentSearchBackfillMigration = "0157_document_search_backfill.up.sql"
+	documentSearchTableMigration    = "0162_document_search.up.sql"
+	documentSearchTriggerMigration  = "0163_artifact_versions_document_search_trigger.up.sql"
+	documentSearchBackfillMigration = "0164_document_search_backfill.up.sql"
 )
 
 // applyStoreMigration applies one migration of the store's set, as the runner applies it: the
@@ -33,10 +33,10 @@ func applyStoreMigration(t *testing.T, database *store.Store, name string) {
 }
 
 // A4. The backfill, run the way a deploy runs it. The three migrations are undone, which leaves
-// the schema the one before 0155 - they are the last three of the set and nothing else depends
+// the schema the one before 0162 - they are the last three of the set and nothing else depends
 // on them - and the documents are then written as a build without this change writes them, with
-// no table to fill. 0155 and 0156 are applied, one more version is written in the window between
-// 0156 and 0157, which the trigger catches, and 0157 fills the rest. Search then answers what
+// no table to fill. 0162 and 0163 are applied, one more version is written in the window between
+// 0163 and 0164, which the trigger catches, and 0164 fills the rest. Search then answers what
 // main's own statement answers over the same rows, which is what says the backfilled table holds
 // each document's latest version and no older one.
 func TestTheBackfillLeavesSearchAnsweringWhatMainsStatementDoes(t *testing.T) {

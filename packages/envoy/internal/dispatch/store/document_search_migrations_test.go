@@ -9,21 +9,21 @@ import (
 	"github.com/sjawhar/envoy/internal/pgmigrate"
 )
 
-// The three migrations of the document-search table: 0155 creates it with its GIN index, 0156
-// adds the function and the trigger that keep it at each document's latest version, and 0157
+// The three migrations of the document-search table: 0162 creates it with its GIN index, 0163
+// adds the function and the trigger that keep it at each document's latest version, and 0164
 // fills it for the documents already stored.
 const (
-	documentSearchTable    = 155
-	documentSearchTrigger  = 156
-	documentSearchBackfill = 157
+	documentSearchTable    = 162
+	documentSearchTrigger  = 163
+	documentSearchBackfill = 164
 )
 
-// 0156 is a function and a trigger and nothing else, which is what lets it ship: the pre-deploy
+// 0163 is a function and a trigger and nothing else, which is what lets it ship: the pre-deploy
 // census refuses any migration that locks a table above its size limit, and the trigger's table,
 // artifact_versions, is 5.2 GiB in production. Neither statement reads a row, so the time the
 // migration holds its lock does not grow with the table and the limit does not apply to it
 // (pgmigrate tableSizeExemption). The limit is injected at one byte so the test needs no
-// gigabyte, over a database at 0155, where artifact_versions is already above that.
+// gigabyte, over a database at 0162, where artifact_versions is already above that.
 func TestCensusExemptsTheDocumentSearchTriggerFromTheTableLimit(t *testing.T) {
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, documentSearchTable)
@@ -36,7 +36,7 @@ func TestCensusExemptsTheDocumentSearchTriggerFromTheTableLimit(t *testing.T) {
 		t.Errorf("the document-search trigger was refused: %v", refusals(report))
 	}
 	if len(report.Pending) != 1 || report.Pending[0].TableSizeExemption != "create function and create trigger" {
-		t.Errorf("pending = %+v, want 0156 alone, exempt as a function and a trigger", report.Pending)
+		t.Errorf("pending = %+v, want 0163 alone, exempt as a function and a trigger", report.Pending)
 	}
 	if out := reportText(report); !strings.Contains(out, "touches artifact_versions: ") ||
 		!strings.Contains(out, "from which the migration is exempt because its statements are only create function and create trigger") {
@@ -55,9 +55,9 @@ func TestTheDocumentSearchMigrationsTouchOnlyWhatTheyMustLock(t *testing.T) {
 		files string
 		want  []string
 	}{
-		{"0155, the table and its index", "0155_document_search.up.sql", []string{"document_search"}},
-		{"0156, the function and the trigger", "0156_artifact_versions_document_search_trigger.up.sql", []string{"artifact_versions"}},
-		{"0157, the backfill", "0157_document_search_backfill.up.sql", []string{"document_search"}},
+		{"0162, the table and its index", "0162_document_search.up.sql", []string{"document_search"}},
+		{"0163, the function and the trigger", "0163_artifact_versions_document_search_trigger.up.sql", []string{"artifact_versions"}},
+		{"0164, the backfill", "0164_document_search_backfill.up.sql", []string{"document_search"}},
 	} {
 		t.Run(migration.name, func(t *testing.T) {
 			sql, err := migrationFiles.ReadFile("migrations/" + migration.files)

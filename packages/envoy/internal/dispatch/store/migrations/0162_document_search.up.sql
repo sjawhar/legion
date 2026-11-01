@@ -1,4 +1,4 @@
--- 0155_document_search.up.sql
+-- 0162_document_search.up.sql
 -- One row for each document, holding the search vector of its latest version, with a GIN index
 -- over that vector. Search's document arm tests every document's latest version through a lateral
 -- join over artifacts (api/search.go searchKeywordLegs), because artifact_versions.search has no
@@ -8,7 +8,7 @@
 -- an index over them that the census allows.
 --
 -- Four columns, and no more. artifact_id is the key one row per document needs; number is what
--- the write guard of 0156's trigger reads, so a late write of an older version never replaces the
+-- the write guard of 0163's trigger reads, so a late write of an older version never replaces the
 -- latest; created_at is the other column the lateral supplies today (coalesce(i.updated_at,
 -- v.created_at) in the keyword arm, and the meaning candidate CTE reads nothing else from the
 -- version), so without it the lateral would stay; search is the vector the index is on. A

@@ -1,5 +1,5 @@
--- 0160_search_term_queue_triggers.up.sql
--- The five triggers that fill 0158's search_term_queue: one for each kind of item the
+-- 0167_search_term_queue_triggers.up.sql
+-- The five triggers that fill 0165's search_term_queue: one for each kind of item the
 -- related-terms refresh counts.
 --
 -- Each fires only when an item's search text changes, on the columns that item's search vector is
@@ -9,10 +9,10 @@
 -- Inserts and deletes carry no column list, because every one of them changes what the project
 -- holds.
 --
--- A document's changes are taken from 0155's document_search, not from artifact_versions. That
--- table already holds exactly the vector of the version the refresh counts, and 0156's trigger
+-- A document's changes are taken from 0162's document_search, not from artifact_versions. That
+-- table already holds exactly the vector of the version the refresh counts, and 0163's trigger
 -- writes it inside the artifact_versions write, so this trigger fires nested inside that one and
--- the refresh needs no second trigger on the 5.2 GiB table. 0156's guard,
+-- the refresh needs no second trigger on the 5.2 GiB table. 0163's guard,
 -- `where excluded.number >= document_search.number`, correctly queues nothing when a late write
 -- of an older version updates no row.
 --
@@ -93,7 +93,7 @@ begin
   return null;
 end $$;
 
--- document_search has no delete path (0155), so this one covers the two writes 0156's trigger
+-- document_search has no delete path (0162), so this one covers the two writes 0163's trigger
 -- makes: the document's first row, which queues no old vector, and every later replacement of it,
 -- which queues the vector the row held.
 create or replace function document_search_term_queue() returns trigger language plpgsql as $$

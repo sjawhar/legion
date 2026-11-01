@@ -1,4 +1,4 @@
--- 0153_messages_issue_roots.up.sql
+-- 0160_messages_issue_roots.up.sql
 -- GET /api/v1/issues/{key}/messages reads an issue's root messages, `where issue_key = $1 and
 -- in_reply_to is null order by created_at, id` (api/messages.go listIssueRootMessagesQuery), and
 -- no index of messages leads with issue_key: messages_in_reply_to (0033) leads with the parent

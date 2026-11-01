@@ -1,4 +1,4 @@
--- 0152_asks_issue_key.up.sql
+-- 0159_asks_issue_key.up.sql
 -- GET /api/v1/issues/{key}/asks with no state filter reads every ask of one issue
 -- (api/asks.go listIssueAsksQueryAll), and no index serves it: asks_open (0001) is partial on
 -- state = 'open', which Postgres cannot apply to a read that asks for every state, and every

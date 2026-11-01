@@ -21,7 +21,7 @@ import (
 //     `exists` probe that sat under an OR, which the planner could only run as a hashed subplan
 //     over all of document_blocks. Both texts read the same tables and the same indexes, so one
 //     schema holds both sides. The closure also gains from asks (issue_key) and
-//     messages (issue_key, created_at, id), the two indexes migrations 0152 and 0153 add, and
+//     messages (issue_key, created_at, id), the two indexes migrations 0159 and 0160 add, and
 //     that part of its gain is not in this pair: both sides here are read with those indexes
 //     present, which only helps main's side, so the pair is the conservative reading of the
 //     text's own gain. Seam 7's two-commit run takes the whole gain under protocol 2.
@@ -29,7 +29,7 @@ import (
 //   - The two backlink counts are protocol 2, head text alone. Main counted over the whole
 //     graph_edges view (this package holds that read as backlinkCountOracle), and the before
 //     side of record is that statement on a schema without ask_followers_session_id, which
-//     migration 0151 adds and this branch's schema therefore has. One database cannot be both,
+//     migration 0158 adds and this branch's schema therefore has. One database cannot be both,
 //     so the pair is seam 7's two-commit run and what is measured here is the head side of it,
 //     with its plan, under the same protocol as every other reading.
 func TestStatementTimings(t *testing.T) {

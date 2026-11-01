@@ -219,7 +219,7 @@ var backlinkArms = map[string][]backlinkArm{
 		{kind: "affects", sql: `select m.project_key || '/' || m.component_id as to_id from issue_component_members m where m.project_key || '/' || m.component_id = any($1)`},
 	},
 	"session": {
-		// ask_followers_session_id (migration 0151), which exists for this arm.
+		// ask_followers_session_id (migration 0158), which exists for this arm.
 		{kind: "followed_by", sql: `select f.session_id as to_id from ask_followers f where f.session_id = any($1)`},
 	},
 	// No arm of the view whose edge kind is a literal targets a block: a block is pointed at by

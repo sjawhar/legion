@@ -465,7 +465,7 @@ It ends with one full `search_term_stats` build for every project, so no measure
 a freshly loaded table has no all-visible pages, so the planner avoids an index-only scan on it however good the statistics are.
 
 That build is the one the database's own schema carries, read once from the catalogue rather than by running a build and catching its error, which could not tell a missing column from a real failure:
-a database holding `search_term_totals.snapshot` (migration 0159) is built by the server's own pass (`api.BuildEverySearchTermStats`, which calls `api.RefreshEverySearchTermStats`), so the row carries the snapshot that makes the first measured pass a step pass;
+a database holding `search_term_totals.snapshot` (migration 0166) is built by the server's own pass (`api.BuildEverySearchTermStats`, which calls `api.RefreshEverySearchTermStats`), so the row carries the snapshot that makes the first measured pass a step pass;
 a database migrated from an older commit, which is what `--no-migrate` seeds for the "before" side of a two-commit measurement, is built by that release's four statements, which write `items` and `refreshed_at` alone.
 Either way the step fails the command when it built fewer projects than the seed wrote.
 
@@ -1201,7 +1201,7 @@ the no-write related route records nothing):
 its project and source, the actor, the outcome (`found`, `none` or `not_made`), how it searched (`meaning_and_keywords` or `keywords_only`, none when not made), the reason it was not made (`timeout` for the check's own allowance running out, apart from `cancelled` for the request that ran it ending first:
 its client leaving for a write sent without an `Idempotency-Key`, the keyed run's own 10-minute bound for a keyed one) or searched by keywords alone, the lexemes it searched for, its keyword, meaning and total milliseconds and how many items it listed.
 `search_term_stats` (how many of a project's searchable items hold each lexeme) and `search_term_totals` (how many searchable items the project has, and when they were counted) are the statistics the check picks its keywords from;
-the term-statistics refresh, added with it, rebuilt a project's rows whole at boot and every 10 minutes, where `0158`-`0160` have it apply what changed, and the check only reads them.
+the term-statistics refresh, added with it, rebuilt a project's rows whole at boot and every 10 minutes, where `0165`-`0167` have it apply what changed, and the check only reads them.
 Every row names its project with `on
 delete cascade`, and a check's row also cascades from its issue, document or ask.
 The tables are new, so the migration rewrites and refuses no row and its census answers `0`;
@@ -1278,14 +1278,14 @@ A caller presenting an access token the secrets broker issued signs a fresh proo
 the maintenance pass deletes every record past its proof's acceptance window beside the idempotency-key sweep.
 It is a new table that touches no row, which the release before it neither reads nor writes; its census answers `0`.
 
-Migration `0151_ask_followers_session` creates `ask_followers_session_id` on `ask_followers (session_id)`, for the `followed_by` arm of `graph_edges`, which `refs.BacklinkCounts` now reads directly rather than leaving the planner the whole view.
+Migration `0158_ask_followers_session` creates `ask_followers_session_id` on `ask_followers (session_id)`, for the `followed_by` arm of `graph_edges`, which `refs.BacklinkCounts` now reads directly rather than leaving the planner the whole view.
 The arm reads `ask_followers` by `session_id` and had no index for it:
 the table's primary key leads with `ask_id`, which cannot serve that predicate, and its only other index, `ask_followers_ask_id_text` (`0032`), is on the ask as well, so every count of a session's backlinks scanned the table.
 A plain `create index` inside the runner's transaction, it holds `SHARE` on `ask_followers` while it builds:
 the build waits out a write of a follower already open and holds off a new one for that moment, while reads are not held, and the table is small.
 Its census answers `0`: one index on an existing column, refusing no row and rewriting none.
 
-Migration `0152_asks_issue_key` creates `asks_issue_key` on `asks (issue_key)`, for the read of every ask of one issue that `GET /api/v1/issues/{key}/asks` makes with no state filter (`api/asks.go` `listIssueAsksQueryAll`) and for the reference closure's read of an issue's asks.
+Migration `0159_asks_issue_key` creates `asks_issue_key` on `asks (issue_key)`, for the read of every ask of one issue that `GET /api/v1/issues/{key}/asks` makes with no state filter (`api/asks.go` `listIssueAsksQueryAll`) and for the reference closure's read of an issue's asks.
 No index served either: `asks_open` (`0001`) is partial on `state = 'open'`, which a read asking for every state cannot use, and every other index of `asks` is keyed on something else, so both scanned the table.
 The read orders by `created_at, id` within the issue, so `(issue_key, created_at, id)` would be strictly better
 — the index would answer the order too and leave the plan no sort
@@ -1293,7 +1293,7 @@ The read orders by `created_at, id` within the issue, so `(issue_key, created_at
 A plain `create index` inside the runner's transaction, it holds `SHARE` on `asks` while it builds: ask writes wait, reads do not.
 Its census answers `0`: one index on an existing column, refusing no row and rewriting none.
 
-Migration `0153_messages_issue_roots` creates `messages_issue_roots` on `messages (issue_key, created_at, id)`, for the read of an issue's root messages that `GET /api/v1/issues/{key}/messages` makes, `where issue_key = $1 and in_reply_to is null order by created_at, id` (`api/messages.go` `listIssueRootMessagesQuery`).
+Migration `0160_messages_issue_roots` creates `messages_issue_roots` on `messages (issue_key, created_at, id)`, for the read of an issue's root messages that `GET /api/v1/issues/{key}/messages` makes, `where issue_key = $1 and in_reply_to is null order by created_at, id` (`api/messages.go` `listIssueRootMessagesQuery`).
 No index of `messages` led with `issue_key` — `messages_in_reply_to` (`0033`) leads with the parent and `messages_search` (`0061`) is the text index
 — so every read of an issue's threads scanned the table, 15.8 s of database time in the 24 hours to 2026-10-30 22:00Z.
 The key is the read's predicate and then its order, so the plan takes one range of the index and sorts nothing.
@@ -1303,7 +1303,7 @@ A plain `create index` inside the runner's transaction, it holds `SHARE` on `mes
 message writes wait, reads do not, and the census of 2026-10-30 gives `messages` 5,810 rows and 20 MiB.
 Its census answers `0`.
 
-Migration `0154_drop_asks_open_artifact` drops `asks_open_artifact`, `asks (artifact_id) where state = 'open' and artifact_id is not null` (`0009`).
+Migration `0161_drop_asks_open_artifact` drops `asks_open_artifact`, `asks (artifact_id) where state = 'open' and artifact_id is not null` (`0009`).
 It was built for the one read that lists a document's open asks (`api/asks.go` `listArtifactAsksQueryOpen`), and that read uses `asks_artifact_id` (`0032`) instead, which a plan test holds it to;
 the index audit of 2026-10-25 found `asks_open_artifact` unused from 2026-10-16 to 2026-10-25.
 An index nothing reads is write cost on every ask that opens, closes or changes its document, and one more plan for the planner to cost on every read of `asks`.
@@ -1313,7 +1313,7 @@ an index is not a shape the running code reads, so the release before this one a
 Its census answers `0`: the drop reads no row, refuses none and rewrites none, and the census report still names `asks`, the table behind the index, so a deployment sees what it locks.
 No operator follow-up: nothing is left to rebuild, and a rollback past it is an image rollback alone, since no release reads the index.
 
-Migration `0155_document_search` creates `document_search`, one row for each document holding its latest version's `search` vector (`artifact_id`, `number`, `created_at`, `search`), and `document_search_vector`, the GIN index over that vector.
+Migration `0162_document_search` creates `document_search`, one row for each document holding its latest version's `search` vector (`artifact_id`, `number`, `created_at`, `search`), and `document_search_vector`, the GIN index over that vector.
 Search's document arm, the related-item check's and the related-terms probe's each read every document's latest version through a lateral join and tested `v.search @@ q.tsq` on it before this release, because `artifact_versions.search` has no index and can have none:
 `0010` left it out, since an index over every version would also find a word only an old version holds, and `artifact_versions` is 5.2 GiB, above the size the pre-deploy census lets a migration touch.
 One row per document is an index over exactly the versions search reads.
@@ -1323,9 +1323,9 @@ Nothing is lost by leaving it out, because every reader joins `artifacts` on `a.
 there is no delete path and no trigger for one, since no production code path deletes an artifact or a version.
 Both statements lock only the table this same migration creates, which no other session can reach before the commit, so the transaction holds nothing of `artifacts` or `artifact_versions` and takes milliseconds.
 Its census answers `0`: the table is new and holds no row, and the migration reads no other table.
-No operator follow-up — `0156` keeps the table in step and `0157` fills it for the documents already stored, both in the same boot.
+No operator follow-up — `0163` keeps the table in step and `0164` fills it for the documents already stored, both in the same boot.
 
-Migration `0156_artifact_versions_document_search_trigger` creates `artifact_versions_document_search`, the function and the `after insert or update of markdown, search` trigger on `artifact_versions` that writes each version into `0155`'s table under `on conflict (artifact_id) do update … where excluded.number >= document_search.number`, so a late write of an older version and an edit of an old version both leave the latest version's vector in place.
+Migration `0163_artifact_versions_document_search_trigger` creates `artifact_versions_document_search`, the function and the `after insert or update of markdown, search` trigger on `artifact_versions` that writes each version into `0162`'s table under `on conflict (artifact_id) do update … where excluded.number >= document_search.number`, so a late write of an older version and an edit of an old version both leave the latest version's vector in place.
 It fires after `0058`'s BEFORE trigger has filled `search`, and `when (new.markdown is not null)` keeps a version with no markdown
 — an image or a file upload, whose vector is null — from blanking the document's row, exactly as `0122`'s trigger guards itself.
 `update of search` is in the column list so that a writer setting the vector directly cannot leave the table behind.
@@ -1333,7 +1333,7 @@ A function and a trigger are the migration's only two statements, which is what 
 neither reads a row, so the time they hold their lock does not grow with the table.
 Its census answers `0`: a trigger runs only on later writes and rewrites no row already stored.
 
-The risk `0156` carries is its lock.
+The risk `0163` carries is its lock.
 `create trigger` takes `SHARE ROW EXCLUSIVE` on `artifact_versions`, the 5.2 GiB table every document save writes and every search page still reads for its snippet:
 a read is not held, since `ACCESS SHARE` does not conflict with it, but every version write waits for the commit, and the migration waits for every version write already in flight.
 Every migration runs with `lock_timeout` at `pgmigrate.LockTimeout`, five seconds, and the runner applies one whose lock wait outlasts it `pgmigrate.LockTimeoutAttempts` times, three, pausing two seconds between attempts and holding nothing meanwhile.
@@ -1341,8 +1341,8 @@ A holder that outlives all three fails the migration and the boot with it:
 that pod never serves, the release before it keeps serving every request, and the deployment reports the new pod crash-looping.
 A retry is safe — the failed attempt's transaction rolled back, so nothing of it is in the database and no version record was written, and the next boot applies the migration again from the same state.
 
-Migration `0157_document_search_backfill` fills `document_search` for the documents already stored:
-`insert … select distinct on (artifact_id) … from artifact_versions where markdown is not null order by artifact_id, number desc`, under the same write guard as `0156`'s trigger, so a version written between the two migrations keeps its higher number.
+Migration `0164_document_search_backfill` fills `document_search` for the documents already stored:
+`insert … select distinct on (artifact_id) … from artifact_versions where markdown is not null order by artifact_id, number desc`, under the same write guard as `0163`'s trigger, so a version written between the two migrations keeps its higher number.
 It reads `artifact_versions` and writes no row of it, so the census does not size that table and the migration is not refused over its 5.2 GiB;
 the read takes `ACCESS SHARE`, which waits only behind an `ACCESS EXCLUSIVE` holder, and the order `distinct on` asks for is the one `artifact_versions_artifact_id_number_key` already holds, so the plan can walk that index rather than sort the table.
 Its own lock is on `document_search`, which only this release's build reads.
@@ -1350,7 +1350,7 @@ Its census answers `0`: it rewrites no row already stored and refuses none.
 The operator follow-up is the wait: a migration runs inside `pg_advisory_xact_lock(8150001)`, so this backfill holds the runner's advisory lock for its whole run, and every other Dispatch process booting meanwhile waits on it before it can apply or check a migration of its own.
 The pull request records the run time on the larger test database; a boot that looks stuck during a deploy of this release is this statement.
 
-Migration `0158_search_term_queue` creates `search_term_queue`, the items whose search text has changed since each project's word counts were last written.
+Migration `0165_search_term_queue` creates `search_term_queue`, the items whose search text has changed since each project's word counts were last written.
 The related-terms refresh counted every issue, document, comment, ask and message of every project every ten minutes, 1,882 s of database time in the 24 hours to 2026-10-30;
 with this table it applies what changed and counts a project again only where no pass of this build has counted it.
 Each row names the kind of item, the item
@@ -1363,7 +1363,7 @@ Both statements lock only the table this migration creates, which no other sessi
 Its census answers `0`: the table is new and the migration reads no other.
 No operator follow-up — the queue starts empty, and the first pass of this release counts every project in full, so nothing is owed for the writes made before it.
 
-Migration `0159_search_term_totals_snapshot` adds `snapshot pg_snapshot` and `snapshot_at timestamptz` to `search_term_totals`, both nullable and with no default.
+Migration `0166_search_term_totals_snapshot` adds `snapshot pg_snapshot` and `snapshot_at timestamptz` to `search_term_totals`, both nullable and with no default.
 Every pass of this release writes `items`, `refreshed_at`, `snapshot` and `snapshot_at` in the one statement that counts, `refreshed_at` and `snapshot_at` from that statement's `statement_timestamp()` and `snapshot` from the `pg_current_snapshot()` it takes there, and then drops exactly the queue rows that snapshot sees.
 A later pass applies the queue on top of those counts only where the row is its own work, which is `snapshot is not null and refreshed_at is not distinct from snapshot_at`; otherwise it counts the project again.
 The signal is that comparison and not a null snapshot, because the release before this one updates `items` and `refreshed_at` alone and leaves this release's snapshot in place, so during a roll a rule keyed on a null snapshot would apply the queue on top of counts that rebuild already held.
@@ -1372,9 +1372,9 @@ the `ACCESS EXCLUSIVE` it takes on `search_term_totals`, one row per project, is
 Its census answers `0`: it reads no row, rewrites none and refuses none, and every row already there reads as the null snapshot of a project this release has not counted yet.
 No operator follow-up.
 
-Migration `0160_search_term_queue_triggers` creates the five functions and the five triggers that fill `0158`'s queue:
+Migration `0167_search_term_queue_triggers` creates the five functions and the five triggers that fill `0165`'s queue:
 `asks` on `insert or delete or update of question, options, answer`, `comments` on `body`, `issues` on `key, title`, `messages` on `body` — the columns each item's search vector is built from (`0057`–`0061`)
-— and `document_search` on `insert or update of search`, which is where a document's change is taken from, because `0155`'s table already holds exactly the vector the refresh counts and `0156`'s trigger writes it inside the `artifact_versions` write.
+— and `document_search` on `insert or update of search`, which is where a document's change is taken from, because `0162`'s table already holds exactly the vector the refresh counts and `0163`'s trigger writes it inside the `artifact_versions` write.
 The event broker advances `issues.last_seq` and `artifacts.last_seq` on every event and neither column is in a list here, so an event append queues nothing.
 Each trigger is one insert that reads no row, which is what holds the writes to the 10% this change allows them.
 Ten statements, every one a `create function` or a `create trigger`, which is what exempts the migration from the census's table-size limit (`internal/pgmigrate/exempt.go`):
@@ -1702,10 +1702,10 @@ It searches the write's own project in two stages started together:
   for a keyed write, which no client's leaving ends, the keyed run's own 10-minute bound), it was not made, cancelled (reason `cancelled`), which says nothing of the search's time.
 
 df and N come from `search_term_stats` and `search_term_totals` (`0139`), which the term-statistics refresh (`api.RunSearchTermStatsRefresh`, lease `search-term-stats`) keeps up to date for every project at boot and every 10 minutes; the check only reads them.
-Each pass applies what changed: the triggers of `0160` queue every item whose search text a write changed, with the vector it held before, and a pass subtracts that vector, adds what the item holds now, and moves the item count by the items that appeared less those that were there
+Each pass applies what changed: the triggers of `0167` queue every item whose search text a write changed, with the vector it held before, and a pass subtracts that vector, adds what the item holds now, and moves the item count by the items that appeared less those that were there
 — the counts a rebuild from every item would write, for a fraction of its work.
 A pass counts a project from its items again where no pass of this build has counted it:
-a project created since the last pass, a project whose row another writer touched (`0159`), and every project on the first pass after this release is deployed.
+a project created since the last pass, a project whose row another writer touched (`0166`), and every project on the first pass after this release is deployed.
 A pass drains a project's whole queue, every row its own snapshot sees, before it moves `refreshed_at`;
 a change committed after that snapshot waits for the next pass, so no change is applied twice and none is lost.
 Each project a pass changes is logged on a line of its own, with `mode=step` or `mode=full` and how many items it applied.

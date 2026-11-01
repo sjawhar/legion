@@ -1,5 +1,5 @@
--- 0156_artifact_versions_document_search_trigger.up.sql
--- Keeps 0155's document_search in step with artifact_versions: every version any build writes
+-- 0163_artifact_versions_document_search_trigger.up.sql
+-- Keeps 0162's document_search in step with artifact_versions: every version any build writes
 -- replaces its document's row, unless the row already names a higher version.
 --
 -- A function and a trigger alone, and nothing else, so the pre-deploy census exempts the
