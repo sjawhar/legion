@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
@@ -50,35 +49,10 @@ func (m ResolvedMention) mentionedSession() (string, bool) {
 // mentionLookupTimeout bounds each listener lookup a comment's creation makes before its
 // transaction opens: every mention's, and the issue route's. A lookup cut short leaves its
 // target unresolved (resolveMentionTarget), and the comment is created and answered without it.
-// A listener that answers no lookup delays a comment with up to mentionLookupConcurrency
-// mentions by one timeout, and each further mentionLookupConcurrency mentions by one more:
-// ceil(k/8) timeouts for k mentions.
+// Every lookup of one comment runs at once (resolveCommentDeliveries, and
+// validateCommentMentions allows ten mentions), so a listener that answers none delays the
+// comment by one timeout however many mentions it carries.
 const mentionLookupTimeout = 250 * time.Millisecond
-
-// mentionLookupConcurrency is how many targets resolveMentionTargets resolves at once, so up to 8
-// mentions cost a comment one listener round trip - one 250 ms timeout when the listener answers
-// none - and each further 8 add one: ceil(k/8) for k mentions.
-const mentionLookupConcurrency = 8
-
-// resolveMentionTargets is the registry lookup behind a comment's deliveries, one try per target.
-// What a comment resolved before its transaction (resolveCommentDeliveries) is persisted in the
-// comment-created event and handed to the post-commit sender, so a role transition cannot change
-// the target after routing suppression has been decided. It resolves up to
-// mentionLookupConcurrency targets at once, each bounded by mentionLookupTimeout, and answers
-// them in input order.
-func (s *server) resolveMentionTargets(ctx context.Context, targets []string, delivery string) []ResolvedMention {
-	resolved := make([]ResolvedMention, len(targets))
-	var lookups errgroup.Group
-	lookups.SetLimit(mentionLookupConcurrency)
-	for index, target := range targets {
-		lookups.Go(func() error {
-			resolved[index] = s.resolveMentionTarget(ctx, target, delivery, mentionLookupTimeout)
-			return nil
-		})
-	}
-	_ = lookups.Wait()
-	return resolved
-}
 
 // resolveMentionTarget resolves one mention target. timeout, when positive, bounds the lookup;
 // zero leaves it bounded by the listener client's own window. A lookup that timeout cut short,

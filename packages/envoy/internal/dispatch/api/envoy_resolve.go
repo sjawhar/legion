@@ -280,7 +280,7 @@ func (s *server) resolveThroughTakeover(
 	takeover := s.newTakeoverRetry()
 	var resolved ResolvedMention
 	resolve := func() string {
-		resolved = s.resolveMentionTargets(ctx, []string{target}, delivery)[0]
+		resolved = s.resolveMentionTarget(ctx, target, delivery, mentionLookupTimeout)
 		return resolved.ResolveError
 	}
 	if !wait {

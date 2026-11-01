@@ -422,9 +422,9 @@ func TestABlockedMentionRecipientDoesNotHoldBackAnother(t *testing.T) {
 	}
 }
 
-// A comment's mention lookups run at once, up to mentionLookupConcurrency of them, so up to 8
-// mentions cost the comment one listener round trip rather than one each: three lookups of
-// 200 ms each, seen from the listener, all finish within 400 ms of the first one starting.
+// A comment's mention lookups all run at once, so its mentions cost the comment one listener
+// round trip rather than one each: three lookups of 200 ms each, seen from the listener, all
+// finish within 400 ms of the first one starting.
 func TestMentionLookupsOfOneCommentRunAtOnce(t *testing.T) {
 	const lookup = 200 * time.Millisecond
 	var mu sync.Mutex

@@ -775,7 +775,7 @@ func (s *server) renewMessageDeliveryClaim(
 		route = "session:" + pending.resolved.attemptSessionID
 	}
 	renewed := pending
-	renewed.resolved = s.resolveMentionTargets(ctx, []string{route}, pending.resolved.Delivery)[0]
+	renewed.resolved = s.resolveMentionTarget(ctx, route, pending.resolved.Delivery, mentionLookupTimeout)
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return pending, false, err

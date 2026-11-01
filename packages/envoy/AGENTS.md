@@ -1026,8 +1026,9 @@ a comment mention's `session:` target, each selected recipient of a broadcast (`
 A list is one listener's cache of the session registry, so only the per-session read tells a session that ended from one that cache has not refilled yet, and a read that did not answer never reports the session gone:
 a broadcast and a claim are refused `503
 ENVOY_UNAVAILABLE`, the broadcast with nothing written, while a mention's comment is still created `201`.
-A mention lookup is bounded at 250 ms (`mentionLookupTimeout`, as is the route's when the comment mentions anyone, and up to 8 run at once, the route's beside them):
-a listener that answers none delays a comment with up to 8 mentions by one 250 ms timeout, and each further 8 mentions add one (ceil(k/8) timeouts for k mentions).
+A mention lookup is bounded at 250 ms (`mentionLookupTimeout`, as is the route's when the comment mentions anyone), and every lookup of one comment runs at once, the route's beside the mentions' (`resolveCommentDeliveries`;
+`validateCommentMentions` allows ten mentions, so eleven lookups at most):
+a listener that answers none delays the comment by one 250 ms timeout however many mentions it carries.
 One cut short leaves its mention unresolved, for the sender to resolve when it sends, and one the listener answered with its own `envoy listener: …` error records that mention's delivery `failed` with that text once the take-over window below has passed.
 A write - `Envoy.Send`, `Unsubscribe` - runs after a commit, never inside:
 the attempt is committed first, sent, and settled by a second short transaction, so a process that dies in between leaves a record of the attempt rather than losing it.
