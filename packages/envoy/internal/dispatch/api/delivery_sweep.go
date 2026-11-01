@@ -21,9 +21,10 @@ import (
 // attempt before its send and settles it after. A process that dies between the two leaves the
 // attempt pending under a claim no process holds; once that claim lapses (claimLapsed, a minute)
 // the attempt is owed. Nobody has to ask again for it: every pass of the maintenance loop
-// (RunSuggestionOutcomeSweep) sends each owed attempt, once, under its own attempt number and so
-// its own idempotency key, as a repeat under the write's key does, so the listener drops a frame
-// that did land (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts).
+// (RunMaintenanceSweep, once a minute across the processes) sends each owed attempt, once, under
+// its own attempt number and so its own idempotency key, as a repeat under the write's key does,
+// so the listener drops a frame that did land (DELIVERY_DUPLICATE_WINDOW_MS in
+// packages/contracts).
 //
 // An attempt is owed when it is its message's, or its mention's, latest attempt, still pending,
 // its claim lapsed, and opened over a lease ago: an unclaimed attempt the write itself opened (a

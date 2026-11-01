@@ -1,0 +1,9 @@
+kind: Changed
+body: |-
+    The suggestion outcome sweep reads only the events written since its last pass and the
+    suggestions recorded since, so its work follows what changed rather than how many suggestions
+    are still pending; it judges a suggestion once the suggestion and the events that resolve it are
+    a minute old, and the first pass on a database judges every pending suggestion once, as before.
+time: 2026-10-28T12:35:17.553285025Z
+custom:
+    Issue: pr2391
