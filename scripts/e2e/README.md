@@ -873,6 +873,7 @@ The `EXIT` trap stops every process and container, copies every Oh My Pi session
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> \
 LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest of the branch's image> \
 LEGION_E2E_STORAGE_CLASS=gp2 \
+LEGION_E2E_POD_SERVICE_ACCOUNT=<ServiceAccount the pods run as> \
 LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> \
 LEGION_E2E_CLAUDE_MODEL=<model id> \
 [LEGION_E2E_MODEL_BASE_URL=<gateway base URL>] \
@@ -894,6 +895,7 @@ LEGION_E2E_RUNTIME_KUBECONFIG=<file> \
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> \
 LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest of the branch's image> \
 LEGION_E2E_STORAGE_CLASS=standard-rwo \
+LEGION_E2E_POD_SERVICE_ACCOUNT=<ServiceAccount the pods run as> \
 LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key, or the gateway key> \
 LEGION_E2E_CLAUDE_MODEL=<model id> \
 LEGION_E2E_POD_REACHABILITY=bridge \
@@ -987,6 +989,8 @@ With a base URL named the preflight holds the endpoint to more ([`lib/model-endp
 `LEGION_E2E_MODEL_ROUTE` (required, `gateway` or `key-file`) is the route the pod's *Oh My Pi* roles take, the operator route's own as Stage 4a takes it:
 under `gateway`, `{pod,models}.yml` with `LEGION_E2E_MODEL_GATEWAY_URL` and `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` (both required then);
 under `key-file`, `{pod,models}-key-file.yml`, which carry no projected token and read the same Secret's `ANTHROPIC_API_KEY`.
+`LEGION_E2E_POD_SERVICE_ACCOUNT` (required, under both routes) is the ServiceAccount the deployment's pods run as, checked by [`lib/pod-service-account.sh`](#libpod-service-accountsh).
+The run puts it in place of the `${POD_SERVICE_ACCOUNT}` placeholder in its copy of the chosen route's pod fixture, `pod.yml` or `pod-key-file.yml`.
 `LEGION_E2E_POD_REACHABILITY` (required, `aws-private-ip` or `bridge`) is how the pods reach the run's services on the devbox ([Pod reachability](#pod-reachability), below), and `LEGION_E2E_DAEMON_CONTAINER_MOUNTS` (optional, `bridge` only) the extra read-only mounts of the daemon's container there.
 The App inputs ([`lib/github-apps.sh`](#libgithub-appssh), optional) name another deployment's two role Apps;
 a run here sets none and takes this deployment's own.
@@ -1146,6 +1150,7 @@ LEGION_E2E_MODEL_ROUTE=gateway \
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
 LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
 LEGION_E2E_STORAGE_CLASS=gp2 \
+LEGION_E2E_POD_SERVICE_ACCOUNT=<ServiceAccount the pods run as> \
 LEGION_E2E_SESSION_DB_PORT=<port> \
 LEGION_E2E_REPO_SECOND_OWNER=<owner>/<name> \
 LEGION_E2E_PREVIOUS_IMAGE=<worker image of main at contract 37 or 38, before one container@sha256> \
@@ -1159,6 +1164,7 @@ LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
 LEGION_E2E_POD_REACHABILITY=bridge \
 LEGION_E2E_MODEL_ROUTE=key-file \
 LEGION_E2E_STORAGE_CLASS=standard-rwo \
+LEGION_E2E_POD_SERVICE_ACCOUNT=<ServiceAccount the pods run as> \
 LEGION_E2E_SESSION_DB_PORT=<port> \
 LEGION_E2E_REPO_SECOND_OWNER=<owner>/<name> \
 LEGION_E2E_PREVIOUS_IMAGE=<worker image of main at contract 37 or 38, before one container@sha256> \
@@ -1211,18 +1217,19 @@ That checkpoint's negative control packs nothing of its own:
 it names the published `@sjawhar/pi-legion@9.6.1` by exact version, which the daemon-rendered install script resolves to `@sjawhar/pi-legion@9.6.1` for `bun add` and bun fetches from the registry inside the pod.
 
 Every pod carries the operator route's pod fixture for the chosen `LEGION_E2E_MODEL_ROUTE`, read through the daemon's own loader (`config.ReadPodFile`):
-ServiceAccount `legion-worker`, and a ConfigMap holding the route's `models.yml` and `overlay.yml` (every role Legion's prompts reach, `enabledModels` holding each session to anthropic, and each provider a pod could reach without the route disabled).
+the ServiceAccount `LEGION_E2E_POD_SERVICE_ACCOUNT` names, which the pods run as, and a ConfigMap holding the route's `models.yml` and `overlay.yml` (every role Legion's prompts reach, `enabledModels` holding each session to anthropic, and each provider a pod could reach without the route disabled).
 Legion holds none of it.
 Before the harness runs, the script creates the run's own copy of that ConfigMap as the operator, `legion-operator-route-<project>`, labelled with the run's project, so another run in the namespace can neither see nor delete this one's route.
 
 - **`gateway`** ([`pod.yml`](../../deploy/kubernetes/operator-route/pod.yml), [`models.yml`](../../deploy/kubernetes/operator-route/models.yml)):
   one projected token for the model gateway's audience;
-  `models.yml`'s `baseUrl` gets `LEGION_E2E_MODEL_GATEWAY_URL` in place of its `${MODEL_BASE_URL}` placeholder, and `pod.yml`'s token audience gets `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` in place of its `${MODEL_TOKEN_AUDIENCE}` placeholder, so `operator-token` checks the token against it.
+  `models.yml`'s `baseUrl` gets `LEGION_E2E_MODEL_GATEWAY_URL` in place of its `${MODEL_BASE_URL}` placeholder, `pod.yml`'s token audience gets `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` in place of its `${MODEL_TOKEN_AUDIENCE}` placeholder, so `operator-token` checks the token against it, and its ServiceAccount gets `LEGION_E2E_POD_SERVICE_ACCOUNT` in place of its `${POD_SERVICE_ACCOUNT}` placeholder.
 
 - **`key-file`** ([`pod-key-file.yml`](../../deploy/kubernetes/operator-route/pod-key-file.yml), [`models-key-file.yml`](../../deploy/kubernetes/operator-route/models-key-file.yml)):
   no projected token at all (`operator-token`'s ServiceAccount, automount and no-API-token checks still run and pass;
   its one projected-token check is skipped, since there is nothing for it to read);
   `models.yml`'s `baseUrl` is Anthropic's own endpoint directly, keyed by `ANTHROPIC_API_KEY` read back from a `provider_keys` entry the shim exported into the agent's environment.
+  `pod-key-file.yml`'s ServiceAccount gets `LEGION_E2E_POD_SERVICE_ACCOUNT` in place of its `${POD_SERVICE_ACCOUNT}` placeholder, as the gateway route's does.
   Neither `LEGION_E2E_MODEL_GATEWAY_URL` nor `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` is read in this mode.
   No check anywhere in the harness makes a real model round trip (the pods run a stub agent, decision 7;
   Legion's own image probe makes none either), so the script generates `ANTHROPIC_API_KEY` as a local, never-printed placeholder
@@ -1317,6 +1324,11 @@ Each item below names an input and its default, then what it means.
 
   the issue volumes' StorageClass — AWS's `gp2`, GKE's `standard-rwo`, or whatever else the cluster under test defaults to;
   the cluster has no default of its own to fall back on
+
+- `LEGION_E2E_POD_SERVICE_ACCOUNT` — required
+
+  the ServiceAccount the deployment's pods run as, put in place of the `${POD_SERVICE_ACCOUNT}` placeholder in the run's copy of the operator route's `pod.yml` or `pod-key-file.yml`;
+  checked by [`lib/pod-service-account.sh`](#libpod-service-accountsh)
 
 - `LEGION_E2E_MODEL_GATEWAY_URL` — required under `LEGION_E2E_MODEL_ROUTE=gateway`, unused under `key-file`
 
@@ -1839,6 +1851,7 @@ It sets `linger_hours: 0.5` (tree 1's linger runs from the close its last child'
 
 ```sh
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
+  LEGION_E2E_POD_SERVICE_ACCOUNT=<ServiceAccount the pods run as> \
   LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
   LEGION_E2E_DISPATCH_URL=https://<dispatch> LEGION_E2E_ENVOY_URL=http://<listener>:<port> LEGION_E2E_NATS_URL=nats://<nats>:4222 \
   LEGION_E2E_DISPATCH_TOKEN_FILE=<0600 file> LEGION_E2E_ENVOY_TOKEN_SECRET_ID=<secret id> \
@@ -1858,6 +1871,8 @@ The repository names no production service.
 
 `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` is the audience the model gateway accepts on a worker's projected ServiceAccount token.
 The run puts it in place of the placeholder in its copy of the operator route's `pod.yml`, which the daemon loads, and `pod-shape` holds every pod to exactly that one token.
+`LEGION_E2E_POD_SERVICE_ACCOUNT` (required) is the ServiceAccount the deployment's pods run as, checked by [`lib/pod-service-account.sh`](#libpod-service-accountsh).
+The run puts it in place of the `${POD_SERVICE_ACCOUNT}` placeholder in that same copy of `pod.yml`, and `pod-shape` holds every pod to that account.
 `LEGION_E2E_DISPATCH_TOKEN_FILE` names a file only its owner can read (no group or other permission bits) holding a bearer of the Dispatch agents' client:
 the one an agent session's own Dispatch configuration resolves, `DISPATCH_TOKEN_FILE`, then `DISPATCH_TOKEN`, then `dispatch.token` in the envoy.json the session reads (`packages/envoy-client/src/dispatch-config.ts`).
 Dispatch answers that bearer as an agent session, the actor its HTTP routes and its document websocket require.
@@ -4103,6 +4118,19 @@ gateway_audience=$(bash scripts/e2e/lib/model-gateway-audience.sh)
 ```
 
 The audience is written inside a double-quoted YAML string, so the helper exits 1 when the variable is unset or holds a character other than letters, digits and `._:/-` (a quote or a backslash would break the pod the daemon loads).
+Its refusal names the variable on stderr and never prints the value.
+
+## lib/pod-service-account.sh
+
+Prints `LEGION_E2E_POD_SERVICE_ACCOUNT`, the ServiceAccount the deployment's pods run as, once it is a name a stage proof can use.
+Stage 4a, Stage 4b and [`claude-backend-sandbox.sh`](#claude-backend-sandboxsh) read the variable through it and put it in place of the `${POD_SERVICE_ACCOUNT}` placeholder in the run's copy of the operator route's `pod.yml` or `pod-key-file.yml`, which the daemon's loader refuses unfilled.
+The repository carries no default: the operator sets it to the account their own pods run as.
+
+```sh
+pod_service_account=$(bash scripts/e2e/lib/pod-service-account.sh)
+```
+
+A ServiceAccount's name is a DNS-1123 subdomain, so the helper exits 1 when the variable is unset or holds anything else: lowercase letters, digits, `-` and `.` alone, beginning and ending with a letter or a digit, at most 253 characters.
 Its refusal names the variable on stderr and never prints the value.
 
 ## lib/install-model-gateway.sh
