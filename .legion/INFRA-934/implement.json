@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-934",
-  "previousHandoff": "dae282b9dd4281bbfdea7b27000d729d6c44522b",
+  "previousHandoff": "5a2b5301780b4ccc706ee6f02acd80bffaf51cad",
   "proof": [
+    {
+      "criterion": "Round 3, the review's three requested changes: the fixture names no deployment's own ServiceAccount, Stage 4a fills the account once, and the account drift test reads the last start through the package's own lastStart.",
+      "surface": "The rendered operator-route pod each model route of scripts/e2e/stage4a-sandbox-runtime.sh writes, read back through the daemon's own loader (legion start --check-config), plus the Go rig and the e2e library's bun tests.",
+      "command": "the restructured arm-then-esac fill driven on both model routes against deploy/kubernetes/operator-route/pod.yml and pod-key-file.yml, each rendered file loaded with $TMPDIR/infra934/legion start --check-config; go test ./internal/runtime/sandbox/; bun test scripts/e2e/lib; bunx biome check scripts/e2e/ packages/daemon/; bash -n scripts/e2e/stage4a-sandbox-runtime.sh; git grep for the account the review named",
+      "observed": "Both routes render a pod carrying `service_account: operator-account` with no ${ left (the gateway route also carrying its filled audience), and the loader answers 'Config OK: project=LEGSMOKE', exit 0, for each. go test ./internal/runtime/sandbox/ ok 234.198s; bun test scripts/e2e/lib 740 pass / 2 fail, the two docker-only nats-stream.test.ts cases this pod cannot run; biome clean but for the one pre-existing warning; bash -n clean; the grep finds the account nowhere outside .legion/. The three review threads are answered and resolved one at a time: PRRT_kwDORFy7ds6yX0TF, PRRT_kwDORFy7ds6yX0TH and PRRT_kwDORFy7ds6yX0TJ.",
+      "headSha": "9a9f6f5ed9694192982d4d844fabf377b25dc790",
+      "negativeControl": "The same key-file fixture with ${POD_SERVICE_ACCOUNT} left unfilled is refused by the loader: 'runtime.kubernetes.pod.service_account \"${POD_SERVICE_ACCOUNT}\" is an unfilled placeholder: put the ServiceAccount the pods run as in its place', exit 1 — so the one fill after esac is what makes each route's pod loadable, not something else in the file. For the test change, lastStart fails naming the claim whose launcher was sent no start, where the loop it replaces left a zero LauncherStart and failed on the argv instead."
+    },
     {
       "criterion": "Round 2, the tester's failure: R5 / A2, the LEGION_E2E_POD_FILE lane — the account a deployment's pod block names is read by one rule, an absent service_account and an empty one both meaning the namespace's `default`.",
       "surface": "scripts/e2e/stage4b-sandbox-tree.sh's own `block_account`, run out of the script by the tester's test with the file's own scriptFunctions harness, as its shape_problems, record_stream and pod_shape_verdict tests are run.",
