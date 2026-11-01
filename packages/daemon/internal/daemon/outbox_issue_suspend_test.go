@@ -665,11 +665,14 @@ func TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns(t *testing.T) {
 	if _, touched := api.deleted(rootSandbox); touched || api.pvcRequests != 0 {
 		t.Fatalf("the child's close deleted the root's Sandbox (%t) or sent %d PVC requests, want neither", touched, api.pvcRequests)
 	}
-	// The claim keeps the session it recorded: a done issue is reopened, and its roles are then
-	// started again on the same issue (dispatch://INFRA-714 R8). It keeps no resume path, which is
-	// the volume the reaping guard leaves behind rather than anything a resume reads.
-	if got := storedClaim(planner.Token); got.State != supervise.StateRetired || got.Session != planner.Session || got.SessionFile != "" || got.Locator != nil {
-		t.Fatalf("done child's planner after the close = %+v, want retired with its session, no resume path and no locator", got)
+	// The claim keeps both halves of the session it recorded: a done issue is reopened, and its
+	// roles are then started again on the same issue, where only the resume path brings the
+	// worker that did the work back (dispatch://INFRA-714 R8, A10). This deployment's sessions
+	// are rows in a session database (Options.SessionStore above), not files on the volume the
+	// close deletes, so the path still names a session its store holds and the close leaves it
+	// alone (supervise.Deps.SessionOnIssueVolume).
+	if got := storedClaim(planner.Token); got.State != supervise.StateRetired || got.Session != planner.Session || got.SessionFile != planner.SessionFile || got.Locator != nil {
+		t.Fatalf("done child's planner after the close = %+v, want retired with its session, its resume path and no locator", got)
 	}
 	if got := storedClaim(architect.Token); got.State != supervise.StateWorking || got.Session != "saved-architect" {
 		t.Fatalf("root architect after the child's close = %+v, want it working with its session", got)
@@ -725,12 +728,12 @@ func TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns(t *testing.T) {
 	}
 	// The pod and its disk are new, and the session is not: the planner that worked this issue is
 	// started again on the session it recorded, where a fresh agent would have read none of its
-	// own earlier work (dispatch://INFRA-714 R8). What carries it is the session id, which lives
-	// in the session store rather than on the disk the close deleted. The resume path does not
-	// survive and must not: it named a file on that disk, so a launch built for it would resume
-	// from a path nothing holds, and clearing it leaves the id alone to carry the session and to
-	// stand as the volume reaping's evidence.
-	if got := storedClaim(planner.Token); got.Session != "saved-planner" || got.SessionFile != "" {
-		t.Fatalf("re-entered child's planner = %+v, want the session it recorded kept and no resume path", got)
+	// own earlier work (dispatch://INFRA-714 R8, A10). Both halves of that record survive the
+	// close here — the id, which the session database holds and the volume reaping reads as its
+	// evidence, and the resume path, which is the only handle a runtime resumes by. The path
+	// would go only under a deployment that wrote the session to the deleted disk
+	// (supervise.Deps.SessionOnIssueVolume), which is not this one.
+	if got := storedClaim(planner.Token); got.Session != "saved-planner" || got.SessionFile != planner.SessionFile {
+		t.Fatalf("re-entered child's planner = %+v, want the session and resume path it recorded kept", got)
 	}
 }

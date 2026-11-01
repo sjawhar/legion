@@ -700,9 +700,9 @@ func fillTable(t *builder) {
 	t.row(onTreeClose, "the workflow's close of the tree: release the claim and retire it", treeClose, []ClaimState{StateRetired}, stoppable...)
 	t.row(onTreeClose, "already retired", nothingToDo, nil, StateRetired)
 
-	t.row(onIssueClose, "the workflow's close of the issue as done: release the claim, keep its session for a reopen, clear the resume path the volume took with it, and retire it", issueClose,
+	t.row(onIssueClose, "the workflow's close of the issue as done: release the claim and retire it, its session kept for a reopen", issueClose,
 		[]ClaimState{StateRetired}, stoppable...)
-	t.row(onIssueClose, "already retired, its session kept for a reopen: clear the resume path alone", issueCloseRetired, nil, StateRetired)
+	t.row(onIssueClose, "already retired, with its session kept for a reopen", nothingToDo, nil, StateRetired)
 
 	t.row(onOperatorClose, "the operator's close of the tree, if no workflow issue backs it", operatorClose, []ClaimState{StateRetired}, stoppable...)
 	// A close of a tree already retired is the outcome the operator asked for, so it answers as
@@ -1409,34 +1409,26 @@ func treeClose(m *Machine, ctx context.Context, _ Event) error { return m.end(ct
 // its five siblings take this close and no IssueSuspend is queued (workflow/linger.go). A release
 // that fails changes nothing, so the close can be asked again.
 //
-// The claim keeps the session it recorded. A done issue is reopened — a person moves it back, a
-// production check fails — and its roles are started again on the same issue, where a session
-// forgotten here would start each as a fresh agent that has read none of the work it is
-// continuing. The session is a row in the session database, not a file on the issue's disk, so it
-// outlives the pod and the workspace, and a resume that cannot find it is the one case that
-// starts fresh, uncharged and reported (machine.go's start). What does go is the resume path: the
-// volume it names is deleted with the issue's pod, so the path would resolve to nothing, and the
-// session id left behind is also what the volume reaping reads as its evidence. Nothing else of
-// the workspace is recovered, and a later start of the issue is a fresh spawn on a pod and a disk
-// of its own.
+// The claim keeps the session it recorded, both halves of it. A done issue is reopened — a person
+// moves it back, a production check fails — and its roles are started again on the same issue,
+// where a session forgotten here would start each as a fresh agent that has read none of the work
+// it is continuing (dispatch://INFRA-714 A10). The session id is what the Sandbox volume reaping
+// reads as its evidence, and the resume path is the only handle either runtime resumes by, so
+// dropping the path would be dropping the resume whatever the id said.
+//
+// A store that has since lost the session is not this decision's to guess at. Keeping the path
+// costs one resume when the session is gone: the runtime answers runtime.ErrSessionFileMissing,
+// the same try forgets the session and spawns a fresh agent, the claim is charged nothing, and
+// the loss is reported to the issue, its architect and the controller, with the fresh agent told
+// in its own prompt (Machine.start, startFresh, Deps.SessionLost; dispatch://INFRA-714 R8).
+// Clearing the path here instead would reach that same fresh agent silently, which is the one
+// outcome R8 forbids. Nothing of the workspace is recovered either way: a later start of the
+// issue runs on a pod and a disk of its own, resuming the agent's session on it.
 func issueClose(m *Machine, ctx context.Context, _ Event) error {
 	if err := m.release(ctx); err != nil {
 		return err
 	}
-	m.clearIssueResumePath()
 	return m.retire(ctx)
-}
-
-// issueCloseRetired is the issue's close reaching a claim already retired (a tree's close retired
-// it with its session kept): the issue is finished, so its resume path goes with the volume while
-// the session id remains, both for a reopen's resume and as the reaping guard's evidence. Once its
-// resume path is gone, the claim is left as it is.
-func issueCloseRetired(m *Machine, ctx context.Context, _ Event) error {
-	if m.claim.SessionFile == "" {
-		return nil
-	}
-	m.clearIssueResumePath()
-	return m.persist(ctx)
 }
 
 // forgetSession drops the named session record from a processless claim: the operator's
@@ -1457,12 +1449,6 @@ func forgetSession(m *Machine, ctx context.Context, ev Event) error {
 		"sessionFile", m.claim.SessionFile, "state", string(m.claim.State))
 	m.forgetSession("an operator cleared it with `legion claims forget-session`, so this claim starts fresh")
 	return m.persist(ctx)
-}
-
-// clearIssueResumePath leaves the session id as the reaping guard's durable evidence but clears its
-// resume path, so a later admission starts fresh once the volume is gone.
-func (m *Machine) clearIssueResumePath() {
-	m.claim.SessionFile = ""
 }
 
 // operatorClose is the operator's own close, asked of a claim through the API. TreeClosable is
