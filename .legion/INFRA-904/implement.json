@@ -2,100 +2,67 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-904",
-  "previousHandoff": "f9e0efad82a5ea6d1f6616843bb13df964cd6f58",
+  "previousHandoff": "d5763a453310e5536b67c1308be9ecc4dc72da22",
   "proof": [
     {
-      "criterion": "The head carries CI and is no longer conflicting. GitHub reported pull request 2618 `dirty` and no workflow had ever run on the branch, which was the tester's first failure.",
-      "surface": "the pull request on GitHub, and the branch in the issue workspace",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && base=$(gh pr view 2618 -R sjawhar/legion --json baseRefName -q '.baseRefName | @json') && jj -R \"$LEGION_WORKSPACE\" new legion/INFRA-904 \"${base}@origin\" -m 'merge: resolve conflict against main@origin' ; then the four conflicts resolved in that one commit, pushed, and `gh pr checks 2618 --repo sjawhar/legion`",
-      "observed": "The merge of main at f124e657 conflicted in exactly the four files the tester named, each one a file this change edits and each taken by main in #2571 forty-five minutes before this branch first pushed; every resolution keeps main's text and folds this change's clause into it. The fingerprint moved 9539dc2cb01021ff3b4b2703a5f02a00cf7e4a95a6005006a72cb457e7ee153a to 57b575aa7f5a2b10aba70d2d14411903c26a3bca81ebe3ea393cabaf69736c56, so this is a changed diff and a full round, posted as the forward-merge comment on the pull request. `gh pr checks` then listed the branch's whole workflow for the first time, and the one red, `pr-title`, was the title not being a conventional subject; the title is now `feat(prompts): …` and the check passes.",
-      "headSha": "2b20f843d2d3d8ccf05122559c543e8dc190abb0",
-      "negativeControl": "`git merge-tree --write-tree f124e657 a4f71af2` before the merge reports CONFLICT (content) in those four files and in no other; after the merge `gh api repos/sjawhar/legion/pulls/2618 --jq .mergeable_state` no longer answers `dirty`."
+      "criterion": "A3. Full-delivery replays, 3 runs each, no run reports the goal or a requirement as unmet.",
+      "surface": "a real Oh My Pi reviewer session per run, its whole --append-system-prompt composed by the production composer inside each arm's own packages/daemon module, with that arm's @sjawhar/pi-legion loaded by package root and the stand-ins first on PATH serving the case's frozen inputs",
+      "command": "cd $TMPDIR/infra-904/harness && bash arms.sh && bun run.ts --criterion A3 && bun score.ts && bun report.ts --criterion A3",
+      "observed": "9 of 9 on the corpus the architect set: INFRA-87, INFRA-158 and INFRA-272, three runs each, every one reporting the goal met and no requirement unmet. Two causes were fixed rather than argued: INFRA-110 left the corpus, because its own gate exits 0 on the drifted tree its acceptance says it cannot pass, and INFRA-272 replaced it after an adversarial check that ran its code; and the scorer now counts the goal row and the requirement rows of the Goal check block alone, which is what A3's line asks, so INFRA-87's flag against a plan task no longer counts. Every uncounted row is printed with its own text and the reason.",
+      "headSha": "c279c2cd60dd5dddb87452f7675d576fcbcf52d8",
+      "negativeControl": "the scorer still counts the three INFRA-110 runs of round 2 as reporting something unmet, over spec items (acceptance 1, proof 2), so the row classifier does not simply pass everything; and A3's own corpus is its control, since the same reviewer text flags four cases in A2 and nothing in these three."
     },
     {
-      "criterion": "A2. Shortfall replays of four original approvals, 3 runs each on the change's text and on main's: all 12 runs of the change end in REQUEST_CHANGES that names the case's requirement, and at most 5 of the 12 control runs name it.",
-      "surface": "a real Oh My Pi reviewer session, its whole --append-system-prompt composed by the production composer inside each arm's own packages/daemon module, with that arm's @sjawhar/pi-legion loaded by package root and the stand-ins first on PATH answering the case's frozen inputs",
-      "command": "cd $TMPDIR/infra-904/harness && bash arms.sh && bun run.ts --criterion A2 && bun score.ts && bun report.ts --criterion A2",
-      "observed": "change 12/12 (INFRA-122, INFRA-180, INFRA-195 and INFRA-497 all 3/3), control 3/12 against the bar of 5. INFRA-195 went 2/3 to 3/3 on this round's third stance revision, the one that tells the reviewer a deploy-only requirement is judged at review and is never pending there.",
-      "headSha": "2b20f843d2d3d8ccf05122559c543e8dc190abb0",
-      "negativeControl": "the control arm's 12 sessions, same task text and same frozen inputs, built from main at f124e657, which carries no goal-red-team agent and the old texts: it approves INFRA-195 three times and INFRA-497 and INFRA-122 twice each."
-    },
-    {
-      "criterion": "A4. The waiver path: the owner's record waives the setup-window requirement, and the same words from an agent do not.",
-      "surface": "the same reviewer sessions, over INFRA-497's frozen inputs plus one constructed comment, in two variants that differ only in the comment's actor",
-      "command": "cd $TMPDIR/infra-904/harness && bun run.ts --criterion A4 && bun report.ts --criterion A4",
-      "observed": "6/6. owner-record 3/3: every run marks the requirement waived, carries the comment's link and requests no change for it. agent-record 3/3: every run requests changes for it, each title naming it.",
-      "headSha": "2b20f843d2d3d8ccf05122559c543e8dc190abb0",
-      "negativeControl": "the agent-record variant is itself the control of the owner-record one: the same comment, the same words, an agent as its actor, and the verdict inverts in every run."
+      "criterion": "A6. The plan check on INFRA-184's spec at version 4: the as-written variant rejected in every run naming the goal, the narrowed variant rejected in every run, and the with-step variant rejected in no run for the goal or for a missing or narrowed requirement.",
+      "surface": "a real Oh My Pi planner session running its own plan check, over INFRA-184's plan and its spec at v4, in a workspace at the commit the plan was written against",
+      "command": "cd $TMPDIR/infra-904/harness && bun run.ts --criterion A6 && bun report.ts --criterion A6",
+      "observed": "as-written 3/3 rejected naming the goal (control 1/3), where round 2 was 0/3 after the re-cut; narrowed 3/3 (control 1/3); with-step 2 approvals and one rejection whose first paragraph says scope is not the problem — 'R1 (Task 1, A1/A2), R2 (Task 2, A3), R3 (Task 3, A4) and both Decisions are each carried by a task and a named proof, and the Goal's fourth text is added (Task 3b/A5) rather than narrowed' — rejecting instead for two environment claims of the plan that are false in the checkout, which is a true finding about the plan and not a scope rejection.",
+      "headSha": "c279c2cd60dd5dddb87452f7675d576fcbcf52d8",
+      "negativeControl": "the control arm of all three variants, main's planner.md and plan-reviewer.md at f124e657 over the identical fixture: it approves the as-written plan in one run of three and the narrowed plan in one of three, so the change's 3/3 on each is the stance and not the fixture."
     },
     {
       "criterion": "A5. Every run of A2 to A4 on the change writes a Goal check: block naming the spec version and listing the goal, each requirement and each red-team finding with what the reviewer did with it, and its transcript holds one goal-red-team dispatch.",
-      "surface": "the written verdict files and the session transcripts of every A2, A3 and A4 change-arm run",
+      "surface": "the written verdict files and the session transcripts of every A2, A3 and A4 change-arm run, the nine new A3 runs included",
       "command": "cd $TMPDIR/infra-904/harness && bun report.ts --criterion A5",
-      "observed": "Every change-arm run carries the block with the spec version, the goal and each requirement with a verdict, and each red-team finding with its disposition, and exactly one goal-red-team dispatch that really ran that agent. Last round three runs missed; the cause of the worst was a task call that put the agent's name at the top of its arguments and left tasks[0].agent unset, so Oh My Pi ran its general-purpose agent under the red team's name. roles/reviewer.md now says the name goes inside the entry, and the scorer now confirms the subagent's own system prompt rather than trusting the call.",
-      "headSha": "2b20f843d2d3d8ccf05122559c543e8dc190abb0",
-      "negativeControl": "every control-arm run of the same cases: 0 carry the block, 0 name a spec version in one, 0 dispatch the agent, which does not exist in that arm."
-    },
-    {
-      "criterion": "A7. The architect's acceptance on INFRA-497's frozen inputs, two variants, 3 runs each on the changed skill: no run signs off, and each names item 1.",
-      "surface": "a real Oh My Pi root-architect session, its prompt composed by cmd/goal-pane overlaid into the arm's daemon module, under gates.design: root-issues",
-      "command": "cd $TMPDIR/infra-904/harness && bun run.ts --criterion A7 && bun report.ts --criterion A7",
-      "observed": "change 6/6: every run answers request_backward_move and names item 1, with the constructed Goal check approval and with the original approval alike. Control 4/6: main's skill signs INFRA-497 off twice on the original approval.",
-      "headSha": "2b20f843d2d3d8ccf05122559c543e8dc190abb0",
-      "negativeControl": "the control arm's six runs on main's skills, which sign the issue off on the approval that carries no Goal check block."
-    },
-    {
-      "criterion": "A8. The production check on INFRA-492's merged pull request at the check's last look, 3 runs on the changed prompt: every run reports fail and names acceptance 4.",
-      "surface": "a real Oh My Pi implementer session on the production-check task text the daemon really sends (internal/workflow/check.go, unchanged), with the frozen request-log fixture whose only Dispatch tab is an agent's own",
-      "command": "cd $TMPDIR/infra-904/harness && bun run.ts --criterion A8 && bun report.ts --criterion A8",
-      "observed": "change 3/3 fail, each naming the request log, the caller kind and the served times; control 0/3 (main's prompt reports pending three times). The first A8 of this round was thrown away: its sessions reached the live cluster, which the stand-ins did not cover, and one quoted a request-log window of its own run day. Every live-reaching command is refused in a replay now, and these three runs are from after that.",
-      "headSha": "2b20f843d2d3d8ccf05122559c543e8dc190abb0",
-      "negativeControl": "the control arm's three runs on main's prompt against the identical fixture: none reports fail."
+      "observed": "Every change-arm run carries the block with the spec version, the goal and each requirement with a verdict, and each red-team finding with its disposition, and exactly one goal-red-team dispatch whose subagent transcript really is that agent's.",
+      "headSha": "c279c2cd60dd5dddb87452f7675d576fcbcf52d8",
+      "negativeControl": "every control-arm run of the same cases carries none of it: no block, no spec version in one, and no dispatch, the agent not existing in that arm."
     },
     {
       "criterion": "A1. jj diff --name-only from main to the head lists no *.go file, and a grep of the changed texts for the name and email of each person who is a user actor in the replayed issues' events finds none.",
       "surface": "the change's own diff at the pushed head, and the frozen events of every case",
       "command": "cd $TMPDIR/infra-904/harness && bun a1-names.ts",
-      "observed": "No *.go in the changed paths, and no person's name or email in a line this change writes. The tester found one last round: the previous implement handoff quoted the owner's first name in its own A1 note, and the checker called it pre-existing because it read the head rather than the merge base. The checker now judges pre-existing against the merge base, so a file the base does not hold has no pre-existing line at all, and this handoff names no person.",
-      "headSha": "2b20f843d2d3d8ccf05122559c543e8dc190abb0",
-      "negativeControl": "the same program still finds and prints the two genuinely pre-existing lines in docs/kubernetes.md, which AGENTS.md exempts, so neither the harvest nor the grep is vacuous; and it reported the handoff's own line as written the moment the merge-base test went in."
+      "observed": "33 changed files, no *.go, and no person's name or email in any line this change writes. The last hit, in the tester's own handoff, is gone now that the tester has written that file again.",
+      "headSha": "c279c2cd60dd5dddb87452f7675d576fcbcf52d8",
+      "negativeControl": "the same program still finds and prints the two genuinely pre-existing lines of docs/kubernetes.md, which AGENTS.md exempts, so neither the harvest nor the grep is vacuous."
     },
     {
       "criterion": "R9, the owner's condition on the approval: each changed text is a few sentences and the skills do not grow overall, at the numbers the architect set.",
       "surface": "the files at the pushed head against the branch's merge base with main",
       "command": "cd $TMPDIR/infra-904/harness && bun linecounts.ts",
-      "observed": "Every budget held against the new base, main at f124e657: skills/**/*.md 4962 to 4962 lines and 66342 to 66342 words; roles/reviewer.md +150 (cap 150), core/reviewer.md +99, planner.md +87, implementer.md +77, architect-common.md +58, core/implementer.md +57, go/implementer.md +51, core/common.md +27, architect-root.md and architect.md +25 each, claude-mechanics.md +1; goal-red-team.md 299 words and 39 lines.",
-      "headSha": "2b20f843d2d3d8ccf05122559c543e8dc190abb0",
-      "negativeControl": "linecounts.ts exits 1 and names each breach: it did so three times this round (goal-red-team.md at 311 words after the blocking comment, and skills over by 2 lines and 44 words after the deploy-only sentence went in), and each was paid for before the push."
+      "observed": "Every budget held: skills/**/*.md 4962 to 4962 lines and 66342 to 66342 words against the base f124e657; roles/reviewer.md +150 (cap 150), core/reviewer.md +99, planner.md +87, implementer.md +77; goal-red-team.md 299 words and 39 lines. This round's one text change is packages/pi-legion/agents/plan-reviewer.md, +5 lines and +90 words, which is no skill and no role prompt and sits inside the +5 lines its plan allowed it.",
+      "headSha": "c279c2cd60dd5dddb87452f7675d576fcbcf52d8",
+      "negativeControl": "linecounts.ts exits 1 and names each breach; the first draft of this round's check 5 was +6 lines and was cut to +5 before the push."
     }
   ],
   "filesChanged": [
-    "merge: resolve conflict against main@origin — the four files main took in #2571: go/claude-mechanics.md, roles/planner.md, src/shipped-agents.test.ts, references/decomposition.md, each keeping main's text with this change's clause folded in",
-    "packages/pi-legion/agents/goal-red-team.md — the blocking field dropped, which main now refuses in any agent",
-    "packages/daemon/internal/prompts/roles/reviewer.md — the red team's name goes inside the task entry, and the reviewer waits for it as main's other checks are waited for",
-    "skills/legion-worker/references/merge-gate.md — a deploy-only requirement is judged at review too and is never pending there, paid for by compressing the reviewer and production-check sections",
-    "everything round 1 changed, carried through the merge unchanged"
+    "packages/pi-legion/agents/plan-reviewer.md — check 5 now rejects a plan whose own text says it leaves out work the goal covers, and takes the broader reading where two parts of a spec disagree on scope",
+    "everything rounds 1 and 2 changed, unchanged this round"
   ],
   "trickyParts": [
-    "The merge was not only four conflicts. main had also made `blocking` a forbidden field in every agent's frontmatter and moved its own checks to `task` plus `wait`, so goal-red-team.md and roles/reviewer.md had to follow or the merged head would fail shipped-agents.test.ts and tell the reviewer to use a convention main had dropped. That is the clean-merge hazard the forward-merge rule warns about, found by running the tests at the merge head rather than by the conflict list.",
-    "The replay sessions could reach live systems. kubectl, curl, wget, aws, psql, redis-cli, nc and dig are all on this pod's PATH and the harness had stand-ins for gh and dispatch alone, so A7's and A8's sessions tried the cluster and one A8 run quoted a request-log window of its own run day instead of the frozen one. Every one of those commands is now refused in a replay, with the frozen file named, and A7, A8 and the three A2 runs that had called curl were all re-made after it. This is why the first A8 of this round is not in the evidence.",
-    "The budget's base moves with the merge. linecounts.ts held skills/**/*.md against two literals taken before the merge, which read main's own growth as this change's; it now takes the cap from whatever the base holds at the time of the count."
+    "A6's workspace was wrong for a reason the fixture did not hold. Re-cutting the INFRA-184 variants did not move the run's checkout, because run.ts reused `$H/runs/.clones/<fixture>.git` and an existing run workspace unconditionally and every cache was still at the finished branch c150e430. Both now compare the cache's HEAD with the fixture's head and rebuild on a mismatch.",
+    "The A6 base commit was settled from evidence rather than from either name proposed. meta.json said 6e66210b and the ruling said 7bf2759c; the decisive record is INFRA-184's own planner handoff commit 7def8b85, committed at 2026-10-24T22:59:51Z, one minute after the plan's cut, whose parent is 7bf2759c. That is the tree the plan was written against, and the three variants are rebuilt on it.",
+    "A3's row classifier had to be written by what a row judges, not by the phrases one run used. A row is read as the goal, a requirement of the issue's spec, or neither, from what its head names and from the opener of the list it sits in; a plan task, a red-team finding, a risk or a note is neither, and is printed beside the table with its text and the reason. Two refinements came out of running it over all 78 recorded runs, both recorded in the scorer."
   ],
   "deviations": [
-    "The third and last stance revision D5 allows was spent: skills/legion-worker/references/merge-gate.md now tells the reviewer that a requirement only the deploy can show is met at review when the change holds what it needs and the plan names the observation, unmet when nobody observes it or the plan measures something else, and never pending. It is a rule of the approved spec's Design that round 1's compression had left out, and its absence was the whole of A2's INFRA-195 failure: the run that approved had found the gap and filed it as pending because the observation is post-merge work. With the sentence in, INFRA-195 is 3/3.",
-    "The pull request's title changed to a conventional subject, `feat(prompts): the reviewer holds a change to its issue's goal, and a declared shortfall does not pass`, because the required pr-title check refuses anything else and the squash takes the title as main's commit subject."
+    "No stance revision was spent this round beyond the one the architect allowed for A6. The three D5 revisions were spent in rounds 1 and 2; this round's single text change is the sharpening the architect asked for by name, inside its line budget."
   ],
-  "openItemsForOtherRoles": [
-    "One A1 hit is left and it is not in a file I may rewrite: `.legion/INFRA-904/test.json:33` quotes the owner's first name, in the tester's own evidence for the A1 failure it was reporting. That file is new in this change, so by the architect's ruling the line is one this change writes and the hit is a defect, exactly as the implement handoff's was. I removed mine and left the tester's record alone rather than editing another phase's handoff; the tester writes that file again next round and can drop the word then. `bun a1-names.ts` reports it, and will pass on its own once it is gone."
-  ],
-  "openQuestions": [
-    "A3 is 5 of 9 on its new corpus and does not pass. INFRA-158 is 3/3 and INFRA-87 is 2/3, but all three INFRA-110 runs report something unmet — the goal in two of them, acceptance 1 in all three, over a raise of the body limit refused only in the plain-decimal form. The tester's own full-delivery check confirmed INFRA-110 as a full delivery, so either that check or these runs is wrong, and by the architect's standing instruction on this criterion I did not change the stance to hide the flag. The transcripts and the frozen inputs are on the issue.",
-    "A6 does not pass, and the re-cut moved it the other way. With INFRA-184's fixture cut at the plan's own time, so that spec v4 is the latest version the case can see, the as-written variant is 0 of 3: every run approves the plan. The with-step variant, whose line asks for no rejection, is 2 of 3 rejected. The narrowed variant is 3/3 (control 2/3), so the plan check does reject a narrowed requirement. Whether v4 alone carries the goal the as-written variant asks the reviewer to reject against is the architect's reading, not mine; all three stance revisions are spent.",
-    "D11, the supplementary replay of the architect's decomposition, is evidence and not a gate: change 3/3 hold naming the dropped requirement, control 2/3."
+  "openQuestions": [],
+  "knownRed": [
+    "One check is red on this head: `envoy-go`, on `TestMigrationSetTakesNumbersThenTimestamps`. It is red on main itself from fa0b1f537 (#2387) at 2026-11-01T15:46Z, before this branch's head existed; main's own ci.yaml run 41322873833 for that commit concluded failure. This change touches no migration, the architect's instruction is to spend no fix on it, and the forward merge that picks up the fix waits until the fix is on main. Every other check on this head passes."
   ],
   "discoveredComplexity": [
-    "Four measurement defects the tester and the architect named are fixed in the scorer, not in the change: the dispatch counter now confirms the subagent's own system prompt instead of the name the call used, so a call that named the agent while a general-purpose agent answered reads as a miss and says which kind; a line is classified by the first verdict word it states, so 'met for every sentence it names, but read the findings below' is no longer unmet; a requested change's title is read for a sub-item of the case's own item, so 'Requirement 1e unmet' names item 1; and a1-names.ts judges pre-existing against the merge base.",
-    "The requested-change reader had to learn two more layouts this round (a bold numbered line, and a bold section label), because reviews write their findings in whatever shape the body wants. Every widening is applied to both arms and the matched title is printed beside each counted row, so a reader of the pull request can judge the count rather than trust it.",
-    "The gh stand-in answers every code search empty, because a replay holds one pull request's inputs and not the repository's index, and its GraphQL route answers one fixed document whatever the query asked. Both are stated at the route. A session cannot tell either from a true empty answer."
+    "A3's corpus is now checked adversarially by running the delivered code, which is what caught INFRA-110: reading a gate's source said it refused a drifted tree, and running it on that tree said otherwise. The defect is on main today and went to the controller as a finding outside this tree, filed as dispatch://INFRA-953, not into this pull request.",
+    "The with-step variant of A6 is the one row of the report whose column cannot decide it: its line is about the reason for a rejection, and the scorer counts the event. The reason is quoted in the pull request body and in this handoff so the reading is visible rather than asserted."
   ]
 }
