@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "LEGION-755",
+  "previousHandoff": "f4f13b79c080de3d78e3c47d433a345c76fe5918",
+  "headReviewed": "2a1a0bbe94b64ecd592d140e98c74694d9f79a8e",
+  "codeHead": "f4f13b79c080de3d78e3c47d433a345c76fe5918",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 1,
+  "round": "Round 2, after CI went red at retro's head f4f13b79 on a timing assertion in packages/pi-legion/extensions/legion-background-subagent-omp.test.ts (outside this pull request's paths), the implementer re-ran the failed jobs once (green) and the tester passed. No forward merge (merge base f29f58bb unchanged); no READY refusal in the task. The code is the code approved in round 1 (review 5726715630 at e6ec6d44): compare e6ec6d44...f4f13b79 lists only the four docs/solutions/ learnings retro added and the removal of .legion/LEGION-755/, so the thermonuclear pair from round 1 stands and was not run again; the round read retro's four learnings as new prose.",
+  "keyFindings": [
+    {"severity": "minor", "file": "docs/solutions/{daemon,skill-patterns,testing}/*-pr2619.md", "description": "All four learnings cited .legion/LEGION-755/{review,test}.json as evidence, files retro removes before the merge, so the citations would point at nothing on main (docs/solutions/legion/a-solutions-note-cannot-cite-a-legion-handoff-because-retro-removes-it-before-the-merge-INFRA-69.md). Fixed by the reviewer in abc2dd9d43392dc53cc78e753c73b184c2b5f89f: each now cites the pull request's durable record instead (review 5726715630 and its inline note, the E2E (tester) line of #2619, or the proof's own assertions at person_handover_scratch_dispatch_test.go:956). Prose only; grep -rn '.legion/LEGION-755' docs/solutions/ prints nothing; check-private-names.sh clean."}
+  ],
+  "threads": "Three threads on the pull request, all opened by this reviewer's round-1 approval (PRRT_kwDORFy7ds6yXzYw at daemon/outbox.go:522, PRRT_kwDORFy7ds6yXzYy at record/outbox.go:122, PRRT_kwDORFy7ds6yXzY0 at triage.md:33): two Minor not-a-defect notes and the round-1 prose fix. Each answered again this round and named to the implementer to resolve.",
+  "ci": "Read on GitHub: required set from main's rulesets ci-ok and pr-title (branch protection none). CI head f4f13b79 (the branch's newest pull_request run): ci-ok completed success at 09:23:25Z after the implementer's one re-run of the failed jobs (pi-legion check run 124796051553 success), pr-title success. Compare f4f13b79...2a1a0bbe: handoffsOnly true, 2 files. The approved head is this round's push (handoff plus the prose commit abc2dd9d), whose own ci-ok and pr-title the reviewer waited for before approving; the review body records their times.",
+  "e2e": "Both lines stand in the PR body: the implementer's at code head c26f58b7 (daemon code byte-identical at f4f13b79, as the tester's empty jj diff over packages/, AGENTS.md, docs/site and skills/dispatch shows) and the tester's re-run of the three scratch tests at 10f5eb0f with the round-1 live negatives (a park and a label removal between queue and delivery).",
+  "thermo": "Not run again this round: the runtime code at f4f13b79 equals the code the round-1 pair audited at 06743f8f (compare e6ec6d44...f4f13b79: docs/solutions/ and .legion/ only). Round 1: deep-review APPROVE, code-quality CHANGES judged Minor.",
+  "proseFix": {"commit": "abc2dd9d43392dc53cc78e753c73b184c2b5f89f", "files": ["docs/solutions/daemon/a-fact-field-the-prepare-stage-fills-is-filled-for-the-boot-listing-by-a-read-is-a-safe-no-everywhere-else-and-is-proven-on-a-first-boot-pr2619.md", "docs/solutions/daemon/a-field-added-to-a-strictly-decoded-outbox-payload-needs-no-migration-and-is-not-downgrade-safe-while-a-row-is-pending-pr2619.md", "docs/solutions/skill-patterns/a-skill-recipe-that-derives-what-the-daemon-derives-in-code-reads-the-whole-input-the-code-reads-pr2619.md", "docs/solutions/testing/a-scratch-rig-proof-of-an-actor-keyed-rule-sweeps-its-fixtures-identities-sends-a-human-only-route-its-exact-body-and-anchors-each-negative-on-the-applied-event-pr2619.md"], "what": "the Evidence sections cite the pull request's durable records in place of .legion/LEGION-755/{review,test}.json"},
+  "noteForRetro": "Retro's next pass re-adds the removal of .legion/LEGION-755/ above this approval; the four learnings are already on the branch and need no edit (the retro skill forbids editing a learning another retro wrote, and these are this issue's own)."
+}
