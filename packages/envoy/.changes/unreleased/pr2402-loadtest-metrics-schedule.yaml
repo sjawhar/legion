@@ -1,0 +1,10 @@
+kind: Added
+body: |-
+  The load test (`packages/envoy/loadtest/`) scrapes Dispatch's `/metrics` every 5 seconds
+  (`LOADTEST_METRICS_PORT`, default `10007 + 10k` for the root's port block k) and adds a Pools
+  and admission table: each pool's connections, waiters and acquire timeouts, and the requests
+  admission admitted and refused. A
+  failed answer records its refusal code and a connection-level failure its class. `--schedule
+  <factor>x:<duration>,...` varies the load over the window (a burst and the drop after it), and a
+  step with two segments or more measures its recovery after the drop in 10 s windows, with
+  `--recovery-ref-p99` as the latency it is judged against.

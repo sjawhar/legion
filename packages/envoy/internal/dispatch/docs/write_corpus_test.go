@@ -279,7 +279,7 @@ func runWriteCorpus(t *testing.T, service *Service, specName, markdown string, o
 			}
 			step := writeCorpusStep{Name: name}
 			began := time.Now()
-			if err := joinedWrite(service, func(ctx context.Context) error {
+			if err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 				observe(mode + "/" + name + "/begin")
 				return write(ctx, &step, func(operation string) { observe(mode + "/" + name + "/" + operation) })
 			}); err != nil {

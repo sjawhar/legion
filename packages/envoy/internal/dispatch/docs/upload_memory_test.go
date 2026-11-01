@@ -205,7 +205,7 @@ func (a *loadAgent) anchorQuotes(n int) []string {
 func (a *loadAgent) anchoredComment(quote, body string) *loadThread {
 	a.t.Helper()
 	thread := &loadThread{id: a.newID(), body: body, at: time.Now().UTC().Format(time.RFC3339Nano)}
-	if err := joinedWrite(a.service, func(ctx context.Context) error {
+	if err := joinedWrite(a.service, a.artifactID, func(ctx context.Context) error {
 		anchored, err := a.service.MarkQuote(ctx, a.artifactID, MarkSpec{Kind: MarkComment, ID: thread.id, By: a.actor}, quote, nil)
 		if err != nil {
 			return err

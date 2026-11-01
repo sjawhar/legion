@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 )
 
@@ -97,11 +98,19 @@ func (NoBrowserIdentity) Login(*http.Request) (string, error) {
 // that needs the sign-in issuer while the issuer cannot be reached.
 const signInUnavailableMessage = "the sign-in issuer cannot be reached; try again in a minute"
 
-// WriteError renders an Identity error, or a sign-in's, as Dispatch's JSON error response: 401
-// NO_IDENTITY for ErrNoIdentity; 503 SIGNIN_UNAVAILABLE for ErrSignInUnavailable (Membership: the
-// person stays signed in, and the first request after the issuer answers is served); and 500
-// IDENTITY_ERROR for anything else.
-func WriteError(w http.ResponseWriter, err error) {
+// WriteError renders an Identity error, or a sign-in's, for request r as Dispatch's JSON error
+// response: 401 NO_IDENTITY for ErrNoIdentity; 503 SIGNIN_UNAVAILABLE for ErrSignInUnavailable
+// (Membership: the person stays signed in, and the first request after the issuer answers is
+// served); and 500 IDENTITY_ERROR for anything else. A lookup that failed because r could not be
+// served - its deadline passed, its client went away, or no connection of a pool came free within
+// its acquire bound - is answered as admission.WriteUnserved answers it, a retryable 503 or
+// nothing, rather than as a failure of the identity service. An unreachable sign-in issuer is
+// answered as itself: the timeout its error carries is the call to the issuer's, which no longer
+// reads as a want of database room (store.IsPoolBusy).
+func WriteError(w http.ResponseWriter, r *http.Request, err error) {
+	if admission.WriteUnserved(w, r.Context(), err) {
+		return
+	}
 	status := http.StatusInternalServerError
 	body := map[string]string{"error": "identity resolution failed", "code": "IDENTITY_ERROR"}
 	switch {

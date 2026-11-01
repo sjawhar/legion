@@ -1474,7 +1474,7 @@ func TestAWriteDoesNotForkFromTheStoreInsideAnAppendsCursorWindow(t *testing.T) 
 	var forked string
 	written := make(chan error, 1)
 	go func() {
-		written <- joinedWrite(service, func(ctx context.Context) error {
+		written <- joinedWrite(service, artifactID, func(ctx context.Context) error {
 			if err := service.ProjectMark(ctx, artifactID, "mark-in-the-window", MarkRecord{
 				Kind: "comment", By: "user:bob", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "note",
 			}, model.Actor{Kind: "user", ID: "bob"}); err != nil {
@@ -1643,7 +1643,7 @@ func TestAMarginWriteFromAColdForkIsRenderedByTheRoomItIsPublishedInto(t *testin
 
 	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
 	var cold bool
-	if err := joinedWrite(pair.taskA, func(ctx context.Context) error {
+	if err := joinedWrite(pair.taskA, pair.artifactID, func(ctx context.Context) error {
 		if err := pair.taskA.ProjectMark(ctx, pair.artifactID, "comment-on-task-a", MarkRecord{
 			Kind: "comment", By: "user:alice-on-task-a", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "a reply",
 		}, alice); err != nil {
@@ -1717,7 +1717,7 @@ func TestAMarginWriteFromAWarmForkKeepsTheRenderingOfTheRoomItWasForkedFrom(t *t
 	classes, room := recordClasses(t, pair.taskA, pair.artifactID)
 	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
 	var cold bool
-	if err := joinedWrite(pair.taskA, func(ctx context.Context) error {
+	if err := joinedWrite(pair.taskA, pair.artifactID, func(ctx context.Context) error {
 		if _, err := pair.taskA.ReplaceText(ctx, pair.artifactID, "First.\n", alice); err != nil {
 			return err
 		}
@@ -1805,7 +1805,7 @@ func TestARoomLoadingWhileThisProcessesWriteCommitsStandsAtTheHead(t *testing.T)
 	if _, _, err := lockArtifactOwner(ctx, tx, artifactID); err != nil {
 		t.Fatalf("lock document owner: %v", err)
 	}
-	joined, ledger := service.Join(ctx, tx)
+	joined, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	defer ledger.Discard()
 	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{
 		{Op: "insert", Markdown: "Agent's paragraph.", After: "Second."},

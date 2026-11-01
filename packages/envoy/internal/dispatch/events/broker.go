@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"sync/atomic"
 
 	"github.com/jackc/pgx/v5"
 
@@ -21,8 +22,12 @@ import (
 // (outbox/publisher.go) and the delivery hub's intake (api/delivery_live_hub_intake.go). An
 // events subscription is not one of them; it reads the relay's stream, which carries the other
 // process's events too.
+//
+// It also counts the events this process has committed (Committed), which every appending path
+// hands to Publish once its transaction has committed.
 type Broker struct {
-	stream *Stream
+	stream    *Stream
+	committed atomic.Uint64
 }
 
 // NewBroker creates an empty in-process broker.
@@ -421,7 +426,20 @@ func (b *Broker) SubscriberCount() int { return b.stream.SubscriberCount() }
 // Publish fans a committed event out to local subscribers, which the caller does only once the
 // appending transaction has committed. An overflowed subscriber is dropped and its channel
 // closed (Stream.Publish).
-func (b *Broker) Publish(e model.Event) { b.stream.Publish(e) }
+//
+// It is also where a committed event is counted (Committed): every path that appends an event -
+// a request's handler, the document ledger's commit and settlement's own, the delivery and
+// architecture writers, the repository-project seed - publishes each event it appended, once,
+// right after its commit, and nothing else calls Publish. Counted here, at the one call every
+// such site makes, the count grows as the events table does, with no appending path left out.
+func (b *Broker) Publish(e model.Event) {
+	b.committed.Add(1)
+	b.stream.Publish(e)
+}
+
+// Committed is how many events this broker has published since it was made: the events this
+// process has committed, the dispatch_events_committed_total counter of the metrics endpoint.
+func (b *Broker) Committed() uint64 { return b.committed.Load() }
 
 // CloseAll disconnects every active local subscriber. Test-only.
 func (b *Broker) CloseAll() { b.stream.CloseAll() }

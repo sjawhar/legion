@@ -46,7 +46,7 @@ func TestRecordedMarkRefsListsOnlyTheDocumentsAnchoredRows(t *testing.T) {
 		values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Ask block on A', 'ttl', $2)
 	`, "00000000-0000-4000-8000-0000000000a3", documentA)
 
-	recorded, err := service.recordedMarkRefs(context.Background(), documentA)
+	recorded, err := recordedMarkRefs(context.Background(), service.store.Pool, documentA)
 	if err != nil {
 		t.Fatalf("recordedMarkRefs: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestRecordedMarkRefsSkipsAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {
 			jsonb_build_object('artifact_id', $3::text, 'mark_id', 'upper-case'), $2)
 	`, "00000000-0000-4000-8000-0000000000a5", documentB, strings.ToUpper(documentA))
 
-	recorded, err := service.recordedMarkRefs(context.Background(), documentA)
+	recorded, err := recordedMarkRefs(context.Background(), service.store.Pool, documentA)
 	if err != nil {
 		t.Fatalf("recordedMarkRefs: %v", err)
 	}

@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -203,15 +202,16 @@ func withSuggestions(payload any, advice *writeAdvice, suggestions *model.Sugges
 // decisionBlockChecks runs the related-item check for each decision block a document edit added,
 // once the edit has committed, so a block whose question restates a decision already made or work
 // already filed is answered with it while the writer is still at the document. The first
-// decisionBlockCheckLimit blocks are checked at once, all under one allowance (relatedBounds), so
-// an edit waits on its checks no longer than an issue create waits on its one; each block past
-// them answers as not made, and all of those are recorded in one round trip. A block's source is
-// the document's issue, or the project document itself when it has no issue, left out of its
-// results as an ask's owner is. Nil when the edit added no block.
+// decisionBlockCheckLimit blocks are checked, one after another and all under one allowance
+// (relatedBounds), so an edit waits on its checks no longer than an issue create waits on its
+// one; each block past them answers as not made, and all of those are recorded in one round trip.
+// A block's source is the document's issue, or the project document itself when it has no issue,
+// left out of its results as an ask's owner is. Nil when the edit added no block.
 //
-// Each check reads and records under a connection mark of its own (store.ForConcurrentRead): on
-// the request's one mark, one check's open cursor would have the pool refuse the others' reads
-// and records (store.ErrNestedAcquire).
+// One check at a time is what the edit's route is admitted for: a request may hold no more
+// request-pool connections than its route's weight (apiRoute.Weight, concurrentReadWeight for
+// every route that runs a check), and one check holds two of them, its keyword read and its
+// meaning read side by side (store.ForConcurrentRead). Five checks at once asked for ten.
 func (s *server) decisionBlockChecks(
 	ctx context.Context, artifact model.Artifact, blocks []docs.AddedAskBlock, actor model.Actor,
 ) []decisionBlockCheck {
@@ -222,7 +222,6 @@ func (s *server) decisionBlockChecks(
 	defer cancel()
 	checks := make([]decisionBlockCheck, len(blocks))
 	var overflow []relatedCheckRecord
-	var running sync.WaitGroup
 	for index, block := range blocks {
 		source := suggestionSource{kind: "decision_block", blockID: block.ID, actor: actor}
 		if artifact.IssueKey != nil {
@@ -241,18 +240,11 @@ func (s *server) decisionBlockChecks(
 			})
 			continue
 		}
-		checkCtx, err := store.ForConcurrentRead(bounded)
-		if err != nil {
-			slog.Warn("dispatch: related-item check not made", "error", err)
-			checks[index].Suggestions = s.relatedCheckNotRun(ctx, input, relatedReasonSearchFailed, relatedSearchFailedMissing)
-			continue
-		}
-		running.Go(func() { checks[index].Suggestions = s.relatedCheck(checkCtx, input) })
+		checks[index].Suggestions = s.relatedCheck(bounded, input)
 	}
 	if len(overflow) > 0 {
 		s.recordRelatedChecks(ctx, overflow...)
 	}
-	running.Wait()
 	return checks
 }
 
@@ -367,6 +359,9 @@ type relatedPick struct {
 // the search's own order. Unless record is false it then records what it offered and how it went
 // (recordRelatedChecks).
 func (s *server) relatedCheck(ctx context.Context, input relatedInput) *model.Suggestions {
+	if s.relatedCheckEntered != nil {
+		s.relatedCheckEntered()
+	}
 	started := time.Now()
 	suggestions, record := s.runRelatedCheck(ctx, input, started)
 	record.totalMS = int(time.Since(started).Milliseconds())
@@ -439,7 +434,11 @@ func (s *server) runRelatedCheck(
 		return notMade(relatedReasonBlankText, relatedBlankTextMissing)
 	}
 
-	keywordCtx, err := store.ForConcurrentRead(bounded)
+	// Stage 1 runs on a cancel of its own so that a check which answered without it does not
+	// leave it holding a request-pool connection past the answer (the wait below).
+	keywordStage, endKeyword := context.WithCancel(bounded)
+	defer endKeyword()
+	keywordCtx, err := store.ForConcurrentRead(keywordStage)
 	if err != nil {
 		slog.Warn("dispatch: related-item check not made", "error", err)
 		return notMade(relatedReasonSearchFailed, relatedSearchFailedMissing)
@@ -464,6 +463,19 @@ func (s *server) runRelatedCheck(
 		stage.took = time.Since(stagesStarted)
 		keyword <- stage
 	}()
+	// Stage 1's goroutine holds a request-pool connection for its reads, so the check ends its
+	// context and waits for the stage before it returns, whichever return that is, as it does for
+	// stage 2 below: its allowance running out, the request going away, the terms failing. Left
+	// running, it would still hold that connection while the edit's next decision-block check ran,
+	// which is admitted for its own two connections and not for these as well
+	// (decisionBlockChecks). A stage already taken off the channel leaves nothing to wait for.
+	defer func() {
+		if keyword == nil {
+			return
+		}
+		endKeyword()
+		<-keyword
+	}()
 
 	// Stage 2 runs on a context of its own ending at relatedMeaningAllowance from the check's
 	// start, so the embedding and the meaning query both stop there and leave the rest of the
@@ -471,6 +483,20 @@ func (s *server) runRelatedCheck(
 	meaningAllowance := min(relatedMeaningAllowance, allowance)
 	var meaning chan relatedStage
 	var meaningDone <-chan struct{}
+	var endMeaning context.CancelFunc
+	// Stage 2's goroutine holds a request-pool connection for its query, so the check ends its
+	// context and waits for the stage before it returns, whichever return that is: its allowance
+	// running out, the request going away, stage 1 failing. Left running, it would still hold
+	// that connection while the edit's next decision-block check ran, which is admitted for its
+	// own two connections and not for these as well (decisionBlockChecks). A stage already taken
+	// off the channel leaves nothing to wait for.
+	defer func() {
+		if meaning == nil {
+			return
+		}
+		endMeaning()
+		<-meaning
+	}()
 	reason := ""
 	switch {
 	case input.keywordsOnly:
@@ -479,13 +505,13 @@ func (s *server) runRelatedCheck(
 		reason = relatedReasonNoEmbedder
 	default:
 		meaningCtx, cancelMeaning := context.WithDeadline(bounded, started.Add(meaningAllowance))
-		defer cancelMeaning()
 		meaningRead, err := store.ForConcurrentRead(meaningCtx)
 		if err != nil {
+			cancelMeaning()
 			reason = relatedReasonMeaningFailed
 			break
 		}
-		meaningDone = meaningCtx.Done()
+		meaningDone, endMeaning = meaningCtx.Done(), cancelMeaning
 		meaning = make(chan relatedStage, 1)
 		go func() {
 			stage := s.relatedMeaningStage(meaningRead, project, input.text, pick)
@@ -515,6 +541,7 @@ func (s *server) runRelatedCheck(
 	if meaning != nil {
 		select {
 		case stage := <-meaning:
+			meaning = nil
 			record.meaningMS = milliseconds(stage.took)
 			if stage.reason == "" {
 				answer, answered = stage, true
@@ -526,22 +553,28 @@ func (s *server) runRelatedCheck(
 			reason = relatedReasonMeaningTimeout
 		}
 	}
-	// A meaning stage cut short by the request going away did not time out, and nobody waits on
-	// the keyword stage's answer.
+	// A meaning stage cut short by the request going away did not time out, and the keyword
+	// stage's answer is waited for by nobody but the wait above.
 	if callerGone() {
 		return notMade(relatedReasonCancelled, relatedCancelledMissing)
 	}
 	if answered {
 		suggestions.Search = relatedMeaningAndKeywords
-		// Stage 1's time is recorded when it has answered by now; it is not waited for.
+		// Stage 1's time is recorded when it has answered by now; its answer is not waited for.
+		// One still running is ended, and waited out, by the wait above rather than left to the
+		// allowance, so a check that has answered holds no request-pool connection: the next check
+		// of the same edit is admitted for its own two, not for these as well
+		// (decisionBlockChecks).
 		select {
 		case stage := <-keyword:
+			keyword = nil
 			record.keywordMS = milliseconds(stage.took)
 		default:
 		}
 	} else {
 		select {
 		case stage := <-keyword:
+			keyword = nil
 			record.keywordMS = milliseconds(stage.took)
 			if stage.err != nil {
 				return searchFailed(stage.err)
@@ -606,6 +639,9 @@ func (s *server) relatedMeaningSearch(
 		return model.SearchResponse{}, err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if s.meaningSearchEntered != nil {
+		s.meaningSearchEntered()
+	}
 	if _, err := tx.Exec(ctx, relatedEFSearch); err != nil {
 		return model.SearchResponse{}, err
 	}
@@ -639,6 +675,9 @@ func (s *server) relatedSearch(
 		return model.SearchResponse{}, err
 	}
 	defer rows.Close()
+	if s.relatedSearchEntered != nil {
+		s.relatedSearchEntered()
+	}
 	// A document hit's link opens the document with these words highlighted.
 	return scanSearchRows(rows, relatedSearchQuery(picked.Terms), suggestionSearchDepth, 0)
 }

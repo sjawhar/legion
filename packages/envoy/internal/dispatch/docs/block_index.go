@@ -29,11 +29,6 @@ const (
 	BlockIndexReconcileInterval = 30 * time.Second
 )
 
-// blockIndexLease names the lease one block-index tick runs under. The index it writes is the
-// same whichever process writes it, so two processes indexing the same batch is work done twice
-// for one result.
-const blockIndexLease = "block-index"
-
 // BlockIndexTick is what one tick of the block-index reconciliation did (ReconcileBlockIndex).
 type BlockIndexTick struct {
 	// Documents is how many owed documents it indexed, Items how many owed comments, asks and
@@ -65,8 +60,10 @@ type BlockIndexTick struct {
 // than the block grammar indexes without, and every comment and message owed a block index of its
 // own blocks (comment_block_state and message_block_state owed_at, set by migrations 0143-0144's
 // triggers on every write and by rebuild-refs), which a build older than item blocks leaves owed.
-// One tick per lease, at start, then every blockIndexStep while a batch is full and every
-// BlockIndexReconcileInterval once none is, until ctx ends.
+// One tick per lease (duty.BlockIndexLease: the index it writes is the same whichever process
+// writes it, so two processes indexing the same batch is work done twice for one result), at
+// start, then every blockIndexStep while a batch is full and every BlockIndexReconcileInterval
+// once none is, until ctx ends.
 //
 // The ticks are duty.RunLeasedAfterEachPass's, each one the wait the pass before it asked for after
 // that pass returned, and so is the period each runs under: that wait, blockIndexStep while a batch
@@ -80,7 +77,7 @@ func (s *Service) RunBlockIndexReconciliation(ctx context.Context, leases duty.L
 	// counts (an open issue's document whose live text stays ahead, skipped every tick) logs nothing.
 	var logged BlockIndexTick
 	liveAhead := liveAheadDocuments{}
-	duty.RunLeasedAfterEachPass(ctx, leases, blockIndexLease, BlockIndexReconcileInterval, func(ctx context.Context) time.Duration {
+	duty.RunLeasedAfterEachPass(ctx, leases, duty.BlockIndexLease, BlockIndexReconcileInterval, func(ctx context.Context) time.Duration {
 		var wait time.Duration
 		wait, cursor = s.blockIndexTick(ctx, cursor, liveAhead, &logged)
 		return wait
@@ -148,10 +145,16 @@ type liveAheadDocuments map[string]owedDocument
 // once a batch lists fewer than a full one. A document or item it cannot index for a reason of
 // its own is logged and left owed, so one never holds back the rest of its batch. liveAhead is
 // the documents the calling loop's earlier ticks found live ahead, which this tick counts again
-// without reading and keeps up to date.
+// without reading and keeps up to date. Its statements run on the background pool
+// (store.Pool.Background), which no request waits on; the documents it reads go through the rooms
+// pool, as every document read does (TextWithBlocks).
 func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhead liveAheadDocuments) (BlockIndexTick, error) {
 	tick := BlockIndexTick{Cursor: after}
-	owed, err := s.owedDocuments(ctx, after)
+	background, err := s.backgroundPool()
+	if err != nil {
+		return tick, err
+	}
+	owed, err := owedDocuments(ctx, background, after)
 	if err != nil {
 		return tick, err
 	}
@@ -168,7 +171,7 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 		}
 		delete(liveAhead, document.id)
 		cold := s.srv.GetDoc(document.id) == nil
-		indexed, ahead, err := s.indexOwedDocument(ctx, document)
+		indexed, ahead, err := s.indexOwedDocument(ctx, background, document)
 		switch {
 		case ctx.Err() != nil:
 			return tick, ctx.Err()
@@ -191,12 +194,12 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 		tick.Cursor = ""
 	}
 
-	items, err := refs.OwedItems(ctx, s.store.Pool, blockIndexItemBatch)
+	items, err := refs.OwedItems(ctx, background, blockIndexItemBatch)
 	if err != nil {
 		return tick, err
 	}
 	for _, item := range items {
-		if err := refs.ReindexOwedItem(ctx, s.store.Pool, item, s.serverURL); err != nil {
+		if err := refs.ReindexOwedItem(ctx, background, item, s.serverURL); err != nil {
 			if ctx.Err() != nil {
 				return tick, ctx.Err()
 			}
@@ -207,12 +210,12 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 		tick.Items++
 	}
 
-	itemBlocks, err := refs.OwedItemBlocks(ctx, s.store.Pool, blockIndexItemBatch)
+	itemBlocks, err := refs.OwedItemBlocks(ctx, background, blockIndexItemBatch)
 	if err != nil {
 		return tick, err
 	}
 	for _, item := range itemBlocks {
-		indexed, err := refs.IndexOwedItemBlocks(ctx, s.store.Pool, item, s.serverURL)
+		indexed, err := refs.IndexOwedItemBlocks(ctx, background, item, s.serverURL)
 		if err != nil {
 			if ctx.Err() != nil {
 				return tick, ctx.Err()
@@ -227,7 +230,7 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 	}
 	tick.Full = documentsFull || len(items) == blockIndexItemBatch || len(itemBlocks) == blockIndexItemBatch
 
-	if err := s.store.Pool.QueryRow(ctx, `
+	if err := background.QueryRow(ctx, `
 		select (select count(*) from document_block_versions where version is null),
 		       (select count(*) from block_grammar_owed),
 		       (select count(*) from comment_block_state where owed_at is not null) +
@@ -263,16 +266,16 @@ func (liveAhead liveAheadDocuments) forgetUnlisted(after string, owed []owedDocu
 	}
 }
 
-// owedDocuments lists, in id order, at most blockIndexDocumentBatch documents owed a block index
-// past after, each with its latest markdown version, its pending settlement's marked_at and
+// owedDocuments lists on pool, in id order, at most blockIndexDocumentBatch documents owed a block
+// index past after, each with its latest markdown version, its pending settlement's marked_at and
 // whether its issue is open. A document with no markdown version has nothing to index and is
 // listed with version 0, which indexOwedDocument passes over.
-func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocument, error) {
+func owedDocuments(ctx context.Context, pool *store.Pool, after string) ([]owedDocument, error) {
 	var cursor any
 	if after != "" {
 		cursor = after
 	}
-	rows, err := s.store.Pool.Query(ctx, `
+	rows, err := pool.Query(ctx, `
 		select b.artifact_id::text,
 		       coalesce((select max(v.number) from artifact_versions v
 		                 where v.artifact_id = b.artifact_id and v.markdown is not null), 0),
@@ -308,11 +311,11 @@ func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocume
 }
 
 // indexOwedDocument indexes one owed document at its latest version with the full version index
-// (indexRenderedVersion): references, excerpts, blocks, block texts and the indexed version. It
-// reads the document the server serves (TextWithBlocks) with no transaction held, then, under the
-// document's owner row, which every version write holds first, re-checks that the latest version
-// is still the one listed and the document still owed; otherwise another writer has indexed it or
-// will, and it does nothing.
+// (indexRenderedVersion), in a transaction on pool: references, excerpts, blocks, block texts and
+// the indexed version. It reads the document the server serves (TextWithBlocks) with no
+// transaction held, then, under the document's owner row, which every version write holds first,
+// re-checks that the latest version is still the one listed and the document still owed;
+// otherwise another writer has indexed it or will, and it does nothing.
 //
 // The live text is indexed only where it is the latest version's text: when the document owes no
 // settlement, or owes one but its live markdown equals the version's stored markdown byte for
@@ -341,7 +344,7 @@ func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocume
 //
 // A pair the index inserts takes the version's created_at, and the source_seq of the event that
 // recorded the version (stampVersionEvent).
-func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) (indexed, liveAhead bool, err error) {
+func (s *Service) indexOwedDocument(ctx context.Context, pool *store.Pool, document owedDocument) (indexed, liveAhead bool, err error) {
 	if document.version == 0 {
 		return false, false, nil
 	}
@@ -358,7 +361,7 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 		return false, false, err
 	}
 
-	tx, err := s.store.Pool.Begin(ctx)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return false, false, err
 	}

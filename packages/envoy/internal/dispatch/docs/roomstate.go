@@ -94,8 +94,8 @@ type roomState struct {
 	// arms no second settlement for the document's pending-settlement row (onLoadDocument).
 	settleWarming  bool
 	settleFailures int
-	// settling counts the settlements running on this state (settleRoomWithin), which hold it
-	// across their database work.
+	// settling counts the settlements running on this state (settleRoomWithin), from before their
+	// wait for a settlement slot to the end of their database work, which they hold it across.
 	settling   int
 	closed     bool
 	failed     error
@@ -161,6 +161,14 @@ func (s *Service) lockState(room string) *roomState {
 // lockExistingState returns room's state locked, or nil when the service holds none.
 func (s *Service) lockExistingState(room string) *roomState {
 	return s.lookUpState(room, false)
+}
+
+// roomGone reports whether room's state is no longer this service's to write into: the service is
+// stopping, or the room has been closed or has failed. Whoever closed or failed it - or the
+// shutdown - answers for the work left on it, so a settlement that meets it writes nothing more
+// and ends. The caller holds state.mu.
+func (s *Service) roomGone(state *roomState) bool {
+	return s.stopping.Load() || state.closed || state.failed != nil
 }
 
 // newRoomState is a document's record with nothing of a room on it yet.

@@ -8,7 +8,6 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -217,50 +216,58 @@ func TestLockTableAnchorRowsRejectsCommentReopenedAfterPrevalidation(t *testing.
 	}
 }
 
-func TestConditionalEditAdmissionBoundsQueuedRequests(t *testing.T) {
+// A document's writer gate queues at most maxQueuedDocumentWriters writers behind its holder, and
+// refuses the next with ErrPreconditionBusy before it holds anything. A queued writer whose context
+// ends leaves the queue, and the gate keeps nothing for a document once its last writer releases.
+func TestDocumentWriterGateBoundsItsQueue(t *testing.T) {
 	service, artifactID := newTestService(t)
-	release, err := service.AcquireConditionalEdit(context.Background(), artifactID)
+	_, release, err := service.AcquireDocumentWriter(context.Background(), artifactID)
 	if err != nil {
-		t.Fatalf("acquire first conditional edit: %v", err)
+		t.Fatalf("take the document's writer gate: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var queued sync.WaitGroup
-	for range maxQueuedConditionalEdits - 1 {
-		queued.Add(1)
+	queuedErrors := make(chan error, maxQueuedDocumentWriters)
+	for range maxQueuedDocumentWriters {
 		go func() {
-			defer queued.Done()
-			_, _ = service.AcquireConditionalEdit(ctx, artifactID)
+			_, _, err := service.AcquireDocumentWriter(ctx, artifactID)
+			queuedErrors <- err
 		}()
 	}
-	gateValue, ok := service.conditionalGates.Load(artifactID)
-	if !ok {
-		t.Fatal("conditional edit gate not registered")
-	}
-	gate := gateValue.(*conditionalEditGate)
-	deadline := time.Now().Add(time.Second)
-	for queueDepth(gate) != maxQueuedConditionalEdits && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if got := queueDepth(gate); got != maxQueuedConditionalEdits {
-		t.Fatalf("queued conditional edits = %d, want %d", got, maxQueuedConditionalEdits)
-	}
-	if _, err := service.AcquireConditionalEdit(context.Background(), artifactID); !errors.Is(err, ErrPreconditionBusy) {
-		t.Fatalf("overflow conditional edit = %v, want ErrPreconditionBusy", err)
+	waitForQueuedWriters(t, service, maxQueuedDocumentWriters)
+	if _, _, err := service.AcquireDocumentWriter(context.Background(), artifactID); !errors.Is(err, ErrPreconditionBusy) {
+		t.Fatalf("writer %d queued for the document = %v, want ErrPreconditionBusy", maxQueuedDocumentWriters+1, err)
 	}
 	cancel()
-	queued.Wait()
-	release()
-	if _, exists := service.conditionalGates.Load(artifactID); exists {
-		t.Fatal("idle conditional edit gate was retained")
+	for range maxQueuedDocumentWriters {
+		if err := <-queuedErrors; !errors.Is(err, context.Canceled) {
+			t.Errorf("a queued writer whose context ended = %v, want context.Canceled", err)
+		}
 	}
-
+	if queued := service.QueuedDocumentWriters(); queued != 0 {
+		t.Errorf("writers queued after every waiter's context ended = %d, want 0", queued)
+	}
+	release()
+	service.writers.mu.Lock()
+	kept := len(service.writers.gates)
+	service.writers.mu.Unlock()
+	if kept != 0 {
+		t.Errorf("the writer gate keeps %d documents once every writer has gone, want none", kept)
+	}
 }
-func queueDepth(gate *conditionalEditGate) int {
-	gate.mu.Lock()
-	defer gate.mu.Unlock()
-	return gate.queued
+
+// waitForQueuedWriters waits until want writers are queued for a document's writer gate, over
+// every document of service.
+func waitForQueuedWriters(t *testing.T, service *Service, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for service.QueuedDocumentWriters() != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("queued writers = %d, want %d", service.QueuedDocumentWriters(), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestApplyOperationRetypesAParagraphInPlace(t *testing.T) {

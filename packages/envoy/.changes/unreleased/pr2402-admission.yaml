@@ -1,0 +1,51 @@
+kind: Changed
+body: |-
+  Past what it can serve, Dispatch refuses a request at once rather than queueing it without end.
+  Every `/api/v1` route but the test hooks is admitted first: reads
+  (GET, HEAD) up to 14 at once and writes up to 12 at once per CPU the server may use, at most 28
+  reads and 24 writes (28 and 24 on two CPUs or more) and at most 40 units of the two together,
+  which is the request pool's 48 connections less the 8 its uncounted users need. The class
+  limits add up to more than the 40, so a class reaches its own only while the other is quiet,
+  and a request past the 40 is refused here rather than left to queue on the pool and time out
+  there. 22 of the 40 units are kept for reads while a read is waiting for room, so writes hold
+  at most 18 under read pressure, where they held 24 and left the reads too few to serve the
+  reads the everyday load offers, and reach their 24 only while the reads are light. A
+  route that runs two reads side by side counts two: the delivery timeline, measures and pipeline
+  (which now run at most two reads at once, where the timeline ran up to seven), and every route
+  that runs the related-item check, whose keyword and meaning searches are two such reads - the
+  two related routes, creating an issue or an ask, and editing a document, whose new decision
+  blocks are now checked one after another rather than five at once, so one check's two reads are
+  all the edit runs at once. Measured on two CPUs, fewer reads committed more
+  events at ten times the load but refused 4-6% of the reads at the everyday load. A request that
+  finds no room waits at most 1 second in a queue twice as long as its class's limit, in the
+  order the requests arrived at the server rather than the order they got round to asking for
+  room, and is otherwise answered `429 OVERLOADED` with
+  `Retry-After: 1` and `Cache-Control: no-store`, after its body is off the connection: nothing
+  of it ran, so any method may be sent again. That 1 second is the wait over the whole request,
+  however often it asks: a write admitted, parked while it waits for a document's writer gate
+  and resumed queues again where it arrived, ahead of every write that arrived after it, and is
+  refused only within what is left of the one second, where a second whole wait refused writes
+  the server had already admitted (at ten times the load, refusals reached a p99 of 2.1 seconds
+  and a maximum of 5.8). A read has a deadline of 20 seconds, 5 minutes for the four file
+  version downloads, and past it is `503 REQUEST_TIMEOUT`; a write has none and runs to completion
+  once admitted, and every transaction commits apart from its caller's cancellation, within 10
+  seconds. A request whose handler waited its pool's bound for a database connection is `503
+  DATABASE_BUSY`, which now means exactly that: every pool, the document loads' and the leases'
+  among them, answers a bound it ran out with one error of its own, where a deadline on a live
+  request used to be read as a busy pool. A commit the database does not answer within its 10
+  seconds is `500 COMMIT_OUTCOME_UNKNOWN` with an ERROR line naming the unknown outcome, where it
+  was `503 DATABASE_BUSY` at DEBUG telling the client nothing had run: the transaction may have
+  committed, so the write is not to be sent again until what it wrote has been read, or sent again
+  under its `Idempotency-Key`. The ERROR line is written whether or not the client is still there
+  to read the 500, since the unknown outcome is the operator's to see; a client that left while
+  the commit ran is answered nothing and recorded as `status=499`. Both 503s carry `Retry-After:
+  1` and `Cache-Control: no-store`; the 500 carries neither. A request whose client went away is
+  answered nothing, where it was a `500` and an ERROR line, and its access-log line now records
+  `status=499`, nginx's client-closed code, where a write that rolled back because its client left
+  read as a `200`: a client that left while its request was queued for room, while its body was
+  arriving, or while its handler ran is recorded that way. Of these answers the 500 alone is
+  logged above DEBUG (`cmd/dispatch/README.md`, "Load errors"). An
+  admitted read runs every statement on one pinned connection for its whole length, where an issue
+  read took twelve connections one after another; a read of weight two, whose two reads run side
+  by side, and the four file version downloads, which hold no connection while their bytes move,
+  pin none.

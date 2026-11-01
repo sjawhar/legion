@@ -15,7 +15,6 @@ import (
 	"maps"
 	"mime"
 	"net/http"
-	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -25,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -82,14 +82,11 @@ const (
 	// keyedAnswerKept is the largest answer a key keeps. A larger one is still answered in full, but
 	// stored as its status alone, and its replay says so (IdempotencyAnswerNotKept).
 	keyedAnswerKept = 1 << 20
-	// keyedBodyInMemory is how much of a keyed request's body is held in memory while its digest is
-	// judged; the rest of an upload's body waits in a temporary file, as the multipart parser's own
-	// spill does, so a keyed 25 MiB upload costs no more memory than an unkeyed one.
-	keyedBodyInMemory = 1 << 20
 	// keyedBodyMax is the largest body an upload route reads: an upload's file and a megabyte of
-	// fields (uploadArtifactFor). Every other route reads a JSON body of at most
-	// maxJSONRequestBytes (routeBodyLimit).
-	keyedBodyMax = maxArtifactBlobSize + 1<<20
+	// fields (uploadArtifactFor), which is what the table gives those routes
+	// (apiRoute.BodyLimit, upload). Every other route reads a JSON body of at most
+	// maxJSONRequestBytes (apiRoute.bodyLimit).
+	keyedBodyMax = maxUploadRequestBytes
 	// keyedBookkeeping bounds the layer's work around the handler - the claim before it, and each
 	// statement recording its answer after it - which runs on past a client that went away, since
 	// its retry needs the key claimed and the answer recorded.
@@ -129,20 +126,9 @@ var errRequestKeyTakenOver = errorf(http.StatusConflict, contracts.IdempotencyKe
 // write made as it stands now, with the status the route's write answers - a stale success, in
 // Google AIP-155's words, never a second write. stored is the first answer's body when the key kept
 // one and it was a success, and nil when the first request never answered or answered a refusal.
+// A route that commits a recovery point names its replay on its own row (replays, routes), so the
+// write and the replay of it are one line of the table.
 type keyedReplay func(w http.ResponseWriter, r *http.Request, recovery json.RawMessage, stored []byte)
-
-// keyedReplays is every route whose write commits a recovery point, by method and pattern: the
-// writes that also deliver to sessions, whose deliveries a repeat finishes. Each key names a
-// registered route (TestEveryKeyedRouteTableNamesARoute).
-func (s *server) keyedReplays() map[string]keyedReplay {
-	return map[string]keyedReplay{
-		http.MethodPost + " /api/v1/agents/{session_id}/messages": replayRecovered(s, s.replayAgentMessage),
-		http.MethodPost + " /api/v1/broadcasts":                   replayRecovered(s, s.replayBroadcast),
-		http.MethodPost + " /api/v1/issues/{key}/messages":        replayRecovered(s, s.replayIssueMessage),
-		http.MethodPost + " /api/v1/issues/{key}/comments":        replayRecovered(s, s.replayComment),
-		http.MethodPost + " /api/v1/artifacts/{id}/comments":      replayRecovered(s, s.replayComment),
-	}
-}
 
 // replayKeptMembers are the members of a write's first answer a replay keeps beside the resource
 // as it stands now: what the write's answer carried that a read of the resource does not.
@@ -152,15 +138,15 @@ var replayKeptMembers = []string{"advice", "ask_waiting_on"}
 // answer's shape: the replayKeptMembers stored holds and fresh does not (a write's advice, a reply's
 // ask_waiting_on) kept, and nothing else of stored, so a member the fresh read leaves out is never
 // answered stale. With no stored answer it answers fresh alone. Its status is the write's own 201.
-func (s *server) writeRefreshed(w http.ResponseWriter, stored []byte, fresh any) {
+func (s *server) writeRefreshed(w http.ResponseWriter, r *http.Request, stored []byte, fresh any) {
 	encoded, err := json.Marshal(fresh)
 	if err != nil {
-		s.writeHandlerError(w, fmt.Errorf("encode a replayed resource: %w", err))
+		s.writeHandlerError(w, r, fmt.Errorf("encode a replayed resource: %w", err))
 		return
 	}
 	var current map[string]json.RawMessage
 	if err := json.Unmarshal(encoded, &current); err != nil {
-		s.writeHandlerError(w, fmt.Errorf("read a replayed resource: %w", err))
+		s.writeHandlerError(w, r, fmt.Errorf("read a replayed resource: %w", err))
 		return
 	}
 	var answer map[string]json.RawMessage
@@ -230,10 +216,10 @@ type resolvedCaller struct {
 // died is taken over, once its lease lapses. A handler cut off with its client would roll its
 // transactions back and leave the next attempt to start again from nothing, so a write that takes
 // the server longer than the client waits could never land.
-func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, replay keyedReplay) http.HandlerFunc {
+func (s *server) keyedWrites(route apiRoute, handler http.HandlerFunc) http.HandlerFunc {
+	method, pattern, bodyLimit, replay := route.Method, route.Pattern, route.bodyLimit(), route.Replay
 	wildcards := patternWildcards(pattern)
 	keepsAnswer := !answerHoldsSecret[method+" "+pattern]
-	bodyLimit := routeBodyLimit(method, pattern)
 	run := handler
 	if s.deps.TestHooksEnabled {
 		run = s.slowedByTestHook(handler)
@@ -246,7 +232,7 @@ func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, r
 			return
 		}
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		actor, human, err := s.optionalActor(r)
@@ -267,36 +253,44 @@ func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, r
 		inFlight, err := s.requestKeyInFlight(r.Context(), login, key)
 		if err != nil {
 			w.Header().Set(contracts.IdempotencyKeyHeader, key)
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		if inFlight {
 			if s.repeatFoundInFlight != nil {
 				s.repeatFoundInFlight()
 			}
-			s.answerDrainedRepeat(w, r, method, pattern, wildcards, login, key, replay)
+			s.answerDrainedRepeat(w, r, route, wildcards, login, key, replay)
 			return
 		}
 		digest := sha256.New()
 		writeRequestFields(digest, r, method, pattern, wildcards)
 		body, err := readKeyedBody(r.Body, digest, r.Header.Get("Content-Type"), bodyLimit)
 		defer body.close()
-		var spill *keyedSpillError
+		var spill *spillError
 		switch {
 		case errors.As(err, &spill):
 			// Dispatch's own failure, not the request's: answered as a 5xx under the key, which
 			// nothing has claimed, so the client asks again under it.
 			w.Header().Set(contracts.IdempotencyKeyHeader, key)
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		case err != nil:
+			// A client that went away while its body arrived is written nothing and its line
+			// carries 499, as every gone client's does: this wrote it a 400 nobody was left to
+			// read, and the line carried that 400. A client still there is answered the 400 as
+			// before, and a body cut off by a refusal of the units its request asked back is
+			// answered that refusal (admission.WriteUnserved).
+			if admission.WriteUnserved(w, r.Context(), err) {
+				return
+			}
 			writeError(w, "REQUEST_BODY_UNREADABLE", http.StatusBadRequest, "could not read the request body: "+err.Error())
 			return
 		}
 		replayable, err := body.reader()
 		if err != nil {
 			w.Header().Set(contracts.IdempotencyKeyHeader, key)
-			s.writeHandlerError(w, fmt.Errorf("reread a keyed request's body: %w", err))
+			s.writeHandlerError(w, r, fmt.Errorf("reread a keyed request's body: %w", err))
 			return
 		}
 		if body.size > bodyLimit {
@@ -347,25 +341,6 @@ func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, r
 		settled = true
 		answer.deliver()
 	}
-}
-
-// routeBodyLimit is the largest body a route reads: an upload's file and a megabyte of fields
-// (uploadArtifactFor) for an upload route, and a JSON body (decodeJSON) for every other. It is the
-// most the keyed layer spools before its handler runs - a body past it is refused by the route's
-// handler whatever its key, so it runs unkeyed rather than spooled - and the most an early answer
-// discards before it is written (drainBeforeAnswer).
-func routeBodyLimit(method, pattern string) int64 {
-	if keyedUploads[method+" "+pattern] {
-		return keyedBodyMax
-	}
-	return maxJSONRequestBytes
-}
-
-// keyedUploads is every keyed route whose body may hold a file (uploadArtifactFor).
-var keyedUploads = map[string]bool{
-	issueUploadRoute: true,
-	http.MethodPost + " /api/v1/projects/{key}/artifacts":      true,
-	http.MethodPost + " /api/v1/agents/{session_id}/artifacts": true,
 }
 
 // keyLease is how long a keyed request holds its key without a renewal before a repeat presumes
@@ -520,66 +495,14 @@ func writeRequestFields(digest hash.Hash, r *http.Request, method, pattern strin
 	field(contentType)
 }
 
-// keyedBody is a keyed request's body, read whole before its handler runs so its digest can be
-// judged: its first keyedBodyInMemory bytes in memory, and the rest, if any, in a temporary file.
-type keyedBody struct {
-	head  []byte
-	spill *os.File
-	size  int64
-}
-
-// keyedSpillError is a keyed body's spill to its temporary file failing: Dispatch's own fault (a
-// full disk, a temporary directory it cannot write), answered as a 5xx, where a body the client
-// did not finish sending is the request's and answered 400.
-type keyedSpillError struct{ err error }
-
-func (e *keyedSpillError) Error() string {
-	return "spool a keyed request's body to a temporary file: " + e.err.Error()
-}
-
-func (e *keyedSpillError) Unwrap() error { return e.err }
-
-// spillWriter is a keyed body's temporary file, whose write failures are keyedSpillErrors.
-type spillWriter struct{ file *os.File }
-
-func (w spillWriter) Write(p []byte) (int, error) {
-	n, err := w.file.Write(p)
-	if err != nil {
-		return n, &keyedSpillError{err: err}
-	}
-	return n, nil
-}
-
-// readKeyedBody reads body into a keyedBody, at most one byte past limit, the route's own
-// (routeBodyLimit), writing it to digest as it goes (bodyDigest). A body that fits in
-// keyedBodyInMemory never touches the disk: a route whose limit is no more than that holds even its
-// one byte past the limit in memory.
-func readKeyedBody(body io.Reader, digest io.Writer, contentType string, limit int64) (*keyedBody, error) {
-	read := &keyedBody{}
+// readKeyedBody reads body into a spooledBody, at most one byte past limit, the route's own
+// (apiRoute.bodyLimit), writing it to digest as it goes (bodyDigest), so the handler reads the
+// same body the digest judged.
+func readKeyedBody(body io.Reader, digest io.Writer, contentType string, limit int64) (*spooledBody, error) {
 	target, flush := bodyDigest(digest, contentType)
-	source := io.TeeReader(io.LimitReader(body, limit+1), target)
-	inMemory := int64(keyedBodyInMemory)
-	if limit <= inMemory {
-		inMemory = limit + 1
-	}
-	var head bytes.Buffer
-	n, err := io.CopyN(&head, source, inMemory)
-	read.head, read.size = head.Bytes(), n
-	switch {
-	case err != nil && !errors.Is(err, io.EOF):
+	read, err := spoolBody(io.TeeReader(body, target), limit)
+	if err != nil {
 		return read, err
-	case err == nil && n <= limit:
-		// The head is full and the limit not reached: the rest waits in a temporary file.
-		spill, err := os.CreateTemp("", "dispatch-keyed-body-*")
-		if err != nil {
-			return read, &keyedSpillError{err: err}
-		}
-		read.spill = spill
-		rest, err := io.Copy(spillWriter{file: spill}, source)
-		read.size += rest
-		if err != nil {
-			return read, err
-		}
 	}
 	flush()
 	return read, nil
@@ -608,27 +531,6 @@ func bodyDigest(digest io.Writer, contentType string) (target io.Writer, flush f
 		return mask, mask.flush
 	}
 	return digest, func() {}
-}
-
-// reader is the body again, from its first byte.
-func (b *keyedBody) reader() (io.Reader, error) {
-	if b.spill == nil {
-		return bytes.NewReader(b.head), nil
-	}
-	if _, err := b.spill.Seek(0, io.SeekStart); err != nil {
-		return nil, err
-	}
-	return io.MultiReader(bytes.NewReader(b.head), b.spill), nil
-}
-
-// close removes the body's temporary file, if it has one.
-func (b *keyedBody) close() {
-	if b == nil || b.spill == nil {
-		return
-	}
-	name := b.spill.Name()
-	_ = b.spill.Close()
-	_ = os.Remove(name)
 }
 
 // boundaryMask writes what it is given to w with every occurrence of boundary replaced by
@@ -802,12 +704,12 @@ func (s *server) claimRequestKey(
 			return claim, false
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
-			s.writeHandlerError(w, fmt.Errorf("claim an idempotency key: %w", err))
+			s.writeHandlerError(w, r, fmt.Errorf("claim an idempotency key: %w", err))
 			return claim, true
 		}
 		held, found, err := s.readHeldRequestKey(ctx, login, key)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return claim, true
 		}
 		if !found {
@@ -822,7 +724,7 @@ func (s *server) claimRequestKey(
 				delete from request_keys
 				where login = $1 and idempotency_key = $2 and created_at < now() - make_interval(secs => $3)
 			`, login, key, contracts.IdempotencyKeyTTL.Seconds()); err != nil {
-				s.writeHandlerError(w, fmt.Errorf("expire an idempotency key: %w", err))
+				s.writeHandlerError(w, r, fmt.Errorf("expire an idempotency key: %w", err))
 				return claim, true
 			}
 			continue
@@ -835,7 +737,7 @@ func (s *server) claimRequestKey(
 			  and status is null and recovery is null and committed_at is null
 		`, login, key, held.attempt)
 		if err != nil {
-			s.writeHandlerError(w, fmt.Errorf("take over an idempotency key: %w", err))
+			s.writeHandlerError(w, r, fmt.Errorf("take over an idempotency key: %w", err))
 			return claim, true
 		}
 		if tag.RowsAffected() == 1 {
@@ -911,23 +813,23 @@ func answerHeldKey(w http.ResponseWriter, r *http.Request, key string, held held
 // answered 409 KEY_IN_FLIGHT at once, with nothing read: it has sent nothing, so the answer is as
 // fresh as the key, and a read would ask it for its whole body only to judge it.
 //
-// The body is read for at most drainTime (readFor): one that stops arriving is answered 409
-// KEY_IN_FLIGHT, which is what the key said, and the connection closes after it. A body past the
-// route's limit is answered as its route answers one (bodyTooLarge), unkeyed, as a request whose
-// body is past the limit runs unkeyed. Either keeps the read's deadline for net/http's own reads
-// after the answer; only a body read to its end lifts it.
+// The body is read under the bounds it arrives under, whatever is left of it (movingDeadline.arm):
+// one that stops arriving is answered 409 KEY_IN_FLIGHT, which is what the key said, and the
+// connection closes after it. A body past the route's limit is answered as its route answers one
+// (bodyTooLarge), unkeyed, as a request whose body is past the limit runs unkeyed. Either keeps
+// that bound for net/http's own reads after the answer; only a body that ended lifts it
+// (movingDeadline.lift).
 func (s *server) answerDrainedRepeat(
-	w http.ResponseWriter, r *http.Request, method, pattern string, wildcards []string, login, key string, replay keyedReplay,
+	w http.ResponseWriter, r *http.Request, route apiRoute, wildcards []string, login, key string, replay keyedReplay,
 ) {
+	limit := route.bodyLimit()
 	if expectsContinue(r) {
 		w.Header().Set(contracts.IdempotencyKeyHeader, key)
 		writeKeyInFlight(w, key)
 		return
 	}
-	limit := routeBodyLimit(method, pattern)
 	digest := sha256.New()
-	writeRequestFields(digest, r, method, pattern, wildcards)
-	lift := s.readFor(w)
+	writeRequestFields(digest, r, route.Method, route.Pattern, wildcards)
 	size, err := digestKeyedBody(r.Body, digest, r.Header.Get("Content-Type"), limit)
 	switch {
 	case err != nil:
@@ -936,17 +838,16 @@ func (s *server) answerDrainedRepeat(
 		writeKeyInFlight(w, key)
 		return
 	case size > limit:
-		tooLarge := bodyTooLarge(method, pattern)
+		tooLarge := bodyTooLarge(route)
 		writeError(w, tooLarge.code, tooLarge.status, tooLarge.message)
 		return
 	}
-	lift()
 	w.Header().Set(contracts.IdempotencyKeyHeader, key)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), keyedBookkeeping)
 	defer cancel()
 	held, found, err := s.readHeldRequestKey(ctx, login, key)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if found && answerHeldKey(w, r, key, held, held.state(hex.EncodeToString(digest.Sum(nil)), replay != nil), replay) {
@@ -1161,7 +1062,7 @@ func replayRecovered[T recoveryPoint](
 	return func(w http.ResponseWriter, r *http.Request, recovery json.RawMessage, stored []byte) {
 		var point T
 		if err := json.Unmarshal(recovery, &point); err != nil {
-			s.writeHandlerError(w, fmt.Errorf("read a recovery point: %w", err))
+			s.writeHandlerError(w, r, fmt.Errorf("read a recovery point: %w", err))
 			return
 		}
 		replay(w, r, point, stored)

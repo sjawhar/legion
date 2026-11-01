@@ -25,12 +25,6 @@ const IssueAskRepairInterval = 10 * time.Minute
 // short keeps what it repaired, and the next one goes on from what is left.
 const issueAskRepairTimeout = 5 * time.Minute
 
-// issueAskRepairLease names the lease one interval pass runs under. Two passes running at once
-// are correct - they serialise on each issue's row, and the second finds nothing left - but they
-// would read the same documents for the same result, which is reason enough for one process to
-// run it each interval.
-const issueAskRepairLease = "issue-ask-repair"
-
 // IssueAskRepair counts what one RepairIssueAsks pass changed: the asks it withdrew on closed
 // issues, the asks it restored on reopened ones, and the readable ask blocks with no ask row its
 // sweeps of closed issues' documents marked resolved.
@@ -88,8 +82,8 @@ func RepairIssueAsks(ctx context.Context, deps Deps, markedSince *time.Time) (Is
 }
 
 // RunIssueAskRepair runs RepairIssueAsks every IssueAskRepairInterval until ctx ends, each pass
-// under issueAskRepairLease for one interval, so one process repairs per interval however many
-// serve the database; leases is required, as it is of every leased loop. The ticks are
+// under duty.IssueAskRepairLease for one interval, so one process repairs per interval however
+// many serve the database; leases is required, as it is of every leased loop. The ticks are
 // duty.RunLeased's, a ticker's: the first one interval after the call, then one each interval;
 // the first tick a pass overran comes at once with the moment it was due, and only the ones after
 // it are dropped. A pass that fails or runs out of time is logged, and the next interval's pass
@@ -113,7 +107,7 @@ func RunIssueAskRepair(ctx context.Context, deps Deps, leases duty.Leases) {
 	s := &server{deps: deps}
 	var markedSince *time.Time
 	var unrepaired []string
-	duty.RunLeased(ctx, leases, issueAskRepairLease, IssueAskRepairInterval, duty.TickAfterInterval, func(ctx context.Context) {
+	duty.RunLeased(ctx, leases, duty.IssueAskRepairLease, IssueAskRepairInterval, duty.TickAfterInterval, func(ctx context.Context) {
 		markedSince, unrepaired = s.repairIssueAsksOnTick(ctx, markedSince, unrepaired)
 	})
 }
@@ -214,21 +208,30 @@ func (s *server) repairIssueAsks(ctx context.Context, markedSince *time.Time, re
 }
 
 // repairIssueAsksOf repairs issueKey's asks (RepairIssueAsks) in a transaction of its own, which
-// it commits through the document ledger before publishing the events it appended.
+// it commits through the document ledger before publishing the events it appended. It writes the
+// issue's documents, so it takes their writer gates before that transaction opens and names them
+// again under the issue's row (gatedWrite).
 func (s *server) repairIssueAsksOf(ctx context.Context, issueKey string) (IssueAskRepair, error) {
 	var repair IssueAskRepair
-	tx, err := s.begin(ctx)
+	opened, gatedCtx, release, err := gatedWrite(ctx, s.deps.Docs,
+		func(ctx context.Context) ([]string, error) {
+			return issueDocuments(ctx, s.documentQueryer(), issueKey)
+		},
+		func(ctx context.Context, gated []string) (issueAskRepairTx, error) {
+			return s.beginIssueAskRepair(ctx, issueKey, gated)
+		})
 	if err != nil {
 		return repair, err
 	}
+	// The gates end at the commit below; the defer is the error paths' release.
+	defer release()
+	ctx = gatedCtx
+	tx, closed := opened.tx, opened.closed
 	defer tx.Rollback(ctx)
 	documentCtx, ledger := s.deps.Docs.Join(ctx, tx)
 	defer ledger.Discard()
-	var closed, owesSettlement bool
+	var owesSettlement bool
 	var open, withdrawn int
-	if err := tx.QueryRow(ctx, `select closed_at is not null from issues where key = $1 for no key update`, issueKey).Scan(&closed); err != nil {
-		return repair, fmt.Errorf("lock the issue: %w", err)
-	}
 	if err := tx.QueryRow(ctx, `
 		select
 			count(*) filter (where a.state = 'open'),
@@ -303,10 +306,43 @@ func (s *server) repairIssueAsksOf(ctx context.Context, issueKey string) (IssueA
 		return IssueAskRepair{}, err
 	}
 	s.publish(events...)
+	release()
 	if repair.Changed() {
 		slog.Info("dispatch: repaired the asks of an issue", append([]any{"issue", issueKey}, repair.LogArgs()...)...)
 	}
 	return repair, nil
+}
+
+// issueAskRepairTx is a repair's open transaction, holding the issue's row, and whether the issue
+// is closed.
+type issueAskRepairTx struct {
+	tx     pgx.Tx
+	closed bool
+}
+
+// beginIssueAskRepair opens a repair's transaction and locks issueKey's row in it, with the
+// writer gates of gated held: documents of the issue other than gated are refused with
+// errDocumentsMoved, rolled back.
+func (s *server) beginIssueAskRepair(ctx context.Context, issueKey string, gated []string) (issueAskRepairTx, error) {
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return issueAskRepairTx{}, err
+	}
+	var closed bool
+	err = tx.QueryRow(ctx, `select closed_at is not null from issues where key = $1 for no key update`, issueKey).Scan(&closed)
+	if err != nil {
+		err = fmt.Errorf("lock the issue: %w", err)
+	} else {
+		var named []string
+		if named, err = issueDocuments(ctx, tx, issueKey); err == nil && !sameDocuments(gated, named) {
+			err = errDocumentsMoved
+		}
+	}
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return issueAskRepairTx{}, err
+	}
+	return issueAskRepairTx{tx: tx, closed: closed}, nil
 }
 
 // latestIssueEventActor reads the actor of the event query selects for issueKey, exactly as the

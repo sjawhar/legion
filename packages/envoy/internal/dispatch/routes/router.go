@@ -34,6 +34,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/brokertoken"
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
+	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
@@ -134,6 +135,9 @@ type AppContextOptions struct {
 	// files in Postgres. See api.DepsInput.
 	Files            files.Store
 	TestHooksEnabled bool
+	// Admission is the API's admission limiter, which main also reads for the metrics endpoint;
+	// nil is one at the deployment's limits. See api.DepsInput.
+	Admission *admission.Limiter
 	// RouteRosterTTL replaces how long a stored listener answer serves issue reads; zero keeps the
 	// server's five seconds. See api.Deps.RouteRosterTTL.
 	RouteRosterTTL time.Duration
@@ -194,6 +198,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		TestHooksEnabled:       opts.TestHooksEnabled,
 		RouteRosterTTL:         opts.RouteRosterTTL,
 		ListenerRosterUncached: opts.ListenerRosterUncached,
+		Admission:              opts.Admission,
 		DashboardEntry:         opts.DashboardEntry,
 	})
 	if err != nil {
@@ -317,7 +322,7 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		// AuthURL fails only while the issuer is not discovered (oidc.ErrIssuerUnavailable).
 		slog.Warn("dispatch: sign-in not started: the sign-in issuer is not discovered", "error", err)
-		identity.WriteError(w, fmt.Errorf("%w: %w", identity.ErrSignInUnavailable, err))
+		identity.WriteError(w, req, fmt.Errorf("%w: %w", identity.ErrSignInUnavailable, err))
 		return
 	}
 	value, err := signOAuthState(r.ctx.SigningKey, oauthState{
@@ -372,7 +377,7 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 	session, err := r.ctx.SignIn.Exchange(req.Context(), callbackURL(r.ctx.ServerURL, req), code, pending.Nonce)
 	if errors.Is(err, oidc.ErrIssuerUnavailable) {
 		slog.Warn("dispatch: sign-in code exchange failed: the sign-in issuer is not discovered", "error", err)
-		identity.WriteError(w, fmt.Errorf("%w: %w", identity.ErrSignInUnavailable, err))
+		identity.WriteError(w, req, fmt.Errorf("%w: %w", identity.ErrSignInUnavailable, err))
 		return
 	}
 	if err != nil {
@@ -388,8 +393,7 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 	}
 	subject := r.ctx.SignInRule.Subject(session.Claims)
 	if err := r.ctx.SignInRule.WriteSignIn(req.Context(), r.ctx.People, email, subject, session.RefreshToken); err != nil {
-		slog.Error("dispatch: record sign-in failed", "email", email, "error", err)
-		writeError(w, http.StatusInternalServerError, "record sign-in")
+		writeUnservedOr500(w, req, err, slog.LevelError, "dispatch: record sign-in failed", "record sign-in", "email", email)
 		return
 	}
 	if !r.issueSession(w, req, email, subject) {
@@ -416,8 +420,7 @@ func (r *router) issueSession(w http.ResponseWriter, req *http.Request, email, s
 		var err error
 		generation, err = r.ctx.Sessions.EnsureSession(req.Context(), email)
 		if err != nil {
-			slog.Error("dispatch: ensure session generation failed", "email", email, "error", err)
-			writeError(w, http.StatusInternalServerError, "session generation")
+			writeUnservedOr500(w, req, err, slog.LevelError, "dispatch: ensure session generation failed", "session generation", "email", email)
 			return false
 		}
 	}
@@ -428,8 +431,7 @@ func (r *router) issueSession(w http.ResponseWriter, req *http.Request, email, s
 				writeCodeError(w, http.StatusConflict, "another Google account signed in to this address meanwhile; start over at /auth/start", "SIGNIN_SUPERSEDED")
 				return false
 			}
-			slog.Error("dispatch: read the account the sign-in recorded failed", "email", email, "error", err)
-			writeError(w, http.StatusInternalServerError, "record sign-in")
+			writeUnservedOr500(w, req, err, slog.LevelError, "dispatch: read the account the sign-in recorded failed", "record sign-in", "email", email)
 			return false
 		}
 	}
@@ -444,8 +446,7 @@ func (r *router) authLogout(w http.ResponseWriter, req *http.Request) {
 	}
 	if r.ctx.Sessions != nil {
 		if err := r.ctx.Sessions.RevokeSessions(req.Context(), email); err != nil {
-			slog.Warn("dispatch: revoke sessions failed", "email", email, "error", err)
-			writeError(w, http.StatusInternalServerError, "revoke session")
+			writeUnservedOr500(w, req, err, slog.LevelWarn, "dispatch: revoke sessions failed", "revoke session", "email", email)
 			return
 		}
 	}
@@ -511,7 +512,7 @@ func (r *router) apiGithubRest(w http.ResponseWriter, req *http.Request) {
 func (r *router) login(w http.ResponseWriter, req *http.Request) (string, bool) {
 	login, err := r.ctx.Identity.Login(req)
 	if err != nil {
-		identity.WriteError(w, err)
+		identity.WriteError(w, req, err)
 		return "", false
 	}
 	accesslog.Note(req.Context(), accesslog.KindUser, login)
@@ -643,9 +644,9 @@ func isRetainedAssetPath(normalized string) bool {
 // stale tab's chunks is served in turn and a request that cannot reserve in time is a 503 that
 // asks the store nothing. A request whose context ends because its client went away, while still
 // queued for that room or while waiting for the store's answer (a navigation cancels the chunks
-// still loading), logs nothing more than a debug line and writes no response, since neither the
-// cap nor the store was the reason and nobody is left to answer. Once the object is read the
-// request keeps only its size until its response is written or its client goes away. A request
+// still loading), writes no response and logs a debug line, since neither the cap nor the store
+// was the reason and nobody is left to answer. Once the object is read the request keeps only
+// its size until its response is written or its client goes away. A request
 // that stops waiting for the store's answer (its client went away, or its bound ran out) leaves
 // the read running for the requests after it (readRetainedAsset), and its reservation outlives
 // the request until that read ends: a client that abandons each request the moment it reaches
@@ -929,6 +930,20 @@ func oauthStateCookieFor(value string, maxAge int, secure bool) *http.Cookie {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   maxAge,
 	}
+}
+
+// writeUnservedOr500 answers req, whose call into the store or the identity layer failed with
+// err: a request the server could not serve as admission.WriteUnserved answers it - a retryable
+// 503, or nothing for a client that is gone - and anything else as a 500 carrying publicMessage,
+// with one line at level naming message, attrs and the error. Every route of this package that
+// answers a failed store call does it this way, so each answers alike. The caller returns after
+// it: the request is answered whichever branch was taken.
+func writeUnservedOr500(w http.ResponseWriter, req *http.Request, err error, level slog.Level, message, publicMessage string, attrs ...any) {
+	if admission.WriteUnserved(w, req.Context(), err) {
+		return
+	}
+	slog.Log(req.Context(), level, message, append(attrs, "error", err)...)
+	writeError(w, http.StatusInternalServerError, publicMessage)
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {

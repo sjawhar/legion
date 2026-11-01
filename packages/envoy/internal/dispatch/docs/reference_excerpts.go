@@ -154,16 +154,15 @@ type excerptSchedule struct {
 // that timer did; one minute before a failed document's first retry.
 var referenceExcerptSchedule = excerptSchedule{minGap: 2 * time.Second, retryBase: time.Minute}
 
-// referenceExcerptLease names the lease one reconciliation pass runs under. The excerpts it
+// The lease one reconciliation pass runs under is duty.ReferenceExcerptLease. The excerpts it
 // stores are the same whichever process cuts them, and a mention is owed one until some process
 // does, so two processes reading the same batch of documents and writing the same rows is work
 // done twice for one result - and, because each pass claims nothing, the same documents twice.
-const referenceExcerptLease = "reference-excerpts"
 
 // RunReferenceExcerptReconciliation stores the excerpts of every document some of whose mentions
 // are owed one (refs.DriftedExcerpts): every mention indexed before migration 0092, each one
 // rebuild-refs inserts, and each a version write could not cut. It is a woken loop
-// (duty.RunWoken) under the reference-excerpts lease: one pass at start, then a pass when wake is
+// (duty.RunWoken) under duty.ReferenceExcerptLease: one pass at start, then a pass when wake is
 // signalled - in the server, the pglisten.Hub wake on ExcerptsOwedChannel, which every mention
 // left owed announces through a trigger on refs, and which the hub also signals after each
 // successful LISTEN, so what was written while the listener had no connection is caught up then -
@@ -179,6 +178,10 @@ const referenceExcerptLease = "reference-excerpts"
 // (refs.MarkStaleExcerpts); every build since records its excerpts in each version write, so one
 // marking per process is enough. A mention owed an excerpt is answered with the document's name
 // until this stores one.
+//
+// Its own statements run on the background pool (store.Pool.Background), which no request waits
+// on; the documents it reads go through the rooms pool, as every document read does
+// (TextWithBlocks).
 func (s *Service) RunReferenceExcerptReconciliation(ctx context.Context, leases duty.Leases, wake <-chan struct{}) {
 	s.runReferenceExcerptReconciliation(ctx, leases, wake, referenceExcerptSchedule)
 }
@@ -189,7 +192,7 @@ func (s *Service) runReferenceExcerptReconciliation(ctx context.Context, leases 
 	// failed is tried again by the next pass that runs.
 	marked := false
 	duty.RunWoken(ctx, duty.WokenLoop{
-		Lease:  referenceExcerptLease,
+		Lease:  duty.ReferenceExcerptLease,
 		Leases: leases,
 		Wake:   wake,
 		MinGap: schedule.minGap,
@@ -203,9 +206,17 @@ func (s *Service) runReferenceExcerptReconciliation(ctx context.Context, leases 
 }
 
 // markStaleExcerpts marks owed the excerpts older than their document's latest version
-// (refs.MarkStaleExcerpts) and reports whether it did so without error.
+// (refs.MarkStaleExcerpts), on the background pool the reconciliation's own statements run on,
+// and reports whether it did so without error.
 func (s *Service) markStaleExcerpts(ctx context.Context) bool {
-	marked, err := refs.MarkStaleExcerpts(ctx, s.store.Pool)
+	background, err := s.backgroundPool()
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Error("dispatch: mark stale reference excerpts", "error", err)
+		}
+		return false
+	}
+	marked, err := refs.MarkStaleExcerpts(ctx, background)
 	if err != nil {
 		if ctx.Err() == nil {
 			slog.Error("dispatch: mark stale reference excerpts", "error", err)
@@ -236,7 +247,15 @@ func (s *Service) reconcileExcerptPass(ctx context.Context, schedule excerptSche
 	case full:
 		return time.Now()
 	}
-	next, err := refs.NextExcerptRetry(ctx, s.store.Pool)
+	background, err := s.backgroundPool()
+	if err != nil {
+		if ctx.Err() != nil {
+			return time.Time{}
+		}
+		slog.Error("dispatch: reconcile reference excerpts", "error", err)
+		return time.Now().Add(schedule.retryBase)
+	}
+	next, err := refs.NextExcerptRetry(ctx, background)
 	if err != nil {
 		if ctx.Err() != nil {
 			return time.Time{}
@@ -264,13 +283,17 @@ func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int
 // full reports a full batch at least one of whose documents left the drift a batch reads - recorded
 // or deferred - so the next batch reads documents this one did not.
 func (s *Service) reconcileReferenceExcerpts(ctx context.Context, retryBase time.Duration) (documents int, full bool, err error) {
-	drifted, err := refs.DriftedExcerpts(ctx, s.store.Pool, referenceExcerptBatch)
+	background, err := s.backgroundPool()
+	if err != nil {
+		return 0, false, err
+	}
+	drifted, err := refs.DriftedExcerpts(ctx, background, referenceExcerptBatch)
 	if err != nil {
 		return 0, false, err
 	}
 	moved := 0
 	deferDocument := func(document refs.ExcerptDrift) {
-		if err := refs.DeferExcerpts(ctx, s.store.Pool, document.FromID, document.Version, retryBase, referenceExcerptRetryCeiling); err != nil {
+		if err := refs.DeferExcerpts(ctx, background, document.FromID, document.Version, retryBase, referenceExcerptRetryCeiling); err != nil {
 			if ctx.Err() == nil {
 				slog.Error("dispatch: reference excerpt reconciliation could not defer a document; the next batch reads it again",
 					"artifact", document.FromID, "error", err)
@@ -298,7 +321,7 @@ func (s *Service) reconcileReferenceExcerpts(ctx context.Context, retryBase time
 		}
 		// The reconciliation appends no event, so what it moved is named nowhere: until it stores
 		// an excerpt, the route answers a mention owed one with the document's name.
-		if _, err := refs.RecordExcerpts(ctx, s.store.Pool, document.FromID, document.Version, excerpts); err != nil {
+		if _, err := refs.RecordExcerpts(ctx, background, document.FromID, document.Version, excerpts); err != nil {
 			if ctx.Err() != nil {
 				return documents, false, ctx.Err()
 			}
@@ -313,7 +336,7 @@ func (s *Service) reconcileReferenceExcerpts(ctx context.Context, retryBase time
 			// A row left behind only costs the next batch its exclusion check: the version
 			// recorded here owes nothing, and NextExcerptRetry drops rows of documents that owe
 			// nothing.
-			if err := refs.ClearExcerptBackoff(ctx, s.store.Pool, document.FromID); err != nil && ctx.Err() == nil {
+			if err := refs.ClearExcerptBackoff(ctx, background, document.FromID); err != nil && ctx.Err() == nil {
 				slog.Error("dispatch: reference excerpt reconciliation could not clear a document's backoff",
 					"artifact", document.FromID, "error", err)
 			}

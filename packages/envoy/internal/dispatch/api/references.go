@@ -74,7 +74,7 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 	}
 	query, ref, err := parseReferencesQuery(r, s.deps.ServerURL)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	var node model.GraphNode
@@ -85,7 +85,7 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 			node, err = s.blockReferenceNode(r.Context(), query, ref)
 		}
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		if node.Pin != nil && node.Pin.State == "removed" {
@@ -97,40 +97,40 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 		if query.Direction == "out" && ref.Kind == "artifact" {
 			if err := s.deps.Store.Pool.QueryRow(r.Context(), `select id::text from artifacts where ref_key = $1`, query.ID).Scan(&query.ID); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
-					s.writeHandlerError(w, errorf(http.StatusNotFound, "NOT_FOUND", "no document at %s", query.ID))
+					s.writeHandlerError(w, r, errorf(http.StatusNotFound, "NOT_FOUND", "no document at %s", query.ID))
 					return
 				}
-				s.writeHandlerError(w, err)
+				s.writeHandlerError(w, r, err)
 				return
 			}
 		}
 		var found bool
 		node, found, err = refs.Node(r.Context(), s.deps.Store.Pool, query.Kind, query.ID, query.Direction == "in")
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		if !found {
-			s.writeHandlerError(w, errorf(http.StatusNotFound, "NOT_FOUND", "no %s at %s", query.Kind, query.ID))
+			s.writeHandlerError(w, r, errorf(http.StatusNotFound, "NOT_FOUND", "no %s at %s", query.Kind, query.ID))
 			return
 		}
 	}
 	if query.Since != nil {
 		safe, err := s.sinceHorizon(r.Context())
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		query.Through = &safe
 	}
 	edges, err := refs.Edges(r.Context(), s.deps.Store.Pool, query)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if query.Direction == "in" {
 		if err := s.documentMentionExcerpts(r.Context(), query, edges); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
@@ -395,7 +395,7 @@ func (s *server) getIssueReferences(w http.ResponseWriter, r *http.Request) {
 	}
 	versionsValues := r.URL.Query()["versions"]
 	if len(versionsValues) > 1 {
-		s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_QUERY", "versions must be given once, as all or latest"))
+		s.writeHandlerError(w, r, errorf(http.StatusBadRequest, "INVALID_QUERY", "versions must be given once, as all or latest"))
 		return
 	}
 	var latestOnly bool
@@ -405,18 +405,18 @@ func (s *server) getIssueReferences(w http.ResponseWriter, r *http.Request) {
 		case "latest":
 			latestOnly = true
 		default:
-			s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_QUERY", "versions must be all or latest"))
+			s.writeHandlerError(w, r, errorf(http.StatusBadRequest, "INVALID_QUERY", "versions must be all or latest"))
 			return
 		}
 	}
 	issue, err := s.loadIssue(r.Context(), s.deps.Store.Pool, r.PathValue("key"))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	closure, truncated, err := refs.Closure(r.Context(), s.deps.Store.Pool, issue.Key)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	refKeys := make([]string, len(closure))
@@ -425,14 +425,14 @@ func (s *server) getIssueReferences(w http.ResponseWriter, r *http.Request) {
 	}
 	artifacts, err := s.loadArtifactsByRefKey(r.Context(), s.deps.Store.Pool, refKeys, latestOnly)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	members := make([]model.ReferenceMember, 0, len(closure))
 	for _, closureMember := range closure {
 		artifact, ok := artifacts[closureMember.RefKey]
 		if !ok {
-			s.writeHandlerError(w, fmt.Errorf("reference target %q disappeared while loading closure", closureMember.RefKey))
+			s.writeHandlerError(w, r, fmt.Errorf("reference target %q disappeared while loading closure", closureMember.RefKey))
 			return
 		}
 		members = append(members, model.ReferenceMember{
@@ -456,17 +456,17 @@ func (s *server) getArtifactReferences(w http.ResponseWriter, r *http.Request) {
 	}
 	artifact, err := s.loadArtifact(r.Context(), s.deps.Store.Pool, r.PathValue("id"))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	outgoing, err := refs.Outgoing(r.Context(), s.deps.Store.Pool, artifact.ID)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	referencedBy, err := refs.ReferencedBy(r.Context(), s.deps.Store.Pool, artifact.RefKey)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, model.ArtifactReferences{Outgoing: outgoing, ReferencedBy: referencedBy})

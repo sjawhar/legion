@@ -38,7 +38,7 @@ func TestAnEditWhoseForkWentAndWhoseRoomHasCommittedIsRefusedAsUnavailable(t *te
 	// (liveOperation.abandon) and leaves the transaction the update it appended before it.
 	heavy := model.Actor{Kind: "session", ID: "s" + strings.Repeat("a", maxAnchorBytes)}
 
-	refusal := joinedWrite(service, func(ctx context.Context) error {
+	refusal := joinedWrite(service, artifactID, func(ctx context.Context) error {
 		first := []model.EditOp{{Op: "replace", Find: "First.", With: "First, agent."}}
 		if _, err := service.ApplyOps(ctx, artifactID, first, agent, nil); err != nil {
 			t.Fatalf("the agent's first edit: %v", err)

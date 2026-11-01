@@ -49,7 +49,7 @@ func (s *server) getDashboardBuilds(w http.ResponseWriter, r *http.Request) {
 	}
 	builds, err := LiveDashboardBuilds(r.Context(), s.deps.Store.Pool)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
@@ -58,13 +58,13 @@ func (s *server) getDashboardBuilds(w http.ResponseWriter, r *http.Request) {
 		group by entry
 		order by entry collate "C"`, builds)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	// CollectRows answers a non-nil slice when there are no rows, which keeps "live":[] in the JSON.
 	entries, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, dashboardBuilds{Serving: s.deps.DashboardEntry, Live: entries})

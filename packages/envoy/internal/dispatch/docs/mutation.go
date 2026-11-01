@@ -12,7 +12,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"weak"
 
@@ -1199,62 +1198,6 @@ func (s *Service) prevalidationTree(ctx context.Context, artifactID string) (*pm
 	return s.storedTree(ctx, artifactID)
 }
 
-const maxQueuedConditionalEdits = 32
-
-type conditionalEditGate struct {
-	turn   chan struct{}
-	mu     sync.Mutex
-	queued int
-}
-
-// AcquireConditionalEdit queues one conditional edit in memory before it can
-// acquire a database connection, keeping stale retries from exhausting pgx.
-func (s *Service) AcquireConditionalEdit(ctx context.Context, artifactID string) (func(), error) {
-	for {
-		created := &conditionalEditGate{turn: make(chan struct{}, 1)}
-		created.turn <- struct{}{}
-		value, _ := s.conditionalGates.LoadOrStore(artifactID, created)
-		gate := value.(*conditionalEditGate)
-		gate.mu.Lock()
-		current, present := s.conditionalGates.Load(artifactID)
-		if !present || current != gate {
-			gate.mu.Unlock()
-			continue
-		}
-		if gate.queued >= maxQueuedConditionalEdits {
-			gate.mu.Unlock()
-			return nil, ErrPreconditionBusy
-		}
-		gate.queued++
-		gate.mu.Unlock()
-
-		select {
-		case <-gate.turn:
-			return func() {
-				gate.mu.Lock()
-				gate.queued--
-				last := gate.queued == 0
-				if last {
-					s.conditionalGates.CompareAndDelete(artifactID, gate)
-				}
-				gate.mu.Unlock()
-				if !last {
-					gate.turn <- struct{}{}
-				}
-			}, nil
-		case <-ctx.Done():
-			gate.mu.Lock()
-			gate.queued--
-			last := gate.queued == 0
-			if last {
-				s.conditionalGates.CompareAndDelete(artifactID, gate)
-			}
-			gate.mu.Unlock()
-			return nil, ctx.Err()
-		}
-	}
-}
-
 func lockTableAnchorRows(ctx context.Context, tx pgx.Tx, artifactID string, snapshots []tableAnchorSnapshot) error {
 	byMark := make(map[string]tableAnchorSnapshot)
 	for _, snapshot := range snapshots {
@@ -1578,7 +1521,7 @@ func editTree(current pmdoc.ValidDocument, read func() (*pmdoc.Node, error)) (*b
 // transactional live-document mutation path. An ask's answer the document has no room for - its
 // words or the options it selects (pmdoc.IsAnswerAttribute), which are caller text - is left out of
 // the block: the block is written without either, saying who answered and when, and the caller's
-// ask keeps the answer, as settlement leaves a returning block's answer out (withholdAnswers).
+// ask keeps the answer, as settlement leaves a returning block's answer out (weighAnswers).
 // attributes' names are the server's own, never taken from a request (pmdoc.SetBlockAttributes).
 func (s *Service) SetBlockAttributes(
 	ctx context.Context,

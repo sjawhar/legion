@@ -1,0 +1,7 @@
+kind: Changed
+body: |-
+  Shutdown runs every stage within one deadline, 27 seconds after the signal (`stopGrace` less 3
+  seconds kept for closing the pools, the last log lines and the exit): the document service
+  starts settling at most 6 seconds after the signal with requests still in flight, where it
+  waited 11, and a process with a write still running at the deadline exits without it,
+  `dispatch: exit at the shutdown deadline with requests or database connections still in use`.

@@ -15,8 +15,10 @@
 #   step-10x          40     1,000         600            20
 #
 # Events are 4/s and requests 60/s at 1x, live sockets max(1, round(2·f)); sessions come from
-# `loadgen series-sessions <f>`. Any other run-step.sh flag (--duration, --warmup, --grace,
-# --event-mix, --route-mix, --human, --rng-seed) is passed to every step.
+# `loadgen series-sessions <f>`. Every other flag is passed to every step as given, and run-step.sh
+# refuses one it does not know: --duration, --warmup, --grace, --event-mix, --route-mix, --human,
+# --rng-seed, --schedule and --recovery-ref-p99. With --schedule each step's factors multiply that
+# step's events and requests; its live sockets stay the series' max(1, round(2·f)).
 #
 # The series holds LOADTEST_ROOT for its whole run (common.sh); its own run-step.sh calls pass, and
 # keep the lock if the series is killed. It sets up (builds this checkout), starts and seeds the

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-592",
+  "previousHandoff": "2e069c27fc34f7c61fde6e7e5f19a2f45e8e1723",
+  "round": 3,
+  "headReviewed": "226d9a2187f052a610f244bf53ba5a85c87ac523",
+  "codeHeadReviewed": "a1581b1b858b285217eba59c7e0379c38c896cef",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 5,
+  "minor": 4,
+  "ci": "Required set (rulesets): ci-ok, pr-title. CI head a1581b1b: every lane completed success, ci-ok success, pr-title success (one cancelled run beside it); dispatch-memory success with its peak lines in the log (cold edits 96-199 MiB above idle). Compare a1581b1b...226d9a21: 2 files, handoffs only.",
+  "mergeability": "CONFLICTING: main's #2411 (4644a072, 14:28:28Z) conflicts with a1581b1b in .github/workflows/docs-pages.yaml and packages/envoy/internal/dispatch/store/pool.go (git merge-tree). A forward merge is needed.",
+  "roundTwoThreads": "All 10 answered and resolved by the implementer; each checked in the code. The answer-bound part of the body_drain.go thread is fixed only in part (single Write); continued in a new comment.",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/api/body_drain.go", "description": "A parked write refused at resume delivers the refusal only as the error of the read that returns its body's last bytes; an unkeyed multipart upload's parser finds its closing boundary in the buffered data and never reads that error, so the handler stores and commits the file holding no unit, and begin then replaces its 201 with 429 OVERLOADED 'nothing ran': a client that follows Retry-After uploads twice."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/api/body_drain.go", "description": "boundedAnswer.Write arms the idle deadline once per call; WriteJSON and a row-held file version write the whole answer in one call, so a 25 MiB download is cut at 20 s below about 1.3 MB/s and a 1 MB JSON answer below 50 KB/s, a regression from main and contrary to the PR's 'an honest slow reader completes'."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/api/delivery_live_hub_intake.go", "description": "expire also sets computing with readingKnown false, so a change caught up during an expiry is held in startingSeq, changeSeq moves past it, and expire never resolves it: the view keeps a stale answer until something else touches it (6c4847f0)."},
+    {"severity": "important", "file": "packages/envoy/.changes/unreleased/INFRA-592-connection-budget.yaml", "description": "After main's #2391 merge the budget is 90 (permanentListeners 4, dispatchConnectionsPerPod 90); this fragment and .dispatch/architecture/dispatch-store.md still say 89 and 3 LISTEN connections."},
+    {"severity": "important", "file": ".github/workflows/docs-pages.yaml", "description": "The PR conflicts with main's #2411 in docs-pages.yaml and store/pool.go: forward merge needed."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/body_drain.go", "description": "clientGone counts every non-deadline read failure as a gone client, so a chunked-framing error from a client still connected gets an empty 200 where round 2 answered 400."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/request_keys.go", "description": "A keyed write whose client leaves mid-body writes 400 REQUEST_BODY_UNREADABLE directly, not through writeHandlerError, so it is logged 400 rather than 499."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/suggestions.go", "description": "The keyword stage is cancelled but not awaited on the early returns, the class 1f2f572d fixed for the meaning stage."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/routes/router.go", "description": "The ClientGone calls on the static handler reach no access-log line; drainingWriter.limit duplicates drainedBody.limit and failed duplicates failure != nil."}
+  ]
+}

@@ -14,16 +14,22 @@ type writeRec struct {
 	Kind   string
 	Issue  string
 	// Sent is when the client began the write's request (callResult.start; for an upload, the
-	// POST's, not the GET's before it). Arrival is when the whole request was in Dispatch's
-	// socket (httptrace WroteRequest), or Sent if it never got there (callResult.arrival);
-	// Response is when the response was read.
+	// POST's, not the GET's before it, unless that GET ended the write: a 429 or 503 answer to it
+	// is the upload's refusal, and a failed read its transport error). Arrival is when the whole
+	// request was in Dispatch's socket (httptrace WroteRequest), or Sent if it never got there
+	// (callResult.arrival); Response is when the response was read.
 	Sent, Arrival, Response int64
 	// ConnWait is the client's own wait for a connection (GetConn to GotConn).
 	ConnWait     time.Duration
 	Status       int
 	TransportErr string
-	// InWindow is set when the arrival the open-loop schedule drew is in the measured window.
-	InWindow bool
+	// Code is the refusal code of an answer outside 2xx (callResult.code); ConnFailure the class
+	// of a write that got no complete response (connFailureOf), "" when it has none.
+	Code, ConnFailure string
+	// Scheduled is the arrival the open-loop schedule drew for the write, Unix ns; InWindow is set
+	// when it is in the measured window.
+	Scheduled int64
+	InWindow  bool
 }
 
 // commitRow is one loadtest.event_commits row of this run: an event that carries one of the run's
@@ -83,7 +89,12 @@ type eventsSummary struct {
 	// ClockAnomalies counts receipts whose event committed before its write arrived.
 	ClockAnomalies int         `json:"clock_anomalies"`
 	WriteErrors    writeErrors `json:"write_errors"`
-	ConnWaitMs     stat        `json:"conn_wait_ms"`
+	// Refusals splits the offered writes that failed: by refusal code, then by connection failure,
+	// with the latency of the 429 and 503 answers.
+	Refusals refusalSummary `json:"refusals"`
+	// Answered counts the offered writes that got an HTTP status, whatever it was.
+	Answered   int  `json:"answered"`
+	ConnWaitMs stat `json:"conn_wait_ms"`
 	// CommitsError is why loadtest.event_commits could not be read, when it could not. Then every
 	// count and latency above that comes from the commit rows (committed, by_kind committed, the
 	// receipts, missing, other events and receipts, commit_times_missing, clock_anomalies and the
@@ -127,6 +138,7 @@ func joinDelivery(writes []writeRec, commits []commitRow, receipts []receipt, wa
 	other := map[int64]bool{}
 	writeMs := map[string][]float64{}
 	var connWait []float64
+	refusals := newRefusalTally()
 	for i := range writes {
 		w := &writes[i]
 		if !w.InWindow {
@@ -137,13 +149,18 @@ func joinDelivery(writes []writeRec, commits []commitRow, receipts []receipt, wa
 		k.Offered++
 		out.Offered++
 		connWait = append(connWait, float64(w.ConnWait)/1e6)
+		writeLatency := float64(w.Response-w.Arrival) / 1e6
+		refusals.add(w.TransportErr != "", w.ConnFailure, w.Status, w.Code, writeLatency)
+		if w.Status != 0 {
+			out.Answered++
+		}
 		switch {
 		case w.TransportErr != "":
 			out.WriteErrors.Transport++
 		case w.Status/100 != 2:
 			out.WriteErrors.Non2xx++
 		default:
-			writeMs[w.Kind] = append(writeMs[w.Kind], float64(w.Response-w.Arrival)/1e6)
+			writeMs[w.Kind] = append(writeMs[w.Kind], writeLatency)
 		}
 		first := primaryCommit(byMarker[w.Marker], k.PrimaryType)
 		for _, c := range byMarker[w.Marker] {
@@ -203,6 +220,7 @@ func joinDelivery(writes []writeRec, commits []commitRow, receipts []receipt, wa
 	out.DeliveryMsFromCommit = mkStat(fromCommit)
 	out.DeliveryMsFromPublish = mkStat(fromPublish)
 	out.ConnWaitMs = mkStat(connWait)
+	out.Refusals = refusals.summary()
 	for kind, k := range out.ByKind {
 		k.WriteMs = mkStat(writeMs[kind])
 		k.DeliveryMsFromArrival = mkStat(kindArrival[kind])

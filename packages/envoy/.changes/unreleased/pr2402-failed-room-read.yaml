@@ -1,0 +1,10 @@
+kind: Fixed
+body: |-
+  A read that holds a database connection of its own is answered `503 DOC_SERVICE_UNAVAILABLE` at
+  once on a document whose room has failed, instead of waiting for that room's recovery: every
+  ordinary `GET`, the `/text` and `/blocks` routes among them, holds one connection for its whole
+  length. The recovery they waited for flushes and compacts the document on a connection of the
+  same pool, so the waiting readers held the connections it needed: under load the recovery ran
+  out its own 3-second wait for one and the readers ran out their 20-second deadline on a room
+  nobody had compacted. A reader that holds no connection, a document websocket's admission check
+  among them, still waits and is answered once the room has reloaded.

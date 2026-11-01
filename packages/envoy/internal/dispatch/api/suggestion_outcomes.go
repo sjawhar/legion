@@ -406,12 +406,11 @@ func runSuggestionRules(ctx context.Context, tx pgx.Tx, rules [3]string, args ..
 // nothing: each pass works out afresh what it held back for being younger than settle, and the
 // late commit's own notification on dispatch_events wakes the loop as any other commit does.
 //
-// Two answers say an id stands above what this pass read, and a pass needs both: Pending, this
-// pass's own observation having seen an id above H, and a horizon now proven past the safe this
-// pass read, which is what Pending reads as settled once another reader of the one Horizon - the
-// relay, the delivery hub - proves that observation while this pass's pages run. Neither alone
-// covers the other: without the second, a pass whose gap closed under it would ask for nothing
-// and leave those events to the next commit's wake.
+// One answer says an id stands above what this pass read: Behind, measured against the safe this
+// pass read and not against the H the Horizon holds now, since another reader of the one Horizon
+// - the relay, the delivery hub - can prove this pass's own observation while its pages run and
+// raise that H past the ids this pass could not read. Measured against the H the pass read,
+// those ids still stand above it and still earn a pass.
 func suggestionOutcomePass(ctx context.Context, pool *store.Pool, horizon *events.Horizon, schedule suggestionSchedule) (time.Time, error) {
 	safe, err := horizon.Safe(ctx)
 	if err != nil {
@@ -426,7 +425,7 @@ func suggestionOutcomePass(ctx context.Context, pool *store.Pool, horizon *event
 	if err != nil {
 		return time.Time{}, err
 	}
-	if horizon.Pending() || horizon.Proven() > safe {
+	if horizon.Behind(safe) {
 		return time.Now().Add(schedule.minGap), nil
 	}
 	return next, nil
@@ -434,7 +433,9 @@ func suggestionOutcomePass(ctx context.Context, pool *store.Pool, horizon *event
 
 // RunSuggestionOutcomeSweep resolves LEGION-550's write_suggestions off the write path entirely:
 // whether the agent acted on a suggestion (cited it, or updated the suggested issue directly) or
-// overrode it (kept working on what it filed instead). It stops when ctx is done.
+// overrode it (kept working on what it filed instead). It stops when ctx is done. pool is what
+// its statements run on: cmd/dispatch hands it the background pool (store.Pool.Background), so a
+// pass neither waits for the requests' connections nor takes one.
 //
 // It is a woken loop (duty.RunWoken): one pass at start, then a pass when wake is signalled - in
 // the server, the pglisten.Hub wake on EventsChannel, which every event commit announces

@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -606,5 +607,66 @@ func TestAnchorMarksCannotGrowALiveDocumentPastWhatItsMarksMayCarry(t *testing.T
 	}
 	if response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice"); response.Code != http.StatusOK {
 		t.Fatalf("the document's text after the refused anchors: status=%d body=%.300s", response.Code, response.Body.String())
+	}
+}
+
+// A settlement that withholds returned answers from their blocks still completes: the document
+// stops owing a settlement. Twenty-four asks answered with 900 KB each have their blocks deleted,
+// then all return in one edit; the document has no room for the answers, so settlement writes back
+// who answered each and withholds the text. Its own write must not read as the document moving
+// under it: a settlement that re-reads for its own write until its re-read bound leaves the
+// document owed for good, and every later trigger does the same.
+func TestASettlementThatWithholdsReturnedAnswersCompletes(t *testing.T) {
+	handler, database := blockAskHandler(t)
+	const asks = 24
+	prose := strings.Repeat("word ", 180_000)
+	var spec, blocks strings.Builder
+	spec.WriteString("Before sentinel.\n")
+	for index := range asks {
+		block := fmt.Sprintf("\n:::ask{#ask-%d urgency=\"med\" multiple=\"false\"}\nQuestion %d?\n:::\n", index, index)
+		spec.WriteString(block)
+		blocks.WriteString(block)
+	}
+	issue := createInteractionIssue(t, handler, "TEST", "Returned answers", spec.String())
+	edit := func(op map[string]string) {
+		t.Helper()
+		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{"ops": []map[string]string{op}}, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("edit %v: status=%d body=%.300s", op, response.Code, response.Body.String())
+		}
+	}
+	owed := func() bool {
+		t.Helper()
+		var owes bool
+		if err := database.Pool.QueryRow(t.Context(),
+			`select exists(select 1 from doc_settlements_pending where artifact_id = $1)`, issue.PrimaryArtifactID,
+		).Scan(&owes); err != nil {
+			t.Fatalf("read the document's pending settlement: %v", err)
+		}
+		return owes
+	}
+	awaitSettled := func(what string) {
+		t.Helper()
+		deadline := time.Now().Add(45 * time.Second)
+		for owed() {
+			if time.Now().After(deadline) {
+				t.Fatalf("the document still owes a settlement 45 s after %s", what)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	for index := range asks {
+		blockID := fmt.Sprintf("ask-%d", index)
+		awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, blockID, fmt.Sprintf("Question %d?", index))
+		id := blockAskID(t, handler, issue.Key, blockID)
+		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+id+"/answer", map[string]any{"text": prose}, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("answer %s: status=%d body=%.300s", blockID, response.Code, response.Body.String())
+		}
+		edit(map[string]string{"op": "delete", "block": blockID})
+	}
+	awaitSettled("the blocks were deleted")
+	edit(map[string]string{"op": "insert", "after": "end", "markdown": blocks.String()})
+	awaitSettled("the answered blocks returned in one edit")
+	if text := documentMarkdown(t, handler, issue.PrimaryArtifactID); len(text) > 1<<20 {
+		t.Fatalf("returning the blocks left a %d-byte document, past the 1 MiB one upload may hold", len(text))
 	}
 }

@@ -213,7 +213,7 @@ func TestWritingIssueAskStatesLeavesTheLatestEditSourceAlone(t *testing.T) {
 			writeThroughLedger(t, service, artifactID, session, freshBlock, test.version)
 
 			var marked []BlockRef
-			err := joinedWrite(service, func(ctx context.Context) (err error) {
+			err := joinedIssueWrite(service, "DOC-1", func(ctx context.Context) (err error) {
 				tx, _ := txFromContext(ctx)
 				if _, err := tx.Exec(ctx, `select 1 from issues where key = 'DOC-1' for no key update`); err != nil {
 					return fmt.Errorf("lock the issue: %w", err)
@@ -405,7 +405,7 @@ func requireLatestEditSource(t *testing.T, service *Service, artifactID string, 
 	}
 	state := service.lockState(artifactID)
 	latest := state.lastActor
-	credit := settlementAuthors(state, owedAuthors, durableLatest, everyCredit)
+	credit := settlementAuthors(state, owedAuthors, durableLatest, settlementTake{creditThrough: state.creditSeq.Load(), lastActor: latest})
 	service.unlockState(artifactID, state)
 	if latest == nil || *latest != want {
 		t.Fatalf("the room's latest edit source = %+v, want %+v", latest, want)
@@ -597,7 +597,7 @@ func withdrawnAsk(ask model.Ask, closer model.Actor) model.Ask {
 func writeIssueAskStates(t *testing.T, service *Service, asks []model.Ask, actor model.Actor, markUnindexed bool) []BlockRef {
 	t.Helper()
 	var marked []BlockRef
-	err := joinedWrite(service, func(ctx context.Context) (err error) {
+	err := joinedIssueWrite(service, "DOC-1", func(ctx context.Context) (err error) {
 		tx, _ := txFromContext(ctx)
 		// The issue route holds the issue's row before it writes any document.
 		if _, err := tx.Exec(ctx, `select 1 from issues where key = 'DOC-1' for no key update`); err != nil {

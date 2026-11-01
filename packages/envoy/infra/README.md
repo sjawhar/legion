@@ -727,7 +727,7 @@ its own uid alone.
 SQL's default `max_connections` follows the instance's memory, and from 15 to under 30 GB it is
 500 ([Configure database flags](https://cloud.google.com/sql/docs/postgres/flags),
 `max_connections`). Every app pod opens up to `ConnectionsPerProcess` connections
-(`packages/envoy/internal/dispatch/store/pool.go`: the sum of its counted pools and its permanent
+(`packages/envoy/internal/dispatch/store/pools.go`: the sum of its counted pools and its permanent
 `LISTEN` connections); the listener's and the front door's pods open none. During a roll, every
 app pod that holds connections, the replicas, the surge pod and pods still terminating for up to
 their grace period, times `ConnectionsPerProcess` must fit in the instance's `max_connections` less
@@ -1181,8 +1181,9 @@ signals the container only once it returns, so each pod asks for 35 seconds. For
 the five of the wait added to the thirty `envoy-dispatch`'s own shutdown is built for (`stopGrace`
 in `packages/envoy/cmd/dispatch/shutdown.go`) rather than taken out of them; whoever tunes either
 number moves both, since a wait the grace period does not cover is paid for out of the server's
-drain, which spends its document service's reserve and kills a slow write mid-commit. For the
-listener, it is the five of the wait added to its own stop of about 26 seconds, with a margin.
+shutdown, which loses first the margin its one deadline keeps for its last log lines and exit, then
+a slow write killed mid-commit. For the listener, it is the five of the wait added to its own
+stop of about 26 seconds, with a margin.
 Whether five seconds is enough to lose no request across a real release is unmeasured; the
 consuming stack's release measures it, with a poll every 250 milliseconds. The front door drains
 its node instead ([The front door](#the-front-door)).

@@ -43,12 +43,19 @@ func maxConnAgeHandler(next http.Handler, maxAge time.Duration, now func() time.
 
 // newHTTPServer is the server main runs: handler behind the connection age limit, with every
 // connection stamped with its accept time as now reads it.
+//
+// ReadTimeout and WriteTimeout remain zero: both are per connection, and this server's longest
+// connections are the websockets (/ws/doc, /ws/live), which a server timeout would cut mid-stream.
+// What they would bound is bounded per request instead, where a handler can tell a stream from a
+// request: a request's body arrives, and a read's answer goes out, under api's own transfer
+// bounds - no silence longer than 20 s and 32 KiB/s after a minute's grace - as a read deadline
+// the API pushes out as the body arrives (api.drainedBody) and a write deadline it pushes out as
+// the answer goes out (api.boundedAnswer).
 func newHTTPServer(handler http.Handler, now func() time.Time) *http.Server {
 	return &http.Server{
 		Handler:           maxConnAgeHandler(handler, maxConnAge, now),
 		ConnContext:       connAcceptTime(now),
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
-		// WriteTimeout remains zero because the event stream is long-lived.
 	}
 }

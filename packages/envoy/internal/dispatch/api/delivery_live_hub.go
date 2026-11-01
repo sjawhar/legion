@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"strconv"
@@ -261,11 +262,18 @@ type deliveryView struct {
 	readFrom time.Time
 	// body is the last answer, nil until the first and while delivery is not configured; seq the
 	// change position it reflects and changedAt when that change was recorded; readingSeq the
-	// position a read under way reflects, so a change at or before it marks nothing.
-	body       *deliveryLiveEncoded
-	seq        int64
-	readingSeq int64
-	changedAt  *time.Time
+	// position a read under way reflects, so a change at or before it marks nothing. readStarting
+	// says a recompute's read has begun and not yet recorded its position: a change caught up then
+	// is held in startingSeq and decided once the read records its position (deliveryHub.read) or
+	// once the recompute ends, since marking it would recompute the view for a change the read
+	// already holds. Only a recompute sets it, so a change caught up while an expiry computes,
+	// which reads nothing and so records no position, marks the view as any other change does.
+	body         *deliveryLiveEncoded
+	seq          int64
+	readingSeq   int64
+	readStarting bool
+	startingSeq  int64
+	changedAt    *time.Time
 	// from and at are the window start and the pipeline clock the last answer resolved; expiry is
 	// the next moment something leaves it, zero for a custom range or a pinned at.
 	from, at time.Time
@@ -402,10 +410,23 @@ func signal(wake chan struct{}) {
 	}
 }
 
-// readContext is a context for one read of the shared pool, marked so the pool refuses it a second
-// connection.
+// readContext is a context for one read of the request pool, marked so the pool refuses it a second
+// connection: a Subscribe's resume read, which a page's frame asks for and so is the client's.
 func (h *deliveryHub) readContext() context.Context {
 	return store.WithTransactionTracking(h.lifetime)
+}
+
+// liveRead is a context for one of the intake's or the worker's reads, marked so the pool refuses it
+// a second connection, and the pool it reads through: the live pool (store.Pool.Live), so an open
+// page hears of a change while the requests hold every connection of theirs. The intake reads one
+// statement at a time and the worker's recompute at most concurrentReadWeight at once, which with
+// the event stream relay's one read are the live pool's connections.
+func (h *deliveryHub) liveRead() (context.Context, *store.Pool, error) {
+	live, err := h.server.deps.Store.Pool.Live()
+	if err != nil {
+		return nil, nil, fmt.Errorf("open the delivery live hub's pool: %w", err)
+	}
+	return store.WithTransactionTracking(h.lifetime), live, nil
 }
 
 func (h *deliveryHub) note(n deliveryHubNote) {

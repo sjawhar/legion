@@ -268,7 +268,7 @@ func (s *server) withinProjectScope(route apiRoute, handler http.HandlerFunc) ht
 			}
 			belongsTo, err := resolve(r.Context(), s.deps.Store.Pool, r)
 			if err != nil {
-				s.writeHandlerError(w, err)
+				s.writeHandlerError(w, r, err)
 				return
 			}
 			if belongsTo != covers {

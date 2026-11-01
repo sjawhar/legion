@@ -77,30 +77,45 @@ type loadedSource struct {
 // (xmin) is still the one the sync loaded before its fetch, so a sync another
 // write overtook never records the older head, files or failure it read
 // (errSuperseded). The per-project mutex only keeps one process from fetching
-// one project twice at once.
+// one project twice at once; an importer On derives shares those mutexes, so
+// the ticker's importer on the background pool and the routes' on the request
+// pool still take turns on one project.
 type Importer struct {
-	store  *store.Store
-	github *githubapp.Client
-	events *events.Broker
+	store    *store.Store
+	github   *githubapp.Client
+	events   *events.Broker
+	projects *projectLocks
+}
 
-	mu    sync.Mutex
-	locks map[string]*sync.Mutex
+// projectLocks is the per-project mutex every sync of a project takes, one set for an importer and
+// every importer On derives from it.
+type projectLocks struct {
+	mu        sync.Mutex
+	byProject map[string]*sync.Mutex
 }
 
 // NewImporter wires the importer to the database, the GitHub App client (nil
 // is the "no app credentials" state: every sync answers ErrNoAppKey), and the
 // event broker.
 func NewImporter(database *store.Store, github *githubapp.Client, broker *events.Broker) *Importer {
-	return &Importer{store: database, github: github, events: broker, locks: map[string]*sync.Mutex{}}
+	return &Importer{store: database, github: github, events: broker, projects: &projectLocks{byProject: map[string]*sync.Mutex{}}}
+}
+
+// On is this importer reading and writing through database instead: the same GitHub App client and
+// event broker, and the same per-project mutexes, so its syncs and this importer's of one project
+// still take turns. cmd/dispatch runs the ticker on the background pool's store this way, while the
+// routes sync on the request pool's.
+func (i *Importer) On(database *store.Store) *Importer {
+	return &Importer{store: database, github: i.github, events: i.events, projects: i.projects}
 }
 
 func (i *Importer) lock(project string) *sync.Mutex {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	lock, ok := i.locks[project]
+	i.projects.mu.Lock()
+	defer i.projects.mu.Unlock()
+	lock, ok := i.projects.byProject[project]
 	if !ok {
 		lock = &sync.Mutex{}
-		i.locks[project] = lock
+		i.projects.byProject[project] = lock
 	}
 	return lock
 }
@@ -208,10 +223,10 @@ func (i *Importer) Sync(ctx context.Context, project, repo string) (model.Archit
 	lock := i.lock(project)
 	lock.Lock()
 	defer lock.Unlock()
-	// A sync opens its own transactions on the shared pool, so it is marked like an API
-	// request: a read it makes while one is open must come from that transaction, never from a
-	// second connection (store.ErrNestedAcquire). The scheduled sync has no request to inherit
-	// the mark from.
+	// A sync opens its own transactions on its store's pool (the request pool for a route's
+	// sync, the background pool for the ticker's), so it is marked like an API request: a read it
+	// makes while one is open must come from that transaction, never from a second connection
+	// (store.ErrNestedAcquire). The scheduled sync has no request to inherit the mark from.
 	parent := store.WithTransactionTracking(ctx)
 	ctx, cancel := context.WithTimeout(parent, syncTimeout)
 	defer cancel()

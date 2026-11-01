@@ -16,6 +16,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // An issue's route says where its messages go; whether that reaches anyone is a separate fact,
@@ -158,7 +159,7 @@ func (s *server) readRouteRoster(ctx context.Context) (routeRoster, error) {
 		// no shared fetch and nothing kept.
 		return s.listRouteRoster(ctx), nil
 	}
-	roster, fresh, now, seen, err := s.storedRouteRoster(ctx)
+	roster, fresh, now, seen, err := s.storedRouteRoster(ctx, s.deps.Store.Pool)
 	if err != nil {
 		return routeRoster{}, fmt.Errorf("read the stored listener answer: %w", err)
 	}
@@ -211,10 +212,12 @@ const routeRosterQuery = `
 	from (values (true)) as one (present)
 	left join route_roster r on true`
 
-// storedRouteRoster reads the route_roster row on the pool, outside any transaction, and answers
+// storedRouteRoster reads the route_roster row on pool, outside any transaction, and answers
 // the roster it holds, whether that is still fresh by the database's clock, that clock's now(),
-// and the row's sent_at, zero for no row. No row reads as not fresh.
-func (s *server) storedRouteRoster(ctx context.Context) (roster routeRoster, fresh bool, now, sent time.Time, err error) {
+// and the row's sent_at, zero for no row. No row reads as not fresh. A request reads it on the
+// request pool, through the connection it already holds; the shared fetch, which runs on the
+// server's lifetime, reads and writes it on the background pool (fetchRouteRoster).
+func (s *server) storedRouteRoster(ctx context.Context, pool *store.Pool) (roster routeRoster, fresh bool, now, sent time.Time, err error) {
 	cache := &s.rosters
 	cache.mu.Lock()
 	built, builtSent := cache.built, cache.builtSent
@@ -226,7 +229,7 @@ func (s *server) storedRouteRoster(ctx context.Context) (roster routeRoster, fre
 	var answered bool
 	var sentAt, expiresAt *time.Time
 	var sessions []byte
-	if err := s.deps.Store.Pool.QueryRow(ctx, routeRosterQuery, known).Scan(&now, &answered, &sentAt, &expiresAt, &sessions); err != nil {
+	if err := pool.QueryRow(ctx, routeRosterQuery, known).Scan(&now, &answered, &sentAt, &expiresAt, &sessions); err != nil {
 		return routeRoster{}, false, time.Time{}, time.Time{}, err
 	}
 	if sentAt == nil {
@@ -270,8 +273,20 @@ func (c *rosterCache) keep(sent time.Time, roster routeRoster) {
 // read waiting on fetch the stored answer. An answer's TTL counts from sent, the database's clock
 // before the call, so no read is served a list older than the TTL however long the listener took;
 // a silence's counts from the moment it was known, so a read that timed out is still left alone.
+//
+// It is the waiting reads' work, not any one request's: it runs on the server's lifetime, outside
+// admission, so it stores its answer through the background pool rather than the request pool,
+// whose connections admission counts and one of which every waiting read already holds.
 func (s *server) fetchRouteRoster(ctx context.Context, fetch *rosterFetch, sent time.Time) {
-	fetch.roster = s.storeRouteRoster(ctx, sent, s.listRouteRoster(ctx))
+	own := s.listRouteRoster(ctx)
+	fetch.roster = own
+	if background, err := s.deps.Store.Pool.Background(); err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("dispatch: open the background pool to store the listener's answer; this process alone reads it", "error", err)
+		}
+	} else {
+		fetch.roster = s.storeRouteRoster(ctx, background, sent, own)
+	}
 	cache := &s.rosters
 	cache.mu.Lock()
 	cache.fetch = nil
@@ -298,7 +313,7 @@ const storeRouteRosterQuery = `
 // call is stored too (answered false, for the silence), so every process reads unknown together
 // rather than each waiting out the listener on its own. Should the database refuse the write, the
 // waiting reads in this process are served own, which no other process sees.
-func (s *server) storeRouteRoster(ctx context.Context, sent time.Time, own routeRoster) routeRoster {
+func (s *server) storeRouteRoster(ctx context.Context, pool *store.Pool, sent time.Time, own routeRoster) routeRoster {
 	sessions := []byte("[]")
 	if len(own.sessions) > 0 {
 		encoded, err := json.Marshal(own.sessions)
@@ -308,14 +323,14 @@ func (s *server) storeRouteRoster(ctx context.Context, sent time.Time, own route
 		sessions = encoded
 	}
 	var stored bool
-	err := s.deps.Store.Pool.QueryRow(ctx, storeRouteRosterQuery,
+	err := pool.QueryRow(ctx, storeRouteRosterQuery,
 		own.answered, sessions, sent, s.rosters.ttl.Seconds(), s.rosters.silenceTTL.Seconds()).Scan(&stored)
 	if err == nil {
 		s.rosters.keep(sent, own)
 		return own
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
-		if newer, _, _, _, err := s.storedRouteRoster(ctx); err == nil {
+		if newer, _, _, _, err := s.storedRouteRoster(ctx, pool); err == nil {
 			return newer
 		}
 		return own

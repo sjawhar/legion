@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -132,7 +133,7 @@ func TestTheMaintenanceLoopKeepsAKeyForItsWholeWindow(t *testing.T) {
 		defer close(done)
 		RunMaintenanceSweep(ctx, rig.database.Pool, 50*time.Millisecond, sweepLeases(t, rig.database), nil)
 	}()
-	for deadline := time.Now().Add(30 * time.Second); countLeaseLines(logs, "dispatch duty: leased pass ran", maintenanceLease) == 0; {
+	for deadline := time.Now().Add(30 * time.Second); countLeaseLines(logs, "dispatch duty: leased pass ran", duty.SuggestionOutcomeLease) == 0; {
 		if time.Now().After(deadline) {
 			t.Fatalf("the loop never made a pass:\n%s", logs.Lines("lease="))
 		}
@@ -196,7 +197,8 @@ func TestARecoveredReplayKeepsNothingOfARefusal(t *testing.T) {
 		t.Fatalf("a success's stored body = %s, want it handed to the replay", body)
 	}
 	response := httptest.NewRecorder()
-	(&server{}).writeRefreshed(response, stored, map[string]any{"id": "m1"})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/issues/TEST-1/messages", nil)
+	(&server{}).writeRefreshed(response, request, stored, map[string]any{"id": "m1"})
 	var answer map[string]json.RawMessage
 	if err := json.Unmarshal(response.Body.Bytes(), &answer); err != nil {
 		t.Fatal(err)
@@ -224,9 +226,10 @@ func TestARequestKeysRowIsOneOfItsStates(t *testing.T) {
 	}
 }
 
-// Every route the keyed layer's own tables name - those that replay a recovery point, never keep
-// their answer, or take an upload's body - is a POST or PATCH route the server registers: a pattern
-// spelled wrong would silently turn its rule off.
+// Every route the keyed layer's one remaining table names - the answers a key never keeps - is a
+// POST or PATCH route the server registers: a pattern spelled wrong would silently turn its rule
+// off. The layer's other per-route rules are on the route's own row (apiRoute.Replay,
+// apiRoute.BodyLimit), where no pattern is spelled twice.
 func TestEveryKeyedRouteTableNamesARoute(t *testing.T) {
 	registered := map[string]bool{}
 	for _, route := range (&server{}).routes() {
@@ -235,14 +238,8 @@ func TestEveryKeyedRouteTableNamesARoute(t *testing.T) {
 		}
 	}
 	tables := map[string][]string{}
-	for route := range (&server{}).keyedReplays() {
-		tables["keyedReplays"] = append(tables["keyedReplays"], route)
-	}
 	for route := range answerHoldsSecret {
 		tables["answerHoldsSecret"] = append(tables["answerHoldsSecret"], route)
-	}
-	for route := range keyedUploads {
-		tables["keyedUploads"] = append(tables["keyedUploads"], route)
 	}
 	for table, routes := range tables {
 		for _, route := range routes {

@@ -327,7 +327,7 @@ func TestBlockIndexIndexesAClosedDocumentWhoseAskStatesAreAheadOfItsVersion(t *t
 	// The close's final sweep, as the repair runs it, under the issue's row: it writes resolved
 	// the ask block no settlement has indexed.
 	var marked []BlockRef
-	if err := joinedWrite(service, func(ctx context.Context) (err error) {
+	if err := joinedIssueWrite(service, "CORE-1", func(ctx context.Context) (err error) {
 		tx, _ := txFromContext(ctx)
 		if _, err := tx.Exec(ctx, `select 1 from issues where key = 'CORE-1' for no key update`); err != nil {
 			return fmt.Errorf("lock the issue: %w", err)

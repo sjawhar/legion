@@ -470,7 +470,10 @@ func (s *server) runTestHook(ctx context.Context, call testHookCall) (int, []byt
 	case hookQuiesceDocuments:
 		if err := s.deps.Docs.Quiesce(ctx); err != nil {
 			answer := &testHookAnswer{header: http.Header{}}
-			s.writeHandlerError(answer, err)
+			// The hook runs on a notification, not on a request, so the error writer is given a
+			// request carrying only this call's context, which is all it reads of one
+			// (writeHandlerError, admission.WriteUnserved).
+			s.writeHandlerError(answer, (&http.Request{}).WithContext(ctx), err)
 			return answer.status, answer.body.Bytes()
 		}
 	case hookPublishFrame:

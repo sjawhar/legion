@@ -545,7 +545,7 @@ func TestTheSuggestionSweepTrailsTheSafeHorizon(t *testing.T) {
 	time.Sleep(10 * time.Millisecond) // the events must postdate the suggestion row
 
 	schedule := suggestionSchedule{minGap: time.Second, page: suggestionOutcomePage}
-	low, _, commitLow := appendOutOfOrder(t, database, deps.Events, target, other)
+	low, _, commitLow, _ := appendOutOfOrder(t, database, deps.Events, target, other)
 	started := time.Now()
 	next, err := suggestionOutcomePass(ctx, database.Pool, srv.horizon(), schedule)
 	if err != nil {

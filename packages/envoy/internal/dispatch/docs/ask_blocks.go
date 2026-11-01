@@ -50,7 +50,7 @@ type settlementReconciliation struct {
 	// is neither: its author is kept for the ask it opens once its source is retracted.
 	indexedAskBlocks []string
 	// rewrites are the ask blocks whose server attributes repairAsk repaired, which
-	// withholdAnswers reads again where a repair wrote back an answer.
+	// weighAnswers and applyAnswers read again where a repair wrote back an answer.
 	rewrites []serverRewrite
 }
 
@@ -93,7 +93,7 @@ func (r *settlementReconciliation) repair(node *pmdoc.Node, blockID string, set 
 
 // repairAsk repairs the server attributes of node, the ask block carrying blockID in the tree
 // settlement read, to agree with ask (setAskServerAttributes), records the repair for repairLive
-// and, when event is not nil, the block.repaired it emits - each where withholdAnswers finds it
+// and, when event is not nil, the block.repaired it emits - each where applyAnswers finds it
 // again - and reports whether it changed the block. copied is the document ask is on when node is
 // a copy of it, "" otherwise.
 func (r *settlementReconciliation) repairAsk(node *pmdoc.Node, blockID string, ask model.Ask, copied string, event *model.Event) bool {
@@ -110,15 +110,6 @@ func (r *settlementReconciliation) repairAsk(node *pmdoc.Node, blockID string, a
 	}
 	r.rewrites = append(r.rewrites, rewrite)
 	return true
-}
-
-// changedTree reports whether reconcileAskBlocks changed the tree it reconciled. Every change it
-// makes in place is recorded in repairs - by repair, by repairAsk, and by its own write of a
-// decided ask's wording - and repairAsk records its change in rewrites too. withholdAnswers drops
-// a repair only for an entry of rewrites, which never shrinks, so changedTree is true whenever the
-// tree was touched.
-func (r *settlementReconciliation) changedTree() bool {
-	return len(r.repairs) > 0 || len(r.rewrites) > 0
 }
 
 // repairLive makes the reconciliation's repairs on live, the document as it stands when settlement
@@ -235,8 +226,9 @@ func settlementRetraction(resolution model.AskResolution) bool {
 // (copiedAskSources). A decided ask of this document that a task of an earlier release reworded
 // gets its decided wording back first (restoreDocumentDecidedWordings), so the block is written
 // back to it, and its copies settle again.
-// before is the document's rendering as settlement read it ("" where it did not render), which the
-// answers settlement writes back into returning blocks are weighed against (withholdAnswers).
+// Every answer it writes back into a returning block is in the reconciliation; whether the document
+// has room for each is weighed apart from it (weighAnswers, applyAnswers), since weighing renders
+// the document and this runs under the document's locks.
 func (s *Service) reconcileAskBlocks(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -244,7 +236,6 @@ func (s *Service) reconcileAskBlocks(
 	owner artifactOwner,
 	tree *pmdoc.Node,
 	credit settlementVersionCredit,
-	before string,
 ) (settlementReconciliation, error) {
 	blocks, invalidBlocks, err := collectAskBlocksForSettlement(tree)
 	if err != nil {
@@ -408,7 +399,7 @@ func (s *Service) reconcileAskBlocks(
 		)
 		if reworded {
 			// One block.repaired names both repairs: the wording's, and the server attributes'
-			// when they changed too, which withholdAnswers may then drop without taking the
+			// when they changed too, which applyAnswers may then drop without taking the
 			// event that still names the wording's.
 			reconciled.events = append(reconciled.events, repaired)
 			reconciled.repairAsk(block.node, block.id, ask, "", nil)
@@ -416,7 +407,6 @@ func (s *Service) reconcileAskBlocks(
 			reconciled.repairAsk(block.node, block.id, ask, "", &repaired)
 		}
 	}
-	reconciled.withholdAnswers(artifactID, tree, before)
 
 	for _, ask := range rows {
 		// Only an open ask is retracted: an answered or resolved one is already closed, its

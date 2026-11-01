@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/oidc"
 )
 
@@ -264,27 +265,55 @@ func TestCookieIdentityRejectsCookieWithoutSessionRow(t *testing.T) {
 }
 
 func TestWriteErrorMapsNoIdentityToUnauthorized(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/auth/whoami", nil)
 	w := httptest.NewRecorder()
-	WriteError(w, ErrNoIdentity)
+	WriteError(w, request, ErrNoIdentity)
 	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), `"code":"NO_IDENTITY"`) {
 		t.Errorf("no identity: status %d body %s, want 401 NO_IDENTITY", w.Code, w.Body.String())
 	}
 	w = httptest.NewRecorder()
-	WriteError(w, fmt.Errorf("%w: %w", ErrSignInUnavailable, fmt.Errorf("oidc: refresh: %w: oauth2: 503", oidc.ErrIssuerUnavailable)))
+	WriteError(w, request, fmt.Errorf("%w: %w", ErrSignInUnavailable, fmt.Errorf("oidc: refresh: %w: oauth2: 503", oidc.ErrIssuerUnavailable)))
 	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"code":"SIGNIN_UNAVAILABLE"`) || !strings.Contains(w.Body.String(), "try again in a minute") {
 		t.Errorf("sign-in issuer unreachable: status %d body %s, want 503 SIGNIN_UNAVAILABLE", w.Code, w.Body.String())
 	}
 	// An issuer outage that is not the sign-in's (a service-account token's issuer) is not
 	// SIGNIN_UNAVAILABLE: only ErrSignInUnavailable answers that, whatever else the error carries.
 	w = httptest.NewRecorder()
-	WriteError(w, fmt.Errorf("verify: %w", oidc.ErrIssuerUnavailable))
+	WriteError(w, request, fmt.Errorf("verify: %w", oidc.ErrIssuerUnavailable))
 	if w.Code != http.StatusInternalServerError || strings.Contains(w.Body.String(), "SIGNIN_UNAVAILABLE") {
 		t.Errorf("another issuer unreachable: status %d body %s, want 500 and not SIGNIN_UNAVAILABLE", w.Code, w.Body.String())
 	}
 	w = httptest.NewRecorder()
-	WriteError(w, errors.New("database down"))
+	WriteError(w, request, errors.New("database down"))
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("other error: status %d, want 500", w.Code)
+	}
+}
+
+// busySessionStore answers every generation read as a request pool with no connection free within
+// its acquire bound answers it.
+type busySessionStore struct{ testSessionStore }
+
+func (*busySessionStore) CurrentSessionGeneration(context.Context, string) (int64, bool, error) {
+	return 0, false, fmt.Errorf("read session generation: requests pool: %w: %w", store.ErrPoolBusy, context.DeadlineExceeded)
+}
+
+// A sign-in that could not be checked because the database had no connection free is the
+// server's to retry, not a failure of the identity service: 503 DATABASE_BUSY with Retry-After,
+// never 500 IDENTITY_ERROR.
+func TestWriteErrorAnswersABusyPoolDatabaseBusy(t *testing.T) {
+	request := cookieRequest(t, "sami@example.com", 0)
+	_, err := (CookieIdentity{SigningKey: testSigningKey, Sessions: &busySessionStore{}}).Login(request)
+	if !store.IsPoolBusy(err) {
+		t.Fatalf("login on a busy pool: %v, want store.ErrPoolBusy", err)
+	}
+	w := httptest.NewRecorder()
+	WriteError(w, request, err)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"code":"DATABASE_BUSY"`) {
+		t.Fatalf("busy pool: status %d body %s, want 503 DATABASE_BUSY", w.Code, w.Body.String())
+	}
+	if w.Header().Get("Retry-After") != "1" || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("busy pool headers %v, want Retry-After: 1 and Cache-Control: no-store", w.Header())
 	}
 }
 

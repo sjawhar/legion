@@ -1,0 +1,10 @@
+kind: Added
+body: |-
+  `DISPATCH_METRICS_ADDR` (`host:port`) serves Prometheus's `GET /metrics` on a listener of its
+  own, with no authentication, since every series carries counts and durations only: each
+  database pool's size, open, in-use and idle connections, its waiters, its acquire waits and the
+  acquires that ran out its bound; admission's requests in flight, queued and refused; the
+  writers waiting for a document's writer gate; the settlements running and waiting; the outbox's
+  lag and published events; the events committed; garbage-collector pauses, the heap and the
+  goroutines; and the log lines dropped (`cmd/dispatch/README.md`, "Metrics"). Unset, nothing
+  listens; a value that is not `host:port`, or an address already taken, refuses startup.

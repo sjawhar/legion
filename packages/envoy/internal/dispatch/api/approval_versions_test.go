@@ -702,7 +702,11 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 			typeNote(t, connect(t, doc, humanPeer), "A note from bob.")
 		}, 2, docs.SettlementActor, true},
 		{"an earlier author and the next browser editor", time.Hour, func(t *testing.T, doc *document) {
-			earlierCtx := context.Background()
+			earlierCtx, release, err := doc.documentService.AcquireDocumentWriter(context.Background(), doc.artifactID)
+			if err != nil {
+				t.Fatalf("take the document's writer gate: %v", err)
+			}
+			defer release()
 			earlierTx, err := doc.database.Pool.Begin(earlierCtx)
 			if err != nil {
 				t.Fatalf("begin the earlier edit: %v", err)
@@ -719,11 +723,16 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 			if err := earlierLedger.Commit(earlierCtx); err != nil {
 				t.Fatalf("commit the earlier edit: %v", err)
 			}
+			release()
 			typeNote(t, connect(t, doc, humanPeer), "A note from bob.")
 		}, 2, bob, true},
 		{"an agent's joined write and a human's typing in one settlement window", time.Hour, func(t *testing.T, doc *document) {
 			typist := connect(t, doc, humanPeer)
-			ctx := context.Background()
+			ctx, release, err := doc.documentService.AcquireDocumentWriter(context.Background(), doc.artifactID)
+			if err != nil {
+				t.Fatalf("take the document's writer gate: %v", err)
+			}
+			defer release()
 			tx, err := doc.database.Pool.Begin(ctx)
 			if err != nil {
 				t.Fatalf("begin the agent's write: %v", err)

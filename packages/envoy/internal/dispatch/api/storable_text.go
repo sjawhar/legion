@@ -139,7 +139,7 @@ func (s *server) refuseUnstorableParameters(pattern string, handler http.Handler
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if refusal := unstorableParameter(r, wildcards); refusal != nil {
-			s.writeHandlerError(w, refusal)
+			s.writeHandlerError(w, r, refusal)
 			return
 		}
 		handler(w, r)

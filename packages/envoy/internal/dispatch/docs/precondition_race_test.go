@@ -104,12 +104,13 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 			if _, err := gate.Exec(context.Background(), "lock table asks in access exclusive mode"); err != nil {
 				t.Fatalf("lock asks: %v", err)
 			}
-			conditionalTx, err := database.Pool.Begin(context.Background())
+			gated, _ := gatedContext(t, service, context.Background(), artifactID)
+			conditionalTx, err := database.Pool.Begin(gated)
 			if err != nil {
 				t.Fatalf("begin edit transaction: %v", err)
 			}
 			defer conditionalTx.Rollback(context.Background())
-			joined, ledger := service.Join(context.Background(), conditionalTx)
+			joined, ledger := service.Join(gated, conditionalTx)
 			defer ledger.Discard()
 			result := make(chan error, 1)
 			var precondition *model.EditPrecondition

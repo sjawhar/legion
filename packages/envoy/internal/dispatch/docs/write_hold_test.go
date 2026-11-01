@@ -32,7 +32,7 @@ func TestSnapshotReusesTheTransactionsRenderedDocument(t *testing.T) {
 		t.Fatalf("begin transactional edit: %v", err)
 	}
 	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
-	joinedCtx, ledger := service.Join(ctx, tx)
+	joinedCtx, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	t.Cleanup(ledger.Discard)
 
 	alice := model.Actor{Kind: "user", ID: "alice"}
@@ -77,7 +77,7 @@ func TestContentTheRoomGainsAfterAWritesReadIsVersionedAfterTheWrite(t *testing.
 		t.Fatalf("begin transactional edit: %v", err)
 	}
 	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
-	joinedCtx, ledger := service.Join(ctx, tx)
+	joinedCtx, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	t.Cleanup(ledger.Discard)
 
 	alice := model.Actor{Kind: "user", ID: "alice"}
@@ -207,7 +207,7 @@ func TestAnEditRefreshesItsAnchorsOncePerTransaction(t *testing.T) {
 		t.Fatalf("begin transactional edit: %v", err)
 	}
 	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
-	joinedCtx, ledger := service.Join(ctx, tx)
+	joinedCtx, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	t.Cleanup(ledger.Discard)
 
 	counter.count.Store(0)
@@ -250,7 +250,7 @@ func TestAnEditAnnouncesEachChangedAnchorOnce(t *testing.T) {
 		t.Fatalf("begin transactional edit: %v", err)
 	}
 	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
-	joinedCtx, ledger := service.Join(ctx, tx)
+	joinedCtx, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	t.Cleanup(ledger.Discard)
 
 	if _, err := service.ApplyOps(joinedCtx, artifactID, []model.EditOp{{
@@ -357,7 +357,7 @@ func TestFormattingTheRoomGainsAfterAWritesReadIsVersionedAfterTheWrite(t *testi
 		t.Fatalf("begin transactional edit: %v", err)
 	}
 	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
-	joinedCtx, ledger := service.Join(ctx, tx)
+	joinedCtx, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	t.Cleanup(ledger.Discard)
 
 	alice := model.Actor{Kind: "user", ID: "alice"}

@@ -1241,7 +1241,7 @@ func TestAHubCatchUpNeverMovesItsCursorPastAnOpenLowerID(t *testing.T) {
 	second := createHubIssue(t, rig.handler, map[string]any{"title": "Second"})
 	rig.startCaughtUp(t)
 
-	low, high, commitLow := appendOutOfOrder(t, rig.database, rig.deps.Events, first, second)
+	low, high, commitLow, _ := appendOutOfOrder(t, rig.database, rig.deps.Events, first, second)
 	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
 		rig.hub.catchUpNow()
 		if _, cursor := rig.cursors(); cursor >= low {
@@ -1364,20 +1364,69 @@ func TestAHubGapRereadTakesNoSharedConnectionWhileTheHorizonStandsStill(t *testi
 	caughtUp := func(note deliveryHubNote) bool { return note.what == "events caught up" }
 
 	start := rig.mark()
-	low, high, commitLow := appendOutOfOrder(t, rig.database, rig.deps.Events, first, second)
+	low, high, commitLow, _ := appendOutOfOrder(t, rig.database, rig.deps.Events, first, second)
 	// The higher id's commit notifies: that catch-up checks for a reset and leaves the gap open.
 	rig.waitFor(t, start, 3*time.Second, "the catch-up the higher id's commit woke", caughtUp)
-	before, rereads := acquires(rig.database), rig.mark()
+	before, rereads := readAcquires(rig.database), rig.mark()
 	time.Sleep(time.Second)
 	if n := rig.count(rereads, caughtUp); n < 3 {
 		t.Fatalf("the hub re-read the gap below %d %d times in a second, want at least 3", high, n)
 	}
-	if got := acquires(rig.database); got != before {
-		t.Fatalf("the hub's gap re-reads took %d shared-pool connections while %d stayed open, want none", got-before, low)
+	if got := readAcquires(rig.database); got != before {
+		t.Fatalf("the hub's gap re-reads took %d request- or live-pool connections while %d stayed open, want none", got-before, low)
 	}
 
 	commitLow()
 	rig.waitForEventCursor(t, high, "the lower id committed")
+}
+
+// A gap re-read is scheduled on the horizon the catch-up read the log through, not on the one
+// the Horizon holds by the time that catch-up decides. Another reader of the process observes
+// in between - the event relay, a `GET /api/v1/references?since=` read - and its observation
+// can prove the ids this catch-up could not read final: H then stands at the newest id
+// observed, with nothing above it, though this hub has read nothing past its own cursor. Here
+// the id open below the committed one rolls back, which notifies nothing, and the other
+// reader's Await moves H past both while the catch-up is between its own read and its decision.
+// Nothing commits afterwards, so a decision taken on the Horizon's H alone would leave the
+// committed event unread until some unrelated write woke the hub.
+func TestAHubRereadsTheGapAnotherReaderProvedWhileItRead(t *testing.T) {
+	var armed atomic.Bool
+	caught, released := make(chan struct{}), make(chan struct{})
+	rig := newHubRig(t, func(hub *deliveryHub) {
+		noted := hub.observe
+		// The catch-up makes this note between its read of the log and its re-read decision.
+		hub.observe = func(note deliveryHubNote) {
+			if note.what == "events caught up" && armed.CompareAndSwap(true, false) {
+				close(caught)
+				select {
+				case <-released:
+				case <-time.After(eventFeedWait): // the test failed before it let the hub on
+				}
+			}
+			noted(note)
+		}
+	})
+	first := createHubIssue(t, rig.handler, map[string]any{"title": "First"})
+	second := createHubIssue(t, rig.handler, map[string]any{"title": "Second"})
+	rig.startCaughtUp(t)
+	rig.waitQuiet(t, 300*time.Millisecond)
+
+	low, high, _, rollbackLow := appendOutOfOrder(t, rig.database, rig.deps.Events, first, second)
+	armed.Store(true)
+	select {
+	case <-caught:
+	case <-time.After(eventFeedWait):
+		t.Fatalf("no catch-up read the event log while id %d stood open below the committed %d", low, high)
+	}
+
+	rollbackLow()
+	proven, err := rig.hub.server.horizon().Await(t.Context())
+	if err != nil || proven < high {
+		t.Fatalf("the other reader's Await once id %d had rolled back = %d, %v; want at least the committed %d", low, proven, err, high)
+	}
+	close(released)
+
+	rig.waitForEventCursor(t, high, "another reader proved the horizon past the catch-up's own")
 }
 
 // waitQuiet waits until the hub has made no note for quiet.
@@ -1472,8 +1521,21 @@ func TestAnEventAnotherTaskCommittedReachesThisHub(t *testing.T) {
 	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, snapshot.Body, delta, "")
 }
 
-// acquires is how many connections the shared pool has handed out so far.
-func acquires(database *store.Store) int64 { return database.Pool.Stat().AcquireCount() }
+// acquires is how many connections the store's pools have handed out so far, every pool it has
+// opened counted: the hub reads through the live pool, a route through the request pool.
+func acquires(database *store.Store) int64 {
+	use := database.Pool.Use()
+	return int64(use.InUse) + use.Returned
+}
+
+// readAcquires is how many connections the pools the hub's event reads run through - the request
+// pool and the live pool - have handed out. The event log's safe horizon observes on a pool of its
+// own (store.Pool.Horizon), which a gap re-read does take, and which is the whole point of it:
+// while the horizon stands still it observes and reads nothing else.
+func readAcquires(database *store.Store) int64 {
+	use := database.Pool.Use(store.RequestsPool, store.LivePool)
+	return int64(use.InUse) + use.Returned
+}
 
 // waitConnected waits for the hub's listener to have connected and caught both logs up, after
 // which the hub reads nothing until something changes.
@@ -1532,13 +1594,88 @@ func TestAPresetViewSendsItsOldestPullRequestLeavingWithoutAReadingTheDatabase(t
 	clock.Advance(3 * time.Second)
 	delta := conn.delta(t, 4*time.Second, "p")
 	if got := acquires(rig.database); got != before {
-		t.Fatalf("the shared pool handed out %d connections while the oldest pull request left, want none", got-before)
+		t.Fatalf("the pools handed out %d connections while the oldest pull request left, want none", got-before)
 	}
 	if got := delta.Items["prs"].Remove; !slices.Equal(got, []string{"acme/widgets#1"}) {
 		t.Fatalf("the expiry's delta removes %v, want acme/widgets#1", got)
 	}
 	conn.none(t, time.Second, "the expiry's one delta")
 	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, held, delta, "")
+}
+
+// A change caught up while a view's expiry is computing marks the view: an expiry reads nothing,
+// so it records no read position, and a change held back for one (deliveryView.readStarting) would
+// be held for good - the catch-up's cursor moves past it and the expiry ends without looking at
+// it, leaving every subscriber a stale answer. The clock stands still, so the pull request leaving
+// two seconds on is the view's first expiry; the hook holds that expiry open, between its mark of
+// the view as computing and its end, while the test writes a second pull request and has the hub
+// catch it up.
+func TestAChangeCaughtUpWhileAViewExpiresIsRecomputed(t *testing.T) {
+	clock := newStillHubClock()
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	expiring, release := make(chan struct{}), make(chan struct{})
+	var held, released sync.Once
+	releaseExpiry := func() { released.Do(func() { close(release) }) }
+	defer releaseExpiry()
+	rig := hubOn(t, handler, database, deps, clock, func(hub *deliveryHub) {
+		observe := hub.observe
+		hub.observe = func(note deliveryHubNote) {
+			observe(note)
+			if note.what == "recompute begin" && note.cause == deliveryCauseExpiry {
+				held.Do(func() {
+					close(expiring)
+					<-release
+				})
+			}
+		}
+	})
+	seedHubSettings(t, rig.database)
+	now := clock.Now()
+	upsertPR(t, rig.database, hubPR(1, now.Add(-28*24*time.Hour+2*time.Second)))
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("p", presetView(deliveryLiveTimeline, 28, "")))
+	conn.snapshot(t, 5*time.Second, "p")
+	rig.waitConnected(t)
+	rig.settle(t)
+	// A delivery change the snapshot did not hold may have marked the view dirty, and on this
+	// clock, standing still, its recompute is due only once the clock moves. Moving it by less
+	// than the two seconds the pull request has left runs that recompute, and sends whatever delta
+	// it has, before the expiry below.
+	clock.Advance(2 * viewQuiet)
+	rig.waitNoRecompute(t, 2*viewQuiet)
+	for drained := false; !drained; {
+		select {
+		case <-conn.frames:
+		default:
+			drained = true
+		}
+	}
+
+	start := rig.mark()
+	clock.Advance(3 * time.Second)
+	select {
+	case <-expiring:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the view's expiry did not begin within 5s of the clock passing it")
+	}
+	// The second pull request is written and caught up while the expiry computes.
+	upsertPR(t, rig.database, hubPR(2, now.Add(-time.Hour)))
+	rig.hub.catchUpNow()
+	releaseExpiry()
+
+	expired := conn.delta(t, 5*time.Second, "p")
+	if got := expired.Items["prs"].Remove; !slices.Equal(got, []string{"acme/widgets#1"}) {
+		t.Fatalf("the expiry's delta removes %v, want acme/widgets#1", got)
+	}
+	rig.waitFor(t, start, 5*time.Second, "the expiry's end", func(note deliveryHubNote) bool {
+		return note.what == "recompute end" && note.cause == deliveryCauseExpiry
+	})
+	// The change marked the view, so its recompute is due a quiet after the mark.
+	clock.Advance(viewQuiet)
+	delta := conn.delta(t, 5*time.Second, "p")
+	if got := liveUpsertIDs(t, delta, "prs"); !slices.Equal(got, []string{"acme/widgets#2"}) {
+		t.Fatalf("the delta after the change caught up while the view expired upserts %v, want acme/widgets#2", got)
+	}
 }
 
 func TestAPipelineViewMovesItsDaysAtMidnightWithoutReadingTheDatabase(t *testing.T) {
@@ -1556,7 +1693,7 @@ func TestAPipelineViewMovesItsDaysAtMidnightWithoutReadingTheDatabase(t *testing
 	clock.Advance(nextUTCMidnight(now).Sub(now) + time.Second)
 	delta := conn.delta(t, 3*time.Second, "p")
 	if got := acquires(rig.database); got != before {
-		t.Fatalf("the shared pool handed out %d connections at midnight, want none", got-before)
+		t.Fatalf("the pools handed out %d connections at midnight, want none", got-before)
 	}
 	var days []string
 	if err := json.Unmarshal(delta.Set["days"], &days); err != nil {

@@ -68,9 +68,9 @@ func (s *server) getDeliveryPipeline(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	population, err := s.readPipelinePopulation(r.Context(), settings, at)
+	population, err := s.readPipelinePopulation(r.Context(), s.deps.Store.Pool, settings, at)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, deliveryPipelineCompute(settings, population, at, time.Now().UTC()))
@@ -85,10 +85,9 @@ type pipelinePopulation struct {
 }
 
 // readPipelinePopulation reads the Pipeline page's runs and pull requests for the shown days
-// ending on at's UTC day. Runs are read by start over the whole of the shown days, today included
-// past at.
-func (s *server) readPipelinePopulation(ctx context.Context, settings delivery.DeliverySettings, at time.Time) (pipelinePopulation, error) {
-	pool := s.deps.Store.Pool
+// ending on at's UTC day, through pool (readDeliveryPopulation names who passes which). Runs are
+// read by start over the whole of the shown days, today included past at.
+func (s *server) readPipelinePopulation(ctx context.Context, pool *store.Pool, settings delivery.DeliverySettings, at time.Time) (pipelinePopulation, error) {
 	from := measures.WindowStart(at)
 	to := from.AddDate(0, 0, measures.ShownDayCount)
 
@@ -118,7 +117,7 @@ func (s *server) readPipelinePopulation(ctx context.Context, settings delivery.D
 		return pipelinePopulation{}, err
 	}
 	var err error
-	if pop.leadTimes, err = s.readDeliveryRows(ctx, settings, from, to, url.Values{}, false, false); err != nil {
+	if pop.leadTimes, err = s.readDeliveryRows(ctx, pool, settings, from, to, url.Values{}, false, false); err != nil {
 		return pipelinePopulation{}, err
 	}
 	return pop, nil

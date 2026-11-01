@@ -118,11 +118,12 @@ on:
       - 'packages/daemon/internal/workspace/*'
       - 'packages/envoy/listenfd/*'
       - 'packages/envoy/migrationid/*'
-      # ci.yaml's *dispatch_server, 42 patterns:
+      # ci.yaml's *dispatch_server, 49 patterns:
       - 'packages/envoy/cmd/dispatch/*'
       - 'packages/envoy/internal/bus/*'
       - 'packages/envoy/internal/contracts/*'
       - 'packages/envoy/internal/dispatch/accesslog/*'
+      - 'packages/envoy/internal/dispatch/admission/*'
       - 'packages/envoy/internal/dispatch/agentsecrets/*'
       - 'packages/envoy/internal/dispatch/agentstream/*'
       - 'packages/envoy/internal/dispatch/api/*'
@@ -145,6 +146,7 @@ on:
       - 'packages/envoy/internal/dispatch/githubapp/ratelimit/*'
       - 'packages/envoy/internal/dispatch/identity/*'
       - 'packages/envoy/internal/dispatch/itemblocks/*'
+      - 'packages/envoy/internal/dispatch/logging/*'
       - 'packages/envoy/internal/dispatch/model/*'
       - 'packages/envoy/internal/dispatch/outbox/*'
       - 'packages/envoy/internal/dispatch/pmdoc/**'

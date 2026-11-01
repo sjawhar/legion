@@ -25,7 +25,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -63,10 +62,6 @@ const heartbeatTimeout = 2 * time.Second
 // commit order "DISPATCH" in events/broker.go and the file backfill's "LEGION52" in
 // files/backfill.go), and the two-key form other locks take is a key space of its own.
 const registryLock int64 = 0x4450524F43524547
-
-// pruneLease is the duty.Exclusive lease the prune loop runs under, so one process prunes per
-// PruneInterval however many serve the database.
-const pruneLease = "server-processes"
 
 // ErrKeySetMismatch is Register refusing to start a process beside a live process whose signing
 // key set does not share this process's both ways, or a heartbeat refusing to count a process that
@@ -142,7 +137,7 @@ type Registration struct {
 	instance Instance
 	// pool is the registry's own one-connection pool, which Register opens and Deregister closes
 	// (Register says why it is not the shared pool).
-	pool    *pgxpool.Pool
+	pool    *store.RawPool
 	stop    context.CancelFunc
 	stopped chan struct{}
 	// lost carries the heartbeat's refusal (Lost); it holds one value and is sent at most once.
@@ -175,21 +170,20 @@ type Registration struct {
 // (Registration.renew).
 //
 // The registry's statements, the heartbeat above all, run on a pool of one connection of its own,
-// opened here from the shared pool's configuration and closed by Deregister. Not the shared pool,
-// for two reasons. A heartbeat queued behind sixteen requests that wait on one writer's lock is a
-// heartbeat that lands late, and three late ones make a process that still serves look gone. And
-// cmd/dispatch's shutdown decides that the database has stopped answering from the shared pool's
-// connections (store.Pool.Use): a heartbeat timing out there every few seconds hands a connection
-// back each time, which reads as a database still answering, and the process would never exit.
+// opened here from the shared pool's configuration re-named as the registry's
+// (store.Pool.OpenRegistry: dispatch-registry, counted in store.ConnectionsPerProcess and reported in
+// its Stats) and
+// closed by Deregister. Not the shared pool, for two reasons. A heartbeat queued behind the
+// requests that wait on one writer's lock is a heartbeat that lands late, and three late ones make
+// a process that still serves look gone. And cmd/dispatch's shutdown decides that the database has
+// stopped answering from the request pool's connections (store.Pool.Use): a heartbeat timing out
+// there every few seconds hands a connection back each time, which reads as a database still
+// answering, and the process would never exit.
 func Register(ctx context.Context, pool *store.Pool, instance Instance) (*Registration, error) {
 	if len(instance.SigningKeys) == 0 {
 		return nil, errors.New("register this server process: it names no signing key")
 	}
-	config := pool.Config()
-	config.MaxConns = 1
-	config.MinConns = 0
-	config.MinIdleConns = 0
-	own, err := pgxpool.NewWithConfig(ctx, config)
+	own, err := pool.OpenRegistry(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("open the server process registry's pool: %w", err)
 	}
@@ -208,7 +202,7 @@ func Register(ctx context.Context, pool *store.Pool, instance Instance) (*Regist
 // process, or until LiveWindow and one HeartbeatInterval have passed since its first refusal, when
 // that last refusal is returned. A refusal naming another process than the one before is logged
 // again, so the log names every process the wait was on.
-func waitForAdmission(ctx context.Context, pool *pgxpool.Pool, id string, instance Instance) error {
+func waitForAdmission(ctx context.Context, pool *store.RawPool, id string, instance Instance) error {
 	var giveUp time.Time
 	logged := ""
 	for {
@@ -240,7 +234,7 @@ func waitForAdmission(ctx context.Context, pool *pgxpool.Pool, id string, instan
 
 // tryRegister is one admission of Register, in its own transaction under registryLock: admit's
 // refusal, nil once the row is written, and an error when no decision was reached.
-func tryRegister(ctx context.Context, pool *pgxpool.Pool, id string, instance Instance) (refusal error, err error) {
+func tryRegister(ctx context.Context, pool *store.RawPool, id string, instance Instance) (refusal error, err error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -429,12 +423,12 @@ func (r *Registration) Deregister(ctx context.Context) error {
 
 // RunPrune deletes, every PruneInterval until ctx ends, the rows whose heartbeat is older than
 // PruneAge by the database's clock: what processes that died without deregistering left behind.
-// Each pass runs under pruneLease, so one process prunes per period however many serve the
-// database. The ticks are duty.RunLeased's, a ticker's: the first one interval after the call,
-// then one each interval; the first tick a pass overran comes at once with the moment it was due,
-// and only the ones after it are dropped.
+// Each pass runs under duty.ServerProcessesLease, so one process prunes per period however many
+// serve the database. The ticks are duty.RunLeased's, a ticker's: the first one interval after
+// the call, then one each interval; the first tick a pass overran comes at once with the moment
+// it was due, and only the ones after it are dropped.
 func RunPrune(ctx context.Context, pool *store.Pool, leases duty.Leases) {
-	duty.RunLeased(ctx, leases, pruneLease, PruneInterval, duty.TickAfterInterval, func(ctx context.Context) {
+	duty.RunLeased(ctx, leases, duty.ServerProcessesLease, PruneInterval, duty.TickAfterInterval, func(ctx context.Context) {
 		pruned, err := prune(ctx, pool)
 		if err != nil {
 			slog.Warn("dispatch: prune the server process registry", "error", err)

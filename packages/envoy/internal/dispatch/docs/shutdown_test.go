@@ -263,9 +263,9 @@ func TestShutdownSettlesABurstOfAppendsIncludingOneRecordedAfterItsScan(t *testi
 
 // A room whose settlement is still rendering when Shutdown's own drain budget (drainCtx) ends
 // does not make Shutdown return the settlements-unconfirmed error, as long as the per-room worker
-// returns within the document service's whole deadline: documentShutdownTimeout's 5 s reserve past
-// ShutdownDrainBudget comfortably outlasts the 3.4 s overrun service_test.go's own measurement
-// found (a 1 MiB document settling in 4.5 s against a 5 s budget). Shutdown's wait for its
+// returns within the document service's whole deadline: the 5 s cmd/dispatch's documentReserve
+// keeps past ShutdownDrainBudget comfortably outlasts the 3.4 s overrun service_test.go's own
+// measurement found (a 1 MiB document settling in 4.5 s against a 5 s budget). Shutdown's wait for its
 // per-room workers (waitGroup(ctx, &workers)) runs under the whole outer deadline, not the drain
 // budget alone, because a render or commit already under way when the budget ends does not stop
 // for it; drainCtx having already expired by the time this one tries to commit still leaves it to
@@ -298,8 +298,8 @@ func TestShutdownReturnsNilForARenderStillRunningPastItsDrainBudget(t *testing.T
 		time.Sleep(ShutdownDrainBudget + 3400*time.Millisecond)
 	}
 
-	// The document service's own production deadline: ShutdownDrainBudget plus the 5 s reserve
-	// cmd/dispatch/shutdown.go's documentShutdownTimeout now adds past it.
+	// The least deadline cmd/dispatch's shutdown gives the document service: ShutdownDrainBudget
+	// plus the 5 s reserve its documentReserve keeps past it.
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), ShutdownDrainBudget+5*time.Second)
 	defer cancelShutdown()
 	shutdown := make(chan error, 1)

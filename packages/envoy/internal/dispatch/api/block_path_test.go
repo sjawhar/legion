@@ -191,8 +191,8 @@ func TestCommentAndAskReadsStandWhenTheAnchorDocumentCannotBeRead(t *testing.T) 
 // A room fails with the cause that failed it, and a writer whose client went away during its
 // commit fails the room with a cause that holds context.Canceled. That cancellation is the
 // writer's, so a live read of the same document still answers 200 without the position, while a
-// read whose own request has gone away fails. The two reads meet the same error; only the request
-// differs.
+// read whose own request has gone away fails, and, nobody being left to read it, is answered
+// nothing and logs no ERROR line. The two reads meet the same error; only the request differs.
 func TestAnAnchoredReadDecidesCancellationByItsOwnRequest(t *testing.T) {
 	writer, database, _ := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, writer, "TEST", "Cancelled writer", "Intro.\n\nThe quoted line.\n")
@@ -234,9 +234,13 @@ func TestAnAnchoredReadDecidesCancellationByItsOwnRequest(t *testing.T) {
 		request := httptest.NewRequest(http.MethodGet, read.path, nil).WithContext(ctx)
 		request.Header.Set("X-Dispatch-User", "alice")
 		cancelled := httptest.NewRecorder()
+		logged := captureLog(t)
 		gone.ServeHTTP(cancelled, request)
-		if cancelled.Code != http.StatusInternalServerError || !strings.Contains(cancelled.Body.String(), `"code":"`+codeInternal+`"`) {
-			t.Fatalf("cancelled GET %s: status=%d body=%s, want 500 %s", read.path, cancelled.Code, cancelled.Body.String(), codeInternal)
+		if cancelled.Body.Len() != 0 {
+			t.Fatalf("cancelled GET %s: status=%d body=%s, want no body for a client that is gone", read.path, cancelled.Code, cancelled.Body.String())
+		}
+		if strings.Contains(logged.String(), "level=ERROR") {
+			t.Fatalf("cancelled GET %s logged an ERROR line:\n%s", read.path, logged.String())
 		}
 	}
 }
@@ -327,7 +331,7 @@ func TestAnAskBlockRefusalWhoseReasonIsASchemaRefusalStaysThatRefusal(t *testing
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
-			(&server{}).writeHandlerError(recorder, test.err)
+			(&server{}).writeHandlerError(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/asks/a", nil), test.err)
 			if recorder.Code != test.status || !strings.Contains(recorder.Body.String(), `"code":"`+test.code+`"`) {
 				t.Fatalf("status=%d body=%s, want %d %s", recorder.Code, recorder.Body.String(), test.status, test.code)
 			}

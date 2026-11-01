@@ -91,7 +91,7 @@ const (
 )
 
 // dispatchConnectionsPerPod is the most connections one app pod opens to Postgres: envoy-dispatch's
-// store.ConnectionsPerProcess (packages/envoy/internal/dispatch/store/pool.go), the sum of its
+// store.ConnectionsPerProcess (packages/envoy/internal/dispatch/store/pools.go), the sum of its
 // counted pools and its permanent listeners. The listener's and the front door's pods open none.
 // TestDispatchConnectionsPerPodIsTheServers fails when a counted pool's size changes and this
 // does not.

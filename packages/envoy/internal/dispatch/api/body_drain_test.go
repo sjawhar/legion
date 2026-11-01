@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -73,6 +74,20 @@ func (b *heldBackBody) finish(rest []byte) (*http.Response, []byte) {
 	b.t.Helper()
 	if _, err := b.connection.Write(rest); err != nil {
 		b.t.Fatalf("send the rest of the body: %v", err)
+	}
+	return b.answer()
+}
+
+// sendSteadily sends rest in chunks of its length over chunks sends, one every pause, as a
+// client on a slow uplink sends a body, and reads the answer once the last of it is out.
+func (b *heldBackBody) sendSteadily(rest []byte, chunks int, pause time.Duration) (*http.Response, []byte) {
+	b.t.Helper()
+	size := (len(rest) + chunks - 1) / chunks
+	for start := 0; start < len(rest); start += size {
+		time.Sleep(pause)
+		if _, err := b.connection.Write(rest[start:min(start+size, len(rest))]); err != nil {
+			b.t.Fatalf("send bytes %d on of the body: %v", start, err)
+		}
 	}
 	return b.answer()
 }
@@ -231,8 +246,43 @@ func (b repeatedByte) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// Which 413 a route answers a body past its limit with follows the limit on its own row: every
+// row that takes an upload's body (apiRoute.BodyLimit, upload) answers the upload's CAP_EXCEEDED,
+// and every other row the JSON limit's REQUEST_TOO_LARGE (bodyTooLarge). A new upload row is
+// answered as an upload by being an upload row, with no list of upload patterns to keep in step.
+func TestEveryRoutesOversizedBodyIsAnsweredByItsRowsLimit(t *testing.T) {
+	served := &server{}
+	uploads := 0
+	for _, route := range served.routes() {
+		if route.Method == http.MethodGet {
+			continue
+		}
+		want := "REQUEST_TOO_LARGE"
+		if route.BodyLimit == maxUploadRequestBytes {
+			want, uploads = "CAP_EXCEEDED", uploads+1
+		}
+		t.Run(route.Method+" "+route.Pattern, func(t *testing.T) {
+			// The route's own handler is left out: what answers here is the drain around it,
+			// which needs no caller, no issue and no database to judge a body past the limit.
+			answered := served.drainBeforeAnswer(route, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			})
+			sent := endlessBody(route.bodyLimit() + 1)
+			response := httptest.NewRecorder()
+			answered(response, httptest.NewRequest(route.Method, "/api/v1/oversized-body-test", sent))
+			code, _ := refusalOf(t, response)
+			if response.Code != http.StatusRequestEntityTooLarge || code != want {
+				t.Fatalf("status=%d body=%s, want 413 %s", response.Code, response.Body.String(), want)
+			}
+		})
+	}
+	if uploads == 0 {
+		t.Fatal("no route of the table takes an upload's body, so the upload 413 is never covered here")
+	}
+}
+
 // INFRA-258. An early answer drains at most the route's own limit and one byte
-// more (routeBodyLimit): a body that runs past it is answered as the limit answers it, 413 with the
+// more (apiRoute.bodyLimit): a body that runs past it is answered as the limit answers it, 413 with the
 // route's refusal and none of the early answer's headers, and the rest is never read. A body inside
 // the limit is read to its end and the early answer stands, whichever layer gave it: the keyed
 // layer's KEY_IN_FLIGHT, the closed-issue refusal of an upload, LOGIN_CHANGED on a JSON route. A
@@ -512,12 +562,13 @@ func TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived(t *testing.T) {
 }
 
 // INFRA-258. A drain is bounded in time as well as in bytes: a body that stops arriving is waited
-// for at most bodyDrainLimit, and then the answer goes out as it stood, with the connection closed
-// after it, rather than the request held open for as long as its client cares to. Both drains: the
-// one every early answer waits behind (drainBeforeAnswer), here an upload to a closed issue and a
-// message pressed by another login, and the keyed layer's reading of a repeat found in flight.
+// for within the idle bound it arrives under (transferBounds), and then the
+// answer goes out as it stood, with the connection closed after it, rather than the request held
+// open for as long as its client cares to. Both drains: the one every early answer waits behind
+// (drainBeforeAnswer), here an upload to a closed issue and a message pressed by another login,
+// and the keyed layer's reading of a repeat found in flight.
 //
-// The drain's deadline stays on the connection once a drain ends short of the body's end, whether
+// The body's read bound stays on the connection once a drain ends short of the body's end, whether
 // its read failed or the body ran past the route's limit: net/http itself reads on after the
 // answer, up to 256 KiB more of a body whose Content-Length leaves that little unread (its discard
 // before the answer's header, and its Close of the body once the handler returns), and a deadline
@@ -528,7 +579,7 @@ func TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived(t *testing.T) {
 func TestADrainStopsWaitingForABodyThatStalls(t *testing.T) {
 	const drainLimit = time.Second
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{files: filestest.NewMemory()})
-	served.drainReadLimit = drainLimit
+	served.transfer = transferBounds{idle: drainLimit}
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	open := createArtifactIssue(t, handler)
@@ -662,5 +713,161 @@ func TestAnEarlyAnswerToAClientWaitingToContinueAsksForNoBody(t *testing.T) {
 				t.Fatalf("the refusal left open a connection whose body was never sent (Connection: %q)", response.Header.Get("Connection"))
 			}
 		})
+	}
+}
+
+// refusedAtResume sends a write over a connection of its own whose client asks to be told to
+// continue, waits for the first read of its body - which parks the request's admission units -
+// then fills the write class so those units cannot come back, and only then sends the whole
+// body. It answers what the server answered the write.
+//
+// net/http tells a client that asked to continue to do so at the first read of its body, so the
+// 100 Continue says the request is in that read with its units parked and not a byte of its
+// body sent (drainedBody.park).
+func refusedAtResume(t *testing.T, limiter *admission.Limiter, address, target, contentType string, body []byte) (*http.Response, []byte) {
+	t.Helper()
+	header := http.Header{}
+	header.Set("Content-Type", contentType)
+	header.Set("X-Dispatch-User", "alice")
+	header.Set("Expect", "100-continue")
+	sent := sendPartOfBody(t, address, target, header, len(body), nil)
+	if response, answer := sent.answer(); response.StatusCode != http.StatusContinue {
+		t.Fatalf("the write was answered %d %s before it sent a byte, want the 100 Continue of a body being read",
+			response.StatusCode, answer)
+	}
+	held, err := limiter.Admit(context.Background(), admission.Write, 1)
+	if err != nil {
+		t.Fatalf("hold the write class's one unit while the body arrives: %v", err)
+	}
+	defer held.Release()
+	return sent.finish(body)
+}
+
+// A write admitted before its body parks its admission units while that body arrives and asks
+// for them back at its end, where the server may have no room left for it (drainedBody.resume).
+// Such a write runs and commits nothing: its client is answered the refusal, whose body says
+// nothing ran, and may send the whole thing again after Retry-After.
+//
+// The refusal reached the handler only as the error of the read that returned the body's last
+// bytes, and neither of these two readers passes that error on: a multipart parse reads through
+// a bufio.Reader, and a JSON decode through a json.Decoder, each of which has the whole value
+// from the bytes that came with the error and holds the error back for a read nobody makes. So
+// an unkeyed upload stored its file, committed its artifact row and published its event, and
+// only then had its 201 replaced by the 429 - and every client that obeyed Retry-After uploaded
+// the file a second time.
+func TestAWriteRefusedWhenItAsksItsUnitsBackCommitsNothing(t *testing.T) {
+	limiter := admission.New(admission.Limits{Read: 4, Write: 1, Wait: 250 * time.Millisecond})
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{
+		admission: limiter, files: filestest.NewMemory(),
+	})
+	served.transfer = transferBounds{idle: 10 * time.Second}
+	issue := createArtifactIssue(t, handler)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	upload, contentType, err := apitest.MultipartUpload(
+		map[string]string{"name": "refused.bin"}, "refused.bin", "application/octet-stream", bytes.Repeat([]byte("a"), 64<<10))
+	if err != nil {
+		t.Fatalf("build the upload: %v", err)
+	}
+
+	for _, write := range []struct {
+		name, target, contentType string
+		body                      []byte
+		// written counts the rows the write would have left behind.
+		written func() int
+	}{
+		{
+			name: "an unkeyed multipart upload", target: "/api/v1/issues/" + issue.Key + "/artifacts",
+			contentType: contentType, body: upload.Bytes(),
+			written: func() int {
+				return countRows(t, database, `select count(*) from artifact_versions v
+					join artifacts a on a.id = v.artifact_id where a.issue_key = $1`, issue.Key)
+			},
+		},
+		{
+			name: "a JSON comment", target: "/api/v1/issues/" + issue.Key + "/comments",
+			contentType: "application/json", body: []byte(`{"body":"refused when it asked its units back"}`),
+			written: func() int {
+				return countRows(t, database, `select count(*) from comments where issue_key = $1`, issue.Key)
+			},
+		},
+	} {
+		t.Run(write.name, func(t *testing.T) {
+			before := write.written()
+			response, answer := refusedAtResume(t, limiter, httpServer.Listener.Addr().String(),
+				write.target, write.contentType, write.body)
+			if response.StatusCode != http.StatusTooManyRequests || refusalCode(answer) != admission.CodeOverloaded {
+				t.Fatalf("the write refused when it asked its units back: status=%d body=%s, want 429 %s",
+					response.StatusCode, answer, admission.CodeOverloaded)
+			}
+			if retryAfter := response.Header.Get("Retry-After"); retryAfter != admission.RetryAfter {
+				t.Fatalf("the refusal's Retry-After = %q, want %s", retryAfter, admission.RetryAfter)
+			}
+			if after := write.written(); after != before {
+				t.Fatalf("the refused write left %d rows where there were %d, want nothing of it written", after, before)
+			}
+		})
+	}
+}
+
+// countRows is the one count query answers for the issue key it takes.
+func countRows(t *testing.T, database *store.Store, query, issueKey string) int {
+	t.Helper()
+	var rows int
+	if err := database.Pool.QueryRow(context.Background(), query, issueKey).Scan(&rows); err != nil {
+		t.Fatalf("count the write's rows: %v", err)
+	}
+	return rows
+}
+
+// A body whose framing the server cannot read is refused 400 REQUEST_BODY_UNREADABLE with its
+// client still there to read it. net/http cancels the request of a connection whose own read
+// fails, the body's read bound among them, but a chunked body whose framing is malformed fails
+// in the parser with the connection and its context untouched, so a read failure on its own
+// does not say the client has gone (drainedBody.clientGone). Taking every failure but the
+// bound's deadline for a client that had gone, the request was written nothing and net/http
+// answered the client that was still there an empty 200 OK, which a client reads as its write
+// having been taken.
+func TestAWriteWhoseBodyFramingFailsIsRefusedRatherThanAnsweredEmpty(t *testing.T) {
+	limiter := admission.New(admission.Limits{Read: 4, Write: 1})
+	handler, _, _ := newTestServer(t, testServerOptions{admission: limiter})
+	issue := createInteractionIssue(t, handler, "TEST", "Malformed framing", "A spec")
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	// With the write class full the request reads its body off the connection before it waits
+	// for room (drainedBody.readWhole), so the failed read is met before any handler runs and
+	// nothing but the drain's own refusal can answer it.
+	held, err := limiter.Admit(context.Background(), admission.Write, 1)
+	if err != nil {
+		t.Fatalf("hold the write class's one unit: %v", err)
+	}
+	defer held.Release()
+
+	connection, err := net.Dial("tcp", httpServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial the server: %v", err)
+	}
+	t.Cleanup(func() { connection.Close() })
+	if err := connection.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	// A chunk whose length is not hexadecimal: net/http's parser refuses it, having read it off
+	// a connection that is still open.
+	if _, err := fmt.Fprintf(connection, "POST /api/v1/issues/%s/comments HTTP/1.1\r\nHost: dispatch\r\n"+
+		"X-Dispatch-User: alice\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n"+
+		"5\r\n{\"bo\r\nZZZZ\r\n", issue.Key); err != nil {
+		t.Fatalf("send the write with the malformed chunk: %v", err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	if err != nil {
+		t.Fatalf("read the answer: %v", err)
+	}
+	defer response.Body.Close()
+	answer, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read the answer's body: %v", err)
+	}
+	if response.StatusCode != http.StatusBadRequest || refusalCode(answer) != "REQUEST_BODY_UNREADABLE" {
+		t.Fatalf("status=%d body=%s, want 400 REQUEST_BODY_UNREADABLE", response.StatusCode, answer)
 	}
 }

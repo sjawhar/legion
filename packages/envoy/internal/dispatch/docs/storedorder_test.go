@@ -390,7 +390,7 @@ func TestStoredOrderHeldBrowserEditUnderAnAgentVersion(t *testing.T) {
 	service, artifactID, entered, release := heldAppendService(t)
 	editAsConnectedPeer(t, service, artifactID, 1, storedOrderBob, replaceRun("Second.", "Second, bob."))
 	awaitHeldAppend(t, entered)
-	if err := joinedWrite(service, func(ctx context.Context) error {
+	if err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 		if _, err := service.ApplyOps(ctx, artifactID, []model.EditOp{{Op: "replace", Find: "First.", With: "First, agent."}}, storedOrderAgent, nil); err != nil {
 			return err
 		}
@@ -430,7 +430,7 @@ func TestStoredOrderEditAfterTheForkReadIsNotInTheWritesVersion(t *testing.T) {
 	service.afterForkRead = onFirst(artifactID, func() {
 		editAsPeer(t, service, artifactID, replaceRun("Second.", "Second, bob."))
 	})
-	if err := joinedWrite(service, func(ctx context.Context) error {
+	if err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 		if _, err := service.ApplyOps(ctx, artifactID, []model.EditOp{{Op: "replace", Find: "First.", With: "First, agent."}}, storedOrderAgent, &model.EditPrecondition{Document: token}); err != nil {
 			return err
 		}
@@ -574,7 +574,7 @@ func TestStoredOrderAcceptWithABrowserEditBetweenItsOperations(t *testing.T) {
 	}
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	service.addConnection(artifactID, 1, storedOrderBob)
-	if err := joinedWrite(service, func(ctx context.Context) error {
+	if err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 		if err := service.AcceptSuggestion(ctx, artifactID, "s1", "Primary", alice); err != nil {
 			return fmt.Errorf("accept: %w", err)
 		}
@@ -733,9 +733,15 @@ func (s *Service) unstoredRoomUpdates(room string) int {
 	return unstored
 }
 
-// soakWrite runs write as joinedWrite does, its context marked for soakStore.
-func soakWrite(service *Service, write func(ctx context.Context) error) error {
+// soakWrite runs write to artifactID as joinedWrite does - holding the document's writer gate,
+// taken before the transaction opens - with its context marked for soakStore.
+func soakWrite(service *Service, artifactID string, write func(ctx context.Context) error) error {
 	ctx := context.WithValue(context.Background(), soakWriteKey{}, true)
+	ctx, release, err := takeWriterGates(service, ctx, artifactID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	tx, err := service.store.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin the write's transaction: %w", err)
@@ -796,10 +802,10 @@ func TestStoredOrderSoak(t *testing.T) {
 	}
 
 	var latencies []time.Duration
-	write := func(write func(ctx context.Context) error) {
+	write := func(artifactID string, write func(ctx context.Context) error) {
 		t.Helper()
 		started := time.Now()
-		if err := soakWrite(service, write); err != nil {
+		if err := soakWrite(service, artifactID, write); err != nil {
 			t.Fatalf("agent write: %v", err)
 		}
 		latencies = append(latencies, time.Since(started))
@@ -847,7 +853,7 @@ func TestStoredOrderSoak(t *testing.T) {
 			switch round % 4 {
 			case 0:
 				next := fmt.Sprintf("Alpha line %d.", round)
-				write(func(ctx context.Context) error {
+				write(document.id, func(ctx context.Context) error {
 					if _, err := service.ApplyOps(ctx, document.id, []model.EditOp{{Op: "replace", Find: document.alpha, With: next}}, storedOrderAgent, nil); err != nil {
 						return err
 					}
@@ -856,19 +862,19 @@ func TestStoredOrderSoak(t *testing.T) {
 				})
 				document.alpha = next
 			case 1:
-				write(func(ctx context.Context) error {
+				write(document.id, func(ctx context.Context) error {
 					_, err := service.MarkQuote(ctx, document.id, MarkSpec{Kind: MarkComment, ID: fmt.Sprintf("soak-%d-%d", index, round), By: storedOrderAgent}, "Bravo line.", nil)
 					return err
 				})
 			case 2:
 				ask := fmt.Sprintf(":::ask{#soak-ask-%d urgency=\"med\" multiple=\"false\"}\nWhich option in round %d?\n:::\n", round, round)
-				write(func(ctx context.Context) error {
+				write(document.id, func(ctx context.Context) error {
 					_, err := service.ApplyOps(ctx, document.id, []model.EditOp{{Op: "insert", After: "end", Markdown: ask}}, storedOrderAgent, nil)
 					return err
 				})
 			case 3:
 				charlie, alpha := fmt.Sprintf("Charlie line %d.", round), fmt.Sprintf("Alpha line %d, again.", round)
-				write(func(ctx context.Context) error {
+				write(document.id, func(ctx context.Context) error {
 					if _, err := service.ApplyOps(ctx, document.id, []model.EditOp{{Op: "replace", Find: document.charlie, With: charlie}}, storedOrderAgent, nil); err != nil {
 						return err
 					}

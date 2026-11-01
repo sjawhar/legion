@@ -7,6 +7,7 @@ import (
 	"log"
 	"maps"
 	"math/rand/v2"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -242,9 +243,18 @@ func (w *writer) do(ctx context.Context, p eventPlan) writeRec {
 		defer w.locks[p.issue].Unlock()
 		text, markdown := w.specText(ctx, p.issue, id)
 		old, found := currentRevision(markdown)
-		if !found {
+		switch {
+		case text.err == nil && (text.status == http.StatusTooManyRequests || text.status == http.StatusServiceUnavailable):
+			// Dispatch refused the read the upload needs, so it refused the upload: a refusal of
+			// the write with the read's code and latency, not a transport error.
+			rec.Sent, rec.Arrival, rec.Response, rec.Status, rec.ConnWait = text.start, text.arrival(), text.end, text.status, text.connWait
+			rec.Code = text.code
+			w.lg.Printf("write %s %s: read %s before upload: %d %s", p.kind, is.Key, specName, text.status, trunc(text.body))
+			return rec
+		case !found:
 			rec.Sent, rec.Arrival, rec.Response, rec.Status = text.start, text.start, text.end, text.status
 			rec.TransportErr = fmt.Sprintf("read %s before upload: status %d, revision token found %t, %v", specName, text.status, found, text.err)
+			rec.ConnFailure = text.connFailure
 			w.lg.Printf("write %s %s: %s", p.kind, is.Key, rec.TransportErr)
 			return rec
 		}
@@ -258,6 +268,7 @@ func (w *writer) do(ctx context.Context, p eventPlan) writeRec {
 	}
 	res := w.a.call(ctx, "POST", path, id, body)
 	rec.Sent, rec.Arrival, rec.Response, rec.Status, rec.ConnWait = res.start, res.arrival(), res.end, res.status, res.connWait
+	rec.Code, rec.ConnFailure = res.code, res.connFailure
 	if res.err != nil {
 		rec.TransportErr = res.err.Error()
 	}

@@ -41,10 +41,6 @@ const (
 // table costs probes, not results.
 const SearchTermStatsInterval = 10 * time.Minute
 
-// searchTermStatsLease names the lease one refresh pass runs under, as the suggestion-outcome
-// sweep's does: two processes rebuilding the same rows would be the same work twice.
-const searchTermStatsLease = "search-term-stats"
-
 // relatedQOpener is the related-item check's q in place of search's (searchQOpener): the chosen
 // lexemes as a tsquery already built (relatedTerms.TSQuery), never re-stemmed through
 // websearch_to_tsquery, and no own_key, since no issue key is the whole text.
@@ -163,11 +159,12 @@ func refreshEverySearchTermStats(ctx context.Context, pool *store.Pool) {
 
 // RunSearchTermStatsRefresh rebuilds every project's term statistics, the related-item check's df
 // and N, at boot and then every interval, until ctx is done. Each pass runs under
-// searchTermStatsLease for one interval, so one process refreshes per interval however many serve
-// the database; leases is required, as it is of every leased loop. The ticks are
-// duty.RunLeased's, a ticker's: the first at the moment the call starts, then one each interval.
+// duty.SearchTermStatsLease for one interval, so one process refreshes per interval however many
+// serve the database - two processes rebuilding the same rows would be the same work twice - and
+// leases is required, as it is of every leased loop. The ticks are duty.RunLeased's, a ticker's:
+// the first at the moment the call starts, then one each interval.
 func RunSearchTermStatsRefresh(ctx context.Context, pool *store.Pool, interval time.Duration, leases duty.Leases) {
-	duty.RunLeased(ctx, leases, searchTermStatsLease, interval, duty.TickAtStart, func(ctx context.Context) {
+	duty.RunLeased(ctx, leases, duty.SearchTermStatsLease, interval, duty.TickAtStart, func(ctx context.Context) {
 		refreshEverySearchTermStats(ctx, pool)
 	})
 }
@@ -178,13 +175,21 @@ func RunSearchTermStatsRefresh(ctx context.Context, pool *store.Pool, interval t
 // pass, or a server whose first pass has not reached it) calls it and picks in probe mode
 // meanwhile; many checks of that project then cost one refresh, not one each. The refresh runs on
 // the server's lifetime, bounded by one interval, by which the leased pass would have refreshed
-// the project anyway.
+// the project anyway. It is background work - it outlives the request that started it and runs
+// outside admission - so it reads and writes through the background pool, as the leased pass
+// does, never the request pool, whose connections admission counts.
 func (s *server) ensureSearchTermStats(project string) <-chan singleflight.Result {
 	return s.termStats.DoChan(project, func() (any, error) {
 		ctx, cancel := context.WithTimeout(s.lifetime, SearchTermStatsInterval)
 		defer cancel()
 		started := time.Now()
-		items, err := refreshSearchTermStats(ctx, s.deps.Store.Pool, project)
+		background, err := s.deps.Store.Pool.Background()
+		if err != nil {
+			slog.Warn("dispatch: refresh the search term statistics of a project the related-item check found without them",
+				"project", project, "error", err)
+			return nil, err
+		}
+		items, err := refreshSearchTermStats(ctx, background, project)
 		if err != nil {
 			slog.Warn("dispatch: refresh the search term statistics of a project the related-item check found without them",
 				"project", project, "error", err)

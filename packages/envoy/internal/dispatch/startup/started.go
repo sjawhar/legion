@@ -93,7 +93,8 @@ type Publisher interface {
 
 // Deps is what an Announcer reads and publishes through.
 type Deps struct {
-	// Pool is the shared pool the announcements and the registry are read and written through.
+	// Pool is the pool the announcements and the registry are read and written through: the
+	// background pool (store.Pool.Background), since no request waits on a pass.
 	Pool *store.Pool
 	// Publisher publishes announcements; nil where NATS is disabled, and such a process announces
 	// into the table and publishes nothing.

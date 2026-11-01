@@ -418,7 +418,7 @@ func TestAServiceWriteAndABrowserEditLandTogetherEachAskGoesToItsOwnAuthor(t *te
 	current := currentLiveMarkdown(t, service, artifactID)
 	agentAsk := "\n:::ask{#agent-ask urgency=\"high\" multiple=\"false\"}\nWhich database?\n:::\n"
 	release := holdObserver(t, service, artifactID, &service.beforeObserveUpdate, func() error {
-		return joinedWrite(service, func(ctx context.Context) error {
+		return joinedWrite(service, artifactID, func(ctx context.Context) error {
 			_, err := service.ReplaceText(ctx, artifactID, current+agentAsk, session)
 			return err
 		})
@@ -458,7 +458,7 @@ func TestAPublishedAgentWriteAndABrowserEditLandTogetherEachAskGoesToItsOwnAutho
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	joined, ledger := service.Join(context.Background(), tx)
+	joined, ledger := service.Join(gated(t, service, context.Background(), artifactID), tx)
 	defer ledger.Discard()
 	if _, err := service.ReplaceText(joined, artifactID, current+agentAsk, session); err != nil {
 		t.Fatalf("agent joined edit: %v", err)
@@ -571,7 +571,7 @@ func TestAConditionalEditIntroducesAnAskCreditedToItsAuthor(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	joined, ledger := service.Join(context.Background(), tx)
+	joined, ledger := service.Join(gated(t, service, context.Background(), artifactID), tx)
 	defer ledger.Discard()
 	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{
 		{Op: "insert", After: "end", Markdown: ":::ask{#agent-ask urgency=\"high\" multiple=\"false\"}\nWhich database?\n:::\n"},
@@ -603,7 +603,8 @@ func TestADiscardedJoinedWriteDoesNotOutrankALaterCommitOfTheSameAskID(t *testin
 	if err != nil {
 		t.Fatalf("begin tx1: %v", err)
 	}
-	joined1, ledger1 := service.Join(context.Background(), tx1)
+	gated1, release1 := gatedContext(t, service, context.Background(), artifactID)
+	joined1, ledger1 := service.Join(gated1, tx1)
 	if _, err := service.ApplyOps(joined1, artifactID, []model.EditOp{
 		{Op: "insert", After: "end", Markdown: ":::ask{#decision urgency=\"high\" multiple=\"false\"}\nAlice's question?\n:::\n"},
 	}, alice, nil); err != nil {
@@ -611,13 +612,14 @@ func TestADiscardedJoinedWriteDoesNotOutrankALaterCommitOfTheSameAskID(t *testin
 	}
 	ledger1.Discard()
 	tx1.Rollback(context.Background())
+	release1()
 
 	tx2, err := service.store.Pool.Begin(context.Background())
 	if err != nil {
 		t.Fatalf("begin tx2: %v", err)
 	}
 	defer tx2.Rollback(context.Background())
-	joined2, ledger2 := service.Join(context.Background(), tx2)
+	joined2, ledger2 := service.Join(gated(t, service, context.Background(), artifactID), tx2)
 	defer ledger2.Discard()
 	if _, err := service.ApplyOps(joined2, artifactID, []model.EditOp{
 		{Op: "insert", After: "end", Markdown: ":::ask{#decision urgency=\"high\" multiple=\"false\"}\nBob's question?\n:::\n"},

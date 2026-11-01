@@ -91,7 +91,7 @@ func (s *server) listArtifactSubscribers(w http.ResponseWriter, r *http.Request)
 	}
 	artifact, _, err := s.documentOwnerFromRequest(r.Context(), s.deps.Store.Pool, r)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	s.writeSubscribers(w, r, documentSubscriberBase(artifact.Project, artifact.Slug))
@@ -104,12 +104,12 @@ func (s *server) writeSubscribers(w http.ResponseWriter, r *http.Request, base s
 	}
 	interests, err := s.deps.Envoy.ListInterests(r.Context())
 	if err != nil {
-		s.writeEnvoyError(w, err)
+		s.writeEnvoyError(w, r, err)
 		return
 	}
 	sessions, err := s.deps.Envoy.Sessions(r.Context())
 	if err != nil {
-		s.writeEnvoyError(w, err)
+		s.writeEnvoyError(w, r, err)
 		return
 	}
 	live := make(map[string]envoy.Session, len(sessions))
@@ -166,7 +166,7 @@ func (s *server) unsubscribeArtifactSession(w http.ResponseWriter, r *http.Reque
 	}
 	artifact, own, err := s.documentOwnerFromRequest(r.Context(), s.deps.Store.Pool, r)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	s.unsubscribeSession(w, r, actor, own, documentSubscriberBase(artifact.Project, artifact.Slug))
@@ -314,7 +314,7 @@ func (s *server) completeSubscriptionRemoval(
 func (s *server) finishPendingRemoval(w http.ResponseWriter, r *http.Request, own owner, sessionID string, actor model.Actor) {
 	requestID, recordErr := s.pendingSubscriptionRemoval(r.Context(), s.deps.Store.Pool, own, sessionID, nil)
 	if recordErr != nil {
-		s.writeHandlerError(w, recordErr)
+		s.writeHandlerError(w, r, recordErr)
 		return
 	}
 	if requestID == nil {
@@ -323,7 +323,7 @@ func (s *server) finishPendingRemoval(w http.ResponseWriter, r *http.Request, ow
 	}
 	event, completeErr := s.completeSubscriptionRemoval(r.Context(), own, sessionID, *requestID, actor)
 	if completeErr != nil {
-		s.writeHandlerError(w, completeErr)
+		s.writeHandlerError(w, r, completeErr)
 		return
 	}
 	if event != nil {
@@ -350,7 +350,7 @@ func (s *server) unsubscribeSession(
 			s.finishPendingRemoval(w, r, own, sessionID, actor)
 			return
 		}
-		s.writeEnvoyError(w, err)
+		s.writeEnvoyError(w, r, err)
 		return
 	}
 	matched := matchingTopics(interest.Topics, base)
@@ -373,17 +373,17 @@ func (s *server) unsubscribeSession(
 
 	tx, err := s.begin(r.Context())
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
 	if err := s.deps.Events.LockOwners(r.Context(), tx, own.event("", actor, nil)); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	requestID, err := s.pendingSubscriptionRemoval(r.Context(), tx, own, sessionID, exact)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if requestID == nil {
@@ -393,13 +393,13 @@ func (s *server) unsubscribeSession(
 			subscriptionRemovedPayload{SessionID: sessionID, By: actor, Topics: exact, Pending: true},
 		))
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		requestID = &request.ID
 	}
 	if err := tx.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if _, err := s.deps.Envoy.Unsubscribe(r.Context(), sessionID, exact); err != nil {
@@ -408,7 +408,7 @@ func (s *server) unsubscribeSession(
 	}
 	event, err := s.completeSubscriptionRemoval(r.Context(), own, sessionID, *requestID, actor)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if event != nil {
@@ -417,10 +417,10 @@ func (s *server) unsubscribeSession(
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *server) writeEnvoyError(w http.ResponseWriter, err error) {
+func (s *server) writeEnvoyError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, envoy.ErrUnavailable) {
 		writeError(w, "ENVOY_UNAVAILABLE", http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	s.writeHandlerError(w, err)
+	s.writeHandlerError(w, r, err)
 }

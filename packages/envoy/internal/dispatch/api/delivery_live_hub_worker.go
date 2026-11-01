@@ -149,7 +149,7 @@ type deliveryViewRead struct {
 func (h *deliveryHub) recompute(view *deliveryView, cause string) {
 	started := time.Now()
 	h.mu.Lock()
-	view.dirty, view.immediate, view.computing = false, false, true
+	view.dirty, view.immediate, view.computing, view.readStarting = false, false, true, true
 	spec, epoch := view.spec, h.epoch
 	h.mu.Unlock()
 	h.note(deliveryHubNote{what: "recompute begin", view: spec.key, cause: cause})
@@ -158,7 +158,12 @@ func (h *deliveryHub) recompute(view *deliveryView, cause string) {
 
 	now := h.clock.Now()
 	h.mu.Lock()
-	view.computing, view.readingSeq = false, 0
+	view.computing, view.readingSeq, view.readStarting = false, 0, false
+	if view.startingSeq > 0 {
+		// The read ended before it recorded its position, so it holds none of the change.
+		h.markDirtyLocked(view, now, deliveryCauseChange)
+		view.startingSeq = 0
+	}
 	sent := 0
 	switch {
 	case h.views[spec.key] != view:
@@ -209,16 +214,23 @@ func (h *deliveryHub) recompute(view *deliveryView, cause string) {
 	h.finishRecompute(spec, cause, started, read.prs, read.runs, subscribers, sent)
 }
 
-// read is recompute's read and compute, outside the hub's lock.
+// read is recompute's read and compute, outside the hub's lock, through the live pool (liveRead).
 func (h *deliveryHub) read(view *deliveryView, spec deliveryLiveSpec) (deliveryViewRead, error) {
-	ctx, pool := h.readContext(), h.server.deps.Store.Pool
 	var read deliveryViewRead
-	var err error
+	ctx, pool, err := h.liveRead()
+	if err != nil {
+		return read, err
+	}
 	if read.seq, err = delivery.LatestChangeSeq(ctx, pool); err != nil {
 		return read, err
 	}
 	h.mu.Lock()
-	view.readingSeq = read.seq
+	view.readingSeq, view.readStarting = read.seq, false
+	if view.startingSeq > read.seq {
+		// A change caught up before this read recorded its position, and after it.
+		h.markDirtyLocked(view, h.clock.Now(), deliveryCauseChange)
+	}
+	view.startingSeq = 0
 	h.mu.Unlock()
 	if read.seq > 0 {
 		if read.changedAt, err = delivery.ChangeAt(ctx, pool, read.seq); err != nil {
@@ -235,7 +247,7 @@ func (h *deliveryHub) read(view *deliveryView, spec deliveryLiveSpec) (deliveryV
 		if spec.at != nil {
 			read.at = *spec.at
 		}
-		if read.pipe, err = h.server.readPipelinePopulation(ctx, read.settings, read.at); err != nil {
+		if read.pipe, err = h.server.readPipelinePopulation(ctx, pool, read.settings, read.at); err != nil {
 			return read, err
 		}
 		body = deliveryPipelineCompute(read.settings, read.pipe, read.at, now)
@@ -250,7 +262,7 @@ func (h *deliveryHub) read(view *deliveryView, spec deliveryLiveSpec) (deliveryV
 		if spec.preset > 0 {
 			from, to = now.Add(-spec.days()), now
 		}
-		if read.pop, err = h.server.readDeliveryPopulation(ctx, read.settings, from, to, spec.query, spec.kind == deliveryLiveTimeline); err != nil {
+		if read.pop, err = h.server.readDeliveryPopulation(ctx, pool, read.settings, from, to, spec.query, spec.kind == deliveryLiveTimeline); err != nil {
 			return read, err
 		}
 		read.issues = map[string]struct{}{}
@@ -287,7 +299,9 @@ func (h *deliveryHub) read(view *deliveryView, spec deliveryLiveSpec) (deliveryV
 // expire answers a view whose preset window, or whose pipeline day, moved past something it holds,
 // reading nothing: the compute over the population as last read, narrowed to the window now, with
 // the settings that read held. The population and its read's start stay as read, and the next
-// expiry comes from the narrowed population.
+// expiry comes from the narrowed population. Reading nothing, it records no read position, so a
+// change caught up while it computes marks the view dirty as any other does (catchUpChanges) and
+// that mark stands through the expiry, which clears none.
 func (h *deliveryHub) expire(view *deliveryView) {
 	started := time.Now()
 	h.mu.Lock()

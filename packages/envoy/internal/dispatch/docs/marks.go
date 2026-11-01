@@ -795,11 +795,11 @@ func recordedMarksQuery(target recordedMarkTarget) string {
 // recordedMarkRefs is every mark an ask or comment row anchored on artifactID records, read by the
 // anchor's artifact alone whatever an ask's block_artifact_id holds: an ask that also names an ask
 // block on another document keeps its mark on its anchor's document, as refreshAnchors and the
-// other anchor readers read it.
-func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[pmdoc.MarkRef]struct{}, error) {
+// other anchor readers read it. The rows are read through q.
+func recordedMarkRefs(ctx context.Context, q Queryer, artifactID string) (map[pmdoc.MarkRef]struct{}, error) {
 	recorded := make(map[pmdoc.MarkRef]struct{})
 	for _, target := range recordedMarkTargets {
-		rows, err := s.queryFrom(ctx).Query(ctx, recordedMarksQuery(target), artifactID)
+		rows, err := q.Query(ctx, recordedMarksQuery(target), artifactID)
 		if err != nil {
 			return nil, fmt.Errorf("list recorded %s marks: %w", target.table, err)
 		}
@@ -839,8 +839,17 @@ func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[
 // of a quiet document are a TTL apart, so a drop a second before one - an idle reconnect - would
 // otherwise lose the mark a second after it rather than a TTL after it. A tab that closes or goes
 // offline therefore loses its stray mark one TTL later, as every other unrecorded mark does.
+//
+// It runs after a settlement commits, while the settlement still holds its slot, so it reads the
+// recorded marks through the settlements pool, as the settlement did: it is settlement work, and a
+// read of the request pool would take a connection from the requests.
 func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
-	recordedRefs, err := s.recordedMarkRefs(context.Background(), room)
+	settlements, err := s.store.Pool.Settlements()
+	if err != nil {
+		slog.Error("dispatch: list recorded marks for sweep", "room", room, "error", err)
+		return
+	}
+	recordedRefs, err := recordedMarkRefs(context.Background(), settlements, room)
 	if err != nil {
 		slog.Error("dispatch: list recorded marks for sweep", "room", room, "error", err)
 		return

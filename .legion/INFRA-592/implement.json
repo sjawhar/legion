@@ -1,0 +1,75 @@
+{
+ "schemaVersion": 1,
+ "phase": "implement",
+ "issue": "INFRA-592",
+ "previousHandoff": "e865147a033bf2218d1b8154217b83f16ca25bfb",
+ "proof": [
+  {
+   "criterion": "Review round 3 item 1: a write refused when its body asks its admission units back commits nothing and its client is answered the refusal",
+   "surface": "go test against a real Postgres 16 (UTF-8, DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:25433/postgres), TMPDIR=/legion/scratch/tmp GOMAXPROCS=4 GOMEMLIMIT=12GiB, on pod 5be9ec7a-cae5-48b9-98ff-2df107a9930c",
+   "command": "go test -p 1 -count=1 -run 'TestAWriteRefusedWhenItAsksItsUnitsBackCommitsNothing' ./internal/dispatch/api/ (and -race -count=3)",
+   "observed": "PASS: an unkeyed multipart upload and a comment, each admitted at once, body trickled so it parks, write class filled, then body finished: 429 OVERLOADED with Retry-After 1, no new artifact_versions or comments row (abfe677d).",
+   "headSha": "d191e573d1b1786c3b8316392f3788d89dfaf437",
+   "negativeControl": "Without drainedBody.resume cancelling the handler: 'the refused write left 2 rows where there were 1' (the upload stored and committed)."
+  },
+  {
+   "criterion": "Review round 3 item 2: an answer written in one Write keeps the idle-plus-floor rule",
+   "surface": "go test against a real Postgres 16 (UTF-8, DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:25433/postgres), TMPDIR=/legion/scratch/tmp GOMAXPROCS=4 GOMEMLIMIT=12GiB, on pod 5be9ec7a-cae5-48b9-98ff-2df107a9930c",
+   "command": "go test -p 1 -count=1 -run 'TestASlowButSteadyReaderOfAnAnswerWrittenInOneWriteIsAnsweredInFull' ./internal/dispatch/api/",
+   "observed": "PASS: a 32 MiB answer in one Write reaches a steady reader in full, taking longer than the idle bound (abfe677d).",
+   "headSha": "d191e573d1b1786c3b8316392f3788d89dfaf437",
+   "negativeControl": "With one arm per Write call: 'i/o timeout' at the idle bound, 'the answer stopped 1.4s in, after 17563539 of 33554432 bytes'."
+  },
+  {
+   "criterion": "Review round 3 item 3: a change caught up while a delivery view expires marks the view",
+   "surface": "go test against a real Postgres 16 (UTF-8, DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:25433/postgres), TMPDIR=/legion/scratch/tmp GOMAXPROCS=4 GOMEMLIMIT=12GiB, on pod 5be9ec7a-cae5-48b9-98ff-2df107a9930c",
+   "command": "go test -p 1 -count=1 -run 'TestAChangeCaughtUpWhileAViewExpiresIsRecomputed' ./internal/dispatch/api/; CGO_ENABLED=1 go test -race -p 1 -count=50 -run '^TestIdenticalViewsShareOneRecompute$|^TestAChangeCaughtUpWhileAViewExpiresIsRecomputed$|^TestARelatedCheckWaitsForItsHeldKeywordStagesConnection$' ./internal/dispatch/api/",
+   "observed": "PASS, and 50 race runs of the three tests with no failure and no DATA RACE (cc10902d).",
+   "headSha": "d191e573d1b1786c3b8316392f3788d89dfaf437",
+   "negativeControl": "With the old hold (computing && !readingKnown): 'no frame within 5s, waiting for a delta' after the expiry."
+  },
+  {
+   "criterion": "Review round 3 minors: a connected client whose body framing fails gets 400 not an empty 200; a keyed write whose client left is logged 499; the related check waits for its keyword stage",
+   "surface": "go test against a real Postgres 16 (UTF-8, DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:25433/postgres), TMPDIR=/legion/scratch/tmp GOMAXPROCS=4 GOMEMLIMIT=12GiB, on pod 5be9ec7a-cae5-48b9-98ff-2df107a9930c",
+   "command": "go test -p 1 -count=1 -run 'TestAWriteWhoseBodyFramingFailsIsRefusedRatherThanAnsweredEmpty|TestAKeyedWriteWhoseClientLeavesMidBodyIsLoggedClientGone|TestARelatedCheckWaitsForItsHeldKeywordStagesConnection' ./internal/dispatch/api/",
+   "observed": "PASS for all three (abfe677d, cc10902d).",
+   "headSha": "d191e573d1b1786c3b8316392f3788d89dfaf437",
+   "negativeControl": "Before: 'status=200 body=, want 400 REQUEST_BODY_UNREADABLE'; 'status=400 ... want status=499'; 'the check answered ... while its keyword stage still held a request-pool connection'."
+  },
+  {
+   "criterion": "10x on the 2-core reproduction at this round's code, after the merge of main's #2387 and #2496: excess refused with 429, no collapse",
+   "surface": "INFRA-589's load reproduction (packages/envoy/loadtest), stack on ports 11250-11257, fresh seed by base main 05d65789, one adjacent base/head pair on pod 5be9ec7a-cae5-48b9-98ff-2df107a9930c with nothing else of mine running",
+   "command": "LOADTEST_SRC=<base|head> bash loadtest/run-step.sh r15-{base,head}-10x-a --events 40 --sessions 1000 --requests 600",
+   "observed": "Head a7d8b26b (clean; this head's code): every refusal 429 OVERLOADED, 0 connection failures, 5.75 events/s committed, 11,381 reads served (63/s), write refusal p50 1,035 ms, p99 1,258 ms, max 2,925 ms, read refusal p99 320 ms. Memory peak 12.34 GiB of 19. Run: dispatch://INFRA-592/artifact/infra-592-implementer-r15-r15-head-10x-a-tar-gz.",
+   "headSha": "d191e573d1b1786c3b8316392f3788d89dfaf437",
+   "negativeControl": "Base main 05d65789 in the same pair: 1.51 events/s committed, 6,941 write timeouts, 11 reads served of 107,355 (read p50 30 s): dispatch://INFRA-592/artifact/infra-592-implementer-r15-r15-base-10x-a-tar-gz."
+  },
+  {
+   "criterion": "The suites pass after the forward merges",
+   "surface": "go test against a real Postgres 16 (UTF-8, DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:25433/postgres), TMPDIR=/legion/scratch/tmp GOMAXPROCS=4 GOMEMLIMIT=12GiB, on pod 5be9ec7a-cae5-48b9-98ff-2df107a9930c",
+   "command": "At cc10902d+038ba69a (before the #2387 merge): go test -p 1 -count=1 ./internal/dispatch/api/ ./cmd/dispatch/ ./internal/dispatch/store/ ./internal/dispatch/delivery/... ./internal/dispatch/admission/ ./internal/dispatch/routes/ ./internal/dispatch/docs/. At the merge 517acb89 (the merge worker's run): the same plus redeliver, duty, architecture, loadtest, infra/gcp ConnectionsPer, check-ci-filters, semantic-line-breaks. At 07b62cc8 (#2633 merged): go test -run 'TestMigrationSet|Migrat' ./internal/dispatch/store/.",
+   "observed": "Every package ok except api's TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (refuses on this pod's byte-order database) and, at 517acb89 only, store's TestMigrationSetTakesNumbersThenTimestamps (main's 0158-0161, fixed by #2633); after #2633 the store migration tests pass.",
+   "headSha": "d191e573d1b1786c3b8316392f3788d89dfaf437",
+   "negativeControl": "The api failure is the test's own refusal ('this test's database already orders \"a\" after \"B\"'), the same on main."
+  }
+ ],
+ "filesChanged": [
+  "packages/envoy/internal/dispatch/api/{server,body_drain,request_keys,artifact_files}.go, admission/answer.go and tests in body_drain_test.go, request_bounds_test.go (round-3 items 1, 2 and the two body minors)",
+  "packages/envoy/internal/dispatch/api/delivery_live_hub{,_intake,_worker}.go, suggestions.go, server.go, routes/router.go and tests in delivery_live_hub_test.go, related_check_test.go (item 3, keyword stage, router cleanup)",
+  "packages/envoy/.changes/unreleased and .dispatch/architecture/dispatch-store.md (budget 90, four listeners)",
+  "All 14 changelog fragments renamed INFRA-592-*.yaml -> pr2402-*.yaml with issue keys removed from their bodies",
+  "Forward merges e98147fe (#2411), 517acb89 (#2387, #2496, #2446, #2394, #2198: 28 conflicted files, docs/settlement.go carries #2496's flush), 07b62cc8 (#2633), d191e573 (joins the review handoff 0e9e89dd)"
+ ],
+ "trickyParts": [
+  "A resume refusal now cancels the handler's own context with the refusal as cause; admission.WriteUnserved tells that apart from a client that went away (checked first), so the answer is 429 and never 499.",
+  "docs/settlement.go: the stored-order flush (ledger.flushThrough) runs after reconcileAskBlocks, in commitRepairs and commitVersion, since its appends write a doc_settlements_pending row that must not come before the copy lock.",
+  "main's route-roster fetch runs on the server's lifetime outside admission, so it stores through the background pool; through the request pool an issue read cost two connections."
+ ],
+ "deviations": [
+  "The merge worker lowered TestARepairingSettlementRendersNothingUnderItsDocumentsOwnerRow's render count from 6 to 5: the stamped-copy render existed only to classify the stamp's append, which storeRepair now takes from the room's update observer; the property (no render under the owner row) is still asserted on every render.",
+  "main's #2496 test settlement_repair_test.go replaced the branch's failing-append resend test, which the flush ordering makes unreachable.",
+  "My first code push missed the issue branch's handoff commits (I had branched from a1581b1b); d191e573 merges 0e9e89dd so the push is a fast-forward, with no rewrite.",
+  "Leftover check after the run (ps for the sampler, go test, run-step, loadgen, pairs15, envoy-dispatch, nats-server): it listed nothing."
+ ],
+ "openQuestions": []
+}

@@ -1,0 +1,18 @@
+kind: Changed
+body: |-
+  Dispatch's database connections are one budget of 90 a process, as many as before, partitioned so that neither
+  requests nor background work can starve the other: the request pool holds 48, from 64, and the
+  background loops (6), the live event stream relay and delivery hub (4) and document settlements
+  (4) each draw from a pool of their own. The lease pool holds a connection for each of its 13
+  lease names and 2 spare, 15 where it held 13 with none spare; `duty.Exclusive` refuses a name
+  that is not on its list, and skips
+  a pass that finds no lease connection free within 2 seconds until its next tick. Every
+  connection names its pool in `application_name` (`dispatch-requests`, `dispatch-background`,
+  `dispatch-live`, `dispatch-settlements`, `dispatch-rooms`, `dispatch-health`, `dispatch-listen`,
+  `dispatch-leases`, `dispatch-outbox`, `dispatch-horizon`, `dispatch-registry`), in place of the
+  connection string's own, and a wait for a connection is bounded on every pool but three: 3
+  seconds for a request's, a document load's, a live reader's or the event horizon's, 30 for
+  background work and settlements, 2 for a lease and 10 for a LISTEN dial. The outbox, the
+  registry and the health probe have no bound, each being the only caller of its pool's one
+  connection; the health probe bounds its own wait, dial and query together at 2 seconds instead.
+  A database's connection limit must allow 90 a process.

@@ -28,7 +28,7 @@ func isolatePG(t *testing.T) {
 func testStack() *stackFile {
 	return &stackFile{
 		Name: "loadtest-abc", DispatchToken: "agent-secret", ListenerToken: "listener-secret",
-		Ports: stackPorts{Postgres: 15432, Proxy: 15433, NATS: 14222, NATSMonitor: 18222, Listener: 19120, Dispatch: 18777, Pprof: 16061},
+		Ports: stackPorts{Postgres: 15432, Proxy: 15433, NATS: 14222, NATSMonitor: 18222, Listener: 19120, Dispatch: 18777, Pprof: 16061, Metrics: 16062},
 		PIDs:  stackPIDs{Postgres: 11, Dispatch: 12},
 	}
 }
@@ -40,6 +40,7 @@ func TestGuardRefusesAFlagThatDiffersFromTheStack(t *testing.T) {
 		"-token":          {token: "some-other-token"},
 		"-listener-token": {listenerToken: "some-other-token"},
 		"-pg":             {pg: "postgres://postgres@127.0.0.1:5432/dispatch"},
+		"-metrics":        {metrics: "http://127.0.0.1:9090"},
 	}
 	for flag, flags := range cases {
 		_, err := resolveEndpoints(flags, testStack())
@@ -55,12 +56,12 @@ func TestGuardRefusesAFlagThatDiffersFromTheStack(t *testing.T) {
 
 func TestGuardTakesEndpointsFromTheStack(t *testing.T) {
 	isolatePG(t)
-	e, err := resolveEndpoints(endpointFlags{url: "http://127.0.0.1:18777/"}, testStack())
+	e, err := resolveEndpoints(endpointFlags{url: "http://127.0.0.1:18777/", metrics: "http://127.0.0.1:16062/"}, testStack())
 	if err != nil {
 		t.Fatalf("a flag equal to the stack's value was refused: %v", err)
 	}
 	if e.dispatch != "http://127.0.0.1:18777" || e.pg != "postgres://postgres@127.0.0.1:15432/dispatch?sslmode=disable" ||
-		e.listenerToken != "listener-secret" || e.natsServerName != "loadtest-abc" {
+		e.listenerToken != "listener-secret" || e.natsServerName != "loadtest-abc" || e.metrics != "http://127.0.0.1:16062" {
 		t.Fatalf("endpoints %+v do not come from the stack", e)
 	}
 	if e.pids["postgres"] != 11 || e.pids["dispatch"] != 12 {
@@ -71,7 +72,21 @@ func TestGuardTakesEndpointsFromTheStack(t *testing.T) {
 	}
 }
 
-// foreignFlags gives every endpoint flag a foreign value.
+// Under -allow-foreign, -metrics is the one endpoint that may stay empty: the run then scrapes no
+// metrics, and never the local stack's.
+func TestGuardAllowForeignTakesMetricsOnlyFromItsFlag(t *testing.T) {
+	flags := foreignFlags()
+	e, err := resolveEndpoints(flags, testStack())
+	if err != nil || e.metrics != "" {
+		t.Fatalf("-allow-foreign without -metrics: metrics %q, %v; want empty and no refusal", e.metrics, err)
+	}
+	flags.metrics = "http://dispatch.example:9090/"
+	if e, err = resolveEndpoints(flags, testStack()); err != nil || e.metrics != "http://dispatch.example:9090" {
+		t.Fatalf("-allow-foreign with -metrics: metrics %q, %v", e.metrics, err)
+	}
+}
+
+// foreignFlags gives every required endpoint flag a foreign value; -metrics stays empty.
 func foreignFlags() endpointFlags {
 	return endpointFlags{
 		url: "http://dispatch.example:8080/", listener: "http://listener.example:9120", nats: "nats://nats.example:4222",

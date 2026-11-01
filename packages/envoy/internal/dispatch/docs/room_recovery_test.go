@@ -142,7 +142,7 @@ func TestARoomThatFailsWhileItIsLoadingRecovers(t *testing.T) {
 		t.Fatalf("begin write transaction: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	joined, ledger := service.Join(ctx, tx)
+	joined, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	defer ledger.Discard()
 	if _, err := service.ReplaceText(joined, artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("joined write after the failed load recovered: %v", err)
@@ -181,7 +181,8 @@ func TestAPublishRefusedByAFailedRoomLeavesTheReplacementAlone(t *testing.T) {
 		t.Fatalf("begin write transaction: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	joined, ledger := service.Join(ctx, tx)
+	writeCtx, releaseWrite := gatedContext(t, service, ctx, artifactID)
+	joined, ledger := service.Join(writeCtx, tx)
 	defer ledger.Discard()
 	if _, err := service.ReplaceText(joined, artifactID, "after", alice); err != nil {
 		t.Fatalf("joined write: %v", err)
@@ -201,6 +202,7 @@ func TestAPublishRefusedByAFailedRoomLeavesTheReplacementAlone(t *testing.T) {
 	service.afterPublishRefused = func(room string) { awaitRecovered(t, service, room) }
 	ledger.publish()
 	<-persist.failed
+	releaseWrite()
 
 	if service.roomFailed(artifactID) {
 		t.Fatal("the refused publish failed the room that replaced the one it was refused by")
@@ -210,7 +212,7 @@ func TestAPublishRefusedByAFailedRoomLeavesTheReplacementAlone(t *testing.T) {
 		t.Fatalf("begin retry transaction: %v", err)
 	}
 	defer retry.Rollback(ctx)
-	retryJoined, retryLedger := service.Join(ctx, retry)
+	retryJoined, retryLedger := service.Join(gated(t, service, ctx, artifactID), retry)
 	defer retryLedger.Discard()
 	if _, err := service.ReplaceText(retryJoined, artifactID, "later", alice); err != nil {
 		t.Fatalf("joined write after the refused publish: %v", err)
@@ -285,7 +287,7 @@ func TestATransactionHoldingTheRoomLockFailsFastOnItsFailedRoom(t *testing.T) {
 				t.Fatalf("begin transaction: %v", err)
 			}
 			defer tx.Rollback(ctx)
-			joined, ledger := service.Join(ctx, tx)
+			joined, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 			defer ledger.Discard()
 			if err := lockDocumentRoom(ctx, tx, artifactID); err != nil {
 				t.Fatalf("take the document's advisory lock: %v", err)
@@ -333,7 +335,8 @@ func TestAWriteMeetingAFailedRoomFailsFastWhoeverHoldsItsLock(t *testing.T) {
 		t.Fatalf("begin edit transaction: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	joined, ledger := service.Join(ctx, tx)
+	duringCtx, releaseDuring := gatedContext(t, service, ctx, artifactID)
+	joined, ledger := service.Join(duringCtx, tx)
 	defer ledger.Discard()
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	failsFast(t, "a joined write", func() error {
@@ -344,6 +347,7 @@ func TestAWriteMeetingAFailedRoomFailsFastWhoeverHoldsItsLock(t *testing.T) {
 		t.Fatalf("roll back: %v", err)
 	}
 	ledger.Discard()
+	releaseDuring()
 	if err := holder.Rollback(ctx); err != nil {
 		t.Fatalf("release document lock: %v", err)
 	}
@@ -354,7 +358,7 @@ func TestAWriteMeetingAFailedRoomFailsFastWhoeverHoldsItsLock(t *testing.T) {
 		t.Fatalf("begin retry transaction: %v", err)
 	}
 	defer retry.Rollback(ctx)
-	retryJoined, retryLedger := service.Join(ctx, retry)
+	retryJoined, retryLedger := service.Join(gated(t, service, ctx, artifactID), retry)
 	defer retryLedger.Discard()
 	if _, err := service.ReplaceText(retryJoined, artifactID, "after", alice); err != nil {
 		t.Fatalf("joined write on the recovered room: %v", err)
@@ -427,7 +431,7 @@ func TestARoomFailingBetweenTwoJoinedOperationsFailsTheSecondFast(t *testing.T) 
 		t.Fatalf("begin transaction: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	joined, ledger := service.Join(ctx, tx)
+	joined, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	defer ledger.Discard()
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	if _, err := service.ReplaceText(joined, artifactID, "during", alice); err != nil {
@@ -460,7 +464,7 @@ func TestARoomFailingDuringAJoinedWriteFailsTheWrite(t *testing.T) {
 		t.Fatalf("begin transaction: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	joined, ledger := service.Join(ctx, tx)
+	joined, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	defer ledger.Discard()
 
 	failsFast(t, "a joined write whose room fails under it", func() error {
@@ -490,7 +494,9 @@ func TestARoomFailingDuringAJoinedWriteFailsTheWrite(t *testing.T) {
 // A committed write that has not been published yet holds the writer slot while a second write
 // waits for it. The room fails: the first write's publish waits for the recovery, which needs
 // no lock either transaction holds, and the second write then either runs on the reloaded room
-// or, had it reached the failed room first, fails fast. It never waits for good.
+// or, had it reached the failed room first, fails fast. It never waits for good. The second write
+// is beneath the writer gate (beneathTheGate), which would otherwise hold it ahead of its
+// transaction: this pins the slot's own wait.
 func TestAWriterWaitingForTheSlotFinishesWhenTheRoomFails(t *testing.T) {
 	database, service, artifactID := lockOrderService(t)
 	seedServiceText(t, service, artifactID, "before")
@@ -501,7 +507,7 @@ func TestAWriterWaitingForTheSlotFinishesWhenTheRoomFails(t *testing.T) {
 		t.Fatalf("begin first transaction: %v", err)
 	}
 	defer first.Rollback(ctx)
-	firstJoined, firstLedger := service.Join(ctx, first)
+	firstJoined, firstLedger := service.Join(gated(t, service, ctx, artifactID), first)
 	defer firstLedger.Discard()
 	if _, err := service.ReplaceText(firstJoined, artifactID, "first", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("first joined write: %v", err)
@@ -512,7 +518,7 @@ func TestAWriterWaitingForTheSlotFinishesWhenTheRoomFails(t *testing.T) {
 		t.Fatalf("begin second transaction: %v", err)
 	}
 	defer second.Rollback(ctx)
-	secondJoined, secondLedger := service.Join(ctx, second)
+	secondJoined, secondLedger := service.Join(beneathTheGate(ctx, artifactID), second)
 	defer secondLedger.Discard()
 	returned := make(chan error, 1)
 	go func() {
@@ -708,7 +714,7 @@ func TestAWriteWhoseRoomFailsBeforeItsFirstAppendFailsFast(t *testing.T) {
 		t.Fatalf("begin transactional edit: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	joinedCtx, ledger := service.Join(ctx, tx)
+	joinedCtx, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	defer ledger.Discard()
 
 	store.failing.Store(true)
@@ -739,4 +745,41 @@ func TestAWriteWhoseRoomFailsBeforeItsFirstAppendFailsFast(t *testing.T) {
 	if latest != 1 {
 		t.Fatalf("latest version = %d, want the seeded version only", latest)
 	}
+}
+
+// A read holding its request-pool connection does not wait for a failed room's eviction. The API
+// pins each ordinary read (store.PinConnection), the artifact, issue and project /text routes
+// among them, so such a read holds one request-pool connection from its first statement to its
+// end; the eviction it would wait for flushes and compacts the document under its advisory lock
+// on a request-pool connection of its own (PgVersioned.withRoomLock). A pinned reader waiting
+// here waits on the pool its own connection is out of, so with the readers holding it the
+// eviction's acquire runs out its bound and the readers run out their deadlines on a room nobody
+// compacted.
+func TestAPinnedReadOfAFailedRoomDoesNotWaitForItsEviction(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	hold := make(chan struct{})
+	release := sync.OnceFunc(func() { close(hold) })
+	t.Cleanup(release)
+	service.beforeFailedEviction = func(room string) {
+		if room == artifactID {
+			<-hold
+		}
+	}
+	service.failRoom(artifactID, errors.New("test: the room failed"))
+
+	ctx, end := store.PinConnection(context.Background())
+	defer end()
+	var pinned int
+	if err := service.store.Pool.QueryRow(ctx, `select 1`).Scan(&pinned); err != nil {
+		t.Fatalf("take the read's pinned connection: %v", err)
+	}
+	if !store.ConnectionHeld(ctx) {
+		t.Fatal("the read holds no connection, so nothing here is tested")
+	}
+
+	failsFast(t, "a pinned read of a failed room's text", func() error {
+		_, _, err := service.TextWithToken(ctx, artifactID)
+		return err
+	})
 }

@@ -22,7 +22,7 @@ func (s *server) armSlowWrite(w http.ResponseWriter, r *http.Request) {
 		DelayMS int64  `json:"delay_ms"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if !keyedMethod(input.Method) || !strings.HasPrefix(input.Path, "/") ||

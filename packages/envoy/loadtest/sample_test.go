@@ -191,7 +191,7 @@ func TestSummarizeResourcesTakesNATSRatesFromTheReadsThatWorked(t *testing.T) {
 // marked in its sample and logged; a sample taken once ctx has ended is not kept at all, and its
 // failed reads are neither counted nor logged, as poll does.
 func TestSamplerMarksNoReadThatFailedOnceTheStepEnded(t *testing.T) {
-	down := endpoints{pprof: "http://127.0.0.1:1", natsMon: "http://127.0.0.1:1", pg: unreachablePG, pids: map[string]int{}}
+	down := endpoints{pprof: "http://127.0.0.1:1", metrics: "http://127.0.0.1:1", natsMon: "http://127.0.0.1:1", pg: unreachablePG, pids: map[string]int{}}
 	now := time.Now()
 
 	var logged bytes.Buffer
@@ -200,10 +200,10 @@ func TestSamplerMarksNoReadThatFailedOnceTheStepEnded(t *testing.T) {
 	defer cancel()
 	running.loop(ctx, now, now.Add(time.Minute), log.New(&logged, "", 0))
 	ss := running.all()
-	if want := []string{readPostgres, readGoroutines, readHeap, readNATS}; len(ss) == 0 || !slices.Equal(ss[0].FailedReads, want) {
+	if want := []string{readPostgres, readGoroutines, readHeap, readMetrics, readNATS}; len(ss) == 0 || !slices.Equal(ss[0].FailedReads, want) {
 		t.Fatalf("samples %+v: want the first to mark %v", ss, want)
 	}
-	for _, name := range []string{"sampler: postgres", "sampler: pprof", "sampler: nats"} {
+	for _, name := range []string{"sampler: postgres", "sampler: pprof", "sampler: metrics", "sampler: nats"} {
 		if !strings.Contains(logged.String(), name) {
 			t.Errorf("run.log does not log the failed %s read:\n%s", name, logged.String())
 		}

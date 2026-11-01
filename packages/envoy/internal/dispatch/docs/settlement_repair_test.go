@@ -155,10 +155,12 @@ func TestSettlementRepairCreditsTheAuthorOfAnEditItsVersionHolds(t *testing.T) {
 	}
 }
 
-// An edit a browser makes after a repairing settlement has read the tree its version is rendered
-// from - while that version renders - is not in the version, so the version does not credit its
-// author. The version the edit's own settlement writes holds it and credits them (LEGION-479).
-func TestSettlementRepairCreditsNoAuthorOfAnEditMadeWhileItsVersionRenders(t *testing.T) {
+// An edit a browser makes while a settlement renders the tree it read lands after the settlement's
+// take, so the tree lacks it. The settlement writes no version of that tree: once its locks find the
+// room's instance holds an update it did not hold at the take, it rolls back and reads the document
+// again, commits its repair of the ask block in one transaction and versions the repaired document,
+// the edit included and its author credited, in the next.
+func TestSettlementWritesNoVersionOfATreeAnEditLandedOnWhileItRendered(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n\nContext before.\n")
@@ -166,34 +168,44 @@ func TestSettlementRepairCreditsNoAuthorOfAnEditMadeWhileItsVersionRenders(t *te
 	answer := answerBlockAsk(t, service, artifactID)
 	bob := model.Actor{Kind: "user", ID: "bob"}
 	service.addConnection(artifactID, 1, bob)
+	before := latestVersionNumber(t, service, artifactID)
 
 	var edited atomic.Bool
-	service.afterSettleVersionRead = func(room string) {
-		if room == artifactID && edited.CompareAndSwap(false, true) {
-			editAsPeer(t, service, artifactID, replaceRun("Context before.", "Context after."))
+	service.beforeSettleRender = func(room string) {
+		if room != artifactID || !edited.CompareAndSwap(false, true) {
+			return
+		}
+		editAsPeer(t, service, artifactID, replaceRun("Context before.", "Context after."))
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
+			t.Errorf("wait for the edit to reach persistence: %v", err)
+		}
+		if err := service.waitForDurableAppends(ctx, artifactID); err != nil {
+			t.Errorf("wait for the edit to become durable: %v", err)
 		}
 	}
 	settleCurrentGeneration(t, service, artifactID)
 	if !edited.Load() {
-		t.Fatal("settlement never reached the window between its version's read and its render")
+		t.Fatal("settlement never reached the window between its read and its render")
 	}
 	repaired := ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"" +
 		answer.At.Format(time.RFC3339Nano) + "\" selected=\"[]\"}\nShip it?\n:::\n\n"
-	requireLatestVersionMarkdown(t, service, artifactID, repaired+"Context before.\n")
-	repairVersion := latestVersionNumber(t, service, artifactID)
-	if authors := latestVersionAuthors(t, service, artifactID); slices.Contains(authors, bob) {
-		t.Fatalf("version %d authors = %#v, want no bob, whose edit it lacks", repairVersion, authors)
+	var stale int
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select count(*) from artifact_versions where artifact_id = $1 and markdown like '%Context before.%' and number > $2
+	`, artifactID, before).Scan(&stale); err != nil {
+		t.Fatalf("count versions of the tree without the edit: %v", err)
 	}
-
-	service.afterSettleVersionRead = nil
-	settleCurrentGeneration(t, service, artifactID)
+	if stale != 0 {
+		t.Fatalf("%d version(s) written of the tree rendered without the edit that landed during its render", stale)
+	}
 	requireLatestVersionMarkdown(t, service, artifactID, repaired+"Context after.\n")
-	editVersion := latestVersionNumber(t, service, artifactID)
-	if editVersion != repairVersion+1 {
-		t.Fatalf("latest version = %d, want %d, the edit's own", editVersion, repairVersion+1)
+	if latest := latestVersionNumber(t, service, artifactID); latest != before+1 {
+		t.Fatalf("latest version = %d, want %d: one version of the repaired document with the edit", latest, before+1)
 	}
 	if authors := latestVersionAuthors(t, service, artifactID); !slices.Contains(authors, bob) {
-		t.Fatalf("version %d authors = %#v, want bob, whose edit it holds", editVersion, authors)
+		t.Fatalf("version %d authors = %#v, want bob, whose edit it holds", before+1, authors)
 	}
 }
 
@@ -268,9 +280,10 @@ func requireLatestVersionMarkdown(t *testing.T, service *Service, artifactID, wa
 
 // A browser that deletes the ask block settlement is repairing, between the reconciliation and its
 // write, keeps the deletion: the repair finds no block to write into, so the settlement wrote nothing
-// into the room and leaves the moved document, versions included, to the settlement the deletion
-// scheduled. The repair's transaction, which changed nothing, still reports an update; its slot is
-// finished with that update and the room's persistence worker consumes it (LEGION-479).
+// into the room, rolls its pass back and reads the moved document again, whose version holds the
+// deletion and no ask block. The repair's transaction, which changed nothing, still reports an
+// update; its slot is finished with that update and the room's persistence worker consumes it
+// (LEGION-479).
 func TestSettlementRepairOfAnAskAPeerDeletedWritesNothing(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -296,8 +309,12 @@ func TestSettlementRepairOfAnAskAPeerDeletedWritesNothing(t *testing.T) {
 	waitForDocumentText(t, service, artifactID, "Context.\n")
 	requireNoSuppressedSlots(t, service, artifactID, "after the repair")
 	waitForPersistedProofText(t, service.store, artifactID, "Context.\n")
-	if versions := latestVersionNumber(t, service, artifactID); versions != versionsBefore {
-		t.Fatalf("latest version = %d, want %d: the settlement versioned the ask block the peer deleted", versions, versionsBefore)
+	// The deletion's append may land after the pass that reads the document again has looked for
+	// it, which then leaves the version to a retry moments later (retrySettleSoon).
+	waitForDocumentVersion(t, service.store, artifactID, versionsBefore+1)
+	requireLatestVersionMarkdown(t, service, artifactID, "Context.\n")
+	if versions := latestVersionNumber(t, service, artifactID); versions != versionsBefore+1 {
+		t.Fatalf("latest version = %d, want %d: the deletion's one version", versions, versionsBefore+1)
 	}
 }
 
