@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-934",
+  "previousHandoff": "e9e218e8312c5702e7261acdf78baf2ff4e80069",
+  "headReviewed": "0dcc9cf567d0a05c793cfa2d1dfe8d18a6c2947d",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "(whole pull request)",
+      "description": "Forward-merge confirmation, not a new round: the unchanged-diff fingerprint (fork_point diff, --context 0, excluding .legion and docs/solutions) is eb443e84770577670144848b605bef37105e014ecd31e271e456a36fc624f96c both at a059c116472aa5738a7eb70ea84505e1ef823294, the head of my last review (APPROVE 5727250285), and at 0dcc9cf567d0a05c793cfa2d1dfe8d18a6c2947d after 64ecd4d5 brought main in for #2633. The required checks ci-ok and pr-title are green at CI head 64ecd4d5, and only .legion/INFRA-934/ changed above it."
+    }
+  ]
+}
