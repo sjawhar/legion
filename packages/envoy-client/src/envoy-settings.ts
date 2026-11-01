@@ -198,9 +198,9 @@ function natsCredential(
  * resolve. The file's `!` token and seed run here, only when Envoy uses them, and a seed's failing
  * command, too, turns off inbound messages alone.
  *
- * A caller that opens no NATS connection (`nats: false`, OpenCode's plugin) takes no inbound
- * messages and resolves no seed, so a seed it would never send can neither run a command nor turn
- * it off.
+ * A caller that opens no NATS connection (`nats: false`: the `dispatch` command, `claude-envoy`'s
+ * `envoy-send`, pi-legion's `legion.ts` extension) takes no inbound messages and resolves no seed,
+ * so a seed it would never send can neither run a command nor turn it off.
  */
 export function envoySettings(
   env: EnvoyEnvironment,

@@ -28,7 +28,6 @@ interface SentCard {
 }
 
 const interrupted = { stopReason: "aborted", errorMessage: "Interrupted by user" };
-const steer = { deliverAs: "steer", triggerTurn: true } as const;
 const aside = { deliverAs: "aside", triggerTurn: true } as const;
 const followUp = { deliverAs: "followUp", triggerTurn: false } as const;
 /** The session the harness's cards go into, which `isOwnSession` answers for. */
@@ -215,13 +214,13 @@ describe("the delivery a card gets", () => {
     });
   });
 
-  test("a card that finds the host idle after the startup phase is a steer that starts a turn", async () => {
+  test("a card that finds the host idle after the startup phase is an aside that starts a turn", async () => {
     const host = harness();
     await host.endStartup();
     host.setIdle(true);
 
     expect(host.card("idle").delivery).toEqual({
-      ...steer,
+      ...aside,
       details: { envoyCard: expect.any(String), wake: "fold" },
     });
   });
@@ -240,15 +239,38 @@ describe("the delivery a card gets", () => {
     ]);
   });
 
-  // A context without `isIdle` cannot say no turn runs, and the wake for a folded card needs it,
-  // so its cards stay steers with `triggerTurn`; a targeted Aside stays an aside.
-  test("a host that reports no idle state gets a steer, and a targeted Aside an aside", () => {
+  // A context without `isIdle` cannot say no turn runs; its cards are asides with `triggerTurn`
+  // all the same, and a targeted Aside stays an aside.
+  test("a host that reports no idle state gets an aside, and a targeted Aside an aside", () => {
     const host = harness({ reportsIdle: false });
 
     expect([host.card("card").delivery, host.card("targeted", true).delivery]).toMatchObject([
-      steer,
+      aside,
       aside,
     ]);
+  });
+
+  // A steer joins the host's one steering queue, which the agent loop releases one message per
+  // step boundary, the queue a person's typed message waits in too. Cards that arrive faster than
+  // the session takes steps would wait there without end, and a card handed while the host looks
+  // idle is read as idle here but checked by the host only after its own awaits, so of several
+  // handed together the rest join that queue. So no card, in any state the host is in, is a steer.
+  test("no card after the startup phase goes as a steer, whatever state the host is in", async () => {
+    const host = harness();
+    await host.endStartup();
+    const deliveries: CardDelivery[] = [];
+    host.setIdle(true);
+    deliveries.push(host.card("idle-1").delivery, host.card("idle-2").delivery);
+    host.setIdle(false);
+    deliveries.push(host.card("setting-up").delivery);
+    host.run();
+    deliveries.push(host.card("running").delivery, host.card("running-targeted", true).delivery);
+    const noIdleState = harness({ reportsIdle: false });
+    deliveries.push(noIdleState.card("no-idle-state").delivery);
+
+    for (const delivery of deliveries) {
+      expect({ deliverAs: delivery.deliverAs, triggerTurn: delivery.triggerTurn }).toEqual(aside);
+    }
   });
 
   test("every card carries an id no other card shares", () => {
@@ -511,12 +533,12 @@ describe("in the startup phase", () => {
   // there makes that prompt fail; a terminal reads input only once its startup is over. Only RPC
   // mode reads nothing while the host drains the startup sends.
   for (const mode of ["print", "json", "tui", null] as const) {
-    test(`sends a card that finds the host idle as a steer in ${mode ?? "a context with no"} mode`, () => {
+    test(`sends a card that finds the host idle as an aside in ${mode ?? "a context with no"} mode`, () => {
       const host = harness({ mode });
       host.setIdle(true);
 
-      expect(host.card("startup-steer").delivery).toEqual({
-        ...steer,
+      expect(host.card("startup-aside").delivery).toEqual({
+        ...aside,
         details: { envoyCard: expect.any(String), wake: "fold" },
       });
     });
@@ -538,7 +560,7 @@ describe("in the startup phase", () => {
       wakeMessage("1 Envoy message above arrived with no turn to read it: read it and act on it."),
     ]);
 
-    expect(host.card("after-startup").delivery).toMatchObject(steer);
+    expect(host.card("after-startup").delivery).toMatchObject(aside);
   });
 
   test("sends one wake for several startup cards", async () => {
@@ -572,7 +594,7 @@ describe("in the startup phase", () => {
     await host.fire();
     expect(host.sent).toEqual([]);
     // That check found the host idle, which ended the phase.
-    expect(host.card("after-busy-read").delivery).toMatchObject(steer);
+    expect(host.card("after-busy-read").delivery).toMatchObject(aside);
   });
 
   test("wakes at the run's end for startup cards a busy check kept and no run read", async () => {
@@ -605,10 +627,10 @@ describe("in the startup phase", () => {
     expect(host.sent).toHaveLength(1);
   });
 
-  test("sends a card on a host that reports no idle state as a steer that starts a turn", () => {
+  test("sends a card on a host that reports no idle state as an aside that starts a turn", () => {
     const host = harness({ reportsIdle: false });
 
-    expect(host.card("startup-no-idle").delivery).toMatchObject(steer);
+    expect(host.card("startup-no-idle").delivery).toMatchObject(aside);
   });
 
   test("sends a card that finds a turn running as an aside that starts one", () => {
@@ -634,7 +656,7 @@ describe("in the startup phase", () => {
     await host.fire();
     expect(host.sent).toHaveLength(1);
     expect(contentOf(host.sent[0])).toContain("1 Envoy message ");
-    expect(host.card("after-cap").delivery).toMatchObject(steer);
+    expect(host.card("after-cap").delivery).toMatchObject(aside);
   });
 });
 
@@ -695,8 +717,8 @@ describe("while the start-turn mark names the session", () => {
     await host.fire();
     expect(host.delays).toHaveLength(armed);
 
-    // The same unsent mark holds nothing now: an idle card is a steer that starts its own turn.
-    expect(host.card("after-the-cap").delivery).toMatchObject(steer);
+    // The same unsent mark holds nothing now: an idle card is an aside that starts its own turn.
+    expect(host.card("after-the-cap").delivery).toMatchObject(aside);
   });
 
   // `/legion-controller-start`'s claim refused before the send clears the unsent mark.
@@ -729,7 +751,7 @@ describe("while the start-turn mark names the session", () => {
     host.startTurn();
     await host.fire();
     expect(host.sent).toEqual([wakeMessage(twoCards)]);
-    expect(host.card("after-start-turn").delivery).toMatchObject(steer);
+    expect(host.card("after-start-turn").delivery).toMatchObject(aside);
   });
 
   test("still owes the wake to a startup card when only the start turn's replies follow it, its tool calls included", async () => {
@@ -890,7 +912,7 @@ describe("while the start-turn mark names the session", () => {
     const terminal = harness({ mode: "tui" });
     terminal.markSent(terminal.clock() - STARTUP_TURN_CAP_MS);
     terminal.setIdle(true);
-    expect(terminal.card("stale-mark-terminal").delivery).toMatchObject(steer);
+    expect(terminal.card("stale-mark-terminal").delivery).toMatchObject(aside);
   });
 
   test("ignores a mark that names another session, unsent or sent", async () => {
@@ -911,7 +933,7 @@ describe("while the start-turn mark names the session", () => {
     const terminal = harness({ mode: "tui" });
     terminal.markUnsent("ses_task_subagent");
     terminal.setIdle(true);
-    expect(terminal.card("other-session-terminal").delivery).toMatchObject(steer);
+    expect(terminal.card("other-session-terminal").delivery).toMatchObject(aside);
   });
 
   test("drops the cards it owes when the session goes", async () => {
