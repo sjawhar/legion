@@ -18,13 +18,18 @@ body: |-
   clients trickling bodies, which are unauthenticated at that point because every layer reads the
   body before a handler resolves its caller, can no longer hold every write unit of a process and
   have every other write answered `429 OVERLOADED`. A body that arrives to find no room left is
-  itself answered `429 OVERLOADED`, with the body already read. Before, a body had 60 seconds in
+  itself answered `429 OVERLOADED`, with the body already read, and nothing of that write runs or
+  commits: the refusal cancels its handler where it stands, so a client that obeys `Retry-After`
+  and sends the write again stores it once. An upload refused that way stored its file, committed
+  its artifact row and had only its `201` replaced by the 429, so such a client uploaded the file
+  twice. Before, a body had 60 seconds in
   all from the first read of it and an answer the read's own deadline from its first byte, which
   refused an honest 25 MiB upload on a 1 Mbit/s uplink with `400 REQUEST_BODY_UNREADABLE` and cut
   off a large answer at 20 seconds, while 24 trickling clients still held every write unit for a
-  minute at a time. A body that stops arriving is still answered `400 REQUEST_BODY_UNREADABLE` (or
-  the answer its layer had already written, such as a refused upload's `409 ISSUE_CLOSED`) with the
-  connection closed after it, and a client that went away mid-body is now answered nothing and
-  recorded as `status=499` rather than written a 400 nobody reads. Every route still bounds its
+  minute at a time. A body that stops arriving, or whose framing the server cannot read, is still
+  answered `400 REQUEST_BODY_UNREADABLE` (or the answer its layer had already written, such as a
+  refused upload's `409 ISSUE_CLOSED`) with the connection closed after it, and a client that went
+  away mid-body is now answered nothing and recorded as `status=499` rather than written a 400
+  nobody reads, a keyed write's client as well as an unkeyed one's. Every route still bounds its
   body in bytes as it did: 1 MiB for a JSON route, 26 MiB for an upload. The document and delivery
   websockets are mounted outside the routes and neither bound touches them (INFRA-592).

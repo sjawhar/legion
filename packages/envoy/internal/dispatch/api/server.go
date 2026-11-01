@@ -682,6 +682,13 @@ func (s *server) serveRoute(route apiRoute, limiter *admission.Limiter, deadline
 // (drainedBody.park). A body that did not arrive is answered by the drain
 // (drainingWriter.refuseUnreadBody) and asks for no room at all.
 //
+// Such a body asks for the units again at its end, and admission may refuse it there: the
+// handler is then cancelled with that refusal as its context's cause (drainedBody.resume), so
+// its statements and its commit fail where they stand and nothing of the request is written,
+// whether or not the handler reads the refusal from the read that ended its body. Its answer is
+// the refusal, which admission.WriteUnserved writes from the cause: the client is still there,
+// so this cancellation is never the 499 of a client that went away.
+//
 // A request whose client went away while it waited is answered nothing, since nobody is left to
 // read it, and its line carries 499 rather than the 200 of a handler that wrote nothing: under
 // load a client that gives up while queued is the most frequent way a request ends unanswered.
@@ -705,10 +712,15 @@ func admitted(limiter *admission.Limiter, weight int, handler http.HandlerFunc) 
 			}
 		}
 		defer ticket.Release()
+		ctx := admission.WithTicket(r.Context(), ticket)
 		if body, drained := r.Body.(*drainedBody); drained {
 			body.ticket = ticket
+			var refused context.CancelCauseFunc
+			ctx, refused = context.WithCancelCause(ctx)
+			defer refused(nil)
+			body.refuse = refused
 		}
-		handler(w, r.WithContext(admission.WithTicket(r.Context(), ticket)))
+		handler(w, r.WithContext(ctx))
 	}
 }
 

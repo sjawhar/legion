@@ -59,6 +59,10 @@ func WriteRefused(w http.ResponseWriter, refusal *Refusal) {
 // serve it, and reports whether it did; on false the caller maps err as it always has. Its
 // order is the order the causes are told apart:
 //
+//   - a request cancelled by a refusal of the units it asked back (Ticket.Resume, whose refusal
+//     the caller made ctx's cause): 429 OVERLOADED, as a request refused before it ran is
+//     answered. It is told first because that cancellation reads as a client that went away,
+//     which it is not: the client is still there, and what it is owed is the refusal;
 //   - the read's deadline passed (DeadlinePassed): 503 REQUEST_TIMEOUT, whatever err says,
 //     since every failure after the deadline is the deadline's;
 //   - the client went away (ctx cancelled): nothing is written, since nobody reads it, and the
@@ -75,7 +79,11 @@ func WriteRefused(w http.ResponseWriter, refusal *Refusal) {
 // None of these is a fault of the server's to alarm an operator over, and under load every
 // request meets one, so each is logged at debug and never at error.
 func WriteUnserved(w http.ResponseWriter, ctx context.Context, err error) bool {
+	var refusal *Refusal
 	switch {
+	case errors.As(context.Cause(ctx), &refusal):
+		slog.Debug("dispatch: request refused the units it asked back", "error", refusal)
+		WriteRefused(w, refusal)
 	case DeadlinePassed(ctx):
 		slog.Debug("dispatch: read ran past its deadline", "error", err)
 		writeRetryable(w, http.StatusServiceUnavailable, CodeRequestTimeout, "the read ran past its deadline; retry after Retry-After")

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 )
 
@@ -24,12 +25,18 @@ import (
 // lock, which every other writer of that issue queues behind. A store that refuses leaves no row
 // behind; anything that refuses after it (a closed issue, a kind mismatch, a new name past its
 // bound, a failed insert) leaves an object no row names, which a later upload of the same bytes
-// reuses. The row records the hash the object is keyed by and no bytes.
+// reuses. The row records the hash the object is keyed by and no bytes. A write the request's
+// own context cut off - the refusal of the units its body asked back, or a client that went away
+// - is the request's, not the store's, and is answered as admission.WriteUnserved answers it,
+// with no ERROR line.
 func (s *server) putUploadedFile(w http.ResponseWriter, r *http.Request, kind, sha string, input artifactUploadInput) bool {
 	if kind == "doc" || s.deps.Files == nil {
 		return true
 	}
 	if err := s.deps.Files.Put(r.Context(), sha, input.contentType, input.content); err != nil {
+		if admission.WriteUnserved(w, r.Context(), err) {
+			return false
+		}
 		slog.Error("dispatch: store an uploaded file", "sha256", sha, "size", len(input.content), "error", err)
 		writeError(w, "FILE_STORE_UNAVAILABLE", http.StatusBadGateway, "the file store did not accept the upload")
 		return false

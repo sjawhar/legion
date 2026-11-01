@@ -1712,6 +1712,7 @@ Each item below names a status and code, then its meaning.
 - `400 REQUEST_BODY_UNREADABLE`
 
   The client did not finish sending the body the layer reads before the handler; nothing ran and the key was not claimed, so the same key may be sent again.
+  A client that went away mid-body is answered nothing instead, and recorded as `status=499`.
 
 A 5xx, a 401, a 408 and a 429 are not stored:
 the key is released and the next attempt runs the request again, unless the request had already committed a write, which makes that next attempt `409 KEY_COMMITTED` at once.
@@ -1735,7 +1736,7 @@ a broadcast answers once its messages are committed, with its deliveries behind 
 The layer reads a keyed body before its handler runs, spooling at most the route's own limit:
 26 MiB for the three upload routes (`POST /api/v1/issues/{key}/artifacts`, `/projects/{key}/artifacts`, `/agents/{session_id}/artifacts`), 1 MiB for every other.
 A body past it runs unkeyed and its route refuses it.
-A body the client did not finish sending is `400 REQUEST_BODY_UNREADABLE`;
+A body the client did not finish sending is `400 REQUEST_BODY_UNREADABLE`, and one whose client went away is answered nothing and recorded as `status=499`;
 one Dispatch cannot spool to its temporary directory is Dispatch's own failure, a 5xx with the key echoed, which the client asks again.
 
 Every answer the layer judged echoes the key back (`Idempotency-Key: <key>`) - not the `400 KEY_INVALID`, a request whose caller it could not resolve, or one whose body is past its route's limit, each of which runs unkeyed - and `/healthz` answers `idempotency_keys: true` on every build that judges the header - a fact of the binary, so it is true whatever the database or NATS answer, on a `503` too.
@@ -2656,10 +2657,11 @@ A request's body, and a read's answer, are bounded on the silence between their 
 20 seconds without a byte ends it, and so does an average below 32 KB/s once the transfer has had a minute's grace.
 So an upload over a slow uplink is taken however long it needs - a 26 MiB file at 1 Mbit/s takes about three and a half minutes - and a large answer read over a slow downlink is written in full, where both were once cut off at a fixed 60 and 20 seconds.
 Past either bound the read of the body fails, and the request is answered `400 REQUEST_BODY_UNREADABLE` - or with whatever its layer had already answered, such as a refused upload's `409 ISSUE_CLOSED` - with the connection closed after it;
+a body whose framing Dispatch cannot read at all is the same `400`, its client being still there;
 a client that went away instead is answered nothing and recorded as `status=499`.
 A client that stops reading an answer has the connection closed under it within the same 20 seconds.
 A write whose client is already sending, and whose class has no room for it, reads its whole body off the connection before it asks for room at all: it waits holding nothing, its wait counts from the body's end, and a client that hangs up while it waits is noticed there and then - the request leaves the queue at once and is recorded as `status=499`, where a queued write with an unread body held its place for its whole wait and was answered a 429 nobody read.
-A write admitted before its body - one the server had room for, and one whose client asked to be told to continue (`Expect: 100-continue`) and so has sent nothing - gives its admission units back while the body arrives and takes them again once it has arrived, at the place it arrived in the queue, so clients trickling bodies cannot hold the server's room for writes either way, and a body that arrives to find no room left is answered `429 OVERLOADED` with its body already read.
+A write admitted before its body - one the server had room for, and one whose client asked to be told to continue (`Expect: 100-continue`) and so has sent nothing - gives its admission units back while the body arrives and takes them again once it has arrived, at the place it arrived in the queue, so clients trickling bodies cannot hold the server's room for writes either way, and a body that arrives to find no room left is answered `429 OVERLOADED` with its body already read, its handler cancelled by the refusal so that nothing of the write runs or commits and the whole of it may be sent again.
 Each route also bounds its body in bytes: 1 MiB for a JSON route (`413 REQUEST_TOO_LARGE`) and 26 MiB for an upload (`413 CAP_EXCEEDED`).
 Neither bound touches the websockets, which are mounted outside the routes.
 
@@ -2710,6 +2712,7 @@ Each item below names a status and code, then its meaning.
 - `400 REQUEST_BODY_UNREADABLE`
 
   The request's body stopped arriving: 20 seconds passed without a byte of it, or it fell below 32 KB/s after its first minute; nothing ran, and the connection closes after the answer.
+  A body whose framing the server cannot read, a malformed chunk among them, is answered the same way.
   A client that went away mid-body is answered nothing instead, and recorded as `status=499`.
   A keyed request answers it too, with its key unclaimed, so the same key may be sent again.
 

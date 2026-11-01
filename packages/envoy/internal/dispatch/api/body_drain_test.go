@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -712,5 +713,161 @@ func TestAnEarlyAnswerToAClientWaitingToContinueAsksForNoBody(t *testing.T) {
 				t.Fatalf("the refusal left open a connection whose body was never sent (Connection: %q)", response.Header.Get("Connection"))
 			}
 		})
+	}
+}
+
+// refusedAtResume sends a write over a connection of its own whose client asks to be told to
+// continue, waits for the first read of its body - which parks the request's admission units -
+// then fills the write class so those units cannot come back, and only then sends the whole
+// body. It answers what the server answered the write.
+//
+// net/http tells a client that asked to continue to do so at the first read of its body, so the
+// 100 Continue says the request is in that read with its units parked and not a byte of its
+// body sent (drainedBody.park).
+func refusedAtResume(t *testing.T, limiter *admission.Limiter, address, target, contentType string, body []byte) (*http.Response, []byte) {
+	t.Helper()
+	header := http.Header{}
+	header.Set("Content-Type", contentType)
+	header.Set("X-Dispatch-User", "alice")
+	header.Set("Expect", "100-continue")
+	sent := sendPartOfBody(t, address, target, header, len(body), nil)
+	if response, answer := sent.answer(); response.StatusCode != http.StatusContinue {
+		t.Fatalf("the write was answered %d %s before it sent a byte, want the 100 Continue of a body being read",
+			response.StatusCode, answer)
+	}
+	held, err := limiter.Admit(context.Background(), admission.Write, 1)
+	if err != nil {
+		t.Fatalf("hold the write class's one unit while the body arrives: %v", err)
+	}
+	defer held.Release()
+	return sent.finish(body)
+}
+
+// A write admitted before its body parks its admission units while that body arrives and asks
+// for them back at its end, where the server may have no room left for it (drainedBody.resume).
+// Such a write runs and commits nothing: its client is answered the refusal, whose body says
+// nothing ran, and may send the whole thing again after Retry-After.
+//
+// The refusal reached the handler only as the error of the read that returned the body's last
+// bytes, and neither of these two readers passes that error on: a multipart parse reads through
+// a bufio.Reader, and a JSON decode through a json.Decoder, each of which has the whole value
+// from the bytes that came with the error and holds the error back for a read nobody makes. So
+// an unkeyed upload stored its file, committed its artifact row and published its event, and
+// only then had its 201 replaced by the 429 - and every client that obeyed Retry-After uploaded
+// the file a second time.
+func TestAWriteRefusedWhenItAsksItsUnitsBackCommitsNothing(t *testing.T) {
+	limiter := admission.New(admission.Limits{Read: 4, Write: 1, Wait: 250 * time.Millisecond})
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{
+		admission: limiter, files: filestest.NewMemory(),
+	})
+	served.transfer = transferBounds{idle: 10 * time.Second}
+	issue := createArtifactIssue(t, handler)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	upload, contentType, err := apitest.MultipartUpload(
+		map[string]string{"name": "refused.bin"}, "refused.bin", "application/octet-stream", bytes.Repeat([]byte("a"), 64<<10))
+	if err != nil {
+		t.Fatalf("build the upload: %v", err)
+	}
+
+	for _, write := range []struct {
+		name, target, contentType string
+		body                      []byte
+		// written counts the rows the write would have left behind.
+		written func() int
+	}{
+		{
+			name: "an unkeyed multipart upload", target: "/api/v1/issues/" + issue.Key + "/artifacts",
+			contentType: contentType, body: upload.Bytes(),
+			written: func() int {
+				return countRows(t, database, `select count(*) from artifact_versions v
+					join artifacts a on a.id = v.artifact_id where a.issue_key = $1`, issue.Key)
+			},
+		},
+		{
+			name: "a JSON comment", target: "/api/v1/issues/" + issue.Key + "/comments",
+			contentType: "application/json", body: []byte(`{"body":"refused when it asked its units back"}`),
+			written: func() int {
+				return countRows(t, database, `select count(*) from comments where issue_key = $1`, issue.Key)
+			},
+		},
+	} {
+		t.Run(write.name, func(t *testing.T) {
+			before := write.written()
+			response, answer := refusedAtResume(t, limiter, httpServer.Listener.Addr().String(),
+				write.target, write.contentType, write.body)
+			if response.StatusCode != http.StatusTooManyRequests || refusalCode(answer) != admission.CodeOverloaded {
+				t.Fatalf("the write refused when it asked its units back: status=%d body=%s, want 429 %s",
+					response.StatusCode, answer, admission.CodeOverloaded)
+			}
+			if retryAfter := response.Header.Get("Retry-After"); retryAfter != admission.RetryAfter {
+				t.Fatalf("the refusal's Retry-After = %q, want %s", retryAfter, admission.RetryAfter)
+			}
+			if after := write.written(); after != before {
+				t.Fatalf("the refused write left %d rows where there were %d, want nothing of it written", after, before)
+			}
+		})
+	}
+}
+
+// countRows is the one count query answers for the issue key it takes.
+func countRows(t *testing.T, database *store.Store, query, issueKey string) int {
+	t.Helper()
+	var rows int
+	if err := database.Pool.QueryRow(context.Background(), query, issueKey).Scan(&rows); err != nil {
+		t.Fatalf("count the write's rows: %v", err)
+	}
+	return rows
+}
+
+// A body whose framing the server cannot read is refused 400 REQUEST_BODY_UNREADABLE with its
+// client still there to read it. net/http cancels the request of a connection whose own read
+// fails, the body's read bound among them, but a chunked body whose framing is malformed fails
+// in the parser with the connection and its context untouched, so a read failure on its own
+// does not say the client has gone (drainedBody.clientGone). Taking every failure but the
+// bound's deadline for a client that had gone, the request was written nothing and net/http
+// answered the client that was still there an empty 200 OK, which a client reads as its write
+// having been taken.
+func TestAWriteWhoseBodyFramingFailsIsRefusedRatherThanAnsweredEmpty(t *testing.T) {
+	limiter := admission.New(admission.Limits{Read: 4, Write: 1})
+	handler, _, _ := newTestServer(t, testServerOptions{admission: limiter})
+	issue := createInteractionIssue(t, handler, "TEST", "Malformed framing", "A spec")
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	// With the write class full the request reads its body off the connection before it waits
+	// for room (drainedBody.readWhole), so the failed read is met before any handler runs and
+	// nothing but the drain's own refusal can answer it.
+	held, err := limiter.Admit(context.Background(), admission.Write, 1)
+	if err != nil {
+		t.Fatalf("hold the write class's one unit: %v", err)
+	}
+	defer held.Release()
+
+	connection, err := net.Dial("tcp", httpServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial the server: %v", err)
+	}
+	t.Cleanup(func() { connection.Close() })
+	if err := connection.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	// A chunk whose length is not hexadecimal: net/http's parser refuses it, having read it off
+	// a connection that is still open.
+	if _, err := fmt.Fprintf(connection, "POST /api/v1/issues/%s/comments HTTP/1.1\r\nHost: dispatch\r\n"+
+		"X-Dispatch-User: alice\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n"+
+		"5\r\n{\"bo\r\nZZZZ\r\n", issue.Key); err != nil {
+		t.Fatalf("send the write with the malformed chunk: %v", err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	if err != nil {
+		t.Fatalf("read the answer: %v", err)
+	}
+	defer response.Body.Close()
+	answer, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read the answer's body: %v", err)
+	}
+	if response.StatusCode != http.StatusBadRequest || refusalCode(answer) != "REQUEST_BODY_UNREADABLE" {
+		t.Fatalf("status=%d body=%s, want 400 REQUEST_BODY_UNREADABLE", response.StatusCode, answer)
 	}
 }

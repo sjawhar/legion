@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -275,6 +276,14 @@ func (s *server) keyedWrites(route apiRoute, handler http.HandlerFunc) http.Hand
 			s.writeHandlerError(w, r, err)
 			return
 		case err != nil:
+			// A client that went away while its body arrived is written nothing and its line
+			// carries 499, as every gone client's does: this wrote it a 400 nobody was left to
+			// read, and the line carried that 400. A client still there is answered the 400 as
+			// before, and a body cut off by a refusal of the units its request asked back is
+			// answered that refusal (admission.WriteUnserved).
+			if admission.WriteUnserved(w, r.Context(), err) {
+				return
+			}
 			writeError(w, "REQUEST_BODY_UNREADABLE", http.StatusBadRequest, "could not read the request body: "+err.Error())
 			return
 		}

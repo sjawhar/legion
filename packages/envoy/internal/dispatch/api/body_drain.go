@@ -189,7 +189,6 @@ func (s *server) drainBeforeAnswer(route apiRoute, handler http.HandlerFunc) htt
 		answer := &drainingWriter{
 			ResponseWriter: w,
 			body:           body,
-			limit:          limit,
 			tooLarge:       tooLarge,
 		}
 		handler(answer, r)
@@ -207,7 +206,14 @@ type drainedBody struct {
 	// was given (the drain sits outside admission, serveRoute); nil for a request admission did
 	// not count or has not admitted yet, whose body parks nothing.
 	ticket *admission.Ticket
-	// ctx is the request's own context, which the units are taken back under (resume).
+	// refuse cancels the handler's own context with the refusal that would not let the request
+	// take its units back (resume), which admitted gives the body beside the ticket; nil for a
+	// request admission did not count. The handler then writes nothing and commits nothing,
+	// whether or not it read that refusal from the Read that ended its body, and its answer is
+	// the refusal (admission.WriteUnserved).
+	refuse context.CancelCauseFunc
+	// ctx is the request's own context, which the units are taken back under (resume). It is
+	// the one outside the handler's, so a refusal of those units does not cancel it.
 	ctx context.Context
 	// length is how many bytes the client said its body holds (Content-Length), or -1 where it
 	// said nothing: the body has ended once that many have arrived, whether or not the layer
@@ -233,9 +239,8 @@ type drainedBody struct {
 	touched  bool
 	ended    bool
 	answered bool
-	// failed is a body that ended on anything but its end: the bound it arrives under passed, its
-	// client went away, its connection broke. failure is what that read answered.
-	failed  bool
+	// failure is what the read that ended the body on anything but its end answered: the bound
+	// it arrives under passed, its client went away, its connection broke.
 	failure error
 	// spoilt is the spool's own failure - a temporary file Dispatch could not write or read back
 	// - which is the server's fault rather than the request's and is answered as one.
@@ -305,10 +310,18 @@ func (b *drainedBody) park() {
 // them, and answers what its reader is told. The units come back at the place the request
 // arrived, ahead of every request that arrived after it, and the queue costs it one wait over
 // its whole life (admission.Ticket.Resume). A request whose answer has already begun takes
-// nothing back: its work is over, and the units it parked are another request's. A refusal is the
-// request's answer, kept for the answer's writer to give as a 429 with the body already read; ctx's
-// error is its client having gone, which the handler it ends answers as it answers any other gone
-// client (admission.WriteUnserved).
+// nothing back: its work is over, and the units it parked are another request's. ctx's error is
+// its client having gone, which the handler it ends answers as it answers any other gone client
+// (admission.WriteUnserved).
+//
+// A refusal is the request's answer, kept for the answer's writer to give as a 429 with the body
+// already read, and the handler is cancelled under it with the refusal as its cause (refuse).
+// Returning the refusal from the read that ended the body is not enough on its own: an upload's
+// multipart parse reads the body through a bufio.Reader, which holds back the error that came
+// with the last bytes once it has read the closing boundary from them, so the handler went on to
+// store the file and commit the artifact row and only then had its 201 replaced by the 429, and a
+// client that obeyed Retry-After uploaded the file twice. Cancelled, the handler's next statement
+// and its commit fail whether it reads that refusal or not, so nothing of the request is written.
 func (b *drainedBody) resume() error {
 	if !b.parked || b.answered {
 		return nil
@@ -318,6 +331,9 @@ func (b *drainedBody) resume() error {
 	var refusal *admission.Refusal
 	if errors.As(err, &refusal) {
 		b.refusal = refusal
+		if b.refuse != nil {
+			b.refuse(refusal)
+		}
 	}
 	return err
 }
@@ -331,12 +347,14 @@ func (b *drainedBody) complete() bool {
 }
 
 // clientGone reports whether the read that failed this body failed because its client went away
-// rather than because the bound it arrives under cut it off. net/http cancels the request of any
-// connection whose read fails, the bound's own deadline among them (connReader.handleReadError),
-// so the request's context does not tell the two apart; the failure does, and a client still
-// there is owed the answer its body never let the server give.
+// rather than because the body itself could not be read. A client that went away cancels the
+// request's context, as does the bound's own deadline, since net/http cancels the request of any
+// connection whose read fails (connReader.handleReadError): the two are told apart by the
+// failure, the deadline's being the bound's. Every other failure - a chunked body whose framing
+// net/http cannot read, a connection that broke under a client still there - leaves that context
+// alone, and such a client is owed the answer its body never let the server give.
 func (b *drainedBody) clientGone() bool {
-	return !errors.Is(b.failure, os.ErrDeadlineExceeded)
+	return errors.Is(b.ctx.Err(), context.Canceled) && !errors.Is(b.failure, os.ErrDeadlineExceeded)
 }
 
 func (b *drainedBody) Read(p []byte) (int, error) {
@@ -379,7 +397,7 @@ func (b *drainedBody) Read(p []byte) (int, error) {
 func (b *drainedBody) end(err error) error {
 	b.ended = true
 	if err != nil && !errors.Is(err, io.EOF) {
-		b.failed, b.failure = true, err
+		b.failure = err
 		return err
 	}
 	b.lift()
@@ -485,7 +503,6 @@ func (b *spooledBody) close() {
 type drainingWriter struct {
 	http.ResponseWriter
 	body     *drainedBody
-	limit    int64
 	tooLarge *apiError
 	begun    bool
 	replaced bool
@@ -507,9 +524,11 @@ type drainingWriter struct {
 // handler's 413 - stands as it does for a body read off the connection.
 //
 // A body that arrived and found the server with no room to take its units back is answered the
-// 429 that refused it, in place of whatever its reader made of the error that refusal ended its
-// last read with: nothing of the request ran, the body is off the connection, and the client may
-// send it again after Retry-After.
+// 429 that refused it, in place of whatever the layer above made of that refusal: the body is
+// off the connection and the client may send the whole request again after Retry-After. Nothing
+// of the request ran, because the refusal cancelled the handler as well (drainedBody.resume),
+// and whatever that handler then tried to write - the refusal itself through
+// admission.WriteUnserved, or an answer to the error its own reader gave it - is this one 429.
 func (w *drainingWriter) begin(status int) {
 	if w.begun {
 		return
@@ -532,7 +551,7 @@ func (w *drainingWriter) begin(status int) {
 	if body.ended || body.oversize() || (body.askedContinue && !body.touched) {
 		return
 	}
-	_, err := io.CopyN(io.Discard, body, w.limit-body.moved+1)
+	_, err := io.CopyN(io.Discard, body, body.limit-body.moved+1)
 	switch {
 	case errors.Is(err, io.EOF):
 		// The body ended inside the limit: the answer stands.
@@ -561,16 +580,16 @@ func (w *drainingWriter) answerTooLarge() {
 // an empty body, and a client that trickled its body would read that as its write having been
 // taken. A handler that answered, however early, answered for itself (begin).
 //
-// A body the bound cut off is refused as the keyed layer refuses a body it could not read, and
-// the connection closes after the answer, the rest of the body unread: its client is still there
-// to read the refusal. A client that went away is written nothing, since nobody is left to read
-// it, and its line carries 499 rather than the 200 of a handler that wrote nothing. A body that
-// arrived and found no room to take its units back is the 429 that refused it. A spool Dispatch
-// could not write is none of these: the request was good, the server was not, so it is the 500 a
-// server fault always is.
+// A body the bound cut off, and one whose framing could not be read, are refused as the keyed
+// layer refuses a body it could not read, and the connection closes after the answer, the rest
+// of the body unread: that client is still there to read the refusal. A client that went away is
+// written nothing, since nobody is left to read it, and its line carries 499 rather than the 200
+// of a handler that wrote nothing. A body that arrived and found no room to take its units back
+// is the 429 that refused it. A spool Dispatch could not write is none of these: the request was
+// good, the server was not, so it is the 500 a server fault always is.
 func (w *drainingWriter) refuseUnreadBody() {
 	body := w.body
-	if w.begun || (!body.failed && body.refusal == nil && body.spoilt == nil) {
+	if w.begun || (body.failure == nil && body.refusal == nil && body.spoilt == nil) {
 		return
 	}
 	w.begun = true
@@ -641,16 +660,36 @@ type boundedAnswer struct {
 	control *http.ResponseController
 }
 
+// answerSlice is how much of one Write goes to net/http at a time. The bound is armed before
+// each slice and the slice counted after it, so an answer written in one call - WriteJSON
+// encodes the whole answer in one Write, and a version held in its row is served in one
+// (serveFileVersion) - is bounded as one written in many: the idle bound is on the silence
+// between its slices rather than on the whole call, and the floor on the rate they keep. Handed
+// to net/http whole, a 25 MiB answer had to leave the server inside one idle bound, which cut
+// off every client below about 1.3 MB/s, where the rule is twenty seconds of silence and
+// 32 KiB/s after the first minute.
+const answerSlice = 64 << 10
+
 func (a *boundedAnswer) WriteHeader(status int) {
 	a.arm()
 	a.ResponseWriter.WriteHeader(status)
 }
 
 func (a *boundedAnswer) Write(p []byte) (int, error) {
-	a.arm()
-	n, err := a.ResponseWriter.Write(p)
-	a.moved += int64(n)
-	return n, err
+	written := 0
+	for {
+		slice := p[written:]
+		if len(slice) > answerSlice {
+			slice = slice[:answerSlice]
+		}
+		a.arm()
+		n, err := a.ResponseWriter.Write(slice)
+		written += n
+		a.moved += int64(n)
+		if err != nil || written >= len(p) {
+			return written, err
+		}
+	}
 }
 
 func (a *boundedAnswer) Flush() {

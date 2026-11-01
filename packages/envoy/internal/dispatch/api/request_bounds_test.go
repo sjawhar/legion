@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
@@ -961,4 +962,110 @@ func TestAWriteWhoseBodyOutlastsItsWaitIsAdmittedAfterIt(t *testing.T) {
 	if response := awaitResponse(t, held); response.Code != http.StatusOK {
 		t.Fatalf("the held write: status=%d body=%s, want 200", response.Code, response.Body.String())
 	}
+}
+
+// A slow but steady reader is answered in full however the handler wrote the answer: one Write
+// of the whole thing is bounded as many small ones are, the silence between its bytes and the
+// rate they keep (boundedAnswer.Write, which sends it in slices). Most answers are written in
+// one call - WriteJSON encodes the whole answer and writes it once, and a file version held in
+// its row is served in one Write - and one call had to finish inside a single idle bound, so a
+// 25 MiB download was cut for every client below about 1.3 MB/s. Here the reader takes several
+// times the idle bound to read an answer the handler wrote in one call, and reads far faster
+// than the floor.
+func TestASlowButSteadyReaderOfAnAnswerWrittenInOneWriteIsAnsweredInFull(t *testing.T) {
+	const idle, deadline, answer, chunk = time.Second, 30 * time.Second, 32 << 20, 256 << 10
+	_, _, _, served := newRegisteredTestServer(t, testServerOptions{})
+	served.transfer = transferBounds{idle: idle, grace: 2 * time.Second, floor: 32 << 10}
+	const pattern = "/api/v1/one-write-answer-test"
+	route := apiRoute{routeRow: routeRow{Method: http.MethodGet, Pattern: pattern, Auth: authAny, Handler: func(w http.ResponseWriter, r *http.Request) {
+		began := time.Now()
+		if _, err := w.Write(make([]byte, answer)); err != nil {
+			t.Errorf("write the whole answer in one call, %v in: %v", time.Since(began), err)
+		}
+	}}}
+	mux := http.NewServeMux()
+	mux.HandleFunc(route.Method+" "+pattern, served.serveRoute(route, admission.New(admission.DefaultLimits()), deadline))
+	httpServer := httptest.NewServer(mux)
+	t.Cleanup(httpServer.Close)
+
+	connection, err := net.Dial("tcp", httpServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial the server: %v", err)
+	}
+	t.Cleanup(func() { connection.Close() })
+	if _, err := fmt.Fprintf(connection, "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n", pattern, httpServer.Listener.Addr()); err != nil {
+		t.Fatalf("send the read: %v", err)
+	}
+	if err := connection.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	if err != nil {
+		t.Fatalf("read the answer's head: %v", err)
+	}
+	defer response.Body.Close()
+
+	started := time.Now()
+	block := make([]byte, chunk)
+	for read := 0; read < answer; {
+		// A chunk every 20 ms: the whole answer takes about two and a half seconds, several
+		// times the idle bound, at about 13 MB/s, which is far above the 32 KiB/s floor.
+		time.Sleep(20 * time.Millisecond)
+		n, err := io.ReadFull(response.Body, block)
+		read += n
+		if err != nil {
+			t.Fatalf("the answer stopped %v in, after %d of %d bytes: %v", time.Since(started), read, answer, err)
+		}
+	}
+	if elapsed := time.Since(started); elapsed < idle {
+		t.Fatalf("the answer was read in %v, want a reader slower than its %v idle bound", elapsed, idle)
+	}
+}
+
+// A keyed write whose client goes away while its body arrives is answered nothing and recorded
+// as the 499 it is, as an unkeyed one is: the keyed layer reads the body itself, to judge the
+// key by its digest, and wrote the 400 of a body it could not read to a client that was no
+// longer there, which the line then carried. First-party clients - the page, the dispatch
+// command - send Idempotency-Key on every write, so this is the common shape of a write a
+// client abandons.
+func TestAKeyedWriteWhoseClientLeavesMidBodyIsLoggedClientGone(t *testing.T) {
+	handler, _, _, served := newRegisteredTestServer(t, testServerOptions{})
+	served.transfer = transferBounds{idle: 10 * time.Second}
+	issue := createInteractionIssue(t, handler, "TEST", "Keyed write left mid-body", "A spec")
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	logged := captureLog(t)
+
+	connection, err := net.Dial("tcp", httpServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial the server: %v", err)
+	}
+	body := `{"body":"half of this comment`
+	if _, err := fmt.Fprintf(connection, "POST /api/v1/issues/%s/comments HTTP/1.1\r\nHost: dispatch\r\n"+
+		"X-Dispatch-User: alice\r\nContent-Type: application/json\r\n%s: left-mid-body\r\nContent-Length: %d\r\n\r\n%s",
+		issue.Key, contracts.IdempotencyKeyHeader, len(body)+100, body); err != nil {
+		t.Fatalf("send the keyed write: %v", err)
+	}
+	// The rest of the body never comes: the client goes away with the server reading.
+	time.Sleep(100 * time.Millisecond)
+	_ = connection.Close()
+
+	line := awaitAccessLineOfRoute(t, logged, "/api/v1/issues/{key}/comments")
+	if !strings.Contains(line, "status=499") {
+		t.Fatalf("the keyed write whose client left mid-body logged:\n%s\nwant status=499", line)
+	}
+}
+
+// awaitAccessLineOfRoute is accessLineOfRoute once the line is there, within ten seconds of the
+// call: a request whose client has gone is answered nobody, so nothing but its line says it ended.
+func awaitAccessLineOfRoute(t *testing.T, logged *logBuffer, route string) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !strings.Contains(logged.String(), " route="+route+" ") {
+		if time.Now().After(deadline) {
+			t.Fatalf("no access-log line named route %s within ten seconds:\n%s", route, logged.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return accessLineOfRoute(t, logged, route)
 }
