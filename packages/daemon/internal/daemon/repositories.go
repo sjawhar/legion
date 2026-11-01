@@ -1238,7 +1238,7 @@ func (w *workflowRuntime) prepareIssue(ctx context.Context, issue intake.Dispatc
 		return w.withAncestry(ctx, w.prepareRecorded(issue, recorded), recorded, observe)
 	}
 	if !admissionBound(issue) {
-		if labelledTriageRoot(issue) {
+		if issue.LabelledTriageRoot() {
 			if issue.LabelSetter, err = w.labelSetter(ctx, issue.Key); err != nil {
 				return issue, err
 			}
@@ -1270,13 +1270,6 @@ func (w *workflowRuntime) prepareIssue(ctx context.Context, issue intake.Dispatc
 	return prepared, nil
 }
 
-// labelledTriageRoot says whether issue is a root (no Dispatch parent) in triage that carries the
-// label: the issue whose label's setter admission reads to queue a person's handover
-// (intake.DispatchIssue.LabelSetter), while the workflow does not record it.
-func labelledTriageRoot(issue intake.DispatchIssue) bool {
-	return issue.Status == "triage" && issue.Parent == "" && issue.HandedOver
-}
-
 // labelSetter is the kind of the Dispatch actor that added the label to key, read from the issue's
 // whole Dispatch event log, from sequence 0, by intake.LabelSetter's rule: one paged read per call,
 // outside the fact lock as the rest of a preparation reads, for an event's preparation
@@ -1306,7 +1299,7 @@ func (w *workflowRuntime) labelSetter(ctx context.Context, key string) (string, 
 // a changes request, a carried approval, a version — asks Dispatch nothing and is applied as
 // decoded, with no view, which queues nothing.
 func (w *workflowRuntime) prepareArtifact(ctx context.Context, fact intake.DispatchArtifact) (intake.DispatchArtifact, error) {
-	if fact.Kind != intake.DispatchArtifactApproved || !fact.Actor.Person() || fact.CarriedApproval() {
+	if !fact.PersonApproval() {
 		return fact, nil
 	}
 	issue, err := w.dispatch.GetIssue(ctx, fact.Key)

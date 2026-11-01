@@ -179,8 +179,8 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 	// record stays empty, as for any root not yet todo; the daemon's own todo write records it
 	// through the path below once Dispatch echoes it. Reconcile's boot listing reads every status
 	// now, but a triage root is never a todo candidate it admits.
-	if observation.Status == "triage" && observation.Parent == "" && handed {
-		if observation.LabelSetter == "user" {
+	if observation.LabelledTriageRoot() {
+		if observation.LabelSetByPerson() {
 			if err := a.queuePersonHandover(ctx, tx, observation.Key, "triage", "event"); err != nil {
 				return nil, nil, err
 			}
@@ -616,7 +616,7 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary intake.
 		// setter returns below as it did before, with no wake: the listing carries no actor, so
 		// only a person's label read from the log queues, and a session's label at boot is the
 		// controller's to find at its own start, as it always was.
-		if summary.Status == "triage" && summary.Parent == "" && handed && summary.LabelSetter == "user" {
+		if summary.LabelledTriageRoot() && summary.LabelSetByPerson() {
 			return a.queuePersonHandover(ctx, tx, summary.Key, "triage", "listing")
 		}
 		if summary.Status != "todo" {

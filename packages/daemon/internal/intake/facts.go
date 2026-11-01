@@ -110,6 +110,20 @@ type DispatchIssue struct {
 	LabelSetter string
 }
 
+// LabelledTriageRoot says whether the fact shows a root (no Dispatch parent) in triage that
+// carries the label: the one kind of issue whose label's setter the prepare stage and the boot
+// listing read (LabelSetter), and admission then judges, so the two sides test one predicate.
+func (i DispatchIssue) LabelledTriageRoot() bool {
+	return i.Status == "triage" && i.Parent == "" && i.HandedOver
+}
+
+// LabelSetByPerson says whether a person set the label (LabelSetter), by the one rule the daemon
+// has for who is a person (dispatch.Actor.Person): a session's or Dispatch's own label is not,
+// and neither is a setter nothing read.
+func (i DispatchIssue) LabelSetByPerson() bool {
+	return dispatch.Actor{Kind: i.LabelSetter}.Person()
+}
+
 // ObservedIssue is issue as Dispatch's detail shows it now, as an Observed fact at the sequence
 // Dispatch has run to: its status, title, parent, rank, hand-over and repository, with no event's
 // type or actor, since no one event wrote that state. release_children's todo child and an
@@ -249,6 +263,15 @@ const CarriedApprovalReasonPrefix = "Carried forward from the approval of versio
 // an approval given with none carries) is not a carry.
 func (a DispatchArtifact) CarriedApproval() bool {
 	return strings.HasPrefix(a.Reason, CarriedApprovalReasonPrefix)
+}
+
+// PersonApproval says whether the review is an approval a person made themselves: an approval,
+// not a changes request or a version, by an actor Dispatch names a person, and not a carried one
+// (CarriedApproval). It is the one review the daemon reads the issue for when it prepares the
+// fact, and the one that can queue a parked labelled root as the person's handover, so the read
+// side and the deciding side test one predicate.
+func (a DispatchArtifact) PersonApproval() bool {
+	return a.Kind == DispatchArtifactApproved && a.Actor.Person() && !a.CarriedApproval()
 }
 
 // GateAboveDispatch is the gate seed of a generation (Generation) finding the document at a version

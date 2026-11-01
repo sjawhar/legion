@@ -504,7 +504,8 @@ func (w *workflowRuntime) reconcileListing(ctx context.Context, issues []dispatc
 			continue
 		}
 		fact := intake.ListedIssue(summary)
-		if summary.Status == "todo" || labelledTriageRoot(fact) {
+		labelledTriageRoot := fact.LabelledTriageRoot()
+		if fact.Status == "todo" || labelledTriageRoot {
 			if walk == nil {
 				if records, walk, err = w.listingAncestry(ctx, issues); err != nil {
 					return err
@@ -512,13 +513,13 @@ func (w *workflowRuntime) reconcileListing(ctx context.Context, issues []dispatc
 			}
 		}
 		switch {
-		case summary.Status == "todo":
+		case fact.Status == "todo":
 			prepared, err := w.prepareListed(ctx, records, walk, fact)
 			if err != nil {
 				return fmt.Errorf("prepare the repository of %s for admission: %w", summary.Key, err)
 			}
 			fact.Ancestry = prepared.Ancestry
-		case labelledTriageRoot(fact) && records[summary.Key] == nil:
+		case labelledTriageRoot && records[summary.Key] == nil:
 			// The listing carries no actor, so the setter is read from the log as an event's is;
 			// a recorded root a person moved back to triage is never queued again, so its log is
 			// not read.

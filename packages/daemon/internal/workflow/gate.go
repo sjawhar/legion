@@ -608,7 +608,7 @@ func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.Di
 // sees the approvals given while it lingered.
 func (e *Engine) personHandoverQueues(ctx context.Context, tx pgx.Tx, fact intake.DispatchArtifact) (bool, error) {
 	view := fact.Issue
-	if view == nil || fact.Kind != intake.DispatchArtifactApproved || !fact.Actor.Person() || fact.CarriedApproval() {
+	if view == nil || !fact.PersonApproval() {
 		return false, nil
 	}
 	parked := view.Status == "backlog" || view.Status == "icebox"
