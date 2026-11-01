@@ -286,7 +286,7 @@ func TestARoleStartedInAKeptPodIsToldTheSessionStoreThatPodCarries(t *testing.T)
 				wanted, wants := want[variable]
 				if told != wants || got != wanted {
 					t.Errorf("the start command carries %s=%q (told %t), want %q (told %t): its kept pod carries %s",
-						variable, got, told, wanted, wants, sessionStoreInPod(g.pod(loc.Sandbox.Name)))
+						variable, got, told, wanted, wants, sessionStoreInPod(&g.pod(loc.Sandbox.Name).Spec))
 				}
 			}
 		})

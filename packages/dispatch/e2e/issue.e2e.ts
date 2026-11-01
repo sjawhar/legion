@@ -550,7 +550,9 @@ test("closing an issue removes its asks from the inbox and pinning stays private
   try {
     await page.goto(`/issues/${issue.key}`);
     await inbox.goto("/");
-    await expect(inbox.locator("[data-testid^=ask-]")).toHaveCount(2);
+    // The Inbox's rows are what the close takes a question out of: from 1280 px a card is drawn
+    // for the selected row alone (INFRA-575), so the rows are the list.
+    await expect(inbox.locator("[data-inbox-row]")).toHaveCount(2);
     await page.getByRole("button", { name: "Close issue" }).click();
     await expect
       .poll(() => getIssue(issue.key))
@@ -559,7 +561,7 @@ test("closing an issue removes its asks from the inbox and pinning stays private
         status: "done",
       });
     await expect(page.getByText("This issue is closed.", { exact: true })).toBeVisible();
-    await expect(inbox.locator("[data-testid^=ask-]")).toHaveCount(1);
+    await expect(inbox.locator("[data-inbox-row]")).toHaveCount(1);
     await expect(inbox.getByText("First ask", { exact: true })).toHaveCount(0);
     await page.getByRole("button", { name: "Pin issue" }).click();
     await expect(page.getByRole("button", { name: "Unpin issue" })).toBeEnabled();
@@ -578,7 +580,7 @@ test("closing an issue removes its asks from the inbox and pinning stays private
       // Alice's issues are nobody else's own work; the closed one is gone from the cleared
       // filter too.
       await bobPage.goto("/?assignee=everyone");
-      await expect(bobPage.locator("[data-testid^=ask-]")).toHaveCount(1);
+      await expect(bobPage.locator("[data-inbox-row]")).toHaveCount(1);
       await expect(bobPage.getByText("First ask", { exact: true })).toHaveCount(0);
       await expect(bobPage.getByRole("heading", { name: "Pinned" })).toHaveCount(0);
     } finally {

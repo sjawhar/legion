@@ -581,7 +581,7 @@ func (r *Runtime) movedSessionStore(pod *corev1.Pod) (movedAddress, bool) {
 	for i, value := range proxy {
 		proxy[i] = kubeletEscape(value)
 	}
-	held := sessionStoreInPod(pod)
+	held := sessionStoreInPod(&pod.Spec)
 	handed := sessionStoreName(r.sessionStore.Kind, r.sessionStore.DSNSecretKey(), proxy)
 	if held == handed {
 		return movedAddress{}, false
@@ -589,10 +589,11 @@ func (r *Runtime) movedSessionStore(pod *corev1.Pod) (movedAddress, bool) {
 	return movedAddress{where: "the session store", held: held, handed: handed}, true
 }
 
-// sessionStoreInPod names the session store pod was created under, read back from the pod itself
-// (heldSessionStore, sessionStoreName).
-func sessionStoreInPod(pod *corev1.Pod) string {
-	return sessionStoreName(heldSessionStore(pod.Spec))
+// sessionStoreInPod names the session store a pod specification was created under, read back from
+// the specification itself (heldSessionStore, sessionStoreName). The Sandbox pod template and the
+// created Pod carry the same markers.
+func sessionStoreInPod(spec *corev1.PodSpec) string {
+	return sessionStoreName(heldSessionStore(*spec))
 }
 
 // heldSessionStore is the session store the pod spec was created under, and the one field that

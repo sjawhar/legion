@@ -825,6 +825,9 @@ func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 	if err := k.Validate(); err != nil {
 		return fmt.Errorf("sandbox runtime: release: %w", err)
 	}
+	if err := r.guardControllerVolumeReap(ctx, k.Claim); err != nil {
+		return err
+	}
 	if k.Locator != nil {
 		if err := r.Suspend(ctx, *k.Locator); err != nil {
 			return err
@@ -844,28 +847,53 @@ func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 // Sandbox to the orphan sweep, which judges it again on the claims known then, and a relaunch that
 // begins after waits for the delete and creates the Sandbox afresh.
 func (r *Runtime) releaseControllerSandbox(ctx context.Context, token claim.Token) error {
-	name := SandboxName(token)
-	s, err := r.storedSandbox(name)
+	s, err := r.controllerSandbox(ctx, token)
 	if err != nil {
-		return fmt.Errorf("release %s: %w", token, err)
+		return err
 	}
-	if s == nil || s.Labels[labelProject] != r.project {
+	if s == nil {
 		return nil
 	}
-	kind, err := podKindOf(s.Labels)
-	if _, controller := kind.(controllerPod); err != nil || !controller {
-		return nil
-	}
-	release, err := r.lockPod(ctx, name)
+	release, err := r.lockPod(ctx, s.Name)
 	if err != nil {
 		return fmt.Errorf("release %s: %w", token, err)
 	}
 	defer release()
-	fence := metav1.Preconditions{UID: &s.UID, ResourceVersion: &s.ResourceVersion}
-	if err := r.deleteFenced(ctx, name, fence, "sandbox runtime: deleted a released claim's sandbox", "claim", token); err != nil {
+	if err := r.deleteFenced(ctx, s, "sandbox runtime: deleted a released claim's sandbox", "claim", token); err != nil {
 		return fmt.Errorf("release %s: %w", token, err)
 	}
 	return nil
+}
+
+// guardControllerVolumeReap runs before Release suspends the controller, so a
+// file-backed session refusal leaves its process and claim unchanged.
+func (r *Runtime) guardControllerVolumeReap(ctx context.Context, token claim.Token) error {
+	s, err := r.controllerSandbox(ctx, token)
+	if err != nil || s == nil {
+		return err
+	}
+	if err := r.guardSessionVolumeReap(ctx, s); err != nil {
+		return fmt.Errorf("release %s: %w", token, err)
+	}
+	return nil
+}
+
+// controllerSandbox is token's current Sandbox only when it is this runtime's
+// controller. Workflow Sandboxes never reach controller-specific cleanup.
+func (r *Runtime) controllerSandbox(ctx context.Context, token claim.Token) (*sandbox, error) {
+	name := SandboxName(token)
+	s, err := r.storedSandbox(name)
+	if err != nil {
+		return nil, fmt.Errorf("release %s: %w", token, err)
+	}
+	if s == nil || s.Labels[labelProject] != r.project {
+		return nil, nil
+	}
+	kind, err := podKindOf(s.Labels)
+	if _, controller := kind.(controllerPod); err != nil || !controller {
+		return nil, nil
+	}
+	return s, nil
 }
 
 // AdoptWorkingCopy has the agent's shim set its working copy's author (the shared `jj metaedit
@@ -999,7 +1027,7 @@ func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured, contr
 	if err != nil {
 		return fmt.Errorf("reconcile orphans: Sandbox %s: %v; kept", u.GetName(), err)
 	}
-	name, uid := u.GetName(), u.GetUID()
+	name := u.GetName()
 	switch kind.(type) {
 	case controllerPod:
 		if controllers[name] {
@@ -1016,9 +1044,11 @@ func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured, contr
 		if owned, err := r.controllerOwned(ctx, name); err != nil || owned {
 			return err
 		}
-		version := u.GetResourceVersion()
-		fence := metav1.Preconditions{UID: &uid, ResourceVersion: &version}
-		if err := r.deleteFenced(ctx, name, fence, "sandbox runtime: deleted an orphaned sandbox", "role", claim.RoleController); err != nil {
+		s, err := decodeSandbox(u)
+		if err != nil {
+			return fmt.Errorf("reconcile orphans: decode Sandbox %s: %w", name, err)
+		}
+		if err := r.deleteFenced(ctx, s, "sandbox runtime: deleted an orphaned sandbox", "role", claim.RoleController); err != nil {
 			return fmt.Errorf("reconcile orphans: %w", err)
 		}
 		return nil
@@ -1052,9 +1082,11 @@ func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured, contr
 	// Fenced to the uid and resourceVersion the decision read: a re-admission of this issue that
 	// landed between the informer's snapshot and this turn relabelled the same Sandbox for its new
 	// tree (ensureSandbox) and may already run a pod in it; the uid alone would not tell.
-	version := u.GetResourceVersion()
-	fence := metav1.Preconditions{UID: &uid, ResourceVersion: &version}
-	if err := r.deleteFenced(ctx, name, fence, "sandbox runtime: deleted an orphaned sandbox", "tree", tree); err != nil {
+	s, err := decodeSandbox(u)
+	if err != nil {
+		return fmt.Errorf("reconcile orphans: decode Sandbox %s: %w", name, err)
+	}
+	if err := r.deleteFenced(ctx, s, "sandbox runtime: deleted an orphaned sandbox", "tree", tree); err != nil {
 		return fmt.Errorf("reconcile orphans: %w", err)
 	}
 	return nil
@@ -1076,30 +1108,30 @@ func (r *Runtime) controllerOwned(ctx context.Context, name string) (bool, error
 	return unretired, nil
 }
 
-// deleteFenced deletes the Sandbox name once, fenced by fence, and forgets its launchers'
-// credentials; msg and attrs log the delete. Its caller holds the pod's launch turn. One already
-// gone is gone, and one the fence refuses, replaced or written since, is kept and logged with
-// attrs, since its owner's next decision is the orphan sweep's: neither is an error. Deletion
-// propagates in the foreground, as the tree cleanup's does (deleteSandbox): the Sandbox owns its
-// Secrets by owner reference, and a controller's or a repository cache's Sandbox also its PVC, which
-// the next Sandbox of that name names again (IssueClaimName, cacheClaimName), so a background
-// delete, which drops the Sandbox at once and collects the PVC after, would let a launch inside
-// that window create a Sandbox asking for a Terminating PVC. In the foreground the Sandbox stays,
-// Terminating, until they are gone, so a launch that waits out a Sandbox being deleted
-// (ensureSandbox) waits for its volume too. An issue's Sandbox owns no PVC: the issue's disk is its
-// pod's own, and goes when the delete takes the pod.
-func (r *Runtime) deleteFenced(ctx context.Context, name string, fence metav1.Preconditions, msg string, attrs ...any) error {
+// deleteFenced deletes s once, fenced to the object the caller read, and
+// forgets its launchers' credentials. Its caller holds the pod's launch turn.
+// One already gone is gone; a conflict keeps its replacement for the next
+// orphan sweep. Deletion is foreground, so a Sandbox and the volume it owns
+// remain until garbage collection has removed the volume. The session-volume
+// guard runs immediately before the same fence prevents a newer Sandbox from
+// being reaped.
+func (r *Runtime) deleteFenced(ctx context.Context, s *sandbox, msg string, attrs ...any) error {
+	if err := r.guardSessionVolumeReap(ctx, s); err != nil {
+		return err
+	}
+	name, uid, version := s.Name, s.UID, s.ResourceVersion
 	policy := metav1.DeletePropagationForeground
+	fence := metav1.Preconditions{UID: &uid, ResourceVersion: &version}
 	err := r.sandboxClient().Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &policy, Preconditions: &fence})
 	switch {
 	case err == nil:
 		r.forgetLauncherCredentials(name)
-		r.log.Info(msg, append([]any{"sandbox", name, "uid", *fence.UID}, attrs...)...)
+		r.log.Info(msg, append([]any{"sandbox", name, "uid", uid}, attrs...)...)
 	case apierrors.IsNotFound(err):
 		r.forgetLauncherCredentials(name)
 	case apierrors.IsConflict(err):
 		r.log.Info("sandbox runtime: kept a sandbox written since its delete was decided; the orphan sweep decides it again",
-			append([]any{"sandbox", name, "uid", *fence.UID, "error", err}, attrs...)...)
+			append([]any{"sandbox", name, "uid", uid, "error", err}, attrs...)...)
 	default:
 		return fmt.Errorf("delete sandbox %s: %w", name, err)
 	}
