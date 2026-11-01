@@ -67,8 +67,8 @@ var sweepBatch = 1000
 var sweepMaxBatches = 10
 
 // sweepStatements are Sweep's statements for state deleted row by row, $1 the batch. Each
-// selects its batch by primary key through 0016's or 0018's *_expires index on the predicate it
-// sweeps by, oldest first, so a table of mostly live rows is never read whole.
+// selects its batch by primary key through 0016's, 0018's or 0021's *_expires index on the
+// predicate it sweeps by, oldest first, so a table of mostly live rows is never read whole.
 var sweepStatements = []struct{ what, sql string }{
 	{"device codes", `delete from oauth_device_codes where signature in (select signature from oauth_device_codes
 		where expires_at < now() - interval '1 hour' order by expires_at limit $1)`},
@@ -81,6 +81,8 @@ var sweepStatements = []struct{ what, sql string }{
 	{"session bindings", `delete from oauth_session_bindings where session in (select session from oauth_session_bindings
 		where expires_at <= now() order by expires_at limit $1)`},
 	{"exchanged JWT ids", `delete from oauth_exchange_jtis where jti in (select jti from oauth_exchange_jtis
+		where expires_at <= now() order by expires_at limit $1)`},
+	{"pod session registrations", `delete from oauth_pod_sessions where (pod_uid, session) in (select pod_uid, session from oauth_pod_sessions
 		where expires_at <= now() order by expires_at limit $1)`},
 }
 
@@ -106,8 +108,9 @@ type sweepCursor struct {
 
 // Sweep deletes spent OAuth state: device codes an hour past their expiry (so a helper still
 // polling one is answered expired_token, not invalid_grant as for an unknown code), DPoP proofs
-// and nonces past theirs, access tokens past theirs, lapsed session bindings and the two replay
-// stores' remembered JWT ids past theirs, and every refresh token of a family (rows sharing
+// and nonces past theirs, access tokens past theirs, lapsed session bindings, the two replay
+// stores' remembered JWT ids past theirs, pod-session registrations past theirs, and every
+// refresh token of a family (rows sharing
 // request_id) none of whose rows is still redeemable (active, unexpired, and in its
 // rotation's grace or never rotated). A family with a redeemable row keeps all its rows, so
 // replaying one of its rotated tokens still finds it and revokes the family. Each kind is
@@ -667,15 +670,18 @@ func (s *Store) RotateRefreshToken(ctx context.Context, requestID string, signat
 }
 
 // RevokeRefreshToken deactivates every refresh token of the request, the whole rotation family
-// (which shares the request id), and ends the launcher credential the family names (Reused). The
-// library calls it only when a refresh presents a rotated token past its grace (its reuse
-// response, in its own transaction): this provider mounts no revocation endpoint and issues no
-// authorization code. The library has already deleted the presented token's row in this
-// transaction before it calls here, so Reused locks the credential's row after a token row, the
-// reverse of the order a revoke, a retire (enroll.Service.RetireCredential, which locks the
-// credential and then deletes its token rows) or a refresh takes them. A revoke, a retire, or a
-// second redemption inside the grace, racing this can therefore deadlock with it: Postgres aborts
-// one of them, which answers 500 and clears on a retry, and the credential ends either way.
+// (which shares the request id), and ends the launcher credential the family names (Reused). Two
+// callers reach it. One is a refresh presenting a rotated token past its grace (the library's
+// reuse response, in its own transaction), which has already deleted the presented token's row
+// in this transaction before it calls here, so Reused locks the credential's row after a token
+// row, the reverse of the order a revoke, a retire (enroll.Service.RetireCredential, which locks
+// the credential and then deletes its token rows) or a refresh takes them. A revoke, a retire, or
+// a second redemption inside the grace, racing this can therefore deadlock with it: Postgres
+// aborts one of them, which answers 500 and clears on a retry, and the credential ends either
+// way. The other is POST /v1/oauth/revoke presenting a refresh token itself: the provider sets
+// RevokeRefreshTokensExplicit, so revoking an access token never reaches here and a caller that
+// ends a family, and with it the login behind it, is one that presented that family's own token.
+// This provider issues no authorization code, so nothing else calls it.
 func (s *Store) RevokeRefreshToken(ctx context.Context, requestID string) error {
 	state, err := txOf(ctx)
 	if err != nil {

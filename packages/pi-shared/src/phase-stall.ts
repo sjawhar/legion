@@ -21,8 +21,9 @@ import { LOCAL_ENVOY_NOTICE } from "./envoy-notice";
  * `handoff_complete`:
  * - `closed`: no assignment since the last successful completion, or none seen yet;
  * - `open`: assigned and not completed, so a turn that settles now earns a reminder;
- * - `waiting`: still open, and the worker's last reply said with a WAITING line what it waits on,
- *   which buys the longer quiet wait `LEGION_STALL_WAITING_MS` before the next reminder;
+ * - `waiting`: still open, and either the worker's last reply said with a WAITING line what it
+ *   waits on, or its turn ended with background work of its own still running; both buy the
+ *   longer quiet wait `LEGION_STALL_WAITING_MS` before the next reminder;
  * - `awaiting-update`: still open, and the worker has answered the daemon's update task
  *   (`ready_for_update`), so it is to start nothing until the daemon comes back to it. This wait
  *   earns no reminder and no wait of any length, because the daemon is what wakes the worker: it
@@ -54,7 +55,18 @@ export type PhaseStallInput =
   | { readonly kind: "update-answered" }
   /** The settling assistant message ran at least one real tool call (`assistantRanTool`). */
   | { readonly kind: "tool-call" }
-  | { readonly kind: "settle"; readonly lastAssistantText: string }
+  | {
+      readonly kind: "settle";
+      readonly lastAssistantText: string;
+      /**
+       * The session ends this turn with background work of its own still running, which will wake
+       * it when it finishes. Only a host whose turn can end that way sets it: Oh My
+       * Pi holds `session_stop` back until its own async jobs are idle, so its settle never has
+       * any, while Claude Code's `Stop` hook fires with the running tasks in its payload
+       * (`background_tasks`, measured on 2.1.310).
+       */
+      readonly backgroundWork?: boolean | undefined;
+    }
   /** The host has just delivered a reminder to the worker. */
   | { readonly kind: "reminded" };
 
@@ -135,7 +147,11 @@ export function stepPhaseStall(state: PhaseStallState, input: PhaseStallInput): 
       // Only an open phase earns a reminder: a closed one has nothing to remind about, and either
       // wait stands as it is until whatever ends that wait ends it.
       if (state.state !== "open") return { state };
-      if (WAITING_REPLY.test(input.lastAssistantText)) {
+      // A worker waiting on its own background job is not stalled: the job's own result starts
+      // the next turn. It buys the same quiet wait a WAITING line does, which is also what bounds
+      // it — a job that never finishes is a wait the host's waiting delay ends, and the reminder
+      // comes again then rather than never.
+      if (input.backgroundWork === true || WAITING_REPLY.test(input.lastAssistantText)) {
         return { state: { state: "waiting", count: state.count } };
       }
       return { state, reminder: reminderText(input.lastAssistantText) };

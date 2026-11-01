@@ -288,7 +288,7 @@ func TestPodUpdateTakesTheTurnsEndAsTheAnswerOfAClaimBelowTheContract(t *testing
 		t.Errorf("UpdateSignalledAt = %v before any turn ran, want nil", c.UpdateSignalledAt)
 	}
 
-	h.must(StreamTurnStart{Claim: h.token})
+	h.must(StreamTurnStart{Claim: h.token, DeliveryID: h.pending().ID})
 	h.must(StreamTurnEnd{Claim: h.token})
 
 	c = h.claim()
@@ -334,52 +334,6 @@ func TestPodUpdateTakesNoForeignTurnsEndAsTheAnswerBelowTheContract(t *testing.T
 
 	if c := h.claim(); c.UpdateSignalledAt != nil {
 		t.Errorf("UpdateSignalledAt = %v, want nil: this turn never read the round's task", c.UpdateSignalledAt)
-	}
-}
-
-// A turn the daemon itself cut is no answer, whatever the claim's contract, because the worker
-// was stopped where it stood and may never have reached its push. Two shapes, and the second is
-// the one a roll meets: the same configuration change that drifts a pod restarts the daemon, and
-// a restarted daemon has no memory of the abort an earlier one sent. Each refusal takes the
-// ask's clock back, so the next sweep asks again rather than the round waiting out the re-task
-// bound.
-func TestPodUpdateTakesNoCutTurnsEndAsTheAnswerBelowTheContract(t *testing.T) {
-	for _, testCase := range []struct {
-		name    string
-		restart bool
-	}{
-		{name: "the daemon that cut the turn is the one that sees it end"},
-		{name: "the daemon restarted after the cut and never saw the turn start", restart: true},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			h := updateHarness(t, PodUpdateContract-1)
-			h.reach(StateReady)
-			h.openUpdate(testRound, testReasons)
-			h.wantPrompts(1)
-			h.must(StreamTurnStart{Claim: h.token})
-
-			// A start takes over this claim's phase — CI settled red on the head — and the
-			// worker's tool calls are cancelled, its push among them.
-			// Quiesce answers ErrQuiesceHeld: the start waits for the cut turn to end, which is
-			// this test's next event.
-			if err := h.m.Quiesce(h.ctx, 1); !errors.Is(err, ErrQuiesceHeld) {
-				t.Fatalf("quiesce the turn = %v, want the start held for the interrupted turn", err)
-			}
-			if testCase.restart {
-				h.restart()
-			}
-			h.must(StreamTurnEnd{Claim: h.token})
-
-			c := h.claim()
-			if c.UpdateSignalledAt != nil {
-				t.Errorf("UpdateSignalledAt = %v, want nil: the daemon cut this turn and cannot read its end as a push",
-					c.UpdateSignalledAt)
-			}
-			if c.UpdateTaskedAt != nil {
-				t.Errorf("UpdateTaskedAt = %v, want nil: the ask's clock goes back so the next sweep asks again",
-					c.UpdateTaskedAt)
-			}
-		})
 	}
 }
 
@@ -1310,12 +1264,13 @@ func TestPodUpdateARoundThatEndsOnAnAskNoTurnConfirmedReleasesItsWorker(t *testi
 }
 
 // A turn this daemon learned of from the agent's own get_state answer, rather than from an
-// agent_start it read, is one it cannot vouch for either: a restart leaves the agent in a turn
+// agent_start it read, is one it cannot vouch for: a restart leaves the agent in a turn
 // an earlier daemon sent the task for, and the send that follows asks the agent whether it is
 // streaming and confirms the pending ask against that answer (sendPending's askFirst branch).
 // Nothing there says what the turn has already done, so its end is no answer to the round, and
 // the round asks again. The same holds for a turn start that names no delivery, which is
-// confirmed against what the daemon had in flight (turnStarted).
+// confirmed against what the daemon had in flight (turnStarted). Each refusal takes the ask's
+// clock back, so the next sweep asks again rather than the round waiting out the re-task bound.
 func TestPodUpdateTakesNoTurnTheDaemonLearnedOfFromTheAgentAsTheAnswer(t *testing.T) {
 	t.Run("the send asked the agent whether it was streaming", func(t *testing.T) {
 		h := updateHarness(t, PodUpdateContract-1)
@@ -1331,8 +1286,13 @@ func TestPodUpdateTakesNoTurnTheDaemonLearnedOfFromTheAgentAsTheAnswer(t *testin
 
 		h.must(StreamTurnEnd{Claim: h.token})
 
-		if c := h.claim(); c.UpdateSignalledAt != nil {
+		c := h.claim()
+		if c.UpdateSignalledAt != nil {
 			t.Errorf("UpdateSignalledAt = %v, want nil: this daemon never saw the turn start", c.UpdateSignalledAt)
+		}
+		if c.UpdateTaskedAt != nil {
+			t.Errorf("UpdateTaskedAt = %v, want nil: the ask's clock goes back so the next sweep asks again",
+				c.UpdateTaskedAt)
 		}
 	})
 
@@ -1345,8 +1305,13 @@ func TestPodUpdateTakesNoTurnTheDaemonLearnedOfFromTheAgentAsTheAnswer(t *testin
 		h.must(StreamTurnStart{Claim: h.token})
 		h.must(StreamTurnEnd{Claim: h.token})
 
-		if c := h.claim(); c.UpdateSignalledAt != nil {
+		c := h.claim()
+		if c.UpdateSignalledAt != nil {
 			t.Errorf("UpdateSignalledAt = %v, want nil: the start named no delivery, so the daemon confirmed it against what it had in flight", c.UpdateSignalledAt)
+		}
+		if c.UpdateTaskedAt != nil {
+			t.Errorf("UpdateTaskedAt = %v, want nil: the ask's clock goes back so the next sweep asks again",
+				c.UpdateTaskedAt)
 		}
 	})
 }

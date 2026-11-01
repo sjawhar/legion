@@ -284,6 +284,17 @@ func (r *podUpdateRig) handle(role claim.Role, ev supervise.Event) {
 	}
 }
 
+// endTurn is the worker's turn over as Oh My Pi reports it: the agent_end, and behind it the
+// result of the prompt whose turn it was, which is what retires that task (promptResulted). A
+// turn whose end leaves the prompt outstanding retires nothing, so a test that waits for the
+// round's own ask to go ends the turn this way.
+func (r *podUpdateRig) endTurn(role claim.Role, delivery string) {
+	r.t.Helper()
+	token := r.tokens[role]
+	r.handle(role, supervise.StreamTurnEnd{Claim: token})
+	r.handle(role, supervise.StreamPromptResult{Claim: token, DeliveryID: delivery, AgentInvoked: true})
+}
+
 // startInPod is the daemon starting a role into the issue's pod while a round holds that pod: the
 // launch keeps the drifted pod rather than replacing it where it stands, so the process it returns
 // is in that same pod, and the role registers and readies from it as any other worker does. The
@@ -590,7 +601,7 @@ func TestPodUpdateAsksAgainAfterTheRetaskBound(t *testing.T) {
 	// no task for the next ask to be.
 	token := rig.tokens[claim.RoleImplementer]
 	rig.handle(claim.RoleImplementer, supervise.StreamTurnStart{Claim: token, DeliveryID: asked.Pending.ID})
-	rig.handle(claim.RoleImplementer, supervise.StreamTurnEnd{Claim: token})
+	rig.endTurn(claim.RoleImplementer, asked.Pending.ID)
 	rig.awaitClaim(claim.RoleImplementer, "the unanswered ask to end with its turn", func(c supervise.Claim) bool {
 		return c.Pending == nil
 	})
@@ -679,8 +690,9 @@ func TestPodUpdateEndsTheRoundWhenTheDriftClears(t *testing.T) {
 	// The worker's turn — the one it answered from — ends, which retires the round's own task.
 	// The next task then arrives while the round holds it back.
 	token := rig.tokens[claim.RoleImplementer]
-	rig.handle(claim.RoleImplementer, supervise.StreamTurnStart{Claim: token, DeliveryID: rig.claimOf(claim.RoleImplementer).Pending.ID})
-	rig.handle(claim.RoleImplementer, supervise.StreamTurnEnd{Claim: token})
+	answered := rig.claimOf(claim.RoleImplementer).Pending.ID
+	rig.handle(claim.RoleImplementer, supervise.StreamTurnStart{Claim: token, DeliveryID: answered})
+	rig.endTurn(claim.RoleImplementer, answered)
 	rig.awaitClaim(claim.RoleImplementer, "the round's own task to retire with the turn", func(c supervise.Claim) bool {
 		return c.Pending == nil
 	})
@@ -817,8 +829,9 @@ func TestPodUpdateTellsTheWorkerToCarryOnOnlyWhereItsPodStayed(t *testing.T) {
 			// The turn the implementer answered from ends, which retires the round's own ask:
 			// from here it holds nothing at all.
 			token := rig.tokens[claim.RoleImplementer]
-			rig.handle(claim.RoleImplementer, supervise.StreamTurnStart{Claim: token, DeliveryID: rig.claimOf(claim.RoleImplementer).Pending.ID})
-			rig.handle(claim.RoleImplementer, supervise.StreamTurnEnd{Claim: token})
+			answered := rig.claimOf(claim.RoleImplementer).Pending.ID
+			rig.handle(claim.RoleImplementer, supervise.StreamTurnStart{Claim: token, DeliveryID: answered})
+			rig.endTurn(claim.RoleImplementer, answered)
 			rig.awaitClaim(claim.RoleImplementer, "the round's own ask to retire with its turn",
 				func(c supervise.Claim) bool { return c.Pending == nil })
 			conn := rig.workers[claim.RoleImplementer]

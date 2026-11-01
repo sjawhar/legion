@@ -28,11 +28,12 @@ var _ supervise.Store = (*Store)(nil)
 const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.generation, c.tree_epoch, c.session,
 	c.session_file, c.locator, c.state, c.failure, c.launch_failures, c.deaths, c.prompt_failures, c.prompt_retires,
 	c.boot_token_hash, c.capability_hash, c.uncertain_streak, c.last_start_row, c.serving_generation,
+	c.serving_assignment,
 	c.agent_secrets_enrollment, c.agent_secrets_enrollment_incarnation, c.suspended_by,
 	c.plugin_contract, c.plugin_relaunch_for,
 	c.update_round, c.update_reasons, c.update_opened_at, c.update_tasked_at, c.update_signalled_at,
 	c.update_head, c.update_told_at,
-	d.delivery_id, d.task, d.phase, d.generation, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted
+	d.delivery_id, d.task, d.phase, d.generation, d.assignment, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
 // PutClaim persists an admitted claim's state: every write a claim's machine makes. A claim enters
@@ -66,12 +67,12 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 	_, err := db.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, tree_epoch,
 		session, session_file, locator, state, failure, launch_failures, deaths, prompt_failures, prompt_retires,
 		boot_token_hash, capability_hash, uncertain_streak, last_start_row,
-		serving_generation, agent_secrets_enrollment, agent_secrets_enrollment_incarnation, suspended_by,
+		serving_generation, serving_assignment, agent_secrets_enrollment, agent_secrets_enrollment_incarnation, suspended_by,
 		plugin_contract, plugin_relaunch_for,
 		update_round, update_reasons, update_opened_at, update_tasked_at, update_signalled_at,
 		update_head, update_told_at)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
-		$27, $28, $29, $30, $31, $32, $33)
+		$27, $28, $29, $30, $31, $32, $33, $34)
 		on conflict (token) do update set project = excluded.project, tree = excluded.tree,
 		issue = excluded.issue, role = excluded.role, generation = excluded.generation, tree_epoch = excluded.tree_epoch,
 		session = excluded.session, session_file = excluded.session_file,
@@ -82,6 +83,7 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		capability_hash = excluded.capability_hash, uncertain_streak = excluded.uncertain_streak,
 		last_start_row = excluded.last_start_row,
 		serving_generation = excluded.serving_generation,
+		serving_assignment = excluded.serving_assignment,
 		agent_secrets_enrollment = excluded.agent_secrets_enrollment,
 		agent_secrets_enrollment_incarnation = excluded.agent_secrets_enrollment_incarnation,
 		suspended_by = excluded.suspended_by,
@@ -95,7 +97,7 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		string(c.Token), c.Project, c.Tree, c.Issue, string(c.Role), int64(c.Generation), int64(c.TreeEpoch),
 		c.Session, c.SessionFile, locator, string(c.State), c.Failure,
 		c.Budgets.LaunchFailures, c.Budgets.Deaths, c.Budgets.PromptFailures, c.Budgets.PromptRetires,
-		c.BootTokenHash, c.CapabilityHash, c.UncertainStreak, c.LastStartRow, int64(c.ServingGeneration),
+		c.BootTokenHash, c.CapabilityHash, c.UncertainStreak, c.LastStartRow, int64(c.ServingGeneration), c.ServingAssignmentID,
 		enrollmentID, enrollmentIncarnation, string(c.SuspendedBy),
 		c.PluginContract, c.PluginRelaunchFor,
 		c.UpdateRound, c.UpdateReasons, c.UpdateOpenedAt, c.UpdateTaskedAt, c.UpdateSignalledAt,
@@ -270,14 +272,14 @@ func putDelivery(ctx context.Context, db execer, token claim.Token, d supervise.
 		return fmt.Errorf("put delivery %s on %s: generation %d does not fit a bigint", d.ID, token, d.Generation)
 	}
 	_, err := db.Exec(ctx, `insert into pending_task_deliveries (claim_token, delivery_id, task,
-		phase, generation, queued_at, delivered_at, marked_by, confirmed_at, interrupted)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		phase, generation, assignment, queued_at, delivered_at, marked_by, confirmed_at, interrupted)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		on conflict (claim_token) do update set delivery_id = excluded.delivery_id,
 		task = excluded.task, phase = excluded.phase, generation = excluded.generation,
-		queued_at = excluded.queued_at,
+		assignment = excluded.assignment, queued_at = excluded.queued_at,
 		delivered_at = excluded.delivered_at, marked_by = excluded.marked_by, confirmed_at = excluded.confirmed_at,
 		interrupted = excluded.interrupted`,
-		string(token), d.ID, d.Task, string(d.Phase), int64(d.Generation), d.QueuedAt, instant(d.DeliveredAt), d.MarkedBy,
+		string(token), d.ID, d.Task, string(d.Phase), int64(d.Generation), d.Assignment, d.QueuedAt, instant(d.DeliveredAt), d.MarkedBy,
 		instant(d.ConfirmedAt), d.Interrupted,
 	)
 	if err != nil {
@@ -333,6 +335,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		markedBy                    *string
 		deliveryPhase               *string
 		deliveryGeneration          *int64
+		deliveryAssignment          *string
 		servingGeneration           int64
 		enrollmentID, enrollmentIC  *string
 		queuedAt, delivered         *time.Time
@@ -344,11 +347,11 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 	err := row.Scan(&token, &c.Project, &c.Tree, &c.Issue, &role, &generation, &treeEpoch, &c.Session,
 		&c.SessionFile, &locator, &state, &c.Failure, &c.Budgets.LaunchFailures, &c.Budgets.Deaths, &c.Budgets.PromptFailures,
 		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak,
-		&c.LastStartRow, &servingGeneration, &enrollmentID, &enrollmentIC, &by,
+		&c.LastStartRow, &servingGeneration, &c.ServingAssignmentID, &enrollmentID, &enrollmentIC, &by,
 		&c.PluginContract, &c.PluginRelaunchFor,
 		&c.UpdateRound, &c.UpdateReasons, &updateOpened, &updateTasked, &updateSignalled,
 		&c.UpdateHead, &updateTold,
-		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted)
+		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &deliveryAssignment, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return supervise.Claim{}, err
 	}
@@ -377,6 +380,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 			Task:        *task,
 			Phase:       phase.Phase(*deliveryPhase),
 			Generation:  uint64(orZeroInt(deliveryGeneration)),
+			Assignment:  *deliveryAssignment,
 			QueuedAt:    *queuedAt,
 			DeliveredAt: orZero(delivered),
 			MarkedBy:    *markedBy,

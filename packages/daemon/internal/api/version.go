@@ -427,7 +427,20 @@ package api
 // the repository is served all the same. (This branch took 41, then 42; 42 is declared by main's
 // stalled-worker reminder, so this change takes the number above it, as the collision note says.)
 //
-// 44: INFRA-484 -- the update round, which replaces a pod only once the work on it is pushed.
+// 44: a Claude Code role's start command and pane no longer carry
+// CLAUDE_CODE_DISABLE_BACKGROUND_TASKS; CLAUDE_CONFIG_DIR and CLAUDE_CODE_DISABLE_CRON stay, and
+// the name is no longer the runtime's, so an operator's `runtime.kubernetes.pod.env` and
+// `runtime.tmux.pane_env` may set it as they may set Claude Code's other variables. A role may
+// leave a background task running past the end of a turn: when it finishes, Claude Code starts a
+// turn of its own, which the bridge reports to the daemon as a turn (`internal/claudebridge`), so
+// the result is read in a turn the daemon sees rather than after one the daemon thinks has ended.
+// The worker container's and the pane's environment is one of this contract's surfaces, so
+// dropping a variable from it bumps the number, as adding the three at 42 did, and the image probe
+// holds this daemon and the image that runs its roles together. This change adds no store
+// migration. (This branch took 43; main then landed the consumer lag at 43, so this branch takes
+// the number above it, as the collision note says.)
+//
+// 45: INFRA-484 -- the update round, which replaces a pod only once the work on it is pushed.
 // `POST /legion/v1/claims/ready-for-update` is a new claim route in the shape of `claims/ready`
 // (`claim.ReadyForUpdateRequest`: `claimToken`, `sessionId`, `secret`, `generation`, `round`, and
 // an optional `head`), answering 204: it is the worker's answer to the update task — everything
@@ -442,10 +455,12 @@ package api
 // the head its worker reported when it answered — `updateRound` and `updateHead`, both absent
 // when there is none — on the state's claims (`api.ClaimView`) and on the operator's
 // (`api.OperatorClaim`), which `packages/contracts/src/legion-api.ts` mirrors; a strict reader
-// before 44 refuses a state carrying either. `legion.yaml` gains `pod_update_retask_hours` and
+// before 45 refuses a state carrying either. `legion.yaml` gains `pod_update_retask_hours` and
 // `pod_update_notice_hours`, which the settings carry as the two numbers they are. A plugin
-// before 44 has no op to signal with, so its pod's round would never end, and a daemon before 44
+// before 45 has no op to signal with, so its pod's round would never end, and a daemon before 45
 // answers that op's post a 404; the boot gate and `legion probe-image` refuse either pair. (This
-// branch took 43 while main's consumer lag was unmerged; main landed 43 first, so this change
-// takes the number above it, as the collision note says.)
-const DaemonAPIVersion = 44
+// branch took 43 while main's consumer lag was unmerged, then 44, and its store migration 0065;
+// main landed the consumer lag at 43 and the Claude Code background-task variable at 44 first,
+// with store migrations 0065, 0066 and 0067, so this change takes the number above them and
+// store migration 0068, as the collision note says.)
+const DaemonAPIVersion = 45

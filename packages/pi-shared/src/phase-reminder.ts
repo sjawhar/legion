@@ -83,10 +83,12 @@ export interface PhaseReminder {
   /** `session_stop`: the continuation text to return to the host, or undefined. A host that
    * cannot turn this settle into one more turn of the same session — Claude Code ignores what a
    * `StopFailure` hook returns — says so with `canContinue: false`, and the reminder it earned
-   * comes from the timer instead, under every guard an armed reminder has. */
+   * comes from the timer instead, under every guard an armed reminder has. `backgroundWork` is a
+   * turn ending with the session's own background job still running, which buys the same quiet
+   * wait a WAITING line does. */
   readonly settle: (
     lastAssistantText: string,
-    options?: { readonly canContinue?: boolean }
+    options?: { readonly canContinue?: boolean; readonly backgroundWork?: boolean }
   ) => Promise<string | undefined>;
   /** `session_switch`, `session_branch`, `session_tree`. */
   readonly sessionChanged: () => void;
@@ -383,7 +385,11 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
       // one records none: a finished worker's chatter writes nothing.
       if (stall.state !== "closed") lastMessage = text.slice(0, LAST_MESSAGE_LIMIT);
       const before = stall.count;
-      const reminder = advance({ kind: "settle", lastAssistantText: text });
+      const reminder = advance({
+        kind: "settle",
+        lastAssistantText: text,
+        backgroundWork: options?.backgroundWork,
+      });
       // Every outcome but the continuation ends the run here, so the next one may continue again.
 
       // The wait a `ready_for_update` answer created is the daemon's to end, so nothing is armed

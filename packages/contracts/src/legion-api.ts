@@ -140,7 +140,7 @@ const legionClaimView = z.strictObject({
   /** The update round the claim is in, absent while none is open: `pod:<pod uid>`, the drift
    * round every claim of that pod shares, or `plugin:<daemon contract>`, this claim's own. Once
    * the worker has answered `ready_for_update`, the daemon holds the claim's next task until the
-   * round ends and the process is replaced (contract 44). */
+   * round ends and the process is replaced (contract 45). */
   updateRound: nonEmptyString.optional(),
   /** The commit the worker reported as its issue branch's head at origin when it answered the
    * round; absent until it answers, and for a worker that reported none. It is the worker's
@@ -656,7 +656,7 @@ export const LegionOperatorClaimResponse = z.strictObject({
   /** The update round the claim is in, absent while none is open: `pod:<pod uid>`, the drift
    * round every claim of that pod shares, or `plugin:<daemon contract>`, this claim's own. Once
    * the worker has answered `ready_for_update`, the daemon holds the claim's next task until the
-   * round ends and the process is replaced (contract 44). */
+   * round ends and the process is replaced (contract 45). */
   updateRound: nonEmptyString.optional(),
   /** The commit the worker reported as its issue branch's head at origin when it answered the
    * round; absent until it answers, and for a worker that reported none. It is the worker's
