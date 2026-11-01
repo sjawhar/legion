@@ -340,8 +340,19 @@ export function isIssueStatus(value: string): value is IssueStatus {
   return (ISSUE_STATUSES as readonly string[]).includes(value);
 }
 
-/** Whether an issue's route reaches a running session (`model.RouteLive` and siblings). */
-export const ISSUE_ROUTE_STATUSES = ["live", "no_holder", "unknown"] as const;
+/**
+ * Whether an issue's route reaches a running session (`model.RouteLive` and siblings).
+ * `holder_unresponsive` is a route whose session - the routed session, or the role's holder -
+ * has missed its heartbeats without ending: the route still reaches it, since the listener
+ * stores its messages, so it is told apart from `no_holder` rather than folded into it
+ * (dispatch://INFRA-392).
+ */
+export const ISSUE_ROUTE_STATUSES = [
+  "live",
+  "holder_unresponsive",
+  "no_holder",
+  "unknown",
+] as const;
 
 /** Document edit operations the Dispatch server applies. */
 export const DOC_EDIT_OPS = [
@@ -1390,8 +1401,10 @@ export const dispatchToolSpecs = [
         .enum(ISSUE_ROUTE_STATUSES)
         .describe(
           "Optional: only open issues whose route is in this state. live: a running session holds " +
-            "the role or is the routed session. no_holder: nobody running holds the role, or the " +
-            "session is not running, right now. unknown: the Envoy listener did not answer."
+            "the role or is the routed session. holder_unresponsive: that session has missed its " +
+            "heartbeats without ending, so the route still reaches it and its messages wait. " +
+            "no_holder: nobody running holds the role, or the session is gone, right now. " +
+            "unknown: the Envoy listener did not answer."
         )
         .optional(),
       limit: z

@@ -1,20 +1,25 @@
 package store
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/kvwatch"
 )
 
 // benchmarkRegistry is a registry whose cache holds sessions sessions of machine "bench", each
 // following what a working session follows: its own agent subject, one Dispatch issue (twenty
 // sessions share each), one pull request of one of twenty repositories, and one Slack thread.
-func benchmarkRegistry(sessions int) *Registry {
-	r := &Registry{}
+func benchmarkRegistry(b *testing.B, sessions int) *Registry {
+	b.Helper()
+	r := &Registry{index: newSubjectIndex()}
+	r.cache = newInterestCopy(r)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i := range sessions {
 		sessionID := fmt.Sprintf("ses_bench_%05d", i)
-		r.cacheInterestLocked(sessionID, Interest{
+		value, err := json.Marshal(Interest{
 			SessionID: sessionID,
 			MachineID: "bench",
 			Topics: []string{
@@ -23,7 +28,13 @@ func benchmarkRegistry(sessions int) *Registry {
 				fmt.Sprintf("notifications.github.sjawhar.repo%d.pr.%d.>", i%20, i),
 				fmt.Sprintf("notifications.slack.T1.C%d.thread.%d.>", i%10, i),
 			},
-		}, 1)
+		})
+		if err != nil {
+			b.Fatalf("encode %s: %v", sessionID, err)
+		}
+		if err := r.cache.Delivered(kvwatch.Entry{Key: sessionID, Value: value, Revision: 1}); err != nil {
+			b.Fatalf("deliver %s: %v", sessionID, err)
+		}
 	}
 	return r
 }
@@ -45,7 +56,7 @@ func benchmarkSubjects(sessions int) []string {
 func BenchmarkMatch(b *testing.B) {
 	for _, sessions := range []int{400, 1000, 3000} {
 		b.Run(fmt.Sprintf("sessions=%d", sessions), func(b *testing.B) {
-			r := benchmarkRegistry(sessions)
+			r := benchmarkRegistry(b, sessions)
 			subjects := benchmarkSubjects(sessions)
 			matched := 0
 			b.ReportAllocs()

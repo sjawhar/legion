@@ -104,14 +104,13 @@ func TestOnChangeReportsWritesDeletesAndAnotherListenersWrites(t *testing.T) {
 
 func TestOnChangeReportsALapseOncePruneLapsedFindsIt(t *testing.T) {
 	now := time.Now()
-	r := &SessionRegistry{
-		ttl: 5 * time.Minute,
-		cache: map[string]cachedSession{
-			"ses_live":   {entry: SessionEntry{MachineID: "m1", Delivery: DeliveryConsumer}, expiresAt: now.Add(time.Minute)},
-			"ses_lapsed": {entry: SessionEntry{MachineID: "m1", Delivery: DeliveryConsumer, UpdatedAt: now.Add(-6 * time.Minute).UnixMilli()}, expiresAt: now.Add(-time.Second)},
-		},
-		cacheRevisions: map[string]uint64{},
-	}
+	r := newTestRegistry(5 * time.Minute)
+	// ses_live's heartbeat is now, since a row's state is read from its own UpdatedAt and List
+	// answers the live rows alone.
+	hold(t, r, map[string]cachedSession{
+		"ses_live":   {entry: SessionEntry{MachineID: "m1", Delivery: DeliveryConsumer, UpdatedAt: now.UnixMilli()}, expiresAt: now.Add(time.Minute)},
+		"ses_lapsed": {entry: SessionEntry{MachineID: "m1", Delivery: DeliveryConsumer, UpdatedAt: now.Add(-6 * time.Minute).UnixMilli()}, expiresAt: now.Add(-time.Second)},
+	})
 	changes, _ := watchSessionChanges(t, r)
 
 	r.PruneLapsed()

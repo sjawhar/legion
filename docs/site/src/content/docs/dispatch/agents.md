@@ -269,8 +269,12 @@ shows the same three things:
   adds `(for <login>)`.
 - **Whether it is running**: a filled dot when it is running, a hollow ring when it is not, and a
   dashed ring while Dispatch cannot tell (the list of running sessions has not loaded, or failed to
-  load). Running means Envoy lists the session as connected, not that its process is alive: a
-  session that stopped drops off a while after its last heartbeat.
+  load). The mark reads Envoy's three session states, not the agent's process: a session is `live`
+  (it registered within the live window, 5 minutes by default), `unresponsive` (it last registered
+  longer ago than that but inside the gone horizon, 1 hour by default) or `gone` (past the horizon,
+  or Envoy holds no record of it). Only `gone` is a hollow ring. An **unresponsive** session is not
+  dead: it is shown as running, it keeps its claims, and a message you send it waits for it and
+  arrives when it answers again.
 - **A link to its live view**: choose the name. Where the name is itself a button, such as an
   agent's row on this page or the asker on an Inbox card, which shows the session's ID and title
   to copy, the link is the **↗** beside it.

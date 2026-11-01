@@ -140,7 +140,7 @@ function createHarness(): Harness {
     deadlineMs: 60_000,
     subscribe: async (input) => subscribeResultFor(input.sessionID),
     setRole: async () => ({ claimed: true, interest: interestFor("ses_a") }),
-    getRole: async (role) => ({ role, holder: "", last_seen: 1 }),
+    getRole: async (role) => ({ role, holder: "", last_seen: 1, state: "gone" }),
     getInterest: async (sessionID) => interestFor(sessionID),
     unsubscribe: async () => {},
     dial: async () => fakeConnection("one"),
@@ -611,7 +611,7 @@ describe("the serial queues", () => {
   test("the handle's listener reads and subscribes answer a task that still decides", async () => {
     const { state, control, subscribedTopics } = createHarness();
     control.open = "ses_a";
-    control.getRole = async (role) => ({ role, holder: "ses_a", last_seen: 3 });
+    control.getRole = async (role) => ({ role, holder: "ses_a", last_seen: 3, state: "live" });
     const read = await state.passes.run(async (handle) => {
       handle.actFor("ses_a");
       return {
@@ -1161,7 +1161,7 @@ describe("claimRole", () => {
     control.getRole = async (role) => {
       reading.resolve();
       await release.promise;
-      return { role, holder: "ses_old", last_seen: 9 };
+      return { role, holder: "ses_old", last_seen: 9, state: "live" };
     };
     control.deadlineMs = 0;
     const running = state.roleMoves.run(async (handle) => {
@@ -1228,7 +1228,12 @@ describe("reassertRole", () => {
   test("a healthy tick the listener still names writes nothing and asks for no regain", async () => {
     const harness = createHarness();
     await harness.hold("alpha", "ses_a");
-    harness.control.getRole = async (role) => ({ role, holder: "ses_a", last_seen: 2 });
+    harness.control.getRole = async (role) => ({
+      role,
+      holder: "ses_a",
+      last_seen: 2,
+      state: "live",
+    });
     harness.claims.length = 0;
     expect(await reassert(harness, false)).toEqual({ decided: true });
     expect(harness.claims).toEqual([]);
@@ -1238,7 +1243,12 @@ describe("reassertRole", () => {
   test("the first healthy tick after an outage asks for a reregistered regain", async () => {
     const harness = createHarness();
     await harness.hold("alpha", "ses_a");
-    harness.control.getRole = async (role) => ({ role, holder: "ses_a", last_seen: 2 });
+    harness.control.getRole = async (role) => ({
+      role,
+      holder: "ses_a",
+      last_seen: 2,
+      state: "live",
+    });
     expect(await reassert(harness, true)).toEqual({ decided: true, regain: "reregistered" });
   });
 
@@ -1258,7 +1268,12 @@ describe("reassertRole", () => {
   test("a refused re-assertion ends the role, records it and tells the pane", async () => {
     const harness = createHarness();
     await harness.hold("alpha", "ses_a");
-    harness.control.getRole = async (role) => ({ role, holder: "ses_other", last_seen: 2 });
+    harness.control.getRole = async (role) => ({
+      role,
+      holder: "ses_other",
+      last_seen: 2,
+      state: "live",
+    });
     harness.control.setRole = async () => ({ claimed: false, holder: "ses_newer" });
     harness.notices.length = 0;
     expect(await reassert(harness, false)).toEqual({ decided: true });
@@ -1291,7 +1306,7 @@ describe("reassertRole", () => {
     control.getRole = async (role) => {
       reading.resolve();
       await release.promise;
-      return { role, holder: "ses_other", last_seen: 2 };
+      return { role, holder: "ses_other", last_seen: 2, state: "live" };
     };
     const running = state.roleMoves.run(async (handle) => {
       handle.actFor("ses_a");

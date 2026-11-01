@@ -11,11 +11,79 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
-	"github.com/sjawhar/envoy/internal/kvwatch/kvwatchtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
+
+// applyRoleClaim applies one record as the role claim watcher delivers it (roleCache.Apply), the
+// way these tests reach the holder view without a bucket write.
+func (r *Registry) applyRoleClaim(entry natsgo.KeyValueEntry) {
+	roleCache{r}.Apply(kvwatch.LegacyEntry(entry), kvwatch.Read{})
+}
+
+// resetRoleHolders empties the holder view and its fence, as a listener start leaves it.
+func (r *Registry) resetRoleHolders() {
+	r.holdersMu.Lock()
+	defer r.holdersMu.Unlock()
+	r.roleHolders = newRoleHolderCopy()
+}
+
+// holderOf is the session the view names for role, empty when it names none.
+func holderOf(r *Registry, role string) string {
+	r.holdersMu.RLock()
+	defer r.holdersMu.RUnlock()
+	holder, _ := r.roleHolders.Get(role)
+	return holder
+}
+
+// servableView reports whether the role claim view can be served, which is what RolesHeldBy
+// answers from (kvwatch.Watcher.Servable).
+func servableView(r *Registry) bool { return r.roleWatcher.Servable() == nil }
+
+// gatedRoleClaims is roleCache with hold called before each record reaches the view and began
+// called at each read's start, so a test can hold one delivery while it asks the view, and see a
+// recreated bucket's read begin (kvwatch.Cache).
+type gatedRoleClaims struct {
+	r     *Registry
+	hold  func(key string)
+	began func(read kvwatch.Read)
+}
+
+func (g gatedRoleClaims) BeginRead(read kvwatch.Read) {
+	if g.began != nil {
+		g.began(read)
+	}
+	roleCache{g.r}.BeginRead(read)
+}
+
+func (g gatedRoleClaims) Apply(entry kvwatch.Entry, read kvwatch.Read) {
+	if g.hold != nil {
+		g.hold(entry.Key)
+	}
+	roleCache{g.r}.Apply(entry, read)
+}
+
+func (g gatedRoleClaims) CompleteRead(read kvwatch.Read) { roleCache{g.r}.CompleteRead(read) }
+
+// stallFirstKV stalls the first watch it hands out after `after` entries, as a first scan that
+// delivers part of the bucket and then nothing does (earlyEndKV), and hands the real bucket's
+// watcher to every watch after it: the watcher reads the bucket again itself once its first read
+// times out, so the view becomes servable with no Rewatch.
+type stallFirstKV struct {
+	jetstream.KeyValue
+
+	after   int
+	stalled atomic.Bool
+}
+
+func (k *stallFirstKV) Watch(ctx context.Context, keys string, opts ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
+	if k.stalled.Swap(true) {
+		return k.KeyValue.Watch(ctx, keys, opts...)
+	}
+	return earlyEndKV{KeyValue: k.KeyValue, after: k.after}.Watch(ctx, keys, opts...)
+}
 
 // heldRoles is RolesHeldBy that fails the test when the view cannot answer.
 func heldRoles(t *testing.T, reg *Registry, sessionID string) []string {
@@ -105,16 +173,14 @@ func TestRolesHeldByFollowsTheRoleClaims(t *testing.T) {
 	open := func() { openOnce.Do(func() { close(gate) }) }
 	t.Cleanup(open)
 	reg.roleWatcher.Stop()
-	reg.roleWatcher = kvwatch.New("role claims", reg.roles(), func(entry natsgo.KeyValueEntry) {
-		if entry.Key() == "planner" {
+	reg.roleWatcher = kvwatch.New("role claims", reg.roles(), gatedRoleClaims{r: reg, hold: func(key string) {
+		if key == "planner" {
 			<-gate
 		}
-		reg.applyRoleClaim(entry)
-	}, reg.resetRoleHolders)
+	}})
 	reg.roleWatcher.Start()
 	waitFor(t, 5*time.Second, func() bool {
-		_, complete := reg.roleWatcher.Complete()
-		return complete
+		return servableView(reg)
 	})
 	if _, err := reg.SetRole("ses_c", "m1", "planner", false); err != nil {
 		t.Fatalf("SetRole: %v", err)
@@ -204,16 +270,23 @@ func waitForHeld(t *testing.T, reg *Registry, sessionID string, want ...string) 
 	})
 }
 
-// restartRoleViewTimingOutAfter puts the role claim view where a listener start leaves it when
-// nats.go's idle timer ends its first scan: the view is emptied and followed again by a watcher
-// whose first scan delivers delivered claims and then stalls until that timer ends it. The
-// replacement is the registry's own role watcher (newRoleWatcher), so it rescans as the product's
-// does and the view becomes complete without a Rewatch.
-func restartRoleViewTimingOutAfter(t *testing.T, reg *Registry, rawRoles natsgo.KeyValue, delivered int) {
+// restartRoleViewTimingOutAfter puts the role claim view where a listener start leaves it when a
+// first read's own idle bound ends its scan: the view is emptied and followed again by a watcher
+// whose first read delivers delivered claims and then stalls until that bound ends it. The
+// watcher reads the bucket again itself after such a read (stallFirstKV), so the view becomes
+// servable without a Rewatch, as the product's does. It takes conn because the stalling handle is
+// built on the bucket's own jetstream handles (bus.WrapKeyValue), which a raw nats.go handle has
+// no route to.
+func restartRoleViewTimingOutAfter(t *testing.T, conn *natsgo.Conn, reg *Registry, rawRoles natsgo.KeyValue, delivered int) {
 	t.Helper()
 	reg.roleWatcher.Stop()
 	reg.resetRoleHolders()
-	reg.roleWatcher = reg.newRoleWatcher(bus.KeyValue{KeyValue: kvwatchtest.TimingOutFirst(rawRoles, delivered)})
+	roles, err := bus.WrapKeyValue(conn, rawRoles)
+	if err != nil {
+		t.Fatalf("wrap the role bucket: %v", err)
+	}
+	stalling := bus.NewKeyValue(rawRoles, &stallFirstKV{KeyValue: roles.WatchHandle(), after: delivered}, roles.Streams())
+	reg.roleWatcher = kvwatch.New("role claims", stalling, roleCache{reg}, kvwatch.WithScanIdleTimeout(200*time.Millisecond))
 	reg.roleWatcher.Start()
 }
 
@@ -244,7 +317,7 @@ func TestARoleViewWhoseFirstScanTimedOutAnswersOnlyOnceItsRescanCompletes(t *tes
 	// is the only one short of them.
 	waitForHeld(t, reg, "ses_holder", "planner", "reviewer")
 
-	restartRoleViewTimingOutAfter(t, reg, rawRoles, 1)
+	restartRoleViewTimingOutAfter(t, conn, reg, rawRoles, 1)
 	waitFor(t, 5*time.Second, reg.roleWatcher.Ready)
 	if roles, err := reg.RolesHeldBy("ses_holder"); !errors.Is(err, ErrRoleViewNotReady) {
 		t.Fatalf("after a first scan the idle timer ended, RolesHeldBy(ses_holder) = %v, %v; want ErrRoleViewNotReady", roles, err)
@@ -288,7 +361,7 @@ func TestWaitForCacheReadyHoldsUntilTheRoleClaimViewAnswers(t *testing.T) {
 	}
 	waitForHeld(t, reg, "ses_holder", "planner", "reviewer")
 
-	restartRoleViewTimingOutAfter(t, reg, rawRoles, 1)
+	restartRoleViewTimingOutAfter(t, conn, reg, rawRoles, 1)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -346,19 +419,22 @@ func TestARecreatedRoleBucketsViewAnswersOnlyOnceItsRefillCompletes(t *testing.T
 	released := make(chan struct{})
 	release := func() { releaseOnce.Do(func() { close(released) }) }
 	t.Cleanup(release)
-	apply := func(entry natsgo.KeyValueEntry) {
-		if refilling.Load() && entry.Key() == "reviewer" {
-			holdOnce.Do(func() { close(held) })
-			<-released
-		}
-		reg.applyRoleClaim(entry)
-	}
-	reset := func() {
-		reg.resetRoleHolders()
-		refilling.Store(true)
+	cache := gatedRoleClaims{
+		r: reg,
+		hold: func(key string) {
+			if refilling.Load() && key == "reviewer" {
+				holdOnce.Do(func() { close(held) })
+				<-released
+			}
+		},
+		began: func(read kvwatch.Read) {
+			if read.Recreated {
+				refilling.Store(true)
+			}
+		},
 	}
 	reg.roleWatcher.Stop()
-	reg.roleWatcher = kvwatch.New("role claims", reg.roles(), apply, reset)
+	reg.roleWatcher = kvwatch.New("role claims", reg.roles(), cache)
 	reg.roleWatcher.Start()
 	waitFor(t, 5*time.Second, reg.roleWatcher.Ready)
 	heldOnceComplete(t, reg, "ses_holder", []string{"planner", "reviewer"})
@@ -379,14 +455,14 @@ func TestARecreatedRoleBucketsViewAnswersOnlyOnceItsRefillCompletes(t *testing.T
 	case <-time.After(10 * time.Second):
 		t.Fatal("the refill never reached the holder's claim")
 	}
-	if roles, err := reg.RolesHeldBy("ses_holder"); !errors.Is(err, ErrRoleViewNotReady) {
-		t.Fatalf("with the refill short of the holder's claim, RolesHeldBy(ses_holder) = %v, %v; want ErrRoleViewNotReady", roles, err)
+	// The copy keeps every holder through the read and removes what the read found no evidence of
+	// only once it completes (roleCache), so a read of it while the refill is short of the
+	// holder's claim answers the copy the view had, never a part of the new bucket.
+	if got := heldRoles(t, reg, "ses_holder"); !slices.Equal(got, []string{"planner", "reviewer"}) {
+		t.Fatalf("with the refill short of the holder's claim, ses_holder holds %v, want the copy it had, [planner reviewer]", got)
 	}
 	release()
-	waitFor(t, 30*time.Second, func() bool {
-		_, complete := reg.roleWatcher.Complete()
-		return complete
-	})
+	waitFor(t, 30*time.Second, reg.roleWatcher.Following)
 	if got := heldRoles(t, reg, "ses_holder"); !slices.Equal(got, []string{"reviewer"}) {
 		t.Fatalf("after the refill ses_holder holds %v, want [reviewer]: a claim only the old bucket had outlived the reset", got)
 	}
@@ -432,7 +508,8 @@ func TestAClaimWhoseRequestEndsDuringItsCleanupSucceedsAndLogsNoFailure(t *testi
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	reg.watcher = kvwatch.New("interest registry", bus.KeyValue{KeyValue: &endingGetKeyValue{KeyValue: kv, key: oldSession, end: cancel}}, reg.applyWatched, reg.resetCache)
+	interests := reg.watcher.KV()
+	reg.watcher = kvwatch.New("interest registry", bus.NewKeyValue(&endingGetKeyValue{KeyValue: kv, key: oldSession, end: cancel}, interests.WatchHandle(), interests.Streams()), interestCache{reg})
 
 	if _, err := reg.SetRoleWithPrevious(ctx, newSession, "example-host", role, "", false); err != nil {
 		t.Fatalf("a claim that landed returned %v when its request ended during the cleanup, want success", err)
@@ -449,26 +526,54 @@ func TestAClaimWhoseRequestEndsDuringItsCleanupSucceedsAndLogsNoFailure(t *testi
 	t.Logf("cut-short cleanup: %s", strings.TrimSpace(out))
 }
 
-// A claim write this registry made on the old role bucket, whose answer arrives after a recreated
-// bucket's reset, must not land in the new bucket's view: its revision is the old bucket's, and as
-// the view's fence it would drop every lower revision the new bucket delivers, leaving the role
-// with the old write's holder (or none) until the new bucket's numbering passes it. The control is
-// the same write with no reset between: it applies, and fences out an older delivery.
+// A claim write this registry made on the old role bucket, whose answer arrives after a watch has
+// installed the recreated bucket, must not land in the new bucket's view: its revision is the old
+// bucket's, and as the view's fence it would drop every lower revision the new bucket delivers,
+// leaving the role with the old write's holder (or none) until the new bucket's numbering passes
+// it. The control is the same write through the view's own handle: it applies, and fences out an
+// older delivery.
 func TestAClaimWriteAnsweredAcrossARecreatedRoleBucketLeavesTheNewBucketsView(t *testing.T) {
-	r := &Registry{}
-	epoch := r.roleHolderEpoch()
-	r.resetRoleHolders()
-	r.setOwnRoleHolder("reviewer", "ses_old_bucket", 7, epoch)
-	r.setRoleHolder("reviewer", "ses_new_bucket", 1)
-	if got := r.holders["reviewer"]; got != "ses_new_bucket" {
-		t.Fatalf("after a reset, reviewer's holder = %q, want ses_new_bucket: the old bucket's claim write at revision 7 fenced out the new bucket's revision 1", got)
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	reg, err := Open(conn, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(reg.StopWatch)
+	// The watcher is stopped so only this test writes to the view; its epoch is still the one a
+	// write through its handle carries (kvwatch.Watcher.Handle).
+	reg.roleWatcher.Stop()
+	epoch := reg.roleWatcher.Epoch()
+
+	reg.setOwnRoleHolder("reviewer", "ses_old_bucket", 7, epoch+1)
+	reg.applyRoleClaim(roleClaimEntry("reviewer", "ses_new_bucket", 1))
+	if got := holderOf(reg, "reviewer"); got != "ses_new_bucket" {
+		t.Fatalf("after a watch moved the epoch, reviewer's holder = %q, want ses_new_bucket: the old bucket's claim write at revision 7 fenced out the new bucket's revision 1", got)
 	}
 
-	control := &Registry{}
-	controlEpoch := control.roleHolderEpoch()
-	control.setOwnRoleHolder("reviewer", "ses_written", 7, controlEpoch)
-	control.setRoleHolder("reviewer", "ses_delayed", 6)
-	if got := control.holders["reviewer"]; got != "ses_written" {
-		t.Fatalf("with no reset, reviewer's holder = %q, want ses_written: a delayed delivery at revision 6 undid the registry's own write at 7", got)
+	reg.setOwnRoleHolder("planner", "ses_written", 7, epoch)
+	reg.applyRoleClaim(roleClaimEntry("planner", "ses_delayed", 6))
+	if got := holderOf(reg, "planner"); got != "ses_written" {
+		t.Fatalf("with no recreate, planner's holder = %q, want ses_written: a delayed delivery at revision 6 undid the registry's own write at 7", got)
 	}
 }
+
+// roleClaimEntry is a record of the role bucket the watcher could have delivered: role's claim
+// naming holder, at revision.
+func roleClaimEntry(role, holder string, revision uint64) natsgo.KeyValueEntry {
+	return watchedRoleClaim{role: role, value: []byte(`{"holder_session_id":"` + holder + `"}`), revision: revision}
+}
+
+type watchedRoleClaim struct {
+	role     string
+	value    []byte
+	revision uint64
+}
+
+func (e watchedRoleClaim) Bucket() string               { return bus.RoleClaimBucket }
+func (e watchedRoleClaim) Key() string                  { return e.role }
+func (e watchedRoleClaim) Value() []byte                { return e.value }
+func (e watchedRoleClaim) Revision() uint64             { return e.revision }
+func (e watchedRoleClaim) Created() time.Time           { return time.Time{} }
+func (e watchedRoleClaim) Delta() uint64                { return 0 }
+func (e watchedRoleClaim) Operation() natsgo.KeyValueOp { return natsgo.KeyValuePut }

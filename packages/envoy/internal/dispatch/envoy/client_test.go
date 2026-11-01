@@ -135,6 +135,8 @@ func TestSessionsMapsListenerRowsAndDefaultsMissingSlices(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The row this older listener sends names no state; a session it lists is one it holds
+	// live, so the client reads it as live rather than leaving it blank.
 	want := []Session{{
 		SessionID:    "s1",
 		Title:        "planner",
@@ -143,6 +145,7 @@ func TestSessionsMapsListenerRowsAndDefaultsMissingSlices(t *testing.T) {
 		Roles:        []string{"legion-planner"},
 		Capabilities: []string{},
 		LastSeen:     1700000000000,
+		State:        StateLive,
 	}}
 	if !reflect.DeepEqual(sessions, want) {
 		t.Fatalf("sessions = %#v, want %#v", sessions, want)
@@ -229,6 +232,58 @@ func TestListInterestsReportsUnavailableListener(t *testing.T) {
 
 	if _, err := New(failing.URL).ListInterests(context.Background()); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("500: err = %v, want ErrUnavailable", err)
+	}
+}
+
+// The listener refuses a list it cannot stand behind with a 503 whose code is "refilling"
+// (cmd/listener writeListRefilling). Both list reads return that as ErrRefilling carrying the
+// listener's Retry-After, never as ErrUnavailable; any other 503 - another code, no code, a body
+// that is not JSON - stays ErrUnavailable.
+func TestListReadsTellARefillingListenerFromAnUnavailableOne(t *testing.T) {
+	reads := map[string]func(*Client) error{
+		"sessions": func(c *Client) error {
+			_, err := c.Sessions(context.Background())
+			return err
+		},
+		"interests": func(c *Client) error {
+			_, err := c.ListInterests(context.Background())
+			return err
+		},
+	}
+	answer := func(retryAfter, body string) *httptest.Server {
+		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if retryAfter != "" {
+				w.Header().Set("Retry-After", retryAfter)
+			}
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(body))
+		}))
+		t.Cleanup(listener.Close)
+		return listener
+	}
+	const refilling = `{"error":"envoy: the agent list is refilling; try again in a moment","code":"refilling"}`
+	for name, read := range reads {
+		t.Run(name, func(t *testing.T) {
+			for retryAfter, want := range map[string]string{"7": "7", "": ""} {
+				err := read(New(answer(retryAfter, refilling).URL))
+				var refused *RefillingError
+				if !errors.Is(err, ErrRefilling) || errors.Is(err, ErrUnavailable) || !errors.As(err, &refused) {
+					t.Fatalf("refilling 503: err = %v, want ErrRefilling and not ErrUnavailable", err)
+				}
+				if refused.RetryAfter != want {
+					t.Fatalf("refilling 503 with Retry-After %q: RetryAfter = %q, want %q", retryAfter, refused.RetryAfter, want)
+				}
+			}
+			for _, body := range []string{
+				`{"error":"service starting","code":"starting"}`,
+				`{"error":"envoy: the message bus did not answer: no responders"}`,
+				"listener restarting\n",
+			} {
+				if err := read(New(answer("1", body).URL)); !errors.Is(err, ErrUnavailable) || errors.Is(err, ErrRefilling) {
+					t.Fatalf("503 %q: err = %v, want ErrUnavailable and not ErrRefilling", body, err)
+				}
+			}
+		})
 	}
 }
 
@@ -389,6 +444,59 @@ func TestRolePreservesListenerNotFoundText(t *testing.T) {
 	}
 }
 
+// dispatch://INFRA-392. The listener's lookup route answers an unresponsive holder with its 404:
+// the role cannot be reached now, its state is named, and claim_released is false because the
+// claim stands (cmd/listener roleHolderError, pinned by its own
+// TestLookupsAndAReaperPassLeaveAStalledHoldersRoleClaimExactlyAsItWas). A reader that took that
+// refusal for "the role has no holder" dropped every role-routed message to a session that
+// missed its heartbeats - the failure this change exists to remove - so the holder it names is
+// resolved through the session route, which answers an unresponsive record like any other and
+// carries the capabilities a delivery is judged on.
+func TestARoleRefusedForAnUnresponsiveHolderResolvesToThatHolder(t *testing.T) {
+	var registryReads int
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/roles/legion-planner":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"role legion-planner holder s1 lapsed; claim retained (last seen 42)",` +
+				`"reason":"holder_lapsed","holder":"s1","holder_state":"unresponsive","last_seen":42,` +
+				`"claim_released":false}`))
+		case "/v1/roles/legion-reviewer":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"role legion-reviewer holder s9 lapsed; claim retained (last seen 1)",` +
+				`"reason":"holder_lapsed","holder":"s9","holder_state":"gone","last_seen":1,` +
+				`"claim_released":false}`))
+		case "/v1/registry/s1":
+			registryReads++
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","state":"unresponsive",` +
+				`"last_seen":42,"capabilities":["steer","btw"]}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer listener.Close()
+	client := New(listener.URL)
+
+	holder, err := client.Role(context.Background(), "legion-planner")
+	if err != nil {
+		t.Fatalf("resolve a role whose holder is unresponsive: %v", err)
+	}
+	if holder.SessionID != "s1" || holder.State != StateUnresponsive || holder.LastSeen != 42 ||
+		!reflect.DeepEqual(holder.Capabilities, []string{"steer", "btw"}) {
+		t.Fatalf("holder = %#v, want the unresponsive session s1 with its capabilities", holder)
+	}
+	if registryReads != 1 {
+		t.Fatalf("session reads = %d, want the holder read once", registryReads)
+	}
+
+	// A holder the registry calls gone is the refusal it is: nothing holds the role now.
+	if _, err := client.Role(context.Background(), "legion-reviewer"); err == nil ||
+		err.Error() != "role legion-reviewer holder s9 lapsed; claim retained (last seen 1)" {
+		t.Fatalf("role error for a gone holder = %v, want the listener's own refusal", err)
+	}
+}
+
 // A listener that is starting answers every /v1 route 503 with a JSON reason ("service starting",
 // cmd/listener/main.go's startingGate), and a gateway in front of one that is gone answers 502 or
 // 504, so on a role lookup and on a send alike those are ErrUnavailable - a caller's "ask again" -
@@ -453,7 +561,7 @@ func TestSessionDecodesTheListenerRowAndFillsWhatItOmits(t *testing.T) {
 			want: Session{
 				SessionID: "s1", Title: "planner", Dir: "/w/legion", MachineID: "m1", Host: "h1",
 				Roles: []string{"legion-planner"}, Capabilities: []string{"aside", "btw"},
-				LastSeen: 1700000000001,
+				LastSeen: 1700000000001, State: StateLive,
 			},
 		},
 		{
@@ -461,7 +569,19 @@ func TestSessionDecodesTheListenerRowAndFillsWhatItOmits(t *testing.T) {
 			body: `{"machine_id":"m1","host":"h1","dir":"/w/legion","title":"planner","last_seen":42}`,
 			want: Session{
 				SessionID: "s1", Title: "planner", Dir: "/w/legion", MachineID: "m1", Host: "h1",
-				Roles: []string{}, Capabilities: []string{}, LastSeen: 42,
+				Roles: []string{}, Capabilities: []string{}, LastSeen: 42, State: StateLive,
+			},
+		},
+		{
+			// The answer INFRA-392 turns on: a session past the live window is a 200 with its
+			// own state. A caller that read that 200 as a live session would keep calling a
+			// stalled one live; one that read a missing row as death would retire a session
+			// that is still working.
+			name: "a row the listener names unresponsive",
+			body: `{"session_id":"s1","title":"planner","state":"unresponsive","last_seen":1700000000002}`,
+			want: Session{
+				SessionID: "s1", Title: "planner", Roles: []string{}, Capabilities: []string{},
+				LastSeen: 1700000000002, State: StateUnresponsive,
 			},
 		},
 	} {
@@ -534,6 +654,64 @@ func TestSessionReportsAnUnreachableListenerAsUnavailable(t *testing.T) {
 		t.Fatalf("refused: err = %v, want ErrUnavailable", err)
 	} else if errors.Is(err, ErrNotFound) {
 		t.Fatalf("refused: err = %v, want it not to read as a missing session", err)
+	}
+}
+
+// Every session read asks for the unresponsive sessions too. A listener answers the live ones
+// alone unless it is asked (dispatch://INFRA-392), so a read that leaves the selector off reads
+// a stalled session as no session at all: its issue claim looks free, its role looks unheld and
+// a message aimed at it is refused. The stub here answers only when asked, exactly as the
+// listener does.
+func TestEverySessionReadAsksForTheUnresponsiveSessionsToo(t *testing.T) {
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("include") != "unresponsive" {
+			// The live-only answer: the stalled session is simply not in it.
+			switch r.URL.Path {
+			case "/v1/sessions":
+				_, _ = w.Write([]byte(`[]`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":"no live session s1","reason":"holder_lapsed"}`))
+			}
+			return
+		}
+		switch r.URL.Path {
+		case "/v1/sessions":
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","state":"unresponsive","last_seen":42}]`))
+		case "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","state":"unresponsive","last_seen":42}`))
+		case "/v1/roles/legion-planner":
+			_, _ = w.Write([]byte(`{"role":"legion-planner","holder":"s1","title":"planner","holder_state":"unresponsive","last_seen":42}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer listener.Close()
+	client := New(listener.URL)
+
+	sessions, err := client.Sessions(context.Background())
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].State != StateUnresponsive || sessions[0].LastSeen != 42 {
+		t.Fatalf("sessions = %#v, want the unresponsive session listed with its last_seen", sessions)
+	}
+	session, err := client.Session(context.Background(), "s1")
+	if err != nil {
+		t.Fatalf("read session s1: %v", err)
+	}
+	if session.State != StateUnresponsive || session.LastSeen != 42 {
+		t.Fatalf("session = %#v, want it unresponsive with its last_seen", session)
+	}
+	// A role answer names the holder's state as holder_state, and a holder that is only
+	// unresponsive still holds the role: the caller delivers to it and the message waits.
+	holder, err := client.Role(context.Background(), "legion-planner")
+	if err != nil {
+		t.Fatalf("resolve role: %v", err)
+	}
+	if holder.SessionID != "s1" || holder.State != StateUnresponsive || holder.LastSeen != 42 {
+		t.Fatalf("holder = %#v, want session s1 unresponsive with its last_seen", holder)
 	}
 }
 

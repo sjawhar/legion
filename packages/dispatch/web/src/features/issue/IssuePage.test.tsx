@@ -7,7 +7,7 @@ import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerIssuePatches } from "../../__tests__/send-answers";
-import { ApiError, api } from "../../api/client";
+import { AGENT_LIST_REFILLING, ApiError, api } from "../../api/client";
 import type {
   Agent,
   Ask,
@@ -24,6 +24,10 @@ import { IssuePage } from "./IssuePage";
 const issue: IssueDetails = {
   route_status: null,
   route_holder: null,
+  route_status_reason: null,
+  holder_state: null,
+  last_seen: null,
+  takeable_at: null,
   artifacts: [
     {
       created_at: "2026-09-09T00:00:00Z",
@@ -346,15 +350,90 @@ test("IssuePage's header warns when nobody holds the route, and adds nothing whe
     live();
   }
 
-  const unjudged = stubIssuePage({ ...issue, route: "role:sre", route_status: "unknown" });
+  const unjudged = stubIssuePage({
+    ...issue,
+    route: "role:sre",
+    route_status: "unknown",
+    route_status_reason: "unreachable",
+  });
   const unjudgedView = renderIssuePage();
   try {
     const row = await stateRow();
     expect(within(row).getByTestId("issue-route-unknown").textContent).toBe("Route reach unknown");
+    expect(within(row).queryByTestId("issue-route-refilling")).toBeNull();
     expect(within(row).queryByTestId("issue-route-unreachable")).toBeNull();
   } finally {
     unjudgedView.unmount();
     unjudged();
+  }
+
+  // A listener that is refilling its agent list says so: the route is unknown for that reason,
+  // never unheld.
+  const refilling = stubIssuePage({
+    ...issue,
+    route: "role:sre",
+    route_status: "unknown",
+    route_status_reason: "refilling",
+  });
+  const refillingView = renderIssuePage();
+  try {
+    const row = await stateRow();
+    expect(within(row).getByTestId("issue-route-refilling").textContent).toBe(
+      `Route reach unknown: ${AGENT_LIST_REFILLING}`
+    );
+    expect(within(row).queryByTestId("issue-route-unknown")).toBeNull();
+    expect(within(row).queryByTestId("issue-route-unreachable")).toBeNull();
+  } finally {
+    refillingView.unmount();
+    refilling();
+  }
+});
+
+// A route whose holder has missed its heartbeats is neither unreachable nor unjudged: the
+// listener judged it and said the session is stalled, and what is sent to the issue waits for
+// it. Folding that into either of the other two markers tells a reader to re-staff a role that
+// is still held, or hides that anything is wrong at all (dispatch://INFRA-392).
+test("IssuePage's header marks an unresponsive route holder apart from an unheld and a refilling route", async () => {
+  const stateRow = async () => {
+    const rail = await screen.findByTestId("issue-metadata-rail");
+    await within(rail).findByRole("button", { name: "Messages default to role:sre" });
+    return screen.getByTestId("issue-state-actions");
+  };
+
+  const stalled = stubIssuePage({
+    ...issue,
+    route: "role:sre",
+    route_status: "holder_unresponsive",
+    route_holder: "ses-sre",
+  });
+  const stalledView = renderIssuePage();
+  try {
+    const row = await stateRow();
+    const marker = within(row).getByTestId("issue-route-unresponsive");
+    expect(marker.textContent).toContain("role:sre:");
+    expect(marker.textContent).toContain("Unresponsive, still reached");
+    expect(marker.getAttribute("title")).toContain("waits until it answers");
+    expect(within(row).queryByTestId("issue-route-unreachable")).toBeNull();
+    expect(within(row).queryByTestId("issue-route-unknown")).toBeNull();
+    expect(within(row).queryByTestId("issue-route-refilling")).toBeNull();
+  } finally {
+    stalledView.unmount();
+    stalled();
+  }
+
+  // The other two states leave this marker off, so the three never read as one another.
+  for (const reach of [
+    { route_status: "no_holder" } as const,
+    { route_status: "unknown", route_status_reason: "refilling" } as const,
+  ]) {
+    const other = stubIssuePage({ ...issue, route: "role:sre", ...reach });
+    const otherView = renderIssuePage();
+    try {
+      expect(within(await stateRow()).queryByTestId("issue-route-unresponsive")).toBeNull();
+    } finally {
+      otherView.unmount();
+      other();
+    }
   }
 });
 
@@ -608,6 +687,30 @@ test("IssuePage shows a retryable error and hides the section when the subscribe
       expect(screen.queryByRole("region", { name: "Subscribed agents" })).toBeNull()
     );
     await screen.findByText("Subscribed agents unavailable — Envoy listener unreachable.");
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+// A refilling agent list is not an unreachable listener, and a failed read counts nobody: the
+// header's toggle drops its number rather than say the issue has no subscribers.
+test("IssuePage says the agent list is refilling and counts no subscribers from a failed read", async () => {
+  const restore = stubIssuePage(issue);
+  api.getIssueSubscribers = async () => {
+    throw new ApiError(503, { code: "ENVOY_REFILLING", error: AGENT_LIST_REFILLING });
+  };
+  const view = renderIssuePage();
+
+  try {
+    await screen.findByText(issue.title);
+    const notice = await screen.findByTestId("agent-list-refilling");
+    expect(notice.textContent).toBe(AGENT_LIST_REFILLING);
+    expect(
+      screen.queryByText("Subscribed agents unavailable — Envoy listener unreachable.")
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "Subscribers" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Subscribers: / })).toBeNull();
   } finally {
     view.unmount();
     restore();
@@ -911,6 +1014,7 @@ test("IssuePage opens the Spec tab and leaves open asks out of the main column",
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
       },
     },
   ]);

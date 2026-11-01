@@ -11,6 +11,7 @@ import type {
   AskUrgency,
   BlockPath,
   ClaimedIssue,
+  ClaimHolderLiveness,
   Comment,
   CommentRead,
   CreateArtifactInput,
@@ -46,6 +47,7 @@ import {
   ASK_URGENCIES,
   actorLabel,
   claimHolds,
+  claimTakeableAt,
   DEFAULT_ISSUE_PAGE_LIMIT,
   DISPATCH_BODY_MAX,
   decodeBlockId,
@@ -1865,11 +1867,32 @@ function componentsLine(components: IssueComponents): string {
  * "· not running", as the chip does, and its issue is free to claim; with no registry (`titles`
  * undefined) a session's claim reads "· liveness unknown", since nothing can say whether that
  * session runs. A person's claim, and a session the registry lists, carry no marker.
+ *
+ * `liveness` is the issue read's own answer about the holder, which the list of titles cannot
+ * give: a holder that has missed its heartbeats without ending reads
+ * "· unresponsive since <last seen>, takeable at <time>". An agent deciding whether to take the
+ * issue reads exactly that - wait until the second time, or pick it up now - so both times are
+ * named, and the second is `claimTakeableAt`, the moment the server's own refusal names.
  */
-function claimText(claim: IssueClaim, titles: ReadonlyMap<string, string> | undefined): string {
-  const holding = claimHolds(claim, titles);
+function claimText(
+  claim: IssueClaim,
+  titles: ReadonlyMap<string, string> | undefined,
+  liveness: ClaimHolderLiveness = {}
+): string {
+  const holding = claimHolds(claim, titles, liveness);
+  const takeableAt = claimTakeableAt(liveness);
+  const unresponsive =
+    liveness.holder_state === "unresponsive" && liveness.last_seen != null
+      ? ` · unresponsive since ${liveness.last_seen}${takeableAt === null ? "" : `, takeable at ${takeableAt}`}`
+      : " · unresponsive";
   const marker =
-    holding === "unknown" ? " · liveness unknown" : holding === "lapsed" ? " · not running" : "";
+    holding === "unknown"
+      ? " · liveness unknown"
+      : holding === "lapsed"
+        ? " · not running"
+        : holding === "unresponsive"
+          ? unresponsive
+          : "";
   return `${actorLabel(claim.actor, titles)} since ${claim.at}${marker}`;
 }
 
@@ -1915,7 +1938,12 @@ function routeHeldBySession(issue: RoutedIssue): boolean {
  * reaches anyone, from the `route_status` the server resolved on this read. A route to a role
  * nobody holds, or to a session that is not running, reaches nobody as of the listener's session
  * list Dispatch last stored, at most 5 s old and the same on every server process, so it says
- * so - and says "right now", because a restarting session is absent for minutes.
+ * so - and says "right now", because a restarting session is absent for minutes. A route whose
+ * holder is unresponsive still reaches it - the listener stores what is sent while it is silent
+ * - so it names the state rather than reading as unreachable. An `unknown` route says why from
+ * `route_status_reason`: a listener whose agent list is refilling did answer and will judge it
+ * in a moment, while one that is unreachable (or a server too old to give a reason) did not
+ * answer at all.
  */
 function routeText(issue: RoutedIssue, titles?: ReadonlyMap<string, string>): string {
   if (issue.route === null) return "none";
@@ -1925,10 +1953,16 @@ function routeText(issue: RoutedIssue, titles?: ReadonlyMap<string, string>): st
       routeHeldBySession(issue) && holder !== null
         ? ` (held by ${titles?.get(holder) ?? holder})`
         : "",
+    holder_unresponsive: issue.route.startsWith("role:")
+      ? ` (its holder${holder === null ? "" : ` ${titles?.get(holder) ?? holder}`} is unresponsive: messages wait for it)`
+      : " (that session is unresponsive: messages wait for it)",
     no_holder: issue.route.startsWith("role:")
       ? " (nobody holds it right now)"
       : " (that session is not running right now)",
-    unknown: " (the Envoy listener did not answer, so whether it reaches anyone is unknown)",
+    unknown:
+      issue.route_status_reason === "refilling"
+        ? " (the Envoy listener's agent list is refilling, so whether it reaches anyone is unknown; try again in a moment)"
+        : " (the Envoy listener did not answer, so whether it reaches anyone is unknown)",
   };
   return issue.route + (issue.route_status == null ? "" : reach[issue.route_status]);
 }
@@ -2019,7 +2053,7 @@ function issueSummary(
     `Link: ${new URL(`/issues/${encodeURIComponent(issue.key)}`, linkBase).toString()}`,
     `Status: ${issue.status}`,
     `Assignee: ${issue.assignee ?? "unassigned"}`,
-    `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, titles)}`,
+    `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, titles, issue)}`,
     ...(issue.priority === null ? [] : [`Priority: P${issue.priority}`]),
     `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     componentsLine(issue.components),
@@ -3727,6 +3761,7 @@ export async function executeDispatchTool(
         route: row.route ?? null,
         route_status: row.route_status ?? null,
         route_holder: row.route_holder ?? null,
+        route_status_reason: row.route_status_reason ?? null,
         updated_at: row.updated_at,
         progress: row.progress,
       }));

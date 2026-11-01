@@ -3925,6 +3925,9 @@ A phase worker or sub-architect pod that dies mid-task
 — is relaunched by the daemon itself, as the same agent one generation later (`legion-<issue>-<role>-g<n+1>`, its command carrying `--resume=<the recorded session>`), and prompted with the daemon's catch-up rather than a replay of the interrupted task (LEGION-179).
 The death is seen twice over: at once, when the pod's worker stream closes and the daemon's one reconnect (`connect` awaiting a fresh registration for `worker_rpc_timeout_seconds`) finds none;
 and, for a death the stream never reported, on the next resync tick, which probes every located, ready-confirmed worker claim with the rules above.
+Either judgement is a probe's, never the closed stream by itself — a daemon restart closes every stream while the agents run on — and when a probe says the process is gone the daemon sends the Envoy listener `DELETE /v1/sessions/<the session the claim registered>`.
+That clean stop makes the listener read the session `gone` at once, rather than `unresponsive` until its live window ends, so the role claim and the issue claims that session held are released as soon as the process behind them is (dispatch://INFRA-392); the relaunch registers the same session again.
+A listener that refuses the stop or cannot be reached costs nothing but that promptness, and the daemon logs it.
 Each death counts one `launchFailures`, so a pod that keeps dying before its `/worker/ready` reaches `worker-died` at `MAX_LAUNCH_FAILURES` exactly like a boot that never confirms; a confirmed ready resets the count.
 A finished worker whose pod dies while idle
 — no longer its issue's active phase, nothing queued for it
@@ -5051,9 +5054,9 @@ The session's pi-legion extension registers on `POST /legion/v1/claims/register`
 The daemon records `controllerLocator: {runtime, external: true, sessionId, registeredAt}` (`legion state
 --json`, `GET /legion/v1/state`), `runtime` being the daemon's own.
 On every orphan sweep it reads `GET /v1/roles/legion-<project>-controller` from the Envoy listener with its bearer.
-The controller is alive while the holder is the recorded session and its `last_seen` is within `max(worker_boot_timeout_seconds, 4 × 90 s)`, which is 360 s at the defaults.
-It is gone when the role is unheld or expired, held by another session, or last seen that long ago.
-It is unknown, never gone, when the listener is unreachable, refuses with anything but a 404, or answers a body the probe cannot read.
+The controller is alive while the listener names the recorded session as the role's holder, which it does only for a session inside its own live window (`ENVOY_SESSION_LIVE_WINDOW`, 5 minutes by default); the daemon keeps no staleness window of its own to drift from it.
+It is gone when the listener answers 404 for a role nobody claimed or for a holder it reports `gone`, when another session holds the role, and when a listener of an earlier release answers 404 naming no `holder_state` at all.
+It is unknown, never gone, when the listener reports the holder `unresponsive` — past the live window but inside the gone horizon, its claim kept, which a session stalled under load reads as — and when the listener is unreachable, refuses with anything but a 404, or answers a body the probe cannot read.
 
 **Re-running and failing.**
 Running the command again mints a new capability and takes the role.

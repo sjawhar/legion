@@ -1,0 +1,20 @@
+kind: Added
+body: |-
+    An Envoy session is now `live`, `unresponsive` or `gone`, judged by how long ago its
+    registration record was written rather than by whether the listener's cache holds it. A session
+    that has not registered since the live window (`ENVOY_SESSION_LIVE_WINDOW`, five minutes) is
+    `unresponsive`, and stays so until the gone horizon (`ENVOY_SESSION_GONE_HORIZON`, one hour).
+    An unresponsive session is not a dead one: nothing a lookup, a publish, a role-lane delivery or
+    a reaper pass does releases its role claim, a send to it is accepted and stored with
+    `recipient_state: unresponsive`, topic fan-out skips it with a status of its own rather than a
+    failure, and its interests are kept. Only the role-claim reaper releases a claim, and only once
+    the holder is `gone`. Every list, lookup and refusal carries `state` and `last_seen`, a role
+    lookup answers `holder_state` and `claim_released`, and `GET /v1/sessions` and
+    `GET /v1/registry/<id>` take `include=unresponsive`; without it an unresponsive session is not
+    answered for, and the 404 keeps the `no live session <id>` prefix it had. A session reaper
+    deletes a record past the gone horizon at exactly the revision its pass judged, so a
+    registration that lands between the decision and the delete survives, and counts the messages
+    stored on the session's subject after its last registration — bounded, and not a count of
+    unread messages, since the listener keeps no read receipt. The bucket's maximum age is
+    `ENVOY_SESSION_MAX_AGE`, reported in `/healthz` as `session_max_age` and re-read on each reaper
+    pass, so a change made by another process reaches a running listener with no restart.

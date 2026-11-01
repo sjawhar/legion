@@ -19,6 +19,22 @@ const REPLAY_TIMEOUT_MS = 10_000;
  */
 export const REPLAY_UNAVAILABLE_CODE = "REPLAY_UNAVAILABLE";
 
+/**
+ * A session's state, which the listener computes from that session's last registration and from
+ * nothing else (dispatch://INFRA-392): `live` within the live window (5 minutes), `unresponsive`
+ * past it and inside the gone horizon (an hour), `gone` past that or with no record at all. An
+ * unresponsive session is not dead — it keeps its role and issue claims, a message sent to it is
+ * stored for it, and nothing starts a replacement for it.
+ */
+const SessionStateSchema = z.enum(["live", "unresponsive", "gone"]);
+
+export type SessionState = z.infer<typeof SessionStateSchema>;
+
+// A listener predating the field names no state, and it lists only sessions it holds a
+// registration for: `live` is what such an answer means, and reading an absent state as anything
+// else would make every session on an older listener look dead.
+const WireStateSchema = SessionStateSchema.default("live");
+
 const InterestWireSchema = z.object({
   session_id: z.string(),
   machine_id: z.string(),
@@ -65,6 +81,7 @@ const SessionWireSchema = z.object({
   capabilities: z.array(z.string()).optional(),
   self_subscribed: z.boolean(),
   last_seen: z.number().int().optional(),
+  state: WireStateSchema,
   // The plugin the session registered through and its build; absent from a listener predating the
   // fields and for a session whose plugin predates them.
   plugin: z.string().optional(),
@@ -76,6 +93,10 @@ const RoleWireSchema = z.object({
   holder: z.string(),
   host: z.string().optional(),
   last_seen: z.number().int(),
+  // The holder's own state. A role answer names it `holder_state`; `state` is the same session's
+  // state as a session row reports it, so both are read and `holder_state` wins.
+  state: WireStateSchema,
+  holder_state: SessionStateSchema.optional(),
 });
 
 const RoleHeldWireSchema = z.object({
@@ -93,6 +114,7 @@ const ErrorWireSchema = z.object({
 const EnvelopeResponseSchema = EnvelopeSchema.extend({
   recipient: z.string().optional(),
   holder: z.string().optional(),
+  recipient_state: SessionStateSchema.optional(),
 });
 
 const ReplayWireSchema = z.object({
@@ -207,6 +229,15 @@ export function mergeInterestSources(
 export type SessionInfo = z.infer<typeof SessionWireSchema>;
 
 export type RoleInfo = z.infer<typeof RoleWireSchema>;
+
+/**
+ * The state a role answer reports for its holder: `holder_state` where the listener names it,
+ * else the row's own state. A holder that is only unresponsive still holds the role — nothing on
+ * a lookup releases its claim — so this never reads as "no holder".
+ */
+export function holderStateOf(role: RoleInfo): SessionState {
+  return role.holder_state ?? role.state;
+}
 
 export type SubscribeInput = {
   readonly sessionID: string;
@@ -334,12 +365,18 @@ export type SetRoleResult =
 export type ListSessionsInput = {
   readonly directory?: string;
   readonly title?: string;
+  /** `unresponsive` asks the listener for the sessions past their live window as well; without it
+   *  the list holds the live ones alone. A gone session is never listed either way. */
+  readonly include?: "unresponsive";
 };
 
 export type SendResult = {
   readonly envelope: Envelope;
   readonly recipient: string;
   readonly confirmed: boolean;
+  /** The recipient's state as the listener resolved it; `live` from a listener that names none.
+   *  A message to an unresponsive recipient is stored and reaches it when it answers again. */
+  readonly recipientState: SessionState;
 };
 
 export type PublishResult = {
@@ -559,6 +596,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         envelope: response,
         recipient: response.recipient ?? input.targetSessionID,
         confirmed: response.recipient !== undefined,
+        recipientState: response.recipient_state ?? "live",
       };
     },
     publish: async (input) => {
@@ -628,6 +666,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       const search = new URLSearchParams();
       if (input.directory !== undefined) search.set("dir", input.directory);
       if (input.title !== undefined) search.set("title", input.title);
+      if (input.include !== undefined) search.set("include", input.include);
       const query = search.size === 0 ? "" : `?${search.toString()}`;
       return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
     },

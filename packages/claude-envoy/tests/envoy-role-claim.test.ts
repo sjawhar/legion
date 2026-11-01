@@ -83,7 +83,7 @@ test("reasserts a role claimed after channel startup on the next heartbeat", asy
       reasserted.resolve()
       return { claimed: true, interest: interest() }
     },
-    getRole: async () => ({ role: "reviewer", holder: "ses_lost", last_seen: 1 }),
+    getRole: async () => ({ role: "reviewer", holder: "ses_lost", last_seen: 1, state: "live" }),
     replay: emptyReplay,
   }
   let session: ChannelSession | undefined

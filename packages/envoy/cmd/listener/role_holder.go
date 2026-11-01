@@ -1,7 +1,8 @@
-// Role-holder resolution: reading a role's claim and its holder's session through to the
-// bucket, releasing a lapsed claim, answering the race a superseded release loses, deciding
-// whether a soft claim takes the role from the holder it found, and the 404 that names a role
-// with no live holder.
+// Role-holder resolution: reading a role's claim and its holder's session through to the bucket,
+// judging that holder's state, deciding whether a soft claim takes the role from the holder it
+// found, and the 404 that names a role whose holder is not answering. No resolution here releases
+// a claim: a holder that stopped answering keeps its role until the role reaper finds it gone
+// (session.Gone), which is the one place a claim is taken away.
 
 package main
 
@@ -19,19 +20,16 @@ import (
 
 type roleClaimResolver interface {
 	RoleClaim(ctx context.Context, role string) (store.RoleClaim, error)
-	ReleaseExpiredRoleClaim(ctx context.Context, role, sessionID string, sessionTTL time.Duration) (store.ExpiredRoleClaimRelease, error)
 }
 
-// readRoleClaim reads role's claim for attempt of a resolution (resolveRoleHolderFrom, whose
-// attempts are numbered from 0). Attempt 0 of a resolution given a firstHolder reads it from
-// there — the registry's watched copy of the role bucket (store.Registry.CachedRoleHolder), which
-// costs no round trip, so a role message the lane forwards reads no bucket — and every later
-// attempt from registry itself, since a retry after a superseded release must see the claim that
-// superseded it, which the copy can trail. A route, which answers a caller within its own
-// deadline, passes no firstHolder and reads the bucket on every attempt. The copy names a holder,
-// not a whole claim, and the resolution reads nothing else from it.
-func readRoleClaim(ctx context.Context, registry roleClaimResolver, firstHolder func(role string) (string, error), role string, attempt int) (store.RoleClaim, error) {
-	if attempt > 0 || firstHolder == nil {
+// readRoleClaim reads role's claim for a resolution (resolveRoleHolderFrom). A resolution given a
+// firstHolder reads it from there — the registry's watched copy of the role bucket
+// (store.Registry.CachedRoleHolder), which costs no round trip, so a role message the lane
+// forwards reads no bucket. A route, which answers a caller within its own deadline, passes no
+// firstHolder and reads the bucket itself. The copy names a holder, not a whole claim, and the
+// resolution reads nothing else from it.
+func readRoleClaim(ctx context.Context, registry roleClaimResolver, firstHolder func(role string) (string, error), role string) (store.RoleClaim, error) {
+	if firstHolder == nil {
 		return registry.RoleClaim(ctx, role)
 	}
 	holder, err := firstHolder(role)
@@ -50,15 +48,16 @@ const (
 )
 
 // roleHolderResult is one resolution of a role's holder (resolveRoleHolder). holder names the
-// claim's holder whenever one was read; entry is set only for roleHolderLive; lastSeen,
-// lastSeenAvailable and claimRelease only for roleHolderLapsed.
+// claim's holder whenever one was read, and holderState the state that holder's record puts it
+// in (session.StateOf), on the two outcomes a record was read on; entry is set only for
+// roleHolderLive; lastSeen and lastSeenAvailable only for roleHolderLapsed.
 type roleHolderResult struct {
 	state             roleHolderState
 	holder            string
+	holderState       session.State
 	entry             session.SessionEntry
 	lastSeen          int64
 	lastSeenAvailable bool
-	claimRelease      store.ExpiredRoleClaimRelease
 }
 
 // roleHolderStep names the read a role-holder resolution failed at, so a caller that reports the
@@ -67,43 +66,42 @@ type roleHolderStep uint8
 
 const (
 	// roleHolderClaimRead: the role claim could not be read, or the resolution's context ended
-	// before an attempt began.
+	// before the read began.
 	roleHolderClaimRead roleHolderStep = iota
 	// roleHolderSessionRead: the holder's session entry could not be read.
 	roleHolderSessionRead
-	// roleHolderRelease: the lapsed holder's claim could not be released.
-	roleHolderRelease
-	// roleHolderChurn: every release found the claim superseded by a fresher one, past
-	// roleHolderResolutionAttempts.
-	roleHolderChurn
 )
 
 // roleHolderFailure is the error of a resolution that did not resolve. Its message is what an
 // HTTP route names in its answer, so it names the step; cause is the read's own error, which the
-// role lane logs under a line of its own per step, and errRoleHolderChanged for roleHolderChurn.
-// It unwraps to cause, so a route still tells errRoleHolderChanged, store.ErrMalformedRoleClaim
-// and a refused or oversized read (writeBusUnavailable) by the read's own error.
+// role lane logs under a line of its own per step. It unwraps to cause, so a route still tells
+// store.ErrMalformedRoleClaim and a refused or oversized read (writeBusUnavailable) by the read's
+// own error.
 type roleHolderFailure struct {
 	step  roleHolderStep
 	cause error
 }
 
 func (f *roleHolderFailure) Error() string {
-	switch f.step {
-	case roleHolderSessionRead:
+	if f.step == roleHolderSessionRead {
 		return "read role holder session: " + f.cause.Error()
-	case roleHolderRelease:
-		return "drop expired role claim: " + f.cause.Error()
 	}
 	return f.cause.Error()
 }
 
 func (f *roleHolderFailure) Unwrap() error { return f.cause }
 
+// roleHolderError is the 404 of a role with no live holder. HolderState says which of the three
+// states the claim's holder is in, so a caller can tell a holder that is merely unresponsive -
+// stalled, still claiming, still being stored for - from one that is gone. ClaimReleased is on
+// every lapsed answer and is always false: a lookup takes nothing from a holder, whatever its
+// state, so a caller that used to read this answer as "the role is free now" is told plainly that
+// the claim still stands.
 type roleHolderError struct {
 	Error         string          `json:"error"`
 	Reason        roleHolderState `json:"reason"`
 	Holder        string          `json:"holder,omitempty"`
+	HolderState   session.State   `json:"holder_state,omitempty"`
 	LastSeen      *int64          `json:"last_seen,omitempty"`
 	ClaimReleased *bool           `json:"claim_released,omitempty"`
 }
@@ -117,54 +115,22 @@ func writeRoleHolderError(w http.ResponseWriter, role string, result roleHolderR
 		response.Error = fmt.Sprintf("no holder for role %s", role)
 	case roleHolderLapsed:
 		response.Holder = result.holder
+		response.HolderState = result.holderState
 		lastSeen := " (last seen unavailable)"
 		if result.lastSeenAvailable {
 			response.LastSeen = &result.lastSeen
 			lastSeen = fmt.Sprintf(" (last seen %d)", result.lastSeen)
 		}
-		claimReleased := result.claimRelease == store.ExpiredRoleClaimReleased
+		claimReleased := false
 		response.ClaimReleased = &claimReleased
-		switch result.claimRelease {
-		case store.ExpiredRoleClaimReleased:
-			response.Error = fmt.Sprintf(
-				"role %s holder %s lapsed; claim released%s",
-				role,
-				result.holder,
-				lastSeen,
-			)
-		case store.ExpiredRoleClaimMissing:
-			response.Error = fmt.Sprintf(
-				"role %s holder %s lapsed; claim was already absent%s",
-				role,
-				result.holder,
-				lastSeen,
-			)
-		default:
-			response.Error = fmt.Sprintf(
-				"role %s holder %s lapsed; claim retained%s",
-				role,
-				result.holder,
-				lastSeen,
-			)
-		}
+		response.Error = fmt.Sprintf(
+			"role %s holder %s lapsed; claim retained%s",
+			role,
+			result.holder,
+			lastSeen,
+		)
 	}
 	writeJSON(w, http.StatusNotFound, response)
-}
-
-const roleHolderResolutionAttempts = 2
-
-// writeRoleHolderChanged answers a role-holder resolution that lost the race for the role's claim
-// (errRoleHolderChanged), for both routes that resolve one: asking is what the caller asked for, a
-// "publish" or a "lookup". The 503 and the Retry-After are the same ask as a bus that did not
-// answer - a fresh read wins this race as soon as the replacement claim settles - but the body is
-// not: every bus read answered, so it names the race rather than an outage that never happened. It
-// returns the status it wrote, for the publish route's record (refuseRoleHolderChanged).
-func writeRoleHolderChanged(w http.ResponseWriter, role, asking string) int {
-	w.Header().Set("Retry-After", "1")
-	writeJSONError(w, http.StatusServiceUnavailable, fmt.Sprintf(
-		"envoy: the holder of role %s changed while this %s was resolving it", role, asking,
-	))
-	return http.StatusServiceUnavailable
 }
 
 // writeRoleClaimUnreadable answers a role-holder resolution that read a claim record it cannot
@@ -179,59 +145,51 @@ func writeRoleClaimUnreadable(w http.ResponseWriter, role string, err error) int
 	return http.StatusInternalServerError
 }
 
-// releaseExpiredRoleClaim is the single point in the listener that interprets
-// store.ExpiredRoleClaimRelease's ExpiredRoleClaimSuperseded outcome. resolveRoleHolder, the one
-// resolution behind HTTP role lookups, the publish route's role sends and role delivery, calls it
-// instead of registry.ReleaseExpiredRoleClaim directly, so a claim that raced a fresh SetRole
-// before the conditional delete landed is reported as "must re-resolve" in exactly one place. A
-// second, drifted branch on ExpiredRoleClaimSuperseded is exactly how a live replacement holder
-// ends up reported as this call's stale verdict — the defect this helper exists to make
-// structurally impossible.
+// liveSessionEntry is sessionID's record and the state that record puts its session in, for a
+// decision that acts on a session having stopped answering: a role lookup, a soft claim, the
+// reapers, a session-addressed send and an agent delivery. accept is the caller's rule about that
+// state - every caller that may not act on a stalled session passes notGone, and only the two
+// that push to a session's own port pass sessionIsLive.
 //
-// The release waits no longer than ctx: a route passes its request's own context, role delivery
-// context.Background(). store.Registry.ReleaseExpiredRoleClaim says why a delete it abandons is safe
-// to leave running.
-func releaseExpiredRoleClaim(ctx context.Context, registry roleClaimResolver, role, sessionID string, sessionTTL time.Duration) (release store.ExpiredRoleClaimRelease, superseded bool, err error) {
-	release, err = registry.ReleaseExpiredRoleClaim(ctx, role, sessionID, sessionTTL)
-	if err != nil {
-		return store.ExpiredRoleClaimRetained, false, err
-	}
-	return release, release == store.ExpiredRoleClaimSuperseded, nil
-}
-
-// liveSessionEntry is sessionID's session entry for a decision that acts on its absence: a role
-// lookup or role delivery that releases a lapsed claim, a soft claim that supersedes a gone holder,
-// the role reaper, and a session-addressed send, which tells its sender the destination is gone.
-// live is the caller's test of an entry. The cache answers when it holds an entry live accepts;
-// otherwise the session is read from the session bucket itself (session.SessionRegistry.Refresh),
-// because the cache follows the bucket through a watcher and so trails it: a session another
-// listener registered a moment ago, or one this listener has not re-read since its bus connection
-// came back, is in the bucket before it is here. A role claim is read from the role bucket itself,
-// so during a rolling deploy the old task resolves the claims the replacement accepts; a send asks
-// the same question for the same reason, since a sender told its destination is gone acts on that
-// answer - it routes around the pane, reports it, or stops - and the cache alone cannot tell a
-// session that ended from one it has not caught up with. nats.ErrKeyNotFound is the bucket's word
-// that the session is gone or fails live; any other error is a read that did not answer, on which
-// nothing is taken from a holder and no send is refused as unaddressed. The bucket read gets bound,
-// derived from ctx, so a lookup, a soft claim, a role send through the publish route and a send that cannot read the
-// bucket answer their 503 inside the deadline their own caller holds.
+// The cache answers when it holds a record accept takes (session.SessionRegistry.Lookup, which
+// judges the record's own age and never its membership of the cache); otherwise the session is
+// read from the session bucket itself (Refresh), because the cache follows the bucket through a
+// watcher and so trails it: a session another listener registered a moment ago, or one this
+// listener has not re-read since its bus connection came back, is in the bucket before it is
+// here. A role claim is read from the role bucket itself, so during a rolling deploy the old task
+// resolves the claims the replacement accepts; a send asks the same question for the same reason,
+// since a sender told its destination is gone acts on that answer - it routes around the pane,
+// reports it, or stops - and the cache alone cannot tell a session that ended from one it has not
+// caught up with.
+//
+// nats.ErrKeyNotFound is the answer for a session the bucket holds no record of and for one whose
+// record accept refuses, and the state returned with it says which: session.Gone for the first,
+// and the state the record really carries for the second, so a caller can report what it refused
+// on rather than call every such session gone. Any other error is a read that did not answer, on
+// which nothing is taken from a holder and no send is refused as unaddressed. The bucket read gets
+// bound, derived from ctx, so a lookup, a soft claim, a role send through the publish route and a
+// send that cannot read the bucket answer their 503 inside the deadline their own caller holds.
 func liveSessionEntry(
 	ctx context.Context,
 	sessions *session.SessionRegistry,
 	sessionID string,
 	bound time.Duration,
-	live func(session.SessionEntry) bool,
-) (session.SessionEntry, error) {
-	if entry, err := sessions.Get(sessionID); err == nil && live(entry) {
-		return entry, nil
+	accept func(session.State) bool,
+) (session.SessionEntry, session.State, error) {
+	if entry, state := sessions.Lookup(sessionID); accept(state) {
+		return entry, state, nil
 	}
 	readCtx, cancel := context.WithTimeout(ctx, bound)
 	defer cancel()
 	entry, err := sessions.Refresh(readCtx, sessionID)
-	if err == nil && !live(entry) {
-		return session.SessionEntry{}, nats.ErrKeyNotFound
+	if err != nil {
+		return session.SessionEntry{}, session.Gone, err
 	}
-	return entry, err
+	state := sessions.EntryState(entry)
+	if !accept(state) {
+		return entry, state, nats.ErrKeyNotFound
+	}
+	return entry, state, nil
 }
 
 // bucketSessionEntry is sessionID's entry read from the session bucket itself
@@ -265,10 +223,10 @@ const (
 	// predecessor keeps the role, and so does a named predecessor still live inside another
 	// client instance; store.Registry.SetRoleWithPrevious then answers the 409 that names it.
 	roleStaysWithHolder roleSupersession = iota
-	// roleTakenFromHolder: the holder gives the role up, because it has no live session entry
-	// in the bucket, or because it is the claimant's named predecessor and its entry carries
-	// the claimant's own client instance id - the same conversation continuing inside the
-	// instance that held the role.
+	// roleTakenFromHolder: the holder gives the role up, because it is not live - stalled past
+	// the live window, or with no record at all - or because it is the claimant's named
+	// predecessor and its entry carries the claimant's own client instance id, the same
+	// conversation continuing inside the instance that held the role.
 	roleTakenFromHolder
 	// roleTakenFromUnidentifiedPredecessor is roleTakenFromHolder for the one case
 	// session.InstanceMatches accepts without two ids to compare: a live named predecessor
@@ -288,14 +246,18 @@ const (
 // already trimmed; claimantInstanceID is the client instance the claimant's own registration
 // carries.
 //
-// A holder the claimant did not name as its predecessor is weighed on liveness alone
-// (liveSessionEntry): gone from the session bucket it has lapsed and the role is free, live it
-// keeps the role. The declared predecessor is weighed on the client instance it belongs to as
-// well, and is read from the bucket itself (bucketSessionEntry, which says why a cached entry
-// cannot decide this): gone, it gives the role up; live, it gives it up only to a claimant
-// session.InstanceMatches accepts, which is its own client instance, or a side that carries no
-// id at all - the one of those two arms the route logs, and the only reason this function tells
-// them apart.
+// A holder the claimant did not name as its predecessor is weighed on its state alone
+// (liveSessionEntry with sessionIsLive): anything but live - unresponsive past the live window,
+// or gone - and the role is the claimant's to take, which is how a relaunched Legion role
+// recovers its own role once its predecessor stopped answering; live, it keeps the role.
+//
+// The declared predecessor is weighed on that same state and on the client instance it belongs
+// to, and is read from the bucket itself (bucketSessionEntry, which says why a cached entry
+// cannot decide this). Not live, it gives the role up whatever instance it ran in. Live, it
+// gives it up only to a claimant session.InstanceMatches accepts, which is its own client
+// instance, or a side that carries no id at all - the one of those two arms the route logs, and
+// the only reason this function tells them apart. So knowing a live predecessor's session id is
+// not enough to take its role out of the client instance that still runs it.
 //
 // The error is non-nil only with roleHolderUnread, wrapped as the route reports it, naming the
 // read that failed. A key the bucket does not hold is that bucket's word that the session is
@@ -304,7 +266,7 @@ const (
 // caller holds.
 func roleSupersessionVerdict(ctx context.Context, sessions *session.SessionRegistry, holder, previous, claimantInstanceID string) (roleSupersession, error) {
 	if previous == "" || holder != previous {
-		_, err := liveSessionEntry(ctx, sessions, holder, roleHolderReadTimeout, registered)
+		_, _, err := liveSessionEntry(ctx, sessions, holder, roleHolderReadTimeout, sessionIsLive)
 		switch {
 		case errors.Is(err, nats.ErrKeyNotFound):
 			return roleTakenFromHolder, nil
@@ -320,6 +282,8 @@ func roleSupersessionVerdict(ctx context.Context, sessions *session.SessionRegis
 		return roleTakenFromHolder, nil
 	case err != nil:
 		return roleHolderUnread, fmt.Errorf("read role predecessor registration: %w", err)
+	case !sessionIsLive(sessions.EntryState(predecessor)):
+		return roleTakenFromHolder, nil
 	case !session.InstanceMatches(predecessor.ClientInstanceID, claimantInstanceID):
 		return roleStaysWithHolder, nil
 	case predecessor.ClientInstanceID == "" || claimantInstanceID == "":
@@ -329,20 +293,18 @@ func roleSupersessionVerdict(ctx context.Context, sessions *session.SessionRegis
 	}
 }
 
-// roleHolderSession is liveSessionEntry as the role paths that hold no request context ask it: the
-// reaper answers no caller at all, and shares one bound with role delivery's resolution
-// (resolveRoleHolder under context.Background()), so every such decision that can take a role from
-// its holder waits the same roleHolderReadTimeout. A route does not come here: GET
-// /v1/roles/<role>, a role send through the publish route (resolveRoleHolder), a soft claim (POST
-// /v1/roles/set) and GET /v1/registry/<session_id> read through liveSessionEntry under their
-// request's own context, with roleHolderReadTimeout as the cap.
-func roleHolderSession(sessions *session.SessionRegistry, sessionID string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
-	return liveSessionEntry(context.Background(), sessions, sessionID, roleHolderReadTimeout, live)
-}
+// notGone is the state test of every caller that may not act on a session for having stopped
+// answering: a lookup, a soft claim's liveness read, both reapers, a session-addressed send, an
+// agent delivery and the publish route's first resolution of a role. A session within the gone
+// horizon of its last registration is unresponsive, not dead: it keeps its claims, its messages
+// are stored for it, and no replacement is started for it, so only session.Gone is an absence
+// these callers may act on.
+func notGone(state session.State) bool { return state != session.Gone }
 
-// registered is the liveness a lookup, a soft claim, the reaper, a session-addressed send and the
-// publish route's first resolution of a role ask of the session they name: any entry.
-func registered(session.SessionEntry) bool { return true }
+// sessionIsLive is the state test of the two decisions that may act only on a session that is
+// answering now: a push to a session's serving port, and a soft claim that takes a role from the
+// session that holds it.
+func sessionIsLive(state session.State) bool { return state == session.Live }
 
 // roleHolderReadTimeout bounds each of the role paths' session-bucket reads, well inside the
 // listener's 10 s HTTP write timeout (main.go) and the 10 s JetStream MaxWait the read would
@@ -350,82 +312,65 @@ func registered(session.SessionEntry) bool { return true }
 // and so ends at the earlier of the two.
 const roleHolderReadTimeout = 2 * time.Second
 
-// errRoleHolderChanged is the cause of resolveRoleHolder's roleHolderChurn failure, when every one
-// of roleHolderResolutionAttempts was spent on a supersession: each attempt found the claim's
-// holder session gone and lost its conditional release to a fresh claim another writer had already
-// installed. Every bus read answered, so this is a lost compare-and-swap against a live
-// replacement holder and not a bus failure, and a caller recognises it rather than sweeping it in
-// with the reads that did not answer (publishHandler's role send, roleGetHandler).
-var errRoleHolderChanged = errors.New("role holder changed while resolving")
-
-// resolveRoleHolder resolves role's current holder inside ctx: the claim's holder, live when live
-// accepts its session entry (liveSessionEntry). A holder whose entry is gone or that live refuses
-// has lapsed: its claim is released through releaseExpiredRoleClaim, and when the release finds the
-// claim already superseded by a fresh one the role is resolved again, bounded to
-// roleHolderResolutionAttempts, so a claim raced by a live replacement resolves to that
-// replacement instead of reporting a session the fresh claim has already superseded.
+// resolveRoleHolder resolves role's current holder inside ctx: the claim's holder, live when that
+// holder's own record reads live (liveSessionEntry with sessionIsLive). A holder whose record
+// does not has lapsed, and its claim is left exactly as it is - this resolution writes nothing to
+// the role bucket, so a stalled holder's claim and its claimed_at outlive any number of lookups,
+// and only the role reaper, finding the holder gone, ever releases one.
 //
-// live is the one rule its callers differ on. An HTTP lookup (GET /v1/roles/<role>) and the
-// publish route's first resolution pass registered, any entry. Role delivery — the role lane
-// (resolveCoreRoleHolder) and the publish route's attempts — passes laneHolderFresh, which
-// distrusts a holder that has not heartbeated within session.ClaimStaleAfter even while its
-// registry cache entry has not expired, since a dropped delivery is costlier than an HTTP 404.
+// Live is the rule for every caller, and the one rule: a role reaches its holder only while that
+// holder is answering, and a holder past the live window answers neither a forward's receipt nor
+// anything else. What changed is what that costs the holder - nothing. The lookup and the publish
+// route report it lapsed with its state and its claim intact, and role delivery fails the one
+// attempt and leaves the claim for the holder to come back to, where both used to release it.
 //
-// Every bus call it makes waits no longer than ctx: the claim read and the conditional release,
-// which store.Registry bounds by ctx, and the holder's session read through liveSessionEntry, which
-// also keeps roleHolderReadTimeout as its own cap; a second attempt is not started once ctx has
-// ended. A route passes its request's own context, bounded by its budget, so a bus that does not
-// answer is reported to the caller within its attempt rather than after it; role delivery passes
-// context.Background().
+// Every bus call it makes waits no longer than ctx: the claim read, which store.Registry bounds by
+// ctx, and the holder's session read through liveSessionEntry, which also keeps
+// roleHolderReadTimeout as its own cap. A route passes its request's own context, bounded by its
+// budget, so a bus that does not answer is reported to the caller within its attempt rather than
+// after it; role delivery passes context.Background().
 //
 // An error is a *roleHolderFailure naming the read that failed; with it the result still names
 // the claim's holder when one was read, so the role lane's log line and the publish route's 504
 // can name it. It unwraps to the read's own error: an ended ctx, wrapped naming the call that did
-// not answer, which a route answers as a bus that did not answer; store.ErrMalformedRoleClaim, a
-// claim record that cannot be read (writeRoleClaimUnreadable); or errRoleHolderChanged.
-// It reads every claim from registry. Role delivery, whose first read is the registry's watched
-// copy of the role bucket, resolves through resolveRoleHolderFrom instead.
-func resolveRoleHolder(ctx context.Context, registry roleClaimResolver, sessions *session.SessionRegistry, role string, live func(session.SessionEntry) bool) (roleHolderResult, error) {
-	return resolveRoleHolderFrom(ctx, registry, nil, sessions, role, live)
+// not answer, which a route answers as a bus that did not answer; or store.ErrMalformedRoleClaim,
+// a claim record that cannot be read (writeRoleClaimUnreadable).
+//
+// It reads the claim from registry itself. Role delivery, whose read of a claim is the registry's
+// watched copy of the role bucket, resolves through resolveRoleHolderFrom instead.
+func resolveRoleHolder(ctx context.Context, registry roleClaimResolver, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
+	return resolveRoleHolderFrom(ctx, registry, nil, sessions, role)
 }
 
-// resolveRoleHolderFrom is resolveRoleHolder reading each attempt's claim through readRoleClaim,
-// so a resolution given a firstHolder spends no bucket round trip on its first attempt.
-func resolveRoleHolderFrom(ctx context.Context, registry roleClaimResolver, firstHolder func(role string) (string, error), sessions *session.SessionRegistry, role string, live func(session.SessionEntry) bool) (roleHolderResult, error) {
-	for attempt := range roleHolderResolutionAttempts {
-		if err := ctx.Err(); err != nil {
-			return roleHolderResult{}, &roleHolderFailure{step: roleHolderClaimRead, cause: fmt.Errorf("resolve role %s's holder: %w", role, err)}
-		}
-		claim, err := readRoleClaim(ctx, registry, firstHolder, role, attempt)
-		if err != nil {
-			return roleHolderResult{}, &roleHolderFailure{step: roleHolderClaimRead, cause: err}
-		}
-		holder := claim.HolderSessionID
-		if holder == "" {
-			return roleHolderResult{state: roleHolderUnclaimed}, nil
-		}
-		entry, err := liveSessionEntry(ctx, sessions, holder, roleHolderReadTimeout, live)
-		if err == nil {
-			return roleHolderResult{state: roleHolderLive, holder: holder, entry: entry}, nil
-		}
-		if !errors.Is(err, nats.ErrKeyNotFound) {
-			return roleHolderResult{holder: holder}, &roleHolderFailure{step: roleHolderSessionRead, cause: err}
-		}
-		lastSeen := sessions.LastSeen(holder)
-		release, superseded, err := releaseExpiredRoleClaim(ctx, registry, role, holder, sessions.TTL())
-		if err != nil {
-			return roleHolderResult{holder: holder}, &roleHolderFailure{step: roleHolderRelease, cause: err}
-		}
-		if superseded {
-			continue
-		}
-		return roleHolderResult{
-			state:             roleHolderLapsed,
-			holder:            holder,
-			lastSeen:          lastSeen,
-			lastSeenAvailable: lastSeen != 0,
-			claimRelease:      release,
-		}, nil
+// resolveRoleHolderFrom is resolveRoleHolder reading its claim through readRoleClaim, so a
+// resolution given a firstHolder spends no bucket round trip on it. One resolution is one claim
+// read: a resolution never retries, because a holder that stopped answering keeps its claim and
+// so there is no release of one for a later read to see past.
+func resolveRoleHolderFrom(ctx context.Context, registry roleClaimResolver, firstHolder func(role string) (string, error), sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
+	if err := ctx.Err(); err != nil {
+		return roleHolderResult{}, &roleHolderFailure{step: roleHolderClaimRead, cause: fmt.Errorf("resolve role %s's holder: %w", role, err)}
 	}
-	return roleHolderResult{}, &roleHolderFailure{step: roleHolderChurn, cause: errRoleHolderChanged}
+	claim, err := readRoleClaim(ctx, registry, firstHolder, role)
+	if err != nil {
+		return roleHolderResult{}, &roleHolderFailure{step: roleHolderClaimRead, cause: err}
+	}
+	holder := claim.HolderSessionID
+	if holder == "" {
+		return roleHolderResult{state: roleHolderUnclaimed}, nil
+	}
+	entry, state, err := liveSessionEntry(ctx, sessions, holder, roleHolderReadTimeout, sessionIsLive)
+	if err == nil {
+		return roleHolderResult{state: roleHolderLive, holder: holder, holderState: state, entry: entry}, nil
+	}
+	if !errors.Is(err, nats.ErrKeyNotFound) {
+		return roleHolderResult{holder: holder}, &roleHolderFailure{step: roleHolderSessionRead, cause: err}
+	}
+	lastSeen := lastSeenOf(sessions, holder, entry)
+	return roleHolderResult{
+		state:             roleHolderLapsed,
+		holder:            holder,
+		holderState:       state,
+		lastSeen:          lastSeen,
+		lastSeenAvailable: lastSeen != 0,
+	}, nil
 }

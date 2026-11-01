@@ -78,11 +78,50 @@ test("sends Envoy messages through the shared transport", async () => {
     message: "ready",
   })
   expect(result).toEqual({
-    message: "sent evt-sent to ses_receiver",
+    message: "sent evt-sent to ses_receiver (live)",
     event_id: "evt-sent",
     recipient: "ses_receiver",
+    recipient_state: "live",
     confirmed: true,
   })
+})
+
+// The list is what the model reads before it decides a peer is dead: a session past its live
+// window is still running, so it must be asked for and must arrive with the state and the
+// heartbeat that say so (dispatch://INFRA-392).
+test("lists the unresponsive sessions too, each with its state and last_seen", async () => {
+  let requested = ""
+  const client = createEnvoyClient({
+    baseUrl: "http://envoy.test",
+    fetch: async (request) => {
+      requested = String(request)
+      return Response.json([
+        {
+          session_id: "ses_stalled",
+          machine_id: "host-a",
+          dir: "/work",
+          port: 0,
+          title: "Reviewer",
+          topics: [],
+          self_subscribed: true,
+          last_seen: 1_700_000_000_000,
+          state: "unresponsive",
+        },
+      ])
+    },
+  })
+  const runtime: ChannelToolRuntime = { identity, client, session: sessionWith([]) }
+
+  const result = await executeEnvoyTool(runtime, "envoy_sessions", {})
+
+  expect(requested).toBe("http://envoy.test/v1/sessions?include=unresponsive")
+  expect(result).toEqual([
+    expect.objectContaining({
+      session_id: "ses_stalled",
+      state: "unresponsive",
+      last_seen: 1_700_000_000_000,
+    }),
+  ])
 })
 
 test("replies in a Slack thread with slack_post, with the token the broker grants", async () => {

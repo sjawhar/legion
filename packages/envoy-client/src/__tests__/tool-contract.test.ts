@@ -6,6 +6,7 @@ import {
   MessageMetadataSchema,
   messageMetadataShape,
   parseEnvoyToolArguments,
+  sendConfirmationText,
   sessionsOnMachine,
   toMessageMetadata,
 } from "../tool-contract";
@@ -117,10 +118,59 @@ describe("envoyToolSpecs", () => {
     }
     expect(publish?.description).toContain("errs naming each session that did not confirm");
     expect(publish?.description).toContain(
-      "a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions"
+      "a session that stopped without unregistering stays registered until Envoy finds it gone and is named until then, and so is one that is merely unresponsive, which takes the message when it answers. A named session is not a failed delivery to the other sessions"
     );
     expect(publish?.description).toContain(
       "a role message errs when its holder did not confirm it within the listener's window"
+    );
+  });
+
+  // The description is what an agent reads at the moment it decides whether a peer is alive. The
+  // old wording ("all live sessions", "up to 5 minutes") said a quiet session was a dead one, and
+  // agents acted on it: role claims taken, replacements started (dispatch://INFRA-392).
+  test("every tool that names another session carries the three states and the unresponsive rule", () => {
+    const named = ["envoy_sessions", "envoy_role_get", "envoy_send", "envoy_publish"];
+
+    for (const name of named) {
+      const description = envoyToolSpecs.find((spec) => spec.name === name)?.description ?? "";
+      expect(description).toContain(
+        "A session is live, unresponsive or gone, by how long ago it last registered: live within 5 minutes, unresponsive after that and within an hour, gone past the hour or with no record at all."
+      );
+      expect(description).toContain(
+        "An unresponsive session is not dead: it keeps its role claims and its issue claims, and a message sent to it is stored until it answers. Start no replacement for it and take no claim from it until it is gone, or has been unresponsive for more than 20 minutes."
+      );
+      expect(description).toContain("A session named with no state is live.");
+    }
+    expect(
+      envoyToolSpecs.find((spec) => spec.name === "envoy_sessions")?.description
+    ).not.toContain("List all live sessions");
+    expect(envoyToolSpecs.find((spec) => spec.name === "envoy_publish")?.description).not.toContain(
+      "up to 5 minutes"
+    );
+  });
+});
+
+describe("sendConfirmationText", () => {
+  const envelope = { event_id: "evt_1" };
+
+  test("names the recipient's state, and tells the sender an unresponsive one is not a failure", () => {
+    expect(
+      sendConfirmationText({
+        envelope,
+        recipient: "ses_peer",
+        recipientState: "live",
+        confirmed: true,
+      })
+    ).toBe("sent evt_1 to ses_peer (live)");
+    expect(
+      sendConfirmationText({
+        envelope,
+        recipient: "ses_peer",
+        recipientState: "unresponsive",
+        confirmed: false,
+      })
+    ).toBe(
+      "sent evt_1 to ses_peer (unresponsive, so it is stored until that session answers; An unresponsive session is not dead: it keeps its role claims and its issue claims, and a message sent to it is stored until it answers. Start no replacement for it and take no claim from it until it is gone, or has been unresponsive for more than 20 minutes.) (recipient unconfirmed by listener)"
     );
   });
 });
@@ -233,6 +283,7 @@ describe("sessionsOnMachine", () => {
     title: "",
     topics: [],
     self_subscribed: true,
+    state: "live" as const,
   });
   const onHub = session("ses_on_hub", "envoy-hub", "gke-node-7");
   const onDevbox = session("ses_on_devbox", "devbox", "devbox");
@@ -259,6 +310,7 @@ describe("sessionsOnMachine", () => {
       title: "",
       topics: [],
       self_subscribed: true,
+      state: "live" as const,
     };
 
     expect(sessionsOnMachine([hostless], "devbox")).toEqual([hostless]);

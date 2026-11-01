@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // listeningDescriptor opens a listening loopback socket and returns its descriptor number and
@@ -171,13 +172,13 @@ func TestLoadRefusesAllowedHostsWithAPortSchemeOrPath(t *testing.T) {
 	}
 }
 
-// loadWith runs Load with ENVOY_NATS_REPLICAS and ENVOY_STREAM_MAX_BYTES as values says: a
-// variable values lacks is unset.
+// loadWith runs Load with ENVOY_NATS_REPLICAS, ENVOY_STREAM_MAX_BYTES and ENVOY_SESSION_MAX_AGE
+// as values says: a variable values lacks is unset.
 func loadWith(t *testing.T, values map[string]string) (Service, error) {
 	t.Helper()
 	t.Setenv("ENVOY_MACHINE_ID", "test-machine")
 	t.Setenv("NATS_URLS", "nats://127.0.0.1:4222")
-	for _, name := range []string{"ENVOY_NATS_REPLICAS", "ENVOY_STREAM_MAX_BYTES"} {
+	for _, name := range []string{"ENVOY_NATS_REPLICAS", "ENVOY_STREAM_MAX_BYTES", "ENVOY_SESSION_MAX_AGE"} {
 		// t.Setenv restores the variable after the test; Unsetenv then leaves it unset for this one.
 		t.Setenv(name, "")
 		if value, ok := values[name]; ok {
@@ -189,37 +190,46 @@ func loadWith(t *testing.T, values map[string]string) (Service, error) {
 	return Load(9020)
 }
 
-// Load reads ENVOY_NATS_REPLICAS and ENVOY_STREAM_MAX_BYTES through bus.ParseNATSReplicas and
-// bus.ParseStreamMaxBytes (their own cases are in internal/bus): 1 copy and no byte limit when
-// unset, and the values as set otherwise.
-func TestLoadReadsTheReplicaCountAndTheStreamByteLimit(t *testing.T) {
+// Load reads ENVOY_NATS_REPLICAS, ENVOY_STREAM_MAX_BYTES and ENVOY_SESSION_MAX_AGE through
+// bus.ParseNATSReplicas, bus.ParseStreamMaxBytes and bus.ParseSessionMaxAge (their own cases are
+// in internal/bus): 1 copy, no byte limit and no maximum age when unset, and the values as set
+// otherwise. An unset maximum age is 0, which leaves the session bucket's own age exactly as it
+// is; a listener never writes an age it was not given.
+func TestLoadReadsTheReplicaCountTheStreamByteLimitAndTheSessionMaxAge(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		values   map[string]string
 		replicas int
 		maxBytes int64
+		maxAge   time.Duration
 	}{
-		{"unset", nil, 1, 0},
-		{"three with a limit", map[string]string{"ENVOY_NATS_REPLICAS": " 3 ", "ENVOY_STREAM_MAX_BYTES": "10737418240"}, 3, 10 << 30},
+		{"unset", nil, 1, 0, 0},
+		{
+			"three with a limit and an age",
+			map[string]string{"ENVOY_NATS_REPLICAS": " 3 ", "ENVOY_STREAM_MAX_BYTES": "10737418240", "ENVOY_SESSION_MAX_AGE": "90m"},
+			3, 10 << 30, 90 * time.Minute,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			service, err := loadWith(t, tc.values)
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
-			if service.NATSReplicas != tc.replicas || service.StreamMaxBytes != tc.maxBytes {
-				t.Fatalf("NATSReplicas = %d and StreamMaxBytes = %d, want %d and %d", service.NATSReplicas, service.StreamMaxBytes, tc.replicas, tc.maxBytes)
+			if service.NATSReplicas != tc.replicas || service.StreamMaxBytes != tc.maxBytes || service.SessionMaxAge != tc.maxAge {
+				t.Fatalf("NATSReplicas = %d, StreamMaxBytes = %d and SessionMaxAge = %s; want %d, %d and %s",
+					service.NATSReplicas, service.StreamMaxBytes, service.SessionMaxAge, tc.replicas, tc.maxBytes, tc.maxAge)
 			}
 		})
 	}
 }
 
-// Load refuses a replica count or a byte limit its parser refuses, naming the variable and the
-// value.
-func TestLoadRefusesAReplicaCountOrAByteLimitItsParserRefuses(t *testing.T) {
+// Load refuses a replica count, a byte limit or a session maximum age its parser refuses, naming
+// the variable and the value.
+func TestLoadRefusesASettingItsParserRefuses(t *testing.T) {
 	for _, tc := range []struct{ name, value string }{
 		{"ENVOY_NATS_REPLICAS", "6"},
 		{"ENVOY_STREAM_MAX_BYTES", "10GB"},
+		{"ENVOY_SESSION_MAX_AGE", "90"},
 	} {
 		t.Run(tc.name+"="+tc.value, func(t *testing.T) {
 			_, err := loadWith(t, map[string]string{tc.name: tc.value})

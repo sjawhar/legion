@@ -24,9 +24,15 @@ export interface IssueFiltersState {
   readonly needsYou: boolean;
   readonly unread: boolean;
   /** Only issues an agent could pick up: nobody has claimed them, or the session that did is
-   *  no longer running (`claimHasLapsed`), which is exactly when the server hands the claim
-   *  to the next agent that asks. */
+   *  gone (`claimHasLapsed`), which is exactly when the server hands the claim to the next
+   *  agent that asks. A holder that has only missed its heartbeats is not gone and keeps the
+   *  issue, so it stays out of this list (dispatch://INFRA-392). */
   readonly unclaimed: boolean;
+  /** Why the Unclaimed filter cannot tell which claims have lapsed while it is on: the agent list
+   *  is `refilling`, or its read failed (`unreachable`). Until it can, every session's claim
+   *  counts as held - no claim is called lapsed from a list that did not answer - and the strip
+   *  says so. `undefined` while the filter is off or the list is current or loading. */
+  readonly unclaimedUnchecked: "refilling" | "unreachable" | undefined;
   readonly activeFilterCount: number;
   readonly activeFilters: ActiveFilter[];
   readonly setLabels: (next: string[]) => void;
@@ -144,6 +150,12 @@ export function useIssueFilters(): IssueFiltersState {
     setUnread,
     statuses,
     unclaimed,
+    unclaimedUnchecked:
+      unclaimed && registry.isError
+        ? registry.refilling
+          ? "refilling"
+          : "unreachable"
+        : undefined,
     unread,
   };
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -46,18 +47,31 @@ import (
 // `dispatch issues --help` (route_status) ask for two reads ten minutes apart instead.
 
 // routeRoster is one listener answer about who is running. answered is false when the listener
-// is unconfigured or did not answer; every route then reads unknown. Its maps and its session
-// slice are read-only once built, since every read in this process served from one stored answer
-// shares them (rosterCache.built): a reader that sorts or edits the sessions copies them first,
-// and never writes a session's Roles or Capabilities, which every copy shares too.
+// is unconfigured or gave no list; every route then reads unknown, and reason says why:
+// model.RouteReasonRefilling for the listener's refilling answer, whose Retry-After rides in
+// retryAfter, model.RouteReasonUnreachable for anything else. Its maps and its session slice are
+// read-only once built, since every read in this process served from one stored answer shares
+// them (rosterCache.built): a reader that sorts or edits the sessions copies them first, and
+// never writes a session's Roles or Capabilities, which every copy shares too.
 type routeRoster struct {
 	answered bool
-	// sessions is the listener's answer, in the listener's order.
+	// reason is why an unanswered roster gave no list: model.RouteReasonRefilling, with the
+	// listener's Retry-After in retryAfter, or model.RouteReasonUnreachable.
+	reason     string
+	retryAfter string
+	// sessions is the listener's answer, in the listener's order. It carries the unresponsive
+	// sessions as well as the live ones (the client asks with include=unresponsive), so a row's
+	// presence is no longer liveness: every reader tests the row's State.
 	sessions []envoy.Session
-	live     map[string]struct{}
-	// holders maps a role to the live session holding it. The listener gives a role one holder
-	// (last claim wins); should two live rows ever name one role, the most recently seen session
-	// is named, and the id breaks a tie, so a read never flips between them.
+	// entries maps a session id to the index of its row in sessions, which holds the row itself:
+	// a roster of a few hundred sessions keeps one copy of each. A session the registry holds no
+	// record of, live or unresponsive, is simply absent, which is the one membership test left
+	// in this file and means gone.
+	entries map[string]int
+	// holders maps a role to the session holding it, whatever that session's state. The listener
+	// gives a role one holder (last claim wins); should two rows ever name one role, the most
+	// recently seen session is named, and the id breaks a tie, so a read never flips between
+	// them - and the most recently seen is the live one when a lapsed claim lingers beside it.
 	holders map[string]string
 	// err is why the roster did not answer: the listener client's own error when this process's
 	// fetch got it, errListenerSilence when the silence was read from a row another fetch stored,
@@ -65,6 +79,19 @@ type routeRoster struct {
 	// wrapping the request's context error, so it always matches envoy.ErrUnavailable. It is nil
 	// when the roster answered or the listener is unconfigured.
 	err error
+}
+
+// state is the state the roster holds for a session: the row's own, or envoy.StateGone when the
+// roster holds no row for it. The roster lists every session the registry holds a record of,
+// live and unresponsive alike, so an absent row is a session the registry has no record of -
+// which is exactly gone. It answers for an unanswered roster too, and a caller that has not
+// checked answered must not read that as gone.
+func (r routeRoster) state(sessionID string) string {
+	index, held := r.entries[sessionID]
+	if !held {
+		return envoy.StateGone
+	}
+	return r.sessions[index].State
 }
 
 // errListenerSilence is the err of a stored silence this process did not fetch itself: the row
@@ -90,7 +117,9 @@ const routeRosterTimeout = 2 * time.Second
 // changes no answer's age; it is as long as routeRosterTTL so that a listener that hangs costs
 // fewer routeRosterTimeout waits: one shared wait per routeRosterTimeout+routeRosterSilenceTTL
 // (7 s) rather than per 3 s. A route_status, unknown included, then lags the listener by at most
-// routeRosterTTL, plus routeRosterTimeout while the listener hangs.
+// routeRosterTTL, plus routeRosterTimeout while the listener hangs. A listener refilling its list
+// is left alone for the silence window like any other unanswered fetch: its reason, and the
+// Retry-After it sent, are the roster's and reach every read the window serves.
 const (
 	routeRosterTTL        = 5 * time.Second
 	routeRosterSilenceTTL = 5 * time.Second
@@ -131,15 +160,16 @@ type rosterFetch struct {
 
 // readRouteRoster answers who is running: the stored answer while it is fresh, else the answer of
 // this process's one fetch in flight, starting it when none is. A listener that is unconfigured,
-// does not answer, or answers late leaves the roster unanswered, and so does a read whose own
-// request ends while it waits (its err then wraps the request's context error); the fetch runs on
-// for the other reads, and stores its answer for every process. The fetch runs on the process's
-// lifetime, so once a shutdown begins it ends or fails at once. What an unanswered roster means is
-// the caller's: an issue read reads every route unknown and still succeeds, while listAgents,
-// which has nothing to list without the listener, answers 503 with the roster's err, or, during a
-// shutdown drain, asks the listener on its own request. A read whose own read of the row fails
-// answers that error: the failure is the database's, and a caller that filters by a judged state
-// or lists the sessions answers it as one rather than as the listener's silence, while a caller
+// does not answer, answers late, or is refilling its list leaves the roster unanswered with the
+// reason that says which, and so does a read whose own request ends while it waits (its err then
+// wraps the request's context error); the fetch runs on for the other reads, and stores its
+// answer for every process. The fetch runs on the process's lifetime, so once a shutdown begins
+// it ends or fails at once. What an unanswered roster means is the caller's: an issue read reads
+// every route unknown, with the roster's reason, and still succeeds, while listAgents, which has
+// nothing to list without the listener, answers 503 with the roster's err, or, during a shutdown
+// drain, asks the listener on its own request. A read whose own read of the row fails answers
+// that error: the failure is the database's, and a caller that filters by a judged state or
+// lists the sessions answers it as one rather than as the listener's silence, while a caller
 // that only shows a route may read it unknown (routeRosterOrUnknown).
 //
 // A read that found the row stale may reach the lock only after the fetch that was in flight
@@ -151,7 +181,7 @@ type rosterFetch struct {
 // reached the lock a moment sooner.
 func (s *server) readRouteRoster(ctx context.Context) (routeRoster, error) {
 	if s.deps.Envoy == nil {
-		return routeRoster{}, nil
+		return routeRoster{reason: model.RouteReasonUnreachable}, nil
 	}
 	if s.deps.ListenerRosterUncached {
 		// An end-to-end test process: every read asks the listener itself, with no stored answer,
@@ -188,16 +218,23 @@ func (s *server) readRouteRoster(ctx context.Context) (routeRoster, error) {
 	case <-fetch.done:
 		return fetch.roster, nil
 	case <-ctx.Done():
-		return routeRoster{err: fmt.Errorf("%w: %v", envoy.ErrUnavailable, ctx.Err())}, nil
+		return routeRoster{reason: model.RouteReasonUnreachable, err: fmt.Errorf("%w: %v", envoy.ErrUnavailable, ctx.Err())}, nil
 	}
 }
 
 // routeRosterOrUnknown is readRouteRoster for a read that only shows a route: a failed read of the
-// stored answer is logged and every route reads unknown, since the issue itself was read.
+// stored answer is logged and every route reads unknown, since the issue itself was read. Its
+// reason is the listener's own unreachable: an unanswered roster always names one (reach), and a
+// stored answer this process cannot read is the listener's answer out of reach, whatever put it
+// there.
 func (s *server) routeRosterOrUnknown(ctx context.Context) routeRoster {
 	roster, err := s.readRouteRoster(ctx)
-	if err != nil && ctx.Err() == nil {
-		slog.Warn("dispatch: routes read unknown", "error", err)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("dispatch: routes read unknown", "error", err)
+		}
+		roster.answered = false
+		roster.reason = model.RouteReasonUnreachable
 	}
 	return roster
 }
@@ -242,9 +279,12 @@ func (s *server) storedRouteRoster(ctx context.Context) (roster routeRoster, fre
 }
 
 // remember builds the roster a stored answer holds and keeps it as this process's built roster.
-// The stored sessions are envoy.Session rows; a field a row lacks reads as its zero value.
+// The stored sessions are envoy.Session rows; a field a row lacks reads as its zero value. The
+// row records only that the listener answered or did not, so a stored silence reads as
+// model.RouteReasonUnreachable: the reason the fetching process saw, a refilling list among
+// them, is its own and reaches no other process.
 func (c *rosterCache) remember(sent time.Time, answered bool, sessions []byte) (routeRoster, error) {
-	roster := routeRoster{err: errListenerSilence}
+	roster := routeRoster{reason: model.RouteReasonUnreachable, err: errListenerSilence}
 	if answered {
 		var listed []envoy.Session
 		if err := json.Unmarshal(sessions, &listed); err != nil {
@@ -332,8 +372,12 @@ func (s *server) listRouteRoster(ctx context.Context) routeRoster {
 	ctx, cancel := context.WithTimeout(ctx, cmp.Or(s.rosters.timeout, routeRosterTimeout))
 	defer cancel()
 	sessions, err := s.deps.Envoy.Sessions(ctx)
-	if err != nil {
-		return routeRoster{err: err}
+	var refilling *envoy.RefillingError
+	switch {
+	case errors.As(err, &refilling):
+		return routeRoster{reason: model.RouteReasonRefilling, retryAfter: refilling.RetryAfter, err: err}
+	case err != nil:
+		return routeRoster{reason: model.RouteReasonUnreachable, err: err}
 	}
 	return buildRouteRoster(sessions)
 }
@@ -343,12 +387,12 @@ func buildRouteRoster(listed []envoy.Session) routeRoster {
 	roster := routeRoster{
 		answered: true,
 		sessions: listed,
-		live:     make(map[string]struct{}, len(listed)),
+		entries:  make(map[string]int, len(listed)),
 		holders:  map[string]string{},
 	}
 	lastSeen := map[string]int64{}
-	for _, session := range listed {
-		roster.live[session.SessionID] = struct{}{}
+	for index, session := range listed {
+		roster.entries[session.SessionID] = index
 		for _, role := range session.Roles {
 			current, held := roster.holders[role]
 			if held && (lastSeen[current] > session.LastSeen ||
@@ -362,44 +406,92 @@ func buildRouteRoster(listed []envoy.Session) routeRoster {
 	return roster
 }
 
-// reach judges one route against the roster: null for no route, unknown when the listener did
-// not answer, live with the holder when a running session receives it, no_holder otherwise. A
-// stored route that no longer parses reaches nobody.
+// reach judges one route against the roster: null for no route, unknown with the roster's reason
+// when the listener gave no list, live with the holder when a live session receives it,
+// holder_unresponsive with that same holder when the session that receives it has missed its
+// heartbeats, no_holder otherwise. A stored route that no longer parses reaches nobody.
+//
+// An unresponsive holder is named, not dropped: the message is stored for it and waits, so a
+// reader that wants "nobody is working this" must ask for no_holder, which excludes it.
 func (r routeRoster) reach(route *string) model.IssueRouteReach {
 	if route == nil {
 		return model.IssueRouteReach{}
 	}
-	status := func(value string) *string { return &value }
 	if !r.answered {
-		return model.IssueRouteReach{RouteStatus: status(model.RouteUnknown)}
+		return model.IssueRouteReach{
+			RouteStatus: new(model.RouteUnknown), RouteStatusReason: new(r.reason),
+		}
 	}
 	parsed, err := model.ParseRoute(*route)
 	if err != nil {
-		return model.IssueRouteReach{RouteStatus: status(model.RouteNoHolder)}
+		return model.IssueRouteReach{RouteStatus: new(model.RouteNoHolder)}
 	}
 	holder := ""
 	switch parsed.Kind {
 	case "role":
 		holder = r.holders[parsed.ID]
 	case "session":
-		if _, live := r.live[parsed.ID]; live {
-			holder = parsed.ID
+		holder = parsed.ID
+	}
+	switch r.state(holder) {
+	case envoy.StateLive:
+		return model.IssueRouteReach{RouteStatus: new(model.RouteLive), RouteHolder: &holder}
+	case envoy.StateUnresponsive:
+		return model.IssueRouteReach{
+			RouteStatus: new(model.RouteHolderUnresponsive), RouteHolder: &holder,
 		}
 	}
-	if holder == "" {
-		return model.IssueRouteReach{RouteStatus: status(model.RouteNoHolder)}
+	return model.IssueRouteReach{RouteStatus: new(model.RouteNoHolder)}
+}
+
+// claimLiveness is what an issue read says about the session holding its claim: the state this
+// roster read for it, when it was last seen, and from when another agent may take the claim
+// without a person's force. It answers the zero value - every field null - for an issue nobody
+// holds and for one a person holds, which has no session state to read.
+//
+// This is the read side of the two sources the claim rule has, and the slacker of them: the
+// roster is the server's copy of the listener's session list, up to routeRosterTTL (5 s) old,
+// while a claim write re-reads the holder's own record from the listener (fetchHolderLiveness)
+// and decides on that. The two can therefore disagree by that much; a read that cannot judge at
+// all answers model.ClaimHolderUnknown and never fails, because an issue page must render while
+// the listener is down, and only the write refuses.
+func (r routeRoster) claimLiveness(claim *model.IssueClaim, now time.Time) model.IssueClaimLiveness {
+	if claim == nil || claim.Actor.Kind != "session" {
+		return model.IssueClaimLiveness{}
 	}
-	return model.IssueRouteReach{RouteStatus: status(model.RouteLive), RouteHolder: &holder}
+	if !r.answered {
+		return model.IssueClaimLiveness{HolderState: new(model.ClaimHolderUnknown)}
+	}
+	held := r.state(claim.Actor.ID)
+	liveness := model.IssueClaimLiveness{HolderState: new(held)}
+	if index, found := r.entries[claim.Actor.ID]; found && r.sessions[index].LastSeen > 0 {
+		lastSeen := time.UnixMilli(r.sessions[index].LastSeen).UTC()
+		liveness.LastSeen = &lastSeen
+	}
+	switch held {
+	case envoy.StateUnresponsive:
+		if liveness.LastSeen != nil {
+			takeable := liveness.LastSeen.Add(contracts.IssueClaimUnresponsiveGrace)
+			liveness.TakeableAt = &takeable
+		}
+	case envoy.StateGone:
+		// Gone is takeable now, and now is when this read said so; the registry keeps no
+		// last_seen for a session it holds no record of, so there is no earlier instant to name.
+		takeable := now.UTC()
+		liveness.TakeableAt = &takeable
+	}
+	return liveness
 }
 
 // parseRouteStatusFilter reads the `route_status` list filter: empty for none, or one of live,
-// no_holder and unknown.
+// holder_unresponsive, no_holder and unknown.
 func parseRouteStatusFilter(raw string) (string, error) {
 	value := strings.TrimSpace(raw)
 	switch value {
-	case "", model.RouteLive, model.RouteNoHolder, model.RouteUnknown:
+	case "", model.RouteLive, model.RouteHolderUnresponsive, model.RouteNoHolder, model.RouteUnknown:
 		return value, nil
 	}
 	return "", errorf(http.StatusBadRequest, "INVALID_ROUTE_STATUS",
-		"route_status must be %s, %s or %s, got %q", model.RouteLive, model.RouteNoHolder, model.RouteUnknown, raw)
+		"route_status must be %s, %s, %s or %s, got %q",
+		model.RouteLive, model.RouteHolderUnresponsive, model.RouteNoHolder, model.RouteUnknown, raw)
 }

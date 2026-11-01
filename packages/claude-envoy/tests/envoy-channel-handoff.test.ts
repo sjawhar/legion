@@ -60,7 +60,7 @@ test("follows the session id its Claude process hands off: new subject first, th
     },
     // The listener reports this session as the holder once a claim landed, so
     // heartbeats reassert nothing and the recorded calls stay the handoff's own.
-    getRole: async (role) => ({ role, holder: identity.id, last_seen: 1 }),
+    getRole: async (role) => ({ role, holder: identity.id, last_seen: 1, state: "live" }),
   })
   const session = await startChannelSession(
     sessionOptions(identity, stateDirectory, {
@@ -331,7 +331,7 @@ test("a subscription made while a handoff deregisters the old id registers under
       unregisterStarted = true
       await unregistering.promise
     },
-    getRole: async (role) => ({ role, holder: identity.id, last_seen: 1 }),
+    getRole: async (role) => ({ role, holder: identity.id, last_seen: 1, state: "live" }),
   })
   const session = await startChannelSession(
     sessionOptions(identity, stateDirectory, { client, heartbeatMs: 25, handoffPid: 778 }),
@@ -370,7 +370,7 @@ test("a delivery still in flight on the old subject does not hold back registrat
   const handoff = sessionHandoffFile(stateDirectory, 779)
   await writeSessionHandoff(handoff, "ses_old")
   const client = recordingClient(calls, {
-    getRole: async (role) => ({ role, holder: identity.id, last_seen: 1 }),
+    getRole: async (role) => ({ role, holder: identity.id, last_seen: 1, state: "live" }),
   })
   const session = await startChannelSession(
     sessionOptions(identity, stateDirectory, {
@@ -419,7 +419,7 @@ test("a handoff whose first registration under the new id fails takes the role b
       calls.push(`subscribe ${input.sessionID} [${input.capabilities?.join(",") ?? ""}]`)
       return noInterest()
     },
-    getRole: async (role) => ({ role, holder: identity.id, last_seen: 1 }),
+    getRole: async (role) => ({ role, holder: identity.id, last_seen: 1, state: "live" }),
   })
   const session = await startChannelSession(
     sessionOptions(identity, stateDirectory, { client, heartbeatMs: 25, handoffPid: 780 }),
@@ -565,7 +565,7 @@ test("two handoffs before a registration succeeds move the role from the first i
       calls.push(`subscribe ${input.sessionID} [${input.capabilities?.join(",") ?? ""}]`)
       return noInterest()
     },
-    getRole: async (role) => ({ role, holder: identity.id, last_seen: 1 }),
+    getRole: async (role) => ({ role, holder: identity.id, last_seen: 1, state: "live" }),
   })
   const session = await startChannelSession(
     sessionOptions(identity, stateDirectory, { client, heartbeatMs: 25, handoffPid: 784 }),
@@ -608,7 +608,7 @@ test("a role claim that fails at startup still starts the session, and the next 
         holder = input.sessionID
         return { claimed: true, interest: noInterest() }
       },
-      getRole: async (role) => ({ role, holder, last_seen: 1 }),
+      getRole: async (role) => ({ role, holder, last_seen: 1, state: "live" }),
     }),
   )
   const state = (): string => `holder now "${holder}"; ${observed.describe()}`
@@ -650,7 +650,7 @@ test("a heartbeat that confirms this session as holder refreshes the role record
   const session = await startChannelSession(
     sessionOptions(identity, stateDirectory, {
       client: recordingClient([], {
-        getRole: async (role) => ({ role, holder: identity.id, last_seen: 1 }),
+        getRole: async (role) => ({ role, holder: identity.id, last_seen: 1, state: "live" }),
       }),
       heartbeatMs: 25,
     }),
@@ -700,7 +700,7 @@ test("a record already past the sweep's age survives a startup whose claim was r
       holder = input.sessionID
       return { claimed: true, interest: noInterest() }
     },
-    getRole: async (role) => ({ role, holder, last_seen: 1 }),
+    getRole: async (role) => ({ role, holder, last_seen: 1, state: "live" }),
   })
   const session = await startChannelSession(
     sessionOptions(identity, stateDirectory, { client, heartbeatMs: 25 }),
@@ -844,7 +844,7 @@ test("a listener answer that is not JSON at startup still starts the session, an
       holder = input.sessionID
       return { claimed: true, interest: noInterest() }
     },
-    getRole: async (role) => ({ role, holder, last_seen: 1 }),
+    getRole: async (role) => ({ role, holder, last_seen: 1, state: "live" }),
   })
   const session = await startChannelSession(
     sessionOptions(identity, stateDirectory, { client, heartbeatMs: 25 }),
@@ -881,7 +881,7 @@ test("a role file whose bytes are not JSON starts the session without the role, 
       holder = input.sessionID
       return { claimed: true, interest: noInterest() }
     },
-    getRole: async (role) => ({ role, holder, last_seen: 1 }),
+    getRole: async (role) => ({ role, holder, last_seen: 1, state: "live" }),
   })
   const written: string[] = []
   const stderr = spyOn(process.stderr, "write").mockImplementation((chunk) => {

@@ -9,17 +9,35 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/kvwatch"
 )
 
 // newTestRegistry is a registry with the given TTL built from a struct literal, as the cache's unit
-// tests build one: no NATS, no watcher, and no expiry heap or timer until its first write.
+// tests build one: no NATS, no watcher, and no expiry heap or timer until its first write. With no
+// watcher the copy counts as following its bucket (SessionRegistry.following), so rows expire by
+// their deadlines alone.
 func newTestRegistry(ttl time.Duration) *SessionRegistry {
-	return &SessionRegistry{
-		ttl:            ttl,
-		cache:          map[string]cachedSession{},
-		cacheRevisions: map[string]uint64{},
-		lastSeen:       map[string]lastSeenSession{},
+	r := &SessionRegistry{
+		now:      time.Now,
+		ttl:      ttl,
+		lastSeen: map[string]lastSeenSession{},
 	}
+	r.cache = newSessionCopy(r)
+	return r
+}
+
+// applyWatched applies one record as the session bucket's watcher delivers it
+// (sessionCache.Apply), which is how the cache's own tests write to the copy.
+func (r *SessionRegistry) applyWatched(entry natsgo.KeyValueEntry) {
+	sessionCache{r}.Apply(kvwatch.LegacyEntry(entry), kvwatch.Read{})
+}
+
+// sweep runs a read of the bucket that delivers nothing, so the copy removes every row and fence
+// entry it found no evidence of (kvwatch.Copy.CompleteRead): the one place the merged design
+// drops a fence, in place of the lastSeen deadline that dropped it before.
+func (r *SessionRegistry) sweep() {
+	sessionCache{r}.BeginRead(kvwatch.Read{})
+	sessionCache{r}.CompleteRead(kvwatch.Read{})
 }
 
 // watchedEntry is a nats.KeyValueEntry the session bucket's watcher could have delivered.
@@ -80,12 +98,13 @@ func lastSeenHeld(r *SessionRegistry, id string) bool {
 	return ok
 }
 
-// fence is the registry's revision fence for id and whether it holds one.
+// fence is the revision the copy's fence holds for id, and whether it holds one. A registry built
+// from a struct literal has no watcher, so its read epoch is the zero one (kvwatch.Copy.FenceFor).
 func fence(r *SessionRegistry, id string) (uint64, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	revision, ok := r.cacheRevisions[id]
-	return revision, ok
+	revision := r.cache.FenceFor(0, id)
+	return revision, revision != 0
 }
 
 // TestRegistryReadsRaceWatchedWritesAndExpiry runs Get, List, LastSeen and LiveCount from several
@@ -156,8 +175,14 @@ func TestRegistryReadsRaceWatchedWritesAndExpiry(t *testing.T) {
 	waitUntil(t, func() bool {
 		r.mu.RLock()
 		defer r.mu.RUnlock()
-		return len(r.cache) == 0 && len(r.lastSeen) == 0 && len(r.cacheRevisions) == 0
+		return r.cache.Len() == 0 && len(r.lastSeen) == 0
 	})
+	// The fences outlive the rows: a completed read of the bucket is the one thing that drops
+	// them (kvwatch.Copy.CompleteRead), and a read that delivers nothing drops them all.
+	r.sweep()
+	if revision, held := fence(r, ids[0]); held {
+		t.Fatalf("a completed read left fence %d for %s", revision, ids[0])
+	}
 	if live := r.LiveCount(); live != 0 {
 		t.Fatalf("LiveCount after every deadline = %d, want 0", live)
 	}
@@ -178,7 +203,13 @@ func TestExpiryKeepsAnEntryRewrittenBetweenItsDeadlineAndItsCallback(t *testing.
 	now := time.Now()
 	fresh := SessionEntry{Port: 2, UpdatedAt: now.UnixMilli()}
 	// What applyWatched does with the watcher's next put; it takes the lock this test holds.
-	r.cacheSessionLocked(id, fresh, r.expiryFor(now, fresh.UpdatedAt), 2)
+	value, err := json.Marshal(fresh)
+	if err != nil {
+		t.Fatalf("marshal %s: %v", id, err)
+	}
+	if err := r.cache.Delivered(kvwatch.Entry{Key: id, Value: value, Revision: 2, Created: now}); err != nil {
+		t.Fatalf("deliver %s: %v", id, err)
+	}
 	r.mu.Unlock()
 	// The timer's callback runs once the lock is free; run it here too, so it has certainly run
 	// after the write.
@@ -199,13 +230,17 @@ func TestExpiryKeepsAnEntryRewrittenBetweenItsDeadlineAndItsCallback(t *testing.
 	}
 }
 
-// TestRevisionFenceLeavesWithLastSeenAndAStaleReplayStaysAbsent removes a session, waits for its
-// lastSeen record and revision fence to leave one TTL later, and then replays the put the fence
-// used to hold off, as a late watcher delivery would. The put is more than one TTL old, so the
-// session must stay absent, with no LastSeen answer and no fence.
-func TestRevisionFenceLeavesWithLastSeenAndAStaleReplayStaysAbsent(t *testing.T) {
+// TestRevisionFenceLeavesWithAReadAndAStaleReplayStaysAbsent removes a session, waits for its
+// lastSeen record to leave one TTL later, and then replays the put the fence used to hold off, as
+// a late watcher delivery would. The put is more than one TTL old, so the session must stay
+// absent, with no LastSeen answer; the fence leaves at the next completed read of the bucket, not
+// at the record's deadline, and a replay after that stays absent on its age alone (decodeLocked).
+func TestRevisionFenceLeavesWithAReadAndAStaleReplayStaysAbsent(t *testing.T) {
 	const ttl = 100 * time.Millisecond
 	r := newTestRegistry(ttl)
+	// The live window is this registry's TTL, as production's is the bucket's maximum age today,
+	// so a record past its deadline is past its live window too and reads live nowhere.
+	r.liveWindow = ttl
 	const id = "ses_fenced"
 	created := time.Now()
 	stale := watchedPut(t, id, 5, created, SessionEntry{Port: 1, UpdatedAt: created.UnixMilli()})
@@ -219,27 +254,28 @@ func TestRevisionFenceLeavesWithLastSeenAndAStaleReplayStaysAbsent(t *testing.T)
 		t.Fatalf("Get(%s) after a replay the fence holds off = %v, want ErrKeyNotFound", id, err)
 	}
 
-	waitUntil(t, func() bool {
-		_, ok := fence(r, id)
-		return !ok
-	})
-	if lastSeenHeld(r, id) || r.LastSeen(id) != 0 {
-		t.Fatalf("lastSeen record held %v, LastSeen %d, after the fence left; want neither", lastSeenHeld(r, id), r.LastSeen(id))
+	waitUntil(t, func() bool { return !lastSeenHeld(r, id) })
+	if r.LastSeen(id) != 0 {
+		t.Fatalf("LastSeen %d after the record left; want 0", r.LastSeen(id))
 	}
+	// The fence leaves only with a completed read that found the bucket holds no such key.
+	if revision, held := fence(r, id); !held || revision != 6 {
+		t.Fatalf("fence after the record left = %d (held %v), want the delete's 6", revision, held)
+	}
+	r.sweep()
 
+	// With the fence swept, the replay is just a record of the bucket again: it is past its
+	// deadline, so it never reads as live, the expiry removes it at once, and the record its
+	// removal writes leaves at its own deadline, a retention past the row's.
 	r.applyWatched(stale)
 	if _, err := r.Get(id); !errors.Is(err, natsgo.ErrKeyNotFound) {
 		t.Fatalf("Get(%s) after a stale replay = %v, want ErrKeyNotFound", id, err)
 	}
-	if live, size := r.LiveCount(), r.CacheSize(); live != 0 || size != 0 {
-		t.Fatalf("LiveCount %d, CacheSize %d after a stale replay; want 0 and 0", live, size)
+	if live := r.LiveCount(); live != 0 {
+		t.Fatalf("LiveCount %d after a stale replay; want 0", live)
 	}
-	if seen := r.LastSeen(id); seen != 0 {
-		t.Fatalf("LastSeen(%s) after a stale replay = %d, want 0", id, seen)
-	}
-	if revision, ok := fence(r, id); ok {
-		t.Fatalf("a stale replay left fence %d", revision)
-	}
+	waitForCacheSize(t, r, 0)
+	waitUntil(t, func() bool { return r.LastSeen(id) == 0 })
 }
 
 // TestRevisionFencesStayBoundedAsSessionsComeAndGo registers waves of sessions, deletes half of
@@ -264,9 +300,17 @@ func TestRevisionFencesStayBoundedAsSessionsComeAndGo(t *testing.T) {
 	waitUntil(t, func() bool {
 		r.mu.RLock()
 		defer r.mu.RUnlock()
-		return len(r.cache) == 0 && len(r.lastSeen) == 0 && len(r.cacheRevisions) == 0 &&
+		return r.cache.Len() == 0 && len(r.lastSeen) == 0 &&
 			len(r.expiries) == 0 && len(r.expiryIndex) == 0
 	})
+	// Each wave's fences leave with the next completed read of the bucket, so nothing it holds
+	// outlives the bucket's own keys (kvwatch.Copy.CompleteRead).
+	r.sweep()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if got := r.cache.FenceFor(0, "ses_wave0_000"); got != 0 {
+		t.Fatalf("a completed read left fence %d", got)
+	}
 }
 
 // TestNonPositiveTTLNeverRemovesOrSchedules writes, ages and deletes sessions in registries whose
@@ -284,8 +328,11 @@ func TestNonPositiveTTLNeverRemovesOrSchedules(t *testing.T) {
 			if _, err := r.Get("ses_kept"); err != nil {
 				t.Fatalf("Get(ses_kept): %v", err)
 			}
-			if live, size := r.LiveCount(), r.CacheSize(); live != 1 || size != 1 {
-				t.Fatalf("LiveCount %d, CacheSize %d; want 1 and 1", live, size)
+			// The row has no deadline to pass, so the cache keeps it; its registration is an hour
+			// old, so nothing counts it live. A state is the record's age, never its membership of
+			// the cache.
+			if live, size := r.LiveCount(), r.CacheSize(); live != 0 || size != 1 {
+				t.Fatalf("LiveCount %d, CacheSize %d; want 0 and 1", live, size)
 			}
 			if revision, ok := fence(r, "ses_deleted"); !ok || revision != 3 {
 				t.Fatalf("fence for ses_deleted = %d (held %v), want 3", revision, ok)
@@ -344,7 +391,7 @@ func TestLastSeenRetentionKeepsTheRecordAndFenceThatLong(t *testing.T) {
 	waitUntil(t, func() bool {
 		r.mu.RLock()
 		defer r.mu.RUnlock()
-		return len(r.lastSeen) == 0 && len(r.cacheRevisions) == 0 && len(r.expiries) == 0
+		return len(r.lastSeen) == 0 && len(r.expiries) == 0
 	})
 	if gone := time.Since(deleted); gone < retention {
 		t.Fatalf("records and fences left %s after ses_deleted was removed, before the retention %s", gone, retention)
@@ -357,7 +404,7 @@ func TestLastSeenRetentionKeepsTheRecordAndFenceThatLong(t *testing.T) {
 }
 
 // TestLastSeenRetentionShorterThanTheTTLKeepsOneTTL asks for a retention shorter than the TTL: the
-// record and the fence are still kept one TTL, so dropping the fence stays safe.
+// record is still kept one TTL, and the fence stays until a completed read of the bucket drops it.
 func TestLastSeenRetentionShorterThanTheTTLKeepsOneTTL(t *testing.T) {
 	const ttl = 500 * time.Millisecond
 	r := newTestRegistry(ttl)
@@ -375,11 +422,54 @@ func TestLastSeenRetentionShorterThanTheTTLKeepsOneTTL(t *testing.T) {
 	if revision, ok := fence(r, "ses_deleted"); !ok || revision != 2 {
 		t.Fatalf("fence for ses_deleted = %d (held %v), want 2 within one TTL", revision, ok)
 	}
-	waitUntil(t, func() bool {
-		_, ok := fence(r, "ses_deleted")
-		return !ok
-	})
+	waitUntil(t, func() bool { return !lastSeenHeld(r, "ses_deleted") })
 	if gone := time.Since(deleted); gone < ttl {
-		t.Fatalf("the fence left %s after the delete, before one TTL %s", gone, ttl)
+		t.Fatalf("the record left %s after the delete, before one TTL %s", gone, ttl)
+	}
+	r.sweep()
+	if revision, ok := fence(r, "ses_deleted"); ok {
+		t.Fatalf("a completed read left fence %d", revision)
+	}
+}
+
+// rowDeadline is the deadline the cache holds for id, and whether it holds a row for it at all.
+func rowDeadline(r *SessionRegistry, id string) (time.Time, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	cs, ok := r.cache.Get(id)
+	if !ok {
+		return time.Time{}, false
+	}
+	return cs.expiresAt, true
+}
+
+// A pass of the listener's reaper that reads another maximum age from the bucket moves every
+// cached row's deadline with it, so the cache expires rows by the age the bucket itself keeps
+// them for: a raise pushes each deadline out by the difference, leaving it one new TTL from the
+// moment the record was written, and a cut that puts a row's deadline in the past takes the row
+// at once through the expiry timer, which keeps its last heartbeat as any other expiry does.
+func TestSetTTLMovesEveryCachedRowsDeadline(t *testing.T) {
+	const id = "ses_maxage"
+	r := newTestRegistry(time.Hour)
+	r.lastSeenRetention = time.Minute
+	created := time.Now()
+	r.applyWatched(watchedPut(t, id, 1, created, SessionEntry{Port: 1, UpdatedAt: created.UnixMilli()}))
+	if got, ok := rowDeadline(r, id); !ok || !got.Equal(created.Add(time.Hour)) {
+		t.Fatalf("the row's deadline = %v (held %v), want one TTL past its record %v", got, ok, created.Add(time.Hour))
+	}
+
+	r.SetTTL(2 * time.Hour)
+	if got := r.TTL(); got != 2*time.Hour {
+		t.Fatalf("TTL after the raise = %s, want 2h", got)
+	}
+	if got, ok := rowDeadline(r, id); !ok || !got.Equal(created.Add(2*time.Hour)) {
+		t.Fatalf("the row's deadline after the raise = %v (held %v), want %v", got, ok, created.Add(2*time.Hour))
+	}
+
+	// A maximum age shorter than the row's age: its new deadline has already passed.
+	r.SetTTL(time.Millisecond)
+	waitForCacheSize(t, r, 0)
+	if got := r.LastSeen(id); got != created.UnixMilli() {
+		t.Fatalf("LastSeen after the cut took the row = %d, want its last heartbeat %d", got, created.UnixMilli())
 	}
 }

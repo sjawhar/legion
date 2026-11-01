@@ -12,7 +12,13 @@ import {
 } from "react";
 import { Link } from "react-router-dom";
 
-import { api, apiErrorCodeIn, apiErrorMessage, issuePatchRequest } from "../../api/client";
+import {
+  AGENT_LIST_REFILLING,
+  api,
+  apiErrorCodeIn,
+  apiErrorMessage,
+  issuePatchRequest,
+} from "../../api/client";
 import { mergeIssue } from "../../api/issue-cache";
 import { userStateQuery } from "../../api/queries";
 import type { Artifact, IssueDetails, UserIssueState, UserState } from "../../api/types";
@@ -68,7 +74,11 @@ import { PriorityEditor } from "./PriorityControl";
 import { ProgressChips } from "./ProgressChips";
 import { stateForIssue } from "./pins";
 import { RepoControl } from "./RepoControl";
-import { RouteReachUnknownMarker, UnreachableRouteMarker } from "./RouteReach";
+import {
+  RouteReachUnknownMarker,
+  UnreachableRouteMarker,
+  UnresponsiveRouteMarker,
+} from "./RouteReach";
 import { SubscribedAgents } from "./SubscribedAgents";
 import { type IssueUpdateInput, useIssueDrafts } from "./useIssueDrafts";
 import type { IssuePriorityWrite } from "./useIssuePriority";
@@ -170,6 +180,8 @@ export function IssueHeader({
     queryFn: () => api.getIssueSubscribers(issue.key),
   });
   const subscriberList = subscribers.isError ? [] : (subscribers.data ?? []);
+  // The count is a claim about who is subscribed, so only a read that answered makes it.
+  const subscribersCounted = !subscribers.isError && subscribers.data !== undefined;
   // Every write here names `write` first: its answer and its variables are what the callbacks
   // below read.
   const unsubscribe = useKeyedWrite({
@@ -518,8 +530,19 @@ export function IssueHeader({
           {drafts.route === (issue.route ?? "") ? (
             <>
               <UnreachableRouteMarker issue={issue} showRoute />
+              <UnresponsiveRouteMarker issue={issue} showRoute />
               {issue.route !== null && issue.route_status === "unknown" ? (
-                <RouteReachUnknownMarker className="shrink-0" testId="issue-route-unknown" />
+                issue.route_status_reason === "refilling" ? (
+                  <span
+                    className={`shrink-0 text-xs ${textMutedOnSurface}`}
+                    data-testid="issue-route-refilling"
+                    title="The Envoy listener is refilling its agent list, so Dispatch cannot tell yet whether anyone receives this route."
+                  >
+                    Route reach unknown: {AGENT_LIST_REFILLING}
+                  </span>
+                ) : (
+                  <RouteReachUnknownMarker className="shrink-0" testId="issue-route-unknown" />
+                )
               ) : null}
             </>
           ) : null}
@@ -529,7 +552,7 @@ export function IssueHeader({
                   status, priority and assignee, and Release is an action beside Close. This
                   row wraps, so both stay visible and tappable at 390px; the metadata rail
                   below never wraps (#1211) and would clip them. */}
-              <ClaimChip claim={issue.claim} />
+              <ClaimChip claim={issue.claim} liveness={issue} />
               <button
                 aria-label={`Release the claim on ${issue.key}`}
                 className={`min-h-11 shrink-0 rounded-lg px-2 py-2 text-sm font-medium sm:px-3 md:min-h-8 md:py-1 xl:px-2 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
@@ -624,8 +647,8 @@ export function IssueHeader({
             onClick={() => setSubscribersOpen((open) => !open)}
             type="button"
           >
-            <span>Subscribers:</span>
-            <span>{subscriberList.length}</span>
+            <span>{subscribersCounted ? "Subscribers:" : "Subscribers"}</span>
+            {subscribersCounted ? <span>{subscriberList.length}</span> : null}
           </button>
           <ReferencedByToggle
             controls={referencesPanelId}
@@ -805,6 +828,7 @@ export function IssueHeader({
       ) : null}
       {subscribers.isError ? (
         <QueryError
+          error={subscribers.error}
           message="Subscribed agents unavailable — Envoy listener unreachable."
           onRetry={() => subscribers.refetch()}
           retrying={subscribers.isFetching}

@@ -259,8 +259,10 @@ ask's answer and replies. Open it to see two groups:
   subscribed through a wider topic shows that topic and has no control.
 
 Each row shows the session as Dispatch shows every agent: its name, which opens its live view, and
-its [running mark](/legion/dispatch/agents/#how-dispatch-shows-an-agent). The list updates as
-sessions follow and leave.
+its [running mark](/legion/dispatch/agents/#how-dispatch-shows-an-agent). A session that reads
+`unresponsive` — past its registration window, inside the gone horizon — still receives: the answer
+is stored for it and arrives when it answers again, so do not unfollow it as ended. The list
+updates as sessions follow and leave.
 
 ## Opening the Inbox as a drawer
 

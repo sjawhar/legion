@@ -149,6 +149,7 @@ function askRow(overrides: Partial<Ask> = {}, replies: Comment[] = []): IssueAsk
       route: null,
       route_status: null,
       route_holder: null,
+      route_status_reason: null,
     },
   };
 }

@@ -585,3 +585,40 @@ test("a Dispatch subscription removal that names no topics removes nothing", asy
     await rm(stateDirectory, { recursive: true, force: true })
   }
 })
+
+// The record outlives this process by the live window and the gone horizon after it, so the
+// deregistration is what ends the session for its peers: a registry write this listener has
+// stalled on must delay it, never swallow it (dispatch://INFRA-392).
+test("the shutdown deregistration waits for a stalled registration, then goes out anyway", async () => {
+  const stateDirectory = await scratchState()
+  const calls: string[] = []
+  const wedged = Promise.withResolvers<void>()
+  let registrations = 0
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      connection: new FakeNats(),
+      registrationSettleMs: 50,
+      heartbeatMs: 25,
+      client: recordingClient(calls, {
+        subscribe: async (input) => {
+          calls.push(`subscribe ${input.sessionID}`)
+          registrations += 1
+          // The first registration answers; every later one never does.
+          if (registrations > 1) await wedged.promise
+          return noInterest()
+        },
+      }),
+    }),
+  )
+
+  try {
+    await waitFor(async () => registrations > 1, "a registration the listener never answers")
+
+    await session.shutdown()
+
+    expect(calls).toContain("unregister ses_claude")
+  } finally {
+    wedged.resolve()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})

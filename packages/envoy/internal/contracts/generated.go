@@ -141,6 +141,14 @@ const RoleTopicPrefix = "notifications.role."
 // this window bounds, so the stream, the hosts and the dashboard read one number.
 const DeliveryDuplicateWindow = 259200000 * time.Millisecond
 
+// IssueClaimUnresponsiveGrace is how long an issue claim is held for a holder the Envoy registry
+// calls unresponsive: a session that missed its heartbeats keeps the issue it is working until it
+// was last seen longer ago than this, and only then may another agent take or release the claim
+// without a person's force. Generated from ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS in
+// packages/contracts, whose doc comment states the rule, so the server's refusal and the wait a
+// client predicts are one number.
+const IssueClaimUnresponsiveGrace = 1200000 * time.Millisecond
+
 // MintedDedupeKeyPattern is the shape of a dedupe key minted once for its message, by the listener
 // or by the shared transport's idempotency key, which DedupeKeyNamesTheUpstreamEvent counts as
 // naming its event. Generated from MINTED_DEDUPE_KEY_PATTERN in packages/contracts, which the

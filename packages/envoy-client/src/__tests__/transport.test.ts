@@ -601,8 +601,69 @@ describe("EnvoyClient", () => {
 
     const sessions = await client.listSessions();
 
-    expect(sessions).toEqual([unversioned, versioned]);
+    // A listener that names no state lists only sessions it holds a registration for, so every
+    // row of its answer is live; reading the absence as anything else buries working sessions.
+    expect(sessions).toEqual([
+      { ...unversioned, state: "live" },
+      { ...versioned, state: "live" },
+    ]);
     expect(recorded.requests[0]?.url).toBe("http://listener/v1/sessions");
+  });
+
+  test("keeps an unresponsive row's state and its last registration, and asks for it by name", async () => {
+    const stalled = {
+      session_id: "ses_stalled",
+      machine_id: "host-a",
+      dir: "/work",
+      port: 0,
+      title: "Reviewer",
+      topics: ["notifications.agent.ses_stalled"],
+      self_subscribed: true,
+      last_seen: 1_700_000_000_000,
+      state: "unresponsive",
+    };
+    const recorded = recordFetch([jsonResponse([stalled])]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const sessions = await client.listSessions({ include: "unresponsive" });
+
+    // A caller that must see a stalled peer asks for it: without the selector the listener
+    // answers the live rows alone, and the peer reads as a session nobody is running.
+    expect(recorded.requests[0]?.url).toBe("http://listener/v1/sessions?include=unresponsive");
+    expect(sessions[0]).toMatchObject({ state: "unresponsive", last_seen: 1_700_000_000_000 });
+  });
+
+  test("names the recipient's state on a send, and reads a listener that names none as live", async () => {
+    const envelope = {
+      event_id: "event-stalled",
+      source: "agent",
+      source_event_id: "agent.sender.event-stalled",
+      topic: "notifications.agent.ses_stalled",
+      dedupe_key: "event-stalled",
+      issued_at: 1,
+      payload_summary: "hello",
+      trace_id: "trace-stalled",
+      recipient: "ses_stalled",
+    };
+    const recorded = recordFetch([
+      jsonResponse({ ...envelope, recipient_state: "unresponsive" }),
+      jsonResponse(envelope),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const stalled = await client.send({
+      sourceSessionID: "ses_sender",
+      targetSessionID: "ses_stalled",
+      message: "hello",
+    });
+    const older = await client.send({
+      sourceSessionID: "ses_sender",
+      targetSessionID: "ses_stalled",
+      message: "hello",
+    });
+
+    expect(stalled.recipientState).toBe("unresponsive");
+    expect(older.recipientState).toBe("live");
   });
 
   test("normalizes non-success responses into a typed API error", async () => {
@@ -805,6 +866,9 @@ describe("EnvoyClient", () => {
       role: "legion-reviewer",
       holder: "01a00000-0000-7000-0000-000000000001",
       last_seen: 42,
+      // The listener named no state, and a role answer it gives names a holder it resolved.
+      state: "live",
+      holder_state: undefined,
     });
     expect(recorded.requests[1]?.url).toBe("http://listener/v1/roles/legion-reviewer");
   });

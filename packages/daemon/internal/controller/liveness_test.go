@@ -44,36 +44,28 @@ func holder(session string, lastSeen time.Time) string {
 		`","title":"controller","dir":"/x","machine_id":"m","capabilities":[],"last_seen":` + strconv.FormatInt(lastSeen.UnixMilli(), 10) + `}`
 }
 
-func newTestProber(url, token string, bootTimeout time.Duration, log *bytes.Buffer) *Prober {
+// lapsed is the listener's 404 for a role whose holder is past the live window, in state
+// (writeRoleHolderError, packages/envoy/cmd/listener/api.go).
+func lapsed(state string) string {
+	return `{"error":"role legion-demo-controller holder ses_ctl lapsed; claim retained","reason":"holder_lapsed","holder":"ses_ctl","holder_state":"` +
+		state + `","last_seen":` + strconv.FormatInt(probeNow.Add(-10*time.Minute).UnixMilli(), 10) + `,"claim_released":false}`
+}
+
+func newTestProber(url, token string, log *bytes.Buffer) *Prober {
 	return NewProber(ProberOptions{
-		EnvoyURL: url, EnvoyToken: token, Project: "demo", BootTimeout: bootTimeout,
-		Now: func() time.Time { return probeNow }, Log: slog.New(slog.NewTextHandler(log, nil)),
+		EnvoyURL: url, EnvoyToken: token, Project: "demo", Log: slog.New(slog.NewTextHandler(log, nil)),
 	})
 }
 
-// The window is four plugin heartbeats, never less than the boot timeout: 360 s at the default
-// 120 s boot timeout.
-func TestLivenessWindowIsFourHeartbeatsAtLeastTheBootTimeout(t *testing.T) {
-	for _, tc := range []struct{ boot, want time.Duration }{
-		{120 * time.Second, 360 * time.Second},
-		{60 * time.Second, 360 * time.Second},
-		{420 * time.Second, 420 * time.Second},
-	} {
-		if got := LivenessWindow(tc.boot); got != tc.want {
-			t.Errorf("LivenessWindow(%s) = %s, want %s", tc.boot, got, tc.want)
-		}
-	}
-}
-
-// Alive while the listener names the registered session as the controller role's holder and has
-// seen it within the window; the lookup is the project's controller token, with the listener's
-// bearer.
-func TestProbeIsAliveWhileTheSessionHoldsTheRoleWithinTheWindow(t *testing.T) {
+// Live while the listener names the registered session as the controller role's holder, which it
+// does only inside its own live window; the lookup is the project's controller token, with the
+// listener's bearer.
+func TestProbeIsLiveWhileTheSessionHoldsTheRole(t *testing.T) {
 	var log bytes.Buffer
-	l := &listener{status: http.StatusOK, body: holder("ses_ctl", probeNow.Add(-360*time.Second+time.Millisecond))}
+	l := &listener{status: http.StatusOK, body: holder("ses_ctl", probeNow.Add(-4*time.Minute))}
 	url := l.serve(t)
-	if got := newTestProber(url, "envoy-bearer", 120*time.Second, &log).Probe(context.Background(), "ses_ctl"); got != Alive {
-		t.Fatalf("Probe = %s, want alive; log %s", got, log.String())
+	if got := newTestProber(url, "envoy-bearer", &log).Probe(context.Background(), "ses_ctl"); got != Live {
+		t.Fatalf("Probe = %s, want live; log %s", got, log.String())
 	}
 	if l.path != "/v1/roles/legion-demo-controller" || l.bearer != "Bearer envoy-bearer" {
 		t.Fatalf("lookup = %s with %q, want the controller token with the listener's bearer", l.path, l.bearer)
@@ -84,36 +76,37 @@ func TestProbeSendsNoBearerWithoutAToken(t *testing.T) {
 	var log bytes.Buffer
 	l := &listener{status: http.StatusOK, body: holder("ses_ctl", probeNow)}
 	url := l.serve(t)
-	if got := newTestProber(url, "", 120*time.Second, &log).Probe(context.Background(), "ses_ctl"); got != Alive {
-		t.Fatalf("Probe = %s, want alive", got)
+	if got := newTestProber(url, "", &log).Probe(context.Background(), "ses_ctl"); got != Live {
+		t.Fatalf("Probe = %s, want live", got)
 	}
 	if l.authorization {
 		t.Fatalf("the lookup carried Authorization %q with no token configured", l.bearer)
 	}
 }
 
-// Gone: the role unheld or expired (404), held by another session, or last seen at or beyond the
-// window.
+// Gone: nobody claimed the role, its holder reached the gone horizon, another session holds it, or
+// a listener of an earlier release named no state with its 404 — that listener's lapsed holder is
+// no holder at all.
 func TestProbeIsGone(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		status   int
 		body     string
-		boot     time.Duration
 		wantLogs []string
 	}{
-		{name: "the role is unheld", status: http.StatusNotFound, body: `{"error":"no live holder","reason":"none"}`, boot: 120 * time.Second},
-		{name: "another session holds the role", status: http.StatusOK, body: holder("ses_other", probeNow), boot: 120 * time.Second,
+		{name: "nobody claimed the role", status: http.StatusNotFound, body: `{"error":"no holder for role legion-demo-controller","reason":"unclaimed"}`,
+			wantLogs: []string{"unclaimed"}},
+		{name: "the holder is gone", status: http.StatusNotFound, body: lapsed("gone"), wantLogs: []string{"holder_lapsed", "gone"}},
+		{name: "an older listener names no state", status: http.StatusNotFound, body: `{"error":"no live holder for role legion-demo-controller"}`},
+		{name: "a 404 whose body is not JSON", status: http.StatusNotFound, body: "<html>"},
+		{name: "another session holds the role", status: http.StatusOK, body: holder("ses_other", probeNow),
 			wantLogs: []string{"ses_other", "ses_ctl"}},
-		{name: "last seen at the window", status: http.StatusOK, body: holder("ses_ctl", probeNow.Add(-360*time.Second)), boot: 120 * time.Second,
-			wantLogs: []string{"360"}},
-		{name: "last seen beyond a boot timeout wider than four heartbeats", status: http.StatusOK, body: holder("ses_ctl", probeNow.Add(-421*time.Second)), boot: 420 * time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var log bytes.Buffer
 			l := &listener{status: tc.status, body: tc.body}
 			url := l.serve(t)
-			if got := newTestProber(url, "envoy-bearer", tc.boot, &log).Probe(context.Background(), "ses_ctl"); got != Gone {
+			if got := newTestProber(url, "envoy-bearer", &log).Probe(context.Background(), "ses_ctl"); got != Gone {
 				t.Fatalf("Probe = %s, want gone; log %s", got, log.String())
 			}
 			for _, want := range tc.wantLogs {
@@ -125,13 +118,19 @@ func TestProbeIsGone(t *testing.T) {
 	}
 }
 
-// A boot timeout wider than four heartbeats widens the window.
-func TestProbeWindowFollowsAWideBootTimeout(t *testing.T) {
+// A holder the listener calls unresponsive is past its live window and inside its gone horizon: it
+// still holds the role and answers for itself once its heartbeats land, so the probe says Unknown
+// and the keeper leaves the controller alone rather than replacing a session that is working
+// (dispatch://INFRA-392).
+func TestProbeIsUnknownForAnUnresponsiveHolder(t *testing.T) {
 	var log bytes.Buffer
-	l := &listener{status: http.StatusOK, body: holder("ses_ctl", probeNow.Add(-419*time.Second))}
+	l := &listener{status: http.StatusNotFound, body: lapsed("unresponsive")}
 	url := l.serve(t)
-	if got := newTestProber(url, "envoy-bearer", 420*time.Second, &log).Probe(context.Background(), "ses_ctl"); got != Alive {
-		t.Fatalf("Probe = %s, want alive inside a 420 s window", got)
+	if got := newTestProber(url, "envoy-bearer", &log).Probe(context.Background(), "ses_ctl"); got != Unknown {
+		t.Fatalf("Probe = %s, want unknown; log %s", got, log.String())
+	}
+	if !strings.Contains(log.String(), "unresponsive, not gone") {
+		t.Errorf("log %q does not say the holder is unresponsive rather than gone", log.String())
 	}
 }
 
@@ -154,7 +153,7 @@ func TestProbeIsUnknown(t *testing.T) {
 			var log bytes.Buffer
 			l := &listener{status: tc.status, body: tc.body}
 			url := l.serve(t)
-			if got := newTestProber(url, tc.token, 120*time.Second, &log).Probe(context.Background(), "ses_ctl"); got != Unknown {
+			if got := newTestProber(url, tc.token, &log).Probe(context.Background(), "ses_ctl"); got != Unknown {
 				t.Fatalf("Probe = %s, want unknown", got)
 			}
 			if !strings.Contains(log.String(), tc.wantLog) {
@@ -167,7 +166,7 @@ func TestProbeIsUnknown(t *testing.T) {
 		server := httptest.NewServer(http.NotFoundHandler())
 		url := server.URL
 		server.Close()
-		if got := newTestProber(url, "envoy-bearer", 120*time.Second, &log).Probe(context.Background(), "ses_ctl"); got != Unknown {
+		if got := newTestProber(url, "envoy-bearer", &log).Probe(context.Background(), "ses_ctl"); got != Unknown {
 			t.Fatalf("Probe = %s, want unknown", got)
 		}
 		if !strings.Contains(log.String(), "unreachable") {

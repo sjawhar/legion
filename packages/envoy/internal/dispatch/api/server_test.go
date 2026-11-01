@@ -28,6 +28,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
+	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
@@ -294,6 +295,12 @@ func directServer(deps Deps) *server {
 // listener's do. Dispatch resolves a session through this route rather than through the list,
 // so a stub that served only the list would answer every lookup "no live session"; an id no row
 // names is the listener's own 404, the one absence a caller may act on.
+//
+// A row that names no state or no last_seen is filled in here as a live session seen just now,
+// which is what a real listener answers for a session that is registered and heartbeating: the
+// stubs that predate session state say nothing about either, and a row read as unresponsive
+// (or as last seen at the epoch) would have Dispatch hold claims it should hand on. A row that
+// names them keeps what it names, which is how a test stands up a stalled session.
 func writeSessionRecord(t *testing.T, w http.ResponseWriter, sessionsJSON, sessionID string) {
 	t.Helper()
 	var rows []map[string]any
@@ -303,10 +310,17 @@ func writeSessionRecord(t *testing.T, w http.ResponseWriter, sessionsJSON, sessi
 		return
 	}
 	for _, row := range rows {
-		if row["session_id"] == sessionID {
-			_ = json.NewEncoder(w).Encode(row)
-			return
+		if row["session_id"] != sessionID {
+			continue
 		}
+		if _, named := row["state"]; !named {
+			row["state"] = envoy.StateLive
+		}
+		if _, named := row["last_seen"]; !named {
+			row["last_seen"] = time.Now().UnixMilli()
+		}
+		_ = json.NewEncoder(w).Encode(row)
+		return
 	}
 	w.WriteHeader(http.StatusNotFound)
 	_, _ = w.Write([]byte(`{"error":"no live session ` + sessionID + `"}`))

@@ -10,6 +10,10 @@ import { AuthGate } from "../app";
 const issue: IssueDetails = {
   route_status: null,
   route_holder: null,
+  route_status_reason: null,
+  holder_state: null,
+  last_seen: null,
+  takeable_at: null,
   artifacts: [
     {
       created_at: "2026-09-10T00:00:00Z",
@@ -97,6 +101,7 @@ function renderShellAt(width: number, inbox: InboxRow[] = [], unreadThreads = 0)
       resolved_repo: null,
       route_status: null,
       route_holder: null,
+      route_status_reason: null,
       key: issue.key,
       open_asks: 0,
       progress: { tasks: null, children: null },
@@ -192,6 +197,7 @@ test("compact top bar shows only asks waiting on the viewer", async () => {
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
       },
       priority: null,
       snoozed_until: null,
@@ -222,6 +228,7 @@ test("compact top bar shows only asks waiting on the viewer", async () => {
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
       },
       priority: null,
       snoozed_until: null,

@@ -111,6 +111,7 @@ import {
 import {
   createEnvoyClient,
   expandSubscriptionTopics,
+  holderStateOf,
   mergeInterestSources,
   type SubscribeResult,
 } from "@legion/envoy-client/transport";
@@ -881,6 +882,19 @@ export default function envoyExtension(pi: PiApi): void {
       typedPictures.dropOtherSessions(sessionID);
       // What the session left was handed and has not written is no longer waited on.
       unwritten.releaseOtherSessions(sessionID);
+      // A `/new`, a fork or a branch mints a new id, and nothing heartbeats the one it left from
+      // here on. Left in the registry that id reads as live for the live window and as
+      // unresponsive for the gone horizon after it, so peers go on sending to a session that no
+      // longer exists (dispatch://INFRA-392). The DELETE goes out behind that id's own
+      // registration (`deregisterSession`) and off this chain: no session event waits on it.
+      if (previousSessionID !== "") {
+        void deregisterSession(previousSessionID).catch((error: unknown) => {
+          logger.warn("envoy: the session this process left could not be deregistered", {
+            sessionID: previousSessionID,
+            detail: messageFor(error),
+          });
+        });
+      }
     }
   };
 
@@ -2392,6 +2406,58 @@ export default function envoyExtension(pi: PiApi): void {
     return false;
   };
 
+  /**
+   * The registrations on the wire, by the session each registers. A `DELETE /v1/sessions/<id>`
+   * that overtakes one is undone when it lands: the listener writes the record again, and a
+   * session this process no longer heartbeats reads as live for the whole live window and as
+   * unresponsive for the gone horizon after it, so peers wait an hour on a pane that has gone
+   * (dispatch://INFRA-392). Every deregistration waits its session's registration out first.
+   */
+  const registrationsInFlight = new Map<string, Promise<void>>();
+
+  /** Records `registering` as the registration of `id` on the wire, for a deregistration of that
+   *  session to wait out, and answers it unchanged. Every registration this process makes passes
+   *  through here: a pass's, through its handle, and the one outside any queue. */
+  const trackRegistration = <T>(id: string, registering: Promise<T>): Promise<T> => {
+    if (id === "") return registering;
+    // Tracked as a settled-either-way promise, so a deregistration waits for the call to leave
+    // the wire without taking on its rejection.
+    const settled = registering.then(
+      () => undefined,
+      () => undefined
+    );
+    registrationsInFlight.set(id, settled);
+    void settled.then(() => {
+      if (registrationsInFlight.get(id) === settled) registrationsInFlight.delete(id);
+    });
+    return registering;
+  };
+
+  /** How long a deregistration waits for a registration already on the wire. A client call can
+   *  take a timeout and a retry (5.25 s) to fail, so this is the whole of one attempt; past it
+   *  the DELETE goes out anyway, since one never sent always leaves the record behind where one
+   *  that races a slow registration only may. */
+  const REGISTRATION_SETTLE_MS = 5_000;
+
+  /** Deregisters a session this process has stopped heartbeating — its own at shutdown, the one
+   *  it left at a `/new`, a fork or a branch — once that session's registration has settled. The
+   *  DELETE carries this client instance's id (`registrationState.deregister`), so it removes
+   *  only a record this instance's registration wrote. */
+  const deregisterSession = async (id: string): Promise<void> => {
+    if (id === "" || active === undefined) return;
+    const registering = registrationsInFlight.get(id);
+    if (registering !== undefined) {
+      const waited = Promise.withResolvers<void>();
+      const timer = setTimeout(waited.resolve, REGISTRATION_SETTLE_MS);
+      try {
+        await Promise.race([registering, waited.promise]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    await registrationState.deregister(id);
+  };
+
   // What this session registers with the listener, read afresh at every registration. The
   // listener delivers nothing to a self-subscribed session (it takes its topics over its own
   // NATS subscriptions), so the registered topics serve recovery on resume; a role-bound subject
@@ -2451,8 +2517,10 @@ export default function envoyExtension(pi: PiApi): void {
   // Registers the session outside any queue, carrying this instance's client instance id: a
   // registration moves the session's `last_seen` at the listener even when its answer is lost, so
   // the module first takes back every hold this process abandoned under that session, and times
-  // the answer on the one clock the heartbeat's stall test reads.
-  const registerSession = () => sendRegistration(registrationState.refreshRegistration);
+  // the answer on the one clock the heartbeat's stall test reads. It is recorded as on the wire
+  // for its session, so a deregistration of that session waits it out.
+  const registerSession = () =>
+    trackRegistration(sessionID, sendRegistration(registrationState.refreshRegistration));
 
   const ensureHeartbeat = (context: SessionContext): void => {
     if (heartbeatRegistered) return;
@@ -2487,6 +2555,9 @@ export default function envoyExtension(pi: PiApi): void {
       );
     };
     context.setInterval(() => {
+      // A shutting-down session is about to be deregistered: a tick past that point would put a
+      // registration back on the wire behind the DELETE and leave the record standing.
+      if (shuttingDown) return;
       // Sessions can be created lazily after session_start (a fresh TUI has no session yet); until
       // the host mints an id there is nothing to register.
       if (context.sessionManager.getSessionId() === "") return;
@@ -2796,7 +2867,7 @@ export default function envoyExtension(pi: PiApi): void {
     // Every session subscribes to its own agent subject, so every session is registered;
     // envoy_send treats an unregistered id as dead. The listener rejects a claim from a session it
     // does not currently know, so this comes before the role.
-    const registration = await sendRegistration(handle.register).then(
+    const registration = await trackRegistration(host, sendRegistration(handle.register)).then(
       () => undefined,
       (error: unknown) => ({ error })
     );
@@ -3222,10 +3293,12 @@ export default function envoyExtension(pi: PiApi): void {
     const deadline = Promise.withResolvers<void>();
     const timer = setTimeout(deadline.resolve, 1_000);
     try {
-      const deregistration =
-        sessionID === "" || active === undefined
-          ? Promise.resolve()
-          : registrationState.deregister(sessionID).catch(() => undefined);
+      // The heartbeat has stopped (`shuttingDown`), so no new registration starts; one already on
+      // the wire is waited out before the DELETE, or it would land behind it and leave the session
+      // registered with nobody heartbeating it. The drain runs beside the wait: it needs no
+      // listener call, and both share the deadline below, which is what the host's own limit on a
+      // shutdown handler leaves them.
+      const deregistration = deregisterSession(sessionID).catch(() => undefined);
       const draining = connection?.drain().catch(() => undefined) ?? Promise.resolve();
       await Promise.race([
         Promise.allSettled([deregistration, draining]).then(() => undefined),
@@ -3900,6 +3973,7 @@ export default function envoyExtension(pi: PiApi): void {
           return toolSuccess(sendConfirmationText(result), {
             event_id: result.envelope.event_id,
             recipient: result.recipient,
+            recipient_state: result.recipientState,
             confirmed: result.confirmed,
           });
         }
@@ -3985,7 +4059,10 @@ export default function envoyExtension(pi: PiApi): void {
         }
         case EnvoyToolOperation.getRole: {
           const role = await client.getRole(stringFor(parameters, "role"));
-          return toolSuccess(JSON.stringify(role, null, 2), role);
+          // A listener that names only one of the two states still shows the model one answer:
+          // what state the holder is in, and when it was last seen.
+          const held = { ...role, holder_state: holderStateOf(role) };
+          return toolSuccess(JSON.stringify(held, null, 2), held);
         }
         case EnvoyToolOperation.whoami: {
           const inSubagent = await isSubagent(context);
@@ -4026,10 +4103,17 @@ export default function envoyExtension(pi: PiApi): void {
           const machine = optionalStringFor(parameters, "machine");
           const directory = optionalStringFor(parameters, "dir");
           const title = optionalStringFor(parameters, "title");
-          const sessions = await client.listSessions({ directory, title });
+          // The stalled sessions are asked for by name: a peer that missed its heartbeats is
+          // still running, and a list that leaves it out is read as the peer having died.
+          const sessions = await client.listSessions({
+            directory,
+            title,
+            include: "unresponsive",
+          });
           const result = sessionsOnMachine(sessions, machine);
           return toolSuccess(JSON.stringify(result, null, 2), {
             count: result.length,
+            unresponsive: result.filter((session) => session.state === "unresponsive").length,
             machine,
             dir: directory,
             title,

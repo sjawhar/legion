@@ -42,10 +42,12 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/ratelimit"
+	"github.com/sjawhar/envoy/internal/kvwatch"
 )
 
 const (
@@ -83,10 +85,11 @@ type GitHub interface {
 	Redeliver(ctx context.Context, deliveryID int64) error
 }
 
-// OpenState opens the sweep's KV bucket, creating it on first use with replicas copies, the
-// deployment's ENVOY_NATS_REPLICAS, and raising a bucket found with fewer (bus.EnsureKeyValue).
-func OpenState(js nats.JetStreamContext, replicas int) (bus.KeyValue, error) {
-	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: bus.WebhookRedeliveryBucket, TTL: retention, Storage: nats.FileStorage, Replicas: replicas})
+// OpenState opens the sweep's KV bucket on conn, through js, creating it on first use with
+// replicas copies, the deployment's ENVOY_NATS_REPLICAS, and raising a bucket found with fewer
+// (bus.EnsureKeyValue).
+func OpenState(conn *nats.Conn, js nats.JetStreamContext, replicas int) (bus.KeyValue, error) {
+	kv, err := bus.EnsureKeyValue(conn, js, &nats.KeyValueConfig{Bucket: bus.WebhookRedeliveryBucket, TTL: retention, Storage: nats.FileStorage, Replicas: replicas})
 	if err != nil {
 		return bus.KeyValue{}, fmt.Errorf("open %s KV bucket: %w", bus.WebhookRedeliveryBucket, err)
 	}
@@ -477,33 +480,31 @@ func (s *Sweeper) rateLimited(ctx context.Context, report *Report, limited *gith
 // delivered it. A record in flight is a sweeper's claim, which made no request yet: it comes back
 // too, as ClaimedElsewhere while the claim stands (claimDeadline) and asked for again after it. A
 // record that names no delivery is a claim undone before its request was sent; no request was
-// made, and the listing still brings that delivery back.
+// made, and the listing still brings that delivery back. The records come from one scan of the
+// bucket through the jetstream watcher (kvwatch.ScanExistingKeys), and a scan that ends or
+// stalls before it has delivered every record fails the sweep rather than judge a part of them.
 func (s *Sweeper) openUnlisted(listed map[string][]githubapp.Delivery) ([]githubapp.Delivery, error) {
-	watcher, err := s.state.Watch(recordPrefix+"*", nats.IgnoreDeletes())
-	if err != nil {
-		return nil, fmt.Errorf("list the redelivery records: %w", err)
-	}
-	defer watcher.Stop()
 	var open []githubapp.Delivery
-	for entry := range watcher.Updates() {
-		if entry == nil {
-			break
-		}
-		guid := strings.TrimPrefix(entry.Key(), recordPrefix)
+	_, err := kvwatch.ScanExistingKeys(s.state, recordPrefix+"*", "redelivery records", kvwatch.ScanIdleTimeout, s.Logger, func(entry kvwatch.Entry) error {
+		guid := strings.TrimPrefix(entry.Key, recordPrefix)
 		if _, seen := listed[guid]; seen {
-			continue
+			return nil
 		}
 		var current record
-		if err := json.Unmarshal(entry.Value(), &current); err != nil {
-			return nil, fmt.Errorf("decode the redelivery record of %s: %w", guid, err)
+		if err := json.Unmarshal(entry.Value, &current); err != nil {
+			return fmt.Errorf("decode the redelivery record of %s: %w", guid, err)
 		}
 		if current.Delivered || current.Expired || current.Delivery.GUID == "" {
-			continue
+			return nil
 		}
 		if current.Delivery.GUID != guid {
-			return nil, fmt.Errorf("the redelivery record of %s names delivery %q", guid, current.Delivery.GUID)
+			return fmt.Errorf("the redelivery record of %s names delivery %q", guid, current.Delivery.GUID)
 		}
 		open = append(open, current.Delivery)
+		return nil
+	}, jetstream.IgnoreDeletes())
+	if err != nil {
+		return nil, fmt.Errorf("list the redelivery records: %w", err)
 	}
 	slices.SortFunc(open, func(a, b githubapp.Delivery) int { return b.DeliveredAt.Compare(a.DeliveredAt) })
 	return open, nil
@@ -786,7 +787,7 @@ func writeState(kv bus.KeyValue, key string, value any, revision uint64) (uint64
 // after: the one place the bucket is opened. A sweep it fails for opens nothing, so the next one
 // calls Open again.
 func (s *Sweeper) openState() error {
-	if s.state.KeyValue != nil {
+	if s.state.Legacy() != nil {
 		return nil
 	}
 	state, err := s.Open()

@@ -36,6 +36,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
+	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/projection"
@@ -1080,6 +1081,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		PhaseHolds:    p.phaseHolds,
 		TreeClosable:  p.treeClosable,
 		TaskConfirmed: p.taskConfirmed,
+		SessionGone:   cleanSessionStop(supervising, cfg.EnvoyURL, p.secrets["ENVOY_TOKEN"], log),
 		Clock:         p.clock,
 		Log:           log,
 		Limits: supervise.Limits{
@@ -1105,6 +1107,34 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		cancel: cancel, draining: draining, endDrain: endDrain, decided: api.NewRouteDecisions(),
 		stopping: stopping, beginStop: beginStop,
 	}, nil
+}
+
+// cleanSessionStop is what a machine calls once a probe has judged a claim's agent process gone
+// (supervise.Deps.SessionGone): it deletes that session's registration from the Envoy listener,
+// so the listener reads the session `gone` at once instead of holding its role claim and its
+// issue claims for the whole live window (dispatch://INFRA-392). It runs on the same client the
+// daemon's notices go through (notify.New), beside controller.NewProber, on the same base URL
+// and bearer.
+//
+// The machine calls it inside its own decision, under its lock, so the call is made on a
+// goroutine of its own, on supervising — supervision's lifetime, not the decision's context,
+// which the machine's caller can end the moment the decision returns. A listener that refuses it
+// or cannot be reached costs the session nothing beyond the wait it already had: the registration
+// lapses on its own at the gone horizon. With no listener configured nothing is told.
+func cleanSessionStop(supervising context.Context, envoyURL, token string, log *slog.Logger) func(string) {
+	if envoyURL == "" {
+		return nil
+	}
+	sessions := notify.New(envoyURL, token)
+	return func(session string) {
+		go func() {
+			if err := sessions.DeleteSession(supervising, session); err != nil {
+				log.Warn("the Envoy listener did not take the clean stop of a dead role's session", "session", session, "error", err)
+				return
+			}
+			log.Info("the Envoy session of a role whose process is gone was stopped", "session", session)
+		}()
+	}
 }
 
 // start supervises every claim the store holds. A claim with a live locator is re-adopted — its

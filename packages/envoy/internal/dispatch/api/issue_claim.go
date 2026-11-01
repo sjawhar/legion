@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -36,10 +37,18 @@ import (
 // chooses it, and that the request has no second parameter for claiming on someone's behalf.
 // The body is closed to unknown fields, so an invented one is refused rather than ignored.
 //
-// The taking rule lives in claimBlockedBy alone: a claim whose session the Envoy listener
-// still lists as live belongs to that session until it releases it or a human forces it; a
-// claim whose session is gone may be taken by any agent without asking, and the takeover is
-// recorded on the issue and delivered to the session that lost it.
+// The taking rule lives in claimBlockedBy alone, and it is a test of the holder's registry
+// state, never of any list's membership: a claim whose session the Envoy registry calls live,
+// or calls unresponsive within the grace of its last heartbeat, belongs to that session until
+// it releases it or a human forces it; a claim whose session is gone, or whose unresponsive
+// session has not been seen for longer than that grace, may be taken by any agent without
+// asking, and the takeover is recorded on the issue and delivered to the session that lost it.
+//
+// An issue read answers the same question from the other source: the route roster, the
+// server's copy of the listener's session list, up to five seconds old
+// (issue_route_status.go's claimLiveness). The two can disagree by that age, and only this one
+// decides a write - which is also why a read answers holder_state "unknown" while the listener
+// is down and a write refuses ENVOY_UNAVAILABLE.
 //
 // Every claim write is the resolve-then-lock pair envoy_resolve.go owns, because the listener
 // lookup never runs inside a transaction (fetchHolderLiveness carries the reason): judgeHolder
@@ -78,6 +87,14 @@ type claimConflict struct {
 	// leaves it empty, which costs nothing: claimHolder names a non-session by kind and id
 	// and reads no title at all.
 	liveTitle string
+	// state, lastSeen and takeableAt are the holder's registry state and what follows from it,
+	// and only a session holder's refusal has them. A refusal says what was established, so an
+	// unresponsive holder's names the state and the heartbeat it was last seen at, and the
+	// moment its claim comes free without a person: the caller is being told to wait, and this
+	// is how long.
+	state      string
+	lastSeen   time.Time
+	takeableAt time.Time
 	// forcible is humanRule.forcible, carried through so the refusal offers only what its
 	// caller can use.
 	forcible bool
@@ -85,8 +102,9 @@ type claimConflict struct {
 
 // Error is the refusal a caller reads, and it never says more than was established. A live
 // session is named with the title it is running under and can be asked to release the issue;
-// a human holder had no liveness to check and no session to message, so the text names the
-// person to ask instead.
+// an unresponsive one is named with the state it is in and when it was last seen, because the
+// caller's question is whether to wait and this answers it; a human holder had no liveness to
+// check and no session to message, so the text names the person to ask instead.
 func (c *claimConflict) Error() string {
 	at := c.claim.At.UTC().Format(time.RFC3339)
 	alternative := "or any human can"
@@ -96,6 +114,22 @@ func (c *claimConflict) Error() string {
 	if c.claim.Actor.Kind != "session" {
 		return fmt.Sprintf("%s claimed this issue at %s; ask %s to release it, %s",
 			claimHolder(c.claim.Actor, ""), at, c.claim.Actor.ID, alternative)
+	}
+	switch {
+	case c.state == envoy.StateUnresponsive && c.lastSeen.IsZero():
+		// The listener named the state but no heartbeat behind it, so nothing dates the
+		// silence and the refusal names no instant it cannot stand behind.
+		return fmt.Sprintf(
+			"%s claimed this issue at %s and is unresponsive, not gone; ask that session to release it, %s",
+			claimHolder(c.claim.Actor, c.liveTitle), at, alternative,
+		)
+	case c.state == envoy.StateUnresponsive:
+		return fmt.Sprintf(
+			"%s claimed this issue at %s and is unresponsive since %s, not gone: it keeps the claim until %s; "+
+				"ask that session to release it, %s",
+			claimHolder(c.claim.Actor, c.liveTitle), at,
+			c.lastSeen.UTC().Format(time.RFC3339), c.takeableAt.UTC().Format(time.RFC3339), alternative,
+		)
 	}
 	return fmt.Sprintf(
 		"%s claimed this issue at %s and is still running; ask that session to release it, %s",
@@ -119,10 +153,10 @@ func (s *server) writeClaimError(w http.ResponseWriter, err error) {
 }
 
 // holderLiveness is what the listener answered about the claim's holder, read with no
-// transaction open and no pooled connection held. `holder` is that session's own record, or
-// nil when the session store holds none, because that one session is the only thing the
-// decision asks about. `fetched` is false when the caller never needed it, which is every
-// claim of an issue nobody else holds.
+// transaction open and no pooled connection held. `holder` is that session's own record - its
+// State and the LastSeen that dates it, which is all the rule asks about - or nil when the
+// registry holds no record of it at all, which is gone. `fetched` is false when the caller
+// never needed it, which is every claim of an issue nobody else holds.
 type holderLiveness struct {
 	fetched bool
 	holder  *envoy.Session
@@ -133,16 +167,21 @@ type holderLiveness struct {
 // cycle rather than deciding from a snapshot that does not describe the holder.
 var errHolderUnjudged = errors.New("claim holder was not covered by the liveness snapshot")
 
-// fetchHolderLiveness asks the listener about the holder's own session, by id, and answers
-// with that one session's record, or with none when the session store holds no record of it.
+// fetchHolderLiveness asks the listener about the holder's own session, by id
+// (GET /v1/registry/<id>, include=unresponsive), and answers with that one session's record -
+// its state and last_seen - or with none when the registry holds no record of it. This is the
+// write side's source, and the authoritative one: an issue read judges the same holder against
+// the route roster instead, the server's copy of the listener's list from up to five seconds
+// ago, so the two can disagree by that much and only this one decides a write.
+//
 // It must be called with nothing held: it is a cross-service HTTP call of up to five seconds,
 // and each process's pool is bounded (store.sharedPoolSize), so a connection held across it is
 // one fewer for that process's other requests, and a row lock held across it stalls every
 // process that writes the issue. An unreachable or unconfigured listener is a 503, never
 // "unknown, therefore free" — Dispatch does not hand one session's work to another on a
-// transport error. Only a session holder is ever asked about: judgeHolder reaches this
-// through errHolderUnjudged, which a holder of any other kind never produces, so no read is
-// made for a human's claim.
+// transport error, which is also why only the read answers "unknown" and goes on. Only a
+// session holder is ever asked about: judgeHolder reaches this through errHolderUnjudged,
+// which a holder of any other kind never produces, so no read is made for a human's claim.
 func (s *server) fetchHolderLiveness(ctx context.Context, holder model.IssueClaim) (holderLiveness, error) {
 	if s.deps.Envoy == nil {
 		return holderLiveness{}, errorf(http.StatusServiceUnavailable, "ENVOY_UNAVAILABLE",
@@ -190,15 +229,23 @@ type judgement struct {
 // session the store no longer holds, and let a live session's claim be taken without force.
 //
 // A human's claim has no session to end, so it is held until that human or another releases
-// it. A session's claim is held while the session store still holds that session's record,
-// read by id. The listener's live list is not that record: it is one process's in-memory
-// cache, and it cannot tell a cache that is still refilling from a session that has ended, so
-// a working session reads as absent from it for as long as the refill takes. Handing that
-// session's issue to someone else is not a mistake the next read undoes — two sessions then
-// work the same issue, and whatever the first wrote is already another's to overwrite — so
-// the holder's own record decides.
+// it. A session's claim is held by that session's own registry state, read by id — never by a
+// list's membership. The listener's live list is one process's in-memory cache, and it cannot
+// tell a cache that is still refilling from a session that has ended, so a working session
+// reads as absent from it for as long as the refill takes. Handing that session's issue to
+// someone else is not a mistake the next read undoes — two sessions then work the same issue,
+// and whatever the first wrote is already another's to overwrite — so the holder's own record
+// decides.
+//
+// That record gives three answers. A live holder keeps its claim. An unresponsive holder keeps
+// it too, for contracts.IssueClaimUnresponsiveGrace past the heartbeat it was last seen at:
+// missing heartbeats under box load is ordinary, and a session that comes back must still have
+// the issue it was working (dispatch://INFRA-392). Past that grace, and for a holder that is
+// gone or has no record at all, the claim is free. A holder the listener calls unresponsive
+// while naming no heartbeat keeps its claim: nothing established when it was last seen, and
+// the direction that errs toward one session per issue is to wait.
 func claimBlockedBy(
-	current *model.IssueClaim, actor model.Actor, rule humanRule, judged judgement,
+	current *model.IssueClaim, actor model.Actor, rule humanRule, judged judgement, now time.Time,
 ) error {
 	if judged.live.fetched && !sameHolder(judged.holder, current) {
 		return errHolderUnjudged
@@ -218,9 +265,25 @@ func claimBlockedBy(
 	if judged.live.holder == nil {
 		return nil
 	}
-	return &claimConflict{
-		claim: *current, liveTitle: judged.live.holder.Title, forcible: rule.forcible,
+	holder := *judged.live.holder
+	conflict := &claimConflict{
+		claim: *current, liveTitle: holder.Title, state: holder.State, forcible: rule.forcible,
 	}
+	switch holder.State {
+	case envoy.StateGone:
+		// A record the listener answers with but calls gone is no holder at all.
+		return nil
+	case envoy.StateUnresponsive:
+		if holder.LastSeen <= 0 {
+			return conflict
+		}
+		conflict.lastSeen = time.UnixMilli(holder.LastSeen).UTC()
+		conflict.takeableAt = conflict.lastSeen.Add(contracts.IssueClaimUnresponsiveGrace)
+		if now.After(conflict.takeableAt) {
+			return nil
+		}
+	}
+	return conflict
 }
 
 // sameHolder reports whether two nullable claims name the same holder.
@@ -229,6 +292,15 @@ func sameHolder(left, right *model.IssueClaim) bool {
 		return left == right
 	}
 	return left.Actor.SameAs(right.Actor)
+}
+
+// issueClaimSession is the id of the session holding a claim, empty for an unclaimed issue and
+// for one a person holds: only a session has a registry state to read.
+func issueClaimSession(claim *model.IssueClaim) string {
+	if claim == nil || claim.Actor.Kind != "session" {
+		return ""
+	}
+	return claim.Actor.ID
 }
 
 // judgeHolder is the pre-lock half: read who holds the issue on a pooled connection, release
@@ -244,7 +316,7 @@ func (s *server) judgeHolder(
 		return judgement{}, err
 	}
 	judged := judgement{holder: holder}
-	if !errors.Is(claimBlockedBy(holder, actor, rule, judged), errHolderUnjudged) {
+	if !errors.Is(claimBlockedBy(holder, actor, rule, judged, time.Now()), errHolderUnjudged) {
 		return judged, nil
 	}
 	judged.live, err = s.fetchHolderLiveness(ctx, *holder)
@@ -532,7 +604,7 @@ func (s *server) claimIssue(w http.ResponseWriter, r *http.Request) {
 		if before.ClosedAt != nil {
 			return claimChange{}, errorf(http.StatusConflict, "ISSUE_CLOSED", "issue is closed")
 		}
-		if blocked := claimBlockedBy(before.Claim, actor, rule, judged); blocked != nil {
+		if blocked := claimBlockedBy(before.Claim, actor, rule, judged, time.Now()); blocked != nil {
 			return claimChange{}, blocked
 		}
 		if before.Claim != nil && before.Claim.Actor.SameAs(actor) {
@@ -615,7 +687,7 @@ func (s *server) releaseIssueClaim(w http.ResponseWriter, r *http.Request) {
 			// working never has to care which happened first.
 			return claimChange{}, nil
 		}
-		if blocked := claimBlockedBy(before.Claim, actor, rule, judged); blocked != nil {
+		if blocked := claimBlockedBy(before.Claim, actor, rule, judged, time.Now()); blocked != nil {
 			return claimChange{}, blocked
 		}
 		return claimChange{

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,137 +16,16 @@ import (
 	"github.com/sjawhar/envoy/internal/logging"
 )
 
-// supersedingRoleDeleteKV answers every conditional Delete of a role claim with nats.ErrKeyExists,
-// the server's word for a revision that is no longer the stored one: a fresh claim landed first.
-// store.ReleaseExpiredRoleClaim reads that as ExpiredRoleClaimSuperseded, so each attempt
-// resolveRoleHolder makes loses its compare-and-swap while every bus read it makes answers --
-// the one state that spends all of roleHolderResolutionAttempts on supersessions. The claim's
-// stored bytes are left alone: every other call goes to the real bucket.
-type supersedingRoleDeleteKV struct {
-	nats.KeyValue
-}
-
-func (kv supersedingRoleDeleteKV) Delete(key string, opts ...nats.DeleteOpt) error {
-	return nats.ErrKeyExists
-}
-
-// A publish whose role claim is superseded on every resolution attempt is a lost race against a
-// live replacement holder, not a bus that went quiet: each attempt's reads were answered, and only
-// the conditional release lost. This asserts the sentinel resolveRoleHolder returns for it and
-// the whole answer publishHandler gives it -- the 503 and the Retry-After that ask for the retry a
-// fresh read wins, the body that names the race, and the record that names it too, so the
-// bus_unavailable bucket an operator reads afterwards keeps meaning a bus that did not answer.
-//
-// What it does not prove: that two listeners racing one claim produce this state. That needs two
-// listeners and a real contended claim; here the supersession is forced by a KV whose conditional
-// Delete always loses, which is the same answer store.ReleaseExpiredRoleClaim reads from the
-// server when a real race is lost (internal/store/kv.go), reached without the timing.
-func TestAPublishThatLosesTheRoleClaimRaceSaysSoRatherThanBlamingTheBus(t *testing.T) {
-	const (
-		role   = "reviewer"
-		holder = "ses_superseded_holder"
-	)
-	topic := contracts.RoleTopicPrefix + role
-	client := setupPublishTestClient(t)
-	registry, sessions := setupSessionsTest(t, nil, nil)
-	if _, err := registry.SetRole(holder, "test-machine", role, false); err != nil {
-		t.Fatalf("seed the role claim: %v", err)
-	}
-	// The holder's session is never registered, so every attempt reads the claim, finds its holder
-	// gone and tries to release it -- and loses that release to the KV above, every time.
-	setRegistryRoleKV(t, registry, supersedingRoleDeleteKV{KeyValue: registryRoleKV(t, registry)})
-
-	if _, err := resolveRoleHolder(context.Background(), registry, sessions, role, registered); !errors.Is(err, errRoleHolderChanged) {
-		t.Fatalf("resolving a claim superseded on every attempt = %v, want errRoleHolderChanged", err)
-	}
-
-	state := withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
-	recorder, record := serveRecorded(t,
-		func(logger *logging.Logger) http.HandlerFunc { return publishHandler(state, logger) },
-		postJSON("/v1/messages/publish", sendBody(map[string]any{
-			"topic":          topic,
-			"source":         "agent",
-			"source_session": "ses_racing_publisher",
-			"message":        "the claim moved while I was resolving it",
-		})))
-	if recorder.Code != http.StatusServiceUnavailable {
-		t.Fatalf("publish into a lost claim race: status %d, body %s; want 503", recorder.Code, recorder.Body.String())
-	}
-	if got := recorder.Header().Get("Retry-After"); got != "1" {
-		t.Fatalf("Retry-After = %q, want 1: a fresh read wins this race as soon as the replacement claim settles", got)
-	}
-	var refusal apiError
-	if err := json.Unmarshal(recorder.Body.Bytes(), &refusal); err != nil {
-		t.Fatalf("decode the refusal %s: %v", recorder.Body.String(), err)
-	}
-	want := "envoy: the holder of role reviewer changed while this publish was resolving it"
-	if refusal.Error != want {
-		t.Fatalf("the refusal reads %q, want %q", refusal.Error, want)
-	}
-	if strings.Contains(refusal.Error, busUnansweredPrefix) {
-		t.Fatalf("the refusal reads %q: every bus read answered, so it must not say the bus did not", refusal.Error)
-	}
-	assertRecordFields(t, record, map[string]any{
-		"msg":     "listener publish",
-		"level":   "WARN",
-		"outcome": "role_holder_changed",
-		"status":  float64(http.StatusServiceUnavailable),
-		"topic":   topic,
-	})
-	t.Logf("lost claim race: %s", refusal.Error)
-}
-
-// GET /v1/roles/<role> resolves its holder exactly as a role send through the publish route does, so it can lose the
-// same race, and it answers it as the publish route does: the 503 and the Retry-After that ask for
-// the retry a fresh lookup wins, and a body that names the race in a lookup's words. Every bus read
-// answered and the claim decoded, so neither the bus-unavailable 503 this route gives a read that
-// did not answer nor the 500 it gives an undecodable claim would be true of it.
-func TestARoleLookupThatLosesTheRoleClaimRaceSaysSoRatherThanFailing(t *testing.T) {
-	const (
-		role   = "reviewer"
-		holder = "ses_superseded_holder"
-	)
-	client := setupPublishTestClient(t)
-	registry, sessions := setupSessionsTest(t, nil, nil)
-	if _, err := registry.SetRole(holder, "test-machine", role, false); err != nil {
-		t.Fatalf("seed the role claim: %v", err)
-	}
-	// As in the publish test above: the holder is never registered, so every attempt finds it gone
-	// and loses its conditional release.
-	setRegistryRoleKV(t, registry, supersedingRoleDeleteKV{KeyValue: registryRoleKV(t, registry)})
-
-	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
-	recorder := httptest.NewRecorder()
-	roleGetHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/roles/"+role, nil))
-	if recorder.Code != http.StatusServiceUnavailable {
-		t.Fatalf("lookup into a lost claim race: status %d, body %s; want 503", recorder.Code, recorder.Body.String())
-	}
-	if got := recorder.Header().Get("Retry-After"); got != "1" {
-		t.Fatalf("Retry-After = %q, want 1: a fresh lookup wins this race as soon as the replacement claim settles", got)
-	}
-	var refusal apiError
-	if err := json.Unmarshal(recorder.Body.Bytes(), &refusal); err != nil {
-		t.Fatalf("decode the refusal %s: %v", recorder.Body.String(), err)
-	}
-	want := "envoy: the holder of role reviewer changed while this lookup was resolving it"
-	if refusal.Error != want {
-		t.Fatalf("the refusal reads %q, want %q", refusal.Error, want)
-	}
-	if got, err := registry.RoleHolder(role); err != nil || got != holder {
-		t.Fatalf("the claim after the lookup = %q, %v; want %s's, untouched", got, err, holder)
-	}
-}
-
-// stalledRoleKV is a role bucket one of whose calls does not answer: a claim read (stallGet) or a
-// conditional delete (stallDelete) waits stall, or until the test ends, and then fails, the way a
-// legacy nats.go KV call waits out the JetStream MaxWait on a bus that has stopped answering. Every
-// other call goes to the real bucket. stall is longer than sendRequestBudget, so a route that waits
-// the call out answers after its budget, and one bounded by its budget answers at it.
+// stalledRoleKV is a role bucket whose claim read does not answer: a Get waits stall, or until the
+// test ends, and then fails, the way a legacy nats.go KV call waits out the JetStream MaxWait on a
+// bus that has stopped answering. Every other call goes to the real bucket. stall is longer than
+// sendRequestBudget, so a route that waits the call out answers after its budget, and one bounded
+// by its budget answers at it.
 type stalledRoleKV struct {
 	nats.KeyValue
-	stallGet, stallDelete bool
-	stall                 time.Duration
-	released              <-chan struct{}
+	stallGet bool
+	stall    time.Duration
+	released <-chan struct{}
 }
 
 func (kv stalledRoleKV) wait() {
@@ -165,23 +43,14 @@ func (kv stalledRoleKV) Get(key string) (nats.KeyValueEntry, error) {
 	return kv.KeyValue.Get(key)
 }
 
-func (kv stalledRoleKV) Delete(key string, opts ...nats.DeleteOpt) error {
-	if kv.stallDelete {
-		kv.wait()
-		return errors.New("the role bucket's delete never answered")
-	}
-	return kv.KeyValue.Delete(key, opts...)
-}
-
 // A role send through the publish route resolves its role's holder within sendRequestBudget of the request's own
-// context, so a role-bucket call that does not answer - the claim read, or the conditional release
-// of a claim whose holder is gone, neither of which takes a context in nats.go - is reported inside
-// the caller's attempt (the client gives each 5 s, packages/envoy-client/src/transport.ts) rather
-// than after it: the bus-unavailable 503 with Retry-After: 1, naming the call that did not answer.
-// It must answer at its budget and before stalledRoleKV's stall: answering before the budget would
-// mean something other than the stalled call ended the request, and answering after it that the
-// resolution waited the call out. A lookup's same two cases are
-// TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering's.
+// context, so a role-bucket call that does not answer - the claim read, which takes no context in
+// nats.go - is reported inside the caller's attempt (the client gives each 5 s,
+// packages/envoy-client/src/transport.ts) rather than after it: the bus-unavailable 503 with
+// Retry-After: 1, naming the call that did not answer. It must answer at its budget and before
+// stalledRoleKV's stall: answering before the budget would mean something other than the stalled
+// call ended the request, and answering after it that the resolution waited the call out. A
+// lookup's same case is TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering's.
 func TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget(t *testing.T) {
 	const (
 		role   = "reviewer"
@@ -192,15 +61,15 @@ func TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget(t *tes
 	)
 	topic := contracts.RoleTopicPrefix + role
 	for _, tc := range []struct {
-		name                  string
-		stallGet, stallDelete bool
-		unanswered            string
+		name       string
+		stallGet   bool
+		unanswered string
 	}{
 		{name: "the claim read", stallGet: true, unanswered: "read role reviewer's claim: context deadline exceeded"},
-		{name: "the conditional release", stallDelete: true, unanswered: "release role reviewer's expired claim held by ses_unanswered_holder: context deadline exceeded"},
 	} {
-		// open seeds a claim whose holder never registered, so a resolution that reads it goes on
-		// to release it, and then stalls the role bucket's tc call.
+		// open seeds a claim whose holder never registered, so a resolution reads the claim, finds
+		// its holder gone and reports it lapsed - taking nothing from it - and then stalls the
+		// role bucket's tc call.
 		open := func(t *testing.T) *listenerDeps {
 			t.Helper()
 			client := setupPublishTestClient(t)
@@ -211,11 +80,10 @@ func TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget(t *tes
 			released := make(chan struct{})
 			t.Cleanup(func() { close(released) })
 			setRegistryRoleKV(t, registry, stalledRoleKV{
-				KeyValue:    registryRoleKV(t, registry),
-				stallGet:    tc.stallGet,
-				stallDelete: tc.stallDelete,
-				stall:       6 * time.Second,
-				released:    released,
+				KeyValue: registryRoleKV(t, registry),
+				stallGet: tc.stallGet,
+				stall:    6 * time.Second,
+				released: released,
 			})
 			return withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 		}
@@ -268,7 +136,8 @@ func TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget(t *tes
 // reads as a broken listener rather than an unreachable bus, the distinction the spec gives
 // bus-down its 503 for, so an operator's filter on that prefix finds this outage too; and the
 // publish route already answers the same stalled store this way, in the test above. The bus is
-// connected throughout, so nothing but the stalled role-bucket call can end the lookup.
+// connected throughout, so nothing but the stalled role-bucket call can end the lookup. A lookup
+// releases nothing, so the claim read is the only role-bucket call it makes.
 func TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering(t *testing.T) {
 	const (
 		role   = "reviewer"
@@ -276,12 +145,11 @@ func TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering(t *test
 		within = 4 * time.Second
 	)
 	for _, tc := range []struct {
-		name                  string
-		stallGet, stallDelete bool
-		unanswered            string
+		name       string
+		stallGet   bool
+		unanswered string
 	}{
 		{name: "the claim read", stallGet: true, unanswered: "read role reviewer's claim: context deadline exceeded"},
-		{name: "the conditional release", stallDelete: true, unanswered: "release role reviewer's expired claim held by " + holder + ": context deadline exceeded"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := setupPublishTestClient(t)
@@ -292,11 +160,10 @@ func TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering(t *test
 			released := make(chan struct{})
 			t.Cleanup(func() { close(released) })
 			setRegistryRoleKV(t, registry, stalledRoleKV{
-				KeyValue:    registryRoleKV(t, registry),
-				stallGet:    tc.stallGet,
-				stallDelete: tc.stallDelete,
-				stall:       6 * time.Second,
-				released:    released,
+				KeyValue: registryRoleKV(t, registry),
+				stallGet: tc.stallGet,
+				stall:    6 * time.Second,
+				released: released,
 			})
 			state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 

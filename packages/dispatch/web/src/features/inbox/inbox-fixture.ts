@@ -70,6 +70,7 @@ export function issueAsk(overrides: Partial<InboxRow> = {}): InboxRow {
       route: null,
       route_status: null,
       route_holder: null,
+      route_status_reason: null,
     },
     question: "Which approach?",
     state: "open",
@@ -96,6 +97,7 @@ export function mockAskReads(rows: readonly InboxRow[]) {
       route: null,
       route_status: null,
       route_holder: null,
+      route_status_reason: null,
     };
   });
 }

@@ -1,0 +1,157 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-392",
+  "completed": "2026-10-31T03:29:34Z",
+  "plan": "dispatch://INFRA-392/artifact/plan-md (version 1). One pull request on sjawhar/legion carrying every sjawhar/legion part of spec v5: the listener's three-state session registry, the ENVOY_SESSION_MAX_AGE setting and the /healthz session_max_age field, the session reaper and R8's counters, R6's re-reads (carried from sjawhar/legion#2238), Dispatch's claims, route status, agent list and dashboard, the Legion daemon's holder_state reads and the clean stop, the three session plugins, the skills and the docs. 21 tasks, T0 to T21, one commit each, in the order the plan gives. It ships at a 5-minute bucket maximum age; the theorem-labs/agent-infra rollout and A9 are the architect's three child issues.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase's own rules, with references/pr-body.md for the six-field proofs this plan demands, references/conflicts-and-rewrites.md for T0's merge of legion/INFRA-261@origin, references/tools.md for installing Claude Code and OpenCode under $TMPDIR for the pod E2E, and references/skip-checks-trailer.md for the handoff-only pushes",
+      "envoy: the change rewrites every tool description, skill line and doc page that states what a live session is; the skill is the semantics they must all agree with",
+      "dispatch and dispatch-first: the phase writes on the issue and must search before it posts any finding",
+      "ce-simplify-code: the simplify pass over a change of about 200 files, before the handoff",
+      "asd-ste100: the pull-request body, the review replies and every message to another role"
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md defines what a proof is and what the tester must be able to re-run; references/tools.md covers a client the pod does not carry (nats, psql) for reading envoy_roles and the stream",
+      "envoy: judging whether a delivery, a role claim and a receipt behaved as the three states require needs the skill's own account of the lanes",
+      "dispatch: the phase's writes on the issue and its reads of the claim the test drives"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md for the approval and the READY rules, and references/review-threads.md for replies and for judging a bot's finding on a change this large",
+      "ce-simplify-code: the review judges the implementer's simplify pass over about 200 files",
+      "asd-ste100: the review's own text, which another agent reads and acts on"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "At the 5-minute bucket maximum age this change ships at, JetStream removes a stalled session's key, so by R1's third clause the session is gone, not unresponsive: R5's 20-minute protection and the reaper's gone rule have nothing to act on in production until the child issues raise the maximum age.",
+        "answer": "Stated as the shipping behaviour in plan.md, 'What production gets at the merge, and what waits', on the authority of the approved spec's own decision 'The session's own record outlives its lease'. Every A1-A6 run sets the maximum age itself (ENVOY_SESSION_MAX_AGE=2h), which is also what proves the setting."
+      },
+      {
+        "finding": "A1-A6 are sized to a 7-minute stall and the live window is the one value the spec does not make a setting; envoy-session-stall has timeout-minutes 15.",
+        "answer": "Departure 4: the live window becomes ENVOY_SESSION_LIVE_WINDOW beside the gone horizon, the reaper interval and the claim protection. check-heartbeat-margin.sh keeps reading the compiled default declaration, so the gate is not weakened."
+      },
+      {
+        "finding": "No surface that needs no dev box runs a real, stallable session process: the only SIGSTOP rig needs a model key this repository does not hold.",
+        "answer": "T20 builds two surfaces. (a) committed: a forked child process carrying the real plugin registration and heartbeat against a real listener and natsd, in packages/envoy-client/test. (b) the pod E2E scripts/e2e/envoy-session-states.sh, run by the implementer and the tester with the issue pod's own model route, driving real Oh My Pi, Claude Code and OpenCode sessions. The architect fixed this split."
+      },
+      {
+        "finding": "R3 and R4 disagree about envoy_publish to a role whose holder is unresponsive.",
+        "answer": "R4's literal reading, recorded in plan.md and in T4 and T8: the publish stays 404 holder_lapsed with holder_state unresponsive and claim_released false, and Dispatch's role route re-addresses to the holder's session, where the message is stored."
+      },
+      {
+        "finding": "The daemon cannot do what R4 asks: notify maps unclaimed and holder_lapsed alike to ErrNoHolder, and Prober.Probe answers Gone on any 404 before reading the body, so A4's kept READY packet and its controller line both fail.",
+        "answer": "T11 and T12 add both reads of holder_state; A4's acceptance row names them."
+      },
+      {
+        "finding": "R6's 'a kept entry still reads live' contradicts R1's computed state.",
+        "answer": "R1 wins (T1): the state is computed from updated_at, never from cache membership. A row kept through a re-read is re-judged; the acceptance names it."
+      },
+      {
+        "finding": "An issue read's holder_state and a claim write's decision come from two different listener routes (the 5-second route roster, and GET /v1/registry/<id>), and the spec names only one.",
+        "answer": "T7 names both and states that they may disagree by the roster's cache. An issue read never fails and answers holder_state unknown; a claim write keeps today's refusal while the listener cannot answer."
+      },
+      {
+        "finding": "claimHolds' cutover is unspecified: where holder_state, last_seen and takeable_at live, and what takeable_at is for a live holder. model.IssueClaim is embedded in the issue.claimed event payload.",
+        "answer": "T7: the three fields sit beside the claim on the issue read, not inside model.IssueClaim, so no read-time state is persisted into an event; takeable_at is null for a live holder. T9 cuts over every caller."
+      },
+      {
+        "finding": "The registry's ttl becomes mutable and is read today with no lock by expiryFor, retention(), TTL() and the two role-reaper callers.",
+        "answer": "T1 and T2: guard it with the registry's mutex, recompute every cached entry's expiry when it changes with a stated rule for an already-passed deadline, and move the role reaper's grace to the live window."
+      },
+      {
+        "finding": "A1's raise-and-rollback clause cannot be proved: a raise restores no key JetStream removed, and at 5 minutes nothing can read unresponsive.",
+        "answer": "Departure 2, accepted by the architect: after the raise both listeners report 2h0m0s in /healthz within 2 minutes and a session stalled 7 minutes from then reads unresponsive; after the rollback both report 5m0s within 2 minutes and that session reads gone."
+      },
+      {
+        "finding": "R7 asks the worker shim to send a clean stop it cannot address: no shimwire frame carries a session id and the shim commits 9 s of its 10 s stop grace.",
+        "answer": "Departure 1, accepted by the architect: T13 puts DELETE /v1/sessions/<id> in the daemon, which holds Claim.Session, ENVOY_URL and ENVOY_TOKEN and learns of the exit event-driven. A6's bound is measured and reported as a number rather than asserted."
+      },
+      {
+        "finding": "R8's 'messages it never read' is not computable (the listener keeps no read receipt) and the count is unbounded, one STREAM.MSG.GET per message.",
+        "answer": "T3 defines it as messages stored on notifications.agent.<id> with a stream time after last_seen, up to one watermark read per pass, bounded by a message cap and a time budget in the shape of /v1/replay's, and the log field and the metric help say it is stored-after-last-seen, not proven-unread."
+      },
+      {
+        "finding": "A7's 'the bucket's maximum age is back at the listener setting's value' is undefined when the setting is unset, which is the shipping state.",
+        "answer": "A7 proves both cases: with the setting set, the recreated bucket returns to the setting's value; unset, to the registry default, which /healthz reports and the listener does not change."
+      },
+      {
+        "finding": "check-heartbeat-margin.sh runs in the lint job on every pull request and is fatal on a declaration it cannot read; its test suite pins every message.",
+        "answer": "T14 moves rules 1 and 4 onto the live window, removes rule 2 with LivenessWindow and ProberOptions.BootTimeout, and updates the header text and every pinned string. It ships in the same commit as T1's constants."
+      },
+      {
+        "finding": "The 404 body of GET /v1/registry/<id> for an unresponsive session asked without include is unspecified, and Dispatch matches its text by prefix.",
+        "answer": "T4: today's body with state and last_seen added, the 'no live session <id>' prefix kept, so an older Dispatch reading only the prefix is unaffected. The acceptance names both the 404 and the 200 with include."
+      },
+      {
+        "finding": "Adding include=unresponsive silently changes the meaning of every roster-membership test and every bare ErrNotFound read in Dispatch.",
+        "answer": "T8 enumerates them: route status (holder_unresponsive, the filter, no_holder excluding it), the Agents page, subscribers, broadcasts, mentions and delivery, ask reach."
+      },
+      {
+        "finding": "The browser fixture and about 29 Go listener stubs carry no state, no include and no 503.",
+        "answer": "T10: the Go stubs learn them in the one shared helper writeSessionRecord; fake-envoy.ts learns state, include and the 503 with the fixture controls a browser test drives."
+      },
+      {
+        "finding": "A8's skill line is not machine-checkable as written, and the leading-a-work-stream rule it targets is not only about liveness.",
+        "answer": "T19 names lines 78 and 84 and references/sources.md, keeps line 78's wider rule with its session example replaced, and A8 checks it with two greps rather than with the spec's prose."
+      },
+      {
+        "finding": "Raising the last-seen memory to 2 hours breaks the documented coupling with the interest reap allowance.",
+        "answer": "T1 sets the memory to the new constant and updates internal/store/kv.go's coupling comment and packages/envoy/AGENTS.md, which otherwise state a rule the code no longer follows."
+      },
+      {
+        "finding": "R2's 'every listener gives the same state' cannot hold for a gone session's last_seen, which is per-process memory, and A6 depends on it not holding.",
+        "answer": "Narrowed in plan.md: every listener gives the same state; last_seen in a refusal is what that listener still remembers. A6's text check is the acceptance. No code change."
+      },
+      {
+        "finding": "envoy_active_sessions must publish no sample during the refilling 503, and internal/metrics has no way to omit a series.",
+        "answer": "T4 adds an omittable gauge to internal/metrics; A7's fourth bullet checks that /metrics carries no envoy_active_sessions line while /v1/sessions answers 503."
+      },
+      {
+        "finding": "The soft-claim supersede test moves from 'any entry' to 'live', so an unresponsive holder loses its role to a soft claim after the live window rather than after the gone horizon.",
+        "answer": "T4 makes the change and T19 writes the consequence into the skills and role prompts: an unresponsive Legion role is takeable by its successor's soft claim, which is how a relaunch recovers its role. Told to the dispatch://INFRA-404 tree, which changes the predecessor rule in the same file."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "R7: 'When a Legion role's agent process (Oh My Pi, or Claude Code behind legion claude-bridge) exits, the worker shim (its parent process) sends the clean stop for that session.'",
+      "plan": "The Legion daemon sends DELETE /v1/sessions/<id> on the exit it already observes (stream.Closed then Probe; Kubernetes LauncherState.LastExit), reading supervise.Claim.Session before forgetSession clears it (T13).",
+      "evidence": "No shimwire frame carries a session id, an Envoy URL or an Envoy token (packages/daemon/internal/shimwire/frames.go); Oh My Pi reports its session id to the daemon over HTTP (internal/api/claims.go). The shim's MinStopGrace already commits 9 s of the 10 s default (internal/shim/shim.go:63-68), so R7's 5-second DELETE does not fit its SIGTERM path. The daemon holds cfg.EnvoyURL and secrets[ENVOY_TOKEN] (internal/daemon/workflow.go:584-586) and also covers a SIGKILLed shim and a lost pod, which the shim cannot.",
+      "outcome": { "kind": "unchanged" }
+    },
+    {
+      "spec": "A1: 'With two listeners running at a 5-minute maximum age, a third raises it to 2 hours; within 2 minutes both running listeners report 2 hours in /healthz and answer unresponsive for a session stopped 7 minutes, and a rollback to 5 minutes reaches both within 2 minutes the same way.'",
+      "plan": "After the raise, both running listeners report 2h0m0s in /healthz within 2 minutes and a session stalled 7 minutes from then reads unresponsive. After the rollback, both report 5m0s within 2 minutes and that session reads gone.",
+      "evidence": "JetStream removed the key at the 5-minute maximum age and raising MaxAge restores no removed message, so a session already stalled 7 minutes cannot read unresponsive after the raise; and at a 5-minute maximum age no session stalled past it can read unresponsive at all, so the rollback half cannot assert the same thing. The architect accepted the restatement on 2026-10-31T03:17Z.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A1's raise clause is proved for a session stalled after the raise, not before it.",
+          "A1's rollback clause asserts the /healthz value and gone, not unresponsive."
+        ]
+      }
+    },
+    {
+      "spec": "Design, 'Values': only the gone horizon, the reaper intervals and the issue-claim protection are settings.",
+      "plan": "The live window is a setting too, ENVOY_SESSION_LIVE_WINDOW, with the 5-minute compiled default that check-heartbeat-margin.sh reads.",
+      "evidence": "The live window is the value A1-A6's 7-minute stall is sized against; envoy-session-stall has timeout-minutes 15 (.github/workflows/ci.yaml:2918) and A1, A3, A4, A5 and A6 each need a stall past it. The gate reads the default declaration, not the environment, so it is not weakened.",
+      "outcome": { "kind": "unchanged" }
+    },
+    {
+      "spec": "R9 and A9: 'Production runs the change' - every listener and Dispatch pin, the plugin releases, the INFRA legion/ image pin, and the bucket maximum age raised to 2 hours, with the issue closing only after the raise.",
+      "plan": "This issue delivers A1-A8 in sjawhar/legion at a 5-minute bucket maximum age, with the new ENVOY_SESSION_MAX_AGE setting unset by default. The theorem-labs/agent-infra pins and the raise are three child issues the architect files.",
+      "evidence": "The tree architect's instruction on its role topic, 2026-10-31T02:53Z: 'The theorem-labs/agent-infra rollout is NOT in your plan... So the root's acceptance in your plan is A1 to A8... A9 belongs to those children.' The raise also waits on an envoy-infra release the hub does not yet run (spec non-goals, dispatch://INFRA-810 and dispatch://INFRA-553).",
+      "outcome": {
+        "kind": "changed",
+        "scope": "R9 and A9 leave this issue for three child issues of the same tree; the root ships the code and the setting, not the production pins or the raise."
+      }
+    }
+  ]
+}

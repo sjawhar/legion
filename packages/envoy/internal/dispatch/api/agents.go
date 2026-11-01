@@ -79,13 +79,18 @@ func (s *server) agentLastActivity(ctx context.Context, sessionIDs []string) (ma
 
 // listAgents is readable by any authenticated caller: a session picks a target by the
 // capabilities it advertises. Sending to a session without an issue stays human-only. The list is
-// the stored copy of the listener's live sessions every process shares (readRouteRoster, the
+// the stored copy of the listener's sessions every process shares (readRouteRoster, the
 // route_roster row), at most routeRosterTTL (5 s) old, so one listener call serves agents lists
 // and issue reads alike; a listener that did not answer answers 503 for as long as that copy is a
 // silence, a request that ends while it waits on the shared fetch answers 503 saying so, and a
 // failed read of the stored copy answers as the database's error. Once the process is shutting
 // down, a list the drain still serves asks the listener on its own request instead, since the
 // shared fetch runs on the process's lifetime and can no longer answer.
+//
+// The copy carries the unresponsive sessions as well as the live ones, each row with its own
+// `state`, so the Agents page shows a session that missed its heartbeats as stalled rather than
+// dropping it: it is still working, still holds its claims, and is still a target a reader may
+// pick (dispatch://INFRA-392).
 func (s *server) listAgents(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return

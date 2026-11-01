@@ -52,6 +52,7 @@ function artifactAsk(): InboxRow {
       route: null,
       route_status: null,
       route_holder: null,
+      route_status_reason: null,
     },
     question: "Does this design need review?",
     priority: null,
@@ -122,6 +123,7 @@ test("a cold Inbox hydrates every ask thread from its one list response", async 
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
         replies: [
           {
             ...commentDeliveryFields(),
@@ -186,6 +188,7 @@ test("an unchanged old Inbox cache does not refetch every thread on remount", as
       route: null,
       route_status: null,
       route_holder: null,
+      route_status_reason: null,
       replies: [
         {
           ...commentDeliveryFields(),
@@ -245,6 +248,7 @@ test("Inbox labels an artifact-owned ask with its project and document page link
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -287,6 +291,7 @@ test("Inbox puts every ask waiting on the viewer under Waiting on you", async ()
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -331,6 +336,7 @@ test("Inbox keeps rows waiting on agents below Waiting on you without duplicatin
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -385,6 +391,7 @@ test("Inbox keeps an agent's latest reply on its Waiting-on-you row", async () =
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -426,6 +433,7 @@ test("Inbox partitions by waiting_on: an agent's progress note keeps its ask und
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -482,6 +490,7 @@ test("Inbox preserves server priority order within Waiting on you", async () => 
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -851,6 +860,7 @@ test("Inbox narrows to one agent's asks from ?agent and clears back to the whole
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   }));
   const listAgents = spyOn(api, "listAgents").mockResolvedValue([
@@ -924,6 +934,7 @@ test("Inbox ?section=needs-you keeps only the agent's asks waiting on the viewer
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   }));
   const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
@@ -965,6 +976,7 @@ test("Inbox filtered to an agent with no open asks says so and still offers to c
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   });
   const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
@@ -1018,6 +1030,7 @@ test("a row being typed into stays under Waiting on you when an agent's note fli
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -1108,6 +1121,7 @@ test("the reader's own Ask back keeps the row under Waiting on you, unscrolled, 
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: id === askB.id ? repliesB : [],
   }));
   // The server records the clarification: the turn is the agent's, and the inbox says so on
@@ -1224,6 +1238,7 @@ test("an ask answered elsewhere stays in place with its recorded answer while th
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -1291,6 +1306,7 @@ test("the reader's own answer leaves the Inbox at once, even though their focus 
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   }));
   const answerAsk = spyOn(api, "answerAsk").mockImplementation(async () => {
@@ -1353,6 +1369,7 @@ test("after the reader's own answer fails, an answer from elsewhere still holds 
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   }));
   const answerAsk = spyOn(api, "answerAsk").mockRejectedValue(new Error("offline"));
@@ -2736,6 +2753,7 @@ function retracted(row: InboxRow): AskRead {
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
   };
 }
 

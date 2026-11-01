@@ -1,0 +1,9 @@
+kind: Added
+body: |-
+    The Envoy tools render a session's `state` and `last_seen`, and the lists ask for unresponsive
+    sessions too, so a session that has missed its heartbeats is shown as unresponsive rather than
+    left out. A session that ends is `gone` at once instead of at the end of the live window: the
+    end path stops the heartbeat and waits, for up to five seconds, for a registration already in
+    flight before it deletes the session, because without that wait the registration lands after
+    the delete and brings the row back. A `/new`, a fork or a branch deletes the session id it
+    leaves.

@@ -90,6 +90,7 @@ test("ProofDocument hands its decision blocks the indexed ask; the hosted card a
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   });
   const answerAsk = spyOn(api, "answerAsk").mockResolvedValue({
@@ -173,6 +174,7 @@ test("after Ask back on a decision block, the hosted card's turn label follows t
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   });
   const createComment = spyOn(api, "createComment").mockResolvedValue({
@@ -334,6 +336,7 @@ test("a pane's decision block hosts its answer form and tells its host which que
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   });
   const answerAsk = spyOn(api, "answerAsk").mockResolvedValue({

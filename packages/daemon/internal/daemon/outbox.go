@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -642,21 +641,12 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // lingers or has closed — the row finishes undelivered with one log line. So does a row whose
 // architect cannot be resolved from the record (errNoticeUnroutable), which holds back no later
 // notice either, and, before any publish, a row whose architect stopped with its finished tree
-// (stoppedWithTree). A listener that confirms a role message before it answers says when the
-// architect's session did not take the notice (notify.ErrNotDelivered): when the last forward
-// reached the NATS server and drew no receipt (`receipt_timeout`) — a session that is registered
-// but no longer running, or one whose connection is moving to another server — the notice is
-// queued again from the answer by the re-hold policy (reholdNotice, notice_exceptions.go) and the
-// row finishes; when the listener could not forward it at all (`delivery_failed`), as when the hub
-// is down, the row retries on its backoff as any failed publish does, so an outage drops nothing.
-// A holder that does not advertise the notice's delivery mode (notify.ErrRefusedByHolder) refuses
-// every attempt until another session holds the role, and a forward the listener's own NATS grant
-// denies (notify.ErrPublishDenied) is denied on every attempt until an operator changes the grant,
-// so either row finishes undelivered with one log line naming the reason rather than hold every
-// later notice to the architect behind the fence. A listener of an earlier release answers 200 and
-// reports a forward that then fails as a role-lane exception, which is queued again by the same
-// policy (rehold). Neither re-hold queues a copy when its architect stopped with its finished
-// tree. The runner executes a row it leased from memory, so a row deleted under its lease since (a
+// (stoppedWithTree). What the listener's answer to the publish then decides — a delivery the
+// architect's session did not confirm, a holder that cannot take the payload, a forward the
+// listener's own NATS grant denies, a holder only unresponsive, a role nobody holds — is the
+// re-hold policy's (noticeAnswered, notice_exceptions.go), which a role-lane exception of an
+// earlier listener reaches by the same route (rehold).
+// The runner executes a row it leased from memory, so a row deleted under its lease since (a
 // catch-up a newer ready dropped) is found gone in the tree's snapshot and finishes without a
 // publish, and so does a catch-up a newer one superseded (catchUpSuperseded, read against the
 // snapshot's root and the claim as it runs now): the re-hold reads the claim from memory and
@@ -706,37 +696,7 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	}
 	notice, key := payload.Published(row.ID)
 	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
-	var notDelivered notify.ErrNotDelivered
-	var refused notify.ErrRefusedByHolder
-	var denied notify.ErrPublishDenied
-	switch {
-	case published == nil:
-		return nil
-	case errors.As(published, &notDelivered) && notDelivered.Reason == notify.ReasonReceiptTimeout:
-		// The notice went out under the key of the row it copies, or of this row (Notice.Published).
-		source := cmp.Or(payload.ResendOf, row.ID)
-		reported := reportedNotice{issue: row.Issue, notice: notice, row: source, architect: architect}
-		if err := r.reholdNotice(ctx, reported, notDelivered.Reason, notDelivered.Holder); err != nil {
-			return fmt.Errorf("re-hold the notice for %s that its architect %s did not take: %w", row.Issue, architect, err)
-		}
-		return nil
-	case errors.As(published, &refused):
-		r.log.Warn("outbox notice finished undelivered: its architect's session does not advertise the delivery mode",
-			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "holder", refused.Holder, "error", published)
-		return nil
-	case errors.As(published, &denied):
-		r.log.Warn("outbox notice finished undelivered: the listener's NATS grant denied the forward to its architect",
-			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "reason", denied.Message)
-		return nil
-	case !errors.Is(published, notify.ErrNoHolder):
-		return fmt.Errorf("publish notice for %s to its architect %s: %w", row.Issue, architect, published)
-	}
-	if ended := architectEnded(tree, r.claimState(architect)); ended != "" {
-		r.log.Info("outbox notice finished undelivered: its architect will not hold its role again",
-			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "because", ended)
-		return nil
-	}
-	return fmt.Errorf("%w: %s holds no role for %s: %w", errNoticeWaits, architect, row.Issue, published)
+	return r.noticeAnswered(ctx, row, payload, notice, tree, architect, published)
 }
 
 // mergeQueue publishes the merger's READY packet, or the daemon's withdrawal of it, to the
@@ -750,12 +710,18 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 // internal/prompts/go/merger.md, says the daemon does), that its holder refused the packet, or that
 // the listener was denied the forward, and the row is done. A holder that did not confirm the packet
 // in time (notify.ErrNotDelivered) is retried on the row's backoff as any failed publish is: the
-// holder, or the session that next claims the role, can take it.
+// holder, or the session that next claims the role, can take it. So is a holder only unresponsive
+// (notify.ErrHolderUnresponsive): its session is past the listener's live window but still holds
+// the role, and the packet is kept for it rather than stood in for by a Dispatch message naming a
+// holder that is still there (dispatch://INFRA-392).
 func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload record.MergeQueuePublish) error {
 	if r.notices == nil {
 		return errors.New("merge queue executor has no Envoy publisher")
 	}
 	err := r.notices.Publish(ctx, notify.RoleTopicPrefix+payload.Role, payload.Packet, payload.Packet, record.OutboxKey(row.ID))
+	if errors.Is(err, notify.ErrHolderUnresponsive) {
+		return fmt.Errorf("publish %s's READY packet or its withdrawal to merge queue role %s, whose holder is unresponsive: %w", row.Issue, payload.Role, err)
+	}
 	if errors.Is(err, notify.ErrNoHolder) {
 		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s had no live holder at %s", payload.Role, r.now().UTC().Format(time.RFC3339))})
 	}
