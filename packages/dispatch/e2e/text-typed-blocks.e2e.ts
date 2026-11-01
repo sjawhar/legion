@@ -6,6 +6,7 @@ import {
   type Page,
   test,
 } from "@playwright/test";
+import type { IssueDetails } from "../web/src/api/types";
 
 import {
   createComment,
@@ -172,8 +173,13 @@ async function replyUnderDocumentDecision(
     },
     { as: "agent" }
   );
-  await expect.poll(async () => (await getIssue(issue.key)).open_asks.length).toBe(1);
-  const [storage] = (await getIssue(issue.key)).open_asks;
+  let storage: IssueDetails["open_asks"][number] | undefined;
+  await expect
+    .poll(async () => {
+      [storage] = (await getIssue(issue.key)).open_asks;
+      return storage;
+    })
+    .toBeDefined();
   if (storage === undefined) {
     throw new Error("the storage decision was not indexed");
   }
@@ -223,6 +229,8 @@ test("a reply under a document's decision keeps the lists of the typed blocks it
 // sit flush with the card's edges as a document's decision does. The reply sits in the footer of
 // the document's decision, whose `prose-sm` spacing for the reply's paragraphs and lists must not
 // reach the nested card's first and last lines.
+// SLOW(>=2s): an issue document with a decision card, its reply and the nested card whose first
+// and last lines are measured; the time is the editor's mount.
 test("a decision in a reply under a document's decision sits flush in its card", async ({
   browser,
 }) => {

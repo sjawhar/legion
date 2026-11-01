@@ -158,6 +158,9 @@ test("a docked Reply on a different comment redirects onto the one whose refusal
 // Past the send's deadline Collapse thread, and on a phone the thread's Back, let the reader leave
 // a thread whose own reply is still out. The reply's composer goes with the thread it is in; the
 // send does not, and the thread opened again has its draft and refusal.
+// SLOW(>=2s): the 30 s deadline is already crossed with page.clock (SEND_DEADLINE_MS,
+// web/src/features/writes/keyed-write.ts); what remains is the thread, its composer and the
+// refusal round trip, in two layouts.
 test("a thread's own reply refused after the reader left it past the deadline is there when the thread opens again @phone", async ({
   browser,
 }, testInfo) => {

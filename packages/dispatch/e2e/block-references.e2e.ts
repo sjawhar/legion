@@ -1,5 +1,7 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
+import { MIN_REFETCH_INTERVAL_MS } from "../web/src/api/query-refresh";
+
 import {
   createComment,
   createIssue,
@@ -19,6 +21,10 @@ import { signIn } from "./users";
 // `GET /api/v1/artifacts/<id>/blocks`, never from a guess. Its helpers live in this file, in
 // `editor.ts` (`blockId`) and in `api.ts` (`getArtifactBlocks`, which `blockId` reads), so a run at
 // the base, where none of this exists, copies those three files.
+
+// `editArtifact` writes its version inside the request, so the version read below is true within
+// a round trip: the default ladder would not look again until 350 ms.
+const PROBE = { intervals: [50, 50, 100, 200, 500] };
 
 test.beforeEach(async ({ context }) => {
   await resetDatabase();
@@ -174,7 +180,7 @@ test("a pinned link keeps the text of the version it pins, says how the block st
     ops: [{ find: "Friday", op: "replace", with: "Monday" }],
     summary: "Move the day",
   });
-  await expect.poll(() => latestVersion(specId)).toBe(pinned + 1);
+  await expect.poll(() => latestVersion(specId), PROBE).toBe(pinned + 1);
 
   await page.goto(`/issues/${issue.key}/conversation`);
   const turns = page.getByRole("list", { name: "Conversation turns" });
@@ -197,7 +203,7 @@ test("a pinned link keeps the text of the version it pins, says how the block st
     ops: [{ block: paragraph, op: "delete" }],
     summary: "Drop the day",
   });
-  await expect.poll(() => latestVersion(specId)).toBe(pinned + 2);
+  await expect.poll(() => latestVersion(specId), PROBE).toBe(pinned + 2);
   await page.goto(`/issues/${issue.key}/conversation`);
   const removed = page
     .getByRole("list", { name: "Conversation turns" })
@@ -242,7 +248,7 @@ test("a block reference a person made keeps resolving after an upload that leave
   expect(uploaded).not.toBe(markdown);
   expect(uploaded).toContain(cited);
   await createIssueArtifact(issue.key, { content: uploaded, name: spec.name });
-  await expect.poll(() => latestVersion(specId)).toBe(before + 1);
+  await expect.poll(() => latestVersion(specId), PROBE).toBe(before + 1);
 
   // The reference still names a block of the live document, so it reads that paragraph's text and
   // opens the document at it.
@@ -273,11 +279,13 @@ test("a link to a block of a comment shows the block's new text once its author 
   });
 
   // The first events subscription resumes from the sign-in check's head, so once the live socket
-  // opens, every write after this reaches the page.
+  // opens, every write after this reaches the page. The card's refetch for such an event is held
+  // to one per second (`MIN_REFETCH_INTERVAL_MS`): a page timer the page's own clock fires.
   const stream = page.waitForEvent(
     "websocket",
     (socket) => new URL(socket.url()).pathname === "/ws/live"
   );
+  await page.clock.install();
   await page.goto(`/issues/${issue.key}/conversation`);
   await stream;
   const turns = page.getByRole("list", { name: "Conversation turns" });
@@ -289,6 +297,7 @@ test("a link to a block of a comment shows the block's new text once its author 
 
   // The author rewords the cited paragraph; b1 stays, so the reworded paragraph keeps b2.
   await editComment(cited.id, { body: "Alpha first.\n\nBeta as reworded." });
+  await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
   await expect(card).toContainText("Beta as reworded.", { timeout: 5_000 });
   await expect(card).not.toContainText("as first written");
   await expect(turns.getByRole("link", { name: "Beta as reworded." })).toHaveAttribute(
@@ -300,6 +309,8 @@ test("a link to a block of a comment shows the block's new text once its author 
 // The author's edit that deletes the cited paragraph is an edit too: the open card and the link
 // stop showing the paragraph's text without a reload, and read as a freshly loaded page reads the
 // same link (no text of a paragraph the comment no longer holds).
+// SLOW(>=2s): a Conversation page, a hover card opened from the keyboard and one live refetch;
+// the seconds are the render, not a wait.
 test("a link to a block of a comment stops showing the block's text once its author deletes it, with no reload", async ({
   page,
 }) => {
@@ -309,10 +320,13 @@ test("a link to a block of a comment stops showing the block's text once its aut
     body: `The detail was in dispatch://${issue.key}/comment/${cited.id}#b-b2 today.`,
   });
 
+  // The card's refetch for a live event is held to one per second (`MIN_REFETCH_INTERVAL_MS`):
+  // a page timer the page's own clock fires.
   const stream = page.waitForEvent(
     "websocket",
     (socket) => new URL(socket.url()).pathname === "/ws/live"
   );
+  await page.clock.install();
   await page.goto(`/issues/${issue.key}/conversation`);
   await stream;
   const turns = page.getByRole("list", { name: "Conversation turns" });
@@ -321,6 +335,7 @@ test("a link to a block of a comment stops showing the block's text once its aut
   await expect(card).toContainText("Beta soon deleted.");
 
   await editComment(cited.id, { body: "Alpha first." });
+  await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
   await expect(card).not.toContainText("Beta soon deleted.", { timeout: 5_000 });
   await expect(turns.getByRole("link", { name: "Beta soon deleted." })).toHaveCount(0);
 });
@@ -329,6 +344,8 @@ test("a link to a block of a comment stops showing the block's text once its aut
 // fetches again: a document edit that deletes the cited block makes it answer 404, and the open
 // card and the link stop showing the block's text without a reload, reading as a freshly loaded
 // page reads the same link (no text of a block the document no longer holds).
+// SLOW(>=2s): the second load is the claim - a freshly loaded page reads the same link the same
+// way - so this row pays two document loads.
 test("a link to a block of a spec stops showing the block's text once a document edit deletes it, with no reload", async ({
   page,
 }) => {
@@ -344,10 +361,13 @@ test("a link to a block of a spec stops showing the block's text once a document
     body: `The detail was in dispatch://${issue.key}/spec#b-${paragraph} today.`,
   });
 
+  // The card's refetch for a live event is held to one per second (`MIN_REFETCH_INTERVAL_MS`):
+  // a page timer the page's own clock fires.
   const stream = page.waitForEvent(
     "websocket",
     (socket) => new URL(socket.url()).pathname === "/ws/live"
   );
+  await page.clock.install();
   await page.goto(`/issues/${issue.key}/conversation`);
   await stream;
   const turns = page.getByRole("list", { name: "Conversation turns" });
@@ -360,7 +380,8 @@ test("a link to a block of a spec stops showing the block's text once a document
     ops: [{ block: paragraph, op: "delete" }],
     summary: "Drop the paragraph",
   });
-  await expect.poll(() => latestVersion(specId)).toBe(before + 1);
+  await expect.poll(() => latestVersion(specId), PROBE).toBe(before + 1);
+  await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
   await expect(card).not.toContainText("Gamma soon deleted.", { timeout: 5_000 });
   await expect(card).toHaveText(`${issue.key} spec block`);
   await expect(turns.getByRole("link", { name: "Gamma soon deleted." })).toHaveCount(0);
