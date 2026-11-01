@@ -116,8 +116,9 @@ type StatusWrite struct {
 	// legion label on an unrecorded root in triage, or a person's approval of a parked labelled
 	// root's primary document. The pending-row rule (Store.PersonHandoverPending) reads it to tell
 	// such a row from the workflow's other status rows, which suppress nothing: while one is
-	// pending for an issue, no second one is queued for it. A hand-over row (HandOver), also a
-	// todo, is not one.
+	// pending for an issue, no second one is queued for it. The outbox's status executor also drops
+	// a marked row at delivery when the re-read issue no longer carries the label: a person who took
+	// it off withdrew the handover. A hand-over row (HandOver), also a todo, is not one.
 	PersonHandover bool `json:"personHandover,omitempty"`
 }
 
