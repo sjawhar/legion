@@ -543,14 +543,15 @@ reach any work a pod runs, a test or a tool of your own, not a test suite alone.
   budget for a whole job: a lane measured two real builds of the same work faster in a pod than
   on a virtual machine (1,014 s against 1,546 s, and 620 s against 1,117 s), with system time
   roughly doubled and user time lower, so compute-bound work can run as fast or faster there.
-- **Check a `subPath` mount's contents before you use them.** One lane saw this once, on
-  2026-11-01, on a `subPath` mount of its pod's own persistent volume: the mount raised no error
-  and refused nothing, and the directory was empty, so a job that reads it, finds nothing and
-  carries on produces a clean-looking wrong answer and a green exit. Nobody has corroborated it,
-  so treat it as a case to check for and not as a property of the platform: when you mount a
-  `subPath` of your pod's volume, verify the directory holds what you expect, since an empty one
-  is reported as nothing at all. That lane mounted the volume root instead and reached the
-  subdirectory through a symlink. This reaches a role that starts a workload of its own in the
+- **A pod's mounts are not interchangeable.** An operation that works on one can fail on another,
+  or silently do nothing, because the failure comes from the mount's backend and not from your
+  tool. Two cases a lane measured on 2026-11-01: a directory creation that returned `ENOSYS` on
+  one persistent volume while the same work succeeded on the pod's own scratch and on an
+  `emptyDir`, and a `subPath` mount of a pod's own volume that came up empty with no error at
+  all, which a job that reads it and carries on turns into a clean-looking wrong answer. So read
+  back what is in a directory before you trust it, and when something fails on one path try the
+  same work on another mount before you change tool: a tool that succeeds may only be avoiding
+  the operation the mount lacks. This reaches a role that starts a workload of its own in the
   cluster (`docs/kubernetes.md`, "Running a workload in the cluster from a role").
 - **No Docker.** The image carries no container runtime, so a test that starts one through
   testcontainers panics `rootless Docker not found`: in `packages/envoy`, the tests that use
