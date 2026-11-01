@@ -128,8 +128,10 @@ the session still gets the comment on its own inbox topic, as the route, a follo
 the claimant. While the mention is still being sent, for up to a minute, Dispatch holds that copy
 back and checks again a few seconds later. One copy is not guaranteed: when the mention's receipt
 times out, or its send is stranded for over a minute, Dispatch records it as failed though it may
-have landed, so the session can get the comment twice, once as the mention and once on its inbox
-topic. A session treats the second copy as the same comment. A comment's edit reaches every one
+have landed, and when a process stops between a mention's claim and its send, Dispatch sends the
+comment on the session's inbox topic once that claim lapses and sends the mention again, so the
+session can get the comment twice, once as the mention and once on its inbox topic. A session
+treats the second copy as the same comment. A comment's edit reaches every one
 of these sessions, mentioned or not; a resolution or reopening reaches the route, the claimant, the
 ask's followers and the thread root's author, mentioned or not. Neither is held back with the new
 comment: while the new comment waits on its mention, an edit to it can arrive first. A session that

@@ -488,25 +488,10 @@ func TestAHandoverOfAnEmptyKeptLaneResolvesNoHolder(t *testing.T) {
 	lane := newKeptLaneUnderClaim(t, harness, func(int, string, contracts.Envelope) error { return nil })
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if err := harness.sessions.WaitForCacheReady(ctx); err != nil {
-		t.Fatalf("warm the session cache: %v", err)
-	}
 	// The holder is registered through a session registry of its own, with this listener's cache
 	// no longer watching the bucket, so resolving either role's holder must read the session
 	// bucket itself: the read a handover of a lane with nothing on it is not to make.
-	harness.sessions.StopWatch()
-	writer, err := session.OpenSessionRegistry(harness.client.Conn, session.WithSessionReplicas(1))
-	if err != nil {
-		t.Fatalf("open the registry that registers the holder: %v", err)
-	}
-	if err := writer.Put(holder, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
-		t.Fatalf("register %s: %v", holder, err)
-	}
-	for _, role := range []string{empty, full} {
-		if _, err := harness.registry.SetRole(holder, "test-machine", role, false); err != nil {
-			t.Fatalf("claim %s for %s: %v", role, holder, err)
-		}
-	}
+	claimRoleBeyondTheSessionCache(t, harness, holder, empty, full)
 	keys := lane.keep(t, full, "kept-filled", 1)
 	reads := countSessionBucketReads(t, harness.sessions)
 
@@ -599,8 +584,9 @@ func TestAHandoverRetriesALaneHeadReadThatFailedOnlyForAClaimedRole(t *testing.T
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
-			if _, err := harness.client.PublishCursorAt(ctx, bus.KeptRoleCursorSubject(role), []byte("{"), 0); err != nil {
-				t.Fatalf("write the cursor no read can decode: %v", err)
+			cursorSeq, writeErr := harness.client.PublishCursorAt(ctx, bus.KeptRoleCursorSubject(role), []byte("{"), 0)
+			if writeErr != nil {
+				t.Fatalf("write the cursor no read can decode: %v", writeErr)
 			}
 			if test.claimed {
 				claimRoleWith(t, harness, holder, role, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true})
@@ -630,11 +616,16 @@ func TestAHandoverRetriesALaneHeadReadThatFailedOnlyForAClaimedRole(t *testing.T
 				t.Fatalf("the handover of role %s is reported at Error %d times, want %d:\n%s",
 					role, said, test.wantErrorLines, harness.logs.String())
 			}
-			// The copy is still kept: every read of the lane failed, so nothing was walked and
-			// the role's next claim or the sweep is handed it.
-			if _, ok := readKeptRoleMessage(t, harness.client, role); !ok {
-				t.Fatalf("role %s's kept lane holds nothing, want the copy left for the role's next claim:\n%s",
-					role, harness.logs.String())
+			// Nothing was walked: a walk writes the role's cursor before it forwards a copy or
+			// passes one over, so a cursor still stored where this test wrote it is a lane whole
+			// for the role's next claim or the sweep.
+			stored, err := harness.client.LastStoredMessage(ctx, bus.KeptRoleCursorSubject(role))
+			if err != nil {
+				t.Fatalf("read role %s's drain cursor: %v", role, err)
+			}
+			if stored.Sequence != cursorSeq {
+				t.Fatalf("role %s's drain cursor moved from %d to %d, so a walk ran on a lane no read of which answered:\n%s",
+					role, cursorSeq, stored.Sequence, harness.logs.String())
 			}
 		})
 	}
@@ -668,12 +659,12 @@ func failTheNextSessionRead(t *testing.T, sessions *session.SessionRegistry) *at
 	return failed
 }
 
-// claimRoleBeyondTheSessionCache registers holder and claims role for it with this listener's
-// session cache no longer watching the bucket, so every resolution of the role's holder reads
-// the session bucket itself (session.SessionRegistry.Refresh): the read these tests fail. The
-// holder is registered through a registry of its own, since the cache this listener has stopped
-// would otherwise answer for it.
-func claimRoleBeyondTheSessionCache(t *testing.T, harness listenerDeliveryHarness, holder, role string) {
+// claimRoleBeyondTheSessionCache registers holder and claims each of roles for it with this
+// listener's session cache no longer watching the bucket, so every resolution of those roles'
+// holder reads the session bucket itself (session.SessionRegistry.Refresh): the read these tests
+// fail. The holder is registered through a registry of its own, since the cache this listener
+// has stopped would otherwise answer for it.
+func claimRoleBeyondTheSessionCache(t *testing.T, harness listenerDeliveryHarness, holder string, roles ...string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -688,8 +679,10 @@ func claimRoleBeyondTheSessionCache(t *testing.T, harness listenerDeliveryHarnes
 	if err := writer.Put(holder, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
 		t.Fatalf("register %s: %v", holder, err)
 	}
-	if _, err := harness.registry.SetRole(holder, "test-machine", role, false); err != nil {
-		t.Fatalf("claim %s for %s: %v", role, holder, err)
+	for _, role := range roles {
+		if _, err := harness.registry.SetRole(holder, "test-machine", role, false); err != nil {
+			t.Fatalf("claim %s for %s: %v", role, holder, err)
+		}
 	}
 }
 
@@ -754,22 +747,48 @@ func (kv sessionBucketThatFails) Get(string) (natsgo.KeyValueEntry, error) {
 	return nil, kv.err
 }
 
+// sessionBucketThatStalls is a session bucket whose first read fails at once and whose reads
+// after it answer nothing until done is closed: the request a bus leaves unanswered until the
+// context of the handover making it has passed.
+type sessionBucketThatStalls struct {
+	natsgo.KeyValue
+	failed atomic.Bool
+	done   <-chan struct{}
+}
+
+func (kv *sessionBucketThatStalls) Get(string) (natsgo.KeyValueEntry, error) {
+	if kv.failed.CompareAndSwap(false, true) {
+		return nil, errors.New("the session bucket's read did not answer")
+	}
+	<-kv.done
+	return nil, context.DeadlineExceeded
+}
+
 // A read that did not answer is carried out of a claimed role's handover to the one line above
 // Debug its start writes (reportKeptRoleDrain): a bus failing a lane whose copies have a holder
-// waiting is worth an Error line. A context that ended is not. The listener's shutdown cancels
-// the sweep's handovers (sweepKeptRoleLanes), so a handover cancelled in the middle of resolving
-// a role's holder reported `listener kept role drain failed` at Error, and an alert on that line
-// would have fired on every deploy. Such a read ends the handover where the loop's own ctx checks
-// end it, with nothing above Debug, and a read that genuinely failed is still reported.
+// waiting is worth an Error line. A context the listener cancelled is not. The listener's
+// shutdown cancels the sweep's handovers (sweepKeptRoleLanes), so a handover cancelled in the
+// middle of resolving a role's holder reported `listener kept role drain failed` at Error, and an
+// alert on that line would have fired on every deploy. Such a read ends the handover where the
+// loop's own ctx checks end it, with nothing above Debug, and a read that genuinely failed is
+// still reported.
+//
+// A deadline is not a shutdown. A read the bus leaves unanswered holds the handover until a
+// window passes - roleKeepDrainWindow for a request with no reply, where a pause waits at most
+// roleKeepDrainRetryCap - so roleKeepHandoverWindow usually ends inside a read rather than inside
+// a pause. Quieting that read too ended ten minutes of a claimed role's lane failing with nothing
+// above Debug, where the same failure whose window ended in a pause was reported at Error.
 func TestAHandoverReportsAHolderReadThatFailedAndNotOneItsShutdownCancelled(t *testing.T) {
 	for _, test := range []struct {
 		name           string
 		shutdown       bool
+		stalled        bool
 		wantErr        bool
 		wantErrorLines int
 	}{
 		{name: "failed", wantErr: true, wantErrorLines: 1},
 		{name: "cancelled", shutdown: true},
+		{name: "stalled", stalled: true, wantErr: true, wantErrorLines: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			harness := newListenerDeliveryHarness(t, nil)
@@ -784,12 +803,17 @@ func TestAHandoverReportsAHolderReadThatFailedAndNotOneItsShutdownCancelled(t *t
 			// The window is three of the first pause a failed read earns, so the handover that
 			// retries one ends in seconds rather than in roleKeepHandoverWindow. The cancelled
 			// handover ends its own window from inside the read, as the listener's shutdown
-			// cancels a sweep's handover in the middle of one.
+			// cancels a sweep's handover in the middle of one; the stalled handover reads once,
+			// fails, waits its pause out and spends the rest of that window inside its second
+			// read, which is where a handover's window usually ends.
 			handoverCtx, cancelHandover := context.WithTimeout(context.Background(), 3*roleKeepDrainRetryPause)
 			defer cancelHandover()
 			swapSessionBucket(t, harness.sessions, func(kv natsgo.KeyValue) natsgo.KeyValue {
-				if test.shutdown {
+				switch {
+				case test.shutdown:
 					return sessionBucketThatFails{KeyValue: kv, before: cancelHandover, err: context.Canceled}
+				case test.stalled:
+					return &sessionBucketThatStalls{KeyValue: kv, done: handoverCtx.Done()}
 				}
 				return sessionBucketThatFails{KeyValue: kv, err: errors.New("the session bucket's read did not answer")}
 			})

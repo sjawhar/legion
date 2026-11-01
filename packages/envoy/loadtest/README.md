@@ -490,6 +490,7 @@ project, `artifact_id` (the spec), `spec_name`, `spec_bytes`, `quotes` (the requ
 for the issue keys.
 
 `$LOADTEST_ROOT/seed.meta.json` records `migration` (the highest Dispatch migration applied),
+`migrations` (every Dispatch migration version applied, in order),
 `build_commit` and `build_dirty` (the checkout), `dispatch_commit`, `dispatch_binary_sha256` and
 `dispatch_build` (the whole of `$LOADTEST_ROOT/bin/envoy-dispatch.json`: the Dispatch that made the
 seed, another commit than `build_commit` when `setup` ran with `LOADTEST_DISPATCH_COMMIT`),
@@ -557,11 +558,14 @@ hold this package.
 `run-step.sh` with another `LOADTEST_SRC` prepares the stack for that checkout: it runs `setup`,
 which builds that checkout's Dispatch, listener and loadgen into `$LOADTEST_ROOT/bin` over the ones
 the seed used, `start` and `seed`, which does nothing while the template and `seed.meta.json` exist.
-Then it compares the highest migration file in that checkout
-(`packages/envoy/internal/dispatch/store/migrations`) with `seed.meta.json`. It refuses a build
-that is older than the seed, and names both levels; a build at the seed's level runs. For a build
-that is newer than the seed, it prints a note: a backfill that the new migrations start runs inside
-each step of that build. For example, a build at migration 0128 on a seed at 0120 indexes the
+Then it compares the set of migration versions in that checkout
+(`packages/envoy/internal/dispatch/store/migrations`) with the set `seed.meta.json` records. It
+refuses a build that lacks a version the seed holds, naming it; a build holding the seed's set runs.
+A migration merged below the seed's highest is caught too, which comparing only the highest would
+read as equal. For a build that holds versions the seed lacks, it prints a note naming how many: a
+backfill that those migrations start runs inside each step of that build. A `seed.meta.json`
+written before it recorded `migrations` is compared by its highest migration alone, with a note
+saying so. For example, a build at migration 0128 on a seed at 0120 indexes the
 blocks of all 1,000 specs in every step. A newer build migrates the restored copy forward when
 Dispatch starts; an older build cannot start on a seed that a newer build made. To measure one
 build alone, seed with it (`stack.sh seed --force`, with a checkout that has `seed-refs`).

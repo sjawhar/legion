@@ -1,9 +1,0 @@
-kind: Changed
-body: |-
-  `@legion/envoy-client/test/envoy-stack`'s `EnvoyStack` gains `monitorUrl`, natsd's monitoring
-  base URL. `@legion/envoy-client/test/stall-scenario`'s `runFreezeScenario` takes the `stack` in
-  place of `envoyUrl` and puts a session on consumer delivery through the freeze: it waits for a
-  registration answered `consumer` with the relay subject subscribed, then checks that the
-  connection nats.js dials in place of the frozen one subscribes the relay subject again (natsd's
-  `/connz`), that the session's entry in `envoy_sessions` names a new epoch, and that the message
-  sent during the freeze and one sent after it are each shown once, neither as a replay (INFRA-594).
