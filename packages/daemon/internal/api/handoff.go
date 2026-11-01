@@ -344,10 +344,10 @@ func staleCompletion(issue string, current, serving uint64, pending *supervise.D
 func staleAssignment(issue string, role claim.Role, p phase.Phase, current string, pending *supervise.Delivery) string {
 	stale := fmt.Sprintf("%s handed the %s phase %s again, and this completion is of the assignment before it; nothing was recorded", issue, role, p)
 	if pending != nil && pending.Assignment == current {
-		return fmt.Sprintf("%s: your turn began before the daemon's task for this assignment (%s) reached this session. End this turn without completing; that task arrives as your next prompt, and it is work of its own — do what it asks at the head it names and complete it with a handoff of its own, never this completion's commit or verdict",
+		return fmt.Sprintf("%s: your turn began before the daemon's task for this assignment (%s) reached this session. End this turn without completing; that task arrives as your next prompt, and it is work of its own — do what it asks at the head it names and complete it with a handoff of its own, never this completion's record, commit or verdict",
 			stale, pending.ID)
 	}
-	return fmt.Sprintf("%s: the daemon has queued no task of this assignment for this claim yet. End this turn without completing and tell the architect; when that task arrives, do the work it asks for and complete it with a handoff of its own, never this completion's commit or verdict", stale)
+	return fmt.Sprintf("%s: the daemon has queued no task of this assignment for this claim yet. End this turn without completing and tell the architect; when that task arrives, do the work it asks for and complete it with a handoff of its own, never this completion's record, commit or verdict", stale)
 }
 
 // implementationPullRequest is the implementer's completion's read of GitHub: in implementing, a

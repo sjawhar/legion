@@ -3121,10 +3121,36 @@ test("a tester handoff that carries no completed time is read, and one with no i
 // The scorer reads every label's runs, and each label's agent gets the role prompt of its own
 // checkout (`worker-pane.ts` composes it from `<checkout>/packages/daemon`). So the documented
 // comparison `rig.sh batch tester-proof 5 head base` has the base label's tester write the shape
-// its own checkout's prompt spells — a `completed` time — and the head label's tester write this
-// one. A schema that refuses either shape scores that label `pass=false`
-// for a reason that is not the tester-proof rule, which makes the comparison measure the prompt
-// change rather than the rule.
+// its own checkout's prompt spells — since sjawhar/legion#2585 a `previousHandoff` naming the
+// commit before it, and a `completed` time in the prompt before that — and the head label's
+// tester write this one, which carries neither. A schema that refuses any of those shapes scores
+// that label `pass=false` for a reason that is not the tester-proof rule, which makes the
+// comparison measure the prompt change rather than the rule.
+test("a tester handoff of a checkout whose prompt asks for previousHandoff is read too", () => {
+  const handoff = {
+    schemaVersion: 1,
+    phase: "test",
+    issue: "LWEVAL-1",
+    previousHandoff: "4f1b8a0d1c2e3f4a5b6c7d8e9f0a1b2c3d4e5f60",
+    implementerProof: { verdict: "verified", how: "ran `bun greet.ts Ada` at the head" },
+    proof: [
+      {
+        criterion: "`bun greet.ts <name>` prints the greeting it returns",
+        surface: "the CLI",
+        command: "bun greet.ts Ada",
+        observed: "prints Hello, Ada! and exits 0",
+        headSha: "0f2cc1d4e8b0a1f6c7d2e3b4a5968778695a4b3c",
+        negativeControl: "bun greet.ts → exit 2, usage: greet.ts <name> on stderr",
+      },
+    ],
+  };
+  expect(handoff).not.toHaveProperty("completed");
+  expect(TestHandoff.safeParse(handoff).success).toBe(true);
+  const { implementerProof: _proof, ...noVerdict } = handoff;
+  expect(TestHandoff.safeParse(noVerdict).success).toBe(false);
+});
+
+// The same for the shape before #2585, which a checkout older than it still spells.
 test("a tester handoff of a checkout whose prompt still asks for a completed time is read too", () => {
   const handoff = {
     schemaVersion: 1,

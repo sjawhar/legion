@@ -608,7 +608,8 @@ func (r *handoffRecordsLive) write(session, issue, word string, body []byte) han
 // <KEY>, version <n> (id <uuid>)`.
 func parseWritten(t *testing.T, out string, code int) handoffWritten {
 	t.Helper()
-	line := firstLineOf(out)
+	// The whole first line the command printed, its surrounding space trimmed.
+	line, _, _ := strings.Cut(strings.TrimSpace(out), "\n")
 	var word, key, id string
 	var version int
 	if _, err := fmt.Sscanf(line, "Recorded the %s handoff of %s version %d (id %s", &word, &key, &version, &id); code != 0 || err != nil {
@@ -729,13 +730,6 @@ func capBody(size int) []byte {
 func digest(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])[:16]
-}
-
-// firstLineOf is the first line of s with its surrounding space trimmed: the line a command printed
-// first, whole.
-func firstLineOf(s string) string {
-	line, _, _ := strings.Cut(strings.TrimSpace(s), "\n")
-	return line
 }
 
 // handoffClaimant is one role's claim as its pane reaches it: the shim connected with the launch's

@@ -26,7 +26,8 @@
 -- nothing existing is read or rewritten, and the release before this one never names it, so it
 -- rolls (cmd/dispatch/README.md, "Database migrations") and its census answers 0. Its foreign key
 -- holds issues in SHARE ROW EXCLUSIVE only while the table is created. Its identifier
--- is the UTC moment it was written, as every migration after 0149_event_horizon's is.
+-- is the UTC moment it was written, as `migrationid` requires of every migration past the
+-- numbered series (cmd/dispatch/README.md, "Database migrations").
 create table handoffs (
   id uuid primary key default gen_random_uuid(),
   issue_key text not null references issues(key) on delete cascade,

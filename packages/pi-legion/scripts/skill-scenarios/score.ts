@@ -119,10 +119,12 @@ const nonEmpty = z.string().min(1);
 /** The tester's handoff as the tester role's prompt spells it (the `test` shape; nothing in the
  * daemon holds it to one), as far as the score reads it: the stamps the tester writes itself
  * (`schemaVersion` 1, `phase` test and its `issue`), the implementer's proof verdict, the
- * failures, and the tester's own proof, each entry's six fields non-empty. The body carries no
- * time, since Dispatch records when it was written; the object is loose, so a body from a checkout
- * whose prompt still asks for `completed` reads too, and the comparison measures the rule the score
- * is about rather than the prompt the labels vary.
+ * failures, and the tester's own proof, each entry's six fields non-empty. The body carries
+ * neither a time nor a `previousHandoff`, since Dispatch records when each handoff was written and
+ * versions it; the object is loose, so a body from a checkout whose prompt still asks for
+ * `previousHandoff` (main's, since sjawhar/legion#2585) or for a `completed` time (the prompt
+ * before it) reads too, and the comparison measures the rule the score is about rather than the
+ * fields the labels' prompts vary.
  * Nothing stamps a handoff for the tester: it writes the whole body and records it with
  * `dispatch handoff-write`. */
 export const TestHandoff = z.looseObject({

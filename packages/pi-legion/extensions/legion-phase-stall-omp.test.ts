@@ -447,6 +447,10 @@ test.skipIf(omp === undefined && !onActions)(
     // Every request the stand-in served, with the moment it was served: the proposition is that
     // nothing reached the session until the wait was over, and only elapsed time shows it.
     const seen: { readonly path: string; readonly at: number }[] = [];
+    // The quiet wait a WAITING line buys, and the bound every assertion below measures against.
+    // The bound allows the timer a little early, since a host timer may fire slightly short.
+    const waitMs = 1_500;
+    const waitedAtLeastMs = waitMs - 100;
     const pane = await stallPane(
       omp,
       [
@@ -461,7 +465,7 @@ test.skipIf(omp === undefined && !onActions)(
         [{ type: "text", text: "Reported." }],
       ],
       {
-        env: { LEGION_STALL_WAITING_MS: "1500" },
+        env: { LEGION_STALL_WAITING_MS: String(waitMs) },
         quietMs: 4_000,
         answer: (url) => {
           seen.push({ path: url.pathname, at: Date.now() });
@@ -477,7 +481,7 @@ test.skipIf(omp === undefined && !onActions)(
       .map((request) => request.at);
     // The WAITING line bought the wait: no turn started while it ran, and the reminder's did
     // only once it was over.
-    expect(reminderTurn - waitingTurn).toBeGreaterThanOrEqual(1_400);
+    expect(reminderTurn - waitingTurn).toBeGreaterThanOrEqual(waitedAtLeastMs);
     // Nothing arrived from outside in between: in that gap the pane spoke only to the daemon,
     // for the reminder's own record check, and to the listener for its session registration.
     // The stand-in also serves as Dispatch, which holds the handoff record, so the session reads
@@ -486,7 +490,7 @@ test.skipIf(omp === undefined && !onActions)(
     const between = seen.filter((request) => request.at > waitingTurn && request.at < reminderTurn);
     const answersRead = /^\/api\/v1\/agents\/[^/]+\/answers$/;
     for (const request of between.filter(({ path }) => answersRead.test(path))) {
-      expect(request.at - waitingTurn).toBeGreaterThanOrEqual(1_400);
+      expect(request.at - waitingTurn).toBeGreaterThanOrEqual(waitedAtLeastMs);
     }
     expect(
       between

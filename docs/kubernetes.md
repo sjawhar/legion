@@ -1827,7 +1827,7 @@ SQL
 
 It prints `ALTER TABLE` and `DELETE 1`; a rerun prints two `NOTICE`s that the columns do not exist, `ALTER TABLE` and `DELETE 0`.
 The earlier release names every column it reads and writes on `phases` (`Phases` and `PutPhase` in `internal/record/store.go`), so it would boot with the columns left in place, but it never clears them:
-a role it starts on a new phase or round keeps the record of its last one, and an upgrade back to this release would read that record as the new phase's completion (`record.PhaseRow.Completed`), ending a review round on an approval alone or starting the implementer on a red without waiting for the tester's turn.
+a role it starts on a new phase or round keeps the record of its last one, and an upgrade back to this release would read that record as the new phase's completion (`record.PhaseRow.Completed`), ending a review round on an approval alone, or moving an implementing issue to testing on its next pull request event before the implementer has completed anything.
 Dropping the columns and the row makes that upgrade apply 20261101144900_handoff_records again, to empty columns.
 `last_handoff` keeps the record id each role last named;
 the earlier release compares a completion's commit with it, which no record id equals, so no completion is refused `HANDOFF_NOT_NEW` for it.
