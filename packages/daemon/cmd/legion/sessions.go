@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/jackc/pgx/v5"
 
@@ -294,19 +295,16 @@ type importedSession struct {
 // importSession copies the session recorded at file into the table: read at file itself, or from
 // the tree volume mounted at treeVolume when one is given, with the file's modification time.
 func importSession(ctx context.Context, conn *pgx.Conn, file, treeVolume string) (importedSession, error) {
-	source := file
+	source, root := file, ""
 	if treeVolume != "" {
 		onVolume, err := sandbox.SessionOnVolume(file, treeVolume)
 		if err != nil {
 			return importedSession{}, err
 		}
 		source = onVolume
+		root = filepath.Join(treeVolume, sandbox.SessionsSubPath)
 	}
-	info, err := os.Stat(source)
-	if err != nil {
-		return importedSession{}, fmt.Errorf("read the session file: %w", err)
-	}
-	content, err := os.ReadFile(source)
+	content, info, err := readSessionFile(source, root)
 	if err != nil {
 		return importedSession{}, fmt.Errorf("read the session file: %w", err)
 	}
@@ -315,4 +313,44 @@ func importSession(ctx context.Context, conn *pgx.Conn, file, treeVolume string)
 		return importedSession{}, err
 	}
 	return importedSession{Outcome: outcome, Summary: ompsessions.Summarize(content)}, nil
+}
+
+// readSessionFile reads one regular, non-symlinked session file. When root
+// names a mounted legacy sessions directory, its resolved target must stay
+// below that directory.
+func readSessionFile(source, root string) ([]byte, os.FileInfo, error) {
+	if root != "" {
+		resolvedRoot, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			return nil, nil, err
+		}
+		resolvedSource, err := filepath.EvalSymlinks(source)
+		if err != nil {
+			return nil, nil, err
+		}
+		relative, err := filepath.Rel(resolvedRoot, resolvedSource)
+		if err != nil || !filepath.IsLocal(relative) {
+			return nil, nil, fmt.Errorf("%s resolves outside %s", source, resolvedRoot)
+		}
+	}
+	opened, err := os.OpenFile(source, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if errors.Is(err, syscall.ELOOP) {
+		return nil, nil, errors.New("refuses a symbolic link")
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	defer opened.Close()
+	info, err := opened.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, nil, errors.New("is not a regular file")
+	}
+	content, err := io.ReadAll(opened)
+	if err != nil {
+		return nil, nil, err
+	}
+	return content, info, nil
 }
