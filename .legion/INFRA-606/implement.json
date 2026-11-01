@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-11-01T05:15:31Z",
+  "completed": "2026-11-01T08:47:29Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -276,6 +276,14 @@
       "observed": "s1 is handed one frame for a sweep resend and a same-mode Retry of a send the previous build made under main's key; outbox, deliveryaudit, store (TestMigrationSetIsNumberedOneToN) and pgmigrate pass; the live proof reads 9 ok, 0 FAIL; GitHub reports MERGEABLE. Sampled memory peak 2.48 GiB of 19 over 255 samples; the leftover check (ps) listed nothing.",
       "headSha": "253a1afccf556c7f90d96901ce909400d9572342",
       "negativeControl": "With the key <comment>:<target> (45530037's), s1 is handed 2 frames in both cases."
+    },
+    {
+      "criterion": "CI red at 253a1afc (ci-ok: pi-legion's millisecond tie fixed on main by #2621, dispatch's overlapping-marks @phone timeout): a fresh run on current main; review round 9's minors confirmed done.",
+      "surface": "The merged tree against a superuser Postgres 16 on the issue volume",
+      "command": "go build ./... && go vet -p 1 ./internal/dispatch/... ./cmd/...; go test -p 1 ./internal/dispatch/outbox/... ; go test -p 1 ./internal/dispatch/deliveryaudit/...; go test -p 1 ./internal/dispatch/store/... ./internal/pgmigrate/...",
+      "observed": "All pass; the PR's own diff unchanged (fingerprint 9bdec658 before and after); MERGEABLE. Sampled memory peak 3.56 GiB of 19 over 283 samples; the leftover check (ps) listed nothing.",
+      "headSha": "92d2faba5e8b9a634c7f329aa50979186b225232",
+      "negativeControl": "Run 41275846182 at 253a1afc failed pi-legion and dispatch on main's merge ref before #2621."
     }
   ],
   "filesChanged": [
@@ -426,7 +434,8 @@
     "Forward merge at 3d5c31a9 (main f4ec92ee, #2474): scripts/e2e/README.md in one-sentence-per-line layout with this PR's passages, its audit fallback corrected to the /ws/live replay; packages/envoy/AGENTS.md's mention-rule bullet split for the 50-row limit.",
     "Forward merge at 25206ba7 (main 1a9095e6, #2598) for a fresh CI run; the PR's own diff unchanged.",
     "Forward merge at 4c1149eb (main d09b46d7): main took 0150_dpop_proofs, so the fallback table is 0151_comment_fallback_copies; main's Retry-After in writeHandlerError carried into handler_errors.go.",
-    "The mention dedupe key is <comment>:<target>:<the mention's own mode> (review round 9): main's key for every automatic send; a Retry in any mode of a mention that already reached the session is still recorded duplicate."
+    "The mention dedupe key is <comment>:<target>:<the mention's own mode> (review round 9): main's key for every automatic send; a Retry in any mode of a mention that already reached the session is still recorded duplicate.",
+    "Forward merge at 92d2faba (main 7285fd05) for a fresh CI run; no conflict, the PR's own diff unchanged; 0151 stands (main took no migration since 0150)."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -435,7 +444,7 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 22,
+  "round": 23,
   "answersTest": "2a6d5ffa2dc6096a6c3ba219be2bbec4851f60e0",
   "answersReview": "45530037436dbb21120f3299dedbded3b74b9c1a"
 }
