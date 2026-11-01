@@ -95,6 +95,10 @@ type bootConfig struct {
 	// SettleDelay is how long a document waits after a live change before it settles, zero for the
 	// document service's own default; only DISPATCH_TEST_SETTLE_DELAY, under the test hooks, sets it.
 	SettleDelay time.Duration
+	// RouteRosterTTL is how long a stored listener answer serves issue reads' route_status, zero
+	// for the server's own five seconds; only DISPATCH_TEST_ROUTE_ROSTER_TTL, under the test hooks,
+	// sets it.
+	RouteRosterTTL time.Duration
 	// EditNoticeQuiet is how long a document stays quiet after a person's last settled version
 	// before its edit notice goes, zero for the document service's own 30 s; only
 	// DISPATCH_TEST_EDIT_NOTICE_QUIET, under the test hooks, sets it.
@@ -103,6 +107,10 @@ type bootConfig struct {
 	// rather than share the process's five-second copy; only DISPATCH_TEST_ROSTER_UNCACHED=1, under
 	// the test hooks, sets it.
 	ListenerRosterUncached bool
+	// ReconcileAtStart makes the delivery reconcile run one pass as it starts rather than only after
+	// its jittered first tick; only DISPATCH_TEST_RECONCILE_AT_START=1, under the test hooks, sets
+	// it.
+	ReconcileAtStart bool
 	// OIDCIssuer and OIDCAudience configure verification of projected
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
@@ -400,7 +408,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Two envoy-dispatch processes serve one Postgres and one NATS, so each background
+	// Two or more envoy-dispatch processes serve one Postgres and one NATS, so each background
 	// loop below either runs once overall or is deliberately per-process. The ones that must run
 	// once overall take a named lease on this pool for the length of their pass (duty.Exclusive):
 	// a lease is a session-level advisory lock on a connection of its own, so it needs a pool the
@@ -572,7 +580,7 @@ func main() {
 	// reopens during a roll are withdrawn or restored every interval after the boot's own pass.
 	go api.RunIssueAskRepair(ctx, issueAskRepairDeps, leases)
 
-	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase, boot.NATSReplicas)
+	sweeper, err := webhookSweeper(natsClient, database, appCfg, boot.GitHubAPIBase, boot.NATSReplicas)
 	if err != nil {
 		slog.Error("dispatch: open webhook redelivery", "error", err)
 		os.Exit(1)
@@ -590,7 +598,11 @@ func main() {
 	// (it never touches it); the NATS consumer that catches events between reconcile passes needs
 	// a client, exactly like the outbox above. Both take the event broker: each writes
 	// issue.deployed on a pull request's issue once its shipping run is known (LEGION-781).
-	go delivery.NewReconcile(database.Pool, appCtx.GitHub(), broker).Run(ctx, leases)
+	reconcile := delivery.NewReconcile(database.Pool, appCtx.GitHub(), broker)
+	if boot.ReconcileAtStart {
+		reconcile.FirstPassAtStart()
+	}
+	go reconcile.Run(ctx, leases)
 	// waitIntakes waits for the intakes' stop, which shutdown runs before it closes the database
 	// pool; with no NATS client there is nothing to wait for.
 	waitIntakes := func() {}
@@ -854,31 +866,29 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 	if boot.StreamMaxBytes, err = bus.ParseStreamMaxBytes(env.get(bus.StreamMaxBytesEnvVar)); err != nil {
 		return bootConfig{}, err
 	}
-	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_SETTLE_DELAY")); raw != "" {
-		if !boot.TestHooksEnabled {
-			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_SETTLE_DELAY")
+	for _, setting := range []struct {
+		name   string
+		target *time.Duration
+	}{
+		{"DISPATCH_TEST_SETTLE_DELAY", &boot.SettleDelay},
+		{"DISPATCH_TEST_ROUTE_ROSTER_TTL", &boot.RouteRosterTTL},
+		{"DISPATCH_TEST_EDIT_NOTICE_QUIET", &boot.EditNoticeQuiet},
+	} {
+		if err := testHookDuration(env, setting.name, boot.TestHooksEnabled, setting.target); err != nil {
+			return bootConfig{}, err
 		}
-		delay, err := time.ParseDuration(raw)
-		if err != nil || delay <= 0 {
-			return bootConfig{}, fmt.Errorf("DISPATCH_TEST_SETTLE_DELAY=%q (expected a positive Go duration)", raw)
-		}
-		boot.SettleDelay = delay
-	}
-	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_EDIT_NOTICE_QUIET")); raw != "" {
-		if !boot.TestHooksEnabled {
-			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_EDIT_NOTICE_QUIET")
-		}
-		quiet, err := time.ParseDuration(raw)
-		if err != nil || quiet <= 0 {
-			return bootConfig{}, fmt.Errorf("DISPATCH_TEST_EDIT_NOTICE_QUIET=%q (expected a positive Go duration)", raw)
-		}
-		boot.EditNoticeQuiet = quiet
 	}
 	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_ROSTER_UNCACHED")); raw != "" {
 		if !boot.TestHooksEnabled {
 			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_ROSTER_UNCACHED")
 		}
 		boot.ListenerRosterUncached = raw == "1"
+	}
+	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_RECONCILE_AT_START")); raw != "" {
+		if !boot.TestHooksEnabled {
+			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_RECONCILE_AT_START")
+		}
+		boot.ReconcileAtStart = raw == "1"
 	}
 	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
 	if err := checkSignInSettings(boot, identityMode); err != nil {
@@ -1244,6 +1254,7 @@ func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.A
 	built.AgentSecretsURL = boot.AgentSecretsURL
 	built.AgentSecretsTokenFile = boot.AgentSecretsTokenFile
 	built.TestHooksEnabled = boot.TestHooksEnabled
+	built.RouteRosterTTL = boot.RouteRosterTTL
 	built.ListenerRosterUncached = boot.ListenerRosterUncached
 	built.DevSignIn = boot.DevSignIn
 	return built
@@ -1507,6 +1518,25 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 			IdempotencyKeys: true,
 		})
 	}
+}
+
+// testHookDuration reads the test-only duration setting name into target, leaving target as it
+// is when the setting is unset. Such a setting is refused without DISPATCH_TEST_HOOKS=1, and so
+// is any value that is not a positive Go duration.
+func testHookDuration(env settingValues, name string, testHooksEnabled bool, target *time.Duration) error {
+	raw := strings.TrimSpace(env.get(name))
+	if raw == "" {
+		return nil
+	}
+	if !testHooksEnabled {
+		return fmt.Errorf("DISPATCH_TEST_HOOKS=1 required with %s", name)
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil || value <= 0 {
+		return fmt.Errorf("%s=%q (expected a positive Go duration)", name, raw)
+	}
+	*target = value
+	return nil
 }
 
 // resolveListen says where the server serves. With DISPATCH_LISTEN_FD it is the inherited socket

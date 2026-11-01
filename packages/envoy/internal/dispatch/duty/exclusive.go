@@ -23,9 +23,11 @@ type Leases interface {
 // internal/dispatch/docs already fills - a document's room, a project's rank allocation, an agent's
 // artifacts and the migration runner are each a single key (the enumeration in docs/copied_asks.go,
 // at lockProjectCopies) - so a lease can never collide with one of those, whatever its name hashes
-// to. Within the two-key space the only other namespace is the copy locks'
-// (docs.copiedAsksLockNamespace), so a lease's second key, its name's hashtext, separates the leases
-// from each other and from nothing else.
+// to. Within the two-key space the only other namespaces are the copy locks'
+// (docs.copiedAsksLockNamespace, "COPY") and the test hooks' (the api package's
+// testHookLockNamespace, "HOOK", taken only under DISPATCH_TEST_HOOKS), each a first key of its
+// own, so a lease's second key, its name's hashtext, separates the leases from each other and from
+// nothing else.
 const leaseNamespace int32 = 0x4C4F4F50
 
 // takeLease tries for a lease without queueing behind its holder, and freeLease gives it back. Both

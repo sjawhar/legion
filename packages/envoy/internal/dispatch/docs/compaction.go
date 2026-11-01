@@ -128,6 +128,9 @@ func (f compactFold) point() rowVersion {
 // Rows that do not fold into a state that reads back as them are left as stored and logged once
 // for their fold point; a later compaction of the same fold point skips them without folding
 // (compactUnfoldable), and one after the rows changed folds them again.
+//
+// A compaction that waits for the lock and writes nothing - nothing to fold, or rows that do not
+// fold - still waits for the lock and lets it go (passRoomLock).
 func (p *PgVersioned) compactRoom(ctx context.Context, room string, rule compactRule, wait bool) (compactResult, error) {
 	if err := ctx.Err(); err != nil {
 		return compactResult{}, err
@@ -141,20 +144,34 @@ func (p *PgVersioned) compactRoom(ctx context.Context, room string, rule compact
 		return compactResult{}, err
 	}
 	if folded.rows == nil {
-		return compactResult{outcome: ended}, nil
+		return compactResult{outcome: ended}, p.passRoomLock(ctx, pool, room, wait)
 	}
 	if p.duringCompactionFold != nil {
 		p.duringCompactionFold(room)
 	}
 	if folded.misread != nil {
 		p.recordUnfoldable(room, folded.point(), folded.misread)
-		return compactResult{outcome: compactUnfoldable}, nil
+		return compactResult{outcome: compactUnfoldable}, p.passRoomLock(ctx, pool, room, wait)
 	}
 	result, err := p.writeCompaction(ctx, pool, room, wait, folded)
 	if err == nil && result.outcome == compactCompacted {
 		p.forgetUnfoldable(room)
 	}
 	return result, err
+}
+
+// passRoomLock waits for room's lock and lets it go, for a compaction that waits (wait) and writes
+// nothing. A failed room's close (servicePersistenceAdapter.Compact) is one, and it must end only
+// after a writer holding that lock has committed: a repair written into the failed instance
+// before it is stored (backfillBlockIDs, settleRoomWithin) is replayed into no room that loads
+// later, so the eviction that recovery waits for has to queue behind the repair's commit, and the
+// room that loads next reads the repair from the store and is born at the head. A compaction that
+// does not wait passes nothing.
+func (p *PgVersioned) passRoomLock(ctx context.Context, pool *pgxpool.Pool, room string, wait bool) error {
+	if !wait {
+		return nil
+	}
+	return p.lockRoom(ctx, room, true, pool, func(*pgxpool.Conn) error { return nil })
 }
 
 // readCompaction reads the rows at or below the room's fold point and folds them: in memory once

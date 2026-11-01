@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // InboxVariable names the inbox socket in Claude Code's environment, which its MCP servers inherit:
@@ -18,8 +19,9 @@ import (
 const InboxVariable = "LEGION_CLAUDE_INBOX"
 
 // InboxDelivery is one line a client writes to the inbox: an Envoy delivery, already rendered, that
-// becomes a user turn. InboxAnswer is the line the bridge writes back once the delivery is queued:
-// the receipt the channel server publishes for a forwarded lane means exactly that.
+// becomes a user turn. InboxAnswer is the line the bridge writes back once Claude Code has taken the
+// delivery, re-emitting it as the user message it reads (--replay-user-messages), or with an error
+// once it never will: the delivery is in the transcript, which is what claude-envoy's `done` says.
 type InboxDelivery struct {
 	ID      string `json:"id"`
 	Content string `json:"content"`
@@ -75,38 +77,73 @@ func listenInbox(events chan<- event, stop <-chan struct{}, logger *log.Logger) 
 	return in, nil
 }
 
-// serveInbox reads one client's deliveries, each answered once the loop has queued it.
+const (
+	// inboxPending bounds the deliveries one client has sent and the bridge has not yet answered;
+	// past it the inbox reads that client's next line once the oldest is answered.
+	inboxPending = 64
+	// inboxFlushTimeout bounds writing what a client is owed once the inbox closes: the answers
+	// the loop gave before closing it, each one short line a reading client takes at once.
+	inboxFlushTimeout = 100 * time.Millisecond
+	malformedDelivery = "an inbox delivery is one JSON object with an id and content"
+)
+
+// owed is one answer a client is owed, in the order it sent its deliveries.
+type owed struct {
+	id     string
+	answer <-chan error
+}
+
+// serveInbox reads one client's deliveries, handing each to the loop as it arrives, and answers
+// them in the order they came, each once the loop has answered it. The loop answers every delivery
+// it took before the inbox closes, so those answers are written then too, within inboxFlushTimeout.
 func serveInbox(conn net.Conn, events chan<- event, stop <-chan struct{}, logger *log.Logger) {
 	defer conn.Close()
 	go func() {
 		<-stop
-		_ = conn.Close()
+		_ = conn.SetReadDeadline(time.Now())
+		_ = conn.SetWriteDeadline(time.Now().Add(inboxFlushTimeout))
 	}()
-	reader := bufio.NewReaderSize(conn, 64<<10)
-	encoder := json.NewEncoder(conn)
-	for {
-		line, err := reader.ReadBytes('\n')
-		if err != nil {
-			return
-		}
-		var d InboxDelivery
-		if err := json.Unmarshal(line, &d); err != nil || d.ID == "" || d.Content == "" {
-			answer := InboxAnswer{ID: d.ID, Error: "an inbox delivery is one JSON object with an id and content"}
-			if encodeErr := encoder.Encode(answer); encodeErr != nil {
+	pending := make(chan owed, inboxPending)
+	go func() {
+		defer close(pending)
+		reader := bufio.NewReaderSize(conn, 64<<10)
+		for {
+			line, err := reader.ReadBytes('\n')
+			if err != nil {
 				return
 			}
-			continue
+			answer := make(chan error, 1)
+			var d InboxDelivery
+			if err := json.Unmarshal(line, &d); err != nil || d.ID == "" || d.Content == "" {
+				answer <- errors.New(malformedDelivery)
+			} else if !send(events, stop, event{delivery: &delivery{id: d.ID, content: d.Content, answer: answer}}) {
+				return
+			}
+			select {
+			case pending <- owed{id: d.ID, answer: answer}:
+			case <-stop:
+				return
+			}
 		}
-		queued := make(chan error, 1)
-		if !send(events, stop, event{delivery: &delivery{id: d.ID, content: d.Content, queued: queued}}) {
-			return
+	}()
+	encoder := json.NewEncoder(conn)
+	for o := range pending {
+		var err error
+		select {
+		case err = <-o.answer:
+		case <-stop:
+			select {
+			case err = <-o.answer:
+			default:
+				return
+			}
 		}
-		answer := InboxAnswer{ID: d.ID, OK: true}
-		if err := <-queued; err != nil {
-			answer = InboxAnswer{ID: d.ID, Error: err.Error()}
+		answer := InboxAnswer{ID: o.id, OK: true}
+		if err != nil {
+			answer = InboxAnswer{ID: o.id, Error: err.Error()}
 		}
 		if err := encoder.Encode(answer); err != nil {
-			logger.Printf("could not answer inbox delivery %s: %v", d.ID, err)
+			logger.Printf("could not answer inbox delivery %s: %v", o.id, err)
 			return
 		}
 	}

@@ -542,7 +542,9 @@ func TestANarrowedVMOpensNoRequest(t *testing.T) {
 // TestANarrowedVMsPendingRequestGrantsNothingWhenApproved: a fleet VM's request for DEEL_API_KEY
 // (a person's, human tier) waits on that person; once the fleet is narrowed past the VM, the
 // person's approval grants nothing: the request ends denied, naming why, with no grant, as a
-// request of a session that ended does.
+// request of a session that ended does. The person decides it on the broker's own approval page,
+// signed in to the broker, which is where a secret request is decided at all: the account route
+// refuses one for every caller (403 DECIDE_ON_BROKER_PAGE).
 func TestANarrowedVMsPendingRequestGrantsNothingWhenApproved(t *testing.T) {
 	for name, narrow := range narrowings {
 		t.Run(name, func(t *testing.T) {
@@ -554,10 +556,7 @@ func TestANarrowedVMsPendingRequestGrantsNothingWhenApproved(t *testing.T) {
 				t.Fatalf("the fleet's VM asking for DEEL_API_KEY = %d %s, want pending on a record", status, body)
 			}
 			narrow(ts)
-			status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+*pending.RecordID+"/approve", map[string]any{"approver": testApprover})
-			if approved := decode[wireCreateRequestResponse](t, body); approved.GrantID != nil || approved.State == "granted" {
-				t.Fatalf("approving the narrowed VM's request (%s) = %d %s, want no grant", name, status, body)
-			}
+			ts.decide(t, testApprover, *pending.RecordID, true)
 			if got := ts.column(t, `select state || ' ' || coalesce(decision_detail, '') from requests where id = $1`, pending.RequestID); !slices.Equal(got, []string{"denied the requesting VM is no longer one its fleet's settings allow"}) {
 				t.Fatalf("the narrowed VM's request after the approval = %v, want denied naming the fleet", got)
 			}

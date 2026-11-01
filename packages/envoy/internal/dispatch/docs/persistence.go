@@ -186,7 +186,10 @@ func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []by
 // rendered-content classification and the browser edit's in-flight credit: in the update's own
 // transaction, under the document's advisory lock, it writes the credit's authors to the
 // document's pending authors unless a committed version already listed them (UpdateCredit.take),
-// and it lands the credit before it releases that lock (UpdateCredit.landed).
+// and it lands the credit before it releases that lock (UpdateCredit.landed). It stores that one
+// update: the room's own persistence stores the update it was handed with the room's earlier
+// unstored ones through AppendRoomFlush instead, and reaches this only for an update its update
+// observer recorded no class for (StoreUpdateContext).
 func (p *PgVersioned) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
 	return p.appendUpdate(ctx, room, update, contentChanged, credit)
 }
@@ -206,7 +209,7 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 			return fmt.Errorf("begin document update: %w", err)
 		}
 		defer tx.Rollback(ctx)
-		version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit)
+		version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit, nil)
 		if err != nil {
 			return err
 		}
@@ -234,13 +237,79 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 	return version, nil
 }
 
+// AppendRoomFlush is the room's persistence worker's append of its own update (StoreUpdateContext),
+// the whole flush its transaction runs: under the document's lock, in one transaction, it stores
+// every update of the room instance flush names through `through`, the worker's own update's
+// commit position, that no writer has stored yet, in the room's commit order, the worker's last
+// (flushThrough). The update bytes are not passed: the room's queue holds them, with the class and
+// the credit its update observer recorded for each (documentUpdateClass). An update another writer
+// has stored already appends nothing. Each version it appends advances the instance's cursor
+// inside the lock, as appendUpdate's does, and once the transaction has committed each class is
+// marked stored and its credit held and landed before the lock is released, so the next holder of
+// the lock finds them stored, and the room's shadow is freed once no class it measures is left
+// unstored (dropDrainedShadowLocked). credit is the worker's own update's, which lands inside the
+// lock however the transaction ends; the credits of the other updates land only with their
+// committed appends, and stay with their own updates' appends otherwise. The version returned is
+// the last the flush appended, zero when it appended none.
+func (p *PgVersioned) AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error) {
+	err := p.withRoomLock(ctx, room, func(conn *pgxpool.Conn) error {
+		defer credit.landed()
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin document update: %w", err)
+		}
+		defer tx.Rollback(ctx)
+		if err := flush.service.flushThrough(ctx, tx, flush, through); err != nil {
+			return err
+		}
+		if len(flush.versions) == 0 {
+			return nil
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit document update: %w", err)
+		}
+		if p.afterAppendCommit != nil {
+			for _, version := range flush.versions {
+				p.afterAppendCommit(room, version)
+			}
+		}
+		advanceRoomCursorThrough(flush.cursor, flush.appended(nil))
+		for _, unlanded := range flush.markStored(nil) {
+			unlanded.landed()
+		}
+		state := flush.state
+		state.mu.Lock()
+		state.dropDrainedShadowLocked()
+		flush.service.unlockState(room, state)
+		return nil
+	})
+	if err != nil || len(flush.versions) == 0 {
+		return 0, err
+	}
+	last := flush.versions[len(flush.versions)-1]
+	// Noted once the document's locks are gone, as appendUpdate's row is.
+	p.noted(room, int64(last))
+	return last, nil
+}
+
 // AppendUpdateTx appends an already validated V1 update inside tx, recording whether it changes
 // the document's content: settlement versions a document only past a content update.
 func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
 	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
 		return 0, itemCapError(update, maxUpdateItems, err)
 	}
-	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, nil)
+	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, nil, nil)
+}
+
+// AppendRoomUpdateTx appends inside tx an update a room of this process has already applied, with
+// the class and the in-flight credit its update observer recorded, as one append of flush, the
+// run the appending transaction stores of that room instance (flushThrough). The room decoded it
+// when it applied it, so it is not decoded again. flush is what gates the append: the instance's
+// cursor with the versions this flush has appended for it folded in, which is the only way an
+// append of the room's own persistence worker reaches the gate, since no ledger of its
+// transaction names the document (appendingCursor).
+func (p *PgVersioned) AppendRoomUpdateTx(ctx context.Context, tx pgx.Tx, room string, flush *RoomFlush, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit, flush)
 }
 
 // lockDocumentRoom serializes every durable mutation of one document. Callers
@@ -285,7 +354,20 @@ func lockDocumentRoom(ctx context.Context, tx pgx.Tx, room string) error {
 	return nil
 }
 
-func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+// lockedHead takes the document's advisory lock in tx (lockDocumentRoom) and reads the durable
+// head under it, in that order and as one step: the head is then the one every append of tx meets,
+// since no other writer of the document appends while tx holds the lock. A transaction that must
+// hold the lock before it reads the document takes both here (readFork). They are two statements:
+// under read committed a statement reads the snapshot it started with, so a head read in the
+// lock's own statement could miss a commit the lock waited for.
+func lockedHead(ctx context.Context, tx pgx.Tx, room string) (int64, error) {
+	if err := lockDocumentRoom(ctx, tx, room); err != nil {
+		return 0, err
+	}
+	return currentUpdateCursor(ctx, tx, room)
+}
+
+func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit, flush *RoomFlush) (persistence.Version, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -309,7 +391,7 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	// is rendered from text the writer never saw. The order is the lock, then the cursor, then
 	// the head: a peer of this very room whose append committed under this lock has already
 	// advanced the cursor (appendUpdate), so two peers of one room never refuse each other.
-	if err := refuseRoomBehindHead(room, appendingCursor(ctx, room), latest); err != nil {
+	if err := refuseRoomBehindHead(room, appendingCursor(ctx, room, flush), latest); err != nil {
 		return 0, err
 	}
 	version := persistence.Version(latest + 1)
