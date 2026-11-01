@@ -2,24 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-251",
-  "previousHandoff": "8d19216c497669dbc378ae17056a867a972b835f",
-  "headReviewed": "the handoff push above 618de2cc463e (code head 22a0671ee5be)",
-  "completed": "2026-11-01T14:44:37Z",
+  "previousHandoff": "ae45563e13de043d1c0b7413726c7fd67b06de94",
+  "headReviewed": "the handoff push above dc82a6d201be (code head 42250925f8e9)",
+  "completed": "2026-11-01T19:05:27Z",
   "decision": "changes_requested",
-  "round": "narrowed round: the merge kept main's #2619 beside this change's relay, the devbox proof's checkpoints read results back and match spec version 4, and nothing merged reopens a way to lose a decision",
+  "round": "narrowed round: review 5728675512's fix (recordHandover) and Minors, the migration rename and merge, the pi-legion fragment, the oracle's failed-telling allowance",
   "critical": 0,
   "important": 1,
   "minor": 2,
   "accepted": [
-    "#2619 is kept beside the relay: when a person's approval queues a parked labelled root as their handover, dispatchArtifact skips the root's own gate, so no design-approved notice is written and parkDecision relays nothing; the ask relay is unchanged; an unlabelled, live, child or non-primary case falls back to the gate as before. Nothing is both queued and relayed, and nothing is lost: the approval stays on Dispatch for register_gate.",
-    "The branch's DispatchArtifact.Actor dissolved into main's own field of the same name; gate.go's Actor and Ref on spec notices are intact.",
-    "The proof's checkpoints match spec v4's A3 and A4 and read each result back from the daemon log, Dispatch events, legion state or session files; every grepped log string matches the daemon's source."
+    "recordHandover leaves #2619 otherwise unchanged: it only puts the gate. No notice, no answered wait, no tree advance, no READY release; a queued root is never live, so no child starts; a later gate seed finds the gate open and writes no stray design-approved. Its guard matches applyArtifact's (off, older version, StaleReview). The new admit test fails without it.",
+    "The migrations follow main's timestamp rule, after main's numbered ones, through main's merged loader; ci-ok is green at the code head.",
+    "The oracle allows one re-telling after a catch-up whose own telling write failed, or one retold task, and nothing more."
   ],
   "keyFindings": [
-    {"severity": "important", "file": "packages/daemon/internal/admit/admit.go:1016", "description": "After #2619, a queued approval skips the root's own gate, so a gate that held approved=N below latest=N+1 still reads that way when the person approves N+1. The queued todo re-admits the root, keepStaleApproval keeps (N, N+1), and the new architect's start task says 'approved at version N and now at version N+1: request approval of version N+1' about a version the person just approved. The architect then repeats the armed-gate steps and may ask the person again. Record the approval on the root's own gate without a notice when the handover queues (or have keepStaleApproval read Dispatch's approval), and test the readmit."},
-    {"severity": "minor", "file": "scripts/e2e/parked-decision-devbox.sh:839", "description": "`! relayed_logged \"$tree4\" design-approved` cannot fail: the workflow relay is only called for ask decisions. Delete it; undelivered_logged (:418) has no caller either."},
-    {"severity": "minor", "file": "skills/legion-controller/references/parked-decisions.md:169", "description": "Walk step 3 still counts a person's artifact.approved newer than the park, which the paragraph at :40-44 says is the daemon's handover and no notice. A walk while the handover's todo row waits can judge it and post 'stays parked' on a root the daemon is about to set todo. Have step 3 skip a person's approval of the root's primary document."}
+    {"severity": "important", "file": "skills/legion-controller/references/parked-decisions.md:174", "description": "Walk step 3 now skips every artifact.approved of the root's own spec, but personHandoverQueues queues only a person's non-carried approval of a parentless, labelled, parked root's primary document whose tree is not live (workflow/gate.go:636-656). A carried approval (Dispatch writes it in the person's name) and an approval on a handed-over child that keeps its Dispatch parent are relayed as design-approved, yet the walk skips them. The walk is the only backstop for a notice sent while no controller ran, so on the controller's own hold that approval is never judged and the root stays parked. Narrow the skip to the queued case (no Parent:, primary spec, reason not 'Carried forward from the approval of version …') and give the paragraph at :40-44 the same exceptions."},
+    {"severity": "minor", "file": "packages/daemon/internal/admit/parked_decision_test.go:597", "description": "The parked-decision-notice assertion cannot fail: the test never runs the outbox, so no parked-decision row can exist. Assert that no design-approved notice was enqueued and that the person-handover status write was queued."},
+    {"severity": "minor", "file": "packages/daemon/internal/workflow/gate.go:605", "description": "recordHandover's guard repeats applyArtifact's off/stale check and no test reaches its early returns (replacing it with `if false` leaves every test green). Share one check, or add a table test (older version, StaleReview, gates.design off); and the 'one reader' comment omits readmit's carried copy and read_state's designGate."}
   ],
-  "providers": "Verified from each run's own turns in the session store: DeepReview22, 61 assistant turns, and CodeQuality22, 50, all anthropic / claude-opus-5-5.",
-  "ci": "CI head dde47991 (only .legion/INFRA-251/test.json above it), read 2026-11-01T14:3xZ: test in progress, pr-title success. A request for changes does not wait on CI."
+  "providers": "Verified from each run's own turns in the session store: DeepReview25, 71 assistant turns, and CodeQuality25, 41, all anthropic / claude-opus-5-5.",
+  "ci": "CI head 8f5605f9 (only .legion/INFRA-251/test.json above it): ci-ok success and pr-title success, read 2026-11-01T19:0xZ."
 }
