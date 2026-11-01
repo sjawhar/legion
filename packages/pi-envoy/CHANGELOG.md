@@ -1,5 +1,13 @@
 # Changelog
 
+## [14.0.0] - 2026-11-01
+
+### Changed
+
+- The shipped `dispatch` command accepts only `omp` and `claude` as `DISPATCH_HOST`, and reads
+  `OPENCODE_CONFIG_DIR` no longer; `envoy_publish`'s description no longer names an OpenCode
+  agent as the kind of session a serve port reaches. Legion no longer supports OpenCode.
+
 ## [13.13.1] - 2026-11-01
 
 ### Added

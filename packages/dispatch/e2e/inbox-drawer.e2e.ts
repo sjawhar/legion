@@ -87,7 +87,9 @@ test("over an issue page the drawer opens from the header, keeps its page, and E
   const page = await context.newPage();
   try {
     await page.goto(`/issues/${issueKey}`);
-    await expect(page.getByRole("heading", { name: "Drawer issue" })).toBeVisible();
+    await expect(
+      page.getByTestId("issue-header").getByRole("heading", { level: 1, name: "Drawer issue" })
+    ).toBeVisible();
     const trigger =
       testInfo.project.name === "iphone"
         ? page.getByRole("button", { name: /^Open inbox/ })
@@ -110,7 +112,9 @@ test("over an issue page the drawer opens from the header, keeps its page, and E
     await page.keyboard.press("Escape");
     await expect(drawer(page)).toHaveCount(0);
     await expect(trigger).toBeFocused();
-    await expect(page.getByRole("heading", { name: "Drawer issue" })).toBeVisible();
+    await expect(
+      page.getByTestId("issue-header").getByRole("heading", { level: 1, name: "Drawer issue" })
+    ).toBeVisible();
 
     if (testInfo.project.name !== "iphone") {
       // A click outside the panel closes it too.
