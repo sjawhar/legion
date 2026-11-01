@@ -1,6 +1,6 @@
 kind: Changed
 body: |-
-    Migrations `0150`–`0155` back those loops: `embeddings_enqueue` and `delivery_settings_changed`
+    Migrations `0151`–`0156` back those loops: `embeddings_enqueue` and `delivery_settings_changed`
     notify `dispatch_embeddings` and `dispatch_delivery_settings`, a new row trigger on `refs`
     notifies `dispatch_excerpts_owed`, and `reference_excerpt_backoff`,
     `suggestion_outcome_cursor` and `write_suggestions.swept` (with two partial indexes) are new.

@@ -35,8 +35,8 @@ Give each new permanent LISTEN connection a place in the per-process connection 
 
 Pull request sjawhar/legion#2391 moved the embedding queue, reference excerpts, suggestion
 outcomes, edit notices and the delivery settings poll onto these rules. The notify sites are
-migrations `0150_embeddings_notify`, `0152_refs_excerpts_owed_notify`,
-`0155_delivery_settings_notify` and `0156_document_edit_notices_notify`, each in a transaction
+migrations `0151_embeddings_notify`, `0153_refs_excerpts_owed_notify`,
+`0156_delivery_settings_notify` and `0157_document_edit_notices_notify`, each in a transaction
 that already notifies (`0107_events_notify` or `0100_delivery_changes`). Two head processes made
 3.34 statements per second each at idle against 4.50 before, with every changed loop at zero; the
 reviewer's round confirmed each notify site and that no loop runs more often than its timer did.

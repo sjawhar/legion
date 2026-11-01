@@ -1,5 +1,5 @@
 kind: Changed
-body: The edit notice sweep sends no statement while no notice is due. It swept `document_edit_notices` every 5 s; it now runs a sweep at start and then only when a new migration, `0156`, announces a notice given a due time on `dispatch_edit_notices` (a row trigger, so notices the release before writes during a roll wake it too), or when the earliest due time it read comes round. Sweeps stay at least 5 s apart, so a notice still goes within 5 s of the end of its quiet window. The census answers `0`, and the release before keeps sweeping on its timer beside it (`cmd/dispatch/README.md`, "Background loops").
+body: The edit notice sweep sends no statement while no notice is due. It swept `document_edit_notices` every 5 s; it now runs a sweep at start and then only when a new migration, `0157`, announces a notice given a due time on `dispatch_edit_notices` (a row trigger, so notices the release before writes during a roll wake it too), or when the earliest due time it read comes round. Sweeps stay at least 5 s apart, so a notice still goes within 5 s of the end of its quiet window. The census answers `0`, and the release before keeps sweeping on its timer beside it (`cmd/dispatch/README.md`, "Background loops").
 time: 2026-10-28T17:26:57.070509418Z
 custom:
     Issue: pr2391

@@ -218,7 +218,7 @@ var (
 // startSuggestionCursor is what the first pass on a database reads before its rules run: the
 // highest event id at or below the safe horizon ($2, judgeSuggestionPage), which the cursor moves
 // to once the rules have judged every pending suggestion against every event up to it, and up to
-// $1 of the suggestions not yet swept, oldest first (all of them recorded since migration 0154),
+// $1 of the suggestions not yet swept, oldest first (all of them recorded since migration 0155),
 // which the rules judge too and the pass then marks.
 const startSuggestionCursor = `
 select coalesce((select max(id) from events where id <= $2::bigint), 0),
@@ -457,7 +457,7 @@ func suggestionOutcomePass(ctx context.Context, pool *store.Pool, horizon *event
 // (judgeSuggestionPage), which is what serialises two processes woken by one commit. The second
 // process's page waits there for the first's transaction and then reads the cursor that
 // transaction advanced, so it judges what the first did not rather than the same page twice. That
-// holds for the first pass on a database too: the row exists from migration 0153, with event_id
+// holds for the first pass on a database too: the row exists from migration 0154, with event_id
 // null, so the pass that finds it null holds the same row and the one behind it reads the id that
 // pass recorded. A lease over that would only make the second process retry later for a page the
 // cursor already serialises, and the work no wake announces - the Idempotency-Keys past their
