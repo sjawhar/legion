@@ -63,9 +63,18 @@ type sendResponse struct {
 	Duplicate bool   `json:"duplicate,omitempty"`
 }
 
+// publishResponse is the answer to a publish. Recipients and RecipientsConnected are the counts
+// recipientsFor made just before the message was published: how many sessions other than the
+// sender follow the topic, and how many of those hold a session entry now. They are pointers so
+// that a count of zero is carried rather than omitted - "no other session subscribes" is the
+// answer that matters most - and nil, left out, where there is no count to give: a listener with
+// no known-session store sends neither, as does a role topic, whose answer names its holder. An
+// older client reads neither field.
 type publishResponse struct {
 	contracts.Envelope
-	Holder string `json:"holder,omitempty"`
+	Holder              string `json:"holder,omitempty"`
+	Recipients          *int   `json:"recipients,omitempty"`
+	RecipientsConnected *int   `json:"recipients_connected,omitempty"`
 }
 
 type subscribeResponse struct {
@@ -813,6 +822,9 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			sendToTopic(ctx, w, record, d, item, arrived)
 			return
 		}
+		// The counts are of the moment the message is published, and are read from memory alone
+		// (recipientsFor), so taking them here costs the publish below nothing.
+		recipients, connected := recipientCounts(d, item.Topic, item.SourceSession)
 		// The sender stamp's read and the publish take this one deadline, derived from the
 		// caller's own context, so this route too answers a bus it cannot reach rather than
 		// spending the caller's attempt.
@@ -823,7 +835,7 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuseBusUnavailable(w, err)
 			return
 		}
-		record.accept(w, publishResponse{Envelope: item})
+		record.accept(w, publishResponse{Envelope: item, Recipients: recipients, RecipientsConnected: connected})
 	}
 }
 
