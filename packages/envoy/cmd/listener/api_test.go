@@ -999,17 +999,30 @@ func (kv stalledReadKV) Get(string) (nats.KeyValueEntry, error) {
 	return nil, errors.New("the session bucket's read never answered")
 }
 
+// swapSessionBucket puts the handle sessions' (stopped) watcher hands out behind what wrap
+// returns over it, so every read sessions makes of the session bucket from here on goes through
+// it: a resolution of a role's holder reads the holder's session that way whenever this
+// listener's cache does not hold it (session.SessionRegistry.Refresh), which is how a test
+// counts those reads, fails one, or stalls them all. The field the handle hangs off is the
+// registry's own, so one helper holds the reflection that reaches it and a rename of it breaks
+// here alone.
+func swapSessionBucket(t *testing.T, sessions *session.SessionRegistry, wrap func(nats.KeyValue) nats.KeyValue) {
+	t.Helper()
+	field := reflect.ValueOf(sessions).Elem().FieldByName("watcher")
+	watcher := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
+	swapped := bus.KeyValue{KeyValue: wrap(watcher.Interface().(*kvwatch.Watcher).KV().KeyValue)}
+	watcher.Set(reflect.ValueOf(kvwatch.New("session registry", swapped, func(nats.KeyValueEntry) {}, func() {})))
+}
+
 // stallSessionReads makes every bucket read of sessions stall until the test ends, keeping its
-// writes, by swapping the handle its (stopped) watcher hands out. A read that does not answer must
-// take nothing from a role holder.
+// writes. A read that does not answer must take nothing from a role holder.
 func stallSessionReads(t *testing.T, sessions *session.SessionRegistry) {
 	t.Helper()
 	released := make(chan struct{})
 	t.Cleanup(func() { close(released) })
-	field := reflect.ValueOf(sessions).Elem().FieldByName("watcher")
-	watcher := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
-	stalled := bus.KeyValue{KeyValue: stalledReadKV{KeyValue: watcher.Interface().(*kvwatch.Watcher).KV().KeyValue, released: released}}
-	watcher.Set(reflect.ValueOf(kvwatch.New("session registry", stalled, func(nats.KeyValueEntry) {}, func() {})))
+	swapSessionBucket(t, sessions, func(kv nats.KeyValue) nats.KeyValue {
+		return stalledReadKV{KeyValue: kv, released: released}
+	})
 }
 
 // When the session bucket cannot be read, every path that could take a role from its holder takes

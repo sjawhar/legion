@@ -2405,7 +2405,8 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A holder served on a port answers no receipt, so a send to it counts as delivered once the stream acknowledges storing the forward (`bus.Client.StartRequestStoredTo`, `roleForwardStoredOnly`), and that stored copy is what reaches its port.
   Every attempt forwards the same envelope, one `event_id` under the dedupe key `envoy.role.forward.<key>`, so a holder that took two copies drops the second.
   The route answers the outcome to its sender (the Listener API's `/v1/messages/publish` row), writes it on its `listener publish` record line, and publishes no exception.
-  A role send has three answers, and its sender tells them apart by status.
+
+- A role send has three answers, and its sender tells them apart by status.
   200 is a live holder that took the message, named by `holder`.
   202 is the kept answer:
   nobody holds the role, or the holder's claim had lapsed, and the body is the envelope with `kept: true`, `kept_reason` (`unclaimed` or `holder_lapsed`) and `holder` when a lapsed claim named one.
@@ -2415,7 +2416,8 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A keep that failed gives the same 404, beside the `listener kept role message publish failed` line.
   The role's next claim hands the kept lane over off the claim's own request (`runKeptRoleDrain`, `drainKeptRole`), after the claim is answered.
   One walk of the lane (`walkKeptRole`) hands the new holder at most `roleKeepDrainMax` (20) copies, each once and in the order they were kept, reads at most `roleKeepScanMax` (200) of them, lives `roleKeepDrainWindow` (60 s), and moves the role's cursor, `notifications.envoy.kept.cursor.<role>`, which holds the listener's own bookkeeping rather than an envelope and carries one walk's claim of the lane, so two listeners walking it never forward one copy twice.
-  The handover walks the lane again - for the role's holder as it resolves it at the top of every pass, after the pause the walk before it earned - until the lane is empty, the role has no live holder, or `roleKeepDrainIdleRounds` (3) walks running forward nothing and pass nothing over; a walk that failed, and every failed read of the holder after one, is waited out on a widening cadence (`roleKeepDrainBackoff`, 1 s to 30 s) while the holder is live, inside `roleKeepHandoverWindow` (10 min).
+  The handover walks the lane again - for the role's holder as it resolves it at the top of every pass, after the pause the walk before it earned - until the lane is empty, the role has no live holder, or `roleKeepDrainIdleRounds` (3) walks running forward nothing and pass nothing over;
+  a walk that failed, and a read of the lane or holder that did not answer on any pass, the first included, is waited out on a widening cadence (`roleKeepDrainBackoff`, 1 s to 30 s) inside `roleKeepHandoverWindow` (10 min) while this handover's context lives and the role's cached claim names a session, live or lapsed, and ends at Debug otherwise.
   A handover this process loses - a restart, a rolling deploy - is picked up by `sweepKeptRoleLanes`, which runs at the listener's start and every five minutes beside the reapers and hands over every lane holding copies after its cursor whose role has a live holder (`bus.Client.KeptRoleLanes`, one `STREAM.INFO` with a `notifications.envoy.kept.role.>` filter), so no lane waits for a claim a live holder will not make.
   Each forwarded copy carries `kept_at`, the Unix-millisecond time the listener kept it, so the holder can judge the message's age.
   A copy older than `roleKeepWindow` (one hour) when the claim reads it is not forwarded:
@@ -3192,6 +3194,8 @@ Each item below names an endpoint and its method, then its contract, and an item
   the role's next claim is handed each kept copy once, in the order the copies were kept, and drops one the listener kept more than an hour before (the "Role messages use core NATS" rule).
   It answers `404 {"error":…,"reason":"unclaimed"}` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, and a `last_seen` timestamp when the listener still keeps the holder's final heartbeat (until the interest reaper's grace has passed, `store.InterestReapGrace` + `store.InterestRefreshAge` after the holder left the session cache), whether the first resolution or a later attempt's finds it so, and only when nothing was kept:
   four cases keep nothing, and each is answered this way: the request sent `keep: false`; the role's token is one `rolePattern` refuses (`isValidRole`), which no claim can ever name; the claim lapsed and the restart grace retained it (`roleKeepable`), whose holder keeps the role and writes no new claim for a drain to follow; or the keep itself failed.
+
+- A role topic's refusals, each keeping nothing.
   It answers `403 {"error":…,"reason":"capability","holder":…}`, forwarding nothing, when the holder does not advertise the payload's delivery mode or the mode cannot be read unambiguously, as `/v1/messages/send` refuses it.
   It answers `504 {"error":…,"reason":…,"event_id":…,"dedupe_key":…,"holder":…,"attempts":N}` when the window ended without a receipt, keeping nothing, since that forward is already stored on the holder's agent subject:
   `reason` is `receipt_timeout` when the last forward reached the server and drew no receipt (a holder that stopped running while its registration lives gives it), else `delivery_failed` (no live holder to forward to, a later attempt's read that failed or ran out of time, a forward not shown to have reached the server);

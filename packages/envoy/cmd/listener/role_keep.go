@@ -88,10 +88,11 @@ const roleKeepClaimWindow = roleKeepDrainWindow
 const roleKeepDrainRetryPause = time.Second
 
 // roleKeepDrainRetryCap is the widest pause a run of failed walks earns (roleKeepDrainBackoff). A
-// handover whose bus is not answering is worth retrying for as long as the role's holder is live -
-// the copies it holds are messages whose senders were answered 202 kept - and the cost of doing so
-// must fall to about one walk a half-minute rather than one a second. roleKeepHandoverWindow is
-// what ends such a handover.
+// handover whose bus is not answering is worth retrying for as long as the role's cached claim
+// names a session, live or lapsed (handOverKeptRole) - the copies it holds are messages whose
+// senders were answered 202 kept, and that session is the holder they were kept for - and the
+// cost of doing so must fall to about one walk a half-minute rather than one a second.
+// roleKeepHandoverWindow is what ends such a handover.
 const roleKeepDrainRetryCap = 30 * time.Second
 
 // roleKeepDrainIdleRounds is how many walks that made no progress one handover takes before it
@@ -486,11 +487,16 @@ func drainKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role 
 // A read that did not answer - the lane head's, on whichever pass it was made, or the holder's
 // resolution behind one - says nothing about the holder, so what decides whether the handover
 // reads again is the role's cached claim (retry, store.Registry.CachedRoleHolder, the read the
-// sweep makes). A claim naming a session is a lane whose copies have a holder waiting: the read
-// is retried on the widening cadence above and the failure is carried out of the handover, which
-// is what lifts one that ends still failing above debug. A role no claim names - and a claim read
-// that failed too, which says no holder is waiting either - is the keep's own case, a copy kept
-// for a role nobody holds: the handover ends at debug, leaving the lane to the role's next claim.
+// sweep makes). A claim naming a session, live or lapsed, is a lane whose copies have a holder
+// waiting: the read is retried on the widening cadence above, on any pass including the first,
+// and the failure is carried out of the handover, which is what lifts one that ends still
+// failing above debug. A role no claim names - and a claim read that failed too, which says no
+// holder is waiting either - is the keep's own case, a copy kept for a role nobody holds: the
+// handover ends at debug, leaving the lane to the role's next claim. A read whose only failure
+// is this handover's own ctx ending is neither, and is carried out of nothing: the listener is
+// shutting the sweep's handovers down (sweepKeptRoleLanes) or this handover has spent its
+// window, which the loop's own ctx checks end just as quietly, where an Error line would raise
+// one on every deploy.
 //
 // It returns the error of its last walk, or, while no walk has failed, that of the read it was
 // still retrying when its time ran out, so either is logged where every failed handover is
@@ -525,11 +531,16 @@ func handOverKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, ro
 	// retry is what a pass does with a read that did not answer: it writes line for that read and
 	// reports whether this handover reads again, which the role's cached claim decides. A claim
 	// naming a session earns the next pause and carries the failure out of the handover (ended); a
-	// role no claim names, and a claim read that failed too, end it here with nothing above debug.
+	// role no claim names, and a claim read that failed too, end it here with nothing above debug,
+	// and so does a read this handover's own ctx ended, which is a shutdown rather than a bus that
+	// failed.
 	retry := func(line string, cause error) bool {
 		cfg.logger.LogEvent(slog.LevelDebug, line,
 			slog.String("role", role),
 			slog.String("error", cause.Error()))
+		if ctx.Err() != nil {
+			return false
+		}
 		claimed, claimErr := cfg.registry.CachedRoleHolder(role)
 		if claimErr == nil && claimed != "" {
 			readErr = cause
