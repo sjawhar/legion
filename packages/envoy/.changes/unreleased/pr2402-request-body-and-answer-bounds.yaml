@@ -32,4 +32,4 @@ body: |-
   away mid-body is now answered nothing and recorded as `status=499` rather than written a 400
   nobody reads, a keyed write's client as well as an unkeyed one's. Every route still bounds its
   body in bytes as it did: 1 MiB for a JSON route, 26 MiB for an upload. The document and delivery
-  websockets are mounted outside the routes and neither bound touches them (INFRA-592).
+  websockets are mounted outside the routes and neither bound touches them.

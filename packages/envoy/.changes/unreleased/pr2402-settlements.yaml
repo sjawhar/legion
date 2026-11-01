@@ -9,5 +9,4 @@ body: |-
   so the room stays resident with its editors connected rather than failing over work all but
   committed. A settlement renders the document before it locks the document's owner row, so it no
   longer holds that row, and every writer of the issue queued behind it, across a render. A
-  document whose ask blocks need repairs gets them in one commit and its version in the next
-  (INFRA-592).
+  document whose ask blocks need repairs gets them in one commit and its version in the next.

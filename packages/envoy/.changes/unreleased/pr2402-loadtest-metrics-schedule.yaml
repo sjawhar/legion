@@ -7,4 +7,4 @@ body: |-
   failed answer records its refusal code and a connection-level failure its class. `--schedule
   <factor>x:<duration>,...` varies the load over the window (a burst and the drop after it), and a
   step with two segments or more measures its recovery after the drop in 10 s windows, with
-  `--recovery-ref-p99` as the latency it is judged against (INFRA-592).
+  `--recovery-ref-p99` as the latency it is judged against.

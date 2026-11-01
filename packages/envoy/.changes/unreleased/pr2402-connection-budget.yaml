@@ -15,4 +15,4 @@ body: |-
   background work and settlements, 2 for a lease and 10 for a LISTEN dial. The outbox, the
   registry and the health probe have no bound, each being the only caller of its pool's one
   connection; the health probe bounds its own wait, dial and query together at 2 seconds instead.
-  A database's connection limit must allow 90 a process (INFRA-592).
+  A database's connection limit must allow 90 a process.

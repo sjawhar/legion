@@ -11,4 +11,4 @@ body: |-
   before they were delivered: on a quiet Dispatch, minutes or longer, with the Delivery page's
   tiles as stale for just as long. Each reader now decides against the horizon it read through
   (the new `events.Horizon.Behind`, which replaces `Pending`), so it re-reads for its own gap
-  however far another reader has moved the horizon meanwhile (INFRA-592).
+  however far another reader has moved the horizon meanwhile.

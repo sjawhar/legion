@@ -7,4 +7,4 @@ body: |-
   same pool, so the waiting readers held the connections it needed: under load the recovery ran
   out its own 3-second wait for one and the readers ran out their 20-second deadline on a room
   nobody had compacted. A reader that holds no connection, a document websocket's admission check
-  among them, still waits and is answered once the room has reloaded (INFRA-592).
+  among them, still waits and is answered once the room has reloaded.

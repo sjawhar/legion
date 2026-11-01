@@ -12,4 +12,4 @@ body: |-
   transaction alone. A write that finds, under its locks, that it changes other documents than
   the ones it gated - a status change whose issue gained a document while it waited for those
   gates - hands the gates back, names and gates them again and lands; only documents that move a
-  second time are answered `409 DOCUMENT_CHANGED` (INFRA-592).
+  second time are answered `409 DOCUMENT_CHANGED`.

@@ -3,4 +3,4 @@ body: |-
   With `DISPATCH_PPROF_PORT` set, Dispatch's mutex and block profiles record from boot, at rates
   low enough to leave on (one contended unlock in a hundred, every block of a millisecond or
   more), so `/debug/pprof/mutex` and `/debug/pprof/block` show which lock or channel the
-  goroutines queue on. Unset, neither records (INFRA-592).
+  goroutines queue on. Unset, neither records.

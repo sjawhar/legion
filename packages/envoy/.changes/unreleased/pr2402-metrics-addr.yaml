@@ -7,5 +7,4 @@ body: |-
   writers waiting for a document's writer gate; the settlements running and waiting; the outbox's
   lag and published events; the events committed; garbage-collector pauses, the heap and the
   goroutines; and the log lines dropped (`cmd/dispatch/README.md`, "Metrics"). Unset, nothing
-  listens; a value that is not `host:port`, or an address already taken, refuses startup
-  (INFRA-592).
+  listens; a value that is not `host:port`, or an address already taken, refuses startup.

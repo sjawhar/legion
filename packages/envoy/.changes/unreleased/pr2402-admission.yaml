@@ -48,4 +48,4 @@ body: |-
   admitted read runs every statement on one pinned connection for its whole length, where an issue
   read took twelve connections one after another; a read of weight two, whose two reads run side
   by side, and the four file version downloads, which hold no connection while their bytes move,
-  pin none (INFRA-592).
+  pin none.
