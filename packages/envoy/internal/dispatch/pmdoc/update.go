@@ -5,6 +5,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -589,6 +590,19 @@ func marksToAttributes(marks []Mark) crdt.Attributes {
 		attributes[markAttributeKey(mark)] = value
 	}
 	return attributes
+}
+
+// TextInTransaction is text's plain characters, format markers left out, read inside the caller's
+// Yjs transaction: the lock-free form of YText.ToString, which takes the document's lock and so
+// cannot run inside Transact.
+func TextInTransaction(text *crdt.YXmlText) string {
+	var plain strings.Builder
+	for item := yTextStart(text); item != nil; item = item.Right {
+		if content, ok := item.Content.(*crdt.ContentString); ok && !item.Deleted {
+			plain.WriteString(content.Str)
+		}
+	}
+	return plain.String()
 }
 
 // yTextDeltaInTransaction is ToDelta's lock-free body. ygo deliberately

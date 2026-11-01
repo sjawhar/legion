@@ -1,0 +1,11 @@
+kind: Fixed
+body: |-
+    Migrations `0158` to `0161` are additive (a nullable column with a check added `not valid`, and
+    three new tables), so the release before them keeps serving beside this one through a rolling
+    update, and rolling back past them is an image rollback alone. While both releases serve, only
+    this release's processes share the route list, the GitHub rate limits and the warnings; either
+    release's delivery sweep resumes a stranded delivery, and an attempt the earlier release wrote
+    is resumed without an urgency, as its first send was.
+time: 2026-10-28T10:30:10.000000000Z
+custom:
+    Issue: pr2387

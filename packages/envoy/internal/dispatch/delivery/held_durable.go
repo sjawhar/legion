@@ -7,13 +7,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 )
 
@@ -181,7 +181,7 @@ func (t *bindThrottle) reportStandby(name, message string) {
 //     and did not handle, and then releases the hold (stop), so a standby takes over at once and
 //     is redelivered those messages within seconds rather than after the ack wait.
 //
-// The run loop owns hold, recorded and subject; mu guards delivering, which stopDelivering reads
+// The run loop owns hold, recorded and subject; mu guards delivering, which StopDelivering reads
 // from any goroutine.
 type heldDurable struct {
 	nats   *bus.Client
@@ -194,8 +194,11 @@ type heldDurable struct {
 	config func() natsgo.ConsumerConfig
 	// name is the durable's name: config's Durable, which every call returns alike.
 	name string
-	// handle handles one message on the subscription's delivery goroutine and acknowledges it.
-	handle natsgo.MsgHandler
+	// key reads whether this intake wants a message at all and the key whose goroutine handles it
+	// (intakeKey for the delivery intake, jobKey for the job intake).
+	key func(*natsgo.Msg) (string, *contracts.Envelope, bool)
+	// handle handles one message on its key's goroutine and acknowledges it there.
+	handle func(handling context.Context, message intakeMessage)
 
 	// hold is the durable's hold while this intake holds it.
 	hold *duty.Hold
@@ -205,26 +208,43 @@ type heldDurable struct {
 	recorded intakeHoldToken
 	// subject is the deliver subject this intake delivers at, and empty while it delivers nothing.
 	subject string
+	// boundHook, when not nil, runs once a take-over has bound the durable, before the take-over
+	// returns. It is nil outside tests: a test sets it to hold a take-over that has bound the
+	// durable until past Run's ctx's end.
+	boundHook func()
 
 	mu sync.Mutex
-	// delivering is the latest subscription subscribe made, which stopDelivering stops.
+	// delivering is the latest subscription subscribe made, which StopDelivering stops.
 	delivering *intakeDelivery
 }
 
 // newHeldDurable builds the delivery from config's durable on natsClient, taking its hold and
-// consumer lease on leases and handing each message to handle.
-func newHeldDurable(natsClient *bus.Client, leases intakeLeases, config func() natsgo.ConsumerConfig, handle natsgo.MsgHandler) heldDurable {
-	return heldDurable{nats: natsClient, leases: leases, holder: uuid.New(), throttle: &bindThrottle{}, config: config, name: config().Durable, handle: handle}
+// consumer lease on leases, routing each message by key and handing it to handle.
+func newHeldDurable(natsClient *bus.Client, leases intakeLeases, config func() natsgo.ConsumerConfig,
+	key func(*natsgo.Msg) (string, *contracts.Envelope, bool), handle func(context.Context, intakeMessage),
+) heldDurable {
+	return heldDurable{
+		nats: natsClient, leases: leases, holder: uuid.New(), throttle: &bindThrottle{},
+		config: config, name: config().Durable, key: key, handle: handle,
+	}
 }
 
 // run delivers from the durable while this intake holds its hold, and stands by for it otherwise,
-// until ctx ends; then it stops delivering and releases the hold (stop). Each durableBindInterval
-// while it delivers nothing, and ready reports true, it tries for the hold and the durable
-// (attempt); each intakeHoldRenew while it delivers, it checks the durable still delivers to it
-// (check); and the moment its hold is lost it stops delivering. extra and onExtra are a caller's
-// own ticker and what it does on each tick, nil for none.
-func (d *heldDurable) run(ctx context.Context, extra <-chan time.Time, onExtra func(), ready func() bool) {
-	defer d.stop()
+// until ctx ends; then it stops delivering and releases the hold (stop), under the one stop
+// deadline armed at ctx's end (stopContext), so a take-over under way at that moment spends that
+// budget rather than starting one of its own. Each durableBindInterval while it delivers nothing,
+// and ready reports true, it tries for the hold and the durable (attempt); each intakeHoldRenew
+// while it delivers, it checks the durable still delivers to it (check); and the moment its hold
+// is lost it stops delivering. wake, when not nil, answers a channel the loop waits on beside its
+// tickers and takes again each time it fires -- the delivery intake's settings cache storing
+// settings, which is what makes its first attempt ready (Intake.Run).
+func (d *heldDurable) run(ctx context.Context, wake func() <-chan struct{}, ready func() bool) {
+	// Armed before the first attempt, so a take-over under way as ctx ends -- a standby's poll,
+	// whose JetStream calls take their own time -- spends the stop's budget rather than starting
+	// it late.
+	stopping, release := stopContext(ctx)
+	defer release()
+	defer d.stop(stopping)
 	binds := time.NewTicker(durableBindInterval)
 	defer binds.Stop()
 	checks := time.NewTicker(intakeHoldRenew)
@@ -233,6 +253,12 @@ func (d *heldDurable) run(ctx context.Context, extra <-chan time.Time, onExtra f
 		if d.subject == "" && ready() {
 			d.attempt(ctx)
 		}
+	}
+	// Taken before each attempt, which reads what the cache holds, so settings stored after that
+	// read wake the loop.
+	var changed <-chan struct{}
+	if wake != nil {
+		changed = wake()
 	}
 	attempt()
 	for {
@@ -244,18 +270,31 @@ func (d *heldDurable) run(ctx context.Context, extra <-chan time.Time, onExtra f
 		select {
 		case <-ctx.Done():
 			return
-		case <-extra:
-			onExtra()
+		case <-changed:
+			changed = wake()
+			attempt()
 		case <-binds.C:
 			attempt()
 		case <-checks.C:
 			d.check(ctx)
 		case <-lost:
 			slog.Warn("dispatch delivery: the intake's hold is lost; it stops delivering", "name", d.name)
-			d.stopDelivering()
+			// The hold lasts intakeHoldMargin longer on the database's clock, so a handler that
+			// finishes within it finished while the hold still held; the rest are given up,
+			// since another process may take the hold from that moment.
+			d.stopDeliveringWithin(intakeHoldMargin)
 			d.hold, d.subject = nil, ""
 		}
 	}
+}
+
+// stopDeliveringWithin stops this intake's subscription, giving the handlers still running budget
+// to finish and be acknowledged before it gives them up (StopDelivering). It runs on a context of
+// its own, so a stop of the process does not cut the hand-back short.
+func (d *heldDurable) stopDeliveringWithin(budget time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	d.StopDelivering(ctx)
 }
 
 // attempt tries to make this intake the one delivering from the durable: it takes the hold when
@@ -398,7 +437,8 @@ func (d *heldDurable) takeOver(ctx context.Context) {
 // otherwise, on a fresh deliver subject, starting at the stream sequence after the durable's ack
 // floor. Starting there, the recreated durable redelivers at once every message the durable had
 // not acknowledged -- what a dead holder had been handed, what a stopped one handed back --
-// replays nothing it had, and skips nothing (TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor).
+// replays nothing it had, and skips nothing (TestAnAbandonedHoldersMessagesReachTheStandbyWithinTheHoldsLapse,
+// and TestATakeOverWhoseCreateFailsCreatesTheDurableAtItsFloorOnTheNextAttempt for a create retried).
 // The take-over records that start in its hold's token before it deletes the durable, and
 // finishTakeOver says what a create that fails after the delete leaves behind.
 // The deployed metadata keeps its own keys and drops the ones nats-server sets itself (the
@@ -435,8 +475,8 @@ func startingAt(config natsgo.ConsumerConfig, start uint64) natsgo.ConsumerConfi
 // with the renewals from there on failing, about 8 s of the hold are left against the 10 s bound.
 // In both cases retryHeld stops at the hold's deadline. That exit is the safe one -- no step acts
 // once another process can take the hold, and the next attempt takes the durable over again.
-// takeOverFinishWithin is also well inside stopGrace (cmd/dispatch), since a stop that comes
-// meanwhile waits for it to end.
+// takeOverFinishWithin is also inside intakeStopBudget, and so inside stopGrace (cmd/dispatch),
+// since a stop that comes meanwhile waits for it to end.
 //
 // takeOverCallTimeout bounds each try of each step, so that one call that draws no answer -- a
 // JetStream request during a leader change, or one the server denies and never answers -- leaves
@@ -495,7 +535,7 @@ func (d *heldDurable) finishTakeOver(create natsgo.ConsumerConfig, deleteFirst b
 		_, err := createDurable(js, &create, natsgo.Context(call))
 		return err
 	}, "subject", create.FilterSubject, "start_seq", create.OptStartSeq) != nil {
-		d.stopDelivering()
+		d.stopDeliveringWithin(intakeHoldRenew)
 		return
 	}
 	bound := intakeHoldToken{subject: create.DeliverSubject}
@@ -505,12 +545,15 @@ func (d *heldDurable) finishTakeOver(create natsgo.ConsumerConfig, deleteFirst b
 		// The durable delivers here, but the hold does not say so: the next holder would take
 		// the binding for a process that holds nothing and wait for it. Stop, and take the
 		// durable over again on the next attempt.
-		d.stopDelivering()
+		d.stopDeliveringWithin(intakeHoldRenew)
 		return
 	}
 	d.recorded, d.subject = bound, create.DeliverSubject
 	slog.Info("dispatch delivery: NATS consumer bound", "name", d.name, "subject", create.FilterSubject,
 		"start_seq", create.OptStartSeq, "generation", bus.MetadataGeneration(create.Metadata, consumerGenerationKey))
+	if d.boundHook != nil {
+		d.boundHook()
+	}
 }
 
 // errHoldNotHeld is retryHeld finding that this intake no longer holds its hold.
@@ -582,157 +625,31 @@ func (d *heldDurable) check(ctx context.Context) {
 		return
 	}
 	slog.Warn("dispatch delivery: the NATS consumer no longer delivers to this intake; it stops delivering", "name", d.name)
-	d.stopDelivering()
+	// The durable's messages are the next holder's from here, so a handler still running after
+	// the renewal interval is given up rather than left to write what that holder writes too.
+	d.stopDeliveringWithin(intakeHoldRenew)
 	d.subject = ""
 }
 
-// stop is the end of run: it stops delivering, then releases the hold, so a standby takes the
-// durable over at once and is redelivered whatever this intake handed back. A hold whose token
-// still records a take-over's start (intakeHoldToken) is lapsed instead, which frees it as
-// Release does and keeps the row, so the next holder reads that start.
-func (d *heldDurable) stop() {
-	d.stopDelivering()
+// stop is the end of run: it stops delivering under ctx, the run's stop deadline, then releases
+// the hold, so a standby takes the durable over at once and is redelivered whatever this intake
+// handed back. A hold whose token still records a take-over's start (intakeHoldToken) is lapsed
+// instead, which frees it as Release does and keeps the row, so the next holder reads that start.
+// The release runs on a context of its own: it is one statement, and it must reach the database
+// even when the stop's budget has run out.
+func (d *heldDurable) stop(ctx context.Context) {
+	d.StopDelivering(ctx)
 	if d.hold == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), intakeHoldRenew)
-	defer cancel()
 	release := d.hold.Release
 	if d.recorded.start != 0 {
 		release = d.hold.Lapse
 	}
-	if err := release(ctx); err != nil {
+	releasing, cancel := context.WithTimeout(context.Background(), intakeHoldRenew)
+	defer cancel()
+	if err := release(releasing); err != nil {
 		slog.Error("dispatch delivery: release the intake's hold", "name", d.name, "error", err)
 	}
 	d.hold, d.subject = nil, ""
-}
-
-// subscribeDurable subscribes deliver to wanted's durable through client.Subscribe at
-// deliverSubject, acknowledging by hand. Bind with DeliverSubject and SkipConsumerLookup
-// subscribes without looking the durable up, so the durable need not exist yet: nats.go sends
-// the SUB and creates nothing (js.go, the SkipConsumerLookup branch of subscribe with Bind). It
-// is for a caller that creates the durable with that deliver subject right after, under its
-// consumer lease (takeOver).
-func subscribeDurable(client *bus.Client, wanted natsgo.ConsumerConfig, deliverSubject string, deliver natsgo.MsgHandler) (*natsgo.Subscription, error) {
-	options := []natsgo.SubOpt{
-		natsgo.Bind(bus.Stream, wanted.Durable),
-		natsgo.ManualAck(),
-		natsgo.DeliverSubject(deliverSubject),
-		natsgo.SkipConsumerLookup(),
-	}
-	// The subject must be the consumer's own filter subject: nats.go checks a bound
-	// subscription's subject against it, and refuses an empty one ("subject does not match
-	// consumer").
-	return client.Subscribe(wanted.FilterSubject, deliver, options...)
-}
-
-// intakeDelivery is one subscription of an intake's: the client it subscribed on, the
-// subscription, the handler its callback (receive) hands messages to, and the hold it delivers
-// under. Each subscribe makes one of its own, so stopping one ends that subscription and nothing a
-// later subscribe starts.
-type intakeDelivery struct {
-	nats   *bus.Client
-	sub    *natsgo.Subscription
-	handle natsgo.MsgHandler
-	// hold is the hold the subscription delivers under: once its loss deadline has passed, every
-	// message is handed back.
-	hold *duty.Hold
-	// handling is held while a message is in its handler, so stop waits for it.
-	handling sync.Mutex
-	stopping atomic.Bool
-	stopped  sync.Once
-}
-
-// subscribe subscribes the intake's handling to its durable's push deliveries at deliverSubject
-// (subscribeDurable), for a caller that creates the durable with it right after. The
-// subscription's callback (receive) handles each message on the subscription's delivery
-// goroutine, one at a time, under the hold this intake holds. stopDelivering stops the
-// subscription this made last, so a caller subscribing again stops the one before first.
-func (d *heldDurable) subscribe(deliverSubject string) (*natsgo.Subscription, error) {
-	delivery := &intakeDelivery{nats: d.nats, handle: d.handle, hold: d.hold}
-	sub, err := subscribeDurable(d.nats, d.config(), deliverSubject, delivery.receive)
-	if err != nil {
-		return nil, err
-	}
-	delivery.sub = sub
-	d.mu.Lock()
-	d.delivering = delivery
-	d.mu.Unlock()
-	return sub, nil
-}
-
-// stopDelivering stops this intake's subscription so that another process can take the durable
-// over with nothing waiting out the ack wait: it drains the subscription, so the server delivers
-// it nothing more; negatively acknowledges every message the callback is handed from then on,
-// those NATS had already delivered to the client's buffer included, so the server redelivers them
-// at once; lets the message in its handler finish and be acknowledged; and returns once the drain
-// has ended -- at the latest intakeDrainWait after that handler returned, when it unsubscribes
-// instead -- having given up the subscription's registration on the client (bus.Client.Release),
-// so that no reconnect binds it again and a later subscribe on the same client starts afresh. Run
-// calls it when ctx ends and when the hold is lost. It is safe from any goroutine and idempotent: a
-// second call returns once the first has stopped, and a call with nothing subscribed returns at
-// once.
-func (d *heldDurable) stopDelivering() {
-	d.mu.Lock()
-	delivery := d.delivering
-	d.mu.Unlock()
-	if delivery != nil {
-		delivery.stop()
-	}
-}
-
-// stop is stopDelivering for this subscription. The drain goes first, so the server has the
-// subscription's interest gone before any negative acknowledgement reaches it, and redelivers
-// what this one gives back to the next subscriber rather than straight back here.
-func (d *intakeDelivery) stop() {
-	d.stopped.Do(func() {
-		d.stopping.Store(true)
-		drained := true
-		if err := d.sub.Drain(); err != nil {
-			slog.Error("dispatch delivery: drain the intake's subscription", "error", err)
-			drained = false
-		}
-		// The message in its handler, if any, finishes and is acknowledged; every one after it
-		// finds stopping set.
-		d.handling.Lock()
-		d.handling.Unlock()
-		// nats.go ends a drain on a goroutine of its own, once the callback has run every message
-		// the client had buffered, and reports it only by the subscription turning invalid.
-		deadline := time.Now().Add(intakeDrainWait)
-		for drained && d.sub.IsValid() {
-			if !time.Now().Before(deadline) {
-				slog.Error("dispatch delivery: the intake's subscription did not finish draining; unsubscribing it", "waited", intakeDrainWait)
-				if err := d.sub.Unsubscribe(); err != nil {
-					slog.Error("dispatch delivery: unsubscribe the intake's subscription", "error", err)
-				}
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		// The client binds again a registration whose subscription is no longer valid, a drained
-		// one included, so without this the next reconnect would bind this stopped callback, which
-		// negatively acknowledges every message it is handed, straight back to the durable.
-		d.nats.Release(d.sub)
-	})
-}
-
-// intakeDrainWait bounds how long stop waits for the drain to end once the message in its handler
-// has finished. By then all that is left is nats.go's: the callback negatively acknowledging what
-// the client had buffered, which never blocks, and the drain's flush to the server. So the bound is
-// the one nats.go itself gives a connection's drain, natsgo.DefaultDrainTimeout -- bus connections
-// never set their own -- rather than intakeMessageTimeout, which bounds a handler, and the handler
-// is done.
-const intakeDrainWait = natsgo.DefaultDrainTimeout
-
-// receive is the subscription's callback. A message once stopping is set, or once the hold's loss
-// deadline has passed, is negatively acknowledged: this intake may no longer act on the durable's
-// messages, and the server redelivers them to the next holder. Any other goes to the handler.
-func (d *intakeDelivery) receive(msg *natsgo.Msg) {
-	d.handling.Lock()
-	defer d.handling.Unlock()
-	if d.stopping.Load() || (d.hold != nil && !time.Now().Before(d.hold.Deadline())) {
-		negativelyAcknowledge(msg)
-		return
-	}
-	d.handle(msg)
 }

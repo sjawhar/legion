@@ -1,16 +1,16 @@
 kind: Changed
 body: |-
     Each Dispatch delivery durable (`delivery-events`, `delivery-jobs`) delivers to one process at a
-    time: the holder of its hold, a row of `duty_holds` (migration `0151_duty_holds`) with a 15-second
-    lease on the database's clock, renewed every 5 s. The other processes stand by and try for the
-    hold every 2 s. A take-over deletes the durable and creates it again at its ack floor on a fresh
-    deliver subject, which redelivers a dead holder's unacknowledged messages at once and fences that
-    holder off; a stopping process finishes the message in its handler and releases the hold. A
-    durable carries its config's generation (`dispatch.consumer-generation`), and a take-over that
-    finds a higher one keeps the deployed config. The lease pool grows by four connections, to 17,
-    and `store.ConnectionsPerProcess` to 93. A periodic maintenance loop records its passes per
-    lease and period (`duty_passes` row `<lease>/<period_ns>`), so two builds with different
-    intervals for one loop each run it once per their own period.
+    time: the holder of its hold, a row of `duty_holds` (migration `20261101030536_duty_holds`) with
+    a 15-second lease on the database's clock, renewed every 5 s. The other processes stand by and
+    try for the hold every 2 s. A take-over deletes the durable and creates it again at its ack
+    floor on a fresh deliver subject, which redelivers a dead holder's unacknowledged messages at
+    once and fences that holder off; a stopping process finishes the message in its handler and
+    releases the hold. A durable carries its config's generation (`dispatch.consumer-generation`),
+    and a take-over that finds a higher one keeps the deployed config. The lease pool grows by four
+    connections, to 17, and `store.ConnectionsPerProcess` to 94. A periodic maintenance loop records
+    its passes per lease and period (`duty_passes` row `<lease>/<period_ns>`), so two builds with
+    different intervals for one loop each run it once per their own period.
 time: 2026-10-28T12:39:42.200918199Z
 custom:
     Issue: pr2461

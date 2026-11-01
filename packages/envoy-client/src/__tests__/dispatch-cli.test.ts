@@ -428,7 +428,7 @@ describe("the dispatch CLI", () => {
 
   test("an empty session id counts as unset", async () => {
     const { code, stdout } = await run(["message", "--issue", "DSP-1", "--body", "x"], {
-      DISPATCH_HOST: "opencode",
+      DISPATCH_HOST: "omp",
       DISPATCH_SESSION_ID: "",
     });
     expect(code).toBe(2);
@@ -1074,19 +1074,10 @@ describe("the dispatch CLI's envoy.json", () => {
       ENVOY_CONFIG_FILE: handed,
     });
     expect(namedClaude.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
-    // OpenCode likewise.
-    const opencode = await run(["projects"], {
-      ...fromFile,
-      DISPATCH_HOST: "opencode",
-      OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
-      ENVOY_CONFIG_FILE: handed,
-    });
-    expect(opencode.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
   });
 
   test("with DISPATCH_HOST set and no ENVOY_CONFIG_FILE, each host takes its own harness's directory and no other's, else the neutral file", async () => {
     const claude = { DISPATCH_HOST: "claude", CLAUDE_CODE_SESSION_ID: "ses-1" };
-    const opencode = { DISPATCH_HOST: "opencode", DISPATCH_SESSION_ID: "ses-1" };
     const profile = join(stateDir, "profile");
     serverConfig(profile);
     const ompRun = await run(["projects"], {
@@ -1094,7 +1085,6 @@ describe("the dispatch CLI's envoy.json", () => {
       OMP_PROFILE: "work",
       PI_CODING_AGENT_DIR: profile,
       CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
-      OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
     });
     expect(ompRun.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
 
@@ -1119,21 +1109,10 @@ describe("the dispatch CLI's envoy.json", () => {
     });
     expect(emptyHanded.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
 
-    const own = join(stateDir, "opencode");
-    serverConfig(own);
-    const ownRun = await run(["projects"], {
-      ...fromFile,
-      ...opencode,
-      OPENCODE_CONFIG_DIR: own,
-      CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
-    });
-    expect(ownRun.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
-
     serverConfig(join(stateDir, ".config", "legion"));
     const neutral = await run(["projects"], {
       ...fromFile,
       CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
-      OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
     });
     expect(neutral.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
   });
@@ -1528,6 +1507,20 @@ describe("cliRefusals", () => {
       expect(stdout, name).toStartWith("dispatch: ");
       expect(cliRefusals(stdout), name).toEqual(refusal(stdout, null));
     }
+    expect(requests).toEqual([]);
+  });
+
+  // The whole line is pinned, not its `dispatch: ` prefix: `opencode` was an accepted host until
+  // it was removed, so the refusal naming it, and naming omp and claude as the ones left, is the
+  // user-visible behaviour that removal produces. A prefix-only assertion passes again the moment
+  // the host comes back, or the message stops naming the hosts it accepts.
+  test("a host the command does not accept is refused by name, with the two it accepts", async () => {
+    const { code, stdout } = await run(["projects"], {
+      DISPATCH_HOST: "opencode",
+      DISPATCH_SESSION_ID: "ses-1",
+    });
+    expect(code).toBe(2);
+    expect(stdout).toBe('dispatch: DISPATCH_HOST is "opencode", not omp or claude.\n');
     expect(requests).toEqual([]);
   });
 

@@ -61,13 +61,20 @@ func newPair(t *testing.T) *dispatchPair {
 }
 
 // databaseURL is the connection string a process is started with: the database storetest cloned
-// for this test, as its pool's configuration names it. The credential is written through
-// url.UserPassword when the pool carries a password, since CI's Postgres takes one
-// (DISPATCH_TEST_DATABASE_URL) where a trust-authenticated development server does not, and a URL
-// built without it is refused with SQLSTATE 28P01 before the process can serve anything.
+// for this test (databaseURLOf).
 func (p *dispatchPair) databaseURL(t *testing.T) string {
 	t.Helper()
-	config := p.database.Pool.Config().ConnConfig
+	return databaseURLOf(t, p.database)
+}
+
+// databaseURLOf is the connection string of database as its pool's configuration names it. The
+// credential is written through url.UserPassword when the pool carries a password, since CI's
+// Postgres takes one (DISPATCH_TEST_DATABASE_URL) where a trust-authenticated development server
+// does not, and a URL built without it is refused with SQLSTATE 28P01 before the process can serve
+// anything.
+func databaseURLOf(t *testing.T, database *store.Store) string {
+	t.Helper()
+	config := database.Pool.Config().ConnConfig
 	credential := url.User(config.User).String()
 	if config.Password != "" {
 		credential = url.UserPassword(config.User, config.Password).String()

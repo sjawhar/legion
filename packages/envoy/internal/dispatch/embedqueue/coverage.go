@@ -7,22 +7,25 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-const (
-	// coverageInterval is how often Run's coverage pass runs after the one at startup. Writes
-	// reach the queue through their triggers within the same transaction, so the pass only has
-	// to catch what no trigger saw (a restore, replication, a bulk load with triggers off) and
-	// vectors another model or place made during a roll; neither needs a faster cadence.
-	coverageInterval = 10 * time.Minute
-	// coverageStatementRows bounds how many rows one coverage statement changes. Each statement
-	// is its own short transaction, so a pass over a large database never holds locks a live
-	// write would wait behind for longer than one small statement takes.
-	coverageStatementRows = 500
-)
+// coverageStatementRows bounds how many rows one coverage statement changes. Each statement is
+// its own short transaction, so a pass over a large database never holds locks a live write
+// would wait behind for longer than one small statement takes.
+const coverageStatementRows = 500
+
+// identityRecheckInterval is how long, plus up to a tenth again, Run's coverage loop waits after a
+// run that found rows of another identity before it runs the identity steps again (runCoverage),
+// and after a failed run before it tries that run again. While a rolling deploy that changes the
+// identity still has an old-configuration process embedding, that process commits vectors the new
+// identity must drop; ten minutes was the whole pass's period before, and nothing faster is owed
+// to a vector search already filters out by identity. A var, not a const, so a test can shrink it
+// rather than wait out ten minutes.
+var identityRecheckInterval = 10 * time.Minute
 
 // coverageSource is one kind of item meaning search ranks: its FROM clause (from, plus where when
 // the kind needs a filter), and the expressions for its id, its text and when it was written.
@@ -238,18 +241,31 @@ type coverStep struct {
 	args    []any
 }
 
-// run executes step until a statement changes nothing, adding what each changed to its counter.
+// run executes step until a statement changes nothing, adding what each changed to its counter
+// and waking Run's scan loop after each statement that changed rows (Deps.signalEnqueued): the
+// pass writes embeddings directly, so no notification announces what it made pending.
 func (step coverStep) run(ctx context.Context, deps Deps, kind string) error {
 	for {
 		tag, err := deps.Store.Pool.Exec(ctx, step.sql, step.args...)
 		if err != nil {
 			return fmt.Errorf("coverage pass: %s: %w", kind, err)
 		}
-		*step.changed += tag.RowsAffected()
 		if tag.RowsAffected() == 0 {
 			return nil
 		}
+		*step.changed += tag.RowsAffected()
+		deps.signalEnqueued()
 	}
+}
+
+// foreignRowsExist reports whether any row of coverageSources' kinds carries an identity other
+// than identity: a vector another model or place made, or a row dead under one.
+func foreignRowsExist(ctx context.Context, deps Deps, identity string) (bool, error) {
+	var foreign bool
+	if err := deps.Store.Pool.QueryRow(ctx, foreignRows, coverageKinds, identity).Scan(&foreign); err != nil {
+		return false, fmt.Errorf("coverage pass: find other identities' rows: %w", err)
+	}
+	return foreign, nil
 }
 
 // decideIdentitySteps decides whether this pass runs its identity steps (dropForeignVectors,
@@ -260,12 +276,13 @@ func (step coverStep) run(ctx context.Context, deps Deps, kind string) error {
 // times; skipped is false, as there is nothing to skip. With such rows it runs them, with no call,
 // when an Embed this process's queue made has already succeeded (Deps.proven), and otherwise
 // embeds embedCanary (proveEmbedder): a success is proof; a failure, a throttle included, skips
-// them until a later pass, logged once at WARN with the identity, the canary's error, and how many
-// vectors and dead rows stay in place.
+// them until a later run (runCoverage), logged once at WARN with the identity, the canary's
+// error, and how many vectors and dead rows stay in place. run or skipped is true exactly when
+// such rows exist.
 func decideIdentitySteps(ctx context.Context, deps Deps, identity string) (run, skipped bool, err error) {
-	var foreign bool
-	if err := deps.Store.Pool.QueryRow(ctx, foreignRows, coverageKinds, identity).Scan(&foreign); err != nil {
-		return false, false, fmt.Errorf("coverage pass: find other identities' rows: %w", err)
+	foreign, err := foreignRowsExist(ctx, deps, identity)
+	if err != nil {
+		return false, false, err
 	}
 	if !foreign {
 		return false, false, nil
@@ -284,9 +301,66 @@ func decideIdentitySteps(ctx context.Context, deps Deps, identity string) (run, 
 	if err := deps.Store.Pool.QueryRow(ctx, foreignRowsLeft, coverageKinds, identity).Scan(&vectors, &dead); err != nil {
 		return false, true, fmt.Errorf("coverage pass: count other identities' rows: %w", err)
 	}
-	slog.Warn("dispatch embedqueue: coverage pass left other identities' vectors and dead rows in place: the configured embedder has not embedded anything yet and a canary failed; the next pass tries again",
+	slog.Warn("dispatch embedqueue: coverage pass left other identities' vectors and dead rows in place: the configured embedder has not embedded anything yet and a canary failed; they are handled once it answers",
 		"identity", identity, "canaryError", canaryErr, "foreignVectorsLeft", vectors, "foreignDeadLeft", dead)
 	return false, true, nil
+}
+
+// identityRun is what one run of the identity steps (runIdentitySteps) found and did.
+type identityRun struct {
+	// foreign is whether any row of another identity existed when the run looked
+	// (foreignRowsExist), whether or not it then acted on them.
+	foreign bool
+	// skipped is whether it left them in place: because this process's embedder does not hold the
+	// active identity, or because that embedder has not answered yet.
+	skipped bool
+	// active is the embedder identity every process's queue works for (activeIdentity), and mine
+	// whether it is this process's own.
+	active              string
+	mine                bool
+	dropped, readmitted int64
+}
+
+// runIdentitySteps decides whether to run the identity steps and runs them over every kind when
+// it does: only the process whose embedder holds the active identity (embedderActive) drops or
+// re-admits anything, and only once that embedder has answered (decideIdentitySteps). A process
+// whose identity is not active sends no canary and changes nothing, but still reads whether rows
+// of another identity exist, so that its loop keeps looking (runCoverage): the identity it is
+// configured with becomes the active one once no live process carries the one before it, and from
+// then on its runs do the dropping.
+func runIdentitySteps(ctx context.Context, deps Deps, identity string) (identityRun, error) {
+	mine, active, err := deps.embedderActive(ctx)
+	if err != nil {
+		return identityRun{}, fmt.Errorf("coverage pass: %w", err)
+	}
+	result := identityRun{active: active, mine: mine}
+	if !mine {
+		foreign, err := foreignRowsExist(ctx, deps, identity)
+		if err != nil {
+			return identityRun{}, err
+		}
+		result.foreign, result.skipped = foreign, foreign
+		return result, nil
+	}
+	run, skipped, err := decideIdentitySteps(ctx, deps, identity)
+	if err != nil {
+		return identityRun{}, err
+	}
+	result.foreign, result.skipped = run || skipped, skipped
+	if !run {
+		return result, nil
+	}
+	for _, source := range coverageSources {
+		for _, step := range []coverStep{
+			{&result.dropped, dropForeignVectors, []any{source.kind, identity, coverageStatementRows}},
+			{&result.readmitted, readmitForeignDead, []any{source.kind, identity, coverageStatementRows}},
+		} {
+			if err := step.run(ctx, deps, source.kind); err != nil {
+				return identityRun{}, err
+			}
+		}
+	}
+	return result, nil
 }
 
 // Cover is the coverage pass: for every kind in coverageSources it adds a row for each item that
@@ -297,14 +371,21 @@ func decideIdentitySteps(ctx context.Context, deps Deps, identity string) (run, 
 // changed, whether it skipped those two steps, which identity is active, and the coverage that
 // leaves (Coverage). Every step is a statement of at most coverageStatementRows rows in its own
 // short transaction, repeated until one changes nothing, and each is safe beside a live write and
-// beside another process's pass, so it takes no lease: every envoy-dispatch process runs it. Two
-// processes configured with different embedders, as during a release that changes the embedder,
-// do not drop each other's vectors in turn: only the process whose identity is active runs the
-// two identity steps, and the other sends no canary and drops nothing (activeIdentity says which
-// identity is active, and when that changes).
+// beside another process's pass, so it takes no lease: every envoy-dispatch process runs it, as
+// both do at boot during a rolling deploy, and a lease would let an old-configuration process's
+// pass stand in for the new one's. Two processes configured with different embedders, as during a
+// release that changes the embedder, do not drop each other's vectors in turn: only the process
+// whose identity is active runs the two identity steps, and the other sends no canary and drops
+// nothing (activeIdentity says which identity is active, and when that changes).
 func Cover(ctx context.Context, deps Deps) error {
+	_, err := coverPass(ctx, deps)
+	return err
+}
+
+// coverPass is Cover, returning what its identity steps found for runCoverage.
+func coverPass(ctx context.Context, deps Deps) (identityRun, error) {
 	identity := deps.Embedder.Identity()
-	var added, repaired, dropped, settled, readmitted int64
+	var added, repaired, settled int64
 	for _, source := range coverageSources {
 		for _, step := range []coverStep{
 			{&added, source.insertMissing(), []any{source.kind, coverageStatementRows}},
@@ -312,64 +393,84 @@ func Cover(ctx context.Context, deps Deps) error {
 			{&settled, settleDeadNothingToEmbed, []any{source.kind, identity, coverageStatementRows}},
 		} {
 			if err := step.run(ctx, deps, source.kind); err != nil {
-				return err
+				return identityRun{}, err
 			}
 		}
-	}
-	active, activeIdentity, err := deps.embedderActive(ctx)
-	if err != nil {
-		return fmt.Errorf("coverage pass: %w", err)
 	}
 	// Settling runs first, so a dead row with nothing to embed is never what makes the pass
 	// send a canary.
-	run, skipped := false, !active
-	if active {
-		if run, skipped, err = decideIdentitySteps(ctx, deps, identity); err != nil {
-			return err
-		}
-	}
-	if run {
-		for _, source := range coverageSources {
-			for _, step := range []coverStep{
-				{&dropped, dropForeignVectors, []any{source.kind, identity, coverageStatementRows}},
-				{&readmitted, readmitForeignDead, []any{source.kind, identity, coverageStatementRows}},
-			} {
-				if err := step.run(ctx, deps, source.kind); err != nil {
-					return err
-				}
-			}
-		}
+	steps, err := runIdentitySteps(ctx, deps, identity)
+	if err != nil {
+		return identityRun{}, err
 	}
 	report, err := Coverage(ctx, deps.Store, identity)
 	if err != nil {
-		return fmt.Errorf("coverage pass: %w", err)
+		return identityRun{}, fmt.Errorf("coverage pass: %w", err)
 	}
 	var oldest any // null in the log when nothing lacks, as in the report
 	if report.Total.OldestLackingSeconds != nil {
 		oldest = *report.Total.OldestLackingSeconds
 	}
 	slog.Info("dispatch embedqueue: coverage pass",
-		"identity", identity, "activeIdentity", activeIdentity, "added", added, "repaired", repaired,
-		"foreignVectorsDropped", dropped, "deadNothingToEmbedSettled", settled, "foreignDeadReadmitted", readmitted,
-		"identityStepsSkipped", skipped,
+		"identity", identity, "activeIdentity", steps.active, "added", added, "repaired", repaired,
+		"foreignVectorsDropped", steps.dropped, "deadNothingToEmbedSettled", settled, "foreignDeadReadmitted", steps.readmitted,
+		"identityStepsSkipped", steps.skipped,
 		"items", report.Total.Items, "current", report.Total.Current, "lacking", report.Total.Lacking,
 		"failed", report.Total.Failed, "oldestLackingSeconds", oldest)
-	return nil
+	return steps, nil
 }
 
-// runCoverage runs Cover at once and then every coverageInterval until ctx ends. A failed pass is
-// logged and the next tick tries again: every step is idempotent, so nothing is lost by waiting.
+// recheckIdentity is the coverage loop's later run: the identity steps alone, logged when they
+// changed anything.
+func recheckIdentity(ctx context.Context, deps Deps) (identityRun, error) {
+	identity := deps.Embedder.Identity()
+	steps, err := runIdentitySteps(ctx, deps, identity)
+	if err == nil && (steps.dropped > 0 || steps.readmitted > 0) {
+		slog.Info("dispatch embedqueue: coverage identity recheck",
+			"identity", identity, "foreignVectorsDropped", steps.dropped, "foreignDeadReadmitted", steps.readmitted)
+	}
+	return steps, err
+}
+
+// runCoverage runs Cover once at start, and after it only what a later moment can change. Writes
+// reach the queue through their triggers in their own transactions, so the rest of the pass - what
+// no trigger saw - has nothing new to find until the next boot. The identity steps do: while a run
+// finds rows of another identity, a rolling deploy that changed the identity may still have an
+// old-configuration process committing its vectors, so the loop runs the identity steps again
+// every identityRecheckInterval (jittered) until a run finds none, and then holds no timer and
+// makes no statement. A run that skipped them because the embedder had not answered runs them
+// again as soon as it does (Deps.proven: the queue's first successful embed), not ten minutes
+// later; one that skipped them because this process's identity is not the active one has nothing
+// of its own to wait for, and looks again on the timer, since the identity it is configured with
+// becomes active once no live process carries the one before it. A failed run is logged and
+// tried again after identityRecheckInterval: every step is idempotent, so nothing is lost by
+// waiting.
 func runCoverage(ctx context.Context, deps Deps) {
-	ticker := time.NewTicker(coverageInterval)
-	defer ticker.Stop()
+	pass := coverPass
 	for {
-		if err := Cover(ctx, deps); err != nil && ctx.Err() == nil {
-			slog.Error("dispatch embedqueue: coverage pass failed; the next one runs on schedule", "error", err)
+		steps, err := pass(ctx, deps)
+		var answered <-chan struct{}
+		switch {
+		case ctx.Err() != nil:
+			return
+		case err != nil:
+			slog.Error("dispatch embedqueue: coverage pass failed; it runs again later", "error", err, "retryIn", identityRecheckInterval)
+		case !steps.foreign:
+			return
+		default:
+			pass = recheckIdentity
+			if steps.skipped && steps.mine {
+				answered = deps.proven.answered()
+			}
 		}
+		timer := time.NewTimer(duty.Jittered(identityRecheckInterval))
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
+		case <-answered:
+			timer.Stop()
 		}
 	}
 }

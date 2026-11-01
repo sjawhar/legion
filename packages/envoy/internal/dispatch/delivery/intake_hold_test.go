@@ -237,7 +237,7 @@ func startIntakeProcess(t *testing.T, pool *store.Pool, natsURL string, block fu
 	process.release = sync.OnceFunc(func() { close(held) })
 	t.Cleanup(process.release)
 
-	intake := newIntake(client, second.Pool, process.leases, github, events.NewBroker())
+	intake := newIntake(client, second.Pool, process.leases, github, events.NewBroker(), loadedSettingsCache(t, t.Context(), second.Pool))
 	runCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -286,10 +286,12 @@ func awaitAckPending(t *testing.T, publisher *bus.Client, want int) {
 
 // A holder stopped gracefully, as a rolling release stops the old process, hands the messages it
 // had been delivered and not yet handled back at once, and lets the standby take over at once: the
-// standby handles every one of them within seconds, not after the ack wait.
+// standby handles every one of them within seconds, not after the ack wait. The messages it holds
+// are the ones waiting behind their key (intakeKey): one pull request's messages run one after
+// another, so four more of the one its handler is holding wait behind it.
 func TestAGracefulStopHandsTheBufferedMessagesToTheStandby(t *testing.T) {
 	shrinkIntakeFlowControl(t)
-	// One message in the holder's handler and four behind it in its client's buffer.
+	// One message in the holder's handler and four behind it on its key.
 	maxAckPending := intakeMaxAckPending
 	intakeMaxAckPending = 5
 	t.Cleanup(func() { intakeMaxAckPending = maxAckPending })
@@ -299,6 +301,7 @@ func TestAGracefulStopHandsTheBufferedMessagesToTheStandby(t *testing.T) {
 	publisher := intakeTestClient(t)
 
 	const inFlight = 100
+	const queued = 4
 	holder := startIntakeProcess(t, pool, natsURL, func(number int) bool { return number == inFlight })
 	awaitBoundDurable(t, publisher)
 	standby := startIntakeProcess(t, pool, natsURL, nil)
@@ -307,33 +310,23 @@ func TestAGracefulStopHandsTheBufferedMessagesToTheStandby(t *testing.T) {
 	waitFor(t, 20*time.Second, func() bool { return holder.fetches(inFlight) == 1 }, func() string {
 		return "the holder never started on the first message: " + consumerState(publisher)
 	})
-	buffered := []int{1, 2, 3, 4}
-	for _, number := range buffered {
-		publishMergedPullRequest(t, publisher, number)
+	for range queued {
+		publishMergedPullRequest(t, publisher, inFlight)
 	}
-	awaitAckPending(t, publisher, 1+len(buffered))
+	awaitAckPending(t, publisher, 1+queued)
 
 	stopped := time.Now()
 	go holder.stop()
 	// The message in the holder's handler finishes as the stop begins.
 	holder.release()
 
-	waitFor(t, 5*time.Second, func() bool {
-		for _, number := range buffered {
-			if standby.fetches(number) == 0 {
-				return false
-			}
-		}
-		return true
-	}, func() string {
-		return fmt.Sprintf("the standby has not handled the stopped holder's buffered messages %v within 5s: standby %v, holder %v; %s",
-			buffered, fetchesOf(standby, buffered), fetchesOf(holder, buffered), consumerState(publisher))
+	waitFor(t, 10*time.Second, func() bool { return standby.fetches(inFlight) == queued }, func() string {
+		return fmt.Sprintf("the standby has not handled the stopped holder's %d queued messages of pull request %d within 10s: standby %d, holder %d; %s",
+			queued, inFlight, standby.fetches(inFlight), holder.fetches(inFlight), consumerState(publisher))
 	})
-	t.Logf("the standby handled the buffered messages %s after the holder's stop", time.Since(stopped))
-	for _, number := range buffered {
-		if got := holder.fetches(number); got != 0 {
-			t.Errorf("the stopping holder handled buffered message %d (%d fetches); it should have handed it back", number, got)
-		}
+	t.Logf("the standby handled the queued messages %s after the holder's stop", time.Since(stopped))
+	if got := holder.fetches(inFlight); got != 1 {
+		t.Errorf("the stopping holder fetched pull request %d %d times; want the one its handler held, the rest handed back", inFlight, got)
 	}
 }
 
@@ -551,7 +544,9 @@ func TestAStandbyOfAnOlderGenerationLeavesANewerConsumerAlone(t *testing.T) {
 	awaitPushBound(t, publisher, "the newer build's process is not bound")
 
 	standby := startIntakeProcess(t, pool, natsURL, nil)
-	time.Sleep(2*settingsPollInterval + durableBindInterval)
+	// Several of the standby's attempts (durableBindInterval): long enough that one that was
+	// going to change the durable would have.
+	time.Sleep(5 * durableBindInterval)
 	after, err := publisher.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 	if err != nil {
 		t.Fatalf("read the durable: %v", err)

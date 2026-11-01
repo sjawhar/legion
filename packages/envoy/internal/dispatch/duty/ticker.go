@@ -1,11 +1,14 @@
-// Package duty runs envoy-dispatch's periodic background loops and keeps each to one pass per
-// period across the processes serving one database. RunJittered is the "jittered-start, run every
-// interval until cancelled" loop every background GitHub-App importer uses (architecture.Run,
-// delivery.Reconcile.Run): the jitter avoids a restart stampeding GitHub, and the idle check lets
-// a caller with no App credentials configured skip the loop entirely rather than tick forever
-// doing nothing. RunLeased is the loop of every other leased maintenance loop of a fixed cadence,
-// RunLeasedAfterEachPass the loop of those paced by their own passes, and Exclusive is the lease
-// and period gate a pass of any of them runs through.
+// Package duty holds the shapes Dispatch's background loops run in, and the lease that keeps two
+// processes from doing one loop's work twice. RunJittered is the timer loop, for work that has no
+// change to wake on - the GitHub-App importers (architecture.Run, delivery.Reconcile.Run), since
+// GitHub has no feed of what they would miss: a jittered start and a jittered wait after every pass,
+// so a restart does not stampede GitHub and two processes' ticks do not fall into step, and an idle
+// check so a caller with no App credentials configured skips the loop entirely rather than tick
+// forever doing nothing. RunLeased is the loop of every other leased maintenance loop of a fixed
+// cadence, and RunLeasedAfterEachPass the loop of those paced by their own passes. RunWoken is the
+// change-driven loop, for work a Postgres notification can announce: one pass at start, then a pass
+// only when woken or when the last pass asked for one, so an idle database costs it nothing.
+// Exclusive is the lease and period gate a pass of any of them may run through.
 package duty
 
 import (
@@ -14,30 +17,53 @@ import (
 	"time"
 )
 
-// RunJittered calls pass on every tick of interval until ctx is cancelled, starting after a
-// jittered delay in [0, interval) so a restart does not stampede whatever pass calls. idle is
-// checked once, before the first tick: when it returns true the loop never starts (the caller is
-// expected to have logged why inside idle itself). pass receives the moment its tick was due, the
-// time its timer delivered, which is what a leased pass hands Exclusive.
+// jitterN draws a duration in [0, n), and zero for an n of zero or less. Every jittered wait in this
+// package draws from it, and it is a variable only so a test can fix the draw.
+var jitterN = func(n time.Duration) time.Duration {
+	if n <= 0 {
+		return 0
+	}
+	// #nosec G404 — jitter, not a secret.
+	return rand.N(n)
+}
+
+// Jittered is d plus up to a tenth of d again, drawn afresh each call, so the waits of processes
+// that booted together drift apart. The jitter only ever adds, so a jittered wait is never shorter
+// than the d it was asked for - which is what keeps a periodic pass from landing inside a period
+// duty_passes already records as served (Exclusive): a wait of at least one period always reaches
+// the next boundary.
+func Jittered(d time.Duration) time.Duration {
+	return d + jitterN(d/10)
+}
+
+// RunJittered calls pass every interval until ctx is cancelled, starting after a jittered delay in
+// [0, interval) so a restart does not stampede whatever pass calls. Each wait after a pass is the
+// interval plus up to a tenth of it again (jittered), drawn afresh each time, so two processes that
+// booted with nearby phases drift apart rather than ticking in step for the life of both: a gap
+// between passes is at least one interval and under 1.1 of one, plus the pass's own run time. idle
+// is checked once, before the first tick: when it returns true the loop never starts (the caller is
+// expected to have logged why inside idle itself).
+//
+// pass receives the moment its tick was due, the time its timer delivered, which is what a leased
+// pass hands Exclusive. Each timer is armed once the pass before it has returned and waits at least
+// one interval, so two due times are at least one interval apart and a lone loop's tick is never
+// refused by the period its own previous pass recorded, however late either one's lease came.
 func RunJittered(ctx context.Context, interval time.Duration, idle func() bool, pass func(ctx context.Context, due time.Time)) {
 	if idle() {
 		return
 	}
-	// #nosec G404 — jitter, not a secret.
-	start := time.Duration(rand.Int64N(int64(interval)))
-	var due time.Time
-	select {
-	case <-ctx.Done():
-		return
-	case due = <-time.After(start):
-	}
+	wait := jitterN(interval)
 	for {
-		pass(ctx, due)
+		timer := time.NewTimer(wait)
+		var due time.Time
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case due = <-time.After(interval):
+		case due = <-timer.C:
 		}
+		pass(ctx, due)
+		wait = Jittered(interval)
 	}
 }
 
@@ -94,9 +120,9 @@ func RunLeased(ctx context.Context, leases Leases, name string, interval time.Du
 // and each next tick comes the wait its pass returned after that pass returned, not after the tick
 // before it was due. pass is given the period of its tick, the span Exclusive gave it, and returns
 // that wait, which must be positive: the interval, or a wait of its own for a loop that speeds up
-// while work remains, as the reference-excerpt and block-index reconciliations step two seconds
-// after a full batch. A tick whose pass did not run waits interval, and a pass that shutdown cut
-// short still returns its wait, which goes unused.
+// while work remains, as the block-index reconciliation steps two seconds after a full batch. A
+// tick whose pass did not run waits interval, and a pass that shutdown cut short still returns its
+// wait, which goes unused.
 //
 // The period of a tick, the span Exclusive gives it, is the wait before it - interval for the
 // first - and its due time is the moment its timer fired, a timer armed once the tick before it

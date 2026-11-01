@@ -51,7 +51,7 @@ func TestACopyHoldsEveryItemOneClientWroteAheadOfItsParent(t *testing.T) {
 	if !bytes.Equal(crdt.EncodeStateAsUpdateV1(snapshot, nil), state) {
 		t.Fatal("the snapshot holds a different document from its room")
 	}
-	fork, err := buildFork(&liveWrite{clientID: 42}, false, state)
+	fork, err := buildFork(42, state)
 	if err != nil {
 		t.Fatalf("fork the room for a write: %v", err)
 	}

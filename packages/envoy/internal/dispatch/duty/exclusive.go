@@ -24,9 +24,11 @@ type Leases interface {
 // internal/dispatch/docs already fills - a document's room, a project's rank allocation, an agent's
 // artifacts and the migration runner are each a single key (the enumeration in docs/copied_asks.go,
 // at lockProjectCopies) - so a lease can never collide with one of those, whatever its name hashes
-// to. Within the two-key space the only other namespace is the copy locks'
-// (docs.copiedAsksLockNamespace), so a lease's second key, its name's hashtext, separates the leases
-// from each other and from nothing else.
+// to. Within the two-key space the only other namespaces are the copy locks'
+// (docs.copiedAsksLockNamespace, "COPY") and the test hooks' (the api package's
+// testHookLockNamespace, "HOOK", taken only under DISPATCH_TEST_HOOKS), each a first key of its
+// own, so a lease's second key, its name's hashtext, separates the leases from each other and from
+// nothing else.
 const leaseNamespace int32 = 0x4C4F4F50
 
 // takeLease tries for a lease without queueing behind its holder, and freeLease gives it back. Both
@@ -69,12 +71,12 @@ const (
 // and a loop's period can differ between the two builds. With one row per lease, each build's pass
 // overwrote the other's, so every tick after a pass at the other period ran. With one row per
 // period, the processes at one period make one pass per period between them, whatever the
-// processes at another period do. docs.RunReferenceExcerptReconciliation varies its own period
-// between ticks - two seconds while drift remains, five minutes when none does - and its two-second
-// boundary lies at or after the current five-minute one for all but the first two seconds of every
-// five-minute bucket, so a comparison that ignored the scale would refuse that loop's interval tick
-// about 149 times in 150 (measured; and under the bucket-number form this replaces, which was
-// scale-dependent in the same way, it refused every later tick for ever). A record made at another
+// processes at another period do. A two-second boundary lies at or after the current five-minute
+// one for all but the first two seconds of every five-minute bucket, so a comparison that ignored
+// the scale would refuse a five-minute tick after a two-second record about 149 times in 150
+// (measured; and under the bucket-number form this replaces, which was scale-dependent in the same
+// way, it refused every later tick for ever). A lease's period changes when a release changes its
+// loop's interval and runs beside the release before it during a roll. A record made at another
 // period therefore serves nothing, so a change of period costs at most one pass. That is the
 // direction to err in - the other direction is a loop that stops.
 //

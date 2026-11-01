@@ -369,50 +369,43 @@ func buildCopyLockGraph() (*lockGraph, error) {
 	return graph, nil
 }
 
-// addFile registers every function, method and function literal source declares.
+// addFile registers every function, method and function literal source declares, including the
+// literals in package-level declarations (var decode = func(...) {...}), which a call through the
+// variable runs like any other stored function.
 func (g *lockGraph) addFile(source moduleSource) {
 	pkg := source.file.Name.Name
 	for _, declared := range source.file.Decls {
-		decl, ok := declared.(*ast.FuncDecl)
-		if !ok {
-			// A function literal a package-level declaration holds - a var a test swaps for
-			// one of its own, a function in a struct literal - is a body no declared function
-			// holds. Registering it here is what makes a call through that variable reach a
-			// body at all: addStored records the literal as what the variable holds, so
-			// without this the graph stores nothing for it and reads a call of it as reaching
-			// no function.
-			g.addLiterals(source, pkg, declared, "")
-			continue
+		switch decl := declared.(type) {
+		case *ast.GenDecl:
+			g.addLiterals(source, pkg, decl, "package "+pkg)
+		case *ast.FuncDecl:
+			if decl.Body == nil {
+				continue
+			}
+			object, ok := g.info.Defs[decl.Name].(*types.Func)
+			if !ok {
+				continue
+			}
+			fn := &lockFunction{name: functionName(object), pkg: pkg, body: decl.Body, source: source}
+			g.add(fn)
+			g.named[fn.name] = fn
+			g.declared[object] = fn
+			g.addLiterals(source, pkg, decl.Body, fn.name)
 		}
-		if decl.Body == nil {
-			continue
-		}
-		object, ok := g.info.Defs[decl.Name].(*types.Func)
-		if !ok {
-			continue
-		}
-		fn := &lockFunction{name: functionName(object), pkg: pkg, body: decl.Body, source: source}
-		g.add(fn)
-		g.named[fn.name] = fn
-		g.declared[object] = fn
-		g.addLiterals(source, pkg, decl.Body, fn.name)
 	}
 }
 
-// addLiterals registers each function literal node holds as a function of its own, named by where
-// it stands and, when within names the declared function whose body node is, by that function.
-func (g *lockGraph) addLiterals(source moduleSource, pkg string, node ast.Node, within string) {
+// addLiterals registers every function literal inside node, naming each after where it is.
+func (g *lockGraph) addLiterals(source moduleSource, pkg string, node ast.Node, where string) {
 	ast.Inspect(node, func(node ast.Node) bool {
-		lit, ok := node.(*ast.FuncLit)
-		if !ok {
-			return true
+		if lit, ok := node.(*ast.FuncLit); ok {
+			fn := &lockFunction{
+				name: fmt.Sprintf("the function literal at %s in %s", g.line(source, lit), where),
+				pkg:  pkg, body: lit.Body, source: source,
+			}
+			g.add(fn)
+			g.literals[lit] = fn
 		}
-		name := fmt.Sprintf("the function literal at %s", g.line(source, lit))
-		if within != "" {
-			name += " in " + within
-		}
-		g.add(&lockFunction{name: name, pkg: pkg, body: lit.Body, source: source})
-		g.literals[lit] = g.functions[len(g.functions)-1]
 		return true
 	})
 }
@@ -500,7 +493,7 @@ func (g *lockGraph) addStored(source moduleSource) {
 func (g *lockGraph) functionValue(value ast.Expr) []*lockFunction {
 	switch v := ast.Unparen(value).(type) {
 	case *ast.FuncLit:
-		return []*lockFunction{g.literals[v]}
+		return g.literal(v)
 	case *ast.Ident:
 		if fn, ok := g.info.Uses[v].(*types.Func); ok {
 			return g.funcTargets(fn)
@@ -513,6 +506,16 @@ func (g *lockGraph) functionValue(value ast.Expr) []*lockFunction {
 		} else if fn, ok := g.info.Uses[v.Sel].(*types.Func); ok {
 			return g.funcTargets(fn)
 		}
+	}
+	return nil
+}
+
+// literal is the body lit runs. addFile registers every literal in the module's files, so none
+// should be missing; one that is (a declaration shape addFile does not walk) yields nothing rather
+// than a nil function the reach fixpoint would dereference.
+func (g *lockGraph) literal(lit *ast.FuncLit) []*lockFunction {
+	if fn, ok := g.literals[lit]; ok {
+		return []*lockFunction{fn}
 	}
 	return nil
 }
@@ -611,7 +614,7 @@ func (g *lockGraph) callees(call *ast.CallExpr) []*lockFunction {
 	}
 	switch f := fun.(type) {
 	case *ast.FuncLit:
-		callees = append(callees, g.literals[f])
+		callees = append(callees, g.literal(f)...)
 	case *ast.Ident:
 		switch object := g.info.Uses[f].(type) {
 		case *types.Func:

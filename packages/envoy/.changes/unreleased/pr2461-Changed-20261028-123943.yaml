@@ -2,14 +2,14 @@ kind: Changed
 body: |-
     Dispatch processes configured with different embedders no longer drop each other's vectors in
     turn. One embedder identity is active at a time, the one row of the new table `embedder_active`
-    (migration `0153_embedder_active`): it stays active while a live server process registers it, and
-    otherwise passes to the earliest-started live process that registers one. Only a process whose
-    identity is active drops other identities' vectors, embeds and reserves tokens; any other answers
-    meaning search with text matches only. A build before this one drops every identity but its own,
-    so change the embedder no sooner than the release after this one. While a live server process has
-    no file bucket, an upload to a process with one keeps its bytes in `artifact_versions.content` as
-    well, and `envoy-dispatch backfill-files` refuses with exit 1, naming each such process;
-    `--verify-only` and `--restore` still run.
+    (migration `20261101030538_embedder_active`): it stays active while a live server process
+    registers it, and otherwise passes to the earliest-started live process that registers one. Only
+    a process whose identity is active drops other identities' vectors, embeds and reserves tokens;
+    any other answers meaning search with text matches only. A build before this one drops every
+    identity but its own, so change the embedder no sooner than the release after this one. While a
+    live server process has no file bucket, an upload to a process with one keeps its bytes in
+    `artifact_versions.content` as well, and `envoy-dispatch backfill-files` refuses with exit 1,
+    naming each such process; `--verify-only` and `--restore` still run.
 time: 2026-10-28T12:39:43.328206758Z
 custom:
     Issue: pr2461

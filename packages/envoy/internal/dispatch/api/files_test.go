@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
@@ -313,11 +314,18 @@ func (h heldPut) Put(ctx context.Context, sha, mime string, body []byte) error {
 // the issue's row is free: the transaction locks it for no key update, and every other writer
 // of the issue (a comment, an ask, a status change) would queue behind a store write nothing
 // bounds.
+//
+// The settlement of the spec the issue creation seeds is one of those writers - it takes the same
+// row for no key update (docs.lockArtifactOwner) for the ten-odd milliseconds its transaction
+// runs - so this test keeps it out of the window, as the other lock-order tests of an upload do
+// (upload_lock_test.go): under the default delay it fires about twenty milliseconds after the
+// issue is created, which lands inside the park here often enough to fail the nowait below on a
+// loaded machine, naming a lock that is not the upload's.
 func TestAnUploadHoldsNoIssueLockWhileTheStoreWrites(t *testing.T) {
 	held := heldPut{Memory: filestest.NewMemory(), entered: make(chan struct{}), release: make(chan struct{})}
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(held.release) }) }
-	handler, database, _ := newTestServer(t, testServerOptions{files: held})
+	handler, database, _ := newTestServer(t, testServerOptions{files: held, settle: time.Hour})
 	issue := fileIssue(t, handler)
 
 	var body bytes.Buffer

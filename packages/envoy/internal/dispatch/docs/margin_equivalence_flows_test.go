@@ -42,7 +42,10 @@ func equivalenceFlows() []equivalenceFlow {
 		{name: "an anchored comment", refreshing: []string{"MarkQuote"}, run: func(r *flowRun) error {
 			return r.anchoredComment("A new comment on this sentence.", false)
 		}},
-		{name: "an anchored comment beside a browser edit", refreshing: []string{"MarkQuote", "ProjectMark"}, run: func(r *flowRun) error {
+		// The browser's edit lands after the transaction's one read of the document, so it moves
+		// no anchor of this transaction and its ProjectMark refreshes none; the later writes'
+		// flows above and below cover a ProjectMark that refreshes.
+		{name: "an anchored comment beside a browser edit", refreshing: []string{"MarkQuote"}, run: func(r *flowRun) error {
 			return r.anchoredComment("A new comment written while a browser edits.", true)
 		}},
 		{name: "a reply", refreshing: []string{"ProjectMark"}, run: func(r *flowRun) error {
@@ -144,7 +147,8 @@ func (r *flowRun) project(markID string, record MarkRecord, path marginPath) err
 // anchoredComment is a new anchored comment as the create route writes it: the anchor
 // (resolveAnchor's MarkQuote and SnapshotVersion), the comment's row, and its margin record, which
 // reuses the rendering MarkQuote kept. With lateEdit a browser edit lands in the room between the
-// row and the margin record, so the fork moves and the kept rendering no longer describes it.
+// row and the margin record; the transaction reads the document once, so the edit never reaches
+// its fork and the kept rendering describes it still.
 func (r *flowRun) anchoredComment(body string, lateEdit bool) error {
 	var anchored Anchored
 	if err := r.operation("MarkQuote", func() (any, error) {
@@ -169,14 +173,12 @@ func (r *flowRun) anchoredComment(body string, lateEdit bool) error {
 	if err := insertComment(r.ctx, r.tx, r.ids, newCommentID, nil, flowActor, body, &anchor, nil, nil, nil, flowAt); err != nil {
 		return err
 	}
-	path := reusedRendering
 	if lateEdit {
 		r.side.applyBrowserEdit(r.t, r.ids.artifact, r.document.lateEdit, lateEditor)
-		path = readRendering
 	}
 	return r.project(newCommentID, MarkRecord{
 		Kind: "comment", By: ActorRef(flowActor), CreatedAt: flowAt.Format(time.RFC3339Nano), Text: body, Replies: []MarkReply{},
-	}, path)
+	}, reusedRendering)
 }
 
 // reply is a reply to an anchored comment as the create route writes it: the reply's row, then

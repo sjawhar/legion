@@ -17,13 +17,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
-	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -46,43 +44,43 @@ type Intake struct {
 	pool   *store.Pool
 	github *githubapp.Client
 	events *events.Broker
-	// current is the settings the handler routes by. Read on every settingsPollInterval tick and
-	// published here rather than captured by the handler: the durable's filter subject never
-	// changes, so a settings change must reach the running handler without rebinding anything.
-	// Only settings whose deploy repository splitRepo accepts are published, so route can compare
-	// against it as it stands.
-	current atomic.Pointer[DeliverySettings]
+	// settings is the delivery settings every message is routed by, shared with the job intake
+	// (StartIntakes).
+	settings *SettingsCache
 	// heldDurable is this intake's delivery from bus.DispatchDeliveryDurable under the durable's
-	// hold: subscribe, stopDelivering and the take-over.
+	// hold: the subscription, StopDelivering and the take-over.
 	heldDurable
 }
 
 // newIntake builds an Intake on natsClient, a connected client StartIntakes opens for it alone,
-// holding its durable and taking it over under a hold and a lease it takes on leases.
-func newIntake(natsClient *bus.Client, pool *store.Pool, leases intakeLeases, github *githubapp.Client, broker *events.Broker) *Intake {
-	in := &Intake{pool: pool, github: github, events: broker}
-	in.heldDurable = newHeldDurable(natsClient, leases, deliveryConsumerConfig, in.deliver)
+// holding its durable and taking it over under a hold and a lease it takes on leases, and routing
+// by settings.
+func newIntake(natsClient *bus.Client, pool *store.Pool, leases intakeLeases, github *githubapp.Client, broker *events.Broker, settings *SettingsCache) *Intake {
+	in := &Intake{pool: pool, github: github, events: broker, settings: settings}
+	in.heldDurable = newHeldDurable(natsClient, leases, deliveryConsumerConfig, intakeKey, in.deliver)
 	return in
 }
 
 // Run delivers GitHub events from the durable consumer while this process holds the durable's
-// hold, and stands by for the hold while another process holds it, until ctx is cancelled. Idle
-// until a delivery_settings row exists.
+// hold, and stands by for the hold while another process holds it, until ctx is cancelled; then
+// it stops delivering and releases the hold (heldDurable.stop) under intakeStopBudget from ctx's
+// end before it returns. Idle until the settings cache holds settings.
 //
 // The durable carries one filter subject, githubIntakeSubject, which no setting changes, so no
-// setting rebinds it. delivery_settings is read on every settingsPollInterval tick and published
-// to the running handler, so a settings change -- a different deploy repository or workflow path
-// -- takes effect within one poll interval with no restart. route does all the filtering, from
-// those settings.
+// setting rebinds it. Each message is routed by the settings the cache holds when its handler
+// runs, so a settings change -- a different deploy repository or workflow path -- takes effect as
+// soon as the cache has read it, with no restart and no rebind. route does all the filtering,
+// from those settings.
 //
 // Several envoy-dispatch processes run at once during a rolling release, of this build and of the
 // one before it, and exactly one of them delivers from the durable: the one holding its hold
 // (heldDurable). The others stand by, trying for the hold every durableBindInterval for the life
 // of the process, with no deadline, and take the durable over within seconds of the holder
-// releasing its hold, or of the hold lapsing when the holder dies. A holder checks every
+// releasing its hold, or of the hold lapsing when the holder dies. Two things wake a standby that
+// has nothing to route by yet: the cache storing settings, since an intake with none has nothing
+// to do with a message, and, once it has settings, that ticker. A holder checks every
 // intakeHoldRenew that the durable still delivers to it, and stops delivering the moment its hold
-// is lost. When ctx ends it stops delivering, handing back what it holds, and releases the hold,
-// so a standby takes over at once (heldDurable.stop).
+// is lost.
 //
 // The PR-checks workflow path is live-reachable only for a fork-originated pull request: Envoy's
 // own webhook normalizer (internal/contracts/normalize.go, untouched by this package) drops a
@@ -92,42 +90,8 @@ func newIntake(natsClient *bus.Client, pool *store.Pool, leases intakeLeases, gi
 // them. Routed rather than ignored because it is the only live-update path for the fork case,
 // which does reach it.
 func (in *Intake) Run(ctx context.Context) {
-	reads := time.NewTicker(settingsPollInterval)
-	defer reads.Stop()
-	refresh := func() {
-		settings, err := GetSettings(ctx, in.pool)
-		if err != nil {
-			if errors.Is(err, ErrNoSettings) {
-				return
-			}
-			slog.Error("dispatch delivery: read settings for intake", "error", err)
-			return
-		}
-		if _, _, err := splitRepo(settings.DeployRepo); err != nil {
-			slog.Error("dispatch delivery: deploy_repo setting", "error", err)
-			return
-		}
-		in.current.Store(&settings)
-	}
-	refresh()
-	// The durable is tried only once a settings row has been read: the handler routes by those
-	// settings, and an intake with none has nothing to do with a message.
-	in.run(ctx, reads.C, refresh, func() bool { return in.current.Load() != nil })
+	in.run(ctx, in.settings.Changed, func() bool { return in.settings.Load() != nil })
 }
-
-// handle routes one envelope payload by the settings in force (route).
-func (in *Intake) handle(ctx context.Context, payload string) (bool, error) {
-	settings := in.current.Load()
-	if settings == nil {
-		return false, nil
-	}
-	return in.route(ctx, *settings, payload)
-}
-
-// settingsPollInterval is how often Run re-reads delivery_settings so a settings PUT reaches the
-// running handler -- which repository and which workflow paths it routes by -- without an
-// operator restarting the server. A var so a test can shrink it.
-var settingsPollInterval = 30 * time.Second
 
 // route dispatches one envelope payload by its kind field: a pull request to
 // handlePullRequestEnvelope, a workflow run to routeWorkflowEnvelope, any other kind nowhere. It is
@@ -230,8 +194,10 @@ func flatPayload(fields map[string]json.RawMessage) map[string]string {
 }
 
 // githubIntakeSubject is the durable's one filter subject: every GitHub event Envoy relays. The
-// handler decides what to do with each (route), and fetches nothing for the ones this slice does
-// not want, which costs one decode of the payload per envelope.
+// subscription's callback reads each message's subject first (intakeKey) and acknowledges every
+// subject that is not a pull request's own or a workflow run's without decoding it; the handler
+// decides what to do with the rest (route), and fetches nothing for the ones this slice does not
+// want.
 //
 // One subject rather than the set this once carried -- the wildcard pull-request subject
 // notifications.github.*.*.pr.* beside one notifications.github.<owner>.<repo>.workflow.<file>.>
@@ -256,18 +222,18 @@ const githubIntakeSubject = "notifications.github.>"
 var intakeMessageTimeout = time.Minute
 
 // intakeMaxAckPending bounds how many messages NATS may have outstanding with this consumer at
-// once. The handler does its GitHub calls inline on the subscription's own delivery goroutine,
-// one message at a time, so the bound has to be what that one handler can acknowledge well
-// inside intakeAckWait; the server's own default of 1,000 is far past it, and messages it
-// redelivers under a handler still working accumulate in the client's pending buffer until that
-// buffer drops them. A var so a test can shrink it.
+// once, and so how many handlers run at once: one per key (intakeKey), and every message of a key
+// waits for the one before it. All of them can be one key's, so the bound has to be what one
+// handler can acknowledge in turn well inside intakeAckWait; the server's own default of 1,000 is
+// far past it, and messages it redelivers under a handler still working accumulate in the
+// client's pending buffer until that buffer drops them. A var so a test can shrink it.
 var intakeMaxAckPending = 4
 
 // intakeAckWait is how long NATS waits for an acknowledgement before redelivering. Derived from
-// the two values above rather than chosen: the last of intakeMaxAckPending outstanding messages
-// waits for the ones before it, so the bound is their total handling time, plus a minute for the
-// acknowledgement itself to land. A function rather than a value so a test that shrinks either
-// input gets an ack wait derived from it.
+// the two values above rather than chosen: when every outstanding message is one key's, the last
+// of intakeMaxAckPending waits for the ones before it, so the bound is their total handling time,
+// plus a minute for the acknowledgement itself to land. A function rather than a value so a test
+// that shrinks either input gets an ack wait derived from it.
 func intakeAckWait() time.Duration {
 	return time.Duration(intakeMaxAckPending)*intakeMessageTimeout + time.Minute
 }
@@ -311,6 +277,63 @@ func consumerGenerationMetadata() map[string]string {
 	return map[string]string{consumerGenerationKey: strconv.Itoa(consumerConfigGeneration)}
 }
 
+// deliver handles one message on its key's goroutine: it routes the envelope's payload by the
+// settings the cache holds under intakeMessageTimeout, and acks: a malformed envelope has nothing
+// to retry, and a route error (a failed GitHub call, or that deadline passing) is caught up by the
+// next reconcile pass rather than by NATS redelivery -- see the package doc comment. The deadline
+// is what makes intakeAckWait a bound rather than a hope: without it one stuck GitHub call could
+// hold an in-flight slot past the ack wait and have the message redelivered underneath it. An
+// envelope route does not handle (an empty payload, or a kind route sends to no handler) is
+// acknowledged and nothing else: no log line and no freshness write. One it handles records the
+// event's time, whatever its handler decided.
+//
+// The one message it does not ack is one whose handling the stop gave up (handling cancelled,
+// StopDelivering): that is negatively acknowledged, so the next holder of the durable redoes it at
+// once rather than this event waiting five minutes for the reconcile. Its writes are the upserts
+// reconcile makes too, so redoing what had in fact finished just before the stop gave it up
+// writes the same facts again.
+func (in *Intake) deliver(handling context.Context, message intakeMessage) {
+	msg := message.msg
+	defer func() {
+		if handling.Err() != nil {
+			slog.Warn("dispatch delivery: the intake stopped before the event's handling finished; handing it back", "subject", msg.Subject)
+			negativelyAcknowledge(msg)
+			return
+		}
+		acknowledge(msg)
+	}()
+	ctx, cancel := context.WithTimeout(handling, intakeMessageTimeout)
+	defer cancel()
+
+	envelope := message.envelope
+	if envelope == nil {
+		decoded, err := decodeEnvelope(msg.Data)
+		if err != nil {
+			slog.Error("dispatch delivery: decode envelope", "subject", msg.Subject, "error", err)
+			return
+		}
+		envelope = &decoded
+	}
+	settings := in.settings.Load()
+	if settings == nil {
+		return
+	}
+	handled, err := in.route(ctx, *settings, envelope.Payload)
+	switch {
+	case errors.Is(err, errMalformedPayload):
+		slog.Error("dispatch delivery: decode envelope payload", "subject", msg.Subject, "error", err)
+		return
+	case err != nil:
+		slog.Warn("dispatch delivery: process event", "subject", msg.Subject, "error", err)
+		return
+	case !handled:
+		return
+	}
+	if err := RecordEventAt(ctx, in.pool); err != nil {
+		slog.Error("dispatch delivery: record event freshness", "error", err)
+	}
+}
+
 // acknowledge acks msg. An acknowledgement that does not reach the server is never discarded: it
 // leaves the message outstanding, and intakeMaxAckPending of those stop the consumer being given
 // anything until the ack wait expires. The Nak gives the slot back at once; when it fails too (the
@@ -327,41 +350,6 @@ func acknowledge(msg *natsgo.Msg) {
 func negativelyAcknowledge(msg *natsgo.Msg) {
 	if err := msg.Nak(); err != nil {
 		slog.Error("dispatch delivery: negatively acknowledge message", "subject", msg.Subject, "error", err)
-	}
-}
-
-// deliver unwraps one NATS message into its envelope payload, routes it by the settings in force
-// (handle) under intakeMessageTimeout, and always acks: a malformed envelope has nothing to retry,
-// and a route error (a failed GitHub call, or that deadline passing) is caught up by the next
-// reconcile pass rather than by NATS redelivery -- see the package doc comment. The deadline is
-// what makes intakeAckWait a bound rather than a hope: without it one stuck GitHub call could hold
-// an in-flight slot past the ack wait and have the message redelivered underneath it. An envelope
-// route does not handle (an empty payload, or a kind route sends to no handler) is acknowledged
-// and nothing else: no log line and no freshness write. One it handles records the event's time,
-// whatever its handler decided.
-func (in *Intake) deliver(msg *natsgo.Msg) {
-	defer acknowledge(msg)
-	ctx, cancel := context.WithTimeout(context.Background(), intakeMessageTimeout)
-	defer cancel()
-
-	var envelope contracts.Envelope
-	if err := json.Unmarshal(msg.Data, &envelope); err != nil {
-		slog.Error("dispatch delivery: decode envelope", "subject", msg.Subject, "error", err)
-		return
-	}
-	handled, err := in.handle(ctx, envelope.Payload)
-	switch {
-	case errors.Is(err, errMalformedPayload):
-		slog.Error("dispatch delivery: decode envelope payload", "subject", msg.Subject, "error", err)
-		return
-	case err != nil:
-		slog.Warn("dispatch delivery: process event", "subject", msg.Subject, "error", err)
-		return
-	case !handled:
-		return
-	}
-	if err := RecordEventAt(ctx, in.pool); err != nil {
-		slog.Error("dispatch delivery: record event freshness", "error", err)
 	}
 }
 

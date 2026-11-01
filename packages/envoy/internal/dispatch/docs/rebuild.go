@@ -209,7 +209,7 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	}
 	// RebuildTx holds the document's advisory lock until this transaction ends, so the pending
 	// authors read here are the ones the version's commit deletes.
-	capture, err := s.capturePendingAuthors(ctx, tx, artifactID, nil, &actor)
+	capture, err := s.capturePendingAuthors(ctx, tx, artifactID, nil, &actor, everyCredit)
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}

@@ -242,7 +242,7 @@ func TestBroadcastRepeatResumesEveryOwedRecipientAndDeliversEachOnce(t *testing.
 		}
 	}
 	// The planner's frame landed before the process stopped.
-	if _, err := direct.deliverMessageResuming(ctx, recipient("planner"), "btw", nil, actor, nil, 1); err != nil {
+	if _, err := direct.deliverMessageResuming(ctx, recipient("planner"), "btw", actor, nil, 1); err != nil {
 		t.Fatalf("deliver the one recipient the process reached: %v", err)
 	}
 	// The tester's sender claimed its attempt and died inside the send: the claim has lapsed.

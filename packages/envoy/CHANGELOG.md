@@ -1,5 +1,277 @@
 # Changelog
 
+## [26.2.0] - 2026-11-01
+
+### Changed
+
+- A Dispatch migration added from now on is named for the UTC moment its author created it,
+  `YYYYMMDDHHMMSS` (`date -u +%Y%m%d%H%M%S`), with its census under the same timestamp, instead
+  of the next free number: two pull requests open at once each took the next number, nothing
+  conflicted in git, and the clash showed only once one of them merged. The numbered versions
+  keep the numbers they landed with, a timestamp orders after every number, and a migration that
+  merges below one a database has already applied still runs there exactly once, since the
+  runner applies every version `schema_migrations` does not record. A migration must therefore
+  not depend on its order relative to one written in a concurrent pull request: a deployed
+  database applies each one as the release carrying it deploys, so it can apply them in the
+  other order than a fresh database does. `schema_migrations.version` is now a `bigint`, which a
+  14-digit version needs; a database that has the table as an `integer` keeps it until the first
+  boot whose set holds a timestamped migration, which widens it once, in the locked transaction
+  the runner creates the table in, so the previous release's health probe keeps answering during
+  this one's roll. Roll this release out before any release that carries a timestamped
+  migration. `schema_version` in `/healthz` is unchanged, the highest version applied rather
+  than proof that every version below it is applied; the auto-deployer's rollback guard now
+  compares the whole set of versions `schema_migrations` records, and records it in
+  `compose/.env` as `ENVOY_IMAGE_SCHEMA=<tag>:<max>-<count>-<digest>`.
+
+## [26.1.1] - 2026-11-01
+
+### Changed
+
+- Dispatch's change-driven background loops send no statement while nothing is written. The
+  embedding queue (which scanned every 5 s), the reference excerpt reconciliation (every five
+  minutes, and every 2 s while a batch came back full), the suggestion outcome sweep (every
+  minute) and both GitHub intakes' delivery settings (read every 30 s, and by the job intake on
+  every message) now run a pass at start and then only when a Postgres notification says their
+  work may have changed or a due time they asked for comes round, never more often than the timer
+  each replaced. Each process holds one more Postgres connection for this, a shared listener
+  logged as `dispatch background wakes`, with its keep-alive ping; it signals every loop after
+  each LISTEN, so a change made while it was reconnecting is caught up then. The embedding
+  coverage pass and the task progress reconciliation run once at start instead of every 10 and 5
+  minutes: coverage repeats only its identity steps, and only while another embedder identity's
+  rows remain, and task progress retries the rows another writer held for about a minute. The
+  delivery reconcile, the architecture import and the webhook redelivery sweep keep their timers;
+  all three now draw their jitter afresh every period, so two processes' passes drift apart. The
+  `Idempotency-Key` rows past their 24 hours and the deliveries a process that died left owed,
+  which the suggestion outcome sweep's pass carried, keep a once-a-minute leased timer of their
+  own (`api.RunMaintenanceSweep`, still under the `suggestion-outcomes` lease, so one process
+  sweeps per minute however many serve the database): no notification announces an expired key
+  or a dead process's owed delivery (`cmd/dispatch/README.md`, "Background loops").
+- Migrations `0151`–`0156` back those loops: `embeddings_enqueue` and `delivery_settings_changed`
+  notify `dispatch_embeddings` and `dispatch_delivery_settings`, a new row trigger on `refs`
+  notifies `dispatch_excerpts_owed`, and `reference_excerpt_backoff`,
+  `suggestion_outcome_cursor` and `write_suggestions.swept` (with two partial indexes) are new.
+  All are additive, every census answers `0`, and the release before them keeps working beside
+  them during a roll. The suggestion outcome sweep moves `suggestion_outcome_cursor` only up to
+  the event log's safe horizon, the id at or below which every event is final, as the live event
+  feed reads: event ids are not commit order, so a cursor past an event that could still commit
+  would never judge by it.
+- A delivery settings change (the deploy repository, the workflow paths) reaches the running
+  intakes as soon as it commits, through the shared listener, instead of within 30 s.
+- The GitHub intake handles up to four pull requests or workflow runs at once, its consumer's
+  `MaxAckPending`, where it handled one message at a time: messages about one pull request or one
+  run still run in order, one after the other, so an older GitHub fetch is never written over a
+  newer one. A message whose subject cannot carry a pull request or a run (checks, comments,
+  pushes, jobs, `pr.<n>.review`) is acknowledged without decoding it. The consumer's `AckWait`,
+  `MaxAckPending` and filter subject are unchanged.
+- When the GitHub intake stops, it drains its subscription, the one its bus client bound again on
+  a new connection when the client replaced its connection, and holds the messages queued behind a
+  busy pull request or run, and those NATS hands it meanwhile, until no handler is running. The
+  messages in a handler get up to 15 s from the stop to finish and be acknowledged; the handlers
+  still running then are given up, their GitHub calls cancelled, and their messages handed back to
+  NATS. Only then are the held messages handed back, so the next holder never runs a pull
+  request's or run's next message while this process still runs the one before it. The intake
+  then waits for the drain to end and releases the subscription, so a reconnect does not bind the
+  stopped one again. Dispatch's shutdown waits for that stop, which begins at the signal, before
+  it closes its database pool, so a handler GitHub answers during the stop writes what it fetched
+  rather than failing on a closed pool with its message acknowledged (`cmd/dispatch/README.md`,
+  "Background loops").
+- A document whose reference excerpts cannot be read or stored is retried one minute after its
+  first failure, doubling to at most six hours, plus up to a fifth again of jitter, instead of on
+  every pass, and is left out of the batches meanwhile, so documents that keep failing no longer
+  hold the reconciliation at its 2 s step nor keep the documents after them waiting. The
+  excerpts a pre-`0092` build left stale are marked owed once per process at its first pass,
+  rather than on every pass for the hour after start.
+- The suggestion outcome sweep reads only the events written since its last pass and the
+  suggestions recorded since, so its work follows what changed rather than how many suggestions
+  are still pending; it judges a suggestion once the suggestion and the events that resolve it are
+  a minute old, and the first pass on a database judges every pending suggestion once, as before.
+- The edit notice sweep sends no statement while no notice is due. It swept `document_edit_notices` every 5 s; it now runs a sweep at start and then only when a new migration, `0157`, announces a notice given a due time on `dispatch_edit_notices` (a row trigger, so notices the release before writes during a roll wake it too), or when the earliest due time it read comes round. Sweeps stay at least 5 s apart, so a notice still goes within 5 s of the end of its quiet window. The census answers `0`, and the release before keeps sweeping on its timer beside it (`cmd/dispatch/README.md`, "Background loops").
+- The webhook redelivery sweep still sweeps at start, but then waits two minutes plus up to a tenth again after each sweep, drawn afresh every period, as the delivery reconcile and the architecture import do, in place of a plain two-minute ticker, so two processes started together no longer reach its lease in step every two minutes.
+
+## [26.1.0] - 2026-11-01
+
+### Added
+
+- A Google Compute Engine VM logs in to the secrets broker and enrolls itself with the identity
+  token its metadata server signs, with no stored credential and no person approving it. With
+  `BROKER_GOOGLE_OIDC_AUDIENCE` set, the broker discovers Google's issuer at startup (one
+  `google vm identity` log line), and `POST /v1/launcher-credentials/token` also takes a VM's
+  token (`format=full`) whose account `BROKER_VM_SERVICES` binds, from the project
+  `BROKER_VM_PROJECTS` names and with an instance name `BROKER_VM_INSTANCES` matches; anything else
+  is `403 ACCOUNT_NOT_LISTED` naming what did not match, or `401 TOKEN_INVALID`. Each token goes to
+  the one verifier whose issuer it names, so a VM's token never makes the broker read the
+  cluster's keys, nor a cluster token Google's. Each VM holds its own launcher credential and its
+  own `vm` enrollment, keyed by `<account>@<project>/<zone>/<instance id>`, so VMs that share an
+  account never move or end each other's. No launcher credential ends a VM's enrollment
+  (`DELETE /v1/enrollments/{id}` is `403 VM_ENDS_BY_LOGIN_REVOKE`), so a token copied off the VM
+  cannot end or take over its live enrollment; revoking the VM's machine login, or its lease,
+  ends it. A revoke does not revoke the copied token, which logs in again within its hour; taking
+  the VM out of the fleet's settings ends that. `POST /v1/enrollments` takes kind `vm` with `vm_token`
+  (`403 VM_IDENTITY_MISMATCH`, `403 VM_TOKEN_EXPIRED`), every renewal of one carries the VM's
+  current token (`403 VM_TOKEN_REQUIRED` without it), and a VM service's secrets go to its own VMs
+  at once. A VM its fleet's settings no longer allow (its account dropped, or another project or
+  instance-name glob configured) has no identity from then on: every call it signs is refused
+  `401`, as an ended session's is, so it releases no grant it holds, opens no request and renews
+  nothing, and a person's approval of a request it left pending grants nothing; its launcher
+  credential no longer authenticates (`401 LAUNCHER_INVALID` on a new enrollment), and its next
+  login is `403 ACCOUNT_NOT_LISTED`. On the client, `agent-secrets enroll --vm --service <name>
+  [--audience <aud>] [--out <dir>]` fetches the token, logs in with a key it keeps in memory,
+  enrolls `key.pem`, and prints the enrollment id; run again over the same directory it keeps
+  `key.pem` and extends the lease. `agent-secrets renew --vm` renews with a fresh token each time
+  and stops (exit 76) on `VM_TOKEN_REQUIRED`, `VM_NOT_LISTED` or `ENROLLMENT_NOT_LIVE`. Both ask
+  the metadata server directly, never through a proxy `HTTP_PROXY` names, since the token logs
+  in as the VM. With no
+  Google audience nothing changes: kind `vm` is still `400 INVALID_KIND`, and the Kubernetes and
+  GitHub paths are untouched.
+
+## [25.2.0] - 2026-11-01
+
+### Changed
+
+- A Dispatch document edit repeats less work for the same answer: a tree the edit touches is
+  validated once for the batch's reads that take its validated value rather than once a read,
+  every quote of a batch is resolved against one flattened text of its tree, the document-level
+  blocks a write changed are found in one walk and read by every refusal that needs them, and the
+  quote finder's text is built in buffers of its own size.
+  The reads of a write transaction's fork before and after its write go through the lock-free
+  reader, without ygo's ToDelta, and the renders of the write's own operation take the tree it
+  validated rather than validating it again. A conditional edit encodes its tree once: the token
+  its precondition check computed is the token its batch starts from. Every answer, token,
+  version, anchor and CRDT update is what it was.
+
+## [25.1.0] - 2026-11-01
+
+### Added
+
+- Dispatch takes a fifth credential: an access token the secrets broker issued, presented under
+  RFC 9449's DPoP scheme (`Authorization: DPoP <token>` with a `DPoP:` proof header). The server
+  decides a request by its authentication scheme before it reads any token, so such a
+  presentation is never retried as a bearer and the bearer credentials are untouched. Dispatch
+  asks the broker what the token is and holds the caller to the key it is bound to, and the
+  caller writes as the session that token names, acting for the person it names: a body with no
+  `actor` is accepted, one naming that same session is accepted and its `origin` kept, and one
+  naming any other writer is `403 ACTOR_SESSION_MISMATCH` naming the session the token carries.
+  A token scoped to one project carries that project on every actor it writes, set from the
+  token and never from a request body; one scoped to its person carries none. Each refusal has
+  its own code and none repeats the token: `401 BROKER_TOKEN_NOT_ACTIVE`,
+  `401 BROKER_TOKEN_PROOF_INVALID`, `401 BROKER_TOKEN_KEY_MISMATCH`,
+  `401 BROKER_TOKEN_NOT_A_SESSION` for a live token that is no session's credential — one the
+  broker names no session or person for, or that it issued to a client other than the exchange,
+  which a machine login's own access token is — so a request body can never name the session a
+  credential does not prove, `429 BROKER_TOKEN_RATE_LIMITED` with the wait in `Retry-After`,
+  and `503 BROKER_UNAVAILABLE` for
+  a broker that answered nothing, so a caller comes back rather than reading its token as
+  refused. The verifier is built from settings Dispatch already has —
+  `DISPATCH_AGENT_SECRETS_URL`, `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` and
+  `DISPATCH_SERVER_URL` — and adds none; a deployment with no broker has no such credential,
+  and a DPoP presentation there is the `401 UNAUTHORIZED` any Authorization header that is not
+  a bearer has always been.
+- The broker: a pod exchanges its projected token (RFC 8693) under a session name only while a
+  registration says that pod may. A deployment's own daemon writes it as it starts the pod —
+  `POST /v1/oauth/exchange/pod-sessions`, `{"pod_token", "session"}`, authenticated by the
+  account `BROKER_SERVICE_LOGINS` lets log in as a service, the list it already holds for its
+  token login — and the exchange reads it in its own transaction, asking the cluster nothing. The
+  session name still belongs to the listed service account, so a registered successor keeps what
+  its predecessor held and a relaunched pod is not locked out; what the registration adds is the
+  one thing the claim on a name cannot do, which is tell two pods of one account apart, so a pod
+  naming a session of another issue of its own project is now `invalid_grant` naming that
+  session. An entry that fixes a session needs no registration: its name is the configuration's
+  and every pod of that account writes under it, so the replacement pod of a fixed-session
+  account and the next run of a fixed-session workflow are answered as before. A registration is
+  kept 24 hours past its last write, the longest a presented pod token can live, and the
+  authority is the registrar's: a daemon that stops registering costs its pods their writes
+  within that window.
+- Dispatch: a credential that names one project now writes that project and nothing else. Every
+  mutating route declares what its write belongs to — a project's (the issue-key, project-key,
+  artifact-id, ask-id and comment-id rows, and the message rows that carry an issue), a project
+  the body names (the issue create, the one write whose address names no project, whose handler
+  makes the same check the moment it has read one), the
+  calling session's (an agent conversation's own artifact and messages, the two routes a session
+  answers its own delivery on, and the caller-private `me` rows), or the deployment's (the
+  project create, the repository-to-project map, the delivery settings and session groups, the
+  broadcast, and the credential and machine-login decisions) — and two checks in front of every
+  one of them decide it. The project check resolves the project the addressed object belongs to
+  and lets through only a target of the caller's own project: another project's, one that
+  belongs to no project, and one that resolves to nothing at all (no such row, or an id
+  Postgres will not read as a uuid) are each `403 PROJECT_SCOPE`, naming the project the
+  credential covers and the project the write belongs to where one resolved, and nothing of the
+  credential; a deployment-wide write is `403 PROJECT_SCOPE_DEPLOYMENT`, naming that project and
+  the route. Refusing a target it cannot resolve is what keeps the check closed, and it says
+  nothing about which ids exist outside the caller's project. The session check holds the rows
+  whose path names a session — an agent conversation's writes and the caller's own agent view
+  state — to the session the caller's credential proved: another session's is
+  `403 SESSION_SCOPE`. Both are a no-op for every credential that carries no project and proves
+  no session — a browser cookie, a personal agent token, a Kubernetes service-account token, the
+  shared token, and an access token the secrets broker scoped to a person rather than to one
+  project — so no caller that exists today is affected; that is the rule and not a transitional
+  measure.
+- The broker ends one of its own access tokens on demand: `POST /v1/oauth/revoke`, OAuth 2.0
+  token revocation (RFC 7009), whose form names the `token`, optionally which kind to look for
+  first (`token_type_hint`), and the `client_id` it was issued to —
+  `dispatch-token-exchange` for a pod's or a workflow run's exchanged token, the machine-login
+  client for a dev box session's. It is the only way an exchanged token can be ended before its
+  own expiry, since such a token carries no credential id for a credential revocation to reach.
+  The route takes a listed caller's own Kubernetes ServiceAccount token and needs the power that
+  relays a person's decisions, so `dispatch` reaches it and `listener`, listed to read a token
+  back, is `403 ACCOUNT_LACKS_POWER`; a token issued to another client than the request names is
+  `400 unauthorized_client`, and a token the broker never issued is `200` exactly as a token it
+  just ended is. A revoked access token is `active: false` to `POST /v1/oauth/introspect` from
+  the moment the revocation commits, so a resource server that cached an affirmative
+  introspection refuses it within that cache's life and no longer. Ending an access token ends
+  that token alone: the machine login behind it still refreshes, and only a caller presenting
+  that login's own refresh token ends the whole family and the login with it.
+
+### Changed
+
+- The broker: a caller's name in `BROKER_API_ACCOUNTS` now decides which of its named-caller
+  routes that ServiceAccount reaches, where being listed once reached all ten. Each such route
+  declares the power it needs — reading one of the broker's access tokens back
+  (`POST /v1/oauth/introspect`), or relaying a person's decisions (the nine approval, denial,
+  revocation and listing routes Dispatch's server calls) — and the broker's own table says which
+  powers each caller name carries: `dispatch` both, `listener` introspection alone. A listed
+  caller reaching a route its name does not carry is `403 ACCOUNT_LACKS_POWER`, naming the caller
+  and the route; an account the list does not name at all stays `403 ACCOUNT_NOT_LISTED`. A
+  `BROKER_API_ACCOUNTS` entry whose caller name the broker does not know refuses the boot, naming
+  that name and the names it knows, so a typo cannot quietly produce a caller that reaches
+  nothing.
+- `GET /api/v1/whoami` answers `session` and `project` beside `owner` and `service`: the session
+  the caller's credential itself proved, which only an access token the secrets broker issued
+  does, and the one project key that credential may write. Both are null for every other
+  credential, which proves neither, and every existing field keeps its meaning.
+
+### Removed
+
+- The document editor's live connection (`GET /ws/doc/{room}`) no longer takes a bearer. It was
+  a second, weaker door into Dispatch: the shared agent token alone opened it, and the acting
+  session came from a header the caller wrote. The socket now resolves a person through the
+  identity service and nothing else, which is how the browser has always connected (a
+  same-origin cookie); no caller outside Dispatch's own tests presented a bearer to it.
+
+## [25.0.2] - 2026-10-31
+
+### Fixed
+
+- Dispatch's `ENVOY_NATS_REPLICAS` and `ENVOY_STREAM_MAX_BYTES` descriptions now state the real bound between the warning `envoy nats reconnect hook failed; it is retried` and the error `envoy nats reconnect hooks have not succeeded`: Dispatch reconciles the stream on its first connection, retrying until that reconcile succeeds, the minute runs from that first connection to NATS, not from the first retry, and `stall_ms` on both lines is how long the reconcile has been due.
+
+## [25.0.1] - 2026-10-31
+
+### Fixed
+
+- A document whose formatted text a write or a settlement repair had partly removed no longer reads back with its formatting changed (`*x*y` as `*xy*`) in a read, a version or after its room reloads. Since the ygo pin moved to v1.54.1-sami.1, ygo cleaned up the format markers after every update it applied as remote, and the room's reads and the fold of its stored history (which compaction stores) applied the room's own writes that way, where the room itself had run no cleanup. Dispatch's ygo pin moves to v1.54.1-sami.3, which adds a switch to turn that cleanup off (reearth/ygo#369, open upstream), and every copy of a room now replays the room's writes with it off. A room's load also applies its stored history with the cleanup off, so a loaded room holds the state its history holds. The room still cleans up after a browser's edit and a write's publish, and stores that cleanup.
+- A comment, suggestion or ask written on a document keeps its anchor however long the composer
+  stays open. The provisional mark a composer writes is no longer swept while its author still
+  has the document open, and its one-minute life is counted from the author's last presence, so
+  an idle reconnect no longer costs the mark while a tab that closes still loses a stray one a
+  minute later. Send writes the mark again over the reader's own words when it is gone anyway,
+  then sends once more under a key of its own: it finds them by the mark itself, by the text
+  around them in the block they were selected in, or by the one reading the whole document
+  surrounds the same way, a selection that runs across a paragraph break included. Words that
+  read in more than one place with nothing to tell them apart attach nothing, and each refusal
+  says which case it is - the words were changed or deleted, they read elsewhere but not where
+  they were selected, the text around them changed, they read alike in more than one place, or
+  their document is not open - and keeps the draft. An agent's client still reads the server's
+  `ANCHOR_MISSING` wording unchanged.
+
 ## [25.0.0] - 2026-10-31
 
 ### Changed

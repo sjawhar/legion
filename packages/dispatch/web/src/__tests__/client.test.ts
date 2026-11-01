@@ -914,7 +914,7 @@ test(
       deliveryUnsetError,
     ] = await Promise.all([
       unauthorized.whoAmI().catch((error: unknown) => error),
-      featureOff.getCredentialRecord("record-1").catch((error: unknown) => error),
+      featureOff.getCredentialGrants().catch((error: unknown) => error),
       documentSchema.getArtifactText("artifact-1").catch((error: unknown) => error),
       serverError.whoAmI().catch((error: unknown) => error),
       // The run route answers 404 DELIVERY_NOT_CONFIGURED while no settings row exists.
@@ -1000,8 +1000,8 @@ test(
     try {
       await expect(
         queryClient.fetchQuery({
-          queryFn: () => client.getCredentialRecord("record-1"),
-          queryKey: ["credential-record", "record-1"],
+          queryFn: () => client.getCredentialGrants(),
+          queryKey: ["credential-grants"],
         })
       ).rejects.toMatchObject({ code: "FEATURE_OFF" });
 

@@ -520,7 +520,7 @@ An Activity line reads who, when, then what: the author and the time are one `wh
 
 The `Children` tab (`features/issue/ChildrenTab.tsx`) lists the issue's direct children, one card per child: the key · title link and status badge on the first line, then a detail line with the child's subtree progress (`D/N done` from `subtree_done`/`subtree_total` — the child itself plus every descendant, any status), a relative `Timestamp` on `active_at` (the subtree's newest activity), and the child's own external links through `GitHubLink` (state and checks are client-fetched via the `githubRest` proxy exactly as the header does; the server sends only the links). On phones the detail columns wrap under the title line. The header's `Parent:` line always renders — a link or `None` — with an Owner-style inline editor whose Save PATCHes `{parent: <key>}` or `{parent: null}`; a `PARENT_INPUT`/`ISSUE_CLOSED` refusal renders the server's reason inline in place of the generic update error. `child.added`/`child.removed` land on the old and new parents' events subscriptions, so an open parent page's Children tab updates live.
 
-An issue's own progress (`features/issue/ProgressChips.tsx`) is the `progress` object every issue read and list row carries (LEGION-542): `tasks`, the task-list items (`- [ ]` / `- [x]`, nested lists and callouts included) of its primary document's latest version, read from its markdown for the checkboxes alone (`pmdoc.CountTasksMarkdown`), so a spec holding a table the Proof schema refuses is still counted; stored on the issue with the version it was counted from by every version write (`docs.RecordTaskProgress`) and counted again, at start and every five minutes, for every row whose stored version is not the document's latest - the rows the migration found, and any the task a deploy replaces versioned while both ran (`docs.Service.RunTaskProgressReconciliation`); and `children`, its direct children, every status, done being `status = 'done'`, computed from the children's statuses on each read. Each is `null` when the issue has none, and the component renders nothing for a null, or for a response with no `progress` at all (an older server during a deploy's overlap), so a list of plain issues stays quiet. The issue header shows each as a thin bar filled to done/total beside `3/7 tasks` (the `bar` prop; a count of one reads `1/1 task`, `0/1 child`), in the wrapping state row with the status, priority and claim, since the metadata rail below clips; a List row and a Board card show each as a `label` pill beside the claim chip. The bar's fill is `progressBarFill` in `theme/classes.ts`. The Children tab's per-child `D/N done` is a different count — that child's whole subtree — and stays.
+An issue's own progress (`features/issue/ProgressChips.tsx`) is the `progress` object every issue read and list row carries (LEGION-542): `tasks`, the task-list items (`- [ ]` / `- [x]`, nested lists and callouts included) of its primary document's latest version, read from its markdown for the checkboxes alone (`pmdoc.CountTasksMarkdown`), so a spec holding a table the Proof schema refuses is still counted; stored on the issue with the version it was counted from by every version write (`docs.RecordTaskProgress`) and counted again once when the server starts, for every row whose stored version is not the document's latest - the rows the migration found, a version a build predating LEGION-542 wrote, and a row another writer held, retried briefly (`docs.Service.RunTaskProgressReconciliation`); and `children`, its direct children, every status, done being `status = 'done'`, computed from the children's statuses on each read. Each is `null` when the issue has none, and the component renders nothing for a null, or for a response with no `progress` at all (an older server during a deploy's overlap), so a list of plain issues stays quiet. The issue header shows each as a thin bar filled to done/total beside `3/7 tasks` (the `bar` prop; a count of one reads `1/1 task`, `0/1 child`), in the wrapping state row with the status, priority and claim, since the metadata rail below clips; a List row and a Board card show each as a `label` pill beside the claim chip. The bar's fill is `progressBarFill` in `theme/classes.ts`. The Children tab's per-child `D/N done` is a different count — that child's whole subtree — and stays.
 
 The `Artifacts` tab carries the number of rows it lists as a `Pill` after the label (accessible name `Artifacts (2)`; plain `Artifacts` at zero), computed in `IssuePage.tsx` from the issue's `artifacts` - all of them, the issue's own primary document included, since that document is one of the rows. Counting only the uploads beside it put `1` above a list of two. `components/Tabs.tsx` owns the shape: a `TabDefinition.count` renders the pill; every label stays on one line (`whitespace-nowrap`); compact tabs sit tighter on phones (`px-1.5`, no gap), and the issue's five tabs, one of them carrying a count pill, no longer fit a 390 px viewport: there the tablist scrolls sideways, as it already did at 360 px (a default Android width), and `revealTab` scrolls a tab focused from the keyboard or selected fully into view rather than leaving it clipped, so every tab stays reachable and keeps its 44 px touch target. No label is shortened to buy the room. In the Activity tab, an upload is a line (`<author> added <name>` for `artifact.created`, `<author> saved <name> vN` for `artifact.version`, text from `features/activity/activity-model.ts`'s `activityDescription`) whose artifact name `features/activity/ActivityLine.tsx` renders as a link to the artifact (the saved version's link pins `?v=N`; the `artifact.version` payload has no slug, so the line resolves it from the issue query and stays plain text until that loads). `features/issue/event-description.ts` names the artifact the same way (`Added <name>`, `Saved <name> vN`) for the `EventBody` fallback.
 
@@ -803,9 +803,12 @@ names its count. The full vocabulary, with the reason each call beat its alterna
 
 ## Credential requests
 
-`features/credentials/` renders the whole secrets-broker credential-request approval surface —
-directed, signature-verified, immutable-record requests the broker owns and decides; Dispatch
-relays, renders, and names the deciding human. The feature is off — the inbox section and the
+`features/credentials/` renders the secrets-broker credential surface Dispatch still owns —
+directed, signature-verified, immutable-record requests the broker owns and decides. A **machine
+login** is decided here, by its typed code, and Dispatch relays, renders and names the deciding
+human for it and for every revoke; a **secret request** is not: the broker decides one on its own
+page alone, and Dispatch links there (`brokerPage.ts`, below). The feature is off — the inbox
+section and the
 Settings grants section hidden — whenever `DISPATCH_AGENT_SECRETS_URL` is unset on the server, and
 the SPA learns so from the pending list itself, never a separate capability flag: there it answers
 `200` with `null` (every other credential route answers `404 FEATURE_OFF`), since every page reads
@@ -824,9 +827,15 @@ mounts in `features/inbox/Inbox.tsx`, above the ask sections and outside its
 roving-focus/`ViewportAnchor` mechanism (it is not an ask row): each pending row shows a kind
 badge ("Secret request" for `agent_secret`, "Machine login" for `launcher_credential`), the
 requested identifiers, and a
-relative `Timestamp`, linking to `/credentials/:recordId` — except a machine-kind row, which links
-to `/credentials/machine` instead, since only the typed code selects a machine login (a
-direct record link can never approve a machine login) — then, below that link, the session the
+relative `Timestamp`. A machine-kind row links to `/credentials/machine`, since only the typed
+code selects a machine login (a direct record link can never approve one). A secret-request row
+is an `<a>` to the broker's own page, the `approve_url` the broker names on the pending row and
+`brokerPage.ts` takes only as an absolute `http:` or `https:` URL (anything else, a
+`javascript:` URL among them, reads as absent, since the body is the broker's word relayed
+verbatim; the check itself is `lib/external-href.ts`, shared with the issue header's external
+links); from a broker too old to name one the row keeps the `<Link>` it had before that page
+existed, to `/credentials/<record>`, the only place such a request can be decided, since that
+broker serves no page of its own. Below that link each row shows the session the
 broker's `session` field names (LEGION-587: `{request, enrollment}`, either null): each id as an
 `AgentName` - its name, its running state and its live link - followed by the full id in text,
 because the id is an unsigned claim (`session.ts`) and `session:<8>…` alone would let another id
@@ -846,7 +855,14 @@ the one reading of that list - `listed` (empty under `null`), `loading` or `fail
 the section, the Inbox's empty state, its `Blocked on you` banner and both `Needs you N` badges
 all read it, so a request one of them counts is one the section lists.
 
-`CredentialRecordPage.tsx` (`/credentials/:recordId`) and `MachineLoginPage.tsx`
+`CredentialRecordPage.tsx` (`/credentials/:recordId`) sends the browser to the broker's own page
+whenever the record's answer names one: `brokerPage.ts` reads `approve_url` off the record, and
+an effect (never a render, which would repeat the side effect) calls `window.location.replace`,
+so the back button returns where the person came from; until the browser leaves, and for good if
+it never does, the page is one line and a link to the request's page there. What follows is what
+a record the broker names no page for still renders, and what the machine page always renders.
+That record page and its read routes go in step 3 of this rollout.
+`CredentialRecordPage.tsx` and `MachineLoginPage.tsx`
 (`/credentials/machine`) share `CredentialRecordFacts.tsx` (kind, identifiers, enrollment,
 a pod enrollment's worker slot when it has one, session (the same resolution the Inbox row's
 own line uses), lifetime, requested/expiry timestamps, policy
@@ -871,9 +887,11 @@ decide it. A decision is one plain
 POST: a plain record's approve and deny send no body, and a machine record's approve and deny both
 send `{code}`, the code the viewer typed for that lookup (the broker requires it on either
 decision). The page never says who decides: Dispatch's server names the signed-in viewer (below),
-and the broker refuses anyone the record's rule does not admit (anyone signed in for a service's
-machine login or a shared secret naming `anyone`; otherwise its approver) with `403 NOT_APPROVER`,
-surfaced verbatim.
+and the broker refuses anyone a machine login's rule does not admit (anyone signed in for a
+service's login; otherwise its approver) with `403 NOT_APPROVER`, surfaced verbatim. A secret
+request's decision never reaches that rule through Dispatch: the broker answers
+`403 DECIDE_ON_BROKER_PAGE` to every caller on either decide route, which is why the record page
+sends the browser to the broker's own page.
 Terminal-state records (`approved`, `denied`, `expired`, `cancelled`, `revoked`) render their
 recorded decision and no buttons, on the record page and on the machine page alike, whether the
 machine page looked the login up already decided or decided it itself; every broker error
@@ -948,13 +966,15 @@ that stopped at Dispatch's own token, a file missing, unreadable or empty, is
 never asked; any other failure is `503 AGENT_SECRETS_UNAVAILABLE`. `credential_requests_test.go`
 pins the decision bodies
 against a fake broker, and `internal/dispatch/api/contract_test.go` round-trips a real broker
-(`brokerapi.Register` with real services on `BROKER_TEST_DATABASE_URL`): another login refused
-`403 NOT_APPROVER` even when its browser body names the approver, the approver's click accepted
-whatever login its body names, and the value released; a shared secret's request in two people's
-lists and approved by the second; an automatic grant listed as automatic, revoked, and the same
-session's next request for it waiting on its owner while another session still gets it at once;
-once the operator has withheld AUTO_TOKEN, another person's approval of the session's request that
-was waiting on anyone for it refused `403 NOT_APPROVER` and the operator's accepted; a person's
+(`brokerapi.Register` with real services on `BROKER_TEST_DATABASE_URL`): Dispatch's approve and
+deny of a secret request each refused `403 DECIDE_ON_BROKER_PAGE` naming the record's page on the
+broker, by its approver as much as by another login and whatever the browser's body names, and
+the approver's approval on that page releasing the value; a shared secret's request in two
+people's lists and approved on that page by the second; an automatic grant listed as automatic,
+revoked, and the same session's next request for it waiting on its owner while another session
+still gets it at once; once the operator has withheld AUTO_TOKEN, another person's approval on
+the broker's page of the session's request that was waiting on anyone for it deciding nothing and
+the operator's releasing it; a person's
 machine login listed for the person who approved it alone, another person's revoke refused
 `403 NOT_APPROVER` whatever their body names, and the approver's revoke ending the session it
 enrolled and its launcher proofs; a person's machine login refused `403 NOT_APPROVER` to another

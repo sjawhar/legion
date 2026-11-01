@@ -1070,15 +1070,12 @@ func whileTheRowIsHeld(
 	answered := make(chan *httptest.ResponseRecorder, 1)
 	go func() { answered <- request() }()
 	awaitRowLockWaiter(t, database)
-	claim := model.IssueClaim{
-		Actor: model.Actor{
-			Kind:   "session",
-			ID:     holder,
-			Origin: &model.ActorOrigin{SessionTitle: "worker " + holder},
-		},
-		At: time.Now().UTC(),
+	holderActor := model.Actor{
+		Kind:   "session",
+		ID:     holder,
+		Origin: &model.ActorOrigin{SessionTitle: "worker " + holder},
 	}
-	if err := writeIssueClaim(ctx, tx, key, &claim); err != nil {
+	if err := writeIssueClaim(ctx, tx, key, &holderActor); err != nil {
 		t.Fatalf("move the claim to %s: %v", holder, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
