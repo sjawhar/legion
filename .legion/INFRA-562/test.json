@@ -2,36 +2,37 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-562",
-  "completed": "2026-11-01T04:18:31Z",
-  "round": 26,
-  "testedHead": "6aa492b65f0bf376b8b10508119c3ebefe858f3c",
+  "completed": "2026-11-01T07:58:26Z",
+  "round": 27,
+  "testedHead": "65a33ea2b347a16cc286269edfd3796e637626fa",
   "codeHead": "4a6d06a72cc0",
-  "scope": "The merge with main d09b46d7: conflicts in api/routes_table.go, api/server.go, api/server_test.go and cmd/dispatch/AGENTS.md; migrations renumbered 0150-0153 -> 0151-0154 because main's #2541 took 0150_dpop_proofs.",
+  "scope": "No code change since round 26: CI run 41270335139's attempt-1 red at code 4a6d06a7 was main's flaky browser test, and attempt 2 is green.",
   "fingerprint": {
-    "previousVerifiedHead": "ec996090a7f0a11a8bad7eeebd2972452766187d",
-    "previous": "61825754fc740c8f0ad18dc2242bf50efcf8c9612c47ad9f6704103e9ba4b28a",
+    "previousVerifiedHead": "6aa492b65f0bf376b8b10508119c3ebefe858f3c",
+    "previous": "93849d4fadd6eef1221eb6dc75b0f5cc186b1b91c738d82a24a873d3d7bf6f6d",
     "current": "93849d4fadd6eef1221eb6dc75b0f5cc186b1b91c738d82a24a873d3d7bf6f6d",
-    "verdict": "changed, read per file with migration numbers normalised: beyond the renumbering, only three files differ, and in each the branch's own added lines are word for word the same while the surrounding main lines are main's: routes_table.go (main renamed apiRoute to routeRow; this PR's four 'on every process' test-hook descriptions sit on main's routeRow rows), server.go (this PR's test-hooks listener sentence beside main's rewritten comment), server_test.go (this PR's aligned field list now carries main's testServerURL and BrokerTokens). No line of this PR's own behaviour changed."
+    "verdict": "unchanged: rebase re-check 6aa492b6 -> 65a33ea2: fingerprint unchanged, bare gates only. `jj diff --from bd852fdc --to 65a33ea2 --name-only` lists only .legion/INFRA-562/implement.json. The head merges with main@origin 355f8afa with no conflict (`git merge-tree --write-tree --name-only`)."
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "At 6aa492b6 (code 4a6d06a7, fork d09b46d7): (1) Migration SQL: each of the eight files 0151-0154 .up.sql/.census.sql is byte-identical to its 0150-0153 predecessor at ec996090 once the number in its first line is normalised. (2) References: the four file-name references name 0151_message_delivery_urgency, 0152_route_roster, 0153_github_rate_limits, 0154_delivery_run_warnings, once each; every 'migration 015N' beside this PR's tables (AGENTS.md:1013, :1786, cmd/dispatch/README.md:245, :610, :616, :641, the pr2387 fragments, api/delivery.go:755, api/delivery_bound_send_test.go:220, api/issue_route_status.go:26, githubapp/ratelimit/ratelimit.go:2) names the new number; the only 0150 references are main's dpop_proofs. (3) Routes: routes_table.go at the head lists the same 153 method-and-path rows as main d09b46d7 and as the previous head ec996090, and every handler main names (s.<name>) is present. (4) On the pod's Postgres 17: `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -count=1 -v -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' ./internal/dispatch/store/` -> both PASS; `go test -count=1 -run Route ./internal/dispatch/api/ ./internal/dispatch/routes/` -> ok (api 73.593s, routes 0.050s)."
+    "how": "Read on GitHub: CI run 41270335139 at 4a6d06a72cc0, run_attempt 2, completed success. Jobs of both attempts (`gh api 'repos/sjawhar/legion/actions/runs/41270335139/jobs?filter=all&per_page=100'`): attempt 1 lint 124744759464, typecheck 124744759400, test 124744759442 success, dispatch 124744759459 failure, ci-ok 124763730190 failure; attempt 2 lint 124768450590, typecheck 124768419716, test 124768419638, dispatch 124768418607 and ci-ok 124784811061 all success. pr-title at 4a6d06a7 success. Attempt 1's one failure, from job 124744759459's own log: '✘ 786 [chromium] › e2e/overlapping-marks.e2e.ts:311:5 › a click on text a wider and a narrower ask both cover opens the narrower one, the narrower made first @phone (30.0s)', a spec this PR's diff does not touch (the same test failed attempt 1 of run 41209030154 in round 24)."
   },
   "failed": 0,
   "failures": [],
-  "negativeControl": "Before the renumbering the merged tree held 0150_dpop_proofs and 0150_message_delivery_urgency, which TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny refuses (implementer's record; round 18 and round 11 showed the same refusal by the guard and on real binaries).",
-  "ci": "Read on GitHub at 04:18Z at code head 4a6d06a7: CI run 41270335139 queued (lint, typecheck, test queued; ci-ok not yet reported); PR Title run 41270335204 success. Not waited for. The architect's exceptions (TestEditNoticeRestart, a runner disk-full in infra/host) have no result to apply to yet. The PR is MERGEABLE and APPROVED.",
+  "negativeControl": "Attempt 1 of the same run on the same commit: dispatch job 124744759459 failure at main's e2e/overlapping-marks.e2e.ts:311 and ci-ok job 124763730190 failure; the same commit's attempt 2 passes, so the red is not this code's.",
+  "ci": "Read on GitHub at 07:58Z: CI run 41270335139 attempt 2 at code head 4a6d06a7 completed success, ci-ok job 124784811061 and dispatch job 124768418607 success; required lint, typecheck, test success (attempt 2); pr-title success. The PR is MERGEABLE and APPROVED.",
   "observations": [
+    "e2e/overlapping-marks.e2e.ts:311 has now failed attempt 1 of two of this PR's runs (41209030154, 41270335139), in both of its @phone variants; it is main's spec and its flake is main's to fix.",
     "Unchanged and not failures: a person's Retry during a take-over wait opens attempt 2 beside the renewed attempt 1 (existing rule); a resumed comment attempt opened by another person's Retry names the comment's author as actor; the test-hook fan-out (DISPATCH_TEST_HOOKS only) can miss a process whose LISTEN connection redials between the caller's pg_locks read and its NOTIFY; a claim or ask follow made during a comment request mid take-over can still give that session two copies."
   ],
   "proof": [
     {
-      "criterion": "The merge with main d09b46d7 keeps every route and handler from both sides, and the renumbered migrations are the same SQL under the next free numbers",
-      "surface": "api/routes_table.go and the migration files at the head; the Dispatch migration guard and the route tests on a rootless Postgres 17",
-      "command": "route-row and handler comparison against main and ec996090; normalised byte comparison of the eight migration files; go test -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' ./internal/dispatch/store/; go test -run Route ./internal/dispatch/api/ ./internal/dispatch/routes/",
-      "observed": "153 rows on all three, no handler missing; SQL byte-identical; guards and route tests PASS",
-      "headSha": "6aa492b65f0bf376b8b10508119c3ebefe858f3c",
-      "negativeControl": "two migrations at version 0150 before the renumbering -> refused by the guard"
+      "criterion": "ci-ok and the four required checks are green at the code head, which still merges with main",
+      "surface": "GitHub Actions CI run 41270335139 on the pull request's merge ref at 4a6d06a7, the PR Title check, and a merge-tree of the head with main@origin",
+      "command": "gh api 'repos/sjawhar/legion/actions/runs/41270335139/jobs?filter=all&per_page=100'; gh api repos/sjawhar/legion/commits/4a6d06a72cc0/check-runs; git merge-tree --write-tree --name-only 65a33ea2 main@origin",
+      "observed": "attempt 2: ci-ok 124784811061, lint, typecheck, test, dispatch 124768418607 success; pr-title success; no merge conflict",
+      "headSha": "65a33ea2b347a16cc286269edfd3796e637626fa",
+      "negativeControl": "attempt 1 on the same commit: dispatch 124744759459 failure at main's e2e/overlapping-marks.e2e.ts:311, ci-ok 124763730190 failure"
     }
   ]
 }
