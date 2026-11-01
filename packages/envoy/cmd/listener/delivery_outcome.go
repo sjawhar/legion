@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
+	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
@@ -47,7 +50,11 @@ func deliveryExceptionID(eventID, recipientSession, reason string) string {
 	return hex.EncodeToString(sum[:16])
 }
 
-func publishDeliveryException(client *bus.Client, item contracts.Envelope, reason, recipientSession string, fanoutRefusal bool) error {
+// publishDeliveryException publishes item's delivery exception for reason. origin, when not empty,
+// identifies the stored message the exception is about (exceptionOrigin): an exception the stream
+// stores then carries Nats-Msg-Id exception.<reason>.<origin>, so the stream keeps one copy
+// however many listeners raise it for that message, each from its own durable.
+func publishDeliveryException(client *bus.Client, item contracts.Envelope, reason, recipientSession string, fanoutRefusal bool, origin string) error {
 	payload, err := json.Marshal(deliveryExceptionPayload{
 		OriginalTopic:    item.Topic,
 		EventID:          item.EventID,
@@ -83,10 +90,33 @@ func publishDeliveryException(client *bus.Client, item contracts.Envelope, reaso
 		}
 		return nil
 	}
+	if origin != "" && bus.StreamCaptures(exception.Topic) {
+		// One stored copy however many listeners raise it, each reading the same message from its
+		// own durable: they agree on the origin, where they would each mint their own message id.
+		if err := client.PublishStoredAs(context.Background(), exception, "exception."+reason+"."+origin); err != nil {
+			return fmt.Errorf("publish delivery exception: %w", err)
+		}
+		return nil
+	}
 	if err := client.Publish(exception); err != nil {
 		return fmt.Errorf("publish delivery exception: %w", err)
 	}
 	return nil
+}
+
+// exceptionOrigin identifies the durable message message for an exception's Nats-Msg-Id: its own
+// Nats-Msg-Id, else its stream sequence; "" for a message that is not durable.
+func exceptionOrigin(message deliveryMessage) string {
+	if message.mode != durableDelivery || message.msg == nil {
+		return ""
+	}
+	if msgID := message.msg.Header.Get(nats.MsgIdHdr); msgID != "" {
+		return msgID
+	}
+	if meta, err := message.msg.Metadata(); err == nil {
+		return strconv.FormatUint(meta.Sequence.Stream, 10)
+	}
+	return ""
 }
 
 // ledgerSettle is what a delivery outcome does with the pair's delivery-ledger attempt. settleNone
@@ -148,6 +178,8 @@ type deliveryOutcome struct {
 	// core-NATS exception for this terminal fanout outcome.
 	exceptionReason string
 	fanoutRefusal   bool
+	// origin identifies the durable message an exception is about (exceptionOrigin), "" for none.
+	origin string
 	// exceptionFailureClearsAttempt makes an exception-publish failure settle the ledger attempt
 	// settleClear, whatever settle below names.
 	exceptionFailureClearsAttempt bool
@@ -176,7 +208,7 @@ func applyDeliveryOutcome(cfg listenerDeliveryHandlerConfig, item contracts.Enve
 	}
 	settle := outcome.settle
 	if outcome.exceptionReason != "" && !isExceptionsTopic(item.Topic) && (isControlTopic(item.Topic) || outcome.fanoutRefusal) {
-		if err := publishDeliveryException(cfg.client, item, outcome.exceptionReason, outcome.sessionID, outcome.fanoutRefusal); err != nil {
+		if err := publishDeliveryException(cfg.client, item, outcome.exceptionReason, outcome.sessionID, outcome.fanoutRefusal, outcome.origin); err != nil {
 			cfg.logger.Error(exceptionPublishFailedLine, slog.String("error", err.Error()), slog.String("topic", item.Topic))
 			if outcome.exceptionFailureClearsAttempt {
 				settle = settleClear

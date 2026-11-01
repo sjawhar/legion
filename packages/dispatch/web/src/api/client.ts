@@ -1441,7 +1441,8 @@ export class DispatchApiClient {
 
   /** `GET /api/v1/credential-requests?approver=me`: every request the viewer may decide - the
    *  ones naming the viewer, and the ones any signed-in person may decide - as the Inbox's
-   *  credential-requests section lists them, or `null` when this Dispatch has no secrets broker. */
+   *  credential-requests section lists them, each secret request with the secrets broker's page
+   *  where it is decided, or `null` when this Dispatch has no secrets broker. */
   getCredentialPending(): Promise<CredentialPendingResponse | null> {
     return this.json<CredentialPendingResponse | null>(
       pathWithQuery("/api/v1/credential-requests", { approver: "me" })
@@ -1452,9 +1453,10 @@ export class DispatchApiClient {
     return this.json<CredentialRecord>(`/api/v1/credential-requests/${pathSegment(recordId)}`);
   }
 
-  /** Approve a credential request as the signed-in viewer: Dispatch names the viewer's own login
-   *  as the approver, and the broker decides whether that login may. A machine login also carries
-   *  the code the viewer typed. */
+  /** Approve a machine login as the signed-in viewer with the code the viewer typed: Dispatch
+   *  names the viewer's own login as the approver, and the broker decides whether that login may.
+   *  A secret request is decided only on the secrets broker's own page, so the broker refuses it
+   *  here with 403 `DECIDE_ON_BROKER_PAGE`. */
   approveCredentialRecord(
     recordId: string,
     body: { code?: string },
@@ -1467,7 +1469,7 @@ export class DispatchApiClient {
     );
   }
 
-  /** Deny a credential request as the signed-in viewer; a machine login also carries its code. */
+  /** Deny a machine login as the signed-in viewer with the code the viewer typed. */
   denyCredentialRecord(
     recordId: string,
     body: { code?: string },

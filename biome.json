@@ -16,6 +16,7 @@
       "!!packages/envoy/internal/dispatch/pmdoc/testdata",
       "!!packages/envoy/internal/dispatch/text/testdata",
       "!!packages/envoy/internal/testnats/testdata",
+      "!!packages/envoy/internal/broker/approval/templates",
       "!!packages/daemon/docker/language-servers/package-lock.json",
       "!!.legion"
     ]
@@ -63,6 +64,7 @@
         "!packages/proof-editor/src/record-mark-history.ts",
         "!packages/proof-editor/src/record-mark-retype.ts",
         "!packages/proof-editor/src/record-mark-target.ts",
+        "!packages/proof-editor/src/block-pointers.ts",
         "!packages/proof-editor/src/read-only-directives.ts",
         "!packages/proof-editor/src/directive-container.ts",
         "!packages/proof-editor/src/mermaid-svg.ts",

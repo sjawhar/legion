@@ -95,9 +95,11 @@ type liveLane struct {
 // liveDeliveryHandler is the live lane's handler, over every notification topic (openLiveTopics).
 // It leaves alone a subject another lane owns, read before anything is decoded
 // and with no line logged, since the live lane receives each of those messages too: a role lane
-// (the role lane arbitrates it) and a subject the stream stores (the durable delivers it, and a
+// (the role lane arbitrates it), a subject the stream stores (the durable delivers it, and a
 // role forward travels on its holder's agent subject, which the stream stores, while keeping its
-// role topic). Every other message goes through the delivery handler, whose fanout delivers it to
+// role topic), and a session's relay subject (bus.DeliverSubjectPrefix: the frame is the stored
+// message the session's consumer delivered, which the listener owning the session relays to it
+// alone). Every other message goes through the delivery handler, whose fanout delivers it to
 // every session on this machine subscribed to its topic.
 //
 // What the stream stores is the subject list the server holds now, not the one this build
@@ -114,7 +116,7 @@ func liveDeliveryHandler(cfg listenerDeliveryHandlerConfig) *liveLane {
 }
 
 func (l *liveLane) handle(msg *nats.Msg) {
-	if strings.HasPrefix(msg.Subject, contracts.RoleTopicPrefix) || l.streamCaptures(msg.Subject) {
+	if strings.HasPrefix(msg.Subject, contracts.RoleTopicPrefix) || strings.HasPrefix(msg.Subject, bus.DeliverSubjectPrefix) || l.streamCaptures(msg.Subject) {
 		return
 	}
 	l.deliver(deliveryMessage{data: msg.Data, mode: liveDelivery, msg: msg})

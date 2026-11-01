@@ -136,8 +136,9 @@ var errHolderUnjudged = errors.New("claim holder was not covered by the liveness
 // fetchHolderLiveness asks the listener about the holder's own session, by id, and answers
 // with that one session's record, or with none when the session store holds no record of it.
 // It must be called with nothing held: it is a cross-service HTTP call of up to five seconds,
-// and production runs four pool connections, so a held connection or row lock across it
-// stalls unrelated requests. An unreachable or unconfigured listener is a 503, never
+// and each process's pool is bounded (store.sharedPoolSize), so a connection held across it is
+// one fewer for that process's other requests, and a row lock held across it stalls every
+// process that writes the issue. An unreachable or unconfigured listener is a 503, never
 // "unknown, therefore free" — Dispatch does not hand one session's work to another on a
 // transport error. Only a session holder is ever asked about: judgeHolder reaches this
 // through errHolderUnjudged, which a holder of any other kind never produces, so no read is
@@ -264,23 +265,31 @@ func (s *server) readIssueClaim(ctx context.Context, key string) (*model.IssueCl
 	return claim.resolve(key)
 }
 
-// writeIssueClaim sets or clears an issue's claim; a nil claim clears it. The two claim
-// columns always move together, and the issue's status is never touched here. updated_at moves
-// as every issue write moves it (issueUpdatedNow).
-func writeIssueClaim(ctx context.Context, tx pgx.Tx, key string, claim *model.IssueClaim) error {
-	if claim == nil {
+// issueClaimedNow is the value a claim write stamps updated_at with: the transaction's now(),
+// never below what the row already holds, as issueUpdatedNow is never below it. A claim writes
+// three times the reader compares - claimed_at, updated_at and its issue.claimed event's
+// created_at - and all three are that transaction's now(); issueUpdatedNow's clock_timestamp()
+// would put updated_at past the other two, which the one write produced together.
+const issueClaimedNow = "greatest(updated_at, now())"
+
+// writeIssueClaim sets the issue's claim to holder, or clears it when holder is nil. The two claim
+// columns always move together, and the issue's status is never touched here. claimed_at is the
+// transaction's now(): each process's host keeps its own clock, and a claim's time is compared
+// with times other processes wrote.
+func writeIssueClaim(ctx context.Context, tx pgx.Tx, key string, holder *model.Actor) error {
+	if holder == nil {
 		_, err := tx.Exec(ctx, `
-			update issues set claimed_by = null, claimed_at = null, updated_at = `+issueUpdatedNow+` where key = $1
+			update issues set claimed_by = null, claimed_at = null, updated_at = `+issueClaimedNow+` where key = $1
 		`, key)
 		return err
 	}
-	actor, err := encodeJSON(claim.Actor)
+	actor, err := encodeJSON(*holder)
 	if err != nil {
 		return err
 	}
 	_, err = tx.Exec(ctx, `
-		update issues set claimed_by = $2, claimed_at = $3, updated_at = `+issueUpdatedNow+` where key = $1
-	`, key, actor, claim.At)
+		update issues set claimed_by = $2, claimed_at = now(), updated_at = `+issueClaimedNow+` where key = $1
+	`, key, actor)
 	return err
 }
 
@@ -301,11 +310,11 @@ func claimEvent(
 	})
 }
 
-// claimChange is what the locked decision asks for: the claim to store (nil clears it), the
-// event to append, whose claim it replaced, and why. changed false means there is nothing to
+// claimChange is what the locked decision asks for: the holder to store (nil clears the claim),
+// the event to append, whose claim it replaced, and why. changed false means there is nothing to
 // write.
 type claimChange struct {
-	claim     *model.IssueClaim
+	holder    *model.Actor
 	eventType string
 	previous  *model.IssueClaim
 	reason    string
@@ -437,7 +446,7 @@ func (s *server) claimWrite(
 	managed := claimLegionManagedStatus(ctx, tx, key)
 	applied := claimApplied{issue: before, legionManagedStatus: managed}
 	if change.changed {
-		if err := writeIssueClaim(ctx, tx, key, change.claim); err != nil {
+		if err := writeIssueClaim(ctx, tx, key, change.holder); err != nil {
 			return claimApplied{}, err
 		}
 		after, err := s.loadIssue(ctx, tx, key)
@@ -540,7 +549,7 @@ func (s *server) claimIssue(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		return claimChange{
-			claim:     &model.IssueClaim{Actor: actor, At: time.Now().UTC()},
+			holder:    &actor,
 			eventType: "issue.claimed",
 			previous:  previous,
 			reason:    reason,

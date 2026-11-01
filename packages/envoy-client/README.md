@@ -32,10 +32,49 @@ session that subscribed to an issue's topic subscribed for exactly that activity
 `quiet` was published before Dispatch stated it and is judged by `notify`, so a replay of the 72
 hours the stream still holds shows no receipts.
 
+## Consumer delivery
+
+`createConsumerDelivery` (`@legion/envoy-client/consumer-delivery`) is a session's side of the
+listener's relay of its durable consumer ("Session consumers" in `packages/envoy/AGENTS.md`). A
+host makes one per session, subscribes its `subject` (`notifications.envoy.deliver.<session id>`)
+before it registers, passes `registration()` as the registration's `delivery` field, and gives the
+registration's answer and the topics it carried to `answered`, which returns `consumer` or `core`,
+records the stored topics the listener relays (`relays`, `relaying`) and puts the replay engine in
+or out of consumer mode. It hands `receive` each relay message. The delivery decodes the frame's
+`Envoy-*` headers (`decodeRelayFrame`), answers `received` on the frame's reply subject before any
+host work, and hands the host the frames one at a time in stream order
+(`ConsumerDeliveryHost.deliver`): the next waits until `deliver` returns or the host calls
+`release`, `done` or `nak`. The host calls `done` once it wrote the frame, or skipped or refused
+it, and `nak` when the session cannot take it; `progress` goes out every 20 s until then. A frame
+whose `deliver` throws is answered `nak`, and from its third delivery `done`, with the replay
+ledger's `liveFailed` showing its failure notice instead. A frame the replay ledger holds, one on
+a subject no followed topic matches, and one stored more than 2 s before its topic was followed
+(`setFollowed`) whose subject no replay cursor on the frame's stream followed from below the
+frame's sequence either (`since`) are answered `done` and never handed over. A frame delivered
+before, or stored before the current epoch began, is `late`, and a host runs no side turn for it.
+`beginEpoch` starts a new epoch for each new NATS connection. `resumePoint` is the stream id and
+the sequence below which the session holds nothing unwritten; `snapshot` and `restore` carry it
+and the follow times across a restart, and the `persist` option is offered a snapshot whenever it
+changed, so a host writes only changes. A session with no resume point of its own, one moving
+from the core path, registers the lowest cursor the replay ledger holds over its agent subject
+and the followed topics the stream stores: its first consumer starts there instead of at the
+stream's end, so nothing stored while it was away is acked away unshown. Such a session has no
+follow times either, so every topic it follows is stamped at the resume time; the replay cursors
+are what say it followed the topic before then, so its frames are shown and not dropped.
+A registration answer that reports a gap
+or names another stream, and a frame that carries `Envoy-Gap`, call the host's `gap` once. `close`
+answers every unsettled frame, and every later one, `nak`, and leaves consumer mode.
+`streamStores` (`@legion/envoy-client/stream-topics`) says whether the stream stores a topic, so a
+host knows which of its subscriptions the relay carries. On `core` a host runs the replay engine
+below, and `setConsumerMode(true)` stops its `POST /v1/replay` calls while the relay serves the
+session.
+
 ## Missed messages
 
-`createReplayEngine` (`@legion/envoy-client/replay`) shows a session, once, each message the
-notification stream stored on a subject it follows while its own NATS subscription was down. A
+`createReplayEngine` (`@legion/envoy-client/replay`) is the core fallback's recovery, for a
+listener that answers `core` and for a plugin of an earlier release: it shows a session, once,
+each message the notification stream stored on a subject it follows while its own NATS
+subscription was down. A
 host makes one per session process and hands it its live path's `createDeliveryDedupe`, the
 listener client and callbacks (`ReplayHost`): the session id, the followed subjects, how to show
 a stored frame (as a card that runs nothing), a failure notice and a one-time notice, and how to
@@ -43,7 +82,7 @@ persist a change. `sweep()` asks the listener's `POST /v1/replay` for each follo
 messages after its cursor, merges them by stream sequence and hands the host each frame neither
 path showed; it never rejects, and one runs at a time with at most one queued behind it. A
 subject with no cursor starts at the stream's end, so a new follow brings up no history. Role
-forwards are passed over: role messages stay live only.
+forwards are passed over: on this path, role messages stay live only.
 
 The ledger holds the identity of each frame the session finished with (its `event_id`, and its
 `dedupe_key` when that names its event, `replayLedgerIdentity`), each expiring 72 hours after it
@@ -150,9 +189,13 @@ means carrying the patch to the new version.
 tests run: a TCP proxy whose `freeze()` stops forwarding on, and stops reading, the connections
 open at that moment without closing either side, and which records when each connection was
 accepted, first subscribed and closed; a real natsd and listener that each stack builds with
-`go build` from `packages/envoy` into its own scratch directory; and `runFreezeScenario`, the
-freeze both plugins' stall tests put their session through. A test that uses the stack runs only
-with `LEGION_E2E_ENVOY_STACK=1`.
+`go build` from `packages/envoy` into its own scratch directory (its `monitorUrl` is natsd's
+monitoring port); and `runFreezeScenario`, the freeze both plugins' stall tests put their session
+through. The stack's listener answers `consumer`, so the scenario checks consumer delivery across
+the freeze: the connection nats.js dials in place of the frozen one subscribes the relay subject
+again (`/connz`), the session's `envoy_sessions` entry names a new epoch, and the message sent
+during the freeze and one sent after it are each shown once, neither as a replay. A test that
+uses the stack runs only with `LEGION_E2E_ENVOY_STACK=1`.
 
 ## HTTP transport
 

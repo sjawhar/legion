@@ -12,11 +12,12 @@ import (
 
 // Sweeper is the one thing that ends what no human decides: every tick it ends the enrollments
 // whose lease lapsed (revoking their grants and cancelling their pending requests), expires overdue
-// pending agent_secret requests (waking each one's owner) and overdue pending machine logins, and
-// deletes spent OAuth state (oauthstore.Store.Sweep) — all read fresh from Postgres, never from
-// memory, so a restart resumes exactly where the rows are. A lease that ran out while no broker was
-// serving is not lapsed (enroll.Service.EndLapsed), so the first sweep after an outage never ends
-// it for that: the broker's serving clock (enroll.ServingClock) gives it the time back instead.
+// pending agent_secret requests (waking each one's owner) and overdue pending machine logins,
+// deletes spent OAuth state (oauthstore.Store.Sweep), and deletes expired browser sessions — all
+// read fresh from Postgres, never from memory, so a restart resumes exactly where the rows are. A
+// lease that ran out while no broker was serving is not lapsed (enroll.Service.EndLapsed), so the
+// first sweep after an outage never ends it for that: the broker's serving clock
+// (enroll.ServingClock) gives it the time back instead.
 type Sweeper struct {
 	Enrollments   *enroll.Service
 	Machine       *Machine
@@ -40,7 +41,7 @@ func (s *Sweeper) Run(ctx context.Context) {
 }
 
 // Tick runs one sweep: lapsed enrollments, then agent_secret requests, then machine logins, then
-// spent OAuth state. Each
+// spent OAuth state, then expired browser sessions. Each
 // sweep's own failure is logged and does not stop the others — they share nothing but the ticker.
 // Lapsed enrollments go first, so a request whose session is gone is cancelled with it rather
 // than expired and its owner woken.
@@ -69,5 +70,10 @@ func (s *Sweeper) Tick(ctx context.Context) {
 	}
 	if err := s.OAuth.Sweep(ctx); err != nil {
 		slog.Warn("broker sweeper: delete spent OAuth state", "error", err)
+	}
+	if deleted, err := s.Machine.Store.DeleteExpiredBrowserSessions(ctx, now); err != nil {
+		slog.Warn("broker sweeper: delete expired browser sessions", "error", err)
+	} else if deleted > 0 {
+		slog.Info("broker sweeper: deleted expired browser sessions", "count", deleted)
 	}
 }

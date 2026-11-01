@@ -22,17 +22,17 @@ import (
 // their rooms, and publishes the writes to their rooms, in that order. Discard, which callers
 // defer right after Join, drops whatever a transaction that did not commit left behind.
 //
-// Settlement's operations run in a transaction of its own, which no caller joined, so its ledger
-// carries no `tx` and marks itself `settling` instead. Those are the only two ledgers there are:
-// every operation that writes a document either joins its caller's transaction or is
-// settlement's own.
+// A writer that runs its operations in a transaction of its own, which no caller joined, carries
+// no `tx` and marks its ledger `ownTx` instead: a settlement (settleRoomWithin) and the block-id
+// backfill (backfillBlockIDs) are the two. Those are the ledgers there are: every operation that
+// writes a document either joins its caller's transaction or runs in one of those two writers'.
 type Ledger struct {
 	service *Service
 	tx      pgx.Tx
-	// settling marks settlement's ledger, whose operations run inside settlement's own
-	// transaction although no caller joined it.
-	settling bool
-	events   []model.Event
+	// ownTx marks a ledger whose operations run inside a transaction of the writer's own,
+	// which no caller joined: a settlement's and the block-id backfill's.
+	ownTx  bool
+	events []model.Event
 	// live holds, per document, the writes this transaction made to it; order is the order it
 	// first wrote them in.
 	live     map[string]*liveWrite
@@ -48,6 +48,9 @@ type Ledger struct {
 	// copies are the documents showing a copy of an ask this transaction answered or resolved,
 	// whose settlement it marked owed (SettleCopiesOf); Commit arms each once it has committed.
 	copies []string
+	// flushes are the room updates this transaction stored ahead of its own appends, one flush
+	// per document (flushThrough), which its commit marks stored.
+	flushes []*RoomFlush
 }
 
 type ledgerVersion struct {
@@ -82,13 +85,13 @@ func (s *Service) Join(ctx context.Context, tx pgx.Tx) (context.Context, *Ledger
 }
 
 // inTransaction reports whether the operations recording into l run inside an open database
-// transaction that this ledger knows about: one a caller joined, or settlement's own. Such an
-// operation fails on a failed room rather than waiting for its recovery (awaitRoomRecovery). An
-// operation that runs inside a transaction without joining it is invisible here and still
-// waits, which is the hang this rule exists to stop, so a handler joins (Docs.Join) and passes
-// the context Join returned.
+// transaction that this ledger knows about: one a caller joined, or a writer's own, a
+// settlement's or the block-id backfill's. Such an operation fails on a failed room rather than
+// waiting for its recovery (awaitRoomRecovery). An operation that runs inside a transaction
+// without joining it is invisible here and still waits, which is the hang this rule exists to
+// stop, so a handler joins (Docs.Join) and passes the context Join returned.
 func (l *Ledger) inTransaction() bool {
-	return l != nil && (l.tx != nil || l.settling)
+	return l != nil && (l.tx != nil || l.ownTx)
 }
 
 func withLedger(ctx context.Context, ledger *Ledger) context.Context {
@@ -148,9 +151,20 @@ func (l *Ledger) commit(ctx context.Context) error {
 		l.fail(err)
 		return err
 	}
-	captures := make([]roomCapture, 0, len(l.versions))
+	captures := make([]roomCapture, 0, len(l.versions)+len(l.flushes)+len(l.order))
 	for _, written := range l.versions {
 		captures = append(captures, roomCapture{room: written.artifactID, capture: written.capture})
+	}
+	for _, flush := range l.flushes {
+		captures = append(captures, flushCapture(flush))
+	}
+	// Each write leaves its room a shadow (roomShadow), installed by the commit under its state's
+	// lock, after the flushes' classes are marked stored.
+	for _, artifactID := range l.order {
+		write := l.live[artifactID]
+		if shadow := write.newShadow(); shadow != nil {
+			captures = append(captures, roomCapture{room: artifactID, capture: authorCapture{state: write.state}, shadow: shadow})
+		}
 	}
 	// The cursors before the commit, not after it: this transaction holds the document's advisory
 	// lock until the commit drops it, and the writers queued on that lock take it the instant it
@@ -176,8 +190,15 @@ func (l *Ledger) commit(ctx context.Context) error {
 	l.versions = nil
 	if err != nil {
 		l.fail(err)
+		l.flushes = nil
 		return err
 	}
+	for _, flush := range l.flushes {
+		if flush.storedContentChange() {
+			l.service.scheduleSettleAfterAppend(flush.room)
+		}
+	}
+	l.flushes = nil
 	l.creditRooms()
 	return nil
 }
@@ -205,45 +226,95 @@ func (l *Ledger) commit(ctx context.Context) error {
 // these versions takes nothing in - advanceRoomCursor only advances by the version that follows
 // the one it stands at - and the publish records them again on the room it reaches
 // (publishLiveUpdate).
+//
+// The room updates the transaction flushed (flushThrough) are already in the instance they were
+// made in, and only there: they advance that instance's cursor and reach no other, as a repair's
+// append does (advanceRoomCursor). A flush and a write of one instance interleave their versions
+// (an operation's flush, its append, the next operation's flush), so the instance takes one run
+// of both, in version order (RoomFlush.appended): a cursor advances only by the version after
+// the one it stands at. A write whose room is not the flushed instance - a cold write, or one
+// whose room was replaced since its fork - takes in its own versions alone. Which of the two a
+// write is is decided in one place, the loop over the writes below: a flush of that write's
+// document made on the instance it wrote takes the write's versions in with its own, and a
+// flush no write of this transaction shares an instance with takes in its own alone.
 func (l *Ledger) takeRoomCursors() {
+	taken := make(map[*RoomFlush]bool, len(l.flushes))
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
+		if flush := l.flushFor(artifactID); flush != nil && flush.cursor == write.point.cursor {
+			taken[flush] = true
+			advanceRoomCursorThrough(flush.cursor, flush.appended(write.versions))
+		} else {
+			advanceRoomCursorThrough(write.point.cursor, write.versions)
+		}
 		for _, version := range write.versions {
-			advanceRoomCursor(write.forkCursor, version)
 			l.service.tookResidentVersion(artifactID, version)
+		}
+	}
+	for _, flush := range l.flushes {
+		if !taken[flush] {
+			advanceRoomCursorThrough(flush.cursor, flush.appended(nil))
 		}
 	}
 }
 
-// roomCapture is a version's capture with the document it versions.
+// roomCapture is a version's capture with the document it versions, the room updates a
+// transaction flushed (flush), or the shadow a live write leaves its room (shadow); the last two
+// hold only the state, which the commit locks.
 type roomCapture struct {
 	room    string
 	capture authorCapture
+	flush   *RoomFlush
+	shadow  *roomShadow
 }
 
-// commitConsuming commits tx, which wrote the versions captures lists, and marks the in-flight
-// credits each listed consumed once it has committed. Each capture's state is locked (state.mu)
-// from before the commit until then: an append queued behind the document's advisory lock, which
-// tx holds until it commits, takes that lock the instant the commit drops it, and must find its
+// flushCapture is the roomCapture of flush, which locks the state flush took its updates from.
+func flushCapture(flush *RoomFlush) roomCapture {
+	return roomCapture{room: flush.room, capture: authorCapture{state: flush.state}, flush: flush}
+}
+
+// commitConsuming commits tx, which wrote the versions captures lists and the room updates their
+// flushes stored, and once it has committed marks the in-flight credits each version listed
+// consumed and each flushed update stored, its credit held and landed (RoomFlush.markStored), frees
+// a shadow left with nothing to measure (dropDrainedShadowLocked), and installs each live write's
+// shadow (installShadowLocked), in captures' order. Each capture's state is locked (state.mu) from
+// before the commit until then: an append queued behind the document's advisory lock, which tx
+// holds until it commits, takes that lock the instant the commit drops it, and must find its
 // credit consumed when it reads it (UpdateCredit.take), or it writes an author a version listed
-// to the pending authors. The states are locked in their documents' sorted order, so two
-// transactions versioning the same two documents cannot deadlock. ended runs once the commit
-// returns, with its error and the states still locked; a capture with no state locks nothing.
+// to the pending authors; and a durable writer that takes it must find the updates this commit
+// stored marked, or it stores them again, and the write's shadow installed, or it stores a class
+// measured without the write (flushThrough). The states are locked in their documents' sorted
+// order, so two transactions versioning the same two documents cannot deadlock. ended runs once
+// the commit returns, with its error and the states still locked; a capture with no state locks
+// nothing. A commit that fails marks nothing: the room's persistence stores the flushed updates
+// later.
 func (s *Service) commitConsuming(ctx context.Context, tx pgx.Tx, captures []roomCapture, ended func(error)) error {
 	sorted := slices.Clone(captures)
 	slices.SortStableFunc(sorted, func(a, b roomCapture) int { return strings.Compare(a.room, b.room) })
 	locked := make([]roomCapture, 0, len(sorted))
+	holds := func(state *roomState) bool {
+		return slices.ContainsFunc(locked, func(held roomCapture) bool { return held.capture.state == state })
+	}
 	for _, written := range sorted {
-		state := written.capture.state
-		if state != nil && !slices.ContainsFunc(locked, func(held roomCapture) bool { return held.capture.state == state }) {
+		if state := written.capture.state; state != nil && !holds(state) {
 			state.mu.Lock()
 			locked = append(locked, written)
 		}
 	}
 	err := tx.Commit(ctx)
+	var unlanded []*UpdateCredit
 	if err == nil {
 		for _, written := range captures {
 			written.capture.consumeLocked()
+			if written.flush != nil {
+				unlanded = append(unlanded, written.flush.markStored(holds)...)
+				if state := written.capture.state; state != nil {
+					state.dropDrainedShadowLocked()
+				}
+			}
+			if written.shadow != nil {
+				s.installShadowLocked(written.room, written.capture.state, written.shadow)
+			}
 		}
 	}
 	if ended != nil {
@@ -251,6 +322,9 @@ func (s *Service) commitConsuming(ctx context.Context, tx pgx.Tx, captures []roo
 	}
 	for _, held := range locked {
 		s.unlockState(held.room, held.capture.state)
+	}
+	for _, credit := range unlanded {
+		credit.landed()
 	}
 	return err
 }
@@ -263,6 +337,7 @@ func (l *Ledger) Discard() {
 		l.service.finishLiveWrite(l.live[artifactID])
 	}
 	l.versions = nil
+	l.flushes = nil
 	l.endRebuilds()
 }
 
@@ -336,6 +411,7 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 	}
 	l.live[write.artifactID] = write
 	l.order = append(l.order, write.artifactID)
+	write.flushed = l.flushFor(write.artifactID)
 }
 
 // recordSettlementCredit records, in the transaction that wrote the documents, who owes what once
@@ -464,9 +540,15 @@ func (l *Ledger) publish() {
 }
 
 // fail fails the rooms a transaction wrote when its commit returned an error. The commit may
-// have gone through, so the rooms cannot tell whether they should hold the writes; failed, they
-// reload the durable document, whichever way the commit went.
+// have gone through, so the rooms cannot tell whether they should hold the writes, or the room
+// updates the transaction flushed, whose versions their cursors already took in (takeRoomCursors);
+// failed, they reload the durable document, whichever way the commit went.
 func (l *Ledger) fail(cause error) {
+	for _, flush := range l.flushes {
+		if write := l.live[flush.room]; len(flush.versions) > 0 && (write == nil || len(write.updates) == 0) {
+			l.service.failRoom(flush.room, fmt.Errorf("commit flushed document updates: %w", cause))
+		}
+	}
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
 		if write.finished {

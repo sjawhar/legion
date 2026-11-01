@@ -421,6 +421,27 @@ case_prepare_stack_built_migration() {
   printf 'PASS: prepare_stack compares the seed with the built Dispatch'"'"'s migrations, not the checkout'"'"'s\n'
 }
 
+# case_prepare_stack_migration_set: with both records holding their sets, prepare_stack refuses a
+# build that lacks a version the seed holds even when the highest versions are the same (a
+# migration merged below the highest), and accepts one that holds the seed's set.
+case_prepare_stack_migration_set() {
+  local dir="${temporary_dir}/prepare-set" rc
+  mkdir -p "$dir/lib" "$dir/src/packages/envoy/internal/dispatch/store/migrations" "$dir/root/bin"
+  cp -- "$helper" "$dir/lib/common.sh"
+  printf '#!/usr/bin/env bash\n[ "$1" = build-info ] && echo "abc false"\nexit 0\n' >"$dir/lib/stack.sh"
+  chmod +x "$dir/lib/stack.sh"
+  printf '{"migration":20261030110000,"migrations":[1,2,20261030100000,20261030110000],"build_commit":"seedmaker"}\n' >"$dir/root/seed.meta.json"
+  printf '{"newest_migration":20261030110000,"migrations":[1,2,20261030110000],"dispatch_commit":"lacking"}\n' >"$dir/root/bin/envoy-dispatch.json"
+  out=$(LOADTEST_SRC="$dir/src" LOADTEST_ROOT="$dir/root" bash -c 'source "$1"; resolve_paths; prepare_stack' _ "$dir/lib/common.sh" 2>&1) && rc=0 || rc=$?
+  ((rc != 0)) || { fail "(i) prepare_stack accepted a build lacking 20261030100000, which the seed holds below a shared highest"; return; }
+  [[ $out == *"Dispatch lacking"* && $out == *20261030100000* ]] || { fail "(i) the refusal does not name the build and the missing version"; return; }
+  printf '{"newest_migration":20261030110000,"migrations":[1,2,20261030100000,20261030110000],"dispatch_commit":"whole"}\n' >"$dir/root/bin/envoy-dispatch.json"
+  out=$(LOADTEST_SRC="$dir/src" LOADTEST_ROOT="$dir/root" bash -c 'source "$1"; resolve_paths; prepare_stack' _ "$dir/lib/common.sh" 2>&1) && rc=0 || rc=$?
+  ((rc == 0)) || { fail "(i) prepare_stack refused a build holding the seed's whole set: $out"; return; }
+  out=""
+  printf 'PASS: prepare_stack compares the seed'"'"'s set of migrations with the built Dispatch'"'"'s set\n'
+}
+
 # ports_for ROOT [NAME=VALUE...]: ROOT's ports, "KEY PORT" a line, from common.sh, in a shell that
 # holds no LOADTEST_*_PORT but the ones given.
 ports_for() {
@@ -485,8 +506,9 @@ case_holder_ended || failed=$((failed + 1))
 case_waiting_callers || failed=$((failed + 1))
 case_foreign_record_live_pid || failed=$((failed + 1))
 case_prepare_stack_built_migration || failed=$((failed + 1))
+case_prepare_stack_migration_set || failed=$((failed + 1))
 case_stack_ports || failed=$((failed + 1))
 if ((failed > 0)); then
-  printf 'FAIL: %d of 9 cases failed\n' "$failed" >&2
+  printf 'FAIL: %d of 10 cases failed\n' "$failed" >&2
   exit 1
 fi

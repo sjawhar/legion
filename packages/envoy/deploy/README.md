@@ -116,20 +116,32 @@ reads `DISPATCH_SERVER_URL` from `compose/.env` and checks that `/auth/start`
 emits exactly `$DISPATCH_SERVER_URL/auth/callback`. It persists the new
 `ENVOY_IMAGE_TAG` only after both checks. A pull that fails changes nothing; the previous image
 keeps serving. A deploy that fails after the new image started restores the
-previous tag and restarts only `dispatch`, unless the failed image moved the
-database's schema. Before each deploy the deployer reads the schema version and
-records, as `ENVOY_IMAGE_SCHEMA=<tag>:<version>` in `compose/.env`, the version
-the deployed tag runs against. It keeps that record until the tag changes, so a
-retry of a failed image compares against the version the previous tag runs
-against, not the one the failed attempt left. When a deploy fails, it first stops
-the failed image and confirms that no `dispatch` container still runs. Then it
-reads the version again, waiting on the advisory lock Dispatch's migration runner
+previous tag and restarts only `dispatch`, unless the failed image changed the
+set of migrations the database has applied. Before each deploy the deployer
+reads every version in `schema_migrations` and records, as
+`ENVOY_IMAGE_SCHEMA=<tag>:<max>-<count>-<digest>` in `compose/.env`, the set the
+deployed tag runs against: the highest version applied, how many are applied,
+and the SHA-256 of the versions, ascending, one per line. It is the set and not
+`max(version)` alone because a migration whose version is below one already
+applied, a numbered migration merged after a timestamped one deployed, leaves
+the max where it was. The deployer keeps that record until the tag changes, so a
+retry of a failed image compares against the set the previous tag runs against,
+not the one the failed attempt left. When a deploy fails, it first stops the
+failed image and confirms that no `dispatch` container still runs. Then it reads
+the versions again, waiting on the advisory lock Dispatch's migration runner
 holds, so a migration the failed image left in flight ends before the read. If
-the stop or the read fails, or the version moved past the record, it starts
-nothing, logs `refusing to roll back to <previous>` with both versions, and exits
-1. Recovery is then forward: deploy an image that fixes the failure, or start the
-failed one by hand once its failure is understood. Never start the previous tag
-against the newer schema.
+the stop or the read fails, or the value differs from the record, it starts
+nothing, logs `refusing to roll back to <previous>` with both values, each as
+`<max> (<count> applied)`, and exits 1. Recovery is then forward: deploy an image
+that fixes the failure, or start the failed one by hand once its failure is
+understood. Never start the previous tag against the newer schema.
+
+A record the deployer before this one wrote is `<tag>:<version>`, a bare
+`max(version)`. While the tag that wrote it is still deployed it is compared the
+old way, refusing the rollback once the max has moved past it, so a retry in
+flight across the upgrade keeps the safety it started with; it sees an
+out-of-order migration only through the max. The first deploy under a new tag
+records the set.
 
 The deployer's database clients (`pg_dump` for the backup, `psql` for the schema
 version) run in the `pg_dump` image under `docker run --init`, so the bound

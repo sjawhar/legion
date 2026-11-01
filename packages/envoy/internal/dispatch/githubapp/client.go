@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -129,13 +130,19 @@ type cachedToken struct {
 	expires time.Time
 }
 
-// ttlCache is a small time-bounded cache keyed by K, shared by ListInstallations (one fixed key)
-// and ListInstallationRepositoriesByID (one key per installation id) -- both independently
-// hand-rolled the identical lock/check-age/unlock-on-hit, fetch-then-lock/store/unlock shape
-// before this helper existed. A singleflight.Group collapses concurrent cold-cache fetches for
-// the same key into one network call: two goroutines racing a cold cache for the same
-// installation (plausible under the cross-installation errgroup's own concurrency) now share
-// one fetch's answer instead of each minting its own.
+// mintedToken is what the client remembers of a token it minted: the installation that scopes
+// the token's calls, until GitHub's expiry for it.
+type mintedToken struct {
+	installation int64
+	expires      time.Time
+}
+
+// ttlCache is a small time-bounded cache keyed by K, shared by ListInstallations (one fixed key),
+// ListInstallationRepositoriesByID (one key per installation id) and RepositoryToken (one key per
+// "owner/repo"). A singleflight.Group collapses concurrent cold-cache fetches for the same key
+// into one network call: two goroutines racing a cold cache for the same installation (plausible
+// under the cross-installation errgroup's own concurrency, or two browser reads of one repository
+// through the GitHub proxy) share one fetch's answer instead of each making its own.
 type ttlCache[K comparable, V any] struct {
 	ttl   time.Duration
 	now   func() time.Time
@@ -168,17 +175,28 @@ func (c *ttlCache[K, V]) fresh(key K) (V, bool) {
 // get returns key's cached value when fresh; otherwise it calls fetch exactly once across every
 // concurrent caller for this key (singleflight, keyed by key's string form) and caches the
 // result for the rest.
-func (c *ttlCache[K, V]) get(key K, fetch func() (V, error)) (V, error) {
+//
+// The one fetch serves every waiting caller, so it runs on ctx without its cancellation or
+// deadline: whichever caller started it may go away (a closed browser tab, an ended sync) while
+// others still wait on the same answer, and one caller's cancellation must not fail them. Each
+// request the fetch sends is still bounded by RequestTimeout. Each caller stops waiting when its
+// own ctx ends, with ctx's error.
+func (c *ttlCache[K, V]) get(ctx context.Context, key K, fetch func(context.Context) (V, error)) (V, error) {
+	var zero V
 	if value, ok := c.fresh(key); ok {
 		return value, nil
 	}
-	value, err, _ := c.group.Do(fmt.Sprint(key), func() (any, error) {
+	if err := ctx.Err(); err != nil {
+		return zero, err
+	}
+	shared := context.WithoutCancel(ctx)
+	results := c.group.DoChan(fmt.Sprint(key), func() (any, error) {
 		// Re-check: a sibling caller may have already refreshed this key while this one waited
 		// to acquire the singleflight call.
 		if value, ok := c.fresh(key); ok {
 			return value, nil
 		}
-		fetched, err := fetch()
+		fetched, err := fetch(shared)
 		if err != nil {
 			return nil, err
 		}
@@ -187,11 +205,52 @@ func (c *ttlCache[K, V]) get(key K, fetch func() (V, error)) (V, error) {
 		c.mu.Unlock()
 		return fetched, nil
 	})
-	if err != nil {
-		var zero V
-		return zero, err
+	select {
+	case <-ctx.Done():
+		return zero, ctx.Err()
+	case result := <-results:
+		if result.Err != nil {
+			return zero, result.Err
+		}
+		return result.Val.(V), nil
 	}
-	return value.(V), nil
+}
+
+// forget drops key's cached value, so the next get fetches it again.
+func (c *ttlCache[K, V]) forget(key K) {
+	c.mu.Lock()
+	delete(c.items, key)
+	c.mu.Unlock()
+}
+
+// Limits is the GitHub rate limits every process obeys together (ratelimit.Store, over
+// github_rate_limits): GitHub budgets the App and each installation, not a process, so a limit
+// one process meets must stop the others from asking too. Scopes are AppScope and
+// installationScope's.
+type Limits interface {
+	// Wait is how long the limit in force on scope has left, zero when none is, and when that limit
+	// was last recorded: the same for one limit however much of it has passed, changed by every
+	// recording that makes a new limit or extends one.
+	Wait(ctx context.Context, scope string) (wait time.Duration, recorded time.Time, err error)
+	// Record records that GitHub asked for wait before the next request under scope.
+	Record(ctx context.Context, scope string, wait time.Duration) error
+}
+
+// AppScope is the scope of every call the App JWT signs: installation lookups, token mints and the
+// App webhook's delivery endpoints, which GitHub budgets as the App's.
+const AppScope = "app"
+
+// installationScope is the scope of every call made with installation id's token, which GitHub
+// budgets as that installation's.
+func installationScope(id int64) string { return "installation:" + strconv.FormatInt(id, 10) }
+
+// Option configures a Client New builds.
+type Option func(*Client)
+
+// WithLimits makes the client obey, and record, the rate limits limits holds. Without it each
+// client obeys only the answers GitHub gives it.
+func WithLimits(limits Limits) Option {
+	return func(c *Client) { c.limits = limits }
 }
 
 // Client calls the GitHub App API as the configured App. A nil *Client is the
@@ -202,11 +261,27 @@ type Client struct {
 	base string
 	http *http.Client
 	now  func() time.Time
+	// limits is the shared rate limits request obeys and records; nil is no shared limit.
+	limits Limits
 
-	mu     sync.Mutex
+	mu sync.Mutex
+	// tokens holds each installation's token in this process alone. GitHub budgets an
+	// installation, not a token, so a token per process costs no more of the installation's limit
+	// than one shared token would (the limit itself is shared, through limits), and every process's
+	// token is valid at once; storing tokens in the database would put live credentials in Postgres
+	// and its backups.
 	tokens map[int64]cachedToken
-	// repositories maps "owner/repo" to the installation that covers it, for RepositoryToken.
-	repositories map[string]int64
+	// installationOf maps each token this client minted to its installation and expiry, so a call
+	// made with a token is made under that installation's scope (tokenScope). A token keeps its
+	// entry until it expires, not only while it is the cached one: a caller that took it before
+	// the next mint replaced it in tokens (a long sync, or a concurrent first mint) still holds a
+	// token GitHub budgets under that installation. Each mint removes the expired entries, so the
+	// map holds no more than the tokens still valid.
+	installationOf map[string]mintedToken
+	// repositories caches the installation that covers each "owner/repo", for RepositoryToken, for
+	// installationsCacheTTL: an App moved to another installation is found within that, whatever
+	// the old installation still answers. A token that cannot be minted drops the entry at once.
+	repositories *ttlCache[string, int64]
 	// installations caches ListInstallations' own answer under one fixed key
 	// (installationsCacheKey): the installation list changes only when a human
 	// installs/uninstalls the App, far slower than every reconcile pass needs to re-fetch it.
@@ -220,8 +295,8 @@ type Client struct {
 // caches under.
 const installationsCacheKey = "installations"
 
-// installationsCacheTTL bounds how long ListInstallations trusts its own cached answer before
-// asking GitHub again.
+// installationsCacheTTL bounds how long ListInstallations, ListInstallationRepositoriesByID and
+// RepositoryToken trust their own cached answers before asking GitHub again.
 const installationsCacheTTL = 10 * time.Minute
 
 // New builds a client from the loaded App credentials. It returns (nil, nil)
@@ -229,7 +304,7 @@ const installationsCacheTTL = 10 * time.Minute
 // and methods answer ErrNoAppKey — and an error only for a malformed key, so
 // a misconfigured deployment fails at boot. base overrides the GitHub API
 // origin (DISPATCH_GITHUB_API_BASE); empty means api.github.com.
-func New(app *auth.AppConfig, base string) (*Client, error) {
+func New(app *auth.AppConfig, base string, options ...Option) (*Client, error) {
 	if app == nil || app.PEM == "" {
 		return nil, nil
 	}
@@ -246,12 +321,16 @@ func New(app *auth.AppConfig, base string) (*Client, error) {
 		base: strings.TrimSuffix(base, "/"),
 		// No Timeout here: request applies RequestTimeout to each call's own context instead,
 		// so a caller that needs a shorter one sets it on the context it passes.
-		http:         &http.Client{},
-		now:          time.Now,
-		tokens:       map[int64]cachedToken{},
-		repositories: map[string]int64{},
+		http:           &http.Client{},
+		now:            time.Now,
+		tokens:         map[int64]cachedToken{},
+		installationOf: map[string]mintedToken{},
+	}
+	for _, option := range options {
+		option(c)
 	}
 	nowFunc := func() time.Time { return c.now() }
+	c.repositories = newTTLCache[string, int64](installationsCacheTTL, nowFunc)
 	c.installations = newTTLCache[string, []Installation](installationsCacheTTL, nowFunc)
 	c.installationRepos = newTTLCache[int64, []string](installationsCacheTTL, nowFunc)
 	return c, nil
@@ -328,12 +407,15 @@ func (c *Client) installation(ctx context.Context, owner, repo string) (Installa
 		return Installation{}, err
 	}
 	target := c.base + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/installation"
-	body, status, err := c.do(ctx, http.MethodGet, target, "Bearer "+jwt)
+	body, status, header, err := c.do(ctx, AppScope, http.MethodGet, target, "Bearer "+jwt)
 	if err != nil {
 		return Installation{}, err
 	}
 	if status == http.StatusNotFound {
 		return Installation{}, fmt.Errorf("%w on %s/%s", ErrNoInstallation, owner, repo)
+	}
+	if limited := RateLimit(status, header, body); limited != nil {
+		return Installation{}, limited
 	}
 	if status != http.StatusOK {
 		return Installation{}, fmt.Errorf("GET %s: status %d: %s", target, status, body)
@@ -366,18 +448,17 @@ const maxInstallations = 2000
 // ListInstallations lists every installation of this App (GET /app/installations,
 // JWT-authenticated, paginated): LEGION-567's merged-PR search must cover every installation the
 // App has, not only the one covering the configured deploy repository, since the population rule
-// (an author allowlist) names no installation or org boundary. Cached for installationsCacheTTL:
-// unlike RepositoryToken's owner/repo cache (invalidated only when a mint actually fails), this is
-// a plain time-based cache, since there is no per-call signal analogous to a failed token mint to
-// invalidate it on -- the install list changes only when a human installs/uninstalls the App, far
-// slower than any reconcile pass needs a fresh answer. Unlike this cache's own pre-ttlCache form,
-// a zero-installations answer is now cached too (ttlCache.fresh tests presence, not a non-nil
-// slice): an App installed nowhere re-fetches at most once per TTL instead of on every call.
+// (an author allowlist) names no installation or org boundary. Cached for installationsCacheTTL,
+// as RepositoryToken's owner/repo cache is: the install list changes only when a human
+// installs/uninstalls the App, far slower than any reconcile pass needs a fresh answer. Unlike
+// this cache's own pre-ttlCache form, a zero-installations answer is now cached too
+// (ttlCache.fresh tests presence, not a non-nil slice): an App installed nowhere re-fetches at
+// most once per TTL instead of on every call.
 func (c *Client) ListInstallations(ctx context.Context) ([]Installation, error) {
 	if c == nil {
 		return nil, ErrNoAppKey
 	}
-	return c.installations.get(installationsCacheKey, func() ([]Installation, error) {
+	return c.installations.get(ctx, installationsCacheKey, func(ctx context.Context) ([]Installation, error) {
 		jwt, err := c.appJWT()
 		if err != nil {
 			return nil, err
@@ -385,7 +466,7 @@ func (c *Client) ListInstallations(ctx context.Context) ([]Installation, error) 
 		var installations []Installation
 		for page := 1; ; page++ {
 			target := fmt.Sprintf("%s/app/installations?per_page=100&page=%d", c.base, page)
-			body, status, header, err := c.request(ctx, http.MethodGet, target, "Bearer "+jwt, mediaTypeJSON, nil, responseLimit)
+			body, status, header, err := c.request(ctx, AppScope, http.MethodGet, target, "Bearer "+jwt, mediaTypeJSON, nil, responseLimit)
 			if err != nil {
 				return nil, fmt.Errorf("list installations (page %d): %w", page, err)
 			}
@@ -416,31 +497,24 @@ func (c *Client) ListInstallations(ctx context.Context) ([]Installation, error) 
 }
 
 // RepositoryToken returns an installation token of the installation covering owner/repo. The
-// installation a repository resolves to is remembered; a token that cannot be minted for it
-// forgets it, so an App moved between installations is looked up again.
+// installation a repository resolves to is remembered for installationsCacheTTL; a token that
+// cannot be minted for it forgets it at once, so an App moved between installations is looked up
+// again within the TTL, or sooner when the old installation is gone.
 func (c *Client) RepositoryToken(ctx context.Context, owner, repo string) (string, error) {
 	if c == nil {
 		return "", ErrNoAppKey
 	}
 	name := owner + "/" + repo
-	c.mu.Lock()
-	installationID, known := c.repositories[name]
-	c.mu.Unlock()
-	if !known {
+	installationID, err := c.repositories.get(ctx, name, func(ctx context.Context) (int64, error) {
 		installation, err := c.installation(ctx, owner, repo)
-		if err != nil {
-			return "", err
-		}
-		installationID = installation.ID
-		c.mu.Lock()
-		c.repositories[name] = installationID
-		c.mu.Unlock()
+		return installation.ID, err
+	})
+	if err != nil {
+		return "", err
 	}
 	token, err := c.Token(ctx, installationID)
 	if err != nil {
-		c.mu.Lock()
-		delete(c.repositories, name)
-		c.mu.Unlock()
+		c.repositories.forget(name)
 		return "", err
 	}
 	return token, nil
@@ -469,7 +543,7 @@ const maxInstallationRepositories = 2000
 // search's own cost by the installation count for data that changes on human timescales, not
 // every five minutes.
 func (c *Client) ListInstallationRepositoriesByID(ctx context.Context, installationID int64) ([]string, error) {
-	return c.installationRepos.get(installationID, func() ([]string, error) {
+	return c.installationRepos.get(ctx, installationID, func(ctx context.Context) ([]string, error) {
 		token, err := c.Token(ctx, installationID)
 		if err != nil {
 			return nil, fmt.Errorf("mint token for installation %d: %w", installationID, err)
@@ -525,7 +599,7 @@ func (c *Client) ReadWithin(ctx context.Context, token, path string, limit int64
 	if c == nil {
 		return nil, 0, nil, ErrNoAppKey
 	}
-	return c.request(ctx, http.MethodGet, c.base+path, "Bearer "+token, mediaTypeJSON, nil, limit)
+	return c.request(ctx, c.tokenScope(token), http.MethodGet, c.base+path, "Bearer "+token, mediaTypeJSON, nil, limit)
 }
 
 // GraphQL posts query/variables to the API origin's /graphql endpoint with an installation token,
@@ -543,7 +617,7 @@ func (c *Client) GraphQL(ctx context.Context, token string, query string, variab
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("encode GraphQL request: %w", err)
 	}
-	return c.request(ctx, http.MethodPost, c.base+"/graphql", "Bearer "+token, mediaTypeJSON, bytes.NewReader(payload), responseLimit)
+	return c.request(ctx, c.tokenScope(token), http.MethodPost, c.base+"/graphql", "Bearer "+token, mediaTypeJSON, bytes.NewReader(payload), responseLimit)
 }
 
 // Token returns an installation access token, minting one only when the
@@ -563,9 +637,12 @@ func (c *Client) Token(ctx context.Context, installationID int64) (string, error
 		return "", err
 	}
 	target := c.base + "/app/installations/" + strconv.FormatInt(installationID, 10) + "/access_tokens"
-	body, status, err := c.do(ctx, http.MethodPost, target, "Bearer "+jwt)
+	body, status, header, err := c.do(ctx, AppScope, http.MethodPost, target, "Bearer "+jwt)
 	if err != nil {
 		return "", err
+	}
+	if limited := RateLimit(status, header, body); limited != nil {
+		return "", limited
 	}
 	if status != http.StatusCreated {
 		return "", fmt.Errorf("POST %s: status %d: %s", target, status, body)
@@ -578,7 +655,14 @@ func (c *Client) Token(ctx context.Context, installationID int64) (string, error
 		return "", fmt.Errorf("decode installation token: %w", err)
 	}
 	c.mu.Lock()
+	now := c.now()
+	for token, minted := range c.installationOf {
+		if !now.Before(minted.expires) {
+			delete(c.installationOf, token)
+		}
+	}
 	c.tokens[installationID] = cachedToken{token: payload.Token, expires: payload.ExpiresAt}
+	c.installationOf[payload.Token] = mintedToken{installation: installationID, expires: payload.ExpiresAt}
 	c.mu.Unlock()
 	return payload.Token, nil
 }
@@ -600,7 +684,7 @@ func (c *Client) CheckSource(ctx context.Context, owner, repo string) (Source, e
 		return Source{}, err
 	}
 	target := c.base + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo)
-	body, status, err := c.do(ctx, http.MethodGet, target, "Bearer "+token)
+	body, status, _, err := c.do(ctx, installationScope(installation.ID), http.MethodGet, target, "Bearer "+token)
 	if err != nil {
 		return Source{}, err
 	}
@@ -613,19 +697,48 @@ func (c *Client) CheckSource(ctx context.Context, owner, repo string) (Source, e
 	return Source{InstallationID: installation.ID, AppSlug: installation.AppSlug}, nil
 }
 
-func (c *Client) do(ctx context.Context, method, target, authorization string) ([]byte, int, error) {
-	return c.doLimited(ctx, method, target, authorization, responseLimit)
+// tokenScope is the scope of a call made with token: its installation's when this client minted
+// it, until the next mint after its expiry forgets it. A token this client did not mint is under
+// no shared limit, since nothing says whose it is.
+func (c *Client) tokenScope(token string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if minted, ok := c.installationOf[token]; ok {
+		return installationScope(minted.installation)
+	}
+	return ""
 }
 
-func (c *Client) doLimited(ctx context.Context, method, target, authorization string, limit int64) ([]byte, int, error) {
-	body, status, _, err := c.request(ctx, method, target, authorization, mediaTypeJSON, nil, limit)
-	return body, status, err
+func (c *Client) do(ctx context.Context, scope, method, target, authorization string) ([]byte, int, http.Header, error) {
+	return c.doLimited(ctx, scope, method, target, authorization, responseLimit)
 }
 
-// request performs one API call asking for the accept media type and returns its complete body
-// when it fits within limit, status and headers. body is nil for every GET call; GraphQL is this
-// package's only POST with a body.
-func (c *Client) request(ctx context.Context, method, target, authorization, accept string, body io.Reader, limit int64) ([]byte, int, http.Header, error) {
+func (c *Client) doLimited(ctx context.Context, scope, method, target, authorization string, limit int64) ([]byte, int, http.Header, error) {
+	return c.request(ctx, scope, method, target, authorization, mediaTypeJSON, nil, limit)
+}
+
+// request performs one API call under scope asking for the accept media type and returns its
+// complete body when it fits within limit, status and headers. body is nil for every GET call;
+// GraphQL is this package's only POST with a body.
+//
+// It is the one function that sends anything to GitHub, so it is where the shared rate limits are
+// obeyed: while a limit is in force on scope it sends nothing and returns a held *RateLimitError,
+// and an answer RateLimit reads as a limit is recorded under scope with GitHub's own wait, so no
+// process sends GitHub anything under that scope before the wait ends. A limit that cannot be read
+// or recorded (the database failing) is logged and the request goes ahead, as
+// embedqueue.reserveTokens goes ahead: GitHub still answers each process's own requests with the
+// limit. An empty scope, or a client without Limits, is no shared limit.
+func (c *Client) request(ctx context.Context, scope, method, target, authorization, accept string, body io.Reader, limit int64) ([]byte, int, http.Header, error) {
+	shared := c.limits != nil && scope != ""
+	if shared {
+		wait, recorded, err := c.limits.Wait(ctx, scope)
+		switch {
+		case err != nil:
+			slog.Warn("dispatch githubapp: the shared GitHub rate limit was not read; the request is sent", "scope", scope, "error", err)
+		case wait > 0:
+			return nil, 0, nil, &RateLimitError{Wait: wait, Scope: scope, Held: true, Recorded: recorded}
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, method, target, body)
@@ -649,6 +762,13 @@ func (c *Client) request(ctx context.Context, method, target, authorization, acc
 	if int64(len(responseBody)) > limit {
 		return nil, 0, nil, fmt.Errorf("%s %s: %w", method, target, &ResponseTooLargeError{Limit: limit})
 	}
+	if shared {
+		if limited := RateLimit(response.StatusCode, response.Header, responseBody); limited != nil {
+			if err := c.limits.Record(ctx, scope, limited.Wait); err != nil {
+				slog.Error("dispatch githubapp: GitHub's rate limit was not recorded; other processes may ask GitHub inside it", "scope", scope, "wait", limited.Wait, "error", err)
+			}
+		}
+	}
 	return responseBody, response.StatusCode, response.Header, nil
 }
 
@@ -670,7 +790,7 @@ func (c *Client) Ref(ctx context.Context, token, owner, repo, branch string) (st
 	}
 	target := c.base + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) +
 		"/commits/" + url.PathEscape(branch)
-	body, status, _, err := c.request(ctx, http.MethodGet, target, "Bearer "+token, mediaTypeSHA, nil, responseLimit)
+	body, status, _, err := c.request(ctx, c.tokenScope(token), http.MethodGet, target, "Bearer "+token, mediaTypeSHA, nil, responseLimit)
 	if err != nil {
 		return "", err
 	}
@@ -702,7 +822,7 @@ func (c *Client) Branch(ctx context.Context, token, owner, repo, branch string) 
 	}
 	target := c.base + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) +
 		"/git/ref/heads/" + url.PathEscape(branch)
-	body, status, err := c.do(ctx, http.MethodGet, target, "Bearer "+token)
+	body, status, _, err := c.do(ctx, c.tokenScope(token), http.MethodGet, target, "Bearer "+token)
 	if err != nil {
 		return "", err
 	}
@@ -763,7 +883,7 @@ func (c *Client) Dir(ctx context.Context, token, owner, repo, sha, dir string) (
 	dir = strings.Trim(dir, "/")
 	target := c.base + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) +
 		"/git/trees/" + url.PathEscape(sha+":"+dir)
-	body, status, err := c.do(ctx, http.MethodGet, target, "Bearer "+token)
+	body, status, _, err := c.do(ctx, c.tokenScope(token), http.MethodGet, target, "Bearer "+token)
 	if err != nil {
 		return Dir{}, err
 	}
@@ -833,7 +953,7 @@ func (c *Client) DirFiles(ctx context.Context, token, owner, repo string, listin
 
 func (c *Client) blob(ctx context.Context, token, repoBase, path, sha string) ([]byte, error) {
 	target := repoBase + "/git/blobs/" + url.PathEscape(sha)
-	body, status, err := c.doLimited(ctx, http.MethodGet, target, "Bearer "+token, blobResponseLimit)
+	body, status, _, err := c.doLimited(ctx, c.tokenScope(token), http.MethodGet, target, "Bearer "+token, blobResponseLimit)
 	if err != nil {
 		return nil, err
 	}

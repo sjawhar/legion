@@ -5,7 +5,8 @@
 // one address, so the file also drives what bounds a flood spread over many addresses, which every
 // address's own bucket admits in full: the key cache the verifier reads through
 // (internal/oidc.Keys), whose MinRefresh costs the issuer one read of its key set per window
-// however many tokens naming keys it never published arrive.
+// however many tokens naming keys it never published arrive. The approval page's own routes and
+// GET /signin/status spend that same bucket, and each refuses in its own shape.
 package api_test
 
 import (
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/api"
+	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
@@ -276,5 +278,106 @@ func TestAForgedAccountTokenFloodCostsAFetchEachWithoutTheKeyCachesMinimumRefres
 	}
 	if got := issuer.JWKSFetches() - fetchesBefore; got != floodTokens {
 		t.Fatalf("the issuer's key set was read %d times for %d forged tokens against a cache with no minimum refresh, want %d: one for every token, since every miss reopens the window at once", got, floodTokens, floodTokens)
+	}
+}
+
+// browserCall is one request a browser makes on a route of the approval page, arriving through
+// the trusted proxy from address with no credential at all. It follows no redirect, since the
+// sign-in a page starts inside the bucket leads to the provider, and it answers the status, the
+// headers and the body: a refusal's Retry-After and the page's own headers are what this file
+// reads.
+func browserCall(t *testing.T, ts *testServer, path, address string) (int, http.Header, []byte) {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, ts.URL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-Forwarded-For", address)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	answer, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp.StatusCode, resp.Header, answer
+}
+
+// TestAFloodedPageAnswersThePagesOwn429AndNamesNoToken: the approval page's routes spend the
+// bucket the routes a ServiceAccount token authenticates spend, and past it a browser gets the
+// page's own refusal — 429 with Retry-After, under the headers every answer of a page route
+// carries, saying in the page's HTML that too many requests came from this address and naming
+// neither a ServiceAccount nor a token it never sent. GET /signin/status, being JSON, is refused
+// in JSON, and names the address rather than a token too. The page's stylesheet is refused at no
+// point, since it spends nothing, and inside the burst no route of either kind is refused.
+func TestAFloodedPageAnswersThePagesOwn429AndNamesNoToken(t *testing.T) {
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.AccountLimit = &ratelimit.Limit{Every: time.Hour, Burst: 3}
+		d.TrustedProxyHeader = "X-Forwarded-For"
+	})
+	const (
+		flooder = "198.51.100.4"
+		// A record id's shape, which no record of this broker has: the refusal comes before the
+		// page reads anything, and inside the bucket an unknown id starts a sign-in like any
+		// other, so what the page does with it is beside the point here.
+		recordID   = "c92c8c55d333d24204fcb453596cf1c784ea2755e6fc963c1176314c3e2bee9f"
+		stylesheet = "/approve/assets/approve.css"
+	)
+	page := "/approve/" + recordID
+	spenders := []string{page, "/signin/callback", "/signin/status"}
+
+	for _, path := range spenders {
+		if status, _, body := browserCall(t, ts, path, flooder); status == http.StatusTooManyRequests {
+			t.Fatalf("GET %s inside the bucket = %d %s, want anything but a refusal", path, status, body)
+		}
+	}
+	if status, _, body := browserCall(t, ts, stylesheet, flooder); status != http.StatusOK {
+		t.Fatalf("the stylesheet inside the bucket = %d %s, want 200", status, body)
+	}
+
+	for _, path := range spenders[:2] {
+		status, headers, body := browserCall(t, ts, path, flooder)
+		if status != http.StatusTooManyRequests || headers.Get("Retry-After") != "3600" {
+			t.Fatalf("GET %s past the bucket = %d Retry-After=%q %s, want 429 with Retry-After 3600",
+				path, status, headers.Get("Retry-After"), body)
+		}
+		for header, want := range map[string]string{
+			"Content-Security-Policy": approval.ContentSecurityPolicy,
+			"X-Frame-Options":         "DENY",
+			"Referrer-Policy":         "same-origin",
+			"Cache-Control":           "no-store",
+			"X-Content-Type-Options":  "nosniff",
+			"Content-Type":            "text/html; charset=utf-8",
+		} {
+			if got := headers.Get(header); got != want {
+				t.Errorf("GET %s past the bucket: %s = %q, want %q", path, header, got, want)
+			}
+		}
+		text := string(body)
+		if !strings.Contains(text, "<html") || !strings.Contains(text, "Too many requests") {
+			t.Errorf("GET %s past the bucket answered:\n%s\nwant the page's own refusal page", path, text)
+		}
+		for _, word := range []string{"serviceaccount", "token"} {
+			if strings.Contains(strings.ToLower(text), word) {
+				t.Errorf("GET %s past the bucket names %q, which this caller never sent:\n%s", path, word, text)
+			}
+		}
+	}
+
+	status, headers, body := browserCall(t, ts, "/signin/status", flooder)
+	if status != http.StatusTooManyRequests || headers.Get("Retry-After") != "3600" || decode[wireError](t, body).Code != "RATE_LIMITED" {
+		t.Fatalf("GET /signin/status past the bucket = %d Retry-After=%q %s, want 429 RATE_LIMITED with Retry-After 3600",
+			status, headers.Get("Retry-After"), body)
+	}
+	for _, word := range []string{"serviceaccount", "token"} {
+		if strings.Contains(strings.ToLower(string(body)), word) {
+			t.Errorf("GET /signin/status past the bucket names %q, which no caller of it sends: %s", word, body)
+		}
+	}
+	if status, _, body := browserCall(t, ts, stylesheet, flooder); status != http.StatusOK {
+		t.Fatalf("the stylesheet past the bucket = %d %s, want 200: it spends nothing", status, body)
 	}
 }

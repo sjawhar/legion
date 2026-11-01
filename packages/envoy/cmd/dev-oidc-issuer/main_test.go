@@ -76,7 +76,7 @@ func TestTheTokenFileVerifiesAgainstTheIssuerAndIsRewrittenBeforeItLapses(t *tes
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan int, 1)
 	go func() {
-		done <- serve(ctx, []tokenSpec{{audience: testAudience, account: testAccount, file: file}}, nil, lifetime, &stderr)
+		done <- serve(ctx, []tokenSpec{{audience: testAudience, account: testAccount, file: file}}, codeFlow{}, lifetime, &stderr)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -154,10 +154,12 @@ func TestRunRefusesATokenItCannotMint(t *testing.T) {
 }
 
 const (
-	testClientID     = "dispatch-dev"
-	testClientSecret = "dev-client-secret"
-	testRedirect     = "http://127.0.0.1:1/auth/callback"
-	testDomain       = "d.example"
+	testClientID       = "dispatch-dev"
+	testClientSecret   = "dev-client-secret"
+	brokerClientID     = "broker-dev"
+	brokerClientSecret = "broker-dev-client-secret"
+	testRedirect       = "http://127.0.0.1:1/auth/callback"
+	testDomain         = "d.example"
 )
 
 // noRedirects hands back each redirect rather than following it, so a test reads where the
@@ -180,6 +182,26 @@ func startRun(t *testing.T, args ...string) string {
 	return awaitListening(t, &stderr)
 }
 
+// discoveryEndpoints reads the issuer's discovery document and answers the authorization and
+// token endpoints it names, failing the test unless they are the issuer's own.
+func discoveryEndpoints(t *testing.T, issuerURL string) (authorization, token string) {
+	t.Helper()
+	response, err := http.Get(issuerURL + "/.well-known/openid-configuration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var discovery struct {
+		AuthorizationEndpoint string `json:"authorization_endpoint"`
+		TokenEndpoint         string `json:"token_endpoint"`
+	}
+	err = json.NewDecoder(response.Body).Decode(&discovery)
+	response.Body.Close()
+	if err != nil || discovery.AuthorizationEndpoint != issuerURL+"/authorize" || discovery.TokenEndpoint != issuerURL+"/token" {
+		t.Fatalf("discovery = %+v (%v), want the authorization and token endpoints at %s", discovery, err, issuerURL)
+	}
+	return discovery.AuthorizationEndpoint, discovery.TokenEndpoint
+}
+
 // secretFile writes content to a file of t's own and answers its path.
 func secretFile(t *testing.T, content string) string {
 	t.Helper()
@@ -190,10 +212,11 @@ func secretFile(t *testing.T, content string) string {
 	return file
 }
 
-// authorizeURL is the authorization request a confidential client sends the browser to.
-func authorizeURL(endpoint, state, nonce string) string {
+// authorizeURL is the authorization request the confidential client clientID sends the browser
+// to.
+func authorizeURL(endpoint, clientID, state, nonce string) string {
 	return endpoint + "?" + url.Values{
-		"client_id":     {testClientID},
+		"client_id":     {clientID},
 		"response_type": {"code"},
 		"scope":         {"openid email"},
 		"redirect_uri":  {testRedirect},
@@ -224,9 +247,9 @@ func authorize(t *testing.T, authURL, state string) string {
 	return query.Get("code")
 }
 
-// exchangeCode posts code to the token endpoint as testClientID authenticating with secret, and
+// exchangeCode posts code to the token endpoint as clientID authenticating with secret, and
 // answers the status and body.
-func exchangeCode(t *testing.T, endpoint, code, secret string) (int, []byte) {
+func exchangeCode(t *testing.T, endpoint, clientID, code, secret string) (int, []byte) {
 	t.Helper()
 	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {testRedirect}}
 	request, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
@@ -234,7 +257,7 @@ func exchangeCode(t *testing.T, endpoint, code, secret string) (int, []byte) {
 		t.Fatal(err)
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	request.SetBasicAuth(testClientID, secret)
+	request.SetBasicAuth(clientID, secret)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatalf("POST %s: %v", endpoint, err)
@@ -274,27 +297,15 @@ func TestTheCodeFlowSignsInTheDefaultPersonUntilAnotherIsQueued(t *testing.T) {
 	// The trailing newline is the file's, not the secret's.
 	issuerURL := startRun(t, "--code-flow", testClientID+"="+secretFile(t, testClientSecret+"\n"), "--sign-in-as", "Alice@D.example", "--sign-in-group", "dispatch-members")
 
-	response, err := http.Get(issuerURL + "/.well-known/openid-configuration")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var discovery struct {
-		AuthorizationEndpoint string `json:"authorization_endpoint"`
-		TokenEndpoint         string `json:"token_endpoint"`
-	}
-	err = json.NewDecoder(response.Body).Decode(&discovery)
-	response.Body.Close()
-	if err != nil || discovery.AuthorizationEndpoint != issuerURL+"/authorize" || discovery.TokenEndpoint != issuerURL+"/token" {
-		t.Fatalf("discovery = %+v (%v), want the authorization and token endpoints at %s", discovery, err, issuerURL)
-	}
+	authorizeEndpoint, tokenEndpoint := discoveryEndpoints(t, issuerURL)
 	verifier, err := oidc.New(ctx, issuerURL, testClientID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	signIn := func(nonce string) map[string]any {
 		t.Helper()
-		code := authorize(t, authorizeURL(discovery.AuthorizationEndpoint, "state-"+nonce, nonce), "state-"+nonce)
-		status, body := exchangeCode(t, discovery.TokenEndpoint, code, testClientSecret)
+		code := authorize(t, authorizeURL(authorizeEndpoint, testClientID, "state-"+nonce, nonce), "state-"+nonce)
+		status, body := exchangeCode(t, tokenEndpoint, testClientID, code, testClientSecret)
 		var tokens struct {
 			IDToken string `json:"id_token"`
 		}
@@ -338,8 +349,8 @@ func TestTheCodeFlowSignsInTheDefaultPersonUntilAnotherIsQueued(t *testing.T) {
 	}
 	wantPerson(signIn("nonce-2"), bob)
 
-	code := authorize(t, authorizeURL(discovery.AuthorizationEndpoint, "state-wrong", "nonce-wrong"), "state-wrong")
-	if status, body := exchangeCode(t, discovery.TokenEndpoint, code, "not-the-secret"); status != http.StatusUnauthorized || !strings.Contains(string(body), "invalid_client") {
+	code := authorize(t, authorizeURL(authorizeEndpoint, testClientID, "state-wrong", "nonce-wrong"), "state-wrong")
+	if status, body := exchangeCode(t, tokenEndpoint, testClientID, code, "not-the-secret"); status != http.StatusUnauthorized || !strings.Contains(string(body), "invalid_client") {
 		t.Fatalf("token exchange with another secret: status %d, body %s, want 401 invalid_client", status, body)
 	}
 
@@ -377,7 +388,7 @@ func TestTheSignInControlRefusesACallerOffLoopback(t *testing.T) {
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("POST /_dev/sign-in-as from %s: status %d, want 403", request.RemoteAddr, recorder.Code)
 	}
-	response, err := noRedirects.Get(authorizeURL(issuer.URL()+"/authorize", "state", "nonce"))
+	response, err := noRedirects.Get(authorizeURL(issuer.URL()+"/authorize", testClientID, "state", "nonce"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,10 +398,64 @@ func TestTheSignInControlRefusesACallerOffLoopback(t *testing.T) {
 	}
 }
 
+// TestOneIssuerServesTwoClients gives --code-flow twice, Dispatch's client and the secrets
+// broker's, as Dispatch's browser suite runs both against one issuer: the one issuer process
+// serves both, each completes an authorization-code exchange with its own secret, and the ID
+// token each is issued names its own client as the audience and the default person. A code
+// issued to one client is not the other's to exchange, and neither authenticates with the
+// other's secret.
+func TestOneIssuerServesTwoClients(t *testing.T) {
+	ctx := context.Background()
+	issuerURL := startRun(t,
+		"--code-flow", testClientID+"="+secretFile(t, testClientSecret),
+		"--code-flow", brokerClientID+"="+secretFile(t, brokerClientSecret),
+		"--sign-in-as", "alice@d.example")
+	authorizeEndpoint, tokenEndpoint := discoveryEndpoints(t, issuerURL)
+	signIn := func(clientID, secret, nonce string) map[string]any {
+		t.Helper()
+		state := "state-" + nonce
+		code := authorize(t, authorizeURL(authorizeEndpoint, clientID, state, nonce), state)
+		status, body := exchangeCode(t, tokenEndpoint, clientID, code, secret)
+		var tokens struct {
+			IDToken string `json:"id_token"`
+		}
+		if err := json.Unmarshal(body, &tokens); status != http.StatusOK || err != nil {
+			t.Fatalf("%s's token exchange: status %d, body %s, want 200 with an ID token", clientID, status, body)
+		}
+		verifier, err := oidc.New(ctx, issuerURL, clientID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		verified, err := verifier.Verify(ctx, tokens.IDToken)
+		if err != nil || verified.Nonce != nonce {
+			t.Fatalf("%s's ID token verifies %v with nonce %q, want verified with nonce %q", clientID, err, verified.Nonce, nonce)
+		}
+		return idTokenClaims(t, tokens.IDToken)
+	}
+
+	for _, client := range []struct{ clientID, secret string }{
+		{testClientID, testClientSecret},
+		{brokerClientID, brokerClientSecret},
+	} {
+		claims := signIn(client.clientID, client.secret, "nonce-"+client.clientID)
+		if claims["aud"] != client.clientID || claims["email"] != "alice@d.example" || claims["hd"] != testDomain {
+			t.Errorf("%s's ID token: aud %#v, email %#v, hd %#v, want %q, alice@d.example and %s", client.clientID, claims["aud"], claims["email"], claims["hd"], client.clientID, testDomain)
+		}
+	}
+
+	code := authorize(t, authorizeURL(authorizeEndpoint, testClientID, "state-crossed", "nonce-crossed"), "state-crossed")
+	if status, body := exchangeCode(t, tokenEndpoint, brokerClientID, code, brokerClientSecret); status != http.StatusBadRequest || !strings.Contains(string(body), "invalid_grant") {
+		t.Errorf("the broker exchanging Dispatch's code: status %d, body %s, want 400 invalid_grant", status, body)
+	}
+	if status, body := exchangeCode(t, tokenEndpoint, brokerClientID, code, testClientSecret); status != http.StatusUnauthorized || !strings.Contains(string(body), "invalid_client") {
+		t.Errorf("the broker authenticating with Dispatch's secret: status %d, body %s, want 401 invalid_client", status, body)
+	}
+}
+
 // TestRunRefusesACodeFlowItCannotServe pins the usage refusals of --code-flow and --sign-in-as,
 // each exit 2 naming what is wrong before any issuer runs: a value with no secret file, a secret
-// file that cannot be read or holds only whitespace, --sign-in-as with no code flow to sign in at,
-// and a --sign-in-as that is not an email address.
+// file that cannot be read or holds only whitespace, one client id named twice, --sign-in-as with
+// no code flow to sign in at, and a --sign-in-as that is not an email address.
 func TestRunRefusesACodeFlowItCannotServe(t *testing.T) {
 	secret := secretFile(t, testClientSecret)
 	for _, tc := range []struct {
@@ -400,6 +465,7 @@ func TestRunRefusesACodeFlowItCannotServe(t *testing.T) {
 		{[]string{"--code-flow", testClientID}, "want <client id>=<client secret file>"},
 		{[]string{"--code-flow", testClientID + "=" + filepath.Join(t.TempDir(), "missing")}, "read the client secret"},
 		{[]string{"--code-flow", testClientID + "=" + secretFile(t, " \n")}, "is empty"},
+		{[]string{"--code-flow", testClientID + "=" + secret, "--code-flow", testClientID + "=" + secret}, "--code-flow names client " + testClientID + " twice"},
 		{[]string{"--sign-in-as", "alice@d.example"}, "--sign-in-as needs --code-flow"},
 		{[]string{"--code-flow", testClientID + "=" + secret, "--sign-in-as", "alice"}, `--sign-in-as "alice" is not an email address`},
 		{[]string{"--code-flow", testClientID + "=" + secret, "--sign-in-group", "dispatch-members"}, "--sign-in-group needs --sign-in-as"},

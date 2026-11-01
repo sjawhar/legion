@@ -235,8 +235,10 @@ Check, in order:
 
 1. **The label.** The issue must carry the Dispatch label `legion`. A root without it is never
    admitted, whatever its status.
-2. **The status.** A root runs from `todo`. In `triage` it waits for the controller; in `backlog` or
-   `icebox` it does not run.
+2. **The status.** A root runs from `todo`. In `triage`, a person's `legion` label is queued by the
+   daemon, and the root moves to `todo` itself; a label a session set waits for the controller. A
+   root the daemon recorded that a person moved back to `triage` is never queued again: it runs
+   again only from `todo`. In `backlog` or `icebox` it does not run.
 3. **The project and its repository.** The issue's project must be the daemon's, under `projects`
    in `legion.yaml`, and its repository one the daemon serves. An issue whose repository resolves to
    none, or to one not mapped to the project, or left out for a missing App, is not admitted: the

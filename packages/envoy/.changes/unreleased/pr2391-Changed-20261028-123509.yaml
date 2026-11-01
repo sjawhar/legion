@@ -1,7 +1,0 @@
-kind: Changed
-body: |-
-    A delivery settings change (the deploy repository, the workflow paths) reaches the running
-    intakes as soon as it commits, through the shared listener, instead of within 30 s.
-time: 2026-10-28T12:35:09.360138111Z
-custom:
-    Issue: pr2391

@@ -117,7 +117,9 @@ test("eight thirty-character labels scroll inside the header's details line with
   const context = await asUser(browser, "alice");
   try {
     const page = await context.newPage();
-    const title = page.getByRole("heading", { level: 1, name: "Long labels" });
+    const title = page
+      .getByTestId("issue-header")
+      .getByRole("heading", { level: 1, name: "Long labels" });
     const rail = page.getByTestId("issue-metadata-rail");
     for (const [width, height] of [
       [1280, 900],

@@ -6,17 +6,20 @@ The secrets broker's client. An agent session runs it to use a secret:
 agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
 ```
 
-It asks the broker for the named secrets, waits while a person approves them in Dispatch if the
-secret's owner and tier require it, and runs the command with each granted value in its
+It asks the broker for the named secrets, waits while a person approves them on the broker's own
+approval page if the secret's owner and tier require it, and runs the command with each granted
+value in its
 environment, writing one line to standard error first: the names it injected, that the broker
 `AGENT_SECRETS_URL` names gave them, and that store's kind, as `agent-secrets: NAME from the broker
 AGENT_SECRETS_URL names (GCP Secret Manager)`, never a value. Every other line about a secret names
 its source the same way - `request`, `status` and `self` as a `source:` line, a denial, a pending
 request and every refusal as `; asked the broker AGENT_SECRETS_URL names (<store kind>)` - so an
 answer of this CLI's is never taken for another secrets CLI's about the same name. Those lines are
-quoted wherever an agent's output is, so none names the broker's host or the store's account,
-region or project (only a broker that could not be reached is named, by its URL, so a stale
-address reads as one); the secret forms below, which a person runs under their own cloud
+quoted wherever an agent's output is, so none names the store's account, region or project, and
+none names the broker's host but two: a broker that could not be reached, named by its URL so a
+stale address reads as one, and a pending secret request, whose line names the page on the broker
+where its approver decides it, the `approve_url` the broker's own answer carries. The secret
+forms below, which a person runs under their own cloud
 sign-in, name the account or project they write to. No output of `agent-secrets`,
 `agent-secrets-helper` or `agent-secrets-devrelay` prints a credential the broker's URL carries:
 the URL prints only when it is provably a plain http(s) URL (no user info, query, fragment,

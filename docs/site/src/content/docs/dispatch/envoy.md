@@ -10,19 +10,21 @@ Envoy carries events between GitHub, Slack, Dispatch, Legion, and agent sessions
 
 - **NATS JetStream** holds the events. Events are messages on subjects under `notifications.`;
   the `ENVOY_NOTIFICATIONS` stream keeps those of GitHub, Slack, Dispatch, Legion and each
-  session's inbox for 72 hours, while role messages and team topics travel live and are not kept.
-  Envoy also keeps its own state in JetStream key-value buckets: which session is subscribed to
-  what (`envoy_interests`), which sessions are live (`envoy_sessions`), who holds each role
-  (`envoy_roles`), pull request check results (`envoy_ci_state`), and, per machine, which
-  listener delivers and what it has delivered (`envoy_listener`). The stream and every bucket
-  are kept in at least as many copies as the deployment's `ENVOY_NATS_REPLICAS` says, when every
-  Envoy program of the deployment carries the same value
-  ([Keeping the stream](#keeping-the-stream)).
+  session's inbox for 72 hours. Role messages and team topics travel over core NATS and are not
+  kept for a later subscriber, but the listener's forward of a role message to its current holder
+  is kept on that holder's inbox. Envoy also keeps its own state in JetStream key-value buckets:
+  which session is subscribed to what (`envoy_interests`), which sessions are live
+  (`envoy_sessions`), who holds each role (`envoy_roles`), pull request check results
+  (`envoy_ci_state`), and, per machine, which listener delivers and what it has delivered
+  (`envoy_listener`). The stream and every bucket are kept in at least as many copies as the
+  deployment's `ENVOY_NATS_REPLICAS` says, when every Envoy program of the deployment carries the
+  same value ([Keeping the stream](#keeping-the-stream)).
 - **The listener** is an HTTP service in front of it. It takes webhooks in, publishes them as
   events, and delivers events to the agent sessions that subscribed to them. Agents and Legion
-  call its `/v1` API to subscribe, publish, claim roles, and send messages, and a session that
-  holds its own NATS connection asks it for the stored messages it missed while that connection
-  was down ([Messages a session missed](#messages-a-session-missed)).
+  call its `/v1` API to subscribe, publish, claim roles, and send messages. For each session it
+  keeps a durable consumer on the stream and delivers the stored messages from it in order, each
+  marked delivered only when the session has it, so a session that was down or disconnected gets
+  them when it is back ([Messages a session missed](#messages-a-session-missed)).
 
 ## How GitHub events arrive
 
@@ -125,8 +127,10 @@ the session still gets the comment on its own inbox topic, as the route, a follo
 the claimant. While the mention is still being sent, for up to a minute, Dispatch holds that copy
 back and checks again a few seconds later. One copy is not guaranteed: when the mention's receipt
 times out, or its send is stranded for over a minute, Dispatch records it as failed though it may
-have landed, so the session can get the comment twice, once as the mention and once on its inbox
-topic. A session treats the second copy as the same comment. A comment's edit reaches every one
+have landed, and when a process stops between a mention's claim and its send, Dispatch sends the
+comment on the session's inbox topic once that claim lapses and sends the mention again, so the
+session can get the comment twice, once as the mention and once on its inbox topic. A session
+treats the second copy as the same comment. A comment's edit reaches every one
 of these sessions, mentioned or not; a resolution or reopening reaches the route, the claimant, the
 ask's followers and the thread root's author, mentioned or not. Neither is held back with the new
 comment: while the new comment waits on its mention, an edit to it can arrive first. A session that
@@ -149,41 +153,82 @@ published still gets it when it reconnects
 | `notifications.legion.<project>.controller` | A Legion project's controller. |
 | `notifications.slack.*.<channel>.mention` | Every mention of the Slack app in one channel, whatever the team. |
 | `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, with the reason. |
-| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. It reaches every session subscribed to it when it is published, and is not kept for a session that subscribes later. A session that holds its own NATS connection receives it directly, its own publish included. A publish through the listener also hands it to each other such session registered on the topic, on any machine, and waits for each to confirm it: if one does not within four seconds, the publish fails naming each session that did not, and every session it does not name received it. A session that stopped without unregistering stays registered for up to five minutes and is named in that time. A registered session whose connection was down gets the message from the stream when it reconnects ([Messages a session missed](#messages-a-session-missed)). A session the listener delivers to over a serve port is not waited for: it receives the topic through its machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`, which a host's own listener sets; the shared hub's listener does not), except a publish of its own, which the listener does not echo back. A topic outside `notifications.` is refused. |
+| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. It reaches every session subscribed to it when it is published, and is not kept for a session that subscribes later. The stream keeps no such topic, so it is the one family a session still takes live, on its own NATS connection, its own publish included. A publish through the listener also hands it to each other such session registered on the topic, on any machine, and waits for each to confirm it: if one does not within four seconds, the publish fails naming each session that did not, and every session it does not name received it. A session that stopped without unregistering stays registered for up to five minutes and is named in that time. A registered session whose connection was down gets the message from the stream when it reconnects ([Messages a session missed](#messages-a-session-missed)). A session the listener delivers to over a serve port is not waited for: it receives the topic through its machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`, which a host's own listener sets; the shared hub's listener does not), except a publish of its own, which the listener does not echo back. A topic outside `notifications.` is refused. |
 
 An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscription in the
 listener. A subscription to `<subject>.>` also covers `<subject>` itself, so subscribing to a pull
 request's `.>` gets its lifecycle events as well as its comments and checks.
 
-A role message is not stored for later. A publish through the API waits for the holder to confirm
-the message and answers `200` naming the holder. If no live session holds the role, it is refused
-with `404`; if the holder does not take the message's delivery mode, with `403`; and if the holder
-has not confirmed it within four seconds, with `504` and the reason, `receipt_timeout` or
+A role message is not stored for a later holder. A publish through the API waits for the holder to
+confirm the message and answers `200` naming the holder. If no live session holds the role, it is
+refused with `404`; if the holder does not take the message's delivery mode, with `403`; and if the
+holder has not confirmed it within four seconds, with `504` and the reason, `receipt_timeout` or
 `delivery_failed`. A role message published straight onto NATS, not through the API, is forwarded
 once, and if the holder does not take it the listener publishes an exception naming the reason:
-`no_holder`, `delivery_failed`, or `receipt_timeout`.
+`no_holder`, `delivery_failed`, or `receipt_timeout`. Either way the forward to the live holder is
+stored on the holder's inbox, and it counts as delivered only once the stream has stored it, so a
+holder that restarts or loses its connection gets the forward once when it is back.
 
 ## Messages a session missed
 
-An Oh My Pi session (`@sjawhar/pi-envoy`) and a Claude Code session (`claude-envoy`) receive on
-their own NATS subscriptions, and NATS keeps nothing for a subscriber that is not connected: a
-message published while a session's connection is down, NATS is restarting, or the session is not
-running never reaches that subscription. The stream keeps what it captures, so the session asks
-its listener for it, `POST /v1/replay`, when it starts or resumes, when it reconnects, when a
-subscription comes back, and on every heartbeat. The listener reads the stream for the session's
-own inbox topic and for each topic it registered, after the place the session last read to, and
-the session shows each message it was not shown yet, once, marked as published while its
-connection was down. Both plugins ping NATS every 10 seconds and drop a connection that leaves two
-pings unanswered, so a connection that stops answering without closing, as when the network path
-under it freezes, is left within 30 seconds and redialed, and the session asks on the reconnect.
+Every message a session gets comes from a durable consumer the listener keeps for it on the
+stream: one per Oh My Pi session (`@sjawhar/pi-envoy`), per Claude Code session (`claude-envoy`)
+and per session on a serving port, filtered on the session's inbox and on each topic it follows
+that the stream keeps. The listener that owns the session sends it those messages in the order
+they were published, on `notifications.envoy.deliver.<session_id>`, a subject the stream does not
+keep, and marks each one delivered only when the session answers that it has it. No session takes
+its messages from a NATS subscription of its own, so a message published while the session was not
+running, was restarting or had lost its connection, or while its listener restarted, reaches the
+session once when it is back, up to 72 hours later.
+
+- **What comes this way:** the session's inbox, `notifications.agent.<session_id>` (direct
+  messages, Dispatch deliveries, and the forwards of role messages to a role it holds), and the
+  topics it follows that the stream keeps, such as an issue's
+  `notifications.dispatch.issue.<KEY>.>`.
+- **What does not:** team and other ad-hoc topics, which the stream does not keep and which a
+  session therefore still takes live, on its own NATS connection; and anything published on a
+  topic before the session followed it.
+- **When a message counts as delivered:** an Oh My Pi session answers once the message is in its
+  session file. A Claude Code session under Legion's bridge answers once Claude Code took the
+  message as a user message. A Claude Code session in channel mode answers once Claude Code
+  accepted the channel notification, the last signal Claude Code gives there, so a notification it
+  drops after that (a channel it did not load) is not sent again. A session on a serving port gets each message by the listener's push, marked delivered on the port's
+  `204` and pushed again until then.
+- **Nothing runs late:** a BTW delivered before, or published before the session's connection
+  began, starts no side turn: an Oh My Pi session shows it as one inert notice, and a Claude Code
+  session passes it over.
+
+Both plugins ping NATS every 10 seconds and drop a connection that leaves two pings unanswered, so
+a connection that stops answering without closing, as when the network path under it freezes, is
+left within 30 seconds and redialed. On the reconnect the session registers again, and its
+listener sends it what it had not answered yet, from the oldest, so what was published meanwhile
+reaches it once.
+
+The listener manages these consumers only when its NATS user may (the `envoy-infra` grant for a
+listener, `ListenerPermissions`, includes it). Any client that may subscribe to `notifications.>`,
+as every session's NATS user may, can read another session's delivery frames and answer one as
+delivered; such a client already reads every session's traffic.
+
+### Without session consumers
+
+While the rollout lasts, a listener whose NATS user may not manage session consumers, a listener
+of an earlier release, and a plugin of an earlier release fall back to the earlier path: the
+session receives on its own NATS subscriptions, and a message published while its connection is
+down, NATS is restarting, or the session is not running never reaches that subscription. The
+stream keeps what it captures, so the session asks its listener for it, `POST /v1/replay`, when it
+starts or resumes, when it reconnects, when a subscription comes back, and on every heartbeat. The
+listener reads the stream for the session's own inbox topic and for each topic it registered,
+after the place the session last read to, and the session shows each message it was not shown yet,
+once, marked as published while its connection was down. This fallback exists only until every
+session reads its own consumer (`dispatch://INFRA-771`), and nothing should be built on it.
 
 - **What comes back:** messages on the session's inbox topic, `notifications.agent.<session_id>`,
   and on the topics it follows that the stream keeps, such as an issue's
   `notifications.dispatch.issue.<KEY>.>`, up to 72 hours old.
-- **What does not:** role messages, which are live only; team topics, except the copy the listener
-  hands a session registered on the topic, which comes back on its inbox topic; anything from
-  before the session existed, before it followed the topic, or before it first ran a plugin
-  version that recovers; anything older than 72 hours. When the stream was recreated, or the
+- **What does not:** role messages, which this path does not recover; team topics, except the copy
+  the listener hands a session registered on the topic, which comes back on its inbox topic;
+  anything from before the session existed, before it followed the topic, or before it first ran a
+  plugin version that recovers; anything older than 72 hours. When the stream was recreated, or the
   session read it too late to find everything still there, it is told once that messages may be
   missing.
 - **Nothing runs late:** a person's Send or Aside, a Steer or a BTW that comes back this way is
@@ -413,7 +458,7 @@ so run one listener per machine id until the grant is in place.
 | `200` `healthy`, `role` `active` | Everything answers, and this listener delivers. The body includes the consumer's lag, and `live_topics`: `subscribed` when the listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`), `not_applicable` when it does not. |
 | `200` `healthy`, `role` `standby` | Everything answers, and another listener of the machine delivers; `active_instance` names it. A standby is ready: send it traffic. |
 | `200` `degraded` | A passing key-value failure the listener is retrying, a role claim view that answers no read, or a pod that is its machine's deliverer and does not receive the durable yet: it holds the delivery lease, runs without one, has read no holder at all, or the lease record still names it while its renewals have lapsed. Nothing of the durable reaches a session until it receives, so no such answer is healthy; it stays `200`, so a readiness probe keeps the pod in service. The role claim view answers no read until its watcher's first scan has delivered every claim, so `GET /v1/sessions` and `GET /v1/registry/<session_id>` answer the bus-unavailable `503` until it has; it repairs itself, so that answer stays `200` too. A key-value failure's body carries `status` and `error` alone, and the listener checks nothing after it, so it can stand in front of a lost durable consumer. The role claim view is checked last, after every check that can answer `unhealthy`, on an active pod's answer and a standby's alike, and its body keeps the `healthy` body's fields. Also `KV watch rebuild unavailable` when the pod has not rebuilt its key-value watches for a minute after a NATS reconnect, active or standby: its caches serve what they last held, and the answer stays a `200` because the container health check and the readiness probe both read `/healthz`, so refusing would take out a pod still serving those caches and replace it with one that rebuilds into the same failure with empty caches. A pod that has more than one of these names each in `error`, in the order it reads them: its own failure first, then the role claim view, then the stalled rebuild. |
-| `503` `unhealthy` | NATS is unreachable, the role subscription or a cache watcher stopped, or, on the active listener, its subscription stopped, the durable consumer is gone, or the durable consumer is `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves. With `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, also `live subscription inactive` when the subscription to every topic is gone or the server refuses it, as one restarted without that grant does. A pod this answers for is refused however long its KV watch rebuild has stalled, and whatever its role claim view answers: both are the last things `/healthz` reads. |
+| `503` `unhealthy` | NATS is unreachable, the role lane's own connection is down or holds no valid subscription (`role lane subscription inactive`, since no role message is forwarded then), a cache watcher stopped, or, on the active listener, its subscription stopped, the durable consumer is gone, or the durable consumer is `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves. With `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, also `live subscription inactive` when the subscription to every topic is gone or the server refuses it, as one restarted without that grant does. A pod this answers for is refused however long its KV watch rebuild has stalled, and whatever its role claim view answers: both are the last things `/healthz` reads. |
 
 The webhooks open once NATS is connected, and `/v1` once the session and subscription caches are
 loaded too and the role claim view has every claim its watcher holds; until then each answers

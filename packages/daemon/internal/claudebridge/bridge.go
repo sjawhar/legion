@@ -34,14 +34,22 @@ const (
 	// most a few hundred bytes, none over shimwire.MaxFrameBytes. One that has not by then is one
 	// the stop is not waiting on.
 	//
-	// Told to stop, the bridge exits within Grace + drainTimeout + flushTimeout, 4 s, which leaves
-	// a second of the 5 s the shim gives it before killing it (shim.DefaultGrace) for the process to
-	// exit on a loaded machine; its inbox is gone 0.5 s before that.
+	// Told to stop, the bridge exits within Grace + drainTimeout + inboxFlushTimeout + flushTimeout,
+	// 4.1 s, which leaves 0.9 s of the 5 s the shim gives it before killing it (shim.DefaultGrace)
+	// for the process to exit on a loaded machine; its inbox is gone 0.5 s before that.
 	flushTimeout = 500 * time.Millisecond
 	// Busy is the refusal of a prompt that arrives during a turn. It begins with Oh My Pi's own
 	// words, which the daemon reads as a turn of the agent's own (supervise's agentBusy): the task
 	// goes back unread, uncharged, and is sent again when the turn ends.
 	Busy = "Agent is already processing a turn; the Claude Code bridge takes a prompt only between turns"
+)
+
+var (
+	// errClaudeExited answers each Envoy delivery Claude Code had not taken when it exited.
+	errClaudeExited = errors.New("Claude Code has exited")
+	// errNotTaken answers a delivery sent as a step whose result came with no re-emission of it:
+	// Claude Code dropped the message, which it re-emits before the result of the step taking it.
+	errNotTaken = errors.New("Claude Code ended the step without taking the delivery")
 )
 
 // event is a frame from the shim or an Envoy delivery from the inbox, for the bridge's loop.
@@ -50,11 +58,13 @@ type event struct {
 	delivery *delivery // an Envoy delivery from the inbox
 }
 
-// delivery is one Envoy delivery waiting to be a user turn; queued is answered once it is queued.
+// delivery is one Envoy delivery waiting to be a user turn. answer, buffered, is answered once:
+// with nil once Claude Code has taken it (re-emitted it, --replay-user-messages), else with why it
+// never will.
 type delivery struct {
 	id      string
 	content string
-	queued  chan<- error
+	answer  chan<- error
 }
 
 // bridge is Run's state. Everything but the readers, the outputs' writers and end runs on Run's
@@ -87,8 +97,9 @@ type bridge struct {
 	// (shimwire.PromptResult), right behind that turn's agent_end: with background work on it is
 	// the only thing that tells the daemon which of the turns it saw was its task's.
 	promptRun string
-	// queue is the Envoy deliveries waiting for the next step or turn.
-	queue []delivery
+	// queue is the Envoy deliveries waiting for the next step or turn; taking is those sent to
+	// Claude Code that it has yet to re-emit, each answered when it does.
+	queue, taking []delivery
 
 	// heldBack is the shim having once fallen framesHighWater frames behind, which is logged once.
 	heldBack bool
@@ -101,17 +112,20 @@ type bridge struct {
 // The loop never waits on a pipe's reader (output.go), and ending Claude Code is end's, so neither
 // waits on the other. A shim that stops reading holds back Claude Code's output and nothing else
 // (framesHighWater): the loop still takes the shim's input, Envoy's deliveries, Claude Code's exit
-// and its own end. Once Claude Code has exited and its stdout is read, the inbox is removed, and
-// Run returns once the shim has read every frame queued for it.
+// and its own end. Once Claude Code has exited and its stdout is read, every Envoy delivery it has
+// not taken is answered with an error, the inbox is removed, and Run returns once the shim has read
+// every frame queued for it.
 //
-// Told to stop (ctx), the bridge returns within Grace + drainTimeout + flushTimeout, 4 s, its
-// inbox removed by Grace + drainTimeout; after its input ends, within twice Grace + drainTimeout +
-// flushTimeout, 7 s; and a stop or the input's end that comes while it waits for the shim ends the
-// wait within flushTimeout. end's timers need nothing of the loop, Claude Code is reaped by Grace
-// after its SIGTERM, the loop takes that exit at once, drainTimeout bounds what is left of Claude
-// Code's stdout and flushTimeout what is left of the shim's frames. The bounds count on what no
-// reader of the bridge's governs: Claude Code dying of SIGKILL, exec's Wait copying nothing (Claude
-// Code's stderr is a file, as a pane's is), and the log taking the loop's writes.
+// Told to stop (ctx), the bridge returns within Grace + drainTimeout + inboxFlushTimeout +
+// flushTimeout, 4.1 s, its inbox removed by Grace + drainTimeout + inboxFlushTimeout; after its
+// input ends, within twice Grace + drainTimeout + inboxFlushTimeout + flushTimeout, 7.1 s; and a
+// stop or the input's end that comes while it waits for the shim ends the wait within flushTimeout.
+// end's timers need nothing of the loop, Claude Code is reaped by Grace after its SIGTERM, the loop
+// takes that exit at once, drainTimeout bounds what is left of Claude Code's stdout,
+// inboxFlushTimeout the answers the inbox's clients are owed, and flushTimeout what is left of the
+// shim's frames. The bounds count on what no reader of the bridge's governs: Claude Code dying of
+// SIGKILL, exec's Wait copying nothing (Claude Code's stderr is a file, as a pane's is), and the log
+// taking the loop's writes.
 func Run(ctx context.Context, cfg Config) (int, error) {
 	logOut := cfg.Log
 	if logOut == nil {
@@ -207,6 +221,9 @@ func Run(ctx context.Context, cfg Config) (int, error) {
 			claudeDone = true
 		}
 		if claudeDone {
+			answerAll(b.taking, errClaudeExited)
+			answerAll(b.queue, errClaudeExited)
+			b.taking, b.queue = nil, nil
 			closeInbox()
 			if b.toShim.waiting() == 0 {
 				return status, nil
@@ -240,7 +257,7 @@ func Run(ctx context.Context, cfg Config) (int, error) {
 				// Nothing answers the daemon once Claude Code is done: its frames are read so that
 				// the end of the shim's input still reaches the loop.
 				if ev.delivery != nil {
-					ev.delivery.queued <- errors.New("Claude Code has exited")
+					ev.delivery.answer <- errClaudeExited
 				}
 				if !ignoring {
 					ignoring = true
@@ -398,14 +415,28 @@ func (b *bridge) prompt(p shimwire.Prompt) {
 
 // deliver queues an Envoy delivery: between turns it starts one at once; during a turn of the
 // bridge's own it is the next step's message, and during one Claude Code started by itself it is
-// the turn the bridge starts when that one ends.
+// the turn the bridge starts when that one ends. It is answered once Claude Code has taken it
+// (echoed).
 func (b *bridge) deliver(d delivery) {
-	d.queued <- nil
+	b.queue = append(b.queue, d)
 	if b.inRun || b.seeding {
-		b.queue = append(b.queue, d)
+		b.log.Printf("Envoy delivery %s waits for the next step", d.id)
 		return
 	}
 	b.log.Printf("Envoy delivery %s starts a turn", d.id)
+	b.sendQueued()
+}
+
+// sendQueued sends the oldest queued delivery as the next user message, a step of the turn running
+// or else the first of a turn, and waits for Claude Code to take it.
+func (b *bridge) sendQueued() {
+	d := b.queue[0]
+	b.queue = b.queue[1:]
+	b.taking = append(b.taking, d)
+	if b.inRun {
+		b.step(d.content)
+		return
+	}
 	b.startRun(d.content, "")
 }
 
@@ -438,6 +469,7 @@ func (b *bridge) fromClaude(line []byte) {
 		Type      string          `json:"type"`
 		Subtype   string          `json:"subtype"`
 		Message   json.RawMessage `json:"message"`
+		IsReplay  bool            `json:"isReplay"`
 		RequestID string          `json:"request_id"`
 		IsError   bool            `json:"is_error"`
 		Errors    []string        `json:"errors"`
@@ -449,6 +481,12 @@ func (b *bridge) fromClaude(line []byte) {
 	switch head.Type {
 	case "assistant":
 		b.assistant(head.Message)
+	case "user":
+		// A user message Claude Code took from stdin comes back marked isReplay; the others are
+		// its own, which the bridge does not read: tool results.
+		if head.IsReplay {
+			b.echoed(head.Message)
+		}
 	case "system":
 		if head.Subtype == "init" {
 			b.systemInit()
@@ -480,6 +518,7 @@ func (b *bridge) systemInit() {
 // contentBlock is one block of a stream-json message's content.
 type contentBlock struct {
 	Type  string          `json:"type"`
+	Text  string          `json:"text"`
 	Name  string          `json:"name"`
 	Input json.RawMessage `json:"input"`
 }
@@ -508,10 +547,38 @@ func (b *bridge) assistant(message json.RawMessage) {
 	}
 }
 
+// echoed answers the delivery Claude Code has just taken: the oldest one sent, not yet answered,
+// whose text is the re-emitted user message's. The bridge's own user messages (the daemon's prompt,
+// the seed) are no delivery sent, so their echoes answer none.
+func (b *bridge) echoed(message json.RawMessage) {
+	var texts []string
+	for _, block := range blocksOf(message) {
+		if block.Type == "text" {
+			texts = append(texts, block.Text)
+		}
+	}
+	text := strings.Join(texts, "\n")
+	for i, d := range b.taking {
+		if d.content == text {
+			d.answer <- nil
+			b.taking = slices.Delete(b.taking, i, i+1)
+			return
+		}
+	}
+}
+
+// answerAll answers each of deliveries with err.
+func answerAll(deliveries []delivery, err error) {
+	for _, d := range deliveries {
+		d.answer <- err
+	}
+}
+
 // result ends a step, or the turn Claude Code started by itself. The seed's ends the seeding; a
 // step of a turn's is followed by the next Envoy delivery, else the turn's end; a self-started
 // turn's ends that turn, no step of the bridge's being open in it, and the next Envoy delivery
-// then starts a turn of the bridge's own.
+// then starts a turn of the bridge's own. A delivery the step sent that Claude Code ended it
+// without taking never will be.
 func (b *bridge) result(subtype string, isError bool, errs []string) {
 	if b.seeding {
 		b.seeding = false
@@ -526,9 +593,7 @@ func (b *bridge) result(subtype string, isError bool, errs []string) {
 			b.fromDaemon(line)
 		}
 		if !b.inRun && len(b.queue) > 0 {
-			next := b.queue[0]
-			b.queue = b.queue[1:]
-			b.startRun(next.content, "")
+			b.sendQueued()
 		}
 		return
 	}
@@ -538,6 +603,8 @@ func (b *bridge) result(subtype string, isError bool, errs []string) {
 	}
 	stepped := b.stepping
 	b.stepping = false
+	answerAll(b.taking, errNotTaken)
+	b.taking = nil
 	if isError {
 		// Oh My Pi reports a failed step as the assistant message that ends it, stopReason "error";
 		// the daemon reads neither, so the log line is what puts the failure on the pane.
@@ -547,9 +614,7 @@ func (b *bridge) result(subtype string, isError bool, errs []string) {
 			"role": "assistant", "stopReason": "error", "errorMessage": failure}})
 	}
 	if stepped && len(b.queue) > 0 {
-		next := b.queue[0]
-		b.queue = b.queue[1:]
-		b.step(next.content)
+		b.sendQueued()
 		return
 	}
 	b.inRun = false
@@ -562,9 +627,7 @@ func (b *bridge) result(subtype string, isError bool, errs []string) {
 		b.emit(shimwire.PromptResult{ID: prompt, AgentInvoked: true})
 	}
 	if len(b.queue) > 0 {
-		next := b.queue[0]
-		b.queue = b.queue[1:]
-		b.startRun(next.content, "")
+		b.sendQueued()
 	}
 }
 

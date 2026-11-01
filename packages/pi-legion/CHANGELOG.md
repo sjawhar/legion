@@ -3,6 +3,12 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [16.1.0] - 2026-11-01
+
+### Changed
+
+- The controller's skill no longer writes `todo` for a root a person handed over: a person's `legion` label on a new issue in `triage`, and a person's approval of a parked labelled issue's spec, are queued by the daemon. `triage.md` reads the label's setter as the newest event that added it, keeps the controller's `todo` write for the roots it labels or files itself, and `backlog-stewardship.md` says a root the weekly plan says to defer is parked at the next backlog pass.
+
 ## [15.9.0] - 2026-11-01
 
 ### Added

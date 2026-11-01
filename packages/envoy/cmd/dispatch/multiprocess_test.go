@@ -29,16 +29,20 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	gws "github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/reearth/ygo/crdt"
@@ -47,9 +51,13 @@ import (
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
+	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
@@ -114,13 +122,20 @@ func startPair(t *testing.T, env map[string]string) *dispatchPair {
 }
 
 // databaseURL is the connection string a process is started with: the database storetest cloned
-// for this test, as its pool's configuration names it. The credential is written through
-// url.UserPassword when the pool carries a password, since CI's Postgres takes one
-// (DISPATCH_TEST_DATABASE_URL) where a trust-authenticated development server does not, and a URL
-// built without it is refused with SQLSTATE 28P01 before the process can serve anything.
+// for this test (databaseURLOf).
 func (p *dispatchPair) databaseURL(t *testing.T) string {
 	t.Helper()
-	config := p.database.Pool.Config().ConnConfig
+	return databaseURLOf(t, p.database)
+}
+
+// databaseURLOf is the connection string of database as its pool's configuration names it. The
+// credential is written through url.UserPassword when the pool carries a password, since CI's
+// Postgres takes one (DISPATCH_TEST_DATABASE_URL) where a trust-authenticated development server
+// does not, and a URL built without it is refused with SQLSTATE 28P01 before the process can serve
+// anything.
+func databaseURLOf(t *testing.T, database *store.Store) string {
+	t.Helper()
+	config := database.Pool.Config().ConnConfig
 	credential := url.User(config.User).String()
 	if config.Password != "" {
 		credential = url.UserPassword(config.User, config.Password).String()
@@ -422,12 +437,15 @@ func drainEnvelopes(t *testing.T, from <-chan contracts.Envelope, quiet time.Dur
 // ───── the delivery durables ────────────────────────────────────────────────
 
 // githubFake is the loopback GitHub the test's processes send their App calls to, so no call
-// leaves the machine. It answers an empty list to everything, and holds the first webhook
-// delivery listing - the webhook redelivery sweep's own first request, made at boot - until
-// release is closed, which is how a row makes one process hold that sweep's lease long enough
-// for the other to find it held. It counts those listings too: the listing is the call the
-// webhook-redelivery lease exists to make once however many processes sweep, so a row about
-// that lease reads the count rather than the log alone.
+// leaves the machine. It answers each path the processes read in the shape GitHub's API gives it
+// (githubFakeAnswer): an empty webhook delivery list, the App's one installation on acme/deploy
+// granting the reads the delivery reconcile checks for, an installation token, that
+// installation's one repository, an empty pull-request search and empty workflow run and job listings, and GitHub's 404 for any other
+// path. It holds the first webhook delivery listing - the webhook redelivery sweep's own first
+// request, made at boot - until release is closed, which is how a row makes one process hold that
+// sweep's lease long enough for the other to find it held. It counts those listings too: the
+// listing is the call the webhook-redelivery lease exists to make once however many processes
+// sweep, so a row about that lease reads the count rather than the log alone.
 type githubFake struct {
 	server  *httptest.Server
 	release chan struct{}
@@ -446,14 +464,51 @@ func startGitHubFake(t *testing.T) *githubFake {
 			fake.countDeliveryListing()
 			fake.holdFirstDeliveryListing(r.Context())
 		}
+		status, body := githubFakeAnswer(r)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, "[]")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
 	}))
 	t.Cleanup(func() {
 		fake.Release()
 		fake.server.Close()
 	})
 	return fake
+}
+
+// githubFakeInstallation is GitHub's installation object for the App on acme/deploy (the deploy
+// repository seedDeliverySettings names), with the Actions and Pull requests reads the delivery
+// reconcile's permission check requires (githubapp.Client.DeliveryPermissions).
+const githubFakeInstallation = `{"id":1,"app_slug":"multiprocess","account":{"login":"acme"},` +
+	`"permissions":{"actions":"read","pull_requests":"read","contents":"read","metadata":"read"}}`
+
+// githubFakeAnswer is GitHub's status and body for r, in the shape its API gives each path the
+// processes read: the webhook redelivery sweep's listings, the installation lookups and token
+// mint every installation-token call makes, the installation's repository list and the
+// reconcile's GraphQL pull-request search over it, and its workflow run and job listings. Every listing is empty, so a pass reads its whole sequence and
+// finds nothing to import.
+func githubFakeAnswer(r *http.Request) (int, string) {
+	path := r.URL.Path
+	switch {
+	case strings.HasPrefix(path, "/app/hook/deliveries"):
+		return http.StatusOK, "[]"
+	case path == "/app/installations":
+		return http.StatusOK, "[" + githubFakeInstallation + "]"
+	case r.Method == http.MethodPost && strings.HasPrefix(path, "/app/installations/") && strings.HasSuffix(path, "/access_tokens"):
+		return http.StatusCreated, fmt.Sprintf(`{"token":"ghs_multiprocess","expires_at":%q}`,
+			time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+	case strings.HasPrefix(path, "/repos/") && strings.HasSuffix(path, "/installation"):
+		return http.StatusOK, githubFakeInstallation
+	case path == "/installation/repositories":
+		return http.StatusOK, `{"total_count":1,"repositories":[{"id":1,"name":"deploy","full_name":"acme/deploy","private":true,"owner":{"login":"acme"}}]}`
+	case r.Method == http.MethodPost && path == "/graphql":
+		return http.StatusOK, `{"data":{"search":{"issueCount":0,"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[]}}}`
+	case strings.Contains(path, "/actions/workflows/") && strings.HasSuffix(path, "/runs"):
+		return http.StatusOK, `{"total_count":0,"workflow_runs":[]}`
+	case strings.Contains(path, "/actions/runs/") && strings.HasSuffix(path, "/jobs"):
+		return http.StatusOK, `{"total_count":0,"jobs":[]}`
+	}
+	return http.StatusNotFound, `{"message":"Not Found","documentation_url":"https://docs.github.com/rest"}`
 }
 
 // holdFirstDeliveryListing blocks the first listing until Release, the caller gives up, or
@@ -499,12 +554,19 @@ func (f *githubFake) URL() string { return f.server.URL }
 // of them binds each durable and the other stands by - an ordinary state, logged at INFO and
 // never as a failure - polling every two seconds, so the work resumes within seconds of the
 // holder dying rather than waiting for a deploy.
+//
+// The delivery reconcile reads GitHub from whichever process takes its lease. Its first pass is
+// jittered over its first five minutes, so without a knob it lands inside this row's window
+// only now and then; DISPATCH_TEST_RECONCILE_AT_START runs it as each process starts, so every
+// run of this row meets it, and neither process may log a delivery error for it.
 func TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy(t *testing.T) {
 	pair := newPair(t)
 	seedDeliverySettings(t, pair.database)
 	fake := startGitHubFake(t)
 	fake.Release()
-	pair.start(t, githubAppEnv(t, fake.URL()))
+	env := githubAppEnv(t, fake.URL())
+	env["DISPATCH_TEST_RECONCILE_AT_START"] = "1"
+	pair.start(t, env)
 
 	conn := testnats.Connect(t, pair.nats)
 	js, err := conn.JetStream()
@@ -530,6 +592,17 @@ func TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy(t *testing.T) {
 			t.Fatalf("read %s: %v", durable, err)
 		} else if !info.PushBound {
 			t.Errorf("NATS reports nothing bound to %s, though %s logged that it bound it", durable, pair.name(holder))
+		}
+	}
+
+	// The reconcile's pass at start has read GitHub as a deployment's does: its permission check,
+	// its searches and its run listings, answered in GitHub's own shapes. The lease logs its run
+	// once the pass has returned, so every line it wrote is in the log by then.
+	waitForLease(t, pair, leaseRan, "delivery-reconcile", 60*time.Second)
+	for _, process := range []*dispatchProcess{pair.a, pair.b} {
+		if errorLines := process.logLines("level=ERROR", "dispatch delivery:"); len(errorLines) > 0 {
+			t.Errorf("%s logged a delivery error while the reconcile read GitHub:\n%s",
+				pair.name(process), strings.Join(errorLines, "\n"))
 		}
 	}
 
@@ -920,8 +993,9 @@ func TestTheRefusedNotificationClosesARoomThatOwesASettlement(t *testing.T) {
 // (DISPATCH_TEST_SETTLE_DELAY, under the test hooks) is not by itself that removal, and the
 // claim that no settlement of A's can fire under it would be false: s.settle gates only the
 // timer-armed path (scheduleSettleLocked), while settleLastPeer - wired as OnLastPeer - settles
-// at once when the last browser leaves whatever timer is armed, retrySettleSoon re-arms at a
-// fixed 10 ms, and a mark's expiry arms its own. What makes the delay enough here is that the
+// at once when the last browser leaves whatever timer is armed, and a mark's expiry arms its own.
+// A settlement that fails re-arms on the gated path, at A's own delay (retrySettleLocked). What
+// makes the delay enough here is that the
 // close this row measures, the evictor's (closeRoomBehindHead), stops the room's armed settle
 // timer as it reserves the room and arms it again at A's own thirty-minute delay, and that the
 // row then excludes the settlements that could themselves have closed the room: a settlement the
@@ -1284,6 +1358,7 @@ func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
 		{"delivery-reconcile", "its first pass is jittered over ReconcileInterval (5 min) and each process draws its own"},
 		{"edit-notices", "a woken loop whose passes take milliseconds here, so its boot passes meet by luck"},
+		{"server-processes", "its pass is one delete on server_processes, which every process's heartbeat writes, so holding it would hold the heartbeats too"},
 	} {
 		if ran := countLease(pair.a, leaseRan, unobserved.lease) + countLease(pair.b, leaseRan, unobserved.lease); ran > 0 {
 			t.Logf("%s ran %d times in the window, which this row does not hold to a count: %s",
@@ -2037,6 +2112,1643 @@ func waitForFleetCommit(t *testing.T, want string, processes ...*dispatchProcess
 			time.Sleep(200 * time.Millisecond)
 		}
 	}
+}
+
+// ───── deliveries a request or a process left behind ───────────────────────
+
+// listenerRoute is one of the Envoy listener routes Dispatch calls, which a row can hold.
+type listenerRoute string
+
+const (
+	listenerRegistry listenerRoute = "GET /v1/registry/{session_id}"
+	listenerSessions listenerRoute = "GET /v1/sessions"
+	listenerSend     listenerRoute = "POST /v1/messages/send"
+)
+
+// listenerSession is a live session's record as the listener answers it, on its registry read and
+// on its live list alike.
+type listenerSession struct {
+	SessionID    string   `json:"session_id"`
+	Title        string   `json:"title"`
+	Roles        []string `json:"roles"`
+	Capabilities []string `json:"capabilities"`
+}
+
+// listenerSendRecord is one send the fake listener answered: the key and the session it was sent
+// under, its urgency, and whether the listener answered it as a repeat of a send it had already
+// answered.
+type listenerSendRecord struct {
+	Key, Recipient, Urgency string
+	Duplicate               bool
+}
+
+// heldRequest is one request a hold keeps unanswered: its route, what it names - the session id a
+// registry read asks about, the idempotency key a send carries - and a channel closed once its
+// caller has given up on it, a cancelled call or a killed process alike.
+type heldRequest struct {
+	route   listenerRoute
+	subject string
+	gone    <-chan struct{}
+}
+
+// listenerHold keeps every request on its route unanswered from when it is taken until Release,
+// and reports each one on arrived as it comes in.
+type listenerHold struct {
+	arrived chan heldRequest
+	release chan struct{}
+	once    sync.Once
+}
+
+// Release answers every request the hold keeps and lets every later one through.
+func (h *listenerHold) Release() { h.once.Do(func() { close(h.release) }) }
+
+func (h *listenerHold) released() bool {
+	select {
+	case <-h.release:
+		return true
+	default:
+		return false
+	}
+}
+
+// next waits up to within for the next request the hold keeps, and fails the test, naming what was
+// awaited, when none arrives.
+func (h *listenerHold) next(t *testing.T, within time.Duration, what string) heldRequest {
+	t.Helper()
+	select {
+	case held := <-h.arrived:
+		return held
+	case <-time.After(within):
+		t.Fatalf("%s never reached the listener within %v", what, within)
+		return heldRequest{}
+	}
+}
+
+// requireAbandoned waits up to ten seconds for each held request's caller to have gone away, as
+// every request a killed process made has, so a release that follows answers none of them: a
+// send the listener answers to a dead process would be one the row did not mean to land.
+func requireAbandoned(t *testing.T, held ...heldRequest) {
+	t.Helper()
+	for _, request := range held {
+		select {
+		case <-request.gone:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the caller of %s %s never went away", request.route, request.subject)
+		}
+	}
+}
+
+// fakeListener is the Envoy listener both processes of a pair deliver through (ENVOY_URL): an
+// httptest server in the test process that knows a set of live sessions (a row may replace it,
+// setSessions), serves the three routes a delivery calls (the registry read, the live list and
+// the send), counts every live-list read it answers, and records every send it answers. A send
+// whose key and recipient it has already answered is answered as a duplicate, as the real
+// listener answers a repeat inside contracts.DeliveryDuplicateWindow, and recorded as one. A row
+// holds a route (hold) to keep a request unanswered while it acts on the processes;
+// a held request whose caller goes away is never answered and never recorded, so a send a killed
+// process made is not one that reached the session. Every hold is released when the test ends,
+// before the server closes, since a close waits for every request still in flight.
+//
+// Each route's answer is decided in serve, in one place per route. A row that needs the listener
+// to misbehave for a while starts a take-over (takeOver): for its first phase the listener refuses
+// every connection, for its second it answers 503 "service starting" on every route as a starting
+// listener does, for its third the registry read is answered with the session's record while the
+// send still meets that 503, and for its fourth it holds no session yet - the registry read and
+// the send answer "no live session", the live list is empty - and after that it answers as before.
+type fakeListener struct {
+	server *httptest.Server
+
+	mu       sync.Mutex
+	sessions []listenerSession
+	// sessionLists counts the GET /v1/sessions reads the listener answered.
+	sessionLists int
+	answered     []listenerSendRecord
+	holds        map[listenerRoute]*listenerHold
+	// takeOverFrom is when the take-over began, zero when there is none; takeOverPhases is how
+	// long it refuses connections, answers 503 on every route, answers 503 on the send alone, and
+	// holds no session, in that order.
+	takeOverFrom   time.Time
+	takeOverPhases [4]time.Duration
+	// takeOverReads counts, by session id, the registry reads a take-over answered other than
+	// as the session's record.
+	takeOverReads map[string]int
+	// gatedSends counts, by idempotency key, the sends a take-over answered 503 "service
+	// starting".
+	gatedSends map[string]int
+}
+
+// startFakeListener serves the sessions on loopback until the test ends.
+func startFakeListener(t *testing.T, sessions ...listenerSession) *fakeListener {
+	t.Helper()
+	f := &fakeListener{
+		sessions: sessions, holds: map[listenerRoute]*listenerHold{},
+		takeOverReads: map[string]int{}, gatedSends: map[string]int{},
+	}
+	f.server = httptest.NewServer(http.HandlerFunc(f.serve))
+	t.Cleanup(func() {
+		f.mu.Lock()
+		for _, hold := range f.holds {
+			hold.Release()
+		}
+		f.mu.Unlock()
+		f.server.Close()
+	})
+	return f
+}
+
+// processEnv is what a Dispatch process delivering through this listener is started with: the
+// listener's URL. Nothing here shortens the delivery sweep's period: it runs at production's
+// SuggestionSweepInterval (a minute), as every pass of the maintenance loop does.
+func (f *fakeListener) processEnv() map[string]string {
+	return map[string]string{"ENVOY_URL": f.server.URL}
+}
+
+// setSessions replaces the sessions the listener knows: from now on its registry read, its live
+// list and its send answer as though exactly these were live.
+func (f *fakeListener) setSessions(sessions ...listenerSession) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sessions = sessions
+}
+
+// sessionListings is how many GET /v1/sessions reads the listener has answered.
+func (f *fakeListener) sessionListings() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sessionLists
+}
+
+// hold keeps every request on route unanswered from now until the returned hold is released. A
+// hold the route already had is released first, so nothing it keeps is left waiting for the end
+// of the test.
+func (f *fakeListener) hold(route listenerRoute) *listenerHold {
+	hold := &listenerHold{arrived: make(chan heldRequest, 64), release: make(chan struct{})}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if previous := f.holds[route]; previous != nil {
+		previous.Release()
+	}
+	f.holds[route] = hold
+	return hold
+}
+
+// sendsUnder is every send the listener answered under key, in the order it answered them.
+func (f *fakeListener) sendsUnder(key string) []listenerSendRecord {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var sends []listenerSendRecord
+	for _, send := range f.answered {
+		if send.Key == key {
+			sends = append(sends, send)
+		}
+	}
+	return sends
+}
+
+// listenerTakeOverPhase is what a take-over has the fake listener do with a request right now.
+type listenerTakeOverPhase int
+
+const (
+	takeOverOver listenerTakeOverPhase = iota
+	takeOverRefusing
+	takeOverStarting
+	takeOverHandingOver
+	takeOverUnknown
+)
+
+// takeOver begins a take-over now: the listener refuses connections for refuse, then answers 503
+// on every route for starting, then on the send alone for handingOver, then holds no session for
+// unknown.
+//
+// The handing-over phase is a replacement in which both listeners take requests behind the one
+// address: the registry read reaches the outgoing listener, which still holds the session, and
+// the send reaches its successor, still behind its starting gate (cmd/listener/main.go
+// startingGate). It is the one phase in which a send itself meets that gate, because every try
+// reads the registry before it sends.
+func (f *fakeListener) takeOver(refuse, starting, handingOver, unknown time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.takeOverFrom = time.Now()
+	f.takeOverPhases = [4]time.Duration{refuse, starting, handingOver, unknown}
+}
+
+// endTakeOver ends the take-over at once, whatever phase it is in.
+func (f *fakeListener) endTakeOver() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.takeOverFrom = time.Time{}
+}
+
+// takeOverPhase is the phase the take-over is in now.
+func (f *fakeListener) takeOverPhase() listenerTakeOverPhase {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.takeOverFrom.IsZero() {
+		return takeOverOver
+	}
+	elapsed := time.Since(f.takeOverFrom)
+	for index, phase := range []listenerTakeOverPhase{takeOverRefusing, takeOverStarting, takeOverHandingOver, takeOverUnknown} {
+		if elapsed -= f.takeOverPhases[index]; elapsed < 0 {
+			return phase
+		}
+	}
+	return takeOverOver
+}
+
+// readsDuringTakeOver is how many registry reads of sessionID a take-over answered other than as
+// the session's record.
+func (f *fakeListener) readsDuringTakeOver(sessionID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.takeOverReads[sessionID]
+}
+
+// sendsGatedUnder is how many sends under key a take-over answered 503 "service starting".
+func (f *fakeListener) sendsGatedUnder(key string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.gatedSends[key]
+}
+
+// answerStarting answers as the real listener's starting gate does (cmd/listener/main.go
+// startingGate).
+func answerStarting(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "service starting"})
+}
+
+func (f *fakeListener) serve(w http.ResponseWriter, r *http.Request) {
+	// The whole body is read before anything waits, so the server sees the request end and
+	// notices its caller going away while the request is held.
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	phase := f.takeOverPhase()
+	if phase != takeOverOver && phase != takeOverHandingOver &&
+		r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/registry/") {
+		f.mu.Lock()
+		f.takeOverReads[strings.TrimPrefix(r.URL.Path, "/v1/registry/")]++
+		f.mu.Unlock()
+	}
+	switch phase {
+	case takeOverRefusing:
+		// The connection is dropped unanswered, which the client meets as a listener that is not
+		// there: what a deleted listener pod, or its successor not yet listening, gives.
+		if connection, _, err := http.NewResponseController(w).Hijack(); err == nil {
+			_ = connection.Close()
+		}
+		return
+	case takeOverStarting:
+		answerStarting(w)
+		return
+	case takeOverHandingOver:
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send" {
+			var send struct {
+				IdempotencyKey string `json:"idempotency_key"`
+			}
+			_ = json.Unmarshal(body, &send)
+			f.mu.Lock()
+			f.gatedSends[send.IdempotencyKey]++
+			f.mu.Unlock()
+			answerStarting(w)
+			return
+		}
+	}
+	switch {
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/registry/"):
+		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/registry/")
+		if !f.await(listenerRegistry, sessionID, r) {
+			return
+		}
+		session, ok := f.session(sessionID)
+		if !ok || phase == takeOverUnknown {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "no live session " + sessionID})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(session)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+		if !f.await(listenerSessions, "", r) {
+			return
+		}
+		f.mu.Lock()
+		f.sessionLists++
+		sessions := f.sessions
+		f.mu.Unlock()
+		if phase == takeOverUnknown || sessions == nil {
+			sessions = []listenerSession{}
+		}
+		_ = json.NewEncoder(w).Encode(sessions)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+		var send struct {
+			TargetSession  string `json:"target_session"`
+			IdempotencyKey string `json:"idempotency_key"`
+			Urgency        string `json:"urgency"`
+		}
+		if err := json.Unmarshal(body, &send); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if !f.await(listenerSend, send.IdempotencyKey, r) {
+			return
+		}
+		if _, ok := f.session(send.TargetSession); !ok || phase == takeOverUnknown {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "no live session " + send.TargetSession})
+			return
+		}
+		f.mu.Lock()
+		duplicate := false
+		for _, prior := range f.answered {
+			duplicate = duplicate || (prior.Key == send.IdempotencyKey && prior.Recipient == send.TargetSession)
+		}
+		f.answered = append(f.answered, listenerSendRecord{
+			Key: send.IdempotencyKey, Recipient: send.TargetSession, Urgency: send.Urgency, Duplicate: duplicate,
+		})
+		envelope := fmt.Sprintf("envelope-%d", len(f.answered))
+		f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"event_id": envelope, "recipient": send.TargetSession, "duplicate": duplicate,
+		})
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// await keeps r unanswered while route is held, and reports whether it is still to be answered:
+// false when its caller went away first.
+func (f *fakeListener) await(route listenerRoute, subject string, r *http.Request) bool {
+	f.mu.Lock()
+	hold := f.holds[route]
+	f.mu.Unlock()
+	if hold == nil || hold.released() {
+		return true
+	}
+	hold.arrived <- heldRequest{route: route, subject: subject, gone: r.Context().Done()}
+	select {
+	case <-hold.release:
+		return r.Context().Err() == nil
+	case <-r.Context().Done():
+		return false
+	}
+}
+
+func (f *fakeListener) session(sessionID string) (listenerSession, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, session := range f.sessions {
+		if session.SessionID == sessionID {
+			return session, true
+		}
+	}
+	return listenerSession{}, false
+}
+
+// resumeSession is the one live session the delivery rows send to; it takes every mode.
+var resumeSession = listenerSession{
+	SessionID: "resume-session", Title: "resume", Roles: []string{}, Capabilities: []string{"btw", "aside", "steer"},
+}
+
+// deliveryUnderTest is one delivery a row follows: what a failure calls it, the attempt table its
+// rows are in, and the idempotency key its send carries, which begins with the id of its message
+// or comment.
+type deliveryUnderTest struct {
+	what, table, key string
+}
+
+func messageDelivery(what, key string) deliveryUnderTest {
+	return deliveryUnderTest{what: what, table: "message_deliveries", key: key}
+}
+
+func mentionDelivery(what, key string) deliveryUnderTest {
+	return deliveryUnderTest{what: what, table: "comment_deliveries", key: key}
+}
+
+// owner is the column naming the message or comment, the receipt event type and the payload
+// field naming it there, and its id.
+func (d deliveryUnderTest) owner() (column, receipt, field, id string) {
+	id, _, _ = strings.Cut(d.key, ":")
+	if d.table == "message_deliveries" {
+		return "message_id", "message.delivery", "message_id", id
+	}
+	return "comment_id", "comment.delivery", "comment_id", id
+}
+
+// attempts is every attempt of the delivery's message or comment, as "<attempt>:<state>".
+func (d deliveryUnderTest) attempts(t *testing.T, database *store.Store) []string {
+	t.Helper()
+	column, _, _, id := d.owner()
+	rows, err := database.Pool.Query(context.Background(),
+		`select attempt::text || ':' || state from `+d.table+` where `+column+` = $1 order by attempt`, id)
+	if err != nil {
+		t.Fatalf("read the attempts of %s: %v", d.what, err)
+	}
+	states, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("read the attempts of %s: %v", d.what, err)
+	}
+	return states
+}
+
+// receipts is how many delivery receipts the events hold for attempt 1 of the delivery.
+func (d deliveryUnderTest) receipts(t *testing.T, database *store.Store) int {
+	t.Helper()
+	_, receipt, field, id := d.owner()
+	var count int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from events
+		where type = $1 and payload ->> $2 = $3 and (payload ->> 'attempt')::int = 1
+	`, receipt, field, id).Scan(&count); err != nil {
+		t.Fatalf("count the receipts of %s: %v", d.what, err)
+	}
+	return count
+}
+
+// requireDeliveredOnce waits up to within for every delivery to settle and requires each to have
+// reached its session exactly once under its own key: attempt 1 alone, sent, with one receipt,
+// and one send the listener answered as new. A delivery still unsettled at the deadline is
+// reported, and so is every one after it, with the processes' output once.
+func requireDeliveredOnce(t *testing.T, pair *dispatchPair, listener *fakeListener, within time.Duration, deliveries ...deliveryUnderTest) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	unsettled := false
+	for _, delivery := range deliveries {
+		states := delivery.attempts(t, pair.database)
+		for len(states) == 0 || slices.ContainsFunc(states, func(state string) bool {
+			return strings.HasSuffix(state, ":pending")
+		}) {
+			if time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+			states = delivery.attempts(t, pair.database)
+		}
+		if !slices.Equal(states, []string{"1:sent"}) {
+			t.Errorf("%s reads %v %v after the row began waiting; want attempt 1 alone, sent", delivery.what, states, within)
+			unsettled = true
+			continue
+		}
+		if sends := listener.sendsUnder(delivery.key); len(sends) != 1 || sends[0].Duplicate || sends[0].Recipient != resumeSession.SessionID {
+			t.Errorf("%s: the listener answered %+v under %s; want one new send to %s",
+				delivery.what, sends, delivery.key, resumeSession.SessionID)
+		}
+		if receipts := delivery.receipts(t, pair.database); receipts != 1 {
+			t.Errorf("%s: attempt 1 has %d delivery receipts, want one", delivery.what, receipts)
+		}
+	}
+	if unsettled {
+		t.Fatalf("the processes' output:\nA:\n%s\nB:\n%s", pair.a.Output.String(), pair.b.Output.String())
+	}
+}
+
+// sendInBackground sends body to path on p without waiting for the answer, for a request the row
+// expects never to answer: the process is killed while it is held.
+func (p *dispatchProcess) sendInBackground(method, path, body string) {
+	go func() {
+		if response, err := p.send(method, path, body); err == nil {
+			_ = response.Body.Close()
+		}
+	}()
+}
+
+// kill ends the process the way a task replaced mid-deploy or killed for memory ends, with no
+// chance to finish anything, and returns once it has exited.
+func (p *dispatchProcess) kill(t *testing.T) {
+	t.Helper()
+	if err := p.Cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill the process: %v", err)
+	}
+	<-p.Exited
+}
+
+// backDatePendingAttempts moves every pending attempt's claim and creation two minutes back, past
+// both ages the delivery sweep judges an attempt owed by (api/delivery_sweep.go,
+// owedMessageAttempt): the one-minute claim lease, and the minute a row must have been open for,
+// so a row does not wait real minutes for its attempts to be owed.
+func backDatePendingAttempts(t *testing.T, database *store.Store) {
+	t.Helper()
+	for _, table := range []string{"message_deliveries", "comment_deliveries"} {
+		if _, err := database.Pool.Exec(context.Background(), `
+			update `+table+`
+			set claimed_at = claimed_at - interval '2 minutes', created_at = created_at - interval '2 minutes'
+			where state = 'pending'
+		`); err != nil {
+			t.Fatalf("back-date the pending attempts of %s: %v", table, err)
+		}
+	}
+}
+
+// sweepWait is how long a row waits for the surviving process's delivery sweep to send what a
+// killed process left owed. The sweep is a pass of the maintenance loop
+// (api.RunSuggestionOutcomeSweep), which these processes run at production's
+// api.SuggestionSweepInterval (a minute) with no test override: attempts back-dated just after a
+// tick wait that tick out, a minute, and when the killed process had already served that tick's
+// period - one pass per period across the processes, duty.Exclusive - the survivor's next tick
+// serves instead, a second minute. Half a minute on top covers the pass itself: its suggestion
+// and request-key sweeps, and the sends, each bounded by the listener client's five-second
+// window.
+const sweepWait = 150 * time.Second
+
+// A process killed while it delivers leaves its attempts pending: a direct message and a comment
+// mention whose own request was sending them, and a broadcast recipient a background worker was
+// sending. The other process's delivery sweep sends each one once its claim has lapsed, under the
+// attempt and the idempotency key the killed process used, so the session gets each once. The
+// subtest kills the process earlier, after the message is stored and before anything is resolved
+// or claimed: the attempt the storing transaction wrote is what the survivor sends.
+func TestADeliveryAKilledProcessLeftPendingIsSentByTheOther(t *testing.T) {
+	t.Run("killed while sending", func(t *testing.T) {
+		listener := startFakeListener(t, resumeSession)
+		sends := listener.hold(listenerSend)
+		pair := startPair(t, listener.processEnv())
+		project := uniqueProjectKey(t, "RSM")
+		pair.a.createProject(t, project, "Resumed deliveries")
+		issue, _ := pair.a.createIssueIn(t, project, "Mentioned while sending", "spec")
+
+		pair.a.sendInBackground(http.MethodPost, "/api/v1/agents/"+resumeSession.SessionID+"/messages",
+			`{"body":"A direct message","delivery":"steer"}`)
+		direct := sends.next(t, 30*time.Second, "the direct message's send")
+		pair.a.sendInBackground(http.MethodPost, "/api/v1/issues/"+issue+"/comments",
+			fmt.Sprintf(`{"body":"A mention","mentions":[{"target":"session:%s"}]}`, resumeSession.SessionID))
+		mention := sends.next(t, 30*time.Second, "the mention's send")
+		pair.a.call(t, http.MethodPost, "/api/v1/broadcasts", fmt.Sprintf(
+			`{"body":"A broadcast","delivery":"steer","session_ids":[%q]}`,
+			resumeSession.SessionID), http.StatusCreated)
+		broadcast := sends.next(t, 30*time.Second, "the broadcast recipient's send")
+
+		pair.a.kill(t)
+		requireAbandoned(t, direct, mention, broadcast)
+		sends.Release()
+		backDatePendingAttempts(t, pair.database)
+		requireDeliveredOnce(t, pair, listener, sweepWait,
+			messageDelivery("the direct message", direct.subject),
+			mentionDelivery("the mention", mention.subject),
+			messageDelivery("the broadcast recipient's message", broadcast.subject),
+		)
+	})
+
+	t.Run("killed before the claim", func(t *testing.T) {
+		listener := startFakeListener(t, resumeSession)
+		lookups := listener.hold(listenerRegistry)
+		pair := startPair(t, listener.processEnv())
+		pair.a.sendInBackground(http.MethodPost, "/api/v1/agents/"+resumeSession.SessionID+"/messages",
+			`{"body":"Stored, then killed","delivery":"steer"}`)
+		lookup := lookups.next(t, 30*time.Second, "the direct message's registry read")
+		pair.a.kill(t)
+		requireAbandoned(t, lookup)
+		lookups.Release()
+		var messageID string
+		if err := pair.database.Pool.QueryRow(context.Background(),
+			`select id::text from messages where target = $1`, "session:"+resumeSession.SessionID,
+		).Scan(&messageID); err != nil {
+			t.Fatalf("read the stored message: %v", err)
+		}
+		backDatePendingAttempts(t, pair.database)
+		requireDeliveredOnce(t, pair, listener, sweepWait,
+			messageDelivery("the message stored before the kill", messageID+":steer"))
+	})
+}
+
+// cancelGrace is how long cancelOnceHeld gives Dispatch to act on a cancelled request before the
+// listener answers the send that request made, when Dispatch does not abandon that send itself:
+// well inside the listener client's five-second window, so the answer is still awaited.
+const cancelGrace = 2 * time.Second
+
+// cancelOnceHeld sends body to path on p with a request the test cancels as soon as the listener
+// holds the send it made, which is after its commit, and waits for the client to return. The send
+// is then answered once Dispatch has had the cancellation: at once if Dispatch gave up on the send
+// with its request, after cancelGrace if it did not. It answers the send's idempotency key.
+func cancelOnceHeld(t *testing.T, p *dispatchProcess, listener *fakeListener, path, body string) string {
+	t.Helper()
+	sends := listener.hold(listenerSend)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, p.url(path), strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("build POST %s: %v", path, err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Dispatch-User", dispatchTestLogin)
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		if response, err := http.DefaultClient.Do(request); err == nil {
+			_ = response.Body.Close()
+		}
+	}()
+	held := sends.next(t, 30*time.Second, "the send of POST "+path)
+	cancel()
+	select {
+	case <-returned:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("POST %s did not return within 10s of its cancellation", path)
+	}
+	select {
+	case <-held.gone:
+	case <-time.After(cancelGrace):
+	}
+	sends.Release()
+	return held.subject
+}
+
+// A request cut off after its commit - a closed tab, a front door's pod roll - must not take the
+// send it was making with it: the direct message and the mention each reach their session once
+// and read sent, with no Retry. No attempt here is a minute old, and nothing back-dates one, so
+// the delivery sweep owes none of them: only the request's own send can deliver them.
+func TestASendWhoseRequestIsCancelledAfterItsCommitReachesItsRecipient(t *testing.T) {
+	listener := startFakeListener(t, resumeSession)
+	pair := startPair(t, listener.processEnv())
+	project := uniqueProjectKey(t, "CNL")
+	pair.a.createProject(t, project, "Cancelled requests")
+	issue, _ := pair.a.createIssueIn(t, project, "Mentioned, then cut off", "spec")
+
+	direct := cancelOnceHeld(t, pair.a, listener, "/api/v1/agents/"+resumeSession.SessionID+"/messages",
+		`{"body":"Cut off after its commit","delivery":"steer"}`)
+	mention := cancelOnceHeld(t, pair.a, listener, "/api/v1/issues/"+issue+"/comments",
+		fmt.Sprintf(`{"body":"A mention cut off after its commit","mentions":[{"target":"session:%s"}]}`, resumeSession.SessionID))
+	requireDeliveredOnce(t, pair, listener, 15*time.Second,
+		messageDelivery("the direct message", direct),
+		mentionDelivery("the mention", mention),
+	)
+}
+
+// takeOverDeliveries waits up to ten seconds for the direct message and the mentioning comment a
+// row sent, by their bodies, to be stored, and answers each as the delivery it follows.
+func takeOverDeliveries(t *testing.T, database *store.Store, messageBody, commentBody string) (direct, mention deliveryUnderTest) {
+	t.Helper()
+	storedID := func(table, body string) string {
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			var id string
+			err := database.Pool.QueryRow(context.Background(),
+				`select id::text from `+table+` where body = $1`, body).Scan(&id)
+			if err == nil {
+				return id
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				t.Fatalf("read the stored %s %q: %v", table, body, err)
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%q was not stored in %s within 10s", body, table)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	direct = messageDelivery("the direct message", storedID("messages", messageBody)+":steer")
+	mention = mentionDelivery("the mention",
+		storedID("comments", commentBody)+":session:"+resumeSession.SessionID+":steer")
+	return direct, mention
+}
+
+// sendDuringTakeOver sends, on p, a direct message to the live session and a comment mentioning
+// it, each without waiting for its answer, and returns the two deliveries once both are stored.
+func sendDuringTakeOver(t *testing.T, p *dispatchProcess, database *store.Store, issue, what string) (direct, mention deliveryUnderTest) {
+	t.Helper()
+	messageBody, commentBody := "A direct message "+what, "A mention "+what
+	p.sendInBackground(http.MethodPost, "/api/v1/agents/"+resumeSession.SessionID+"/messages",
+		fmt.Sprintf(`{"body":%q,"delivery":"steer"}`, messageBody))
+	p.sendInBackground(http.MethodPost, "/api/v1/issues/"+issue+"/comments",
+		fmt.Sprintf(`{"body":%q,"mentions":[{"target":"session:%s"}]}`, commentBody, resumeSession.SessionID))
+	return takeOverDeliveries(t, database, messageBody, commentBody)
+}
+
+// requireWaitingOutTheTakeOver waits up to ten seconds for both deliveries' senders to be waiting
+// out the take-over: each attempt is still pending under a claim, and the session has been read
+// at least five times during the take-over - the two first resolutions and at least three tries
+// after them.
+func requireWaitingOutTheTakeOver(t *testing.T, database *store.Store, listener *fakeListener, deliveries ...deliveryUnderTest) {
+	t.Helper()
+	claimed := func(delivery deliveryUnderTest) bool {
+		column, _, _, id := delivery.owner()
+		var held bool
+		if err := database.Pool.QueryRow(context.Background(), `
+			select count(*) = 1 and bool_and(state = 'pending' and claimed_at is not null)
+			from `+delivery.table+` where `+column+` = $1
+		`, id).Scan(&held); err != nil {
+			t.Fatalf("read the attempts of %s: %v", delivery.what, err)
+		}
+		return held
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		waiting := listener.readsDuringTakeOver(resumeSession.SessionID) >= 5
+		for _, delivery := range deliveries {
+			waiting = waiting && claimed(delivery)
+		}
+		if waiting {
+			return
+		}
+		if time.Now().After(deadline) {
+			for _, delivery := range deliveries {
+				t.Errorf("%s reads %v", delivery.what, delivery.attempts(t, database))
+			}
+			t.Fatalf("the senders were not waiting out the take-over within 10s: %d reads of the session during it, "+
+				"want at least 5 with every attempt pending under its claim", listener.readsDuringTakeOver(resumeSession.SessionID))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// While the active listener is replaced, its successor refuses connections, then answers 503
+// "service starting" - on every route, then on the send alone while the outgoing listener still
+// answers the registry read - then does not yet hold the session, for a few seconds. A direct
+// message and a mention sent then wait it out under the attempt each holds and reach the session
+// once it answers: attempt 1 sent, one receipt, one send. A session the listener never knows still
+// reads failed, "no live session", once the take-over window has passed. And a process killed
+// while it waits leaves its attempts pending under the claim it renewed last, which the other
+// process's delivery sweep sends.
+func TestASendDuringAListenerTakeOverReachesItsSession(t *testing.T) {
+	t.Run("sent during the take-over", func(t *testing.T) {
+		listener := startFakeListener(t, resumeSession)
+		// No attempt here is back-dated, so the delivery sweep owes none and only each request's
+		// own sender can deliver.
+		pair := startPair(t, listener.processEnv())
+		project := uniqueProjectKey(t, "TKO")
+		pair.a.createProject(t, project, "Listener take-over")
+		issue, _ := pair.a.createIssueIn(t, project, "Mentioned during a take-over", "spec")
+
+		// A sender tries at once, then 0.25, 0.75, 1.75, 3.75, 5.75 and 7.75 s after its first try
+		// (takeoverRetry): from 1.75 s on its tries are two seconds apart plus each try's own time.
+		// The send-only 503 lasts 2.5 s, longer than that spacing, so at least one try of each
+		// sender meets it however late a loaded machine starts the tries; the take-over ends at
+		// 6 s, so the try that lands comes before the row's 10 s bound.
+		listener.takeOver(time.Second, time.Second, 2500*time.Millisecond, 1500*time.Millisecond)
+		direct, mention := sendDuringTakeOver(t, pair.a, pair.database, issue, "sent during a take-over")
+		requireDeliveredOnce(t, pair, listener, 10*time.Second, direct, mention)
+		for _, delivery := range []deliveryUnderTest{direct, mention} {
+			if gated := listener.sendsGatedUnder(delivery.key); gated == 0 {
+				t.Errorf("%s: no send under %s met the starting gate; the row must cover a send answered 503 "+
+					"\"service starting\"", delivery.what, delivery.key)
+			}
+		}
+	})
+
+	t.Run("sent to a session the listener never knows", func(t *testing.T) {
+		listener := startFakeListener(t, resumeSession)
+		pair := startPair(t, listener.processEnv())
+		started := time.Now()
+		var message model.Message
+		if err := json.Unmarshal(pair.a.call(t, http.MethodPost, "/api/v1/agents/never-known/messages",
+			`{"body":"To nobody","delivery":"steer"}`, http.StatusCreated), &message); err != nil {
+			t.Fatalf("decode the message: %v", err)
+		}
+		took := time.Since(started)
+		if len(message.Deliveries) != 1 || message.Deliveries[0].State != "failed" ||
+			message.Deliveries[0].Error == nil || *message.Deliveries[0].Error != "no live session never-known" {
+			t.Fatalf("deliveries = %#v, want attempt 1 failed with %q", message.Deliveries, "no live session never-known")
+		}
+		if took > 15*time.Second {
+			t.Fatalf("the send to a session the listener never knows answered after %v, want within 15s", took)
+		}
+		gone := messageDelivery("the message to nobody", message.ID+":steer")
+		if states := gone.attempts(t, pair.database); !slices.Equal(states, []string{"1:failed"}) {
+			t.Fatalf("%s reads %v, want attempt 1 alone, failed", gone.what, states)
+		}
+		if receipts := gone.receipts(t, pair.database); receipts != 1 {
+			t.Fatalf("%s: attempt 1 has %d delivery receipts, want one", gone.what, receipts)
+		}
+	})
+
+	t.Run("killed during the wait", func(t *testing.T) {
+		listener := startFakeListener(t, resumeSession)
+		pair := startPair(t, listener.processEnv())
+		project := uniqueProjectKey(t, "TKK")
+		pair.a.createProject(t, project, "Killed during a take-over")
+		issue, _ := pair.a.createIssueIn(t, project, "Mentioned, then killed", "spec")
+
+		listener.takeOver(time.Hour, 0, 0, 0)
+		direct, mention := sendDuringTakeOver(t, pair.a, pair.database, issue, "killed during a take-over")
+		requireWaitingOutTheTakeOver(t, pair.database, listener, direct, mention)
+		pair.a.kill(t)
+		listener.endTakeOver()
+		backDatePendingAttempts(t, pair.database)
+		requireDeliveredOnce(t, pair, listener, sweepWait, direct, mention)
+	})
+}
+
+// ───── webhook redelivery ───────────────────────────────────────────────────
+
+// heldRedeliveryProxy stands between the redelivery command and the GitHub webhook fake. It
+// forwards every call but the first redelivery request, which it holds and never forwards: held is
+// closed when that request arrives, and the hold ends when its caller goes away (a killed process)
+// or after githubHoldCap, answered 502 so a process that outlived it records a refusal.
+type heldRedeliveryProxy struct {
+	server *httptest.Server
+	held   chan struct{}
+	once   sync.Once
+}
+
+func startHeldRedeliveryProxy(t *testing.T, upstream string) *heldRedeliveryProxy {
+	t.Helper()
+	target, err := url.Parse(upstream)
+	if err != nil {
+		t.Fatalf("parse the GitHub fake's URL: %v", err)
+	}
+	forward := httputil.NewSingleHostReverseProxy(target)
+	proxy := &heldRedeliveryProxy{held: make(chan struct{})}
+	proxy.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/attempts") {
+			first := false
+			proxy.once.Do(func() {
+				first = true
+				close(proxy.held)
+			})
+			if first {
+				select {
+				case <-r.Context().Done():
+				case <-time.After(githubHoldCap):
+					http.Error(w, `{"message":"held by the test"}`, http.StatusBadGateway)
+				}
+				return
+			}
+		}
+		forward.ServeHTTP(w, r)
+	}))
+	t.Cleanup(proxy.server.Close)
+	return proxy
+}
+
+// startRedeliverWebhooks starts `envoy-dispatch redeliver-webhooks --since 1h` with env, in a home
+// of its own and nothing from the caller's environment.
+func startRedeliverWebhooks(t *testing.T, binary string, env map[string]string) *cmdtest.Process {
+	t.Helper()
+	home := t.TempDir()
+	cmd := exec.Command(binary, "redeliver-webhooks", "--since", "1h")
+	cmd.Dir = home
+	environment := map[string]string{"HOME": home, "XDG_CONFIG_HOME": home, "XDG_DATA_HOME": home}
+	maps.Copy(environment, env)
+	for name, value := range environment {
+		cmd.Env = append(cmd.Env, name+"="+value)
+	}
+	slices.Sort(cmd.Env)
+	return cmdtest.Start(t, "redeliver-webhooks", cmd)
+}
+
+// backDateRedeliveryClaim moves the claimed_at of guid's record in the redelivery KV bucket back
+// by, through the test's own NATS client, so a row does not wait out a claim's deadline.
+func backDateRedeliveryClaim(t *testing.T, natsURL, guid string, by time.Duration) {
+	t.Helper()
+	nc, err := natsgo.Connect(natsURL)
+	if err != nil {
+		t.Fatalf("connect NATS: %v", err)
+	}
+	defer nc.Close()
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream: %v", err)
+	}
+	// One copy, as the single test NATS server holds and the runs under test open.
+	state, err := redeliver.OpenState(js, 1)
+	if err != nil {
+		t.Fatalf("open the redelivery bucket: %v", err)
+	}
+	key := "guid." + guid
+	entry, err := state.Get(key)
+	if err != nil {
+		t.Fatalf("read the redelivery record of %s: %v", guid, err)
+	}
+	var stored map[string]any
+	if err := json.Unmarshal(entry.Value(), &stored); err != nil {
+		t.Fatalf("decode the redelivery record of %s: %v", guid, err)
+	}
+	stored["claimed_at"] = time.Now().Add(-by).UTC().Format(time.RFC3339Nano)
+	data, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.Update(key, data, entry.Revision()); err != nil {
+		t.Fatalf("back-date the redelivery claim of %s: %v", guid, err)
+	}
+}
+
+// A webhook redelivery whose process was killed between claiming the delivery and recording
+// GitHub's answer is requested again by the next sweep once the claim's deadline (three GitHub
+// request timeouts, a minute) has passed. Two `envoy-dispatch redeliver-webhooks --since 1h` runs
+// share one NATS, one database (the GitHub rate limits every process obeys) and one GitHub; the
+// first is SIGKILLed while its redelivery request is held on the way to GitHub, the test moves the
+// claim's time back past the deadline rather than waiting it out, and the second run asks GitHub
+// for the delivery, once.
+func TestAWebhookRedeliveryWhoseProcessDiedAfterItsClaimIsRequestedAgain(t *testing.T) {
+	natsURL := multiprocessNATS(t)
+	key, pemText := githubapptest.Key(t)
+	const clientID = "Iv1.multiprocess"
+	webhook := githubapptest.NewWebhook(t, &key.PublicKey, clientID, nil)
+	failed := webhook.Record(githubapptest.Attempt{GUID: "guid-orphaned-claim", Event: "push", Payload: []byte(`{}`)},
+		"", 7, http.StatusServiceUnavailable, time.Now().Add(-time.Minute))
+	proxy := startHeldRedeliveryProxy(t, webhook.URL())
+	env := githubAppEnv(t, proxy.server.URL)
+	env["DISPATCH_APP_CLIENT_ID"] = clientID
+	env["DISPATCH_APP_PEM_B64"] = base64.StdEncoding.EncodeToString([]byte(pemText))
+	env["NATS_URLS"] = natsURL
+	env["DATABASE_URL"] = databaseURLOf(t, storetest.Open(t))
+	binary := cmdtest.Build(t, "envoy-dispatch")
+
+	first := startRedeliverWebhooks(t, binary, env)
+	select {
+	case <-proxy.held:
+	case <-first.Exited:
+		t.Fatalf("the first run exited before it asked GitHub for the delivery:\n%s", first.Output.String())
+	case <-time.After(60 * time.Second):
+		t.Fatalf("the first run asked GitHub for no delivery within a minute:\n%s", first.Output.String())
+	}
+	if err := first.Cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill the first run: %v", err)
+	}
+	<-first.Exited
+	if got := webhook.Requests(); len(got) != 0 {
+		t.Fatalf("the killed run's held request reached GitHub: %v", got)
+	}
+
+	backDateRedeliveryClaim(t, natsURL, failed.GUID, 2*3*githubapp.RequestTimeout)
+	second := startRedeliverWebhooks(t, binary, env)
+	second.WaitExit(t, "it started")
+	if code := second.Cmd.ProcessState.ExitCode(); code != 0 {
+		t.Fatalf("the second run exited %d:\n%s", code, second.Output.String())
+	}
+	if got, want := webhook.Requests(), []int64{failed.ID}; !slices.Equal(got, want) {
+		t.Fatalf("GitHub got redelivery requests %v, want %v once:\n%s", got, want, second.Output.String())
+	}
+	if !strings.Contains(second.Output.String(), " redelivered=1") {
+		t.Fatalf("the second run does not report the delivery redelivered:\n%s", second.Output.String())
+	}
+}
+
+// ───── one GitHub rate limit across the processes ──────────────────────────
+
+// rateLimitGitHub is the GitHub both processes' proxy reads go to: acme/web, the installation
+// covering it (77), a token mint answering rateLimitToken, and every read under that token, which
+// it records. A read of rateLimitedRead answers as GitHub answers an exhausted rate limit: 403,
+// X-RateLimit-Remaining: 0 and Retry-After. Every other App call answers an empty list, as
+// githubFake's do.
+type rateLimitGitHub struct {
+	server *httptest.Server
+
+	mu         sync.Mutex
+	tokenReads []string
+}
+
+const (
+	rateLimitToken  = "ghs_rate_limit_77"
+	rateLimitedRead = "/repos/acme/web/pulls/1"
+)
+
+func startRateLimitGitHub(t *testing.T) *rateLimitGitHub {
+	t.Helper()
+	fake := &rateLimitGitHub{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/{owner}/{repo}/installation", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":77,"app_slug":"multiprocess","permissions":{"pull_requests":"read"}}`)
+	})
+	mux.HandleFunc("POST /app/installations/{id}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = fmt.Fprintf(w, `{"token":%q,"expires_at":%q}`, rateLimitToken, time.Now().Add(time.Hour).Format(time.RFC3339))
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("Authorization") != "Bearer "+rateLimitToken {
+			_, _ = io.WriteString(w, "[]")
+			return
+		}
+		fake.mu.Lock()
+		fake.tokenReads = append(fake.tokenReads, r.Method+" "+r.URL.RequestURI())
+		fake.mu.Unlock()
+		if r.URL.Path == rateLimitedRead {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"message":"API rate limit exceeded for installation ID 77."}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"state":"open","title":"Ship it"}`)
+	})
+	fake.server = httptest.NewServer(mux)
+	t.Cleanup(fake.server.Close)
+	return fake
+}
+
+// reads is every request GitHub has been sent under the installation's token, by either process.
+func (f *rateLimitGitHub) reads() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.tokenReads)
+}
+
+// proxyRead sends GET path to p's GitHub proxy as the test's login and returns the status, the
+// Retry-After header and the error code of the answer.
+func (p *dispatchProcess) proxyRead(t *testing.T, path string) (status int, retryAfter, code string) {
+	t.Helper()
+	response, err := p.send(http.MethodGet, path, "")
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer response.Body.Close()
+	var body struct {
+		Code string `json:"code"`
+	}
+	_ = json.NewDecoder(response.Body).Decode(&body)
+	return response.StatusCode, response.Header.Get("Retry-After"), body.Code
+}
+
+// GitHub budgets an installation, not a process, so a rate limit one process meets holds every
+// process. A meets an exhausted limit reading acme/web as its installation; B's read of another
+// path under the same installation answers 503 GITHUB_RATE_LIMITED with a Retry-After, and GitHub
+// is sent nothing more under the installation's token. B's installation lookup and token mint are
+// the App's calls, under the App's own limit, and may still reach GitHub.
+func TestARateLimitOneProcessMetStopsTheOtherFromCallingGitHub(t *testing.T) {
+	github := startRateLimitGitHub(t)
+	pair := startPair(t, githubAppEnv(t, github.server.URL))
+
+	statusA, retryA, codeA := pair.a.proxyRead(t, "/api/github/rest"+rateLimitedRead)
+	if reads := github.reads(); len(reads) != 1 {
+		t.Fatalf("GitHub got %v under the installation's token, want A's one read", reads)
+	}
+	statusB, retryB, codeB := pair.b.proxyRead(t, "/api/github/rest/repos/acme/web/issues/2")
+	if reads := github.reads(); len(reads) != 1 {
+		t.Errorf("GitHub got %v under the installation's token: B asked it inside the limit A met", reads)
+	}
+	if statusB != http.StatusServiceUnavailable || codeB != "GITHUB_RATE_LIMITED" {
+		t.Errorf("B's read inside the limit: status %d code %q, want 503 GITHUB_RATE_LIMITED", statusB, codeB)
+	}
+	if seconds, err := strconv.Atoi(retryB); err != nil || seconds < 1 || seconds > 60 {
+		t.Errorf("B's Retry-After %q, want the seconds left of GitHub's 60", retryB)
+	}
+	if statusA != http.StatusServiceUnavailable || codeA != "GITHUB_RATE_LIMITED" || retryA != "60" {
+		t.Errorf("A's limited read: status %d code %q Retry-After %q, want 503 GITHUB_RATE_LIMITED after 60", statusA, codeA, retryA)
+	}
+}
+
+// ───── the database's clock ────────────────────────────────────────────────
+
+// Each process's host keeps a clock of its own, so a time Dispatch stores is the database's: the
+// writing transaction's now(), which every column that transaction stamps shares to the
+// microsecond. A claim made on A answers a claim.at equal to the updated_at its own update
+// stamped, and its issue.claimed event was created at that time; an answer given on B to an ask
+// opened on A carries the `at` its ask.answered event was created at. No process's clock can
+// produce either equality.
+func TestClaimAndAnswerTimesComeFromTheDatabaseOnEitherProcess(t *testing.T) {
+	pair := startPair(t, nil)
+	ctx := context.Background()
+	project := uniqueProjectKey(t, "CLK")
+	pair.a.createProject(t, project, "Database clock")
+	key, _ := pair.a.createIssueIn(t, project, "Claimed on A, answered on B", "spec")
+
+	claimed := pair.a.call(t, http.MethodPost, "/api/v1/issues/"+key+"/claim", `{}`, http.StatusOK)
+	var issue struct {
+		UpdatedAt time.Time `json:"updated_at"`
+		Claim     *struct {
+			At time.Time `json:"at"`
+		} `json:"claim"`
+	}
+	if err := json.Unmarshal(claimed, &issue); err != nil || issue.Claim == nil {
+		t.Fatalf("decode the claim on A: %v: %s", err, claimed)
+	}
+	if !issue.Claim.At.Equal(issue.UpdatedAt) {
+		t.Errorf("A's claim: claim.at %s, updated_at %s, want the one transaction time",
+			issue.Claim.At.Format(time.RFC3339Nano), issue.UpdatedAt.Format(time.RFC3339Nano))
+	}
+	var claimedEvent time.Time
+	if err := pair.database.Pool.QueryRow(ctx, `select created_at from events where issue_key = $1 and type = 'issue.claimed'`, key).Scan(&claimedEvent); err != nil {
+		t.Fatalf("read the issue.claimed event: %v", err)
+	}
+	if !claimedEvent.Equal(issue.Claim.At) {
+		t.Errorf("A's claim: claim.at %s, issue.claimed created at %s, want the one transaction time",
+			issue.Claim.At.Format(time.RFC3339Nano), claimedEvent.Format(time.RFC3339Nano))
+	}
+
+	opened := pair.a.call(t, http.MethodPost, "/api/v1/issues/"+key+"/asks",
+		`{"question":"Ship it?","options":[{"label":"Ship"},{"label":"Hold"}]}`, http.StatusCreated)
+	var ask struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(opened, &ask); err != nil || ask.ID == "" {
+		t.Fatalf("decode the ask opened on A: %v: %s", err, opened)
+	}
+	answered := pair.b.call(t, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer",
+		`{"selected":["Ship"],"expected_edited_at":null}`, http.StatusOK)
+	var answer struct {
+		Answer *struct {
+			At time.Time `json:"at"`
+		} `json:"answer"`
+	}
+	if err := json.Unmarshal(answered, &answer); err != nil || answer.Answer == nil {
+		t.Fatalf("decode the answer given on B: %v: %s", err, answered)
+	}
+	var answeredEvent time.Time
+	if err := pair.database.Pool.QueryRow(ctx, `
+		select created_at from events where issue_key = $1 and type = 'ask.answered' and payload->>'id' = $2
+	`, key, ask.ID).Scan(&answeredEvent); err != nil {
+		t.Fatalf("read the ask.answered event: %v", err)
+	}
+	if !answeredEvent.Equal(answer.Answer.At) {
+		t.Errorf("B's answer: at %s, ask.answered created at %s, want the one transaction time",
+			answer.Answer.At.Format(time.RFC3339Nano), answeredEvent.Format(time.RFC3339Nano))
+	}
+}
+
+// ───── one configuration warning across the processes ──────────────────────
+
+// misconfiguredRun is the deploy run the warning row seeds: a successful run on main whose one job
+// is none of the production job names seedDeliverySettings configures.
+const misconfiguredRun = int64(38041790209)
+
+// A misconfigured production job name is named in the log once, not once per process: the Delivery
+// page judges every deploy run on each read, on whichever process the read reached. The settings
+// name a production job no job of the seeded run holds; the Delivery page is read on A, then on B,
+// and the two processes' logs hold exactly one warning for that run between them. Each process's
+// access line for its read is written after the read's warning, so once both are in, a warning
+// either process wrote is in too.
+func TestAConfigurationWarningIsLoggedOnceAcrossTheProcesses(t *testing.T) {
+	pair := newPair(t)
+	seedDeliverySettings(t, pair.database)
+	ctx := context.Background()
+	start := time.Date(2026, 10, 10, 9, 47, 17, 0, time.UTC)
+	success := delivery.DeliveryRunConclusionSuccess
+	run := strconv.FormatInt(misconfiguredRun, 10)
+	if err := delivery.UpsertRun(ctx, pair.database.Pool, delivery.DeliveryRun{
+		Repo: "acme/deploy", RunID: misconfiguredRun, Kind: delivery.DeliveryRunKindDeploy, HeadSHA: "sha" + run,
+		HeadCommitAt: start.Add(-time.Hour), StartedAt: start, CompletedAt: new(start.Add(15 * time.Minute)), Conclusion: &success,
+		URL: "https://github.com/acme/deploy/actions/runs/" + run, HeadBranch: new("main"), Event: new("workflow_dispatch"),
+	}); err != nil {
+		t.Fatalf("seed the run: %v", err)
+	}
+	if err := delivery.UpsertRunJobs(ctx, pair.database.Pool, "acme/deploy", misconfiguredRun, []delivery.DeliveryRunJob{{
+		Repo: "acme/deploy", RunID: misconfiguredRun, Name: "prod-apply / prod-apply",
+		Conclusion: new(delivery.DeliveryJobConclusionSuccess), CompletedAt: new(start.Add(10 * time.Minute)),
+	}}, true); err != nil {
+		t.Fatalf("seed the run's job: %v", err)
+	}
+	pair.start(t, nil)
+
+	const timeline = "/api/v1/delivery/timeline?from=2026-10-10T00:00:00Z&to=2026-10-11T00:00:00Z"
+	read := []string{`msg="dispatch: request"`, "route=/api/v1/delivery/timeline", "status=200"}
+	pair.a.call(t, http.MethodGet, timeline, "", http.StatusOK)
+	pair.a.waitForLog(t, 10*time.Second, read...)
+	pair.b.call(t, http.MethodGet, timeline, "", http.StatusOK)
+	pair.b.waitForLog(t, 10*time.Second, read...)
+
+	warning := []string{"no job matching the configured production_job_names", "run_id=" + run}
+	onA, onB := pair.a.logLines(warning...), pair.b.logLines(warning...)
+	if len(onA)+len(onB) != 1 {
+		t.Fatalf("warnings for run %s: %d on A, %d on B, want one between them:\nA:\n%s\nB:\n%s",
+			run, len(onA), len(onB), strings.Join(onA, "\n"), strings.Join(onB, "\n"))
+	}
+}
+
+// ───── two processes syncing one architecture source ───────────────────────
+
+// architectureGitHub is the GitHub both processes' architecture syncs read: one repository whose
+// branch head the test moves, each commit answering its own architecture files, and every blob
+// read of one commit held until the test releases it, the caller gives up, or githubHoldCap
+// passes. Any other App call answers an empty list, as githubFake's do.
+type architectureGitHub struct {
+	server      *httptest.Server
+	held        chan struct{}
+	release     chan struct{}
+	heldOnce    sync.Once
+	releaseOnce sync.Once
+
+	mu          sync.Mutex
+	head        string
+	commits     map[string]map[string]string
+	holdBlobsOf string
+}
+
+// startArchitectureGitHub serves on loopback until the test ends, its branch at head.
+func startArchitectureGitHub(t *testing.T, head string, commits map[string]map[string]string) *architectureGitHub {
+	t.Helper()
+	fake := &architectureGitHub{held: make(chan struct{}), release: make(chan struct{}), head: head, commits: commits}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/{owner}/{repo}/installation", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":77,"app_slug":"multiprocess","permissions":{"contents":"read"}}`)
+	})
+	mux.HandleFunc("POST /app/installations/{id}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = fmt.Fprintf(w, `{"token":"ghs_multiprocess","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
+	})
+	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{branch}", func(w http.ResponseWriter, r *http.Request) {
+		fake.mu.Lock()
+		head := fake.head
+		fake.mu.Unlock()
+		// As GitHub does: the bare sha for Accept: application/vnd.github.sha, JSON otherwise.
+		if r.Header.Get("Accept") == "application/vnd.github.sha" {
+			_, _ = io.WriteString(w, head)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"sha":%q}`, head)
+	})
+	mux.HandleFunc("GET /repos/{owner}/{repo}/git/trees/{ref}", func(w http.ResponseWriter, r *http.Request) {
+		commit, _, _ := strings.Cut(r.PathValue("ref"), ":")
+		fake.mu.Lock()
+		files := fake.commits[commit]
+		fake.mu.Unlock()
+		entries := []map[string]any{}
+		for _, name := range slices.Sorted(maps.Keys(files)) {
+			entries = append(entries, map[string]any{
+				"path": name, "mode": "100644", "type": "blob", "sha": commit + "." + name, "size": len(files[name]),
+			})
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{"sha": "tree-" + commit, "truncated": false, "tree": entries}); err != nil {
+			t.Errorf("encode tree: %v", err)
+		}
+	})
+	mux.HandleFunc("GET /repos/{owner}/{repo}/git/blobs/{sha}", func(w http.ResponseWriter, r *http.Request) {
+		commit, name, _ := strings.Cut(r.PathValue("sha"), ".")
+		fake.mu.Lock()
+		content, ok := fake.commits[commit][name]
+		hold := commit == fake.holdBlobsOf
+		fake.mu.Unlock()
+		if hold {
+			fake.heldOnce.Do(func() { close(fake.held) })
+			select {
+			case <-fake.release:
+			case <-r.Context().Done():
+			case <-time.After(githubHoldCap):
+			}
+		}
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"content": base64.StdEncoding.EncodeToString([]byte(content)), "encoding": "base64",
+		}); err != nil {
+			t.Errorf("encode blob: %v", err)
+		}
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, "[]")
+	})
+	fake.server = httptest.NewServer(mux)
+	t.Cleanup(func() {
+		fake.releaseHeld()
+		fake.server.Close()
+	})
+	return fake
+}
+
+// holdBlobs holds every blob read of commit; moveHead pushes commit as the branch's new head.
+func (f *architectureGitHub) holdBlobs(commit string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.holdBlobsOf = commit
+}
+
+func (f *architectureGitHub) moveHead(commit string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.head = commit
+}
+
+func (f *architectureGitHub) releaseHeld() { f.releaseOnce.Do(func() { close(f.release) }) }
+
+// Two processes sync one project's architecture source through the Refresh route: A is held
+// fetching the files of head X, the branch moves to Y, and B imports Y. Once A is released it
+// must not record X over Y: the source stays at Y with Y's components, the only synced event is
+// Y's, and A answers the row at Y. The source is disabled so the import ticker adds no sync of
+// its own.
+func TestTwoProcessesSyncingOneProjectNeverWriteTheOlderCommit(t *testing.T) {
+	const older, newer = "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222"
+	github := startArchitectureGitHub(t, older, map[string]map[string]string{
+		older: {"api.md": "---\ntitle: API\n---\nThe API.\n"},
+		newer: {"queue.md": "---\ntitle: Queue\n---\nThe queue.\n", "store.md": "---\ntitle: Store\n---\nThe store.\n"},
+	})
+	github.holdBlobs(older)
+	pair := startPair(t, githubAppEnv(t, github.server.URL))
+	project := uniqueProjectKey(t, "ARC")
+	pair.a.createProject(t, project, "Architecture")
+	if _, err := pair.database.Pool.Exec(context.Background(), `
+		insert into architecture_sources (project_key, repo, branch, enabled, installation_id, created_by)
+		values ($1, 'acme/arch', 'main', false, 77, '{"kind":"user","id":"alice"}')
+	`, project); err != nil {
+		t.Fatalf("seed the architecture source: %v", err)
+	}
+	path := "/api/v1/projects/" + project + "/architecture-sources/acme/arch/sync"
+
+	type answer struct {
+		status int
+		body   []byte
+		err    error
+	}
+	held := make(chan answer, 1)
+	go func() {
+		response, err := pair.a.send(http.MethodPost, path, "")
+		if err != nil {
+			held <- answer{err: err}
+			return
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		held <- answer{status: response.StatusCode, body: body, err: err}
+	}()
+	select {
+	case <-github.held:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("A's sync never fetched the files of %s:\n%s", older, pair.a.Output.String())
+	}
+	github.moveHead(newer)
+	pair.b.call(t, http.MethodPost, path, "", http.StatusOK)
+	github.releaseHeld()
+
+	var fromA answer
+	select {
+	case fromA = <-held:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("A's sync never answered:\n%s", pair.a.Output.String())
+	}
+	if fromA.err != nil || fromA.status != http.StatusOK {
+		t.Fatalf("A's sync: status %d, err %v: %s", fromA.status, fromA.err, fromA.body)
+	}
+	var row struct {
+		LastCommit *string `json:"last_commit"`
+		LastError  *string `json:"last_error"`
+	}
+	if err := json.Unmarshal(fromA.body, &row); err != nil {
+		t.Fatalf("decode A's answer: %v: %s", err, fromA.body)
+	}
+	if row.LastCommit == nil || *row.LastCommit != newer || row.LastError != nil {
+		t.Errorf("A answered %s, want the row at %s with no error", fromA.body, newer)
+	}
+
+	var lastCommit string
+	var components, synced []string
+	if err := pair.database.Pool.QueryRow(context.Background(), `
+		select last_commit,
+		       array(select id from components where project_key = $1 order by id),
+		       array(select payload->>'commit' from events where project_key = $1 and type = 'architecture.synced' order by id)
+		from architecture_sources where project_key = $1
+	`, project).Scan(&lastCommit, &components, &synced); err != nil {
+		t.Fatalf("read the source: %v", err)
+	}
+	if lastCommit != newer {
+		t.Errorf("last_commit = %s, want %s", lastCommit, newer)
+	}
+	if want := []string{"queue", "store"}; !slices.Equal(components, want) {
+		t.Errorf("components = %v, want %s's %v", components, newer, want)
+	}
+	if want := []string{newer}; !slices.Equal(synced, want) {
+		t.Errorf("architecture.synced events name %v, want %v once", synced, want)
+	}
+}
+
+// ───── route status from one stored listener answer ────────────────────────
+
+// rosterEnv is what both processes of a route-status row are started with: the fake listener as
+// ENVOY_URL, and a listener answer that serves issue reads for a minute
+// (DISPATCH_TEST_ROUTE_ROSTER_TTL, under the test hooks every process here runs with), so the row
+// reads both processes inside one answer's life however slow the machine, with no timing window.
+func rosterEnv(listener *fakeListener) map[string]string {
+	env := listener.processEnv()
+	env["DISPATCH_TEST_ROUTE_ROSTER_TTL"] = time.Minute.String()
+	return env
+}
+
+// routeIssue creates an issue in project titled title and routes it to route, returning its key.
+func (p *dispatchProcess) routeIssue(t *testing.T, project, title, route string) string {
+	t.Helper()
+	created := p.call(t, http.MethodPost, "/api/v1/issues",
+		fmt.Sprintf(`{"project":%q,"title":%q,"force":true}`, project, title), http.StatusCreated)
+	var issue struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(created, &issue); err != nil || issue.Key == "" {
+		t.Fatalf("create issue: %v: %s", err, created)
+	}
+	p.call(t, http.MethodPatch, "/api/v1/issues/"+issue.Key, fmt.Sprintf(`{"route":%q}`, route), http.StatusOK)
+	return issue.Key
+}
+
+// issueReach is the issue's route_status and route_holder as GET /api/v1/issues/{key} on this
+// process answers them, "<status> <holder>", each "null" when absent.
+func (p *dispatchProcess) issueReach(t *testing.T, key string) string {
+	t.Helper()
+	var issue struct {
+		RouteStatus *string `json:"route_status"`
+		RouteHolder *string `json:"route_holder"`
+	}
+	answer := p.call(t, http.MethodGet, "/api/v1/issues/"+key, "", http.StatusOK)
+	if err := json.Unmarshal(answer, &issue); err != nil {
+		t.Fatalf("decode %s: %v: %s", key, err, answer)
+	}
+	orNull := func(value *string) string {
+		if value == nil {
+			return "null"
+		}
+		return *value
+	}
+	return orNull(issue.RouteStatus) + " " + orNull(issue.RouteHolder)
+}
+
+// liveRoutesPage is one page of project's open issues whose route reaches a live session, as GET
+// /api/v1/issues?route_status=live on this process answers it: the page's keys and its total.
+func (p *dispatchProcess) liveRoutesPage(t *testing.T, project string, limit, offset int) (keys []string, total int) {
+	t.Helper()
+	var page struct {
+		Issues []struct {
+			Key string `json:"key"`
+		} `json:"issues"`
+		Total int `json:"total"`
+	}
+	answer := p.call(t, http.MethodGet,
+		fmt.Sprintf("/api/v1/issues?project=%s&route_status=live&limit=%d&offset=%d", project, limit, offset), "", http.StatusOK)
+	if err := json.Unmarshal(answer, &page); err != nil {
+		t.Fatalf("decode the page at offset %d: %v: %s", offset, err, answer)
+	}
+	for _, issue := range page.Issues {
+		keys = append(keys, issue.Key)
+	}
+	return keys, page.Total
+}
+
+// Both processes judge a route against one stored listener answer. A route A reads live reads the
+// same on B, and again on A, after the listener stops listing its holder, inside the answer's life:
+// B does not ask the listener for a copy of its own, so the listener answers one live-list read
+// in all. A filtered listing paged across the two processes is cut from that one answer too: a
+// page read on B after the listener's list has flipped holds the rest of the issues A's page was
+// cut from, never issues judged against B's own later copy.
+func TestBothProcessesJudgeARouteAgainstOneRoster(t *testing.T) {
+	sre := listenerSession{SessionID: "sre-holder", Title: "sre", Roles: []string{"sre"}, Capabilities: []string{}}
+	reviewer := listenerSession{SessionID: "reviewer-holder", Title: "reviewer", Roles: []string{"reviewer"}, Capabilities: []string{}}
+
+	t.Run("an issue's route", func(t *testing.T) {
+		listener := startFakeListener(t, sre)
+		pair := startPair(t, rosterEnv(listener))
+		project := uniqueProjectKey(t, "RST")
+		pair.a.createProject(t, project, "One roster")
+		key := pair.a.routeIssue(t, project, "Routed to sre", "role:sre")
+
+		if got := pair.a.issueReach(t, key); got != "live sre-holder" {
+			t.Fatalf("A reads %s while the listener lists the holder, want live sre-holder", got)
+		}
+		listener.setSessions()
+		for _, reader := range []*dispatchProcess{pair.b, pair.a} {
+			if got := reader.issueReach(t, key); got != "live sre-holder" {
+				t.Fatalf("%s reads %s after the listener stopped listing the holder, want the stored live sre-holder",
+					pair.name(reader), got)
+			}
+		}
+		if calls := listener.sessionListings(); calls != 1 {
+			t.Fatalf("the listener answered %d live-list reads, want 1: both processes judge against one stored answer", calls)
+		}
+	})
+
+	t.Run("a filtered page", func(t *testing.T) {
+		listener := startFakeListener(t, sre)
+		pair := startPair(t, rosterEnv(listener))
+		project := uniqueProjectKey(t, "RSP")
+		pair.a.createProject(t, project, "One roster, paged")
+		routedToSRE := make([]string, 0, 6)
+		for index := range 6 {
+			routedToSRE = append(routedToSRE, pair.a.routeIssue(t, project, fmt.Sprintf("SRE work %d", index), "role:sre"))
+			pair.a.routeIssue(t, project, fmt.Sprintf("Review work %d", index), "role:reviewer")
+		}
+
+		first, firstTotal := pair.a.liveRoutesPage(t, project, 3, 0)
+		listener.setSessions(reviewer)
+		second, secondTotal := pair.b.liveRoutesPage(t, project, 3, 3)
+		if firstTotal != 6 || secondTotal != 6 {
+			t.Errorf("total reads %d on A and %d on B, want 6 on both", firstTotal, secondTotal)
+		}
+		paged := slices.Concat(first, second)
+		slices.Sort(paged)
+		want := slices.Clone(routedToSRE)
+		slices.Sort(want)
+		if !slices.Equal(paged, want) {
+			t.Fatalf("page 1 on A holds %v and page 2 on B holds %v, want together exactly the issues routed to sre %v",
+				first, second, routedToSRE)
+		}
+	})
+}
+
+// ───── the test hooks ───────────────────────────────────────────────────────
+
+// hookViewerSession is the session whose conversation the test-hook row's viewer watches: any
+// UUID, since the in-process relay the publish hook feeds knows no sessions of its own.
+const hookViewerSession = "01a0e090-4848-7473-acc5-fc96e6a646d3"
+
+// startHookPair starts both processes as the browser harness starts its server: with the test
+// hooks, as every process here runs, and without NATS, so the agent conversation relay each
+// serves is the in-process source the publish hook feeds (main.go), one per process.
+func startHookPair(t *testing.T) *dispatchPair {
+	t.Helper()
+	pair := &dispatchPair{database: storetest.Open(t)}
+	options := dispatchOptions{SigningKey: multiprocessSigningKey}
+	pair.a = startDispatchProcessWith(t, pair.databaseURL(t), options)
+	pair.b = startDispatchProcessWith(t, pair.databaseURL(t), options)
+	pair.a.waitHealthy(t)
+	pair.b.waitHealthy(t)
+	return pair
+}
+
+// liveSocketFrames reads conn, a live socket, until it ends: each frame of the agent view it
+// holds lands on frames, and the read error that ended the socket on ended.
+func liveSocketFrames(conn *gws.Conn) (frames <-chan string, ended <-chan streamEnd) {
+	agent := make(chan string, 64)
+	end := make(chan streamEnd, 1)
+	go func() {
+		defer close(agent)
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				end <- streamEnd{at: time.Now(), err: err}
+				return
+			}
+			var frame struct {
+				Type  string          `json:"type"`
+				Event string          `json:"event"`
+				Data  json.RawMessage `json:"data"`
+			}
+			if json.Unmarshal(data, &frame) != nil || frame.Type != "agent" || frame.Event != "frame" {
+				continue
+			}
+			agent <- string(frame.Data)
+		}
+	}()
+	return agent, end
+}
+
+// requireSocketClosed waits for a live socket to end with code, failing the row when it is still
+// open within or ended another way.
+func requireSocketClosed(t *testing.T, ended <-chan streamEnd, code int, within time.Duration, what string) {
+	t.Helper()
+	select {
+	case end := <-ended:
+		if !gws.IsCloseError(end.err, code) {
+			t.Fatalf("%s ended with %v, want the hook's %d", what, end.err, code)
+		}
+	case <-time.After(within):
+		t.Fatalf("%s was still open %v later", what, within)
+	}
+}
+
+// Every test hook acts on every process serving the database, whichever process the call landed
+// on: a browser suite against two processes disconnects, rotates, quiesces and feeds frames to
+// the process its page happens to be connected to, which is not the one its own API call reaches.
+// A live socket - one per tab, holding both the event feed and a conversation view - a live
+// document room and a second live socket are each held open on B, and each hook is called on A.
+// quiesce answers only once B's room has closed too, which is what a harness truncating its
+// database right after relies on. Once B is killed its lock is gone with its connection, and a
+// hook called on A answers on A's acknowledgement alone rather than waiting out the timeout for a
+// process that no longer exists.
+func TestEveryTestHookActsOnBothProcesses(t *testing.T) {
+	pair := startHookPair(t)
+	project := uniqueProjectKey(t, "HKS")
+	pair.a.createProject(t, project, "Test hooks")
+	_, artifactID := pair.a.createIssueIn(t, project, "Open on B", "before")
+
+	// One socket per tab: B's holds the event feed and the conversation view the publish hook
+	// feeds, as a page watching an agent holds them.
+	viewer := pair.b.openLiveEvents(t)
+	pair.b.watchAgent(t, viewer, hookViewerSession)
+	published, viewerEnded := liveSocketFrames(viewer)
+	const frame = `{"v":1,"kind":"message","seq":7}`
+	pair.a.call(t, http.MethodPost, "/api/v1/agents/"+hookViewerSession+"/stream/_test/publish", frame, http.StatusOK)
+	select {
+	case got, open := <-published:
+		if !open {
+			t.Fatal("the conversation view B held closed before the frame published on A arrived")
+		}
+		if got != frame {
+			t.Fatalf("the conversation view B held received %s, want the frame published on A", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the conversation view B held never received the frame published on A")
+	}
+
+	pair.a.call(t, http.MethodPost, "/api/v1/live/_test/disconnect", "", http.StatusOK)
+	requireSocketClosed(t, viewerEnded, gws.CloseServiceRestart, 10*time.Second,
+		"the live socket B held after the disconnect hook was called on A")
+
+	_, rotated := liveSocketFrames(pair.b.openLiveEvents(t))
+	pair.a.call(t, http.MethodPost, "/api/v1/live/_test/rotate", "", http.StatusOK)
+	requireSocketClosed(t, rotated, contracts.LiveSocketMaxAgeClose, 10*time.Second,
+		"the live socket B held after the rotate hook was called on A")
+
+	editor := pair.b.openEditor(t, artifactID, "before\n")
+	pair.a.call(t, http.MethodPost, "/api/v1/artifacts/_test/quiesce", "", http.StatusOK)
+	// B closed the room before it acknowledged, and A answered only after that acknowledgement,
+	// so the close is already on its way over loopback when the answer arrives: the bound is that
+	// trip, not a wait for B to get round to it.
+	select {
+	case <-editor.Ended:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("the document room B held was still open 2s after quiesce answered on A:\nB:\n%s", pair.b.Output.String())
+	}
+
+	_, survivor := liveSocketFrames(pair.a.openLiveEvents(t))
+	pair.b.kill(t)
+	called := time.Now()
+	pair.a.call(t, http.MethodPost, "/api/v1/live/_test/disconnect", "", http.StatusOK)
+	waited := time.Since(called)
+	t.Logf("the disconnect hook on A answered %v after B was killed", waited)
+	// The hook's timeout is ten seconds; an answer inside it is one that did not wait for B.
+	if waited >= 10*time.Second {
+		t.Fatalf("the disconnect hook on A answered %v after B was killed, want well inside the 10s timeout", waited)
+	}
+	requireSocketClosed(t, survivor, gws.CloseServiceRestart, 10*time.Second,
+		"the live socket A held after the disconnect hook answered with B killed")
 }
 
 // ───── two dashboard builds ─────────────────────────────────────────────────

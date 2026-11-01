@@ -1,0 +1,229 @@
+[
+  {
+    "value": "dispatch://CORE-1/spec#b-x",
+    "ok": true,
+    "why": "a block of an issue's primary document"
+  },
+  {
+    "value": "dispatch://CORE-1/artifact/notes-md#b-x",
+    "ok": true,
+    "why": "a block of an issue's document"
+  },
+  {
+    "value": "dispatch://CORE/artifact/handbook-md#b-x",
+    "ok": true,
+    "why": "a block of a project's document"
+  },
+  {
+    "value": "dispatch://CORE/artifact/spec#b-x",
+    "ok": true,
+    "why": "a project's document whose slug is spec"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-d%C3%A9cision%3A1",
+    "ok": true,
+    "why": "a Unicode id"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-x@v2",
+    "ok": true,
+    "why": "a pinned block"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-x@v9223372036854775807",
+    "ok": true,
+    "why": "the largest pin"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-x dispatch://CORE/artifact/handbook-md#b-y",
+    "ok": true,
+    "why": "two references separated by one space"
+  },
+  {
+    "value": "",
+    "ok": true,
+    "why": "no pointers"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "ok": true,
+    "why": "an id of exactly 256 bytes"
+  },
+  {
+    "value": "dispatch://CORE-1/artifact/spec#b-x",
+    "ok": false,
+    "why": "an issue's primary document is written /spec"
+  },
+  {
+    "value": "dispatch://CORE-1/spec",
+    "ok": false,
+    "why": "a document, not a block"
+  },
+  {
+    "value": "dispatch://agent/s1/artifact/x#b-y",
+    "ok": false,
+    "why": "an agent's document has no blocks to point at"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-d%c3%a9",
+    "ok": false,
+    "why": "lower-case hex"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-%41",
+    "ok": false,
+    "why": "an over-encoded ASCII letter"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-x%2Dy",
+    "ok": false,
+    "why": "an over-encoded -"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-%FF",
+    "ok": false,
+    "why": "invalid UTF-8"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-%0A",
+    "ok": false,
+    "why": "a control character"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#x",
+    "ok": false,
+    "why": "a fragment that is not b-"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#c-x",
+    "ok": false,
+    "why": "a fragment that is not b-"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-",
+    "ok": false,
+    "why": "an empty id"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "ok": false,
+    "why": "an id over 256 bytes"
+  },
+  {
+    "value": "dispatch://CORE-1/artifact/notes-md@v2#b-x",
+    "ok": false,
+    "why": "a versioned document"
+  },
+  {
+    "value": "dispatch://CORE-1#b-x",
+    "ok": false,
+    "why": "an issue names no document"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-x@v9223372036854775808",
+    "ok": false,
+    "why": "a pin past the largest"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-x@v01",
+    "ok": false,
+    "why": "a pin with a leading zero"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-x@v0",
+    "ok": false,
+    "why": "a pin of zero"
+  },
+  {
+    "value": "https://dispatch.example/issues/CORE-1/spec#b-x",
+    "ok": false,
+    "why": "a dashboard URL of a block"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-x.",
+    "ok": false,
+    "why": "trailing punctuation"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-x)",
+    "ok": false,
+    "why": "a trailing parenthesis"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-x,dispatch://CORE-1/spec#b-y",
+    "ok": false,
+    "why": "references joined by a comma"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-x dispatch://CORE-1/spec#b-x",
+    "ok": false,
+    "why": "a repeated reference"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-x  dispatch://CORE-1/spec#b-y",
+    "ok": false,
+    "why": "a doubled space"
+  },
+  {
+    "value": " dispatch://CORE-1/spec#b-x",
+    "ok": false,
+    "why": "a leading space"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-x ",
+    "ok": false,
+    "why": "a trailing space"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-x\tdispatch://CORE-1/spec#b-y",
+    "ok": false,
+    "why": "a tab between references"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-x﻿dispatch://CORE-1/spec#b-y",
+    "ok": false,
+    "why": "U+FEFF between references"
+  },
+  {
+    "value": "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2",
+    "ok": false,
+    "why": "a block of an issue's comment",
+    "problem": "a block[] attribute points only at a block of a document"
+  },
+  {
+    "value": "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2@v1",
+    "ok": false,
+    "why": "a block of a revision of an issue's comment",
+    "problem": "a block[] attribute points only at a block of a document"
+  },
+  {
+    "value": "dispatch://CORE/artifact/handbook-md/comment/88888888-8888-4888-8888-888888888888#b-b2",
+    "ok": false,
+    "why": "a block of a project document's comment",
+    "problem": "a block[] attribute points only at a block of a document"
+  },
+  {
+    "value": "dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2",
+    "ok": false,
+    "why": "a block of an issue message",
+    "problem": "a block[] attribute points only at a block of a document"
+  },
+  {
+    "value": "dispatch://CORE-1/artifact/notes-md/comment/c1#b-x",
+    "ok": false,
+    "why": "an issue document's comment, a shape no reference has",
+    "problem": "is not a block reference as Dispatch writes one"
+  },
+  {
+    "value": "dispatch://CORE-1/comment/%ZZ#b-x",
+    "ok": false,
+    "why": "a comment id that does not decode",
+    "problem": "is not a block reference as Dispatch writes one"
+  },
+  {
+    "value": "dispatch://CORE-1/spec#b-x dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2",
+    "ok": false,
+    "why": "a document's block, then an issue message's",
+    "problem": "a block[] attribute points only at a block of a document"
+  }
+]

@@ -238,14 +238,15 @@ func TestAListenerWhoseGrantRefusesAStoreBucketExitsNamingIt(t *testing.T) {
 }
 
 // Every pod of one machine id runs the role lane, the active pod and each standby alike, so both
-// subscribe notifications.role.> at once. They are one core-NATS queue group
-// (envoy-listener-<machine id>), and NATS hands each message to one member of a group, so a role
-// message published on the lane reaches its holder once whichever pod takes it: no publish is
-// forwarded by both. A re-publish under the same dedupe key that lands on the other pod finds the
-// forward recorded in the delivery ledger both pods share and is skipped; a copy that does reach
-// the holder is dropped by its pump by its dedupe key, as it drops the copy each other machine's
-// listener forwards. The messages go straight onto the lane, as an operator's or an earlier
-// listener's do: the publish route forwards a role message itself.
+// subscribe notifications.role.> at once. They are members of one core-NATS queue group
+// (envoy-roles, which every listener shares, or this machine's group on a hub whose grant
+// predates it), and NATS hands each message to one member of a group, so a role message published
+// on the lane reaches its holder once whichever pod takes it: no publish is forwarded by both. A
+// re-publish under the same dedupe key that lands on the other pod finds the forward recorded in
+// the delivery ledger both pods share and is skipped; a copy that does reach the holder is
+// dropped by its pump by its dedupe key, as it drops the copy each other machine's listener
+// forwards. The messages go straight onto the lane, as an operator's or an earlier listener's do:
+// the publish route forwards a role message itself.
 func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T) {
 	const (
 		machineID = "two-tasks"

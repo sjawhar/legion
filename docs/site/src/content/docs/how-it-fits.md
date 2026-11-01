@@ -7,8 +7,9 @@ sidebar:
 
 Four components share the work. **Dispatch** holds the record: the issues, their documents, and
 every decision a person makes about them. **Legion** works the issues handed to it by running coding
-agents. The **Secrets Broker** gives those agents credentials, with a person's approval shown in
-Dispatch when the secret's owner and tier require one. **Envoy** carries events between them.
+agents. The **Secrets Broker** gives those agents credentials, with a person's approval, on the
+broker's own page that Dispatch's Inbox links to, when the secret's owner and tier require one.
+**Envoy** carries events between them.
 
 ```mermaid
 flowchart TB
@@ -23,9 +24,13 @@ flowchart TB
     coordinator[Coordinator]
     agents[Agents]
   end
-  broker[Secrets Broker]
+  subgraph secrets [Secrets Broker]
+    broker[Requests and grants]
+    approve[Approval page]
+  end
 
   people -->|file issues, answer asks, approve specs| dispatch
+  people -->|approve secret requests| approve
   people -->|merge| github
   dispatch -->|events| envoy
   github -->|pull request and CI events| envoy
@@ -35,7 +40,8 @@ flowchart TB
   agents -->|specs, comments, asks, status| dispatch
   agents -->|pull requests| github
   agents -->|request a secret| broker
-  broker <-->|pending requests and decisions| inbox
+  broker -->|pending requests, each linking its page| inbox
+  inbox -->|link| approve
 ```
 
 ## Dispatch: the record of work and decisions
@@ -96,11 +102,15 @@ tier, then decide whether to grant the request automatically (the owner's own se
 an agent-tier secret), send it to a person for approval (its owner, or anyone for a shared
 human-tier secret), or refuse it.
 
-An approval request appears in that person's Dispatch Inbox, labelled as a secret request or a
-machine login, together with the reason the agent gave. The person approves or denies it there, and
-Dispatch relays the decision to the broker under the signed-in person's own identity. The broker
-holds no Dispatch credential: Dispatch reads the pending requests from the broker and sends back
-each decision. A grant lasts until its session ends, or for the shorter lifetime its request named,
+A secret request appears in that person's Dispatch Inbox, labelled as a secret request, as a link
+to its page on the broker. The person opens it, signs in to the broker with their Workspace account
+if their last sign-in there has lapsed, reads the request the broker prints from its own record,
+the reason the agent gave included, and approves or denies it on that page, which the broker
+accepts only from its own origin. No route Dispatch or any other service calls decides a secret
+request. A machine login, labelled as one, is approved in Dispatch by typing the code the machine
+shows, and Dispatch relays that decision, and a person's revoke of a grant or a machine login, under
+the signed-in person's identity. The broker holds no Dispatch credential: Dispatch reads the pending
+requests from the broker. A grant lasts until its session ends, or for the shorter lifetime its request named,
 and `agent-secrets NAME -- <command>` runs a command with the granted value in that command's
 environment rather than printing it. People create and change the secrets themselves, in the
 broker's own store (AWS Secrets Manager or GCP Secret Manager) under their own cloud sign-in, with
@@ -114,11 +124,13 @@ into events on topics for each repository and pull request. Legion's coordinator
 with durable consumers, so an event that arrives while it is down is read when it comes back.
 
 Envoy also delivers messages to agent sessions directly: a message to one session, to whichever
-session holds a role, or a broadcast a person sends from the Dispatch Agents page. An Oh My Pi or
-Claude Code session whose connection drops gets what was sent to it, and what was published on
-the issue topics it follows, from the stream when it reconnects, for up to 72 hours; a role's
-messages are live only. Envoy decides only where an event goes; what to do about it is the
-coordinator's and the agents' business.
+session holds a role, or a broadcast a person sends from the Dispatch Agents page. The listener
+keeps a durable consumer for each Oh My Pi or Claude Code session and hands it the stored
+messages in order, each counted as delivered only once the session has it, so a session that was
+stopped or lost its connection gets what was sent to it, the messages to a role it holds, and what
+was published on the issue topics it follows, once, when it is back, for up to 72 hours. Envoy
+decides only where an event goes; what to do about it is the coordinator's and the agents'
+business.
 
 ## An issue, start to finish
 

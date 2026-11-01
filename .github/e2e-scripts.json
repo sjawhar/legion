@@ -103,6 +103,10 @@
       "needs": "a devbox: tmux, the pinned Oh My Pi on a model route (LEGION_E2E_MODEL_ROUTE), a Chromium that Playwright drives, and its own Postgres and NATS containers"
     },
     {
+      "script": "envoy-session-delivery.sh",
+      "needs": "an issue pod and a model provider, so it is run by hand and never in CI: a loopback Postgres with pgvector (LEGION_TEST_PG_DSN), the model gateway key file (/var/run/model-gateway-key/key, or SESSION_DELIVERY_MODEL_KEY_FILE), go, bun and the checkout's node_modules, jq, curl, socat 1.8.0 or later, setsid, psql, git, tar, pgrep, mkfifo and python3"
+    },
+    {
       "script": "multi-repo-acceptance.sh",
       "needs": "a live multi-repository run on the production cluster: it is the operator's acceptance observer, reads that run's daemon, Dispatch, GitHub and kubectl, and starts nothing of its own"
     },

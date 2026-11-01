@@ -74,6 +74,14 @@ type ConsumerSpec struct {
 	// repository (ResolvedRepoMissing) is filled here. A failed preparation is retried after
 	// NakDelay rather than applied without it. No preparer (a test) applies the fact as decoded.
 	PrepareRepository func(ctx context.Context, issue DispatchIssue) (DispatchIssue, error)
+	// PrepareArtifact readies what the workflow reads of the issue a Dispatch review event is on
+	// (DispatchArtifact.Issue), before the fact is applied, within AckWait, and returns the fact to
+	// apply: the workflow performs no I/O, and decides from Dispatch's view of the issue whether a
+	// person's approval of a parked labelled root's primary document queues that root, so the view
+	// is read here, for a person's approval that is not a carried one. A failed preparation is
+	// retried after NakDelay rather than applied without it. No preparer (a test) applies the fact
+	// as decoded, with no view, which queues nothing.
+	PrepareArtifact func(ctx context.Context, artifact DispatchArtifact) (DispatchArtifact, error)
 }
 
 // RetryLater is an error ConsumerSpec.ReviewPermission returns when its read must not be made again
@@ -594,6 +602,12 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 		return false
 	}
 	decoded.Fact = prepared
+	prepared, err = prepareArtifact(ctx, spec, decoded.Fact)
+	if err != nil {
+		nakResolve(spec, message, decoded.EventID, "prepare the review's issue", "nak the review's issue preparation", err)
+		return false
+	}
+	decoded.Fact = prepared
 	withBody, err := resolveReviewBody(ctx, spec, decoded.Fact)
 	if err != nil {
 		nakResolve(spec, message, decoded.EventID, "restore the review's truncated body", "nak the review body restore", err)
@@ -670,6 +684,18 @@ func prepareRepository(ctx context.Context, spec ConsumerSpec, fact Fact) (Fact,
 	read, cancel := context.WithTimeout(ctx, spec.AckWait)
 	defer cancel()
 	return spec.PrepareRepository(read, issue)
+}
+
+// prepareArtifact runs ConsumerSpec.PrepareArtifact for a Dispatch review or version fact, within
+// AckWait, and is the fact to apply. Every other fact passes through untouched.
+func prepareArtifact(ctx context.Context, spec ConsumerSpec, fact Fact) (Fact, error) {
+	artifact, ok := fact.(DispatchArtifact)
+	if !ok || spec.PrepareArtifact == nil {
+		return fact, nil
+	}
+	read, cancel := context.WithTimeout(ctx, spec.AckWait)
+	defer cancel()
+	return spec.PrepareArtifact(read, artifact)
 }
 
 // resolveReviewPermission fills a review's AuthorCanWrite from ConsumerSpec.ReviewPermission

@@ -56,7 +56,8 @@ without a controller until someone runs the command again. Under `controller: da
 only) the daemon launches it as a pod in the cluster and relaunches it when it dies; a person
 reaches it through Dispatch. The daemon wakes it when something needs a judgment no tree owns:
 
-- a new `triage` issue labelled `legion` to admit, park, or leave alone;
+- a `triage` issue labelled `legion` by an agent session, to admit, park or leave to you (a
+  person's label is queued by the daemon: the issue moves to `todo` without the controller);
 - a tree its own architect escalated, or one whose architect ran out of launches.
 
 The daemon also wakes it when an admission slot frees and on a timer, every
