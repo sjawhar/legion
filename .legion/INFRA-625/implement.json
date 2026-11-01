@@ -2,7 +2,7 @@
  "schemaVersion": 1,
  "phase": "implement",
  "issue": "INFRA-625",
- "completed": "2026-11-01T08:05:00Z",
+ "completed": "2026-11-01T12:20:00Z",
  "proof": [
   {
    "criterion": "Round 3's second failure: the dispatch-memory lane. The tester's red (a four-column table at 260 MiB against 256) is not a regression of this change, and the lane's distribution is moved away from its bound rather than left where it was.",
@@ -219,6 +219,14 @@
    "observed": "A 1 MiB document written as one paragraph: 102,820,580 B/op and 992 allocs on main against 55,404,238 B/op and 713 allocs here - 46 % less. The same mebibyte in ordinary paragraphs: 99,111,886 against 99,088,436 - 0.02 %, nil. Both cuts are the size of the one document-level block the edit lands in, so the fragment now gives the measured number and names the shape it holds for.",
    "headSha": "3c7c64c189d0b9ffd7a0fad80d8aef99d746593f",
    "negativeControl": "The replaced figure, 'about a third less', was measured with this branch's own quote finder and against the base before main's #2522, which merge 66d570f5 took in its place: it was too small for a document held in one block and far too large for prose, which the two measurements above bracket."
+  },
+  {
+   "criterion": "Review round 5: the unit row that turned CI's dispatch lane red waits for the mark React commits, and so does every row of its class.",
+   "surface": "The markdown render path's unit surface (jsdom with the real worker queue and a fake worker), and a scratch copy of the package where a seam defers the commit.",
+   "command": "cd packages/dispatch && bun test web/src/features/refs/MarkdownBody.test.tsx (ten runs) && bun run test && bun run typecheck; bunx biome check packages/dispatch/ from the root",
+   "observed": "51 pass / 0 fail ten runs in a row, package 3,129 pass / 0 fail, tsc and Biome clean. The defect is a race between two clocks in the test rather than in the product: topItems and its kin count nodes the painter writes straight into the DOM outside React, while data-markdown-pending is React state cleared only when done() runs finish() and React commits setIsPending(false), so a wait on the painter's DOM does not settle the mark. Eighteen rows now wait for it - the reviewer's thirteen, four more the same rule caught (692, 1700, 1763, 1789) and 1421 in its true form - and eleven stay synchronous with their reason recorded: 1607's preceding wait already reads React state, 1305/1341/1348/1473/1556/1696 read a mark unchanged since a commit render/act flushed, and 613/656/669/710 expect the value the mark holds before the commit.",
+   "headSha": "615064010f1cfd28f18fdddb714ccd57dda97a2e",
+   "negativeControl": "The natural red is load-dependent - seen only in CI job 124798054818, and green in 20 isolated, 12 file-level and 5 whole-package runs on this pod - so the control is forced: a scratch seam defers finish()'s setIsPending and the fallback flip together, keeping as one commit what the real code never splits. Against the unfixed file one task of lag gives 35 pass / 16 fail, every red Received: \"true\" including the CI line 1241; 120 ms gives 36 pass / 15 fail, also catching 1421 and 1735. The fixed file is 51 pass / 0 fail under both lags. With that faithful seam row 1607 stays green, which is the evidence for leaving it synchronous. The seam is scratch-only and reaches no commit."
   }
  ],
  "filesChanged": [
@@ -256,5 +264,5 @@
   "The reader's-place row's 1-in-10 WebKit failure was not the late paint: the deep link marks the conversation read, every card loses its 24 px unread pill, the page loses 312 px and WebKit's scroll anchoring absorbs it. The failing run's own log shows the late paint moved the content 0 px. The row now takes its first measurement once the page has held it for 600 ms.",
   "goldmark's blank-line bookkeeping is superlinear in depth times lines for a body that holds blocks open across thousands of blank lines. It is the one shape of this issue's family left unfixed, and it is in the vendored parser."
  ],
- "previousHandoff": "83440b1b701e8bd4df7d8046205721a2cadcc960"
+ "previousHandoff": "cb5943aacaab14691661dcb844cc104b8ab0470e"
 }
