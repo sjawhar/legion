@@ -530,12 +530,21 @@ reach any work a pod runs, a test or a tool of your own, not a test suite alone.
   8,388,470 frames. The same probes on an ordinary kernel track the setting as expected, so this
   is the sandbox and not the probes. 131072 is the number because a larger soft limit buys
   nothing and costs: glibc sizes a default thread stack from the soft limit, so a tool that
-  creates a thread pool can fail to allocate one. Set the hard limit too (`ulimit -H -s 131072`
-  first, or `-H` and `-S` together): a helper that raises the stack by setting the soft limit to
-  the hard limit otherwise lands on the pod's `unlimited` hard limit and gets 8 MiB. A tool that
-  checks the stack limit itself may refuse to start when the hard limit is below its own
-  minimum, so set the hard limit to what that tool demands; the 128 MiB ceiling applies
-  whichever finite value you choose.
+  creates a thread pool can fail to allocate one. Write it as one command, `ulimit -s 131072`,
+  which sets soft and hard together and is legal whether the pod starts at 8 MiB or at
+  `unlimited`; a two-command form that lowers the hard limit first returns `EINVAL` from a soft
+  `unlimited`, and chained with `&&` it leaves the process at `unlimited`, which is the 8 MiB
+  this item exists to prevent. Both limits matter, since a helper that raises the stack by
+  setting the soft limit to the hard limit otherwise lands on the pod's `unlimited` hard limit
+  and gets 8 MiB, and a tool that checks the limit itself may refuse to start when the hard
+  limit is below its own minimum; the 128 MiB ceiling applies whichever finite value you choose.
+  Then read both back, since the setter's exit code proves nothing:
+
+  ```sh
+  ulimit -s 131072
+  soft=$(ulimit -Ss); hard=$(ulimit -Hs)
+  [ "$soft $hard" = "131072 131072" ] || { echo "stack limit is $soft/$hard, refusing"; exit 2; }
+  ```
 - **Compare durations within one pod, never across pods.** A gVisor sandbox runs syscall-heavy
   work 2.2 to 3.8 times slower than the same work outside it, and a pod lands on whatever node
   the autoscaler provisions, so two pods are two machines, two sets of neighbours and two
