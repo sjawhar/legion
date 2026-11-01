@@ -551,7 +551,7 @@ something to count.
   ```sh
   want=131072   # a tool with its own stack guard may demand more; use its minimum
   ulimit -S -s "$want" 2>/dev/null || { ulimit -H -s "$want" 2>/dev/null || true; ulimit -S -s "$want"; }
-  [ "$(ulimit -Hs)" = unlimited ] && ulimit -H -s "$want" 2>/dev/null
+  { [ "$(ulimit -Hs)" = unlimited ] && ulimit -H -s "$want" 2>/dev/null; } || true
   soft=$(ulimit -Ss); hard=$(ulimit -Hs)
   [ "$soft" = "$want" ] || { echo "stack soft is $soft, want $want; refusing"; exit 2; }
   [ "$hard" != unlimited ] && [ "$hard" -ge "$want" ] || { echo "stack hard is $hard; refusing"; exit 2; }
@@ -565,7 +565,13 @@ something to count.
   limit: Invalid argument`, and chained with `&&` the soft set never runs, so the process keeps
   `unlimited` and gets 8 MiB, the failure the rule exists to stop. **The hard limit is set only
   when it reads `unlimited`**, because setting it unconditionally lowers a higher finite hard
-  limit the pod gave you, which is the headroom a tool with its own guard may need. And the
+  limit the pod gave you, which is the headroom a tool with its own guard may need. The
+  **`|| true` around it** is not decoration: on the ordinary path, where the hard limit is
+  already finite, that test is false, and a bare `&&` list whose test fails is a non-zero exit
+  status. `set -e` does not abort there, so the script runs to the end and does all of its work
+  — and if that line is the last one in the file, the script exits 1 with everything correct.
+  Measured: as a last line, `exit=1`; with `|| true`, `exit=0`; and with any command after it,
+  `exit=0` either way, which is why it is easy to test and find nothing. And the
   **fallback** covers a want above the current hard limit, where the soft set fails first.
   Measured from three starting states: `unlimited/unlimited` and `8192/unlimited` both end at
   `131072/131072`, and `131072/1048576` ends at `131072/1048576` with the higher hard limit
