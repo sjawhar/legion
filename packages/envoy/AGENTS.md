@@ -2214,7 +2214,10 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   the source's previous projection, and every other source's, stays up.
   `graph_edges` gains the `part_of`/`depends_on` arms over node kind `component` (`<project>/<id>`), never rows in `refs`.
 
-- Every sync runs under a two-minute deadline.
+- Every sync runs under a two-minute deadline of its own, counted from when its flight began rather than from when a caller arrived.
+  A flight runs on a context detached from whichever caller started it (`context.WithoutCancel`), so one caller hanging up fails none of the others.
+  Only the process stopping ends a flight early:
+  `Importer.Close`, which `cmd/dispatch/main.go` runs inside the shutdown's background wait, before `waitUntilIdle` and `pool.Close`, cancels every flight and waits for it.
   `project()` opens with `select … for update` on every source row of the project in id order and `recordFailure()` on its own source row alone, so two server processes never deadlock inside delete+reinsert nor both claim one component id, and a sync whose branch changed or whose source was deleted while it was fetching writes nothing.
   What orders writes across processes is the source row's version, PostgreSQL's `xmin`, which a sync loads (as text) with the row before its fetch:
   every write of the row by any build changes it
@@ -2224,7 +2227,12 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A re-resolved installation id is written only on the row as loaded (`xmin` unchanged), and the sync carries that write's `xmin` on.
   Writes are thus ordered by when each sync read the branch head, never by commit date:
   a process held mid-fetch never records an older head, or a failure it met, over another process's newer import, and a force-push back to an older commit still imports.
-  The per-project mutex only saves duplicate GitHub fetches inside one process.
+  The callers of one source, one project's one repository, share one flight (`singleflight` keyed on both), so two Refresh clicks cost one set of GitHub calls.
+  No lock is held across a GitHub call, so a slow source holds up no other source, of its project or of any other.
+  A caller takes a flight's answer only when that flight issued its branch-head lookup no earlier than the moment the caller asked.
+  Otherwise it joins the next flight, which necessarily began after it asked (`singleflight` deletes the key before it sends a result), so a push followed by a Refresh is never answered the pre-push commit.
+  Every import failure is recorded on the source row whatever its callers did, the sync's own deadline included, which is written on a cancel-free context;
+  only the process stopping suppresses that record.
   A healthy source whose head is the recorded commit only refreshes `last_sync_at` (no fetch, no event);
   a moved head whose subtree sha equals `last_tree_sha` records the commit without re-fetching or re-projecting
   — so a caller looping a sync route is bounded to the head lookups.
@@ -2979,7 +2987,7 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   nats-server answers the refused publish with API error 10077 (`JSStreamStoreFailedF`) `maximum bytes exceeded`, which nats.go returns as `nats: maximum bytes exceeded` and the bus wraps as `bus.ErrStreamFull` (`stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded`;
   `publishJetStream` and a window's send, `streamFull`).
   It is not a `bus.ErrRefused`, so every publisher treats it as a failure to retry:
-  the webhook listener answers GitHub 503 and logs `github publish failed`, and Dispatch's redelivery sweep has GitHub redeliver it (five times, over about half an hour);
+  the webhook listener answers GitHub 503 and logs `github publish failed`, and Dispatch's redelivery sweep has GitHub redeliver it (on a doubling backoff, until GitHub records the delivery or 72 hours after its first failed attempt);
   Dispatch's outbox backs the event off and retries it with no attempt limit;
   the CI store releases its claim and settles again on a later tick;
   `/v1/messages/send` and `/v1/messages/publish` answer `503` with `Retry-After: 1` under `streamFullPrefix` (`envoy: the message bus refused the message because its stream is full: …`), recorded with the outcome `stream_full` rather than `bus_unavailable`, which `@legion/envoy-client` retries once before the session's tool reports it, Dispatch records as a failed delivery attempt its dashboard offers to Retry, and the Legion daemon's notice outbox retries on its backoff.
@@ -3449,7 +3457,8 @@ The row holds a SHA-256 of the method, the route pattern, its path values, the q
   While it runs it renews its key's lease (`IDEMPOTENCY_LEASE_MS`, 60 s) every `keyedLeaseRenewal` (20 s, `renewRequestKeyLease`), each renewal a statement of its own, and only until `keyedHandlerLimit`, so a handler that runs past its limit holds its key one lease longer at most.
   A client that gave up and asks again is answered `409 KEY_IN_FLIGHT` for as long as the first run lives and then its stored answer, and only a run whose process died is taken over.
   A handler cut off with its client would roll its transactions back and leave every retry to start over, so a write that takes the server longer than the client waits could never land.
-  Every handler that reads `r.Context()` for its work gets this detached context, the architecture importer's `Sync` among them.
+  Every handler that reads `r.Context()` for its work gets this detached context.
+  The architecture importer's `Sync` detaches one of its own from it (the importer section above), so the flight it shares outlives the caller that started it and ends only when the process stops.
 
 - The handler answers on a writer that holds its answer (`keyedAnswer`) until the row has it.
   A 2xx or a 4xx is stored and the row finished in one statement;

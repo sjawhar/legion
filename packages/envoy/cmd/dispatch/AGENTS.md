@@ -223,9 +223,13 @@ lands. The flag costs one Postgres connection per process outside the shared poo
 With NATS configured and the GitHub App private key loaded, startup also runs the webhook
 redelivery sweep (`internal/dispatch/redeliver`, wired in `cmd/dispatch/redeliver.go`). Every
 `redeliver.Interval` it lists the App webhook's failed deliveries and redelivers them through
-GitHub's App API. Its cursor and per-delivery claims live in the `envoy_webhook_redelivery` KV
-bucket, which the sweeper opens on its first pass that finds NATS connected (`Sweeper.Open`), not
-at boot, since the server's NATS clients connect in the background (`serverBus`). Its rate-limit
+GitHub's App API. Its cursor, one record per delivery acted on and one index entry per open
+delivery, keyed by the minute it next needs a sweep (`redeliver/index.go`), live in the
+`envoy_webhook_redelivery` KV bucket, which the sweeper opens on its first pass that finds NATS
+connected (`Sweeper.Open`), not at boot, since the server's NATS clients connect in the
+background (`serverBus`). The running sweep reads from that index the deliveries due in its
+window rather than every record in the bucket; a sweep given a window of its own, which is every
+`redeliver-webhooks` run, reads every record. Its rate-limit
 backoff lives in Postgres's `github_rate_limits` (scope `redelivery`, beside the App's `app` and
 each installation's `installation:<id>`, which every process's `githubapp.Client` obeys;
 `internal/dispatch/githubapp/ratelimit`), so the server hands the sweep its own store.
