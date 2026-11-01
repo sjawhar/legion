@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-625",
+  "completed": "2026-11-01T18:42:00Z",
+  "round": 7,
+  "reviewedCodeHead": "2898fcf0d09658e639ed810439645cd83a5a2888",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "fingerprint": "c72bd58295 5641942670c83dd89ffc703418998dcb613705a1166fa49f1db29c16ad9067bd -> 2898fcf0d0 552ce84721fad51696e056a7c709b831f09364003cab08119555a1acf8992bea: changed, so a new round. What moved: the roomLoad block left this pull request's diff of pending_authors.go and websocket.go (main's #2496 now owns it in roomcursor.go), websocket.go lost +\"slices\"/+\"sync\", roomcursor.go gained two comment hunks, and failRoomLoad gained a comment block. Nothing else in the 93 files moved.",
+  "ciRead": "Required set (rulesets): lint, typecheck, test, pr-title. Run 41328402117 at 2898fcf0: lint, typecheck, test, dispatch, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess, envoy-go-race-api/-docs/-pmdoc success; pr-title success (run 41328402072). envoy-go (job 124914080305) and envoy-go-race (job 124914080116) red on TestMigrationSetTakesNumbersThenTimestamps alone (internal/dispatch/store), which is main's red since 15:45Z (#2387's 0158-0161 after #2411 closed numbering at 0157); ci-ok red with them. Main's fix was not on main@origin (8d555cc2) when read. This change adds no migration. Compare 2898fcf0...c448198d: handoffsOnly true.",
+  "thermonuclear": "Both run once on the merge at 2898fcf0: deep-review APPROVE, code-quality APPROVE, no findings. main's #2496 gate is kept whole (pending_authors.go identical to main; roomcursor.go and service.go differ in comments only); this branch's LoadDoc recover/failRoomLoad path and onLoadDocument's CompareAndDelete are intact; failRoomLoad's new comment on shadows checks out against shadow.go:81-97 and service.go:2653. go build/vet clean; DISPATCH_TEST_DATABASE_URL tests -run 'Load|Panic|Cursor|Shadow|RoomLoad' pass (214 runs).",
+  "notes": [
+    "docs/solutions/architecture-patterns/fail-an-operation-where-it-can-still-be-named-not-where-its-failure-surfaces-pr2519.md:38-58 cites websocket.go line numbers and counts true at c72bd582 only (LoadDoc :90 is :88, failRoomLoad :175-178 is :214-217, 884 lines is 865, ten s.srv.Apply sites with livewrite.go 2 is nine with livewrite.go 1). That file is retro's: retro updates it (cite symbols, not lines) in its own docs/solutions commit.",
+    "The PR body's E2E (implementer) line had no round-9 entry; the reviewer added one quoting implement.json's two proofs at 2898fcf0."
+  ],
+  "keyFindings": []
+}
