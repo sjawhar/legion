@@ -288,7 +288,7 @@ func TestTheRoomBudgetChargesEveryServerWritesStructureAndRefusesNone(t *testing
 	browser := connectBrowser(t, httpServer.URL, room, "alice")
 	t.Cleanup(browser.Close)
 	live := service.srv.GetDoc(room)
-	replica := service.liveReplica(live)
+	replica := service.replicaOf(live)
 	charge := replica.roomCharge()
 	if charge == nil {
 		t.Fatal("the browser's room holds no charge in the room budget")

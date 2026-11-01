@@ -13,7 +13,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"weak"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
@@ -724,10 +723,8 @@ func (s *Service) unstoredRoomUpdates(room string) int {
 	state.mu.Unlock()
 	unstored += int(state.durableAppends.Load())
 	if live := s.srv.GetDoc(room); live != nil {
-		if listed, ok := s.replicas.Load(weak.Make(live)); ok {
-			if replica := listed.(weak.Pointer[renderedReplica]).Value(); replica != nil {
-				unstored += replica.log.Pending()
-			}
+		if replica := s.replicaOf(live); replica != nil {
+			unstored += replica.log.Pending()
 		}
 	}
 	return unstored

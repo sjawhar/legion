@@ -1629,9 +1629,7 @@ func (s *Service) chargeLoadedRoom(room string, live *crdt.Doc, replica *rendere
 	bytes, elements, _ := replica.size()
 	charge := s.budget.load(room, copyHeap(bytes, elements, replica.structs.countedStructs()))
 	charge.deleted.seed(crdt.DeleteSetFromDoc(live))
-	replica.sizeMu.Lock()
-	replica.charge = charge
-	replica.sizeMu.Unlock()
+	replica.charge.Store(charge)
 	return charge
 }
 

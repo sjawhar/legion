@@ -20,7 +20,7 @@ import (
 
 // A room a browser opens over a real socket is measured and charged at its load, and its replica
 // follows the room's update log. The load's rendering is the room's first measurement: the bytes
-// the peer update hook weighs (renderedReplica.size, which the hook reads through liveReplica) and
+// the peer update hook weighs (roomWeighing.size, which the hook reads through roomWeighingOf) and
 // the elements the room budget charges the load by (chargeLoadedRoom) beside the struct total the
 // load counted, at both copies, in place of the socket's reservation. The replica then moves only
 // through the room's commits as the update log hands them over (keepReplica, doc.OpenUpdateLog):
@@ -40,7 +40,7 @@ func TestAFreshlyLoadedRoomIsMeasuredAndChargedWithItsUpdateLog(t *testing.T) {
 	if live == nil {
 		t.Fatal("the room is not resident while its browser is connected")
 	}
-	replica := service.liveReplica(live)
+	replica := service.replicaOf(live)
 	if replica == nil {
 		t.Fatal("the loaded room listed no replica for the peer update hook to read")
 	}
@@ -106,7 +106,7 @@ func TestATransactionsUpdateIsChargedOnceWhenAnotherObserverRendersItFirst(t *te
 	if live == nil {
 		t.Fatal("document room is not resident")
 	}
-	charge := service.liveReplica(live).roomCharge()
+	charge := service.replicaOf(live).roomCharge()
 	if charge == nil {
 		t.Fatal("the room's replica holds no charge in the room budget")
 	}
@@ -174,7 +174,7 @@ func TestARoomsReplicaIsTheCopyItsLoadDecoded(t *testing.T) {
 				t.Fatal(err)
 			}
 			live := roomDocument(t, service, artifactID)
-			replica := service.liveReplica(live)
+			replica := service.replicaOf(live)
 			if replica == nil {
 				t.Fatal("the loaded room lists no replica")
 			}

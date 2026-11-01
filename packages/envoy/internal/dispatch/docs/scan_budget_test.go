@@ -537,7 +537,7 @@ func TestTheRoomScanTotalSurvivesAReload(t *testing.T) {
 			t.Fatalf("load the document's room: %v", err)
 		}
 		room := roomDocument(t, service, artifactID)
-		replica := service.liveReplica(room)
+		replica := service.replicaOf(room)
 		if replica == nil {
 			t.Fatal("the loaded room keeps no replica")
 		}
@@ -611,7 +611,7 @@ func TestAServerWriteIsNeverRefusedByTheRoomsScanTotal(t *testing.T) {
 		t.Fatalf("commit the edit: %v", err)
 	}
 	live := roomDocument(t, service, artifactID)
-	replica := service.liveReplica(live)
+	replica := service.replicaOf(live)
 	if replica == nil {
 		t.Fatal("the room keeps no replica")
 	}

@@ -1412,7 +1412,7 @@ func storedHistoryStructs(t *testing.T, database *store.Store, room string) int6
 // load charged it by.
 func liveStructs(t *testing.T, service *Service, room string) int64 {
 	t.Helper()
-	replica := service.liveReplica(service.srv.GetDoc(room))
+	replica := service.replicaOf(service.srv.GetDoc(room))
 	if replica == nil {
 		t.Fatal("the room lists no replica")
 	}

@@ -298,9 +298,10 @@ type Service struct {
 	// decode of it (*preloadedDocument), for the room load that socket makes next (takePreload),
 	// whose replica that decode's copy becomes.
 	preloads sync.Map
-	// replicas holds, for each resident room document, a weak pointer to the replica its update
-	// observer keeps (weak.Pointer[renderedReplica]), which the document's reads walk (readLive),
-	// keyed by a weak pointer to that document (keepReplica).
+	// replicas holds, for each resident room document, what the room's load listed under it
+	// (*roomListing): the weighing the peer update hook reads (roomWeighing), held strongly, and a
+	// weak pointer to the replica its update observer keeps, which the document's reads walk
+	// (readLive), keyed by a weak pointer to that document (keepReplica).
 	replicas sync.Map
 	// renderPaths counts how the renderings the rooms' update observers and the document writes
 	// need were had (renderPathCounts); every replica counts on it (keepReplica).

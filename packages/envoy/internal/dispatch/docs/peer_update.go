@@ -441,13 +441,9 @@ const peerWriteQueueBytes = 60 << 20
 // update first: it counts each parked struct and parked delete range splitsAStructCanCause times
 // within maxUpdateItems, the cap itself.
 func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() error) error {
-	replica := s.liveReplica(info.Doc)
-	charge := replica.roomCharge()
-	var structs *structTotal
-	var scans *roomScans
-	if replica != nil {
-		structs, scans = replica.structs, replica.scans
-	}
+	weighing := s.roomWeighingOf(info.Doc)
+	charge := weighing.roomCharge()
+	structs, scans := weighing.totals()
 	weighed := peerWeighing{held: info.Doc.StateVector(), known: charge.deletes(), retired: structs.retiredClients(), entries: structs.retiredEntries()}
 	tally, err := walkUpdate(info.Update, fromPeer, &weighed)
 	if s.refusesNextPeerUpdateForTest(info.Room) && err == nil && !weighed.former {
@@ -473,11 +469,7 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 		return refusedWith(documentUpdateRefused(),
 			&updateRefusal{rule: errUpdateNotFromEditor, reason: "a change to the retired clients' list, which only a rebuild writes"})
 	}
-	var bytes int64
-	measured := false
-	if replica != nil {
-		bytes, _, measured = replica.size()
-	}
+	bytes, _, measured := weighing.size()
 	if !measured {
 		bytes = 0
 	}
@@ -625,16 +617,18 @@ func (s *Service) refusedUnderPressure(weighed *peerWeighing, charge *roomCharge
 	return structure > 0 && !s.budget.growWithin(charge, structure, s.bounds().PressureReserve)
 }
 
-// liveReplica is the replica of the room holding live (keepReplica), or nil for a document no
-// room's load listed. It is a load off the listing the room's reads already go through (holdLive),
-// so the peer's read loop takes neither the replica's lock, which every browser in the room waits
-// behind (AGENTS.md:559-562), nor the room's state lock.
-func (s *Service) liveReplica(live *crdt.Doc) *renderedReplica {
+// roomWeighingOf is what the hook reads of the room holding live (keepReplica), or nil for a
+// document no room's load listed. It is a load off the listing the room's reads already go through
+// (holdLive), so the peer's read loop takes neither the replica's lock, which every browser in the
+// room waits behind (AGENTS.md:559-562), nor the room's state lock; and the listing holds the
+// weighing strongly, so the read makes no weak pointer strong, which the collector can block for
+// the rest of a mark phase (roomWeighing).
+func (s *Service) roomWeighingOf(live *crdt.Doc) *roomWeighing {
 	listed, ok := s.replicas.Load(weak.Make(live))
 	if !ok {
 		return nil
 	}
-	return listed.(weak.Pointer[renderedReplica]).Value()
+	return listed.(*roomListing).weighing
 }
 
 // peerWeighing is what one walk of a browser's update finds against held, the room's state vector

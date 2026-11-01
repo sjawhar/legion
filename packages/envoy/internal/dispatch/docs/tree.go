@@ -404,30 +404,15 @@ type renderedReplica struct {
 	// loaded until its first transaction since (keepReplica), or as the fresh base a recover
 	// starts from rendered before any update (start); nil while the document is outside the schema.
 	markdown *string
-	// bytes and elements are that rendering's size, published beside it: bytes for the peer update
-	// hook to load (Service.weighPeerUpdate), elements for the room budget to charge the room by
-	// (roomCharge). The hook runs on the peer's read loop, where taking mu would put every browser
-	// in the room behind its load (AGENTS.md:559-562), so the measurement travels as two atomics
-	// rather than under the lock the rendering itself is kept under. Both are sizeUnmeasured while
-	// the room has no rendering to measure, which is a document outside the schema; elements is
-	// elementsPastCounting for a rendering whose elements goldmark stopped counting. An update's
-	// rendering publishes its bytes at once and its elements once the service's measurer has
-	// counted it (elementMeasurer), at most once each roomCountInterval unless the room's
-	// uncounted part passes earlyCountCharge, so elements can be that interval and one count behind
-	// bytes (size).
-	bytes, elements atomic.Int64
-	// measurer is the service's, which counts this room's renderings, and charge the room's charge
-	// in the room budget, which each count re-bases (storeCounted) and the peer update hook adds
-	// the room's structure to (Service.weighPeerUpdate); nil for a replica no room's load charged
-	// (chargeLoadedRoom), a test's.
+	// measurer is the service's, which counts this room's renderings.
 	measurer *elementMeasurer
-	charge   *roomCharge
-	// structs is the room's struct total, which the peer update hook refuses an update past the
-	// decode cap on, and each of the measurer's counts re-bases (structTotal), and scans its scan
-	// total and the budget of each remote apply's scans (roomScans); both nil for a replica no
-	// room's load made (keepReplica), a test's.
-	structs *structTotal
-	scans   *roomScans
+	// roomWeighing is what the peer update hook reads of the room: its charge in the room budget,
+	// which each count re-bases (storeCounted) and the hook adds the room's structure to
+	// (Service.weighPeerUpdate), its struct and scan totals, and the size of the rendering this
+	// replica last published (publishSize). The replica writes it, through the fields it promotes
+	// here; the hook reads the same record without the replica, which is why it is a record of
+	// its own and not these fields.
+	*roomWeighing
 	// sizeMu orders the measurer's count of a rendering against the publications that follow it
 	// (storeCounted). It is held for a few field writes alone, never across a render or a parse,
 	// so neither the update observer nor the measurer waits on the other's work.
@@ -476,14 +461,96 @@ type renderedReplica struct {
 	paths *renderPathCounts
 }
 
-// roomCharge is the room's charge in the room budget, nil for a replica no room's load charged.
-func (r *renderedReplica) roomCharge() *roomCharge {
-	if r == nil {
+// roomWeighing is what the peer update hook reads of a resident room to weigh a browser's update
+// (weighPeerUpdate): the room's charge in the room budget, its struct and scan totals and the size
+// of the rendering its replica last published. The room's document lists it strongly
+// (roomListing, listResident), so the hook finds it with one map load, and it holds no reference
+// to that document - a charge, a scan total and the sizes hold none, and the struct total holds it
+// weakly - so listing it strongly keeps no evicted room's document alive.
+//
+// It is a record of its own, and not the replica's own fields, because a keystroke must make no
+// weak pointer strong. The collector blocks every weak-to-strong conversion from the moment mark
+// termination begins (runtime/mgc.go:1020, runtime/mheap.go:2406-2420), and a termination that
+// finds more marking to do returns with that block still up, so the conversions it parked wait out
+// the rest of the mark phase: two to four seconds on this pod's two processors at the 3.4 GB heap
+// goal a full room budget leaves. A keystroke that read the replica through the listing's weak
+// pointer waited exactly that: 2.96 s and 3.23 s in one run of cmd/dispatch's
+// TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory, where the same step's other
+// keystrokes were answered in 14 to 55 ms.
+type roomWeighing struct {
+	// structs is the room's struct total, which the hook refuses an update past the decode cap on
+	// and each of the measurer's counts re-bases (structTotal); scans is the room's scan total and
+	// the budget of each remote apply's scans (roomScans). Both are made by the room's load
+	// (keepReplica).
+	structs *structTotal
+	scans   *roomScans
+	// bytes and elements are the size of the replica's latest published rendering, published
+	// beside it: bytes for the peer update hook to load (Service.weighPeerUpdate), elements for
+	// the room budget to charge the room by (roomCharge). The hook runs on the peer's read loop,
+	// where taking the replica's mu would put every browser in the room behind its load
+	// (AGENTS.md:559-562), so the measurement travels as two atomics rather than under the lock
+	// the rendering itself is kept under. Both are sizeUnmeasured while the room has no rendering
+	// to measure, which is a document outside the schema; elements is elementsPastCounting for a
+	// rendering whose elements goldmark stopped counting. An update's rendering publishes its
+	// bytes at once and its elements once the service's measurer has counted it (elementMeasurer),
+	// at most once each roomCountInterval unless the room's uncounted part passes
+	// earlyCountCharge, so elements can be that interval and one count behind bytes (size).
+	bytes, elements atomic.Int64
+	// charge is the room's charge in the room budget, which the room's load stores once it has
+	// made it (chargeLoadedRoom) and nothing replaces; nil until then, and for a room no load
+	// charged, a test's.
+	charge atomic.Pointer[roomCharge]
+}
+
+// roomCharge is the room's charge in the room budget, nil for a document no room's load listed and
+// for a room no load charged.
+func (w *roomWeighing) roomCharge() *roomCharge {
+	if w == nil {
 		return nil
 	}
-	r.sizeMu.Lock()
-	defer r.sizeMu.Unlock()
-	return r.charge
+	return w.charge.Load()
+}
+
+// totals are the room's struct and scan totals, both nil for a document no room's load listed.
+func (w *roomWeighing) totals() (*structTotal, *roomScans) {
+	if w == nil {
+		return nil, nil
+	}
+	return w.structs, w.scans
+}
+
+// size is the room's last published measurement - the bytes of its rendering and the elements that
+// rendering makes - and whether it has one; no measurement at all for a document no room's load
+// listed. It takes no lock, so a caller on the peer's read loop holds up nobody for it.
+//
+// The byte half is never stale: the update observer publishes it with the rendering itself, so it
+// is as recent as the room's last update observer, and it is the half the peer update hook weighs.
+// The element half is the room budget's (roomCharge), and as recent as the measurer's last count
+// of the room (elementMeasurer): after the load's own count, a room's rendering is counted at most
+// once each roomCountInterval - sooner once its uncounted part passes earlyCountCharge - and after
+// its observer has returned, and behind the counts of the rooms queued ahead of it, so the element
+// half can be that interval and one count older than the bytes. A rendering after one the room
+// could not read reads sizeUnmeasured elements until its count lands, which the budget does not
+// re-base on (storeCounted). A caller reading across a publication sees one rendering's bytes
+// beside the elements of the rendering before it too, which is within that same staleness.
+// Neither half makes the document bound a ceiling (peer_update.go:56-58).
+func (w *roomWeighing) size() (bytes, elements int64, measured bool) {
+	if w == nil {
+		return 0, 0, false
+	}
+	bytes, elements = w.bytes.Load(), w.elements.Load()
+	return bytes, elements, bytes != sizeUnmeasured
+}
+
+// roomListing is what a room's document is listed under while it is resident (listResident,
+// keepReplica): the weighing the peer update hook reads, held strongly, and the replica the room's
+// reads walk (readLive), held weakly, so that the replica - a whole copy of the document - is
+// collected with the document and in the same cycle. A read does make that weak pointer strong
+// (replicaOf), and waits where the collector blocks the conversion; it then holds the replica's
+// lock and walks the whole document, which is not a keystroke.
+type roomListing struct {
+	weighing *roomWeighing
+	replica  weak.Pointer[renderedReplica]
 }
 
 // sizeUnmeasured is what bytes and elements hold for a room whose document renders no markdown to
@@ -521,7 +588,7 @@ func (r *renderedReplica) publishSize(markdown *string) {
 	r.published++
 	r.bytes.Store(int64(len(*markdown)))
 	r.uncounted, r.uncountedAt = markdown, r.published
-	content, early := r.charge.contentTaken()
+	content, early := r.roomCharge().contentTaken()
 	r.uncountedContent = content
 	switch {
 	case !r.queued:
@@ -590,26 +657,6 @@ func (r *renderedReplica) publishCounted(markdown *string, elements int64) {
 	}
 	r.bytes.Store(int64(len(*markdown)))
 	r.elements.Store(elements)
-}
-
-// size is the room's last published measurement - the bytes of its rendering and the elements that
-// rendering makes - and whether it has one. It takes no lock, so a caller on the peer's read loop
-// holds up nobody for it.
-//
-// The byte half is never stale: the update observer publishes it with the rendering itself, so it
-// is as recent as the room's last update observer, and it is the half the peer update hook weighs.
-// The element half is the room budget's (roomCharge), and as recent as the measurer's last count
-// of the room (elementMeasurer): after the load's own count, a room's rendering is counted at most
-// once each roomCountInterval - sooner once its uncounted part passes earlyCountCharge - and after
-// its observer has returned, and behind the counts of the rooms queued ahead of it, so the element
-// half can be that interval and one count older than the bytes. A rendering after one the room
-// could not read reads sizeUnmeasured elements until its count lands, which the budget does not
-// re-base on (storeCounted). A caller reading across a publication sees one rendering's bytes
-// beside the elements of the rendering before it too, which is within that same staleness.
-// Neither half makes the document bound a ceiling (peer_update.go:56-58).
-func (r *renderedReplica) size() (bytes, elements int64, measured bool) {
-	bytes, elements = r.bytes.Load(), r.elements.Load()
-	return bytes, elements, bytes != sizeUnmeasured
 }
 
 // replicaEpochs is where every renderedReplica.epoch is drawn from, so no two replicas in the
@@ -1037,9 +1084,10 @@ func (r *renderedReplica) chargeAdded(updates []crdt.LoggedUpdate) {
 
 // keepReplica makes the replica live's update observer keeps, moving through log, live's update
 // log, and lists it for live's reads (readLive) and the peer update hook (weighPeerUpdate) while
-// live is resident (listResident). The listing holds the replica weakly too, and the observer,
-// which live holds, holds the replica, so the replica, a whole copy of live, is collected with
-// live and in the same cycle. A reader holding an evicted instance of the room reaches that
+// live is resident (listResident). The listing holds the replica weakly, and the observer, which
+// live holds, holds the replica, so the replica, a whole copy of live, is collected with live and
+// in the same cycle; what the hook reads it holds strongly (roomWeighing), so no keystroke makes
+// a weak pointer strong. A reader holding an evicted instance of the room reaches that
 // instance's replica or none, never its successor's. The replica takes a fresh epoch
 // (replicaEpochs) and counts its paths on the service's renderPaths. A test's replica that
 // nothing observes takes no log.
@@ -1059,10 +1107,11 @@ func (r *renderedReplica) chargeAdded(updates []crdt.LoggedUpdate) {
 // (newRoomScans), so from here every remote apply on live is bounded, with nothing of the room's
 // scan total used until the load records its re-scan (roomScans.rescanned).
 func (s *Service) keepReplica(live *crdt.Doc, log *crdt.UpdateLog, markdown *string, decoded *crdt.Doc) *renderedReplica {
-	replica := &renderedReplica{log: log, doc: decoded, markdown: markdown, measurer: &s.measurer, structs: newStructTotal(live), scans: newRoomScans(live), paths: &s.renderPaths}
+	weighing := &roomWeighing{structs: newStructTotal(live), scans: newRoomScans(live)}
+	replica := &renderedReplica{log: log, doc: decoded, markdown: markdown, measurer: &s.measurer, roomWeighing: weighing, paths: &s.renderPaths}
 	replica.epoch.Store(replicaEpochs.Add(1))
 	replica.publishLoadedSize(markdown)
-	listResident(&s.replicas, live, weak.Make(replica))
+	listResident(&s.replicas, live, &roomListing{weighing: weighing, replica: weak.Make(replica)})
 	return replica
 }
 
@@ -1120,7 +1169,7 @@ func (s *Service) holdLive(room string, live *crdt.Doc) (doc *crdt.Doc, release 
 // document, the key the replica is listed under.
 func (s *Service) replicaOf(live *crdt.Doc) *renderedReplica {
 	if listed, ok := s.replicas.Load(weak.Make(live)); ok {
-		return listed.(weak.Pointer[renderedReplica]).Value()
+		return listed.(*roomListing).replica.Value()
 	}
 	return nil
 }

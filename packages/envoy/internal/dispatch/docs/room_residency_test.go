@@ -564,7 +564,8 @@ func TestAnEvictedRoomsReplicaGoesWithIt(t *testing.T) {
 }
 
 // listedReplica is the resident room's document and the replica listed for its reads, each held
-// weakly, as the listing holds them, once the replica has checked that it holds a copy.
+// weakly, as the listing holds them (roomListing), once the replica has checked that it holds a
+// copy.
 func listedReplica(t *testing.T, service *Service, artifactID string) (weak.Pointer[crdt.Doc], weak.Pointer[renderedReplica]) {
 	t.Helper()
 	live := service.srv.GetDoc(artifactID)
@@ -573,7 +574,7 @@ func listedReplica(t *testing.T, service *Service, artifactID string) (weak.Poin
 	if !ok {
 		t.Fatal("the written room lists no replica")
 	}
-	replica := listed.(weak.Pointer[renderedReplica])
+	replica := listed.(*roomListing).replica
 	resident := replica.Value()
 	if resident == nil {
 		t.Fatal("the written room's replica went while the room is resident")

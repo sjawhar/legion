@@ -550,7 +550,7 @@ func TestABrowserHoldingTheHistoryARebuildReplacedCannotHandItBack(t *testing.T)
 	if live == nil {
 		t.Fatal("the room closed with the refusal, want it open for the document's other browsers")
 	}
-	replica := service.liveReplica(live)
+	replica := service.replicaOf(live)
 	if replica == nil || len(replica.structs.retiredClients()) == 0 {
 		t.Fatal("the rebuilt room lists no retired clients")
 	}
@@ -827,7 +827,7 @@ func TestAWholeStateHandoffOfADocumentAtTheDecodeCapIsAdmitted(t *testing.T) {
 			reader := connectPeer(t, server.URL, artifactID, "alice")
 			awaitAnswer(t, reader, "the document near the cap")
 			live := service.srv.GetDoc(artifactID)
-			replica := service.liveReplica(live)
+			replica := service.replicaOf(live)
 			if live == nil || replica == nil {
 				t.Fatal("the document's room is not resident with a browser connected")
 			}

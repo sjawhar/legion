@@ -317,7 +317,7 @@ func (r *renderedReplica) storeCounted(bytes, elements int64, publication uint64
 	defer r.sizeMu.Unlock()
 	if publication > r.settled {
 		r.elements.Store(elements)
-		r.charge.measured(copyHeap(bytes, elements, r.structs.countedStructs()), content)
+		r.roomCharge().measured(copyHeap(bytes, elements, r.structs.countedStructs()), content)
 	}
 }
 
