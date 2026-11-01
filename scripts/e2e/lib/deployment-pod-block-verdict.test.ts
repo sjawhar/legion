@@ -215,6 +215,16 @@ describe("deployment-pod-block verdict", () => {
     expect(verdict(p, b).wrong).toEqual([]);
   });
 
+  // An empty service_account names no account either, and jq's `//` keeps an empty string, so the
+  // verdict reads it through the same rule rather than holding the pod to a nameless account.
+  test("a block whose ServiceAccount is empty is kept by a pod on default", () => {
+    const b = block();
+    b.service_account = "";
+    const p = pod();
+    p.spec.serviceAccountName = "default";
+    expect(verdict(p, b).wrong).toEqual([]);
+  });
+
   test("a block naming no ServiceAccount is wrong on a pod of another account", () => {
     const b = block();
     delete b.service_account;

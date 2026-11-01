@@ -407,6 +407,8 @@ pass
 
 begin operator-route
 anthropic_key_args=()
+# shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
+account_placeholder='${POD_SERVICE_ACCOUNT}'
 case "$model_route" in
 gateway)
   # shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
@@ -416,8 +418,6 @@ gateway)
   grep -qFx "    baseUrl: $gateway" "$work/models.yml" || fail "the operator route's models.yml has no baseUrl $placeholder to point at the gateway"
   # shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
   placeholder='${MODEL_TOKEN_AUDIENCE}'
-  # shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
-  account_placeholder='${POD_SERVICE_ACCOUNT}'
   pod=$(<"$operator_route/pod.yml")
   pod=${pod//"$placeholder"/"$gateway_audience"}
   printf '%s\n' "${pod//"$account_placeholder"/"$pod_service_account"}" >"$work/pod.yml"
@@ -428,8 +428,6 @@ gateway)
   ;;
 key-file)
   cp "$operator_route/models-key-file.yml" "$work/models.yml"
-  # shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
-  account_placeholder='${POD_SERVICE_ACCOUNT}'
   pod=$(<"$operator_route/pod-key-file.yml")
   printf '%s\n' "${pod//"$account_placeholder"/"$pod_service_account"}" >"$work/pod.yml"
   grep -qF "service_account: $pod_service_account" "$work/pod.yml" || fail "the operator route's pod-key-file.yml has no ServiceAccount $account_placeholder to fill with the run's"

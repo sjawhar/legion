@@ -1428,10 +1428,8 @@ resources_block() {
 # render_operator_pod writes the run's copy of the operator route's pod.yml, the gateway's audience
 # and LEGION_E2E_POD_SERVICE_ACCOUNT's ServiceAccount each in place of its placeholder.
 render_operator_pod() {
-  # shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
-  local placeholder='${MODEL_TOKEN_AUDIENCE}' pod
-  # shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
-  local account_placeholder='${POD_SERVICE_ACCOUNT}'
+  # shellcheck disable=SC2016  # the operator route's literal placeholders, not expansions
+  local placeholder='${MODEL_TOKEN_AUDIENCE}' account_placeholder='${POD_SERVICE_ACCOUNT}' pod
   pod=$(<"$operator_route/pod.yml")
   pod=${pod//"$placeholder"/"$gateway_audience"}
   printf '%s\n' "${pod//"$account_placeholder"/"$pod_service_account"}" >"$work/pod.yml"
@@ -3539,7 +3537,7 @@ else
   if [ -z "$block_kubeconfig" ]; then
     note "the block sets no KUBECONFIG, so the pod's kubectl is not asked"
   else
-    want="system:serviceaccount:$namespace:$(jq -r '.service_account // "default"' "$pod_block")"
+    want="system:serviceaccount:$namespace:$pod_account"
     whoami=$(pod_exec "$block_pod" architect env KUBECONFIG="$block_kubeconfig" kubectl auth whoami -o jsonpath='{.status.userInfo.username}') ||
       fail "kubectl auth whoami, on the block's KUBECONFIG, failed in pod $block_pod"
     note "in pod $block_pod (architect), kubectl auth whoami on the block's KUBECONFIG: $whoami"

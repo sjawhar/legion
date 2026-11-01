@@ -580,8 +580,7 @@ start_dispatch() {
 # env. The key itself is in none of it: a credential-shaped name in pod.env is refused by the
 # daemon, and provider_keys carries it instead.
 write_pod_fixture() {
-  local source=$operator_route/pod.yml placeholder='${MODEL_TOKEN_AUDIENCE}' pod added
-  local account_placeholder='${POD_SERVICE_ACCOUNT}'
+  local source=$operator_route/pod.yml placeholder='${MODEL_TOKEN_AUDIENCE}' account_placeholder='${POD_SERVICE_ACCOUNT}' pod added
   [ "$model_route" = gateway ] || source=$operator_route/pod-key-file.yml
   pod=$(<"$source")
   if [ "$model_route" = gateway ]; then

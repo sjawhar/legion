@@ -24,14 +24,14 @@
 # or under the image's home (/home/legion), which that container mounts at the same path under
 # /var/run/legion/home and each role's namespaces bind back under the home
 # (internal/runtime/sandbox/names.go containerHomePath). Any other container but the init
-# containers carries every mount at the block's path. A block naming no service_account runs its
-# pods as the namespace's `default` account, which is also what a pod naming none runs as, so the
-# two are compared under that name on both sides. A projected token with no expiration_seconds
-# expires in 3600 s (the API server's default),
-# and a mount with no read_only is read-only (Legion's loader). A Secret or ConfigMap volume is
-# compared by its kind, its object name and, when the block sets one, its default_mode (octal text,
-# such as "0440", against the pod's defaultMode; the API server stores 0644 for a volume that sets
-# none), not its `items`; a token is checked as carried, never as accepted by the service it is for.
+# containers carries every mount at the block's path. A block naming no service_account, or naming
+# it empty, runs its pods as the namespace's `default` account, which is also what a pod naming none
+# runs as, so the two are compared under that name on both sides. A projected token with no
+# expiration_seconds expires in 3600 s (the API server's default), and a mount with no read_only is
+# read-only (Legion's loader). A Secret or ConfigMap volume is compared by its kind, its object name
+# and, when the block sets one, its default_mode (octal text, such as "0440", against the pod's
+# defaultMode; the API server stores 0644 for a volume that sets none), not its `items`; a token is
+# checked as carried, never as accepted by the service it is for.
 ($block[0]) as $b
 | . as $pod
 | ($pod.spec.volumes // [] | map({key: .name, value: .}) | from_entries) as $volumes
@@ -50,6 +50,10 @@
   def pod_source_kind: if .serviceAccountToken then "service_account_token" elif .secret then "secret" elif .configMap then "config_map" else "unknown" end;
   def volume_kind: if .projected then "projected" elif .secret then "secret" elif .config_map then "config_map" elif .persistent_volume_claim then "persistent_volume_claim" elif .nfs then "nfs" else "unknown" end;
   def pod_volume_kind: if .projected then "projected" elif .secret then "secret" elif .configMap then "config_map" elif .persistentVolumeClaim then "persistent_volume_claim" elif .nfs then "nfs" else "unknown" end;
+  # account: a ServiceAccount name as the account the pod runs under: `default` when the block or
+  # the pod names none or names it empty, which is the rule the daemon reads an unset account by
+  # (internal/runtime/sandbox's serviceAccountOr), and `//` alone would keep the empty one.
+  def account: if (. // "") == "" then "default" else . end;
   # mode_bits: a block's default_mode, octal text after a leading 0 or 0o (the loader's
   # readFileMode), as the number the pod's defaultMode holds; a number, which the loader refuses,
   # as itself.
@@ -81,8 +85,8 @@
         (if $got.configMap.name != $want.config_map.name then [{wrong: "\($where) is ConfigMap \($got.configMap.name), not \($want.config_map.name)"}] else [] end)
       end;
   [
-    (if ($b.service_account // "default") != ($pod.spec.serviceAccountName // "default") then
-       {wrong: "the pod runs as ServiceAccount \($pod.spec.serviceAccountName // "default"), not \($b.service_account // "default")"} else empty end),
+    (if ($b.service_account | account) != ($pod.spec.serviceAccountName | account) then
+       {wrong: "the pod runs as ServiceAccount \($pod.spec.serviceAccountName | account), not \($b.service_account | account)"} else empty end),
     (($b.volumes // [])[] as $v
      | ($volumes[$v.name]) as $pv
      | ($v | volume_kind) as $k

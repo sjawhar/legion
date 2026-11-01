@@ -271,12 +271,13 @@ type Observation struct {
 	// Displaced is a Gone or NotRecordedProcess of a process that ended through no fault of its
 	// own. The Sandbox runtime reports it when the daemon itself replaced the process's pod while
 	// the process ran, to launch another role there — a replacement of a live issue or controller
-	// pod on another image, one holding a worker stream, secrets broker enrollment or session
-	// database URL key a pod created now is not handed, or one whose role launcher Secret no longer
-	// binds it. The tmux runtime reports it, under `runtime.tmux.take_over`, for a process another
-	// runtime recorded, which this daemon takes over and cannot see. The process did nothing wrong,
-	// so the supervisor resumes its session at once, charging nothing, rather than count a death. It
-	// is a field rather than a shape of Detail, which is prose for an operator and nothing else.
+	// pod on another image or running as another ServiceAccount, one holding a worker stream,
+	// secrets broker enrollment or session database URL key a pod created now is not handed, or one
+	// whose role launcher Secret no longer binds it. The tmux runtime reports it, under
+	// `runtime.tmux.take_over`, for a process another runtime recorded, which this daemon takes over
+	// and cannot see. The process did nothing wrong, so the supervisor resumes its session at once,
+	// charging nothing, rather than count a death. It is a field rather than a shape of Detail,
+	// which is prose for an operator and nothing else.
 	Displaced bool
 }
 

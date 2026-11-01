@@ -21,6 +21,7 @@
 package sandbox
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -675,10 +676,7 @@ const defaultServiceAccount = "default"
 // name is empty. Both sides of accountDrift read through it, so the one rule that an unset account
 // is `default` lives here alone.
 func serviceAccountOr(name string) string {
-	if name == "" {
-		return defaultServiceAccount
-	}
-	return name
+	return cmp.Or(name, defaultServiceAccount)
 }
 
 // accountDrift is the ServiceAccount p runs as, and whether it is not account, the one this
