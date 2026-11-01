@@ -290,3 +290,18 @@ func TestAWorkflowSuspensionTakesOverTheIdleSuspends(t *testing.T) {
 		t.Fatalf("stored suspended by %q, want daemon", stored.SuspendedBy)
 	}
 }
+
+// A rule resume decided from a claim read a moment earlier is refused once another suspension has
+// taken the claim over: the caller names the source it decided on (Only), and the machine reads
+// the claim under its own lock, so the race between a message's wake and the workflow's park ends
+// with the worker stopped, as the workflow left it.
+func TestARuleResumeForTheIdleSuspendIsRefusedOnceAnotherSuspensionTookTheClaim(t *testing.T) {
+	h := idleHarness(t)
+	h.reach(StateIdle)
+	h.advance(testIdleSuspend)
+	h.wantState(StateSuspended)
+	h.must(RequestSuspend{Claim: h.token, Reason: "its child was parked", By: SuspendedByDaemon})
+	h.must(RequestRuleResume{Claim: h.token, Reason: "a message found no holder on its role topic", Only: SuspendedByIdle})
+	h.wantState(StateSuspended)
+	h.wantCalls("Resume", 0)
+}

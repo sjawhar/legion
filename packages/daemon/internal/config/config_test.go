@@ -185,6 +185,11 @@ func TestLoadRefusesAnIdleSuspendUnderTheWaitingReminder(t *testing.T) {
 		{name: "a reminder the worker would fall back from leaves the default floor",
 			seconds: "899", env: waiting("-1"),
 			want: "worker_idle_suspend_seconds must be more than 900"},
+		{name: "a reminder past what a duration holds refuses every idle suspend",
+			seconds: "2147483", env: waiting("10000000000000"),
+			want: "worker_idle_suspend_seconds must be more than 10000000000"},
+		{name: "a radix form the worker reads", seconds: "1200", env: waiting("0x1D4C00"),
+			want: "worker_idle_suspend_seconds must be more than 1920"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, err := Load(writeConfigFile(t, minimalFile+"worker_idle_suspend_seconds: "+c.seconds+"\n"), c.env)

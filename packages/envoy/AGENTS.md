@@ -2381,8 +2381,8 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   after a miss it waits 100 ms (`publishRetryPause`) and tries again, until a receipt arrives or 4 s from the request's arrival have passed (`publishDeliveryWindow`, which bounds every read, forward and pause of the send, and keeps the answer inside envoy-client's 5 s attempt and the Legion daemon's 10 s client).
   Every attempt forwards the same envelope, one `event_id` under the dedupe key `envoy.role.forward.<key>`, so a holder that took two copies drops the second.
   The route answers the outcome to its sender (the Listener API's `/v1/messages/publish` row) and writes it on its `listener publish` record line.
-  Its 404 for a role with no live holder, unclaimed or lapsed, also publishes a delivery exception with reason `role_unheld` (`roleSend.noHolder`), within the send's window, because a session that can bring the holder back is not the sender:
-  the Legion daemon resumes a phase worker its idle suspend stopped on that report, and a peer agent's publish to that worker's role reaches the daemon no other way.
+  Its 404 for a role with no live holder, unclaimed or lapsed, also publishes a delivery exception with reason `role_unheld` (`roleSend.noHolder`), within the send's window, because a session that can bring the holder back is not the sender.
+  The Legion daemon resumes an idle-suspended phase worker on every such report; `dedupe_key`, `source`, and `source_session` are copied from the client-supplied publish request and cannot attribute it to the daemon, so an outbox-shaped key never suppresses that wake.
   Every other outcome of the route publishes no exception.
 
 - The role lane — the listener's core queue subscriber on the role subjects

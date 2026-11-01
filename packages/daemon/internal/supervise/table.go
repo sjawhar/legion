@@ -193,10 +193,15 @@ type RequestResume struct{ Claim claim.Token }
 // included) and of its own controller. It resumes nothing that is not suspended — a failed claim's
 // launch budget is spent, and only the workflow's retry relaunches it — so it is asked again as
 // often as the rule meets the claim without ever relaunching one that is running. Reason is the
-// rule, for the line it logs.
+// rule, for the line it logs. Only, when it is set, is the suspension source the caller decided
+// on: the resume runs only while the claim is still suspended under it, read under the machine's
+// own lock, so a resume decided from a claim read a moment earlier never undoes a suspension of
+// another source that landed in between — the workflow taking an idle suspend over as it parks a
+// child is what this guards (internal/daemon's wakeIdleSuspendedRole, suspendedAgain).
 type RequestRuleResume struct {
 	Claim  claim.Token
 	Reason string
+	Only   SuspendSource
 }
 
 // RequestStop ends one claim. The tree's root claim is not one it can end: a root ends only with
@@ -1249,7 +1254,13 @@ func resume(m *Machine, ctx context.Context, _ Event) error { return m.revive(ct
 // any other, so a claim the rule resumes that keeps failing fails once the budget is spent, and a
 // failed claim is never resumed by rule.
 func resumeByRule(m *Machine, ctx context.Context, ev Event) error {
-	rule := ev.(RequestRuleResume).Reason
+	request := ev.(RequestRuleResume)
+	rule := request.Reason
+	if request.Only != "" && m.claim.SuspendedBy != request.Only {
+		m.log.Info("supervise: not resumed by rule: another suspension took the claim over since the rule read it",
+			"rule", rule, "only", request.Only, "suspendedBy", m.claim.SuspendedBy)
+		return nil
+	}
 	if !m.claim.RuleMayResume() {
 		m.log.Info("supervise: not resumed by rule: its suspension holds until the operator resumes it", "rule", rule, "suspendedBy", m.claim.SuspendedBy)
 		return nil

@@ -998,9 +998,13 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	// stallLimitVariables), so it is read from the same place here; a worker told nothing runs on
 	// the plugin's own default.
 	if cfg.WorkerIdleSuspend > 0 {
-		if waiting := stallWaiting(env); cfg.WorkerIdleSuspend <= waiting {
-			return Config{}, fmt.Errorf("worker_idle_suspend_seconds must be more than %d: a worker that replied WAITING on an open phase is reminded by its own process after %s (LEGION_STALL_WAITING_MS), and an idle suspend that is not longer than that could take the process holding the reminder first",
-				int(waiting/time.Second), waiting)
+		// Both sides are compared in milliseconds, as the worker holds them: a reminder far past
+		// what a time.Duration can hold is still a number the worker runs on, and converting it
+		// would wrap round to a negative duration that passes every floor.
+		waiting := stallWaitingMs(env)
+		if float64(cfg.WorkerIdleSuspend/time.Millisecond) <= waiting {
+			return Config{}, fmt.Errorf("worker_idle_suspend_seconds must be more than %d: a worker that replied WAITING on an open phase is reminded by its own process after %.0f ms (LEGION_STALL_WAITING_MS), and an idle suspend that is not longer than that could take the process holding the reminder first",
+				int64(waiting)/1000, waiting)
 		}
 	}
 	return cfg, nil
@@ -1010,22 +1014,54 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 // default (packages/pi-shared/src/stall-limits.ts, DEFAULT_STALL_LIMITS.waitingMs).
 const defaultStallWaitingMs = 900_000
 
-// stallWaiting is how long a WAITING reply buys a worker before its own process reminds it again:
-// the daemon's LEGION_STALL_WAITING_MS, which it passes to every worker it starts, else the
-// plugin's default. It reads the variable exactly as the worker does (stall-limits.ts's
-// integerSetting, whose Number() takes a decimal and an exponent form alike, and which falls back
-// to the default on anything that is not an integer of 0 or more), so the floor is judged against
-// the value the worker will really run on and no configuration the worker accepts is refused here.
-func stallWaiting(env func(string) string) time.Duration {
+// stallWaitingMs is how long, in milliseconds, a WAITING reply buys a worker before its own
+// process reminds it again: the daemon's LEGION_STALL_WAITING_MS, which it passes to every worker
+// it starts, else the plugin's default. It reads the variable as the worker reads it
+// (stall-limits.ts's integerSetting over JavaScript's Number(), which takes a decimal, an
+// exponent and the 0x/0o/0b radix forms, and falls back to the default on anything that is not an
+// integer of 0 or more, an infinity included), so the floor is judged against the value the
+// worker will really run on: no configuration the worker accepts is refused here, and none it
+// accepts slips past the floor either.
+func stallWaitingMs(env func(string) string) float64 {
 	raw := strings.TrimSpace(env("LEGION_STALL_WAITING_MS"))
-	ms := float64(defaultStallWaitingMs)
-	if raw != "" {
-		read, err := strconv.ParseFloat(raw, 64)
-		if err == nil && read >= 0 && read == math.Trunc(read) {
-			ms = read
+	if raw == "" {
+		return defaultStallWaitingMs
+	}
+	read, ok := jsNumber(raw)
+	if !ok || read < 0 || math.IsInf(read, 0) || math.IsNaN(read) || read != math.Trunc(read) {
+		return defaultStallWaitingMs
+	}
+	return read
+}
+
+// jsNumber is JavaScript's Number() of a string, for the forms a configuration can hold: the
+// radix prefixes it takes (0x, 0o, 0b, each unsigned), and otherwise the decimal and exponent
+// forms, which Go's own ParseFloat reads the same way. A string Number() makes NaN of is this
+// function's false.
+func jsNumber(raw string) (float64, bool) {
+	if len(raw) > 2 && raw[0] == '0' {
+		base := 0
+		switch raw[1] {
+		case 'x', 'X':
+			base = 16
+		case 'o', 'O':
+			base = 8
+		case 'b', 'B':
+			base = 2
+		}
+		if base != 0 {
+			read, err := strconv.ParseUint(raw[2:], base, 64)
+			if err != nil {
+				return 0, false
+			}
+			return float64(read), true
 		}
 	}
-	return time.Duration(ms) * time.Millisecond
+	read, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, false
+	}
+	return read, true
 }
 
 // resolveControllerLaunch settles `controller`: the operator's launch unless the file names the

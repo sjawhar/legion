@@ -6,7 +6,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/notify"
-	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -78,7 +77,7 @@ func (r *outbox) wakeIdleSuspendedRole(ctx context.Context, token claim.Token, r
 			return
 		}
 		rule := "a message found no holder on its role topic: " + why
-		if err := machine.Handle(ctx, supervise.RequestRuleResume{Claim: token, Reason: rule}); err != nil {
+		if err := machine.Handle(ctx, supervise.RequestRuleResume{Claim: token, Reason: rule, Only: supervise.SuspendedByIdle}); err != nil {
 			r.log.Warn("outbox could not resume the idle-suspended worker a message names",
 				"claim", token, "issue", held.Issue, "why", why, "error", err)
 			return
@@ -119,18 +118,17 @@ func (r *outbox) wakeNoticedRole(ctx context.Context, topic string) {
 // stopped looks once its stopped session's registration has gone. When the idle suspend is what
 // stopped that session, the worker is resumed here, so the sender's next attempt reaches it.
 //
-// The `role_unheld` report of this daemon's own publish (its dedupe key names an outbox row)
-// changes nothing: its executor already had the 404 and decided what it means for the row. The one
-// such publish to a worker's role is a phase-ended message, which finishes undelivered because a
-// message nobody is there to read is worth nothing later (phaseEnded), so resuming the worker for
-// it would relaunch a session to read nothing. A report of any other shape changes nothing either.
+// Every `role_unheld` report reaches this wake. The listener copies its dedupe key, source and
+// source session from the publish request, so none can prove that this daemon published it: a peer
+// can choose the idempotency key `legion-outbox:<id>` and make the same-looking report. This can
+// relaunch an idle-suspended phase worker for the daemon's own phase-ended message, which its
+// executor already finishes undelivered because the message is not useful later. That cost is one
+// resume of a worker the idle suspend took, confined by wakeIdleSuspendedRole's phase-role and
+// suspension checks; suppressing a peer's valid wake instead leaves the worker unreachable. A
+// report of any other shape changes nothing.
 func (r *outbox) wakeExceptionRole(ctx context.Context, exception roleLaneException) error {
 	switch exception.Reason {
-	case "delivery_failed", "no_holder", "receipt_timeout":
-	case "role_unheld":
-		if _, own := record.ParseOutboxKey(exception.DedupeKey); own {
-			return nil
-		}
+	case "delivery_failed", "no_holder", "receipt_timeout", "role_unheld":
 	default:
 		return nil
 	}

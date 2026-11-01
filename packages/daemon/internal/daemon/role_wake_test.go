@@ -100,8 +100,9 @@ func TestAReviewStuckNoticeResumesTheIdleSuspendedReviewer(t *testing.T) {
 // report for a worker the idle suspend holds resumes it, so the sender's next attempt finds its role
 // held. Every other report changes nothing here: a reason the listener does not name, a topic of
 // another project, a role the idle suspend is not for (an architect's, which keeps its own re-hold
-// path), a claim an operator suspended or that failed, and the role_unheld report of this daemon's
-// own publish, whose executor already had the 404 and decided what it means for its row.
+// path), or a claim an operator suspended or that failed. A caller can choose the idempotency key
+// that becomes a report's dedupe key, so a key shaped like this daemon's outbox key is not evidence
+// that the daemon published the message and does not suppress a role_unheld wake.
 func TestARoleLaneExceptionResumesTheIdleSuspendedWorker(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -120,8 +121,8 @@ func TestARoleLaneExceptionResumesTheIdleSuspendedWorker(t *testing.T) {
 		{name: "a peer's publish the listener refused: the role is unclaimed", role: claim.RoleImplementer, state: supervise.StateSuspended, by: supervise.SuspendedByIdle, reason: "role_unheld", resumes: 1},
 		{name: "a peer's publish the listener refused: the holder's registration lapsed", role: claim.RoleReviewer, state: supervise.StateSuspended, by: supervise.SuspendedByIdle, reason: "role_unheld",
 			recipient: "ses_reviewer", resumes: 1},
-		{name: "this daemon's own publish the listener refused", role: claim.RoleTester, state: supervise.StateSuspended, by: supervise.SuspendedByIdle, reason: "role_unheld",
-			key: "legion-outbox:9"},
+		{name: "a peer's publish with an outbox-shaped idempotency key", role: claim.RoleTester, state: supervise.StateSuspended, by: supervise.SuspendedByIdle, reason: "role_unheld",
+			key: "legion-outbox:9", resumes: 1},
 		{name: "a reason the listener does not name", role: claim.RoleReviewer, state: supervise.StateSuspended, by: supervise.SuspendedByIdle, reason: "something_else"},
 		{name: "an operator's suspension", role: claim.RoleReviewer, state: supervise.StateSuspended, by: supervise.SuspendedByOperator, reason: "no_holder"},
 		{name: "an operator's suspension the listener reports unheld", role: claim.RoleReviewer, state: supervise.StateSuspended, by: supervise.SuspendedByOperator, reason: "role_unheld"},
@@ -142,8 +143,9 @@ func TestARoleLaneExceptionResumesTheIdleSuspendedWorker(t *testing.T) {
 				topic = tc.topic
 			}
 			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion", now: time.Now}
-			// A peer agent's publish: no outbox dedupe key, and a summary that is no notice of this
-			// daemon's. A row of this daemon's own outbox publishes under its row's key instead.
+			// A peer publish normally has a generated key, but its caller may choose an idempotency
+			// key that becomes an outbox-shaped dedupe key. The report must never treat that spelling
+			// as authenticated daemon provenance.
 			key := cmp.Or(tc.key, "publish.peer-1")
 			report := laneReport{"evt-peer", tc.reason, topic, "a question about the review", map[string]string{"message": "why did you set this aside?"}, key, tc.recipient}
 
