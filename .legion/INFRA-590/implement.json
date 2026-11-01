@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-11-01T14:54:00Z",
+  "completed": "2026-11-01T19:35:23Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "2175cdbaac717bb8cbc8df7f662829cdeaca455b",
-  "round": "31 (the architect's direction and the reviewer's review 5728665099 after main's #2411, 4644a0727, closed the numbered migration series at 0157): forward merge of main 4644a0727 on the reviewer's handoff b5d9f1ff, no text conflict. Migrations named by UTC timestamp, taken with date -u at the rename, duty_holds first: 0158_duty_holds -> 20261101143201_duty_holds, 0159_outbox_claim -> 20261101143203_outbox_claim (forward and census), with every reference (README, AGENTS.md, changelog fragment, dispatch-outbox.md, batch.go, the outbox_claim SQL comment, the hot-table lesson, the PR body). This PR's numbering lesson removed: #2411 makes its rule wrong, and main's docs/solutions/envoy/two-pull-requests-take-the-same-migration-number.md states the current rule. Per-file own-diff: 15 files differ, all the rename. Release order per #2411's README: this deploys in a release after #2411's. Fingerprint e856da31 -> 0ea88439. Diff-check comment 6559569371. First store run failed seven tests on 'relation \"duty_holds\" already exists' because the shared local dispatch_test database had recorded 0158/0159 from round 30; on a recreated database store passes. Sampled memory peak 3.22 GiB of 19, 469 samples; leftover check listed nothing.",
+  "head": "7892827c749322488ea2478e4d6ef43ab808d9d0",
+  "round": "32 (review round 22, changes requested for a forward merge; head conflicting after main took #2446, #2387, #2496, #2198). Three merges in one push: main 7b4bf9a1 (thirteen conflicts, both sides kept: #2446's role lane, relay, handshake-EOF rule and consumer paths, with this PR's MsgId threaded through RequestCoreTo/StartRequestCoreTo/StartRequestStoredTo/PendingForward and forwardAndWait; #2446's firstHolder change applied to the moved resolver as roles.ResolveHolderFrom, main's readRoleClaim/roleClaimResolver deleted so one resolver stands; role forward MsgId = dedupe key when it names its event, else event_id, so both sides' stored-copy tests pass), main c77d054d2 (#2394, README doc conflict), main 0642a37ab (#2633, the numbered series closes at 0161). 92 connections unchanged. Per-file own-diff: 19 files differ, all resolutions or adaptations to main's seams; no assertion changed. Fingerprint 0ea88439 -> 34414a1f. Diff-check comment 6562838986. A deep-worker wrote the first merge's resolution; I reverted its out-of-scope raise of migrationid's closing (main's #2633 made it), read every resolution, and ran every suite below myself. Sampled memory peak 3.73 GiB of 19, 1873 samples; leftover check (sampler, natsd, envoy-dispatch, socat, bridge, omp) listed nothing.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -294,6 +294,22 @@
       "observed": "store ok 261.8 s with TestMigrationSetTakesNumbersThenTimestamps, TestEveryMigrationFileIsEmbedded and TestMigrateAppliesAMigrationThatArrivedBelowOneAlreadyApplied passing; migrationid, pgmigrate, pgmigratetest and duty ok; outbox ok 286.8 s; GitHub MERGEABLE at 2175cdba.",
       "headSha": "2175cdbaac717bb8cbc8df7f662829cdeaca455b",
       "negativeControl": "main's migrationid.Check refuses a set holding a number above 0157, so the pre-merge names 0158_duty_holds/0159_outbox_claim would fail TestMigrationSetTakesNumbersThenTimestamps on the merged set (packages/envoy/cmd/dispatch/README.md 'Database migrations')."
+    },
+    {
+      "criterion": "After main's #2446/#2387, every Envoy event still reaches a real Oh My Pi and a real Claude Code session exactly once and an issue's events arrive in order, with Dispatch's outbox (this PR) publishing them, through session, listener and Dispatch restarts.",
+      "surface": "scripts/e2e/envoy-session-delivery.sh in the issue pod: natsd, two Envoy listeners, envoy-dispatch built from the checkout on a loopback Postgres 17, a real Oh My Pi session and a real Claude Code session under legion claude-bridge",
+      "command": "LEGION_TEST_PG_DSN=<superuser Postgres 17 on 127.0.0.1> SESSION_DELIVERY_EVIDENCE_DIR=$TMPDIR/infra590/e2e/run2 bash scripts/e2e/envoy-session-delivery.sh",
+      "observed": "exit 0, 'ENVOY SESSION DELIVERY: PASS (every event once, the issue in order)'; windows a (sessions SIGKILLed and resumed), b (session NATS cut), c (listener shared killed), d (listener dispatch killed), e (Dispatch killed after its writes), f (control): every marker counted 1 where meant, 0 cells marked '!', the 12 issue comments in stream order in both transcripts.",
+      "headSha": "7892827c749322488ea2478e4d6ef43ab808d9d0",
+      "negativeControl": "The script's documented negative control, --build-from c3d09eec --expect-lost agent,issue,role (scripts/e2e/README.md), judges a pre-#2446 build that loses events under disruption a; not re-run this round."
+    },
+    {
+      "criterion": "The merged bus, outbox, listener and two-process server keep this PR's behaviour beside #2446's and #2387's, with no data race.",
+      "surface": "internal/bus and internal/dispatch/outbox under the race detector, cmd/listener, internal/dispatch/store, duty, roles, and cmd/dispatch -tags multiprocess on in-process NATS and a superuser Postgres 17",
+      "command": "cd packages/envoy && export GOMAXPROCS=4 GOMEMLIMIT=12GiB DISPATCH_TEST_DATABASE_URL=<superuser Postgres 17>; CGO_ENABLED=1 go test -race -p 1 -count=1 -timeout 45m ./internal/bus/ && CGO_ENABLED=1 go test -race -p 1 -parallel 4 -count=1 -timeout 45m ./internal/dispatch/outbox/ && go test -p 1 -count=1 -timeout 30m ./cmd/listener/ && go test -p 1 -count=1 ./internal/dispatch/store/ ./internal/dispatch/duty/ ./internal/roles/ ./migrationid/ && go test -p 1 -parallel 4 -count=1 -timeout 30m -tags multiprocess ./cmd/dispatch/",
+      "observed": "bus -race ok 398.2 s, outbox -race ok 298.0 s, 0 DATA RACE; cmd/listener ok 700.4 s; store ok after #2633 (before it, only main's TestMigrationSetTakesNumbersThenTimestamps on #2387's 0158-0161 failed); duty, roles, migrationid ok; multiprocess ok 1430.7 s; GitHub MERGEABLE at 7892827c.",
+      "headSha": "7892827c749322488ea2478e4d6ef43ab808d9d0",
+      "negativeControl": "Before the merge, git merge-tree of 5f08c915 with main reported 'CONFLICT (content)' in thirteen files including internal/bus/nats.go and cmd/listener/role_holder.go, and GitHub showed the head CONFLICTING."
     }
   ],
   "filesChanged": [
@@ -345,5 +361,5 @@
   "discoveredComplexity": [
     "Ordering per (owner, destination) costs one NATS round trip per event per destination of one owner: with NATS behind 150 ms, a burst of 100 events on one issue drains in 16 s (THROUGHPUT.md)."
   ],
-  "previousHandoff": "4953e1bbbd54cd11b6c342bbeddba25acaf1a740"
+  "previousHandoff": "a22b45c4bacfdb2a6a2a7125649c7fe3faab20e9"
 }
