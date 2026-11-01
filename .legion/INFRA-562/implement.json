@@ -1,0 +1,329 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-562",
+  "completed": "2026-11-01T00:21:22Z",
+  "proof": [
+    {
+      "criterion": "Items 1 and 2: a message or mention whose request is cancelled after commit reaches its recipient without a retry; pending attempts a killed process left are sent by the other process under their own key",
+      "surface": "Dispatch HTTP API (POST /api/v1/agents/{session}/messages, POST /api/v1/issues/{key}/comments with a mention, POST /api/v1/broadcasts) on two real envoy-dispatch processes against one Postgres 17 and one NATS, with a fake Envoy listener",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestADeliveryAKilledProcess|TestASendWhoseRequest' ./cmd/dispatch",
+      "observed": "Whole two-process suite at a8c1b638444a (main 8a72cf79 #2422 merged in, migrations 0150-0153): `ok github.com/sjawhar/envoy/cmd/dispatch 1217.289s`, 136 top-level PASS, 0 FAIL, 0 SKIP; the kill rows TestADeliveryAKilledProcessLeftPendingIsSentByTheOther (145.76s) and TestASendDuringAListenerTakeOverReachesItsSession (118.00s) pass at main's one-minute delivery sweep with no interval override.",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "The same rows at 2c76dfcfbb36 (tests only, on main's code): --- FAIL both rows; 'the direct message reads [1:pending] 30s after the row began waiting', 'the message stored before the kill reads [] 30s after', 'the mention reads [1:pending] 15s after'"
+    },
+    {
+      "criterion": "Item 8: a message or mention sent while the listener is being replaced (connection refused, 503, starting gate's JSON 503 on the send, no live session yet) reaches its session within 10 s on its original attempt; a session the listener never knows still reads failed: no live session; a process killed during the wait has its attempt sent by the other",
+      "surface": "Dispatch HTTP API on two envoy-dispatch processes against a fake listener that goes away and comes back",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=3 -timeout 30m -v -run 'TestASendDuringAListenerTakeOver' ./cmd/dispatch",
+      "observed": "--- PASS: TestASendDuringAListenerTakeOverReachesItsSession three times out of three (sent_during_the_take-over, sent_to_a_session_the_listener_never_knows, killed_during_the_wait all PASS); both keys met the 503 'service starting' gate at least once",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "At 88bf24bf68b7 (tests only, before the retry): --- FAIL sent_during_the_take-over (attempts read [1:failed]) and killed_during_the_wait; at the client before the JSON-503 fix: TestRoleAndSendReportAStartingListenerAsUnavailable FAIL 'err = service starting, want ErrUnavailable true'"
+    },
+    {
+      "criterion": "Item 3: a webhook redelivery whose process died between its claim and its request is requested again",
+      "surface": "envoy-dispatch redeliver-webhooks --since 1h, two processes against one NATS, one Postgres and the GitHub webhook fake behind a proxy that holds the POST",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestAWebhookRedelivery' ./cmd/dispatch",
+      "observed": "--- PASS: TestAWebhookRedeliveryWhoseProcessDiedAfterItsClaimIsRequestedAgain (4.86s): GitHub got the delivery's redelivery request exactly once from the second process, summary redelivered=1",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "On the unfixed sweep: --- FAIL 'GitHub got redelivery requests [], want [<id>] once' (the second sweep read the dead claim as Pending)"
+    },
+    {
+      "criterion": "Item 4: two processes syncing one project's architecture never write the older head over the newer",
+      "surface": "POST /api/v1/projects/{key}/architecture-sources/{owner}/{repo}/sync on two envoy-dispatch processes",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestTwoProcessesSyncing' ./cmd/dispatch",
+      "observed": "--- PASS: TestTwoProcessesSyncingOneProjectNeverWriteTheOlderCommit (7.83s): last_commit = Y, components [queue store], architecture.synced events exactly [Y]",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "On the unfixed importer: --- FAIL 'last_commit = 1111\u2026, want 2222\u2026', components [api], synced events [2222\u2026 1111\u2026]"
+    },
+    {
+      "criterion": "Item 5: an issue's route status agrees across processes and a filtered page served by either process is cut from one answer",
+      "surface": "GET /api/v1/issues/{key} and GET /api/v1/issues?route_status= on two envoy-dispatch processes",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestBothProcessesJudge' ./cmd/dispatch",
+      "observed": "--- PASS: TestBothProcessesJudgeARouteAgainstOneRoster (16.25s), an_issue's_route and a_filtered_page PASS: B and A read the same live with one sessions call; pages 1 (A) and 2 (B) hold exactly the first six, total 6 on both",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "On the unfixed roster: --- FAIL 'B reads no_holder null after the listener stopped listing the holder, want the stored live', 'page 2 on B holds [-8 -10 -12]'"
+    },
+    {
+      "criterion": "Item 6: a GitHub rate limit one process met stops the other from calling GitHub; claim and answer times come from the database; a configuration warning is logged once across processes",
+      "surface": "GET /api/github/rest/\u2026, POST /api/v1/issues/{key}/claim, the ask answer route and the delivery timeline API on two envoy-dispatch processes",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestARateLimitOneProcess|TestClaimAndAnswerTimes|TestAConfigurationWarning' ./cmd/dispatch",
+      "observed": "--- PASS: TestARateLimitOneProcessMetStopsTheOtherFromCallingGitHub (7.90s): B answers 503 GITHUB_RATE_LIMITED and GitHub saw no request under the installation token after A's; --- PASS: TestClaimAndAnswerTimesComeFromTheDatabaseOnEitherProcess (7.77s); --- PASS: TestAConfigurationWarningIsLoggedOnceAcrossTheProcesses (8.32s)",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "On the unfixed code: rate-limit row FAIL 'B's read inside the limit: status 200, want 503 GITHUB_RATE_LIMITED'; clock row FAIL (Go-clock times differ from the transaction's now()); warning row FAIL '1 on A, 1 on B, want one between them'"
+    },
+    {
+      "criterion": "Item 7: every test hook acts on every server process; a dead process does not hold a hook call",
+      "surface": "POST /api/v1/events/_test/disconnect, /api/v1/delivery/_test/disconnect, /api/v1/artifacts/_test/quiesce, /api/v1/agents/{session}/stream/_test/publish on two envoy-dispatch processes, plus the browser suite on one process (chromium)",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=2 -timeout 30m -v -run 'TestEveryTestHookActsOnBothProcesses' ./cmd/dispatch; cd packages/dispatch && bun run e2e --project chromium live.e2e.ts:339 agents.e2e.ts:460 delivery-live.e2e.ts:332 agent-view.e2e.ts:371 agent-view.e2e.ts:744 agent-view.e2e.ts:970",
+      "observed": "--- PASS twice (8.53s, 7.69s); the hook on A answered ~110 ms after B was SIGKILLed; e2e: 6 passed (31.9s), agent-view.e2e.ts:970 publishing a 12 KB replay split across notifications",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "On the unfixed hooks: --- FAIL 'the event stream B held after the disconnect hook was called on A was still open 10s later'"
+    },
+    {
+      "criterion": "Round 2 (tester's failures): a comment during a take-over reaches the route holder once; a comment mentioning several ended sessions answers within one take-over window; a listener refusing the token settles at once; one caller's cancellation does not fail another's repository token; a settings re-save during two syncs never leaves the earlier head; a held rate limit emits one sync_failed; the branch merges with main and boots",
+      "surface": "Dispatch HTTP API (POST /api/v1/issues/{key}/comments, message sends) and the architecture importer on a real Postgres 17, plus the merged tree's two-process suite",
+      "command": "cd packages/envoy && go test -count=1 -v -run 'TestACommentDuringAListenerTakeOverReachesTheRouteHolderOnce|TestACommentMentioningSeveralEndedSessionsAnswersWithinOneTakeOverWindow|TestAListenerRefusingTheTokenSettlesTheSendAtOnce' ./internal/dispatch/api/ && go test -count=1 -v -run TestOneCallersCancellationDoesNotFailAnotherCallersRepositoryToken ./internal/dispatch/githubapp/ && go test -count=1 -v -run 'TestASettingsReSaveDuringTwoSyncsNeverLeavesTheEarlierHead|TestAHeldGitHubRateLimitEmitsOneSyncFailedEvent' ./internal/dispatch/architecture/",
+      "observed": "all six tester tests PASS unmodified (diff against 84e50bd1 empty); PR reports MERGEABLE after the forward merge 125a3bfb; migrations 0130-0133 above main's 0129; leasePoolSize 11; full ./internal/dispatch/... ./cmd/dispatch/... green except the untouched files (no rootless Docker) and pmdoc (timing) packages",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "The same six tests at the tester's commit 84e50bd1 (before the fixes): FAIL 'session s1 received the comment 2 times, want once', 'answered after 23.6s, want within 14s', 'asked for the registry 9 times over 11.8s', 'context canceled', 'the row records commit 1111\u2026, want 2222\u2026', '2 architecture.sync_failed events, want 1'"
+    },
+    {
+      "criterion": "Review round 1: a resumed or retried mention of a routed comment reaches the route holder once; a same-mode Retry of a stranded message sends its recorded urgency; a failed route_roster read on a route_status filter is a database failure, not ENVOY_UNAVAILABLE",
+      "surface": "Dispatch HTTP API (POST /api/v1/issues/{key}/comments, POST /api/v1/comments/{id}/deliveries, POST /api/v1/messages/{id}/deliveries, GET /api/v1/issues?route_status=) and the delivery-resume loop on a real Postgres 17",
+      "command": "cd packages/envoy && go test -count=1 -v -run 'TestAResumedMentionOfARoutedCommentReachesTheRouteHolderOnce|TestARetryCarriesTheUrgencyOfTheAttemptItResumesAndNoneOnANewAttempt|TestARouteStatusFilterAnswersAFailedRosterReadAsTheDatabases|TestAHookNotificationNamingMorePartsThanAnyCallIsDropped' ./internal/dispatch/api/",
+      "observed": "all PASS at 58fd08bf (the resume loop and a person's Retry each leave the route holder with one copy and the attempt [1:failed]; the resumed same-mode Retry sends urgency high, a new attempt none; the filter answers 500 INTERNAL); full ./internal/dispatch/... ./cmd/dispatch/... green except the untouched files (no rootless Docker) and pmdoc (timing) packages",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "Before each fix: 'session s1 received the comment 2 times, want once: 1 mention steer(s) and 1 route fan-out(s)' (at 4d537075, both the resume loop and the Retry case); the same-mode Retry sent urgency \"\"; the filter answered 503 ENVOY_UNAVAILABLE (logs red-resumed-mention.log, red-retry-urgency.log)"
+    },
+    {
+      "criterion": "Review round 2: the api package's existing tests no longer sleep the 12 s take-over window, while every deployment keeps 12 s",
+      "surface": "the api package's test rig (NewDeps via newTestServer) and a deployment's construction (routes.BuildAppContext, cmd/dispatch), which never set Deps.ListenerTakeoverWindow",
+      "command": "cd packages/envoy && go test -count=1 -v -run '<the sixteen tests the reviewer measured>' ./internal/dispatch/api/ && go test -count=1 -timeout 40m ./internal/dispatch/api/ && go test -tags multiprocess -count=1 -v -run 'TestASendDuringAListenerTakeOver' ./cmd/dispatch",
+      "observed": "sixteen tests 13.08 s total (215.68 s before); whole package ok 882.8 s in the pod (1166-1257 s before); the multiprocess take-over row still waits the real window (subtests 15.6 s, 20.0 s, 10.1 s) and passes",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "The same sixteen tests before the change: 215.68 s (e.g. TestTargetedMessagePrefixesUnavailableListenerErrors 34.3 s); CI envoy-go at 125a3bfb: panic: test timed out after 10m0s in internal/dispatch/api"
+    },
+    {
+      "criterion": "Review round 3: the branch merges with main, its changelog entries are fragments, and the api package's new tests add less wall time",
+      "surface": "the merged tree's api package and two-process suite on a real Postgres 17; packages/envoy/.changes/unreleased",
+      "command": "cd packages/envoy && go test -count=1 -timeout 50m ./internal/dispatch/api/ && go test -count=1 -json -run '<the PR's 24 new api tests>' ./internal/dispatch/api/",
+      "observed": "api package ok 1172.4 s in the pod (1635.8 s at the previous head as the reviewer timed it, before main's 582cb2a2); the 24 new tests 33.6 s (46.9 s before); PR MERGEABLE after 3da50c25; CHANGELOG.md equals main's and ten pr2387 fragments carry the entries with no Dispatch key",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "Before this round: TestATestHookNamesTheProcessThatNeverAcknowledged 10.3 s and TestASenderWaitingOutAListenerTakeOverRenewsItsClaimBeforeEachTry 8.3 s; CI envoy-go at 14d17e59: panic: test timed out after 10m0s in internal/dispatch/api"
+    },
+    {
+      "criterion": "Tester round 4: the head merges with main (#2225's claimant delivery meeting the take-over retry)",
+      "surface": "the merged tree's api and outbox packages and the two-process suite on a real Postgres 17",
+      "command": "cd packages/envoy && go test -count=1 -timeout 50m ./internal/dispatch/api/ ./internal/dispatch/outbox/ && go test -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch",
+      "observed": "api ok 1242.8 s, outbox ok 135.2 s, two-process suite 105/0/0 at 66087e9b; the only conflict was the comment above claimLapsed; main's inbox_queries.go roster read uses routeRosterOrUnknown; #2225's ask-reach tests pass",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "At 0a932dff the tester's trial merge reported a 2-sided conflict in api/envoy_resolve.go, and main's loadAskReaches did not compile against this branch's readRouteRoster (assignment mismatch) until it called routeRosterOrUnknown"
+    },
+    {
+      "criterion": "Tester round 5: the head merges with main (#2233's lease, #2429's agents-list roster, #2390's server processes and redelivery changes)",
+      "surface": "the merged tree's api, redeliver, githubapp, architecture packages, the two-process suite and infra/gcp's Pulumi mock tests",
+      "command": "cd packages/envoy && go test -count=1 ./internal/dispatch/api/ ./internal/dispatch/redeliver/ ./internal/dispatch/githubapp/... ./internal/dispatch/architecture/ && go test -tags multiprocess -count=1 -v ./cmd/dispatch && (cd infra && go test -count=1 ./gcp/...)",
+      "observed": "api ok 1335.4 s, redeliver ok 35.6 s, githubapp ok 20.2 s, architecture ok 43.2 s, two-process 120/0/0, infra/gcp ok 117.4 s (TestDispatchConnectionsPerPodIsTheServers: 87 = store.ConnectionsPerProcess); PR MERGEABLE against main 80cc97a6",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "At 6ffefde5 GitHub reported CONFLICTING; main's dispatchConnectionsPerPod 83 against its own ConnectionsPerProcess 84 failed TestDispatchConnectionsPerPodIsTheServers until the merge set it to the merged sum"
+    },
+    {
+      "criterion": "Conflict return at the approved head 234eef90: the head merges with main",
+      "surface": "the merged tree's api package (ask snooze, comments, mentions, take-over), store and cmd/dispatch packages, the two-process suite",
+      "command": "cd packages/envoy && go test -count=1 -run 'Snooze|Ask|Comment|Mention|TakeOver|Takeover|Listener|Route|DatabaseClock|TakesItsTime|Reply|Replies|UserStateEventSaysWhichFieldsMoved|EventStreamSaysWhenItsReplayCoversTheGap' ./internal/dispatch/api/ && go test -tags multiprocess -count=1 -v ./cmd/dispatch",
+      "observed": "api subset ok 307.8 s including main's e82b013b tests and this branch's snooze and comment tests; two-process 120/0/0; GitHub MERGEABLE after f43f33d1",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "At 234eef90 GitHub reported CONFLICTING (DIRTY): five 2-sided conflicts against main's e82b013b in ask_snooze.go, comment_create.go and three docs"
+    },
+    {
+      "criterion": "Merge with #2366: a mention sent during a listener take-over reaches a session the outbox also reaches as claimant, ask follower or primary-document author once",
+      "surface": "Dispatch HTTP API POST /api/v1/issues/{key}/comments on a real Postgres 17 with the outbox's fan-out counted, plus the merged tree's two-process suite",
+      "command": "cd packages/envoy && go test -count=1 -v -run 'TestACommentDuringAListenerTakeOverReachesTheClaimantOnce|TestAnAskReplyDuringAListenerTakeOverReachesTheFollowerOnce|TestACommentDuringAListenerTakeOverReachesThePrimaryDocumentAuthorOnce' ./internal/dispatch/api/",
+      "observed": "all three PASS at c63149d0; api comment/mention/take-over subset ok 183.7 s; outbox ok 140.7 s; GitHub MERGEABLE",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "On the merged code before the wait predicate covered #2366's routes: each failed 'session s1 received the comment 2 times, want once' (1 claimant / follower / primary document author fan-out plus 1 mention steer); log red-2366-routes.log"
+    },
+    {
+      "criterion": "Review round 5: no migration version is taken twice after the merge with main's #2323",
+      "surface": "the store's migration guard and the merged tree's two-process suite on a real Postgres 17",
+      "command": "cd packages/envoy && go test -count=1 -v -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' ./internal/dispatch/store/ && go test -count=1 ./internal/dispatch/store/... ./internal/pgmigrate/...",
+      "observed": "both guard tests PASS; store ok 211.6 s; migrations run 0001..0140 with main's 0136_dashboard_assets and this branch's 0137-0140",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "At 6912fbfb merged with main 8b6ea377, 0136_dashboard_assets and 0136_message_delivery_urgency shared version 136, which pgmigrate.Load refuses (internal/pgmigrate/set.go: 'migrations \u2026 share version \u2026')"
+    },
+    {
+      "criterion": "This round (behaviour beyond conflict resolution, by the architect's ruling): item 2's stranded attempts are resent by main's delivery sweep at production's interval, with the row's urgency and a decided comment's kept resolution; this PR's own resume loop and lease are gone",
+      "surface": "two real envoy-dispatch processes on one Postgres 17 and one NATS (kill rows), and the api package's sweep and sender tests",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -v -run 'TestADeliveryAKilledProcess|TestASendDuringAListenerTakeOverReachesItsSession/killed_during_the_wait' ./cmd/dispatch && go test -count=1 -v -run 'TestTheDeliverySweepResumesAnAttemptWithTheUrgencyItRecorded|TestAResumedMentionOfARoutedCommentReachesTheRouteHolderOnce' ./internal/dispatch/api/",
+      "observed": "all PASS at c2378eb6; each stranded attempt reads 1:sent with one send per key; the sweep sends urgency high; the routed comment's sweep-resumed attempt settles failed with its pre-commit resolution and the route holder hears the comment once",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "With resumeOwedDeliveries returning before any read: the kill rows read [1:pending] after 2m30s, the urgency test's sweep sent nil, the routed-comment sweep case reads [1:pending] (red-sweep-off.log)"
+    },
+    {
+      "criterion": "Review round 7: the merged tree takes no migration version twice and boots; text fixes only, no behaviour change",
+      "surface": "the store's migration guard, the api package, and the merged tree's two-process suite on a real Postgres 17",
+      "command": "cd packages/envoy && go test -count=1 -v -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' ./internal/dispatch/store/ && go test -tags multiprocess -count=1 -v ./cmd/dispatch",
+      "observed": "both guard tests PASS with migrations 0001..0148; two-process 133/0/0; api sweep/delivery/take-over/roster/hook subset ok 178.1 s; store, pgmigrate, cmd/dispatch, routes, infra/gcp ok; GitHub MERGEABLE",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "At 7d1b486d merged with main, 0142_message_delivery_urgency shared version 142 with main's 0142_item_blocks, which pgmigrate.Load refuses"
+    },
+    {
+      "criterion": "Review round 8: no migration version is taken twice after main's 0145-0147; no behaviour change",
+      "surface": "the store's migration guard and the merged tree's two-process suite on a real Postgres 17",
+      "command": "cd packages/envoy && go test -count=1 -v -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' ./internal/dispatch/store/ && go test -tags multiprocess -count=1 -v ./cmd/dispatch",
+      "observed": "both guard tests PASS with migrations 0001..0151; store and pgmigrate ok; two-process 133/0/0. main's sessionanswers plan test fails in this pod on main alone too (Postgres 17 here, 18 in CI), so it is not this change's",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "Merged at 33b672ac, this branch's 0145-0147 shared versions with main's 0145_events_person_words, 0146_comment_deliveries_session and 0147_message_deliveries_session_created, which pgmigrate.Load refuses"
+    },
+    {
+      "criterion": "Review round 9: the head merges with main (#2478's redelivery schedule and #2508) and CI runs on it; no behaviour change",
+      "surface": "the merged tree's redeliver, githubapp, githubapi and cmd/dispatch packages, the migration guard and the two-process suite on a real Postgres 17",
+      "command": "cd packages/envoy && go test -count=1 ./internal/dispatch/redeliver/... ./internal/dispatch/githubapp/... ./internal/dispatch/githubapi/... ./cmd/dispatch/ && go test -tags multiprocess -count=1 -v ./cmd/dispatch",
+      "observed": "redeliver ok 27.6 s, githubapp ok, githubapi ok, cmd/dispatch ok; TestAWebhookRedeliveryWhoseProcessDiedAfterItsClaimIsRequestedAgain and TestARateLimitOneProcessMetStopsTheOtherFromCallingGitHub PASS; two-process 134/0/0; migration guard PASS (0001..0151)",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "At f3410552 GitHub reported CONFLICTING against main 202d0168 (#2508, #2478 in redeliver/sweep.go, sweep_test.go and the dispatch docs), so no pull_request workflow could run"
+    },
+    {
+      "criterion": "Review round 10: the required test job is green; main's daemon intake test runs redeliver-webhooks with the DATABASE_URL this PR requires",
+      "surface": "packages/daemon/internal/intake's end-to-end redelivery test: real envoy-dispatch and listener binaries, Postgres and JetStream NATS, the daemon's intake",
+      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=... LEGION_TEST_NATS_URL=... LEGION_TEST_NATS_MONITOR_URL=... go test -count=1 -v -run TestADeliveryNATSRefusedIsRedeliveredByTheSweepAndApplied ./internal/intake/",
+      "observed": "PASS (7.3 s): redeliver-webhooks exited 0, asked GitHub once, the daemon applied the event once; the rest of internal/intake ok 55.7 s (one Docker-only test skipped in this pod)",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "CI run 41037662914 at d77a4ae0: 'envoy-dispatch redeliver-webhooks --since 1h: exit status 2 / DATABASE_URL is required'"
+    },
+    {
+      "criterion": "After review round 11's approval: the head merges with main (#2483 took 0148) and no migration version is taken twice; no behaviour change",
+      "surface": "the store's migration guard, the daemon's intake redelivery test and the two-process suite on a real Postgres 17 and JetStream NATS",
+      "command": "cd packages/envoy && go test -count=1 -v -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' ./internal/dispatch/store/ && (cd ../daemon && go test -count=1 -run TestADeliveryNATSRefusedIsRedeliveredByTheSweepAndApplied ./internal/intake/) && go test -tags multiprocess -count=1 -v ./cmd/dispatch",
+      "observed": "both guard tests PASS with migrations 0001..0152; TestADeliveryNATSRefusedIsRedeliveredByTheSweepAndApplied PASS and internal/intake ok 58.4 s (one Docker-only test skipped in this pod); two-process 134/0/0",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "Merged at 8e994867 with main a4af0341, this branch's 0148_message_delivery_urgency shared version 148 with main's 0148_asks_anchor_artifact_id, which pgmigrate.Load refuses; GitHub reported CONFLICTING in cmd/dispatch/README.md"
+    },
+    {
+      "criterion": "Tester round 16: ci-filters holds - every CI job that reads the new githubapp/ratelimit package runs on a change to it",
+      "surface": "the repository's CI filter check (.github/scripts/check-ci-filters.sh, ci.yaml's ci-filters job)",
+      "command": "uv run --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh",
+      "observed": "the five problems naming packages/envoy/internal/dispatch/githubapp/ratelimit/ratelimit.go (test, docs, dispatch, dispatch-browser-multiprocess, listener-server-change) are gone, and docs-pages.yaml's on.push.paths equals the docs filter (166 patterns). One problem remains locally, listener-server-change reading api/testdata/decision-block-inserts.json: main's own at this branch's base a4af0341, which main fixed afterwards (ci.yaml on main lists api/testdata/*), so CI's merge ref does not report it (CI run 41072982859 reported only the five)",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "At 9867c75e (before the fix) the same check reported 6 problems, five of them this package's; CI run 41072982859's ci-filters job failed on those five"
+    },
+    {
+      "criterion": "Conflict return after retro: the head merges with main's #2392 (no database-wide event lock, migration 0149_event_horizon), keeping every item of this PR, and no migration version is taken twice",
+      "surface": "two real envoy-dispatch processes on one rootless Postgres 17 + pgvector and one NATS; the api, store, duty, routes, redeliver, githubapp, pgmigrate and docs packages on that Postgres; the daemon intake test against a local JetStream NATS; infra/gcp",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra562_merge?sslmode=disable go test -tags multiprocess -count=1 -timeout 55m -v ./cmd/dispatch; go test -count=1 -timeout 55m ./internal/dispatch/api/; go test -count=1 -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' -v ./internal/dispatch/store/; go test -count=1 ./internal/dispatch/duty/ ./internal/dispatch/store/ ./internal/pgmigrate/... ./internal/dispatch/routes/ ./internal/dispatch/redeliver/ ./internal/dispatch/githubapp/...; (cd infra && go test -count=1 -run Connections ./gcp/...); cd packages/daemon && LEGION_TEST_PG_DSN=... LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 go test -run TestADeliveryNATSRefusedIsRedeliveredByTheSweepAndApplied ./internal/intake/",
+      "observed": "Three comment-only conflicts (duty/exclusive.go, docs/copied_asks.go, api/server.go) resolved keeping both sides: #2392's removal of the events' commit-order lock from the lock enumerations plus this PR's HOOK namespace, and both server fields (testHooks; eventHorizon, bootMark, eventMarks). Migrations renumbered 0149-0152 -> 0150-0153 with every reference (file headers, README, AGENTS.md, Go comments, pr2387 fragments); the urgency paragraph now follows 0149_event_horizon. Two-process suite ok 1272.385s 134/0/0; api ok 1785.765s; both migration guards PASS; duty, store, pgmigrate, routes, redeliver, githubapp ok; infra/gcp ok (dispatchConnectionsPerPod 89 = main's, leasePoolSize 13 = main's); intake PASS 14.18s. go build, go vet (with and without -tags multiprocess) and gofmt clean. The merge also merges cleanly with main 92619d8d (#2562, daemon only, no migration).",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "Before the renumbering the tree held two version-0149 migrations (0149_event_horizon and 0149_message_delivery_urgency), which TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny refuses; after it the set runs 0001-0153 with no gap or repeat. The docs package run alone in this 2-CPU pod passed TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound alone (31.6s) but reached its 30m timeout as a whole; CI runs it in 646-688s, and this round changes only comments in it."
+    },
+    {
+      "criterion": "Conflict return after the second retro: the head merges with main's #2422 (packages/envoy/AGENTS.md and cmd/dispatch/README.md laid out one sentence per line, the big tables made lists, and a new migration describes itself in its own .up.sql header rather than the README's migration log), keeping every edit of this PR, with no behaviour change",
+      "surface": "the two docs' layout tool (bun scripts/semantic-line-breaks.ts) and its guides test; the migration guard on the rootless Postgres 17; check-ci-filters; the two-process suite (two real envoy-dispatch processes on one Postgres and one NATS)",
+      "command": "bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md; bun test scripts/semantic-line-breaks.guides.test.ts; uv run --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh; cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra562_merge?sslmode=disable go test -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' -v ./internal/dispatch/store/ && go test -tags multiprocess -count=1 -timeout 55m -v ./cmd/dispatch",
+      "observed": "Merged by laying out the fork-point and branch copies of both files with the tool's --write (whitespace only) and merging them three ways against main's: two conflicts left per file, each a table #2422 made a list; this PR's nine edited rows were applied to main's list items word for word (the pglisten item's test-hook fan-out, the importer sync line, DISPATCH_TEST_HOOKS's every-process sentence, the GitHub proxy's rate-limit answer, and the quiesce, disconnect, rotate, publish and slow test-hook routes). The README's four migration-log paragraphs for 0150-0153 are removed and what only they said (census 0, image rollback, the release before's behaviour, the sweep's use of 0138's indexes) is in each migration's .up.sql header; SQL unchanged. One AGENTS.md list item grew past R3's 50 screen rows with this PR's importer text, so it is two items (a '- ' before 'Triggers:', nothing else). Layout check exit 0 on both files, guides test 1 pass, check-ci-filters 28 gates and docs-pages equal, both migration guards PASS, go build/vet (with and without -tags multiprocess)/gofmt clean, two-process suite ok 1217.289s 136/0/0. The merge also merges cleanly with main 39b51494 (#2577, skills only).",
+      "headSha": "a8c1b638444a",
+      "negativeControl": "Before the item split the layout check reported `packages/envoy/AGENTS.md:2194: R3: 54 screen rows: - Every sync runs under a two-minute deadline.`; after it the check prints nothing. A word-level diff of each file against main shows only this PR's own edits (git diff --no-index --word-diff)."
+    },
+    {
+      "criterion": "CI red at code head a8c1b638 (run 41156195466, envoy-go-race-api, so ci-ok): TestAReconnectCatchesUpWhatTheListenerMissed failing at delivery_live_hub_test.go:776 is decided with evidence, and the required check no longer fails on it",
+      "surface": "Dispatch's api test package under the race detector against a rootless Postgres 17 + pgvector, at main f4ec92ee (an export of packages/envoy) and at this branch's head",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra562_merge?sslmode=disable CGO_ENABLED=1 go test -race -count=50 -run 'TestAReconnectCatchesUpWhatTheListenerMissed$' ./internal/dispatch/api/ (main's tree with GOWORK=off; the head in the workspace)",
+      "observed": "Before the fix: main f4ec92ee failed 1 of 50 and head a8c1b638 failed 2 of 50, every failure the same `delivery_live_hub_test.go:776: after a merge the listener could not hear, a frame nobody should be sent` CI showed; this branch changes neither delivery_live_hub.go nor the test file, so the failure is main's flaky test (it also failed on main at e018f1d3, run 41141376073). Fix: the test file as sjawhar/legion#2594 (commit 4b7746eb, open, another tree) changes it, byte for byte - the hub settles (rig.settle) before the listener is blinded, and terminateListener returns only once every backend it terminated has left pg_stat_activity. After it, at f9f6188d: `ok github.com/sjawhar/envoy/internal/dispatch/api 219.401s`, 50 of 50, and the live-hub tests (-run 'Hub|Reconnect|DeliveryLive') ok 19.0s; gofmt and go vet clean.",
+      "headSha": "f9f6188deeda",
+      "negativeControl": "The same 50-run command at main f4ec92ee without the fix: `FAIL github.com/sjawhar/envoy/internal/dispatch/api 188.574s`, 1 failure at line 776; at a8c1b638 without the fix: 2 failures."
+    },
+    {
+      "criterion": "Review round 14: ci-ok goes green - packages/envoy/internal/broker/oauth/claims_doc_test.go equals sjawhar/legion#2598's (head 930cad24) byte for byte, so TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries passes against main's relaid docs/kubernetes.md (#2474) in CI's merge tree",
+      "surface": "the broker's oauth test package, run against main's docs/kubernetes.md (what CI's merge ref holds) and against this branch's",
+      "command": "cd packages/envoy && go test -count=1 -run TestTheDocumentedClaims -v ./internal/broker/oauth/ (once with docs/kubernetes.md replaced by main@origin's copy, once with the branch's)",
+      "observed": "Commit fd7b9b1b changes that one file; its sha256 equals `git show 930cad24:packages/envoy/internal/broker/oauth/claims_doc_test.go` (8e06e83bee5c1341\u2026), and the file was identical on this head, main and #2598's base before it. With main's guide: `--- PASS: TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries`, ok; with the branch's guide: PASS too. gofmt and go vet clean. Main's highest migration is still 0149_event_horizon and #2598 is still open, so no merge and no renumbering.",
+      "headSha": "fd7b9b1b2d07",
+      "negativeControl": "The previous file (main's) against main's guide: `--- FAIL: TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries \u2026 claims_doc_test.go:79: docs/kubernetes.md's claim list and the claims the exchange decides on disagree`, the failure CI run 41170368978's envoy-go showed."
+    },
+    {
+      "criterion": "Conflict return after the third retro: the head merges with main cc3a30bb, where #2598 landed this PR's borrowed claims_doc_test.go and #2601 changed it again; the branch takes main's file whole and changes nothing else",
+      "surface": "the broker's oauth test package and the Dispatch migration guard on a rootless Postgres 17, at the merge head; check-ci-filters on the merged tree",
+      "command": "jj restore --from main@origin packages/envoy/internal/broker/oauth/claims_doc_test.go; cd packages/envoy && go test -count=1 -run TestTheDocumentedClaims -v ./internal/broker/oauth/ && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra562_merge?sslmode=disable go test -count=1 -v -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' ./internal/dispatch/store/; uv run --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh",
+      "observed": "The merge's only conflict was claims_doc_test.go: this branch's copy (sha256 8e06e83b\u2026) equals #2598's as merged (1a9095e6), and main's #2601 then changed it (431d7598\u2026). Main's file taken whole: `jj diff --from main@origin` on it is empty, so the PR no longer touches it. TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries PASS; both migration guard tests PASS (main's highest is still 0149_event_horizon, this PR's 0150-0153 unchanged); check-ci-filters 28 gates; go build, go vet and gofmt clean. delivery_live_hub_test.go keeps #2594's content, since #2594 is still open.",
+      "headSha": "14e833d4c21d",
+      "negativeControl": "Before the resolution the merge reported `packages/envoy/internal/broker/oauth/claims_doc_test.go 2-sided conflict` and nothing else (jj resolve --list); after it no conflict remains."
+    },
+    {
+      "criterion": "Review round 16: the head merges with main ff93d6c4 (text-only conflict in packages/envoy/cmd/dispatch/AGENTS.md; #2594 now on main), keeping both sides, so typecheck and pr-title get a fresh merge ref",
+      "surface": "the merged tree: a word-level diff of cmd/dispatch/AGENTS.md against main, the Dispatch migration guard on a rootless Postgres 17, check-ci-filters, and the unchanged-diff fingerprint",
+      "command": "git diff --no-index --word-diff=plain <(jj file show -r main@origin packages/envoy/cmd/dispatch/AGENTS.md) packages/envoy/cmd/dispatch/AGENTS.md; cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra562_merge?sslmode=disable go test -count=1 -v -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' ./internal/dispatch/store/; uv run --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh",
+      "observed": "The one conflict held the branch's five test-hook rows (quiesce, disconnect, rotate, publish, slow) and main's change to the `/ws/doc/{room}` row beside them; the resolution keeps the branch's five rows and main's new `/ws/doc` row. The file's word-level diff against main has 29 changed lines, the same 29 the branch had against its fork point, so only the branch's own edits remain. delivery_live_hub_test.go now equals main's (#2594 landed), so it leaves the diff, and the fingerprint (61825754\u2026) equals the one at a8c1b638, before either borrowed test file. Both migration guard tests PASS (main's highest is still 0149, #2411 not landed, 0150-0153 kept); check-ci-filters 28 gates; go build, go vet and gofmt clean.",
+      "headSha": "0b95c3c74545",
+      "negativeControl": "Before the resolution jj resolve --list reported `packages/envoy/cmd/dispatch/AGENTS.md 2-sided conflict` and nothing else; after it none."
+    },
+    {
+      "criterion": "CI red at 04e67768 (code 0b95c3c7): ci-ok failed only because the dispatch job failed one browser test that main also fails; no code change",
+      "surface": "GitHub Actions CI run 41209030154 on the pull request's merge ref, attempts 1 and 2",
+      "command": "gh api repos/sjawhar/legion/actions/runs/41209030154/jobs?filter=all (attempt 1 job 124566006375 log; attempt 2 job 124606239428)",
+      "observed": "Attempt 1's dispatch job: `1 failed`, `1433 passed`; the failure was `e2e/overlapping-marks.e2e.ts:311` (a wider and a narrower ask, the wider made first, @phone, chromium), a 30 s timeout, while the same case passed in the iphone project and every other mark kind and order passed. This PR changes no Dispatch web code and not that spec; main's own run 41197405735 failed the same test (the architect's reading). Attempt 2 (started by the reviewer, the one permitted re-run): dispatch job 124606239428 `completed success`. No code changed this round; the head stays 0b95c3c7.",
+      "headSha": "0b95c3c74545",
+      "negativeControl": "Attempt 1 of the same job on the same commit failed that one test, so the pass on attempt 2 comes from the rerun, not from any change."
+    },
+    {
+      "criterion": "CI red read at 72f001f2 was attempt 1's ci-ok; attempt 2 of the same run is green at code 0b95c3c7, with no code change",
+      "surface": "GitHub Actions CI run 41209030154 on the pull request's merge ref, attempt 2",
+      "command": "gh api 'repos/sjawhar/legion/actions/runs/41209030154/jobs?per_page=100' --jq '.jobs[] | select(.name==\"ci-ok\" or .name==\"dispatch\")'",
+      "observed": "Attempt 2: dispatch job 124606239428 `completed success`, ci-ok job 124624720380 `completed success`. The only failure of attempt 1 was main's flaky e2e/overlapping-marks.e2e.ts:311 in dispatch job 124566006375. The reviewer approved at 44af8c32. No code changed; the code head stays 0b95c3c7.",
+      "headSha": "0b95c3c74545",
+      "negativeControl": "Attempt 1 of the same run on the same commit: dispatch job 124566006375 failure (1 failed, 1433 passed) and ci-ok job 124596000987 failure."
+    },
+    {
+      "criterion": "CI red at 9e36ee3e (code 0b95c3c7): ci-ok failed only on dispatch-memory's TestEditNoticeRestart, decided with evidence; no code change for it",
+      "surface": "cmd/dispatch's memory-tagged tests (real envoy-dispatch processes) against a rootless Postgres 17, at main f699b131 (an export of packages/envoy) and at the head; GitHub Actions CI run 41233855400 attempts 1 and 2",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra562_merge?sslmode=disable go test -tags memory -count=20 -timeout 60m -v -run 'TestEditNoticeRestart$' ./cmd/dispatch (main's tree with GOWORK=off; the head in the workspace); gh run rerun 41233855400 --failed",
+      "observed": "Attempt 1's dispatch-memory job 124639674720 failed `edit_notice_restart_test.go:31: the person's settled edit wrote no edit notice within 10s` right after the memory tests, with health probes timing out. Locally under the job's flags: main f699b131 20 of 20 PASS (ok 369.9s), code 0b95c3c7 20 of 20 PASS (ok 413.7s). This PR's own docs changes are approval_carry.go (the answer time read from the database) and copied_asks.go (comments), neither touching edit notices or settlement. Attempt 2 (the one rerun): dispatch-memory job 124679923893 `completed success`.",
+      "headSha": "0b95c3c74545",
+      "negativeControl": "Attempt 1 of the same job on the same commit failed that test, so attempt 2's pass comes from the rerun, not a change."
+    },
+    {
+      "criterion": "While that rerun ran, GitHub reported CONFLICTING: the head merges with main daf71f53, keeping both sides of the one conflict",
+      "surface": "the merged tree: cmd/dispatch's stream tests and TestEditNoticeRestart (memory tag) on a rootless Postgres 17, the migration guard, check-ci-filters, the unchanged-diff fingerprint",
+      "command": "cd packages/envoy && go test -count=1 -run 'TestADispatchStart|TestRedeliverWebhooksRaisesAnR1|TestADefaultDispatchStart|TestTheDispatchPublishersKeeper' -v ./cmd/dispatch; go test -tags memory -count=5 -run 'TestEditNoticeRestart$' ./cmd/dispatch; go test -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' -v ./internal/dispatch/store/; uv run --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh",
+      "observed": "The one conflict was cmd/dispatch/stream_replicas_test.go's import list: the branch's store and storetest imports and main's (#2580) logtest import; all three kept. The file's five tests PASS, TestEditNoticeRestart 5 of 5 PASS, both migration guard tests PASS (main still tops out at 0149, #2411 open, 0150-0153 kept), check-ci-filters 28 gates, go build/vet (plain, multiprocess, memory)/gofmt clean. The unchanged-diff fingerprint is the same before and after the merge (61825754\u2026).",
+      "headSha": "6dc52eb20e70",
+      "negativeControl": "Before the resolution jj resolve --list reported `packages/envoy/cmd/dispatch/stream_replicas_test.go 2-sided conflict` and nothing else; after it none."
+    }
+  ],
+  "filesChanged": [
+    "after round 11: forward merge eabadbf1 (cmd/dispatch/README.md conflict; migrations renamed 0149-0152 with references)",
+    "conflict return: forward merge f43f33d1 (api/ask_snooze.go, api/comment_create.go, packages/envoy/AGENTS.md, cmd/dispatch/AGENTS.md, cmd/dispatch/README.md); nothing else",
+    "forward merge 30a70bc9 onto main de546ed2 (23 conflicted files) and the cutover 01c33fe8: delivery_resume.go deleted, delivery_bound_send_test.go, routes/router.go, cmd/dispatch/{main,settings,settings_test,multiprocess_test}.go, store/pool.go, infra/gcp/dispatch.go, migration 0142, AGENTS.md, README.md, docs/site/.../dispatch/envoy.md, fragments",
+    "merge with #2366 (7ac06a53): model/model.go conflict, api/comment_create.go wait predicate (claimant, ask followers, primary-document session authors), deliveryaudit_test.go compile fix; three tests in comment_mention_takeover_test.go (c63149d0)",
+    "packages/dispatch/e2e/{message-agent,mention-composer,broadcast,agent-view-settings}.e2e.ts (the 12 s take-over window)",
+    "packages/envoy/cmd/dispatch/{main.go,redeliver.go,settings.go,README.md,AGENTS.md}",
+    "packages/envoy/internal/dispatch/api/{messages.go,message_delivery.go,comment_create.go,comment_delivery.go,broadcasts.go,envoy_resolve.go,delivery_resume.go (new),issue_route_status.go,test_hooks_fanout.go (new),events.go,delivery_live_socket.go,artifacts.go,agent_stream.go,routes_table.go,server.go,delivery.go,issue_claim.go,ask_transitions.go,ask_snooze.go}",
+    "packages/envoy/internal/dispatch/store/migrations/0121_message_delivery_urgency, 0122_route_roster, 0123_github_rate_limits, 0124_delivery_run_warnings (.up.sql + .census.sql)",
+    "packages/envoy/internal/dispatch/{envoy/client.go,redeliver/sweep.go,architecture/importer.go,githubapp/client.go,githubapp/deliveries.go,githubapp/ratelimit/ratelimit.go (new),githubapi/proxy.go,docs/approval_carry.go,docs/copied_asks.go,duty/exclusive.go,routes/router.go,store/pool.go,model/model.go}",
+    "packages/envoy/internal/pglisten/listener.go",
+    "packages/envoy/{AGENTS.md,CHANGELOG.md}, packages/envoy-client/src/dispatch-execute.ts (comment)",
+    "review round 10: packages/daemon/internal/intake/redelivered_test.go",
+    "review round 1: api/{comment_delivery,comment_create,envoy_resolve,message_delivery,messages,broadcasts,delivery_resume,issue_route_status,issue_queries,routes_table,test_hooks_fanout}.go, model/model.go, githubapi/proxy.go(+proxy_test.go comment), tests comment_mention_takeover_test.go (added a row), delivery_resume_test.go, issue_route_status{,_cache}_test.go, test_hooks_fanout_test.go, AGENTS.md, CHANGELOG.md, cmd/dispatch/README.md; PR body gains a Contract change census",
+    "review round 2: api/{envoy_resolve,server,comment_delivery,message_delivery,delivery_resume}.go, tests server_test.go, listener_takeover_test.go, comment_mention_takeover_test.go (construction line), messages_test.go, comment_delivery_{claim,receipt}_test.go, delivery_resume_test.go; packages/envoy/AGENTS.md; third forward merge with main",
+    "review round 3: fourth forward merge (api/ask_transitions.go, dispatch/e2e/agent-view-settings.e2e.ts conflicts; CHANGELOG.md to main's; packages/envoy/.changes/unreleased/pr2387-*.yaml); api/{server,test_hooks_fanout}.go, tests server_test.go, test_hooks_fanout_test.go, listener_takeover_test.go",
+    "review round 5: forward merge d84220d0 (cmd/dispatch/{README.md,main.go,multiprocess_test.go}, api/server_test.go; migrations renamed 0137-0140 with their references and fragments)",
+    "review round 7: forward merge 6256e014 (cmd/dispatch/README.md conflict; migrations renamed 0145-0148 with references), text fixes in pr2387-Changed-...103003.yaml, pr2387-Fixed-...103005.yaml, pr2387-Fixed-...103010.yaml, cmd/dispatch/main.go, api/messages.go, api/message_delivery.go, api/delivery_sweep.go, packages/envoy/AGENTS.md",
+    "review round 8: forward merge 05185b33 (no conflict; migrations renamed 0148-0151 with references in AGENTS.md, README.md, delivery.go, issue_route_status.go, ratelimit.go, delivery_bound_send_test.go and the pr2387 fragments)",
+    "review round 9: forward merge 51702b24 (redeliver/sweep.go, redeliver/sweep_test.go, cmd/dispatch/AGENTS.md, cmd/dispatch/README.md)",
+    "round 2: api/comment_create.go, api/comment_delivery.go, api/envoy_resolve.go, api/issue_route_status.go, envoy/client.go(+client_test.go), githubapp/{client.go,deliveries.go,ratelimit/ratelimit.go}, architecture/importer.go, AGENTS.md, CHANGELOG.md; two forward merges with main (migrations renumbered to 0130-0133, store/pool.go leasePoolSize 11, cmd/dispatch/{README.md,main.go,settings.go,settings_test.go})",
+    "tester round 16: .github/workflows/ci.yaml (dispatch_server and listener_server_change filters), .github/workflows/docs-pages.yaml (on.push.paths)",
+    "tester round 4: fifth forward merge 66087e9b (api/envoy_resolve.go comment conflict; api/inbox_queries.go calls routeRosterOrUnknown)",
+    "tester round 5: forward merges 19121210, e4441bc4, f10b3d86 (pool.go, README, multiprocess_test.go, issue_route_status.go, agents.go, server.go, router.go, main.go, redeliver sweep and command, infra/gcp/dispatch.go, migrations renumbered 0136-0139, fragments)",
+    "tests: cmd/dispatch/multiprocess_test.go (10 new two-process rows and a fake listener), api/{delivery_resume,listener_takeover,test_hooks_fanout,database_clock}_test.go (new), api/{issue_route_status,issue_route_status_cache,delivery,messages,comment_delivery_*,issue_claim}_test.go, githubapp/limits_test.go (new), envoy/client_test.go, redeliver/sweep_test.go, architecture/importer_test.go, githubapi/proxy_test.go, cmd/dispatch/settings_test.go"
+  ],
+  "trickyParts": [
+    "Item 8's take-over wait retries 'no live session' too, so a send to a session that is really gone reads failed about 12 s after its first try, and a request that sends during a take-over answers up to ~12 s later (up to ~22 s against a listener that hangs every read). Browser specs that assert a failed send were given their own timeouts naming listenerTakeoverWindow; 7 affected specs pass on chromium in the pod.",
+    "Item 7 departs from the plan's 400 above 8000 bytes for a published frame: the browser suite's agent-view specs publish ~12.4 KB replays, so a call is split into parts under 7900 bytes sent in one transaction and reassembled on every process; a frame that is not valid UTF-8 is refused 400 FRAME_INPUT.",
+    "A person's Retry beside a live claim still opens its own attempt (existing rule); claim renewal during the take-over wait keeps the resume loop off the attempt, not a Retry.",
+    "A GitHub installation token keeps its rate-limit scope until it expires, so a caller holding a token minted before a refresh is still gated.",
+    "A listener failure is retried only when the client marks it ErrUnreachable (transport failure, 502/503/504); every other non-200 stays ErrUnavailable for the callers that read only that, and is recorded as 'envoy listener answered: \u2026', which is not retried.",
+    "Importer compare-and-set uses the row's xmin (every write by any build changes it); resolve()'s own installation-id write carries the new xmin so it does not supersede its own sync.",
+    "A comment's concurrent mention senders each take their own transaction-tracking mark (store.ForConcurrentRead); sharing the request's mark made the pool refuse a second connection under load."
+  ],
+  "deviations": [
+    "Item 7 frame limit: chunked notifications instead of a 400 above 8000 bytes (the agent-view browser specs publish ~12 KB replays).",
+    "Held rate-limit error text names when the limit was recorded (updated_at), not its end time: the tester's test moves `until` between syncs, and a new or extended limit still changes the text.",
+    "A comment whose issue has a route, which replies to a thread, or which is on a document waits out a take-over before it commits (up to the 12 s window), so the route fan-out decision is made on a real listener answer; a comment with none of those commits at once and its senders wait under their claims.",
+    "A comment.created payload gains `mentions_decide_routes` (omitempty): whether the comment fans out beyond its mentions (route, thread reply, document), recorded at commit so a resumed or retried mention knows its pre-commit resolution was final.",
+    "Replacing commentClaimMode with one bound-attempt int changes one rare state: if a Retry settled attempt 1 before the creating claim while a later attempt k is pending, the creating send now reports attempt 1 and leaves k to the resume loop instead of sending k itself.",
+    "The tester's comment_mention_takeover_test.go changes in one line only, its server construction, so TestACommentMentioningSeveralEndedSessionsAnswersWithinOneTakeOverWindow keeps the real 12 s window now that the rig defaults to 750 ms; no assertion changed.",
+    "Changelog entries are ten changie fragments (Issue pr2387) under packages/envoy/.changes/unreleased; the branch's edits of two older CHANGELOG.md entries were dropped, their content restated in the fragments.",
+    "Deps.TestHookTimeout (zero = the 10 s every deployment and the browser harness run) lets the silent-process test run a 2 s timeout.",
+    "#2225 interaction, ruled by the INFRA-63 architect as option (a): a crash between a mention's claim and its send can give a mentioned session that is also a session route two copies (the outbox's after the claim lapses, and delivery-resume's); accepted as at-least-once, wording on the PR's Fast-follow line.",
+    "The route_roster row's sessions JSON holds each session's full listener record, so main's agents list (#2429) and route status read one stored answer; an old row with only session_id, roles and last_seen still decodes.",
+    "Test hooks fan out on main's live socket routes (/api/v1/live/_test/disconnect and /api/v1/live/_test/rotate) since #2449 replaced the event-stream and delivery-socket hooks; issueClaimedNow = greatest(updated_at, now()) keeps a claim's updated_at equal to claimed_at beside main's clock_timestamp-based issueUpdatedNow.",
+    "c2378eb6 is an empty commit without the skip-checks trailer so the head can run CI; the pushed WIP commits are not rewritten. GitHub reports CONFLICTING (main moved to e4c9ab85 after the merge), so no pull-request CI runs until the next merge; per the architect, main was not chased.",
+    "Migrations are 0149-0152 (above main's 0148_asks_anchor_artifact_id). This round is one forward merge: README.md keeps both sides' migration paragraphs; leasePoolSize 13 and dispatchConnectionsPerPod 87 equal main's (main shows 87, not 88, at a4af0341); no behaviour change. Code and handoff go out in one push with no skip-checks trailer.",
+    "Tester round 16: a CI-only change: the ratelimit package path added to the dispatch_server and listener_server_change filters in ci.yaml and to docs-pages.yaml's on.push.paths. No code changed; no merge (GitHub reported no conflict).",
+    "The internal/dispatch/docs package was not run whole in the pod: it exceeds 30 minutes on 2 CPUs (CI: 688 s on main 41103417968, 646 s on this branch's 41100941550). Its failing tests passed alone; this round's only docs change is comment text in copied_asks.go."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "Full ./internal/dispatch/... ./cmd/dispatch/... in the pod at 125a3bfb: every package green except files (TestS3AgainstAnS3CompatibleServer: rootless Docker not found) and pmdoc (linearity timings under gVisor's timer), which this branch does not touch.",
+    "The shared test database on 55432 kept the branch's old migration versions after each renumbering; runs use a recreated database (infra562_merge). A tester reusing the `postgres` database there will see store tests fail at main's 0125 for that reason, not a code defect."
+  ]
+}
