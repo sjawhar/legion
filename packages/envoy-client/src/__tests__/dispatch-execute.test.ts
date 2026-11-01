@@ -3654,8 +3654,14 @@ describe("executeDispatchTool", () => {
     });
 
     expect(requests).toEqual(["/api/v1/whoami"]);
-    expect(result.details).toEqual({ session: "session-1", owner: "alice", service: null });
+    expect(result.details).toEqual({
+      session: "session-1",
+      owner: "alice",
+      service: null,
+      project: null,
+    });
     expect(result.text).toContain("alice");
+    expect(result.text).not.toContain("which is not this host session");
   });
 
   test("dispatch_whoami reports a null owner under the shared token", async () => {
@@ -3674,7 +3680,12 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
 
-    expect(result.details).toEqual({ session: "session-1", owner: null, service: null });
+    expect(result.details).toEqual({
+      session: "session-1",
+      owner: null,
+      service: null,
+      project: null,
+    });
     expect(result.text).toContain("shared token");
   });
 
@@ -3704,9 +3715,107 @@ describe("executeDispatchTool", () => {
       session: "session-1",
       owner: null,
       service: "system:serviceaccount:legion:legion-worker",
+      project: null,
     });
     expect(result.text).toContain("runs as service legion/legion-worker");
     expect(result.text).not.toContain("shared token");
+  });
+
+  // The three cases the tool's text distinguishes, now that a credential can prove a session of
+  // its own: the server names the host's session, it names another, or it names none at all,
+  // which is a Dispatch older than broker-issued tokens and not an answer of "no session".
+  test("dispatch_whoami reports the session the credential proved when it is this host's", async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      response({
+        kind: "agent",
+        owner: "alice",
+        service: null,
+        session: "session-1",
+        project: "INFRA",
+      });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_whoami",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result.details).toEqual({
+      session: "session-1",
+      owner: "alice",
+      service: null,
+      project: "INFRA",
+    });
+    expect(result.text).toContain("Session session-1 acts for alice");
+    expect(result.text).toContain("It may write project INFRA and no other.");
+    expect(result.text).not.toContain("which is not this host session");
+  });
+
+  test("dispatch_whoami says plainly when the credential names another session", async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      response({
+        kind: "agent",
+        owner: "alice",
+        service: null,
+        session: "ses_from_the_broker",
+        project: null,
+      });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_whoami",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result.details).toEqual({
+      session: "ses_from_the_broker",
+      owner: "alice",
+      service: null,
+      project: null,
+    });
+    expect(result.text).toContain("Session ses_from_the_broker acts for alice");
+    expect(result.text).toContain(
+      "Your credential names session ses_from_the_broker, which is not this host session (session-1): Dispatch records every write you make as ses_from_the_broker."
+    );
+    expect(result.text).not.toContain("may write project");
+  });
+
+  test("dispatch_whoami reads an omitted session as an older Dispatch, not as none", async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      response({ kind: "agent", owner: "alice", service: null });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_whoami",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result.details).toEqual({
+      session: "session-1",
+      owner: "alice",
+      service: null,
+      project: null,
+    });
+    expect(result.text).toContain("Session session-1 acts for alice");
+    expect(result.text).not.toContain("which is not this host session");
   });
 
   test("dispatch_issue_update moves status and merges external links by URL as the session", async () => {

@@ -2,7 +2,7 @@ kind: Added
 body: |-
     A page's document socket is writable by the numbers of every live server process, not by an
     exact match of its schema version with the answering process's. Each process records, in four new
-    `server_processes` columns (migration `0151_server_processes_schema`, constant defaults, nothing
+    `server_processes` columns (migration `0152_server_processes_schema`, constant defaults, nothing
     rewritten), the schema version it reads and the highest `since` it creates, its embedder's
     identity and whether it stores files in a bucket. A page presenting `schema_version` V and
     `schema_creatable` R is writable on an open issue when R is at most every live process's version

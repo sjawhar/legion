@@ -1,10 +1,10 @@
--- 0152_embedder_active.up.sql
+-- 0153_embedder_active.up.sql
 -- The one embedder identity (embed.Embedder.Identity) the embedding queue of every server process
 -- works for, so that two builds, or two processes, configured with different embedders do not
 -- each drop the vectors the other makes (internal/dispatch/embedqueue, active.go).
 --
 -- The identity stays active while any live server_processes row (migration 0135, embedder_identity
--- from 0151) carries it. When none does, the identity of the earliest-started live process that
+-- from 0152) carries it. When none does, the identity of the earliest-started live process that
 -- carries one becomes active, by a compare-and-set on this row; with no such process, the process
 -- that looks records its own, and with no row yet, the first process to look records its own. A
 -- process whose identity is not active drops no vector, re-admits no dead row, embeds no queue
