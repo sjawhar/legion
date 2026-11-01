@@ -2,26 +2,30 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-839",
-  "completed": "2026-11-01T17:05:00Z",
-  "round": 8,
-  "reviewedCodeHead": "9f31a51503b9a2d7c21253a1bd99537d62daec52",
-  "diffBase": "bab78c8b3d97 (legion/INFRA-594 before #2446 merged); the pull request now targets main",
-  "decision": "changes_requested",
+  "completed": "2026-11-01T21:50:00Z",
+  "round": 9,
+  "reviewedCodeHead": "7ea7205216fa34bac5fee705b50883e244875898",
+  "diffBase": "0642a37abdaa (main, merged at 7ea72052)",
+  "decision": "approved",
   "critical": 0,
-  "important": 3,
-  "minor": 3,
-  "ci": "#2446 (this pull request's old base) merged at 16:10:39Z as squash 621cf0909, and GitHub retargeted #2588 to main, where it reports mergeable CONFLICTING (dirty). Run 41322163397 at 9f31a515 was still in_progress at about 17:00Z. It no longer decides anything, because the next code head is a forward merge of main. The merge 9f31a515 adds no change beyond 824ee98f (empty diff).",
-  "round7": "Round-7 minors 2, 3 and 4 are fixed in 824ee98f: one table test whose unclaimed row asserts that nothing is logged at Error, one swapSessionBucket, and the retry test pinned to the handover's own read by elapsed >= roleKeepDrainRetryPause, a lower bound with no flake risk. Minor 1 is mostly fixed (one wording issue remains at AGENTS.md:2420). Minor 5's fix brings in a regression (finding 2).",
+  "important": 0,
+  "minor": 4,
+  "ci": "Run 41342296186 (CI, pull_request, 7ea7205216fa) completed success at 21:33Z: ci-ok, envoy-go and envoy-go-race succeeded, and pr-title is green. The base main requires lint, typecheck, test and pr-title, all inside ci-ok. My prose commit's own run is read before the approval, as recorded in the review.",
+  "merge": "Checked by line sets rather than jj's merge diff, which against a conflicted auto-merge mixes resolution and conflict-marker content. For every file, every line main (0642a37abdaa) has and the merged head 7ea72052 lacks is one this branch removed from its old base (bab78c8b3d97 to 95e82bae7a75), and every line the merged head adds beyond main is one this branch added, except in the three files the round-8 fix touches (role_keep.go, role_keep_handover_test.go, packages/envoy/AGENTS.md). The PR touches the same 71 files against main as it did against its old base. No main change is dropped. The second merge 7ea72052 (bringing in #2633) has an empty merge diff.",
+  "round8": "Every round-8 finding is fixed. retry() quiets only context.Canceled, so a handover ended by its own deadline carries the read it was retrying out to ended() and reports it at Error. A walk cancelled by a shutdown is quiet only when it left no copy forwarded and unconfirmed (result.unconfirmed, role_keep.go:898). The stalled-read row is deterministic and fails at 824ee98f. role_keep.go was 999 lines, with the retry rule stated once in handOverKeptRole. The dead check is now a cursor-sequence check, and claimRoleBeyondTheSessionCache takes several roles. I answered each round-8 thread.",
+  "proseFixedByReviewer": [
+    "role_keep.go:115-117, roleKeepHolderWindow's doc: a failed resolution 'costs only this copy's wait for the role's next claim' contradicted the retry rule; it now points to handOverKeptRole",
+    "role_keep.go:477, the sentence listing which comments point to the rule was already out of date; deleted",
+    "packages/envoy/AGENTS.md:2537-2541: the handover reports its last walk's error; a shutdown is quiet only when it cancels a read, or a walk that left nothing forwarded and unconfirmed, and one that lands in a pause still reports",
+    "packages/envoy/AGENTS.md:3318: the ad-hoc topic's answers and the denied publish moved out of 'A role topic's refusals' into an item of their own"
+  ],
+  "judgedNotADefect": [
+    "sessionBucketThatStalls (role_keep_handover_test.go:750-765): its fail-then-stall sequence is a realistic order, both reviews traced it as deterministic, and the row fails on the bug at 824ee98f",
+    "no test of a shutdown-cancelled walk: the branch at role_keep.go:581 was traced correct on every cancel path (before the read, at a pass-over write, at the claim write, at a failed forward and release, at the confirm write), and only the confirm-write case leaves a copy to forward twice; a regression there changes one Error line at shutdown, nothing delivered"
+  ],
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 9f31a515",
-    "codeQuality": "Verdict: CHANGES at 9f31a515"
+    "deepReview": "Verdict: APPROVE at 7ea72052",
+    "codeQuality": "Verdict: CHANGES at 7ea72052 (Minor only: the four prose items, fixed here, and one test-double simplification judged not a defect)"
   },
-  "keyFindings": [
-    {"severity": "important", "file": "main", "description": "Merge main forward (not a rebase) to resolve the conflict that GitHub's retarget to main created, now that #2446 is squashed into main as 621cf0909. The tester runs the merged head."},
-    {"severity": "important", "file": "packages/envoy/cmd/listener/role_keep.go:541", "description": "retry() returns false whenever ctx has ended, without setting readErr, and readErr is cleared at :564 before each read. So a claimed role's handover whose 10-minute window ends during a slow read (a stalled JetStream request waits up to roleKeepDrainWindow, 60 s, longer than the 30 s cap on pauses) ends reporting nothing above Debug. The same failure ending during a pause is logged at Error. Make only cancellation quiet: errors.Is(ctx.Err(), context.Canceled), or keep the previous pass's readErr when the deadline cuts the read. Correct :497-498 and AGENTS.md:2420, and add a row whose stalled read outlasts a short window."},
-    {"severity": "important", "file": "packages/envoy/cmd/listener/role_keep.go:1", "description": "role_keep.go is 1010 lines, over the 1000-line rule, and all 11 new lines are comments. The retry rule is written four times (:90-95, :487-499, :531-536, AGENTS.md:2420), which is how round-7 minor 1 drifted. State it once in handOverKeptRole's doc and point to it from the others."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep_handover_test.go:600", "description": "The 'copy is still kept' check reads the newest kept message, which no handover path deletes, so it cannot fail. Check that the cursor or the forward count did not change, or drop it."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep_handover_test.go:491", "description": "Lines 491-509 are a third copy of claimRoleBeyondTheSessionCache (:676). Let the helper take several roles and call it here."},
-    {"severity": "minor", "file": "packages/envoy/AGENTS.md:2420", "description": "This puts a failed walk under the cached-claim rule, but a failed walk retries without checking the claim and ends at Error. Also, the item at :2409 ('A role send has three answers') now also holds the handover and sweep sentences (:2417-2427): start a new item there. A walk that a shutdown cancels still logs at Error (role_keep.go:868-870, :874-876), which the PR body's shutdown line does not cover; either make it quiet with the same Canceled check or narrow the PR body's claim."}
-  ]
+  "keyFindings": []
 }
