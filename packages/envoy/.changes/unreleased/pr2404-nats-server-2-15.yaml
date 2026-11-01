@@ -1,0 +1,16 @@
+kind: Changed
+body: |-
+    `envoy-listener` now needs a NATS server running nats-server v2.15.0 or later, and this
+    package's Go tests and tools link v2.15.2 in place of v2.10.29. The listener's durable
+    consumer sets `MaxDeliver`, and with it set every nats-server from v2.10.29 through v2.14.x
+    loses a message it is pushing to the durable's deliver subject as that subject's only
+    subscriber goes, which a hand-over or a cut connection is: the server takes one off that
+    message's delivery count for the write it could not make, the subtraction underflows a first
+    delivery's count, which has none yet, and the server then drops the message at the ack wait
+    with no redelivery and no advisory, so nothing brings it back. On v2.15.0 and later such a
+    message comes back one ack wait (6 seconds) later, like every other message the vanished
+    subscriber had not acknowledged. The production hubs already run v2.15.1, and the single-node
+    compose example now runs `nats:2.15.1-alpine` in place of `nats:2.10-alpine`.
+time: 2026-11-01T06:30:00.000000000Z
+custom:
+    Issue: pr2404

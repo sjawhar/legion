@@ -199,11 +199,15 @@ func TestAListenerWithoutItsDurablesConsumerCreateNeverAnswersHealthy(t *testing
 	)
 	seed, public := testnats.User(t)
 	grant := testnats.ListenerGrant(t, machineID)
-	refused := "$JS.API.CONSUMER.CREATE." + bus.Stream + "." + bus.ListenerDurable(machineID)
+	// Three entries of the listener's grant admit the create of its own durable: the durable's own
+	// subject, and the session consumers' two wildcards, which reach every consumer of the stream
+	// (infra/core sessionConsumerCalls). All three go, or the create the test refuses still stands.
+	durableCreate := "$JS.API.CONSUMER.CREATE." + bus.Stream + "." + bus.ListenerDurable(machineID)
+	refused := []string{durableCreate, "$JS.API.CONSUMER.CREATE." + bus.Stream + ".*", "$JS.API.CONSUMER.CREATE." + bus.Stream + ".*.>"}
 	held := len(grant.Publish.Allow)
-	grant.Publish.Allow = slices.DeleteFunc(grant.Publish.Allow, func(subject string) bool { return subject == refused })
-	if len(grant.Publish.Allow) != held-1 {
-		t.Fatalf("the listener's grant does not hold %s alone: %q", refused, grant.Publish.Allow)
+	grant.Publish.Allow = slices.DeleteFunc(grant.Publish.Allow, func(subject string) bool { return slices.Contains(refused, subject) })
+	if len(grant.Publish.Allow) != held-len(refused) {
+		t.Fatalf("the listener's grant does not hold each of %q exactly once: %q", refused, grant.Publish.Allow)
 	}
 	granted := testnats.StartGranted(t, testnats.GrantedUser{Public: public, Grant: grant})
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), granted.URL(), machineID,

@@ -994,9 +994,10 @@ func (c *Client) subscriptionOK(transport subscriptionTransport) bool {
 // subscriptionRefusal reads the server's refusal of a subscription: the subject, the queue group
 // when there is one, and the sid when the refusal is a configuration reload's revocation of a
 // subscription it had accepted. A refusal of a subscription the client sent reads `Permissions
-// Violation for Subscription to "<subject>" using queue "<queue>"` (nats-server v2.10.29
-// client.go:4959-4964); a revocation reads `Permissions Violation for Subscription to "<subject>"
-// (sid "<sid>")` (client.go:5300) and names no queue group whether the subscription had one or not.
+// Violation for Subscription to "<subject>" using queue "<queue>"` (nats-server v2.15.2
+// client.go:5926-5930); a revocation reads `Permissions Violation for Subscription to "<subject>"
+// (sid "<sid>")`, with `using queue "<queue>"` before the sid when the subscription has one
+// (client.go:6279-6282; nats-server before v2.15.0 named no queue group in a revocation at all).
 // The server writes each name with %q, so each is matched as a whole Go-quoted string, escapes
 // included, and unquoted before it is compared: a name holding a double quote or a backslash
 // reaches the text escaped. nats.go's own reading (permissionsRe and permissionsQueueRe, nats.go
@@ -1017,10 +1018,10 @@ var subscriptionRefusal = regexp.MustCompile(`Subscription to ("(?:[^"\\]|\\.)*"
 // answered its own denial (window.acknowledged).
 //
 // A refusal of a subscription the client sent names its subject and, when it has one, its queue
-// group, and both must be the core registration's. A reload's revocation names the subject and the
-// sid but never the queue group, so its subject alone identifies the core registration: the client
-// holds one core subscription, and nats.go itself leaves that refusal unrecorded on a queue
-// subscription and the subscription valid, though the server has removed it.
+// group, and both must be the core registration's. A reload's revocation names the subject, the
+// sid, and from v2.15.0 the queue group, so a revocation that names none is identified by its
+// subject alone: the client holds one core subscription, and nats.go itself leaves that refusal
+// unrecorded on a queue subscription and the subscription valid, though the server has removed it.
 //
 // The mark cannot outlive the refusal: nats.go queues the reconnect callback, which clears it
 // (countConnectionEvent, on the callback goroutine, before the event's own work is queued),
@@ -1437,10 +1438,10 @@ func streamFull(err error) error {
 }
 
 // ErrNotStored names a JetStream acknowledgement of a duplicate with no sequence: a repeat of a
-// message id the stream holds no message for. A clustered nats-server (v2.10.29 among them)
-// records a message id at sequence 0 before its store runs, and keeps that record on the stream's
-// leader, a purge notwithstanding, for the whole duplicate window when the store refuses the
-// message, as a full stream's does (ErrStreamFull), so every later publish under the id is
+// message id the stream holds no message for. A clustered nats-server can record a message id at
+// sequence 0 before its store runs, and keep that record on the stream's leader, a purge
+// notwithstanding, for the whole duplicate window when the store refuses the message, as a full
+// stream's does (ErrStreamFull), so every later publish under the id is
 // acknowledged `{"seq":0,"duplicate":true}` though nothing was stored; a repeat of a message still
 // being stored is acknowledged the same way. Publish and a window's send answer that
 // acknowledgement by sending the same envelope once more without its id, which no record matches:
@@ -1451,7 +1452,12 @@ func streamFull(err error) error {
 // of a message that was still being stored, and once a refused message is stored without its id,
 // every later publish under that id stores another copy for as long as the leader keeps the record
 // (the duplicate window, or until the leader changes). A consumer of the stream sees each copy and
-// must drop the repeat itself.
+// must drop the repeat itself. A nats-server below v2.15 keeps such a record, v2.10.29 among them;
+// v2.15.2, which this module links from the release that requires nats-server v2.15.0 or later,
+// answers a retry of a publish its full stream refused with the stream's own refusal instead, so
+// no answer of this kind reaches a publisher on a hub of that version. The resend stays for the
+// older hubs that still give it, and is held by a row that stubs the acknowledgement and sends the
+// resend to a real server (TestADuplicateAcknowledgementOfAMessageTheStreamDoesNotHoldSendsTheEnvelopeAgain).
 var ErrNotStored = errors.New("stream " + Stream + " acknowledged a duplicate of a message it does not hold")
 
 // notStored is ErrNotStored for ack, a JetStream acknowledgement, when it names a duplicate with no

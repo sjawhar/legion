@@ -177,7 +177,7 @@ func TestHealthzAnswersAJetStreamThatStoppedAnsweringInsideItsBudget(t *testing.
 			}
 			subscribeRoleLane(t, client)
 			var deps atomic.Pointer[listenerDeps]
-			deps.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: listenerCaches(registry, sessions, nil), receiver: rig.receiver})
+			deps.Store(&listenerDeps{client: client, roleLane: client, registry: registry, sessions: sessions, caches: listenerCaches(registry, sessions, nil), receiver: rig.receiver})
 			get := func() (int, map[string]any, time.Duration) {
 				recorder := httptest.NewRecorder()
 				started := time.Now()

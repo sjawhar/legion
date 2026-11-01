@@ -76,10 +76,12 @@ import (
 // to return after that.
 //
 // A holder's graceful stop hands its messages back (durableReceiver.handBack) and keeps its
-// subscription until the next holder has one, since nats-server loses a message when a push
-// consumer's last subscriber goes while a first delivery of it is still in the server's send queue
-// (the consumer counts the delivery undone below zero, and the message leaves the pending list at
-// its ack wait, never redelivered). It NAKs what it holds with handBackDelay, so the durable
+// subscription until the next holder has one, since a push consumer's last subscriber going while
+// a first delivery of a message is still in the server's send queue costs that message: the
+// consumer counts the delivery undone below zero, and on nats-server before v2.15.0 the message
+// then leaves the pending list at its ack wait and is never redelivered, lost for good, while on
+// v2.15.0 or later, which this listener requires, it costs a whole ack wait, since the server
+// redelivers it only then. It NAKs what it holds with handBackDelay, so the durable
 // redelivers it once the next holder has subscribed, releases the lease unsettled, so the next
 // holder settles, and then lingers: it NAKs, with the same delay, each message that reaches it, a
 // repeat of one it already handed back included (handBackNaksMax NAKs of one message at most), and

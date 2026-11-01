@@ -1,5 +1,6 @@
-// Package kvwatchtest stands in for the one nats.go behaviour a test cannot provoke on demand: the
-// idle timer that gives up on a KV watch's initial scan.
+// Package kvwatchtest stands in for the server and nats.go behaviour a test cannot provoke on
+// demand: the idle timer that gives up on a KV watch's initial scan (TimingOut, TimingOutFirst),
+// and the stream state a restore leaves on a nats-server below v2.15 (StreamBehind).
 package kvwatchtest
 
 import (
@@ -10,7 +11,7 @@ import (
 )
 
 // TimingOut wraps kv so every watch it hands out ends its initial scan the way nats.go's idle timer
-// does (nats.go v1.50.0 kv.go:1145-1156): after `after` entries of the real bucket it puts
+// does (nats.go v1.53.1 kv.go:1204-1217): after `after` entries of the real bucket it puts
 // ErrKeyWatcherTimeout on Error() and sends the nil marker a complete scan also sends. The watcher
 // stays open afterwards and forwards whatever the bucket delivers next, as nats.go's does: the timer
 // gives up on the initial values, it does not end the subscription.

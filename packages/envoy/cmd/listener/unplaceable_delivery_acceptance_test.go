@@ -869,79 +869,38 @@ func recordsFor(records []deliveryRecord, sessionID string) []deliveryRecord {
 	return kept
 }
 
-// A push that failed is retried once, however long the window, and the causes that push nothing
-// keep the window's whole allowance. A failed push may have landed: session.Deliverer's prompt
-// returns the same error for a session server that refused the prompt, a connection that never
-// reached it, and an answer lost after the server took the prompt, and every deferral clears the
-// ledger attempt that would otherwise stop a redelivery pushing again - so each retry of such
-// a push can hand the session an instruction it already has. At the default window's dozen
-// deferrals that is the same instruction up to thirteen times; at pushFailedDeferrals it is twice
-// at most.
-//
-// Both messages run at the default window on one harness. The push-failed one is deferred on its
-// first delivery and given up on its second, having been pushed exactly twice; the no-record one,
-// in the same window, is deferred again on its second delivery - which is the negative control:
-// the give-up at attempt 2 is the push-failure bound and not a window that ran out.
-func TestAPushFailureIsDeferredOnceWhereOtherCausesAreDeferredFurther(t *testing.T) {
-	const (
-		pushFailed = "ses_bound_push_failed"
-		noRecord   = "ses_bound_no_record"
-	)
-	windowDeferrals := uint64(defaultUnplaceableRetryWindow / unplaceableRetryDelay)
-	if windowDeferrals < pushFailedDeferrals+2 {
-		t.Fatalf("the default window buys %d deferrals, which cannot show a push failure stopping at %d while another cause goes on", windowDeferrals, pushFailedDeferrals)
-	}
+// A push that failed is the one cause the unplaceable path still sees with
+// session.ReasonPushFailed, and only from the core and live lanes: on the durable path every push
+// to a serving-port session is its worker's, which pushes until the port accepts it
+// (servePortWorkers), and the interest path answers its own failed push delivery_failed with a
+// NAK. The registry path's failed push - a session with a port and no stored interest - reaches
+// here, is given up on its first delivery, and is counted and logged under the no_push_target
+// label the reason folds into. A core message is redelivered by nothing, so no deferral bound of
+// its own is left for it.
+func TestAFailedCorePushIsGivenUpAtOnceUnderTheFoldedLabel(t *testing.T) {
 	var pushes atomic.Int32
-	harness := newListenerDeliveryHarness(t, listenerTransport(func(request *http.Request) (*http.Response, error) {
-		if !strings.Contains(request.URL.Path, pushFailed) {
-			t.Errorf("only %s has a port to push to, got a push to %s", pushFailed, request.URL)
-		}
+	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
 		pushes.Add(1)
 		return nil, fmt.Errorf("dial tcp: connect: connection refused")
 	}))
-	if err := harness.sessions.Put(pushFailed, session.SessionEntry{Port: 1, MachineID: "test-machine"}); err != nil {
-		t.Fatalf("register the unreachable session: %v", err)
+	const sessionID = "ses_core_push_failed"
+	if err := harness.sessions.Put(sessionID, session.SessionEntry{Port: 1, MachineID: "test-machine"}); err != nil {
+		t.Fatalf("register the session with a port and no stored interest: %v", err)
 	}
-	cfg := harness.config
-	cfg.unplaceableRetryWindow = defaultUnplaceableRetryWindow
-	startUnplaceableDelivery(t, harness, cfg, pushFailed, 0)
-	startUnplaceableDelivery(t, harness, cfg, noRecord, 0)
+	item := listenerTestEnvelope(contracts.AgentSubject(sessionID), "core-push-failed")
 
-	waitFor(t, 20*time.Second, "the push-failed message to be given up", func() bool {
-		return len(recordsFor(deliveryRecords(t, harness.logs.String(), "listener agent delivery given up"), pushFailed)) > 0
-	})
-	waitFor(t, 20*time.Second, "the no-record message to be deferred on its second delivery", func() bool {
-		return len(recordsFor(deliveryRecords(t, harness.logs.String(), "listener agent delivery deferred"), noRecord)) >= 2
-	})
+	harness.coreHandler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+
 	logs := harness.logs.String()
-
-	pushDeferrals := recordsFor(deliveryRecords(t, logs, "listener agent delivery deferred"), pushFailed)
-	if len(pushDeferrals) != pushFailedDeferrals {
-		t.Fatalf("%d deferral lines for the failed push, want %d - a push that may have landed is retried once:\n%s", len(pushDeferrals), pushFailedDeferrals, logs)
+	if got := pushes.Load(); got != 1 {
+		t.Fatalf("the session was pushed %d times, want 1: the core lane pushes once and retries nothing", got)
 	}
-	if pushDeferrals[0].Attempt != 1 || pushDeferrals[0].Reason != "push_failed" {
-		t.Fatalf("the failed push's deferral is attempt %d with reason %q, want attempt 1 and push_failed:\n%s", pushDeferrals[0].Attempt, pushDeferrals[0].Reason, logs)
+	if deferrals := recordsFor(deliveryRecords(t, logs, "listener agent delivery deferred"), sessionID); len(deferrals) != 0 {
+		t.Fatalf("a core message was deferred %d times, want none - nothing redelivers one:\n%s", len(deferrals), logs)
 	}
-	if pushDeferrals[0].WindowDeferrals != pushFailedDeferrals {
-		t.Fatalf("the failed push's deferral names window_deferrals %d, want %d - the line names the allowance the decision was made on, not the window's:\n%s", pushDeferrals[0].WindowDeferrals, pushFailedDeferrals, logs)
-	}
-	pushGiveUps := recordsFor(deliveryRecords(t, logs, "listener agent delivery given up"), pushFailed)
-	if len(pushGiveUps) != 1 || pushGiveUps[0].Reason != "push_failed" || pushGiveUps[0].DeliveryStatus != "unplaceable_push_failed" {
-		t.Fatalf("want exactly one give-up line for the failed push, naming push_failed and unplaceable_push_failed:\n%s", logs)
-	}
-	if got := pushes.Load(); got != pushFailedDeferrals+1 {
-		t.Fatalf("the session was pushed %d times, want %d - each retry of a push that may have landed repeats it", got, pushFailedDeferrals+1)
-	}
-
-	recordDeferrals := recordsFor(deliveryRecords(t, logs, "listener agent delivery deferred"), noRecord)
-	if recordDeferrals[1].Attempt != 2 || recordDeferrals[1].Reason != "no_session_record" {
-		t.Fatalf("the no-record message's second deferral is attempt %d with reason %q, want attempt 2 and no_session_record:\n%s", recordDeferrals[1].Attempt, recordDeferrals[1].Reason, logs)
-	}
-	if recordDeferrals[1].WindowDeferrals != windowDeferrals {
-		t.Fatalf("the no-record message's deferral names window_deferrals %d, want the window's %d:\n%s", recordDeferrals[1].WindowDeferrals, windowDeferrals, logs)
-	}
-	if got := len(recordsFor(deliveryRecords(t, logs, "listener agent delivery given up"), noRecord)); got != 0 {
-		t.Fatalf("%d give-up lines for the no-record message at attempt 2, want none - the window still has deferrals for it:\n%s", got, logs)
+	giveUps := recordsFor(deliveryRecords(t, logs, "listener agent delivery given up"), sessionID)
+	if len(giveUps) != 1 || giveUps[0].Reason != "no_push_target" || giveUps[0].DeliveryStatus != "unplaceable_no_push_target" {
+		t.Fatalf("want exactly one give-up line for the failed core push, naming no_push_target and unplaceable_no_push_target:\n%s", logs)
 	}
 }
 

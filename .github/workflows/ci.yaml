@@ -938,6 +938,8 @@ jobs:
               - '.github/workflows/ci.yaml'
               - *go_workspace
               - *listener_command
+              - 'packages/envoy/internal/broker/oauthwire/*'
+              - 'packages/envoy/internal/brokertoken/*'
               - 'packages/envoy/internal/bus/bustest/*'
               - 'packages/envoy/internal/cmdtest/*'
               - 'packages/envoy/internal/contracts/testdata/**'
@@ -976,6 +978,7 @@ jobs:
               - 'packages/envoy/internal/oidc/oidctest/*'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
+              - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/internal/testnats/testdata/**'
               - 'packages/envoy/internal/testpg/*'
@@ -1953,12 +1956,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # The NATS server extensions/card-delivery-omp.test.ts delivers Envoy cards and a person's Send
-    # through (LEGION_TEST_NATS_URL on the test step): the 2.10 image the envoy-client job pulls,
-    # pinned by digest as this file's other service images are.
+    # through (LEGION_TEST_NATS_URL on the test step): the copy of nats:2.15.1, the version the
+    # deployment runs, pinned by digest as this file's other service images are.
     services:
       nats:
-        # ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+        # ghcr.io/sjawhar/legion/ci, the copy of nats:2.15.1 (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:023a08c46caa5aff878fb86841187bebfdad9a6e3c552ba5c1a1e18938bbf88a
         ports: ["4222:4222"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -2022,11 +2025,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # The NATS server the Envoy role claim of extensions/controller-start-omp.test.ts's controller
-    # needs (LEGION_TEST_NATS_URL on the test step), on the image the envoy-client job pulls.
+    # needs (LEGION_TEST_NATS_URL on the test step), on the copy of nats:2.15.1 the pi-envoy job's
+    # service runs.
     services:
       nats:
-        # ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+        # ghcr.io/sjawhar/legion/ci, the copy of nats:2.15.1 (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:023a08c46caa5aff878fb86841187bebfdad9a6e3c552ba5c1a1e18938bbf88a
         ports: ["4222:4222"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -2431,9 +2435,9 @@ jobs:
           go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -timeout 20m
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
-      # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
-      # on the image the hub runs, is the one thing an in-process server cannot reproduce: it sits
-      # behind the natslive tag, and this step is where it runs (INFRA-250).
+      # no container. The two-image matrix, which proves a rendered authorization on nats:2.15.1
+      # and on the image the hub runs, is the one thing an in-process server cannot reproduce: it
+      # sits behind the natslive tag, and this step is where it runs (INFRA-250).
       - name: Test the container-backed NATS matrix (natslive)
         run: go test -tags natslive ./internal/testnats/
         working-directory: packages/envoy

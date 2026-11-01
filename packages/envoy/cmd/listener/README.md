@@ -104,6 +104,21 @@ The durable's ack wait is 6 s (`consumerAckWait`). The holder sends `InProgress`
 every message it has received and not settled, queued or in hand, so a message waits out the ack
 wait only once the pod holding it has died or lost the lease.
 
+The listener needs nats-server v2.15.0 or later, and the production hubs run v2.15.1 (the
+deployment's `nats:2.15.1-alpine`, and the clustered hub's chart). The durable carries
+`MaxDeliver` (`consumerMaxDeliver`, 20), and with it set every nats-server from v2.10.29 through
+v2.14.x loses a message it is pushing to the durable's deliver subject as that subject's only
+subscriber goes: the server counts the write undelivered (`server/stream.go` `internalLoop`,
+`consumer.didNotDeliver`) and takes one off the message's delivery count, which underflows a
+first delivery's count, having none, to 2^64-1 (`decDeliveryCount`, v2.10.29
+`server/consumer.go:3533-3538`); `hasMaxDeliveries` (`:1738-1765`) then drops the message at the
+ack wait, with no redelivery and no advisory, so no settle hold, hand-back or retry brings it
+back. v2.15.0 fixed that subtraction (v2.15.2 `server/consumer.go:4866-4883`), where such a
+message comes back one ack wait (6 s) later like every other outstanding message. The Go tests
+link the server `packages/envoy/go.mod` pins, v2.15.2, and
+`TestEveryBackloggedMessagePushedAtAVanishingSubscriberComesBackExactlyOnce`
+(`durable_backlog_cut_test.go`) holds it to that: it fails with messages missing on v2.10.29.
+
 ### Take-over
 
 - **Graceful stop** (SIGTERM on the active pod): the stopping pod stops handing messages to the

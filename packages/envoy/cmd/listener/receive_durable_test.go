@@ -203,7 +203,7 @@ func TestAStandbyOutlivesThreeSelfHealthIntervals(t *testing.T) {
 
 	subscribeRoleLane(t, standby.client)
 	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: standby.client, registry: registry, sessions: sessions, caches: caches, receiver: standby.receiver})
+	state.Store(&listenerDeps{client: standby.client, roleLane: standby.client, registry: registry, sessions: sessions, caches: caches, receiver: standby.receiver})
 	code, body := serveHealthz(&state)
 	if code != http.StatusOK || body["status"] != "healthy" || body["role"] != "standby" || body["active_instance"] != "pod-a" {
 		t.Fatalf("the standby's /healthz = %d %v, want 200 healthy, role standby, active_instance pod-a", code, body)

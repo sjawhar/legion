@@ -45,7 +45,7 @@ func healthzRoleViewRig(t *testing.T, machineID string) (func() (int, map[string
 	}
 	subscribeRoleLane(t, client)
 	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: listenerCaches(registry, sessions, nil), receiver: rig.receiver})
+	state.Store(&listenerDeps{client: client, roleLane: client, registry: registry, sessions: sessions, caches: listenerCaches(registry, sessions, nil), receiver: rig.receiver})
 	get := func() (int, map[string]any) { return serveHealthz(&state) }
 	if code, body := get(); code != http.StatusOK || body["status"] != "healthy" {
 		t.Fatalf("the rig's own /healthz = %d %v, want 200 healthy", code, body)

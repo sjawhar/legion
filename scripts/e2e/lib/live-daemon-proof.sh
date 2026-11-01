@@ -25,9 +25,9 @@
 # shellcheck source-path=SCRIPTDIR source=transcript.sh
 . "$root/scripts/e2e/lib/transcript.sh"
 
-# The nats-server the run installs when the caller names none: the 2.10 line the daemon's own NATS
-# tests pin (packages/daemon/internal/testnats/nats.go).
-nats_version=v2.10.22
+# The nats-server the run installs when the caller names none: the version the Envoy listener
+# requires and the deployment runs (packages/envoy/internal/testnats/nats.go's images).
+nats_version=v2.15.1
 
 # The run's state, global rather than live_daemon_proof's own because cleanup reads it from the
 # EXIT trap, after live_daemon_proof has returned.

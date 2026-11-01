@@ -211,12 +211,53 @@ func TestARewatchOntoARecreatedBucketReadsItInFull(t *testing.T) {
 	}
 }
 
-// A stream whose sequence space went backwards under an unchanged creation time -- a JetStream
-// restore of an older snapshot keeps the snapshot's -- holds no revision past its last sequence, so
-// resuming after the revision the cache applied would skip the revisions the stream numbers again.
-// The Rewatch reads the bucket in full instead, as before; it is not a recreated bucket, so the
-// cache is not emptied.
+// A stream whose sequence space went backwards under an unchanged creation time holds no revision
+// past its last sequence, so resuming after the revision the cache applied would skip the
+// revisions the stream numbers again. The Rewatch reads the bucket in full instead; it is not a
+// recreated bucket, so the cache is not emptied. A JetStream restore of an older snapshot leaves
+// exactly that on a nats-server below v2.15, which keeps the snapshot's creation time; v2.15 gives
+// the restored stream a creation time of its own
+// (TestARewatchOntoAStreamRestoredOnThisServerReadsItInFullAfterAReset), so the state here is the
+// stubbed one (kvwatchtest.StreamBehind) over a real bucket, and the branch stays for the hubs
+// that still produce it.
 func TestARewatchOntoAStreamBehindTheAppliedRevisionReadsItInFull(t *testing.T) {
+	conn, kv := bucket(t, testnats.URL(t))
+	putKeys(t, kv, "one", "two", "three")
+	// The Rewatch opens the bucket from its connection, so the stubbed state is given there: the
+	// real bucket, reporting the last sequence of the stream a restore of its first revision left.
+	behind := bus.KeyValue{KeyValue: kvwatchtest.StreamBehind(kv, 1)}
+	logger, records := jsonLogger(t)
+	into := newMirror()
+	w := kvwatch.New("test cache", kv, into.apply, into.reset, kvwatch.WithLogger(logger),
+		kvwatch.WithBucketOpener(func(natsgo.JetStreamContext, string) (bus.KeyValue, error) { return behind, nil }))
+	t.Cleanup(w.Stop)
+	w.Start()
+	requireWarmUp(t, records, 1, "completed", 3, 0)
+	state, err := bus.ReadStreamState(behind)
+	if err != nil {
+		t.Fatalf("stream state: %v", err)
+	}
+	if state.LastSeq != 1 {
+		t.Fatalf("the stubbed stream state reports last sequence %d, want the three applied revisions to sit past it", state.LastSeq)
+	}
+
+	if err := w.Rewatch(conn); err != nil {
+		t.Fatalf("rewatch: %v", err)
+	}
+	// Read in full: all three keys again, where a resume after the third revision would have
+	// applied none and said "resumed".
+	requireWarmUp(t, records, 2, "completed", 3, 0)
+	if values, resets := into.snapshot(); !maps.Equal(values, bucketValues(t, kv)) || resets != 0 {
+		t.Fatalf("cache %v after %d resets, want the bucket %v and no reset", values, resets, bucketValues(t, kv))
+	}
+}
+
+// What a JetStream restore of an older snapshot leaves on the server this module links: the
+// restored stream carries a creation time of its own, later than the one the cache was filled
+// from, and its last sequence is the snapshot's. The Rewatch reads the restored bucket in full,
+// and because the creation time changed it empties the cache first, as it does for a recreated
+// bucket, so the cache holds exactly what the restored stream holds.
+func TestARewatchOntoAStreamRestoredOnThisServerReadsItInFullAfterAReset(t *testing.T) {
 	_, uri := testnats.Start(t)
 	conn := testnats.Connect(t, uri)
 	t.Cleanup(conn.Close)
@@ -248,16 +289,16 @@ func TestARewatchOntoAStreamBehindTheAppliedRevisionReadsItInFull(t *testing.T) 
 	if err != nil {
 		t.Fatalf("stream state after the restore: %v", err)
 	}
-	if !after.Created.Equal(before.Created) || after.LastSeq != 1 {
-		t.Fatalf("restored stream created %v with last sequence %d, want the original's %v and 1", after.Created, after.LastSeq, before.Created)
+	if !after.Created.After(before.Created) || after.LastSeq != 1 {
+		t.Fatalf("restored stream created %v with last sequence %d, want a creation time past the original's %v and 1", after.Created, after.LastSeq, before.Created)
 	}
 
 	if err := w.Rewatch(conn); err != nil {
 		t.Fatalf("rewatch: %v", err)
 	}
 	requireWarmUp(t, records, 2, "completed", 1, 0)
-	if values, resets := into.snapshot(); values["one"] != "one" || resets != 0 {
-		t.Fatalf("cache %v after %d resets, want one read again and no reset", values, resets)
+	if values, resets := into.snapshot(); !maps.Equal(values, map[string]string{"one": "one"}) || resets != 1 {
+		t.Fatalf("cache %v after %d resets, want the restored bucket's one key after one reset", values, resets)
 	}
 }
 

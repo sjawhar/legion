@@ -158,7 +158,8 @@ func serveHealthz(state *atomic.Pointer[listenerDeps]) (int, map[string]any) {
 	return recorder.Code, body
 }
 
-// subscribeRoleLane subscribes client's role lane as main does, so /healthz over client finds it.
+// subscribeRoleLane subscribes client's role lane as main does on the lane's own connection
+// (bus.ConnectRoleLane), so /healthz over a listenerDeps whose roleLane is client finds it.
 func subscribeRoleLane(t *testing.T, client *bus.Client) {
 	t.Helper()
 	if _, err := client.SubscribeCore(contracts.RoleTopicPrefix+">", func(*natsgo.Msg) {}, bus.ListenerQueue("healthz")); err != nil {
@@ -169,14 +170,15 @@ func subscribeRoleLane(t *testing.T, client *bus.Client) {
 	}
 }
 
-// The role lane is a core subscription every pod holds, active and standby alike, so /healthz
-// answers 503 while the client holds no valid one: role messages for this machine then reach no
-// pod of it.
+// The role lane is a core subscription every pod holds on a connection of its own, active and
+// standby alike, so /healthz answers 503 while that connection holds no valid one: role messages
+// for this machine then reach no pod of it.
 func TestHealthzAnswersUnhealthyWithoutTheRoleLane(t *testing.T) {
+	client := setupPublishTestClient(t)
 	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: setupPublishTestClient(t)})
-	if code, body := serveHealthz(&state); code != http.StatusServiceUnavailable || body["status"] != "unhealthy" || body["error"] != "role subscription inactive" {
-		t.Fatalf("/healthz without the role lane = %d %v, want 503 unhealthy with error \"role subscription inactive\"", code, body)
+	state.Store(&listenerDeps{client: client, roleLane: client})
+	if code, body := serveHealthz(&state); code != http.StatusServiceUnavailable || body["status"] != "unhealthy" || body["error"] != "role lane subscription inactive" {
+		t.Fatalf("/healthz without the role lane = %d %v, want 503 unhealthy with error \"role lane subscription inactive\"", code, body)
 	}
 }
 
@@ -204,7 +206,7 @@ func TestHealthzAnswers503WhenADependencyHangsPastTheDeadline(t *testing.T) {
 	released := make(chan struct{})
 	t.Cleanup(func() { close(released) })
 	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, caches: []listenerCache{{name: "hanging", cache: hangingCache{released}}}})
+	state.Store(&listenerDeps{client: client, roleLane: client, caches: []listenerCache{{name: "hanging", cache: hangingCache{released}}}})
 	started := time.Now()
 	code, body := serveHealthz(&state)
 	elapsed := time.Since(started)
@@ -4908,7 +4910,7 @@ func TestHealthzAnswersUnhealthyWhileTheInterestWatcherIsDead(t *testing.T) {
 	}
 	subscribeRoleLane(t, client)
 	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, receiver: rig.receiver})
+	state.Store(&listenerDeps{client: client, roleLane: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, receiver: rig.receiver})
 	get := func() (int, map[string]any) { return serveHealthz(&state) }
 	if code, body := get(); code != http.StatusOK || body["status"] != "healthy" {
 		t.Fatalf("before the watcher ends: /healthz = %d %v, want 200 healthy", code, body)
@@ -4951,7 +4953,7 @@ func healthzWithLiveLane(t *testing.T, machineID string, lane bool) (*bus.Client
 		t.Fatalf("wait for session cache: %v", err)
 	}
 	subscribeRoleLane(t, client)
-	deps := &listenerDeps{client: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, receiver: rig.receiver}
+	deps := &listenerDeps{client: client, roleLane: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, receiver: rig.receiver}
 	var live *bus.Client
 	var liveSub *natsgo.Subscription
 	if lane {
