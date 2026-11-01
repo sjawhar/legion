@@ -28,6 +28,6 @@ The two superseded files tell an author to renumber; sjawhar/legion#2411 replace
 
 ## Evidence
 
-`packages/envoy/migrationid/migrationid.go` holds the rule (`Check`, `closings`: daemon `0064_pull_request_pass_settlement.up.sql`, Dispatch `0149_event_horizon.up.sql`).
+`packages/envoy/migrationid/migrationid.go` holds the rule: `Check`, `ClosedAt`, and `closings`, which records each runner's closing file.
 Before `closings` existed, a branch adding `0062_*` passed its tests alone and failed only once merged with another (tester, round 8).
 `packages/envoy/deploy/scripts/autodeploy.sh` `schema_changed` and the loadtest seed check in `packages/envoy/loadtest/common.sh` compare sets.
