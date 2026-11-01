@@ -1,9 +1,10 @@
 // What a spec reads off a heavy body already in a page: the element a surface renders one into,
 // the text standing loose in that element, and the state a drawn body ends in. Two specs read a
-// body through these three - `heavy-bodies.e2e.ts`, which draws the bodies of `heavy-bodies.ts`
-// in the Conversation, the Inbox's ask card and a hover card, and `heavy-streamed-turn.e2e.ts`,
-// which watches one grow under a paint in the live view - so both read the same element and mean
-// the same thing by a settled body (sjawhar/legion#2519).
+// body through the element and the settled state - `heavy-bodies.e2e.ts`, which draws the bodies
+// of `heavy-bodies.ts` in the Conversation, the Inbox's ask card and a hover card, and
+// `heavy-streamed-turn.e2e.ts`, which watches one grow under a paint in the live view and alone
+// counts its loose text - so both read the same element and mean the same thing by a settled
+// body (sjawhar/legion#2519).
 import { expect, type Locator } from "@playwright/test";
 
 /**

@@ -91,7 +91,7 @@ func (a *servicePersistenceAdapter) LoadDoc(room string) (_ []byte, err error) {
 	load := a.service.beginRoomLoad(room)
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("loading room %q: panic: %v", room, recovered)
+			err = fmt.Errorf("panic: %v", recovered)
 		}
 		if err != nil {
 			a.service.failRoomLoad(room, load, err)

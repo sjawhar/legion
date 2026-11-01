@@ -4,8 +4,8 @@
 // specs read them from one module, so the two measure the very same bytes. This one drives no
 // browser, so it runs in one Playwright project and nowhere else: every project of a run shares
 // the one server process, so a second project would time these writes against a server that
-// already holds what each shape touches, and what the row says below about a first write of its
-// shape in a fresh server process would be false there (sjawhar/legion#2519).
+// already holds what each shape touches, and what the row says below about the first document
+// write of its shape would be false there (sjawhar/legion#2519).
 import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { expect, test } from "@playwright/test";
 import { createIssue, createIssueArtifact, createProject } from "./api";
@@ -176,9 +176,12 @@ async function everythingOwedFinished(what: string): Promise<void> {
  * out of one would name a regression that is not there.
  *
  * The body is written before its half on each of the three rows held to the ratio. On the two
- * that carry no `warm` - the 8,000 items and the bracket run - that body is the first write of
- * its shape in the server process, which is what the absolute bound has always measured over
- * them, with nothing but the drain above before it. The 49-marker row is the exception: `warm`
+ * that carry no `warm` - the 8,000 items and the bracket run - that body is the first document
+ * write of its shape in the server process, which is what the absolute bound has always measured
+ * over them, with nothing but the drain above before it. It is not the first parse of those
+ * bytes: in the one project this spec runs in, `heavy-bodies.e2e.ts` runs first on the same
+ * server (one worker, files in name order) and creates comments holding the same two bodies,
+ * whose create parses each of them once. The 49-marker row is the exception: `warm`
  * has the row write that shape once before the pair, so the write the absolute bound reads there
  * is the second of its shape - the steady state every later writer of such a body meets - and
  * the first write's own time is annotated beside it and held to no bound (the table above). A

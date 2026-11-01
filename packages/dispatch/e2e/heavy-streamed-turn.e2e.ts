@@ -1,5 +1,5 @@
 // The one surface where a heavy body grows under a paint: the live session view, where a
-// streaming turn arrives whole with every frame. The same bodies drawn where a reader only opens
+// streaming turn arrives whole with every frame. Heavy bodies drawn where a reader only opens
 // them are `heavy-bodies.e2e.ts`, and both specs read a drawn body through `heavy-bodies-page.ts`
 // (sjawhar/legion#2519).
 //
