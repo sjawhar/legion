@@ -272,10 +272,6 @@ func routes() []apiRoute {
 		// List the pending requests and machine logins the named person decides, each secret
 		// request with the broker's own page where that person decides it.
 		{http.MethodGet, "/v1/pending", accountAuth(relaysDecisions, (*server).listPending)},
-		// Read a credential-request record: what was asked, by whom, why, and its decision. A
-		// secret request's record also carries the broker's own page where it is decided, as the
-		// pending list's row does.
-		{http.MethodGet, "/v1/credential-requests/{record}", accountAuth(relaysDecisions, (*server).readRecord)},
 		// Approve a pending machine login as the named person, who must type its code: the broker
 		// takes the person's name on the caller's word, from a listed service's ServiceAccount
 		// token, which the handler verifies itself — and whose name must carry relaysDecisions,
