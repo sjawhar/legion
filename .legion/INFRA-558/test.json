@@ -2,33 +2,66 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-558",
-  "round": 10,
-  "completed": "2026-11-01T00:25:00Z",
-  "codeHead": "b77098219",
-  "scope": "A merge of main at daf71f53 (b7709821) only, as the architect set it: the merge adds nothing beyond the branch's diff; no unreleased fragment repeats a CHANGELOG entry; this PR's fragment exists; the revoke and token tests once; ci-ok and pr-title. Round 9's results stand.",
+  "previousHandoff": "6b6509ed7490bb8aa77d01c50f11db2fddd23905",
+  "round": 11,
+  "completed": "2026-11-01T06:03:00Z",
+  "codeHead": "920859be8",
+  "scope": "Three merges of main since round 10's code head b7709821: 4b63e8d5 (#2541), b3a11acc (#2522) and 920859be (#2549). The fingerprint changed (b5c7591c -> 7aaeb15d), so this was a full round, covering the architect's five checks plus the real-binary and browser runs against the new previous release.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I re-ran the revoke and token tests at b7709821 under -race (10 tests pass) and read the merge's remerge-diff."
+    "how": "I re-ran the route, write-class, migration guard, census, revoke and token tests at 920859be, and the two-build harness and browser cross-build spec against legion-envoy-v25.1.0."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The merge of main adds nothing beyond the branch's own diff, and the changelog fragments are right.",
-      "surface": "git remerge-diff of b7709821; each package's .changes/unreleased against its CHANGELOG.md at b7709821",
-      "command": "git show --remerge-diff --stat b7709821; for each code file changed since 7a037ba4, compare its changed lines with main's efed4e4d..daf71f53 change; check each unreleased fragment's body against the package's CHANGELOG.md",
-      "observed": "The remerge-diff names three files: main's deletion of the two INFRA-767 fragments (folded into packages/envoy/CHANGELOG.md by 6eceb88f), and this PR's pr2461-Added fragment, reworded for sjawhar/ygo v1.54.1-sami.3 and the per-socket token answer. The code files changed since round 9's head (cmd/dispatch/settings.go, settings_test.go, stream_replicas_test.go) carry exactly main's own #2580 lines. No unreleased fragment's entry is in its CHANGELOG.md. This PR's fragments exist: envoy 9, contracts 2, claude-envoy 1, envoy-client 1, pi-envoy 1. Evidence: https://github.com/sjawhar/legion/pull/2461#issuecomment-6551288330",
-      "headSha": "b77098219",
-      "negativeControl": "Before the merge, unreleased/ held the two INFRA-767 fragments that main had already folded into CHANGELOG.md."
+      "criterion": "(1) The merges add nothing beyond the branch's diff and main's changes.",
+      "surface": "git show --remerge-diff of 4b63e8d5, b3a11acc and 920859be",
+      "command": "git show --remerge-diff --stat <each merge>; per-file comparison of the revoke-path changes since b7709821 with main's daf71f53..c656fc4f",
+      "observed": "4b63e8d5: routes_table.go takes main's routeRow and keeps this PR's newer-content row; README, AGENTS, fragments and comments change only migration numbers; three migrations are renamed. b3a11acc: pmdoc update.go and splice.go take main's single validation, with the creation gate in the writer tail; mutation.go applyMargin takes main's ValidDocument read and keeps the outside-schema tolerance. 920859be: web files only. docs/websocket.go carries exactly #2541's lines; the admission and revoke code is unchanged.",
+      "headSha": "920859be8",
+      "negativeControl": "The fingerprint at b7709821 differs from 920859be (b5c7591c vs 7aaeb15d), which is why this was a full round."
     },
     {
-      "criterion": "The revoke and token tests hold on the merged head.",
-      "surface": "Package docs on the pod's test Postgres (LEGION_TEST_PG_DSN)",
-      "command": "CGO_ENABLED=1 go test -race -count=1 -v -run 'TestARevoke|TestARevoked|TestAdmissionRecheck|TestATokenIsAnswered|TestSchemaAdmission' ./internal/dispatch/docs/",
-      "observed": "10 tests PASS, including TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole and TestATokenIsAnsweredFromItsOwnSocketInEitherOrder; ok 50.958s.",
-      "headSha": "b77098219",
-      "negativeControl": "Round 9: without the revoke's cancel, the slow-page test FAILs (i/o timeout)."
+      "criterion": "(2) Every route from both sides is in routes_table.go, and this PR's test hook has its write class.",
+      "surface": "routes_table.go at the branch (78d58843), main (f93dd689) and the merge; package api tests on the pod's test Postgres",
+      "command": "Set comparison of route rows and writeClasses keys; go test -run 'TestRouteIndex|TestWriteRouteIndex|TestRoutesTable|TestEveryMutatingRouteIsClassed|TestAProjectScoped|TestADeploymentWriteIsRefused' ./internal/dispatch/api/",
+      "observed": "No route row of either side is lost, and the merge has no row that neither side has. writeClasses is the union of both sides plus POST /api/v1/artifacts/{id}/_test/newer-content: scopeProject. All 8 tests PASS.",
+      "headSha": "920859be8",
+      "negativeControl": "In a scratch copy without the newer-content write class, TestEveryMutatingRouteIsClassed FAILs: '1 mutating row(s) the project check cannot decide'."
+    },
+    {
+      "criterion": "(3) The creation gate sits in pmdoc's single writer tail.",
+      "surface": "pmdoc/update.go at 920859be; docs.ApplyOps through a probe test, at head and in a scratch copy whose UpdateDocument skips writeDocument",
+      "command": "Grep of updateChildren and refuseUncreatable callers; probe TestZZProbeAnEditBatchCreatesNoUncreatableElement (future block staged as not creatable)",
+      "observed": "Update, UpdateHolding and UpdateDocument all end in writeDocument (refuseUncreatable, then updateChildren); writeDocument is the only non-recursive caller of updateChildren. At head and in the broken copy, the edit batch's insert is refused at parse ('reads typed block \"future\" but cannot write it yet'), and a replace writes escaped inline text only. UpdateDocument's gate is a second guard; losing it shows no consumer-visible defect, so this is not a finding.",
+      "headSha": "920859be8",
+      "negativeControl": "An insert holding the future block is refused, at head and in the broken copy."
+    },
+    {
+      "criterion": "(4) The migrations renumbered to 0151-0153 have the same SQL apart from the numbers, no old reference remains, and the migration guard tests pass.",
+      "surface": "Migration files at 78d58843 and 920859be; package store tests on the pod's test Postgres",
+      "command": "diff of each .up.sql and .census.sql with the numbers masked; git grep for 015[0-3] and the migration file names; go test -run 'TestMigrate|TestEveryShippedCensus|TestTheCensusPairCheck|TestCensusOnAMigratedDatabaseHasNothingPending' ./internal/dispatch/store/",
+      "observed": "All six files are identical apart from the numbers. Every 0150 reference names main's dpop_proofs, and every reference to the three migrations names 0151-0153. TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny, the census pair checks and every TestMigrate test PASS; ok 105.439s.",
+      "headSha": "920859be8",
+      "negativeControl": "Before the merge, main's 0150_dpop_proofs and the branch's 0150_duty_holds would share version 0150, which TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny refuses."
+    },
+    {
+      "criterion": "(5) The revoke and token tests pass under -race.",
+      "surface": "Package docs on the pod's test Postgres",
+      "command": "CGO_ENABLED=1 go test -race -count=1 -run 'TestARevoke|TestARevoked|TestAdmissionRecheck|TestATokenIsAnswered|TestSchemaAdmission' ./internal/dispatch/docs/",
+      "observed": "10 tests PASS; ok 50.552s.",
+      "headSha": "920859be8",
+      "negativeControl": "Round 9: without the revoke's cancel, the slow-page test FAILs (i/o timeout); the revoke code is unchanged since then."
+    },
+    {
+      "criterion": "Acceptance 1 / item 6: two builds on one database and one bus, both ways, against the previous release.",
+      "surface": "Real envoy-dispatch processes (legion-envoy-v25.1.0, f93dd689, and this head) on the pod's test Postgres and a nats-server; Chromium through the two-process proxy",
+      "command": "DISPATCH_PREVIOUS_BUILD=$TMPDIR/dispatch-previous-251 go test -tags twobuild -count=1 -timeout 30m -v -run TestTwoBuilds ./cmd/dispatch; DISPATCH_E2E_BINARY_B=<prev>/envoy-dispatch DISPATCH_E2E_WEB_DIST_B=<prev>/web bun run e2e:multiprocess -- cross-build.multiprocess, then with both processes on this tree",
+      "observed": "CLI PASS (33.7s), documents PASS (102.7s, 57 of 57 refs rows each way), messages PASS (128.9s), ok 265.432s. Browser: 2 passed and 1 skipped (B=v25.1.0); 3 passed (both on this tree). Evidence: https://github.com/sjawhar/legion/pull/2461#issuecomment-6554194520",
+      "headSha": "920859be8",
+      "negativeControl": "The newer-content spec is skipped against v25.1.0, which lacks the hook, and passes on this tree."
     }
   ],
-  "ci": "At b7709821, CI run 41257504555 was queued, changes included; pr-title was queued (run 41257556683). There is no ci-ok or pr-title verdict yet. At 7a037ba4, ci-ok was cancelled when the next push superseded it, and pr-title succeeded."
+  "ci": "At 920859be, CI run 41277396655 was queued, changes included; pr-title was pending (run 41277449496) at 2026-11-01T06:00:50Z. There is no ci-ok or pr-title verdict yet."
 }
