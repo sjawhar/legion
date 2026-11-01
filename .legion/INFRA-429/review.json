@@ -2,16 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-429",
-  "completed": "2026-10-31T17:40:00Z",
-  "round": 3,
+  "completed": "2026-11-01T01:53:00Z",
+  "round": 4,
   "decision": "approved",
   "critical": 0,
   "important": 0,
-  "minor": 0,
-  "reviewedHead": "the handoff-only head this push makes above 677d6ee5b73c4bd9233df891823f36b85efc91e8; code head cd1d5c63b2b554aa847f32a177d78390165604a1 (forward merge against main dbdf9318c059)",
-  "fingerprint": "c08d06bcdd61 (last approval) 4737f9c629620b33179268f4af8a895e5dd79151cc1eb5cd456165530cc862d9 -> 677d6ee5b73c d844b733048c3dc585396a247010b9b221367ba6120592d77d1789c8cb32b3ba: changed, so a new round. The line-by-line difference is three version lines: bun.lock's pi-envoy 13.10.1->13.10.2 and pi-legion 15.5.1->15.6.1, and the removed version line of the deleted packages/envoy-plugin/package.json 12.5.1->12.6.1.",
-  "thermonuclear": "Pair at 677d6ee5 on the forward merge: deep-review APPROVE (the merge undoes nothing of main's; no OpenCode reference re-introduced; bun install --frozen-lockfile passes and an unfrozen install changes nothing; no Dockerfile COPY or workflow names the deleted package), code-quality APPROVE (the four files both sides edited carry this pull request's lines byte-identical to the approved head).",
-  "ci": "ci-ok and pr-title completed/success at cd1d5c63, the newest pull_request run's head; compare cd1d5c63...677d6ee5 changes only .legion/INFRA-429/.",
-  "openRisk": "GitHub reports the pull request CONFLICTING again at 677d6ee5: main's 290625b75 (release envoy-plugin v12.7.0) changed packages/envoy-plugin/package.json, which this pull request deletes. The architect handles it with child INFRA-909 and one last forward merge after it.",
-  "keyFindings": []
+  "minor": 1,
+  "reviewedHead": "the handoff-only head this push makes above 27c8d404820856ad9c5e53742c2d8bff0b7ec101; code head e04460a750db146362e3acecc7ee2a47903bc6ef (forward merge against main f699b1316430, #2607 / INFRA-909)",
+  "fingerprint": "35ea1346b994 (last approval) d844b733048c3dc585396a247010b9b221367ba6120592d77d1789c8cb32b3ba -> 27c8d404820 cff10a6916909bedecf371e2a8a76ff85a4e13dc8b5b48919476a9946f54db61: changed, so a new round. Line by line the diff only shrank: #2607 landed on main exactly this pull request's approved edits to release.yaml, changelog-fold.yaml, check-release-credentials.sh and AGENTS.md's changelog-package line (git diff 35ea1346 e04460a75 on those files is empty). Left: release.yaml's packages/envoy-plugin/package.json trigger, AGENTS.md's typecheck list, and three version strings (bun.lock pi-envoy 13.11.1, pi-legion 15.7.1; the deleted envoy-plugin package.json at 12.7.1). The opencode/envoy-plugin grep hits match the approved head up to line shifts.",
+  "thermonuclear": "Pair at 27c8d404 on the merge: deep-review APPROVE (the merge undoes nothing of main's; release.yaml has no dangling needs; check-image-trigger-paths.sh and check-ci-filters.sh pass in a copy of the tree; bun install --frozen-lockfile passes; main brings back no OpenCode reference outside docs/solutions); code-quality APPROVE (the nine files both sides edited read as one text, with no lost or duplicated lines).",
+  "ci": "ci-ok and pr-title completed/success at e04460a75, the newest pull_request run's head; compare e04460a75...27c8d404 changes only .legion/INFRA-429/.",
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "PR body",
+      "description": "Fixed by the reviewer in the PR body (changes no commit): the Size line (now 90 files, +469/-3492), the Change and Look-at-first lines that still credited this pull request with removing envoy_plugin_build (main's #2607 did), the stale CONFLICTING risk bullet, and the reason the merge starts release.yaml, release-envoy-listener.yaml and docs-pages.yaml (the root package.json and bun.lock in their filters, not the deleted envoy-plugin manifest)."
+    }
+  ]
 }
