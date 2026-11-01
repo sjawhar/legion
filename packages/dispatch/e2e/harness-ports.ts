@@ -11,7 +11,14 @@
  * `DISPATCH_E2E_PORT` is the round-robin proxy's; unset, each is held before the proxy starts, so
  * the proxy can name it (`e2e/harness-start.ts`). `DISPATCH_E2E_SIGNIN_ISSUER_PORT` is the dev
  * OIDC issuer's under `DISPATCH_E2E_SIGNIN=oidc` (`e2e/harness-signin.ts`), which always serves
- * on a port the OS chooses: `e2e/run-signin-issuer.sh` refuses it set.
+ * on a port the OS chooses: `e2e/run-signin-issuer.sh` refuses it set. `REAL_BROKER_PORT` is the
+ * real secrets broker's and `DEV_OIDC_ISSUER_PORT` its dev OIDC issuer's (`e2e/run-broker.sh`),
+ * the pair `e2e/broker-approval.e2e.ts` drives an approval on. A run starts that pair only when a
+ * spec of its can reach it (`e2e/harness-real-broker.ts`), so neither port takes part in the
+ * collision check otherwise. The issuer serves on a port the OS chooses, as the sign-in issuer
+ * does, and `e2e/run-broker.sh` refuses `DEV_OIDC_ISSUER_PORT` set for it. The broker half reads
+ * that variable instead, which `e2e/harness-start.ts` exports from the issuer's report, since the
+ * broker takes the issuer's URL as its token issuer and its sign-in provider.
  *
  * A set value that is not a port in canonical decimal is refused naming its variable, because
  * every later consumer turns it into something that names nothing: `net.connect` raises
@@ -37,6 +44,7 @@
  */
 
 import { harnessProcessCount } from "./harness-processes";
+import { usesRealBroker } from "./harness-real-broker";
 import { harnessSignIn } from "./harness-signin";
 
 /** How many Playwright workers, and so how many lanes, a run has. */
@@ -100,6 +108,7 @@ export function asLane(lane: number, env: NodeJS.ProcessEnv = process.env): Node
 
 /** Each harness listener's port variable. */
 export const harnessVariables = {
+  devIssuer: "DEV_OIDC_ISSUER_PORT",
   dispatch: "DISPATCH_E2E_PORT",
   dispatchA: "DISPATCH_E2E_PORT_A",
   dispatchB: "DISPATCH_E2E_PORT_B",
@@ -107,6 +116,7 @@ export const harnessVariables = {
   fakeEnvoy: "FAKE_ENVOY_PORT",
   fakeGithub: "FAKE_GITHUB_PORT",
   plainHttp: "PLAIN_HTTP_PORT",
+  realBroker: "REAL_BROKER_PORT",
   signinIssuer: "DISPATCH_E2E_SIGNIN_ISSUER_PORT",
 } as const;
 
@@ -155,11 +165,14 @@ function harnessPort(env: NodeJS.ProcessEnv, variable: string): HarnessPort {
  *  every consumer would then fail in its own words — the second listener dying on `EADDRINUSE`
  *  without naming a variable. Refused here, where the ports resolve, so every caller refuses it
  *  the same way, including the Bun listeners. A's and B's ports take part only in two-process
- *  mode, the one mode that listens on them, and the issuer's only under `DISPATCH_E2E_SIGNIN=oidc`. */
+ *  mode, the one mode that listens on them, the sign-in issuer's only under
+ *  `DISPATCH_E2E_SIGNIN=oidc`, and the real broker's and its issuer's only when this run starts
+ *  that pair (`e2e/harness-real-broker.ts`). */
 export function harnessPorts(
   env: NodeJS.ProcessEnv = process.env
 ): Record<HarnessListenerKey, HarnessPort> {
   const ports = {
+    devIssuer: harnessPort(env, harnessVariables.devIssuer),
     dispatch: harnessPort(env, harnessVariables.dispatch),
     dispatchA: harnessPort(env, harnessVariables.dispatchA),
     dispatchB: harnessPort(env, harnessVariables.dispatchB),
@@ -167,13 +180,15 @@ export function harnessPorts(
     fakeEnvoy: harnessPort(env, harnessVariables.fakeEnvoy),
     fakeGithub: harnessPort(env, harnessVariables.fakeGithub),
     plainHttp: harnessPort(env, harnessVariables.plainHttp),
+    realBroker: harnessPort(env, harnessVariables.realBroker),
     signinIssuer: harnessPort(env, harnessVariables.signinIssuer),
   };
   const given = Object.values(ports).filter(
     (entry) =>
       entry.port !== 0 &&
       (harnessProcessCount === 2 || (entry !== ports.dispatchA && entry !== ports.dispatchB)) &&
-      (harnessSignIn === "oidc" || entry !== ports.signinIssuer)
+      (harnessSignIn === "oidc" || entry !== ports.signinIssuer) &&
+      (usesRealBroker || (entry !== ports.devIssuer && entry !== ports.realBroker))
   );
   const collisions = [...new Set(given.map((entry) => entry.port))]
     .map((port) => ({

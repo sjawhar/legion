@@ -17,14 +17,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
-// Kinds is every edge type graph_edges emits.
-var Kinds = []string{"mentions", "child_of", "blocked_by", "attached_to", "anchored_to", "owned_by", "replies_to", "followed_by", "part_of", "depends_on", "affects"}
-
-// KnownKind reports whether kind is an edge type graph_edges emits.
-func KnownKind(kind string) bool {
-	return slices.Contains(Kinds, kind)
-}
-
 // excerptRunes bounds the head of an item's text shown beside an edge.
 const excerptRunes = 240
 
@@ -69,10 +61,10 @@ var AskBacklinkExclusions = []string{"replies_to"}
 // BacklinkCounts is how many edges point at each of ids, in one grouped query: the number a
 // list carries beside a row, counted the same way the rows behind it are listed. It counts only
 // edges whose source is a node kind this build reads, so the count is the rows its list shows,
-// and counts a document's, comment's or message's mention once for each of its blocks citing the
-// node, in place of the item's own edge (heldByABlock): a comment citing a node from two
-// paragraphs counts 2. A node with no inbound edge is absent from the result; the caller decides
-// what zero means.
+// and counts a document's, comment's or message's mention once for each of its blocks' links to
+// the node, in place of the item's own edge (heldByABlock): a comment citing a node from two
+// paragraphs counts 2, and a document's block pointing at the node counts once whatever its link's
+// kind. A node with no inbound edge is absent from the result; the caller decides what zero means.
 func BacklinkCounts(
 	ctx context.Context,
 	q Queryer,
@@ -126,9 +118,12 @@ type edgeRow struct {
 }
 
 // heldByABlock is true of a document's, comment's or message's mention edge (graph_edges row
-// alias) when a block of that item holds a link of the same kind to the same target: that block's
-// own edge is listed and counted in its place, so each link shows once. An item the block index
-// has not reached holds no block mention, so its own edge stays.
+// alias) when a block of that item holds a link of any kind to the same target, listed or not:
+// that block's own edge is listed and counted in its place, so each link shows once. A typed
+// block's pointer is also written in the document's text, so the document's mention of the target
+// is hidden behind the pointer's edge, and stays hidden while the pointer's target has a type the
+// pointer does not allow (block_ref_listed). An item the block index has not reached holds no
+// block link, so its own edge stays.
 func heldByABlock(alias string) string {
 	holders := []string{blockHolds(alias, "artifact", "block_refs", "artifact_id")}
 	for _, item := range []ItemKind{ItemComment, ItemMessage} {
@@ -139,11 +134,11 @@ func heldByABlock(alias string) string {
 }
 
 // blockHolds is true of a graph_edges row alias written by an item of fromKind when one of the
-// item's blocks holds a link of the row's kind to its target in table, whose column keys the item.
+// item's blocks holds a link of any kind to its target in table, whose column keys the item.
 func blockHolds(alias, fromKind, table, column string) string {
 	return `(` + alias + `.from_kind = '` + fromKind + `' and exists (
 		select 1 from ` + table + ` b where b.to_kind = ` + alias + `.to_kind and b.to_id = ` + alias + `.to_id
-		and b.kind = ` + alias + `.kind and b.` + column + `::text = ` + alias + `.from_id))`
+		and b.` + column + `::text = ` + alias + `.from_id))`
 }
 
 // documentBlockIDs is the node id of every current block of the document whose ref_key is the
@@ -310,7 +305,7 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 			from graph_edges g where g.from_kind = $1 and g.from_id = $2 and not ` + heldByABlock("g") + `
 			union all
 			select b.kind, b.to_kind, b.to_id, b.created_at, b.source_seq, b.from_node
-			from block_refs b where b.artifact_id = $3::uuid`
+			from block_refs b where b.artifact_id = $3::uuid and (b.to_types is null or block_ref_listed(b.to_types, b.to_id))`
 	case query.Direction == "out" && itemBlocks:
 		tables, _ := item.tables()
 		arms = `select g.kind, g.to_kind, g.to_id, g.created_at, g.source_seq, null::text
