@@ -2,43 +2,72 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-606",
-  "round": 23,
-  "previousHandoff": "05f21326314b6f48c07a33fa5feb898a5ae65c86",
-  "headTested": "92d2faba5e8b9a634c7f329aa50979186b225232",
-  "handoffHead": "1e9ff3b3fb54adb4baaa861583d3b12a023db538",
+  "round": 24,
+  "previousHandoff": "ff59a79f689c85026feafc486b177bb07835879e",
+  "headTested": "b29a1a0aac06a503b066e7b6121326af46ef2477",
+  "handoffHead": "d25a64e55373b73179f4cc552ffe8aa1f2b057a6",
   "roundShape": {
-    "verdict": "confirmation round (forward-merge re-check 253a1afc -> 92d2faba: fingerprint unchanged)",
+    "verdict": "full round on the merge of main 225f2bea (#2391), as the architect asked",
     "tool": "round-shape.py v3, run from the workspace with 2406",
     "oldHead": "253a1afccf556c7f90d96901ce909400d9572342",
-    "newHead": "92d2faba5e8b9a634c7f329aa50979186b225232",
-    "differingFiles": [],
-    "equalOnlyAfterNormalisation": [],
-    "toolCheck": "25206ba7 -> 253a1afc on the same tool lists 20 differing files and 3 equal after normalisation"
+    "newHead": "b29a1a0aac06a503b066e7b6121326af46ef2477",
+    "differingFiles": [
+      ".dispatch/architecture/dispatch-api.md (doc)",
+      "packages/envoy/.changes/unreleased/pr2406-Changed-20261028-113303.yaml (changelog)",
+      "packages/envoy/AGENTS.md (doc)",
+      "packages/envoy/cmd/dispatch/shutdown_mentions_test.go (test: main's renamed api.MaintenanceSweepInterval)",
+      "packages/envoy/internal/dispatch/api/delivery_live_hub.go (runtime: the events channel is main's exported EventsChannel; comment narrowed to the live paths)",
+      "packages/envoy/internal/dispatch/api/delivery_live_hub_test.go (test)",
+      "packages/envoy/internal/dispatch/api/delivery_sweep.go (comments only)",
+      "packages/envoy/internal/dispatch/api/event_stream_relay.go (runtime: dispatchEventsChannel is now main's exported EventsChannel, which cmd/dispatch also hands main's RunSuggestionOutcomeSweep wake; comments)",
+      "packages/envoy/internal/dispatch/api/event_stream_relay_test.go (test)",
+      "packages/envoy/internal/dispatch/store/pool.go (comments only: main's fourth listener, pglisten.Hub, named beside this PR's on-demand relay and hub; listenerPoolSize unchanged)"
+    ],
+    "equalOnlyAfterNormalisation": [
+      "packages/envoy/.changes/unreleased/pr2406-Changed-20261028-113305.yaml",
+      "packages/envoy/cmd/dispatch/README.md",
+      "packages/envoy/internal/dispatch/store/migrations/NNNN_comment_fallback_copies.census.sql (0151 -> 0161)",
+      "packages/envoy/internal/dispatch/store/migrations/NNNN_comment_fallback_copies.up.sql (0151 -> 0161)"
+    ],
+    "toolCheck": "25206ba7 -> 253a1afc lists 20 differing files on the same tool"
   },
-  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round23-checkpoint-md; round 22's evidence stands for the rest",
+  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round24-checkpoint-md (version 2); dispatch://INFRA-606/artifact/infra606-tester-round24-restart-tar-gz",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The PR's own diff is unchanged at 92d2faba (round-shape.py, 0 files), as the implementer reports."
+    "how": "Re-ran at b29a1a0a the deploy test, the store and pgmigrate suites, outbox, events and the api mention and stream groups, and the claimant proof. The numbering test fails exactly as the implementer and architect state; everything else the implementer lists passes here too, except one relay test that failed once (notes)."
   },
-  "failures": [
-    {
-      "criterion": "The fallback table's migration has a number no other migration uses.",
-      "evidence": "Main 225f2bea (#2391, merged 09:21:49Z) now holds 0151_embeddings_notify through 0157_document_edit_notices_notify. This PR's 0151_comment_fallback_copies.up.sql and .census.sql collide with 0151_embeddings_notify, which pgmigrate's shared-version guard and TestMigrationSetIsNumberedOneToN refuse after a merge. When I first read main (4b0b98ec, about 08:50Z) its highest migration was 0150_dpop_proofs. The implementer renumbers to the next free number (0158 at main 225f2bea; the architect names 0161)."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "Confirmation at 92d2faba: the PR's own diff is unchanged from 253a1afc.",
-      "surface": "round-shape.py over the two heads",
-      "command": "python3 round-shape.py 253a1afccf556c7f90d96901ce909400d9572342 92d2faba5e8b9a634c7f329aa50979186b225232 2406",
-      "observed": "0 files differ, and none is equal only after normalisation.",
-      "headSha": "92d2faba5e8b",
-      "negativeControl": "The same tool on 25206ba7 -> 253a1afc lists 20 differing files."
+      "criterion": "Main's fourth LISTEN listener and the events channel work beside this PR's relay on the real binary, and a live stream and a resume across a held insert deliver in id order.",
+      "surface": "envoy-dispatch built from d25a64e5 (vcs.modified=false) on the load-test stack; Postgres with log_statement=all for the run; GET /ws/live events view (wse client); a psql transaction holding an event insert open",
+      "command": "swap.sh head; grep 'statement: listen' in the Postgres log at boot and with one events subscriber; pg_stat_activity count of LISTEN connections before, during and after; horizon.sh h24-live live; horizon.sh h24-resume resume",
+      "observed": "At boot two listeners: main's wake hub ('listen dispatch_excerpts_owed; listen dispatch_edit_notices; listen dispatch_events') and the stale-room evictor ('listen dispatch_doc_changed'). An events subscriber starts the relay ('listen dispatch_events', 3 listeners); once it leaves, 2 again. Live: nothing above the held id L while it is open, then L and the comment, in order. Resume: events_start replay_complete true, nothing until L commits, then both in order.",
+      "headSha": "b29a1a0aac06",
+      "negativeControl": "Round 17 recorded round 16's build delivering the comment first and never L, on both paths."
+    },
+    {
+      "criterion": "Review round 9's deploy test still passes; every migration test but the numbering one passes, and the numbering one fails only on 0158-0160.",
+      "surface": "internal/dispatch/api, store and pgmigrate against a superuser Postgres 16 on the issue volume",
+      "command": "GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 ./internal/dispatch/api/ -run '^TestAMentionThePreviousBuildDeliveredIsDroppedAsARepeatAfterTheDeploy$' -count=2; go test -p 1 ./internal/dispatch/store/ -run '^TestMigrationSetIsNumberedOneToN$'; go test -p 1 ./internal/dispatch/store/ -skip '^TestMigrationSetIsNumberedOneToN$'; go test -p 1 ./internal/pgmigrate/...",
+      "observed": "Deploy test: both subtests pass 2 of 2. TestMigrationSetIsNumberedOneToN fails with: 'migration 0161_comment_fallback_copies.up.sql is numbered 161 where 158 comes next'. The rest of store passes, and pgmigrate passes.",
+      "headSha": "b29a1a0aac06",
+      "negativeControl": "Round 22 recorded the deploy test failing with 45530037's key (2 frames)."
+    },
+    {
+      "criterion": "Outbox, events and the api mention suites, the claimant proof, and a restart with resuming live sockets.",
+      "surface": "Go suites; scripts/e2e/dispatch-claimant-delivery.sh on the head binary; the load-test restart scenario on a stack seeded at migration 161",
+      "command": "go test -p 1 ./internal/dispatch/outbox/... ./internal/dispatch/events/...; go test -p 1 ./internal/dispatch/api/ -run 'Mention|Retry|Sweep|Keyed|Fallback|Supersede|Claimant|Refresh|Lane|Deploy|Duplicate|Silent|Abandoned|Listener|Relay|Horizon|Hub|Live'; claimant proof; run-step.sh r24-restart and r24-restart-b (--live 50 --live-resume 1 --live-stale 10 --restart-at 90s --mention-frac 0.2 --mentions 3 --envoy-rtt 200ms)",
+      "observed": "outbox and events pass. The api groups give 232 PASS, 1 SKIP and 1 FAIL (TestEventStreamRelaySubscribeRacingTheLastCancelReceivesTheNextEvent, notes). Claimant proof: 15 ok. Restart run 2: 50 reconnects, replayed frames per reconnect at most 175, under the 256 bound, the stale sockets refetched, 13.2 Dispatch CPU-s in the minute after. Restart run 1: see notes. Sampled memory peak 6.35 GiB of 19 over 3,144 samples.",
+      "headSha": "b29a1a0aac06",
+      "negativeControl": "The replay bound's control is round 17's base build, which replays the whole backlog; not re-run."
     }
   ],
   "notes": [
-    "CI at 92d2faba, read at 09:22Z: only changes (success) and pr-title (queued) had started. ci-ok and every other lane are unread.",
-    "No Go suite or load run in this round; nothing of mine runs except the CI watcher job, which I stop before completing."
+    "CI at b29a1a0a, read 12:25Z: every lane green except envoy-go and envoy-go-race, each red on TestMigrationSetIsNumberedOneToN alone (the 0158-0160 gap, by design until #2395 and #2444 land); ci-ok was queued and will be red for that reason. envoy-go-race-api and dispatch passed. Main's collation test did not show as a red in CI.",
+    "Restart run 1 (r24-restart) was a storm the second run did not repeat: in the minute after the restart the new process answered 96 GET /ws/live with 500 after 10 s ('record person \"viewer-N\": context canceled', store/people.go:43, a one-row insert), so the sockets reconnected 115 s after the restart (7 failed attempts each), outside the measured window. Run 2 on the same build had no such 500. Round 22's run, before #2391's merge, had none either. I could not take a base pair: run-step refuses main 225f2bea on the 0161 seed, and a reseed with main costs about 40 minutes. A one-row insert waiting 10 s points at the shared pool being saturated at start; whether #2391's woken loops, this PR's startup recovery pass, or the box (2 vCPU) caused it is not settled. Both runs are uploaded.",
+    "TestEventStreamRelaySubscribeRacingTheLastCancelReceivesTheNextEvent failed once ('the relay published nothing in 5s') in the full api run while the stack seed ran beside it; it then passed 20 of 20 alone and 30 of 30 under six busy loops on 2 vCPU, and it passed in CI's envoy-go-race-api.",
+    "Leftover check (ps for memory.usage_in_bytes, sleep 2, envoy-dispatch, the compiled test binary, busy loops): nothing listed. The load stack is stopped."
   ]
 }
