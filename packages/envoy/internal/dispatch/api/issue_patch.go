@@ -351,7 +351,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	advice := s.writeAdviceBefore(r.Context(), tx, "PATCH /api/v1/issues/{key}", key, actor, afterStatus, afterRow, adviceAsks{
 		excluded: askIDs(closingAsks),
-		opened:   reopenedAsks,
+		opened:   askIDs(reopenedAsks),
 	})
 	if changed {
 		sets = append(sets, "updated_at = "+issueUpdatedNow)

@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
@@ -79,19 +78,15 @@ const adviceOpenAskLimit = 2
 // the read runs in the write's read phase, before the write's statements (writeAdvice), so a
 // close's withdrawals and a reopen's restorations are queued rather than written. excluded names
 // the asks the answer leaves out - the ask the write is about, which it never echoes back, and
-// the asks a close withdraws, whose rows the read still finds open - and opened the asks a reopen
-// restores, whose rows the read still finds resolved; a write names an ask in at most one of
-// them. The adjustment keeps the read's order, created_at then id, and its cap, so the answer is
-// the one the same read gave after the write.
+// the asks a close withdraws, whose rows the read still finds open - and opened the ids of the
+// asks a reopen restores, whose rows the read still finds resolved; a write names an ask in at
+// most one of them. A restoration writes back an ask's state, its answer and its resolution and
+// nothing else (prepareRestoration), so a restored row's question, author and created_at already
+// read as they would after the write, and the query itself takes both sets, in its own order and
+// under its own cap.
 type adviceAsks struct {
 	excluded []string
-	opened   []model.Ask
-}
-
-// adviceOpenAsk is one open ask with what your_open_asks orders by.
-type adviceOpenAsk struct {
-	adviceAsk
-	createdAt time.Time
+	opened   []string
 }
 
 // computeWriteAdvice runs the issue-scoped advice queries for a session's write. Two of them are
@@ -142,47 +137,27 @@ func (s *server) computeWriteAdvice(
 		return nil, &adviceQueryError{query: "your_open_asks", err: err}
 	}
 	rows, err := tx.Query(ctx, `
-		select id::text, question, created_at from asks
-		where issue_key = $1 and state = 'open'
+		select id::text, question from asks
+		where issue_key = $1
 		  and author->>'kind' = 'session' and author->>'id' = $2
-		  and id::text <> all(coalesce($3::text[], '{}'))
+		  and ((state = 'open' and id::text <> all(coalesce($3::text[], '{}')))
+		    or id::text = any(coalesce($5::text[], '{}')))
 		order by created_at, id
 		limit $4
-	`, issueKey, actor.ID, asks.excluded, adviceOpenAskLimit)
+	`, issueKey, actor.ID, asks.excluded, adviceOpenAskLimit, asks.opened)
 	if err != nil {
 		return nil, &adviceQueryError{query: "your_open_asks", err: err}
 	}
 	defer rows.Close()
-	open := make([]adviceOpenAsk, 0, adviceOpenAskLimit+len(asks.opened))
 	for rows.Next() {
-		var ask adviceOpenAsk
-		if err := rows.Scan(&ask.ID, &ask.Question, &ask.createdAt); err != nil {
+		var ask adviceAsk
+		if err := rows.Scan(&ask.ID, &ask.Question); err != nil {
 			return nil, &adviceQueryError{query: "your_open_asks", err: err}
 		}
-		open = append(open, ask)
+		advice.YourOpenAsks = append(advice.YourOpenAsks, ask)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, &adviceQueryError{query: "your_open_asks", err: err}
-	}
-	// The asks the write opens that the read found resolved, merged into the read's own order:
-	// every stored open ask past the cap sorts after the ones it answered, so the oldest of the
-	// merged list are the oldest of them all.
-	for _, ask := range asks.opened {
-		if ask.Author.Kind != "session" || ask.Author.ID != actor.ID {
-			continue
-		}
-		open = append(open, adviceOpenAsk{
-			adviceAsk: adviceAsk{ID: ask.ID, Question: ask.Question}, createdAt: ask.CreatedAt,
-		})
-	}
-	slices.SortFunc(open, func(left, right adviceOpenAsk) int {
-		if order := left.createdAt.Compare(right.createdAt); order != 0 {
-			return order
-		}
-		return strings.Compare(left.ID, right.ID)
-	})
-	for _, ask := range open[:min(len(open), adviceOpenAskLimit)] {
-		advice.YourOpenAsks = append(advice.YourOpenAsks, ask.adviceAsk)
 	}
 	if status == model.IssueStatusTriage {
 		advice.LegionManagedStatus = s.legionManagedStatusAdvice(ctx, tx, route, issueKey, row)
