@@ -2,60 +2,64 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-644",
-  "completed": "2026-10-30T01:41:27Z",
-  "pullRequest": "https://github.com/sjawhar/legion/pull/2485",
-  "head": "e00c6528f3bb10724d08941ffe07ab3b30949676",
-  "mergeRuleApplied": "INFRA-512 spec v25 (architect's message 2026-10-29 17:52Z): correct (tests plus base-versus-head equivalence over real LINUX specs) and not slower (median of three head runs at or below the highest of three base runs, whole-process CPU-seconds); memory kept beyond a request is quoted for the architect's decision. The plan's earlier gates (A6 E/2 on observe share, A7 G/2) are reported as evidence only, as the new rule says.",
+  "previousHandoff": "05a9bbe26b62897a8e907170127336f2fff02834",
   "proof": [
     {
-      "criterion": "A6 / DR-02: the per-keystroke whole render is gone under browser editors, and the process is not slower",
-      "surface": "INFRA-589 editor load test (packages/envoy/loadtest from INFRA-605's branch): Dispatch, Postgres, NATS and the listener built from source, 20 and 200 browser editors on the document websocket, #2445 applied on both sides, one 2-vCPU pod",
-      "command": "run-step.sh a6-1x-<side>-<n> --events 4 --sessions 400 --requests 60 --editors 20 --editor-rate 2 --editor-docs 10 and run-step.sh a6-ed10x-<side>-<n> --events 1 --sessions 100 --requests 15 --editors 200 --editor-docs 100; base ec8f343b (INFRA-605 + main 2b427f93 on ygo sami.8) and head 0f5c43c1 (base merged with e00c6528) alternated, 3 runs each, 19:19Z-20:19Z 2026-10-29; observe = cum seconds of docs.(*renderedReplica).observe in go tool pprof -top -cum -nodecount=300; runs in dispatch://INFRA-644/artifact/infra644-a6-editor-runs-tar-gz",
-      "observed": "1x: process CPU-s base 69.26/63.70/65.52, head 66.59/75.70/66.74 (head median 66.74 <= base high 69.26); observe cum-s median 13.53 -> 1.59; REST 2xx 29.5% -> 55.3%; relay p50 87 -> 21 ms. editors-10x: CPU-s base 120.19/123.70/107.88, head 97.04/91.20/94.47; observe 66.0 -> 6.1 cum-s; acked editor updates 32,678 -> 71,734; REST 2xx 88% -> 100%. One head 1x run had 2 editor sockets close 1006 (632 updates not sent) with the same Postgres conn-closed errors the base runs show.",
-      "headSha": "e00c6528f3bb10724d08941ffe07ab3b30949676",
-      "negativeControl": "The base build (no per-block path) under the same command rendered the whole document on every browser update: observe 13.1-15.1 cum-s at 1x and 64-71 cum-s at editors-10x, with relay p99 1.5-2.7 s and 2.1 min-3 min respectively."
+      "criterion": "Copies of a room replay its commits exactly at ygo v1.54.1-sami.3 (#2496's review): the replica equals the room in state vector, delete set, every text's ToDelta and state bytes after local Server.Apply formatting, browser formatting and API writes",
+      "surface": "docs package live room against Postgres (render-reuse harness, real ygo websocket room, browser peer)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=$LEGION_TEST_PG_DSN go test -count=1 ./internal/dispatch/docs/ (TestRenderReuseAReplicaReplaysTheRoomsFormattingExactly among them); logs dispatch://INFRA-644/artifact/infra644-final-suites-tar-gz",
+      "observed": "every docs test passed at a3f98f2e (the package's FAIL line is storetest's teardown on the pod's test Postgres alone: permission denied to terminate process); the format replay test's fixed case and 4 seeds x 160 steps hold the replica equal to the room after every step",
+      "headSha": "a3f98f2efc0ac810cf0c117337575e91ae2d7bd0",
+      "negativeControl": "with crdt.WithFormatCleanup(false) removed from newDocumentCopy, the fixed case fails at its delete ('the replica tombstones what the room does not') and seeds 2 and 3 fail at local deletes"
     },
     {
-      "criterion": "A7 / W13 and A8: the replica's catch-up reuses the load's rendering, the write workload is not slower, and no memory is kept beyond the layout",
-      "surface": "INFRA-639's replay of LINUX's 2026-10-26 write window against Dispatch built from each commit, Postgres from the replay seed, one 2-vCPU pod",
-      "command": "run-step.sh a7-<side>-<n> --replay --rate 0.15 --gomaxprocs 2 --uploads 0.25 --rng-seed 1 --dispatch-commit <rev> (client 4f53011a), base 40660978 (main 2b427f93 on ygo sami.8) and head e00c6528 alternated, 3 each, 20:47Z-01:10Z; runs in dispatch://INFRA-644/artifact/infra644-a7-replay-runs-tar-gz",
-      "observed": "Dispatch CPU-s base 1142.0/1099.0/1102.2, head 1054.7/1072.3/1067.6: every head run below every base run (median -3.1%); identical end state (sha256 f550e89c...) in all six; renderedReplica.start cum-s median 29.0 -> 18.4, observe 29.6 -> 19.0. Heap in use p50 median 604 -> 588 MB, RSS max median 1478 -> 1408 MB; the layout (5 B per top-level block, at most about 350 KB for the replay's 71 documents) is below the heap profile's 512 KiB sampling rate.",
-      "headSha": "e00c6528f3bb10724d08941ffe07ab3b30949676",
-      "negativeControl": "TestRenderReuseACatchUpTakesTheLoadsRendering: with runtime.GC() between the load and the first commit, the weak pointer is nil and the run counts catchUpRendered, not catchUpFromLoad; after a recover the held rendering is dropped and never taken."
+      "criterion": "Not slower on LINUX's write window, the same end state (INFRA-512's merge rule), at ygo v1.54.1-sami.3",
+      "surface": "INFRA-639's replay of LINUX's write window: Dispatch, Postgres, NATS and the listener built from each tree on one 2-vCPU pod (3354b744), base and head alternating",
+      "command": "run-step.sh r5-replay-<side>-<n> --replay --rate 0.15 --gomaxprocs 2 --uploads 0.25 --rng-seed 1 --dispatch-commit <rev>, base main efed4e4d, head c28aead3; steps dispatch://INFRA-644/artifact/infra644-r5-replay-*-tar-gz, tables dispatch://INFRA-644/artifact/infra644-r5r6-tables-tar-gz",
+      "observed": "Dispatch CPU-s base 1005.8/1016.8/1015.0, head 1004.9/987.5/981.2: every head run below every base run (medians -2.7%); all six end in state 973d289e; observe cum-s 26.1-27.5 at the base, 15.5-16.0 at the head",
+      "headSha": "c28aead36f35b4526ef97b1149c03fbe26493722",
+      "negativeControl": "the base side is the control for the cost: no per-block path or load hand-over, observe 26.1-27.5 cum-s against 15.5-16.0"
     },
     {
-      "criterion": "A1-A3: the per-block splice equals the whole render byte for byte on real documents, and every update's class is unchanged in a live room",
-      "surface": "pmdoc differential over 32 real LINUX specs (fetched with dispatch doc-read, not committed) and the docs package's live-room shadow harness against Postgres 17 + pgvector",
-      "command": "DISPATCH_RENDER_CORPUS=$TMPDIR/infra644/corpus go test -count=1 -timeout 120m -run TestIncrementalRenderCorpus -v ./internal/dispatch/pmdoc/ ; go test -count=1 -run 'TestRenderReuse' ./internal/dispatch/docs/ (packages/envoy)",
-      "observed": "Corpus: 32 documents, 18,764 seeded edits, 17,345 spliced, each byte-identical to RenderWithLayout of the edited document with an equal layout; 5,077/5,077 paragraph, heading and list text edits spliced; PASS (991.96 s). TestRenderReuseABrowserTypingScript on a 400 KB+ document: sh.check equal after every update, whole render only for the 2 Enters and 2 block edits; all TestRenderReuse tests pass.",
-      "headSha": "e00c6528f3bb10724d08941ffe07ab3b30949676",
-      "negativeControl": "With guard G4 (footnote definitions) or G5 (block marker class) disabled, the differential failed with spliced markdown differing from the whole render (e.g. '[^b] stays text' vs '\\[^b] stays text'); with the incremental path's ask ids made empty, the typing test failed on the ask-id comparison and on the ask author."
+      "criterion": "Render CPU and REST 2xx before and after on INFRA-589's editor load test (spec), at ygo v1.54.1-sami.3",
+      "surface": "INFRA-589's editor load test (INFRA-605's #2445 harness on both sides): 20 or 200 browser editors on the real document websocket beside REST sessions",
+      "command": "run-step.sh r5-ed1x-<side>-<n> --events 4 --sessions 400 --requests 60 --editors 20 --editor-rate 2 --editor-docs 10 and r5-ed10x-<side>-<n> --events 1 --sessions 100 --requests 15 --editors 200 --editor-docs 100; base ecbaee7d, head bdf27ffb; steps dispatch://INFRA-644/artifact/infra644-r5-ed*-tar-gz",
+      "observed": "1x: Dispatch CPU-s 72.01/51.71 base, 42.92/37.38 head, observe 19.24/8.27 vs 0.59/0.23, REST 2xx 31.1/18.2% vs 23.2/17.8% (falling with run order on both sides; Postgres at 0.80-0.92 cores bounds it); editors-10x: Dispatch cores 0.493/0.558 vs 0.486/0.454, observe 39.2/46.2 vs 3.4/3.0, REST 2xx 72.6/81.4% vs 100/100%, acked 22081/29470 vs 69471/67055",
+      "headSha": "bdf27ffbac7de16548ef3ee60dce4b7866a83a06",
+      "negativeControl": "the base side is the control: whole render per keystroke, observe 8-46 cum-s and relay p50 83-719 ms against 28-56 ms"
+    },
+    {
+      "criterion": "The pairs still hold at the merged head, whose merge of #2522 changed a write's render (documentRenderingValidWithLayout); a validated tree's RenderWithLayout is the validating render",
+      "surface": "the replay and the 1x editor step at the merged head on one pod (37bf5b88), and the pmdoc differential over 32 real LINUX documents",
+      "command": "confirm-all.sh: replay base main d09b46d7 vs a3f98f2e, ed1x ed-base2 13666dd2 vs ed-head2 7983a59f (dispatch://INFRA-644/artifact/infra644-round6-trees-tar-gz, steps infra644-r6-*); DISPATCH_RENDER_CORPUS=<32 docs> go test -run 'TestIncrementalRenderCorpus|TestValidDocumentRenderWithLayoutIsTheValidatingRender' -v ./internal/dispatch/pmdoc/",
+      "observed": "replay 1071.1 vs 1055.4 Dispatch CPU-s, both end in 973d289e; ed1x 48.85 vs 40.44 CPU-s, observe 7.38 vs 0.41; corpus: 17,381 of 18,805 edits spliced byte-identical, 5,084/5,084 text edits; 307 documents render identically through the validated and the validating render",
+      "headSha": "a3f98f2efc0ac810cf0c117337575e91ae2d7bd0",
+      "negativeControl": "with the validated render recording no layout, TestValidDocumentRenderWithLayoutIsTheValidatingRender fails on every fixture ('the validated render's layout is not the validating render's')"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/pmdoc/layout.go (new: Layout, RenderWithLayout, Splice with guards G0-G8)",
-    "packages/envoy/internal/dispatch/pmdoc/render.go, read.go (layout recording; ReadBlockForRendering)",
-    "packages/envoy/internal/dispatch/pmdoc/layout_test.go, layout_race_test.go, layout_norace_test.go",
-    "packages/envoy/internal/dispatch/docs/tree.go (three observer paths, touchedBlocks, blockChangeFinder, loadedRendering, renderingAt, keep)",
-    "packages/envoy/internal/dispatch/docs/websocket.go, livewrite.go, mutation.go",
-    "packages/envoy/internal/dispatch/docs/render_reuse_test.go, stale_room_test.go, live_read_bench_test.go",
-    "packages/envoy/go.mod, go.sum (sjawhar/ygo v1.51.3-sami.8)",
-    "packages/envoy/AGENTS.md, packages/envoy/.changes/unreleased/INFRA-644-observer-renders-touched-blocks.yaml"
+    "packages/envoy/go.mod, go.sum: sjawhar/ygo v1.54.1-sami.3",
+    "packages/envoy/internal/dispatch/docs/tree.go: newDocumentCopy replays with crdt.WithFormatCleanup(false); documentRenderingValidWithLayout",
+    "packages/envoy/internal/dispatch/docs/mutation.go: a write's render of its validated fork records the layout without validating again",
+    "packages/envoy/internal/dispatch/pmdoc/layout.go: ValidDocument.RenderWithLayout",
+    "packages/envoy/internal/dispatch/docs/render_formatting_test.go, peer_test.go: the format replay test",
+    "packages/envoy/internal/dispatch/pmdoc/valid_layout_test.go: the validated-render equivalence test",
+    "packages/envoy/internal/dispatch/docs/nil_origin_credit_test.go: helper renamed copiedRoomMarkdown (clash with main's roomMarkdown)",
+    "packages/envoy/internal/dispatch/docs/websocket.go: main's taken stored state named stored (clash with the load's rendering)",
+    "packages/envoy/.changes/unreleased/pr2485-observer-renders-touched-blocks.yaml: fragment named for the pull request"
   ],
   "trickyParts": [
-    "Exactness of the splice rests on the guards in pmdoc/layout.go: no cross-block renderer state may carry into the next block, the footnote label set and other-list-marker classes must be unchanged, and the span budget must never reach 0.",
-    "ygo's ChangedTypes includes types the transaction created or deleted; the walk up Parent is bounded by pmdoc.MaxTreeDepth so a deep chain renders whole instead of costing depth per changed type.",
-    "Two forward merges of main (#2448 margin-only path, #2479 validate-once read) were needed for GitHub-reported conflicts; their fingerprints are posted on the pull request."
+    "Three forward merges (main 151d2d79, efed4e4d, d09b46d7); each fingerprint and resolution is a comment on #2485. #2522's merge changed measured code, so a confirming replay and 1x pair ran at the merged head.",
+    "Two pod replacements lost the scratch disk; each step was uploaded as it ended and a pair a replacement cut was dropped and run again."
   ],
   "deviations": [
-    "Spec title S1: the base encode stays; the catch-up reuses the load's render (accepted by the INFRA-512 architect 2026-10-28 19:04Z).",
-    "Spec memory S2: 5 bytes per top-level block per resident replica (accepted 2026-10-28 19:04Z); measured memory quoted in the pull request for the architect's rule-3 decision.",
-    "Scope S3: two ygo fork accessors, released by the fork maintainer as v1.51.3-sami.8 after the consumer-side route was measured (dispatch://INFRA-644/artifact/block-finder-routes-measured-md); the architect chose the accessor route 2026-10-28 22:33Z.",
-    "The merge rule changed mid-phase to INFRA-512 spec v25; A6 and A7 ran 3 alternating runs per side under it rather than the plan's 5.",
-    "The docs package's full -race run does not fit this pod's memory in one process (main's tests reach 5-6 GB too); it was run in 40-test chunks, all race-clean."
+    "The confirming 1x pair cannot run on main d09b46d7 itself: the editor harness lives only on INFRA-605's branch (#2445, open, 134 commits behind main, 18 files conflicting). Its base is the editor base with #2522 cherry-picked and its head the editor head with #2522 resolved as merge 7a985b8c resolves it.",
+    "The corpus was rebuilt by the same rule (30 largest LINUX issue documents plus LINUX-129 and LINUX-364) over the project's documents on 2026-11-01, so its members differ from the October set; the list is dispatch://INFRA-644/artifact/infra644-corpus-list-tsv."
   ],
-  "openQuestions": [
-    "Merge order: this pull request pins sami.8, which carries sami.5-7; #2444 (sami.7) is still open. If #2444 is not on main at READY, the INFRA-512 architect decides the order with INFRA-514's architect, as the plan says.",
-    "#2445 (INFRA-605) must carry its admission's markdown and layout to keepReplica after this merges, or its cold-socket loads render their base (catchUpRendered); already told to INFRA-514's architect."
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "Sent to the controller: Ledger.fail fails every room a write touched when a client cancels the write during its commit (r6-ed1x-head-1: four rooms failed, 693 editor updates unsent).",
+    "Sent to the controller: TestAnUploadHoldsNoIssueLockWhileTheStoreWrites is flaky on main's code.",
+    "Sent to the controller and the merge lane: the pod's test Postgres role lacks pg_signal_backend, so storetest's teardown fails."
   ]
 }
