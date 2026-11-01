@@ -2,24 +2,26 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-839",
-  "completed": "2026-11-01T11:05:00Z",
-  "round": 6,
-  "reviewedCodeHead": "a4b9ededf432b025a66d1405e75780845152928f",
-  "diffBase": "15e39ed3b8ba (legion/INFRA-594, merged at e19f161c)",
+  "completed": "2026-11-01T14:20:00Z",
+  "round": 7,
+  "reviewedCodeHead": "9c02143e3c9d28d57567ec9ef214a0cda99e03e5",
+  "diffBase": "6ef5cefabac2 (legion/INFRA-594, merged at 9c02143e)",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
-  "minor": 2,
-  "ci": "Run 41286410318 (CI, pull_request, a4b9ededf432) completed success at 10:58Z. ci-ok, envoy-go, envoy-go-race and claude-envoy succeeded, and pr-title succeeded at the handoff head. I pushed nothing while the run ran. The base legion/INFRA-594 requires no check.",
-  "round5": "All four round-5 findings and the three minors are fixed in a4b9eded. The claude-envoy calls pass clientInstanceID. The race test holds the role's guard for the subtest; I and the deep review checked the other tests that keep and then claim one role and found no second race. A failed lane-head read is retried and reported at Error. Each pass reads the head once and hands it to the walk, and the sweep no longer reads it. role_keep.go is 979 lines, with the two single-caller helpers folded in. I answered each round-5 thread.",
+  "important": 0,
+  "minor": 5,
+  "ci": "Run 41306087031 (CI, pull_request, 9c02143e3c9d) completed success at 14:09Z. ci-ok, envoy-go, envoy-go-race and claude-envoy succeeded, and pr-title succeeded at the handoff head. I pushed nothing while the run ran. The base legion/INFRA-594 requires no check.",
+  "round6": "Both round-6 findings and the two minors are fixed in 628cb287. Every failed read goes through one retry() that retries and reports at Error only while the cached claim names a session, and otherwise ends at Debug. hold(ctx, role) is a channel of one that gives up with its context. Every exit returns ended(). The merge 9c02143e is correct: the merged tool-contract.ts and deliveries.md are this branch's text plus every change the base made. I answered each round-6 thread.",
+  "whyChangesRequested": "No correctness finding stands. The deep review approved; the code quality review returned CHANGES on Minor findings only. Under the no-deferrals rule, a clear fix in a file this pull request touches is fixed in this round, and three of the five are test code, which the implementer must change. The next round should be an approval once these land and CI is green.",
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at a4b9eded",
-    "codeQuality": "Verdict: CHANGES at a4b9eded"
+    "deepReview": "Verdict: APPROVE at 9c02143e",
+    "codeQuality": "Verdict: CHANGES at 9c02143e (Minor only)"
   },
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/cmd/listener/role_keep.go:507", "description": "A failed first resolution of the holder ends a handover at Debug and returns nil, so reportKeptRoleDrain logs nothing and the copies wait for the sweep, or age out while the session reads keep failing. The doc's premise is false: resolveRoleHolder returns an error only for a read that failed, and a role nobody holds comes back roleHolderUnclaimed with a nil error, which already ends the handover at :552. This is round 5's lane-read finding again, on the other read."},
-    {"severity": "important", "file": "packages/envoy/cmd/listener/role_keep.go:529", "description": "A failed lane-head read now retries for the full 10-minute window even for a keep's handover of a role nobody holds, and never reaches the holder check. hold (:240) ignores ctx, and the window starts before it (:361, :431), so with persistent failures (an undecodable cursor, a bus refusing reads) every keep queues one goroutine on the role's guard and each ends in one Error line. Fix both findings with one rule: on a failed read, retry with backoff only while the cached claim (cfg.registry.CachedRoleHolder, as the sweep reads it) names a session; otherwise end at Debug. Treat a failed holder resolution the same way, and drop the walked branch."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:493", "description": "holderUnresolved has one caller; the backoff pair is written three times; ended() is used at two exits and err at five, which agree only because headErr is reset on every pass. Use one retry helper and return ended() everywhere. The roleKeepDrainBackoff doc (:409-414) omits the failed head read."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:665", "description": "The sweep now starts a handover for every claimed role with any kept copy, drained lanes included, and logs 'found a lane no handover was draining' for each, which is wrong for a drained lane. Reword it, or log it in the handover after the head read."}
+    {"severity": "minor", "file": "packages/envoy/AGENTS.md:2418", "description": "This passage and the roleKeepDrainRetryCap doc (role_keep.go:90-94) still state the deleted rule: failed reads retried 'after one' walk, 'while the holder is live'. The code now retries a failed lane-head read or holder resolution while the cached claim names a session, live or lapsed, and otherwise ends at Debug."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep_handover_test.go:659", "description": "TestAHandoverForAnUnclaimedRoleEndsOnACursorNoReadCanDecode: the report-and-count after the err == nil check is dead, because reportKeptRoleDrain(nil) returns at once. The test repeats the setup of TestAHandoverRetriesALaneHeadReadThatFailedOnItsFirstPass. Make the two one table test, with no dead assertion."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep_handover_test.go:694", "description": "The reflect/unsafe swap of the session registry's watcher is now written three times (:473-476, :694-698, api_test.go:1009-1012). Use one helper."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep_handover_test.go:700", "description": "TestAHandoverOfAClaimedRoleRetriesAHolderResolutionThatFailed counts that some session read failed, not that the handover's resolution was the one that failed. Pin it to the handover's read, for example by asserting the retry's debug line or that the holder was handed the copy after one failure."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:533", "description": "retry() now carries a context-canceled error out of a claimed role's handover, so a listener shutdown that cancels a sweep handover mid-resolution logs 'listener kept role drain failed' at Error. Do not carry a read error that is only the handover's own context ending."}
   ]
 }
