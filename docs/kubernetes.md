@@ -260,14 +260,14 @@ The worker image ships that skill, so a role reads it where it works, and a tool
 
 A role whose change owes a Postgres test has one in its own pod.
 The image carries the PostgreSQL 18 server with `pgvector` beside the `psql` above
-— 18 is CI's version and Cloud SQL's — and `/usr/local/bin/legion-testpg`, whose `ensure` runs `initdb` if the data directory is empty, starts the server on loopback port 5433, and creates the DSN's login role.
+— 18 is CI's version and Cloud SQL's — and `/usr/local/bin/legion-testpg`, whose `ensure` runs `initdb` if the data directory is empty, starts the server on loopback port 5433, and creates the DSN's login role and the database it owns.
 
 A deployment turns it on with `runtime.kubernetes.test_postgres: true`, a key of its own beside `pod` rather than inside it.
 Then:
 
-- The **roles container's launcher**, PID 1 of the one `roles` container, runs `legion-testpg
-  ensure` once at container start, before any role's agent, and every 15 seconds after, so a postmaster that exits is restarted and a start that died with the server up but its role, `vector` or database unmade is finished by the next tick:
-  what `ensure` tests is the DSN, not the port.
+- The **roles container's launcher**, PID 1 of the one `roles` container, starts one `legion launcher testpg-init` at container start, before any role's agent, cloned into user, mount, PID and IPC namespaces of its own.
+  That process is the server's PID 1: it runs `legion-testpg ensure` at once and every 15 seconds after, so a postmaster that exits is restarted and a start that died with the server up but its role, `vector` or database unmade is finished by the next tick, and its own exit ends the namespaces and the postmaster with them.
+  What `ensure` tests is the DSN, not the port.
   It is not `runtime.kubernetes.setup`: that command runs inside a role's own PID namespace, so the server would be a child of that role's generation and would die with it, and the next role would find a stale data directory and no postmaster.
 
 - The **daemon** puts `LEGION_TEST_PG_DSN` in every role's environment and refuses the name in `runtime.kubernetes.pod.env`, so one deployment line cannot disagree with the server the launcher started.
@@ -278,20 +278,47 @@ Then:
   what bounds it is the pod's own ephemeral-storage limit, and a runaway test that fills the node's disk through it is evicted with all six roles.
   The WAL settings below bound the server's steady state, not a test writing rows.
 
-- The DSN's user is `legion_test`, created `LOGIN CREATEDB CREATEROLE NOSUPERUSER` after the start;
-  `initdb`'s superuser is the container's own OS user (`legion`).
-  A test gets `create
-  database`, `drop database` and `create role` and not the cluster superuser, because a superuser can `COPY … TO PROGRAM` and so run commands as the server's process.
-  `CREATEROLE` is there because a suite that makes a role and then connects as it
-  — CI's Postgres lets it, since every login there is a test login — would otherwise fail in the pod alone.
-  So that the role it makes can log in, `pg_hba.conf` trusts every role on loopback, and the line before that rejects the cluster's superuser over TCP:
-  a test that creates a role and connects as it works in the pod as it does in CI, and no login over the DSN's port
-  — the superuser's own name included — reaches the superuser, so the trust the created roles need cannot be turned into `COPY … TO PROGRAM`.
+- The DSN's user is `legion_test`, created `LOGIN CREATEDB CREATEROLE SUPERUSER` after the start, owning the database `legion_test` the DSN names; `initdb`'s superuser is the container's own OS user (`legion`), reachable on the admin socket alone.
+  **The role can do anything on that one server.**
+  That is the design, not an oversight: the privileges the suites need do not reduce to a set of grants.
+  Measured on 18, `packages/envoy/internal/dispatch/store` needs `pg_read_all_stats`, a WAL sender, CREATE on a database's public schema, and `create event trigger` — and event triggers need SUPERUSER on PostgreSQL 18, and there is no grantable role for them.
+  Granting one privilege at a time found the next one each time, so the bound moved from the role to the server.
+
+- **What bounds the test server**, now that its role does not:
+
+  | The bound | What would have to be true for it to fail |
+  | --- | --- |
+  | The cluster is the pod's own, on an `emptyDir` the kubelet makes with the pod and deletes with it, holding test data only. | Something real would have to be written into it, or the volume would have to outlive the pod — a role that points a test at the deployment's own database writes there, not here. |
+  | It listens on `127.0.0.1` alone (`listen_addresses=127.0.0.1`), inside the pod's network namespace. | The pod's network namespace would have to be shared with something outside it, or the server started with another `listen_addresses`, which only this script sets. |
+  | The DSN is the runtime's (`launcher.TestPGDSN`), and the daemon refuses the name in `runtime.kubernetes.pod.env`. | A deployment would have to be able to point the name at another server; the refusal is the operator pod's `CheckPod`. |
+  | The script and the postmaster run in mount, PID, IPC and user namespaces of their own, where every role's `gh`, `private`, `state` and `agent-secrets` directories are behind an empty filesystem, and where no role's and no launcher's pid exists. | The cover would have to fail to mount, which `testpg-init` refuses to start without — and note that what goes behind it is the roles directory and the home mounts directory, so it bounds a sibling role's credentials and the launcher's token rather than everything on the pod, which the paragraph below sets out. |
+  | A replication slot can now be made (`pg_create_physical_replication_slot` succeeds under `wal_level=replica`), and a slot pins WAL. | Nothing stops the slot; what bounds it is the pod's own ephemeral-storage limit above, which the kubelet evicts all six roles over. |
+
+  The mechanisms the earlier, non-superuser design rested on are **gone**, and this is the list: ownership no longer gates a drop (a superuser may drop any database), a superuser's backend no longer refuses a force-drop, `pg_hba.conf` no longer keeps a superuser out of a test database (the DSN's role is one, over loopback), the role can now make another superuser, and it can run `COPY … TO PROGRAM`, `COPY … FROM '<path>'`, `pg_read_file` and `pg_ls_dir`.
+  `pg_hba.conf` still trusts loopback only, rejects every host line for the `initdb` superuser, and rejects `0.0.0.0/0`, so nothing off the pod reaches the server at all; what it no longer does is keep a superuser out.
+
+- **`COPY … TO PROGRAM` and the uid.**
+  The postmaster runs as the container's own user (uid 1000 on a live pod, the same uid every role's processes run as), so a program it runs is that user's.
+  Before this change the postmaster was the launcher's child in the roles container's own namespace, where `/var/run/legion/roles/<role>/private/g<n>/{DISPATCH_TOKEN,ENVOY_TOKEN,LEGION_BOOT_TOKEN}` of every role is present and readable by that uid — a leak that exists in a pod today, held shut only by the role's privileges, with no superuser anywhere.
+  In the namespaces `testpg-init` makes, those paths are not there: measured, `copy (select 1) to program 'cat <a sibling role's token>'` fails with `child process exited with exit code 1` and the program's own `No such file or directory`, `copy … from '<that token>'` and `pg_read_file` fail with `could not open file … No such file or directory`, and `pg_ls_dir` of the roles directory answers `testpg` and nothing else.
+  `/proc` lists the server's own processes and no other — a dozen or so, the count moving with the backends open — and `/proc/1` is `testpg-init` itself; no role's and no launcher's pid is in that namespace at all, so there is no `/proc/<pid>` of one to open a root or an environment through.
+
+- **What the confined superuser still reaches**, and why that is no change.
+  `/var/run/legion/providers` — every provider key and the `postgres` store's `OMP_SESSION_SQL_DSN` — is under the fixed root rather than the roles directory, so it is there; so is `/var/run/legion/agent-secrets-token/token`, the pod's projected broker token; so is `/legion`, the issue disk, to read and to write; and so is the pod's network.
+  A role's own shell reaches every one of those: the shim is told `--provider-env-dir /var/run/legion/providers` inside the role's namespace, the projected token sits at the same fixed path for it, the issue disk is the one workspace the pod works, and the network is the pod's.
+  So the change takes nothing away from what a test could already reach, and "confined" here means exactly one thing: the sibling roles' credential directories, the launcher's own token, and every process outside the server.
+  The per-role `agent-secrets` key directory is under the roles directory and is behind the cover.
+
+- The DSN's **database** is `legion_test`, created owned by that role, not `postgres`.
+  `postgres` belongs to the `initdb` superuser, and on 18 a non-owner may not create a table in its public schema, so a suite that migrates into the database the DSN names — rather than making one per test — failed there with `permission denied for schema public`.
 
 - `ensure` is idempotent and cheap when the server is up:
-  it returns after one connection through the DSN itself (`psql … select 1`, with a connect timeout), and otherwise initialises and starts under `flock -o`.
+  it returns after one connection through the DSN itself, which reads the role's own `rolsuper` back (with a connect timeout), and otherwise initialises and starts under `flock -o`.
+  Reading `rolsuper` rather than `select 1` is what carries the change to a cluster a script before it made: `ensure` returns on a server it finds serving, so a probe that asked only for a connection would leave that cluster's role unraised for the pod's life.
   The `-o` closes the lock's descriptor in the child, without which the server inherits it and every later `ensure` waits on a lock the server holds for the pod's life.
   That connection is a connection: a suite that has taken all `max_connections=100` slots makes each tick's `ensure` fail and log, and spend a slot trying, until the suite gives them back.
+  `wal_level=replica` and `max_wal_senders=10` are postmaster options, so a tick on a server that is already up does not apply them and does not restart it: a restart would end every connection a suite has open mid-test.
+  A pod started after this change has them from its first `ensure`.
 
 - Each run of the script is bounded at 60 s.
   The first `ensure` runs before the launcher serves any role, and the daemon gives a pod 120 s to boot by default, so an `ensure` that hangs costs that pod a log line and not its boot.

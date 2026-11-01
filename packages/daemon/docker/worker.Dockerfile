@@ -948,13 +948,21 @@ ENV AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt COREPACK_DEFAULT_TO_LATEST=
 # `DiG 9.20.30-1~deb13u1-Debian`, `dig -v 2>&1 >/dev/null` prints nothing), so the step takes it as
 # it comes.
 # legion-testpg runs here for real, not as a version print: it initdbs a cluster in the scratch
-# directory as the runtime user, starts it, makes a database from template1 and reads pgvector back
-# out of it, then stops it with `legion-testpg stop`, a fast shutdown it waits for — a postmaster
-# killed instead would leave its shutdown checkpoint running and the `rm -rf` below would race it.
-# An issue pod's launcher runs the same command, so a build whose server package, extension or
-# script no longer works fails here rather than at every role's start in every pod. The DSN is the
-# one the runtime sets for every role: a loopback host, no password, and legion_test, the
-# non-superuser role `ensure` creates, not the cluster's own superuser.
+# directory as the runtime user, starts it, creates a table in the schema of the database the DSN
+# names — which is the role's own, so a suite that migrates there rather than making one per test
+# works — makes a second database from template1, reads pgvector back out of it, and drops that one
+# with `with (force)` while another role holds a connection to it, which fails unless the DSN's
+# role may end that other role's backend. It then creates an event trigger and reads another
+# backend's query out of pg_stat_activity: those two are the privileges
+# packages/envoy/internal/dispatch/store needs that no grant gives, and they are what the DSN's
+# role being this cluster's SUPERUSER is for. Then it stops the server with `legion-testpg stop`,
+# a fast shutdown it waits for — a postmaster killed instead would leave its shutdown checkpoint
+# running and the `rm -rf` below would race it.
+# An issue pod's launcher runs the same script, inside namespaces of its own that this build step
+# cannot make, so a build whose server package, extension or script no longer works fails here
+# rather than at every role's start in every pod. The DSN is the one the runtime sets for every
+# role (launcher.TestPGDSN): a loopback host, no password, and legion_test on the database of
+# that name it owns, not the cluster's initdb superuser on `postgres`.
 RUN set -eu; \
     scratch="$(mktemp -d)"; \
     export TMPDIR="$scratch" COREPACK_HOME="$scratch/corepack" XDG_CONFIG_HOME="$scratch/config"; \
@@ -977,10 +985,23 @@ RUN set -eu; \
     flock --version; \
     psql --version; redis-cli --version; sqlite3 --version; nc -h; dig -v; \
     legion-testpg check; \
-    probe_dsn='postgres://legion_test@127.0.0.1:5433/postgres?sslmode=disable'; \
+    probe_dsn='postgres://legion_test@127.0.0.1:5433/legion_test?sslmode=disable'; \
     LEGION_TESTPG_DIR="$scratch/testpg" LEGION_TEST_PG_DSN="$probe_dsn" legion-testpg ensure; \
+    psql -X -q "$probe_dsn" -c 'create table probe_owned (id int)' -c 'drop table probe_owned'; \
     psql -X -q "$probe_dsn" -c 'create database probe'; \
     psql -X -tAq 'postgres://legion_test@127.0.0.1:5433/probe?sslmode=disable' -c "select extname from pg_extension where extname = 'vector'" | grep -qx vector; \
+    psql -X -q "$probe_dsn" -c 'create role probe_other login'; \
+    psql -X -tAq 'postgres://probe_other@127.0.0.1:5433/probe?sslmode=disable' -c 'select pg_sleep(60)' > /dev/null 2>&1 & \
+    waited=0; \
+    until psql -X -tAq "$probe_dsn" -c "select 1 from pg_stat_activity where datname = 'probe' and usename = 'probe_other'" | grep -qx 1; do \
+      waited=$((waited + 1)); \
+      test "$waited" -lt 100 || { echo "probe_other never connected to the probe database" >&2; exit 1; }; \
+      sleep 0.2; \
+    done; \
+    psql -X -tAq "$probe_dsn" -c "select query from pg_stat_activity where datname = 'probe' and usename = 'probe_other'" | grep -q 'pg_sleep'; \
+    psql -X -q "$probe_dsn" -c "create function probe_event() returns event_trigger language plpgsql as \$\$ begin end \$\$" \
+      -c 'create event trigger probe_event_trigger on ddl_command_end execute function probe_event()' \
+      -c 'drop event trigger probe_event_trigger'; \
     psql -X -q "$probe_dsn" -c 'drop database probe with (force)'; \
     LEGION_TESTPG_DIR="$scratch/testpg" legion-testpg stop; \
     rm -rf "$scratch"

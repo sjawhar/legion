@@ -1,0 +1,12 @@
+kind: Changed
+body: |-
+    `legion-worker`'s tools reference drops the `createdb` workaround for a test that migrates into
+    the database `$LEGION_TEST_PG_DSN` names. That DSN now names `legion_test`, a database the
+    role it logs in as owns, so such a test works against it: it named `postgres`, the cluster
+    superuser's, where a non-owner may not create a table in the public schema. The reference keeps
+    one sentence on what the owned database does not solve: two roles of one pod that both migrate
+    into it still write the same tables, so a role whose sibling may do the same still makes a
+    database of its own.
+time: 2026-11-01T01:00:00.000000000Z
+custom:
+    Issue: pr2613

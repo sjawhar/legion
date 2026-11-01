@@ -35,7 +35,7 @@ on:
 # in the group because GitHub lists a pull request's checks once per check name and event (as
 # `gh pr checks` does): a review run that cancelled a pull_request run would leave that event's
 # latest `pr-title` cancelled on the head until the next push or edit. A review run checks with
-# main's copy of check-pr-text.sh; the required lint job checks a pull request that changes it with
+# main's copy of check-pr-text.sh; the lint job checks a pull request that changes it with
 # its own copy (ci.yaml says when that job runs: at every push to a pull request that is not a
 # draft, and when a draft is marked ready). A merge group carries no pull request and is a group
 # of its own per commit (its head sha), so no run cancels a merge group's, which the queue waits
@@ -61,7 +61,7 @@ jobs:
       # A review or merge-group run checks out the default branch, so the script it runs is
       # main's, never the pull request's: a pull_request_review run would otherwise check out the
       # pull request's merge ref, which is its GITHUB_REF. A pull_request run checks out that merge
-      # ref as the required lint job does, so a pull request that changes the script is checked by
+      # ref as the lint job does, so a pull request that changes the script is checked by
       # its own version.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
