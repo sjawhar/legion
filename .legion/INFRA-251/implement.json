@@ -2,43 +2,22 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-251",
-  "previousHandoff": "8f5605f93976b81dfb5789996bd888264cbd4b61",
+  "previousHandoff": "a71947ddb981c8daf19be12045c47c8082f7aeae",
   "proof": [
     {
-      "criterion": "Review 5729779186 Minor (gate.go:605): the handover's guard is reached by a test and shares applyArtifact's check",
-      "surface": "workflow.Engine.dispatchArtifact through intake facts on a real Postgres (person_handover_test.go)",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u OMP_SESSION_SQL_DSN_FILE LEGION_TEST_PG_DSN=<own Postgres on the issue volume> go test -count=1 -run 'TestAHandoverApprovalTheGateWouldNotTakeLeavesItAsItWas|Handover|PersonsApproval' ./internal/workflow/",
-      "observed": "ok. recordHandover and applyArtifact now both read artifactIgnored (off, stale). The new table test's three cases (an approval of v2 with the gate at v3; an approval at seq 9 after a changes request of v2 at seq 12; any approval under gates.design off) each queue the person's handover status write and leave the gate exactly as seeded. The comment names the gate's three readers: the re-admission's keepStaleApproval, readmit's carried copy for an orphaned child, and read_state's designGate.",
-      "headSha": "8b3c87d819aa817d15cdd2abcfb7698ebb09a336",
-      "negativeControl": "With the guard replaced by `false && (off || stale)`, all three subtests FAIL (the gate takes the approval)."
-    },
-    {
-      "criterion": "Review 5729779186 Minor (parked_decision_test.go:597): the admit test asserts what it promises",
-      "surface": "admit.Admission and the workflow engine on a real Postgres",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u OMP_SESSION_SQL_DSN_FILE LEGION_TEST_PG_DSN=<own Postgres on the issue volume> go test -count=1 -run 'TestARootAPersonsApprovalHandsOverIsToldNoStaleApproval' ./internal/admit/",
-      "observed": "ok. The test now asserts no design-approved notice for LEGION-ROOT and exactly one status write {todo, observed backlog, PersonHandover}, before the re-admission's no-stale-pair checks.",
-      "headSha": "8b3c87d819aa817d15cdd2abcfb7698ebb09a336",
-      "negativeControl": "With dispatchArtifact's handover branch disabled (the approval applied to the gate as before #2619), the test FAILs at parked_decision_test.go:600 naming the design-approved notice; with recordHandover recording nothing, it FAILs on the stale pair."
-    },
-    {
-      "criterion": "Review 5729779186 Important (parked-decisions.md:174): the walk skips only the approval personHandoverQueues queues",
-      "surface": "skills/legion-controller/references/parked-decisions.md walk step 3 and the paragraph under The notice",
-      "command": "curl -sS -H \"Authorization: Bearer $(cat \"$DISPATCH_TOKEN_FILE\")\" \"$DISPATCH_URL/api/v1/issues/INFRA-168/events?limit=200\"; the same curl of /api/v1/issues/INFRA-168; dispatch read --issue INFRA-251",
-      "observed": "The skip now needs all three of: no child_of under Links (dispatch read --issue INFRA-251 shows `child_of issue dispatch://INFRA-168` for a child), the event's payload.artifact_id equal to the root's primary_artifact_id (both read live on INFRA-168: a0d2035b-\u2026), and a payload.reason not beginning 'Carried forward from the approval of version' (Dispatch's carryReason, packages/envoy/internal/dispatch/docs/approval_carry.go:62). A carried approval and an approval on a root that keeps its Dispatch parent are judged as decisions, and the notice paragraph names both as notices that remain. The skills guard passes (14 tests).",
-      "headSha": "8b3c87d819aa817d15cdd2abcfb7698ebb09a336",
-      "negativeControl": "The Spec approval: line shows no review reason for an approval (dispatch read --issue INFRA-168: 'Spec approval: approved v22 by \u2026'), so the reference names the events API payload, which does carry it."
+      "criterion": "The devbox proof of A3/A4 runs with one GitHub App in both github_apps slots, the implement App 5341240 (the architect's task for this round)",
+      "surface": "scripts/e2e/parked-decision-devbox.sh's own rig and boot (start_listener, start_dispatch, write_legion_config, install-plugin-profile.sh, install-key-file-model-route.sh, the real `legion start`) in this issue's pod, with Postgres 18 and NATS 2.10 started locally, a scratch Dispatch project PDBOOT mapped to sjawhar/legion-smoke, and a stand-in mise for the pinned Oh My Pi build (the pod has no mise or tmux)",
+      "command": "script edit: require_app_inputs implement; write_github_apps implement; the implement entry copied to the review slot; check_github_apps implement. Then legion start --check-config --config work/legion.yaml; then start_kept daemon \u2026 legion start --config work/legion.yaml",
+      "observed": "GET /app proved the key: {\"implement\":\"legion-implementer[bot]\"}, both slots app_id \"5341240\". `legion start --check-config` printed 'Config OK: project=PDBOOT'. The real boot passed the plugin gate ('pi-legion speaks this daemon's contract and loads with pi-envoy', daemonApiVersion 44) and the store, config and dispatch stages, then exited: 'legion start: the review App names bot login \"legion-implementer[bot]\" and the implement App \"legion-implementer[bot]\"; the workflow needs two different Apps' (packages/daemon/internal/daemon/workflow.go:233, appLoginsAtBoot, called at workflow.go:294; workflow_test.go:90 asserts it). The daemon judges a push by its pusher against the review App's login, so one App cannot serve both roles. The architect ruled: no daemon change and no other App; the script stays as it is (two Apps) and the proof waits on a readable key for the review App 5341243.",
+      "headSha": "56b6404b40e1f916f90dbc3d110471bf49e69b59",
+      "negativeControl": "`legion start --check-config` accepts the one-App file (it runs no key command and reads no login), so it cannot show the refusal; only the real boot reaches appLoginsAtBoot, and the refusal names both logins."
     }
   ],
-  "filesChanged": [
-    "packages/daemon/internal/workflow/gate.go",
-    "packages/daemon/internal/workflow/person_handover_test.go",
-    "packages/daemon/internal/admit/parked_decision_test.go",
-    "skills/legion-controller/references/parked-decisions.md"
-  ],
+  "filesChanged": [],
   "deviations": [
-    "The reviewer's fix named the Spec approval: line's reason; that line shows no reason for an approval, so the reference reads payload.reason from the events API instead. packages/claude-envoy/legion/skills carries no parked-decisions.md on this branch, so there is no copy to regenerate."
+    "No code change this round: the one-App edit was made, booted and reverted. scripts/e2e/parked-decision-devbox.sh is unchanged from d94e8bfd (code head 56b6404b)."
   ],
   "openQuestions": [
-    "The workflow and admit packages run whole on this pod failed only on the pod Postgres's database drops (permission denied to terminate process, SQLSTATE 42501) and one connection reset that passed when run alone."
+    "The A3/A4 devbox proof needs a key the proof can read for the review App 5341243 (GH_REVIEW_APP_PRIVATE_KEY_B64 is destroyed in the broker); the architect sends that request to the controller for the operator's approval. Acceptance also waits on the gateway grant."
   ]
 }
