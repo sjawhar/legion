@@ -417,7 +417,8 @@ What each part is for:
 - **`worker_idle_suspend_seconds`** (optional, 1800) is how long a worker keeps its process while
   nothing is waiting for it. At that point the daemon suspends the claim and keeps its session, so
   the next task resumes the same agent where it stopped; the suspension is the daemon's own, and
-  `legion claims list` shows it `suspended` by `idle`. Anything that reaches the worker before the
+  `legion claims list` shows it `suspended`, and `legion claims list --json` names its
+  `suspendedBy` as `idle`. Anything that reaches the worker before the
   wait is spent — a task, a turn of its own — ends the wait, and a whole new one begins the moment
   the worker has nothing to do again: its turn ended, or the task it was given went to a phase its
   issue has since left and was dropped. A daemon restart begins the wait again for every idle
