@@ -711,14 +711,14 @@ func TestTwoConcurrentImportsOfOneSourceShareOneGitHubSync(t *testing.T) {
 // is one source's, so acme/infra imports and answers while legion/arch is
 // still inside the blob read the test holds.
 //
-// The model read is folded in because it belongs to the same held moment:
-// while a sync waits on GitHub it must hold no pooled connection. It holds
-// none today either — loadSourceByRepo is one Pool.QueryRow, resolve's
-// transaction commits before the token call, and Ref, Dir and DirFiles all
-// run outside every transaction — so that assertion is no regression test
-// for the per-project lock that is gone. Its value is the day someone moves
-// a fetch inside a transaction, where a slow GitHub would hold a connection
-// of the shared pool for as long as it took.
+// The pooled-connection check is folded in because it belongs to the same
+// held moment: while a sync waits on GitHub it must hold no pooled
+// connection. The code keeps that rule — loadSourceByRepo is one
+// Pool.QueryRow, resolve's transaction commits before the token call, and
+// Ref, Dir and DirFiles all run outside every transaction — so the check
+// passes today and earns its place the day someone moves a fetch inside a
+// transaction, where a slow GitHub would hold a connection of the shared
+// pool for as long as it took.
 func TestASlowSourceDoesNotBlockAnotherSourceOfItsProject(t *testing.T) {
 	fake := &fakeSource{t: t, files: validFiles(), holdArchBlobs: true}
 	importer, database := newImporterFixture(t, fake)
