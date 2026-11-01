@@ -1,5 +1,70 @@
 # Changelog
 
+## [26.1.1] - 2026-11-01
+
+### Changed
+
+- Dispatch's change-driven background loops send no statement while nothing is written. The
+  embedding queue (which scanned every 5 s), the reference excerpt reconciliation (every five
+  minutes, and every 2 s while a batch came back full), the suggestion outcome sweep (every
+  minute) and both GitHub intakes' delivery settings (read every 30 s, and by the job intake on
+  every message) now run a pass at start and then only when a Postgres notification says their
+  work may have changed or a due time they asked for comes round, never more often than the timer
+  each replaced. Each process holds one more Postgres connection for this, a shared listener
+  logged as `dispatch background wakes`, with its keep-alive ping; it signals every loop after
+  each LISTEN, so a change made while it was reconnecting is caught up then. The embedding
+  coverage pass and the task progress reconciliation run once at start instead of every 10 and 5
+  minutes: coverage repeats only its identity steps, and only while another embedder identity's
+  rows remain, and task progress retries the rows another writer held for about a minute. The
+  delivery reconcile, the architecture import and the webhook redelivery sweep keep their timers;
+  all three now draw their jitter afresh every period, so two processes' passes drift apart. The
+  `Idempotency-Key` rows past their 24 hours and the deliveries a process that died left owed,
+  which the suggestion outcome sweep's pass carried, keep a once-a-minute leased timer of their
+  own (`api.RunMaintenanceSweep`, still under the `suggestion-outcomes` lease, so one process
+  sweeps per minute however many serve the database): no notification announces an expired key
+  or a dead process's owed delivery (`cmd/dispatch/README.md`, "Background loops").
+- Migrations `0151`–`0156` back those loops: `embeddings_enqueue` and `delivery_settings_changed`
+  notify `dispatch_embeddings` and `dispatch_delivery_settings`, a new row trigger on `refs`
+  notifies `dispatch_excerpts_owed`, and `reference_excerpt_backoff`,
+  `suggestion_outcome_cursor` and `write_suggestions.swept` (with two partial indexes) are new.
+  All are additive, every census answers `0`, and the release before them keeps working beside
+  them during a roll. The suggestion outcome sweep moves `suggestion_outcome_cursor` only up to
+  the event log's safe horizon, the id at or below which every event is final, as the live event
+  feed reads: event ids are not commit order, so a cursor past an event that could still commit
+  would never judge by it.
+- A delivery settings change (the deploy repository, the workflow paths) reaches the running
+  intakes as soon as it commits, through the shared listener, instead of within 30 s.
+- The GitHub intake handles up to four pull requests or workflow runs at once, its consumer's
+  `MaxAckPending`, where it handled one message at a time: messages about one pull request or one
+  run still run in order, one after the other, so an older GitHub fetch is never written over a
+  newer one. A message whose subject cannot carry a pull request or a run (checks, comments,
+  pushes, jobs, `pr.<n>.review`) is acknowledged without decoding it. The consumer's `AckWait`,
+  `MaxAckPending` and filter subject are unchanged.
+- When the GitHub intake stops, it drains its subscription, the one its bus client bound again on
+  a new connection when the client replaced its connection, and holds the messages queued behind a
+  busy pull request or run, and those NATS hands it meanwhile, until no handler is running. The
+  messages in a handler get up to 15 s from the stop to finish and be acknowledged; the handlers
+  still running then are given up, their GitHub calls cancelled, and their messages handed back to
+  NATS. Only then are the held messages handed back, so the next holder never runs a pull
+  request's or run's next message while this process still runs the one before it. The intake
+  then waits for the drain to end and releases the subscription, so a reconnect does not bind the
+  stopped one again. Dispatch's shutdown waits for that stop, which begins at the signal, before
+  it closes its database pool, so a handler GitHub answers during the stop writes what it fetched
+  rather than failing on a closed pool with its message acknowledged (`cmd/dispatch/README.md`,
+  "Background loops").
+- A document whose reference excerpts cannot be read or stored is retried one minute after its
+  first failure, doubling to at most six hours, plus up to a fifth again of jitter, instead of on
+  every pass, and is left out of the batches meanwhile, so documents that keep failing no longer
+  hold the reconciliation at its 2 s step nor keep the documents after them waiting. The
+  excerpts a pre-`0092` build left stale are marked owed once per process at its first pass,
+  rather than on every pass for the hour after start.
+- The suggestion outcome sweep reads only the events written since its last pass and the
+  suggestions recorded since, so its work follows what changed rather than how many suggestions
+  are still pending; it judges a suggestion once the suggestion and the events that resolve it are
+  a minute old, and the first pass on a database judges every pending suggestion once, as before.
+- The edit notice sweep sends no statement while no notice is due. It swept `document_edit_notices` every 5 s; it now runs a sweep at start and then only when a new migration, `0157`, announces a notice given a due time on `dispatch_edit_notices` (a row trigger, so notices the release before writes during a roll wake it too), or when the earliest due time it read comes round. Sweeps stay at least 5 s apart, so a notice still goes within 5 s of the end of its quiet window. The census answers `0`, and the release before keeps sweeping on its timer beside it (`cmd/dispatch/README.md`, "Background loops").
+- The webhook redelivery sweep still sweeps at start, but then waits two minutes plus up to a tenth again after each sweep, drawn afresh every period, as the delivery reconcile and the architecture import do, in place of a plain two-minute ticker, so two processes started together no longer reach its lease in step every two minutes.
+
 ## [26.1.0] - 2026-11-01
 
 ### Added

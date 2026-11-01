@@ -1,5 +1,0 @@
-kind: Changed
-body: 'The controller''s skill no longer writes `todo` for a root a person handed over: a person''s `legion` label on a new issue in `triage`, and a person''s approval of a parked labelled issue''s spec, are queued by the daemon. `triage.md` reads the label''s setter as the newest event that added it, keeps the controller''s `todo` write for the roots it labels or files itself, and `backlog-stewardship.md` says a root the weekly plan says to defer is parked at the next backlog pass.'
-time: 2026-11-01T02:59:51.743733145Z
-custom:
-    Issue: pr2619
