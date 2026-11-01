@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-156",
-  "completed": "2026-10-31T21:00:10Z",
+  "completed": "2026-11-01T03:27:04Z",
   "proof": [
     {
       "criterion": "A3 (server): a test block type declaring a block-pointer attribute accepts a valid block reference and refuses a malformed one",
       "surface": "the real Dispatch server process (packages/dispatch/e2e/run-server.sh, go build of the working copy) on a local Postgres 17 with pgvector and real migrations, built with a scratch blocks.json adding requirement and claim{serves: block[], targets [requirement]}; driven over HTTP",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh (script posted on the pull request), steps 2 and 4",
       "observed": "upload of checks.md holding :::claim{#c1 serves=\"dispatch://CORE-1/spec#b-r1\"} -> 201; serves=\"dispatch://CORE-1/spec#x\", \"...#b-r%311\" (over-encoded), \"dispatch://CORE-1/artifact/spec#b-r1\" (non-canonical spec spelling), a doubled space and a leading space -> each 400 INVALID_MARKDOWN naming typed block \"claim\" attribute \"serves\" and the bad value",
-      "headSha": "3e6565b320cdf9fc708efbce81a63c7bec2fe2b6",
+      "headSha": "e2d85fd15680c2737cbf2f59c0fe37002bf2db21",
       "negativeControl": "the malformed values above, each refused 400 INVALID_MARKDOWN with no version written"
     },
     {
@@ -17,7 +17,7 @@
       "surface": "same real server process over HTTP (upload route and POST /api/v1/artifacts/{id}/edits)",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh, step 4",
       "observed": "serves naming the spec's paragraph -> 400 INVALID_MARKDOWN 'block pointer refused: typed block \"claim\" #c1 attribute \"serves\" points at dispatch://CORE-1/spec#b-<paragraph id>, a \"paragraph\" block; it points only at requirement'; naming callout k1 -> 400 INVALID_MARKDOWN naming \"callout\"; an edit op inserting a claim pointing at k1 -> 400 INVALID_OP field \"attributes\" with the same message",
-      "headSha": "3e6565b320cdf9fc708efbce81a63c7bec2fe2b6",
+      "headSha": "e2d85fd15680c2737cbf2f59c0fe37002bf2db21",
       "negativeControl": "the same pointer at requirement r1 -> 201 (the allowed type is accepted)"
     },
     {
@@ -25,7 +25,7 @@
       "surface": "same real server process, read over HTTP and with the real dispatch CLI (bun packages/envoy-client/bin/dispatch.ts read)",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh, step 3",
       "observed": "dispatch read --ref dispatch://CORE-1/spec#b-r1 prints 'Referenced by: - serves block dispatch://CORE-1/artifact/checks-md#b-c1'; GET /api/v1/references?to=...#b-r1&kind=serves -> [{kind: serves, node: dispatch://CORE-1/artifact/checks-md#b-c1}]; &kind=mentions -> []; GET /api/v1/block-links?from=checks.md&to=spec -> [{kind: serves, from: c1, to: r1}]",
-      "headSha": "3e6565b320cdf9fc708efbce81a63c7bec2fe2b6",
+      "headSha": "e2d85fd15680c2737cbf2f59c0fe37002bf2db21",
       "negativeControl": "?kind=nope -> 400 INVALID_KIND naming the structural kinds and the declared block[] names (serves); checks.md re-uploaded with serves=\"\" -> 201 and ?to=...#b-r1 lists no edge"
     },
     {
@@ -33,7 +33,7 @@
       "surface": "same real server process over HTTP",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh, retype steps",
       "observed": "edit op retype r1 -> callout on the spec -> 200, then ?to=...#b-r1 lists no edge; retype back to requirement -> 200, the serves edge from c1 is listed again",
-      "headSha": "3e6565b320cdf9fc708efbce81a63c7bec2fe2b6",
+      "headSha": "e2d85fd15680c2737cbf2f59c0fe37002bf2db21",
       "negativeControl": "while r1 is a callout the serves edge is absent from ?to= (a target of a disallowed type is not listed)"
     },
     {
@@ -41,7 +41,7 @@
       "surface": "same real server process over HTTP, with a scratch type loose{serves: block[] with no targets} beside claim{serves: block[] targets [requirement]}",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh, 'review finding 1' steps",
       "observed": "loose.md holding :::loose{#c1 serves=\"dispatch://CORE-1/spec#b-k1\"} -> 201; the same document re-uploaded as :::claim{#c1 serves=...k1} -> 400 INVALID_MARKDOWN 'block pointer refused: typed block \"claim\" #c1 attribute \"serves\" points at dispatch://CORE-1/spec#b-k1, a \"callout\" block; it points only at requirement'; edit op {op: retype, block: c1, type: claim, attributes: {serves: [k1]}} -> 400 INVALID_OP field \"attributes\" with the same message",
-      "headSha": "3e6565b320cdf9fc708efbce81a63c7bec2fe2b6",
+      "headSha": "e2d85fd15680c2737cbf2f59c0fe37002bf2db21",
       "negativeControl": "the same retype op with serves at requirement r1 -> 200, and an unrelated insert into loose.md -> 200"
     },
     {
@@ -49,7 +49,7 @@
       "surface": "the real Dispatch server built from the head with a scratch schema (requirement; claim{serves: block[] targets [requirement], cites: block[]}), on local Postgres 17 + pgvector; the tester's rig: a browser write gives claim c1 the paragraph's id, the server is killed before it settles, then rebuild-refs and the block index pass re-index the stored state",
       "command": "bash $TMPDIR/infra156/dup2.sh $TMPDIR/infra156/r5-bin infra156_impl_dup_new 8811 $TMPDIR/infra156-tester/src5 (the tester's dup2.sh with its log, jar and client paths moved under $TMPDIR/infra156)",
       "observed": "stored blocks [paragraph f1a508e6, claim f1a508e6, paragraph]; after rebuild-refs and the block index pass block_refs holds only 'f1a508e6 mentions -> DUP-1/spec#r1', and GET /api/v1/references?to=r1 lists [mentions #f1a508e6]",
-      "headSha": "3e6565b320cdf9fc708efbce81a63c7bec2fe2b6",
+      "headSha": "e2d85fd15680c2737cbf2f59c0fe37002bf2db21",
       "negativeControl": "the same rig on the code before the type check in pointerPairs (BlockPointers' skip alone): block_refs held 'serves' from the paragraph and the paragraph's mention was lost; the tester reproduced the same at f5cc766b"
     }
   ],
@@ -101,6 +101,7 @@
     "Landing round after retro (merge 6b29d18f of main e018f1d3): main added 0148_asks_anchor_artifact_id and 0149_event_horizon, so the migration is now 0150_block_pointer_links (header and census comment), every reference moved (packages/envoy/AGENTS.md x2, cmd/dispatch/README.md x2, cmd/dispatch/AGENTS.md, the envoy changelog fragment). Main's 0148-0149 touch no graph_edges, block_refs or document_blocks. Four prose conflicts kept both sides (ci.yaml, cmd/dispatch AGENTS.md and README, docs/copied_asks.go's comment). Main split the race job: this PR's contracts/src/** filter moved to envoy_go_race_pmdoc, which also needs model/*, text/* and text/testdata/** because this PR's pmdoc imports both; check-ci-filters.sh exits 0 (14 uncovered without them). A database main's binary migrated to 149 migrates to 150 with the head's binary (to_types, block_ref_listed present). Checks: go build/vet/gofmt; store whole; refs, text whole; docs filtered; biome; a3 E2E as in earlier rounds. retro's removal of .legion/INFRA-156/ is undone by this handoff; the next retro removes it again.",
     "Mechanical merge 340fc02b of main d7e1daaa (#2474: guides laid out one sentence per line, tables turned into lists; a claude-envoy dist rebuild). Conflicts only in packages/envoy/AGENTS.md (6) and cmd/dispatch/README.md (5); main changed no words in the four blocks that overlapped this PR's edits, so those took this PR's side and scripts/semantic-line-breaks.ts --write reflowed both files (its check exits 0). A whitespace-insensitive three-way word merge of e018f1d3, bfd5cf69 and d7e1daaa equals each merged file exactly, with no overlaps. Migration stays 0150 (main's highest 0149); dist and legion/ are main's. Checks: go build/vet, biome over packages/envoy, check-ci-filters.sh exit 0, the semantic-line-breaks guides test 3 pass (one earlier run reported 1 fail and did not recur).",
     "CI round (merge b1bf182e of main 1a9095e6, no conflicts): ci-ok was red at 7ed54386 only through envoy-go's TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries (broker/oauth claims_doc_test.go:79), main's break from #2474's reflow of docs/kubernetes.md, which this PR does not touch; main fixed it in #2598 (1a9095e6). The test passes at the merge. Migration stays 0150 (main's highest 0149); dist and legion/ are main's. Checks: go build/vet, the claims test, biome over packages/envoy, check-ci-filters.sh exit 0, semantic-line-breaks check exit 0.",
-    "Conflict round (merge 3e6565b3 of main efed4e4d): the rerun of run 41187131385 at fc9b4dc6 came back green, but main's #2548 (7583d8d1) made ProofDocument.tsx conflict. The only conflict was the editor effect's dependency list; it now holds this PR's documentRef beside #2548's pendingWaiter and whenSent. #2411 is not on main, so the migration stays 0150 (main's highest 0149); the timestamp rename comes in a later merge once #2411 lands. dist and legion/ are main's. Checks: proof-editor 236 pass and its typecheck, dispatch typecheck and web/src/features/doc 195 pass, biome over packages/dispatch and packages/proof-editor, go build and vet."
+    "Conflict round (merge 3e6565b3 of main efed4e4d): the rerun of run 41187131385 at fc9b4dc6 came back green, but main's #2548 (7583d8d1) made ProofDocument.tsx conflict. The only conflict was the editor effect's dependency list; it now holds this PR's documentRef beside #2548's pendingWaiter and whenSent. #2411 is not on main, so the migration stays 0150 (main's highest 0149); the timestamp rename comes in a later merge once #2411 lands. dist and legion/ are main's. Checks: proof-editor 236 pass and its typecheck, dispatch typecheck and web/src/features/doc 195 pass, biome over packages/dispatch and packages/proof-editor, go build and vet.",
+    "Renumber round (merge e2d85fd1 of main 072a7d34): main's #2541 took 0150_dpop_proofs, so the migration is now 0151_block_pointer_links (header and census comment), every reference moved (packages/envoy/AGENTS.md x2, cmd/dispatch/README.md x2, cmd/dispatch/AGENTS.md, the envoy changelog fragment). The one README conflict kept both paragraphs, main's 0150_dpop_proofs first. Main's 0150 touches no graph_edges, block_refs or document_blocks. Main's applyLive now holds a pmdoc.ValidDocument, so the refuseBlockPointers call passes tree.Node(). #2411 is not on main, so no timestamp name yet and no migrationid package exists. dist and legion/ are main's. Checks: go build/vet/gofmt; the whole store package; refs, text; docs block-pointer tests; biome."
   ]
 }
