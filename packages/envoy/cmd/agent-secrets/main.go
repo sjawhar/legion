@@ -45,10 +45,9 @@
 // and a default counts only when its file is there (identity.go). AGENT_SECRETS_ENROLL_WAIT (a
 // duration, default 20s) bounds how long a call waits while a box's launcher is still enrolling
 // it. AGENT_SECRETS_APPROVE_URL (Dispatch's origin) makes `machine login` print the Dispatch page
-// where a person types its code, and a pending secret request (request, status, the exec form's
-// wait) name its record's Dispatch page beside the approver the broker names. A request whose
-// answer carries approve_url, the record's page on the secrets broker, names that page instead,
-// whatever AGENT_SECRETS_APPROVE_URL says. The exec form's child keeps
+// where a person types its code, and nothing else: a pending secret request (request, status, the
+// exec form's wait) names the approver the broker names, and the record's page on the secrets
+// broker that the broker's own answer carries as approve_url. The exec form's child keeps
 // AGENT_SECRETS_URL, AGENT_SECRETS_KEY_DIR and AGENT_SECRETS_HELPER_SOCK, since it is the same
 // session (buildChildEnv). A machine session enrolls automatically through the helper's own
 // enroll loop, and a pod's own enrollment is its launcher's job — this CLI has no direct
@@ -168,9 +167,7 @@ environment:
   AGENT_SECRETS_ENROLL_WAIT  how long a call waits while a box's launcher is still enrolling it
                              (default 20s)
   AGENT_SECRETS_APPROVE_URL  Dispatch's address; machine login names the page under it where the
-                             operator types the code, and a waiting request names the page where
-                             its approver decides it, unless the broker's answer names one of its
-                             own on the broker
+                             operator types the code
   AGENT_SECRETS_AUDIENCE     the audience the broker verifies a Google VM's identity tokens for;
                              enroll --vm and renew --vm need it when --audience names none
   GCE_METADATA_HOST          the metadata server's host (and port) enroll --vm and renew --vm ask
@@ -771,7 +768,7 @@ func cmdRequest(args []string, stdout, stderr io.Writer) int {
 	} else {
 		fmt.Fprintf(stdout, "request_id: %s\nstate: %s\nsource: %s\n", result.RequestID, result.State, c.source(ctx))
 		if result.State == "pending" {
-			fmt.Fprintln(stdout, waitingOn(result.Approver, pendingRecordID(result.RecordID), result.ApproveURL))
+			fmt.Fprintln(stdout, waitingOn(result.Approver, result.ApproveURL))
 		}
 	}
 	switch result.State {
@@ -817,7 +814,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "state: %s\nsource: %s\n", result.State, c.source(ctx))
 	if result.State == "pending" {
-		fmt.Fprintln(stdout, waitingOn(result.Approver, pendingRecordID(result.RecordID), result.ApproveURL))
+		fmt.Fprintln(stdout, waitingOn(result.Approver, result.ApproveURL))
 	}
 	if result.GrantID != nil {
 		fmt.Fprintf(stdout, "grant_id: %s\n", *result.GrantID)
@@ -1013,7 +1010,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 
 	state, grantID, requestID := result.State, result.GrantID, result.RequestID
 	if state == "pending" {
-		reportPending(stderr, requestID, pendingRecordID(result.RecordID), result.Approver, result.ApproveURL, *wait, src())
+		reportPending(stderr, requestID, result.Approver, result.ApproveURL, *wait, src())
 		deadline := time.Now().Add(*wait)
 		backoff := 2 * time.Second
 		for state == "pending" {
@@ -1089,22 +1086,11 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 }
 
 // reportPending says, once, before the exec form's wait, that a person must decide the request,
-// where the secrets it would inject come from (src), and who decides it and where (waitingOn).
-func reportPending(stderr io.Writer, requestID, recordID string, approver *string, brokerPage string, wait time.Duration, src source) {
+// where the secrets it would inject come from (src), and who decides it, and on which page of the
+// broker when its answer names one (waitingOn).
+func reportPending(stderr io.Writer, requestID string, approver *string, brokerPage string, wait time.Duration, src source) {
 	fmt.Fprintf(stderr, "agent-secrets: request %s to %s is waiting for approval; waiting up to %s\n", requestID, src, wait)
-	fmt.Fprintf(stderr, "agent-secrets: %s\n", waitingOn(approver, recordID, brokerPage))
-}
-
-// pendingRecordID is the record a pending request waits on, and "" when the broker's answer
-// names none. The field is optional in the broker's own model, and the only line that needs it
-// is the Dispatch page a broker older than the approval page sends a person to, which is exactly
-// the broker whose answer may leave it out; so a missing one names no page rather than ending
-// the command on a nil.
-func pendingRecordID(id *string) string {
-	if id == nil {
-		return ""
-	}
-	return *id
+	fmt.Fprintf(stderr, "agent-secrets: %s\n", waitingOn(approver, brokerPage))
 }
 
 // waitingOn is the sentence that says whom a pending request waits on and where they decide it:
@@ -1114,12 +1100,11 @@ func pendingRecordID(id *string) string {
 // line of this command names the broker's own host, and it names it because a person must open
 // that page: the host is the one AGENT_SECRETS_URL already names, and no other line says where an
 // answer came from (source_test.go's TestNoSessionLineNamesAHostOrAStoreID). A broker from before
-// that page carries none, and a person decides the record in Dispatch instead: its page under
-// AGENT_SECRETS_APPROVE_URL where that is set, else the Inbox's Credential requests section. A
-// broker that names no record either leaves only the Inbox, since no page can be built without
-// one. The broker names an approver for every pending request; one from before it did names
-// none, and the sentence says so rather than guessing.
-func waitingOn(approver *string, recordID, brokerPage string) string {
+// that page carries none, and the sentence then names the approver alone, with no page: the
+// request waits on the same person, who opens the broker themselves. The broker names an approver
+// for every pending request; one from before it did names none, and the sentence says so rather
+// than guessing.
+func waitingOn(approver *string, brokerPage string) string {
 	if brokerPage != "" {
 		switch {
 		case approver == nil:
@@ -1130,25 +1115,13 @@ func waitingOn(approver *string, recordID, brokerPage string) string {
 			return "waiting for " + *approver + " to approve it on the secrets broker: " + brokerPage
 		}
 	}
-	// The record's page in Dispatch, and "" when there is none to open: either
-	// AGENT_SECRETS_APPROVE_URL is unset, or the broker named no record to build a page from.
-	var page string
-	if base := approveURL(); base != "" && recordID != "" {
-		page = base + "/credentials/" + recordID
-	}
 	switch {
-	case approver == nil && page == "":
-		return "waiting for approval under Credential requests in the Dispatch Inbox; the broker does not say whose"
 	case approver == nil:
-		return "waiting for approval in Dispatch: " + page + "; the broker does not say whose"
-	case *approver == record.AnyoneApprover && page == "":
-		return "waiting for anyone signed in to Dispatch to approve it under Credential requests in their Inbox"
+		return "waiting for approval on the secrets broker; the broker does not say whose"
 	case *approver == record.AnyoneApprover:
-		return "waiting for anyone signed in to Dispatch to approve it: " + page
-	case page == "":
-		return "waiting for " + *approver + " to approve it under Credential requests in their Dispatch Inbox"
+		return "waiting for anyone signed in to the secrets broker to approve it"
 	default:
-		return "waiting for " + *approver + " to approve it in Dispatch: " + page
+		return "waiting for " + *approver + " to approve it on the secrets broker"
 	}
 }
 
