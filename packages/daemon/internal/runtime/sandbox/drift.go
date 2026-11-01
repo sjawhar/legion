@@ -308,10 +308,8 @@ func (r *Runtime) ReplacePod(ctx context.Context, k runtime.Known, due func(cont
 	if v.pod == nil || string(v.pod.UID) != k.Locator.Sandbox.PodUID {
 		return nil
 	}
-	if due != nil {
-		if err := due(ctx); err != nil {
-			return err
-		}
+	if err := due(ctx); err != nil {
+		return err
 	}
 	if _, err := r.suspendDisplacing(ctx, s, v.pod.UID); err != nil {
 		return fmt.Errorf("replace %s's pod: suspend its sandbox: %w", k.Claim, err)

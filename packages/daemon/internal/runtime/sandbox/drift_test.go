@@ -383,7 +383,7 @@ func TestReplacePodNamesTheDisplacedPodAndWaitsItOut(t *testing.T) {
 	testerLoc, reviewerLoc := g.spawn(tester), g.spawn(reviewer)
 	name := testerLoc.Sandbox.Name
 
-	if err := g.r.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &testerLoc}, nil); err != nil {
+	if err := g.r.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &testerLoc}, stillDue); err != nil {
 		t.Fatalf("ReplacePod: %v", err)
 	}
 	if named := g.sandbox(name).Annotations[displacedAnnotation]; named != testerLoc.Sandbox.PodUID {
@@ -468,13 +468,13 @@ func TestReplacePodIsANoOpWithoutThePodTheLocatorRecords(t *testing.T) {
 	g := newRig(t, nil)
 	loc := g.spawn(workerSpec(t))
 	name := loc.Sandbox.Name
-	if err := g.r.ReplacePod(g.ctx, runtime.Known{Claim: workerToken}, nil); err != nil {
+	if err := g.r.ReplacePod(g.ctx, runtime.Known{Claim: workerToken}, stillDue); err != nil {
 		t.Fatalf("ReplacePod of a claim running nowhere: %v", err)
 	}
 
 	suspendSandbox(t, g, g.r, name)
 	g.clearActions()
-	if err := g.r.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &loc}, nil); err != nil {
+	if err := g.r.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &loc}, stillDue); err != nil {
 		t.Fatalf("ReplacePod of a suspended sandbox: %v", err)
 	}
 	if wrote := g.writes(); len(wrote) > 0 {
@@ -493,7 +493,7 @@ func TestReplacePodIsANoOpWithoutThePodTheLocatorRecords(t *testing.T) {
 		s, err := gone.r.storedSandbox(goneLoc.Sandbox.Name)
 		return err == nil && s == nil
 	})
-	if err := gone.r.ReplacePod(gone.ctx, runtime.Known{Claim: workerToken, Locator: &goneLoc}, nil); err != nil {
+	if err := gone.r.ReplacePod(gone.ctx, runtime.Known{Claim: workerToken, Locator: &goneLoc}, stillDue); err != nil {
 		t.Fatalf("ReplacePod of an absent sandbox: %v", err)
 	}
 }
@@ -511,7 +511,12 @@ func TestPodDriftAndReplacePodRefuseALocatorTheRuntimeDidNotMint(t *testing.T) {
 	if _, err := g.r.PodDrift(g.ctx, known); err == nil {
 		t.Error("PodDrift of a locator in another namespace was answered")
 	}
-	if err := g.r.ReplacePod(g.ctx, known, nil); err == nil {
+	if err := g.r.ReplacePod(g.ctx, known, stillDue); err == nil {
 		t.Error("ReplacePod of a locator in another namespace acted")
 	}
 }
+
+// stillDue is the last word a test gives ReplacePod when its own subject is not that word: the
+// replacement is due, so the runtime goes on. The parameter is required, since a replacement is
+// the one call that deletes an issue's disk and every caller states what makes it still due.
+func stillDue(context.Context) error { return nil }

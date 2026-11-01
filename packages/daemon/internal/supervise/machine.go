@@ -534,6 +534,21 @@ type Machine struct {
 	// a claim still stale (refreshStalePlugins in internal/daemon), so a restart that forgets this
 	// mark finds the same claim again, and letGo drops it with the process it was made for.
 	staleRelaunch *string
+	// roundOver is the update round's end held for the agent's turn to end (endPodUpdate,
+	// turnEnded), nil for none. A worker that answered its round from inside a turn still holds
+	// the round's own ask, so the end cannot tell it the round is over until that turn is done;
+	// held here, the machine itself ends the round at the turn's end rather than leaving the
+	// worker for the next sweep. It is memory only, as the held relaunch is: the sweep posts the
+	// end again for a round still open, and letGo drops it with the process it was made for.
+	roundOver *PodUpdateEnded
+	// unseenTurn is the claim in a turn this daemon never saw begin: one an earlier daemon's
+	// process was already in, which this one learns of from the agent's own get_state answer
+	// (sendPending's askFirst branch, turnStarted's inFlight) rather than from an agent_start it
+	// read. The daemon cannot say what such a turn has done, so a decision that rests on knowing
+	// refuses it: the end of a turn is a worker's answer to an update round only where the
+	// daemon saw the turn start (answerByTurnEnd). turnEnded clears it with the turn, and it is
+	// memory only, as askFirst is: a restart asks the agent again.
+	unseenTurn bool
 	// interrupt is the turn this claim was interrupted in for a start that takes over its issue's
 	// phase (Quiesce), nil for none; quiesced is the newest such start that has found the claim out
 	// of a turn. Both are memory only (Quiesce).
@@ -1261,6 +1276,8 @@ func (m *Machine) letGo() {
 	m.forgetSend()
 	m.held = nil
 	m.staleRelaunch = nil
+	m.roundOver = nil
+	m.unseenTurn = false
 	m.interruptOver()
 	if enrollment := ClearEnrollment(&m.claim); enrollment != nil {
 		m.revoke(*enrollment)

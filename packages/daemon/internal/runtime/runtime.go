@@ -137,8 +137,9 @@ type Runtime interface {
 	// starting a turn, or a claim of the issue the caller had never read. nil from due is a
 	// replacement still due, and the runtime goes on; any error is a replacement no longer due,
 	// which the runtime returns having changed nothing, so the caller tells its own refusal from
-	// a failure by the error it handed over. A nil due is always due, which is what a caller with
-	// nothing to re-read passes.
+	// a failure by the error it handed over. due is required: a replacement is the one call that
+	// deletes an issue's disk, so every caller states what makes it still due rather than
+	// leaving the question to a nil.
 	ReplacePod(ctx context.Context, k Known, due func(context.Context) error) error
 	// CleanupTree deletes what the runtime holds for tree beyond its claims' processes, once every
 	// claim of the tree has retired and the tree's cleanup is reserved (store.CleanupReservedTree);

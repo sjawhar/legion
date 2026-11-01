@@ -28,11 +28,6 @@ import (
 // constant above the daemon's own.
 const PodUpdateContract = 44
 
-// CanAnswerUpdate says whether c's registration declared PodUpdateContract or above, so its
-// plugin has the ready_for_update op. It reads the contract alone; its one reader is
-// CannotAnswerUpdate, which adds the running process the rule also needs.
-func CanAnswerUpdate(c Claim) bool { return c.PluginContract >= PodUpdateContract }
-
 // CannotAnswerUpdate says whether c's worker has no ready_for_update op to answer its update task
 // with: its process runs now (HoldsCapability) and the registration that process made declared a
 // plugin contract below the one that introduced the op. It is the one statement of that rule,
@@ -46,7 +41,9 @@ func CanAnswerUpdate(c Claim) bool { return c.PluginContract >= PodUpdateContrac
 // relaunched onto the current plugin a moment ago registers at this contract, and a suspended
 // claim the round revives comes back on it. Reading those records as "this claim has no op" would
 // take the answer of a worker that is about to make the call itself.
-func CannotAnswerUpdate(c Claim) bool { return HoldsCapability(c.State) && !CanAnswerUpdate(c) }
+func CannotAnswerUpdate(c Claim) bool {
+	return HoldsCapability(c.State) && c.PluginContract < PodUpdateContract
+}
 
 // refreshPlugin is the claim's process found to speak a plugin contract this daemon does not: at
 // boot, re-adopting a claim whose recorded contract is an earlier daemon's, or none at all (the
@@ -227,22 +224,25 @@ func refreshStalePlugin(m *Machine, ctx context.Context, ev Event) error {
 //
 // A registration no relaunch can take past the daemon's contract is accepted and charged
 // nothing, exactly as that one is: a claim whose launch installs no plugin (Deps.NoPluginInstall
-// — a Claude Code role's plugin is its pod image's own claude-envoy) and whose process speaks a
-// contract below PodUpdateContract. Relaunching it would keep the pod, bring the same plugin
-// back, and land here again with PluginRelaunchFor already naming this daemon, which is the
-// charged path: the claim would walk its launch budget down to failed for a plugin no launch of
-// this deployment can change. A failed claim cannot push its work, and pushing is step 1 of the
-// update task such a worker still answers, by ending the turn the task starts (answerByTurnEnd),
-// so the process is left running and answered as any other. What replaces it is a new image,
-// which the update round over its pod is opened for and which that answer completes
+// — a Claude Code role's plugin is its pod image's own claude-envoy), whatever contract it
+// records. Relaunching it would keep the pod, bring the same plugin back, and land here again
+// with PluginRelaunchFor already naming this daemon, which is the charged path: the claim would
+// walk its launch budget down to failed for a plugin no launch of this deployment can change.
+// The contract it records decides nothing here — a claim at this release's own contract is as
+// unreachable by an install as one below it, and the next bump would walk exactly that claim to
+// failed — so the rule is the install alone.
+//
+// What replaces such a claim's plugin is a new image, which the update round over its pod is
+// opened for: it is asked like every other worker and answers either with the op or by ending
+// the turn its task starts (answerByTurnEnd), and the round's replacement brings the image
 // (internal/daemon's refreshStalePlugins, which posts no relaunch for it either).
 func (m *Machine) staleRegistration(ctx context.Context, got int) error {
 	if got == m.deps.PluginContract {
 		return m.endCurrentPluginRound(ctx)
 	}
-	if m.deps.NoPluginInstall != nil && m.deps.NoPluginInstall(m.claim) && got < PodUpdateContract {
-		m.log.Warn("supervise: this claim's launch installs no plugin, and its process speaks a contract with no ready_for_update; the registration stands and the update round over its pod brings the new image",
-			"pluginContract", got, "daemonApiVersion", m.deps.PluginContract, "updateContract", PodUpdateContract)
+	if m.deps.NoPluginInstall != nil && m.deps.NoPluginInstall(m.claim) {
+		m.log.Warn("supervise: this claim's launch installs no plugin, so no relaunch can move its contract; the registration stands and the update round over its pod brings the new image",
+			"pluginContract", got, "daemonApiVersion", m.deps.PluginContract)
 		return nil
 	}
 	if !m.deps.PluginRelaunchable {

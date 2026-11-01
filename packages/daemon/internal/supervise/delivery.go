@@ -178,6 +178,9 @@ func (m *Machine) sendPending(ctx context.Context) error {
 		m.askFirst = false
 		if streaming, _ := m.streaming(ctx, conn); streaming {
 			m.claim.State = StateWorking
+			// The turn is the agent's own word, not an agent_start this daemon read, so nothing
+			// here knows what it has already done (Machine.unseenTurn).
+			m.unseenTurn = true
 			if !holds {
 				m.log.Info("supervise: the agent is in a turn of its own after its task was dropped", "claim", m.claim.Token)
 				return m.persist(ctx)

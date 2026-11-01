@@ -79,6 +79,7 @@ type Runtime struct {
 	failures    map[string]error
 	drift       map[claim.Token][]string
 	holdReplace func()
+	holdResume  func()
 	queue       []runtime.Observation
 	minted      int
 }
@@ -184,6 +185,18 @@ func (r *Runtime) HoldReplacePod(hold func()) {
 	r.holdReplace = hold
 }
 
+// HoldResume makes every later Resume run hold before it answers, which is where the Sandbox
+// runtime waits out a pod it is building: the claim's machine holds its own lock for the whole
+// call, so a reader that waits on Machine.Claim waits with it. A test holds there to read what
+// another part of the daemon sees of a claim mid-relaunch, and then lets the call go on. nil
+// clears it; the hook runs with none of the fake's own locks held, so it may drive the fake
+// again.
+func (r *Runtime) HoldResume(hold func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.holdResume = hold
+}
+
 func (r *Runtime) fail(method string, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -236,6 +249,12 @@ func (r *Runtime) Spawn(_ context.Context, spec runtime.SpawnSpec) (runtime.Loca
 // Resume records its call, then refuses a previous incarnation of another claim, as every runtime
 // does.
 func (r *Runtime) Resume(_ context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
+	r.mu.Lock()
+	hold := r.holdResume
+	r.mu.Unlock()
+	if hold != nil {
+		hold()
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	call := Call{Method: "Resume", Spec: spec}
@@ -420,13 +439,11 @@ func (r *Runtime) ReplacePod(ctx context.Context, k runtime.Known, due func(cont
 	if hold != nil {
 		hold()
 	}
-	if due != nil {
-		if err := due(ctx); err != nil {
-			r.mu.Lock()
-			defer r.mu.Unlock()
-			r.calls = append(r.calls, Call{Method: "ReplacePodNotDue", Pod: copyKnown(k)})
-			return err
-		}
+	if err := due(ctx); err != nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.calls = append(r.calls, Call{Method: "ReplacePodNotDue", Pod: copyKnown(k)})
+		return err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()

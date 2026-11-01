@@ -197,16 +197,31 @@ If your `+"`legion`"+` tool has no "ready_for_update" operation, do step 1 and s
 }
 
 // PodUpdateEnded is the update round over for this claim: every update_* field goes, and the task
-// the round held back is released. Which round ended is the round's own id (Claim.InPluginRound),
-// read before the fields go, rather than a flag the caller must keep in step with it. A pod's
-// round: the pod itself has just been replaced, and each role comes back on its own session
-// through the displaced path, so nothing is relaunched here. A claim's own plugin round
-// (refreshPlugin): the process is replaced now, onto this daemon's plugin contract, which is what
-// the round was waiting for — and only where that process runs (HoldsCapability), since a
-// suspended or launching claim has no process to replace and its next launch installs this
-// daemon's plugin itself. A claim in no round at all is decided nothing by this event.
+// the round held back is released. A pod's round: the pod itself has just been replaced, and each
+// role comes back on its own session through the displaced path, so nothing is relaunched here.
+// A claim's own plugin round (refreshPlugin): the process is replaced now, onto this daemon's
+// plugin contract, which is what the round was waiting for — and only where that process runs
+// (HoldsCapability), since a suspended or launching claim has no process to replace and its next
+// launch installs this daemon's plugin itself. A claim in no round at all is decided nothing by
+// this event.
 type PodUpdateEnded struct {
 	Claim claim.Token
+	// Round is the round this end is of, as the sweep read it from the claim. An end for any
+	// other round decides nothing: the sweep posts from the claims it read at the start of a
+	// tick, and a round can be replaced by another (openPodUpdate) or left behind (leaveRound)
+	// before the post is handled, where ending whichever round the claim stands in now would end
+	// a round nobody has weighed. What each round's end then does is read from its own id
+	// (Claim.InPluginRound), never from a flag the caller keeps in step with it.
+	Round string
+	// Replaced is the pod the round was opened over gone, which the round's id cannot say: the
+	// replacement the round waited for, a pod that went for a failure of its own and was
+	// replaced under the round, and a pod the claims record replaced before the round could
+	// finish are all of them this. It is false only where the round ended with that pod still
+	// running — the drift went away, an operator rolled the release back — which is the one end
+	// that leaves the worker that answered holding nothing and needing the daemon's own word
+	// (endPodUpdate, podUpdateOverTask). A claim's own plugin round keeps its pod whatever ends
+	// it, so an end posted for one is false here.
+	Replaced bool
 }
 
 // PodUpdateSignalled is the worker's answer to the update task (api's claims/ready-for-update):
@@ -1099,6 +1114,12 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	_, awaiting := m.timers[TimerTurn]
 	inFlight := m.send != nil || awaiting || m.askFirst
 	own := p != nil && p.ConfirmedAt.IsZero() && (start.DeliveryID == p.ID || (start.DeliveryID == "" && inFlight))
+	if own && start.DeliveryID == "" {
+		// The start named no delivery, so this confirmation rests on what the daemon had in
+		// flight rather than on the agent's own word about which task it took
+		// (Machine.unseenTurn).
+		m.unseenTurn = true
+	}
 	m.takeBackSignal(own)
 	if own {
 		return m.confirm(ctx)
@@ -1153,7 +1174,7 @@ func (m *Machine) takeBackSignal(ownTask bool) {
 // answerByTurnEnd runs first of all, before interruptOver clears what it reads.
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	m.answerByTurnEnd()
-	m.askFirst = false
+	m.askFirst, m.unseenTurn = false, false
 	m.interruptOver()
 	if m.held != nil {
 		if err := m.suspendHeld(ctx); err != nil {
@@ -1173,6 +1194,12 @@ func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	}
 	if err := m.settle(ctx); err != nil {
 		return err
+	}
+	if over := m.roundOver; over != nil {
+		m.roundOver = nil
+		if err := endPodUpdate(m, ctx, *over); err != nil {
+			return err
+		}
 	}
 	if held := m.staleRelaunch; held != nil {
 		m.staleRelaunch = nil
@@ -1207,7 +1234,7 @@ func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 // before interruptOver clears it), whether or not its abort was sent: a turn that abort cut was
 // cut while the worker worked, and counting it would delete a disk holding work the worker never
 // got to push, which is the one harm this round exists to stop. And this daemon saw the turn
-// start (askFirst, which turnEnded clears after this runs): a turn restored from an earlier
+// start (askFirst and unseenTurn, which turnEnded clears after this runs): a turn restored from an earlier
 // daemon's record is one this daemon never saw begin and whose abort it has no memory of — an
 // earlier daemon's Quiesce leaves the round's ask confirmed and the claim working, and the
 // restored machine would otherwise read the agent's "the turn is over" as the answer.
@@ -1223,9 +1250,9 @@ func (m *Machine) answerByTurnEnd() {
 	if !updatesRound(p, m.claim.UpdateRound) || p.ConfirmedAt.IsZero() {
 		return
 	}
-	if m.interrupt != nil || m.askFirst {
+	if m.interrupt != nil || m.askFirst || m.unseenTurn {
 		m.log.Warn("supervise: this daemon cannot vouch for the turn the update task started, so its end is no answer; the round asks again",
-			"round", m.claim.UpdateRound, "takenOver", m.interrupt != nil, "restoredTurn", m.askFirst)
+			"round", m.claim.UpdateRound, "takenOver", m.interrupt != nil, "restoredTurn", m.askFirst || m.unseenTurn)
 		m.claim.UpdateTaskedAt = nil
 		return
 	}
@@ -1767,9 +1794,15 @@ func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time
 	task := RequestDeliver{Claim: m.claim.Token, ID: updateTaskID(open.Round), Task: open.Task}
 	if err := m.queue(ctx, task); err != nil {
 		if errors.Is(err, ErrDeliveryPending) {
+			// The claim holds a task of its own, so the update task waits for that turn to end.
+			// The held one is sent here rather than left: a round that replaced another cleared
+			// the answer that was holding it back (clearUpdate), and nothing else would send it
+			// until the next periodic observation, with the new round's own ask waiting behind
+			// it. sendPending hands nothing to a claim in a turn, so the ordinary case costs
+			// nothing.
 			m.log.Info("supervise: the claim holds a task of its own, so the update task waits for that turn to end",
 				"round", open.Round, "delivery", pendingID(m.claim.Pending))
-			return nil
+			return m.sendPending(ctx)
 		}
 		return err
 	}
@@ -1808,10 +1841,25 @@ func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time
 // task since (sendPending), and no launch is coming to prompt it. Its plugin arms no reminder
 // after ready_for_update either, so it would sit idle with its phase open until some Envoy
 // message happened to reach it. The daemon is the only side that knows the round ended this way,
-// so it tells the worker itself (podUpdateOverTask), and only where the process that answered
-// still runs (HoldsCapability) — a suspended or failed claim is told nothing, as it is sent
-// nothing. A claim that holds a task needs no telling: the round was holding that task back, and
-// leaveRound sends it.
+// so it tells the worker itself (podUpdateOverTask). Which end this is the post carries
+// (PodUpdateEnded.Replaced), since the round's id says the kind of the round and not the fate of
+// its pod: a worker whose pod did go comes back on a new session and a new disk, where the launch
+// itself is what starts it, and the words of this task — your session and your disk are the ones
+// you had — would be false. The worker is told only where the process that answered still runs
+// (HoldsCapability) too: a suspended or failed claim is told nothing, as it is sent nothing.
+//
+// Empty hands are read after leaveRound, never before. The round's own ask can still be pending
+// when the end lands — the worker answered from a turn that started late, and no turn confirmed
+// the ask — and leaveRound is what drops it; read before, that ask would pass for work the worker
+// holds and the release would never be sent. What is left pending after leaveRound is a task of
+// the claim's own, which needs no telling: the round was holding it back, and leaveRound sent it.
+//
+// A claim still in the turn it answered this round from is left exactly as the post found it, as
+// a plugin round's own worker is: the task that turn is reading is the round's ask, which the
+// turn's end retires, so a release decided now would read a worker that holds something, tell it
+// nothing, and leave it idle with nothing to start its next turn. The next sweep posts the end
+// again once the turn is over. An end that replaced the pod does not wait: that process is gone,
+// and leaving the round on the claim would outlive the pod it was opened over.
 //
 // A claim's own plugin round ends with the relaunch it was opened for: the worker has pushed its
 // work and answered, so the process is replaced now, through the path the stale-plugin lane used
@@ -1842,14 +1890,26 @@ func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time
 // suspension is already held (the case replaceProcess would launch rather than end in a
 // suspension, as relaunchStale reads it), and the round is left exactly as the post found it for
 // the next sweep to end again.
-func endPodUpdate(m *Machine, ctx context.Context, _ Event) error {
+func endPodUpdate(m *Machine, ctx context.Context, ev Event) error {
+	ended := ev.(PodUpdateEnded)
 	if m.claim.UpdateRound == "" {
 		m.log.Info("supervise: this claim is in no update round; the end posted for it decides nothing")
+		return nil
+	}
+	if ended.Round != "" && ended.Round != m.claim.UpdateRound {
+		m.log.Info("supervise: the end posted for this claim names a round it is not in; it decides nothing",
+			"ended", ended.Round, "round", m.claim.UpdateRound)
 		return nil
 	}
 	if m.claim.InPluginRound() && (m.claim.State == StateWorking || m.claim.UpdateSignalledAt == nil) {
 		m.log.Info("supervise: this claim's plugin round is not ready to end; its process is left as it is and the next sweep posts the end again",
 			"round", m.claim.UpdateRound, "state", m.claim.State, "answered", m.claim.UpdateSignalledAt != nil)
+		return nil
+	}
+	if !ended.Replaced && m.claim.State == StateWorking && updatesRound(m.claim.Pending, m.claim.UpdateRound) {
+		m.log.Info("supervise: this claim is in the turn it answered its update round from and nothing was replaced; the round ends when that turn does",
+			"round", m.claim.UpdateRound, "delivery", m.claim.Pending.ID)
+		m.roundOver = &ended
 		return nil
 	}
 	relaunch := m.claim.InPluginRound() && HoldsCapability(m.claim.State)
@@ -1858,16 +1918,18 @@ func endPodUpdate(m *Machine, ctx context.Context, _ Event) error {
 			return err
 		}
 	}
-	m.log.Info("supervise: the update round is over for this claim", "round", m.claim.UpdateRound, "relaunch", relaunch)
+	m.log.Info("supervise: the update round is over for this claim",
+		"round", m.claim.UpdateRound, "relaunch", relaunch, "replaced", ended.Replaced)
 	if !relaunch {
-		// Read before leaveRound clears the round: the answer, the running process and the empty
-		// hands together are what say this worker is the one left with nothing to start its next
-		// turn.
-		tell := m.claim.UpdateSignalledAt != nil && HoldsCapability(m.claim.State) && m.claim.Pending == nil
+		// Read before leaveRound clears the round: the answer and the process that gave it are
+		// what say this worker is one the round could leave with nothing.
+		tell := !ended.Replaced && m.claim.UpdateSignalledAt != nil && HoldsCapability(m.claim.State)
 		if err := m.leaveRound(ctx); err != nil {
 			return err
 		}
-		if !tell {
+		// Read after it: the round's own ask is gone by now, and anything still pending is a task
+		// of the claim's own that leaveRound has just sent.
+		if !tell || m.claim.Pending != nil {
 			return nil
 		}
 		return m.tellRoundIsOver(ctx)
@@ -1880,12 +1942,14 @@ func endPodUpdate(m *Machine, ctx context.Context, _ Event) error {
 	return m.replaceProcess(ctx, "the process on another plugin contract is replaced now that its worker has pushed its work")
 }
 
-// leaveRound is the round going from this claim with no process replaced: the ask nothing read
-// goes (dropUpdateTask), every field the round wrote goes (clearUpdate), the claim is written,
-// and the task the round was holding back is sent. It is the whole of the round's end for a pod's
-// round and for a plugin round the registration ended, which differ only in what they log.
-// sendPending hands nothing to a claim that is not ready or idle, so a failed or suspended claim
-// is sent nothing by it.
+// leaveRound is the round going from this claim with no process this machine replaces: the ask
+// nothing read goes (dropUpdateTask), every field the round wrote goes (clearUpdate), the claim
+// is written, and the task the round was holding back is sent. It is the whole of the round's end
+// for a pod's round — whose pod the daemon replaced, or left standing — and for a plugin round
+// the registration ended, which differ only in what they log. sendPending hands nothing to a
+// claim that is not ready or idle, so a failed or suspended claim is sent nothing by it. What it
+// leaves pending is what endPodUpdate reads to decide whether the worker is told anything of the
+// daemon's own.
 func (m *Machine) leaveRound(ctx context.Context) error {
 	if err := m.dropUpdateTask(ctx); err != nil {
 		return err
@@ -1900,7 +1964,9 @@ func (m *Machine) leaveRound(ctx context.Context) error {
 // podUpdateOverTask is what a worker that answered an update round is told when the round ends
 // with nothing replaced: the drift the round was opened for went away — an operator rolled the
 // release back — and the round simply ended. It answers the ask that worker read (UpdateTask),
-// which told it to push its work and to start no new work until its process ran again.
+// which told it to push its work and to start no new work until its process ran again. Its words
+// are true of that end alone, so it is sent for that end alone (PodUpdateEnded.Replaced false):
+// a worker whose pod did go reads them on a session and a disk that are not the ones it had.
 //
 // Another agent reads it, so it follows ASD-STE100 as UpdateTask does: one instruction per
 // sentence, active voice, and no word that has a second reading.
@@ -1983,10 +2049,17 @@ func podUpdateSignalled(m *Machine, ctx context.Context, ev Event) error {
 // (podUpdateSignalled). Another agent reads it, so it follows ASD-STE100 as the task it answers
 // does: one instruction per sentence, active voice, and no word that has a second reading. It
 // names the round the answer carried and the round the claim stands in, and then what the worker
-// does next — answer the round of the task it now holds, or nothing at all, for a claim the
-// daemon is asking nothing of.
+// does next.
+//
+// What it does next is never "answer the round named here". A round that replaced another holds
+// its own ask back until the turn in flight ends (askForUpdate), so the id this refusal prints
+// is one whose words the worker has not read, and an answer given for it would be counted for a
+// round the worker was never asked (podUpdateSignalled is the one guard that stops exactly
+// that). So the worker is told to end its turn and to answer the task the daemon then sends. For
+// a claim the daemon is asking nothing of, it is told so.
 func foreignRoundRefusal(c Claim, answered string) error {
-	in, next := fmt.Sprintf("%q", c.UpdateRound), "Answer the round that your newest update task names"
+	in, next := fmt.Sprintf("%q", c.UpdateRound),
+		"Do not answer that round in this turn. End your turn. The daemon then sends you the task of that round. Answer it after you read that task"
 	if c.UpdateRound == "" {
 		in, next = "no update round", "The daemon asks this claim for no answer now"
 	}

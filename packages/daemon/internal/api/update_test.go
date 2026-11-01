@@ -65,7 +65,7 @@ func TestReadyForUpdateTakesTheOpenRoundsAnswerAndRefusesAnother(t *testing.T) {
 	wantRefusal(t, h.readyForUpdate(foreign), http.StatusConflict,
 		"ready_for_update refused: the answer names an update round this claim is not in. "+
 			"It answers \""+foreign.Round+"\", and this claim is in \""+testUpdateRound+"\". "+
-			"Answer the round that your newest update task names")
+			"Do not answer that round in this turn. End your turn. The daemon then sends you the task of that round. Answer it after you read that task")
 	if c := machine.Claim(); c.UpdateSignalledAt != nil || c.UpdateHead != "" {
 		t.Fatalf("claim after the answer for another round = %+v, want nothing of it recorded", c)
 	}

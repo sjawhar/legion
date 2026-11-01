@@ -1,8 +1,14 @@
 kind: Fixed
 body: |-
-    A worker whose plugin is below the contract that added `ready_for_update` is no longer
-    relaunched in the middle of its turn. It cannot be asked to push first, so its relaunch now
-    waits for the turn to end, and whatever it had not pushed survives. A claim that is idle is
-    relaunched at once as before, and the project controller, which works no checkout and has
-    nothing to push, keeps its immediate relaunch.
+    The stale-plugin relaunch no longer ends a worker's turn where it stands. A worker whose
+    plugin can answer the daemon is asked to push its work first and is replaced once it has; one
+    whose plugin cannot be asked at all is relaunched when its turn ends rather than in it, so
+    whatever it had not pushed survives. A claim that is idle is relaunched at once as before, and
+    the project controller, which works no checkout and has nothing to push, keeps its immediate
+    relaunch.
+
+    A claim whose launch installs no plugin is relaunched by that lane no more, at any contract: a
+    Claude Code role's plugin is its pod image's own, which no install reaches, so each relaunch
+    brought the same plugin back and charged the claim toward `failed`. Its plugin moves with a
+    new image, which the update round over its pod brings.
 time: 2026-10-30T19:30:00Z

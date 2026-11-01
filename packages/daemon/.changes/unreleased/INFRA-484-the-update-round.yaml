@@ -1,0 +1,26 @@
+kind: Added
+body: |-
+    An update round, so that an image, plugin or pod-settings change reaches a running issue pod
+    without ending anybody's turn. A launch into a live pod no longer replaces it for drift. The
+    daemon opens a round over the pod instead: every worker claim of the issue is sent a task
+    naming the drift and asking it to push its work and answer `ready_for_update` with the round
+    the task names, and the pod is replaced only once each has answered and no claim is in a
+    turn. The daemon's last word is asked again under the pod's own lock, from the issue's claims
+    as the store holds them then, so a claim created since the sweep read its list and a turn
+    that starts while the replacement waits both stop it, and an answer for any other round is
+    refused with both ids named.
+
+    A worker whose plugin is older than the contract that added the operation is asked all the
+    same, and its task tells it what to do without one: push, and end the turn. The daemon reads
+    the end of that turn as the answer and records it with no head, so no release needs an
+    operator's drain. A turn the daemon cut, and a turn it never saw begin, are no answer: the
+    round asks again.
+
+    A round that ends having replaced nothing — the drift went away — releases every worker that
+    answered it, an idle one at once and a working one when its turn ends, and a worker whose pod
+    was replaced is told nothing, since its session comes back on the new pod by itself. A round
+    that is not finishing is told to the project's controller once, naming only the claims that
+    have not answered. `pod_update_retask_hours` (1) bounds how often an unanswered worker is
+    asked again and `pod_update_notice_hours` (4) when that notice is sent; `legion state` and
+    `legion claims list` show each open round and the head each worker reported.
+time: 2026-11-01T03:41:39Z

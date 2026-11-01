@@ -154,3 +154,55 @@ func TestAStalePluginRelaunchThatDecidesNothingStillSendsTheWaitingTask(t *testi
 		t.Errorf("the task sent after the turn = %q, want the one that waited behind the relaunch", released.Message)
 	}
 }
+
+// A claim whose launch installs no plugin is never relaunched for its contract, whatever that
+// contract is. A Claude Code role's plugin is its pod image's own claude-envoy, which no install
+// reaches, so the relaunch keeps the pod, brings the same plugin back, and lands in
+// staleRegistration again with PluginRelaunchFor already naming this daemon — the charged path,
+// which walks the claim's launch budget down to failed for a plugin no launch of this deployment
+// can change.
+//
+// The contract it records decides nothing. The rule used to read "below PodUpdateContract", which
+// left exactly one claim unprotected: a Claude Code worker at this release's own contract under
+// the next release's daemon. Its registration was charged, and the next bump walked it to failed
+// the same way the bump before had. What moves such a worker's plugin is a new image, and the
+// update round over its pod is what brings one.
+func TestAStaleRegistrationNoInstallCanMoveIsAcceptedAtAnyContract(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		declared int
+	}{
+		{name: "below the update contract", declared: PodUpdateContract - 1},
+		{name: "at the update contract, under a later daemon", declared: PodUpdateContract},
+		{name: "above the update contract, under a later daemon still", declared: PodUpdateContract + 1},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			h := updateHarness(t, testCase.declared)
+			h.reach(StateReady)
+			h.m.deps.PluginContract = PodUpdateContract + 2
+			h.m.deps.PluginRelaunchable = true
+			h.m.deps.NoPluginInstall = func(Claim) bool { return true }
+			// The relaunch a plugin round over this claim already made, which is what turns the
+			// next stale registration into the charged path (relaunchAfterFailure).
+			h.m.claim.PluginRelaunchFor = h.m.deps.PluginContract
+
+			h.must(RequestRegister{
+				Claim: h.token, Generation: h.generation(), Session: session, SessionFile: sessionFile,
+				CapabilityHash: []byte("capability"), PluginContract: testCase.declared,
+			})
+
+			h.wantCalls("Resume", 0)
+			c := h.claim()
+			if c.Budgets != (Budgets{}) {
+				t.Errorf("the registration left budgets %+v, want none charged", c.Budgets)
+			}
+			if c.PluginRelaunchFor != h.m.deps.PluginContract {
+				t.Errorf("PluginRelaunchFor = %d, want the mark the round's relaunch left, %d",
+					c.PluginRelaunchFor, h.m.deps.PluginContract)
+			}
+			if c.PluginContract != testCase.declared {
+				t.Errorf("PluginContract = %d, want the contract the process declared, %d", c.PluginContract, testCase.declared)
+			}
+		})
+	}
+}

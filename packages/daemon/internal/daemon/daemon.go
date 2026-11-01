@@ -1215,16 +1215,17 @@ func (s *supervision) start(boot context.Context, settle func() error) error {
 // launching is left to its own registration, which decides the comparison the moment it arrives,
 // so only the four states whose process has registered are read.
 //
-// A claim whose launch installs no plugin and whose process is below the contract that
-// introduced ready_for_update is never posted, round or no round (noPluginInstall,
-// supervise.CannotAnswerUpdate). A relaunch is the lane's whole act, and for such a claim the
-// relaunch cannot work: a Claude Code role's plugin is the worker image's own claude-envoy,
+// A claim whose launch installs no plugin is never posted, whatever contract it records and
+// round or no round (noPluginInstall). A relaunch is the lane's whole act, and for such a claim
+// the relaunch cannot work: a Claude Code role's plugin is the worker image's own claude-envoy,
 // which no install reaches, so the launch keeps the pod the claim already runs in, the process
-// comes back on that same plugin, registers the old contract again, and the next registration is
-// the second relaunch in a row — which staleRegistration charges, until the launch budget fails
-// the claim. Nothing here can take such a worker past the contract; a new image can, which is
-// what the pod round replaces the pod for. So it is left running and answers its round like any
-// other worker, by ending the turn the round's task starts (supervise's turnEnded).
+// comes back on that same plugin, registers the same contract again, and the next registration
+// is the second relaunch in a row — which staleRegistration would charge, until the launch
+// budget fails the claim. The contract decides nothing: a claim at this release's own contract
+// is as unreachable by an install as one below it, and the next bump would walk exactly that
+// claim to failed. Nothing here can move such a worker's plugin; a new image can, which is what
+// the pod round replaces the pod for. So it is left running and answers its round like any other
+// worker, with the op or by ending the turn the round's task starts (supervise's turnEnded).
 // staleRegistration accepts such a registration and charges it nothing, for the same reason
 // (supervise.Deps.NoPluginInstall).
 //
@@ -1243,7 +1244,7 @@ func (s *supervision) refreshStalePlugins(claims []supervise.Claim, trigger stri
 		if c.Session == "" || c.PluginContract == api.DaemonAPIVersion || !supervise.HoldsCapability(c.State) {
 			continue
 		}
-		if supervise.CannotAnswerUpdate(c) && s.noPluginInstall(c) {
+		if noPluginInstall(s.cfg, c) {
 			continue
 		}
 		if c.UpdateRound != "" {
@@ -1266,14 +1267,13 @@ func (s *supervision) refreshStalePlugins(claims []supervise.Claim, trigger stri
 // releases claude-envoy). A plugin-contract change for such a role is answered by a new image,
 // which is what the pod round replaces the pod for.
 //
-// It is one rule read in two places: this package's own stale-plugin pass, and the machine's
-// stale registration, which supervise cannot decide for itself because a role's backend is the
-// daemon's configuration (supervise.Deps.NoPluginInstall, handed the same function below).
+// It is one rule read in two places: this package's own stale-plugin pass
+// (refreshStalePlugins), and the machine's stale registration, which supervise cannot decide for
+// itself because a role's backend is the daemon's configuration (supervise.Deps.NoPluginInstall,
+// handed this same function).
 func noPluginInstall(cfg config.Config, c supervise.Claim) bool {
 	return runtime.Of(cfg.BackendFor(c.Role)) == runtime.BackendClaude
 }
-
-func (s *supervision) noPluginInstall(c supervise.Claim) bool { return noPluginInstall(s.cfg, c) }
 
 // reconcileBootOrphans retries only the boot reconciliation, boundedly. A listing error does not
 // prove an unrecorded launch's pane is gone, so callers must not launch the claim again until this

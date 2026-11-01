@@ -406,7 +406,7 @@ func TestTheBootReconciliationWarnsOfEachPodRunningAnotherImage(t *testing.T) {
 		t.Fatalf("Resume replaced the pod %s running the older image, which its update round replaces", issue.Sandbox.PodUID)
 	}
 	// The round over, the pod is replaced and the next launch makes one on the configured image.
-	if err := r2.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &kept}, nil); err != nil {
+	if err := r2.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &kept}, stillDue); err != nil {
 		t.Fatalf("ReplacePod: %v", err)
 	}
 	spec.Generation, spec.BootToken = 3, "boot-g3"

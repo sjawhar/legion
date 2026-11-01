@@ -303,7 +303,7 @@ func TestPodDriftAnswersTheScriptAndReplacePodEndsIt(t *testing.T) {
 		t.Fatalf("a claim running nowhere has drifted: %q, %v", got, err)
 	}
 
-	if err := fake.ReplacePod(ctx, known, nil); err != nil {
+	if err := fake.ReplacePod(ctx, known, stillDue); err != nil {
 		t.Fatalf("replace pod: %v", err)
 	}
 	if got, err := fake.PodDrift(ctx, known); err != nil || len(got) > 0 {
@@ -319,7 +319,7 @@ func TestPodDriftAnswersTheScriptAndReplacePodEndsIt(t *testing.T) {
 	if _, err := fake.PodDrift(ctx, known); !errors.Is(err, refused) {
 		t.Fatalf("pod drift: got %v, want %v", err, refused)
 	}
-	if err := fake.ReplacePod(ctx, known, nil); !errors.Is(err, refused) {
+	if err := fake.ReplacePod(ctx, known, stillDue); !errors.Is(err, refused) {
 		t.Fatalf("replace pod: got %v, want %v", err, refused)
 	}
 }
@@ -450,3 +450,8 @@ func TestReleaseResumeAndTheSweepRefuseALocatorOfAnotherClaim(t *testing.T) {
 		t.Fatalf("methods: got %v, want the refused calls recorded", methods)
 	}
 }
+
+// stillDue is the last word a test gives ReplacePod when its own subject is not that word: the
+// replacement is due, so the runtime goes on. The parameter is required, since a replacement is
+// the one call that deletes an issue's disk and every caller states what makes it still due.
+func stillDue(context.Context) error { return nil }
