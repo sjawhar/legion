@@ -2,37 +2,36 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-562",
-  "completed": "2026-11-01T00:24:26Z",
-  "round": 25,
-  "testedHead": "ec996090a7f0a11a8bad7eeebd2972452766187d",
-  "codeHead": "6dc52eb20e70",
-  "scope": "The merge with main daf71f53 (#2580): one conflict, the import list of cmd/dispatch/stream_replicas_test.go.",
+  "completed": "2026-11-01T04:18:31Z",
+  "round": 26,
+  "testedHead": "6aa492b65f0bf376b8b10508119c3ebefe858f3c",
+  "codeHead": "4a6d06a72cc0",
+  "scope": "The merge with main d09b46d7: conflicts in api/routes_table.go, api/server.go, api/server_test.go and cmd/dispatch/AGENTS.md; migrations renumbered 0150-0153 -> 0151-0154 because main's #2541 took 0150_dpop_proofs.",
   "fingerprint": {
-    "previousVerifiedHead": "5d3815b8f6a97fee5259e4d9d6eca803526d54fa",
+    "previousVerifiedHead": "ec996090a7f0a11a8bad7eeebd2972452766187d",
     "previous": "61825754fc740c8f0ad18dc2242bf50efcf8c9612c47ad9f6704103e9ba4b28a",
-    "current": "61825754fc740c8f0ad18dc2242bf50efcf8c9612c47ad9f6704103e9ba4b28a",
-    "verdict": "unchanged: rebase re-check 5d3815b8 -> ec996090: fingerprint unchanged, bare gates only. The resolved import list of stream_replicas_test.go holds this branch's store and storetest imports and main's logtest import; the file's diff against main daf71f53 is this branch's own lines alone (the two imports, webhookSweeper's store argument, the test's own database and DATABASE_URL)."
+    "current": "93849d4fadd6eef1221eb6dc75b0f5cc186b1b91c738d82a24a873d3d7bf6f6d",
+    "verdict": "changed, read per file with migration numbers normalised: beyond the renumbering, only three files differ, and in each the branch's own added lines are word for word the same while the surrounding main lines are main's: routes_table.go (main renamed apiRoute to routeRow; this PR's four 'on every process' test-hook descriptions sit on main's routeRow rows), server.go (this PR's test-hooks listener sentence beside main's rewritten comment), server_test.go (this PR's aligned field list now carries main's testServerURL and BrokerTokens). No line of this PR's own behaviour changed."
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Bare gates at ec996090 on the pod's Postgres 17: `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -count=1 -v -run 'TestADispatchStart|TestRedeliverWebhooksRaisesAnR1|TestADefaultDispatchStart|TestTheDispatchPublishersKeeper' ./cmd/dispatch` -> the merged file's five tests PASS (ok 40.814s); `go test -count=1 -v -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' ./internal/dispatch/store/` -> both PASS (main tops out at 0149, this PR's 0150-0153)."
+    "how": "At 6aa492b6 (code 4a6d06a7, fork d09b46d7): (1) Migration SQL: each of the eight files 0151-0154 .up.sql/.census.sql is byte-identical to its 0150-0153 predecessor at ec996090 once the number in its first line is normalised. (2) References: the four file-name references name 0151_message_delivery_urgency, 0152_route_roster, 0153_github_rate_limits, 0154_delivery_run_warnings, once each; every 'migration 015N' beside this PR's tables (AGENTS.md:1013, :1786, cmd/dispatch/README.md:245, :610, :616, :641, the pr2387 fragments, api/delivery.go:755, api/delivery_bound_send_test.go:220, api/issue_route_status.go:26, githubapp/ratelimit/ratelimit.go:2) names the new number; the only 0150 references are main's dpop_proofs. (3) Routes: routes_table.go at the head lists the same 153 method-and-path rows as main d09b46d7 and as the previous head ec996090, and every handler main names (s.<name>) is present. (4) On the pod's Postgres 17: `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -count=1 -v -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' ./internal/dispatch/store/` -> both PASS; `go test -count=1 -run Route ./internal/dispatch/api/ ./internal/dispatch/routes/` -> ok (api 73.593s, routes 0.050s)."
   },
   "failed": 0,
   "failures": [],
-  "negativeControl": "Round 18: two migrations sharing version 0149 are refused by the same migration guard. Before the resolution the merge reported stream_replicas_test.go as a 2-sided conflict (implementer's record).",
-  "ci": "Read on GitHub at 00:24Z at code head 6dc52eb2: CI run 41256365139 and PR Title run 41256365017 queued; pr-title queued; ci-ok not yet reported. Not waited for. The previous code head 9e36ee3e: CI run 41233855400 success, PR Title 41233855129 success. The PR is MERGEABLE and APPROVED.",
+  "negativeControl": "Before the renumbering the merged tree held 0150_dpop_proofs and 0150_message_delivery_urgency, which TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny refuses (implementer's record; round 18 and round 11 showed the same refusal by the guard and on real binaries).",
+  "ci": "Read on GitHub at 04:18Z at code head 4a6d06a7: CI run 41270335139 queued (lint, typecheck, test queued; ci-ok not yet reported); PR Title run 41270335204 success. Not waited for. The architect's exceptions (TestEditNoticeRestart, a runner disk-full in infra/host) have no result to apply to yet. The PR is MERGEABLE and APPROVED.",
   "observations": [
-    "Retro removed .legion/INFRA-562/ (9e36ee3e); this handoff writes test.json back, so the next retro removes it again before READY.",
     "Unchanged and not failures: a person's Retry during a take-over wait opens attempt 2 beside the renewed attempt 1 (existing rule); a resumed comment attempt opened by another person's Retry names the comment's author as actor; the test-hook fan-out (DISPATCH_TEST_HOOKS only) can miss a process whose LISTEN connection redials between the caller's pg_locks read and its NOTIFY; a claim or ask follow made during a comment request mid take-over can still give that session two copies."
   ],
   "proof": [
     {
-      "criterion": "The merge with main daf71f53 keeps both sides of stream_replicas_test.go and adds nothing to the branch's diff",
-      "surface": "the branch's diff from its fork point and the merged cmd/dispatch stream tests on Postgres 17",
-      "command": "fingerprint at 5d3815b8 and ec996090; go test -count=1 -v -run 'TestADispatchStart|TestRedeliverWebhooksRaisesAnR1|TestADefaultDispatchStart|TestTheDispatchPublishersKeeper' ./cmd/dispatch",
-      "observed": "fingerprint 61825754 at both; five tests PASS",
-      "headSha": "ec996090a7f0a11a8bad7eeebd2972452766187d",
-      "negativeControl": "round 18: two version-0149 migrations are refused by the migration guard, which passes here"
+      "criterion": "The merge with main d09b46d7 keeps every route and handler from both sides, and the renumbered migrations are the same SQL under the next free numbers",
+      "surface": "api/routes_table.go and the migration files at the head; the Dispatch migration guard and the route tests on a rootless Postgres 17",
+      "command": "route-row and handler comparison against main and ec996090; normalised byte comparison of the eight migration files; go test -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' ./internal/dispatch/store/; go test -run Route ./internal/dispatch/api/ ./internal/dispatch/routes/",
+      "observed": "153 rows on all three, no handler missing; SQL byte-identical; guards and route tests PASS",
+      "headSha": "6aa492b65f0bf376b8b10508119c3ebefe858f3c",
+      "negativeControl": "two migrations at version 0150 before the renumbering -> refused by the guard"
     }
   ]
 }
