@@ -1297,7 +1297,8 @@ included), 2 on a usage error. So exit 0 always means the check compared somethi
 `packages/envoy/loadtest/browsertype` is the browser side of a load test this check judges: it
 connects peers to documents' rooms as people, each named in the server's identity header
 (`-identity-header`, `X-Dispatch-User` by default, on a server run with
-`DISPATCH_IDENTITY=header:<name>`, since a room admits no agent token), and types inside existing
+`DISPATCH_IDENTITY=header:<name>` and `DISPATCH_IDENTITY_HEADER_TRUSTED=1`, since a room admits no
+agent token), and types inside existing
 paragraphs at a set rate (`browsertype -h` lists its flags). A paragraph whose text
 holds a `-protect` value (repeatable) is never edited, so the text a load generator's own writes
 quote stays as it wrote it.

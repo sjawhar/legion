@@ -183,7 +183,7 @@ func treeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
 }
 
 // treeOfUnshared is treeOf for a document nothing else reads or writes while the call runs - a
-// write transaction's fork, read on the request goroutine that holds it (readFork, startTree) -
+// write transaction's fork, read on the request goroutine that holds it (readForkTree, startTree) -
 // which it reads through pmdoc.ReadUnshared, without ygo's ToDelta, and hands back validated once
 // (pmdoc.ValidDocument), so the renders and reads that follow do not validate it again.
 func treeOfUnshared(doc *crdt.Doc) (pmdoc.ValidDocument, error) {
@@ -266,8 +266,8 @@ func documentMarkdownWithOffsets(tree *pmdoc.Node) (string, []pmdoc.BlockOffset,
 	return markdown, offsets, documentSchemaError(err)
 }
 
-// documentMarkdownValid is documentMarkdown of a tree readFork already validated, which the render
-// then does not validate again (pmdoc.ValidDocument.RenderWithBlockOffsets).
+// documentMarkdownValid is documentMarkdown of a tree readForkTree already validated, which the
+// render then does not validate again (pmdoc.ValidDocument.RenderWithBlockOffsets).
 func documentMarkdownValid(tree pmdoc.ValidDocument) (string, error) {
 	markdown, _, err := documentMarkdownValidWithOffsets(tree)
 	return markdown, err
