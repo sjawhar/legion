@@ -45,8 +45,9 @@ sjawhar/legion#2620 added a second drift term to the Kubernetes runtime: a pod r
 ServiceAccount other than `runtime.kubernetes.pod.service_account` is replaced at the next launch,
 as one on another image already was.
 
-The daemon writes `""` into the pod template when `service_account` is unset
-(`config/kubernetes.go`'s `optionalString`), where the API server stores `"default"` on the pod it
+The daemon writes `""` into the pod template when `service_account` is unset (`readPod` in
+`config/kubernetes.go` reads it with `optionalString`, `config/config.go`), where the API server
+stores `"default"` on the pod it
 creates. `accountDrift` and `serviceAccountOr` in
 `packages/daemon/internal/runtime/sandbox/sandbox.go` read both sides through one helper for that
 reason; comparing either raw would have replaced every pod of a deployment naming no account. The
