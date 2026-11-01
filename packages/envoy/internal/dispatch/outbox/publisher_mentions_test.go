@@ -44,15 +44,14 @@ func seedMentionDelivery(t *testing.T, database *store.Store, commentID, session
 }
 
 // seedDelivery records an attempt of commentID's mention of target, as the comment handler and
-// its sender leave it, inserting the comment first when no test seeded it. sessionID is the
-// session the attempt names, "" for none: an unanswered mention's attempt names none until its
-// sender resolves it. outcome is the attempt's state - "sent", "failed", or "pending" for a send
-// its sender claimed just now - or "resumed" for a pending attempt whose sender's claim lapsed
-// two minutes ago (its sender died with the send in flight; the API's delivery sweep resends it),
-// "queued" for a pending attempt created just now that no sender has claimed yet, and
-// "backlogged" or "abandoned" for one created past model.MentionSweepWindow ago that no sender
-// ever claimed, which the delivery sweep will never send. ""
-// records no attempt.
+// its sender leave it, inserting the comment and the mention row first when no test seeded them.
+// sessionID is the session the attempt names, "" for none: an unanswered mention's attempt names
+// none until its sender resolves it. outcome is the attempt's state - "sent", "failed", or
+// "pending" for a send its sender claimed just now - or "resumed" for a pending attempt whose
+// sender's claim lapsed two minutes ago (its sender died with the send in flight; the API's
+// delivery sweep resends it), "queued" for a pending attempt created just now that no sender has
+// claimed yet, and "backlogged" or "abandoned" for one created past model.MentionSweepWindow ago
+// that no sender ever claimed, which the delivery sweep will never send. "" records no attempt.
 func seedDelivery(t *testing.T, database *store.Store, commentID, target, sessionID, outcome string) {
 	t.Helper()
 	if outcome == "" {
@@ -73,6 +72,14 @@ func seedDelivery(t *testing.T, database *store.Store, commentID, target, sessio
 		on conflict (id) do nothing
 	`, commentID); err != nil {
 		t.Fatalf("seed mentioning comment: %v", err)
+	}
+	// The mention row every attempt of it is opened under, in the mode the comment recorded:
+	// what the attempts' sends are keyed by (model.CommentMentionIdempotencyKey).
+	if _, err := database.Pool.Exec(ctx, `
+		insert into comment_mentions (comment_id, target, delivery) values ($1, $2, 'steer')
+		on conflict (comment_id, target) do nothing
+	`, commentID, target); err != nil {
+		t.Fatalf("seed the mention of %s: %v", target, err)
 	}
 	if _, err := database.Pool.Exec(ctx, `
 		insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, state, created_at, claimed_at)
@@ -863,7 +870,7 @@ func TestAResumedMentionsHeldCopyFollowsItsResend(t *testing.T) {
 			publishFallbackCopies(ctx, deps)
 			copies := publisher.all()[1:]
 			if tc.wantCopy {
-				wantKey := contracts.AgentSendDedupeKey("s1", model.CommentMentionIdempotencyKey(commentID, "session:s1"))
+				wantKey := contracts.AgentSendDedupeKey("s1", model.CommentMentionIdempotencyKey(commentID, "session:s1", "steer"))
 				if len(copies) != 1 || copies[0].Topic != sessionTopic || copies[0].DedupeKey != wantKey ||
 					copies[0].EventID != fmt.Sprintf("dispatch-%d", event.ID) {
 					t.Fatalf("the fallback passes published %#v, want one copy to %s keyed %q", copies, sessionTopic, wantKey)
@@ -1217,7 +1224,7 @@ func TestAFallbackCopyOutlivesANATSOutageLongerThanTheDeadLetterThreshold(t *tes
 			"want no attempt counted by the outage, settled and published", row.attempts, row.settled, row.published)
 	}
 	pass()
-	wantKey := contracts.AgentSendDedupeKey("s1", model.CommentMentionIdempotencyKey(commentID, "session:s1"))
+	wantKey := contracts.AgentSendDedupeKey("s1", model.CommentMentionIdempotencyKey(commentID, "session:s1", "steer"))
 	copies := publisher.all()[1:]
 	if len(copies) != 1 || copies[0].Topic != sessionTopic || copies[0].DedupeKey != wantKey {
 		t.Fatalf("the passes after the outage published %#v, want s1's copy once, to %s keyed %q",
@@ -1336,12 +1343,13 @@ func TestAFallbackPassThatIsStoppingClaimsNoRow(t *testing.T) {
 
 // TestTheCopyOfAFailedMentionCarriesTheMentionsDedupeKey: the copy of a new comment on the own
 // topic of a session whose mention failed carries the dedupe key that mention's send went under
-// (agent.<session>.<comment>:<target>), so a host the send reached before its attempt failed
-// drops the copy; every other destination carries the event's own key, and every one the event's
-// own id. Of several failed targets the lowest keys the copy; the mode a target's attempts went
-// in never shows in it, since every attempt of one mention sends under one key; an abandoned
-// attempt the outbox settles failed keys it too. The copy goes out as the route and as the
-// claimant route alike.
+// (agent.<session>.<comment>:<target>:<the mention's mode>), so a host the send reached before
+// its attempt failed drops the copy; every other destination carries the event's own key, and
+// every one the event's own id. Of several failed targets the lowest keys the copy; the mode in
+// it is the one the comment recorded on the mention and never the mode a target's attempts went
+// in, since every attempt of one mention sends under that one key; an abandoned attempt the
+// outbox settles failed keys it too. The copy goes out as the route and as the claimant route
+// alike.
 func TestTheCopyOfAFailedMentionCarriesTheMentionsDedupeKey(t *testing.T) {
 	const (
 		issueTopic     = "notifications.dispatch.issue.T-1.comment.created"
@@ -1367,7 +1375,7 @@ func TestTheCopyOfAFailedMentionCarriesTheMentionsDedupeKey(t *testing.T) {
 				seedDelivery(t, database, commentID, "session:mentioned", "mentioned", "failed")
 				seedDelivery(t, database, commentID, "role:reviewer", "mentioned", "failed")
 			},
-			wantKey: "agent.mentioned.00000000-0000-0000-0004-000000000001:role:reviewer",
+			wantKey: "agent.mentioned.00000000-0000-0000-0004-000000000001:role:reviewer:steer",
 		},
 		{
 			name:      "failed under two targets, as the claimant route",
@@ -1376,7 +1384,7 @@ func TestTheCopyOfAFailedMentionCarriesTheMentionsDedupeKey(t *testing.T) {
 				seedDelivery(t, database, commentID, "session:mentioned", "mentioned", "failed")
 				seedDelivery(t, database, commentID, "role:reviewer", "mentioned", "failed")
 			},
-			wantKey: "agent.mentioned.00000000-0000-0000-0004-000000000002:role:reviewer",
+			wantKey: "agent.mentioned.00000000-0000-0000-0004-000000000002:role:reviewer:steer",
 		},
 		{
 			name:      "two failed attempts of one target in two modes",
@@ -1390,8 +1398,9 @@ func TestTheCopyOfAFailedMentionCarriesTheMentionsDedupeKey(t *testing.T) {
 					t.Fatalf("retry the mention in another mode: %v", err)
 				}
 			},
-			// Both attempts sent under the mention's one key, so the mode of neither shows in it.
-			wantKey: "agent.mentioned.00000000-0000-0000-0004-000000000003:session:mentioned",
+			// Both attempts sent under the mention's one key, in the mode the comment recorded on
+			// it, so attempt 2's btw does not show in it.
+			wantKey: "agent.mentioned.00000000-0000-0000-0004-000000000003:session:mentioned:steer",
 		},
 		{
 			name:      "abandoned, settled failed by the outbox",
@@ -1400,7 +1409,7 @@ func TestTheCopyOfAFailedMentionCarriesTheMentionsDedupeKey(t *testing.T) {
 			seed: func(t *testing.T, database *store.Store, commentID string) {
 				seedDelivery(t, database, commentID, "session:mentioned", "mentioned", "abandoned")
 			},
-			wantKey: "agent.mentioned.00000000-0000-0000-0004-000000000004:session:mentioned",
+			wantKey: "agent.mentioned.00000000-0000-0000-0004-000000000004:session:mentioned:steer",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

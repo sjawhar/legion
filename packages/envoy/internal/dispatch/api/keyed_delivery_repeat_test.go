@@ -133,9 +133,9 @@ func TestARepeatOfACommentDeliversItsOwedMentionOnce(t *testing.T) {
 	if settled := settledCommentDeliveries(t, database, comment.ID); !allSent(settled) {
 		t.Fatalf("the attempt after the repeat = %#v, want it sent", settled)
 	}
-	// Both sends carry the attempt's own key, which is what makes the second a repeat the stream
-	// drops rather than a second frame.
-	key := comment.ID + ":session:s1"
+	// Both sends carry the mention's own key - its target and the mode the comment recorded on it
+	// - which is what makes the second a repeat the stream drops rather than a second frame.
+	key := comment.ID + ":session:s1:steer"
 	if keys := keysOf(sends); !equalStrings(keys, []string{key, key}) {
 		t.Fatalf("listener sends = %v, want the one attempt's key twice", keys)
 	}

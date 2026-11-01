@@ -241,7 +241,7 @@ func TestAbandonedMentionAttemptIsResumedUnderItsOriginalIdempotencyKey(t *testi
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "The sender dies before it hears back.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
-	original := comment.ID + ":session:s1"
+	original := comment.ID + ":session:s1:steer"
 	settledCommentDeliveries(t, database, comment.ID)
 	if len(keys) != 1 || keys[0] != original {
 		t.Fatalf("original send keys = %#v, want %q", keys, original)
@@ -264,10 +264,11 @@ func TestAbandonedMentionAttemptIsResumedUnderItsOriginalIdempotencyKey(t *testi
 	if attempt := decodeBody[commentDeliveryRead](t, held); attempt.Attempt != 2 || attempt.State != "sent" {
 		t.Fatalf("retry beside a held attempt = %#v, want its own attempt 2", attempt)
 	}
-	// The key carries no attempt number and no mode, only the mention's target: a retry beside a
-	// live claim opens its own attempt ROW (nobody drives the held one), but sends under the
-	// SAME key as the original - if the held attempt's send lands too, the stream recognises
-	// the repeat and this one settles as a duplicate rather than a second delivery.
+	// The key carries no attempt number: it is the mention's target and the mode the comment
+	// recorded on the mention, so a retry beside a live claim opens its own attempt ROW (nobody
+	// drives the held one) but sends under the SAME key as the original - if the held attempt's
+	// send lands too, the stream recognises the repeat and this one settles as a duplicate
+	// rather than a second delivery.
 	if len(keys) != 1 || keys[0] != original {
 		t.Fatalf("held-attempt retry keys = %#v, want the same key %q", keys, original)
 	}
@@ -363,7 +364,7 @@ func TestStrandedMentionAttemptIsResolvedRatherThanFailedUnsent(t *testing.T) {
 		attempt.SessionID == nil || *attempt.SessionID != "s1" {
 		t.Fatalf("resumed stranded attempt = %#v, want attempt 1 sent to the live session s1", attempt)
 	}
-	original := comment.ID + ":session:s1"
+	original := comment.ID + ":session:s1:steer"
 	if len(keys) != 1 || keys[0] != original {
 		t.Fatalf("stranded-attempt send keys = %#v, want one send under the original key %q", keys, original)
 	}

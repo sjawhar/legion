@@ -87,12 +87,14 @@ var (
 	// owedCommentAttempt is model.OwedMentionAttemptSQL, built from the same lease the outbox's
 	// split of a pending attempt reads (model.MentionResumedSQL, which counts beside the attempts
 	// this sweep sends every attempt past that lease that is not abandoned - one queued behind a
-	// held lane, whose sender writes its claim again, and one a lane stood down from, which this
-	// sweep sends once the attempt that overtook it failed). So the outbox holds a session's copy
-	// back for every attempt a send is still coming for, this sweep's and a live sender's alike,
-	// and waits on no attempt longer than this sweep does; one no send is coming for reads
-	// abandoned (model.MentionAbandonedSQL), and the outbox publishes that copy rather than
-	// waiting on it.
+	// held lane, whose sender writes its claim again, and one a later attempt overtook while its
+	// sender holds it, which that sender sends or settles when its lane reaches it). So the
+	// outbox holds a session's copy back for every attempt a send is still coming for, this
+	// sweep's and a live sender's alike, and waits on no attempt longer than this sweep does;
+	// one no send is coming for while it reads so counts abandoned (model.MentionAbandonedSQL) -
+	// the attempt a lane stood down from among them, for as long as the attempt that overtook it
+	// is pending - and the outbox publishes that copy rather than waiting on it. Should that
+	// overtaking attempt then fail, the stood-down attempt stands again and is this sweep's.
 	owedCommentAttempt = `d.state = 'pending' and ` + model.OwedMentionAttemptSQL("d")
 	// supersededCommentAttempt holds for a pending mention attempt a later attempt of the same
 	// mention has delivered the comment in the place of (model.MentionAttemptDeliveredLaterSQL)

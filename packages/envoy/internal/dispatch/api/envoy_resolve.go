@@ -143,9 +143,9 @@ func deliveryErrorText(err error) string {
 // that attempt under its original number, and so its original idempotency key, whose repeat of a
 // send that did land is recognised and dropped (DELIVERY_DUPLICATE_WINDOW_MS in
 // packages/contracts), and in the mode that attempt's row pinned rather than the one asked for.
-// For a comment mention that is the whole of it: its key names the mention and not the mode
-// (model.CommentMentionIdempotencyKey), so a resumed attempt's frame goes under the key its
-// earlier frame went under whichever mode either was sent in (claimCommentDeliveryAttempt). A
+// For a comment mention that is the whole of it: its key names the mention's own mode, not the
+// attempt's (model.CommentMentionIdempotencyKey), so a resumed attempt's frame goes under the key
+// its earlier frame went under whichever mode either was sent in (claimCommentDeliveryAttempt). A
 // targeted message's key is mode-scoped, so a retry there in another mode may not ride that row
 // at all: it settles the stranded attempt and opens an attempt of its own (deliverMessageResuming).
 type attemptClaim struct {

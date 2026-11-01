@@ -578,7 +578,7 @@ func TestTheDeliverySweepSettlesWhatItCannotSend(t *testing.T) {
 			len(closedMessages), len(closedKeyed), len(closedMentions)+1, unsendable)
 	}
 
-	mentionKey := sendableMention + ":session:s1"
+	mentionKey := sendableMention + ":session:s1:steer"
 	want := []string{mentionKey, mentionKey, sendableKeyed + ":steer", sendableMessage + ":steer"}
 	slices.Sort(want)
 	settled := func() map[string]int {
@@ -676,10 +676,11 @@ func TestTheDeliverySweepSendsTheAttemptItFoundOwed(t *testing.T) {
 		if err := served.resumeOwedDeliveries(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		// Every attempt of one mention sends under its one key, whatever its mode, so which
-		// attempt the sweep sent shows in the rows below - attempt 2 sent, attempt 1 superseded
-		// by it - rather than in the key.
-		want := slices.Concat(before, []string{comment + ":session:s1"})
+		// Every attempt of one mention sends under its one key - the mention's target and the
+		// mode the comment recorded on it, not attempt 2's btw - so which attempt the sweep sent
+		// shows in the rows below - attempt 2 sent, attempt 1 superseded by it - rather than in
+		// the key.
+		want := slices.Concat(before, []string{comment + ":session:s1:steer"})
 		slices.Sort(want)
 		if keys := keysOf(sends); !equalStrings(keys, want) {
 			t.Fatalf("the sweep sent %v after the comment's own send, want %v: the retry's attempt alone", keys, want)

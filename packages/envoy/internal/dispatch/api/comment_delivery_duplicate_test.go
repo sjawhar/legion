@@ -80,7 +80,7 @@ func TestCommentMentionThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(
 	keys := append([]string(nil), listenerState.keys...)
 	delivered := len(listenerState.delivered)
 	listenerState.Unlock()
-	original := comment.ID + ":session:s1"
+	original := comment.ID + ":session:s1:steer"
 	if len(keys) != 2 || keys[0] != original || keys[1] != original {
 		t.Fatalf("mention send keys = %#v, want both sends under the mention's key %q", keys, original)
 	}

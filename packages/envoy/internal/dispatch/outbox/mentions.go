@@ -62,12 +62,13 @@ type mentionDeliveries struct {
 	// publishFallbackCopies). A send that landed before its attempt failed - a receipt timeout, or
 	// a send handed the listener before a kill whose resend then failed - has already given the
 	// host that key, so the host drops the copy; a session no mention reached shows it. Every
-	// attempt of one mention sends under that one key whatever its mode, so which of a target's
-	// failed attempts is the latest does not change it. A session whose failed attempts span
-	// several targets keys by the lowest target. One key is enough: each target is a send of its
-	// own, so a comment naming one session under two targets gives it one copy per target that
-	// lands, and a copy shown beside another target's landed mention leaves the session no more
-	// copies than had every one of its mentions landed.
+	// attempt of one mention sends under that one key, which carries the mention's own mode and
+	// no attempt's, so which of a target's failed attempts is the latest, and what mode it went
+	// in, do not change it. A session whose failed attempts span several targets keys by the
+	// lowest target. One key is enough: each target is a send of its own, so a comment naming one
+	// session under two targets gives it one copy per target that lands, and a copy shown beside
+	// another target's landed mention leaves the session no more copies than had every one of
+	// its mentions landed.
 	fallbackKeys map[string]string
 	// targetFallbackKeys is keyed like targets, and holds for each target with a failed or
 	// abandoned attempt that names a session the dedupe key of that target's mention (of the
@@ -113,7 +114,7 @@ func (k mentionKind) attemptKey() string {
 	if k == targetMentions {
 		return "target"
 	}
-	return model.MentionSessionSQL
+	return model.MentionSessionSQL("comment_deliveries")
 }
 
 // fallbackColumn is the comment_fallback_copies column that names a row's key of this kind.
@@ -332,22 +333,27 @@ func payloadMentionedSessions(payload any) map[string]struct{} {
 }
 
 // mentionDeliveryQuery groups a comment's mention attempts by the session each counts under
-// (model.MentionSessionSQL) and by its target, and reports of each group whether an attempt was
-// sent, is past the lease a send is waited out for (model.MentionResumedSQL), is live
-// (model.MentionLiveSQL), is abandoned (model.MentionAbandonedSQL), and whether any attempt of it
-// failed or is abandoned (mentionDeliveries.fallbackKeys). What mode those attempts went in does
-// not matter: every attempt of one mention sends under one key
-// (model.CommentMentionIdempotencyKey).
+// (model.MentionSessionSQL) and by its target, and reports of each group the mode the comment
+// recorded on that mention, whether an attempt was sent, is past the lease a send is waited out
+// for (model.MentionResumedSQL), is live (model.MentionLiveSQL), is abandoned
+// (model.MentionAbandonedSQL), and whether any attempt of it failed or is abandoned
+// (mentionDeliveries.fallbackKeys). What mode those attempts went in does not matter: every
+// attempt of one mention sends under the mention's own key (model.CommentMentionIdempotencyKey),
+// so the mode comes from comment_mentions - one row per (comment, target), which is what makes
+// min() of it that row's mode - and never from the attempts themselves. Every attempt is opened
+// under that row (claimCommentDeliveryAttempt in internal/dispatch/api), so the join drops none.
 var mentionDeliveryQuery = `
-	select ` + model.MentionSessionSQL + `,
-	       target,
-	       bool_or(state = 'sent'),
-	       bool_or(state = 'pending' and ` + model.MentionResumedSQL("comment_deliveries") + `),
-	       bool_or(state = 'pending' and ` + model.MentionLiveSQL("comment_deliveries") + `),
-	       bool_or(state = 'pending' and ` + model.MentionAbandonedSQL("comment_deliveries") + `),
-	       bool_or(state = 'failed' or (state = 'pending' and ` + model.MentionAbandonedSQL("comment_deliveries") + `))
-	from comment_deliveries
-	where comment_id = $1
+	select ` + model.MentionSessionSQL("d") + `,
+	       d.target,
+	       min(m.delivery),
+	       bool_or(d.state = 'sent'),
+	       bool_or(d.state = 'pending' and ` + model.MentionResumedSQL("d") + `),
+	       bool_or(d.state = 'pending' and ` + model.MentionLiveSQL("d") + `),
+	       bool_or(d.state = 'pending' and ` + model.MentionAbandonedSQL("d") + `),
+	       bool_or(d.state = 'failed' or (d.state = 'pending' and ` + model.MentionAbandonedSQL("d") + `))
+	from comment_deliveries d
+	join comment_mentions m on m.comment_id = d.comment_id and m.target = d.target
+	where d.comment_id = $1
 	group by 1, 2
 `
 
@@ -391,16 +397,17 @@ func readMentionDeliveries(ctx context.Context, deps Deps, event model.Event, co
 	fallbackTargets, fallbackSessions := map[string]string{}, map[string]string{}
 	for rows.Next() {
 		var sessionID *string
-		var target string
+		var target, mentionMode string
 		var sent, resending, sending, abandoned, failedSend bool
-		if err := rows.Scan(&sessionID, &target, &sent, &resending, &sending, &abandoned, &failedSend); err != nil {
+		if err := rows.Scan(&sessionID, &target, &mentionMode, &sent, &resending, &sending, &abandoned, &failedSend); err != nil {
 			return failed(err)
 		}
 		state := mentionStateOf(sent, resending, sending, abandoned)
 		if sessionID != nil {
 			result.sessions.record(*sessionID, state)
 			if failedSend {
-				key := contracts.AgentSendDedupeKey(*sessionID, model.CommentMentionIdempotencyKey(commentID, target))
+				key := contracts.AgentSendDedupeKey(
+					*sessionID, model.CommentMentionIdempotencyKey(commentID, target, mentionMode))
 				if chosen, ok := fallbackTargets[*sessionID]; !ok || target < chosen {
 					fallbackTargets[*sessionID] = target
 					result.fallbackKeys[*sessionID] = key

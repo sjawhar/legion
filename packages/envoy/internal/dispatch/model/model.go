@@ -1284,19 +1284,21 @@ type Mention struct {
 }
 
 // CommentMentionIdempotencyKey is the idempotency key every send of a comment's mention of target
-// goes under, <comment>:<target>: stable across every attempt of that pair and across the modes
-// those attempts were made in, so whichever copy reaches the recipient second repeats the key of
-// the one that landed and is recognised as the repeat it is (DELIVERY_DUPLICATE_WINDOW_MS in
-// packages/contracts). The mode is left out on purpose. An attempt a Retry overtook is sent after
-// that Retry whenever the Retry failed (MentionAttemptStandsSQL), and a Retry recorded failed may
-// still have reached the session - a receipt timeout says so itself - so one key per mention is
-// what makes that send safe: the session keeps one copy whichever of the two arrives first. The
-// consequence is that a Retry in any mode of a mention whose earlier attempt reached the session
-// is recorded duplicate and delivers nothing. The API sends the mention under it, and the outbox
-// keys the copy it publishes to a session whose mention failed by the same send's dedupe key
-// (contracts.AgentSendDedupeKey).
-func CommentMentionIdempotencyKey(commentID, target string) string {
-	return commentID + ":" + target
+// goes under, <comment>:<target>:<mention mode>. mentionMode is the mode the comment recorded on
+// that mention (comment_mentions.delivery), never the mode of the attempt being sent: the
+// mention's first attempt is opened in it (createCommentFor in internal/dispatch/api), so this is
+// one key per mention, the same for its automatic send, for the delivery sweep's resend and for a
+// dashboard Retry in any mode. Whichever copy reaches the recipient second therefore repeats the
+// key of the one that landed and is recognised as the repeat it is (DELIVERY_DUPLICATE_WINDOW_MS
+// in packages/contracts). An attempt a Retry overtook is sent after that Retry whenever the Retry
+// failed (MentionAttemptStandsSQL), and a Retry recorded failed may still have reached the session
+// - a receipt timeout says so itself - so one key per mention is what makes that send safe: the
+// session keeps one copy whichever of the two arrives first. The consequence is that a Retry in
+// any mode of a mention whose earlier attempt reached the session is recorded duplicate and
+// delivers nothing. The API sends the mention under it, and the outbox keys the copy it publishes
+// to a session whose mention failed by the same send's dedupe key (contracts.AgentSendDedupeKey).
+func CommentMentionIdempotencyKey(commentID, target, mentionMode string) string {
+	return commentID + ":" + target + ":" + mentionMode
 }
 
 // DeliveryClaimLapse is the lease on a pending delivery attempt (a comment_deliveries or
@@ -1375,12 +1377,12 @@ func mentionLaterAttemptSQL(row, condition string) string {
 // mention is this attempt's to send again all the same - the sweep owes it
 // (OwedMentionAttemptSQL), a sender bound to it sends it, and the outbox waits on it as the
 // mention's (MentionAttemptIsTheMentionsSQL) - because every attempt of one mention sends under
-// one idempotency key (CommentMentionIdempotencyKey), whatever its mode: should that failed
-// later attempt have landed, this send repeats its key and the recipient's host drops it. Only a
-// later attempt that delivered the comment takes the send over for good
-// (MentionAttemptDeliveredLaterSQL); while a later attempt is still pending neither is settled,
-// and the attempt it overtook is left pending for whichever of the two outcomes follows
-// (claimCommentDeliveryAttempt in internal/dispatch/api).
+// the mention's one idempotency key (CommentMentionIdempotencyKey), whatever mode the attempt
+// itself went in: should that failed later attempt have landed, this send repeats its key and
+// the recipient's host drops it. Only a later attempt that delivered the comment takes the send
+// over for good (MentionAttemptDeliveredLaterSQL); while a later attempt is still pending
+// neither is settled, and the attempt it overtook is left pending for whichever of the two
+// outcomes follows (claimCommentDeliveryAttempt in internal/dispatch/api).
 func MentionAttemptStandsSQL(row string) string {
 	return `(not ` + mentionLaterAttemptSQL(row, `later.state <> 'failed'`) + `)`
 }
@@ -1446,15 +1448,22 @@ func MentionResumedSQL(row string) string {
 		` and not ` + MentionAbandonedSQL(row) + `)`
 }
 
-// MentionAbandonedSQL is true of a pending mention attempt no send of its own is coming for and
-// no sender holds: created more than MentionSweepWindow ago, or overtaken by a later attempt of
-// the same target that did not fail (MentionAttemptStandsSQL), and claimed by nobody within
-// DeliveryClaimLapse. The delivery sweep sends no such attempt; it settles the overtaken ones
-// superseded once that later attempt has been sent (MentionAttemptDeliveredLaterSQL,
+// MentionAbandonedSQL is true of a pending mention attempt no send is coming for while it reads
+// so, and that no sender holds: created more than MentionSweepWindow ago, or overtaken by a later
+// attempt of the same target that did not fail (MentionAttemptStandsSQL), and claimed by nobody
+// within DeliveryClaimLapse. The delivery sweep sends no such attempt; it settles the overtaken
+// ones superseded once that later attempt has been sent (MentionAttemptDeliveredLaterSQL,
 // settleSupersededMentions in internal/dispatch/api), and leaves the ones past the window. The
 // outbox settles such an attempt failed before it publishes the copy in the mention's place; a
 // claim that commits first leaves the attempt live until that claim lapses, so the sender and the
 // outbox never both act on it.
+//
+// Reading abandoned is not final. The attempt a lane stood down from while a Retry of its mention
+// was in flight (claimCommentDeliveryAttempt in internal/dispatch/api) is claim-free and
+// overtaken, so it reads abandoned for as long as that Retry stays pending; once the Retry fails
+// the attempt stands again and is the sweep's to send (OwedMentionAttemptSQL). Whichever comes
+// first decides it: an outbox pass that settles it failed takes it from the sweep, and a sweep
+// that sends it leaves the outbox nothing to settle.
 func MentionAbandonedSQL(row string) string {
 	return `(not ` + MentionAttemptIsTheMentionsSQL(row) + ` and ` + deliveryClaimFreeSQL(row) + `)`
 }
@@ -1488,9 +1497,12 @@ func MentionSession(sessionID, target string) (string, bool) {
 	return "", false
 }
 
-// MentionSessionSQL is MentionSession over a comment_deliveries row, null when the attempt counts
+// MentionSessionSQL is MentionSession over the comment_deliveries row named row - its alias, or
+// the table's own name, as the mention predicates above take it - null when the attempt counts
 // under no session (substr drops the 8 bytes of "session:").
-const MentionSessionSQL = `coalesce(session_id, case when target like 'session:%' then substr(target, 9) end)`
+func MentionSessionSQL(row string) string {
+	return `coalesce(` + row + `.session_id, case when ` + row + `.target like 'session:%' then substr(` + row + `.target, 9) end)`
+}
 
 // CommentDelivery records one attempt to deliver a mention to its resolved session.
 type CommentDelivery struct {

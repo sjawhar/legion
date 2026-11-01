@@ -381,13 +381,13 @@ func TestTheSweepSendsTheAttemptAFailedRetryOvertookOnceItsClaimLapses(t *testin
 	}
 }
 
-// framesOfTheQueuedComment is what the listener took of the comment queued behind the stalled
-// send: how many sends of it reached s1, the distinct idempotency keys those sends went under,
-// and how many of them s1 was actually handed - a send answered as a repeat of a key the
-// recipient's host already holds hands it nothing (dropRepeats).
-func framesOfTheQueuedComment(listener *mentionListener) (sends int, keys []string, handedOver int) {
+// framesOf is what the listener took of the comment whose body is body: how many sends of it
+// reached session, the distinct idempotency keys those sends went under, and how many of them
+// session was actually handed - a send answered as a repeat of a key the recipient's host
+// already holds hands it nothing (dropRepeats).
+func framesOf(listener *mentionListener, session, body string) (sends int, keys []string, handedOver int) {
 	for _, send := range listener.sent() {
-		if !send.is("s1", "second") {
+		if !send.is(session, body) {
 			continue
 		}
 		sends++
@@ -401,14 +401,21 @@ func framesOfTheQueuedComment(listener *mentionListener) (sends int, keys []stri
 	return sends, keys, handedOver
 }
 
+// framesOfTheQueuedComment is framesOf the comment queued behind the stalled send, which every
+// test of this file posts as "second" and mentions s1 in.
+func framesOfTheQueuedComment(listener *mentionListener) (sends int, keys []string, handedOver int) {
+	return framesOf(listener, "s1", "second")
+}
+
 // Round 8 of the review, the reviewer's reproduction. A Retry in ANOTHER mode whose frame reached
 // s1 but whose receipt missed the send window settles failed, saying the message may already have
 // been delivered. The attempt it overtook therefore stands (model.MentionAttemptStandsSQL) and is
 // sent after it, in its own pinned mode - and that is only safe because every attempt of one
-// mention goes under the mention's one idempotency key
-// (model.CommentMentionIdempotencyKey), whatever its mode: s1's host recognises the second frame
-// as the repeat it is and hands s1 nothing. With the mode in the key the two frames went under
-// different keys and s1 was handed the comment twice.
+// mention goes under the mention's one idempotency key (model.CommentMentionIdempotencyKey),
+// which carries the mode the comment recorded on the mention, never the mode the attempt went
+// in: s1's host recognises the second frame as the repeat it is and hands s1 nothing. With the
+// ATTEMPT's mode in the key the two frames went under different keys and s1 was handed the
+// comment twice.
 func TestARetryInAnotherModeThatTimedOutLeavesTheRecipientOneCopy(t *testing.T) {
 	const sendWindow = 2 * time.Second
 	lane := aMentionQueuedWithinASendWindow(t, "", sendWindow)
@@ -447,7 +454,7 @@ func TestARetryInAnotherModeThatTimedOutLeavesTheRecipientOneCopy(t *testing.T) 
 			"and s1's host to have dropped it as the repeat it is", settled[0])
 	}
 	sends, keys, handedOver := framesOfTheQueuedComment(lane.listener)
-	wantKey := model.CommentMentionIdempotencyKey(lane.queued, "session:s1")
+	wantKey := model.CommentMentionIdempotencyKey(lane.queued, "session:s1", "steer")
 	if sends != 2 || !slices.Equal(keys, []string{wantKey}) {
 		t.Fatalf("the listener took %d sends of the queued comment under keys %v, want the Retry's and "+
 			"the sweep's, both under the mention's key %q", sends, keys, wantKey)

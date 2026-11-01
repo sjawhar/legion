@@ -1583,8 +1583,9 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  * stated; every other place that relies on it points here.
  *
  * Dispatch keys a targeted message's send by message and mode (`<message>:<mode>`) and a comment
- * mention's by comment and target (`<comment>:<target>`, whatever mode each attempt went in), the
- * same for every attempt, and the listener makes that key, scoped to the recipient
+ * mention's by comment, target and the mode the comment recorded on that mention
+ * (`<comment>:<target>:<the mention's mode>`, whatever mode each attempt went in), the same for
+ * every attempt, and the listener makes that key, scoped to the recipient
  * (`agent.<session>.<key>`), the envelope's `dedupe_key`. A Retry of a send that already landed -
  * in the same mode, or in any mode at all for a mention - therefore repeats that frame's dedupe
  * key, and only that: the listener mints a new

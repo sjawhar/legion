@@ -1055,7 +1055,8 @@ A resumed attempt keeps the recipient it was opened for - a comment attempt its 
 a role that has moved since is reached by an attempt of its own rather than by re-pointing this one, and only whether the original recipient can still receive the mode is re-derived.
 An attempt stranded before anything was resolved has no recipient to keep and is resolved afresh under that same number, never reported undeliverable unsent.
 
-The idempotency key carries no attempt number: a targeted message's is `<message>:<mode>` and a comment mention's is `<comment>:<target>`, stable across every attempt of that pair - and, for a mention, across the modes those attempts went in.
+The idempotency key carries no attempt number: a targeted message's is `<message>:<mode>` and a comment mention's is `<comment>:<target>:<the mention's mode>`, stable across every attempt of that pair - and, for a mention, across the modes those attempts went in, because the mode in its key is the one the comment recorded on the mention (`comment_mentions.delivery`) and never the attempt's own.
+The mention's first attempt is opened in that mode, so it is one key per mention: the key its automatic send, the delivery sweep's resend and a Retry in any mode all go under, which is also the key the build before this one sent it under, so a mention delivered before a deploy is dropped as a repeat across it.
 The listener prefixes the recipient (`agent.<session>.<key>`) to make the envelope's `dedupe_key`, and the JetStream MsgId appends the topic, so the key's real scope is **(message, mode, recipient session)** for a message and **(comment, target, recipient session)** for a mention, and a retry of a send that already landed repeats the dedupe key of the frame that landed - and nothing else of it, because the listener mints a fresh `event_id` per send.
 That is what makes a retry after a receipt timeout safe:
 the listener publishes the envelope before it answers, so an answer that misses the client's window says nothing about whether the message landed, and only the same key can be recognised as the repeat it is.
@@ -1070,7 +1071,7 @@ A retry of a MESSAGE in a DIFFERENT mode is a different key and genuinely does d
 its **Retry** re-sends the attempt's own mode, and the two mode-change actions say "instead".
 A mode change never rides on a stranded message attempt - resuming it would publish a second frame under one attempt number - so the claim transaction settles that attempt `failed` ("superseded by a retry in another mode"), moves its `claimed_at` so the original sender stops owning it, appends its own `message.delivery` receipt, and opens a new attempt pinned to the session the stranded row named.
 
-A comment mention's key names no mode, so a Retry of a mention in another mode repeats it:
+A comment mention's key names the mention's own mode and no attempt's, so a Retry of a mention in another mode repeats it:
 when an earlier attempt of that mention reached the session, the Retry's frame is dropped and its attempt is recorded `duplicate`, delivering nothing.
 That is what makes the attempt a Retry overtook safe to send after it (INFRA-606).
 An attempt stands as soon as every later attempt failed (`model.MentionAttemptStandsSQL`), and a failure says nothing about whether the frame landed - a receipt timeout says it may have, and a reply callback can fail an attempt the session plainly received - so the overtaken attempt is sent, and whichever copy arrives second is the repeat its host drops (`model.CommentMentionIdempotencyKey`).
@@ -3779,9 +3780,9 @@ a token the issuer never signed, one naming a key id the issuer publishes nothin
   The doc comment of `publishFallbackCopies` in `internal/dispatch/outbox/mentions.go` is that protocol's one description, races included.
 
 - Every other session - each attempt `failed`, or no row at all - is published to as if it had not been mentioned, but for the dedupe key of its copy:
-  a copy on the own topic of a session with a `failed` attempt (or an abandoned one, which the outbox settles `failed` first) carries the key that attempt's send went under, `contracts.AgentSendDedupeKey(session, model.CommentMentionIdempotencyKey(comment, target))` - the listener's `agent.<session>.<comment>:<target>` for the mention - in place of `dispatch-<event id>`, and keeps the event id `dispatch-<event id>` (`attempt.sessionCopy`, `mentionDeliveries.fallbackKeys`).
+  a copy on the own topic of a session with a `failed` attempt (or an abandoned one, which the outbox settles `failed` first) carries the key that attempt's send went under, `contracts.AgentSendDedupeKey(session, model.CommentMentionIdempotencyKey(comment, target, mentionMode))` - the listener's `agent.<session>.<comment>:<target>:<the mention's mode>` for the mention - in place of `dispatch-<event id>`, and keeps the event id `dispatch-<event id>` (`attempt.sessionCopy`, `mentionDeliveries.fallbackKeys`).
   Of several failed targets the lowest target string keys it;
-  the mode a target's attempts went in never shows in it, every attempt of one mention sending under that one key.
+  the mode in it is the one the comment recorded on the mention, read from `comment_mentions` beside the attempts, and the mode a target's attempts went in never shows in it, every attempt of one mention sending under that one key.
   Every other destination the event's own publish reaches, a role route included, carries `dispatch-<event id>`;
   a fallback copy carries its key's failed attempt's key whatever its destination (`targetFallbackKeys` for a row keyed by a target).
   A deferral with a denial (`bus.ErrPublishDenied`) or any other failure of the event is backed off as a failure, its attempt counted;

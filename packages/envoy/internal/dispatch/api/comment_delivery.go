@@ -193,6 +193,11 @@ type claimedCommentDelivery struct {
 	// later attempt of the same mention that was sent: its caller settles it failed rather than
 	// send it (supersedeCommentDelivery).
 	superseded bool
+	// mentionMode is the mode the comment recorded on the mention this attempt is of
+	// (comment_mentions.delivery), read under the lock the claim transaction already takes on
+	// that row. It is what keys the send (model.CommentMentionIdempotencyKey), whatever mode
+	// this attempt itself goes in.
+	mentionMode string
 	attemptClaim
 	// pending is the attempt row an earlier call committed and this one resumed, under its
 	// original number and idempotency key. Its pinned session, delivery mode and resolve error
@@ -270,12 +275,14 @@ func (s *server) claimCommentDeliveryAttempt(
 	if err != nil {
 		return claimedCommentDelivery{}, err
 	}
+	// The mention's own mode comes from the row this lock is taken on, so the send is keyed by it
+	// without a read of its own (model.CommentMentionIdempotencyKey).
+	claimed := claimedCommentDelivery{comment: stored}
 	if err := tx.QueryRow(ctx, `
-		select target from comment_mentions where comment_id = $1 and target = $2 for update
-	`, stored.ID, target.Target).Scan(new(string)); err != nil {
+		select delivery from comment_mentions where comment_id = $1 and target = $2 for update
+	`, stored.ID, target.Target).Scan(&claimed.mentionMode); err != nil {
 		return claimedCommentDelivery{}, err
 	}
-	claimed := claimedCommentDelivery{comment: stored}
 	var takeable bool
 	if resume.attempt > 0 {
 		var stands, delivered bool
@@ -333,10 +340,10 @@ func (s *server) claimCommentDeliveryAttempt(
 	case err == nil && takeable:
 		// A Retry that asks for another mode resumes this attempt in the mode its row pinned
 		// rather than the one asked for: a resumed attempt keeps the resolution it was opened
-		// with, mode included (mentionResolutionFor), and the mention's idempotency key is one
-		// whatever the mode, so the mode decides only how the frame is presented and the
-		// recipient is handed one copy either way. A send in the other mode is what a Retry
-		// opened once this attempt has settled makes.
+		// with, mode included (mentionResolutionFor), and the mention's idempotency key carries
+		// the mention's own mode whatever an attempt's, so the mode decides only how the frame
+		// is presented and the recipient is handed one copy either way. A send in the other mode
+		// is what a Retry opened once this attempt has settled makes.
 		if err := claimed.take(ctx, tx, &pending); err != nil {
 			return claimedCommentDelivery{}, err
 		}
@@ -645,12 +652,14 @@ func (s *server) deliverResolvedCommentMention(
 	if err != nil {
 		return model.CommentDelivery{}, fmt.Errorf("encode comment mention delivery frame: %w", err)
 	}
-	// The key is the mention's, scoped to its target and not to the mode of this attempt
-	// (model.CommentMentionIdempotencyKey), so a second frame of this mention repeats the key of
-	// the first whichever modes the two went in and the recipient's host drops it.
+	// The key is the mention's: its target and the mode the comment recorded on it, never the
+	// mode of this attempt (model.CommentMentionIdempotencyKey), so a second frame of this
+	// mention repeats the key of the first whichever modes the two attempts went in and the
+	// recipient's host drops it.
 	// When the issue route's copy is suppressed for this send: model.CommentEventPayload.SuppressRoute.
 	envelopeID, duplicate, deliveryError := s.sendResolvedDelivery(
-		ctx, target, stored.Body, model.CommentMentionIdempotencyKey(stored.ID, target.Target), nil, frame,
+		ctx, target, stored.Body,
+		model.CommentMentionIdempotencyKey(stored.ID, target.Target, claimed.mentionMode), nil, frame,
 	)
 	settled, err := s.completeCommentDelivery(
 		ctx, stored, recorded, actor, claimed.attemptClaim, envelopeID, duplicate, deliveryError,
@@ -671,10 +680,10 @@ func (s *server) deliverResolvedCommentMention(
 
 // supersedeOvertakenAttempts settles superseded every earlier attempt of sent's mention that this
 // send has delivered the comment in the place of and no sender holds: the attempt a lane stood
-// down from because this one was in flight (claimCommentDeliveryAttempt), which nothing else
-// settles, since the delivery sweep sends an overtaken attempt no more than it settles one. A
-// lane that reaches such an attempt after this send has landed settles it itself, under the same
-// guard, so each is settled once and by whichever of the two comes second.
+// down from because this one was in flight (claimCommentDeliveryAttempt), which the delivery
+// sweep sends no more than any other overtaken attempt. A lane that reaches such an attempt after
+// this send has landed settles it itself, under the same guard, and the sweep settles one neither
+// of them did (settleSupersededMentions), so each is settled once and by whichever comes first.
 //
 // It costs a read only when this send settled an attempt past the first, which is the only way an
 // earlier attempt can exist, and nothing at all when that send delivered nothing: a failed
