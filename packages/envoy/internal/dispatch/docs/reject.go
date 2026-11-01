@@ -30,11 +30,19 @@ func rejectedInsert(tree *pmdoc.Node, id string) (*pmdoc.Node, error) {
 		if joinsTwo(next, span, "table") {
 			return nil, rejectSpliceRefusal(errJoinsTwoTables)
 		}
-		spliced, err := pmdoc.Splice(next, span, nothing)
+		valid, err := pmdoc.ValidateDocument(next, "Splice")
 		if err != nil {
 			return nil, rejectSpliceRefusal(err)
 		}
-		if next, err = padCutTables(next, spliced, span, budget); err != nil {
+		spliced, err := valid.Splice(span, nothing)
+		if err != nil {
+			return nil, rejectSpliceRefusal(err)
+		}
+		found, err := matchedBlocks(valid, span)
+		if err != nil {
+			return nil, rejectSpliceRefusal(err)
+		}
+		if next, err = padCutTables(spliced, found, budget); err != nil {
 			return nil, rejectSpliceRefusal(err)
 		}
 		if err := next.Validate(); err != nil {

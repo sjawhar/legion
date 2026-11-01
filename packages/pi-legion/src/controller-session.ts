@@ -145,10 +145,10 @@ export function createControllerSession(deps: {
    * That order holds only outside Oh My Pi's startup, so this controller claims from
    * `/legion-controller-start` (`startCommand`), never from `session_start`. Oh My Pi holds every
    * send a `session_start` handler makes and drains them all at the end of its startup, while an
-   * Envoy card is a steer that starts its own turn: a role claim made during startup lets a card
-   * on the role's lane, or a notice on the controller topic, start its turn ahead of the held
-   * start message, and a turn started there runs inside the startup wait, before the TUI shows it
-   * and before any input is read. `legion controller start` puts the command on Oh My Pi's
+   * Envoy card that finds the session idle starts its own turn: a role claim made during startup
+   * lets a card on the role's lane, or a notice on the controller topic, start its turn ahead of
+   * the held start message, and a turn started there runs inside the startup wait, before the TUI
+   * shows it and before any input is read. `legion controller start` puts the command on Oh My Pi's
    * command line, which Oh My Pi runs after its startup and once the TUI listens, so the role's
    * lane and the controller topic open only once the start message is queued. A claim from
    * `/legion-claim-controller`, or a re-claim after a session change, sends a message still

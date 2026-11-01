@@ -3,6 +3,29 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [15.7.0] - 2026-10-31
+
+### Changed
+
+- `legion-worker`'s tools reference opens with the database a role's tests use: never the URL in
+  the file `OMP_SESSION_SQL_DSN_FILE`, the live sessions database every pod shares, whose login
+  can create and drop databases there, but `$LEGION_TEST_PG_DSN`, the pod's own PostgreSQL, which
+  the worker image now carries and the roles container's launcher starts at container start. The
+  rule names every Postgres variable a test reads, how a suite that resets the database it is
+  given makes one of its own with `createdb`, and what a role on a digest that predates the
+  server does instead.
+
+## [15.6.0] - 2026-10-31
+
+### Changed
+
+- A phase worker's handoff carries no `completed` time: a handoff's time is the committer date of
+  the commit that carries it. Each handoff instead carries `previousHandoff`, the newest commit on
+  the branch that changed that handoff's file (usually the role's previous handoff of the phase),
+  so a round that repeats its predecessor's words still writes a new commit; a reviewer's also
+  carries `headReviewed`. Every worker, architect and controller is told that a time or date it
+  writes comes from a command, a task result or its own task, never from an estimate.
+
 ## [15.5.1] - 2026-10-31
 
 ### Changed
