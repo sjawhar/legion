@@ -273,9 +273,9 @@ func TestCoreSubOKIsFalseWhileTheServerRefusesTheResentSubscription(t *testing.T
 
 // A reload that takes the grant away revokes the core subscription the server had accepted, and
 // the server says so in a refusal of its own form (`Permissions Violation for Subscription to
-// "<subject>" (sid "<sid>")`), naming no queue group: CoreSubOK reads it as refused while the
-// connection stays up, though nats.go keeps the subscription valid and leaves the refusal of a
-// queue subscription unrecorded. A restart onto a configuration that grants it again, to which the
+// "<subject>" using queue "<queue>" (sid "<sid>")`, which named no queue group on a nats-server
+// before v2.15.0): CoreSubOK reads it as refused while the connection stays up, though nats.go
+// keeps the subscription valid. A restart onto a configuration that grants it again, to which the
 // client re-sends the subscription, makes it OK again.
 func TestCoreSubOKIsFalseOnceAReloadRevokesTheSubscription(t *testing.T) {
 	const (
@@ -315,8 +315,8 @@ func TestCoreSubOKIsFalseOnceAReloadRevokesTheSubscription(t *testing.T) {
 		t.Fatal("nats.go dropped the revoked subscription; the test proves nothing about a refusal it keeps valid")
 	}
 	if err := client.Conn.LastError(); !errors.Is(err, natsgo.ErrPermissionViolation) ||
-		!strings.Contains(err.Error(), `Permissions Violation for Subscription to "`+subject+`" (sid "`) {
-		t.Fatalf("the server's last error is %v, want its revocation of %s naming the sid", err, subject)
+		!strings.Contains(err.Error(), `Permissions Violation for Subscription to "`+subject+`" using queue "`+queue+`" (sid "`) {
+		t.Fatalf("the server's last error is %v, want its revocation of %s naming the queue group and the sid", err, subject)
 	}
 
 	server.Restart(t, granted)

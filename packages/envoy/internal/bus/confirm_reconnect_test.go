@@ -55,7 +55,7 @@ func denyThenDrop(t *testing.T, subject string, reconnectable bool) string {
 // violation for it and the PONG, and the connection is closed.
 func serveFake(conn net.Conn, deny string) {
 	defer conn.Close()
-	fmt.Fprintf(conn, "INFO {\"server_id\":\"fake\",\"version\":\"2.10.29\",\"proto\":1,\"headers\":true,\"max_payload\":1048576}\r\n")
+	fmt.Fprintf(conn, "INFO {\"server_id\":\"fake\",\"version\":\"2.15.2\",\"proto\":1,\"headers\":true,\"max_payload\":1048576}\r\n")
 	lines := bufio.NewReader(conn)
 	published := false
 	for {
@@ -185,7 +185,7 @@ func answeringServer(t *testing.T, deny string, receipt bool) *nats.Conn {
 			return
 		}
 		defer conn.Close()
-		fmt.Fprintf(conn, "INFO {\"server_id\":\"fake\",\"version\":\"2.10.29\",\"proto\":1,\"headers\":true,\"max_payload\":1048576}\r\n")
+		fmt.Fprintf(conn, "INFO {\"server_id\":\"fake\",\"version\":\"2.15.2\",\"proto\":1,\"headers\":true,\"max_payload\":1048576}\r\n")
 		lines := bufio.NewReader(conn)
 		sids := map[string]string{}
 		published, reply := false, ""
