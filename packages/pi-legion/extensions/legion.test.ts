@@ -98,6 +98,7 @@ mock.module("nats", () => ({
       close: async () => undefined,
       drain: async () => undefined,
       isClosed: () => connection.closed,
+      flush: async () => undefined,
       publish: () => undefined,
       subscribe: (subject: string) => {
         natsSubscribeObserver?.(subject);

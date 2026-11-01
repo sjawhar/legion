@@ -117,6 +117,12 @@ const natsState = {
   /** Each mocked connection's `status()` readers: a push hands every one of them the status, as
    *  nats.js reports a reconnect to every reader of the connection's status iterator. */
   statusReaders: [] as ((status: { readonly type: string; readonly data: unknown }) => void)[],
+  /** Every subject the connection had been asked to subscribe to when a `flush()` was called:
+   *  the round trip the server answers, which is what makes a subscription live. */
+  flushes: [] as string[][],
+  /** A `flush()` a test parks on, so what the extension does before the server confirms a
+   *  subscription can be watched. */
+  heldFlush: undefined as Promise<void> | undefined,
 };
 
 /** Reports `{ type }` to every reader of a mocked connection's `status()`. */
@@ -197,6 +203,11 @@ mock.module("nats", () => ({
             },
           }),
         };
+      },
+      // nats.js's round trip: the server has every SUB written before it when this resolves.
+      flush: async () => {
+        natsState.flushes.push([...natsState.subscriptions.keys()]);
+        if (natsState.heldFlush !== undefined) await natsState.heldFlush;
       },
       publish: (subject: string, data?: Uint8Array) => {
         if (natsState.failPublishes > 0) {
@@ -426,6 +437,9 @@ afterEach(async () => {
   natsState.drainHangs = false;
   natsState.drainStarted = false;
   natsState.statusReaders.length = 0;
+  // As for `heldConnect`: a parked flush left behind would park every later test's subscribe.
+  natsState.heldFlush = undefined;
+  natsState.flushes.length = 0;
   hostBuiltins.length = 0;
 });
 
@@ -14522,6 +14536,46 @@ console.log(JSON.stringify(args));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(natsState.connectedNames.length).toBe(connectionsAfterRecovery);
+  });
+
+  test("a topic is registered only once the server has confirmed its subscription", async () => {
+    // The listener routes to a session the moment its interest names a topic, and core NATS drops
+    // a publish no subscription matches yet: a registration sent while the SUB is still in the
+    // connection's out buffer costs the session whatever is published next on that topic. So the
+    // round trip comes between the two.
+    const paths: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      paths.push(new URL(input.toString()).pathname);
+      return responseWithRegistration(input, init, []);
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?subscribe-flush");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_flush"));
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
+
+    const topic = "team.confirmed";
+    const confirmed = Promise.withResolvers<void>();
+    natsState.heldFlush = confirmed.promise;
+    natsState.flushes.length = 0;
+    paths.length = 0;
+    const subscribing = subscribeTool.execute("", { topics: [topic] });
+    for (let tick = 0; tick < 50 && natsState.flushes.length === 0; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    // The SUB is written and its round trip is in flight; the listener has been told nothing.
+    expect(natsState.subscriptions.has(topic)).toBe(true);
+    expect(natsState.flushes[0]).toContain(topic);
+    expect(paths).not.toContain("/v1/interests/subscribe");
+
+    natsState.heldFlush = undefined;
+    confirmed.resolve();
+    await subscribing;
+
+    expect(paths).toContain("/v1/interests/subscribe");
   });
 
   test("rebinds the direct subscription after an in-process session switch", async () => {

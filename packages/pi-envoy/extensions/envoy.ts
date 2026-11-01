@@ -1545,6 +1545,18 @@ export default function envoyExtension(pi: PiApi): void {
   // still has something to suppress.
   const awaitingRetry = new Set<string>();
 
+  // How long an open waits for the server to confirm it (the bound claude-envoy's handoff flush
+  // uses for the same round trip). A connection that has not answered by then is treated as an
+  // open that failed: the caller retries it rather than registering a subject the server may not
+  // have.
+  const SUBSCRIBE_FLUSH_TIMEOUT_MS = 10_000;
+
+  // Subjects whose SUB has been written but not yet confirmed by a round trip. A later
+  // `subscribe()` for such a subject opens nothing (it is already in `subscriptions`) and
+  // confirms it, so a flush that failed once does not leave a subject registered as this
+  // session's that the server never took.
+  const unconfirmed = new Set<string>();
+
   // Drop a topic we no longer want. Every marker set here is consumed again by
   // the pump end-path, the retry callback, or the next subscribe(), so the set
   // cannot accumulate topics that were never live in the first place.
@@ -1655,27 +1667,58 @@ export default function envoyExtension(pi: PiApi): void {
     retry(RESUBSCRIBE_DELAY_MS);
   };
 
-  // Opens every subject of `topic` not already open; answers whether any were new. A queued task
-  // subscribes through its handle, which hands in its own `connect`: a connection its task
-  // outran refuses there, before the first subject opens, so nothing a newer pass has since
-  // settled is reopened behind its back.
+  // `promise`, or a rejection naming `what`, once `ms` pass.
+  const within = async <T>(promise: Promise<T>, ms: number, what: string): Promise<T> => {
+    const expired = Promise.withResolvers<never>();
+    const timer = setTimeout(
+      () => expired.reject(new Error(`${what} timed out after ${ms} ms`)),
+      ms
+    );
+    try {
+      return await Promise.race([promise, expired.promise]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  // Opens every subject of `topic` not already open, and returns once the server has every one of
+  // them; answers whether any were new. A queued task subscribes through its handle, which hands in
+  // its own `connect`: a connection its task outran refuses there, before the first subject opens,
+  // so nothing a newer pass has since settled is reopened behind its back.
+  //
+  // The flush is what makes the subject live rather than merely asked for. `subscribe()` only
+  // writes SUB into the connection's out buffer, and core NATS drops a publish no subscription
+  // matches yet, so without the round trip the caller can register this session's interest — or
+  // claim a role, or tell a peer it is listening — while the server still has nothing to route to.
+  // The window is the whole gap between the write and the next flush, and it is the one
+  // `notifications.legion.<project>.controller` lost a triage notice in. claude-envoy's channel
+  // flushes before every registration for the same reason.
   const subscribe = async (
     topic: string,
     connect: () => Promise<NatsConnection> = ensureConnection
   ): Promise<boolean> => {
-    const subjects = expandSubscriptionTopics([topic]).filter(
-      (candidate) => !subscriptions.has(candidate)
+    const subjects = expandSubscriptionTopics([topic]);
+    const fresh = subjects.filter((candidate) => !subscriptions.has(candidate));
+    const confirming = subjects.filter(
+      (candidate) => !subscriptions.has(candidate) || unconfirmed.has(candidate)
     );
-    if (subjects.length === 0) return false;
+    if (confirming.length === 0) return false;
     const activeConnection = await connect();
-    for (const subject of subjects) {
+    for (const subject of fresh) {
       const subscription = activeConnection.subscribe(subject);
       // A fresh subscription supersedes any earlier deliberate close of this topic.
       intentionallyClosed.delete(subject);
       subscriptions.set(subject, subscription);
       void pump(subject, subscription);
     }
-    return true;
+    for (const subject of confirming) unconfirmed.add(subject);
+    await within(
+      activeConnection.flush(),
+      SUBSCRIBE_FLUSH_TIMEOUT_MS,
+      `confirming the subscription to ${topic}`
+    );
+    for (const subject of confirming) unconfirmed.delete(subject);
+    return fresh.length > 0;
   };
 
   const noteInbox = (envelope: NonNullable<RenderInboundResult["envelope"]>): void => {
@@ -1980,6 +2023,16 @@ export default function envoyExtension(pi: PiApi): void {
     const subscription = connected.subscribe(agentStreamControlSubject(session));
     agentStreamControl = subscription;
     void pumpAgentStreamControl(subscription, session);
+    // As in `subscribe()`: the control subject is live only once the server has answered. A
+    // viewer's first ping is published as soon as the registration names this session, and one
+    // sent before the server took this SUB would be dropped, leaving the viewer to retry. The
+    // pump is started first, so a connection that never answers still leaves a subscription the
+    // pump's own recovery path owns.
+    await within(
+      connected.flush(),
+      SUBSCRIBE_FLUSH_TIMEOUT_MS,
+      `confirming the agent stream control subscription for ${session}`
+    );
   };
 
   /** One of this session's messages, on its way to whoever has the session open, tagged with the
