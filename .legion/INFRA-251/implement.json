@@ -2,73 +2,22 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-251",
-  "previousHandoff": "31ac9c554a23ddcba6638765b540b2463144c6a1",
+  "previousHandoff": "f8925f0cb9e7959d7cc12f5809d673933fb8dac3",
   "proof": [
     {
-      "criterion": "main merged forward with no rebase; migrations renumbered to follow main's 0067",
-      "surface": "jj merge commits ea077a4d (main d09b46d7) and 946d850c (main e622d943), each made with `jj new legion/INFRA-251 main`. Main's 0065_supervise_quiesce, 0066_phase_ended_kind and 0067_phase_assignment are kept; this change's 0065_parked_decisions and 0066_claim_delivered_rows become 0068 and 0069, and their test becomes migration_0068_test.go (TestParkedDecisionsArriveWith0068AndGoWithTheirIssue, migrating through 67). Main's migration_0065_test.go is kept as it is. In supervise/delivery.go, supervise/table.go, store/claims.go and daemon/outbox.go main's assignment is kept, and only this change's Row, Kept, delivered_rows and kept_decisions are applied again.",
-      "command": "jj diff --from <fork point> --to <head> --git '~(.legion | docs/solutions)' | sha256sum, before and after each merge; cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go build ./... && go vet ./internal/... ./cmd/...",
-      "observed": "Merge 1: before c3de9711ac4556c81a496f6ca4a9695c68395ef9083ebbfeeb9f1bc793e8ffc5 (at 8c77911b), after 8c156bd546060425ac5800663cc3b002ddf35804b94e9061b7c8b540abba593e (at ea077a4d). The changed paths are the same 78 except the three renamed migration files, and there is one insertion fewer. Merge 2: before a97e999111cdc0409232dca43f5ade8d6470481f212b900c6ae3ac833a5f2a7c (at c7d8ae93), after 3f7d4072131be37f3b5cb0ed080cb0b2fbfbf58b84185d8e88c2f227b6fb5558 (at 946d850c), 77 files rather than 78: bun.lock, the one conflict, takes main's lock, and the branch's stale workspace version lines go with it. Build and vet are clean. bun install --frozen-lockfile, the contracts, pi-shared, pi-legion and claude-envoy typechecks, contracts bun test (328 pass) and biome check . pass.",
-      "headSha": "946d850cba530d71d711cab09472711aef5e0d99",
-      "negativeControl": "Before the renumbering, main's 0065 and 0066 shared their numbers with this change's two files, and migrations.All refuses two files with one version."
-    },
-    {
-      "criterion": "Review 5726218763's five Minors",
-      "surface": "record/store.go ClaimKeptDecisions comment (the lock stops a second composer; the count check is defensive and cannot catch that race); store/kept_decisions.go:36 and daemon/workflow.go rootTask comment (the put-back runs on every unconfirmed write, and why only a taken-back confirmation reaches it); notice_exceptions.go spent branch (a root that does not hear gets no catch-up, and its decisions wait KEPT); workflow/catch_up.go (DropCatchUps keeps a catch-up while any row of its telling is leased); three test gaps",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -count=1 -run 'TestTwoComposersNeverBothNameOneKeptDecision|TestAHoldReleaseLeavesAClaimThatCounts' ./internal/store/ && go test -count=1 -run 'TestALateReportOfASpentCatchUpNamesWhatItsRowReleased|TestACatchUpWhoseReholdsAreSpent' ./internal/daemon/",
-      "observed": "All pass at the head. The composer test now reads pg_locks for the second transaction's own pg_backend_pid(). TestAHoldReleaseLeavesAClaimThatCounts puts the old hold back beside the new claim before the retirement, so the release's own rule is what it checks. TestALateReportOfASpentCatchUpNamesWhatItsRowReleased covers spentKept's claims == 0 branch in two cases: a root that hears gets one fresh catch-up claiming the decision, and a lingering root gets no catch-up while the decision stays kept, unclaimed.",
-      "headSha": "946d850cba530d71d711cab09472711aef5e0d99",
-      "negativeControl": "Each test fails under its own mutation. Release also clears claimed_by: 'is claimed by 0 and held by \"\" after the old task's retirement, want claimed by 2'. spentKept's claims == 0 branch made to return nil: 'name dispatch://LEGION-1/ask/ask-2 0 times: map[], want 1'. UnclaimedKept's FOR UPDATE removed: 'the second composer named [dispatch://LEGION-330/ask/ask-1] while the first claimed it'."
-    },
-    {
-      "criterion": "The daemon tests drive a turn's end as main's supervisor now needs it",
-      "surface": "Main's #2571 retires a delivery on the prompt's StreamPromptResult rather than on agent_end alone (supervise.promptResulted). The kept-decision model's turn op (keptRun.endTurn), parked_decision_test.go's two retried-start tests and confirmation_tell_failure_test.go now send the result of the confirmed prompt after its turn ends, as main's own endTurn helper (supervision_test.go) does.",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -count=1 -v -run TestKeptDecisionsRegressionSeeds ./internal/daemon/",
-      "observed": "All 39 pinned seed runs pass. At the first merge head, before this change, 24 of the 39 failed (most 'did not drain in 400 quiescence steps', some 'prompted by delivery \u2026 whose outbox row 0 the run never saw'), because a delivery no prompt result retired stayed pending.",
-      "headSha": "946d850cba530d71d711cab09472711aef5e0d99",
-      "negativeControl": "The before failures above are the same tests at merge ea077a4d."
-    },
-    {
-      "criterion": "Bounded sweep of at least 400 seeds x 300 steps, and the daemon suite at the merge head",
-      "surface": "TestKeptDecisionsReachTheCurrentArchitectOnce, and the whole Go module, on the pod's PostgreSQL 18.6",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 LEGION_KEPT_PROPERTY_RUNS=500 LEGION_KEPT_PROPERTY_STEPS=300 timeout 3500 go test -count=1 -timeout 58m -v -run '^TestKeptDecisionsReachTheCurrentArchitectOnce$' ./internal/daemon/; then go test -count=1 -p 1 ./internal/... ./cmd/... -skip '<Docker-only, tmux, scratch Dispatch, keeper flake, NATS seed>' with LEGION_TEST_PG_DSN on a database legion_test owns (infra251_suite2)",
-      "observed": "Sweep: 499 of 500 seeds passed. Seed 483 could not open its database ('failed to receive message \u2026 connection reset' at 127.0.0.1:5433, with the suite sharing the server) and passed when run alone. No seed broke the model's rules, and 119 receipt timeouts got no copy. Suite: 53 packages ok, among them intake, launcher, record, store and supervise. In admit, api, daemon and workflow, every failing test failed only in its cleanup drop: 'permission denied to terminate process (SQLSTATE 42501)', the pod's test PostgreSQL, which the controller ruled not #2163's (legion-testpg, #2613). The daemon package was rerun after the turn-end fix: 36 failures, all of that cleanup kind.",
-      "headSha": "946d850cba530d71d711cab09472711aef5e0d99",
-      "negativeControl": "At the first merge head, before the turn-end fix, the same sweep failed 321 of 500 seeds on drain and phantom-delivery errors."
-    },
-    {
-      "criterion": "The red ci-ok at 9dda974d: two failing tests read",
-      "surface": "CI run 41254193153 (job 124702666460): intake TestConsumePreparesAnIssueEventsRepositoryBeforeApplyingIt 'prepared [... x3], want [... x2]', and launcher TestTheContainersStopEndsEveryRoleWithinOneStopGrace 'the container's stop took 2.729180929s'",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -count=20 -run '^TestConsumePreparesAnIssueEventsRepositoryBeforeApplyingIt$' ./internal/intake/ ; go test -count=20 -run '^TestTheContainersStopEndsEveryRoleWithinOneStopGrace$' ./internal/launcher/; gh run view <id> --log-failed over the 40 latest failed ci.yaml runs",
-      "observed": "At the merge head, 20 of 20 runs of each pass. The only failure seen was one intake cleanup 42501 on the pod Postgres. Neither test failed in any other of the 40 latest failed ci.yaml runs. The intake test's consumer has a 200 ms AckWait (intake_test.go consumerSpec), so a third preparation is a redelivery after an apply that ran past 200 ms on a loaded runner. The launcher bound is a wall-clock limit that 2.73 s exceeded. This branch changes the launcher not at all, and changes intake only by fields on three facts in decode.go and facts.go, not the consume path. The merged head's CI is the next reading.",
-      "headSha": "946d850cba530d71d711cab09472711aef5e0d99",
-      "negativeControl": "none: they are flakes, so no mutation applies; the 20x reruns are the evidence."
+      "criterion": "The red ci-ok at 079532ed: its one failing test, read and fixed by merging main",
+      "surface": "CI run 41279179715, job 124768258283 (pi-legion). legion-background-subagent-omp.test.ts:477 `expect(read.arrivedAt).toBeLessThan(releasedAt)` received two equal millisecond stamps (1793514903922): a strict `<` between Date.now() values, which fails whenever both moments fall in one millisecond. This branch changes no code in that test or in pi-legion, only a changelog fragment. main fixed the test in #2621 (081e9e60, 'the background-subagent case orders its moments by a counter, not by a millisecond clock'). So this round merges main forward, with `jj new legion/INFRA-251 main`, at 695ee39d, which the architect named as the allowed case. The merge is clean.",
+      "command": "jj diff --from <fork point> --to <head> --git '~(.legion | docs/solutions)' | sha256sum, before and after; cd packages/pi-legion && LEGION_TEST_OMP=<omp v18.13.3-sami.20261029-115123, the .omp-pin release> LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 bun test ./extensions/legion-background-subagent-omp.test.ts, 20 times",
+      "observed": "Fingerprint before (079532ed) and after (695ee39d): 3f7d4072131be37f3b5cb0ed080cb0b2fbfbf58b84185d8e88c2f227b6fb5558, unchanged, 77 files on both sides. The test passed 20 of 20 on the pinned Oh My Pi. One run measured: 'the subagent started 35 ms before the role's turn ended; the role's turn ended 105 ms before the subagent's request was released'. pi-legion typecheck ok. bun test, leaving out controller-start-omp (CI runs that file in its own invocation) and scripts/skill-scenarios/rig.test.ts (its judge-omp cases need Docker, which the pod lacks): 680 pass, 0 fail.",
+      "headSha": "695ee39dea13551b75d43b0a6ae5e8b1ca4445d6",
+      "negativeControl": "The same test at 079532ed failed in CI on equal millisecond stamps (run 41279179715). main's #2621 is the change that replaces those stamps with an ordering counter."
     }
   ],
   "filesChanged": [
-    "packages/daemon/internal/store/migrations/0068_parked_decisions.up.sql (renamed from 0065)",
-    "packages/daemon/internal/store/migrations/0069_claim_delivered_rows.up.sql (renamed from 0066)",
-    "packages/daemon/internal/store/migration_0068_test.go (renamed from migration_0065_test.go; main's migration_0065_test.go kept)",
-    "packages/daemon/internal/store/claims.go",
-    "packages/daemon/internal/supervise/delivery.go",
-    "packages/daemon/internal/supervise/table.go",
-    "packages/daemon/internal/daemon/outbox.go",
-    "packages/daemon/internal/record/store.go",
-    "packages/daemon/internal/store/kept_decisions.go",
-    "packages/daemon/internal/store/kept_decisions_test.go",
-    "packages/daemon/internal/daemon/workflow.go",
-    "packages/daemon/internal/daemon/notice_exceptions.go",
-    "packages/daemon/internal/workflow/catch_up.go",
-    "packages/daemon/internal/daemon/catch_up_settling_test.go",
-    "packages/daemon/internal/daemon/kept_decision_property_test.go",
-    "packages/daemon/internal/daemon/parked_decision_test.go",
-    "packages/daemon/internal/daemon/confirmation_tell_failure_test.go",
-    "packages/daemon/internal/daemon/root_hears_main_paths_test.go",
-    "bun.lock (main's)"
+    "none of this branch's own: the merge brings main's #2621 (packages/pi-legion/extensions/legion-background-subagent-omp.test.ts) and main's other commits since e622d943"
   ],
   "deviations": [
-    "Two forward merges, both needed: main moved to e622d943 (the OpenCode removal) while this round ran, and a probe merge showed bun.lock conflicting with it, so the head merges main again. That merge changes no Go code.",
-    "The kept-decision model, two parked-decision tests and the confirmation-failure test were changed so that a turn ends with its prompt's result: main's #2571 made the supervisor retire a delivery on that result, and without it these tests leave every delivery pending. The tests' assertions are unchanged."
+    "No daemon code changed. The fix is main's own, reached by merging main forward rather than by editing the test here."
   ],
   "openQuestions": []
 }
