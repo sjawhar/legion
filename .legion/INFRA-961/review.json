@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-961",
+  "previousHandoff": "ec13b8bb507abac20cb7496c0bf0ff53da6c944e",
+  "headReviewed": "9b07bed67f3c07b69d4c31356bd859de6ac6828f",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/envoy/infra/gcp/clusteredhub_live_test.go:1142-1144",
+      "description": "Fixed by the reviewer in 9b07bed67f3c: the comment said the election log line came '20 ms later in one run of fifteen', but round 1's probe only checked the log at the agreement and 20 ms after it, so 20 ms was an upper bound, not the gap. The comment now gives the tester's measured gap: 2.8-13.7 ms in four of twelve runs (.legion/INFRA-961/test.json). Round 1's important finding (the selfElected control at :1204 read once, racing the log) is fixed in 80bc419e9d9b: the count is inside the meta wait at :1209-1211, and both thermonuclear agents confirmed the wait cannot pass before the line is in the buffer and that every nats-server citation matches v2.15.1. Round 1's two comment findings are fixed in the same commit."
+    }
+  ]
+}

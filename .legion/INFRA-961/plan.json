@@ -1,0 +1,115 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-961",
+  "previousHandoff": "",
+  "plan": "dispatch://INFRA-961/artifact/plan-md (version 2). One file changes: packages/envoy/infra/gcp/clusteredhub_live_test.go. T1 adds hubServer.metaCluster() and uses it in phase (a). T2 forces the LIVE_R3 stream leadership onto the JetStream meta leader with a preferred $JS.API.STREAM.LEADER.STEPDOWN request, in a bounded loop that re-issues the request, run before the publisher starts and again (3 s bound) immediately before the kill. T3 logs what each survivor's /jsz names right after the kill, waits (30 s bound) until both survivors name one live meta leader before the StreamInfo and GetMsg reads, and asserts the control from the new meta leader's own log line. T4 is the conventions and the simplify pass; T5 records that no changelog, ci_job_reads.py, docs or release edit is needed and that go.work.sum must be restored before each push.",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the phase's mechanics are all there, and its references/pr-body.md defines the six-field proof entries this plan's acceptance evidence must take, while references/skip-checks-trailer.md governs the handoff-only push",
+      "skill://ce-simplify-code: the change adds a helper, a closure and two bounded waits to a 1,332-line test file, so the finished diff gets the simplify pass before the pull request",
+      "skill://plain-words: the pull-request body quotes two negative-control runs and three departures from the issue's acceptance, and a person reads it",
+      "skill://dispatch-first and skill://dispatch: anything written on the issue, and the search before it"
+    ],
+    "test": [
+      "skill://legion-worker: the tester re-runs the plan's evidence commands at the head and records them, and references/pr-body.md gives the proof shape and the rule that a proof is measured on the surface the criterion names",
+      "skill://dispatch: for anything the tester writes on the issue"
+    ],
+    "review": [
+      "skill://legion-worker: references/merge-gate.md for what an approval of this head means, and references/review-threads.md for posting and resolving the findings",
+      "skill://ce-simplify-code: the reviewer judges whether the simplify pass was run and whether the new helper earns its place",
+      "skill://plain-words: the review text and any thread reply a person reads"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "The spec's step 1 heading, \"Make the worst case happen on every run\", and acceptance bullet 3 are false: forcing the co-located kill makes the leaderless window exist but does not make the reads land in it, since the stream and meta elections are independent 4-9 s draws (server/raft.go:317-318). Measured: 10008 in 1 of 6 scratch runs.",
+        "answer": "Decision D2. The negative control is two runs, neither committed: a deterministic probe (after the kill, also kill one survivor; the lone server answers js.GetMsg with err_code 10008 every time, 2 of 2 measured) and the twenty-run loop with the wait removed, whose measured rate is about one failure in six runs. The plan says plainly that this changes acceptance bullet 3 and leaves the spec to the architect."
+      },
+      {
+        "finding": "The acceptance command `go test -run TestClusteredNatsHubCluster -count=20` compiles none of the file without -tags natslive and would report \"no tests to run\" twenty times; with the tag it passes Go's ten-minute package deadline (docs/testing.md:28-30).",
+        "answer": "Decision D4 and the \"Acceptance and its evidence\" section: the command is restated with -tags natslive, -run '^TestClusteredNatsHubCluster$', -count=20, -timeout 180m and -v, run off CI in the issue pod with TMPDIR=/legion/scratch/tmp, with the two grep checks that decide it."
+      },
+      {
+        "finding": "The lane's real budget is `timeout-minutes: 15` (ci.yaml:2441), not the test binary's -timeout 30m, and one run costs about 65 s on CI, so no -count loop can be committed to the lane.",
+        "answer": "Recorded in \"What was measured\" and in acceptance line 4: the committed test keeps one run per job, and the change adds at most the meta wait's own duration (0 s to about 5 s) against roughly 8 minutes of headroom."
+      },
+      {
+        "finding": "Acceptance bullet 2's control, read literally as `meta_cluster.leader == \"\"`, is a coin flip: the state lasted 18-49 ms in five of six measured runs and `within` polls every 100 ms, so asserting it would make this test fail at random for a new reason, which is what dispatch://INFRA-436's non-goal forbids.",
+        "answer": "Decision D1. The asserted control is the file's own s.count(text) before/after idiom over `Self is new JetStream cluster metadata leader`, which the winning node logs unconditionally (jetstream_cluster.go:10079-10080): a raft group elects only by passing through a term with no leader, so the log proves the state without sampling it. The /jsz reading taken right after the kill is logged, not asserted."
+      },
+      {
+        "finding": "Nothing re-requests the stepdown if the transfer does not land: the preferred peer is not guaranteed to win the election it starts, so a loop that only polls would fail the run outright.",
+        "answer": "T2 drives the stepdown from inside the bounded loop, re-issuing the request on every pass that still finds the stream leader is not the meta leader, and failing with a message naming the stream leader, the meta leader and the last answer."
+      },
+      {
+        "finding": "Two source claims in the planner's reading were wrong: jsStreamInfoRequest does have isLeaderless guards (at :2088 and :2105, on its non-leader paths, answered through sendDelayedAPIErrResponse), and the reason the wait must cover both survivors is that jsMsgGetRequest's guard runs on every server that receives the request, before it decides who leads the stream.",
+        "answer": "Both corrected in \"What was measured\" and used as the stated reason for D3: the wait covers both survivors because either can answer the refusal, which is also why no retry wrapper is needed."
+      },
+      {
+        "finding": "The watcher goroutines the planner intended carried three traps: test API called from a non-test goroutine, a log after the test completes, and a saturated core per watcher at 2 ms sampling on a 4-vCPU runner.",
+        "answer": "Dropped entirely. With the control moved to the server log (D1), the wait is a plain `within` as the spec asks, and the change adds no goroutine; T4 records that rule."
+      },
+      {
+        "finding": "The plan derived the wait from watcher state instead of the spec's \"inside a bounded `within`\".",
+        "answer": "T3 uses `within(t, 30*time.Second, ...)` over both survivors' metaCluster(), as the spec words it."
+      },
+      {
+        "finding": "The change narrows coverage: phase (b) will now always kill the meta leader, so the case \"the stream leader is not the meta leader\" is no longer exercised there, and phase (c)'s choice of `down` becomes more deterministic.",
+        "answer": "Decision D5: accepted as a how-to-build choice, since the co-located kill contains the easier case and phase (c) still kills a server that does not lead the stream, and named in the plan and in the completion summary so the architect can overrule it."
+      },
+      {
+        "finding": "Acceptance bullet 1's second half, \"In every run, the killed server led both the stream and the meta group\", has no machine check: -count=20 without -v discards t.Logf and the existing log line names only the stream leader.",
+        "answer": "T2 makes it true by construction with a require.Equal immediately before the kill, T3 extends the (b) log line to name both roles and both election times, and the evidence command runs with -v and greps that line twenty times."
+      },
+      {
+        "finding": "Where the twenty runs run is unstated, and the environment can defeat them.",
+        "answer": "The \"Acceptance and its evidence\" preamble names the issue pod, TMPDIR=/legion/scratch/tmp, the measured 259.59 s for one run and the roughly 90 minutes for the loop, and says the loop exercises phases (a) to (f) so a failure anywhere counts."
+      },
+      {
+        "finding": "jj snapshots the working copy on every command, so the negative control's removal of the wait is in the pull request's change as soon as any jj command runs.",
+        "answer": "Acceptance line 3 runs both negative controls in a throwaway `jj new` change, abandons it, and verifies with `jj --ignore-working-copy diff --stat` before the push."
+      },
+      {
+        "finding": "Changelog, ci_job_reads.py, release and docs were unverified.",
+        "answer": "T5 records each as checked and needing no edit, with its evidence, and warns that a fragment written into a package .github/changelog-packages does not name fails the lint job."
+      },
+      {
+        "finding": "Round 1 of the plan review added one the gap analyst did not: the forcing loop would have run while the publisher was live, and require.Less(t, atKill, int64(messages)) (:1037) needs the publisher still going at the kill, so a slow stepdown would have tripped an unrelated assertion.",
+        "answer": "T2 moves the forcing to before the publisher starts (:995-:997) and keeps only a 3 s-bounded second call before the kill, whose bound is justified against the roughly 5 s of publishing left when the 200-acknowledgement wait returns."
+      },
+      {
+        "finding": "Running the live test in this pod with a cold module cache added 136 /go.mod hash lines to the root go.work.sum, which are not a need of the change.",
+        "answer": "T5 records it and tells the implementer to restore the file before the handoff and before every push, and to check jj status so the pull request carries one file."
+      }
+    ]
+  },
+  "planReview": { "verdict": "approved", "rounds": 2 },
+  "specDepartures": [
+    {
+      "spec": "Change step 1 is headed \"Make the worst case happen on every run\", and acceptance bullet 3 reads \"With step 2's wait removed in the working copy, the forced case fails. The pull request quotes that run, and the removal is not committed.\"",
+      "plan": "The negative control is two runs, neither committed: a deterministic probe that kills a second server so the lone survivor has no quorum and answers js.GetMsg with err_code 10008 every time, and the twenty-run loop with the wait removed, whose result is quoted whatever it shows.",
+      "evidence": "Forcing the co-located kill makes the leaderless window exist but not the reads land in it: the stream and the meta group elect on independent 4-9 s draws (nats-server v2.15.1, server/raft.go:317-318). A continuous GetMsg loop met 10008 in 1 of 6 scratch runs in this session; the two-kill probe reproduced it 2 of 2.",
+      "outcome": { "kind": "changed", "acceptance": ["With step 2's wait removed in the working copy, the forced case fails. The pull request quotes that run, and the removal is not committed."] }
+    },
+    {
+      "spec": "Acceptance bullet 2: \"Control: the test asserts that the survivors report no meta leader at least once after the kill, so the case the fix covers is proven to happen, not assumed.\"",
+      "plan": "The asserted control is that the server the survivors name as the new meta leader logged `Self is new JetStream cluster metadata leader` after the kill, counted with the file's existing s.count(text) before/after idiom. What each survivor's /jsz named right after the kill is logged, not asserted.",
+      "evidence": "The empty-leader state that `isLeaderless()` refuses on (server/jetstream_cluster.go:1481-1497) lasted 18, 20, 22, 43 and 49 ms in five of six scratch runs in this session, and `within` polls every 100 ms (clusteredhub_live_test.go:627-640), so asserting a sample of it would add a new random failure to a test being fixed for failing at random. The winning node logs that line unconditionally (jetstream_cluster.go:10079-10080), and a raft group elects only by passing through a term with no leader.",
+      "outcome": { "kind": "changed", "acceptance": ["Control: the test asserts that the survivors report no meta leader at least once after the kill, so the case the fix covers is proven to happen, not assumed."] }
+    },
+    {
+      "spec": "Acceptance bullet 1: \"`go test -run TestClusteredNatsHubCluster -count=20` in `packages/envoy/infra/gcp`, with the natslive build tag the lane uses, passes 20 of 20.\"",
+      "plan": "The evidence command is `go test -tags natslive -run '^TestClusteredNatsHubCluster$' -count=20 -timeout 180m -v ./gcp/` from packages/envoy/infra, run in the issue pod with TMPDIR=/legion/scratch/tmp and decided by two greps of its log; the committed lane keeps one run per job.",
+      "evidence": "Without -tags natslive the file is not compiled (//go:build natslive) and the command reports \"no tests to run\" twenty times. With the tag, twenty runs pass Go's ten-minute package deadline (docs/testing.md:28-30): one run measured 259.59 s in this pod and about 65 s on CI. The lane's job cap is timeout-minutes: 15 (ci.yaml:2441), so no -count loop can be committed.",
+      "outcome": { "kind": "changed", "acceptance": ["`go test -run TestClusteredNatsHubCluster -count=20` in `packages/envoy/infra/gcp`, with the natslive build tag the lane uses, passes 20 of 20."] }
+    },
+    {
+      "spec": "Change step 1: \"Then require that the stream leader is the meta leader, and kill that server\", with no word on the coverage the forced kill removes.",
+      "plan": "Phase (b) now always kills the server that leads both groups, so the case where the stream leader is not the meta leader is no longer exercised there.",
+      "evidence": "The co-located kill contains the easier case, since the stream loses its leader either way, and phase (c) still kills a server that does not lead the stream (clusteredhub_live_test.go:1114-1123).",
+      "outcome": { "kind": "changed", "scope": "Phase (b) no longer exercises a kill of a stream leader that is not the JetStream meta leader." }
+    }
+  ]
+}

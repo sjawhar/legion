@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-961",
+  "previousHandoff": "ec5105c1063359befc0104c9f0ee1adc55920470",
+  "round": 2,
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Round 2 is a full test round, not a forward-merge re-check: the base did not move and the implementer changed the test's own logic at 80bc419e9d9b055b7700b846299fca2e1bd7f6ed. Re-ran the implementer's acceptance command at this head in the INFRA-961 issue pod - cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -tags natslive -run '^TestClusteredNatsHubCluster$' -count=20 -timeout 180m -v ./gcp/ - and got 'ok github.com/sjawhar/envoy/infra/gcp 645.847s', 20 of 20 '--- PASS', 0 '--- FAIL', 20 of 20 co-located SIGKILL lines (/legion/scratch/tmp/infra961-tester-r2/acceptance20.log). Drove its round-2 negative control independently with my own edit, not a copy of its command: selfElected set to a line nats-server never writes made the wait refuse the run at clusteredhub_live_test.go:1197 after 30 s (/legion/scratch/tmp/infra961-tester-r2/c-negative-control.log). And measured the race the round-2 change answers, which the implementer asserts from the source rather than from a measurement of its own: a microsecond-rate probe of both survivors' /jsz and of the new leader's log, 12 runs, saw the log line arrive after the /jsz agreement by 2.776 ms, 11.177 ms, 11.325 ms and 13.739 ms in 4 of the 12 (6 us to 48 us in the other 8), so the single read the reviewer objected to was genuinely racy and the in-loop condition closes it (/legion/scratch/tmp/infra961-tester-r2/b-race-probe.log). Round 1's proof entries still hold at this head; the round-1 two-kill 10008 probe was reproduced in round 1 and the code it exercises did not change."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Round 2's finding: the selfElected control must not fail at random, because /jsz names the new JetStream meta leader before that leader writes its election line (review 5730474273, important finding at clusteredhub_live_test.go:1204).",
+      "surface": "The live test as the envoy-infra-go lane runs it: three real nats-server v2.15.1 processes on the chart's rendered nats.conf and auth.conf, under the natslive tag, in the INFRA-961 issue pod with TMPDIR=/legion/scratch/tmp. The control is now a condition of the bounded within at clusteredhub_live_test.go:1197-1211.",
+      "command": "cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -tags natslive -run '^TestClusteredNatsHubCluster$' -count=20 -timeout 180m -v ./gcp/ > /legion/scratch/tmp/infra961-tester-r2/acceptance20.log 2>&1, and, in a throwaway working-copy change, a microsecond-rate probe between the kill and the stream-leader wait that records when both survivors first agree on a live new meta leader and when that leader's own election line first reaches its log, run with -count=12 (/legion/scratch/tmp/infra961-tester-r2/b-race-probe.log).",
+      "observed": "The race the fix answers is real and measured: in 4 of 12 probe runs the line reached the log 2.776 ms, 11.177 ms, 11.325 ms and 13.739 ms after the /jsz agreement, and in the other 8 within 6-48 us. With the control inside the wait, 20 of 20 acceptance runs passed (ok ... 645.847s, 0 '--- FAIL'), and the wait's cost did not move: the meta election is reported 4.217-7.824 s after the kill against 4.816-8.220 s at the round-1 head.",
+      "headSha": "cdc35553b4234fdc074130e56f9e8f529f15f369",
+      "negativeControl": "selfElected changed in the working copy to 'Self is new JetStream cluster metadata leader (TESTER NEGATIVE CONTROL)', a line nats-server never writes, so the /jsz agreement alone would end the wait if the log were not part of its condition. The run was refused: 'clusteredhub_live_test.go:1197: a new JetStream meta leader after the SIGKILL, with its own election in its log: not within 30s: envoy-nats-2, which the survivors name the new JetStream meta leader, has not logged \"Self is new JetStream cluster metadata leader (TESTER NEGATIVE CONTROL)\" since the kill' (exit 1, 1 '--- FAIL'). The mutation was reverted with jj restore; jj status reports no change."
+    },
+    {
+      "criterion": "The change the issue asks for still holds at the new head: every run kills the server that leads both the LIVE_R3 stream and the JetStream meta group, and js.StreamInfo and js.GetMsg run only once both survivors name one live meta leader (spec, 'Acceptance, as corrected by the plan', first and second bullets).",
+      "surface": "The same live test, in the same pod.",
+      "command": "cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -tags natslive -run '^TestClusteredNatsHubCluster$' -count=20 -timeout 180m -v ./gcp/",
+      "observed": "20 of 20 runs carry '(b) SIGKILL of <server> (pid N), which led both LIVE_R3 and the JetStream meta group'. The stream election took 4.215-7.822 s after the kill and the meta election 4.217-7.824 s; the meta leader came more than one 100 ms poll later in 3 of the 20 runs (0.323 s, 0.725 s, 1.030 s), which is how long the wait blocked there. The publisher still ran at every kill (204-214 of 1000 messages acknowledged). The 3 s forcing loop immediately before the kill never needed a stepdown and took 4-10 ms.",
+      "headSha": "cdc35553b4234fdc074130e56f9e8f529f15f369",
+      "negativeControl": "Round 1's mutation of the same assertion, at the round-1 head and unchanged by this round's diff: the forcing neutered so forceCoLocated observes and never issues the stepdown, run 4 times, refused 3 of the 4 at 'Not equal: expected envoy-nats-0 / actual envoy-nats-1 ... the server about to be killed leads both LIVE_R3 and the JetStream meta group' (/legion/scratch/tmp/infra961-tester/t1-no-forcing.log)."
+    }
+  ],
+  "ci": "Read on GitHub, recorded here for this round only. The pull request's head cdc35553b4234fdc074130e56f9e8f529f15f369 is a handoff-only push carrying 'skip-checks: true' and has no check runs. At the code head 80bc419e9d9b055b7700b846299fca2e1bd7f6ed, read at 2026-11-01T22:48Z: changes, envoy-go-race, envoy-session-stall, lint and pr-title success; envoy-infra-go (run 41355351205, job 124998955799), envoy-go and envoy-smoke in progress; ci-filters and envoy-go-race-api queued. A running lane is read as running and not waited for. No lane was re-run as evidence.",
+  "notes": [
+    "No red test was written: nothing broke. Both probes of this round were throwaway working-copy changes, run and then reverted with `jj restore packages/envoy/infra/gcp/clusteredhub_live_test.go`; `jj status` reports no change and the only commit of this phase is this handoff.",
+    "Round 1's unreproduced single-kill 503/10008 is unchanged by this round and still stands in the pull request's 'Not proven / risk' line. This round's diff touches the control's timing and three comments, not the wait's condition on the meta leader.",
+    "The two comment findings were checked against the pinned source: jsStreamLeaderStepDownRequest refuses on the meta group at server/jetstream_api.go:2282-2286 before it looks at the stream, and jsMsgGetRequest's 503/10008 at :3922-3926 is conditional on js.isLeaderless (server/jetstream_cluster.go:1481-1497). The new comments say exactly that."
+  ]
+}
