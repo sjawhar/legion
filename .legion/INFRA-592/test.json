@@ -2,57 +2,54 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-592",
-  "previousHandoff": "e96b0661c0fefab88e8bf03ed666248f751759eb",
-  "round": 13,
-  "headSha": "105903a37f94a2c024afbeae8fa88715aa8a2d18",
-  "codeHeadSha": "b7312fc12916d748b53d8ecaffa2d27bf557e711",
-  "loadRule": "Pod 5be9ec7a-cae5-48b9-98ff-2df107a9930c (new; 3 CPUs; my round-12 scratch died with pod 0e42651c, its evidence is dispatch://INFRA-592/artifact/infra-592-tester-r12-tar-gz). Fresh LOADTEST_ROOT /legion/scratch/tmp/infra-592-tester/lt seeded by the base build (main 072a7d34, migration 150, 1,019 s). Adjacent base / head pairs, nothing else of mine running during the series (07:41-09:01Z). Superuser Postgres: the stack's own (port 15190, byte order) and an en_US.UTF-8 cluster I initialised (port 15180) for the collation test, both on the issue volume. Memory sampled every 2 s by the named job mem-sampler-infra-592-tester: peak 14.80 GiB of 19 at 09:00:53Z, 3,526 samples. Go tests -p 1, GOMAXPROCS=3, GOMEMLIMIT=12GiB; -race with CGO_ENABLED=1.",
+  "previousHandoff": "24c1fad39d0bb2e6f613f68b32146552a167ac5a",
+  "round": 14,
+  "headSha": "e865147a033bf2218d1b8154217b83f16ca25bfb",
+  "codeHeadSha": "a1581b1b858b285217eba59c7e0379c38c896cef",
+  "loadRule": "Pod 5be9ec7a-cae5-48b9-98ff-2df107a9930c (3 CPUs). LOADTEST_ROOT /legion/scratch/tmp/infra-592-tester/lt re-seeded by the base build main d86f8de8 (the merge 1f6822bf's main side, migration 157, 1,091 s). Adjacent base / head pairs, nothing else of mine running during the series (13:57-14:26Z). Superuser Postgres: the stack's own, on the issue volume. Memory sampled every 2 s by the named job mem-sampler-infra-592-tester: peak 11.99 GiB of 19 at 14:26:03Z, 1,755 samples. Go tests -p 1, GOMAXPROCS=3, GOMEMLIMIT=12GiB; -race with CGO_ENABLED=1.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran their test selections at b7312fc1 (red test unmodified 3/3 and -race; admission ordering tests 3/3 and admission -race; publish test), reproduced their negative controls for the admission tests by removing arrival order and the single wait in a scratch copy, and re-ran their 10x pairs on my pair shape: p99 1,174-1,195 ms against their 1,204-1,209, but max 4,409-5,672 ms against their 3,009-3,579."
+    "how": "Re-ran their hub test counts (200 plain, 100 -race: 0 failures), their room test, and their 10x pairs on my pair shape (5.51-5.58 events/s and 63.6-65.8 reads/s against their 5.66-5.87 and 65-68; refusals 429 only, 0 connection failures). Their negative control holds: the head with 6c4847f0 reverted fails 8 of 100."
   },
-  "failed": 2,
-  "failures": [
-    {
-      "criterion": "The suites pass at the head (CI's envoy-go-race-api at b7312fc1)",
-      "evidence": "TestIdenticalViewsShareOneRecompute (packages/envoy/internal/dispatch/api/delivery_live_hub_test.go:1997) fails at the head and not at main. `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... go test -p 1 -count=100 ./internal/dispatch/api/ -run '^TestIdenticalViewsShareOneRecompute$'`: head b7312fc1 8 of 100 fail, 'delivery_live_hub_test.go:2010: recomputes for two identical views = 2, want 1'; main 072a7d34 0 of 100 (ok). With CGO_ENABLED=1 -race -count=50: head 3 of 50 fail, main 0 of 50. CI: envoy-go-race-api failed at b7312fc1 on it (job 124785346042) and envoy-go failed at 44aada0b on it (job 124636223113); no main CI run in the last 30 failed on it. The PR changes the hub's read path (delivery_live_hub_worker.go reads through the live pool, liveRead; delivery_live_hub.go and _intake.go). The existing test is the red test; I wrote none."
-    },
-    {
-      "criterion": "The PR body's Not proven / risk lines describe the head, none stale (architect check 4)",
-      "evidence": "(a) Line 1 says a write 'is never refused after it was admitted'. On the real binary at b7312fc1 (order.py refused mode): a comment write admitted at once whose 60-byte body trickled for 1.5 s, while 24 writes on a locked issue took every write unit, was answered 429 at 2.543 s, 1.0 s after its body ended. This follows the architect's decision (one refusal deadline), so the claim, not the code, is wrong. (b) The 1x line still gives round 10's refusals at e9b1b005; rounds 12 and 13 measured 0 refused in all three pairs. (c) The 10x/memory line still gives round 10's 57.7-59.5 reads/s and 30-minute memory; this round: 68.3-72.0 reads/s in the pairs, 73.2 over 30 minutes, heap 8.5-8.8 GiB from minute 10, RSS 10.0 GB last 5 minutes. (d) The refusal line's write max 3,009-3,579 ms is below this round's 4,409-5,672 ms in the pairs and 4,063 ms in the 30-minute run (p50 and p99 agree)."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "architectChecks": {
-    "queuedWriteGone": "PASS. Red test TestAQueuedWriteWhoseClientHangsUpIsLoggedClientGone byte-identical to 0e2b3ea9's: 3/3 pass at head and with -race; fails at 1176657a ('left the queue 10.006220467s later ... want status=499'). Real binary (gone.py, issues locked 8 s): queued POST whose client closed at 0.4 s logged status=499 elapsed_ms=400 bytes=0 at head, status=429 elapsed_ms=1000 bytes=135 at 1176657a; queued GET 499 at both.",
-    "park": "Tricklers: PASS on the real binary at head: 30 unauthenticated tricklers, honest writes at 5/15/30/45 s answered 201 in 0.080-0.091 s, tricklers 400 at 60.03-61.52 s; 3 MiB upload at 44.8 KB/s answered 201 after 70.3 s (1176657a the same, since round 12's fix). Arrival order: on the real binary (order.py, a write whose body trickled 1.5 s, 24 writes holding every unit on a locked issue, 4 later writes on a free issue, release at 1.9 s) the trickled write committed first at head in 2 runs, but also at 1176657a in 2 runs, so this probe does not tell the builds apart. The discriminating evidence is admission's tests: TestAnEarlierArrivalIsQueuedAheadOfLaterOnesAlreadyWaiting and TestAResumedTicketIsGrantedAheadOfLaterArrivals fail with queue() replaced by PushBack ('a queued request was never answered', 'the parked ticket never resumed, though it arrived before the queued write'), TestAQueuedThenParkedRequestWaitsOnceOverAll fails with a full wait per ask ('waited 1.000306702s more after 600ms in the queue'). Read in the code: the wait budget counts queue time only (Arrival.waited), not time the body took, so a slow honest upload is not refused for its transfer time. Refused after admission: see failure 2a.",
-    "tenX": "Pairs t13-{base,head}-10x-{a,b}: head 68.3/72.0 reads/s, 5.83/6.17 events/s, 95,062/94,401 read and 6,115/6,055 write refusals all 429, 0 connection failures, 0 other non-2xx; write refusal p50 1,034/1,031, p90 1,093/1,085, p99 1,195/1,174, max 5,672/4,409 ms; read refusal p50 26/24, p99 194/149 ms. Base 1.51/1.52 events/s, 0.0/0.1 reads/s, 107,348/107,346 30 s timeouts, 6,937/6,938 write transport errors, 19,690/19,719 pool waiters.",
-    "oneX": "Three pairs: head 0 refused, 0 non-2xx, read p99 657/587/528 ms; base 0 non-2xx, read p99 913/5,877/803 ms; both 3.99 events/s and 59.7 reads/s.",
-    "thirtyMinutes": "t13-head-10x-30m: 73.2 reads/s, 6.59 events/s, only 429, 0 connection failures; per 5 minutes RSS max 7.4, 8.7, 9.4, 9.5, 10.0, 10.0 GB and heap max 6.8, 8.1, 8.6, 8.8, 8.8, 8.5 GiB: levels.",
-    "publishTest": "PASS. TestAnEditHoldsItsDocumentsGateUntilItsEventsArePublished passes at head (3/3 and -race) and fails 3/3 with editArtifact's release() moved above s.publish ('a second writer of the document answered 200 while the first edit's events were still unpublished').",
-    "roomOnGoneClient": "The room survives at head (INFRA-644's check). Throwaway real-process test TestARestEditWhoseClientLeavesMidTransactionLeavesItsRoomOpen (cmd/dispatch, attached as room_commit_client_gone_test.go): an editor in the room, a trigger on doc_updates sleeping 4 s, the REST edit's client closed at 1.5 s. Slow COMMIT (deferred trigger): head logs the edit 200 after 4,075 ms, the editor stays connected, no room failure, the room takes the editor's next edit; main 072a7d34 logs 'API handler failed error=\"context canceled\"' and the editor's socket closes 0.9 ms after the client left. Slow statement before the commit (immediate trigger): head 499 and main 500, the room survives on both (the statement fails, the ledger is discarded, Ledger.Discard fails no room). Why head survives: Ledger.commit runs on store.CommitContext (context.WithoutCancel, 10 s bound) from recordSettlementCredit through the COMMIT (docs/ledger.go:153-199, store/pool.go:570-576), and only a commit error fails rooms (Ledger.fail). Not committed as a permanent test (it passes at head; offered to the architect).",
-    "merge": "My per-file script round_shape.py (dispatch://INFRA-592/artifact/round-shape-py), stand-in for the lost round-shape.py v3: 1176657a (base daf71f53) -> b7312fc1 (base 072a7d34): 23 files whose own diff differs. 15 are this round's commits (b7312fc1's 12 files, bccea8e0's project_scope.go, two .legion handoffs). 8 differ only through main: cmd/dispatch/main.go, issue_create.go, routes/router.go have identical +/- lines; server_test.go, storable_text.go, suggestion_outcomes.go, docs/service.go differ by main's own lines (testServerURL, writeHandlerError's request argument, the DPoP sweep wording, gofmt); routes_table.go and server.go carry main's withinProjectScope/withinSessionScope inside serveRoute, still outside the keyed layer as main has them. GET /api/v1 lists the same 147 routes at 1176657a and b7312fc1, with main's #2541 descriptions at the head. Control: 783a30cc -> 3d5c31a9 gives 4, 2 without .legion/, as INFRA-606's tester found.",
-    "collationTest": "TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves fails on byte-order Postgres at main 072a7d34 and the head with its own guard (rank_test.go:317) and passes at both on an en_US.UTF-8 cluster (4.7-4.8 s). Still main's.",
-    "ci": "At b7312fc1, 09:16Z: 28 lanes success (among them lint, typecheck, test, dispatch-memory, dispatch-multiprocess, envoy-go, envoy-go-race, -docs, -pmdoc); envoy-go-race-api failure (failure 1); dispatch in progress and ci-ok not reported: both unread. Round 12's unread lanes at 1176657a ended success: dispatch, envoy-go, listener-server-change, ci-ok."
+    "hubFlake": "PASS. TestIdenticalViewsShareOneRecompute at a1581b1b: -count=200 0 failures; CGO_ENABLED=1 -race -count=100 -timeout 60m 0 failures, no DATA RACE. The fix 6c4847f0 changes only delivery_live_hub.go, delivery_live_hub_intake.go and delivery_live_hub_worker.go (no test file): a change caught up while a view's read has begun but not recorded its position is held in startingSeq and marks the view only if it lies past the read's position. With that commit reverted on the head (git apply -R in a scratch copy), 8 of 100 fail ('delivery_live_hub_test.go:2010: recomputes for two identical views = 2, want 1').",
+    "roomTest": "PASS. TestARestEditWhoseClientLeavesMidTransactionLeavesItsRoomOpen (committed 08719730, my test plus a check that the mid-COMMIT edit is committed) passes both subtests at the head (the edit logged 200 after its 4 s COMMIT); at main d86f8de8 the mid-COMMIT subtest fails: 'the editor's connection closed 1.67494ms after the REST client left mid-transaction', 'API handler failed error=\"context canceled\"'.",
+    "uploadLockTest": "The implementer's decision, now in the PR body's last risk line: main's TestAnUploadHoldsNoIssueLockWhileTheStoreWrites is kept unchanged and no product lock was changed; a bounded-wait change to the test was tried and dropped. Runs: head -count=200 then -count=400, 0 of 600 fail; head -race -count=50 0 fail; main d86f8de8 -count=200: 3 fail, 'files_test.go:306: lock the issue while its upload's bytes are in flight: ERROR: could not obtain lock on row in relation \"issues\" (SQLSTATE 55P03)'; main -race -count=50 0 fail. The body's 'main's own version then passed -count=300 at the merge' is not what I see on main (3 of 200 here). The flake is main's and not the head's: the test file is identical at both, and the head passed 650 runs. I did not establish what holds main's issue row.",
+    "riskLines": "PASS. The body was rewritten during my round (read at 14:26Z): line 1 now says a write admitted at once whose body arrives slowly can be refused 429 after it was first admitted, citing my round 13; the 1x line cites rounds 12-13 (0 refusals; this round 0/0 in one pair); the 10x line cites my round-13 68.3-72.0 reads/s and 30-minute 73.2 (this round 63.6-65.8, 5.51-5.58 events/s); the refusal line gives max 3.0-3.6 s for the implementer's pairs and 4.4-5.7 s for mine (this round 3.9-5.0 s, p99 1.2 s). The last line names the upload-lock decision. None contradicts this round's numbers.",
+    "tenX": "Pairs t14-{base,head}-10x-{a,b}: head 65.8/63.6 reads/s, 5.58/5.51 events/s, 95,506/95,903 read and 6,160/6,173 write refusals all 429, 0 connection failures, 0 other non-2xx; write refusal p50 1,034/1,037, p90 1,104/1,109, p99 1,201/1,247, max 3,863/4,977 ms; read refusal p99 245/338 ms; pool waiters max 11/10. Base 3.18/1.48 events/s, 28.8/0.0 reads/s, 102,179/107,353 requests not 2xx, 6,739/6,945 write transport errors, 17,915/19,708 pool waiters. 1x pair t14-*-1x-a: head 0 refused, read p99 760 ms; base read p99 1,418 ms.",
+    "realBinary": "At a1581b1b (real.sh): queued write hang-up logged status=499 elapsed_ms=401, queued read 499; 30 tricklers 400 at 60.03-61.58 s with honest writes 201 in 0.086-0.091 s; 3 MiB upload at 44.6 KB/s 201 after 70.5 s; a write admitted at once with its body trickled 1.5 s and every unit held: 429 at 2.540 s.",
+    "merge": "round_shape.py b7312fc1 (base 072a7d34) -> a1581b1b (base d86f8de8): 41 files whose own diff differs; 6 are this round's commits (hub fix, room test, live-socket test, guide), the rest come through main's #2391, #2549, #2599, #2608, #2615, #2617. The PR's own code lines in main.go keep #2391's loops on this PR's pools: embedqueue on backgroundStore, StartIntakes on background and leases, RunSuggestionOutcomeSweep and RunMaintenanceSweep on background; the suggestion-outcome and webhook-redelivery leases now use duty's named leases; #2391's shared wakes hub dials the listener pool (pools.go Listener), counted as the fourth permanent listener, ConnectionsPerProcess 90. TestDispatchConnectionsPerPodIsTheServers (infra/gcp) passes: dispatchConnectionsPerPod 90.",
+    "ci": "At a1581b1b, 14:26Z: every lane success, ci-ok success (32 lanes; pr-title has one cancelled run beside a success, worker-image attest skipped). No lane unread."
   },
-  "leftoverCheck": "After stack.sh stop, pg_ctl stop of the en_US cluster and proc kill of the sampler: ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|series.sh|real.sh|order.sh|flake.sh|r13-unit|go test|loadgen|infra-592-tester/|postgres' printed 0 lines.",
-  "raceNote": "Every -race run of mine used CGO_ENABLED=1 and its result is as stated.",
-  "evidence": "dispatch://INFRA-592/artifact/infra-592-tester-r13-tar-gz",
+  "leftoverCheck": "After stack.sh stop and proc kill of the sampler: ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|series14|real.sh|r14-unit|go test|loadgen|infra-592-tester/|postgres' printed 0 lines.",
+  "raceNote": "Every -race run of mine used CGO_ENABLED=1 and ended as stated.",
+  "evidence": "dispatch://INFRA-592/artifact/infra-592-tester-r14-tar-gz",
   "proof": [
     {
-      "criterion": "A queued write whose client hangs up is logged 499 and leaves the queue at once",
-      "surface": "real envoy-dispatch on INFRA-589's stack, raw TCP client",
-      "command": "real.sh (gone.py <port> LGA-10 write, issues locked 8 s)",
-      "observed": "status=499 elapsed_ms=400 bytes=0",
-      "headSha": "105903a37f94a2c024afbeae8fa88715aa8a2d18",
-      "negativeControl": "1176657a: status=429 elapsed_ms=1000 bytes=135"
+      "criterion": "Excess load is refused early with a retryable 429 and the server keeps serving (10x)",
+      "surface": "INFRA-589's 2-core load reproduction, adjacent pairs on one pod",
+      "command": "run-step.sh t14-{base,head}-10x-{a,b} --events 40 --sessions 1000 --requests 600",
+      "observed": "head 5.58/5.51 events/s, 65.8/63.6 reads/s, refusals 429 only, 0 connection failures, write refusal p99 1,201/1,247 ms",
+      "headSha": "e865147a033bf2218d1b8154217b83f16ca25bfb",
+      "negativeControl": "main d86f8de8: 3.18/1.48 events/s, 28.8/0.0 reads/s, 102,179/107,353 requests not 2xx"
     },
     {
-      "criterion": "10x refuses with 429 only, no dropped connection, refusals about admission's 1 s wait",
-      "surface": "INFRA-589's 2-core load reproduction, adjacent pairs on one pod",
-      "command": "run-step.sh t13-{base,head}-10x-{a,b} --events 40 --sessions 1000 --requests 600",
-      "observed": "head 5.83/6.17 events/s, 68.3/72.0 reads/s, write refusal p99 1,195/1,174 ms",
-      "headSha": "105903a37f94a2c024afbeae8fa88715aa8a2d18",
-      "negativeControl": "main 072a7d34: 1.51/1.52 events/s, about 107,350 timeouts at 30 s"
+      "criterion": "A queued write whose client hangs up is recorded 499 and gives up its slot",
+      "surface": "real envoy-dispatch on the stack, raw TCP client",
+      "command": "real.sh (gone.py write, issues locked 8 s)",
+      "observed": "status=499 elapsed_ms=401 bytes=0",
+      "headSha": "e865147a033bf2218d1b8154217b83f16ca25bfb",
+      "negativeControl": "round 13 at 1176657a: status=429 elapsed_ms=1000"
+    },
+    {
+      "criterion": "Identical live views share one recompute (round-13 failure)",
+      "surface": "Go test against a real Postgres",
+      "command": "go test -p 1 -count=200 ./internal/dispatch/api/ -run '^TestIdenticalViewsShareOneRecompute$'; CGO_ENABLED=1 go test -race -p 1 -count=100 ...",
+      "observed": "0 of 200 and 0 of 100 fail",
+      "headSha": "e865147a033bf2218d1b8154217b83f16ca25bfb",
+      "negativeControl": "6c4847f0 reverted: 8 of 100 fail"
     }
   ]
 }
