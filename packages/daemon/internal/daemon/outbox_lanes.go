@@ -14,9 +14,10 @@ import (
 )
 
 // The outbox runs its rows on lanes. A lane is one issue's rows of one kind of work — its lifecycle
-// rows (starts, stops, the branch, the workspace) or its board rows (status writes, messages,
-// notices), record.OutboxLane — run one at a time in the order they are due, on a goroutine of its
-// own that lives only while the issue has such rows. A lane is woken by the write that commits one
+// rows (starts, stops, the branch, the workspace), its board rows (status writes, messages,
+// notices) or its role messages (the end of a role's phase), record.OutboxLane — run one at a time
+// in the order they are due, on a goroutine of its own that lives only while the issue has such
+// rows. A lane is woken by the write that commits one
 // of its rows (projectRecords, through intake.OnCommit), by the timer it arms for its next row due
 // later, and by the sweep, which every outboxLease lists the lanes with a row still in the outbox
 // (record.Store.UnfinishedLanes) and wakes each: a row whose run ended without its finish or retry

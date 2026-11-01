@@ -8,13 +8,13 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// beforeDocCompactionOwed is the last migration before 0150_doc_compaction_owed.
-const beforeDocCompactionOwed = 149
+// beforeDocCompactionOwed is the last migration before 0151_doc_compaction_owed.
+const beforeDocCompactionOwed = 150
 
-// 0150 names in doc_compaction_owed every document stored before it with more than one
+// 0151 names in doc_compaction_owed every document stored before it with more than one
 // doc_updates row, and no other: a document of one row, or of none, has nothing a compaction could
 // fold.
-func TestMigrate0150NamesEveryDocumentOfMoreThanOneRow(t *testing.T) {
+func TestMigrate0151NamesEveryDocumentOfMoreThanOneRow(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, beforeDocCompactionOwed)
@@ -46,21 +46,21 @@ func TestMigrate0150NamesEveryDocumentOfMoreThanOneRow(t *testing.T) {
 	}
 
 	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate through 0150: %v", err)
+		t.Fatalf("migrate through 0151: %v", err)
 	}
 
 	rows, err := store.Pool.Query(ctx, `select artifact_id::text from doc_compaction_owed`)
 	if err != nil {
-		t.Fatalf("read doc_compaction_owed after 0150: %v", err)
+		t.Fatalf("read doc_compaction_owed after 0151: %v", err)
 	}
 	owed, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
-		t.Fatalf("read doc_compaction_owed after 0150: %v", err)
+		t.Fatalf("read doc_compaction_owed after 0151: %v", err)
 	}
 	slices.Sort(owed)
 	want := []string{ids["two"], ids["three"]}
 	slices.Sort(want)
 	if !slices.Equal(owed, want) {
-		t.Fatalf("doc_compaction_owed names %v after 0150, want the documents of two and three rows %v", owed, want)
+		t.Fatalf("doc_compaction_owed names %v after 0151, want the documents of two and three rows %v", owed, want)
 	}
 }

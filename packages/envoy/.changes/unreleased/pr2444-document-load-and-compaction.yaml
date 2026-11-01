@@ -16,7 +16,7 @@ body: |-
   and an hourly sweep under the `document-compaction` lease, with or without NATS, ticks at start
   and then hourly and compacts what the queues missed. The sweep reads only the documents a table of
   documents with rows to fold names (`doc_compaction_owed`), written by each append in its own
-  statement and cleared by compaction; migration 0150 adds it and backfills it. Compaction reads and
+  statement and cleared by compaction; migration 0151 adds it and backfills it. Compaction reads and
   folds on a two-connection pool of its own (`dispatch-compaction`), so one server's stated
   connection ceiling rises by 2, to 91; it holds no document lock while it folds, writes under the
   lock only when the rows it folded are unchanged, and leaves rows younger than 2 minutes as
