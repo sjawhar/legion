@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -152,9 +153,11 @@ type bootConfig struct {
 
 // setGoMemoryLimit gives the Go runtime a soft memory limit of 90% of the container's, so the
 // collector works harder as the heap nears it rather than letting garbage pile up until the
-// container is killed at its limit (4 GiB in the GKE deployment, infra/gcp/dispatch_kube.go:498,
-// which resources() at :108-111 sets as a limit); nothing else tells the runtime that limit
-// exists. The ratio is automemlimit's default, 0.9: 3.6 GiB of 4 GiB. provider reads the
+// container is killed at its limit (the deployment's appMemory, which sizedResources sets as the
+// container's limit, infra/gcp/dispatch_kube.go:748 and :204: 4Gi where the stack leaves it
+// unset, defaultDispatchAppMemory, and 32Gi in production, theorem-labs/agent-infra
+// dispatch/Pulumi.prod.yaml); nothing else tells the runtime that limit
+// exists. The ratio is automemlimit's default, 0.9. provider reads the
 // container's limit: main passes memlimit.FromCgroup, which reads memory.max under control group
 // v2 and memory.limit_in_bytes under v1, takes the smallest in the hierarchy and reports `max` as
 // no limit; a test passes its own rather than depending on the runner's control group. Where no
@@ -162,7 +165,12 @@ type bootConfig struct {
 // own variables, read inside memlimit.Set and not settings rows (settings.go:11-23): a GOMEMLIMIT,
 // or AUTOMEMLIMIT=off, skips the provider, and any other AUTOMEMLIMIT replaces the ratio. It logs
 // one line naming the limit it read and the limit it set.
-func setGoMemoryLimit(provider memlimit.Provider) {
+//
+// It then logs the memory bounds the document service derives from the limit the runtime holds
+// afterwards, whichever way it got there (docs.BoundsForLimit), and returns that limit for main
+// to hand the service (docs.Deps.GoMemoryLimit), so the bounds an operator reads in the boot log
+// are the bounds the service runs under.
+func setGoMemoryLimit(provider memlimit.Provider) int64 {
 	read, readErr, called := uint64(0), error(nil), false
 	limit, err := memlimit.Set(memlimit.WithProvider(func() (uint64, error) {
 		called = true
@@ -185,12 +193,27 @@ func setGoMemoryLimit(provider memlimit.Provider) {
 	default:
 		slog.Info("dispatch: go memory limit taken from GOMEMLIMIT; the container's was not read", "go_memory_limit_bytes", limit)
 	}
+	held := debug.SetMemoryLimit(-1)
+	bounds := docs.BoundsForLimit(held)
+	slog.Info("dispatch: the document service's memory bounds",
+		"go_memory_limit_bytes", bounds.Limit,
+		"room_budget_bytes", bounds.RoomBudget,
+		"document_read_cache_bytes", bounds.DocumentReadCache,
+		"pressure_reserve_bytes", bounds.PressureReserve,
+		"apply_heap_bytes", bounds.ApplyHeap,
+		"copy_heap_bytes", bounds.CopyHeap,
+		"heap_slack_bytes", bounds.HeapSlack,
+		"apply_too_heavy_bytes", bounds.ApplyTooHeavy,
+		"peer_write_queue_bytes", bounds.PeerWriteQueue)
+	return held
 }
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	// First, before the server allocates anything the collector would have to catch up on.
-	setGoMemoryLimit(memlimit.FromCgroup)
+	// First, before the server allocates anything the collector would have to catch up on. The
+	// limit it returns is what the document service derives its memory bounds from
+	// (docs.Deps.GoMemoryLimit).
+	goMemoryLimit := setGoMemoryLimit(memlimit.FromCgroup)
 	env := processSettings()
 	if len(os.Args) > 1 {
 		os.Exit(runSubcommand(context.Background(), os.Args[1:], env, os.Stdout, os.Stderr))
@@ -375,6 +398,7 @@ func main() {
 		ServerURL:       serverURL,
 		Settle:          boot.SettleDelay,
 		EditNoticeQuiet: boot.EditNoticeQuiet,
+		GoMemoryLimit:   goMemoryLimit,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 	// The asks a close or a reopen by a release older than the withdrawal left: at boot, then on an

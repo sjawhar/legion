@@ -33,12 +33,13 @@ func (s *Service) AfterSettleLockForTest(hook func(room string)) {
 	s.afterSettleLock = hook
 }
 
-// SetRoomBudgetForTest replaces the room budget's limit with bytes, or restores roomBudgetBytes for
-// zero, so a browser test can fill the budget with documents a test can type into. It is mounted
-// only through Dispatch's test-hook route; the real-process drives use the real budget.
+// SetRoomBudgetForTest replaces the room budget's limit with bytes, or restores the service's own
+// (MemoryBounds.RoomBudget) for zero, so a browser test can fill the budget with documents a test
+// can type into. It is mounted only through Dispatch's test-hook route; the real-process drives
+// use the real budget.
 func (s *Service) SetRoomBudgetForTest(bytes int64) int64 {
 	if bytes <= 0 {
-		bytes = roomBudgetBytes
+		bytes = s.bounds().RoomBudget
 	}
 	s.budget.setLimit(bytes)
 	return bytes

@@ -20,10 +20,13 @@ import (
 	"github.com/reearth/ygo/persistence"
 )
 
-// roomBudgetBytes is the most heap the open rooms are charged together (roomCharge): 2 GiB of the
-// task's 4 GiB, under the 3.6 GiB Go memory limit the server takes from its container at boot
-// (setGoMemoryLimit, cmd/dispatch/main.go:121-156). Open documents are the largest thing the pod
-// holds; the rest is the request path's, the cold reads' cache's (documentReadBudget, 256 MiB,
+// roomBudgetBytes is the most heap the open rooms are charged together (roomCharge) at the Go
+// memory limit this package's figures are calibrated at: 2 GiB of a task's 4 GiB, under the
+// 3.6 GiB limit a server of that container takes at boot (setGoMemoryLimit,
+// cmd/dispatch/main.go). A process holding another limit charges them the same share of it
+// (MemoryBounds.RoomBudget), which is what its budget's limit is (New); the figures below are
+// this calibration's. Open documents are the largest thing the pod holds; the rest is the request
+// path's, the cold reads' cache's (documentReadBudget, 256 MiB,
 // which this does not count) and the collector's slack. At the measured cost of a room
 // (bytesOfHeapAnElement) it holds thirty-seven documents of a mebibyte of prose (57,600 elements,
 // 58 MB each at both copies, roomCopies) as they load, and since an admission reserves its stored
@@ -231,7 +234,9 @@ const bytesOfHeapAByteOfValues = 120
 const earlyCountCharge = 16 << 20
 
 // pressureReserveBytes is how far past the budget's limit the charges of the delete-only updates
-// admitted while the budget is full may take it (refusedUnderPressure): 256 MiB. A delete that cuts
+// admitted while the budget is full may take it at the calibration (refusedUnderPressure):
+// 256 MiB, and the same share of another Go memory limit, since what fills it is a share of the
+// rooms the budget holds (MemoryBounds.PressureReserve). A delete that cuts
 // the middle of an item splits it and adds structs, so unbounded deletes would grow the heap while
 // nothing can be closed. A delete range is charged a split at both copies, 800 bytes, for each of
 // its ends its apply can leave split (deletedRuns.splitEnds), two at most, where a split keeps
@@ -285,8 +290,8 @@ var errRoomBudgetFull = errors.New("the open documents fill their memory budget"
 // within the budget, and a sweep started once a room may have become closable lowers it too.
 type roomBudget struct {
 	mu sync.Mutex
-	// limit is roomBudgetBytes, but for a browser test's own (SetRoomBudgetForTest), and used
-	// what the rooms' charges and the reservations come to.
+	// limit is what the service's Go memory limit gives it (MemoryBounds.RoomBudget), but for a
+	// browser test's own (SetRoomBudgetForTest), and used
 	limit, used int64
 	// rooms holds, per document, the charges of its loaded instances and the reservations of the
 	// sockets being admitted to it; a document with neither has no entry.
@@ -608,7 +613,8 @@ type roomReservation struct {
 // charged one copy, rooms would be admitted at half their price, an admission of a mebibyte of
 // prose reserving 28,800,000 bytes rather than 57,600,000, and an empty budget admitting
 // seventy-four of them rather than thirty-seven, whose open rooms would come to about twice the
-// 2 GiB budget in a 4 GiB pod. Every part of a charge is at both copies: the replica holds the
+// budget: the figures here are the calibration's, a 2 GiB budget in a 4 GiB pod, and the rooms
+// double at any limit. Every part of a charge is at both copies: the replica holds the
 // live document's whole state and then takes every update the room commits
 // (renderedReplica.observe), so each struct, split and byte of content the live document takes,
 // the replica takes too.

@@ -271,7 +271,7 @@ const maxMessageBytes = 54 << 20
 //     what it clears the largest frame by.
 //
 //   - Twenty sockets that never read, each holding the budget and the frame that crossed it, fit
-//     the Go memory limit beside a room budget charged to its limit. goMemoryLimitBytes,
+//     the Go memory limit beside a room budget charged to its limit. The calibration,
 //     3,865,470,566, leaves 1,717,986,918 bytes above roomBudgetBytes, 2,147,483,648. The frames
 //     those twenty hold are bounded by the same room budget: a room's charge is never below its
 //     structs at bytesOfHeapAStructHeld in each of roomCopies copies (copyHeap), so the rooms
@@ -294,6 +294,19 @@ const maxMessageBytes = 54 << 20
 // as well - a second frame a socket, since ygo credits a frame before it writes it - fifteen such
 // sockets fit at this budget, 15 x 62,914,560 + 2 x 370,167,031 + 2,147,483,648 = 3,831,536,110,
 // and sixteen are 51,147,656 bytes past the limit.
+//
+// It is the one bound here that does not scale with the Go memory limit (MemoryBounds). What
+// sizes it is the frames a room sends, and no frame bound scales: a budget at or under the
+// largest frame would close an honest reader at any limit, so it can never shrink below
+// maxMessageBytes, and a larger limit buys a silent socket nothing - it is closed at the budget
+// either way, and the bytes it was holding are the pod's loss, not its allowance. The arithmetic
+// above stays true at every limit at or above the calibration: what the limit leaves above the
+// room budget grows with the limit, since the budget is a fixed share of it, and the frames the
+// rooms under a full budget can send grow with the budget, while these twenty queues stay 60 MiB
+// each. Below the calibration it is the limit, not the budget, that gives way: fewer than twenty
+// silent sockets fit beside a full room budget, and no budget that clears the largest frame
+// could make twenty fit, since twenty frames at the message floor are 1,132,462,080 bytes on
+// their own (TestTheWriteQueueBudgetsArithmetic weighs both limits).
 //
 // The close is logged at Warn, "peer queued bytes over budget; closing peer", with the room, the
 // enqueue path, the socket's queued bytes, this budget, the refused frame and the frame cap
@@ -471,9 +484,9 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 	own := weighed.ownApplyHeap(len(info.Update))
 	weighs := own > unweighedApplyHeapBytes
 	heap := own + weighed.roomApplyHeap(structs.roomStructs(info.Doc))
-	if heap > applyTooHeavyBytes {
+	if tooHeavy := s.bounds().ApplyTooHeavy; heap > uint64(tooHeavy) {
 		return refusedWith(documentTooLarge(), fmt.Errorf("%w: its apply is estimated to allocate %d bytes, past the %d bytes the pod lets any apply hold, even alone",
-			errApplyTooHeavy, heap, uint64(applyTooHeavyBytes)))
+			errApplyTooHeavy, heap, tooHeavy))
 	}
 	atTheBound := bytes+int64(len(info.Update)) >= pmdoc.MaxDocumentBytes
 	crept := measured && bytes >= pmdoc.MaxDocumentBytes+maxPeerByteCreep
@@ -600,15 +613,16 @@ func refusedWith(refusal *websocket.PeerClose, cause error) error {
 // refusedUnderPressure is whether the room budget's pressure, while the budget is full and nothing
 // can be closed (roomBudget.full), refuses weighed, an update the document's own bounds admit:
 // one that carries anything the room does not already hold, and one that only deletes once its
-// structure would take the charges and reservations past the limit and pressureReserveBytes
-// beyond it. A delete it admits is charged to charge, the room's, in the same look at the budget
+// structure would take the charges and reservations past the limit and the service's pressure
+// reserve beyond it (MemoryBounds.PressureReserve). A delete it admits is charged to charge, the
+// room's, in the same look at the budget
 // (roomBudget.growWithin), so the hook does not charge it again after its apply.
 func (s *Service) refusedUnderPressure(weighed *peerWeighing, charge *roomCharge) bool {
 	if weighed.inserted > 0 {
 		return true
 	}
 	structure := weighed.structureHeap()
-	return structure > 0 && !s.budget.growWithin(charge, structure, pressureReserveBytes)
+	return structure > 0 && !s.budget.growWithin(charge, structure, s.bounds().PressureReserve)
 }
 
 // liveReplica is the replica of the room holding live (keepReplica), or nil for a document no
@@ -1534,25 +1548,34 @@ func structTotalOf(tally updateTally, err error, pending crdt.PendingStats) uint
 // refuses.
 var errApplyTooHeavy = errors.New("the update is heavier to apply than the pod can hold")
 
-// goMemoryLimitBytes is the Go runtime's soft memory limit on the production pod: 90 per cent of
-// the container's 4 GiB, which the server sets at boot (setGoMemoryLimit, cmd/dispatch/main.go:121-156).
-const goMemoryLimitBytes = 4 << 30 * 9 / 10
+// calibratedGoMemoryLimitBytes is the Go memory limit every bound in this package is calibrated
+// at, and the limit a service runs under when its process holds none: 90 per cent of a
+// container's 4 GiB, 3,865,470,566 bytes, which is what Dispatch's deployment gave it while
+// these figures were measured. The production pod is larger now - 32Gi, whose 90 per cent is
+// 30,923,764,531 (setGoMemoryLimit, cmd/dispatch/main.go) - and a process holding another limit
+// runs under this calibration scaled to that limit (BoundsForLimit), not under these constants:
+// each is what its bound comes to at this limit alone.
+const calibratedGoMemoryLimitBytes = 4 << 30 * 9 / 10
 
-// heapAboveTheReserve is what the Go memory limit leaves above the room budget, the cold reads'
-// cache and the pressure reserve the budget's charges may pass its limit by: 3,865,470,566 -
+// heapAboveTheReserve is what the calibration leaves above the room budget, the cold reads' cache
+// and the pressure reserve the budget's charges may pass its limit by: 3,865,470,566 -
 // roomBudgetBytes 2,147,483,648 - documentReadBudget 268,435,456 - pressureReserveBytes
 // 268,435,456 = 1,181,116,006 bytes. The architect's ruling splits it three ways: the apply-heap
 // bound (applyHeapBound), the copy-heap bound (copyHeapBound) and slack named for what neither
 // bound weighs (heapSlackBytes), a third each. The ruling's words are "a quarter of what the limit
 // leaves above the reserve to each bound, and a quarter as named slack", which come to three
 // quarters and leave the last quarter to nothing; a third each is taken as what "the three-way
-// split" means, so that every byte of it has a named holder.
-const heapAboveTheReserve = goMemoryLimitBytes - roomBudgetBytes - documentReadBudget - pressureReserveBytes
+// split" means, so that every byte of it has a named holder. A process holding another limit
+// splits what that limit leaves above its own room budget, cache and reserve the same way
+// (MemoryBounds).
+const heapAboveTheReserve = calibratedGoMemoryLimitBytes - roomBudgetBytes - documentReadBudget - pressureReserveBytes
 
 // applyHeapBound is the most heap, by their estimates (peerWeighing.applyHeap), that the pod's
-// weighed applies of browsers' updates hold at once (applyHeaps): a third of heapAboveTheReserve,
-// 1,181,116,006 / 3 = 393,705,335 bytes, about 375 MiB. The copy-heap bound (copyHeapBound), which
-// holds the full-state decodes of loads, forks and folds, takes another third, and the slack
+// weighed applies of browsers' updates hold at once at the calibration (applyHeaps): a third of
+// heapAboveTheReserve, 1,181,116,006 / 3 = 393,705,335 bytes, about 375 MiB, and at another
+// limit a third of what that limit leaves above its own reserve (MemoryBounds.ApplyHeap). The
+// copy-heap bound (copyHeapBound), which holds the full-state decodes of loads, forks and folds,
+// takes another third, and the slack
 // (heapSlackBytes) the last, where the applies under unweighedApplyHeapBytes run. A weighed apply
 // whose estimate passes the bound is never refused for it: it waits for the whole bound and then
 // holds all of it, so it runs alone (applyHeaps.hold), as a copy past the copy-heap bound does.
@@ -1580,16 +1603,18 @@ const heapAboveTheReserve = goMemoryLimitBytes - roomBudgetBytes - documentReadB
 // bound, so it runs alone.
 const applyHeapBound = heapAboveTheReserve / 3
 
-// heapSlackBytes is the third of heapAboveTheReserve that neither bound grants, 1,181,116,006 / 3 =
-// 393,705,335 bytes, about 375 MiB: the slack for what no bound weighs - the request path, the
-// applies of browsers' updates under unweighedApplyHeapBytes, one for each browser's read loop at
+// heapSlackBytes is the third of heapAboveTheReserve that neither bound grants at the
+// calibration, 1,181,116,006 / 3 = 393,705,335 bytes, about 375 MiB, and at another limit a
+// third of what that limit leaves above its own reserve (MemoryBounds.HeapSlack): the slack for
+// what no bound weighs - the request path, the applies of browsers' updates under
+// unweighedApplyHeapBytes, one for each browser's read loop at
 // most, the measurer's parse of a rendering, up to about 130 MiB for a mebibyte of the heaviest
 // shape (pmdoc/elements.go:31-37), and the collector, which needs headroom under the Go memory
 // limit to free garbage before it reaches it. An apply estimated past applyHeapBound, which runs
 // alone, may reach into it too, up to applyTooHeavyBytes.
 //
 // Nothing in Dispatch reads or sets GOGC: the collector runs at the runtime's own ratio, and what
-// holds the pod inside its memory is the Go memory limit (goMemoryLimitBytes). At that default the
+// holds the pod inside its memory is the Go memory limit the runtime holds. At that default the
 // heap goal is twice the live heap, which past half the limit is the limit itself, so a server
 // whose budget is full keeps every byte of garbage the limit allows - the budget's unused room,
 // both heap bounds and this slack together - and the memory it holds parks under the limit. That
@@ -1614,11 +1639,13 @@ const applyHeapBound = heapAboveTheReserve / 3
 const heapSlackBytes = heapAboveTheReserve / 3
 
 // applyTooHeavyBytes is the estimate (peerWeighing.applyHeap) past which the hook refuses an
-// update as too heavy to apply (errApplyTooHeavy): all of heapAboveTheReserve, 1,181,116,006
-// bytes, both bounds and the slack together, so that no apply is refused that could run with every
-// other weighed heap at rest. An update estimated past applyHeapBound and within it is never
-// refused: it waits for the whole apply bound and then runs alone (applyHeaps.hold). The estimate
-// bounds what an apply allocates from above: the heaviest server-written document's handoff is
+// update as too heavy to apply at the calibration (errApplyTooHeavy): all of heapAboveTheReserve,
+// 1,181,116,006 bytes, both bounds and the slack together, so that no apply is refused that could
+// run with every other weighed heap at rest; at another limit it is all of what that limit leaves
+// above its own reserve (MemoryBounds.ApplyTooHeavy). An update estimated past applyHeapBound and
+// within it is never refused: it waits for the whole apply bound and then runs alone
+// (applyHeaps.hold). The estimate bounds what an apply allocates from above: the heaviest
+// server-written document's handoff is
 // estimated at 71,356,658 bytes and allocates 33,410,168, and no handoff of the editor's is
 // estimated past three times what it allocates (TestEveryApplysTransientHeapIsWithinItsEstimate).
 //
@@ -1644,15 +1671,26 @@ const applyTooHeavyBytes = heapAboveTheReserve
 // browser's read loop at most, in the slack neither bound grants (heapSlackBytes).
 const unweighedApplyHeapBytes = 2 << 20
 
-// applyHeaps is the service's bound on the estimated heap of its weighed applies, applyHeapBound
-// of it. Its zero value is ready: the bound is made on first use. A waiter has no timeout - it is
-// a browser's read loop waiting its turn, and the browser's next frame waits with it - and holds
-// nothing while it waits, neither part of the bound nor its room's admission lock. Waiters are
-// served in the order they came (semaphore.Weighted), so a heavy handoff is not passed over
+// applyHeaps is the service's bound on the estimated heap of its weighed applies,
+// MemoryBounds.ApplyHeap of it. Its zero value is ready: the bound is made on first use, at the
+// calibration's applyHeapBound for a service that named no size (New). A waiter has no timeout -
+// it is a browser's read loop waiting its turn, and the browser's next frame waits with it - and
+// holds nothing while it waits, neither part of the bound nor its room's admission lock. Waiters
+// are served in the order they came (semaphore.Weighted), so a heavy handoff is not passed over
 // forever by lighter ones behind it.
 type applyHeaps struct {
 	once  sync.Once
 	bound *semaphore.Weighted
+	// size is the bound: the service's MemoryBounds.ApplyHeap, zero for applyHeapBound.
+	size int64
+}
+
+// limit is the bound's size.
+func (h *applyHeaps) limit() int64 {
+	if h.size > 0 {
+		return h.size
+	}
+	return applyHeapBound
 }
 
 // hold waits until it holds heap of the bound, or the whole bound for a heap past it, and returns
@@ -1660,14 +1698,15 @@ type applyHeaps struct {
 // (logHeapGrant). With a context that is never done Acquire returns only once it holds what it
 // asked for, so it cannot fail.
 func (h *applyHeaps) hold(heap uint64) (release func()) {
-	h.once.Do(func() { h.bound = semaphore.NewWeighted(applyHeapBound) })
-	held := int64(min(heap, applyHeapBound))
+	size := h.limit()
+	h.once.Do(func() { h.bound = semaphore.NewWeighted(size) })
+	held := int64(min(heap, uint64(size)))
 	started := time.Now()
 	_ = h.bound.Acquire(context.Background(), held)
 	granted := time.Now()
 	return func() {
 		h.bound.Release(held)
-		logHeapGrant("apply", held, applyHeapBound, granted.Sub(started), time.Since(granted))
+		logHeapGrant("apply", held, size, granted.Sub(started), time.Since(granted))
 	}
 }
 

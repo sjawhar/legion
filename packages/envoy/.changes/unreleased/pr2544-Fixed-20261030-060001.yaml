@@ -21,11 +21,14 @@ body: |-
     browser sends may carry at most 54 MiB, a floor that clears every whole-state frame those bounds
     allow.
 
-    The open documents are charged a memory budget of 2 GiB, under the Go soft memory limit the server
-    now sets at boot from its container's own, 90 per cent of it (3.6 GiB of the pod's 4 GiB), so the
-    collector works harder as the heap nears the limit instead of letting garbage pile up until the
-    container is killed; the limit it read and the limit it set are logged in one line, `GOMEMLIMIT` in
-    the environment is used as it is, and `AUTOMEMLIMIT=off` turns it off. Dispatch reads and sets no
+    The open documents are charged a memory budget under the Go soft memory limit the server now
+    sets at boot from its container's own, 90 per cent of it, so the collector works harder as the
+    heap nears the limit instead of letting garbage pile up until the container is killed; the limit
+    it read and the limit it set are logged in one line, `GOMEMLIMIT` in the environment is used as
+    it is, and `AUTOMEMLIMIT=off` turns it off. The budget and every heap bound below are derived at
+    boot from the limit the runtime holds, as the same share of it they are of the 3.6 GiB limit of
+    a 4 GiB pod (a 2 GiB budget there; 16 GiB under a 32Gi container), with the 256 MiB read cache
+    kept as it is, and a second boot line names each. Dispatch reads and sets no
     `GOGC`, so the collector keeps the runtime's own ratio of garbage to live heap: with the budget
     full the heap goal is that limit itself and the garbage waiting to be freed fills every byte the
     limit leaves, which is what the limit bounds - the memory a pod's kernel charges, what the runtime

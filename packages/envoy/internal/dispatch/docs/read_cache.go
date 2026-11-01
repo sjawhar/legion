@@ -52,9 +52,13 @@ func readDocumentStamp(ctx context.Context, q Queryer, room string) (DocumentSta
 	return stamp, nil
 }
 
-// documentReadBudget is the most weight (documentRead.weight) the cold reads' cache holds:
-// production's task has 4,096 MiB, and one request may raise it by at most 256 MiB
-// (cmd/dispatch/memory_test.go). An entry heavier than an eighth of it is never stored.
+// documentReadBudget is the most weight (documentRead.weight) the cold reads' cache holds: the
+// task these figures were calibrated on has 4,096 MiB, and one request may raise it by at most
+// 256 MiB (cmd/dispatch/memory_test.go). An entry heavier than an eighth of it is never stored.
+// It is the one memory figure that does not follow the Go memory limit
+// (MemoryBounds.DocumentReadCache): it caches whole renderings, each at most
+// pmdoc.MaxDocumentBytes, and 256 MiB of them is what the request path reuses whatever the pod
+// holds. Every other bound takes its share of the limit above it.
 const documentReadBudget = 256 << 20
 
 // coldReadTimeout bounds a cold read's fold of the stored history (LoadDocument), which belongs to

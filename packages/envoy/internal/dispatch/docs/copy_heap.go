@@ -44,11 +44,14 @@ import (
 // in the replica's build. One path's figure moved by up to a fifth from one run to the other.
 const copyHeapPerByte = 48
 
-// copyHeapBound is the most the full-state decodes are granted at once: the third of what the Go
-// memory limit leaves above the room budget, the cold reads' cache and the pressure reserve past
-// the budget's limit (heapAboveTheReserve) that neither the apply-heap bound nor the slack takes,
-// 1,181,116,006 - applyHeapBound 393,705,335 - heapSlackBytes 393,705,335 = 393,705,336 bytes,
-// about 375 MiB. Every load of a document at or near the decode cap measured holds less above what
+// copyHeapBound is the most the full-state decodes are granted at once at the calibration: the
+// third of what that Go memory limit leaves above the room budget, the cold reads' cache and the
+// pressure reserve past the budget's limit (heapAboveTheReserve) that neither the apply-heap
+// bound nor the slack takes, 1,181,116,006 - applyHeapBound 393,705,335 - heapSlackBytes
+// 393,705,335 = 393,705,336 bytes, about 375 MiB. A process holding another limit bounds them at
+// that limit's own third (MemoryBounds.CopyHeap), which the boot sizes the pod's bound from
+// (New).
+// Every load of a document at or near the decode cap measured holds less above what
 // it leaves than the whole bound: the heaviest load measured held 303,430,664 bytes live beside its
 // two copies (copyHeapPerByte), and the heaviest decode of any path 320,762,656, 72,942,680 under
 // the bound. Weighed at copyHeapPerByte, a mebibyte of prose (145,691,520 bytes) decodes two at a
@@ -130,7 +133,8 @@ func storedCountWeight(markdown, row int64) int64 {
 type copyHeaps struct {
 	once  sync.Once
 	bound *semaphore.Weighted
-	// size is the bound: copyHeapBound, or a test's.
+	// size is the bound: the process's MemoryBounds.CopyHeap, or a test's. Zero is the
+	// calibration's copyHeapBound.
 	size int64
 	// held is what the grants hold of the bound now.
 	held atomic.Int64
@@ -141,7 +145,8 @@ type copyHeaps struct {
 }
 
 // podCopyHeaps is the process's bound, shared by every service and store in it as the memory it
-// bounds is; a test swaps in one of its own (useCopyHeaps).
+// bounds is: the calibration's copyHeapBound until a service built at another Go memory limit
+// sizes it from that limit (New), and a test swaps in one of its own (useCopyHeaps).
 var podCopyHeaps atomic.Pointer[copyHeaps]
 
 func init() { podCopyHeaps.Store(&copyHeaps{}) }

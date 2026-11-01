@@ -431,13 +431,13 @@ func TestTheHeaviestWholeStateFrameTheServerStoresFitsTheMessageFloor(t *testing
 	}
 }
 
-// roomFramesUnderTheBudget is the most bytes of whole-state frames rooms can send when the room
-// budget is charged to its limit and holds rooms of them: every room's charge is at least its
-// structs at bytesOfHeapAStructHeld in each of roomCopies copies (copyHeap), so the rooms share
-// roomBudgetBytes / 340 structs, whose frames are densestStateFrame's bytes a struct, and each
+// roomFramesUnderTheBudget is the most bytes of whole-state frames rooms can send when a room
+// budget of budget bytes is charged to its limit and holds rooms of them: every room's charge is
+// at least its structs at bytesOfHeapAStructHeld in each of roomCopies copies (copyHeap), so the
+// rooms share budget / 340 structs, whose frames are densestStateFrame's bytes a struct, and each
 // room adds F's other terms, its rendering at the creep cap and its unrendered bytes.
-func roomFramesUnderTheBudget(rooms int64) int64 {
-	structs := int64(roomBudgetBytes) / (bytesOfHeapAStructHeld * roomCopies)
+func roomFramesUnderTheBudget(budget, rooms int64) int64 {
+	structs := budget / (bytesOfHeapAStructHeld * roomCopies)
 	ofStructs := (structs*densestStateFrame + densestStateStructs - 1) / densestStateStructs
 	return ofStructs + rooms*(pmdoc.MaxDocumentBytes+maxPeerByteCreep+maxPeerInsertAtTheBound+maxUnrenderedBytes)
 }
@@ -449,36 +449,53 @@ func roomFramesUnderTheBudget(rooms int64) int64 {
 // frames those twenty hold are bounded by that same budget (roomFramesUnderTheBudget), which is
 // why twenty fit at all: twenty times F would be 898,721,780 bytes.
 //
-// It also holds the two figures the constant's own sizing is argued from: 64 MiB, the draft's
-// budget against ygo's draft semantics, where a socket held the budget and no frame more, no
-// longer fits; and fifteen sockets fit when the frame each socket's writer is in the middle of is
-// counted as well, a second frame a socket, where sixteen do not.
+// The budget is the one bound that does not follow the Go memory limit, so the arithmetic is
+// weighed at the calibration and at the production pod's limit, where the room budget and the
+// frames its rooms can send are eight times larger and these twenty queues are not.
+//
+// It also holds the two figures the constant's own sizing is argued from, both of the
+// calibration: 64 MiB, the draft's budget against ygo's draft semantics, where a socket held the
+// budget and no frame more, no longer fits; and fifteen sockets fit when the frame each socket's
+// writer is in the middle of is counted as well, a second frame a socket, where sixteen do not.
 func TestTheWriteQueueBudgetsArithmetic(t *testing.T) {
 	const sockets = 20
 	if peerWriteQueueBytes <= maxMessageBytes || peerWriteQueueBytes <= heaviestHandoffBound {
 		t.Errorf("the write-queue budget is %d bytes, want it past the %d-byte message floor and past F, %d: a socket holding one such frame would be closed by the next frame it is sent",
 			peerWriteQueueBytes, maxMessageBytes, uint64(heaviestHandoffBound))
 	}
-	frames := roomFramesUnderTheBudget(sockets)
-	held := sockets*peerWriteQueueBytes + frames + roomBudgetBytes
-	t.Logf("%d sockets hold %d x %d and the %d bytes of frames their rooms can send under a full room budget, %d beside that budget, against the %d-byte Go memory limit",
-		sockets, sockets, peerWriteQueueBytes, frames, held, int64(goMemoryLimitBytes))
-	if held > goMemoryLimitBytes {
-		t.Errorf("%d sockets that never read hold %d bytes beside a full room budget, %d past the %d-byte Go memory limit: lower the budget",
-			sockets, held, held-goMemoryLimitBytes, int64(goMemoryLimitBytes))
+	for _, row := range []struct {
+		name  string
+		limit int64
+	}{
+		{"the calibration", calibratedGoMemoryLimitBytes},
+		{"the production pod's limit", productionGoMemoryLimitBytes},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			bounds := BoundsForLimit(row.limit)
+			frames := roomFramesUnderTheBudget(bounds.RoomBudget, sockets)
+			held := sockets*bounds.PeerWriteQueue + frames + bounds.RoomBudget
+			t.Logf("%d sockets hold %d x %d and the %d bytes of frames their rooms can send under a full room budget of %d, %d in all, against the %d-byte Go memory limit",
+				sockets, sockets, bounds.PeerWriteQueue, frames, bounds.RoomBudget, held, bounds.Limit)
+			if held > bounds.Limit {
+				t.Errorf("%d sockets that never read hold %d bytes beside a full room budget, %d past the %d-byte Go memory limit: lower the budget",
+					sockets, held, held-bounds.Limit, bounds.Limit)
+			}
+		})
 	}
-	if draft := int64(sockets)*(64<<20) + frames + roomBudgetBytes; draft <= goMemoryLimitBytes {
+	calibrated := BoundsForLimit(calibratedGoMemoryLimitBytes)
+	frames := roomFramesUnderTheBudget(calibrated.RoomBudget, sockets)
+	if draft := int64(sockets)*(64<<20) + frames + calibrated.RoomBudget; draft <= calibrated.Limit {
 		t.Errorf("%d sockets at a 64 MiB budget hold %d bytes beside a full room budget, within the %d-byte Go memory limit: the constant's account of why 64 MiB no longer fits is stale",
-			sockets, draft, int64(goMemoryLimitBytes))
+			sockets, draft, calibrated.Limit)
 	}
 	for _, row := range []struct {
 		sockets int64
 		fits    bool
 	}{{15, true}, {16, false}} {
-		withTheWriterFrame := row.sockets*peerWriteQueueBytes + 2*roomFramesUnderTheBudget(row.sockets) + roomBudgetBytes
-		if fits := withTheWriterFrame <= goMemoryLimitBytes; fits != row.fits {
+		withTheWriterFrame := row.sockets*peerWriteQueueBytes + 2*roomFramesUnderTheBudget(calibrated.RoomBudget, row.sockets) + calibrated.RoomBudget
+		if fits := withTheWriterFrame <= calibrated.Limit; fits != row.fits {
 			t.Errorf("%d sockets holding the budget, the frame that crossed it and the frame their writer is in the middle of hold %d bytes beside a full room budget, which fits the %d-byte Go memory limit: %t, want %t",
-				row.sockets, withTheWriterFrame, int64(goMemoryLimitBytes), fits, row.fits)
+				row.sockets, withTheWriterFrame, calibrated.Limit, fits, row.fits)
 		}
 	}
 }

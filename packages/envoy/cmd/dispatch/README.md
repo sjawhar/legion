@@ -1792,7 +1792,7 @@ Each item below names a path with its method and identity, then its purpose.
 
 - `/api/v1/artifacts/_test/room-budget` (POST; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
 
-  Set the open documents' memory budget to `bytes`, or restore the real one (2 GiB) with `0`, and answer the budget it set, so a browser test can fill the budget with a few small documents and drive the editor's handling of `4503 DOC_BUSY`;
+  Set the open documents' memory budget to `bytes`, or restore the real one with `0` - the share of this process's Go memory limit the budget takes, 2 GiB at the 4 GiB limit the figures are calibrated on and 16 GiB on the production pod - and answer the budget it set, so a browser test can fill the budget with a few small documents and drive the editor's handling of `4503 DOC_BUSY`;
   the real-process drives use the real budget.
   Not mounted otherwise.
 
@@ -2646,9 +2646,9 @@ Each item below names a status and code, then its meaning.
 
 - `4503 DOC_BUSY`
 
-  The memory budget over the documents this server holds open (2 GiB) is full and no room can be closed:
+  The memory budget over the documents this server holds open is full and no room can be closed:
   a browser asking for one more document is closed with code `4503` (`DOCUMENT_BUSY_CLOSE_CODE` and `DOCUMENT_BUSY_CLOSE_REASON` in `packages/contracts`) before any room is made for it, once its admission has waited for the sweep it started, and an update that inserts anything into a document already open is closed with it too, whatever it leaves the document's bytes at, since an insert of fewer bytes than it deletes can still add elements.
-  An update that only deletes is admitted while the charges stay within the 256 MiB reserve past the budget's limit, so a full document can still be cut.
+  The budget is the share of the server's Go memory limit the open rooms are charged together (2 GiB at the 4 GiB limit the figures are calibrated on, 16 GiB on the production pod; the boot line `dispatch: the document service's memory bounds` names it), and an update that only deletes is admitted while the charges stay within the pressure reserve past that limit - a share of the same limit, 256 MiB of the calibration - so a full document can still be cut.
   The 4500-4599 band is transient, so the dashboard keeps the edit it could not send and lets the provider's own backoff retry.
 
 ## Comment errors

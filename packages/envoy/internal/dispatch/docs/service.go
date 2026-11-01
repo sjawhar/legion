@@ -63,6 +63,12 @@ type Deps struct {
 	// EditNoticeQuiet is how long a document stays quiet after a person's last settled version
 	// before its edit notice goes (recordEditNotice, RunEditNotices); zero means 30 s.
 	EditNoticeQuiet time.Duration
+	// GoMemoryLimit is the Go memory limit this process holds, which the service's memory bounds
+	// are derived from (BoundsForLimit): cmd/dispatch reads it off the runtime at boot
+	// (debug.SetMemoryLimit(-1), setGoMemoryLimit). Zero names none, and the bounds are then the
+	// 4 GiB calibration (calibratedGoMemoryLimitBytes), which is what every test that does not
+	// set this runs under.
+	GoMemoryLimit int64
 }
 
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
@@ -292,16 +298,20 @@ type Service struct {
 	// confirmations of the server's writes outside applyLive in the same turn (elementMeasurer).
 	// Its zero value is ready, and Shutdown stops it.
 	measurer elementMeasurer
+	// memory is what the process's Go memory limit gives this service (BoundsForLimit), which
+	// New derives from Deps.GoMemoryLimit. Zero in a service New did not build (a test's), whose
+	// bounds are the calibration's (bounds).
+	memory MemoryBounds
 	// budget charges every open room the heap it holds and refuses a browser one more room past
-	// roomBudgetBytes (roomBudget). New readies it; Shutdown joins its sweeps (evictWG) and the
+	// memory.RoomBudget (roomBudget). New readies it; Shutdown joins its sweeps (evictWG) and the
 	// closes of the rooms it opened over the budget (closeIfOpenedOverBudget).
 	budget roomBudget
 	// admissionWait is the longest a browser's admission waits on the budget's sweeps before it is
 	// refused (reserveRoom): the settle delay and admissionFlushAllowance, which New sets. Zero in a
 	// service New did not build (a test's), whose admission is refused at once.
 	admissionWait time.Duration
-	// applyHeaps is the pod's bound on the estimated heap of browsers' applies, applyHeapBound of
-	// it, out of which an admitted update whose own share of its estimate passes
+	// applyHeaps is the pod's bound on the estimated heap of browsers' applies, memory.ApplyHeap
+	// of it, out of which an admitted update whose own share of its estimate passes
 	// unweighedApplyHeapBytes holds its estimate, or all of it for an estimate past it, while it
 	// applies (weighPeerUpdate). Its zero value is ready.
 	applyHeaps applyHeaps
@@ -637,6 +647,10 @@ func New(deps Deps) *Service {
 	if persist == nil {
 		persist = NewPgVersioned(deps.Store)
 	}
+	// Every bound this service holds comes from the Go memory limit its process runs under, so a
+	// pod larger than the one the figures were calibrated on holds rooms, applies and decodes in
+	// proportion to its memory (MemoryBounds).
+	bounds := BoundsForLimit(deps.GoMemoryLimit)
 	service := &Service{
 		store:             deps.Store,
 		persistence:       persist,
@@ -649,9 +663,18 @@ func New(deps Deps) *Service {
 		timers:            make(map[uint64]*time.Timer),
 		unrecordedMarkTTL: unrecordedMarkTTL,
 		editNoticeQuiet:   editNoticeQuiet,
-		reads:             newDocumentReads(documentReadBudget),
-		budget:            roomBudget{limit: roomBudgetBytes},
+		memory:            bounds,
+		reads:             newDocumentReads(bounds.DocumentReadCache),
+		budget:            roomBudget{limit: bounds.RoomBudget},
+		applyHeaps:        applyHeaps{size: bounds.ApplyHeap},
 		admissionWait:     settle + admissionFlushAllowance,
+	}
+	// The copy-heap bound is the process's, not one service's, because the memory it bounds is
+	// the process's: every service and store in it shares one (copyHeaps, podCopyHeaps). A
+	// service at the calibration leaves it as it stands, so a test that swapped its own keeps it;
+	// a boot that read another limit sizes it from that limit, before anything decodes.
+	if bounds.CopyHeap != copyHeapBound {
+		podCopyHeaps.Store(&copyHeaps{size: bounds.CopyHeap})
 	}
 	service.budget.sweep = service.sweepRooms
 	adapter := &servicePersistenceAdapter{store: persist, service: service}
@@ -702,8 +725,9 @@ func New(deps Deps) *Service {
 	// ygo bounds a browser's write queue in frames alone without this, 512 of them whatever their
 	// size, so a socket that sends SyncStep1 frames it never reads the answers to can make the
 	// server hold 512 whole states of its room. The budget bounds those queued bytes instead, and
-	// closes a socket a frame reaches while the budget or more waits (peerWriteQueueBytes).
-	srv.PeerWriteQueueBytes = peerWriteQueueBytes
+	// closes a socket a frame reaches while the budget or more waits (MemoryBounds.PeerWriteQueue,
+	// peerWriteQueueBytes).
+	srv.PeerWriteQueueBytes = bounds.PeerWriteQueue
 
 	service.srv = newRoomServer(srv)
 	// A room an Apply held is looked at again once it returns: the budget's closes give up in
@@ -723,6 +747,16 @@ func New(deps Deps) *Service {
 	srv.OnPeerUpdate = service.weighPeerUpdate
 
 	return service
+}
+
+// bounds is what the process's Go memory limit gives this service (memory): the calibration for a
+// service New did not build, which is every test's that names no limit of its own. The hook reads
+// it on a peer's read loop for every update it weighs, so it is a field read and no lock.
+func (s *Service) bounds() MemoryBounds {
+	if s.memory.Limit == 0 {
+		return calibratedBounds
+	}
+	return s.memory
 }
 
 // ShutdownDrainBudget bounds the part of Shutdown that waits on document work - each room's durable
