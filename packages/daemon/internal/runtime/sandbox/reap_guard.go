@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -23,7 +22,7 @@ func (r *Runtime) guardSessionVolumeReap(ctx context.Context, s *sandbox) error 
 		return fmt.Errorf("read claims before reaping volume %s: %w", issueVolume+"-"+s.Name, err)
 	}
 	for _, c := range claims {
-		if !matches(c) || c.Session == "" || (ompsessions.Store{Kind: ompsessions.StoreKind(c.SessionStore)}).InDatabase() {
+		if !matches(c) || c.Session == "" || sandboxStoresSessionsInDatabase(s) {
 			continue
 		}
 		return fmt.Errorf("refuse to reap volume %s: claim %s records file-store session %s; run legion sessions import before retrying, or run legion claims forget-session --claim %s --session %s after the claim has no live process",
@@ -61,6 +60,17 @@ func ownsIssueVolume(s *sandbox) bool {
 	for _, template := range s.Spec.VolumeClaimTemplates {
 		if template.Metadata.Name == issueVolume {
 			return true
+		}
+	}
+	return false
+}
+
+func sandboxStoresSessionsInDatabase(s *sandbox) bool {
+	for _, container := range s.Spec.PodTemplate.Spec.Containers {
+		for _, env := range container.Env {
+			if env.Name == "OMP_SESSION_STORAGE" && env.Value == "sql" {
+				return true
+			}
 		}
 	}
 	return false

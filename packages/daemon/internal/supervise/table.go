@@ -1174,6 +1174,7 @@ func reregister(m *Machine, ctx context.Context, ev Event) error {
 		m.claim.SessionStore = r.SessionStore
 	}
 	m.claim.CapabilityHash = bytes.Clone(r.CapabilityHash)
+	m.claim.PluginContract = r.PluginContract
 	if r.PluginContract == m.deps.PluginContract {
 		m.claim.PluginRelaunchFor = 0
 	}
