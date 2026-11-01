@@ -30,7 +30,7 @@ on:
       - '.github/workflows/ci.yaml'
       - '.github/workflows/docs-pages.yaml'
       - '.github/workflows/docs-site.yaml'
-      # ci.yaml's *bun_install, 16 patterns:
+      # ci.yaml's *bun_install, 15 patterns:
       - 'package.json'
       - 'bun.lock'
       - 'patches/**'
@@ -58,7 +58,7 @@ on:
       - 'packages/envoy/go.sum'
       # The docs filter's own:
       - 'docs/site/**'
-      # ci.yaml's *legion_command, 57 patterns:
+      # ci.yaml's *legion_command, 59 patterns:
       - 'packages/daemon/cmd/legion/*'
       - 'packages/daemon/internal/admit/*'
       - 'packages/daemon/internal/agentsecrets/*'
@@ -118,7 +118,7 @@ on:
       - 'packages/daemon/internal/workspace/*'
       - 'packages/envoy/listenfd/*'
       - 'packages/envoy/migrationid/*'
-      # ci.yaml's *dispatch_server, 42 patterns:
+      # ci.yaml's *dispatch_server, 50 patterns:
       - 'packages/envoy/cmd/dispatch/*'
       - 'packages/envoy/internal/bus/*'
       - 'packages/envoy/internal/contracts/*'
