@@ -1529,7 +1529,7 @@ Each block of a document is a node of the graph too (migration `0121`; `packages
 Its reference is the document's with `#b-` and the block's id, percent-encoded as `encodeBlockId` (`@legion/contracts`) writes it:
 `dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or `dispatch://PROJECT/artifact/<slug>#b-<id>`.
 Text cites a block only while its id holds at most 256 bytes decoded (`text.MaxBlockIDBytes`), and any node only while its target id, the id its edge is stored under (`text.TargetID`:
-an issue's key, a document's `<KEY or PROJECT>/<slug>`, a document block's `<KEY or PROJECT>/<slug>#<id>`, a comment's or message's block's `<item kind>/<item id>#<id>`, an ask's, a comment's or a message's id), holds at most 2048 bytes (`text.MaxTargetBytes`), since `refs` and `block_refs` hold it in B-tree keys and neither a slug nor an item id has a bound of its own:
+an issue's key, a document's `<KEY or PROJECT>/<slug>`, a document block's `<KEY or PROJECT>/<slug>#<id>`, a comment's or message's block's or an ask's part's `<item kind>/<item id>#<id>` (`ask/<ask uuid>#<part id>`), an ask's, a comment's or a message's id), holds at most 2048 bytes (`text.MaxTargetBytes`), since `refs` and `block_refs` hold it in B-tree keys and neither a slug nor an item id has a bound of its own:
 text citing past either is written with no edge.
 The bounds decide only what the graph indexes.
 Every write is taken whatever the length of a block id it names (a seeded spec, an upload, an `insert`, a rebuild, an accepted suggestion, a browser's edit);
@@ -1565,11 +1565,29 @@ A reply names the block it answers with `reply_to_block` (a comment) or `in_repl
 `GET /api/v1/comments/{id}/blocks` and `GET /api/v1/messages/{id}/blocks` list an item's current blocks.
 A comment or message an earlier build writes during the roll, or after a rollback, is owed its blocks (`owed_at`, set by the triggers of `0143` and `0144`), which the same block-index reconciliation indexes, at most 200 a tick, with no command run.
 
+An ask's parts are blocks too (migrations `20261101143211` and `20261101143212`):
+its question, each of its options and its current answer, in that order (`refs.AskParts`), each a text of its own rather than a span of one body, since an ask has no body — the question as the row holds it, an option as `<label> — <description>` or its label alone, and the answer as the one line an `ask.answered` summary renders it.
+What identifies a part is its type and its text, and for the answer part its answerer, so the same answer from another person is a part of its own (`askAnswerPart`).
+Parts are named `b1`, `b2`, … as an item's blocks are, and an edit keeps each id the same way, except that an answer is replaced rather than reworded:
+`itemblocks.Align` takes a variadic list of the types a new block replaces instead of rewording, and the ask's index passes the answer part's (`refs.AskAnswerPart`), where a comment's and a message's passes none.
+A later answer is a new part, so a reference to the answer it replaced reads `removed` where one to a reworded option reads `changed`.
+A part's reference is the ask's with `#b-` and the id: `dispatch://KEY/ask/<id>#b-<part>` or `dispatch://PROJECT/artifact/<slug>/ask/<id>#b-<part>`, and an ask's dashboard page with a `#b-` fragment names it too;
+pinned, `#b-<part>@v<N>` names a revision of the ask's parts, as a comment's block pins a revision of the comment, and reads the part as that revision held it.
+Its graph node is kind `block`, id `ask/<ask uuid>#<part id>`, whose `parent` is the ask;
+`graph_edges` stores it under the kind `ask_block`, which a build without ask parts skips as an unknown kind.
+An ask's detail read, its owner's ask list, the Inbox and the ask payloads the events route serves carry the part id of each option and of the answer, with the ask's `revision`, the number a pin names (`attachAskPartIDs`);
+a write's own response carries neither, nor does an ask the index has not reached, whose revision reads 0.
+An ask's own read lists the edges at its parts, each naming its part as `block`, and leaves out both its `replies_to` edges, its clarification thread, and its parts' `part_of` edges unless `?kind=` names them (`refs.AskBacklinkExclusions`).
+A reply names a part of an ask only when its request names the ask, `ask_id` with `reply_to_block`:
+a reply to a comment names a block of that comment, whether or not the comment's thread hangs under an ask, and so does the delivery callback `POST /api/v1/comments/{id}/reply`.
+A reference to a part no current revision of the ask holds is `404 NOT_FOUND` `no part "<part>" in ask <id>`.
+An ask any build writes is owed a part index (`20261101143212`'s trigger on `asks`), which the same block-index reconciliation drains.
+
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch rebuild-refs
 ```
 
-reparses every source and reconciles the index with the text (surviving edges keep their provenance, edges of deleted sources are removed), marks every document owed a block index and every comment and message owed a block index of its own blocks, which the server's block-index reconciliation then indexes, and prints `rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N blocks_owed=N items_owed=N`, `blocks_owed` being the documents it marked and `items_owed` the comments and messages.
+reparses every source and reconciles the index with the text (surviving edges keep their provenance, edges of deleted sources are removed), marks every document owed a block index and every comment, message and ask owed a block index of its own blocks, an ask's parts included, which the server's block-index reconciliation then indexes, and prints `rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N blocks_owed=N items_owed=N`, `blocks_owed` being the documents it marked and `items_owed` the comments, messages and asks.
 It reads `dispatch.server_url` from the envoy config the same way the server does and refuses an empty value:
 dashboard-URL mentions are recognised only against it, so an empty URL would drop them all.
 
@@ -2238,14 +2256,22 @@ Each item below names a path with its method and identity, then its purpose.
   The answer is `{node, edges}`, the node read and its edges.
   Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`.
   The node read, each edge's `node` and each edge's `block` carry the six facts of every node, `made_by`, `made_at`, `changed_by`, `changed_at`, `parent` and `parent_version` ([Reference graph](#reference-graph)).
-  A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document);
-  a typed block's `block[]` pointer is an edge of the attribute's kind from it, listed only while its target has a type the attribute allows;
-  and a mention a block of a comment or issue message holds is listed from that block (`node.kind` `block`, id `comment/<uuid>#<block id>` or `message/<uuid>#<block id>`, `node.parent` the comment or message);
-  a document's, comment's or message's own read also lists the edges at its blocks, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`, and a reply that names a block of the comment or message read is listed once, under that block.
+<<<<<<< conflict 1 of 1
++++++++ nkyspzno a7a9f51e "test: record handoff"
+  A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document), and one a block of a comment or issue message, or a part of an ask, holds from that block (`node.kind` `block`, id `comment/<uuid>#<block id>`, `message/<uuid>#<block id>` or `ask/<uuid>#<part id>`, `node.parent` the comment, message or ask);
+  a document's, comment's, message's or ask's own read also lists the edges at its blocks, an ask's parts among them, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`, and a reply that names a block of the comment or message read, or a part of the ask read, is listed once, under that block.
+%%%%%%% diff from: vlvxlmuq 4644a072 "feat(scripts): measure Legion pull requests' merge conflicts before and after a fix (#2411)"
+\\\\\\\        to: ttznowrr 8d555cc2 "chore: fold changelog fragments [skip ci]"
+-  A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document), and one a block of a comment or issue message holds from that block (`node.kind` `block`, id `comment/<uuid>#<block id>` or `message/<uuid>#<block id>`, `node.parent` the comment or message);
++  A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document);
++  a typed block's `block[]` pointer is an edge of the attribute's kind from it, listed only while its target has a type the attribute allows;
++  and a mention a block of a comment or issue message holds is listed from that block (`node.kind` `block`, id `comment/<uuid>#<block id>` or `message/<uuid>#<block id>`, `node.parent` the comment or message);
+   a document's, comment's or message's own read also lists the edges at its blocks, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`, and a reply that names a block of the comment or message read is listed once, under that block.
+>>>>>>> conflict 1 of 1 ends
   A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`;
-  pinned to a version (`#b-<id>@v<N>`; for a comment's block, a revision of the comment) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges.
+  pinned to a version (`#b-<id>@v<N>`; for a comment's block, a revision of the comment, and for an ask's part, a revision of the ask's parts) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges.
   `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`, `INVALID_REFERENCE` too for a message block pinned with `@v<N>` (a message never changes);
-  `404` for a node that does not exist, a block no current version or revision holds (unpinned) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at, or a revision past the comment's current one or that did not hold the block.
+  `404` for a node that does not exist, a block no current version or revision holds (unpinned; an ask's part is called a part, `no part "<part>" in ask <id>`, where a comment's and a message's is called a block) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at, or a revision past the comment's or the ask's current one or that did not hold the block.
   A `since` read stops at the event log's safe horizon, and first waits up to 1 s for the horizon to pass every event committed before the read, so it answers every mention committed before it, the caller's own included;
   when an open transaction holds the horizon back past that wait, it answers the mentions at or below the horizon and a later read the rest.
 
@@ -2354,9 +2380,10 @@ Each item below names a path with its method and identity, then its purpose.
 
   Create a comment, root-level reply, or suggestion.
   An anchored comment uses the same quote-or-mark-ID shape as an ask; replies inherit their root's anchor and send none.
-  A reply may name the block of the comment `reply_to` names that it answers, `reply_to_block` (`b2`), checked against that comment before `reply_to` climbs to its thread's head:
-  `400 INVALID_COMMENT` without `reply_to`, for a block that comment does not hold now, and in an ask's thread.
-  The delivery callback `POST /api/v1/comments/{id}/reply` takes `reply_to_block` for a block of comment `{id}` the same way.
+  A reply may name the block of the comment `reply_to` names that it answers, `reply_to_block` (`b2`), checked against that comment before `reply_to` climbs to its thread's head, and against that comment even when the climb reaches an ask;
+  with `ask_id` instead of `reply_to` it names a part of that ask.
+  `400 INVALID_COMMENT` with neither `reply_to` nor `ask_id`, and for a block or part the named item does not hold now.
+  The delivery callback `POST /api/v1/comments/{id}/reply` takes `reply_to_block` for a block of comment `{id}`, never for a part of the ask its thread hangs under.
   A comment's record in its document's margin - its body and replies, or a suggestion's and its replacement - holds at most 256 KiB of text, and a document's margin 1 MiB:
   a comment, reply or suggestion that would leave either past its bound and bigger is `413 CAP_EXCEEDED`, naming the bound and both sizes.
   A quote anchor that would leave the marks on the document's text carrying more than 1 MiB of ids and authors, and more than they carried, is `413 CAP_EXCEEDED` too, as for an ask's.
