@@ -27,7 +27,8 @@ const strandedRoleRunBatchSize = 200
 //     suspension was recorded before migration 0038 (unknown) and no start is queued for it: the
 //     boot resumes neither, and a start queued for an unknown one resumes it. The daemon resumes
 //     one it or its own exit suspended by rule (supervise's ByRule), at boot (DaemonBooted) and at
-//     the phase's next start.
+//     the phase's next start, and one whose idle pod it released at the next wake for that role,
+//     so the report leaves every ByRule source out.
 //   - Its tree's architect: only its tree's admission starts it, whoever suspended it. A notice to a
 //     suspended one is held until it holds its role again, which nothing in the daemon brings
 //     about, and a notice to a failed one finishes undelivered (the notice executor). Its tree

@@ -443,4 +443,21 @@ package api
 // holds this daemon and the image that runs its roles together. This change adds no store
 // migration. (This branch took 43; main then landed the consumer lag at 43, so this branch takes
 // the number above it, as the collision note says.)
-const DaemonAPIVersion = 44
+//
+// 47: an idle issue pod is released, so a plugin tells the daemon what its session is doing and a
+// released claim is a new suspension source. Each session reports its activity to the daemon on
+// POST /legion/v1/claims/activity, authenticated by its claim as `claims/ready` is: whether it
+// runs background work and of which kinds, and, for a phase worker whose phase is open, when its
+// next phase reminder is due. The daemon releases an issue pod no claim of which has reported
+// background work and none of whose phase workers is due a reminder inside the idle period
+// (`runtime.kubernetes.idle_release`), suspending each of its claims with the new
+// `suspendedBy` value `released`, which keeps the claim's phase and its pending delivery and
+// which the operator routes now serve. A released pod's unpushed work travels as a git bundle,
+// which the shim builds on the daemon's `bundle-workspace` frame and the next pod's launcher
+// restores from the chunked `launcher_bundle` frames before any role starts; a launcher before 47
+// knows neither frame, and a shim before 47 answers none, so the image probe holds this daemon
+// and the image that runs its roles together. A claim may read the deployment's release, resume
+// and hold records on GET /legion/v1/claims/release-records. This change adds four store
+// migrations. (#2538 takes 45 and #2539 takes 46, so this branch takes the number above them, as
+// the collision note says.)
+const DaemonAPIVersion = 47

@@ -32,7 +32,10 @@ import (
 // only when a tree is re-admitted, and the next start is the next phase's. This is the one trigger
 // main did not have, so it acts on no other source: an operator's suspension holds until the
 // operator resumes the claim, and a suspension recorded before the source existed (unknown) may be
-// a drain made before the upgrade, so both are left as they are.
+// a drain made before the upgrade, so both are left as they are. A released claim is the one ByRule
+// source the boot leaves too: the daemon released its idle pod, and what brings the pod and its
+// bundled work back is the next wake for its role, not a daemon restart, so a boot that started it
+// would raise a pod nothing asked for.
 //
 // The phase's owner is the role that works the issue's phase (RoleFor) on an issue in the workflow
 // whose tree is admitted — its root holds a slot — and does not linger: a lingering tree's claims
@@ -98,7 +101,7 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 		}
 		held := run.Claim
 		if held == nil || held.State != supervise.StateSuspended || !held.SuspendedBy.ByRule() ||
-			!StartFor(run, root, issue.Generation, issue.Phase) {
+			held.SuspendedBy == supervise.SuspendedByReleased || !StartFor(run, root, issue.Generation, issue.Phase) {
 			continue
 		}
 		task, err := ResumeTask(ctx, e.store, tx, issue, role)

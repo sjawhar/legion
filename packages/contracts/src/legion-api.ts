@@ -620,8 +620,10 @@ export const LegionOperatorClaimResponse = z.strictObject({
   uncertainStreak: z.number().int().nonnegative(),
   pending: legionDeliveryView.optional(),
   /** Who suspended the claim while it is suspended; absent otherwise. `unknown` is a suspension
-   * recorded before migration 0038; only an `operator` one holds against the daemon's rules. */
-  suspendedBy: z.enum(["unknown", "operator", "daemon", "exit"]).optional(),
+   * recorded before migration 0038; `released` is one whose idle issue pod the daemon released,
+   * which keeps the claim's phase and its pending task until the next wake for its role; only an
+   * `operator` one holds against the daemon's rules. */
+  suspendedBy: z.enum(["unknown", "operator", "daemon", "exit", "released"]).optional(),
   /** A suspension the claim's machine holds for the agent's turn to end; absent when none is. */
   suspensionHeld: z.literal(true).optional(),
   /** 0 = no contract recorded. */

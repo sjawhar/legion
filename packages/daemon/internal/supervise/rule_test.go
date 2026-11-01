@@ -19,7 +19,7 @@ func suspendedBy(h *harness, by SuspendSource) {
 // Every suspension records who asked for it, and the store keeps it while the claim is suspended:
 // the rule reads it after a restart as before one. A resume clears it.
 func TestASuspensionRecordsItsSource(t *testing.T) {
-	for _, by := range []SuspendSource{SuspendedByOperator, SuspendedByDaemon} {
+	for _, by := range []SuspendSource{SuspendedByOperator, SuspendedByDaemon, SuspendedByReleased} {
 		t.Run(string(by), func(t *testing.T) {
 			h := newHarness(t)
 			suspendedBy(h, by)
@@ -48,14 +48,15 @@ func TestASuspensionRecordsItsSource(t *testing.T) {
 	})
 }
 
-// A suspension that names no source is a wiring error, refused before anything is stopped: the
-// source is what decides whether the daemon may resume the claim.
+// A suspension that names no source the machine records is a wiring error, refused before anything
+// is stopped: the source is what decides whether the daemon may resume the claim and what becomes
+// of its phase's task.
 func TestASuspensionNamingNoSourceIsRefused(t *testing.T) {
 	for _, by := range []SuspendSource{"", SuspendedByExit, "someone"} {
 		t.Run(string(by), func(t *testing.T) {
 			h := newHarness(t)
 			h.reach(StateIdle)
-			if err := h.handle(RequestSuspend{Claim: testToken, By: by}); err == nil || !strings.Contains(err.Error(), "not operator or daemon") {
+			if err := h.handle(RequestSuspend{Claim: testToken, By: by}); err == nil || !strings.Contains(err.Error(), "not operator, daemon or released") {
 				t.Fatalf("suspend naming %q returned %v, want it refused", by, err)
 			}
 			h.wantState(StateIdle)
@@ -67,7 +68,8 @@ func TestASuspensionNamingNoSourceIsRefused(t *testing.T) {
 // The rule resumes every suspension but the operator's: the daemon's, a root's own exit, and one
 // suspended before migration 0038 recorded its source (unknown, or none), as main resumed those on
 // the same triggers. The operator's holds until the operator resumes the claim. (The boot's resume
-// by rule, the one trigger main did not have, filters for daemon and exit itself: workflow's booted.)
+// by rule, the one trigger main did not have, filters for daemon and exit itself, leaving a released
+// claim to its role's wake: workflow's booted.)
 func TestTheRuleResumesEverySuspensionButTheOperators(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
