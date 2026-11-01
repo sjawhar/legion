@@ -19,10 +19,16 @@ body: |-
   to a relay only where that relay judges what it sends: a portless session's relay publishes
   every frame unjudged, and the plugin drops a frame whose delivery mode it cannot read without a
   word, so the fan-out publishes that session's `delivery_failed` itself, recording no attempt
-  for it. The fan-out records an attempt only once its resolution of the recipient succeeds, so a
-  resolution that fails leaves nothing behind for a relay to hold a later copy of that message
-  under; each further copy of an event for a session whose record is gone is reported as a failed
-  delivery rather than skipped as an attempt already made. The other side of that rule: an
+  for it. The fan-out records an attempt only once its resolution of the recipient succeeds, its
+  own refusals included, so a refusal of a session whose entry is gone -- an unreadable delivery
+  mode, which any publisher can send on a followed topic, judged before the entry is read at all
+  -- leaves nothing behind for a relay to hold a later copy of that message under once the
+  session registers again on a serving port. What that costs is the exception dedupe: a portless
+  session on consumer delivery, and a session with no entry, are sent one `delivery_failed` per
+  stored copy of the event and per redelivery of each, up to the durable's 20 deliveries, where
+  a recorded refusal gave one per dedupe key per attempt window. Each further copy of an event
+  for a session whose record is gone is reported as a failed delivery rather than skipped as an
+  attempt already made. The other side of that rule: an
   attempt record is a push in flight, not a delivery, so the relay holds a message another path
   is pushing -- unacked in its consumer, kept in progress, judged again every second -- rather
   than acking it, and acks it only once the

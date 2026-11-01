@@ -2,20 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-594",
-  "completed": "2026-10-31T14:30:00Z",
-  "round": 6,
-  "reviewedCode": "196233c090e5 (code) under handoff head 6c972822",
+  "completed": "2026-10-31T21:30:00Z",
+  "round": 7,
+  "reviewedCode": "3a38540c3919 (code) under handoff head d44e1d62",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
   "minor": 3,
-  "ci": "Required set now ci-ok and pr-title (ruleset 12331919). At code head 196233c0: envoy-go failed on TestAReconnectCatchesUpWhatTheListenerMissed (internal/dispatch/api), fixed on main by #2594 (3b0ae77e, 11:34Z), which this branch does not carry, so ci-ok cannot go green here; dispatch was still in progress. Compare 196233c0...6c972822 handoffsOnly true (6 files). Changes are requested, so no empty commit of mine: the implementer's next push merges main and refreshes CI.",
-  "thermonuclear": "deep review: Verdict CHANGES at 196233c0 (1 Medium, reproduced with a scratch overlay test; the serving-port fix confirmed); code quality: Verdict CHANGES at 196233c0 (Low only). I re-traced the Medium in the code.",
-  "threads": "Accepted PRRT_kwDORFy7ds6yPwVe, PRRT_kwDORFy7ds6yPwVf, PRRT_kwDORFy7ds6yPwVl, PRRT_kwDORFy7ds6yPwVo.",
+  "ci": "Required set ci-ok and pr-title. At code head 3a38540c: every named lane green; dispatch failed (one Playwright row of overlapping-marks.e2e.ts at browserContext.close, a package this PR does not touch), so ci-ok will be red. Compare 3a38540c...d44e1d62 handoffsOnly true (9 files). Changes requested, so no empty commit of mine: the implementer's push refreshes CI.",
+  "thermonuclear": "deep review: Verdict CHANGES at 3a38540c (1 Medium, reproduced in a scratch copy; the #2592 merge and the e2e order comparison hold); code quality: Verdict CHANGES at 3a38540c (structure only). I re-traced the Medium in the code.",
+  "threads": "Accepted PRRT_kwDORFy7ds6yRU8J, PRRT_kwDORFy7ds6yRU8K, PRRT_kwDORFy7ds6yRU8L, PRRT_kwDORFy7ds6yRU8N.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/cmd/listener/delivery.go:965", "description": "The reorder leaves every refusal of a consumer-relayed session to its relay, but only relayServingPort judges (session_relay.go:938-990); relayNATS, a portless session's relay, publishes every frame unjudged (session_relay.go:683-730) and the plugin publishes no exception for a malformed delivery. So a portless consumer session gets no delivery_failed exception for an unreadable mode (it did at ce082506, and on main), against AGENTS.md:2487's exception contract and this round's own AGENTS.md:3415, changelog and delivery.go:967-971 text. Test that must fail: a portless consumerRegistration session plus a second core serving-port interest on the topic, publish {\"delivery\":{\"mode\":\"bogus\"}}, awaitFanoutFinished, deliveryExceptionsFor(sid) expects one delivery_failed and gets []."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/delivery.go:1022", "description": "clearAttempt: true on every failed resolution has no test (reverting to retryable passes every subtest); also record the attempt only after Resolve succeeds, which removes the reason for this branch; each further copy for a dead session now logs ERROR 'listener delivery failed' instead of an attempt-dedupe skip, which the changelog should name."},
-    {"severity": "minor", "file": ".github/workflows/ci.yaml:1430", "description": "The fail-open reason is wrong (ci-ok.sh already fails when changes failed) and 'keep the names main's ruleset required before it required ci-ok' leaves a reader unsure whether the names matter; ci.yaml:1518-1520 still says claude-envoy 'is not required until ci-ok is', and ci-ok is required now. Workflow file: the review App may not push it."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/session_relay_test.go:1179", "description": "awaitFanoutFinished repeats awaitDurableState, and the inline exception subscription repeats exceptionProbe/subscribeExceptionLanes."}
+    {"severity": "important", "file": "packages/envoy/cmd/listener/delivery.go:993", "description": "A session with no entry sent an unreadable mode: judgeFollowedTopic returns followedTopicModeUnreadable before the nil-target check, Resolve fails ErrNoSessionRecord, so relayed is false and the refusal records an attempt (recorded = !relayed). When the session registers again with its consumer start at or below the message, its relay judges followedTopicAttempted and holds for attemptCacheTTL (5 min), stalling later messages, then reports a second delivery_failed. Contradicts delivery.go:999-1003, AGENTS.md:3411 and the changelog. fanout_refusal_reports_test.go:81 pins wantAttempt: true. Test that must fail: serving-port consumer session, delete its entry, publish {\"delivery\":{\"mode\":\"bogus\"}}, await the fan-out, assert no attempt record; register again and assert a later message reaches the port well inside attemptCacheTTL. Fix: recorded = err == nil && !delivery.Relayed."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/delivery.go:969", "description": "Structure: decide refusals before the take case (relayed && Port > 0 skip; else report with recorded) so the 'verdict == take ||' clause and the three copies of the reason go."},
+    {"severity": "minor", "file": "scripts/e2e/envoy-session-delivery.sh:1160", "description": "compare_issue_order's length check cannot fail: published_order and written_order come from the same filter; read the markers once and sort by stream_seq; the duplicated selector is checked in one copy only."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/delivery.go:990", "description": "The comment 'nothing reads such a record back for that session' is wrong (judgeFollowedTopic reads it on the next copy, which is why a portless relayed session now gets one exception per copy and redelivery); name the serving-port hold as the reason. session_relay_portless_refusal_test.go duplicates a row of fanout_refusal_reports_test.go."}
   ]
 }

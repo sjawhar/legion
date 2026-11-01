@@ -6,7 +6,16 @@ import { requestMermaidDrawing } from "../refs/mermaid-diagrams";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import { MARKS_MAP_NAME } from "./roots";
 
-export type { MarkAction, RetypeOutcome, RetypeRefusal, StoredMark } from "@legion/proof-editor";
+export type {
+  MarkAction,
+  RecordMarkPlacement,
+  RemarkOutcome,
+  RemarkRefusal,
+  RetypedMark,
+  RetypeOutcome,
+  RetypeRefusal,
+  StoredMark,
+} from "@legion/proof-editor";
 
 export type EditorHandle = ProofEditorHandle;
 export type EditorOptions = CreateProofEditorOptions & { blockSchema: BlockSchema };

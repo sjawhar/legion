@@ -1,0 +1,68 @@
+build: listener and bridge this checkout (92d1681b0 plus the working copy); plugins this checkout (92d1681b0 plus the working copy); listener grant current
+disruption             kind   event             marker           pi   cc
+a session-restart      issue  comment-1         LDT27a1-001Z      1    1
+a session-restart      issue  comment-2         LDT27a1-002Z      1    1
+a session-restart      agent  dispatch-message  LDT27a1-003Z      1    -
+a session-restart      agent  dispatch-message  LDT27a1-004Z      -    1
+a session-restart      agent  listener-send     LDT27a1-005Z      1    -
+a session-restart      agent  listener-send     LDT27a1-006Z      -    1
+a session-restart      role   listener-publish  LDT27a1-007Z      1    -
+a session-restart      role   listener-publish  LDT27a1-008Z      -    1
+a session-restart      role   core-publish      LDT27a1-009Z      1    -
+a session-restart      role   core-publish      LDT27a1-010Z      -    1
+b nats-cut             issue  comment-1         LDT27a1-011Z      1    1
+b nats-cut             issue  comment-2         LDT27a1-012Z      1    1
+b nats-cut             agent  dispatch-message  LDT27a1-013Z      1    -
+b nats-cut             agent  dispatch-message  LDT27a1-014Z      -    1
+b nats-cut             agent  listener-send     LDT27a1-015Z      1    -
+b nats-cut             agent  listener-send     LDT27a1-016Z      -    1
+b nats-cut             role   listener-publish  LDT27a1-017Z      1    -
+b nats-cut             role   listener-publish  LDT27a1-018Z      -    1
+b nats-cut             role   core-publish      LDT27a1-019Z      1    -
+b nats-cut             role   core-publish      LDT27a1-020Z      -    1
+c listener-shared      issue  comment-1         LDT27a1-021Z      1    1
+c listener-shared      issue  comment-2         LDT27a1-022Z      1    1
+c listener-shared      agent  dispatch-message  LDT27a1-023Z      1    -
+c listener-shared      agent  dispatch-message  LDT27a1-024Z      -    1
+c listener-shared      agent  listener-send     LDT27a1-025Z      1    -
+c listener-shared      agent  listener-send     LDT27a1-026Z      -    1
+c listener-shared      role   listener-publish  LDT27a1-027Z      1    -
+c listener-shared      role   listener-publish  LDT27a1-028Z      -    1
+c listener-shared      role   core-publish      LDT27a1-029Z      1    -
+c listener-shared      role   core-publish      LDT27a1-030Z      -    1
+d listener-dispatch    issue  comment-1         LDT27a1-031Z      1    1
+d listener-dispatch    issue  comment-2         LDT27a1-032Z      1    1
+d listener-dispatch    agent  dispatch-message  LDT27a1-033Z    0/0    -
+d listener-dispatch    agent  dispatch-message  LDT27a1-034Z      -  0/0
+d listener-dispatch    agent  listener-send     LDT27a1-035Z      1    -
+d listener-dispatch    agent  listener-send     LDT27a1-036Z      -    1
+d listener-dispatch    role   listener-publish  LDT27a1-037Z      1    -
+d listener-dispatch    role   listener-publish  LDT27a1-038Z      -    1
+d listener-dispatch    role   core-publish      LDT27a1-039Z      1    -
+d listener-dispatch    role   core-publish      LDT27a1-040Z      -    1
+e dispatch-kill        issue  comment-1         LDT27a1-041Z      1    1
+e dispatch-kill        issue  comment-2         LDT27a1-042Z      1    1
+e dispatch-kill        agent  dispatch-message  LDT27a1-043Z      1    -
+e dispatch-kill        agent  dispatch-message  LDT27a1-044Z      -    1
+e dispatch-kill        agent  listener-send     LDT27a1-045Z      1    -
+e dispatch-kill        agent  listener-send     LDT27a1-046Z      -    1
+e dispatch-kill        role   listener-publish  LDT27a1-047Z      1    -
+e dispatch-kill        role   listener-publish  LDT27a1-048Z      -    1
+e dispatch-kill        role   core-publish      LDT27a1-049Z      1    -
+e dispatch-kill        role   core-publish      LDT27a1-050Z      -    1
+f none                 issue  comment-1         LDT27a1-051Z      1    1
+f none                 issue  comment-2         LDT27a1-052Z      1    1
+f none                 agent  dispatch-message  LDT27a1-053Z      1    -
+f none                 agent  dispatch-message  LDT27a1-054Z      -    1
+f none                 agent  listener-send     LDT27a1-055Z      1    -
+f none                 agent  listener-send     LDT27a1-056Z      -    1
+f none                 role   listener-publish  LDT27a1-057Z      1    -
+f none                 role   listener-publish  LDT27a1-058Z      -    1
+f none                 role   core-publish      LDT27a1-059Z      1    -
+f none                 role   core-publish      LDT27a1-060Z      -    1
+(a cell is the count of entries carrying the marker in that session's transcript; "!" marks a count other than expected; "/0" marks an event its publisher refused, expected 0 times; "-" an event not meant for that session)
+note: Dispatch published LIVE-1's comments in another order than they were written: written LDT27a1-001Z LDT27a1-002Z LDT27a1-011Z LDT27a1-012Z LDT27a1-021Z LDT27a1-022Z LDT27a1-031Z LDT27a1-032Z LDT27a1-041Z LDT27a1-042Z LDT27a1-051Z LDT27a1-052Z ; stored LDT27a1-001Z LDT27a1-002Z LDT27a1-011Z LDT27a1-012Z LDT27a1-021Z LDT27a1-022Z LDT27a1-031Z LDT27a1-032Z LDT27a1-042Z LDT27a1-041Z LDT27a1-051Z LDT27a1-052Z
+issue order compared in pi (12 comments): LDT27a1-001Z@seq4:line17 LDT27a1-002Z@seq5:line18 LDT27a1-011Z@seq18:line37 LDT27a1-012Z@seq19:line41 LDT27a1-021Z@seq32:line57 LDT27a1-022Z@seq33:line61 LDT27a1-031Z@seq46:line77 LDT27a1-032Z@seq47:line81 LDT27a1-042Z@seq66:line110 LDT27a1-041Z@seq71:line114 LDT27a1-051Z@seq72:line118 LDT27a1-052Z@seq73:line122
+issue order compared in cc (12 comments): LDT27a1-001Z@seq4:line62 LDT27a1-002Z@seq5:line71 LDT27a1-011Z@seq18:line121 LDT27a1-012Z@seq19:line132 LDT27a1-021Z@seq32:line182 LDT27a1-022Z@seq33:line196 LDT27a1-031Z@seq46:line248 LDT27a1-032Z@seq47:line257 LDT27a1-042Z@seq66:line341 LDT27a1-041Z@seq71:line350 LDT27a1-051Z@seq72:line364 LDT27a1-052Z@seq73:line373
+issue order: every comment of LIVE-1 appears in its stream order in both transcripts
+transcripts: pi /legion/scratch/tmp/infra594/live/head-92d1/sessions/pi/sessions/2026-10-31T22-38-37-463Z_01a1941d-6797-7550-9192-95929fbd85a1.jsonl; cc /legion/scratch/tmp/infra594/live/head-92d1/sessions/cc/config/projects/-legion-scratch-tmp-infra594-live-head-92d1-sessions-cc-cwd/731a0794-cbde-40c8-8bd3-01944026b230.jsonl

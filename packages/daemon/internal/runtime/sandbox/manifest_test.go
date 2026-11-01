@@ -723,7 +723,11 @@ func TestEveryRolesGitStartsNoPlantedFsmonitorOrHook(t *testing.T) {
 			t.Fatalf("git %v: %v\n%s", args, err, output)
 		}
 	}
-	if output, err := exec.Command(git, "init", "--quiet", clone).CombinedOutput(); err != nil {
+	initialise := exec.Command(git, "init", "--quiet", clone)
+	// The init creates the clone, so it runs in the directory holding it rather than in the one
+	// the test process happens to have; every later command runs in the clone itself.
+	initialise.Dir = dir
+	if output, err := initialise.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, output)
 	}
 	if err := os.WriteFile(filepath.Join(clone, ".git", "config"), append(mustRead(t, filepath.Join(clone, ".git", "config")), planted...), 0o644); err != nil {

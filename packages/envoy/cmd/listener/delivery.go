@@ -869,12 +869,18 @@ func judgeFollowedTopic(rules followedTopicRules, sessionID string, item contrac
 
 // fanoutRefusalOutcome is how the fan-out reports a refusal judgeFollowedTopic returned, each
 // under the line and the metric status it has always had. recorded says whether an attempt record
-// of this refusal is one some path reads back: a mode refusal of a session this path delivers to
-// records the attempt, so an identical redelivery inside the attempt window is the dedupe skip
-// above rather than a second exception, while one of a session whose own consumer relays the
-// message records nothing -- no path reads such a record for a portless session, and the relay of
-// the same session on a serving port would hold its copy under it (fanoutDelivery). A refusal the
-// caches themselves made records nothing either way.
+// of this refusal is one to leave behind: a mode refusal of a session this path resolved and
+// delivers to itself records the attempt, so an identical redelivery inside the attempt window is
+// the attempt-dedupe skip above rather than a second exception, and so does one of a session
+// whose entry this path read and can push nothing to (session.ErrNoPushTarget), the recipient
+// this path alone reports. A refusal the resolution found no recipient of -- a session whose
+// entry is gone, one another listener owns -- and one of a session whose own consumer relays
+// the message, records nothing and gives that dedupe up. judgeFollowedTopic is what reads the
+// record back, on the next copy, and the relay of
+// a serving-port session's consumer applies it too (sessionRelays.followedTopicVerdict): a record
+// would make that relay hold its copy of the message, and the session's later messages behind it,
+// until the record expired, for a session on a serving port now or one that registers on one
+// before then (fanoutDelivery). A refusal the caches themselves made records nothing either way.
 func fanoutRefusalOutcome(sessionID string, item contracts.Envelope, verdict followedTopicVerdict, mode string, recorded bool) deliveryOutcome {
 	switch verdict {
 	case followedTopicDeduped:
@@ -955,31 +961,49 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		// them, and makes no call of its own.
 		delivery, err := cfg.deliverer.Resolve(item, interest, target, item.Topic, message.storedSeq())
 		relayed := err == nil && delivery.Relayed
-		if relayed && (verdict == takeFollowedTopic || target.Port > 0) {
-			// The session's own consumer holds this message, so the relay of that consumer is
-			// what pushes it (sessionRelays.pushUntilAccepted) and what records its dedupe key on
-			// the port's 204: this path pushes nothing and records nothing for such a session. A
-			// dedupe record it wrote for a session it does not push to is one the relay would ack
-			// a copy the session never received by, and an attempt record one it would hold that
-			// copy under, the session's later messages behind it, until the record expired
-			// (session.SessionEntry.ConsumerRelaysStored). A refusal is left to that relay only
-			// where the relay judges it, which is a serving-port session's: it applies these same
-			// rules to what it pushes (sessionRelays.followedTopicVerdict) and reports the refusal
-			// itself. A portless session's relay publishes every frame unjudged
-			// (sessionRelays.relayNATS), and the plugin drops a frame whose delivery mode it
-			// cannot read without a word, so that session's refusals are reported below instead.
+		// Refusals are decided before the take case, since the session whose own consumer relays
+		// the message is one this path still reports a refusal of unless that relay judges it.
+		//
+		// Such a session's message is pushed by the relay of its consumer
+		// (sessionRelays.pushUntilAccepted), which records the dedupe key on the port's 204: this
+		// path pushes nothing and records nothing for it. A dedupe record it wrote for a session
+		// it does not push to is one the relay would ack a copy the session never received by,
+		// and an attempt record one it would hold that copy under, the session's later messages
+		// behind it, until the record expired (session.SessionEntry.ConsumerRelaysStored).
+		if verdict != takeFollowedTopic {
+			if relayed && target.Port > 0 {
+				// A refusal is left to that relay only where the relay judges it, which is a
+				// serving-port session's: it applies these same rules to what it pushes
+				// (sessionRelays.followedTopicVerdict) and reports the refusal itself. A portless
+				// session's relay publishes every frame unjudged (sessionRelays.relayNATS), and
+				// the plugin drops a frame whose delivery mode it cannot read without a word, so
+				// that session's refusals are reported below instead.
+				applyDeliveryOutcome(cfg, item, deliveryOutcome{
+					sessionID:    interest.SessionID,
+					metricStatus: "skipped",
+					duration:     &deliveryTimer,
+				})
+				continue
+			}
+			// The attempt is recorded only where this path is the delivery of the message the
+			// refusal answers: a session it resolved and pushes to itself, and one whose entry it
+			// read that nothing can be pushed to (session.ErrNoPushTarget, the record of a
+			// session on no delivery path at all), whose refusal this path alone reports. One
+			// left for a session whose entry is gone (session.ErrNoSessionRecord), for a session
+			// another listener owns and reports (session.ErrWrongMachine), or for a portless
+			// session on consumer delivery is one the relay of that session would hold this
+			// message under, its later messages behind it, once the session registers again on a
+			// serving port.
+			recorded := !delivery.Relayed && (err == nil || errors.Is(err, session.ErrNoPushTarget))
+			applyDeliveryOutcome(cfg, item, fanoutRefusalOutcome(interest.SessionID, item, verdict, mode, recorded))
+			continue
+		}
+		if relayed {
 			applyDeliveryOutcome(cfg, item, deliveryOutcome{
 				sessionID:    interest.SessionID,
 				metricStatus: "skipped",
 				duration:     &deliveryTimer,
 			})
-			continue
-		}
-		if verdict != takeFollowedTopic {
-			// A refusal of a portless session whose consumer relays the message is reported here
-			// and recorded nowhere: nothing reads such a record back for that session, and the
-			// relay of the same session on a serving port would hold its copy under it.
-			applyDeliveryOutcome(cfg, item, fanoutRefusalOutcome(interest.SessionID, item, verdict, mode, !relayed))
 			continue
 		}
 		if err == nil {
