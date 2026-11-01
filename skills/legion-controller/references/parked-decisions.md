@@ -177,12 +177,13 @@ At every start (step 4 of the start procedure) and on each `tick`:
    the issue's `Spec approval:` line shows a request's reason. Skip an `artifact.approved` only
    when it is the person's handover, which the daemon queues itself (the paragraph under **The
    notice**), and with it the approval request's `ask.answered` at the same time. It is that
-   handover when all three hold: the root's `dispatch read` shows no `child_of` under `Links:`;
-   the event's `payload.artifact_id` is the root's `primary_artifact_id`; and its `payload.reason`
-   does not begin `Carried forward from the approval of version`. The events `curl` of
+   handover when all three hold: the root's `parent` is `null`; the event's `payload.artifact_id`
+   is the root's `primary_artifact_id`; and its `payload.reason` does not begin `Carried forward
+   from the approval of version`. The events `curl` of
    [Triage a root](skill://legion-controller/references/triage.md#triage-a-root) step 2 shows the
-   payload, and the same `curl` of `/api/v1/issues/<root>` shows `primary_artifact_id`. Judge
-   every other approval as a decision. For any other ask or a comment, find
+   payload, and the same `curl` of `/api/v1/issues/<root>` shows `parent` and
+   `primary_artifact_id`, the fields the daemon reads. When that read fails, skip nothing: judge
+   the approval. Judge every other approval as a decision. For any other ask or a comment, find
    the item: `Open asks:` names an ask still open, and `dispatch search` finds an ask or a comment
    by its words. The id at the end of a hit's link (`/asks/<id>`, `?ask=<id>`, `#b-<block id>`,
    `/comments/<id>`, `?comment=<id>`) names it. Read an ask with `dispatch read --ref

@@ -596,14 +596,12 @@ func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.Di
 
 // recordHandover records on a parked root's own gate the person's approval that queues the root as
 // their handover (personHandoverQueues), with nothing else applyArtifact does: no notice, no
-// answered wait, no log of a gate opened, since the tree has no architect to hear any of it. The
-// gate it writes has three readers before the new architect registers: the re-admission the
-// queued todo brings, whose keepStaleApproval would otherwise find the approval the gate held
-// before the spec's last revision and have the new architect told to request approval of the
-// version the person has just approved; a re-admission of a child of this root's tree as an orphan,
-// which carries a copy of this gate to that child (admit's readmit); and read_state's designGate.
-// An event applyArtifact records nothing for (artifactIgnored: under gates.design off, or an
-// approval of a version older than the gate's latest or one the gate has already seen superseded)
+// answered wait, no log of a gate opened, since the tree has no architect to hear any of it. What
+// reads the gate before the new architect registers is everything that reads a gate: among them
+// the re-admission the queued todo brings, whose keepStaleApproval would otherwise find the
+// approval the gate held before the spec's last revision and have the new architect told to
+// request approval of the version the person has just approved, and a later review of the same
+// document, whose artifactIgnored reads the approval's mark. An event artifactIgnored ignores
 // records nothing here either.
 func (e *Engine) recordHandover(ctx context.Context, tx pgx.Tx, gate record.DesignGate, fact intake.DispatchArtifact) error {
 	if off, stale := e.artifactIgnored(gate, fact); off || stale {
@@ -643,6 +641,10 @@ func (e *Engine) artifactIgnored(gate record.DesignGate, fact intake.DispatchArt
 // (CarriedApproval) queues nothing either: it is the review Dispatch writes in the person's name
 // when their answer to a decision block was the whole change since the version they approved,
 // Dispatch's bookkeeping of an earlier approval and not a new act of theirs.
+//
+// The controller's parked-root walk (skill://legion-controller/references/parked-decisions.md,
+// "The walk", step 3) repeats this decision in prose to skip the approvals it queues: a change to
+// what queues changes that step too.
 //
 // dispatchArtifact ties its skip of the root's own gate to this decision rather than to the tree
 // being live: a lingering root that is not parked — closed as done, or still in triage — queues
