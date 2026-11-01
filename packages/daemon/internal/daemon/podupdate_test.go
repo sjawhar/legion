@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"testing"
@@ -104,6 +105,9 @@ type podUpdateRig struct {
 	conns   *fake.Conns
 	workers map[claim.Role]*fake.Conn
 	tokens  map[claim.Role]claim.Token
+	// logs is what the sweep itself wrote, which is where a round the store refused to take a
+	// notice for is reported (tellUpdateStalled). The machines keep their own quiet logger.
+	logs *syncBuffer
 }
 
 func newPodUpdateRig(t *testing.T, roles ...podUpdateRole) *podUpdateRig {
@@ -162,9 +166,15 @@ func newPodUpdateRig(t *testing.T, roles ...podUpdateRole) *podUpdateRig {
 	// its answers: which roles a launch installs no plugin for, which only the daemon's own
 	// configuration knows (supervise.Deps.NoPluginInstall). A test that moves a role onto another
 	// backend writes rig.s.cfg, and the closure reads it when a registration asks.
+	logs := &syncBuffer{}
 	s := &supervision{
-		cfg: config.Config{Project: "LEGION", PodUpdateRetask: podUpdateRetask, PodUpdateNotice: podUpdateNotice},
-		log: quietLogger(), plan: plan{clock: clock, project: podUpdateProject, pluginRelaunchable: true, orphanSweep: orphanSweepInterval},
+		// The rig's claims run in an issue pod, so its configuration is a Kubernetes
+		// deployment's: that is what the Claude Code role's exemption from the stale-plugin
+		// lane is read from, beside the role's backend (noPluginInstall).
+		cfg: config.Config{Project: "LEGION", Runtime: config.Runtime{Name: "kubernetes"},
+			PodUpdateRetask: podUpdateRetask, PodUpdateNotice: podUpdateNotice},
+		log:     slog.New(slog.NewJSONHandler(logs, nil)),
+		plan:    plan{clock: clock, project: podUpdateProject, pluginRelaunchable: true, orphanSweep: orphanSweepInterval},
 		runtime: rt, supervisor: sup,
 		enqueue: (&workflowRuntime{pool: pool, records: records, log: quietLogger()}).enqueueOutbox,
 	}
@@ -190,7 +200,7 @@ func newPodUpdateRig(t *testing.T, roles ...podUpdateRole) *podUpdateRig {
 		t.Fatalf("restore the seeded claims: %v", err)
 	}
 	rig := &podUpdateRig{t: t, ctx: ctx, s: s, sup: sup, rt: rt, pool: pool, records: records, clock: clock, conns: conns,
-		workers: map[claim.Role]*fake.Conn{}, tokens: tokens}
+		workers: map[claim.Role]*fake.Conn{}, tokens: tokens, logs: logs}
 	for _, role := range roles {
 		if !role.session {
 			continue
@@ -1552,34 +1562,58 @@ func TestPodUpdateTellsTheControllerWhenNoClaimRecordsThePod(t *testing.T) {
 }
 
 // Outside a round the stale-plugin lane divides the claims below the contract by what their
-// launch installs. A Claude Code role's plugin is its pod image's own claude-envoy: the relaunch
-// installs nothing and keeps the pod, so the process comes back on the same contract, its
-// registration is charged, and the claim walks to failed. It is left running, and the round over
-// its pod is what carries it. A claim whose launch does install one is relaunched: that is what
-// puts it on a plugin with the op, with its pod and its disk kept.
-func TestStalePluginLeavesAClaudeWorkerAloneAndRelaunchesOneAnInstallCanCarry(t *testing.T) {
-	rig := newPodUpdateRig(t,
-		podUpdateRole{role: claim.RoleImplementer, state: supervise.StateReady, session: true, inPod: true,
-			contract: supervise.PodUpdateContract - 1},
-		podUpdateRole{role: claim.RoleTester, state: supervise.StateReady, session: true, inPod: true,
-			contract: supervise.PodUpdateContract - 1},
-	)
-	rig.s.cfg.WorkerBackends = map[claim.Role]runtime.Backend{claim.RoleImplementer: runtime.BackendClaude}
-	claims, err := rig.sup.Claims(rig.ctx)
-	if err != nil {
-		t.Fatalf("read the claims for the sweep: %v", err)
-	}
+// launch installs. Under Kubernetes a Claude Code role's plugin is its pod image's own
+// claude-envoy: the relaunch installs nothing and keeps the pod, so the process comes back on
+// the same contract, its registration is charged, and the claim walks to failed. It is left
+// running, and the round over its pod is what carries it. A claim whose launch does install one
+// is relaunched: that is what puts it on a plugin with the op, with its pod and its disk kept.
+//
+// Under tmux the same Claude Code role is exempt from nothing. No tmux launch installs a plugin
+// for any backend: a pane resumes on the plugin the daemon's host holds, a Claude Code pane on
+// the claude-envoy at LEGION_CLAUDE_PLUGIN_DIR, which its launch reads again. So the relaunch
+// does there what it does for an Oh My Pi pane, and the lane relaunches both workers.
+func TestStalePluginLeavesAClaudeWorkerAloneUnderKubernetesAndRelaunchesItUnderTmux(t *testing.T) {
+	for _, tc := range []struct {
+		runtimeName string
+		// relaunched is every role the lane started a process for, and left is the role it
+		// posted nothing to, which is still running the process it had.
+		relaunched []claim.Role
+		left       []claim.Role
+	}{
+		{runtimeName: "kubernetes", relaunched: []claim.Role{claim.RoleTester}, left: []claim.Role{claim.RoleImplementer}},
+		{runtimeName: "tmux", relaunched: []claim.Role{claim.RoleImplementer, claim.RoleTester}},
+	} {
+		t.Run(tc.runtimeName, func(t *testing.T) {
+			rig := newPodUpdateRig(t,
+				podUpdateRole{role: claim.RoleImplementer, state: supervise.StateReady, session: true, inPod: true,
+					contract: supervise.PodUpdateContract - 1},
+				podUpdateRole{role: claim.RoleTester, state: supervise.StateReady, session: true, inPod: true,
+					contract: supervise.PodUpdateContract - 1},
+			)
+			rig.s.cfg.Runtime = config.Runtime{Name: tc.runtimeName}
+			rig.s.cfg.WorkerBackends = map[claim.Role]runtime.Backend{claim.RoleImplementer: runtime.BackendClaude}
+			claims, err := rig.sup.Claims(rig.ctx)
+			if err != nil {
+				t.Fatalf("read the claims for the sweep: %v", err)
+			}
 
-	rig.s.refreshStalePlugins(claims, "sweep")
+			rig.s.refreshStalePlugins(claims, "sweep")
 
-	rig.awaitClaim(claim.RoleTester, "the worker whose launch installs a plugin to be relaunched", func(c supervise.Claim) bool {
-		return c.State == supervise.StateLaunching
-	})
-	if c := rig.claimOf(claim.RoleImplementer); c.State != supervise.StateReady {
-		t.Errorf("the Claude Code worker is %s, want it left running for the round over its pod", c.State)
-	}
-	if resumes := rig.rt.CallsOf("Resume"); len(resumes) != 1 {
-		t.Errorf("the sweep started %d processes, want the one whose launch installs a plugin", len(resumes))
+			for _, role := range tc.relaunched {
+				rig.awaitClaim(role, "the worker a relaunch can carry past the contract to be relaunched", func(c supervise.Claim) bool {
+					return c.State == supervise.StateLaunching
+				})
+			}
+			for _, role := range tc.left {
+				if c := rig.claimOf(role); c.State != supervise.StateReady {
+					t.Errorf("the Claude Code worker is %s, want it left running for the round over its pod", c.State)
+				}
+			}
+			if resumes := rig.rt.CallsOf("Resume"); len(resumes) != len(tc.relaunched) {
+				t.Errorf("the sweep started %d processes under %s, want %d: %v",
+					len(resumes), tc.runtimeName, len(tc.relaunched), tc.relaunched)
+			}
+		})
 	}
 }
 
@@ -1932,6 +1966,93 @@ func TestPodUpdateReadsAClaimMidRelaunchWithoutWaitingAndCountsItUnanswered(t *t
 	}
 	if len(answered) != 1 || answered[0] != claim.RoleImplementer {
 		t.Fatalf("the live read counts %v as answered, want the implementer alone: a claim whose machine is deciding has not answered", answered)
+	}
+}
+
+// A round past its notice bound whose only unanswered worker is one the sweep's own read masked
+// — its machine was deciding at that moment — is not stalled, and the operator's side is told
+// nothing of it. The notice is built from a second, unmasked read (noticeGroup), which finds
+// every claim of the round answered, so the row would name no claim at all: the store refuses
+// such a row, an update-stalled notice requiring its round and the claims it waits on, and the
+// refusal leaves the round unmarked, so every tick until that decision ended would build the
+// same row, be refused again and log it at Error. Such a round is one decision away from
+// complete, and the next sweep decides it.
+//
+// The control is the same round past the same bound with a worker that really has not answered:
+// there the unmasked read finds it waiting, and the operator's side is told once, naming it.
+func TestPodUpdateTellsNobodyOfARoundWaitingOnlyOnAClaimMidDecision(t *testing.T) {
+	// refusedNotice is what the sweep logs when the store will not take the notice's row.
+	const refusedNotice = "supervise: tell the operator's side that an update round is stalled; telling again at the next sweep"
+	for _, tc := range []struct {
+		name string
+		// answers is whether the tester answers the round, and held whether its machine is
+		// inside a decision for the whole of the sweep that follows — which is what makes the
+		// sweep's own read count an answered claim as one the round waits on. Only an answer
+		// the mask hides leaves the unmasked read with nothing to name.
+		answers bool
+		held    bool
+		notices int
+	}{
+		{name: "the claim the round waits on answered, and its machine is deciding", answers: true, held: true, notices: 0},
+		{name: "the claim the round waits on has not answered", answers: false, notices: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newPodUpdateRig(t, readyWorker(claim.RoleImplementer), readyWorker(claim.RoleTester))
+			rig.drifts(podUpdateDrift)
+			rig.tick()
+			rig.awaitRound(claim.RoleImplementer, podUpdateRound)
+			rig.awaitRound(claim.RoleTester, podUpdateRound)
+			rig.signal(claim.RoleImplementer, "a1b2c3d")
+			if tc.answers {
+				rig.signal(claim.RoleTester, "a1b2c3d")
+			}
+			// Every machine settles first, so the one claim the sweep finds deciding is the one
+			// this test holds there.
+			rig.settleAll()
+
+			if tc.held {
+				// The tester's machine is held inside a Resume for the whole of the sweep
+				// below, as a relaunch into a pod being built holds it: the sweep reads that
+				// machine's published view and counts it as not having answered.
+				pod := *rig.claimOf(claim.RoleTester).Locator
+				entered, release := make(chan struct{}), make(chan struct{})
+				rig.rt.HoldResume(func() {
+					rig.rt.HoldResume(nil)
+					close(entered)
+					<-release
+				})
+				defer close(release)
+				go func() {
+					m, _ := rig.sup.Machine(rig.tokens[claim.RoleTester])
+					_ = m.Handle(rig.ctx, supervise.RuntimeObservation{
+						Observation: runtime.Observation{Locator: pod, Kind: runtime.Gone, Detail: "the process ended"},
+					})
+				}()
+				select {
+				case <-entered:
+				case <-time.After(10 * time.Second):
+					t.Fatal("the tester's machine never reached the Resume this test holds it in")
+				}
+			}
+
+			rig.clock.advance(podUpdateNotice)
+			rig.tick()
+
+			notices := rig.notices()
+			if len(notices) != tc.notices {
+				t.Fatalf("the controller was told %d times, want %d: %+v", len(notices), tc.notices, notices)
+			}
+			if refused := loggedLines(t, rig.logs.String(), refusedNotice); len(refused) != 0 {
+				t.Fatalf("the sweep logged %d refused notices, want none: %+v", len(refused), refused)
+			}
+			if tc.notices == 0 {
+				return
+			}
+			if waiting := notices[0].Update.Waiting; len(waiting) != 1 ||
+				waiting[0].Role != claim.RoleTester || waiting[0].Answered {
+				t.Fatalf("the notice waits on %+v, want the tester alone, unanswered", waiting)
+			}
+		})
 	}
 }
 

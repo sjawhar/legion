@@ -76,11 +76,12 @@ type Options struct {
 	// work today.
 	PluginRelaunchable bool
 	// NoPluginInstall is supervise.Deps.NoPluginInstall as the API sees it: whether this claim's
-	// launch installs no plugin at all, which only the daemon knows, since a role's backend is
-	// its configuration (internal/daemon's noPluginInstall — a Claude Code role's plugin is its
-	// pod image's own claude-envoy). Nothing of this daemon relaunches such a claim for its
-	// contract and its registration stands, so the routes serve it on the contract it speaks
-	// (staleClaim). Nil is a daemon whose every claim a relaunch can carry.
+	// launch installs no plugin at all, which only the daemon knows, since a role's backend and
+	// the runtime it launches into are its configuration (internal/daemon's noPluginInstall — a
+	// Claude Code role's plugin in a pod is its image's own claude-envoy). Nothing of this
+	// daemon relaunches such a claim for its contract and its registration stands, so the routes
+	// serve it on the contract it speaks (staleClaim). Nil is a daemon whose every claim a
+	// relaunch can carry.
 	NoPluginInstall func(c supervise.Claim) bool
 	// Stopping is done once the daemon's stop begins, before the stop closes the worker stream
 	// connections no route holds (RouteDecisions): an operator's request that would change a claim

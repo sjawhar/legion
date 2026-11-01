@@ -19,9 +19,11 @@ import (
 // That relaunch is what takes a worker of the release before this one past the constant: it
 // installs this daemon's plugin, and the registration that follows records this daemon's
 // contract. What it cannot take past the constant is a plugin an install never reaches — a
-// Claude Code role's, which is its pod image's own — and that claim needs none: a new image
-// carries it, and the round over its pod is what brings the new image in, with no operator and
-// no drain.
+// Claude Code role's in a pod, which is its image's own — and that claim needs none: a new
+// image carries it, and the round over its pod is what brings the new image in, with no operator
+// and no drain. A Claude Code pane is not that claim: its plugin is the built checkout
+// LEGION_CLAUDE_PLUGIN_DIR names, which a relaunch brings it up on like any other pane's
+// (internal/daemon's noPluginInstall).
 //
 // It lives here rather than beside DaemonAPIVersion because internal/api imports this package.
 // internal/api's own test holds it to that version, so a later contract bump can never leave this

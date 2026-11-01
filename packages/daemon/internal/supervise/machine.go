@@ -377,12 +377,13 @@ type Deps struct {
 	// means a stale claim is recorded and reported, never relaunched or refused — relaunching
 	// nothing it cannot build, and refusing nothing a relaunch is not already under way to fix.
 	PluginRelaunchable bool
-	// NoPluginInstall is whether a launch of this claim installs no plugin at all: its role runs
-	// on a backend whose plugin is the worker image's own, which no install reaches (a Claude
-	// Code role's claude-envoy). Only the daemon knows a role's backend — this package cannot
-	// read the configuration a role is launched from — so it states the fact here, as it states
-	// its plugin contract and whether it can relaunch at all. nil is a daemon whose every launch
-	// installs a plugin, which is what every caller that states nothing means.
+	// NoPluginInstall is whether a launch of this claim installs no plugin at all: it runs in a
+	// pod whose image carries its plugin, which no install reaches (a Claude Code role's
+	// claude-envoy under Kubernetes). Only the daemon knows a role's backend and the runtime it
+	// launches into — this package cannot read the configuration a role is launched from — so it
+	// states the fact here, as it states its plugin contract and whether it can relaunch at all.
+	// nil is a daemon whose every launch installs a plugin, which is what every caller that
+	// states nothing means.
 	//
 	// A claim it answers true for, at any contract, is never relaunched by the stale-plugin lane
 	// and never charged for its stale registration (staleRegistration): the relaunch would keep

@@ -344,7 +344,7 @@ func (s *server) readRegisterBody(w http.ResponseWriter, r *http.Request, into *
 // refusing it would stall agents that work today.
 //
 // A claim whose launch installs no plugin is not stale here, whatever its contract and with no
-// round open (Options.NoPluginInstall — a Claude Code role's plugin is its pod image's own
+// round open (Options.NoPluginInstall — a Claude Code role's plugin in a pod is its image's own
 // claude-envoy, which no install reaches). Nothing relaunches such a claim for its contract: the
 // stale-plugin lane posts it nothing and its stale registration is accepted and charged nothing
 // (internal/daemon's refreshStalePlugins, supervise's staleRegistration), so this refusal's own

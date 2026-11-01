@@ -1217,17 +1217,17 @@ func (s *supervision) start(boot context.Context, settle func() error) error {
 //
 // A claim whose launch installs no plugin is never posted, whatever contract it records and
 // round or no round (noPluginInstall). A relaunch is the lane's whole act, and for such a claim
-// the relaunch cannot work: a Claude Code role's plugin is the worker image's own claude-envoy,
-// which no install reaches, so the launch keeps the pod the claim already runs in, the process
-// comes back on that same plugin, registers the same contract again, and the next registration
-// is the second relaunch in a row — which staleRegistration would charge, until the launch
-// budget fails the claim. The contract decides nothing: a claim at this release's own contract
-// is as unreachable by an install as one below it, and the next bump would walk exactly that
-// claim to failed. Nothing here can move such a worker's plugin; a new image can, which is what
-// the pod round replaces the pod for. So it is left running and answers its round like any other
-// worker, with the op or by ending the turn the round's task starts (supervise's turnEnded).
-// staleRegistration accepts such a registration and charges it nothing, for the same reason
-// (supervise.Deps.NoPluginInstall).
+// the relaunch cannot work: a Claude Code role's plugin under Kubernetes is the worker image's
+// own claude-envoy, which no install reaches, so the launch keeps the pod the claim already runs
+// in, the process comes back on that same plugin, registers the same contract again, and the next
+// registration is the second relaunch in a row — which staleRegistration would charge, until the
+// launch budget fails the claim. The contract decides nothing: a claim at this release's own
+// contract is as unreachable by an install as one below it, and the next bump would walk exactly
+// that claim to failed. Nothing here can move such a worker's plugin; a new image can, which is
+// what the pod round replaces the pod for. So it is left running and answers its round like any
+// other worker, with the op or by ending the turn the round's task starts (supervise's
+// turnEnded). staleRegistration accepts such a registration and charges it nothing, for the same
+// reason (supervise.Deps.NoPluginInstall).
 //
 // A claim in an update round is skipped, whatever contract it records: the round is carrying it,
 // and the process is replaced when the round ends (reconcilePodUpdates), so a StalePlugin post
@@ -1262,10 +1262,19 @@ func (s *supervision) refreshStalePlugins(claims []supervise.Claim, trigger stri
 }
 
 // noPluginInstall is c's launch installing no plugin at all, whatever contract the claim records:
-// its role runs on Claude Code, whose plugin is the worker image's own claude-envoy, which no
-// install reaches (specs.stalePluginInstall installs none for that backend, and no workflow
-// releases claude-envoy). A plugin-contract change for such a role is answered by a new image,
+// the runtime is Kubernetes and the claim's role runs on Claude Code, whose plugin there is the
+// worker image's own claude-envoy. No install reaches it (specs.stalePluginInstall installs none
+// for that backend, and no workflow releases claude-envoy) and no relaunch moves it, because the
+// launch keeps the pod the claim already runs in: only a new image carries another claude-envoy,
 // which is what the pod round replaces the pod for.
+//
+// Under tmux a Claude Code role is exempt from nothing. Its pane loads the claude-envoy held at
+// LEGION_CLAUDE_PLUGIN_DIR (resolveClaude; tmux's ClaudeLaunch, whose MCP configuration and
+// plugin argument every launch writes afresh), so a relaunch once that pane's turn ends brings
+// the worker up on whatever that directory holds now, exactly as an Oh My Pi pane comes back on
+// the plugin installed on the daemon's host. No tmux launch installs a plugin for any backend
+// (specs.stalePluginInstall), so a relaunch is the whole of the lane there — and for this role
+// it is enough.
 //
 // It is one rule read in three places, each of which would otherwise act on a claim no install
 // of this deployment can move: this package's own stale-plugin pass (refreshStalePlugins); the
@@ -1275,7 +1284,7 @@ func (s *supervision) refreshStalePlugins(claims []supervise.Claim, trigger stri
 // grants, its handoff_complete and its ready on a relaunch that never comes
 // (api.Options.NoPluginInstall, api's staleClaim).
 func noPluginInstall(cfg config.Config, c supervise.Claim) bool {
-	return runtime.Of(cfg.BackendFor(c.Role)) == runtime.BackendClaude
+	return cfg.Runtime.Name == "kubernetes" && runtime.Of(cfg.BackendFor(c.Role)) == runtime.BackendClaude
 }
 
 // reconcileBootOrphans retries only the boot reconciliation, boundedly. A listing error does not

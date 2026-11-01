@@ -154,11 +154,12 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 		// the round was opened.
 		joined = roundReasons(group, open)
 	}
-	// One live read, given to both decisions below. Read live by the replacement and from the
-	// snapshot by the post, the two would disagree exactly where it costs most: a snapshot every
-	// claim of which has answered, beside a live read that finds one answer taken back, leaves
-	// the replacement waiting and builds the post's late notice with an empty waiting list, which
-	// the store refuses (record.UpdateStalled) and which every tick after it refuses again.
+	// One live read, given to both decisions below, so the claims the replacement waits on and
+	// the claims the post asks again are one set. Read live by the replacement and from the
+	// snapshot by the post, a claim whose session registered after the tick's read would block
+	// the round in the one and be no worker of it in the other: the replacement would wait on
+	// that claim for an answer the post never asked it for, and the round would run out its
+	// notice bound waiting for a worker nothing had asked anything of.
 	live := s.liveGroup(group)
 	if open != "" && s.completePodUpdate(ctx, issue, group, live, open, pod, joined, now) {
 		return
@@ -515,18 +516,33 @@ func (s *supervision) openPodUpdate(ctx context.Context, issue string, group []s
 	if opened == nil {
 		return
 	}
-	if now.Sub(*opened) >= s.cfg.PodUpdateNotice {
-		// The notice is built unmasked: the mask is the replacement's own caution about a claim
-		// whose machine is deciding, and told to the controller it would read as a claim that
-		// has not answered, which its playbook prompts (noticeGroup).
-		told := s.noticeGroup(group)
-		s.tellUpdateStalled(ctx, updateStall{
-			issue: issue, round: round, pod: pod, reasons: reasons, group: told,
-			waiting: waitingOf(round, waitingClaims(told, round)),
-			reason: fmt.Sprintf("the update round has waited %s for its workers to answer",
-				now.Sub(*opened).Round(time.Minute)),
-		})
+	if now.Sub(*opened) < s.cfg.PodUpdateNotice {
+		return
 	}
+	// The notice is built unmasked: the mask is the replacement's own caution about a claim
+	// whose machine is deciding, and told to the controller it would read as a claim that
+	// has not answered, which its playbook prompts (noticeGroup).
+	told := s.noticeGroup(group)
+	waiting := waitingClaims(told, round)
+	if len(waiting) == 0 {
+		// Unmasked, every claim of the round has answered, so this round is not stalled at
+		// all: the only claim the sweep's own read counted as waiting was counted so because
+		// its machine was deciding at that moment (roundGroup's mask), and the round is one
+		// decision away from complete. A notice here would carry an empty waiting list, which
+		// the store refuses — an update-stalled notice requires its round and the claims it
+		// waits on (record.UpdateStalled) — and a refused row leaves the round unmarked, so
+		// every tick until that decision ends would build the same row, be refused again and
+		// log it at Error. The next sweep reads the decision settled: it replaces the pod, or
+		// it tells the round then if it is waiting after all. tellPodlessRound returns on an
+		// empty list of its own for the same reason.
+		return
+	}
+	s.tellUpdateStalled(ctx, updateStall{
+		issue: issue, round: round, pod: pod, reasons: reasons, group: told,
+		waiting: waitingOf(round, waiting),
+		reason: fmt.Sprintf("the update round has waited %s for its workers to answer",
+			now.Sub(*opened).Round(time.Minute)),
+	})
 }
 
 // reconcilePluginUpdates carries the plugin round of every claim of a group that is in one. It
