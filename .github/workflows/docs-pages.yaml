@@ -205,6 +205,7 @@ on:
       - 'deploy/kubernetes/**'
       - 'scripts/third-party-notices.ts'
       - '.github/scripts/check-private-names.sh'
+      - '.github/scripts/repo-paths.sh'
   workflow_dispatch:
 
 # One run at a time, in push order: `queue: max` keeps up to 100 runs waiting in the group, first

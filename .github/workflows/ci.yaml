@@ -574,6 +574,9 @@ jobs:
               - 'scripts/third-party-notices.ts'
               # The built site's private-name check.
               - '.github/scripts/check-private-names.sh'
+              # The site's own URL, base and edit links are the repository's name, which it reads
+              # from this script (docs/site/repo-paths.ts) rather than holding as literals.
+              - '.github/scripts/repo-paths.sh'
             contracts:
               - '.github/workflows/ci.yaml'
               - *bun_install
@@ -1644,6 +1647,9 @@ jobs:
 
       - name: Test the release credential check
         run: .github/scripts/check-release-credentials.test.sh
+
+      - name: Test the repository path derivation
+        run: .github/scripts/repo-paths.test.sh
 
       # The proof selector e2e.yaml's select job runs, over fixture trees and over this
       # repository's own .github/e2e-scripts.json and scripts/e2e/.
