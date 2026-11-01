@@ -1965,7 +1965,8 @@ An operator's arithmetic is therefore the issue's: one set of four, one Go pair,
 The project controller's pod has a volume of the same size — its Sandbox's own, not its pod's — holding the scratch of its one role.
 Nothing prunes `/legion/scratch`: it grows for the life of the pod, which is the life of the disk it sits on, and this change raises `issue_volume`'s default from `20Gi` to `50Gi` (`defaultIssueVolume`, `packages/daemon/internal/config/kubernetes.go`)
 — a default every project takes rather than a line of one deployment, so the apply this change needs is the image digest alone, with no deployment edit.
-The size rides in the pod's own ephemeral claim template, evaluated when the kubelet creates the claim, so every pod created after that apply gets 50 GiB and a pod already running keeps the size it started with until a launch replaces it.
+The size rides in the pod's own ephemeral claim template, evaluated when the kubelet creates the claim, so every pod created after that apply gets 50 GiB and a pod already running keeps the size it started with.
+The disk size is one of the five keys of the `legion.dev/pod-shape` record a Sandbox carries ([The disk dies with its pod](#the-disk-dies-with-its-pod)), so a running issue pod is brought onto the new size by its update round, once every worker in it has pushed and answered, and the controller's pod, which no round covers, by the next launch into it.
 That fits by the arithmetic alone: the shared layout's worst case for an issue that works all six roles is about 8.5 GiB
 — one temporary directory, one cache home, one data home, one bun install cache and one Go pair
 — against live volumes measured at 2.1 to 2.7 GiB of their 20 (01:45Z on 2026-10-21).
@@ -2963,10 +2964,15 @@ The operator's own variables (`runtime.kubernetes.pod.env`) are not compared: a 
 The supervisor relaunches each reported claim at once, through the launch path a death uses:
 a `Resume` of its recorded session, or a `Spawn` when it has not registered yet.
 What the relaunch replaces follows from what moved.
-A pod whose launcher dials a stale stream, which lacks the broker enrollment its roles are started against now, or which lacks the operator mount holding a file `role_config_files` names for any of its roles, cannot run them as a pod created now would, and every role of it is reported at once, from the boot that re-adopts them:
-the first of them relaunched replaces the pod, under the pod's launch turn, and the others, whose relaunches wait on that turn, resume into the new pod, whose launcher dials the current stream for every role and mounts the current enrollment.
+An issue pod whose launcher dials a stale stream, or which runs the layout before one container, cannot run its roles as a pod created now would, and no worker of it can be asked to push first:
+such a launcher never redials, so it never reaches this daemon to be tasked, and that layout's workers predate the contract that added the op (`movedInPod`, `packages/daemon/internal/runtime/sandbox/addresses.go`).
+Every role of such a pod is reported at once, from the boot that re-adopts them:
+the first of them relaunched replaces the pod, under the pod's launch turn, and the others, whose relaunches wait on that turn, resume into the new pod, whose launcher dials the current stream for every role.
 None of them is charged, and none is found gone when the pod is replaced under it.
-The controller's pod, whose one launcher dials a stale stream, or which lacks the broker enrollment under `runtime.kubernetes.agent_secrets`, or the mount of one of its own `role_config_files`, is replaced the same way at its relaunch.
+What an issue pod lacks that its workers can be asked about first — the broker enrollment its roles are started against now, the operator mount holding a file `role_config_files` names for any of its roles, and the session store it was created under — is drift rather than a moved address (`driftedInPod`):
+the relaunch keeps that pod, the role runs in it as the pod was built, and the update round is what replaces it, once every worker in it has pushed and answered ([The disk dies with its pod](#the-disk-dies-with-its-pod)).
+The controller's pod holds every one of those facets as a moved address, since no round covers it (`roundCovers`):
+it is replaced at its relaunch when its one launcher dials a stale stream, when it lacks the broker enrollment under `runtime.kubernetes.agent_secrets`, and when it lacks the mount of one of its own `role_config_files`.
 A role whose environment alone moved, the broker's URL, `LEGION_SLACK_CHANNELS` for the controller and the other addresses its agent is told among them, starts its next generation in the same pod, handed the current values, and the pod and its other roles are left as they are.
 The stale observation is never charged, since the process did nothing wrong; a relaunch the runtime refuses is charged as any launch failure is.
 A turn the stale process was in used the addresses it holds and ends with the relaunch, so the turn is lost:
