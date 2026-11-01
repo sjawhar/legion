@@ -190,6 +190,12 @@ func TestLoadRefusesAnIdleSuspendUnderTheWaitingReminder(t *testing.T) {
 			want: "worker_idle_suspend_seconds must be more than 10000000000"},
 		{name: "a radix form the worker reads", seconds: "1200", env: waiting("0x1D4C00"),
 			want: "worker_idle_suspend_seconds must be more than 1920"},
+		{name: "a binary form the worker reads", seconds: "1200",
+			env:  waiting("0b111111111111111111111"),
+			want: "worker_idle_suspend_seconds must be more than 2097"},
+		{name: "a radix form past a uint64 refuses every idle suspend", seconds: "2147483",
+			env:  waiting("0x10000000000000000"),
+			want: "worker_idle_suspend_seconds must be more than"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, err := Load(writeConfigFile(t, minimalFile+"worker_idle_suspend_seconds: "+c.seconds+"\n"), c.env)

@@ -1003,8 +1003,8 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		// would wrap round to a negative duration that passes every floor.
 		waiting := stallWaitingMs(env)
 		if float64(cfg.WorkerIdleSuspend/time.Millisecond) <= waiting {
-			return Config{}, fmt.Errorf("worker_idle_suspend_seconds must be more than %d: a worker that replied WAITING on an open phase is reminded by its own process after %.0f ms (LEGION_STALL_WAITING_MS), and an idle suspend that is not longer than that could take the process holding the reminder first",
-				int64(waiting)/1000, waiting)
+			return Config{}, fmt.Errorf("worker_idle_suspend_seconds must be more than %.0f: a worker that replied WAITING on an open phase is reminded by its own process after %.0f ms (LEGION_STALL_WAITING_MS), and an idle suspend that is not longer than that could take the process holding the reminder first",
+				math.Floor(waiting/1000), waiting)
 		}
 	}
 	return cfg, nil
@@ -1051,10 +1051,17 @@ func jsNumber(raw string) (float64, bool) {
 		}
 		if base != 0 {
 			read, err := strconv.ParseUint(raw[2:], base, 64)
-			if err != nil {
-				return 0, false
+			if err == nil {
+				return float64(read), true
 			}
-			return float64(read), true
+			// Number() reads a radix form of any length, so one past a uint64 is a number the
+			// worker runs on all the same, and a reminder that long is longer than any idle
+			// suspend the loader takes: it is answered as the largest float there is rather than
+			// as unreadable, which would silently fall back to the plugin's own default.
+			if errors.Is(err, strconv.ErrRange) {
+				return math.MaxFloat64, true
+			}
+			return 0, false
 		}
 	}
 	read, err := strconv.ParseFloat(raw, 64)

@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
@@ -237,6 +238,36 @@ func (r *outbox) reholdNotice(ctx context.Context, reported reportedNotice, reas
 			"issue", issue, "kind", notice.Kind, "topic", topic, "key", key, "reason", reason)
 	}
 	return nil
+}
+
+// issueWakeable says whether a worker of issue may be brought back for a message at all, read in
+// one transaction so the record it answers from is one state: the issue is recorded, it is still
+// in a phase of the workflow — a child parked in Dispatch, an issue closed or held is out of it,
+// whether or not the suspension its own stop will write has landed yet — and its tree neither
+// lingers nor has closed. A worker whose issue is out of the workflow is the workflow's to start,
+// never a message's, so a wake never races a stop that is still queued (role_wake.go).
+func (r *outbox) issueWakeable(ctx context.Context, issue string) (bool, error) {
+	wakeable := false
+	err := pgx.BeginTxFunc(ctx, r.pool, pgx.TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		recorded, err := r.records.Issue(ctx, tx, issue)
+		if err != nil || recorded == nil {
+			return err
+		}
+		switch recorded.Phase {
+		case phase.Done, phase.Held:
+			return nil
+		}
+		lingers, err := record.TreeLingers(ctx, r.records, tx, recorded.Tree)
+		if err != nil {
+			return err
+		}
+		wakeable = !lingers
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("read the issue %s: %w", issue, err)
+	}
+	return wakeable, nil
 }
 
 // issueTreeLingers says whether the tree of issue, as recorded, lingers or has closed. An issue

@@ -67,13 +67,13 @@ func (r *outbox) wakeIdleSuspendedRole(ctx context.Context, token claim.Token, r
 	held := machine.View().Claim
 	switch {
 	case held.SuspendedBy == supervise.SuspendedByIdle && held.RuleMayResume():
-		lingers, err := r.issueTreeLingers(ctx, held.Issue)
+		wakeable, err := r.issueWakeable(ctx, held.Issue)
 		if err != nil {
-			r.log.Warn("outbox could not read the tree of an idle-suspended worker a message names",
+			r.log.Warn("outbox could not read the issue of an idle-suspended worker a message names",
 				"claim", token, "issue", held.Issue, "why", why, "error", err)
 			return
 		}
-		if lingers {
+		if !wakeable {
 			return
 		}
 		rule := "a message found no holder on its role topic: " + why
