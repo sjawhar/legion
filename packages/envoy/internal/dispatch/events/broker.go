@@ -322,9 +322,10 @@ func Quiet(e model.Event) bool {
 	case "project.created", "settings.repo_project.updated", "settings.architecture_source.updated",
 		"settings.project_default_assignee.updated",
 		"architecture.synced", "architecture.sync_failed", "user_state.updated", "user_agent_state.updated",
-		"user_thread_state.updated":
+		"user_thread_state.updated", "artifact.grants_changed":
 		// Settings, importer and per-viewer bookkeeping: retained on their log and carried by
-		// the event feed, but nobody is woken by them.
+		// the event feed, but nobody is woken by them. A page file's grants are the same: a
+		// person decides which data files a view block's page may read, and no agent acts on it.
 		return true
 	case "ask.edited":
 		// A version move of an approval request that an earlier version already moved since it was

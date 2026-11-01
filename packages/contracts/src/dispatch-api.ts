@@ -2299,6 +2299,16 @@ export interface ArtifactReviewEventPayload {
   readonly ask_id: string | null;
 }
 
+/** `artifact.grants_changed`: a person added or removed a data grant on a page file, so which
+ *  data files Dispatch gives that page has changed. It names the page file alone: every reader
+ *  re-reads the whole list, because a view block applies all of it to the files its attributes
+ *  name. The page file owns the event, so it carries the issue for an issue page file and the
+ *  project with a null `issue_key` for a project one. No token can write one: the two routes
+ *  behind it answer every token `403 HUMAN_ONLY`. */
+export interface ArtifactGrantsChangedEventPayload {
+  readonly artifact_id: string;
+}
+
 /** A server-owned typed-block attribute was restored from its indexed row. */
 export interface BlockRepairedEventPayload {
   readonly block_id: string;
@@ -2574,6 +2584,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "artifact.changes_requested";
       readonly payload: ArtifactReviewEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "artifact.grants_changed";
+      readonly payload: ArtifactGrantsChangedEventPayload;
     })
   | (DispatchEventBase & { readonly type: "ask.opened"; readonly payload: AskEventPayload })
   | (DispatchEventBase & {

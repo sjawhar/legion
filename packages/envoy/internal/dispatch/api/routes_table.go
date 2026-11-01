@@ -70,7 +70,7 @@ const (
 
 // writeClasses is the class of every mutating route, by "<method> <pattern>". It stands beside
 // the table rather than in each row because Go leaves no field out of a positional composite
-// literal: a sixth value on the row would have to be written on all 146 rows, every GET row
+// literal: a sixth value on the row would have to be written on all 151 rows, every GET row
 // included, and a GET row needs no class. routes() stamps it onto the row, so apiRoute.Scope is
 // what every reader of a route sees, and undecidableWrites holds the two in exact correspondence
 // — a mutating row this table does not name, and a name that is no mutating row, each fail
@@ -112,6 +112,8 @@ var writeClasses = map[string]writeScope{
 	"POST /api/v1/artifacts/{id}/approval-requests":          scopeProject,
 	"POST /api/v1/artifacts/{id}/versions":                   scopeProject,
 	"POST /api/v1/artifacts/{id}/edits":                      scopeProject,
+	"POST /api/v1/artifacts/{id}/grants":                     scopeProject,
+	"DELETE /api/v1/artifacts/{id}/grants/{grant_id}":        scopeProject,
 	"POST /api/v1/artifacts/{id}/_test/outside-schema":       scopeProject,
 
 	"PUT /api/v1/asks/{id}/followers/{session_id}":    scopeProject,
@@ -321,6 +323,9 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/artifacts/{id}/text", authAny, "A document's canonical markdown and whole-document token.", s.getArtifactText},
 		{http.MethodGet, "/api/v1/artifacts/{id}/versions/{number}", authAny, "One named or settled document version.", s.getArtifactVersion},
 		{http.MethodGet, "/api/v1/artifacts/{id}/versions/{number}/page", authAny, "One version of a page file, as an HTML page a view block shows in a frame. A page file is a file whose stored type is text/html, or whose name ends .html or .htm. The answer carries Content-Type: text/html; charset=utf-8, X-Content-Type-Options: nosniff, Referrer-Policy: no-referrer, Cache-Control: private, no-cache with the version's ETag, Vary: Sec-Fetch-Dest, and a Content-Security-Policy whose sandbox directive puts the page in an opaque origin and whose 'none' sources stop every request the page could make. Content-Disposition is inline when the request's Sec-Fetch-Dest header is iframe, and attachment for every other value and for no header at all, so a browser that opens the address in a tab saves the file and shows no page. Refusals, to HEAD as to GET: 404 ARTIFACT_NOT_FOUND for an artifact or a version that is not there, 415 NOT_A_PAGE for an artifact that is not a page file (a document never is), 413 PAGE_TOO_LARGE for a version over 5 MiB.", s.getArtifactVersionPage},
+		{http.MethodGet, "/api/v1/artifacts/{id}/grants", authAny, "The data files a person has granted this page file, which is what decides what Dispatch gives the page a view block draws: for each grant its id, the data file's id, reference and name, the version the grant is pinned to (null for every version of that file, the newest included), who granted it and when, oldest first. 415 NOT_A_PAGE when {id} is not a page file, an agent conversation file included.", s.listArtifactGrants},
+		{http.MethodPost, "/api/v1/artifacts/{id}/grants", authHuman, "Grant this page file one data file, named in the body as {\"ref\": \"dispatch://<issue or project>/artifact/<slug>[@v<N>]\"}; a reference without @v<N> covers every version of that file, the newest included. Only a person may: every token gets 403 HUMAN_ONLY and nothing is read or written. The reference is resolved to a file id and that id is stored, so a later file of the same name is not covered. A data file equal to the page file is allowed, and a page file on a closed issue may be granted, because a grant is access and not content. Refusals: 400 NOT_A_FILE_REFERENCE for a reference naming no issue or project file, 400 DATA_FILE_NOT_FOUND for a file that is not there, 400 DATA_FILE_IS_A_DOCUMENT for a document, 400 AGENT_CONVERSATION_FILE for a file an agent's conversation owns, 400 VERSION_NOT_FOUND for a @v<N> the file does not have, 415 NOT_A_PAGE when {id} is not a page file. A new grant is 201 and writes artifact.grants_changed for the page file; one already there is 200 with that grant and changes nothing.", s.createArtifactGrant},
+		{http.MethodDelete, "/api/v1/artifacts/{id}/grants/{grant_id}", authHuman, "Take one data file back from this page file: 204, and artifact.grants_changed for the page file. Only a person may; every token gets 403 HUMAN_ONLY. 404 GRANT_NOT_FOUND for a grant this page file does not hold, and 415 NOT_A_PAGE when {id} is not a page file.", s.deleteArtifactGrant},
 		{http.MethodPost, "/api/v1/artifacts/{id}/versions", authAny, "Name the current document version.", s.createNamedVersion},
 		{http.MethodPost, "/api/v1/artifacts/{id}/edits", authAny, "Apply quote-anchored edit ops with an optional optimistic-concurrency precondition.", s.editArtifact},
 		{http.MethodGet, "/api/v1/issues/{key}/artifacts/{slug}", authAny, "Read an issue document by slug or unambiguous filename.", s.getArtifact},
