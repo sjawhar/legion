@@ -830,3 +830,60 @@ func TestASlowButSteadyReaderOfALargeAnswerIsAnsweredInFull(t *testing.T) {
 		t.Fatalf("the answer was read in %v, want a reader slower than its %v idle bound", elapsed, idle)
 	}
 }
+
+// A write whose client hangs up while it waits in admission's queue is logged 499, as a read's is,
+// over a real connection and not only a cancelled context: net/http notices a closed connection
+// only once the request's body has been read, and a queued write's body has not been. On the real
+// binary at 1176657a, a comment write closed 0.4 s into its queue wait was logged
+// `status=429 elapsed_ms=1000 bytes=135` - its slot held for the whole wait and a refusal written to
+// a client that had gone - while a GET closed the same way was logged 499.
+func TestAQueuedWriteWhoseClientHangsUpIsLoggedClientGone(t *testing.T) {
+	limiter := admission.New(admission.Limits{Read: 4, Write: 1, Wait: 10 * time.Second})
+	handler, database, _ := newTestServer(t, testServerOptions{admission: limiter})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	issue := createInteractionIssue(t, handler, "TEST", "Queued write hangs up", "A spec")
+	release := holdIssueRow(t, database, issue.Key)
+	defer release()
+	held := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		held <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"title": "Renamed"}, "alice")
+	}()
+	waitForWritesInFlight(t, limiter, 1)
+	logged := captureLog(t)
+
+	connection, err := net.Dial("tcp", strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatalf("dial the server: %v", err)
+	}
+	body := `{"body":"queued, then gone"}`
+	if _, err := fmt.Fprintf(connection, "POST /api/v1/issues/%s/comments HTTP/1.1\r\nHost: dispatch\r\n"+
+		"X-Dispatch-User: alice\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",
+		issue.Key, len(body), body); err != nil {
+		t.Fatalf("send the queued write: %v", err)
+	}
+	waitForQueuedWrites(t, limiter, 1)
+	_ = connection.Close()
+	hungUp := time.Now()
+
+	deadline := time.Now().Add(15 * time.Second)
+	for limiter.Stats()[admission.Write].Queued != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the write whose client hung up was still queued 15 s later")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	left := time.Since(hungUp)
+	time.Sleep(200 * time.Millisecond)
+	line := accessLineOfRoute(t, logged, "/api/v1/issues/{key}/comments")
+	if !strings.Contains(line, "status=499") {
+		t.Fatalf("the queued write whose client hung up left the queue %v later and logged:\n%s\nwant status=499", left, line)
+	}
+	if left > 2*time.Second {
+		t.Fatalf("the queued write whose client hung up held its queue slot %v, want it given up once its client had gone, not at the end of its 10 s wait", left)
+	}
+	release()
+	if response := awaitResponse(t, held); response.Code != http.StatusOK {
+		t.Fatalf("the held write: status=%d body=%s, want 200", response.Code, response.Body.String())
+	}
+}
