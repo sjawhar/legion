@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-593",
-  "previousHandoff": "4a2ea21181f57a53a8f90e52a61488c4bedd577e",
-  "round": 19,
-  "headTested": "fce9e43b7fa26e2d13c78deb53319ffa901dd256",
-  "prHead": "11a890e13f6407ae42681cb07667eeb88cfb2302",
-  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-19-txt",
-  "rig": "dispatch://INFRA-593/artifact/infra-593-tester-rig-round-19-tar-gz",
+  "previousHandoff": "16b9d704d6824cbd2613e1dbb2bd833dc33ffb2b",
+  "round": 20,
+  "headTested": "f533f33ce137a1c0ca3524656fedc27277a64b12",
+  "prHead": "0f8cd916a7ed25e08902272b654878f8600443fd",
+  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-20-txt",
+  "rig": "dispatch://INFRA-593/artifact/infra-593-tester-rig-round-20-tar-gz",
   "previousRounds": [
     "dispatch://INFRA-593/artifact/infra-593-tester-round-1-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-2-txt",
@@ -26,45 +26,64 @@
     "dispatch://INFRA-593/artifact/infra-593-tester-round-15-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-16-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-17-txt",
-    "dispatch://INFRA-593/artifact/infra-593-tester-round-18-txt"
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-18-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-19-txt"
   ],
   "roundShape": {
-    "tool": "dispatch://INFRA-592/artifact/round-shape-py version 1 (sanity: same head -> 0; a50f4960->b0fa30f7 -> round 18's 24), and INFRA-598's round-shape v3",
-    "oldHead": "b0fa30f7a84bd3e424306bb5948dc53b0f4da34d",
-    "newHead": "fce9e43b7fa26e2d13c78deb53319ffa901dd256",
-    "differs": "the migration pair renamed 0160 -> 20261028195714 (bodies identical but the first comment line), its test (157, renamed), AGENTS.md, the README, the changelog fragment, and main.go comment lines (reviewer e1928187); no runtime code",
-    "round": "narrow, on the architect's call (merge of main 4644a072, the migration renamed by its UTC creation time)"
+    "tool": "dispatch://INFRA-592/artifact/round-shape-py version 1 (sanity: same head -> 0; b0fa30f7->fce9e43b -> round 19's 15), and INFRA-598's round-shape v3",
+    "oldHead": "fce9e43b7fa26e2d13c78deb53319ffa901dd256",
+    "newHead": "f533f33ce137a1c0ca3524656fedc27277a64b12",
+    "runtimeFilesWhoseOwnDiffChanged": {
+      "docs/compaction.go": "ended/unfoldable outcomes return passRoomLock (a waiting compaction takes and lets go the lock)",
+      "docs/ledger.go": "noteAppended after commit: live writes' and every flush's last version, repairs included",
+      "docs/persistence.go": "AppendRoomFlush notes its last version",
+      "docs/service.go": "the settlement flush notes after commit; the repair and stamp notes now go through the flush and ledger",
+      "docs/livewrite.go": "decodeStoredState on main's new fork read",
+      "docs/storedorder.go": "#2496's checker decodes through decodeStoredState",
+      "docs/pending_authors.go -> docs/roomcursor.go": "takeLoadedState moved with main's split, unchanged",
+      "docs/tree.go, docs/websocket.go": "comment lines only"
+    },
+    "round": "full, on the architect's call (#2496 changed how stored updates replay)"
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Ran the per-file diff check from b0fa30f7 with sanity controls; checked the name against the store README's rule and the first commit's author time; ran every store migration test, migrationid and pgmigrate, negative controls on the naming test, a fresh database and an upgrade from main 4644a072 on the real binaries, and the compaction tests under race."
+    "how": "Ran the per-file diff check with sanity controls and read every runtime file's change; grepped every document build; drove a browser's keystrokes through the flush on the real binary and saw the queue fold them; held passRoomLock with a control; ran the eight tests 300x under race, #2496's acceptance 1 with the 200-round soak, stored-order on a compacted document on the real binary, and the replay harness."
   },
   "failed": 0,
   "failures": [],
+  "ciRedIsMains": "envoy-go and envoy-go-race fail only TestMigrationSetTakesNumbersThenTimestamps at store_test.go:391 on #2387's 0158_message_delivery_urgency, 0159_route_roster, 0160_github_rate_limits (main's); #2633 (0642a37a) fixed main; a merge of main clears it, and ci-ok is to be read after that merge.",
   "memory": {
-    "cap": "go test -p 1, GOMAXPROCS=2, GOMEMLIMIT=12GiB, CGO_ENABLED=1 -race -timeout 40m",
-    "sampler": "named job mem-sampler-infra-593-r19, bounded at 1,200 samples, stopped via proc://mem-sampler-infra-593-r19/kill",
-    "samples": 250,
-    "sampledPeakGiB": 3.47,
-    "leftoverCheck": "After the kill returned, ran ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|seq 1 1200|mem19|bin19/' and it listed nothing."
+    "cap": "go test -p 1, GOMAXPROCS=2, GOMEMLIMIT=12GiB, CGO_ENABLED=1 -race -timeout 50m",
+    "sampler": "named job mem-sampler-infra-593-r20, bounded at 3,000 samples, stopped via proc://mem-sampler-infra-593-r20/kill",
+    "samples": 890,
+    "sampledPeakGiB": 3.34,
+    "leftoverCheck": "After the kill returned, ran ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|seq 1 3000|mem20|bin20/' and it listed nothing."
   },
   "proof": [
     {
-      "criterion": "Architect check 2: store's migration tests pass with no numbering gap, the name obeys the README's timestamp rule, a fresh database records 20261028195714 above 157 with doc_compaction_owed, and an upgrade from main 4644a072 applies it once.",
-      "surface": "internal/dispatch/store, migrationid and pgmigrate at fce9e43b on a superuser Postgres 18.6; envoy-dispatch fce9e43b and main 4644a072 as real processes",
-      "command": "go test ./internal/dispatch/store -run 'Migrat|Census|TouchedTables|Embedded|TheCompactionOwedMigration'; go test ./migrationid ./internal/pgmigrate/...; bash scenF19.sh (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-19-tar-gz)",
-      "observed": "87 PASS, ok (TestMigrationSetTakesNumbersThenTimestamps, TestTheCompactionOwedMigrationNamesEveryDocumentOfMoreThanOneRow included). Name = author time of 1b0881b9, 2026-10-28 19:57:14 UTC, the migration's first commit; the numbered series closes at 0157. Fresh database: max 20261028195714, 158 rows, only 20261028195714 above 157, doc_compaction_owed present. Upgrade: main at 157 with 5 rows of one document, SIGKILL; head's first boot records the version (158 rows) and backfills the document; its second boot leaves 158 rows, the version recorded once.",
-      "headSha": "fce9e43b7fa26e2d13c78deb53319ffa901dd256",
-      "negativeControl": "Named 0158, 0160 or 20261328195714: TestMigrationSetTakesNumbersThenTimestamps fails at store_test.go:391 with the rule ('the numbered migrations ended at 157 ... 14 digits YYYYMMDDHHMMSS', '... an instant that exists')."
+      "criterion": "Architect check 2: every copy that replays stored or room updates is built by newCappedDocumentCopy, #2496's included.",
+      "surface": "source at f533f33c and the diff main 4644a072..8d555cc2",
+      "command": "grep -rn 'crdt\\.New(' (non-test); grep SetFormatCleanup/WithFormatCleanup; jj diff 4644a072..8d555cc2 | grep '^+.*(crdt.New(|newDocumentCopy(|newCappedDocumentCopy()'",
+      "observed": "Non-test crdt.New: encodeDocumentTree (local commit), newCappedDocumentCopy, testhooks, docstest, loadtest's browser peer. #2496's flush.go, livewrite.go fork, lostedit.go, storedorder.go and websocket.go copies use newDocumentCopy; its other crdt.New calls are in tests. SetFormatCleanup only in bootstrapLoadedState; WithFormatCleanup(false) is appended last.",
+      "headSha": "f533f33ce137a1c0ca3524656fedc27277a64b12",
+      "negativeControl": "Round 16: with the option out of newCappedDocumentCopy, the compaction and replay tests fail."
     },
     {
-      "criterion": "Architect check 3: the compaction tests once.",
-      "surface": "internal/dispatch/docs and cmd/dispatch at fce9e43b on a superuser Postgres 18.6",
-      "command": "CGO_ENABLED=1 go test -race -p 1 -count=1 -timeout 40m ./internal/dispatch/docs ./cmd/dispatch -run '<format/refusal tests>|Test.*Compaction.*|Test.*Compact.*|Test.*Sweep.*'",
-      "observed": "67 PASS, both packages ok, 0 DATA RACE; go vet ./... clean.",
-      "headSha": "fce9e43b7fa26e2d13c78deb53319ffa901dd256",
-      "negativeControl": "Round 16: the compaction test fails with WithFormatCleanup(false) out of newCappedDocumentCopy."
+      "criterion": "Architect check 3: every row #2496's flush stores is noted to the compaction queue; a failed room's close waits for the document lock with nothing to fold.",
+      "surface": "envoy-dispatch f533f33c process on Postgres 18.6, a typing client on the document websocket; package docs tests",
+      "command": "bash scenQ20.sh (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-20-tar-gz); go test ./internal/dispatch/docs -run '^(TestAFailedRoomsEvictionWaitsForTheStampsCommitAndReloadsIt|TestAFailedRoomsEvictionCompactionWaitsForTheLockAndFoldsOnlyOldRows|TestAWriteMeetingAFailedRoomFailsFastWhoeverHoldsItsLock)$'",
+      "observed": "200 keystrokes through AppendRoomFlush: 205 rows, the document in doc_compaction_owed; with no restart, read or due sweep (only the start pass, candidates=0) the queue folded them to 2 rows between +150 s and +180 s; text holds 200 tokens in order; 0 ERROR. The three failed-room tests pass.",
+      "headSha": "f533f33ce137a1c0ca3524656fedc27277a64b12",
+      "negativeControl": "passRoomLock returning at once: TestAFailedRoomsEvictionWaitsForTheStampsCommitAndReloadsIt fails 3/3 at stale_room_test.go:1894 'the failed room's eviction never queued on the document's advisory lock'."
+    },
+    {
+      "criterion": "Architect check 4: eight tests 300x under race; #2496's acceptance 1; stored-order clean on a compacted document on the real binary; the replay harness 0/0 on a compacted room.",
+      "surface": "internal/dispatch/docs at f533f33c on Postgres 18.6; envoy-dispatch f533f33c process with a typing client and agent HTTP edits; INFRA-707's ygoexp at sami.3",
+      "command": "CGO_ENABLED=1 go test -race -count=300 -timeout 50m -run '^<test>$' (x8); go test -run '^TestStoredOrder'; -run '^TestStoredOrderSoak$' -args -stored-order-rounds=200; bash scenS20.sh; go run . / ./localonly / ./compacted (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-20-tar-gz)",
+      "observed": "Eight tests 300 PASS each, 0 DATA RACE, ok. 15 TestStoredOrder* PASS; soak rounds=200 counted=200 mismatches=0 (write p50 67 ms, p99 243 ms). stored-order: before the fold 408 updates/7 versions clean; the sweep folded 408 rows to 1; the compacted row alone reports unchecked (exit 1, as designed); with 153 newer rows and 2 versions on top, clean, 0 mismatches, exit 0. Harness 0/0 mixed and local-only; compacted variant 0/0 over 120,000 loads. go vet clean.",
+      "headSha": "f533f33ce137a1c0ca3524656fedc27277a64b12",
+      "negativeControl": "Compacted variant folding with cleanup on (NOFIX=1): 413/38."
     }
   ],
-  "ci": "Read on GitHub at fce9e43b at 14:55 UTC: run 41317480208 (created 14:42:01Z) still queued; changes and pr-title success, pi-legion in progress, lint, typecheck, test, dispatch, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess, broker-multiprocess, envoy-go, envoy-go-race, envoy-go-race-api, envoy-go-race-docs, envoy-go-race-pmdoc, envoy-infra-go, envoy-e2e-local, envoy-session-stall, envoy-smoke, listener-server-change, ci-filters, docs / build, worker-image / build queued; ci-ok not posted. Not yet green; every lane but changes and pr-title unread."
+  "ci": "Read on GitHub at f533f33c at 19:19 UTC, run 41337860302: envoy-go and envoy-go-race red on main's TestMigrationSetTakesNumbersThenTimestamps only (see ciRedIsMains); lint, typecheck, test, changes, ci-filters, pr-title, docs/build, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess, broker-multiprocess, envoy-go-race-api, envoy-go-race-docs, envoy-go-race-pmdoc, envoy-infra-go, envoy-e2e-local, envoy-session-stall, envoy-smoke, listener-server-change, pi-legion, worker-image/build green; dispatch in progress and ci-ok not posted (unread)."
 }
