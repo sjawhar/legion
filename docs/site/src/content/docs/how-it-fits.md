@@ -124,11 +124,13 @@ into events on topics for each repository and pull request. Legion's coordinator
 with durable consumers, so an event that arrives while it is down is read when it comes back.
 
 Envoy also delivers messages to agent sessions directly: a message to one session, to whichever
-session holds a role, or a broadcast a person sends from the Dispatch Agents page. An Oh My Pi or
-Claude Code session whose connection drops gets what was sent to it, and what was published on
-the issue topics it follows, from the stream when it reconnects, for up to 72 hours; a role's
-messages are live only. Envoy decides only where an event goes; what to do about it is the
-coordinator's and the agents' business.
+session holds a role, or a broadcast a person sends from the Dispatch Agents page. The listener
+keeps a durable consumer for each Oh My Pi or Claude Code session and hands it the stored
+messages in order, each counted as delivered only once the session has it, so a session that was
+stopped or lost its connection gets what was sent to it, the messages to a role it holds, and what
+was published on the issue topics it follows, once, when it is back, for up to 72 hours. Envoy
+decides only where an event goes; what to do about it is the coordinator's and the agents'
+business.
 
 ## An issue, start to finish
 
