@@ -143,6 +143,50 @@ func TestSessionsImportCopiesEachClaimsSessionOnceAndReportsPerClaim(t *testing.
 	}
 }
 
+func TestSessionsImportFindsAClosedClaimsSessionByID(t *testing.T) {
+	const token = "legion-legion-legion-1-architect"
+	const session = "ses_closed"
+	recorded := agentSessions + "/--legion-workspaces-sjawhar-legion-legion-1--/2026-10-08T12-00-00-000Z_" + session + ".jsonl"
+	r := newSessionsImportRig(t, []map[string]string{{"token": token, "tree": "LEGION-1", "session": session, "sessionFile": ""}})
+
+	t.Run("one matching file imports it", func(t *testing.T) {
+		r.write(recorded, "{\"type\":\"session\",\"id\":\"ses_closed\"}\n")
+		code, out, errb := r.run("--tree", "LEGION-1")
+		if code != 0 || errb != "" || !strings.Contains(out, token+" copied ") {
+			t.Fatalf("import = %d, stdout %q, stderr %q; want the closed session copied", code, out, errb)
+		}
+		onVolume := filepath.Join(r.volume, "sessions", strings.TrimPrefix(recorded, agentSessions+"/"))
+		if held, ok := r.held(onVolume); !ok || held != "{\"type\":\"session\",\"id\":\"ses_closed\"}\n" {
+			t.Fatalf("table holds %q (%t) for the found session, want its file", held, ok)
+		}
+	})
+
+	t.Run("no matching file names the claim and session", func(t *testing.T) {
+		r := newSessionsImportRig(t, []map[string]string{{"token": token, "tree": "LEGION-1", "session": "ses_missing", "sessionFile": ""}})
+		code, out, _ := r.run("--tree", "LEGION-1")
+		if code != 1 || !strings.Contains(out, token+" failed session ses_missing") || !strings.Contains(out, "was not found") {
+			t.Fatalf("import = %d, stdout %q; want the missing session named", code, out)
+		}
+	})
+
+	t.Run("multiple matching files refuse them", func(t *testing.T) {
+		r := newSessionsImportRig(t, []map[string]string{{"token": token, "tree": "LEGION-1", "session": "ses_duplicate", "sessionFile": ""}})
+		first := agentSessions + "/one/2026-10-08T12-00-00-000Z_ses_duplicate.jsonl"
+		second := agentSessions + "/two/2026-10-08T13-00-00-000Z_ses_duplicate.jsonl"
+		r.write(first, "{\"type\":\"session\",\"id\":\"ses_duplicate\"}\n")
+		r.write(second, "{\"type\":\"session\",\"id\":\"ses_duplicate\"}\n")
+		code, out, _ := r.run("--tree", "LEGION-1")
+		for _, want := range []string{token + " refused session ses_duplicate", "multiple files", filepath.Join(r.volume, "sessions", "one"), filepath.Join(r.volume, "sessions", "two")} {
+			if !strings.Contains(out, want) {
+				t.Errorf("import output %q does not name %q", out, want)
+			}
+		}
+		if code != 1 {
+			t.Errorf("import = %d, want 1 for duplicate session files", code)
+		}
+	})
+}
+
 // The claims list is the one `legion claims list --json` prints, read from stdin with `-`; anything
 // else is refused before the database is opened, as is a missing flag.
 func TestSessionsImportRefusesWhatIsNotAClaimsList(t *testing.T) {

@@ -1069,6 +1069,7 @@ Either marker permits the reap.
 Without a database marker, the daemon refuses when a matching claim records a session; it has no providers-Secret read permission or session-store connection, so it cannot inspect the session database.
 Its refusal names the claim, session, and volume.
 To keep the session's contents, run the import procedure below first, then [clear the stopped claim's recorded session](#starting-fresh-when-a-session-is-lost-or-wedged).
+When `issue_close` already cleared its resume path, the importer searches `<tree-volume>/sessions/*/*_<session>.jsonl` by the retained session id; exactly one match imports, no match reports the claim and id, and several matches are refused.
 Only clearing that record permits the reap.
 The next generation starts fresh, while the imported session row remains in the database.
 
@@ -1102,9 +1103,10 @@ Its Sandbox goes, and its volume and session go with it, so step 5 clears the se
    Before anything it refuses a project whose Sandboxes are issue pods (a later release), one with a Sandbox not `Suspended`, whose pod could still start, and one with a pod that has not ended (any phase but `Succeeded` or `Failed`): each would be a writer the copy misses.
    It deletes a pod an interrupted run left before creating one, reports a pod that fails at once, exits 1 when any tree's import did, names a tree whose volume or root Sandbox is gone, and names every claim that records a session and belongs to no tree, the cleared controller's among them, which step 5 clears.
 
-   For each claim of that tree it reads the recorded session file from the volume (its path below the agents' sessions directory, below `<tree-volume>/sessions`; without `--tree-volume` it reads the recorded path itself) and writes it as one row keyed by that recorded path: the whole file as `content`, `byte_len` its size, `mtime_ms` the file's, no title and no parts, which is how Oh My Pi reads a row an older release of it wrote.
+   For each claim with a recorded session file it reads that file from the volume (its path below the agents' sessions directory, below `<tree-volume>/sessions`; without `--tree-volume` it reads the recorded path itself) and writes it as one row keyed by that recorded path: the whole file as `content`, `byte_len` its size, `mtime_ms` the file's, no title and no parts, which is how Oh My Pi reads a row an older release of it wrote.
+   When `issue_close` already cleared a claim's resume path, the importer finds `*_<session>.jsonl` below the volume's sessions directory from the retained session id; exactly one match imports, none names the claim and session as missing, and several are refused by name.
    It creates the two tables with Oh My Pi's own statements when the database has none.
-   It prints one line per claim of the tree — `copied`, `copied before (identical …)`, `recorded no session`, `failed` (a file the volume does not hold) or `refused` (the table already holds that session with other content, which it leaves as it is) — then a `missing` line for every claim of the whole list, any tree's, whose recorded session the table does not hold, then a count of each.
+   It prints one line per claim of the tree — `copied`, `copied before (identical …)`, `recorded no session`, `failed` (a file or retained session the volume does not hold) or `refused` (several files for one retained session id, or a table row with other content, which it leaves as it is) — then a `missing` line for every claim of the whole list, any tree's, whose recorded session the table does not hold, then a count of each.
    It exits 1 on any `failed` or `refused`, on a `missing` of the claims it was asked to copy (another tree's is reported only), and when `--tree` selects no claim of the list, which is a mistyped key.
 
 4. **Copy every tree again.**
@@ -1182,8 +1184,7 @@ Once the roles have stopped, the daemon sets that issue's Sandbox to `Suspended`
 Then it deletes the Sandbox, whatever the close was:
 a child set `done`, one set `backlog`, `icebox` or `triage`, and a root leaving the workflow with its tree are one case now, since a Sandbox kept behind would hold nothing (`SuspendIssue`, `internal/runtime/sandbox/issue_suspend.go`), logging `sandbox runtime: deleted the closed issue's
 Sandbox and the role Secrets it owned` — the six role Secrets go with it by owner reference.
-A `done` child's stops were `issue_close` supervise rows, which retire each of its claims with the session it recorded dropped, so a later `todo` starts it fresh;
-every other close keeps the claims' sessions in the table for a re-admission to resume.
+An `issue_close` retires the claim and keeps its session id as volume-reap evidence, clears the resume path, and so makes a later admission fresh once cleanup succeeds.
 The parent's Sandbox is another issue's and is never touched.
 A daemon restart retries the stored effect.
 Re-admission during linger makes the Sandbox, the pod and its disk afresh and resumes the recorded sessions;
