@@ -595,6 +595,42 @@ func TestAnEventAppendQueuesNoChange(t *testing.T) {
 	}
 }
 
+// A write that sets an item's search vector itself is a change to what the project holds, and
+// each item trigger carries search in its column list so that nothing else is needed to see it.
+// This matters more than it looks: before this release a full rebuild every ten minutes repaired
+// a write no trigger saw, and a project that holds a snapshot is now counted by step passes
+// alone, so such a write would stay counted wrong with no limit. Without search in the four
+// lists, every one of these writes queues nothing and this test fails.
+func TestADirectWriteOfTheSearchVectorQueuesTheChange(t *testing.T) {
+	fixture := newTermFixture(t, "VECTOR")
+	ctx := context.Background()
+	for _, item := range []struct {
+		table     string
+		statement string
+		argument  any
+	}{
+		{"issues", `update issues set search = to_tsvector('simple', 'quadrant') where key = $1`, fixture.issueKey},
+		{"comments", `update comments set search = to_tsvector('simple', 'rete') where issue_key = $1`, fixture.issueKey},
+		{"asks", `update asks set search = to_tsvector('simple', 'quadrant') where issue_key = $1`, fixture.issueKey},
+		{"messages", `update messages set search = to_tsvector('simple', 'plateau') where issue_key = $1`, fixture.issueKey},
+	} {
+		if _, err := fixture.database.Pool.Exec(ctx, `delete from search_term_queue`); err != nil {
+			t.Fatalf("empty the queue before the %s write: %v", item.table, err)
+		}
+		result, err := fixture.database.Pool.Exec(ctx, item.statement, item.argument)
+		if err != nil {
+			t.Fatalf("write %s.search: %v", item.table, err)
+		}
+		written := result.RowsAffected()
+		if written == 0 {
+			t.Fatalf("the write of %s.search matched no row, so it tests nothing", item.table)
+		}
+		if queued := queuedChanges(t, fixture.database); queued == 0 {
+			t.Fatalf("a write of %s.search over %d rows queued no change", item.table, written)
+		}
+	}
+}
+
 // After a step pass the totals row carries the snapshot that pass took, its refreshed_at is the
 // moment of that snapshot, and every queue row left behind is one the snapshot cannot see - which
 // is what makes the rows it dropped exactly the rows it applied.
