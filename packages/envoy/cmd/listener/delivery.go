@@ -93,9 +93,9 @@ type listenerDeliveryHandlerConfig struct {
 	// not walk that role's kept lane together and read the same copy twice (drainKeptRole).
 	// Across listeners the guard is the kept lane's cursor: each drain claims a copy by advancing
 	// the cursor under a compare-and-swap before it forwards it, and the loser of that claim stops
-	// (bus.ErrCursorMoved, writeRoleKeepCursor). It is required, as deferredUnplaceable is: main.go
-	// makes one and sets it once, so every handler and every route built from that config guards
-	// one set of roles. A test that builds a config sets its own.
+	// (bus.ErrCursorMoved, roleKeepLaneCursor.write). It is required, as deferredUnplaceable is:
+	// main.go makes one and sets it once, so every handler and every route built from that config
+	// guards one set of roles. A test that builds a config sets its own.
 	roleKeepDrains *roleKeepGuards
 }
 

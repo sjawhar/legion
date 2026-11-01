@@ -93,6 +93,17 @@ func (l *keptLaneUnderClaim) keep(t *testing.T, role, prefix string, count int) 
 	return keys
 }
 
+// deliver hands item to the role lane as a core message, the way Dispatch's outbox publishes a
+// role-routed event. It is this lane's own delivery configuration rather than the harness's,
+// because the keep the lane makes for a role with no live holder hands that lane over in a
+// goroutine of its own (keepForNextHolder): that handover resolves whoever holds the role by
+// the time it runs, so it must forward through the stand-in this rig records, and not through
+// the harness's own forward to a session nothing stands in for.
+func (l *keptLaneUnderClaim) deliver(t *testing.T, item contracts.Envelope) {
+	t.Helper()
+	coreNATSDeliveryHandler(*l.deps.delivery)(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+}
+
 // register registers sessionID as the live self-subscribed session a drain forwards to.
 func (l *keptLaneUnderClaim) register(t *testing.T, sessionID string) {
 	t.Helper()
@@ -544,7 +555,7 @@ func TestADispatchRoleRoutedEventToAnUnheldRoleReachesTheNextHolder(t *testing.T
 	// The shape publishRoute hands the bus for a role route: the event's own envelope, on the
 	// role topic.
 	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "dispatch-route-1")
-	harness.coreHandler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+	lane.deliver(t, item)
 	waitForKeptRoleMessage(t, harness.client, role, item.EventID)
 
 	lane.register(t, holder)
@@ -553,5 +564,56 @@ func TestADispatchRoleRoutedEventToAnUnheldRoleReachesTheNextHolder(t *testing.T
 	handed := lane.await(t, 1, 30*time.Second)
 	if handed[0].holder != holder || handed[0].key != roleForwardDedupePrefix+item.DedupeKey {
 		t.Fatalf("the Dispatch event reached %+v, want %s to %s", handed[0], roleForwardDedupePrefix+item.DedupeKey, holder)
+	}
+}
+
+// A lane-head read that did not answer says nothing about the role's holder, so the handover
+// reads the lane again after a pause of its own rather than ending there. A handover that ended
+// on the first such read returned nil, so the line every start of a handover writes for one that
+// failed (reportKeptRoleDrain) was never written: the copies on the lane - each with a sender
+// answered 202 kept, and a holder that has just claimed the role - waited for the sweep with
+// nothing above Debug said about them. Only the first resolution of the role's holder is the
+// keep's own no-holder case.
+func TestAHandoverRetriesALaneHeadReadThatFailedOnItsFirstPass(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const (
+		role   = "kept-head-read-failed"
+		holder = "ses_kept_head_read_failed"
+	)
+	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "kept-head-read-failed-00")
+	if !keepRoleMessage(harness.client, harness.config.logger, role, item) {
+		t.Fatalf("keep the copy; the listener log says why:\n%s", harness.logs.String())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	// A cursor no read can decode: every lane-head read of this role fails on it, which is a
+	// bus that answers for the lane and not for its cursor, made deterministic.
+	if _, err := harness.client.PublishCursorAt(ctx, bus.KeptRoleCursorSubject(role), []byte("{"), 0); err != nil {
+		t.Fatalf("write the cursor no read can decode: %v", err)
+	}
+	claimRoleWith(t, harness, holder, role, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true})
+
+	// Every read fails, so the handover's own window is what ends it: three of its first pause
+	// hold the first read, the pause after it and the read behind that one.
+	handoverCtx, cancelHandover := context.WithTimeout(ctx, 3*roleKeepDrainRetryPause)
+	defer cancelHandover()
+	started := time.Now()
+	err := drainKeptRole(handoverCtx, harness.config, role, time.Now)
+	elapsed := time.Since(started)
+
+	if err == nil {
+		t.Fatalf("the handover whose lane-head reads all failed reported nothing, so the lane it left undrained is said nowhere above Debug:\n%s",
+			harness.logs.String())
+	}
+	if elapsed < roleKeepDrainRetryPause {
+		t.Fatalf("the handover ended %s in, inside the first pause of %s it earns: a lane-head read that failed is retried, not read as the keep's no-holder case",
+			elapsed, roleKeepDrainRetryPause)
+	}
+	// What that error is for: the one line every start of a handover writes for one that failed,
+	// at Error.
+	reportKeptRoleDrain(harness.config, role, err)
+	const line = "listener kept role drain failed"
+	if said := strings.Count(harness.logs.String(), line); said != 1 {
+		t.Fatalf("the handover is reported %q %d times, want the one line above Debug:\n%s", line, said, harness.logs.String())
 	}
 }

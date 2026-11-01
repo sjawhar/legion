@@ -376,10 +376,11 @@ test("the architect is told at the threshold, asked again when the listener kept
     env: { LEGION_STALL_ARCHITECT_AFTER: "2" },
     publish: async (_input, attempt) => {
       if (attempt > 1) return {}
-      // The listener's "nothing was kept for that role". The notice asks for no `keep: false`,
-      // so a role no session holds is kept and answered 202 instead (INFRA-839); this 404 is a
-      // keep that failed, or a listener from before the kept lane. Either way the architect was
-      // not told, and the next delivered reminder publishes again under the same key.
+      // The listener's "nothing was kept for that role". The notice is the shared one, which
+      // sends `keep: false` (`createPhaseReminder`, packages/pi-shared/src/phase-reminder.ts),
+      // so the listener keeps nothing for an architect role no session holds: this 404 is the
+      // ordinary answer to it. The architect was not told, and the next delivered reminder
+      // publishes again under the same key.
       throw new EnvoyApiError({
         method: "POST",
         url: "http://listener.test/v1/messages/publish",

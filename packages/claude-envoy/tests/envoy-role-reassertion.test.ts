@@ -197,6 +197,7 @@ test("the role read's 404 still means no live holder: the kept lane changed only
     heartbeatMs: 25,
     configFile: { path: join(stateDirectory, "envoy.json"), error: null },
     stateDirectory,
+    clientInstanceID: "a1b2c3d4e5f60718293a4b5c6d7e8f90",
     pluginVersion: "source",
   })
   session.onRoleRegained(async (role, reason) => {
@@ -246,6 +247,7 @@ test("a soft claim another live session refuses removes the role record, which n
     heartbeatMs: 25,
     configFile: { path: join(stateDirectory, "envoy.json"), error: null },
     stateDirectory,
+    clientInstanceID: "a1b2c3d4e5f60718293a4b5c6d7e8f90",
     pluginVersion: "source",
   })
   const regains: string[] = []

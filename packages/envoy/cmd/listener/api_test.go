@@ -668,7 +668,15 @@ func TestRoleHolderStateIsNamedByEachRoutesAnswer(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client := setupPublishTestClient(t)
 			registry, sessions := setupSessionsTest(t, nil, nil)
-			handler := tc.handler(withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions}))
+			deps := withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
+			handler := tc.handler(deps)
+			// The publish route's keep hands the role's lane over in a goroutine of its own
+			// (keepForNextHolder), and that handover resolves the role's holder: it would find
+			// the claim this test makes below lapsed and release it, which is right of the
+			// product and wrong for a test that is about what each route answers. The guard one
+			// handover of a role takes is held here for the whole subtest, so every handover the
+			// keeps start waits and none resolves a holder while the test is setting one up.
+			defer deps.delivery.roleKeepDrains.hold("reviewer")()
 
 			unclaimedRecorder := httptest.NewRecorder()
 			handler.ServeHTTP(unclaimedRecorder, tc.request())
