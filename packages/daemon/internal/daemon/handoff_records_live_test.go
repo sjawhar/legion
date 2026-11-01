@@ -608,7 +608,7 @@ func (r *handoffRecordsLive) write(session, issue, word string, body []byte) han
 // <KEY>, version <n> (id <uuid>)`.
 func parseWritten(t *testing.T, out string, code int) handoffWritten {
 	t.Helper()
-	line := firstLine(out)
+	line := firstLineOf(out)
 	var word, key, id string
 	var version int
 	if _, err := fmt.Sscanf(line, "Recorded the %s handoff of %s version %d (id %s", &word, &key, &version, &id); code != 0 || err != nil {
@@ -731,7 +731,9 @@ func digest(b []byte) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-func firstLine(s string) string {
+// firstLineOf is the first line of s with its surrounding space trimmed: the line a command printed
+// first, whole.
+func firstLineOf(s string) string {
 	line, _, _ := strings.Cut(strings.TrimSpace(s), "\n")
 	return line
 }
@@ -796,8 +798,8 @@ func (r *handoffRecordsLive) claimant(role claim.Role, issue, session string) *h
 }
 
 // serve reads every frame the daemon sends the shim until the connection closes: it answers the
-// protocol negotiation, the state probe (idle, or streaming while a turn runs) and an abort, and
-// takes each prompt - answering it and starting the turn, as Oh My Pi does - for the step to read.
+// protocol negotiation and the state probe (idle, or streaming while a turn runs), and takes each
+// prompt - answering it and starting the turn, as Oh My Pi does - for the step to read.
 func (c *handoffClaimant) serve() {
 	// The reader dialShim read the hello_ack through, which may already hold the frames after it.
 	reader := c.sh.lines
@@ -820,9 +822,6 @@ func (c *handoffClaimant) serve() {
 			c.mu.Unlock()
 			data, _ := json.Marshal(shimwire.StateData{IsStreaming: &streaming})
 			c.send(shimwire.Response{ID: f.ID, Command: shimwire.TypeGetState, Success: true, Data: data})
-		case shimwire.Abort:
-			c.send(shimwire.Response{ID: f.ID, Command: shimwire.TypeAbort, Success: true})
-			c.endTurn()
 		case shimwire.Prompt:
 			c.send(shimwire.Response{ID: f.ID, Command: shimwire.TypePrompt, Success: true})
 			c.mu.Lock()

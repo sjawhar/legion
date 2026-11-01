@@ -183,8 +183,11 @@ stamps.
 - **The daemon-launched controller keeps failing.** `legion claims list` shows its claim,
   `legion-<project>-controller`, and the daemon logs why each launch failed and when it retries a
   failed one. `kubectl -n <namespace> describe pod legion-<project>-controller` and its logs show the
-  pod's own side. The controller's session is a row in the session database like every other, so a
-  launch that cannot find it fails naming it rather than starting a fresh controller quietly.
+  pod's own side. If the stopped controller's session was lost with its volume or wedged by a
+  provider refusal, take its recorded session from the claim and run `legion claims forget-session
+  --claim legion-<project>-controller --session <recorded session id> --operator-token-file <file>`.
+  The daemon clears the claim's matching session record only; it does not read or change the session
+  database, so its old row remains. Its keeper then retries the claim with a fresh session.
 - **The daemon refuses to boot: `stop legion-<project>-controller, the controller an earlier boot
   under controller: daemon launched, since this daemon leaves the controller to its operator
   (controller: operator): …`.** `legion.yaml` was switched back to `controller: operator`, and the
@@ -232,8 +235,10 @@ Check, in order:
 
 1. **The label.** The issue must carry the Dispatch label `legion`. A root without it is never
    admitted, whatever its status.
-2. **The status.** A root runs from `todo`. In `triage` it waits for the controller; in `backlog` or
-   `icebox` it does not run.
+2. **The status.** A root runs from `todo`. In `triage`, a person's `legion` label is queued by the
+   daemon, and the root moves to `todo` itself; a label a session set waits for the controller. A
+   root the daemon recorded that a person moved back to `triage` is never queued again: it runs
+   again only from `todo`. In `backlog` or `icebox` it does not run.
 3. **The project and its repository.** The issue's project must be the daemon's, under `projects`
    in `legion.yaml`, and its repository one the daemon serves. An issue whose repository resolves to
    none, or to one not mapped to the project, or left out for a missing App, is not admitted: the
@@ -380,6 +385,19 @@ as a lingering tree's does, is refused naming the issue. `legion claims retry --
 same of every failed claim the daemon holds, in turn, prints each one it retried, and exits 1
 naming each it refused: run it once the cause of a run of failed launches is gone (a host moved
 onto tmux, a broken key replaced).
+
+When a failed architect's session was lost with its volume or wedged by a provider refusal, clear
+the stopped claim's matching record before retrying:
+
+```sh
+legion claims forget-session --config legion.yaml --operator-token-file operator-token --claim <token> --session <recorded session id>
+```
+
+The daemon does not read or change the session database, so the old session row remains. A root
+that was parked should be re-admitted after this command, not retried by hand; its next workflow
+start spawns a fresh session. To replace a session of a claim that is still live, suspend it first;
+the command refuses every live claim and any `--session` that does not equal the recorded session.
+The resumed claim starts fresh with its pending task.
 
 To see why the launches failed, read the failed role's lines of the `roles` container's log in the
 issue's pod. The launcher prefixes each role's lines with the role's name:
@@ -658,11 +676,30 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   branch; …`; the issue moves on once a pull request is recorded open, and when the next pass
   lists none open on the branch the architect is told
   ([An architect is told `pull-request-missing`](#an-architect-is-told-pull-request-missing)).
+- **A worker's completion refused `HANDOFF_STALE_ASSIGNMENT`.** The phase the completing turn was
+  working ended under that turn, and the role has since been handed the phase's work again: the
+  issue left the phase and came back, or CI settled red while the tester tested, while the reviewer
+  reviewed a round it had not completed, or while the merger worked toward its `READY`. The daemon
+  ends no turn, so the turn reporting the completion is the earlier assignment's and nothing is
+  recorded. The refusal names the issue, the role and the phase: the worker ends that turn without
+  completing, and reports that commit and that verdict no further. The phase was entered again, so
+  the task the daemon queued for the assignment it hands the role now — which arrives as the
+  session's next prompt — is work of its own: a testing assignment after a red is for the head the
+  fix pushed, and the verdict on the head before it answers for nothing there. The worker does that
+  task's work, writes a handoff of its own for it, and completes in its turn. When no such task is
+  queued for it, the refusal says so and the worker tells its architect.
 
 An issue back in `in_progress` from `retro` or `merging` had a required check or workflow turn red
 on the head: the daemon sent it back to the implementer and told the architect which checks. From
 `retro` the implementer kept its turn and was handed the implementing task once that turn ended;
-from `merging` the merger's turn was interrupted. One back in `in_progress` after its `READY`,
+from `merging` the merger kept its turn, its jobs, its process and its session. Neither turn was
+interrupted: each role was told on its own Envoy role topic that its phase had ended and that the
+workspace is the implementer's now. The implementer's retro completion after the move reports the
+assignment retro handed it while the phase holds the implementing one, so it is refused
+(`HANDOFF_STALE_ASSIGNMENT`), and the implementer fixes the red in the implementing task's own turn
+and completes that work with a handoff of its own, never retro's commit; the merger's row
+still names the assignment merging gave it, so a completion it sends for the phase it lost is
+refused (`HANDOFF_NOT_CURRENT_PHASE`). One back in `in_progress` after its `READY`,
 while it awaited its merge, had a required check or workflow turn red on the head itself, or its
 head conflicts with its base (GitHub computes no merge ref for a conflicting head and runs no
 checks on it at all): the daemon sent it back to the implementer, told the architect which checks

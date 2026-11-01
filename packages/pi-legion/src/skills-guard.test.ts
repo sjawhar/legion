@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import {
   brokenRelativeLinks,
@@ -13,6 +14,15 @@ import {
   stageSkills,
 } from "@legion/pi-shared/test/skills-guard";
 
+// The Claude Code plugin is generated from this repository's skills/ and this package's agents/,
+// and only main's Rebuild Claude Envoy plugin workflow commits packages/claude-envoy/legion/, so
+// a check of what a Claude Code role loads builds a fresh one, as
+// packages/claude-envoy/tests/legion-plugin-fresh.test.ts does. The build runs as its own command,
+// the way stageSkills runs the prepack script: imported, that package's sources would be
+// typechecked under this package's `tsc`, whose `lib` is older than the one they are written
+// against.
+const PLUGIN_BUILDER = path.join(REPO_ROOT, "packages/claude-envoy/scripts/build.ts");
+
 // The rules (`@legion/pi-shared/test/skills-guard`) over the skills this package stages into
 // dist/skills: the partition scripts/pi-plugin-prepack.sh gives @sjawhar/pi-legion, staged here as
 // its prepack stages it. Everything a Legion agent reads that can link into a skill is a linking
@@ -22,6 +32,7 @@ import {
 // partition is valid because the Envoy plugin, installed beside this one, ships it.
 const repoSkillsRoot = path.join(REPO_ROOT, "skills");
 const promptsRoot = path.join(REPO_ROOT, "packages/daemon/internal/prompts");
+const agentsRoot = path.join(REPO_ROOT, "packages/pi-legion/agents");
 let staged: string;
 
 beforeAll(() => {
@@ -226,3 +237,83 @@ test("no staged skill or daemon prompt says what a pull request body `CI` line h
     });
   expect(instructing).toEqual([]);
 });
+
+// Background work is on for every role: Legion writes no Oh My Pi settings
+// overlay, so a long bash call becomes a background job and a `task` subagent runs as one, and a
+// role reads a result with the `wait` tool, which a message to its session also returns from. No
+// task agent declares `blocking`, and nothing interrupts a turn: a CI red that ends a
+// phase starts the implementer at once and tells the role whose phase ended by one message, which
+// stops nothing of its. So no skill, no shipped agent and no file of the plugin a Claude Code role
+// loads may say that a takeover cancels a turn or tell a role to keep its work in
+// the foreground, and each that dispatches a task subagent names the tool that reads its result.
+//
+// Three of the four trees that carry this text are read here — the repository's skills/, the
+// plugin's agents/, and a
+// fresh `buildLegionPlugin` output, which is generated from those two and so is the only copy of
+// `packages/claude-envoy/legion/` a pull request can check (that tree is committed by main's
+// Rebuild Claude Envoy plugin workflow alone). The daemon's prompts are the fourth, read by
+// packages/daemon/internal/prompts/roles_test.go, which walks both of its embed trees and so
+// reaches go/claude-mechanics.md, a part `Compose` never joins.
+//
+// Both halves are exact: the retired sentences as literals, and the dispatch as the boot gate's
+// own `task(agent="` against `` `wait` `` as a backticked token, since the English word "wait" is
+// in many of these files and one of them forbids waiting (packages/daemon/internal/prompts/go/
+// implementer.md, "never wait for CI"). The files that dispatch are listed rather than counted, so
+// one that stopped dispatching fails as loudly as one that started, and a reader that found
+// nothing cannot pass while checking nothing.
+test("no skill, agent or plugin file keeps work in the foreground, and each that dispatches a task names `wait`", () => {
+  const retired = [
+    "interrupts your turn",
+    "tool calls are cancelled",
+    "interrupted its turn",
+    "run none in the background",
+    "one foreground command",
+    "blocking: true",
+  ];
+  const out = path.join(mkdtempSync(path.join(os.tmpdir(), "legion-plugin-")), "build");
+  try {
+    const built = Bun.spawnSync([process.execPath, PLUGIN_BUILDER, "--out", out]);
+    if (built.exitCode !== 0) {
+      throw new Error(
+        `${PLUGIN_BUILDER} --out ${out} exited ${built.exitCode}:\n${built.stderr.toString()}`
+      );
+    }
+    const plugin = path.join(out, "legion");
+    const saidAnyway: string[] = [];
+    const dispatching: string[] = [];
+    const silent: string[] = [];
+    for (const file of [repoSkillsRoot, agentsRoot, plugin].flatMap(files)) {
+      const name = file.startsWith(plugin)
+        ? `the fresh Claude plugin's ${path.relative(plugin, file)}`
+        : path.relative(REPO_ROOT, file);
+      const text = readFileSync(file, "utf8");
+      for (const phrase of retired) {
+        if (text.includes(phrase)) saidAnyway.push(`${name}: ${phrase}`);
+      }
+      if (text.includes('task(agent="')) {
+        dispatching.push(name);
+        if (!text.includes("`wait`")) silent.push(name);
+      }
+    }
+    expect(saidAnyway).toEqual([]);
+    expect(silent).toEqual([]);
+    expect(dispatching.sort()).toEqual([
+      "skills/AGENTS.md",
+      "skills/ce-simplify-code/SKILL.md",
+      "skills/dispatch-writing-specs/SKILL.md",
+      "skills/legion-architect/references/decomposition.md",
+      "skills/legion-architect/references/design-gate.md",
+      "skills/legion-oracle/SKILL.md",
+      "skills/legion-retro/SKILL.md",
+      "skills/legion-worker/references/merge-gate.md",
+      "the fresh Claude plugin's skills/ce-simplify-code/SKILL.md",
+      "the fresh Claude plugin's skills/legion-architect/references/decomposition.md",
+      "the fresh Claude plugin's skills/legion-architect/references/design-gate.md",
+      "the fresh Claude plugin's skills/legion-oracle/SKILL.md",
+      "the fresh Claude plugin's skills/legion-retro/SKILL.md",
+      "the fresh Claude plugin's skills/legion-worker/references/merge-gate.md",
+    ]);
+  } finally {
+    rmSync(path.dirname(out), { recursive: true, force: true });
+  }
+}, 60_000);

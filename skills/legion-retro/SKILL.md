@@ -52,8 +52,9 @@ missing proof goes back as step 1 says. The Dispatch message (step 6) is for a f
    First list, in your session, the constraints the issue did not state, choices between two
    working options, approaches you abandoned, and code another issue could reuse, so the second
    answer does not set your list. Then run `task(agent="oracle")` (read-only) with the issue, the
-   pull request body and the diff in its brief, asking for reusable learnings. You decide which
-   points to keep. Drop one that cites no file, line or commit of this pull request.
+   pull request body and the diff in its brief, asking for reusable learnings, and `wait` for its
+   answer, since it runs as a job of its own. You decide which points to keep. Drop one that cites
+   no file, line or commit of this pull request.
 3. **Commit the learnings.** Start your turn's first commit with the `jj log -r @ -T 'empty'`
    check your role prompt gives, so it does not carry the previous role's author. Write each kept
    point you can state as a rule a worker on another issue could follow as a document under

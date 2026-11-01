@@ -15,7 +15,7 @@ Envoy delivers external events and messages between sessions. Delivery is at-lea
 - Reply with `in_reply_to=<the delivery's id>`, so the recipient can match the answer to its question.
 - Read the `recipient` in the send result, the session Envoy targeted: if it is not the one you meant, resend to the right id.
 - Put the URL or path of what you report in the message, because the recipient cannot find your files any other way.
-- Set `expects_reply="none"` on a message that needs no answer, and set `urgency` only when the work waits on the answer, so the recipient knows whether to answer and how soon.
+- Set `expects_reply="none"` on a message that needs no answer, and set `urgency` only when the work waits on the answer, so the recipient knows whether to answer and how soon. `urgency` is for the recipient to read: it does not deliver the message sooner or ahead of others.
 
 ```text
 envoy_send(session_id="<id>", message="Review complete: <url>", in_reply_to="<id>", expects_reply="none")

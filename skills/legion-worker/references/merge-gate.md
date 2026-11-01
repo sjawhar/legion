@@ -21,9 +21,10 @@ other change to the head voids it.
 - The reviewer reads CI on GitHub and verifies the `Threads` and `E2E` facts there directly —
   never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
   `task(agent="thermonuclear-code-quality")` once at that head — the head the round reviews —
-  and records the verdict. The CI it reads is the head's own checks: no handoff is a commit, so
-  every push to the branch is work whose head gets GitHub's workflow runs of its own. With
-  `<o>/<r>`, `<n>`, `<base>` and `<headRefOid>` from
+  waits for each one's result with `wait`, since each runs as a job of its own, and records the
+  verdict from what those results say. The CI it reads is the head's own checks: no handoff is a
+  commit, so every push to the branch is work whose head gets GitHub's workflow runs of its own.
+  With `<o>/<r>`, `<n>`, `<base>` and `<headRefOid>` from
   `gh pr view <n> --json baseRefName,headRefOid`, two reads. The required set is the
   base branch's rulesets' required checks and its branch protection's, when it has any. Both
   branch endpoints take the base as a URL path, each segment escaped and each `/` kept (a raw `#`

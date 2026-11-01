@@ -30,7 +30,8 @@ Each item below names a variable, then its purpose.
 
   One value, or several separated by whitespace, so the shared token can rotate with an overlap:
   write the new value followed by the old one, move every consumer to the new one, then write the new value alone.
-  The first is the current value; the API and the document websocket accept every value, comparing a bearer with each in constant time.
+  The first is the current value; the API accepts every value, comparing a bearer with each in constant time.
+  The document websocket takes no bearer at all: it is a person's cookie connection only.
   Whitespace at either end is ignored; startup refuses an empty entry (two whitespace characters in a row, a CR LF among them) or a repeated one, naming its position, never its value.
   A request that authenticates with a value after the first logs one WARN line, `dispatch: request authenticated with a previous shared agent token`, with `entry` (the value's position), `address` (the rightmost `X-Forwarded-For` entry, which is the load balancer's view of the caller, or the connection's own address without one), `user_agent` and `path`, at most once per address and User-Agent every 10 minutes, and never a token.
   Each field keeps its first 256 bytes, and the server remembers up to 10,000 callers; one past that is logged on each request.
@@ -138,6 +139,63 @@ A verified caller acts as the `session` it names in the request body, and every 
 — set from the token, never from the body.
 A JWT the verifier rejects is `401 OIDC_TOKEN_INVALID` naming the reason class; it is never retried as a personal token.
 
+With `DISPATCH_AGENT_SECRETS_URL` set, an access token the secrets broker issued is a fifth credential, and the only one that proves a session of its own.
+It is presented under RFC 9449's DPoP scheme
+— `Authorization: DPoP <token>` with a `DPoP:` proof header signed by the key the token is bound to
+— because that RFC refuses a DPoP-bound token presented under any other scheme;
+the server decides a request by its scheme before it reads any token, so such a presentation is never retried as a bearer, and a bearer is never sent to this check.
+The server asks the broker what the token is (RFC 7662 introspection on `/v1/oauth/introspect`, presenting the same projected ServiceAccount token `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` names as the approval relays do, one affirmative answer reused for five seconds from the broker's answer) and checks the proof against the `jkt` that answer carries, with `DISPATCH_SERVER_URL` as the origin the proof's `htu` must name.
+No setting of its own configures it.
+A revoked token therefore stops resolving within five seconds of the introspection that last called it live, not of the revocation:
+an introspection already in flight when the token is revoked is remembered from the moment it completes, and it may take up to five seconds to complete.
+A verified caller acts as the session the token names, for the person it names, and `actor` in the body does not decide that session:
+absent is accepted, one naming the same session is accepted and its `origin` kept, and one naming any other writer is `403 ACTOR_SESSION_MISMATCH` naming the session the token carries.
+A token scoped to one project carries that project on every actor it writes, set from the token and never from the body;
+a token scoped to its person names no single project and carries none.
+Each refusal is its own code and none repeats the token:
+`401 BROKER_TOKEN_NOT_ACTIVE` (the broker does not hold the token live), `401 BROKER_TOKEN_PROOF_INVALID` (the proof did not meet RFC 9449 Section 4.3, a proof presented twice included
+— a proof is single use by its `jti` and target URI), `401 BROKER_TOKEN_KEY_MISMATCH` (a sound proof signed by a key that is not the token's), `401 BROKER_TOKEN_NOT_A_SESSION` (the token is live but is no session's credential:
+it names no session or no person, or it was issued to a client other than the exchange a session's token comes from, which a machine login's own access token is
+— Dispatch records a write under the session its credential proved, so it acts on none of these rather than letting a body name a session for a credential that names none), `429 BROKER_TOKEN_RATE_LIMITED` (this source address's introspection bucket is empty;
+nothing was asked of the broker) and `503 BROKER_UNAVAILABLE` (the broker answered nothing, so the token was never judged
+— a 503 for the reason `OIDC_ISSUER_UNAVAILABLE` is one).
+A websocket re-resolves its caller every heartbeat from the request that opened it, and for this credential that re-resolution is the broker's introspection answer alone:
+the upgrade's proof authenticated it and cannot be presented a second time.
+Without `DISPATCH_AGENT_SECRETS_URL` there is no such credential, and a `DPoP` presentation is the `401 UNAUTHORIZED` `invalid bearer token` any Authorization header that is not a bearer has always been.
+
+A credential that names one project may write that project and nothing else.
+Every mutating row of the route table declares what its write belongs to (`internal/dispatch/api/routes_table.go`, `writeClasses`;
+a `GET` row declares nothing), in four classes:
+*a project's* — the issue-key rows, the project-key rows, the artifact-id rows, the ask-id rows, the comment-id rows, and the message rows that carry an issue;
+*a project the body names* — the issue create alone, whose project its address does not name, so `createIssue` makes the same check itself once that project is settled;
+*the calling session's* — an agent conversation's own artifact and messages, the two routes a session answers its own delivery on, and the caller-private `me` rows;
+and *the deployment's* — the project create, the repository-to-project map, the delivery settings and session groups, the broadcast, and the credential and machine-login decisions.
+`Register` wraps every mutating route in two checks (`internal/dispatch/api/project_scope.go`), which run after the caller is resolved and before the handler, so no route is left to check either for itself.
+
+The project check resolves the project the addressed object belongs to
+— an issue key, a project key, an artifact id, an ask id, a comment id or a message id, each by one read
+— and lets through only a target that resolves to the caller's own project.
+It fails closed, so a target that resolves to another project, to no project at all (an object belonging to none), or to nothing at all (no such row, or an id Postgres will not read as a uuid) is `403 PROJECT_SCOPE`, naming the project the credential covers and the project the write belongs to where one resolved, and nothing of the credential.
+The two refusals still read differently — a target of another project names that project, one that resolved to nothing says the write resolves to no project of that credential's
+— so failing closed does not close an existence oracle and does not claim to.
+Nothing is read out that way: no GET route is project-scoped, so every answer this check can colour is a refusal of the caller's own write.
+Each resolver sends the raw path value to Postgres, as the handler behind it does, so the check reads a path exactly as the handler then addresses its row by it
+— Postgres's uuid parser takes a hyphen after any group of four digits, and a check that parsed ids in Go admitted those spellings unjudged.
+A deployment-wide write is `403 PROJECT_SCOPE_DEPLOYMENT`, naming the credential's project and the route:
+a credential that may write one project may not create another or change a setting that is not any project's.
+`POST /api/v1/issues` takes its project from the body, or from the repository an external ref names, rather than from its address, so its handler makes the same check, with the same refusal, the moment that project is settled
+— before the ref is resolved to an issue already imported, and before anything is written.
+
+The session check holds the rows classed *the calling session's* whose path names a session
+— the `agents/{session_id}` writes and `PUT /api/v1/me/agents/{session_id}/state` — to the session the caller's credential proved:
+addressing another session's conversation is `403 SESSION_SCOPE`, naming the session the credential acts for, the route and the session addressed.
+Only a broker-issued token proves a session;
+a cookie, a personal token, a Kubernetes service-account token and the shared token prove none and are untouched, so a person still uploads into the conversation they name.
+
+Both checks are a no-op for a credential that carries no project and proves no session
+— a browser cookie, a personal agent token, a Kubernetes service-account token, the shared token, and an access token the broker scoped to a person rather than to one project.
+That is the rule and not a transitional measure: every caller that exists today writes exactly what it wrote before.
+
 GitHub App credentials come either from the `DISPATCH_APP_*` variables or from `~/.local/share/dispatch/app.json`; the variables take precedence.
 Two of them carry rules beyond their row:
 
@@ -165,7 +223,8 @@ see that component's README for its inputs, the IAM grant it writes and the one 
 
 GitHub does not redeliver a webhook delivery that failed.
 When NATS is configured and the App's private key (`DISPATCH_APP_PEM_B64`) is present, Dispatch redelivers them itself, following GitHub's documented approach.
-Every two minutes it lists the App webhook's attempts (`GET /app/hook/deliveries`) and judges each delivery by its GUID, as GitHub's own redelivery script does:
+At start and every two minutes after (Background loops, below:
+each sweep two minutes plus up to a tenth after the last) it lists the App webhook's attempts (`GET /app/hook/deliveries`) and judges each delivery by its GUID, as GitHub's own redelivery script does:
 a GUID with an `OK` attempt is delivered, whatever its failures, and it asks GitHub to redeliver each other GUID with an attempt whose status is not `OK` (`POST /app/hook/deliveries/{id}/attempts`).
 Both endpoints accept only an App JWT, which is why Dispatch runs this.
 The webhook the App delivers to is the Envoy listener's `/webhook/github`.
@@ -520,12 +579,17 @@ What the two processes share, and what each keeps to itself:
 - The two delivery durables keep their shape.
   NATS admits one binder; the second process stands by, asking every two seconds, and takes the durable over within seconds of the holder dying.
 
-- Eleven periodic maintenance loops run once per period across the processes, not once per process.
-  Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a process whose tick lands inside another's pass logs a skip;
-  and, under that lease, each pass is recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick lands between another's passes
+- No leased background loop runs a pass beside another process's pass of the same loop.
+  Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a process whose attempt lands inside another's pass finds it held and logs a skip.
+  The nine timer loops — the delivery reconcile, the architecture import, the webhook redelivery sweep, the outbox's daily document compaction, the block index reconciliation, the term-statistics refresh, the repair of closed and reopened issues' asks, the keyed writes' maintenance sweep (lease `suggestion-outcomes`) and the prune of the registry of live server processes
+  — also record each pass in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick lands between another's passes
   — the ordinary case, since each ticker draws its phase at boot and a rolling update starts the second process minutes after the first
-  — finds the period already served and logs the same skip.
-  The settlement resumption, the delivery live hub, the event-stream relay, the stale-room evictor and the document rooms' timers stay per-process by design, and the embedding queue, the task progress reconciliation and the outbox's own scan claim their own work;
+  — finds the period already served and logs the same skip: each runs once per period across the processes.
+  The two leased woken loops, the reference excerpts and the edit notices, take their lease with no period:
+  a process that finds it held tries again until a pass of its own runs, since the other process's pass may have read before the change that woke this one.
+  The suggestion outcome sweep takes no lease at all:
+  each of its pages holds the `suggestion_outcome_cursor` row `for update`, which serialises two processes by itself (Background loops, below).
+  The settlement resumption, the delivery live hub, the event-stream relay, the stale-room evictor, the shared wake listener and the document rooms' timers stay per-process by design, and the embedding queue, the task progress reconciliation and the outbox's own scan claim their own work;
   the embedding queue's coverage pass runs in every process with no lease, each of its steps safe beside another process's, and drops every vector its own embedder did not make, so every process takes the same embedder settings (Search, below);
   `cmd/dispatch/main.go` says at the call site which loop is which and why.
 
@@ -581,6 +645,121 @@ Shutdown needs none of this: once `Server.Shutdown` begins, Go's server already 
 One race remains: a client can write a request onto an idle pooled connection at the instant the server closes it.
 Clients retry an idempotent request on a new connection, but a proxied `POST` can come back as a `502`.
 
+## Background loops
+
+Dispatch's background loops come in three shapes, so that a database nobody writes costs them nothing except where GitHub gives them no change to wake on.
+`cmd/dispatch/main.go` states the classes at the call site.
+
+**Woken loops** run a pass at start and then only when a Postgres notification says their work may have changed, or when a due time their last pass asked for comes round.
+With nothing written and nothing due they hold no timer and send no statement.
+The four that run passes (`duty.RunWoken`) start two passes no closer together than the period of the ticker each replaced, so under load each runs no more often than that ticker did.
+
+- The embedding queue (`embedqueue.Run`) scans when `embeddings_enqueue`, which every embedding trigger calls, writes a row:
+  it notifies `dispatch_embeddings` (migration `0151`) for a new item or a text whose hash changed, and an update that leaves the text as it was notifies nothing.
+  The rows the coverage pass writes wake it in process.
+  Scans start at least 5 s apart.
+  After each scan it reads when the earliest pending row falls due (a failed row's retry, or another process's claim lapsing after its two minutes) and arms one timer for it, never sooner than 5 s away.
+  A throttled batch waits 5 s plus its backoff before the next.
+  It takes no lease: its claim keeps two processes' scans off each other's rows.
+
+- The reference excerpt reconciliation (`docs.Service.RunReferenceExcerptReconciliation`, lease `reference-excerpts`) is woken by a row trigger on `refs` (`0153`) that notifies `dispatch_excerpts_owed` for each document mention left owed an excerpt, whichever build or command wrote it (`rebuild-refs` included).
+  Batches of 20 documents start at least 2 s apart, the next as soon as that allows while a full batch leaves documents it can still record.
+  A document it cannot read or record is deferred in `reference_excerpt_backoff` (`0152`), keyed by the version that failed:
+  one minute after the first failure, doubling to at most six hours, plus up to a fifth again of jitter;
+  a success deletes the row, and a newer version starts again from one.
+  A deferred document stays out of the batches until it falls due, so documents that keep failing neither hold the loop at 2 s nor keep the ones sorting after them waiting, and the earliest due time is the loop's only timer.
+  Each process's first pass also marks owed the excerpts a pre-`0092` build left stale (`refs.MarkStaleExcerpts`), once.
+
+- The edit notice sweep (`docs.Service.RunEditNotices`, lease `edit-notices`) is woken by a row trigger on `document_edit_notices` (`0157`) that notifies `dispatch_edit_notices` each time a writer gives a notice a due time:
+  a person's settled version opening or moving its quiet window, from either build.
+  A sweep sends the notices that are due, each as one `artifact.human_edited` event, and then reads the earliest due time left (`document_edit_notices_due`) and arms one timer for it, so a notice goes when its quiet window ends.
+  Sweeps start at least 5 s apart, the period of the timer it replaced:
+  a notice still due after a sweep (past a batch of 20, or one whose send failed) is swept again 5 s later, and a notice goes at most 5 s after its due time.
+  A held window, which names nobody and has no due time, neither wakes it nor keeps a timer.
+
+- The suggestion outcome sweep (`api.RunSuggestionOutcomeSweep`) is woken by `dispatch_events` (`0107`), which every event commit notifies whichever process made it.
+  Passes start at least 60 s apart.
+  A pass reads the events after its cursor (`suggestion_outcome_cursor`, `0154`) and at or below the event log's safe horizon, as the per-process relay behind a reader's events subscription reads:
+  event ids are not commit order, so a cursor moved past an event that could still commit would never judge by it.
+  The pass takes that horizon once (`events.Horizon.Safe`, the server's one `Horizon`;
+  the first pass after a start takes `events.Horizon.Await`, which waits until the transactions holding an event id on the instance end, and ends with its context), and one left with an event above it asks for a pass 60 s on rather than re-reading at once, so a horizon an open transaction holds back costs one pass a minute;
+  the late commit's own `dispatch_events` notification wakes the loop as any other does.
+  A pass also reads the suggestions no pass has judged yet (`write_suggestions.swept`, `0155`), in pages of 1,000, each page in a transaction that holds the cursor row `for update`, and judges only the pending suggestions those can resolve:
+  the newly recorded ones, against all their events, and those whose source issue, source document or suggested issue a page's event names.
+  An event or suggestion less than 60 s old waits for a later pass, which the pass asks for as its due time, so an agent's writes within a minute are judged together.
+  The first pass on a database, whose cursor is null, judges every pending suggestion once, as every pass of the release before it did.
+  A failed pass is retried a minute later.
+  Like the embedding queue, it takes no lease:
+  the cursor row each page holds is what serialises two processes woken by one commit, the first pass included, since the row is there from `0154` with a null `event_id`.
+  The second process's page waits on the row and then reads the cursor the first advanced, so it judges what the first did not rather than the same page twice, and no wake is given up to another process's pass.
+
+- The delivery settings both GitHub intakes route by are one cache per process (`delivery.SettingsCache`), read at start and again when `delivery_settings` changes:
+  `delivery_settings_changed` notifies `dispatch_delivery_settings` (`0156`) for a change to any column but the freshness ones every GitHub event and reconcile pass rewrite.
+  A settings change reaches a running intake without a restart, and neither intake reads the row per message or on a timer;
+  a read that fails is tried again 30 s later.
+  The release before this one polls the row every 30 s and may run beside it during a roll.
+
+The two leased woken loops take their lease with no period.
+A process that finds it held tries again
+— every 2 s for the excerpts, every 5 s for the edit notices, plus up to a tenth again
+— until a pass of its own runs, because the other process's pass may have read before the change that woke this one.
+
+**Boot passes** run once at start:
+
+- The embedding coverage pass (`embedqueue.Cover`, Search below) runs once, with no lease.
+  After it only its identity steps run again:
+  at once when this process's queue first embeds successfully after the pass skipped them for a canary the embedder did not answer, and every `identityRecheckInterval` (10 minutes, plus up to a tenth again) while a run still finds rows of another identity, so a vector an old-configuration process commits during a roll is dropped.
+  Once a run finds none, the loop holds no timer.
+
+- The task progress reconciliation (`docs.Service.RunTaskProgressReconciliation`) counts every issue whose stored task count is not its latest version's.
+  Every version write records its count in its own transaction, so nothing makes new drift while the process runs but a row another writer held during the pass:
+  those are retried up to six more passes, the first a second later and doubling to at most a minute, and drift left after them is logged at WARN and left to the next start.
+
+**Timers that stay**, because nothing announces what they would miss
+— a webhook that never arrived, a delivery that failed, a source's branch head, an expired key, a delivery a process that died still owes:
+
+- The delivery reconcile (`delivery.ReconcileInterval`) and the architecture import (`architecture.SyncInterval`) run every 5 minutes through `duty.RunJittered`, the first pass after a random delay within one interval.
+  The webhook redelivery sweep (Webhook redelivery, above; `redeliver.Interval`) runs every 2 minutes, its first sweep at start.
+  Each waits the interval plus up to a tenth again after every pass (`duty.Jittered`), drawn afresh every period, so two processes' passes drift apart rather than ticking in step.
+  GitHub has no feed of what these three would miss.
+
+- The keyed writes' maintenance sweep (`api.RunMaintenanceSweep`, lease `suggestion-outcomes`, `api.MaintenanceSweepInterval`) deletes the `Idempotency-Key` rows past their 24 hours and then sends every delivery a process that died left owed (Keyed writes, below), once a minute across the processes:
+  its pass records its period in `duty_passes` like the timers above, so the other process's tick inside a period already served skips.
+  No notification replaces this timer, which is why it is the one piece of maintenance that stayed one:
+  a key passes its window by the clock alone, and a delivery is owed because the process holding it died, which commits nothing to announce.
+  It keeps the lease name the suggestion outcome sweep carried this work under, so during a roll the earlier release's pass and this one still exclude each other on it.
+
+Outside these classes, the outbox still scans on a 5 s retry ticker and compacts daily, the settlement resumption still runs every minute, the block index reconciliation (lease `block-index`) runs every 30 s (every 2 s while a batch is full) and the repair of closed and reopened issues' asks (lease `issue-ask-repair`, Database migrations below) every 10 minutes after its boot pass, each recording its passes in `duty_passes` with its period, and the per-feature listeners (the delivery live hub, the event stream relay, the stale-room evictor) keep their own connections and keep-alive pings.
+
+**One shared listener per process.**
+Every woken loop waits on one `pglisten.Hub` (owner `dispatch background wakes` in its log lines), which holds one connection from the store's listener pool and LISTENs on every loop's channel.
+A channel is registered only for a loop that will run:
+`dispatch_embeddings` only with an embedder, and `dispatch_delivery_settings` only with NATS and the GitHub App.
+No loop waits for the listener: each runs its boot pass whether or not it has connected, and keeps its due-time timers while it has no connection.
+Postgres does not replay a notification sent while nothing listened, so the hub signals every loop after each successful LISTEN, the first included, and a change made while it was redialing (backing off 1 to 30 s) is caught up then.
+
+**The GitHub intake** (`delivery.Intake`) checks each message's subject before it decodes anything:
+only `notifications.github.<owner>.<repo>.pr.<n>`, with nothing after the number, and `notifications.github.<owner>.<repo>.workflow.<file>.<action>` can carry a kind it handles, and every other subject
+— checks, comments, issues, pushes, job events, `pr.<n>.review` — is acknowledged with no decode.
+A wanted message runs under its key: a pull request under its repository and number, read from the subject, and a workflow run under its payload's `repo` and `run_id`.
+Messages of one key run in delivery order, each after the one before has finished, since each fetches its pull request's or run's current state from GitHub and writes it, and run at once an older fetch could be written over a newer one;
+messages of different keys run at once, at most 4, the durable's `MaxAckPending`.
+Its durable's `AckWait`, `MaxAckPending` and filter subject are unchanged.
+`Intake.StopDelivering` hands the durable over, and `Run` calls it when the process stops.
+It drains the subscription the bus client holds for it
+— after the client has replaced its connection, the one the client bound on the new connection
+— and gives up the subscription's registration on the client, so the server delivers it nothing more, no reconnect binds it again and a later subscribe starts afresh (`bus.Client.DrainSubscription`), and holds every message waiting behind its key, and every message the client is handed meanwhile, until no handler is running.
+The messages in their handlers get until the stop's deadline
+— `intakeStopBudget`, 15 s after `Run`'s context ends, armed when it ends
+— to finish and be acknowledged; the handlers still running then are given up, their GitHub calls cancelled, and their messages negatively acknowledged.
+Only then does it negatively acknowledge the held messages, so NATS redelivers them at once to the next holder, which can then not start a pull request's or run's next message while this process still works on the one before it.
+Last it waits for the drain to end, cut short by that deadline.
+A bind under way when the context ends — a standby's poll
+— spends the same deadline rather than starting one of its own:
+its reconciliation's JetStream calls end with it, no subscribe starts once the context has ended, and the subscription of a subscribe already under way is stopped under that deadline.
+The server's shutdown waits for that stop, which begins at the signal and whose 15 s from the signal is its only deadline, before it deregisters the process and closes the database pool:
+a handler waiting on GitHub holds no connection, so nothing else would keep the pool open for its writes.
+
 ## Database migrations
 
 Boot applies `internal/dispatch/store/migrations/*.up.sql` in version order and records each version in `schema_migrations`, which it creates under the runner's advisory lock, so processes booting together against an empty database migrate one after the other.
@@ -610,14 +789,36 @@ The pre-deploy census ("Pre-deploy census" below) is unchanged by that rule and 
 it is taken before any migration of the release applies, and a census that refuses fails the deploy before the service moves.
 The rule in brief is `internal/dispatch/store/README.md`, beside the migrations directory rather than in it, since the loader below refuses a set holding a file named anything else.
 
+A migration added from now on is named `<UTC timestamp>_<name>.up.sql`, the timestamp the moment its author created it, `YYYYMMDDHHMMSS` (`date -u +%Y%m%d%H%M%S`), with its census as `<same timestamp>_<name>.census.sql`.
+The numbered versions are the sequence the set grew up with;
+every one of those files keeps the number it landed with, and no number is added again:
+the series closed at `0157_document_edit_notices_notify.up.sql`, which `migrationid` records once for Dispatch, and a set holding a number above it is refused (`migrationid.Check`), so a branch that takes the next number fails on its own, before it merges.
+Two pull requests open at once used to take one number each and collide only when the first merged — nothing conflicts in git — while two timestamps taken a moment apart belong to their own authors.
+The version is the file name's leading digits read as a number, as before, so every timestamp orders after every number and timestamps order among themselves by time.
+A 14-digit version is past what an `integer` column holds, so `schema_migrations.version` is a `bigint`.
+A database created before the change keeps its `integer` column until a boot whose set holds a timestamped migration, which widens it once, in the same locked transaction that creates the table (`createVersionTable`):
+a boot with no timestamped migration leaves it alone, because the release before this change reads `max(version)` uncast and would fail that read once on every connection that prepared it while it still serves.
+So this release is rolled out before any release that carries a timestamped migration:
+a deployment that skips it costs the release it replaces one failed `/healthz` schema read on each connection that prepared the uncast read, which pgx then drops.
+`schema_version` in `/healthz` is still `max(version)`, the highest version applied — which is not proof that every version below it is applied, since a migration can merge below one a database already has.
+The auto-deployer's rollback guard compares the whole set of recorded versions for that reason, rather than `max(version)` (`packages/envoy/deploy/README.md`, "Auto-deployer").
+
+A migration that merges below one a database has already applied still runs there, exactly once, at the next boot:
+the runner applies every version `schema_migrations` does not record, not only those above the highest it does, each in its own transaction with its version row (`TestMigrateAppliesAMigrationThatArrivedBelowOneAlreadyApplied` and the proofs beside it in `internal/dispatch/store/migrate_out_of_order_test.go`).
+Within one boot the runner applies the versions the database lacks in version order, so a fresh database applies the whole set in that order;
+but a deployed database applies a migration when the release carrying it deploys.
+If T2 deploys before T1 merges, that database applies T2 then T1 while a fresh one applies T1 then T2.
+So a migration must not depend on its order relative to one written in a concurrent pull request, another branch open at the same time;
+one that needs another's effect is written after that one has merged.
+
 The runner records a migration by its version alone, so before it touches the database it reads the whole directory (`pgmigrate.Load`) and refuses to start, applying nothing and naming every file concerned, when two migrations share a version (it would apply the first and skip the rest as already applied;
-keep the number on the file that merged to `main` first and renumber the rest), when a file is named other than `<version>_<name>.up.sql`, `<version>_<name>.down.sql` or `<version>_<name>.census.sql` (a `.down.sql` is a rollback script an operator runs by hand, and a `.census.sql` is the migration's census, "Pre-deploy census" below;
-each needs its `.up.sql`), when a census is not one `select` or calls a function it may not (below), when a version is not decimal digits from 1 to 2147483647, and when a file cannot be read.
+keep the version on the file that merged to `main` first, since a database may already have applied it, and give each of the rest the UTC moment it was created), when a file is named other than `<version>_<name>.up.sql`, `<version>_<name>.down.sql` or `<version>_<name>.census.sql` (a `.down.sql` is a rollback script an operator runs by hand, and a `.census.sql` is the migration's census, "Pre-deploy census" below;
+each needs its `.up.sql`), when a census is not one `select` or calls a function it may not (below), when a version is not decimal digits of a positive number the `bigint` column holds, and when a file cannot be read.
 The directory is embedded with `all:`, which keeps a name beginning with `_` or `.`, so such a name is refused like any other.
 An editor's swap file therefore stops a locally built `envoy-dispatch` from booting, and fails the store's tests, until it is removed, and a binary built while it was there keeps refusing to boot until it is rebuilt;
 Vim writes its swap file beside the file it edits by default.
 What no directive embeds, such as a symlink, a `.git` or a hidden name Go's module paths refuse, never reaches the runner, so only the store's tests catch it (`pgmigrate/pgmigratetest.CheckEmbedsEveryFile` names each cause).
-Versions are applied by number, not by file name, and the store's tests require every file on disk to be embedded (`TestEveryMigrationFileIsEmbedded`) and the versions to run 1 to N with no gap (`TestMigrationSetIsNumberedOneToN`), both reading file names alone, so take the next free number on `main`.
+Versions are applied by their number, not by file name, and the store's tests require every file on disk to be embedded (`TestEveryMigrationFileIsEmbedded`) and the identifiers to be the numbered migrations 1 to the number the series closed at (recorded once in `migrationid`), each taken once with none above it, and a real UTC instant above them (`TestMigrationSetTakesNumbersThenTimestamps`, `migrationid.Check`), both reading file names alone.
 
 Every migration's lock waits are bounded at five seconds (`pgmigrate.LockTimeout`, which `pgmigrate.Exec` sets with `set_config(…, true)`, local to the one transaction the runner applies that migration in, after the runner's advisory lock), so a migration queued behind a long transaction gives up instead of holding every read and write of its table behind its request.
 The runner then rolls that transaction back, holds nothing for two seconds (`pgmigrate.LockTimeoutRetryPause`) so the requests queued behind it run, and tries again, up to three attempts (`pgmigrate.LockTimeoutAttempts`, `pgmigrate.RetryLockTimeouts`).
@@ -1042,6 +1243,11 @@ An anchor whose artifact id is not a lower-case document id is left out of the i
 The release before it never reads the index and serves beside it unchanged, except that its sweep still drops the mark of an ask holding both columns (no such row is written today), and rolling Dispatch back past `0148` is an image rollback alone:
 the index is left for the next release that reads it.
 
+Migration `0150_dpop_proofs` creates `dpop_proofs`, the record of every RFC 9449 DPoP proof Dispatch has accepted, and its expiry index.
+A caller presenting an access token the secrets broker issued signs a fresh proof of that token's key for each request (`internal/brokertoken`), and the row keyed on the proof's `jti` and normalized `htu` is what refuses the same proof presented twice;
+the maintenance pass deletes every record past its proof's acceptance window beside the idempotency-key sweep.
+It is a new table that touches no row, which the release before it neither reads nor writes; its census answers `0`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
 On success it backfills each artifact's project and generated `ref_key`.
@@ -1162,7 +1368,8 @@ During a roll a close or reopen by a process of the earlier release stays unconv
 
 A migration declares its census in `<version>_<name>.census.sql` beside it:
 one `select` (or `with … select`) answering one integer, how many existing rows the migration would refuse (a validating constraint's violators) or rewrite.
-Every migration from `censusRequiredFrom` (`internal/dispatch/store/store_test.go`) on declares one;
+Every migration from `censusRequiredFrom` (`internal/dispatch/store/store_test.go`, 56) on declares one, which from now on is every migration added:
+a timestamped version is above every number.
 one that cannot refuse or rewrite a row says so with `select 0` and a comment (`0054_message_delivery_acceptance.census.sql`;
 `0053_asks_approval_kind_check.census.sql`, the check's own predicate negated, is the other shape).
 A census is written against the schema just before its migration, and the store's tests run every shipped census at exactly that schema and require it to answer (`TestEveryShippedCensusAnswersAtTheSchemaBeforeItsMigration`).
@@ -1297,12 +1504,16 @@ then, and whenever the query's embedding fails, a search answers by keyword alon
 Each vector records its embedder's identity in `embeddings.model`, `us.cohere.embed-v4:0` on Bedrock and `azure:<endpoint host>/<deployment>` on Azure, and search compares a query vector only with stored vectors of its own identity.
 A write enqueues its text through its table's trigger (0073–0077) in the same transaction.
 An issue's text is its title and its spec, the latest version of its primary document (its title alone while that is blank), and a new version of the spec queues the issue again through `0140`'s trigger on `artifact_versions`, so meaning search, and the related-item check below, find an issue with a terse title by what its spec says.
-The server also runs a coverage pass (`embedqueue.Cover`) when it starts and every 10 minutes, so a deployment runs nothing by hand to embed what it already holds:
+The server also runs a coverage pass (`embedqueue.Cover`) once when it starts, so a deployment runs nothing by hand to embed what it already holds:
 the pass adds a row for every searchable item that has none (one written before the triggers existed, or with them off, as a restore or a replication writes), points a row whose item's text changed with the triggers off at the current text, takes every vector another identity made out of the index and queues its item again, gives a row that died under another identity this identity's attempts once, and settles a dead row whose text has nothing to embed (empty or only white space) with no vector, as the queue settles a pending one.
 The two steps that act on another identity's rows wait until the configured embedder has answered:
 an embedding this process's queue made has succeeded, or, when none has yet and such rows exist, the pass embeds a short fixed canary text and it succeeds.
-Until then the pass leaves those vectors and dead rows as they are and logs one WARN naming the identity, the canary's error and how many of each it left, so a misnamed Azure deployment (which answers `404 DeploymentNotFound`) or a refused credential drops nothing;
-a throttled canary waits for the next pass too, and a pass with no such rows calls the embedder not at all.
+Until then the pass leaves those vectors and dead rows as they are and logs one WARN naming the identity, the canary's error and how many of each it left, so a misnamed Azure deployment (which answers `404 DeploymentNotFound`) or a refused credential drops nothing, and a throttled canary waits too;
+a pass with no such rows calls the embedder not at all.
+After the boot pass only those two steps run again (Background loops, above):
+at once when this process's queue first embeds successfully after the pass skipped them, and every `identityRecheckInterval` (10 minutes, plus up to a tenth again) while a run still finds another identity's rows, a canary first when the queue has not proved the embedder, until a run finds none.
+The rest of the pass runs again only at the next start:
+a live write enqueues its own text through its trigger, and what is written with the triggers off waits for that start.
 Each step is a statement of at most 500 rows in its own short transaction, repeated until it changes nothing, and is safe beside a live write and beside another process's pass, so the pass takes no lease.
 `GET /api/v1/search/coverage` reports what that leaves:
 the identity, its place and model (all three null with no embedder), and in total and per kind the searchable items, how many carry a current vector of that identity, how many lack one, how many failed for good, and how long the oldest lacking item has waited.
@@ -1377,8 +1588,10 @@ its outcome, how it searched, the reason, the words, and its keyword, meaning an
 curl -sf -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/related-checks?project=<KEY>&from=<time>&to=<time>"
 ```
 
-Every suggestion an issue's or an ask's check offers is recorded in `write_suggestions`, whose `outcome` the daemon's outcome sweep (`api.RunSuggestionOutcomeSweep`, every `SuggestionSweepInterval`) advances from `ignored` to `acted_on` (the suggested item was cited from the source, or the suggested issue was updated directly) or `overridden` (the source got further activity instead)
+Every suggestion an issue's or an ask's check offers is recorded in `write_suggestions`, whose `outcome` the server's outcome sweep (`api.RunSuggestionOutcomeSweep`) advances from `ignored` to `acted_on` (the suggested item was cited from the source, or the suggested issue was updated directly) or `overridden` (the source got further activity instead)
 — a count of how often the suggestion was right, without refusing anything on its strength.
+The sweep is woken by event commits and judges a suggestion once the events that can resolve it are a minute old, reading only the events written since its last pass (Background loops, above);
+a pending suggestion nothing writes to costs it nothing.
 A ranking or latency change is measured on a restored copy of the production corpus:
 `packages/envoy/scripts/corpus-copy.sh` restores one, `search-smoke.sh` prints what a searcher sees for a list of queries from any build, and `search-latency-compare.sh` runs `TestSearchLatencyOnCorpus` from a base checkout and this one alternately and gates on the difference (`packages/envoy/scripts/README.md`, "Measuring search on a copy of the corpus").
 
@@ -1391,7 +1604,7 @@ No route requires the header: a write without one runs as it always did, unkeyed
 `PUT` and `DELETE` take no key, being idempotent already.
 A key is 1 to 128 letters, digits, `.`, `_`, `:` and `-`, bare or double-quoted, and belongs to the caller who sent it:
 a person's canonical login (from the dashboard or through a personal token), a service token's subject, or the shared agent token.
-Dispatch keeps each key's answer for 24 hours (`request_keys`, migration `0137`; the suggestion-outcome sweep deletes older rows).
+Dispatch keeps each key's answer for 24 hours (`request_keys`, migration `0137`; the maintenance sweep deletes older rows, Background loops above).
 
 A keyed write finishes on the server whatever its client does.
 Its handler runs with the client's cancellation taken off, bounded at ten minutes (past which its work rolls back and the key is released, as for a 5xx) and counted in the server's background wait, so a shutdown lets it finish within its 30 s stop grace;
@@ -1517,11 +1730,11 @@ Each item below names a field of the line, then what it holds.
 
 - `caller_kind`
 
-  How the caller authenticated: `user` (a signed-in person), `session` (the session a bearer named in its `actor`), `token` (a personal agent token with no session named), `service` (a verified service-account token), `shared-token` (`DISPATCH_AGENT_TOKEN` with no session named), or `anonymous` (a public route, a request whose credential was refused, or an `unmatched` path).
+  How the caller authenticated: `user` (a signed-in person), `session` (the session a bearer named in its `actor`, or the one a broker-issued token proved), `token` (a personal agent token with no session named), `service` (a verified service-account token), `broker-token` (an access token the secrets broker issued, on a line no session was named on), `shared-token` (`DISPATCH_AGENT_TOKEN` with no session named), or `anonymous` (a public route, a request whose credential was refused, or an `unmatched` path).
 
 - `caller`
 
-  Who that is: the person's lowercase email, the session id, the personal token's owner, or the service-account subject.
+  Who that is: the person's lowercase email, the session id, the personal token's owner, the service-account subject, or the person a broker-issued token acts for.
   `shared-token` and `anonymous` name nobody.
 
 - `address`
@@ -1555,8 +1768,9 @@ Each item below names a field of the line, then what it holds.
 
 - `credential`
 
-  Only on a `session` line: the credential that named the session, since the session id is the caller's own text.
-  `token:<owner>`, `service:<subject>` or `shared-token`.
+  Only on a `session` line: the credential behind the session.
+  `token:<owner>`, `service:<subject>`, `shared-token` or `broker-token:<person>`.
+  For every one but the last that session id is the caller's own text; under a broker-issued token the credential itself named it.
 
 - `aborted`
 
@@ -1817,10 +2031,12 @@ Each item below names a path with its method and identity, then its purpose.
 
   Everyone who has signed in, as `{users: [{login}]}` sorted by email — the assignee picker's options.
 
-- `/api/v1/whoami` (GET; cookie, trusted header, or bearer)
+- `/api/v1/whoami` (GET; cookie, trusted header, bearer, or a broker-issued DPoP token)
 
-  Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service}` for a bearer (`owner` is a personal token's owner by lowercase email, null for the shared token;
-  `service` is a verified service-account token's Kubernetes subject, null for every other bearer).
+  Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service, session, project}` for every other credential (`owner` is a personal token's owner or a broker-issued token's person, by lowercase email, null for the shared token;
+  `service` is a verified service-account token's Kubernetes subject, null for every other credential;
+  `session` is the session the credential itself proved, which only a broker-issued token does, null otherwise;
+  `project` is the one project key that credential may write, null where it names none).
 
 - `/api/v1/dashboard/builds` (GET; cookie, trusted header, or bearer)
 
@@ -2277,6 +2493,9 @@ Each item below names a path with its method and identity, then its purpose.
   any other file a `file` under its declared type), stored with `session_id` set, `issue_key` null, `project` `""` and `ref_key` `agent/<session_id>/<slug>`, addressed `dispatch://agent/<session_id>/artifact/<slug>`;
   it appends no event, since every event belongs to an issue, a document or a project.
   There is no list route: a conversation's pictures are reached through the references its messages carry, never enumerated.
+  A caller whose credential proves a session of its own — an access token the secrets broker issued, the one that does — uploads only into that session's conversation;
+  any other `session_id` is `403 SESSION_SCOPE`, naming the session the credential acts for and the session addressed.
+  A person's cookie proves no session and uploads into the conversation it names.
   An agent's conversation holds files and images only, so a markdown document (JSON `content` or a `text/markdown` file) is `400 ARTIFACT_INPUT` ("an agent's conversation holds files and images;
   a document belongs to an issue or a project").
   A `session_id` that is empty or holds `/`, `?`, `#`, whitespace, a control character or a character that ends a reference in text (`<>"'` and a backtick, `[`, `]`, `|`) is `400 INVALID_SESSION_ID` on all three agent routes.
@@ -2402,9 +2621,9 @@ Each item below names a status and code, then its meaning.
 - `400 NUL_CHARACTER`
 
   Caller text holds a NUL character (U+0000), which PostgreSQL's text and jsonb cannot store:
-  any string in a JSON body a route decodes, member names included, a multipart upload's field or markdown file, any route's path or query parameter, or the actor a document websocket's bearer names in `X-Dispatch-Actor` (refused before the upgrade).
+  any string in a JSON body a route decodes, member names included, a multipart upload's field or markdown file, or any route's path or query parameter.
   It covers every parameter, field and member a request carries, including ones the route does not read.
-  The message names where it stands (`title`, `options[1].label`, `file`, `path parameter session_id`, `query parameter label`, `X-Dispatch-Actor.id`), with a NUL in a name the caller wrote shown as `\u0000`, and the character's position, counted from 1 in UTF-16 units; nothing is written.
+  The message names where it stands (`title`, `options[1].label`, `file`, `path parameter session_id`, `query parameter label`), with a NUL in a name the caller wrote shown as `\u0000`, and the character's position, counted from 1 in UTF-16 units; nothing is written.
   A NUL a browser edit puts in a live document is written as U+FFFD, which is what CommonMark reads one as, in the document's version and every read, a block's id included, an anchor's quote and an ask block's question and options, and a quote, a `# Title` quote and a `heading:` anchor are matched against that text.
 
 - `400 INVALID_UTF8`
@@ -2447,7 +2666,9 @@ Each item below names a status and code, then its meaning.
 
 - `409 ANCHOR_MISSING`
 
-  A browser submitted a `mark_id` that the server did not observe in the live tree.
+  A browser submitted a `mark_id` that the server did not observe in the live tree, in the second it waits for the document's next update and in one last read of the document when that wait ends.
+  A mark no ask or comment row records is swept from the document a minute after a settlement first saw it.
+  A mark whose `by` names a user with a browser on the room is kept instead, so a composer left open sends, and a mark a closed or offline tab left behind goes a minute after that user's last browser left the room.
 
 - `409 ANCHOR_ORPHANED`
 

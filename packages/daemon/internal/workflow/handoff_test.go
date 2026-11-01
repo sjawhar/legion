@@ -276,48 +276,29 @@ func phaseRowOf(t *testing.T, pool *pgxpool.Pool, role claim.Role) record.PhaseR
 // A reviewer whose first round completed by record starts its second round not completed: the
 // record its first completion named is cleared with the round. So GitHub's approval of the new head
 // alone does not end round 2, as it would were the first round's record read as this round's
-// completion; the reviewer's own completion, naming a new record, is the round's other half. A red
-// that comes to stand meanwhile takes the phase from the reviewer still at work in it, whose turn
-// the implementer's start waits for.
+// completion; the reviewer's own completion, naming a new record, is the round's other half.
 func TestASecondReviewRoundIsNotCompletedByTheFirstRoundsRecord(t *testing.T) {
-	t.Run("an approval alone does not end the round", func(t *testing.T) {
-		pool := migratedPool(t)
-		seedReviewOf(t, pool, "head", "green")
-		engine := testEngine(config.DesignGateRootIssues, nil)
-		toSecondReviewRound(t, pool, engine)
-		applyRefusingNothing(t, pool, engine,
-			intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head-2", HeadSHA: "head-2", Author: testReviewApp, Body: "ship it"})
-		assertPhase(t, pool, phase.Reviewing)
-		result, err := intake.ApplyFact(t.Context(), pool, "api", "review-2-stale", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer,
-			Claim: "review-claim", Summary: "reviewed", HandoffRecord: "review-1", HandoffVersion: 1}, engine, admissionStub{})
-		if err != nil || result.Refusal == nil || result.Refusal.Code != "HANDOFF_NOT_NEW" {
-			t.Fatalf("round 2's completion naming round 1's record = %+v, %v; want HANDOFF_NOT_NEW", result.Refusal, err)
-		}
-		assertPhase(t, pool, phase.Reviewing)
-		applyRefusingNothing(t, pool, engine,
-			intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", HandoffRecord: "review-2", HandoffVersion: 2})
-		assertPhase(t, pool, phase.Accepting)
-	})
-	t.Run("a red waits for the mid-turn reviewer", func(t *testing.T) {
-		pool := migratedPool(t)
-		seedReviewOf(t, pool, "head", "green")
-		engine := testEngine(config.DesignGateRootIssues, nil)
-		toSecondReviewRound(t, pool, engine)
-		if _, err := pool.Exec(t.Context(), "delete from outbox"); err != nil {
-			t.Fatalf("clear outbox: %v", err)
-		}
-		applyRefusingNothing(t, pool, engine, intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head-2",
-			CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 2, Snapshot: "red-head-2", Failing: []string{"ci"}})
-		assertPhase(t, pool, phase.Implementing)
-		if _, quiesce := implementerStart(t, pool); quiesce != claim.RoleReviewer {
-			t.Fatalf("the implementer's start waits for %q, want the reviewer still at work in round 2", quiesce)
-		}
-	})
+	pool := migratedPool(t)
+	seedReviewOf(t, pool, "head", "green")
+	engine := testEngine(config.DesignGateRootIssues, nil)
+	toSecondReviewRound(t, pool, engine)
+	applyRefusingNothing(t, pool, engine,
+		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head-2", HeadSHA: "head-2", Author: testReviewApp, Body: "ship it"})
+	assertPhase(t, pool, phase.Reviewing)
+	result, err := intake.ApplyFact(t.Context(), pool, "api", "review-2-stale", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer,
+		Claim: "review-claim", Summary: "reviewed", HandoffRecord: "review-1", HandoffVersion: 1}, engine, admissionStub{})
+	if err != nil || result.Refusal == nil || result.Refusal.Code != "HANDOFF_NOT_NEW" {
+		t.Fatalf("round 2's completion naming round 1's record = %+v, %v; want HANDOFF_NOT_NEW", result.Refusal, err)
+	}
+	assertPhase(t, pool, phase.Reviewing)
+	applyRefusingNothing(t, pool, engine,
+		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", HandoffRecord: "review-2", HandoffVersion: 2})
+	assertPhase(t, pool, phase.Accepting)
 }
 
 // A tester whose first run completed by record is started again not completed: the record is
-// cleared with the run, so a red that comes to stand while it tests again takes the phase from the
-// tester still at work, and the implementer's start waits for its turn to end.
+// cleared with the run, and the record it last named is kept, so its next completion must name a
+// new one.
 func TestARerunTesterIsNotCompletedByItsLastRunsRecord(t *testing.T) {
 	pool := migratedPool(t)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
@@ -334,15 +315,6 @@ func TestARerunTesterIsNotCompletedByItsLastRunsRecord(t *testing.T) {
 	assertPhase(t, pool, phase.Testing)
 	if tester := phaseRowOf(t, pool, claim.RoleTester); tester.Completed() || tester.LastHandoff != "test-1" {
 		t.Fatalf("the re-run tester's row = %+v, want no handoff and its last run's record kept as the last named", tester)
-	}
-	if _, err := pool.Exec(t.Context(), "delete from outbox"); err != nil {
-		t.Fatalf("clear outbox: %v", err)
-	}
-	applyRefusingNothing(t, pool, engine, intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head",
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "red-head", Failing: []string{"ci"}})
-	assertPhase(t, pool, phase.Implementing)
-	if _, quiesce := implementerStart(t, pool); quiesce != claim.RoleTester {
-		t.Fatalf("the implementer's start waits for %q, want the re-run tester still at work", quiesce)
 	}
 }
 

@@ -129,6 +129,9 @@ func TestTheDaemonLaunchesItsControllerAndHandsItTheStartMessage(t *testing.T) {
 	sh.send(shimwire.Response{ID: prompt.ID, Command: shimwire.TypePrompt, Success: true})
 	sh.send(shimwire.AgentStart{})
 	sh.send(shimwire.AgentEnd{})
+	// What Oh My Pi writes behind the agent_end of the turn its prompt ran, and the only frame
+	// that names that prompt: the delivery's life ends on it.
+	sh.send(shimwire.PromptResult{ID: prompt.ID, AgentInvoked: true})
 	testwait.Eventually(t, "the start turn to end", func() bool {
 		c := d.claim(token)
 		return c.State == string(supervise.StateIdle) && c.Pending == nil
@@ -160,6 +163,51 @@ func controllerSpawns(rt *fake.Runtime, token claim.Token) int {
 		}
 	}
 	return spawns
+}
+
+// A daemon-launched controller can fail forever when its stored session is lost with a reaped
+// volume. An operator can clear that stopped claim's recorded session; the keeper's next retry then
+// starts a fresh controller instead of resuming the abandoned session.
+func TestForgetSessionLetsTheControllerKeeperSpawnFresh(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ControllerLaunch = config.ControllerLaunchDaemon
+	rt := fake.NewRuntime()
+	var record built
+	o := fakeRuntime(rt, &record)
+	o.orphanSweep, o.controllerRetry = 2*time.Second, 100*time.Millisecond
+	d := startDaemon(t, cfg, o)
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := claim.ControllerToken(project)
+	launch := controllerLaunched(t, rt, token)
+	registeredLaunch(t, d, &record, launch, "ses_controller")
+	refused := fake.SpawnResult{Err: errors.New("the session table holds no such session")}
+	rt.ScriptResume(refused, refused, refused)
+	rt.Emit(runtime.Observation{Locator: *d.claim(token).Locator, Kind: runtime.Gone})
+	testwait.Eventually(t, "the controller's missing-session launches to fail", func() bool {
+		return d.claim(token).State == string(supervise.StateFailed)
+	})
+
+	status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/forget-session",
+		api.ForgetSessionRequest{Session: "ses_controller"}, true)
+	if status != http.StatusOK {
+		t.Fatalf("forget-session = %d %s, want 200", status, body)
+	}
+	var forgotten api.OperatorClaim
+	if err := json.Unmarshal(body, &forgotten); err != nil {
+		t.Fatalf("decode forget-session response %s: %v", body, err)
+	}
+	if forgotten.Session != "" || forgotten.SessionFile != "" || forgotten.State != string(supervise.StateFailed) {
+		t.Fatalf("forget-session answered %+v, want a failed controller with no session", forgotten)
+	}
+	testwait.Eventually(t, "the controller keeper to start a fresh controller", func() bool {
+		return controllerSpawns(rt, token) == 2 && d.claim(token).State == string(supervise.StateLaunching)
+	})
+	if spawn := lastLaunch(t, rt, token); spawn.ResumeSessionFile != "" {
+		t.Fatalf("the keeper's controller launch resumed %q, want a fresh spawn", spawn.ResumeSessionFile)
+	}
 }
 
 // A controller whose launches run out of their budget fails, as any claim does, and nothing in the

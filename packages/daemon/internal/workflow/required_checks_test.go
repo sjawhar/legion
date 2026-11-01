@@ -201,7 +201,8 @@ func seedRoundOnRedsBesideTheGate(t *testing.T, pool *pgxpool.Pool, required []s
 // any was read - judges the head by that set alone, sends nothing back and tells nobody, and the
 // reviewer's approval of the head then ends the round. A read that names one of those reds
 // as required brings a red that stands for the head, and sends the work back to implementing from
-// under the open round, naming the check and taking the phase from the reviewer still at work.
+// under the open round, naming the check; the implementer's start runs at once, waiting on no turn
+// of the reviewer still at work.
 func TestARedTheBaseBranchDoesNotRequireSendsNothingBack(t *testing.T) {
 	approval := []intake.Fact{
 		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "code", Author: testReviewApp, Body: "looks right"},
@@ -226,15 +227,15 @@ func TestARedTheBaseBranchDoesNotRequireSendsNothingBack(t *testing.T) {
 				if got := issuePhase(t, pool); got != phase.Implementing {
 					t.Fatalf("after the read the issue is in %s, want implementing", got)
 				}
-				var reason, quiesce string
-				if err := pool.QueryRow(context.Background(), `select payload->>'reason', (select coalesce(payload->>'quiesce', '') from outbox
-					where kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = 'implementer')
-					from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'`).Scan(&reason, &quiesce); err != nil {
-					t.Fatalf("read the architect's checks-red notice and the implementer's start: %v", err)
+				var reason string
+				if err := pool.QueryRow(context.Background(), `select payload->>'reason'
+					from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'`).Scan(&reason); err != nil {
+					t.Fatalf("read the architect's checks-red notice: %v", err)
 				}
-				if reason != "CI is red at code: review" || claim.Role(quiesce) != claim.RoleReviewer {
-					t.Fatalf("checks-red %q, the implementer's start waiting for %q; want the required review check named and the reviewer's turn waited for", reason, quiesce)
+				if reason != "CI is red at code: review" {
+					t.Fatalf("checks-red %q, want the required review check named", reason)
 				}
+				implementerStart(t, pool)
 				return
 			}
 			if got := issuePhase(t, pool); got != phase.Reviewing {

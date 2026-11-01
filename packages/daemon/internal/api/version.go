@@ -357,10 +357,14 @@ package api
 // INFRA-229 at 36, so this branch took 37; main then landed INFRA-80 at 37 with store migration
 // 0051, so this branch took 38 and store migration 0052; main then landed INFRA-225 at 38 with
 // store migrations 0052 and 0053, so this branch takes 39 and store migration 0054, as the
-// collision note says. Other open branches may declare 39 or a migration 0054 too: whichever
-// merges after another takes the next free contract number and renumbers its store migration past
-// main's, every site that names either included, among them the rollback's
-// `delete from schema_version where version = 54` in docs/kubernetes.md.)
+// collision note says. Other open branches may declare 39 too: whichever merges after another
+// takes the next free contract number, every site that names it included. A store migration is
+// not renumbered with it: one added after the numbered series takes the UTC moment it was
+// created as its version, 14 digits YYYYMMDDHHMMSS, which sort above the numbered series, so two
+// branches open at once cannot claim one version and the file keeps the name it was written
+// with. A rollback that deletes the row a migration recorded, as the one in docs/kubernetes.md
+// does with `delete from schema_version where version = 54`, names that version, which for a
+// migration written since is its 14-digit timestamp.)
 //
 // 40: a root whose architect asked a person a question and handed the turn back gives its
 // admission slot up in the new phase `awaiting_person`, and its strict state issue view gains
@@ -427,7 +431,20 @@ package api
 // the repository is served all the same. (This branch took 41, then 42; 42 is declared by main's
 // stalled-worker reminder, so this change takes the number above it, as the collision note says.)
 //
-// 44: sjawhar/legion#2354 -- a phase's handoff is a record on its Dispatch issue, which the
+// 44: a Claude Code role's start command and pane no longer carry
+// CLAUDE_CODE_DISABLE_BACKGROUND_TASKS; CLAUDE_CONFIG_DIR and CLAUDE_CODE_DISABLE_CRON stay, and
+// the name is no longer the runtime's, so an operator's `runtime.kubernetes.pod.env` and
+// `runtime.tmux.pane_env` may set it as they may set Claude Code's other variables. A role may
+// leave a background task running past the end of a turn: when it finishes, Claude Code starts a
+// turn of its own, which the bridge reports to the daemon as a turn (`internal/claudebridge`), so
+// the result is read in a turn the daemon sees rather than after one the daemon thinks has ended.
+// The worker container's and the pane's environment is one of this contract's surfaces, so
+// dropping a variable from it bumps the number, as adding the three at 42 did, and the image probe
+// holds this daemon and the image that runs its roles together. This change adds no store
+// migration. (This branch took 43; main then landed the consumer lag at 43, so this branch takes
+// the number above it, as the collision note says.)
+//
+// 45: sjawhar/legion#2354 -- a phase's handoff is a record on its Dispatch issue, which the
 // worker writes with `dispatch handoff-write` under its own session, rather than a committed
 // `.legion/<KEY>/<phase>.json`. `api.HandoffCompleteRequest` gains `handoffId` and
 // `handoffVersion`, the record a file-backed phase's completion (planning, implementing, testing,
@@ -439,8 +456,8 @@ package api
 // record id in place of the commit. `commit` stays the implementer's (its pushed tip, and retro's
 // commit) and the merger's; the planner, tester and reviewer send none, and the daemon no longer
 // requires one of them. `api.PhaseView` gains `handoffRecord`, `{id, version}`, absent until the
-// worker's completion of its current file-backed phase names one; store migration 0065 keeps it
-// on the phase row. A 43 plugin posts a commit and no record, which this daemon refuses, and its
+// worker's completion of its current file-backed phase names one; store migration 20261101144900_handoff_records keeps it
+// on the phase row. A 44 plugin posts a commit and no record, which this daemon refuses, and its
 // strict reader refuses a state carrying `handoffRecord`, so the boot gate and `legion
 // probe-image` refuse the mixed pair. (This branch took 40 and store migration 0055; main then
 // landed `awaiting_person` at 40 with store migrations 0055 to 0058, and `issue_ancestry` as store
@@ -450,9 +467,8 @@ package api
 // took store migration 0062; main then landed the controller start command at 41 and the worker
 // stall and Claude session environment at 42, so this change took 43 and kept store migration
 // 0062; main then landed the lost-event pass at 43 with store migrations 0062 to 0064, so this
-// change takes 44 and store migration 0065, as the collision note says. Other open branches may
-// declare 44 or a store migration 0065 too: whichever merges after another takes the next free
-// contract number and renumbers its store migration past main's, every site that names either
-// included, among them the rollback's `delete from schema_version where version = 65` in
-// docs/kubernetes.md.)
-const DaemonAPIVersion = 44
+// change took 44 and store migration 0065; main then landed background work at 44 with store
+// migrations 0065 to 0067, which closed the numbered series (sjawhar/legion#2411), so this change
+// takes 45 and a store migration named for the UTC moment it was written, as the collision note
+// says.)
+const DaemonAPIVersion = 45

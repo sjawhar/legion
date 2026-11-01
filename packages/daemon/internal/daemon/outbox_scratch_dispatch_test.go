@@ -228,7 +228,7 @@ func startScratchDispatchOn(t *testing.T, options scratchDispatchOptions) *scrat
 	d := &scratchDispatch{
 		t: t, binary: filepath.Join(t.TempDir(), "dispatch"), dir: filepath.Join(root, "packages", "envoy"),
 		webDist: filepath.Join(root, "packages", "dispatch", "web", "dist"), database: serverURL.String(),
-		natsURL: options.natsURL, token: "scratch-dispatch-agent-token", home: filepath.Join(t.TempDir(), "home"),
+		natsURL: options.natsURL, token: scratchAgentToken, home: filepath.Join(t.TempDir(), "home"),
 		log: options.log,
 	}
 	build := exec.Command("go", "build", "-o", d.binary, "./cmd/dispatch")

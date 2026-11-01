@@ -101,16 +101,16 @@ func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRe
 // base branch requires (requiredRead), and decides, with the issue's phase in hand, what it moves.
 // CI is the daemon's own rule, read beside the review round and never by it (standingRed): in
 // testing, reviewing, retro and merging a red that stands for the head sends the work back to
-// implementing, whatever the tester has found, the round holds or the merger is doing, and takes
-// the phase from a role still at work in it (takenOver). The reviewer's approval of the head ends
-// its round on its own (reviewRound), as the reviewer reads the code commit's checks on GitHub
-// before it approves. In awaiting_merge, the head's own red withdraws the READY
-// (classify.RedWithdrawsReady), and the transition tells the merge queue role so (withdrawReady). A
-// red the tester planned - its own failing tests, pushed for the implementer to make pass - sends
-// nothing back (PlannedRed), and neither does a red in implementing, where the implementer is
-// already at work. The implementer's task and the architect's checks-red notice name the red
-// required checks and workflows, and the implementer's next push is a counted fix attempt, as any
-// new head on a red verdict is (classify.AdvancePullRequestHead).
+// implementing, whatever the tester has found, the round holds or the merger is doing, and tells
+// the role it leaves with no phase so on that role's own topic (phaseEnded). The reviewer's
+// approval of the head ends its round on its own (reviewRound), as the reviewer reads the code
+// commit's checks on GitHub before it approves. In awaiting_merge, the head's own red withdraws
+// the READY (classify.RedWithdrawsReady), and the transition tells the merge queue role so
+// (withdrawReady). A red the tester planned - its own failing tests, pushed for the implementer
+// to make pass - sends nothing back (PlannedRed), and neither does a red in implementing, where
+// the implementer is already at work. The implementer's task and the architect's checks-red
+// notice name the red required checks and workflows, and the implementer's next push is a counted
+// fix attempt, as any new head on a red verdict is (classify.AdvancePullRequestHead).
 //
 // At an exhausted fix-attempt count, a red within the attempt the count last counted - the counted
 // head, or a head pushed on top of it until a push lands on a green verdict or on a settled head

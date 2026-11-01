@@ -54,22 +54,24 @@ func reapNamespace(skip ...int) (bool, error) {
 }
 
 // reapOrphans is PID 1's reaper: on every SIGCHLD it reaps each exited process of the container's
-// PID namespace but the generations its managers run, whose exits their own waits read. Every
-// manager's lock is held across the pass, and a manager records its generation's pid under its
-// lock as it starts it, so the reaper never waits on a generation it has not seen yet. In the
-// controller's pod a pass that fails leaves the role's namespace unobservable, so the launcher
-// fails its container loudly. In an issue pod's container the container's /proc still lists every
-// role's processes, since a role's PID namespace is nested in it, but none is the launcher's child
-// except each role's role-init, which the pass skips: the rest are their role-init's to reap, and
-// Wait4 on them answers ECHILD. So a failed pass costs no role anything, and it is logged and the
-// next pass tries again.
-func reapOrphans(ctx context.Context, signals <-chan os.Signal, managers []*manager) {
+// PID namespace but the generations its managers run, whose exits their own waits read, and the
+// launcher's own children (the test database's script, pidGuard), whose exits their own waits read
+// too. Every manager's lock and the guard's are held across the pass, and a manager records its
+// generation's pid under its lock as it starts it, as the guard records its child's, so the reaper
+// never waits on a process it has not seen yet. In the controller's pod a pass that fails leaves
+// the role's namespace unobservable, so the launcher fails its container loudly. In an issue pod's
+// container the container's /proc still lists every role's processes, since a role's PID namespace
+// is nested in it, but none is the launcher's child except each role's role-init, which the pass
+// skips: the rest are their role-init's to reap, and Wait4 on them answers ECHILD. So a failed
+// pass costs no role anything, and it is logged and the next pass tries again.
+func reapOrphans(ctx context.Context, signals <-chan os.Signal, managers []*manager, guard *pidGuard) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-signals:
-			skip := make([]int, 0, len(managers))
+			guard.mu.Lock()
+			skip := guard.held()
 			for _, m := range managers {
 				m.mu.Lock()
 				if m.child != nil {
@@ -80,6 +82,7 @@ func reapOrphans(ctx context.Context, signals <-chan os.Signal, managers []*mana
 			for _, m := range managers {
 				m.mu.Unlock()
 			}
+			guard.mu.Unlock()
 			switch {
 			case err == nil:
 			case !managers[0].namespaced:

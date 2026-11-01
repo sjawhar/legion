@@ -1,6 +1,6 @@
 kind: Added
 body: |-
-    Dispatch keeps Legion's phase handoffs as records on their issue. Migration `0151` adds the
+    Dispatch keeps Legion's phase handoffs as records on their issue. Migration `20261101144901_handoffs` adds the
     `handoffs` table: one row per write, its `phase` a lowercase slug (`^[a-z][a-z0-9-]{0,31}$`), its
     `version` counting from 1 within the issue and phase, its `body` the exact text written and its
     `author` the writing session; a new table, so the migration rolls.

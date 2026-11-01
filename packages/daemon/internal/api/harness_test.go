@@ -260,6 +260,12 @@ func newHarnessDeps(t *testing.T, relaunchable bool) *harness {
 	}
 	readied := &[]supervise.Claim{}
 	reported, reportedContextErr := &[]capabilities.Report{}, &[]error{}
+	h := &harness{
+		t: t, ctx: ctx, store: st, runtime: rt, conns: conns, tokens: tokens, supervisor: sup,
+		readied:            readied,
+		reported:           reported,
+		reportedContextErr: reportedContextErr,
+	}
 	server := NewServer("127.0.0.1", 8437, Options{
 		Supervisor: sup, BootTokens: tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: st, Log: quiet,
 		Pool: st.Pool(), Record: record.NewStore(), Releaser: rt, Trees: st, PluginRelaunchable: relaunchable,
@@ -270,10 +276,8 @@ func newHarnessDeps(t *testing.T, relaunchable bool) *harness {
 			*reportedContextErr = append(*reportedContextErr, ctx.Err())
 		},
 	})
-	return &harness{
-		t: t, ctx: ctx, store: st, runtime: rt, conns: conns, tokens: tokens, supervisor: sup, handler: server.Handler,
-		readied: readied, reported: reported, reportedContextErr: reportedContextErr,
-	}
+	h.handler = server.Handler
+	return h
 }
 
 // request sends one request through the server's own handler. A nil body sends none; a string is

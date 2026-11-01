@@ -90,10 +90,12 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 44's handoff records
+number is the one `DaemonAPIVersion` declares, last bumped by contract 45's handoff records
 (sjawhar/legion#2354: `handoff_complete` names the phase's Dispatch handoff record, `handoffId` and
-`handoffVersion`, and `GET /legion/v1/state` gives each phase its `handoffRecord`; a 43 plugin
-posts a commit and no record, and rejects `handoffRecord`), after contract 43's strict `consumers`
+`handoffVersion`, and `GET /legion/v1/state` gives each phase its `handoffRecord`; a 44 plugin
+posts a commit and no record, and rejects `handoffRecord`), after contract 44's removal of
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` from a Claude Code role's start command and pane, after
+contract 43's strict `consumers`
 on `GET /legion/v1/state` (the lag of the daemon's three durable consumers, each with what
 waits, the oldest waiting message, the last handled, whether it is stalled and what NATS did not
 answer; a 42 plugin rejects it) and `repositories.withoutWebhookApp` (each served repository
@@ -378,7 +380,7 @@ That order holds only outside Oh My Pi's startup, so the operator's controller c
 `session_start` (`handleSessionStart` in `src/controller-session.ts` returns for it; the session is
 titled and its `legion` tool registered, answering that no claim is registered until one is). Oh
 My Pi holds every send a `session_start` handler makes and drains them at the end of its startup,
-while an Envoy card is a steer that starts its own turn: a role claim made during startup lets a
+while an Envoy card that finds the session idle starts its own turn: a role claim made during startup lets a
 card on the role's lane, or a notice on the controller topic, start its turn ahead of the held start
 message, and a turn started there runs inside the startup wait, before the TUI shows it or reads any
 input — no start message and no busy row on screen, Enter not taking typed text, Esc doing nothing.

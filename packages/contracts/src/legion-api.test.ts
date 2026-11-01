@@ -53,6 +53,7 @@ const schemas: Record<string, z.ZodType> = {
   "controller-github-credential.json": LegionControllerCredentialResponse,
   "error.json": LegionErrorResponse,
   "operator-claim.json": LegionOperatorClaimResponse,
+  "operator-forget-session.json": LegionOperatorClaimResponse,
   "operator-claims.json": LegionOperatorClaimsResponse,
   "grant.json": LegionGrantResponse,
   "handoff-complete.json": LegionHandoffCompleteResponse,

@@ -505,6 +505,27 @@ argv_has_pair() { awk -v flag="$2" -v value="$3" 'prev == flag && $0 == value { 
 # transcript_since OFFSET prints the transcript's bytes past OFFSET, read from its file on the
 # devbox: the tail every predicate of lib/claude-transcript.sh judges.
 transcript_since() { tail -c "+$(($1 + 1))" -- "$transcript"; }
+# background_pair_started OFFSET BASH AGENT: past OFFSET the transcript holds the two calls the
+# background checkpoint asks for — a `Bash` call run in the background whose command names BASH,
+# and a subagent call whose input names AGENT. Both are read from the tool calls themselves, never
+# from the model's prose, so a turn that only said it had started them does not pass. The subagent
+# tool is named by whichever of the two names the pinned Claude Code writes in the transcript: it
+# is `Task` in the model's own prompt and `Agent` in the API, and 2.1.310 writes `Agent`
+# (measured on a devbox run of this script at head ab49995f, where the launch succeeded and only
+# this predicate's name check failed).
+background_pair_started() {
+  transcript_since "$1" | jq -R -s -e --arg bash "$2" --arg agent "$3" '
+    [split("\n")[] | fromjson? | select(.message.content | type == "array") | .message.content[]] as $blocks
+    | any($blocks[]; .type == "tool_use" and .name == "Bash" and .input.run_in_background == true
+        and ((.input.command // "") | contains($bash)))
+      and any($blocks[]; .type == "tool_use" and (.name == "Agent" or .name == "Task")
+        and ((.input | tostring) | contains($agent)))' >/dev/null
+}
+# unprompted_turn: the daemon has the implementer's claim in a turn it handed no task — the turn
+# Claude Code starts by itself when a background result lands, which the bridge reports to the
+# daemon as agent_start…agent_end like any other. A claim working on a pending delivery is the
+# daemon's own task and is not one.
+unprompted_turn() { implementer_claim | jq -e '.state == "working" and .pending == null' >/dev/null; }
 
 begin prerequisites
 require_app_inputs implement review
@@ -740,6 +761,58 @@ files=$(smoke_commit_files "$commit") || exit 1
 legion_handoff_in || fail "the transcript $transcript holds no successful legion handoff_complete call"
 until_true 300 "the implementer's turn to end" issue_worker_state "$issue" implementer idle
 note "handoff_complete through mcp__legion__legion named the implementer's Dispatch handoff record, written under its Claude Code session $session, and its pushed commit $commit on $repo, which changes nothing under .legion/"
+pass
+
+# Background work on the Claude Code backend. The runtime sets no
+# CLAUDE_CODE_DISABLE_BACKGROUND_TASKS on a Claude Code pane — only CLAUDE_CODE_DISABLE_CRON, the
+# one feature that would start a turn no task of the daemon's asked for and nothing would read —
+# so a role can start work that outlives the turn that started it, and a result that lands after
+# that turn wakes Claude Code into a turn of its own. The bridge reports that turn to the daemon
+# as agent_start…agent_end like any other, and the daemon, which handed it no task, sees a claim
+# working on no delivery. The implementer's phase is complete by here, so these turns are its own
+# and no phase waits on them; its Stop hook is quiet for the same reason, which keeps the reminder
+# this proof measured in stop-hook-reminds-the-open-phase out of the way.
+begin claude-background-tasks
+cc=$(claude_pid "$(claim_pane_pid "$issue" implementer)") || fail "the implementer pane runs no Claude Code"
+declare -A background_env=()
+# read_environ fills the array in this shell, so it is called directly: a command substitution's
+# subshell would print its reason and drop the array. A read that fails prints why on this run's
+# own output, which the fail line below points at.
+read_environ "$cc" background_env ||
+  fail "the implementer's Claude Code (pid $cc) environment was not read; its reason is the line above"
+[ -z "${background_env[CLAUDE_CODE_DISABLE_BACKGROUND_TASKS]+set}" ] ||
+  fail "the implementer's Claude Code (pid $cc) carries CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=${background_env[CLAUDE_CODE_DISABLE_BACKGROUND_TASKS]}, want it unset: the runtime sets it no more, and an operator that wants it off sets it itself"
+[ "${background_env[CLAUDE_CODE_DISABLE_CRON]-}" = 1 ] ||
+  fail "the implementer's Claude Code (pid $cc) has CLAUDE_CODE_DISABLE_CRON=${background_env[CLAUDE_CODE_DISABLE_CRON]-<unset>}, want 1: scheduled prompts stay off"
+note "the implementer's Claude Code (pid $cc) sets no CLAUDE_CODE_DISABLE_BACKGROUND_TASKS and keeps CLAUDE_CODE_DISABLE_CRON=1"
+bash_marker="claude-background-bash-$ptoken-$RANDOM$RANDOM"
+agent_marker="claude-background-agent-$ptoken-$RANDOM$RANDOM"
+background_file="$work/claude-background-$ptoken.txt"
+rm -f -- "$background_file"
+background_offset=$(stat -c %s "$transcript")
+send_agent "$issue" implementer "Claude backend proof background operation: start two pieces of work that outlive this turn and then end the turn at once. (1) With the Bash tool and run_in_background true, run exactly: /usr/bin/sleep 90 && printf '%s\\n' $bash_marker > $background_file && echo $bash_marker. (2) With your subagent tool, whichever of Task and Agent this build gives you, and run_in_background true, dispatch a subagent whose whole instruction is: sleep 90 seconds, then answer with the single word $agent_marker. Then end your turn with one line of plain prose saying both are running. Do not wait for either result in this turn, change no file of the repository, and call the legion tool in no turn of this operation. When the bash job's result reaches you, reply with one line BASH-RESULT $bash_marker and nothing else; when the subagent's result reaches you, reply with one line AGENT-RESULT $agent_marker and nothing else. Write neither of those two lines before the result it names has reached you."
+until_true 600 "the implementer to start the background bash job and the background subagent" \
+  background_pair_started "$background_offset" "$bash_marker" "$agent_marker"
+until_true 300 "the implementer's turn to end while that work runs on" issue_worker_state "$issue" implementer idle
+[ ! -e "$background_file" ] ||
+  fail "$background_file exists while the turn that started the job has only just ended: the job must still be sleeping, or it proves nothing of a result that outlives its turn"
+turn_ended_offset=$(stat -c %s "$transcript")
+note "the implementer started a background Bash job and a background subagent and ended its turn with both still running; $background_file is not written yet"
+# The turn each result starts is the daemon's own reading of it: a claim working on no delivery,
+# which only an agent_start the bridge sent for a turn the daemon never prompted can make.
+until_true 600 "a turn the daemon handed no task, which the first background result started" unprompted_turn
+note "the daemon has the implementer working on no delivery of its own: the turn a background result started, reported by the bridge as agent_start…agent_end"
+# Each result is read in the turn it starts: the reply naming it is written after the turn that
+# started the work ended, so neither line can be the first turn's own prose.
+until_true 900 "the bash job's result to reach the implementer in a turn of its own" \
+  resumed_reply_names "$turn_ended_offset" "BASH-RESULT $bash_marker"
+until_true 900 "the subagent's result to reach the implementer in a turn of its own" \
+  resumed_reply_names "$turn_ended_offset" "AGENT-RESULT $agent_marker"
+[ -s "$background_file" ] || fail "the background bash job never wrote $background_file"
+grep -Fq -- "$bash_marker" "$background_file" ||
+  fail "$background_file does not carry $bash_marker: $(head -c 200 -- "$background_file")"
+until_true 300 "the implementer's last background turn to end" issue_worker_state "$issue" implementer idle
+note "both results reached the implementer in turns of their own, after the turn that started them had ended, and the bash job wrote $background_file"
 pass
 
 begin kill-resumes-the-same-claude-session

@@ -16,7 +16,7 @@ import (
 )
 
 // handoffPhasePattern is a handoff's phase, the routes' {phase}: a lowercase slug. Legion writes
-// plan, implement, test and review. The handoffs.phase check (migration 0151) holds the same rule,
+// plan, implement, test and review. The handoffs.phase check (migration 20261101144901_handoffs) holds the same rule,
 // generated from contracts' HANDOFF_PHASE_PATTERN, which the dispatch command checks too.
 var handoffPhasePattern = regexp.MustCompile(contracts.HandoffPhasePattern)
 

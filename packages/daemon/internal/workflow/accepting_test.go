@@ -185,17 +185,16 @@ func TestAPlannersBackwardMoveFromAcceptingIsRefused(t *testing.T) {
 	assertOutboxKinds(t, pool, []string{})
 }
 
-// CI red in accepting sends the work back to implementing as it does in review. The architect holds
-// no workspace turn, so the implementer's start waits on nobody (an empty quiesce).
-func TestChecksRedInAcceptingSendsTheWorkBackWaitingOnNobody(t *testing.T) {
+// CI red in accepting sends the work back to implementing as it does in review, and the
+// implementer's start runs at once, carrying no role to wait for (implementerStart).
+func TestChecksRedInAcceptingSendsTheWorkBackStartingAtOnce(t *testing.T) {
 	pool := migratedPool(t)
 	seedAccepting(t, pool)
 	applyRefusingNothing(t, pool, testEngine(config.DesignGateRootIssues, nil),
 		intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: acceptingRequired, ID: 2}}, Generation: 2, Snapshot: "red-2", Failing: []string{acceptingRequired}})
 	assertPhase(t, pool, phase.Implementing)
-	task, quiesce := implementerStart(t, pool)
-	if quiesce != "" || !strings.Contains(task, "Phase: implementing.") {
-		t.Fatalf("the implementer's start %q waits for %q, want the implementing task waiting on nobody", task, quiesce)
+	if task := implementerStart(t, pool); !strings.Contains(task, "Phase: implementing.") {
+		t.Fatalf("the implementer's start is %q, want the implementing task", task)
 	}
 	reason, from := checksRedNotice(t, pool)
 	if from != phase.Accepting || !strings.Contains(reason, "CI is red at head") {

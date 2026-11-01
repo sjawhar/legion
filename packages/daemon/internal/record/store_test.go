@@ -1262,8 +1262,8 @@ func TestHeldRowsListsLifecycleRowsBehindTheirIssuesRunningOne(t *testing.T) {
 }
 
 // UnfinishedLanes names each lane with a row left, once, by issue then lane, for the project alone:
-// an issue with a status write and a start has both lanes, one with two board rows has the board
-// lane once, and a project with no rows has none.
+// an issue with a status write, a start and a phase-ended message has all three lanes, one with two
+// board rows has the board lane once, and a project with no rows has none.
 func TestUnfinishedLanesNamesEachLaneWithARowLeft(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
@@ -1274,6 +1274,7 @@ func TestUnfinishedLanesNamesEachLaneWithARowLeft(t *testing.T) {
 			{Kind: OutboxKindDispatchStatus, Issue: "LEGION-208", Payload: json.RawMessage(`{"status":"testing"}`)},
 			{Kind: OutboxKindSupervise, Issue: "LEGION-208", Payload: json.RawMessage(`{"op":"start"}`)},
 			{Kind: OutboxKindNotice, Issue: "LEGION-209", Payload: json.RawMessage(`{"kind":"phase-finished"}`)},
+			{Kind: OutboxKindPhaseEnded, Issue: "LEGION-208", Payload: json.RawMessage(`{"role":"tester","from":"testing","to":"implementing","reason":"CI is red"}`)},
 			{Kind: OutboxKindDispatchMessage, Issue: "LEGION-209", Payload: json.RawMessage(`{"body":"Done."}`)},
 			{Kind: OutboxKindSupervise, Issue: "OTHER-7", Payload: json.RawMessage(`{"op":"start"}`)},
 		} {
@@ -1284,7 +1285,8 @@ func TestUnfinishedLanesNamesEachLaneWithARowLeft(t *testing.T) {
 	inTx(t, st, func(tx pgx.Tx) {
 		lanes, err := records.UnfinishedLanes(ctx, tx, "LEGION")
 		must(t, err)
-		want := []LaneKey{{Issue: "LEGION-208", Lane: LaneBoard}, {Issue: "LEGION-208", Lane: LaneLifecycle}, {Issue: "LEGION-209", Lane: LaneBoard}}
+		want := []LaneKey{{Issue: "LEGION-208", Lane: LaneBoard}, {Issue: "LEGION-208", Lane: LaneLifecycle}, {Issue: "LEGION-208", Lane: LaneRoleMessage},
+			{Issue: "LEGION-209", Lane: LaneBoard}}
 		if !reflect.DeepEqual(lanes, want) {
 			t.Errorf("LEGION's unfinished lanes = %v, want %v", lanes, want)
 		}
@@ -1878,7 +1880,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 			"github_repo", "awaiting_ask", "awaiting_gate_version", "awaiting_artifact", "awaiting_answered_at", "awaiting_answered_by",
 			"awaiting_answered_detail", "awaiting_since_seq", "awaiting_since", "handout_seq", "declared_seq", "declared_at", "caught_up_seq",
 			"ancestry", "handed_over_from"},
-		"phases":            {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note", "handoff_record", "handoff_version"},
+		"phases":            {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note", "assignment", "handoff_record", "handoff_version"},
 		"pull_requests":     {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_moves", "head_counted", "head_run", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability", "merge_sha"},
 		"production_checks": {"issue", "project", "tree", "repo", "pr_number", "merge_sha", "opened_at", "bound_at", "looks", "look_open", "look_wake_at", "last_wake_kind", "last_wake_detail", "last_wake_at", "pending_cause_kind", "pending_cause_detail", "last", "closed_at", "outcome"},
 		"design_gates":      {"issue", "artifact_id", "latest_version", "approved_version", "approved_seq", "approved_at", "told_changes_version", "told_changes_reason", "told_changes_seq", "told_changes_at"},

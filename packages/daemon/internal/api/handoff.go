@@ -90,7 +90,7 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusConflict, "HANDOFF_NO_CLAIM", "the daemon supervises no claim for this grant")
 		return
 	}
-	position, err := s.handoffPosition(r.Context(), grant.Issue)
+	position, err := s.handoffPosition(r.Context(), grant.Issue, grant.Role)
 	if err != nil {
 		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the issue record")
 		return
@@ -116,9 +116,13 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The run this completion belongs to is the run of the task the worker took, which the claim
-	// answers (supervise.Claim.ServingRun) and nothing on the request says.
-	held := machine.Claim()
-	serving := held.ServingRun()
+	// answers (supervise.Claim.ServingRun) and nothing on the request says. The claim is read once,
+	// here, and the run, the assignment and the queued task the refusals name all come from that
+	// one read: Claim() waits for the decision in flight, so two reads can straddle one and answer
+	// from different decisions — a run taken before a delivery was confirmed beside the assignment
+	// that confirmation left.
+	c := machine.Claim()
+	serving := c.ServingRun()
 	if serving == 0 {
 		writeFailure(w, http.StatusConflict, "HANDOFF_NO_RUN",
 			"this completion belongs to no task: this claim has taken none, so the run it reports cannot be told")
@@ -130,7 +134,26 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// the phase waits. The worker's turn began before the current run's task reached it; that task
 	// arrives as its next prompt, and the same completion in its turn is applied.
 	if serving != issue.Generation {
-		writeFailure(w, http.StatusConflict, "HANDOFF_STALE_GENERATION", staleCompletion(grant.Issue, issue.Generation, serving, machine.Claim().Pending))
+		writeFailure(w, http.StatusConflict, "HANDOFF_STALE_GENERATION", staleCompletion(grant.Issue, issue.Generation, serving, c.Pending))
+		return
+	}
+	// A completion of an assignment the issue's phase has moved past is refused the same way, and
+	// for the reason the run alone cannot carry: every phase entry of one run carries that run, so
+	// a turn that outlived its phase — the daemon ends no turn when a phase ends — would otherwise
+	// complete the next entry of the same phase with the work of the entry before. The two values
+	// are what the phase handed this role (position.assignment, written by the start's own
+	// transaction) and what the claim's worker took (Claim.ServingAssignment); they differ exactly
+	// while the worker is still on the earlier task, because a second delivery is refused while one
+	// is pending, so the claim serves the first assignment while the row already names the second.
+	// Either side empty is nothing to compare: a daemon upgraded in place has workers that were
+	// given their task before the daemon minted assignments, and a re-admission clears the row's
+	// (record.ClearGeneration). Refused before the fact is applied, so nothing is recorded under
+	// this completion's key and the completion the new task's turn reports is applied — the new
+	// one it writes for the work that task names, since a phase entered again is work of its own,
+	// not this completion's commit sent a second time.
+	if assignment := c.ServingAssignment(); position.assignment != "" && assignment != "" && assignment != position.assignment {
+		writeFailure(w, http.StatusConflict, "HANDOFF_STALE_ASSIGNMENT",
+			staleAssignment(grant.Issue, grant.Role, issue.Phase, position.assignment, c.Pending))
 		return
 	}
 	// A phase with a handoff ends with a Dispatch handoff record, which its writer's completion
@@ -141,7 +164,7 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	recordBacked := handoffPhase && writer == grant.Role
 	switch {
 	case recordBacked:
-		if !s.handoffRecord(w, r, held.Session, issue, word, req) {
+		if !s.handoffRecord(w, r, c.Session, issue, word, req) {
 			return
 		}
 	case !handoffPhase && (req.HandoffID != "" || req.HandoffVersion != 0):
@@ -304,6 +327,27 @@ func staleCompletion(issue string, current, serving uint64, pending *supervise.D
 			stale, current, pending.ID)
 	}
 	return fmt.Sprintf("%s: the daemon has queued no task of generation %d for this claim, and may queue none (the new run's phase may be another claim's). End this turn without completing and tell the architect; if that task arrives, call the same handoff_complete in its turn", stale, current)
+}
+
+// staleAssignment is the refusal of a completion of an assignment the issue's phase has moved
+// past: the role was given this phase's work again — the issue left the phase and came back, or
+// the phase ended under the worker and another role's round sent it here — and the turn reporting
+// this completion is the earlier assignment's. It names the queued task of the assignment the
+// phase hands the role now when the claim already holds it, as staleCompletion does for a run.
+//
+// Where staleCompletion sends the same completion again — a run's completion is the right work,
+// arrived early — this one does not, and that is the whole difference between the two: an
+// assignment is new only because the phase was entered again, so the task it hands the role is
+// work of its own. After a CI red the new testing assignment is for a new head, and a verdict
+// reported for the head before it would become that head's. The worker does the new task's work
+// and writes a handoff of its own for it.
+func staleAssignment(issue string, role claim.Role, p phase.Phase, current string, pending *supervise.Delivery) string {
+	stale := fmt.Sprintf("%s handed the %s phase %s again, and this completion is of the assignment before it; nothing was recorded", issue, role, p)
+	if pending != nil && pending.Assignment == current {
+		return fmt.Sprintf("%s: your turn began before the daemon's task for this assignment (%s) reached this session. End this turn without completing; that task arrives as your next prompt, and it is work of its own — do what it asks at the head it names and complete it with a handoff of its own, never this completion's commit or verdict",
+			stale, pending.ID)
+	}
+	return fmt.Sprintf("%s: the daemon has queued no task of this assignment for this claim yet. End this turn without completing and tell the architect; when that task arrives, do the work it asks for and complete it with a handoff of its own, never this completion's commit or verdict", stale)
 }
 
 // implementationPullRequest is the implementer's completion's read of GitHub: in implementing, a
@@ -524,23 +568,26 @@ func (s *server) readyRecord(ctx context.Context, issue string) (*record.PullReq
 // completionPosition is where issue key stands as the completion route reads it, in one repeatable-read
 // snapshot: the issue record, its tree's generation (the root's) and whether the tree lingers, its
 // review round — the implementer's count of returns to implementing, which tells each implementing,
-// testing, and reviewing pass from the last — and the handoff record the implementer last named
-// for a file-backed phase (record.PhaseRow.LastHandoff), its pull request record while it is implementing
-// (the one phase the route reads it in), nil in any other phase or while none is recorded, and its
-// production check, nil while none was ever opened.
+// testing, and reviewing pass from the last — the handoff record the implementer last named for a
+// file-backed phase (record.PhaseRow.LastHandoff), the assignment the issue's current phase handed
+// the completing role (record.PhaseRow.Assignment, "" on a row no start has stamped), its pull
+// request record while it is implementing (the one phase the route reads it in), nil in any other
+// phase or while none is recorded, and its production check, nil while none was ever opened.
 type completionPosition struct {
 	issue          *record.Issue
 	treeGeneration uint64
 	lingers        bool
 	round          int
+	assignment     string
 	lastHandoff    string
 	pullRequest    *record.PullRequest
 	check          *record.ProductionCheck
 }
 
-// handoffPosition reads key's position (completionPosition); an issue the workflow does not record is
-// a position with no issue and no error.
-func (s *server) handoffPosition(ctx context.Context, key string) (completionPosition, error) {
+// handoffPosition reads key's position (completionPosition) for the completing role, whose phases
+// row names the assignment it was last handed; an issue the workflow does not record is a position
+// with no issue and no error.
+func (s *server) handoffPosition(ctx context.Context, key string, role claim.Role) (completionPosition, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly, IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		return completionPosition{}, err
@@ -563,10 +610,13 @@ func (s *server) handoffPosition(ctx context.Context, key string) (completionPos
 	if err != nil {
 		return completionPosition{}, err
 	}
-	round, lastHandoff := 0, ""
+	round, lastHandoff, assignment := 0, "", ""
 	for _, row := range rows {
 		if row.Role == claim.RoleImplementer {
 			round, lastHandoff = row.Rounds, row.LastHandoff
+		}
+		if row.Role == role {
+			assignment = row.Assignment
 		}
 	}
 	var pr *record.PullRequest
@@ -579,6 +629,6 @@ func (s *server) handoffPosition(ctx context.Context, key string) (completionPos
 	if err != nil {
 		return completionPosition{}, err
 	}
-	return completionPosition{issue: issue, treeGeneration: root.Generation, lingers: root.Lingers(), round: round, lastHandoff: lastHandoff,
-		pullRequest: pr, check: check}, tx.Commit(ctx)
+	return completionPosition{issue: issue, treeGeneration: root.Generation, lingers: root.Lingers(), round: round,
+		lastHandoff: lastHandoff, assignment: assignment, pullRequest: pr, check: check}, tx.Commit(ctx)
 }

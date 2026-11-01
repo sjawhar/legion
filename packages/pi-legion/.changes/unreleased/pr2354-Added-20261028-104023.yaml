@@ -1,6 +1,6 @@
 kind: Added
 body: |-
-    **Breaking:** daemon API contract 44: a phase handoff is a record on the issue's Dispatch issue,
+    **Breaking:** daemon API contract 45: a phase handoff is a record on the issue's Dispatch issue,
     no longer a file committed under `.legion/<issue>/` on its branch. The `legion` tool's
     `handoff_complete` for a planning, implementing, testing or reviewing phase reports the phase's
     Dispatch handoff record, `handoffId` and `handoffVersion`: the newest record of the phase's word

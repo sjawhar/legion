@@ -23,6 +23,21 @@ topic that holds its own NATS connection, as this one does, other than its sende
 error names each session that did not reply. Role messages are live only; they are not retained
 for a later claimant, and a session does not recover one it missed.
 
+This extension claims the role for the session the host has open, and every automatic claim is
+soft: it names the session it continues, which is a fork's or branch's parent, or the session
+this process last held the role under. The listener moves the role off that predecessor only
+when the predecessor has no live registration, when its live registration carries this extension
+instance's own client instance id, or when either side carries no instance id. A predecessor
+another process still runs keeps the role, and the claim is refused naming that holder. A refused
+session keeps running and stays registered, without the role: it does not claim again at each
+heartbeat, and it takes the role on its next session event once the holder is gone. Each
+extension instance mints its client instance id when it starts and sends it on every registration
+and on the deregistration at shutdown, where the listener removes the registration only while it
+carries the same id or none. The queues, deadlines and shared role state behind all of this are
+`src/registration-state.ts`, beside the extension's other `src/` modules: a queued task acts
+through a handle that refuses every step past the task's deadline, or once its session is no
+longer the open session.
+
 `envoy_list()` shows the union of the local subscriptions and the listener's persisted interest
 registry. Each reported interest identifies whether it is `live`, `registry`, or `both`, so
 temporary registration drift does not hide the extension's actual delivery state.
@@ -374,8 +389,8 @@ gated write only when it consumes one, so a write sent any other way is refused 
   it when the ledger cannot take that line, and then posts it with a `dispatch: warning:` line.
   Either way pi-envoy records an `advisor-gate` entry with outcome `unmarked`. A record that cannot
   be read, or that names a store that is gone, is a refusal. A session no live record names needs
-  no marker: a terminal, CI, Claude Code, OpenCode, a pod without pi-envoy, a session with no
-  Dispatch and one with `askgate.enabled: false`.
+  no marker: a terminal, CI, Claude Code, a pod without pi-envoy, a session with no Dispatch and
+  one with `askgate.enabled: false`.
 - **The cause note.** When a `bash` call outside the literal form holds a `dispatch` word and a
   gated subcommand, and its result holds the CLI's refusal (or warn-mode warning) of a write with
   no marker, the gate appends an `AskGate note:` to that result. It names the first cause it found

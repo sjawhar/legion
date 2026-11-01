@@ -255,9 +255,7 @@ func TestAPhaseCompletionLeavesTheWorkerResidentUntilItsIssueCloses(t *testing.T
 		t.Fatalf("while its turn still runs the planner is %s, want working", got)
 	}
 
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: planner}); err != nil {
-		t.Fatalf("end the planning turn: %v", err)
-	}
+	endTurn(ctx, t, machine, planner)
 	run("the rows due after the turn")
 	after := machine.Claim()
 	if after.State != supervise.StateIdle || after.Generation != before.Generation || after.Session != before.Session || after.SessionFile != before.SessionFile ||
@@ -270,11 +268,10 @@ func TestAPhaseCompletionLeavesTheWorkerResidentUntilItsIssueCloses(t *testing.T
 
 	// Another role's question arrives through Envoy, which starts a turn of the planner's own with no
 	// delivery behind it; then its architect asks one through the daemon, a task of no phase.
-	for _, ev := range []supervise.Event{supervise.StreamTurnStart{Claim: planner}, supervise.StreamTurnEnd{Claim: planner}} {
-		if err := machine.Handle(ctx, ev); err != nil {
-			t.Fatalf("answer the Envoy question: handle %T: %v", ev, err)
-		}
+	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: planner}); err != nil {
+		t.Fatalf("answer the Envoy question: %v", err)
 	}
+	endTurn(ctx, t, machine, planner)
 	const question = "Why does the plan keep the old API?"
 	prompted := len(conn.Prompts())
 	if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: planner, Task: question}); err != nil {
@@ -284,11 +281,10 @@ func TestAPhaseCompletionLeavesTheWorkerResidentUntilItsIssueCloses(t *testing.T
 	if sent := conn.Prompts()[prompted]; sent.Message != question {
 		t.Fatalf("the planner was sent %q, want the architect's question", sent.Message)
 	}
-	for _, ev := range []supervise.Event{supervise.StreamTurnStart{Claim: planner, DeliveryID: machine.Claim().Pending.ID}, supervise.StreamTurnEnd{Claim: planner}} {
-		if err := machine.Handle(ctx, ev); err != nil {
-			t.Fatalf("answer the architect's question: handle %T: %v", ev, err)
-		}
+	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: planner, DeliveryID: machine.Claim().Pending.ID}); err != nil {
+		t.Fatalf("answer the architect's question: %v", err)
 	}
+	endTurn(ctx, t, machine, planner)
 	// Answering, it completes again, and the completion changes nothing.
 	result, err := intake.ApplyFact(ctx, pool, "api", "handoff:planner:after", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RolePlanner, Claim: planner, HandoffRecord: "plan-2", HandoffVersion: 2}, engine)
 	if err != nil || result.Refusal == nil || result.Refusal.Code != "HANDOFF_NOT_CURRENT_PHASE" {
@@ -388,9 +384,7 @@ func TestAnIssuesCloseWaitsForTheWorkersTurnToEnd(t *testing.T) {
 			machine.Claim().State, rows, attempts, len(rt.CallsOf("Suspend")))
 	}
 
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: planner}); err != nil {
-		t.Fatalf("end the planning turn: %v", err)
-	}
+	endTurn(ctx, t, machine, planner)
 	if got := machine.Claim(); got.State != supervise.StateSuspended || got.Session != "ses-plan" || got.SessionFile != "/tmp/plan.jsonl" || len(rt.CallsOf("Suspend")) != 1 {
 		t.Fatalf("after its turn the planner is %s on %q with %d suspensions, want suspended once with its session kept", got.State, got.Session, len(rt.CallsOf("Suspend")))
 	}
@@ -405,11 +399,11 @@ func TestAnIssuesCloseWaitsForTheWorkersTurnToEnd(t *testing.T) {
 }
 
 // CI settling red while the tester is in a turn — running a tool, its phase not completed — takes
-// the phase back to implementing with nobody's completion. The tester's turn is interrupted, not its
-// process: the implementer's start waits, sending the implementer nothing, until the tester's turn
-// has ended, and then hands the implementer the CI-red task. The tester keeps its launch, its
-// session and its capability, and nothing stops it.
-func TestACIRedSendBackInterruptsTheTestersTurnBeforeTheImplementerStarts(t *testing.T) {
+// the phase back to implementing with nobody's completion. The implementer's start runs at once, as
+// at every other phase change: it waits for no turn to end, and hands the implementer the CI-red
+// task while the tester is still working. The tester's turn is its own — nothing interrupts it and
+// nothing stops it — and it keeps its launch, its session and its capability.
+func TestACIRedStartsTheImplementerWhileTheTesterIsStillInItsTurn(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	ctx := context.Background()
@@ -461,7 +455,7 @@ func TestACIRedSendBackInterruptsTheTestersTurnBeforeTheImplementerStarts(t *tes
 	}
 	// The implementer finished implementing and is idle; the tester is in its testing turn.
 	implementer, implementerConn := boot(claim.RoleImplementer, "", "")
-	tester, testerConn := boot(claim.RoleTester, "Continue Workflow. Issue: LEGION-208. Phase: testing.", phase.Testing)
+	tester, _ := boot(claim.RoleTester, "Continue Workflow. Issue: LEGION-208. Phase: testing.", phase.Testing)
 	before := tester.Claim()
 	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
 	clock := time.Now()
@@ -495,21 +489,21 @@ func TestACIRedSendBackInterruptsTheTestersTurnBeforeTheImplementerStarts(t *tes
 		t.Fatalf("apply the red verdict = %+v, %v", result, err)
 	}
 	run("the send-back's effects")
-	run("the start's first retry, the tester's turn still running")
-	if got := tester.Claim(); got.State != supervise.StateWorking || testerConn.Aborts() != 1 || ciRedTasks() != 0 || len(implementerConn.Prompts()) != 0 {
-		t.Fatalf("while the tester's turn runs it is %s with %d aborts and the implementer got %d prompts; want working, interrupted once, and nothing sent to the implementer",
-			got.State, testerConn.Aborts(), len(implementerConn.Prompts()))
+	testwait.Eventually(t, "the implementer to be handed its CI-red task", func() bool { return ciRedTasks() == 1 })
+	during := tester.Claim()
+	if during.State != supervise.StateWorking {
+		t.Fatalf("while the implementer started the tester is %s, want working: its turn is its own", during.State)
 	}
 
-	if err := tester.Handle(ctx, supervise.StreamTurnEnd{Claim: before.Token}); err != nil {
-		t.Fatalf("end the tester's interrupted turn: %v", err)
-	}
-	run("the start once the tester's turn is over")
-	testwait.Eventually(t, "the implementer to be handed its CI-red task", func() bool { return ciRedTasks() == 1 })
+	endTurn(ctx, t, tester, before.Token)
+	run("the rows due after the tester's turn ends")
 	after := tester.Claim()
 	if after.State != supervise.StateIdle || after.Generation != before.Generation || after.Session != before.Session || after.Locator == nil ||
-		*after.Locator != *before.Locator || !bytes.Equal(after.CapabilityHash, before.CapabilityHash) || testerConn.Aborts() != 1 {
-		t.Fatalf("after the takeover the tester is %+v with %d aborts, want idle on its launch, session and capability, interrupted once", after, testerConn.Aborts())
+		*after.Locator != *before.Locator || !bytes.Equal(after.CapabilityHash, before.CapabilityHash) {
+		t.Fatalf("after the send-back the tester is %+v, want idle on its launch, session and capability", after)
+	}
+	if ciRedTasks() != 1 {
+		t.Fatalf("the implementer was handed %d CI-red tasks, want the one the start delivered", ciRedTasks())
 	}
 	for _, method := range []string{"Suspend", "Release"} {
 		for _, call := range rt.CallsOf(method) {
@@ -517,15 +511,6 @@ func TestACIRedSendBackInterruptsTheTestersTurnBeforeTheImplementerStarts(t *tes
 				t.Fatalf("the runtime was asked to %s the tester: %+v", method, call)
 			}
 		}
-	}
-	// The tester's next turn, a question asked through Envoy, is not interrupted for the start it
-	// already let go.
-	if err := tester.Handle(ctx, supervise.StreamTurnStart{Claim: before.Token}); err != nil {
-		t.Fatalf("start the tester's later turn: %v", err)
-	}
-	run("the rows due after the tester's later turn starts")
-	if testerConn.Aborts() != 1 || ciRedTasks() != 1 {
-		t.Fatalf("the tester's later turn: %d aborts and %d CI-red tasks, want the one abort and the one task", testerConn.Aborts(), ciRedTasks())
 	}
 }
 
@@ -869,9 +854,7 @@ func TestASameRoleBackwardMoveNeverStopsTheWorkerInItsNewPhase(t *testing.T) {
 		takeTask()
 	}
 	run()
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: token}); err != nil {
-		t.Fatalf("end the retro turn: %v", err)
-	}
+	endTurn(ctx, t, machine, token)
 	run()
 
 	// The runtime recovers, and every row runs to its end.
