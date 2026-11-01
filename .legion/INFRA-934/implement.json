@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-934",
+  "previousHandoff": "e9e218e8312c5702e7261acdf78baf2ff4e80069",
+  "proof": [
+    {
+      "criterion": "Round 4, the checks-red that sent the issue back: the red at e9e218e8312c is main's own, and the branch is green of it once main's fix is in. No acceptance line of this issue changed.",
+      "surface": "The pull request's own CI run read on GitHub, then the daemon's loader and the Go rig rebuilt from the merge head in this workspace.",
+      "command": "gh api repos/sjawhar/legion/actions/jobs/124923436999/logs (the envoy-go job of run 41331799009); go test ./internal/dispatch/store/ -run TestMigrationSetTakesNumbersThenTimestamps in packages/envoy of this branch; jj new legion/INFRA-934 main@origin; then at the merge head go build ./... && go vet ./internal/config/ ./internal/runtime/sandbox/, go test ./internal/config/ ./internal/runtime/sandbox/, go -C packages/daemon build -o $TMPDIR/infra934/legion ./cmd/legion && that binary's start --check-config on the three operator-route fixtures, and bun test scripts/e2e/lib",
+      "observed": "The job's only failure is '--- FAIL: TestMigrationSetTakesNumbersThenTimestamps (0.00s)' with 'FAIL github.com/sjawhar/envoy/internal/dispatch/store 191.875s'; every other job of that run passed or was skipped (lint, test, typecheck, docs/build, pi-legion, worker-image/build, pr-title, ci-filters, changes). That test is not in this branch: the -run above answers 'ok … [no tests to run]', and the file exists only in main's tree, which CI merges with the branch to build the head it tests. main's numbered Dispatch migrations closed at 157 while #2387 added 0158-0161; #2633 closes them at 0161 and merged as 0642a37a. The forward merge of main@origin into legion/INFRA-934 took no conflict (added 314 files, modified 673, removed 55, all main's) and is head 64ecd4d515b00a531c7501d107fcab7b55c0e940. At that head: go build and go vet clean; go test ./internal/config/ ok 2.123s and ./internal/runtime/sandbox/ ok 218.829s; legion start --check-config refuses the unfilled ${POD_SERVICE_ACCOUNT} with its own message and prints 'Config OK: project=LEGSMOKE' for the filled operator route; bun test scripts/e2e/lib is 746 pass / 2 fail, both failures scripts/e2e/lib/nats-stream.test.ts's docker cases, which no worker pod can run. sjawhar/legion#2538 is still OPEN and the merge brought no drift.go into the tree, so the plan's branch A still holds and the account term is at relaunch.go:133 where the review approved it.",
+      "headSha": "64ecd4d515b00a531c7501d107fcab7b55c0e940",
+      "negativeControl": "The unchanged-diff fingerprint over the pull request's own lines, excluding .legion and docs/solutions, is eb443e84770577670144848b605bef37105e014ecd31e271e456a36fc624f96c at e9e218e8312c and the same at 64ecd4d515b0, so the merge changed no line of this change; and at the merge head the audience placeholder left unfilled instead of the account still refuses with its own message, exit 1, so the loader refusal proven here is the account's own."
+    }
+  ],
+  "filesChanged": [
+    "No file of this change moved. The round's one commit is the merge of main@origin into legion/INFRA-934, taken for the fix only main has (#2633, 0642a37a), which the implementer's role prompt names as a sanctioned reason to bring the base in.",
+    ".legion/INFRA-934/implement.json is written again because retro removed the directory and a round ran after it; the next retro removes it again."
+  ],
+  "trickyParts": [
+    "The failing test is in main's tree and absent from this branch, so running it in the workspace answers 'no tests to run'. CI tests the merge of the branch with main, which is where it exists: a red that cannot be reproduced in the workspace is the first sign the red belongs to the base.",
+    "The merge is made from the bookmark (jj new legion/INFRA-934 main@origin), never from @, because @ is an empty undescribed commit above the bookmark after a handoff split and jj git push refuses a commit with no description."
+  ],
+  "deviations": [],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "The controller and the tree's architect both told this session, over Envoy, that main was red from this one test and that no code of #2620 should change for it; the architect named #2633 as the fix and asked for the merge once it landed. That is why the base came in, and the forward-merge comment on the pull request (issuecomment-6562471274) records it with both fingerprints.",
+    "CI at the merge head was still running when this round completed, with nothing red: run 41338676282, typecheck, docs/build, worker-image/build, pi-legion, ci-filters, changes and pr-title green, lint, test and envoy-go queued. The daemon reads the checks itself; nothing here waits for them."
+  ]
+}
