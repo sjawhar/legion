@@ -211,13 +211,22 @@ function binariesProvider(dir: string, bin: string): LanePostgres {
   };
 }
 
-function imageProvider(dir: string, image: string, run: string): LanePostgres {
+/** The container's own last lines, for a refusal that would otherwise say only that nothing
+ *  answered: a server that exits at once leaves its reason there and nowhere else. */
+async function containerLog(container: string): Promise<string> {
+  try {
+    const { stdout, stderr } = await execFileAsync("docker", ["logs", "--tail", "20", container]);
+    const lines = `${stdout}${stderr}`.trim();
+    return lines === "" ? "it logged nothing" : lines;
+  } catch (error) {
+    return `its log could not be read: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+function imageProvider(image: string, run: string): LanePostgres {
   return {
     name: `the Postgres image ${image}`,
     async start(lane: number): Promise<LaneDatabase> {
-      const laneDir = join(dir, `lane-${lane}`);
-      const data = join(laneDir, "pgdata");
-      mkdirSync(data, { recursive: true });
       const what = `lane ${lane}'s Postgres`;
       let last = "";
       for (let attempt = 1; attempt <= bindAttempts; attempt++) {
@@ -239,8 +248,12 @@ function imageProvider(dir: string, image: string, run: string): LanePostgres {
             `POSTGRES_DB=${databaseName}`,
             "--env",
             "POSTGRES_INITDB_ARGS=--no-sync",
-            "--volume",
-            `${data}:/var/lib/postgresql/data`,
+            // The data stays in the container's own writable layer and goes with it. A bind
+            // mount of a directory this process made is what the image cannot use: its server
+            // runs as the image's own user, which may neither write nor chown a directory the
+            // runner's user owns, and the container then exits before it listens.
+            "--tmpfs",
+            "/var/lib/postgresql/data:rw,exec",
             image,
             ...settings.flatMap((setting) => ["-c", setting]),
           ]);
@@ -257,7 +270,7 @@ function imageProvider(dir: string, image: string, run: string): LanePostgres {
             },
           };
         } catch (error) {
-          last = error instanceof Error ? error.message : String(error);
+          last = `${error instanceof Error ? error.message : String(error)}; the container said: ${await containerLog(container)}`;
           await execFileAsync("docker", ["rm", "--force", "--volumes", container]).catch(() => {});
         }
       }
@@ -288,7 +301,7 @@ export function lanePostgres(options: {
         "its initdb and pg_ctl."
     );
   }
-  if (image !== "") return imageProvider(options.dir, image, options.run);
+  if (image !== "") return imageProvider(image, options.run);
   if (bin !== "") return binariesProvider(options.dir, bin);
   return undefined;
 }
