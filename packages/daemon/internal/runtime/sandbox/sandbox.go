@@ -21,6 +21,7 @@
 package sandbox
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -667,6 +668,40 @@ func imageDrift(p *corev1.Pod, image string) (string, bool) {
 	return "", false
 }
 
+// defaultServiceAccount is the account a pod runs as when its spec names none: the namespace's
+// own, which the API server writes onto the pod at creation.
+const defaultServiceAccount = "default"
+
+// serviceAccountOr is the account a pod named name runs as: name, or the namespace's default when
+// name is empty. Both sides of accountDrift read through it, so the one rule that an unset account
+// is `default` lives here alone.
+func serviceAccountOr(name string) string {
+	return cmp.Or(name, defaultServiceAccount)
+}
+
+// accountDrift is the ServiceAccount p runs as, and whether it is not account, the one this
+// runtime creates every pod with (runtime.kubernetes.pod.service_account). A pod runs as the
+// account it was created with for its whole life — the field is fixed on the pod, and nothing the
+// daemon writes to the Sandbox moves it — so an operator who changes service_account reaches a
+// running pod only by replacing it: until then its agents hold the identity the old account
+// grants, whatever the configuration now says they may reach. relaunch replaces such a pod at the
+// next launch of any of its roles, reconcileCachePod at the next ensure of a cache's (a sweep, or
+// a new issue pod of its repository), and ReconcileOrphans warns of each one it finds, as all
+// three do for imageDrift. The comparison is of the live pod's spec.ServiceAccountName, never the
+// Sandbox's stored template: the API server keeps a named account as written. It reads an unset
+// account as `default` on both sides, because the two sides spell the same account differently —
+// the daemon writes "" into the template when service_account is unset (manifest.go, config's
+// optionalString), where the API server writes "default" into the pod it creates — and comparing
+// either raw would read every pod of a deployment that names no account as drifted and replace
+// the whole fleet. A nil pod holds no drift: it is replaced for being absent.
+func accountDrift(p *corev1.Pod, account string) (string, bool) {
+	if p == nil {
+		return "", false
+	}
+	runs := serviceAccountOr(p.Spec.ServiceAccountName)
+	return runs, runs != serviceAccountOr(account)
+}
+
 func decodeSandbox(u *unstructured.Unstructured) (*sandbox, error) {
 	var s sandbox
 	if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &s); err != nil {
@@ -791,6 +826,9 @@ func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 	if err := k.Validate(); err != nil {
 		return fmt.Errorf("sandbox runtime: release: %w", err)
 	}
+	if err := r.guardControllerVolumeReap(ctx, k.Claim); err != nil {
+		return err
+	}
 	if k.Locator != nil {
 		if err := r.Suspend(ctx, *k.Locator); err != nil {
 			return err
@@ -810,28 +848,53 @@ func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 // Sandbox to the orphan sweep, which judges it again on the claims known then, and a relaunch that
 // begins after waits for the delete and creates the Sandbox afresh.
 func (r *Runtime) releaseControllerSandbox(ctx context.Context, token claim.Token) error {
-	name := SandboxName(token)
-	s, err := r.storedSandbox(name)
+	s, err := r.controllerSandbox(ctx, token)
 	if err != nil {
-		return fmt.Errorf("release %s: %w", token, err)
+		return err
 	}
-	if s == nil || s.Labels[labelProject] != r.project {
+	if s == nil {
 		return nil
 	}
-	kind, err := podKindOf(s.Labels)
-	if _, controller := kind.(controllerPod); err != nil || !controller {
-		return nil
-	}
-	release, err := r.lockPod(ctx, name)
+	release, err := r.lockPod(ctx, s.Name)
 	if err != nil {
 		return fmt.Errorf("release %s: %w", token, err)
 	}
 	defer release()
-	fence := metav1.Preconditions{UID: &s.UID, ResourceVersion: &s.ResourceVersion}
-	if err := r.deleteFenced(ctx, name, fence, "sandbox runtime: deleted a released claim's sandbox", "claim", token); err != nil {
+	if err := r.deleteFenced(ctx, s, "sandbox runtime: deleted a released claim's sandbox", "claim", token); err != nil {
 		return fmt.Errorf("release %s: %w", token, err)
 	}
 	return nil
+}
+
+// guardControllerVolumeReap runs before Release suspends the controller, so a
+// file-backed session refusal leaves its process and claim unchanged.
+func (r *Runtime) guardControllerVolumeReap(ctx context.Context, token claim.Token) error {
+	s, err := r.controllerSandbox(ctx, token)
+	if err != nil || s == nil {
+		return err
+	}
+	if err := r.guardSessionVolumeReap(ctx, s); err != nil {
+		return fmt.Errorf("release %s: %w", token, err)
+	}
+	return nil
+}
+
+// controllerSandbox is token's current Sandbox only when it is this runtime's
+// controller. Workflow Sandboxes never reach controller-specific cleanup.
+func (r *Runtime) controllerSandbox(ctx context.Context, token claim.Token) (*sandbox, error) {
+	name := SandboxName(token)
+	s, err := r.storedSandbox(name)
+	if err != nil {
+		return nil, fmt.Errorf("release %s: %w", token, err)
+	}
+	if s == nil || s.Labels[labelProject] != r.project {
+		return nil, nil
+	}
+	kind, err := podKindOf(s.Labels)
+	if _, controller := kind.(controllerPod); err != nil || !controller {
+		return nil, nil
+	}
+	return s, nil
 }
 
 // AdoptWorkingCopy has the agent's shim set its working copy's author (the shared `jj metaedit
@@ -884,13 +947,16 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 // either: the claim path passes over it, and sweepCaches keeps, repairs or retires it after the
 // claim path. known's located claims join the watch, unless it already holds a newer incarnation
 // of the claim, and are evaluated at once. Nothing here lists Secrets: each goes with its Sandbox.
-// Each Sandbox whose pod runs an image other than the runtime's (imageDrift) is warned of, named
-// with both images, at the boot reconciliation and at every sweep until a relaunch of one of its
-// roles replaces the pod (warnImageDrift): a release whose daemon stops serving a route, or stops
-// setting a variable, that the previous image's agents call or read leaves such a pod's agents
-// calling this daemon as the older release, so it is pinned only once every tree is drained or
-// every pod relaunched, and the boot log is where an operator reads which pods are still to go.
-// Only a warning: refusing the pod would stop it being observed.
+// Each Sandbox whose pod runs an image other than the runtime's (imageDrift), or as a
+// ServiceAccount other than the configured one (accountDrift), is warned of, named with both
+// images or both accounts, at the boot reconciliation and at every sweep until a relaunch of one
+// of its roles replaces the pod (warnPodDrift): a release whose daemon stops serving a route, or
+// stops setting a variable, that the previous image's agents call or read leaves such a pod's
+// agents calling this daemon as the older release, and a pod created under an account the
+// configuration has since moved off leaves its agents holding the identity that account grants,
+// so a release is pinned, or the old account deleted, only once every tree is drained or every pod
+// relaunched, and the boot log is where an operator reads which pods are still to go. Only a
+// warning: refusing the pod would stop it being observed.
 func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {
 	var errs []error
 	// controllers are the Sandboxes of the known controller claims, which the sweep keeps.
@@ -917,7 +983,7 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 		if u.GetLabels()[labelProbe] != "" || u.GetLabels()[labelCache] != "" || u.GetDeletionTimestamp() != nil {
 			continue
 		}
-		r.warnImageDrift(u)
+		r.warnPodDrift(u)
 		if age := r.now().Sub(u.GetCreationTimestamp().Time); age < grace {
 			continue
 		}
@@ -929,17 +995,26 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 	return errors.Join(errs...)
 }
 
-// warnImageDrift logs, for the Sandbox u, the pod it owns in the store when a container of it runs
-// an image other than the runtime's (imageDrift): the Sandbox's name, the image found and the
-// configured one, as ReconcileOrphans says. A same-named pod u does not own is an earlier
-// Sandbox's, on its way out, and is nothing of u's to warn about.
-func (r *Runtime) warnImageDrift(u *unstructured.Unstructured) {
+// warnPodDrift logs, for the Sandbox u, what the pod it owns in the store runs that a pod created
+// now would not: a container on an image other than the runtime's (imageDrift), and the pod
+// running as a ServiceAccount other than the configured one (accountDrift). Each kind of drift is
+// one warning of its own, naming the Sandbox, what was found and what is configured, as
+// ReconcileOrphans says, so a pod holding both is named twice. A same-named pod u does not own is
+// an earlier Sandbox's, on its way out, and is nothing of u's to warn about. No cache Sandbox is
+// ever warned of, for the account as for the image: ReconcileOrphans passes over it before the
+// call, since its own sweep replaces its pod for either drift without a relaunch to wait for.
+func (r *Runtime) warnPodDrift(u *unstructured.Unstructured) {
 	pod := r.storedPod(u.GetName())
 	if !ownedBy(pod, u.GetUID()) {
 		return
 	}
 	if other, drifted := imageDrift(pod, r.image); drifted {
 		r.log.Warn(fmt.Sprintf("sandbox runtime: %s runs image %s, the configured image is %s; its agents call this daemon as the older release until the pod is relaunched", u.GetName(), other, r.image),
+			"sandbox", u.GetName(), "pod", pod.UID)
+	}
+	if account, drifted := accountDrift(pod, r.pod.ServiceAccount); drifted {
+		r.log.Warn(fmt.Sprintf("sandbox runtime: %s runs as ServiceAccount %s, the configured ServiceAccount is %s; its agents hold that identity until the pod is relaunched",
+			u.GetName(), account, serviceAccountOr(r.pod.ServiceAccount)),
 			"sandbox", u.GetName(), "pod", pod.UID)
 	}
 }
@@ -965,7 +1040,7 @@ func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured, contr
 	if err != nil {
 		return fmt.Errorf("reconcile orphans: Sandbox %s: %v; kept", u.GetName(), err)
 	}
-	name, uid := u.GetName(), u.GetUID()
+	name := u.GetName()
 	switch kind.(type) {
 	case controllerPod:
 		if controllers[name] {
@@ -982,9 +1057,11 @@ func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured, contr
 		if owned, err := r.controllerOwned(ctx, name); err != nil || owned {
 			return err
 		}
-		version := u.GetResourceVersion()
-		fence := metav1.Preconditions{UID: &uid, ResourceVersion: &version}
-		if err := r.deleteFenced(ctx, name, fence, "sandbox runtime: deleted an orphaned sandbox", "role", claim.RoleController); err != nil {
+		s, err := decodeSandbox(u)
+		if err != nil {
+			return fmt.Errorf("reconcile orphans: decode Sandbox %s: %w", name, err)
+		}
+		if err := r.deleteFenced(ctx, s, "sandbox runtime: deleted an orphaned sandbox", "role", claim.RoleController); err != nil {
 			return fmt.Errorf("reconcile orphans: %w", err)
 		}
 		return nil
@@ -1018,9 +1095,11 @@ func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured, contr
 	// Fenced to the uid and resourceVersion the decision read: a re-admission of this issue that
 	// landed between the informer's snapshot and this turn relabelled the same Sandbox for its new
 	// tree (ensureSandbox) and may already run a pod in it; the uid alone would not tell.
-	version := u.GetResourceVersion()
-	fence := metav1.Preconditions{UID: &uid, ResourceVersion: &version}
-	if err := r.deleteFenced(ctx, name, fence, "sandbox runtime: deleted an orphaned sandbox", "tree", tree); err != nil {
+	s, err := decodeSandbox(u)
+	if err != nil {
+		return fmt.Errorf("reconcile orphans: decode Sandbox %s: %w", name, err)
+	}
+	if err := r.deleteFenced(ctx, s, "sandbox runtime: deleted an orphaned sandbox", "tree", tree); err != nil {
 		return fmt.Errorf("reconcile orphans: %w", err)
 	}
 	return nil
@@ -1042,30 +1121,30 @@ func (r *Runtime) controllerOwned(ctx context.Context, name string) (bool, error
 	return unretired, nil
 }
 
-// deleteFenced deletes the Sandbox name once, fenced by fence, and forgets its launchers'
-// credentials; msg and attrs log the delete. Its caller holds the pod's launch turn. One already
-// gone is gone, and one the fence refuses, replaced or written since, is kept and logged with
-// attrs, since its owner's next decision is the orphan sweep's: neither is an error. Deletion
-// propagates in the foreground, as the tree cleanup's does (deleteSandbox): the Sandbox owns its
-// Secrets by owner reference, and a controller's or a repository cache's Sandbox also its PVC, which
-// the next Sandbox of that name names again (IssueClaimName, cacheClaimName), so a background
-// delete, which drops the Sandbox at once and collects the PVC after, would let a launch inside
-// that window create a Sandbox asking for a Terminating PVC. In the foreground the Sandbox stays,
-// Terminating, until they are gone, so a launch that waits out a Sandbox being deleted
-// (ensureSandbox) waits for its volume too. An issue's Sandbox owns no PVC: the issue's disk is its
-// pod's own, and goes when the delete takes the pod.
-func (r *Runtime) deleteFenced(ctx context.Context, name string, fence metav1.Preconditions, msg string, attrs ...any) error {
+// deleteFenced deletes s once, fenced to the object the caller read, and
+// forgets its launchers' credentials. Its caller holds the pod's launch turn.
+// One already gone is gone; a conflict keeps its replacement for the next
+// orphan sweep. Deletion is foreground, so a Sandbox and the volume it owns
+// remain until garbage collection has removed the volume. The session-volume
+// guard runs immediately before the same fence prevents a newer Sandbox from
+// being reaped.
+func (r *Runtime) deleteFenced(ctx context.Context, s *sandbox, msg string, attrs ...any) error {
+	if err := r.guardSessionVolumeReap(ctx, s); err != nil {
+		return err
+	}
+	name, uid, version := s.Name, s.UID, s.ResourceVersion
 	policy := metav1.DeletePropagationForeground
+	fence := metav1.Preconditions{UID: &uid, ResourceVersion: &version}
 	err := r.sandboxClient().Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &policy, Preconditions: &fence})
 	switch {
 	case err == nil:
 		r.forgetLauncherCredentials(name)
-		r.log.Info(msg, append([]any{"sandbox", name, "uid", *fence.UID}, attrs...)...)
+		r.log.Info(msg, append([]any{"sandbox", name, "uid", uid}, attrs...)...)
 	case apierrors.IsNotFound(err):
 		r.forgetLauncherCredentials(name)
 	case apierrors.IsConflict(err):
 		r.log.Info("sandbox runtime: kept a sandbox written since its delete was decided; the orphan sweep decides it again",
-			append([]any{"sandbox", name, "uid", *fence.UID, "error", err}, attrs...)...)
+			append([]any{"sandbox", name, "uid", uid, "error", err}, attrs...)...)
 	default:
 		return fmt.Errorf("delete sandbox %s: %w", name, err)
 	}

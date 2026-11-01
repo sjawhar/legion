@@ -1,5 +1,84 @@
 # Changelog
 
+## [main@6b1524cdb8aa] - 2026-11-01
+
+### Fixed
+
+- The bundled `dispatch request-approval` finds an ask block whose id the renderer writes
+  `id="…"`, such as `a b` (`id="a b"`) or `R&D` (`id="R&amp;D"`), instead of naming it as one the
+  latest version does not hold yet and refusing every request over the document.
+
+## [main@2605f55135db] - 2026-11-01
+
+### Added
+
+- Consumer delivery. The channel server subscribes the current session id's relay subject,
+  `notifications.envoy.deliver.<session id>`, before it registers, and every registration asks the
+  listener for the session's durable consumer, with an epoch per NATS connection and the resume
+  point `replay-<session id>.json` now keeps beside the replay state. Answered `consumer`, the
+  session takes its agent subject and every followed topic the stream stores from the listener's
+  relay, in stream order: each frame is answered `received` as it decodes and `done` once Claude
+  Code has it. In a Legion pane that is when `legion claude-bridge` answers its inbox, which it does
+  once Claude Code took the message into a step (`--replay-user-messages`). In channel mode it is
+  when the MCP notification write resolves, the last signal Claude Code gives there, so a
+  notification Claude Code drops after that (a channel it did not load) is not sent again. A
+  frame already shown or skipped is `done` at once; one whose write fails, or that arrives after
+  the session moved to another id, is answered `nak` and comes again, and from its third delivery
+  is replaced by a notice naming it. The core copies of those subjects then show nothing and only
+  answer a lane's receipt, and the replay engine makes no `/v1/replay` call. So a message
+  published while Claude Code was not running or its connection was down, a role message to a
+  role it holds included, is delivered once when it is back, for up to 72 hours. A NATS reconnect
+  begins a new epoch and registers at once, so the listener restarts the relay at the consumer's
+  ack floor. A session coming from the previous plugin has no resume point of its own: its first
+  consumer starts at the replay cursors its state file holds, so the messages stored while it was
+  away are delivered instead of acked away.
+  A BTW that arrives late is passed over, as a replayed one is. Answered `core`, or by
+  a listener of an earlier release, delivery works as before (INFRA-594).
+
+### Changed
+
+- In a Legion pane, `legion claude-bridge` runs Claude Code with `--replay-user-messages` and
+  answers an Envoy delivery on its inbox (`LEGION_CLAUDE_INBOX`) only once Claude Code re-emits it
+  as the user message it took, no longer once the bridge queued it; a delivery Claude Code ended a
+  step without taking, or had not taken when it exited, is answered with an error. The inbox reads
+  a client's next deliveries while it waits and answers them in the order they came. So a relayed
+  frame is `done` only once Claude Code took the delivery (INFRA-594).
+
+### Fixed
+
+- `envoy_sessions`' `machine` filter finds a session by the listener it registered through as
+  well as by the machine its process runs on: it matched only the latter, so a filter by a hub's
+  machine id (`envoy-hub`, `gke`) listed nothing for the sessions registered through it
+  (INFRA-594).
+- A message the session missed is no longer shown twice when its live copy arrives while the
+  replayed one is being written. The replay engine's frame is now claimed in the same dedupe a
+  live frame is, from before it is handed to the channel's write queue until the engine records it
+  in the replay ledger, so whichever copy comes second is a repeat and is not shown; the claim is
+  released when the frame was not shown after all, so a later copy still reaches the session
+  (INFRA-594).
+
+## [main@ed9113e7c092] - 2026-11-01
+
+### Changed
+
+- The shipped `dispatch` command accepts only `omp` and `claude` as `DISPATCH_HOST`, and reads
+  `OPENCODE_CONFIG_DIR` no longer; `envoy_publish`'s description no longer names an OpenCode
+  agent as the kind of session a serve port reaches. Legion no longer supports OpenCode.
+- The plugin declares daemon API contract 44 in `package.json`'s `legion.daemonApiVersion`:
+  a Claude Code role's start command and pane no longer carry
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, so a role may leave a background task running past
+  the end of a turn and read its result in the turn Claude Code starts when it finishes.
+  `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_DISABLE_CRON=1` stay.
+- The channel instructions describe `urgency` as how soon the sender asks the reader to act, and say that it does not change when or in what order deliveries arrive.
+
+### Fixed
+
+- The Legion plugin's `Stop` hook entry now carries `${background_tasks}`, Claude Code's list of
+  the session's own tasks, and a turn that ends with one of them still running earns no phase
+  reminder: the task's result starts the next turn, so the worker is waiting to be woken rather
+  than stalled. A hook argument an older binary does not substitute reads as no background work,
+  which is the behaviour before this field existed.
+
 ## [main@f699b1316430] - 2026-10-31
 
 ### Changed

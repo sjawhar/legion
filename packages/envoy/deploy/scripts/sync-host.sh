@@ -8,4 +8,6 @@ root="$(cd "$(dirname "$0")/../../../.." && pwd)"
 # build the image from a partial sync. Remote hosts run a pinned
 # ghcr.io/sjawhar/legion/envoy tag (ENVOY_IMAGE_TAG); sync only the
 # compose files and scripts they need to pull and run it.
+# rsync creates only the final path component, so make the parent tree first.
+ssh "$host" 'mkdir -p ~/legion/default/packages/envoy'
 rsync -az --delete "$root/packages/envoy/deploy/" "$host:~/legion/default/packages/envoy/deploy/"

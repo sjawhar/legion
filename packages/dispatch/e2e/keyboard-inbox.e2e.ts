@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { createAsk, createComment, createIssue, createProject, getInbox, patchIssue } from "./api";
 import {
@@ -9,6 +9,7 @@ import {
   openAssigneeFilter,
   pickAssignee,
 } from "./inbox-filter";
+import { askControls, hasReadingPane, selectedRow, selectRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -48,6 +49,35 @@ async function askIdOf(page: Page, index: number): Promise<string> {
   return id as string;
 }
 
+/**
+ * Marks the rows the reader walks from the keyboard, starting where the Inbox left them.
+ *
+ * `x` marks the row the reader is on: with the reading column that is the row the column is
+ * showing, which the Inbox selects for them when it opens, so the walk starts there; without
+ * it, it is the row holding the focus, which `j` has to reach first.
+ */
+async function markFromKeyboard(page: Page, count: number): Promise<void> {
+  for (let index = 0; index < count; index += 1) {
+    if (index > 0 || !hasReadingPane(page)) await page.keyboard.press("j");
+    await page.keyboard.press("x");
+  }
+}
+
+/** Puts the reader on a row: the focus on it and, with the reading column on, the selection the
+ *  column follows, which is what `x` and `h` act on there. */
+async function goToRow(page: Page, index: number): Promise<void> {
+  const row = page.locator("[data-inbox-row]").nth(index);
+  await selectRow(page, await askIdOf(page, index));
+  await row.focus();
+}
+
+/** The Snooze the reader reaches for one question: the row's own control, or - with the
+ *  reading column on, where the row carries none - the column head's, the column being given
+ *  that row first. */
+async function rowSnooze(page: Page, askId: string): Promise<Locator> {
+  return (await askControls(page, askId)).locator("[data-inbox-snooze]");
+}
+
 test.beforeEach(async () => {
   await resetDatabase();
 });
@@ -67,12 +97,8 @@ test.describe("inbox selection @phone", () => {
       const first = await askIdOf(page, 0);
       const second = await askIdOf(page, 1);
 
-      // x marks the focused row; j moves on and x marks the next one.
-      await page.keyboard.press("j");
-      await expect(rows.nth(0)).toBeFocused();
-      await page.keyboard.press("x");
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
+      // x marks the row the reader is on; j moves on and x marks the next one.
+      await markFromKeyboard(page, 2);
       await expect(rows.nth(0).getByRole("checkbox")).toBeChecked();
       await expect(rows.nth(1).getByRole("checkbox")).toBeChecked();
       await expect(rows.nth(2).getByRole("checkbox")).not.toBeChecked();
@@ -106,9 +132,9 @@ test.describe("inbox selection @phone", () => {
       await expect(page.locator(`[data-inbox-row="${second}"]`)).toHaveCount(0);
       await expect(bar).toHaveCount(0);
 
-      // One row marked and no row focused: Escape clears the selection.
-      await page.keyboard.press("j");
-      await expect(rows.nth(0)).toBeFocused();
+      // One row marked, the reader back on it: Escape steps off the row first, and clears the
+      // selection only once they are off it.
+      await goToRow(page, 0);
       await page.keyboard.press("x");
       await expect(bar).toContainText("1 selected");
       await page.keyboard.press("Escape");
@@ -145,10 +171,7 @@ test.describe("inbox selection @phone", () => {
         })
       );
 
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
+      await markFromKeyboard(page, 2);
       const bar = page.getByRole("group", { name: "Selected asks" });
       await bar.getByRole("combobox", { name: "Snooze selected asks" }).selectOption("tomorrow");
 
@@ -196,10 +219,7 @@ test.describe("inbox selection @phone", () => {
         });
       });
 
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
+      await markFromKeyboard(page, 2);
       const bar = page.getByRole("group", { name: "Selected asks" });
       await bar.getByRole("combobox", { name: "Snooze selected asks" }).selectOption("tomorrow");
       await requested.promise;
@@ -260,15 +280,16 @@ test.describe("inbox selection @phone", () => {
       const rows = page.locator("[data-inbox-row]");
       await expect(rows).toHaveCount(3);
       await checkbox(hidden.id).check();
+      // Ticking a row also selects it where the reading column is on, and the list keeps the
+      // row that column is showing: the reader moves on before the filter narrows, so the mark
+      // is all that is left of it here.
+      if (hasReadingPane(page)) await page.keyboard.press("j");
       await pickAssignee(page, "alice");
       await closeAssigneeFilter(page);
       await expect(rows).toHaveCount(2);
       await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
+      await markFromKeyboard(page, 2);
       const bar = page.getByRole("group", { name: "Selected asks" });
       await expect(bar).toContainText("2 selected");
       await page.keyboard.press("h");
@@ -327,10 +348,7 @@ test.describe("inbox selection @phone", () => {
         })
       );
 
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
+      await markFromKeyboard(page, 2);
       const bar = page.getByRole("group", { name: "Selected asks" });
       await bar.getByRole("combobox", { name: "Snooze selected asks" }).selectOption("tomorrow");
 
@@ -378,21 +396,24 @@ test.describe("inbox selection @phone", () => {
         });
       });
 
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
+      await markFromKeyboard(page, 2);
       // Let go of the row: one under the reader's hand is held on screen whatever the list does,
-      // and this test is about the write, not that mechanism.
-      await page.keyboard.press("Escape");
+      // and this test is about the write, not that mechanism. With the reading column on the
+      // hand is the selection, which has nowhere to be put down, so the row the column is
+      // showing is the one row the list keeps.
+      if (!hasReadingPane(page)) {
+        await page.keyboard.press("Escape");
+      }
       await page.mouse.move(0, 0);
       const bar = page.getByRole("group", { name: "Selected asks" });
       await expect(bar).toContainText("2 selected");
       await bar.getByRole("combobox", { name: "Snooze selected asks" }).selectOption("tomorrow");
 
       // Both rows go at once; the bar stays while its write is in the air, and counts the pick
-      // it is waiting on rather than the selection the optimistic move has just emptied.
-      await expect(rows).toHaveCount(0);
+      // it is waiting on rather than the selection the optimistic move has just emptied. The
+      // list itself empties where the reader's hand was let go of above; where the hand is the
+      // selection, the row the column is showing is the one the list keeps.
+      await expect(rows).toHaveCount(hasReadingPane(page) ? 1 : 0);
       await expect(bar).toHaveCount(1);
       await expect(bar).toContainText("Snoozing 2…");
       await expect(bar).not.toContainText("0 selected");
@@ -433,9 +454,16 @@ test.describe("inbox selection @phone", () => {
       await expect(picker).toBeFocused();
       await page.keyboard.press("Escape");
 
-      // j roves off the ticked row, and h reaches the picker from a focused row too.
+      // j moves off the ticked row, and h reaches the picker from there too. A tick marks its
+      // row and moves nothing else, so the reading column is still on the row the Inbox opened
+      // on and the step from there is the second row; without the column j roves from the box
+      // holding the focus and lands on the third.
       await page.keyboard.press("j");
-      await expect(rows.nth(2)).toBeFocused();
+      if (hasReadingPane(page)) {
+        await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", await askIdOf(page, 1));
+      } else {
+        await expect(rows.nth(2)).toBeFocused();
+      }
       await page.keyboard.press("h");
       await expect(picker).toBeFocused();
     } finally {
@@ -455,17 +483,17 @@ test.describe("inbox selection @phone", () => {
       await openInbox(page);
       const rows = page.locator("[data-inbox-row]");
 
-      // Control: a row's own picker, which already returns to its row.
-      await page.keyboard.press("j");
-      await expect(rows.nth(0)).toBeFocused();
+      // Control: the Snooze the reader reaches for the row they are on, which already returns
+      // to that row.
+      await goToRow(page, 0);
+      const rowPicker = await rowSnooze(page, await askIdOf(page, 0));
       await page.keyboard.press("h");
-      await expect(rows.nth(0).locator("[data-inbox-snooze]")).toBeFocused();
+      await expect(rowPicker).toBeFocused();
       await page.keyboard.press("Escape");
       await expect(rows.nth(0)).toBeFocused();
 
       // The bulk picker does the same, and leaves the selection alone on the way.
-      await page.keyboard.press("j");
-      await expect(rows.nth(1)).toBeFocused();
+      await goToRow(page, 1);
       await page.keyboard.press("x");
       const bar = page.getByRole("group", { name: "Selected asks" });
       await expect(bar).toContainText("1 selected");
@@ -496,8 +524,7 @@ test.describe("inbox selection @phone", () => {
       await openInbox(page);
       const rows = page.locator("[data-inbox-row]");
       const bar = page.getByRole("group", { name: "Selected asks" });
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
+      await markFromKeyboard(page, 1);
       await expect(bar).toContainText("1 selected");
       // No row focused, so the page's Escape is the Clear the popover now stands in front of.
       await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
@@ -558,13 +585,31 @@ test.describe("inbox selection @phone", () => {
       ]);
       expect(new Set(checkboxes).size).toBe(checkboxes.length);
 
-      // Snooze is named from the same place, so the two controls of a row agree.
-      const pickers = await named("[data-inbox-snooze]");
-      expect(pickers).toContain("Snooze CORE-2: Ship it?");
-      expect(new Set(pickers).size).toBe(pickers.length);
-      expect(pickers.map((name) => name.replace(/^Snooze /, "")).sort()).toEqual(
-        checkboxes.map((name) => name.replace(/^Select /, "")).sort()
-      );
+      // Snooze is named from the same place, so the two controls of a row agree. Without the
+      // reading column every row carries its own Snooze, so the names tell the twins apart by
+      // their position exactly as the checkboxes do. With the column one Snooze is on the page
+      // - the head's, for the row the column is showing - so it names that question without
+      // the position, which is only there to tell two controls on one page apart.
+      const pickers: string[] = [];
+      for (const askId of await rows.evaluateAll((items) =>
+        items.map((item) => item.getAttribute("data-inbox-row") ?? "")
+      )) {
+        const picker = await rowSnooze(page, askId);
+        pickers.push((await picker.getAttribute("aria-label")) ?? "none");
+      }
+      if (hasReadingPane(page)) {
+        expect(pickers).toEqual(
+          checkboxes.map((name) =>
+            name.replace(/^Select /, "Snooze ").replace(/, ask \d+ of \d+/, "")
+          )
+        );
+      } else {
+        expect(pickers).toContain("Snooze CORE-2: Ship it?");
+        expect(new Set(pickers).size).toBe(pickers.length);
+        expect(pickers.map((name) => name.replace(/^Snooze /, "")).sort()).toEqual(
+          checkboxes.map((name) => name.replace(/^Select /, "")).sort()
+        );
+      }
     } finally {
       await context.close();
     }
@@ -602,17 +647,22 @@ test.describe("inbox selection @phone", () => {
         return route.fallback();
       });
       // Narrowing to the reader alone, through the control: the Inbox stays mounted, so the
-      // mark is still made while its row is off the list.
+      // mark is still made while its row is off the list. The tick also selected that row
+      // where the reading column is on, and the list keeps the row it is showing, so the
+      // reader moves on first - the mark is what this test follows, not the hold.
+      if (hasReadingPane(page)) await page.keyboard.press("j");
       await pickAssignee(page, "alice");
       await closeAssigneeFilter(page);
       await expect(rows).toHaveCount(1);
       await expect(hiddenRow).toHaveCount(0);
       await expect(bar).toHaveCount(0);
 
-      // Nothing is marked here, so `h` reaches the focused row's own picker, not a bulk write.
-      await page.keyboard.press("j");
+      // Nothing is marked here, so `h` reaches the Snooze of the row the reader is on, not a
+      // bulk write.
+      const onlyPicker = await rowSnooze(page, await askIdOf(page, 0));
+      await goToRow(page, 0);
       await page.keyboard.press("h");
-      await expect(rows.nth(0).locator("[data-inbox-snooze]")).toBeFocused();
+      await expect(onlyPicker).toBeFocused();
       expect(wrote).toBe(false);
     } finally {
       await context.close();
@@ -678,11 +728,10 @@ test.describe("inbox selection @phone", () => {
       const bar = page.getByRole("group", { name: "Selected asks" });
       const later = page.getByRole("button", { name: /^Later \(1\)/ });
 
-      // Mark it, then snooze it from its own row control: it folds into Later.
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
+      // Mark it, then snooze it from its own control: it folds into Later.
+      await markFromKeyboard(page, 1);
       await expect(bar).toContainText("1 selected");
-      await rows.nth(0).locator("[data-inbox-snooze]").selectOption("tomorrow");
+      await (await rowSnooze(page, await askIdOf(page, 0))).selectOption("tomorrow");
       await expect(later).toBeVisible();
       await expect(rows).toHaveCount(0);
       await expect(bar).toHaveCount(0);
@@ -746,16 +795,11 @@ test.describe("inbox selection @phone", () => {
         return route.fallback();
       });
 
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
+      await markFromKeyboard(page, 2);
       await expect(bar).toContainText("2 selected");
 
       // The reader defers one row themselves; it folds into Later, out of sight but still marked.
-      await page
-        .locator(`[data-inbox-row="${deferred.id}"] [data-inbox-snooze]`)
-        .selectOption("tomorrow");
+      await (await rowSnooze(page, deferred.id)).selectOption("tomorrow");
       await expect(page.getByRole("button", { name: /^Later \(1\)/ })).toBeVisible();
       await expect(rows).toHaveCount(1);
       await expect(rows.nth(0)).toHaveAttribute("data-inbox-row", live.id);
@@ -794,10 +838,7 @@ test.describe("inbox selection @phone", () => {
         return route.fallback();
       });
 
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
+      await markFromKeyboard(page, 2);
       const bar = page.getByRole("group", { name: "Selected asks" });
       const picker = bar.getByRole("combobox", { name: "Snooze selected asks" });
       await page.keyboard.press("h");
@@ -842,10 +883,7 @@ test.describe("inbox selection @phone", () => {
         })
       );
 
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
+      await markFromKeyboard(page, 2);
       const bar = page.getByRole("group", { name: "Selected asks" });
       await bar.getByRole("combobox", { name: "Snooze selected asks" }).selectOption("tomorrow");
       await expect(bar).toContainText("Could not snooze 2 of 2");
@@ -880,8 +918,7 @@ test.describe("inbox selection @phone", () => {
       const page = await context.newPage();
       await openInbox(page, 2);
       const bar = page.getByRole("group", { name: "Selected asks" });
-      await page.keyboard.press("j");
-      await page.keyboard.press("x");
+      await markFromKeyboard(page, 1);
       await expect(bar).toContainText("1 selected");
 
       const hold = page.getByRole("radio", { name: "Hold" });
@@ -908,8 +945,8 @@ test.describe("inbox selection @phone", () => {
       const rows = page.locator("[data-inbox-row]");
       const bar = page.getByRole("group", { name: "Selected asks" });
 
-      // An `h` from row 1 records that row, then the reader leaves and marks row 3 instead.
-      await page.keyboard.press("j");
+      // An `h` from the first row records that row, then the reader leaves and marks row 3.
+      await goToRow(page, 0);
       await page.keyboard.press("x");
       await page.keyboard.press("h");
       await page.keyboard.press("Escape");
@@ -946,9 +983,7 @@ test.describe("inbox selection @phone", () => {
       const rows = page.locator("[data-inbox-row]");
 
       // Defer Alpha: it drops into `Later`, which renders below every turn band.
-      await page
-        .locator(`[data-inbox-row="${deferred.id}"] [data-inbox-snooze]`)
-        .selectOption("tomorrow");
+      await (await rowSnooze(page, deferred.id)).selectOption("tomorrow");
       await page.getByRole("button", { name: /^Later \(1\)/ }).click();
       await expect(rows).toHaveCount(2);
 

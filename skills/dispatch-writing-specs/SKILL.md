@@ -19,7 +19,7 @@ Part | Content
 `Problem` | What goes wrong, for whom, with counts
 `Goals and non-goals` | What is in and out of scope
 `Requirements` | `**R1.**` on, each naming its source (`From:`)
-`Design` | How it meets them; a value for each limit, size and time
+`Design` | How it meets them; a value and its reason for each limit, size and time
 `Decisions` | Your own choices
 `Acceptance` | `**A1.**` on, each naming the requirements it tests
 

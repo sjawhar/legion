@@ -51,9 +51,9 @@ session's token, or a process whose standard input is a terminal. The daemon mus
 path — the first would make an agent session the grantee — so:
 
 - Start the daemon in a terminal pane the operator opens by hand (a tmux window or pane in the
-  operator's own session), in which no OMP or OpenCode agent session has run since secretsd last
-  started. secretsd remembers a terminal an agent session has used and refuses tokenless requests
-  from it with `a tokenless request came from a known agent terminal`.
+  operator's own session), in which no agent session has run since secretsd last started.
+  secretsd remembers a terminal an agent session has used and refuses tokenless requests from it
+  with `a tokenless request came from a known agent terminal`.
 - The daemon and its supervisor loop (for example `while :; do legion start <team> --config
   legion.yaml; sleep 5; done`) run inside that pane's process tree with **stdin left on the pane's
   terminal**: no `< /dev/null`, no `nohup`, no `setsid` with stdin redirected. secretsd identifies
@@ -271,7 +271,10 @@ not run it, naming both, a role named twice, and any other value. The
 controller always runs on Oh My Pi.
 
 For such a role the pane's shim runs `legion claude-bridge -- claude -p --input-format stream-json
---output-format stream-json --verbose --permission-mode bypassPermissions --strict-mcp-config …`.
+--output-format stream-json --verbose --replay-user-messages --permission-mode bypassPermissions
+--strict-mcp-config …`. With `--replay-user-messages` Claude Code re-emits each user message it
+takes, and the bridge answers an Envoy delivery only then, so claude-envoy counts the delivery
+taken only once Claude Code has it.
 The claim's own Claude Code directory, `<state_dir>/claude/<claim token>`, is the pane's
 `CLAUDE_CONFIG_DIR`: it holds the transcript, the MCP configuration the daemon writes (one server,
 `legion`, running claude-envoy's `dist/envoy-channel.js` on bun) and that server's phase-reminder

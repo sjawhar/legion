@@ -6,6 +6,7 @@ import {
   MessageMetadataSchema,
   messageMetadataShape,
   parseEnvoyToolArguments,
+  sessionsOnMachine,
   toMessageMetadata,
 } from "../tool-contract";
 import { ToolInputError } from "../tool-input-errors";
@@ -108,6 +109,12 @@ describe("envoyToolSpecs", () => {
     expect(subscribe?.description).toContain("envoy.exceptions.<original-topic>");
     expect(publish?.description).toContain("at-least-once, possibly out of order across topics");
     expect(publish?.description).toContain("id for dedupe and at for freshness");
+    for (const description of [subscribe?.description, publish?.description]) {
+      expect(description).toContain(
+        "reach each subscribed session once from the durable consumer its listener relays to it, also one that was away or restarted"
+      );
+      expect(description).toContain("Team and other ad-hoc topics are live only.");
+    }
     expect(publish?.description).toContain("errs naming each session that did not confirm");
     expect(publish?.description).toContain(
       "a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions"
@@ -153,6 +160,16 @@ describe("message metadata", () => {
         message: 'Invalid option: expected one of "low"|"med"|"high"|"blocking"',
       }),
     ]);
+  });
+
+  // Nothing in Envoy orders, holds or delivers a message by its urgency: the renderers only show
+  // it. A sender told nothing more takes a "high" for a faster lane that does not exist.
+  test("tells a sender that urgency is for the reader and does not deliver a message sooner", () => {
+    // The JSON schema is what a model is shown for the tool's arguments.
+    const shown = JSON.stringify(z.toJSONSchema(MessageMetadataSchema));
+
+    expect(shown).toContain("how soon the recipient should act");
+    expect(shown).toContain("does not deliver the message sooner or ahead of others");
   });
 
   test("refuses an Envoy tool call once with every problem named", () => {
@@ -203,5 +220,48 @@ describe("message metadata", () => {
       `text is 1 characters over the ${SLACK_POST_TEXT_MAX}-character limit (${SLACK_POST_TEXT_MAX + 1}/${SLACK_POST_TEXT_MAX})`,
     ]);
     expect(failure.message).toContain("slack_post was not called: 2 problems");
+  });
+});
+
+describe("sessionsOnMachine", () => {
+  const session = (id: string, machineID: string, host: string) => ({
+    session_id: id,
+    machine_id: machineID,
+    host,
+    dir: "/work",
+    port: 0,
+    title: "",
+    topics: [],
+    self_subscribed: true,
+  });
+  const onHub = session("ses_on_hub", "envoy-hub", "gke-node-7");
+  const onDevbox = session("ses_on_devbox", "devbox", "devbox");
+  const sessions = [onHub, onDevbox];
+
+  test("finds a session by the machine it runs on and by the listener it registered through", () => {
+    expect(sessionsOnMachine(sessions, "envoy-hub")).toEqual([onHub]);
+    expect(sessionsOnMachine(sessions, "gke-node-7")).toEqual([onHub]);
+    expect(sessionsOnMachine(sessions, "devbox")).toEqual([onDevbox]);
+    expect(sessionsOnMachine(sessions, "other")).toEqual([]);
+  });
+
+  test("no filter lists every session", () => {
+    expect(sessionsOnMachine(sessions, undefined)).toEqual(sessions);
+    expect(sessionsOnMachine(sessions, "")).toEqual(sessions);
+  });
+
+  test("a session an earlier listener reported with no host still matches its listener", () => {
+    const hostless = {
+      session_id: "ses_old",
+      machine_id: "devbox",
+      dir: "/work",
+      port: 0,
+      title: "",
+      topics: [],
+      self_subscribed: true,
+    };
+
+    expect(sessionsOnMachine([hostless], "devbox")).toEqual([hostless]);
+    expect(sessionsOnMachine([hostless], "gke-node-7")).toEqual([]);
   });
 });

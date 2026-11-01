@@ -182,7 +182,7 @@ func treeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
 }
 
 // treeOfUnshared is treeOf for a document nothing else reads or writes while the call runs - a
-// write transaction's fork, read on the request goroutine that holds it (readFork, startTree) -
+// write transaction's fork, read on the request goroutine that holds it (readForkTree, startTree) -
 // which it reads through pmdoc.ReadUnshared, without ygo's ToDelta, and hands back validated once
 // (pmdoc.ValidDocument), so the renders and reads that follow do not validate it again.
 func treeOfUnshared(doc *crdt.Doc) (pmdoc.ValidDocument, error) {
@@ -273,15 +273,15 @@ func documentRenderingWithLayout(tree *pmdoc.Node) (string, []pmdoc.BlockOffset,
 	return markdown, offsets, layout, documentSchemaError(err)
 }
 
-// documentRenderingValidWithLayout is documentRenderingWithLayout of a tree readFork already
+// documentRenderingValidWithLayout is documentRenderingWithLayout of a tree readForkTree already
 // validated, which the render then does not validate again (pmdoc.ValidDocument.RenderWithLayout).
 func documentRenderingValidWithLayout(tree pmdoc.ValidDocument) (string, []pmdoc.BlockOffset, *pmdoc.Layout, error) {
 	markdown, offsets, layout, err := tree.RenderWithLayout()
 	return markdown, offsets, layout, documentSchemaError(err)
 }
 
-// documentMarkdownValid is documentMarkdown of a tree readFork already validated, which the render
-// then does not validate again (pmdoc.ValidDocument.RenderWithBlockOffsets).
+// documentMarkdownValid is documentMarkdown of a tree readForkTree already validated, which the
+// render then does not validate again (pmdoc.ValidDocument.RenderWithBlockOffsets).
 func documentMarkdownValid(tree pmdoc.ValidDocument) (string, error) {
 	markdown, _, err := documentMarkdownValidWithOffsets(tree)
 	return markdown, err
@@ -356,10 +356,10 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 // no more often than it means to, and a measurement build can report how often the read is
 // avoided. The service keeps one (Service.forkTrees). Nothing in the service reads them.
 type forkTreeCounts struct {
-	// read counts the trees read off a write transaction's fork (readFork): an operation's reads
-	// before and after its write (applyLive), a margin write's read when the write holds no
+	// read counts the trees read off a write transaction's fork (readForkTree): an operation's
+	// reads before and after its write (applyLive), a margin write's read when the write holds no
 	// rendering of its fork (applyMargin), and the reads joined to the transaction (docTree,
-	// heldTree, captureLiveTextAndAuthors).
+	// heldTree, captureWrite).
 	read atomic.Uint64
 	// renderingReused counts the margin writes (applyMargin) and the joined reads that took the
 	// write's rendering in place of reading the fork (reuseRendering), each a fork read avoided.
@@ -373,21 +373,4 @@ func listResident(listing *sync.Map, live *crdt.Doc, value any) {
 	key := weak.Make(live)
 	listing.Store(key, value)
 	runtime.AddCleanup(live, func(key weak.Pointer[crdt.Doc]) { listing.Delete(key) }, key)
-}
-
-// closureChangedMarkdown reports whether a document closure that produced after changed the
-// canonical markdown a version stores, given what the document rendered before it ran (before,
-// beforeErr). It is the measure `content_changed` records for every other write, applied to
-// settlement's own: stamping a block id or restoring an ask block's server-owned attributes
-// moves the stored Proof state while the rendered document stays as it was.
-//
-// A document that did not render before the closure counts as changed - the closure is what made
-// it renderable - and so does one that does not render after it, since the text a version stores
-// has moved out of reach either way.
-func closureChangedMarkdown(before string, beforeErr error, after *pmdoc.Node) bool {
-	if beforeErr != nil {
-		return true
-	}
-	rendered, err := renderTree(after)
-	return err != nil || rendered != before
 }

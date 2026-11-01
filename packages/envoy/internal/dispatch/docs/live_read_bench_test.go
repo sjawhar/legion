@@ -151,7 +151,7 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 						time.Sleep(20 * time.Millisecond)
 						start := time.Now()
 						live.Transact(func(txn *crdt.Transaction) { texts[0].Insert(txn, 0, "y", nil) })
-						replica.observe("bench", nil)
+						replica.observe("bench")
 						latencies = append(latencies, time.Since(start))
 					}
 					close(stop)
@@ -176,7 +176,7 @@ func benchmarkReplica(b *testing.B, service *Service, live *crdt.Doc) *renderedR
 	b.Cleanup(log.Close)
 	replica := service.keepReplica(live, log, nil)
 	live.Transact(func(*crdt.Transaction) {})
-	replica.observe("bench", nil)
+	replica.observe("bench")
 	if replica.hold() == nil {
 		b.Fatal("the replica holds no document after its first drain")
 	}

@@ -284,7 +284,7 @@ func TestARoomLoadedOntoAKeptRecordTakesTheStoredEditSource(t *testing.T) {
 	}
 	state.mu.Lock()
 	lastActor := state.lastActor
-	credit := settlementAuthors(state, map[string]model.Actor{actorKey(alice): alice}, nil)
+	credit := settlementAuthors(state, map[string]model.Actor{actorKey(alice): alice}, nil, everyCredit)
 	state.mu.Unlock()
 	if lastActor != nil {
 		t.Fatalf("the reloaded room keeps %+v as the latest edit source, want none, as the stored row names", lastActor)
@@ -488,7 +488,7 @@ func TestAFailedRoomsUnstoredUpdatesGoToTheRecordThatReplacesIt(t *testing.T) {
 
 	update := []byte("bob's update")
 	credit := &UpdateCredit{}
-	service.recordUpdateClass(artifactID, update, documentUpdateClass{contentChanged: true, durable: true, credit: credit})
+	service.queueUpdateClass(artifactID, update, documentUpdateClass{seq: 1, contentChanged: true, durable: true, credit: credit}, false)
 	state := service.room(artifactID)
 	state.mu.Lock()
 	service.handOverFailedRoomLocked(artifactID, state)
@@ -508,7 +508,7 @@ func TestAFailedRoomsUnstoredUpdatesGoToTheRecordThatReplacesIt(t *testing.T) {
 	if counted != successor {
 		t.Fatal("the carried update was counted on another record than the one that holds it")
 	}
-	service.finishDurableAppend(artifactID, counted)
+	service.finishUpdateClass(artifactID, counted, class)
 	successor.mu.Lock()
 	appends := successor.durableAppends.Load()
 	pending := successor.pendingUpdates
@@ -553,11 +553,11 @@ func TestAFailedRoomsUpdatesEndOrMoveWithTheRecordThatReplacesIt(t *testing.T) {
 	browser := &struct{ name string }{"bob's browser"}
 	dropped := []byte("the update the failure dropped")
 	droppedCredit := service.creditContentChange(artifactID, browser, hold)
-	service.recordUpdateClass(artifactID, dropped,
-		documentUpdateClass{contentChanged: true, durable: true, credit: droppedCredit})
+	service.queueUpdateClass(artifactID, dropped,
+		documentUpdateClass{seq: 1, contentChanged: true, durable: true, credit: droppedCredit}, false)
 	_, stranded := peerEdit(t, service.srv.GetDoc(artifactID), appendBlocks(t, "typed while the room was failing.\n"))
-	service.recordUpdateClass(artifactID, stranded,
-		documentUpdateClass{contentChanged: true, durable: true, credit: service.creditContentChange(artifactID, browser, hold)})
+	service.queueUpdateClass(artifactID, stranded,
+		documentUpdateClass{seq: 2, contentChanged: true, durable: true, credit: service.creditContentChange(artifactID, browser, hold)}, false)
 	state.mu.Lock()
 	state.failed = errors.New("the room failed on an append")
 	state.mu.Unlock()

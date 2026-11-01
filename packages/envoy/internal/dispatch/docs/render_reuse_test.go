@@ -178,7 +178,7 @@ type shadowOp struct {
 // watchRenders shadows every room service loads for artifactID from now on. Its observer is
 // registered after the service's own (onLoadDocument) and before ygo's persistence observer, so it
 // runs once the service's observer has classified the update, and while the class it recorded is
-// still there to read (recordUpdateClass, consumeUpdateClass).
+// still there to read (queueUpdateClass, consumeUpdateClass).
 func watchRenders(t *testing.T, service *Service, artifactID string) *renderShadow {
 	t.Helper()
 	sh := &renderShadow{service: service, artifactID: artifactID, byDoc: make(map[weak.Pointer[crdt.Doc]]*shadowRoom)}
@@ -232,6 +232,14 @@ func shadowRender(doc *crdt.Doc) (*string, map[string]struct{}, error) {
 		return nil, nil, err
 	}
 	return &markdown, askBlockIDs(tree), nil
+}
+
+// sameUpdate reports whether logged, an update the room's update log handed over, is update, the
+// one an observer was called with: ygo hands both the very slice it encoded at the commit
+// (crdt.LoggedUpdate), so the same backing array is the same commit, where equal bytes need not be
+// - two commits that change nothing encode alike.
+func sameUpdate(logged, update []byte) bool {
+	return len(logged) > 0 && len(logged) == len(update) && &logged[0] == &update[0]
 }
 
 func sameRendering(a, b *string) bool {
@@ -820,24 +828,37 @@ func TestRenderReuseAServiceCommitAfterTheForkReadIsRendered(t *testing.T) {
 		if first == "" {
 			t.Fatal("the document's first block has no id to repeat")
 		}
-		repaired := false
+		read := false
 		sh.onForkRead = func() {
-			if repaired {
+			if read {
+				return
+			}
+			read = true
+			editAsConnectedPeer(t, service, artifactID, 2, reuseBob, appendBlockWithCraftedID(t, "A paragraph repeating the first block's id.\n", first))
+			awaitAppendLandedOrQueued(t, service, artifactID)
+		}
+		// The repair appends in its own transaction, under the document's advisory lock the write
+		// holds from its fork read until it commits, so it runs in the window after that commit and
+		// before the publish: its commit still reaches the room after the write's fork read, which
+		// is what moves the replica past that read.
+		repaired := false
+		service.afterLiveCommit = onFirst(artifactID, func() {
+			report := service.backfillBlockIDs(context.Background(), artifactID)
+			if report.Err != nil || report.Stamped == 0 {
+				t.Errorf("the backfill repaired nothing: %+v", report)
 				return
 			}
 			repaired = true
-			editAsConnectedPeer(t, service, artifactID, 2, reuseBob, appendBlockWithCraftedID(t, "A paragraph repeating the first block's id.\n", first))
-			awaitAppendLandedOrQueued(t, service, artifactID)
-			report := service.backfillBlockIDs(context.Background(), artifactID)
-			if report.Err != nil || report.Stamped == 0 {
-				t.Fatalf("the backfill repaired nothing: %+v", report)
-			}
-		}
+		})
+		defer func() { service.afterLiveCommit = nil }()
 		m := sh.measure()
 		write := sh.write(t, applyOps(service, artifactID, reuseAgent, model.EditOp{Op: "replace", Find: "Paragraph 13 opens", With: "Paragraph 13 now opens"}))
 		sh.onForkRead = nil
-		if !repaired {
+		if !read {
 			t.Fatal("the write never read its fork")
+		}
+		if !repaired {
+			t.Fatal("the backfill never repaired the repeated block id")
 		}
 		waitForLandedAppends(t, service, artifactID)
 		sh.check(t)
@@ -968,10 +989,11 @@ func joinedLiveWriteOf(t *testing.T, service *Service, artifactID string) *liveW
 	return write
 }
 
-// E9. A browser commit F between a transaction's two operations: the first operation's counters
-// predate F, so its update is measured; the second's fork moved, so its before-rendering renders;
-// and its update takes the write's rendering exactly when F was consumed before its fork read.
-// Every update measured changes one paragraph, so each is spliced in.
+// E9. A browser commit F between a transaction's two operations: the transaction reads the
+// document once, so F never moves its fork - the second operation takes the rendering the first
+// left - and F moves the replica past that read, so the observer measures both of the write's
+// updates, whether the room consumed F before the second operation or after it. Every update
+// measured changes one paragraph, so each is spliced in.
 func TestRenderReuseAForeignCommitBetweenOperations(t *testing.T) {
 	for _, consumedFirst := range []bool{true, false} {
 		name := "F consumed later"
@@ -999,11 +1021,12 @@ func TestRenderReuseAForeignCommitBetweenOperations(t *testing.T) {
 			service.beforeObserveUpdate = nil
 			waitForLandedAppends(t, service, artifactID)
 			sh.check(t)
-			if consumedFirst {
-				m.expect(t, renderPaths{beforeFromReplica: 1, beforeRendered: 1, observerIncremental: 2, observerReused: 1}, 0)
-			} else {
-				m.expect(t, renderPaths{beforeFromReplica: 1, beforeRendered: 1, observerIncremental: 3}, 0)
-			}
+			// The transaction reads the document once, so F never reaches its fork: the second
+			// operation takes the rendering the first left, and both published updates are
+			// measured by the observer, since F moved the replica's foreign count past the mark
+			// that one fork read took. When the room consumes F makes no difference to either.
+			// Each update changed one paragraph, so each is spliced into the replica's markdown.
+			m.expect(t, renderPaths{beforeFromReplica: 1, beforeFromWrite: 1, observerIncremental: 3}, 0)
 			sh.versions(t, write)
 		})
 	}

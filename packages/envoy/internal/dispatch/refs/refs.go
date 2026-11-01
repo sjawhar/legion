@@ -267,7 +267,10 @@ var countedKinds = [...]string{"issue", "ask", "artifact", "block"}
 //
 // A reference the grammar accepts need not address anything: `dispatch://CORE-1/ask/hello`
 // parses and is stored, so every lookup here compares text and a target that resolves to no
-// row is simply not named. A write must never fail because of what its body cites.
+// row is simply not named. A write must never fail because of what its body cites, with one
+// exception: a typed block's `block[]` attribute is a schema field, not prose, and an agent's or
+// API write introducing a pointer to an existing block of a type the attribute's targets do not
+// allow is refused (pmdoc.CheckBlockPointers). A target that does not exist is still accepted.
 func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.ReferenceChanges, error) {
 	issueKeys := []string{}
 	askIDs := []string{}

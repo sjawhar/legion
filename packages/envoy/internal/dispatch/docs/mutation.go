@@ -23,6 +23,8 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 type versionWrite struct {
@@ -68,9 +70,15 @@ type liveOperation struct {
 	// them (liveWrite.forkRead), copied when the fork is read: a later fork read in the same
 	// operation (a joined read's) must not pair this operation's rendering with another read's
 	// counters (publishedRendering).
-	read     forkReadMark
-	updates  [][]byte
-	recorded bool
+	read forkReadMark
+	// wasClocks and wasDeletes are the fork's content clocks and deletes as the operation found
+	// them, which say whether its updates moved the fork at all (forkHeld, applyLive). They are
+	// unset for an operation that never reads them, whose write always moves the fork
+	// (applyMargin).
+	wasClocks  crdt.StateVector
+	wasDeletes *crdt.IDSet
+	updates    [][]byte
+	recorded   bool
 	// panicked is whether the operation's change panicked (change), which abandon releases the
 	// fork for whatever updates holds.
 	panicked bool
@@ -103,20 +111,24 @@ func (s *Service) openLiveOperation(ctx context.Context, artifactID string) (liv
 
 // abandon, deferred once the operation is open, undoes what an operation that changed the fork but
 // does not reach its record leaves on its write: the fork holds changes its transaction never
-// recorded, so it goes, and the next operation rebuilds it. One that changed nothing leaves the
-// fork as it was, so the next operation keeps it. One whose change panicked goes whatever updates
-// holds: ygo emits a panicking transaction's update, except when its phase 2 fails before handing
-// the update on (buildPhase2, or a type observer it fires first), which leaves the fork holding a
-// change no update carries, so neither the fork nor the rendering a joined read takes of it
-// (liveWrite.rendering) describes what the transaction records.
+// recorded, so it goes, and the next operation builds it again on the state the transaction's read
+// found (forkLive). An operation whose updates left the fork as it was (wasClocks, wasDeletes)
+// changed nothing, so the fork stays as the next operation's; so does one that read neither,
+// which always moves the fork (applyMargin). One whose change panicked is never kept on the
+// strength of its updates holding every change it made: ygo emits a panicking transaction's
+// update, except when its phase 2 fails before handing the update on (buildPhase2, or a type
+// observer it fires first), which leaves the fork holding a change no update carries, so such a
+// fork has moved and goes, and the rendering a joined read would take of it (liveWrite.rendering)
+// goes with it, neither of them describing what the transaction records.
 func (op *liveOperation) abandon() {
 	if !op.panicked && (op.recorded || len(op.updates) == 0) {
 		return
 	}
-	// The rendering describes that fork, so it goes with it (releaseFork). forkLive's rebuild
-	// drops it too; abandoning both in one call is what covers an operation that recorded the
-	// rendering and then failed to version.
-	op.write.releaseFork()
+	if op.wasDeletes == nil || !forkHeld(op.wasClocks, op.wasDeletes, op.fork) {
+		// The rendering describes that fork, so it goes with it (releaseFork), which covers an
+		// operation that recorded the rendering and then failed to version.
+		op.write.releaseFork()
+	}
 	// A stamp this failed operation ran (stampAskBlockIDs, registerStampedAskBlocks) staged its
 	// renamed ids and any carried-forward authors on these before refusal - a later operation of
 	// the same transaction must not inherit them as its own.
@@ -144,7 +156,8 @@ func (op *liveOperation) change(mutate func() error) (*marginWatch, error) {
 // recordLiveOperation records op, a change its caller has weighed, inside its transaction:
 // rendered is the fork's tree as the change left it with that tree's rendering, and contentChanged
 // whether the change moved the rendered markdown, the class its update is appended with. It
-// refuses a live state ygo could not decode (refuseUndecodable), appends the update, refuses a
+// refuses a live state ygo could not decode (refuseUndecodable), stores the room's updates the
+// write's read point holds ahead of its own (Ledger.flushThrough), appends the update, refuses a
 // write whose room failed before that append, keeps the rendering on the transaction's write for a
 // version it writes later, and refreshes the document's anchors against the tree in the same
 // transaction (writeVersionTx). Only once all of that is done is op recorded, so a refusal anywhere
@@ -166,11 +179,17 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 	if err != nil {
 		return err
 	}
+	// The room's updates the fork holds and the store does not go first, in the room's order, so
+	// this update follows in the store the state it was made on (Ledger.flushThrough). A second
+	// operation of the transaction stores nothing more: the read point never moves.
+	if err := ledgerFrom(ctx).flushThrough(ctx, op.tx, op.write.artifactID, op.write.point); err != nil {
+		return fmt.Errorf("store the room's updates ahead of a live document write: %w", err)
+	}
 	version, err := s.persistence.AppendUpdateTx(ctx, op.tx, op.write.artifactID, update, contentChanged)
 	if err != nil {
 		return fmt.Errorf("append transactional live document update: %w", err)
 	}
-	// The append holds the document's advisory lock until the transaction ends, so no eviction
+	// The transaction holds the document's advisory lock from its read to its end, so no eviction
 	// of the room can finish before then, and a later reload holds the write. A room that failed
 	// before it may already have reloaded without the write, beyond the writer slot, which is on
 	// the failed room: the write cannot reach it coherently, so it fails - before it records the
@@ -184,8 +203,8 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 	}
 	// The rendering is the document as the transaction now sees it, so a version it writes later
 	// snapshots this tree rather than walking and rendering the document again
-	// (captureLiveTextAndAuthors), and a later margin write records it again (applyMargin).
-	// forkLive drops both the moment the fork moves.
+	// (captureLiveTextAndAuthors), and a later margin write records it again (applyMargin). Only
+	// the transaction's next operation moves the fork, and it records its own.
 	op.write.tree, op.write.markdown, op.write.offsets = rendered.tree, rendered.markdown, rendered.offsets
 	if _, err := s.writeVersionTx(ctx, op.tx, op.write.artifactID, rendered, actor, nil); err != nil {
 		return fmt.Errorf("refresh transactional document anchors: %w", err)
@@ -205,7 +224,7 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 // and its answer, a comment's anchor - except a comment's or suggestion's margin record, which
 // runs in applyMargin. Both open and record their operation through the same steps
 // (openLiveOperation, recordLiveOperation), so two rules hold for every write by structure rather
-// than by its caller remembering them:
+// than by its caller remembering them, and a third for every write applyLive runs:
 //
 //   - It refuses a context Join did not return (errUnjoined), as SeedText and the version writes
 //     do: an unjoined write would reach no transaction to be weighed and appended in.
@@ -214,6 +233,9 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 //     (refuseUndecodable), before anything is appended. applyLive takes every measure of the
 //     growth weigh; a margin record, which leaves the rendering and the anchor marks as they
 //     were, is weighed by the margin bound alone (applyMargin).
+//   - applyLive refuses a write introducing a block pointer to a block of a type its attribute
+//     does not allow (refuseBlockPointers), before anything is appended. A margin record leaves
+//     the rendering, and so every pointer, as it was.
 //
 // It writes the transaction's fork of the room (see liveWrite), appends the update inside the
 // transaction, and leaves the room and the credit to its ledger's Commit, so a transaction that
@@ -235,9 +257,10 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 // as it is: forkLive's (liveWrite.forkMarkdown), the room replica's rendering of the very state
 // the fork was read from (warmFork says why that is exact), or else the transaction's previous
 // operation's (liveWrite.markdown), which is the fork's as it stands for as long as the write
-// keeps its tree. A fork moves only through forkLive, which drops that rendering whenever it does
-// (buildFork, releaseFork), and through an operation's mutate, after which that operation records
-// the rendering of what it left or abandons the fork with its rendering (releaseFork). Rendering
+// keeps its tree. A fork moves only through an operation's mutate, after which that operation
+// records the rendering of what it left or abandons the fork with its rendering (abandon,
+// releaseFork), and through the rebuild that follows such an abandon (rebuildFork), which keeps
+// no rendering. Rendering
 // is deterministic over one state - pmdoc.Read and ReadForRendering differ only in copying
 // attributes, and both trees render through pmdoc.RenderWithBlockOffsets - so either is the very
 // string the render would make. A fork no rendering is known for is rendered here.
@@ -256,7 +279,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	// (above), and is then picked up here, before mutate moves the fork it describes; only beside
 	// a readable tree, since one the reader refuses is the refusal, whatever else is known. The
 	// path it took is counted once, when it is first needed (renderPathCounts).
-	before, startErr := s.readFork(fork)
+	before, startErr := s.readForkTree(fork)
 	if startErr != nil && !errors.Is(startErr, ErrDocOutsideSchema) {
 		return startErr
 	}
@@ -290,9 +313,10 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	// What says the write changed the fork is the fork itself, read on either side of mutate: its
 	// state vector and its delete set, since a deletion advances no clock (forkHeld). The updates
 	// the fork emits cannot say it, for they include one for a transaction that changes nothing.
+	// They say it for an operation that fails too, which keeps a fork it left as it was (abandon).
 	// applyMargin reads neither: a marks-map Set always adds an item, so its write always moves the
 	// fork, and the two whole-store walks would buy it nothing.
-	wasClocks, wasDeletes := fork.StateVector(), crdt.DeleteSetFromDoc(fork)
+	op.wasClocks, op.wasDeletes = fork.StateVector(), crdt.DeleteSetFromDoc(fork)
 	margin, mutateErr := op.change(func() error {
 		return mutate(fork, before, func(inner func(*crdt.Transaction)) { fork.Transact(inner) })
 	})
@@ -303,13 +327,13 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	// refresh the anchors and mark the document owing a settlement again (markUpdateOwed), which
 	// every repair pass over a closed issue would then sweep. Its updates are dropped, so the fork,
 	// which it left as it was, is kept.
-	if len(op.updates) > 0 && forkHeld(wasClocks, wasDeletes, fork) {
+	if len(op.updates) > 0 && forkHeld(op.wasClocks, op.wasDeletes, fork) {
 		op.updates = nil
 	}
 	if len(op.updates) == 0 {
 		return websocket.ErrNoChanges
 	}
-	tree, err := s.readFork(fork)
+	tree, err := s.readForkTree(fork)
 	var markdown string
 	var offsets []pmdoc.BlockOffset
 	var layout *pmdoc.Layout
@@ -354,6 +378,12 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if err := refuseGrowth(growth{before: beforeMarkdown, after: markdown, unchanged: unchanged, margin: margin, anchors: anchorWatch{before: weighedFrom, after: tree.Node()}, serverState: func() bool {
 		return weighedFrom != nil && tree.Node().EqualOutsideServerState(weighedFrom)
 	}}); err != nil {
+		return err
+	}
+	// An agent's or API write is refused when a block pointer it introduces names a block of a
+	// type its attribute does not allow, compared with the tree before the write (nil when that
+	// tree was outside the schema: every pointer of a repair is introduced).
+	if err := refuseBlockPointers(ctx, op.tx, artifactID, tree.Node(), weighedFrom, offsets); err != nil {
 		return err
 	}
 	// The tree before the write has served every use it has, so it is let go before the record's
@@ -403,10 +433,10 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 //     same fragment: the update changes no content, adds no ask block, and credits actor with
 //     nothing (creditLiveWrite).
 //   - The tree and rendering it records are the ones the transaction's last operation left on its
-//     write (liveWrite.rendering, taken through reuseRendering), when this operation's own forkLive
-//     kept them: forkLive drops them whenever the fork moves (buildFork, releaseFork), and so does
-//     a refused operation (abandon), so kept, they describe the fork's fragment exactly, and this
-//     write does not move it. Otherwise it reads and renders the fork once (readFork). A tree the
+//     write (liveWrite.rendering, taken through reuseRendering), when no operation since has moved
+//     the fork: the fork goes with its rendering whenever an operation that changed it fails
+//     (abandon, releaseFork), so kept, they describe the fork's fragment exactly, and this write
+//     does not move it. Otherwise it reads and renders the fork once (readForkTree). A tree the
 //     reader or only the renderer refuses is then the document's OutsideSchemaError (treeOf,
 //     documentMarkdownWithOffsets), the one applyLive answers from the tree it started from
 //     (joinedSchemaError), which is this same fragment, and it comes before any growth refusal, as
@@ -444,7 +474,7 @@ func (s *Service) applyMargin(ctx context.Context, artifactID string, actor mode
 	}
 	rendered, reused := s.reuseRendering(op.write, op.fork, "margin")
 	if !reused {
-		valid, err := s.readFork(op.fork)
+		valid, err := s.readForkTree(op.fork)
 		if err != nil {
 			return err
 		}
@@ -459,7 +489,7 @@ func (s *Service) applyMargin(ctx context.Context, artifactID string, actor mode
 	// The room the fork was warm-built from, which the publish tags the update against
 	// (liveWriteOrigin.marginOnly). A cold fork was built from the stored document, with no room
 	// behind it, so it names none; write.cold says so directly rather than leaving it to coldFork
-	// to have cleared forkedFrom and forkLive the fork read's counters.
+	// to have cleared the room it read and the fork read's counters.
 	var room weak.Pointer[crdt.Doc]
 	if !op.write.cold {
 		room = op.write.forkedFrom
@@ -482,6 +512,19 @@ func joinedSchemaError(err error, start func() error) error {
 		return startErr
 	}
 	return producedSchemaError(err)
+}
+
+// refuseBlockPointers refuses tree, the tree a write to artifactID leaves (rendered as offsets),
+// when a `block[]` pointer it introduces over prior names a block of a type the attribute does not
+// allow (pmdoc.CheckBlockPointers), each target's type read as the block index would hold it once
+// the write is indexed (refs.BlockTypes) in the write's transaction. The refusal is
+// pmdoc.ErrBlockPointer, which no schema refusal path (joinedSchemaError) reclassifies. A
+// browser's write (settlement) and the reconciliation never come here: what a browser wrote is
+// already stored, so it is never refused.
+func refuseBlockPointers(ctx context.Context, tx pgx.Tx, artifactID string, tree, prior *pmdoc.Node, offsets []pmdoc.BlockOffset) error {
+	return pmdoc.CheckBlockPointers(tree, prior, func(targets []text.Ref) (map[string][]string, error) {
+		return refs.BlockTypes(ctx, tx, artifactID, offsetBlocks(offsets), targets)
+	})
 }
 
 func mergeUpdates(updates [][]byte) ([]byte, error) {
@@ -520,6 +563,10 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if err := weighRendering("", canonical); err != nil {
 		return "", err
 	}
+	// A new document holds no pointer before this write, so every pointer it seeds is checked.
+	if err := refuseBlockPointers(ctx, tx, artifactID, tree, nil, offsets); err != nil {
+		return "", err
+	}
 	update, err := encodeDocumentTree(tree)
 	if err != nil {
 		return "", fmt.Errorf("seed live document tree: %w", err)
@@ -539,25 +586,19 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 // ReplaceText replaces the entire live document tree so connected clients
 // receive document uploads as a regular server-side transaction.
 func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error) {
-	tx, joined := txFromContext(ctx)
-	if !joined {
+	if _, joined := txFromContext(ctx); !joined {
 		return "", errUnjoined
 	}
 	anchors, err := s.openAnchoredMarks(ctx, s.queryFrom(ctx), artifactID)
 	if err != nil {
 		return "", err
 	}
-	// The live document's locks, in their order (see liveWrite), before the write reads the
-	// document: its owner row and writer slot, then its advisory lock. The upload's version clears
-	// every pending author and each in-flight credit its read held (Ledger.WroteVersion), so no
-	// edit may land between that read and its commit. A document no room holds is read from the
-	// store under that lock (coldFork), which loads no room for the write.
-	if _, err := s.joinLiveWrite(ctx, ledgerFrom(ctx), artifactID); err != nil {
-		return "", err
-	}
-	if err := lockDocumentRoom(ctx, tx, artifactID); err != nil {
-		return "", err
-	}
+	// The live document's locks, in their order (see liveWrite), are taken by the write's one read
+	// of the document (applyLive, forkLive): its owner row and writer slot, then its advisory lock
+	// with the head. The upload's version clears every pending author and each in-flight credit
+	// that read held (Ledger.WroteVersion), so no edit may land between that read and its commit. A
+	// document no room holds is read from the store under that lock (coldFork), which loads no
+	// room for the write.
 	var canonical string
 	var unchanged bool
 	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, start pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error {
@@ -893,7 +934,7 @@ func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.
 		return nil, false, err
 	}
 	if fork != nil {
-		tree, err := s.readFork(fork)
+		tree, err := s.readForkTree(fork)
 		return tree.Node(), true, err
 	}
 	if live := s.srv.GetDoc(artifactID); live != nil {
@@ -1139,11 +1180,28 @@ func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor 
 // before the Yjs transaction, retaining the table-mark snapshots the
 // transaction re-derives before it writes.
 func (s *Service) prevalidateLiveOperations(ctx context.Context, artifactID string, ops []model.EditOp) ([]tableAnchorSnapshot, error) {
-	tree, err := s.docTree(ctx, artifactID)
+	tree, err := s.prevalidationTree(ctx, artifactID)
 	if err != nil {
 		return nil, err
 	}
 	return s.prevalidateOperations(ctx, artifactID, tree, ops)
+}
+
+// prevalidationTree is the tree a conditional edit's table check reads. The check waits on rows
+// other transactions hold, so while the edit's write has not read the document it reads the
+// document as it stands - the resident room's, else the stored document's - rather than taking the
+// write's read (forkLive), which would fix the document the batch applies to before that wait: the
+// write reads it once the check is done (applyLive), its precondition is checked there, and the
+// transaction re-derives the table marks on it (verifyTableAnchorSnapshots). A write that has read
+// the document already checks its fork.
+func (s *Service) prevalidationTree(ctx context.Context, artifactID string) (*pmdoc.Node, error) {
+	if write := joinedLiveWrite(ctx, artifactID); write == nil || write.fork != nil || len(write.updates) > 0 {
+		return s.docTree(ctx, artifactID)
+	}
+	if live := s.srv.GetDoc(artifactID); live != nil {
+		return s.liveTree(artifactID, live)
+	}
+	return s.storedTree(ctx, artifactID)
 }
 
 const maxQueuedConditionalEdits = 32
@@ -1316,9 +1374,11 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		return s.applyOpsUnconditional(ctx, artifactID, ops, actor)
 	}
 	// The live document's locks, in their order (see liveWrite): its owner row and, unless the
-	// room has failed, its writer slot; then its advisory lock, held from before the precondition
-	// is read. A document no room holds is forked from the store under that lock (coldFork), which
-	// loads no room while the lock is held.
+	// room has failed, its writer slot; then its advisory lock, held from before the table anchor
+	// rows are locked. The write's read of the document takes the lock again with the head
+	// (forkLive), after the table check, so the precondition is checked on the document the batch
+	// is applied to. A document no room holds is forked from the store under that lock (coldFork),
+	// which loads no room while the lock is held.
 	if _, err := s.joinLiveWrite(ctx, ledgerFrom(ctx), artifactID); err != nil {
 		return EditOutcome{}, err
 	}
@@ -1420,6 +1480,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		if errors.Is(err, websocket.ErrNoChanges) {
 			return outcome, nil
 		}
+		err = invalidBlockPointerOp(err)
 		if isEditRefusal(err) {
 			return EditOutcome{}, err
 		}
@@ -1480,6 +1541,7 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		if errors.Is(err, websocket.ErrNoChanges) {
 			return outcome, nil
 		}
+		err = invalidBlockPointerOp(err)
 		if isEditRefusal(err) {
 			return EditOutcome{}, err
 		}
@@ -1533,8 +1595,8 @@ func (s *Service) SetBlockAttributes(
 	if IsTooLarge(err) {
 		if withheld, withholds := withoutAnswer(attributes); withholds {
 			slog.Warn("dispatch: an answer is left out of its block", "room", artifactID, "block", blockID, "reason", err)
-			// A refused write appends nothing, and the transaction's next write starts from its
-			// fork as it was (applyLive).
+			// A refused write appends nothing, and the transaction's next write starts from a
+			// fork built again without it (forkLive).
 			err = s.setBlockAttributes(ctx, artifactID, blockID, withheld, actor)
 		}
 	}
@@ -1693,132 +1755,144 @@ func (s *Service) registerStampedAskBlocks(ctx context.Context, room string, sta
 }
 
 // captureLiveTextAndAuthors is the tree a version records and whom it lists, its authors taken
-// under the document's advisory lock and no later than it reads that tree. It takes the
-// document's locks in their order (see liveWrite) before anything else: the owner row and the
-// writer slot, the room loaded - unless the calling transaction has a write of its own, whose fork
-// holds the document already - then the advisory lock, which every write to the pending authors
-// and every in-flight credit's landing hold, so the authors it reads stay where it read them until
-// the version's transaction ends. A transaction with a write of its own versions its fork, which
-// joinRead brings up to date with the room: that is where a browser change made while the write
-// was in flight merges with it - and where a write whose text that merge annihilated is refused
-// rather than versioned as applied (refuseLostWrite, LEGION-269). Its authors are taken before
-// that read, so each in-flight credit taken is for a change the room held and the fork takes in.
-// Without a write of its own, a version reads the room as of one moment under its document lock
-// (holdLive), after taking its authors under the room's state lock. Either way a credit observed
-// after the take, for a change the version holds or not, stays pending for the next version
-// (LEGION-503). The room is taken inside the Apply that loads and as docTree reads it: a room
-// looked up again once that Apply returned can have been evicted in between.
+// under the document's advisory lock. A transaction with a write of its own versions that write's
+// state (captureWrite). Without one, it takes the document's locks in their order (see liveWrite)
+// before anything else: the owner row and the writer slot, the room loaded, then the advisory lock,
+// which every write to the pending authors and every in-flight credit's landing hold, so the
+// authors it reads stay where it read them until the version's transaction ends. It reads the room
+// at an exact commit position (readPoint) and stores every update of the room through it that no
+// writer has stored yet before the version (Ledger.flushThrough), so the version's
+// doc_update_version, the head it reads in this transaction, holds every update its text does.
+// It lists the pending authors it reads after those appends, which wrote the authors of the
+// updates they stored, and the in-flight credits observed before its read: a credit observed
+// after, for a change the version does not hold, stays pending for the next version.
+// The room is read inside the Apply that loads it, as docTree reads it: a room looked up again
+// once that Apply returned can have been evicted in between.
 //
 // A version is never rendered from a room behind the durable head (refuseRoomBehindHead): with two
 // envoy-dispatch processes on one Postgres, that room lacks what the other process appended, and
 // the version would record that update's cursor over text missing it, so no later settlement
 // would version those words (INFRA-218). A room found behind the head inside the Apply, under the
 // document's advisory lock this transaction holds, is versioned from the stored document instead,
-// as a write behind the head forks from it (coldFork); so is a write's fork that came from the
-// store. Neither holds a change still in flight in the room, so the version lists none of the
-// room's in-flight credits (withoutInflight): a credit whose append lands later is owed then, and
-// one whose append the gate refuses is credited again when its browser resends the edit.
+// as a write behind the head forks from it (coldFork), and stores nothing of the room. That holds
+// no change still in flight in the room, so the version lists none of the room's in-flight credits
+// (withoutInflight): a credit whose append lands later is owed then, and one whose append the gate
+// refuses is credited again when its browser resends the edit.
 func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, actor *model.Actor) (renderedTree, authorCapture, error) {
 	tx, _ := txFromContext(ctx)
-	write := joinedLiveWrite(ctx, room)
-	if write == nil {
-		fork, err := s.joinRead(ctx, room)
-		if err != nil {
-			return renderedTree{}, authorCapture{}, err
-		}
-		if err := s.refuseLostWrite(ctx, room, fork, actor); err != nil {
-			return renderedTree{}, authorCapture{}, err
-		}
+	if write := joinedLiveWrite(ctx, room); write != nil {
+		return s.captureWrite(ctx, tx, room, write, actor)
 	}
-	// A write of the transaction's own holds the document already, in its fork; loading a room for
-	// it would hold a second copy beside that fork until the write commits (LEGION-504).
-	if write == nil {
-		if err := s.warmLiveDocument(ctx, room); err != nil {
-			return renderedTree{}, authorCapture{}, err
-		}
+	if _, err := s.joinRead(ctx, room); err != nil {
+		return renderedTree{}, authorCapture{}, err
+	}
+	if err := s.warmLiveDocument(ctx, room); err != nil {
+		return renderedTree{}, authorCapture{}, err
 	}
 	// The warmed-read hook deliberately evicts a loaded room in tests. It runs before this
 	// transaction takes the document lock: CloseRoom flushes a room's persistence, which may
 	// need that lock, so invoking it from the tree read while we hold the lock would be a cycle.
-	// The capture below takes the lock only after the hook returns, then reads R and F before
-	// it holds the current room's tree.
-	if write == nil && s.afterReadWarm != nil {
+	if s.afterReadWarm != nil {
 		s.afterReadWarm(room)
 	}
-	if err := lockDocumentRoom(ctx, tx, room); err != nil {
+	// The head under the document's advisory lock, which this transaction holds from here to its
+	// end: every append, this process's own included, waits for it, so no room's cursor moves and
+	// the head stays where it is read until this transaction's own appends move it.
+	head, err := lockedHead(ctx, tx, room)
+	if err != nil {
 		return renderedTree{}, authorCapture{}, err
 	}
-	var tree *pmdoc.Node
-	var capture authorCapture
-	var err error
-	if write != nil {
-		if capture, err = s.capturePendingAuthors(ctx, tx, room, write, actor); err != nil {
-			return renderedTree{}, authorCapture{}, err
-		}
-		fork, err := s.joinRead(ctx, room)
-		if err != nil {
-			return renderedTree{}, authorCapture{}, err
-		}
-		if err := s.refuseLostWrite(ctx, room, fork, actor); err != nil {
-			return renderedTree{}, authorCapture{}, err
-		}
-		if s.afterCaptureFork != nil {
-			s.afterCaptureFork(room)
-		}
-		if write.cold {
-			capture = capture.withoutInflight(write, actor)
-		}
-		if rendering, reused := s.reuseRendering(write, fork, "capture"); reused {
-			return rendering, capture, nil
-		}
-		valid, readErr := s.readFork(fork)
-		if readErr != nil {
-			return renderedTree{}, authorCapture{}, readErr
-		}
-		tree = valid.Node()
-	} else {
-		// The head under the document's advisory lock, which this transaction holds from here to
-		// its end: every append, this process's own included, waits for it, so no room's cursor
-		// moves and the head stays where it is read.
-		head, err := currentUpdateCursor(ctx, tx, room)
-		if err != nil {
-			return renderedTree{}, authorCapture{}, err
-		}
-		if capture, err = s.capturePendingAuthors(ctx, tx, room, nil, actor); err != nil {
-			return renderedTree{}, authorCapture{}, err
-		}
-		if s.afterCaptureAuthorsTake != nil {
-			s.afterCaptureAuthorsTake(room)
-		}
-		var readErr error
-		var behind bool
-		err = s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
-			if cursor := s.cursorOf(live); cursor != nil && refuseRoomBehindHead(room, cursor, head) != nil {
-				behind = true
-				return
-			}
-			var doc *crdt.Doc
-			var release func()
-			doc, release, readErr = s.holdLive(room, live)
-			if readErr != nil {
-				return
-			}
-			defer release()
-			tree, readErr = treeOf(doc)
-		})
-		if readErr != nil {
-			return renderedTree{}, authorCapture{}, readErr
-		}
-		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
-			return renderedTree{}, authorCapture{}, fmt.Errorf("warm live document: %w", err)
-		}
-		if behind {
-			capture = capture.withoutInflight(nil, actor)
-			if tree, err = s.storedTree(ctx, room); err != nil {
-				return renderedTree{}, authorCapture{}, err
-			}
-		}
+	// An update observer credits a change only once the room holds it, so each in-flight credit
+	// observed by now is for a change the read below holds.
+	state := s.lockState(room)
+	through := state.creditSeq.Load()
+	s.unlockState(room, state)
+	if s.afterCaptureAuthorsTake != nil {
+		s.afterCaptureAuthorsTake(room)
 	}
+	var read []byte
+	var point roomPoint
+	var readErr error
+	var behind bool
+	err = s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		if cursor := s.cursorOf(live); cursor != nil && refuseRoomBehindHead(room, cursor, head) != nil {
+			behind = true
+			return
+		}
+		read, point, _, readErr = s.readPoint(room, live)
+	})
+	if readErr != nil {
+		return renderedTree{}, authorCapture{}, readErr
+	}
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		return renderedTree{}, authorCapture{}, fmt.Errorf("warm live document: %w", err)
+	}
+	var tree *pmdoc.Node
+	if behind {
+		tree, err = s.storedTree(ctx, room)
+	} else if err = ledgerFrom(ctx).flushThrough(ctx, tx, room, point); err == nil {
+		tree, err = stateTree(read)
+	}
+	if err != nil {
+		return renderedTree{}, authorCapture{}, err
+	}
+	capture, err := s.capturePendingAuthors(ctx, tx, room, nil, actor, through)
+	if err != nil {
+		return renderedTree{}, authorCapture{}, err
+	}
+	if behind {
+		capture = capture.withoutInflight(actor)
+	}
+	markdown, offsets, err := documentMarkdownWithOffsets(tree)
+	if err != nil {
+		return renderedTree{}, authorCapture{}, err
+	}
+	return renderedTree{tree: tree, markdown: markdown, offsets: offsets}, capture, nil
+}
+
+// captureWrite is captureLiveTextAndAuthors for a transaction with a write of its own to room: the
+// version records the write's own state, its fork as the write's last operation left it, which
+// holds the room as the write's one read found it (forkLive) and nothing the room committed after
+// that read. The write stores that read's room updates ahead of its own (Ledger.flushThrough), so the
+// state is the fold of the stored updates through the write's last, the version's
+// doc_update_version (writeVersionTx reads it in this transaction, whose last append is the
+// write's). A browser edit the room committed after the read is in no update stored before the
+// write's, so it is in this version neither: the settlement that follows the write's publish
+// versions it.
+//
+// It lists the pending authors this transaction reads, the write's own, and the in-flight credits
+// observed by the write's read (captureAuthors). It reads the authors after the write's room
+// updates are stored, so the authors those appends wrote are among them, and deleted by the
+// version's commit with the rest.
+//
+// A browser change the room committed after the read can still have removed the text the write
+// inserted, and the write must not be versioned as applied then (refuseLostWrite).
+func (s *Service) captureWrite(ctx context.Context, tx pgx.Tx, room string, write *liveWrite, actor *model.Actor) (renderedTree, authorCapture, error) {
+	fork, err := s.forkLive(ctx, write)
+	if err != nil {
+		return renderedTree{}, authorCapture{}, err
+	}
+	if err := ledgerFrom(ctx).flushThrough(ctx, tx, room, write.point); err != nil {
+		return renderedTree{}, authorCapture{}, fmt.Errorf("store the room's updates ahead of a version: %w", err)
+	}
+	capture, err := s.capturePendingAuthors(ctx, tx, room, write, actor, write.forkSeq)
+	if err != nil {
+		return renderedTree{}, authorCapture{}, err
+	}
+	if err := s.refuseLostWrite(room, write, actor); err != nil {
+		return renderedTree{}, authorCapture{}, err
+	}
+	if s.afterCaptureFork != nil {
+		s.afterCaptureFork(room)
+	}
+	if rendering, reused := s.reuseRendering(write, fork, "capture"); reused {
+		return rendering, capture, nil
+	}
+	valid, err := s.readForkTree(fork)
+	if err != nil {
+		return renderedTree{}, authorCapture{}, err
+	}
+	tree := valid.Node()
 	markdown, offsets, err := documentMarkdownWithOffsets(tree)
 	if err != nil {
 		return renderedTree{}, authorCapture{}, err

@@ -513,7 +513,9 @@ To stand it up:
    next apply: a forced one writes its copy back, and one without force fails on any key whose value
    differs and leaves yours. Either way, stop that tool declaring the ConfigMap first.
 3. Put `pod.yml`'s contents under `runtime.kubernetes.pod` in `legion.yaml`, with your endpoint's
-   token audience in place of `${MODEL_TOKEN_AUDIENCE}`.
+   token audience in place of `${MODEL_TOKEN_AUDIENCE}` and the ServiceAccount your pods run as in
+   place of `${POD_SERVICE_ACCOUNT}`. `legion start --check-config` refuses either placeholder
+   unfilled.
 
 Name every role Legion's agents use in `modelRoles` (`default`, `review`, `oracle`, `deep`, `smol`,
 `slow`, and the rest the example names): the daemon refuses to boot when an agent's role has no
@@ -677,12 +679,22 @@ Closing the terminal leaves the project without one, and the daemon logs
    `runtime.kubernetes` block must name a `session_store` that keeps sessions in a database, with
    that store's key — for a deployment today `session_store: postgres` and `session_dsn_secret`,
    with the providers Secret holding that key — before the daemon boots: the loader refuses the
-   file otherwise ([legion.yaml](#legionyaml)). An issue whose Sandbox still owns the volume of the
-   earlier shape keeps it until its next launch, which deletes that Sandbox and the volume with
-   it and starts the issue on a pod-owned disk, so stop each issue with its work pushed and start
-   it again rather than letting a relaunch choose the moment. The repository's
-   `docs/kubernetes.md` ("Cutting over to the pod-owned disk") has the procedure, the audit that
-   finds any claim left behind, and what rolling the image back needs.
+   file otherwise ([legion.yaml](#legionyaml)). Before rolling that change, follow
+   [Copying file sessions before turning it on](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#copying-file-sessions-before-turning-it-on).
+   A later reaping of an older Sandbox-owned volume reads the retiring Sandbox's pod template.
+   The providers volume's `OMP_SESSION_SQL_DSN` item under `postgres`, or the launcher's three
+   Cloud SQL session flags under `cloudsql-iam`, proves that the Sandbox used the session database
+   and permits the reap. Without either marker, it refuses when the matching claim records a
+   session. To keep that session's contents, import it first. When `issue_close` already cleared
+   the resume path, the importer finds the retained session id under the volume's sessions
+   directory. Then run `legion claims forget-session` on the stopped claim with its recorded
+   session id; only that clears the reap guard. Its next generation starts fresh, while the
+   imported row remains in the database. An issue whose
+   Sandbox still owns the volume of the earlier shape keeps it until its next launch, which deletes
+   that Sandbox and the volume with it and starts the issue on a pod-owned disk, so stop each issue
+   with its work pushed and start it again rather than letting a relaunch choose the moment. The
+   repository's `docs/kubernetes.md` ("Cutting over to the pod-owned disk") has the procedure, the
+   audit that finds any claim left behind, and what rolling the image back needs.
 
 3. **Restart the daemon** with the new binary: stop it through your supervisor (or
    `legion stop --config legion.yaml`) and start it again. `legion restart <PROJECT>` does both in
