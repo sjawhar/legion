@@ -7,7 +7,6 @@ body: |-
   is not continued by a phase reminder: after the answer the worker waits, and no reminder
   follows, because the daemon is what wakes it. The daemon replaces the pod only once every
   worker of that pod has answered, and holds the worker's next task until its process comes back
-  on the new pod in the same session; a round that ends having replaced nothing — the drift it
-  was opened for went away — sends that held task instead, or tells the worker the round is over
-  where no task waits.
+  on the new pod in the same session, where its workspace is provisioned afresh from the issue's
+  pushed branch.
   `legion.daemonApiVersion` is 45.

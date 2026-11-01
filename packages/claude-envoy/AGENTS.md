@@ -158,11 +158,11 @@ does not answer, stands between it and a reminder telling it to complete again.
 nothing, so that turn ends and the daemon, which replaces the pod only once every worker of it
 has answered, sees it end. A blocked `Stop` would instead continue that turn, and the work it did
 would go with the pod. Nothing is written into that wait and no timer is armed in it, because the
-daemon is what wakes the worker: it replaces the process, or, where the round ends having
-replaced nothing, it sends the task it held behind the round or the short task saying the round
-is over. The record holds the wait as the plain `waiting` a WAITING reply buys
-(`recordedPhaseStall`): only a relaunched process reads a record, and that relaunch is the round
-over.
+daemon is what wakes the worker: a round, once opened, ends only by replacing its pod or because
+that pod is gone, so the process is replaced and the task the round held behind it reaches the
+worker on the new pod, in the same session. The record holds the wait as the plain `waiting` a
+WAITING reply buys (`recordedPhaseStall`): only a relaunched process reads a record, and that
+relaunch is the round over.
 
 **The state file.** This host has no transcript entry to record in, so the record is
 `<CLAUDE_CONFIG_DIR>/legion-phase-stall-<session id>.json` (`phaseStallFile`), written whole

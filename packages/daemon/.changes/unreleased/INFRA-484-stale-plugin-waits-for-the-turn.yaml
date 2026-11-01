@@ -7,8 +7,11 @@ body: |-
     the project controller, which works no checkout and has nothing to push, keeps its immediate
     relaunch.
 
-    A claim whose launch installs no plugin is relaunched by that lane no more, at any contract: a
-    Claude Code role's plugin is its pod image's own, which no install reaches, so each relaunch
-    brought the same plugin back and charged the claim toward `failed`. Its plugin moves with a
-    new image, which the update round over its pod brings.
+    A claim whose launch installs no plugin is relaunched by that lane no more, at any contract:
+    under Kubernetes a Claude Code role's plugin is its pod image's own, which no install
+    reaches, so each relaunch brought the same plugin back and charged the claim toward
+    `failed`. Its plugin moves with a new image, which the update round over its pod brings. A
+    Claude Code pane under tmux is exempt from nothing: it loads the built claude-envoy
+    `LEGION_CLAUDE_PLUGIN_DIR` names, which a relaunch rereads, so it is relaunched once its
+    turn ends, as an Oh My Pi pane is.
 time: 2026-10-30T19:30:00Z

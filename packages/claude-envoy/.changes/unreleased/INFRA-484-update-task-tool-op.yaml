@@ -6,6 +6,6 @@ body: |-
   the pod has answered. It ends no phase, so the phase hook leaves the phase open where
   `handoff_complete` and `request_backward_move` close it; the `Stop` of the turn it answered in
   blocks nothing, so that turn ends and the daemon sees it end. No reminder follows that turn:
-  the daemon is what wakes the worker again, with the task it held behind the round, or, when the
-  round ends having replaced nothing, with a short task saying the round is over.
+  the daemon is what wakes the worker again, with the task it held behind the round, once the
+  pod is replaced and its process comes back on the new pod in the same session.
   `package.json`'s `legion.daemonApiVersion` is 45.

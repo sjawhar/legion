@@ -1852,15 +1852,15 @@ The controller's pod, which no round covers, is replaced by any relaunch that in
 An install failure ends the child before Oh My Pi starts;
 the launcher reports it gone, the daemon charges it as a launch failure, and the claim is retried until the budget ends it in a `worker-died`.
 
-A role on Claude Code installs neither plugin.
+A role on Claude Code in a pod installs neither plugin.
 That install is `@sjawhar/pi-legion` and `@sjawhar/pi-envoy` from npm, and a phase worker `worker_backends` puts on `claude` loads neither:
 its plugin is the image's own `/opt/legion/claude-envoy`, which no workflow releases.
 So a stale-plugin relaunch of such a claim carries no plugin install (`stalePluginInstall`, `packages/daemon/internal/daemon/specs.go`) and could not take the claim onto this daemon's contract at all:
 the process would come up on the same image's plugin, register the same contract again, and be relaunched for it until its launch budget failed it.
-Such a claim is therefore relaunched by nothing:
-no `StalePlugin` is posted for a Claude Code claim at any contract, round or no round (`refreshStalePlugins`), and a registration of that claim still on the old contract is accepted, uncharged, rather than relaunched (`staleRegistration`).
+Such a claim is therefore relaunched by nothing, and the rule is the runtime and the role's backend together, never the backend alone (`noPluginInstall`, `packages/daemon/internal/daemon/daemon.go`):
+no `StalePlugin` is posted for a Claude Code claim of a pod at any contract, round or no round (`refreshStalePlugins`), and a registration of that claim still on the old contract is accepted, uncharged, rather than relaunched (`staleRegistration`).
 What carries it is the update round over its pod, which asks it like every other worker and takes the end of the turn its task starts as its answer, so the new image reaches it with nothing asked of an operator.
-A plugin-contract change for a Claude Code role is answered by a new image, never by an install, and `legion start --check-config` says so after its plugin line, naming each role this deployment runs on Claude Code:
+A plugin-contract change for a Claude Code role in a pod is answered by a new image, never by an install, and `legion start --check-config`, which prints the line under `runtime: kubernetes` alone, says so after its plugin line, naming each role this deployment runs on Claude Code:
 `Claude Code runs <roles>, whose plugin is the worker image's: a plugin-contract
 change for such a role is answered by a new image, not by an install.`
 
@@ -1881,12 +1881,15 @@ it still records every claim's contract and still writes one Error per stale cla
 knows no plugin versions to relaunch it onto; set runtime.kubernetes.plugins`, but relaunches nothing and refuses nothing.
 Under `runtime: tmux` a relaunch is always possible regardless:
 the pane resumes on the host's own `pi-legion`, which the boot gate already holds to the daemon's contract, so there is no install to source a pair for.
+A Claude Code pane is exempt from nothing there:
+its plugin is the built `packages/claude-envoy` that `LEGION_CLAUDE_PLUGIN_DIR` names, whose MCP configuration and plugin argument every launch writes afresh, so a relaunch rereads that directory and brings the worker up on whatever it holds now, exactly as an Oh My Pi pane comes back on the plugin installed on the daemon's host.
+Such a pane is decided by the same lanes as any other pane: an update round of its own where the contract it records can answer, and otherwise a relaunch, at once where it is idle and once its turn ends where it is in one, which is how the turn of a worker that cannot be asked to push first is kept.
 
 A stale caller's registration is refused 409 with `pi-legion speaks daemon API contract <got>; this daemon requires <want>: the daemon is relaunching
 this process onto the current plugin` (or, when it registered no contract at all, `pi-legion registered no daemon API contract; this daemon requires <want>: …`).
 Its other calls get the same sentence — a claim route answers `{"error": …}`, a credential or workflow route `{"code":"STALE_PLUGIN_CONTRACT","error": …}` — logged `api: refused a call from a process on another plugin contract`;
 the operator's own controller instead gets `…: run legion controller start from the release built with this daemon`, since there is no pod for the daemon to relaunch it in.
-A claim whose launch installs no plugin (a Claude Code role) is never refused on its contract: nothing relaunches it, so it is served on its old contract until the update round over its pod brings a new image.
+A claim whose launch installs no plugin (a Claude Code role in a pod) is never refused on its contract: nothing relaunches it, so it is served on its old contract until the update round over its pod brings a new image.
 Every other undecodable request body is logged `api: refused an undecodable request body` naming the route and the decoder's error.
 A relaunched process that registers still on the old contract is charged as a launch failure (the claim remembers `PluginRelaunchFor`), ending, like any other exhausted budget, in a `worker-died`.
 The contract shows on every claim view — `GET /legion/v1/state`, `legion state --json`, `read_record`'s `pluginContract` field
@@ -3857,8 +3860,12 @@ A claim that has not answered, or a turn that started while the replacement wait
 nothing is suspended, the round stays open, and the next sweep decides again.
 Nothing the round decides is held in memory:
 it is all claim columns, so a daemon restart resumes a round where it stood, and each claim shows it as `updateRound` and `updateHead` on every claim view.
-A round that ends having replaced nothing — the drift returned to nothing, because an operator rolled the release back — releases each worker that answered:
-the task the round held back goes, or, when none waits, a short task saying the round is over and that the worker continues its work.
+A round, once opened, ends only by replacing its pod, or because that pod is gone.
+The drift returning to nothing — an operator rolled the release back — ends no round:
+every worker in it has already been told to push its work and to start no new work, so the pod is replaced all the same, and the task and the notice keep naming the reasons the round was opened for, which the round records (`roundReasons`).
+A worker that has answered waits for that replacement.
+It comes back on the new pod in its own session, through the displaced path, with its workspace provisioned afresh from the issue's pushed branch and the task the round held back still waiting for it
+— which is why it is asked to push before it answers.
 
 A round that is not finishing is told to the project's controller as an `update-stalled` notice `pod_update_notice_hours` after it opened (a `legion.yaml` key, a decimal number of hours, 4 by default),
 naming the issue, the round, the pod, the drift and every claim it waits on with that claim's state (`skill://legion-controller/references/escalation.md`).
@@ -3868,7 +3875,11 @@ a turn that never ends, or a `ReplacePod` the cluster keeps refusing, each holds
 What such a round waits on that only a person can clear is a claim no task reaches — a `failed` one, or one an operator's own suspension holds
 — and the notice marks which claims have answered, so the controller prompts the workers it can and leaves the rest to the operator's own resume.
 A pod that goes before its round is over, replaced where it stood for a failure of its own, has the daemon write on the issue which roles had not answered and that the work they did not push went with the disk.
-What says the pod went is the claims recording another pod in its place.
+Two readings say the pod went:
+the runtime answering that the pod the claims record is not there, and the claims recording another pod in its place.
+The first sweep that reads the pod gone ends the round, and decides that message from the answers recorded at that moment, read from the claims' own machines (`endRoundOverAGonePod`):
+a round every blocking claim had answered lost nothing, so nothing is written on the issue at all.
+It ends there rather than at the sweep that reads the claims recording the pod that replaced this one, because inside that window each role is relaunched into the new pod one at a time, and every turn and every answer of those processes is counted by its machine against the round of a pod they never ran in.
 While no claim of the issue records a pod at all — every role suspended, or the one live role relaunching — the round waits, because no locator is evidence either way.
 
 What a pod's disk carries is therefore the issue's work in progress and nothing more:

@@ -244,10 +244,10 @@ test("a failed delivery arms nothing once a turn has started meanwhile", async (
 });
 
 // The wait a `ready_for_update` answer creates is `awaiting-update`, and nothing is armed in it:
-// the daemon is what wakes the worker, with the task it held behind the round, or with the task
-// saying the round ended having replaced nothing. A timer fired in that wait would steer a real
-// turn into the worker instead, and a new turn is exactly what the daemon reads as the answer
-// retracted (`takeBackSignal`), so the sweep would ask the worker to push again, the round would
+// the daemon is what wakes the worker, with the task it held behind the round, once the round
+// has replaced the pod. A timer fired in that wait would steer a real turn into the worker
+// instead, and a new turn is exactly what the daemon reads as the answer retracted
+// (`takeBackSignal`), so the sweep would ask the worker to push again, the round would
 // restart at every `waitingMs`, and the late-round notice — measured from the latest answer —
 // would never name the `ReplacePod` error or the sibling turn that will not end. The WAITING
 // reply's own wait is untouched: it is the reminder's to time out.
@@ -268,8 +268,8 @@ test("the wait an update answer creates arms no reminder, where a WAITING reply 
   expect(await reminder.settle("Still waiting for the pod.")).toBeUndefined();
   expect(timers).toEqual([]);
 
-  // The daemon wakes the worker — its held task, or the word that the round is over: the phase is
-  // open again, and a WAITING reply buys the quiet wait the reminder itself ends.
+  // The daemon wakes the worker with the task it held behind the round: the phase is open again,
+  // and a WAITING reply buys the quiet wait the reminder itself ends.
   reminder.apply({ kind: "inbound-event" });
   expect(await reminder.settle("WAITING on the reviewer.")).toBeUndefined();
 

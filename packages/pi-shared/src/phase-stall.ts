@@ -26,14 +26,14 @@ import { LOCAL_ENVOY_NOTICE } from "./envoy-notice";
  *   longer quiet wait `LEGION_STALL_WAITING_MS` before the next reminder;
  * - `awaiting-update`: still open, and the worker has answered the daemon's update task
  *   (`ready_for_update`), so it is to start nothing until the daemon comes back to it. This wait
- *   earns no reminder and no wait of any length, because the daemon is what wakes the worker: it
- *   replaces the process, or, where the round ends having replaced nothing — the drift it was
- *   opened for went away — it sends the task it held behind the round, or the short task saying
- *   the round is over and the worker is to carry on (`endPodUpdate`, `tellRoundIsOver` in
- *   `packages/daemon/internal/supervise/table.go`). Either arrives as the daemon's own prompt,
- *   which is an `assignment` and opens the phase again. A reminder steered into this wait would
- *   instead be a turn the daemon reads as the answer retracted (`takeBackSignal`), so the round
- *   would restart at every wait and never converge (INFRA-484).
+ *   earns no reminder and no wait of any length, because the daemon is what wakes the worker: a
+ *   round, once opened, ends only by replacing its pod or because that pod is gone, so the
+ *   process is replaced and the session comes back on the new pod with the task the round held
+ *   behind it (`endPodUpdate` in `packages/daemon/internal/supervise/table.go`). That task
+ *   arrives as the daemon's own prompt, which is an `assignment` and opens the phase again. A
+ *   reminder steered into this wait would instead be a turn the daemon reads as the answer
+ *   retracted (`takeBackSignal`), so the round would restart at every wait and never converge
+ *   (INFRA-484).
  * The reminding never stops where a reminder is the worker's only wake: one that changes nothing
  * is followed by another. */
 export type PhaseStall = "closed" | "open" | "waiting" | "awaiting-update";

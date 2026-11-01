@@ -14,14 +14,19 @@ body: |-
     same, and its task tells it what to do without one: push, and end the turn. The daemon reads
     the end of that turn as the answer and records it with no head, so no release needs an
     operator's drain. A turn the daemon never saw begin is no answer: the round asks again. A
-    Claude Code worker, whose plugin is its image's, is never relaunched for its contract and is
-    served on it until its pod's round brings the new image.
+    Claude Code worker in a pod, whose plugin is its image's own, is never relaunched for its
+    contract and is served on it until its pod's round brings the new image.
 
-    A round that ends having replaced nothing — the drift went away — releases every worker that
-    answered it, an idle one at once and a working one when its turn ends, and a worker whose pod
-    was replaced is told nothing, since its session comes back on the new pod by itself. A round
-    that is not finishing is told to the project's controller once, naming only the claims that
-    have not answered. `pod_update_retask_hours` (1) bounds how often an unanswered worker is
-    asked again and `pod_update_notice_hours` (4) when that notice is sent; `legion state` and
-    `legion claims list` show each open round and the head each worker reported.
+    A round, once opened, ends only by replacing its pod, or because that pod is gone. The drift
+    going away ends none: every worker in it has already been told to push its work and to start
+    no new work, so the pod is replaced all the same. A worker that has answered is told nothing
+    more. It waits, and comes back on the new pod in its own session, its workspace provisioned
+    afresh from the issue's pushed branch, with the task the round held still waiting for it. A
+    pod that goes before its round is over ends that round at the sweep that reads it gone, and
+    what the issue is told of the work lost with the disk is decided from the answers recorded
+    then. A round that is not finishing is told to the project's controller once, naming only
+    the claims that have not answered. `pod_update_retask_hours` (1) bounds how often an
+    unanswered worker is asked again and `pod_update_notice_hours` (4) when that notice is sent;
+    `legion state` and `legion claims list` show each open round and the head each worker
+    reported.
 time: 2026-11-01T03:41:39Z

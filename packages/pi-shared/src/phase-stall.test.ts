@@ -92,8 +92,9 @@ test("a worker that answered the update task stands in awaiting-update, where a 
   expect(stepPhaseStall(answered.state, { kind: "tool-call" })).toEqual({
     state: { state: "awaiting-update", count: 0 },
   });
-  // What ends this wait is the daemon: the task it held behind the round, or the one saying the
-  // round ended having replaced nothing, arrives as its own prompt and opens the phase again.
+  // What ends this wait is the daemon: the round replaces the pod, and the task it held behind
+  // the round arrives in the process that comes back as its own prompt, which opens the phase
+  // again.
   expect(stepPhaseStall(answered.state, { kind: "assignment" })).toEqual({
     state: { state: "open", count: 0 },
   });
