@@ -197,6 +197,9 @@ export interface ApprovalChipProps {
   showActions?: boolean;
   /** `contents` lets a parent flex group place the state chip and actions independently. */
   layout?: "contents" | "inline";
+  /** Called beside the chip's own refreshes once the server has recorded the reader's review, so
+   *  a host that selected the approval request learns it was reviewed here. */
+  onReviewed?(): void;
 }
 
 /**
@@ -207,6 +210,7 @@ export interface ApprovalChipProps {
 export function ApprovalChip({
   artifact,
   layout = "inline",
+  onReviewed,
   variant = "list",
   showActions = variant === "header",
 }: ApprovalChipProps): ReactNode {
@@ -223,6 +227,7 @@ export function ApprovalChip({
     write: (input, bounds) => api.createArtifactReview(artifact.id, input, bounds),
     onSuccess: () => {
       setRequestChangesOpen(false);
+      onReviewed?.();
       void queryClient.invalidateQueries({ queryKey: ["artifact-reviews", artifact.id] });
       void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id] });
       void queryClient.invalidateQueries({ queryKey: inboxQuery().queryKey });

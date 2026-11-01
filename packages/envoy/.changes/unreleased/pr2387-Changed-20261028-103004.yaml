@@ -1,7 +1,7 @@
 kind: Changed
 body: |-
     The Envoy listener's live-session list an issue read with a route and `GET /api/v1/agents` use
-    is stored once for every process, the `route_roster` row (migration `0152`), at most 5 s old by
+    is stored once for every process, the `route_roster` row (migration `0159`), at most 5 s old by
     the database's clock, where each process kept its own copy. One listener call refreshes it for
     every issue read and agents list on that process that asks while the call runs; an answer is
     never stored over one from a later call. A listener that fails or does not answer is stored

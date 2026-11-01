@@ -4,10 +4,11 @@
 // so what one process commits reaches the others only through the database, and a connection
 // waiting for a notification must outlive every failure between it and the server. Its Dispatch
 // users are the delivery hub, the event stream relay and, under DISPATCH_TEST_HOOKS alone, the
-// test hooks' fan-out to every process (internal/dispatch/api), and the document rooms' stale-room
-// evictor (internal/dispatch/docs); the broker's is its cross-pod secret-reread fan-out
-// (internal/broker/reread). Serving two programs is why the package sits here rather than under
-// internal/dispatch, as internal/pgmigrate does for the two migration runners.
+// test hooks' fan-out to every process (internal/dispatch/api), the document rooms' stale-room
+// evictor (internal/dispatch/docs), and the Hub (hub.go) that shares one listener among
+// Dispatch's change-driven background loops; the other is the broker's cross-pod secret-reread
+// fan-out (internal/broker/reread). Serving two programs is why the package sits here rather
+// than under internal/dispatch, as internal/pgmigrate does for the two migration runners.
 package pglisten
 
 import (

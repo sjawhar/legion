@@ -1,6 +1,6 @@
 kind: Fixed
 body: |-
-    Migrations `0151` to `0154` are additive (a nullable column with a check added `not valid`, and
+    Migrations `0158` to `0161` are additive (a nullable column with a check added `not valid`, and
     three new tables), so the release before them keeps serving beside this one through a rolling
     update, and rolling back past them is an image rollback alone. While both releases serve, only
     this release's processes share the route list, the GitHub rate limits and the warnings; either
