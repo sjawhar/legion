@@ -78,6 +78,7 @@ type Runtime struct {
 	probes      []ProbeResult
 	failures    map[string]error
 	drift       map[claim.Token][]string
+	gone        map[claim.Token]bool
 	holdReplace func()
 	holdResume  func()
 	queue       []runtime.Observation
@@ -90,6 +91,7 @@ func NewRuntime() *Runtime {
 		Now:      time.Now,
 		failures: map[string]error{},
 		drift:    map[claim.Token][]string{},
+		gone:     map[claim.Token]bool{},
 	}
 	fake.pending = sync.NewCond(&fake.mu)
 	return fake
@@ -166,6 +168,21 @@ func (r *Runtime) ScriptPodDrift(token claim.Token, reasons ...string) {
 		return
 	}
 	r.drift[token] = reasons
+}
+
+// ScriptPodGone makes every later PodDrift of token's claim answer runtime.ErrPodGone, as a
+// runtime answers a claim whose recorded pod is not there at all: the pod was replaced where it
+// stood for a failure of its own and its disk went with it, or the round's own replacement has
+// already ended it. gone false puts the claim back to the drift it was scripted, which is what a
+// claim running in a pod the runtime can read again answers.
+func (r *Runtime) ScriptPodGone(token claim.Token, gone bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !gone {
+		delete(r.gone, token)
+		return
+	}
+	r.gone[token] = true
 }
 
 // FailPodDrift makes every later PodDrift return err; nil clears it.
@@ -411,7 +428,9 @@ func (r *Runtime) LaunchBound() time.Duration {
 }
 
 // PodDrift records its call and answers what ScriptPodDrift set for the claim, nil for a claim no
-// call named and for one with no process, as a runtime answers a claim that runs nowhere.
+// call named and for one with no process, as a runtime answers a claim that runs nowhere, and
+// runtime.ErrPodGone for a claim ScriptPodGone named, as a runtime answers a claim whose
+// recorded pod is not there.
 func (r *Runtime) PodDrift(_ context.Context, k runtime.Known) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -421,6 +440,9 @@ func (r *Runtime) PodDrift(_ context.Context, k runtime.Known) ([]string, error)
 	}
 	if k.Locator == nil {
 		return nil, nil
+	}
+	if r.gone[k.Claim] {
+		return nil, runtime.ErrPodGone
 	}
 	return append([]string(nil), r.drift[k.Claim]...), nil
 }

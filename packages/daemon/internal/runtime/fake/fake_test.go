@@ -276,9 +276,11 @@ func TestAScriptedFailureReachesTheMethodItWasSetOn(t *testing.T) {
 }
 
 // The fake answers an update round the way a runtime does: PodDrift names what a test scripted for
-// that claim and nothing for any other, ReplacePod records its call and leaves the claim drifted
-// from nothing — the place it ended is built again from the configuration the runtime has now —
-// and each refuses with the failure set on it.
+// that claim and nothing for any other, says runtime.ErrPodGone for a claim whose pod a test
+// scripted gone — which a caller must never read as a claim that has drifted from nothing —
+// ReplacePod records its call and leaves the claim drifted from nothing — the place it ended is
+// built again from the configuration the runtime has now — and each refuses with the failure set
+// on it.
 func TestPodDriftAnswersTheScriptAndReplacePodEndsIt(t *testing.T) {
 	ctx := context.Background()
 	fake := NewRuntime()
@@ -301,6 +303,14 @@ func TestPodDriftAnswersTheScriptAndReplacePodEndsIt(t *testing.T) {
 	}
 	if got, err := fake.PodDrift(ctx, runtime.Known{Claim: drifted.Claim}); err != nil || len(got) > 0 {
 		t.Fatalf("a claim running nowhere has drifted: %q, %v", got, err)
+	}
+	fake.ScriptPodGone(other.Claim, true)
+	if got, err := fake.PodDrift(ctx, runtime.Known{Claim: other.Claim, Locator: &other}); !errors.Is(err, runtime.ErrPodGone) || len(got) > 0 {
+		t.Fatalf("a claim whose pod is gone: %q, %v; want runtime.ErrPodGone", got, err)
+	}
+	fake.ScriptPodGone(other.Claim, false)
+	if got, err := fake.PodDrift(ctx, runtime.Known{Claim: other.Claim, Locator: &other}); err != nil || len(got) > 0 {
+		t.Fatalf("a claim whose pod is there again has drifted: %q, %v", got, err)
 	}
 
 	if err := fake.ReplacePod(ctx, known, stillDue); err != nil {

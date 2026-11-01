@@ -1267,10 +1267,13 @@ func (s *supervision) refreshStalePlugins(claims []supervise.Claim, trigger stri
 // releases claude-envoy). A plugin-contract change for such a role is answered by a new image,
 // which is what the pod round replaces the pod for.
 //
-// It is one rule read in two places: this package's own stale-plugin pass
-// (refreshStalePlugins), and the machine's stale registration, which supervise cannot decide for
-// itself because a role's backend is the daemon's configuration (supervise.Deps.NoPluginInstall,
-// handed this same function).
+// It is one rule read in three places, each of which would otherwise act on a claim no install
+// of this deployment can move: this package's own stale-plugin pass (refreshStalePlugins); the
+// machine's stale registration, which supervise cannot decide for itself because a role's
+// backend is the daemon's configuration (supervise.Deps.NoPluginInstall, handed this same
+// function); and the API's stale-caller refusal, which would otherwise hold such a worker's
+// grants, its handoff_complete and its ready on a relaunch that never comes
+// (api.Options.NoPluginInstall, api's staleClaim).
 func noPluginInstall(cfg config.Config, c supervise.Claim) bool {
 	return runtime.Of(cfg.BackendFor(c.Role)) == runtime.BackendClaude
 }
@@ -1561,6 +1564,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		DesignGate:         cfg.Gates.Design,
 		ControllerLaunched: keeper != nil,
 		PluginRelaunchable: p.pluginRelaunchable,
+		NoPluginInstall:    func(c supervise.Claim) bool { return noPluginInstall(cfg, c) },
 		Stopping:           s.stopping,
 		Drained:            s.draining,
 		Decisions:          s.decided,

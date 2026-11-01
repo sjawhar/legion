@@ -962,7 +962,9 @@ func (m *Machine) askTurnOver(ctx context.Context, ev Event) error {
 	}
 	m.unansweredAsks = 0
 	if streaming {
-		m.askFirst = false
+		// The agent's own word is all this daemon has of the turn: it never saw it begin, so its
+		// end says nothing about what the turn did (Machine.unseenTurn).
+		m.askFirst, m.unseenTurn = false, true
 		return nil
 	}
 	m.log.Info("supervise: the turn an earlier daemon saw start is over")
@@ -1161,13 +1163,14 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	_, awaiting := m.timers[TimerTurn]
 	inFlight := m.send != nil || awaiting || m.askFirst
 	own := p != nil && p.ConfirmedAt.IsZero() && (start.DeliveryID == p.ID || (start.DeliveryID == "" && inFlight))
-	if own && start.DeliveryID == "" {
-		// The start named no delivery, so this confirmation rests on what the daemon had in
-		// flight rather than on the agent's own word about which task it took
-		// (Machine.unseenTurn).
-		m.unseenTurn = true
-	}
-	m.takeBackSignal(own)
+	// Whether this daemon saw the turn begin. No agent_start of a live turn names a delivery —
+	// Oh My Pi never sets the field, and the Claude Code bridge sends a bare start — so a start
+	// naming none says nothing by itself, and only the shim's replay of a start it already saw
+	// does name one. What decides it is what made the confirmation possible: with no send in
+	// flight and no turn awaited, the only thing left is askFirst, the turn an earlier daemon's
+	// process was already in. Every other start is one this daemon read (Machine.unseenTurn).
+	m.unseenTurn = own && start.DeliveryID == "" && m.send == nil && !awaiting
+	m.takeBackSignal(own && !m.unseenTurn)
 	if own {
 		return m.confirm(ctx)
 	}
@@ -1791,6 +1794,13 @@ func openPodUpdate(m *Machine, ctx context.Context, ev Event) error {
 	open := ev.(PodUpdateOpen)
 	now := m.deps.Clock.Now()
 	changed := false
+	if m.roundOver != nil && m.roundOver.Round != open.Round {
+		// An end held for the turn of a round this one replaces, which would otherwise run at
+		// that turn's end and tell the worker a round it is still in is over.
+		m.log.Info("supervise: an update round opens over the end this claim held for its turn; the held end is dropped",
+			"round", open.Round, "held", m.roundOver.Round)
+		m.roundOver = nil
+	}
 	if m.claim.UpdateRound != open.Round {
 		m.log.Info("supervise: an update round is open on this claim; its worker is asked to push its work and answer",
 			"round", open.Round, "reasons", open.Reasons)
@@ -2022,7 +2032,7 @@ func endPodUpdate(m *Machine, ctx context.Context, ev Event) error {
 		m.log.Info("supervise: this claim is in no update round; the end posted for it decides nothing")
 		return nil
 	}
-	if ended.Round != "" && ended.Round != m.claim.UpdateRound {
+	if ended.Round != m.claim.UpdateRound {
 		m.log.Info("supervise: the end posted for this claim names a round it is not in; it decides nothing",
 			"ended", ended.Round, "round", m.claim.UpdateRound)
 		return nil
@@ -2032,9 +2042,17 @@ func endPodUpdate(m *Machine, ctx context.Context, ev Event) error {
 			"round", m.claim.UpdateRound, "state", m.claim.State, "answered", m.claim.UpdateSignalledAt != nil)
 		return nil
 	}
-	if !ended.Replaced && m.claim.State == StateWorking && updatesRound(m.claim.Pending, m.claim.UpdateRound) {
-		m.log.Info("supervise: this claim is in the turn it answered its update round from and nothing was replaced; the round ends when that turn does",
-			"round", m.claim.UpdateRound, "delivery", m.claim.Pending.ID)
+	// The round's own ask still in the worker's hands, confirmed by a turn: the end waits for
+	// that turn to be over for the delivery too. The state alone would miss the window between
+	// agent_end and prompt_result, where the claim is idle and settle has retired nothing
+	// (resultPending), and the end would then release nobody: leaveRound would keep the
+	// confirmed ask, Pending would stop the carry-on task, and the result that followed would
+	// find roundOver nil. An ask no turn has confirmed is no hold: it is a prompt the worker
+	// never took, which leaveRound drops.
+	if !ended.Replaced && updatesRound(m.claim.Pending, m.claim.UpdateRound) &&
+		!m.claim.Pending.ConfirmedAt.IsZero() && (m.claim.State == StateWorking || m.resultPending()) {
+		m.log.Info("supervise: this claim holds the ask it answered its update round from and nothing was replaced; the round ends when that turn is over",
+			"round", m.claim.UpdateRound, "delivery", m.claim.Pending.ID, "state", m.claim.State)
 		m.roundOver = &ended
 		return nil
 	}

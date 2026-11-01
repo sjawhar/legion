@@ -75,6 +75,10 @@ func (s *supervision) reconcilePodUpdates(ctx context.Context, claims []supervis
 // may be suspended (letGo clears the locator), or the one live claim may be minutes into a
 // relaunch — and the round waits for a claim to record a pod again. The one thing that says a
 // pod went is a different pod in its place.
+//
+// A group whose claims record a pod the runtime no longer has decides nothing for the same
+// reason, and is left where it stands until those claims record the pod that replaced it
+// (groupDrift, runtime.ErrPodGone).
 func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string, group []supervise.Claim, now time.Time) {
 	slices.SortFunc(group, func(a, b supervise.Claim) int { return strings.Compare(string(a.Token), string(b.Token)) })
 	pod, split := groupPod(group)
@@ -267,65 +271,69 @@ func (s *supervision) replacementDue(issue, round string) func(context.Context) 
 }
 
 // viewedGroup is every claim of the issue a round weighs, as the store names them and as each
-// machine last published it: the store says which claims there are, and roundView says what each
-// holds now. A retired claim is left out as the sweep's own grouping leaves it out
-// (reconcilePodUpdates): it runs nothing in any pod and blocks no round.
+// machine last published it: the store says which claims there are, and roundGroup says what
+// each holds now, with the answer of a claim whose machine is deciding masked, as the decision
+// the replacement rests on needs it.
 func (s *supervision) viewedGroup(claims []supervise.Claim, issue string) []supervise.Claim {
-	var group []supervise.Claim
+	var of []supervise.Claim
 	for _, c := range claims {
-		if c.Issue != issue {
-			continue
-		}
-		if viewed, weighs := s.roundView(c); weighs {
-			group = append(group, viewed)
+		if c.Issue == issue {
+			of = append(of, c)
 		}
 	}
-	return group
+	return s.roundGroup(of, true)
 }
 
-// liveGroup is the group as its claims' own machines hold them now, in the group's order, less
-// the claims a round no longer weighs. A claim the supervisor no longer holds a machine for runs
-// nothing anywhere, so the snapshot's copy of it stands: it is a claim released since the tick
-// began, and nothing of it can start a turn or take an answer back.
+// liveGroup is the group as its claims' own machines hold them now, in the group's order, with
+// the same mask: it is what the sweep's own decision to replace the pod is read from.
 func (s *supervision) liveGroup(group []supervise.Claim) []supervise.Claim {
-	live := make([]supervise.Claim, 0, len(group))
-	for _, c := range group {
-		if viewed, weighs := s.roundView(c); weighs {
-			live = append(live, viewed)
-		}
-	}
-	return live
+	return s.roundGroup(group, true)
 }
 
-// roundView is one claim as a round must read it, and whether the round weighs it at all. It is
-// the one read both the sweep's live group and the replacement's last word are built from, so
-// the two can never disagree about what a claim holds.
+// noticeGroup is the group as the operator's side is told of it: the same fresh read, unmasked.
+// The mask is a decision the replacement makes — a claim whose machine is deciding has not
+// answered, for the purpose of deleting a disk — and it is not a fact about the claim. Told to
+// the controller it would be one: an answered claim marked `Answered: false` is one the
+// controller's playbook publishes the update task to, and that publish starts a turn, which
+// takes the real answer back (skill://legion-controller/references/escalation.md).
+func (s *supervision) noticeGroup(group []supervise.Claim) []supervise.Claim {
+	return s.roundGroup(group, false)
+}
+
+// roundGroup is the claims of group as a round reads them now, less the ones no round weighs.
+// It is the one read the sweep's decision, the replacement's last word and the operator's notice
+// are all built from, so no two of them can disagree about what a claim holds.
 //
-// What it reads is the machine's published view (Machine.View), never Machine.Claim: Claim waits
-// out the decision in flight, and that decision can be a Sandbox relaunch that holds the machine
-// for minutes. This runs for every drifted issue on every tick, so one relaunching claim would
-// otherwise stall the whole sweep behind it — the orphan reaping, the stale-plugin posts and
-// every later issue's round. The view is at least as fresh as the store for a claim a machine
-// holds, and the store's row stands for a claim no machine of this daemon holds.
+// What it reads is each machine's published view (Machine.View), never Machine.Claim: Claim
+// waits out the decision in flight, and that decision can be a Sandbox relaunch that holds the
+// machine for minutes. This runs for every drifted issue on every tick, so one relaunching claim
+// would otherwise stall the whole sweep behind it — the orphan reaping, the stale-plugin posts
+// and every later issue's round. The view is at least as fresh as the store for a claim a
+// machine holds, and the store's row stands for a claim no machine of this daemon holds.
 //
 // A retired claim is weighed by no round: it runs nothing in any pod.
 //
-// A claim whose machine is deciding something now (Machine.Deciding, which waits on nothing
-// either) is read as not having answered, whatever its view says. The view of such a claim is
-// what the decision in flight last tried to write, and the decision may be the turn that takes
-// the answer back (takeBackSignal) — so counting the answer would let a disk go under work that
-// turn can still commit. The cost of the other way round is one sweep: the round finds the claim
-// waiting, asks nothing more of it, and reads it again a tick later.
-func (s *supervision) roundView(c supervise.Claim) (supervise.Claim, bool) {
-	m, ok := s.supervisor.Machine(c.Token)
-	if !ok {
-		return c, c.State != supervise.StateRetired
+// mask is whether a claim whose machine is deciding something now (Machine.Deciding, which waits
+// on nothing either) is read as not having answered. The view of such a claim is what the
+// decision in flight last tried to write, and the decision may be the turn that takes the answer
+// back (takeBackSignal), so a reader about to delete a disk masks it: the cost is one sweep, and
+// the cost of the other way is work that turn can still commit. A reader that only reports masks
+// nothing (noticeGroup).
+func (s *supervision) roundGroup(group []supervise.Claim, mask bool) []supervise.Claim {
+	read := make([]supervise.Claim, 0, len(group))
+	for _, c := range group {
+		viewed := c
+		if m, ok := s.supervisor.Machine(c.Token); ok {
+			viewed = m.View().Claim
+			if mask && m.Deciding() != nil {
+				viewed.UpdateSignalledAt, viewed.UpdateHead = nil, ""
+			}
+		}
+		if viewed.State != supervise.StateRetired {
+			read = append(read, viewed)
+		}
 	}
-	viewed := m.View().Claim
-	if m.Deciding() != nil {
-		viewed.UpdateSignalledAt, viewed.UpdateHead = nil, ""
-	}
-	return viewed, viewed.State != supervise.StateRetired
+	return read
 }
 
 // tellLateRound tells the operator's side of a round that has answered everything the daemon
@@ -437,9 +445,13 @@ func (s *supervision) openPodUpdate(ctx context.Context, issue string, group []s
 		return
 	}
 	if now.Sub(*opened) >= s.cfg.PodUpdateNotice {
+		// The notice is built unmasked: the mask is the replacement's own caution about a claim
+		// whose machine is deciding, and told to the controller it would read as a claim that
+		// has not answered, which its playbook prompts (noticeGroup).
+		told := s.noticeGroup(group)
 		s.tellUpdateStalled(ctx, updateStall{
-			issue: issue, round: round, pod: pod, reasons: reasons, group: group,
-			waiting: waitingOf(round, waitingClaims(group, round)),
+			issue: issue, round: round, pod: pod, reasons: reasons, group: told,
+			waiting: waitingOf(round, waitingClaims(told, round)),
 			reason: fmt.Sprintf("the update round has waited %s for its workers to answer",
 				now.Sub(*opened).Round(time.Minute)),
 		})
@@ -608,6 +620,16 @@ func (s *supervision) endPodUpdates(group []supervise.Claim, replaced bool) {
 // claim of the group that records a process, in the claims' own order and without repeats. It
 // reports false when the runtime could not be asked at all: an error is never a statement that
 // something drifted, and a round must neither open nor end on one.
+//
+// The pod the claims record not being there is the one error of its own (runtime.ErrPodGone),
+// and it reports false for that too: nothing can be read of a pod that is not there, so this
+// issue decides nothing this tick, exactly as it decides nothing where its claims record no pod
+// at all (reconcileIssuePodUpdate). Read as a pod that has drifted from nothing, it would end
+// the round over a pod that took its workers' unpushed work with it — the issue would be told
+// nothing of what was lost, and every worker that had answered would be sent the task saying the
+// daemon replaced no pod under it. What ends the round instead is the claims recording the pod
+// that replaced this one, one relaunch later, which is what says the pod went
+// (podWentWithoutItsRound). It is no failure, so it is logged as the wait it is.
 func (s *supervision) groupDrift(ctx context.Context, issue string, group []supervise.Claim) ([]string, bool) {
 	var reasons []string
 	for _, c := range group {
@@ -615,6 +637,11 @@ func (s *supervision) groupDrift(ctx context.Context, issue string, group []supe
 			continue
 		}
 		drift, err := s.runtime.PodDrift(ctx, runtime.Known{Claim: c.Token, Locator: c.Locator})
+		if errors.Is(err, runtime.ErrPodGone) {
+			s.log.Info("supervise: the pod this issue's claims record is not there; nothing of its update round is decided until they record the pod that replaced it",
+				"issue", issue, "claim", c.Token, "pod", podOf(c.Locator))
+			return nil, false
+		}
 		if err != nil {
 			if ctx.Err() == nil {
 				s.log.Error("supervise: read whether this issue's pod has drifted", "issue", issue, "claim", c.Token, "error", err)

@@ -330,10 +330,16 @@ func TestPodDriftIsNothingForTheControllersPod(t *testing.T) {
 	}
 }
 
-// A pod that is not there needs no round: a claim running nowhere, a Sandbox gone, and a pod that
-// is not the one the locator records each read as no drift, however far the configuration has
-// moved.
-func TestPodDriftIsNothingWithoutThePodTheLocatorRecords(t *testing.T) {
+// The pod the locator records not being there is said, and never read as a pod that has drifted
+// from nothing: a Sandbox gone and a pod that is not the one the locator records each answer
+// runtime.ErrPodGone, however far the configuration has moved. The daemon's round turns on the
+// difference — a pod that drifted from nothing is still running and its round simply ends, where
+// a pod that is not there took whatever was unpushed on its disk with it, and the workers of its
+// round must be told (internal/daemon's groupDrift).
+//
+// A claim running nowhere records no pod at all, so nothing of it is gone and nothing of it has
+// drifted.
+func TestPodDriftSaysThePodTheLocatorRecordsIsNotThere(t *testing.T) {
 	moved := func(o *Options) { o.Image = nextImage }
 
 	g := newRig(t, nil)
@@ -343,8 +349,7 @@ func TestPodDriftIsNothingWithoutThePodTheLocatorRecords(t *testing.T) {
 		t.Errorf("PodDrift of a claim running nowhere = %q, %v; want nothing", drifted, err)
 	}
 
-	// Another pod of the same Sandbox: the recorded one is gone, and the round would be over
-	// anyway.
+	// Another pod of the same Sandbox: the one the locator records is gone.
 	name := loc.Sandbox.Name
 	if err := g.kube.Tracker().Delete(podsGVR, testNamespace, name); err != nil {
 		t.Fatal(err)
@@ -353,8 +358,8 @@ func TestPodDriftIsNothingWithoutThePodTheLocatorRecords(t *testing.T) {
 		pod := r2.storedPod(name)
 		return pod != nil && string(pod.UID) != loc.Sandbox.PodUID
 	})
-	if drifted := driftOf(t, g.ctx, r2, loc); len(drifted) > 0 {
-		t.Errorf("PodDrift of a locator's replaced pod = %q, want nothing", drifted)
+	if drifted, err := r2.PodDrift(g.ctx, runtime.Known{Claim: loc.Claim, Locator: &loc}); !errors.Is(err, runtime.ErrPodGone) || len(drifted) > 0 {
+		t.Errorf("PodDrift of a locator's replaced pod = %q, %v; want runtime.ErrPodGone", drifted, err)
 	}
 
 	gone := newRig(t, nil)
@@ -367,8 +372,8 @@ func TestPodDriftIsNothingWithoutThePodTheLocatorRecords(t *testing.T) {
 		s, err := r3.storedSandbox(goneLoc.Sandbox.Name)
 		return err == nil && s == nil
 	})
-	if drifted := driftOf(t, gone.ctx, r3, goneLoc); len(drifted) > 0 {
-		t.Errorf("PodDrift of an absent sandbox = %q, want nothing", drifted)
+	if drifted, err := r3.PodDrift(gone.ctx, runtime.Known{Claim: goneLoc.Claim, Locator: &goneLoc}); !errors.Is(err, runtime.ErrPodGone) || len(drifted) > 0 {
+		t.Errorf("PodDrift of an absent sandbox = %q, %v; want runtime.ErrPodGone", drifted, err)
 	}
 }
 

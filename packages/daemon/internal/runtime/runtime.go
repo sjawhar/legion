@@ -116,12 +116,16 @@ type Runtime interface {
 	// — the Sandbox runtime's issue pod, whose image, reservation, operator volumes and mounts,
 	// disk, role overlays, secrets broker enrollment and session store are all fixed for the pod's
 	// life — and only for a claim that runs in one: it answers nothing for a claim with no
-	// process, for the project controller's own pod, which has no issue workspace and nothing to
-	// push, and when the place is not there or is not the one the locator records. The daemon
-	// opens an update round on a non-empty answer: every worker claim of that place is tasked to
-	// push its work and signal (api's claims/ready-for-update), and only once each has answered is
-	// the place replaced (ReplacePod). An error means the runtime itself could not be asked, and
-	// is never a statement that something drifted.
+	// process, which records no place at all, and nothing for the project controller's own pod,
+	// which has no issue workspace and nothing to push. The daemon opens an update round on a
+	// non-empty answer: every worker claim of that place is tasked to push its work and signal
+	// (api's claims/ready-for-update), and only once each has answered is the place replaced
+	// (ReplacePod).
+	//
+	// ErrPodGone is the place the locator records not being there, which is neither drift nor a
+	// failure to ask: nothing can be read of a place that is not there, so nothing says it has
+	// drifted from nothing. Any other error means the runtime itself could not be asked, and is
+	// never a statement that something drifted either.
 	PodDrift(ctx context.Context, k Known) ([]string, error)
 	// ReplacePod ends the place k's process runs in, once its update round is over, and returns
 	// when the runtime no longer has it. It creates nothing in its stead: every process it ends is
@@ -155,6 +159,23 @@ type Runtime interface {
 // Nothing was started, and the caller starts a fresh agent in the session's
 // place. A session file missing with the key off is a refusal that does not wrap it.
 var ErrSessionFileMissing = errors.New("the recorded session file is missing")
+
+// ErrPodGone is PodDrift asked about a place that is not there: the Sandbox the locator records
+// is gone, no pod of it is running, or the pod running now is not the one the locator records —
+// the pod was replaced where it stood for a failure of its own, and its disk went with it.
+//
+// It is why PodDrift says that rather than answering no drift. The two readings are opposite
+// where it matters: drift that cleared is a pod still running that needs no replacement, so the
+// round over it ends and its workers are told to carry on where they are, while a pod that is
+// not there has taken whatever was unpushed on its disk with it, which the round's workers must
+// be told of (internal/daemon's podWentWithoutItsRound). A caller that cannot tell them apart
+// tells an issue nothing of the work it lost and sends the workers already running in the new
+// pod a task saying the daemon replaced nothing under them.
+//
+// A caller decides no round on it: nothing can be read of a place that is not there, and the
+// claims of the issue record the pod that replaced it one relaunch later, which is the evidence
+// the round ends on (internal/daemon's groupDrift).
+var ErrPodGone = errors.New("the pod the locator records is not there")
 
 // IssueSuspender stops an issue's pod once authorize, called under the runtime's issue launch
 // lock, says the issue's durable close and its complete stored role population allow it (false

@@ -343,6 +343,17 @@ func (s *server) readRegisterBody(w http.ResponseWriter, r *http.Request, into *
 // starts that relaunch, so a stale claim there is left running and answered as any other:
 // refusing it would stall agents that work today.
 //
+// A claim whose launch installs no plugin is not stale here, whatever its contract and with no
+// round open (Options.NoPluginInstall — a Claude Code role's plugin is its pod image's own
+// claude-envoy, which no install reaches). Nothing relaunches such a claim for its contract: the
+// stale-plugin lane posts it nothing and its stale registration is accepted and charged nothing
+// (internal/daemon's refreshStalePlugins, supervise's staleRegistration), so this refusal's own
+// sentence would be false of it and no sweep would ever make it true. Only a new image moves
+// that worker's plugin, and the update round over its pod is what brings one — a round that
+// opens on pod-shape drift alone, so a release that changes no image opens none, and a refusal
+// here would hold the worker's grants, its handoff_complete and its ready for the rest of the
+// deployment's life.
+//
 // A claim whose update round is open (Claim.UpdateRound) is not stale here either, whatever its
 // contract: the round's whole point is that the worker pushes its work before its process is
 // replaced, and it cannot push without the daemon it already speaks to. So while the round is
@@ -350,6 +361,9 @@ func (s *server) readRegisterBody(w http.ResponseWriter, r *http.Request, into *
 // other grant-bearing route, as well as the claim routes — and the end of the round is what
 // relaunches the process onto the current plugin.
 func (s *server) staleClaim(c supervise.Claim) (int, bool) {
+	if s.noPluginInstall != nil && s.noPluginInstall(c) {
+		return c.PluginContract, false
+	}
 	return c.PluginContract, s.pluginRelaunchable && c.PluginContract != DaemonAPIVersion && c.UpdateRound == ""
 }
 

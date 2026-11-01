@@ -206,11 +206,16 @@ func (r *Runtime) shapeDrift(s *sandbox, kind podKind) []string {
 // the session store (driftedInPod). The two facets whose worker cannot be reached at all stay a
 // launch's business and are never a round's (movedInPod).
 //
-// It answers nothing for a claim with no process, and nothing for a pod no round covers
-// (roundCovers), today the project controller's: there is nobody in such a pod to task, so its
-// drift is its launch's to replace rather than a round's. It answers nothing when the Sandbox or
-// the pod is absent, or when the pod is not the one the locator records: a pod that is not there
-// needs no round.
+// It answers nothing for a claim with no process — such a claim records no pod, so no pod of it
+// is gone — and nothing for a pod no round covers (roundCovers), today the project controller's:
+// there is nobody in such a pod to task, so its drift is its launch's to replace rather than a
+// round's.
+//
+// It answers runtime.ErrPodGone where the Sandbox or the pod is absent, or where the pod running
+// now is not the one the locator records: a pod that is not there needs no round, and it has not
+// drifted from nothing either. That is the whole difference between a round that ends over the
+// pod it was opened on and a round whose pod went with the work on its disk, which only the
+// caller can tell its workers of (runtime.ErrPodGone, internal/daemon's groupDrift).
 //
 // The sweep asks this of every claim of the deployment at every tick, so the steady state — a pod
 // built from the configuration the runtime still has — costs one read of the annotation the
@@ -238,11 +243,11 @@ func (r *Runtime) PodDrift(_ context.Context, k runtime.Known) ([]string, error)
 		return nil, fmt.Errorf("sandbox runtime: pod drift %s: %w", k.Claim, err)
 	}
 	if u == nil {
-		return nil, nil
+		return nil, fmt.Errorf("sandbox runtime: pod drift %s: %w", k.Claim, runtime.ErrPodGone)
 	}
 	pod := r.storedPod(name)
 	if !ownedBy(pod, u.GetUID()) || string(pod.UID) != k.Locator.Sandbox.PodUID {
-		return nil, nil
+		return nil, fmt.Errorf("sandbox runtime: pod drift %s: %w", k.Claim, runtime.ErrPodGone)
 	}
 	var drifted []string
 	if held, _, _ := unstructured.NestedString(u.Object, "spec", "podTemplate", "metadata", "annotations", podShapeAnnotation); held != r.podShapes[kind] {

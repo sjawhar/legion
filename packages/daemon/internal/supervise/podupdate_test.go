@@ -288,7 +288,7 @@ func TestPodUpdateTakesTheTurnsEndAsTheAnswerOfAClaimBelowTheContract(t *testing
 		t.Errorf("UpdateSignalledAt = %v before any turn ran, want nil", c.UpdateSignalledAt)
 	}
 
-	h.must(StreamTurnStart{Claim: h.token, DeliveryID: h.pending().ID})
+	h.must(StreamTurnStart{Claim: h.token})
 	h.must(StreamTurnEnd{Claim: h.token})
 
 	c = h.claim()
@@ -356,7 +356,7 @@ func TestPodUpdateHoldsTheNextTaskUntilTheRoundEnds(t *testing.T) {
 		t.Fatalf("pending task = %q, want the held next task", got)
 	}
 
-	h.must(PodUpdateEnded{Claim: h.token})
+	h.must(PodUpdateEnded{Claim: h.token, Round: h.claim().UpdateRound})
 
 	released := h.wantPrompts(2)[1]
 	if released.Message != "review the pull request" {
@@ -380,7 +380,7 @@ func TestPodUpdateEndedInAPluginRoundReplacesTheProcess(t *testing.T) {
 	h.signalUpdate("c0ffee")
 	stale := h.locator()
 
-	h.must(PodUpdateEnded{Claim: h.token})
+	h.must(PodUpdateEnded{Claim: h.token, Round: h.claim().UpdateRound})
 
 	h.wantState(StateLaunching)
 	resume := h.wantCalls("Resume", 1)[0]
@@ -415,7 +415,7 @@ func TestPodUpdateARefusedRelaunchLeavesThePluginRoundStanding(t *testing.T) {
 	store := &refusableCheckLaunchStore{memStore: h.store, refuse: true}
 	h.m.deps.Store = store
 
-	if err := h.handle(PodUpdateEnded{Claim: h.token}); !errors.Is(err, treelifecycle.ErrCleanupReserved) {
+	if err := h.handle(PodUpdateEnded{Claim: h.token, Round: h.claim().UpdateRound}); !errors.Is(err, treelifecycle.ErrCleanupReserved) {
 		t.Fatalf("the round's end refused by the launch path = %v, want the reservation's wait", err)
 	}
 
@@ -433,7 +433,7 @@ func TestPodUpdateARefusedRelaunchLeavesThePluginRoundStanding(t *testing.T) {
 	}
 
 	store.refuse = false
-	h.must(PodUpdateEnded{Claim: h.token})
+	h.must(PodUpdateEnded{Claim: h.token, Round: h.claim().UpdateRound})
 
 	h.wantState(StateLaunching)
 	h.wantCalls("Resume", 1)
@@ -662,7 +662,7 @@ func TestPodUpdateEndedOnAFailedClaimClearsTheRoundAndSendsNothing(t *testing.T)
 	h.wantRound(testRound)
 	sent := len(h.prompts())
 
-	h.must(PodUpdateEnded{Claim: h.token})
+	h.must(PodUpdateEnded{Claim: h.token, Round: h.claim().UpdateRound})
 
 	h.wantState(StateFailed)
 	h.wantPrompts(sent)
@@ -723,7 +723,7 @@ func TestPodUpdateAnEndedRoundLeavesNoTaskPending(t *testing.T) {
 		t.Fatalf("pending delivery = %q, want the ask of the round %q waiting for the resume", got, testRound)
 	}
 
-	h.must(PodUpdateEnded{Claim: h.token})
+	h.must(PodUpdateEnded{Claim: h.token, Round: h.claim().UpdateRound})
 
 	h.wantRound("")
 	if p := h.claim().Pending; p != nil {
@@ -846,14 +846,14 @@ func TestPodUpdateEndedOnAClaimInNoRoundLaunchesNothing(t *testing.T) {
 	h.reach(StateIdle)
 	h.openUpdate(PluginRound(PodUpdateContract+1), testReasons)
 	h.signalUpdate("c0ffee")
-	h.must(PodUpdateEnded{Claim: h.token})
+	h.must(PodUpdateEnded{Claim: h.token, Round: h.claim().UpdateRound})
 	h.wantState(StateLaunching)
 	h.wantCalls("Resume", 1)
 	h.relaunched()
 	h.wantRound("")
 	writes := len(h.store.history())
 
-	h.must(PodUpdateEnded{Claim: h.token})
+	h.must(PodUpdateEnded{Claim: h.token, Round: h.claim().UpdateRound})
 
 	h.wantState(StateReady)
 	h.wantCalls("Resume", 1)
@@ -871,14 +871,14 @@ func TestPodUpdateEndedInAPluginRoundLeavesAClaimThatIsNotReadyAlone(t *testing.
 	round := PluginRound(PodUpdateContract + 1)
 	for name, stale := range map[string]func(*harness){
 		"a turn is running": func(h *harness) {
-			ask := h.wantPrompts(1)[0]
-			h.must(StreamTurnStart{Claim: h.token, DeliveryID: ask.DeliveryID})
+			h.wantPrompts(1)
+			h.must(StreamTurnStart{Claim: h.token})
 			h.signalUpdate("c0ffee")
 			h.wantState(StateWorking)
 		},
 		"the answer was taken back": func(h *harness) {
-			ask := h.wantPrompts(1)[0]
-			h.must(StreamTurnStart{Claim: h.token, DeliveryID: ask.DeliveryID})
+			h.wantPrompts(1)
+			h.must(StreamTurnStart{Claim: h.token})
 			h.signalUpdate("c0ffee")
 			h.must(StreamTurnEnd{Claim: h.token})
 			// A turn the daemon sent nothing for — an Envoy notice, a person's steer — takes the
@@ -897,7 +897,7 @@ func TestPodUpdateEndedInAPluginRoundLeavesAClaimThatIsNotReadyAlone(t *testing.
 			stale(h)
 			writes := len(h.store.history())
 
-			h.must(PodUpdateEnded{Claim: h.token})
+			h.must(PodUpdateEnded{Claim: h.token, Round: h.claim().UpdateRound})
 
 			h.wantCalls("Resume", 0)
 			h.wantRound(round)
@@ -915,14 +915,14 @@ func TestPodUpdateEndedInAPluginRoundRelaunchesOnceTheTurnIsOver(t *testing.T) {
 	h := updateHarness(t, PodUpdateContract)
 	h.reach(StateReady)
 	h.openUpdate(round, testReasons)
-	ask := h.wantPrompts(1)[0]
-	h.must(StreamTurnStart{Claim: h.token, DeliveryID: ask.DeliveryID})
+	h.wantPrompts(1)
+	h.must(StreamTurnStart{Claim: h.token})
 	h.signalUpdate("c0ffee")
-	h.must(PodUpdateEnded{Claim: h.token})
+	h.must(PodUpdateEnded{Claim: h.token, Round: h.claim().UpdateRound})
 	h.wantCalls("Resume", 0)
 
 	h.must(StreamTurnEnd{Claim: h.token})
-	h.must(PodUpdateEnded{Claim: h.token})
+	h.must(PodUpdateEnded{Claim: h.token, Round: h.claim().UpdateRound})
 
 	h.wantState(StateLaunching)
 	h.wantCalls("Resume", 1)
@@ -959,7 +959,7 @@ func TestPodUpdateAnAnswerForARoundTheClaimIsNotInIsRefused(t *testing.T) {
 	}
 
 	// A claim in no round at all is the same case: the answer names a round it is not in.
-	h.must(PodUpdateEnded{Claim: h.token})
+	h.must(PodUpdateEnded{Claim: h.token, Round: h.claim().UpdateRound})
 	h.wantRound("")
 
 	err = h.handle(PodUpdateSignalled{Claim: h.token, Generation: h.generation(), Session: session, Round: testRound, Head: "c0ffee"})
@@ -1029,7 +1029,7 @@ func TestPodUpdateAPodRoundDoesNotTakeAPluginRoundsAnswer(t *testing.T) {
 		"a turn the daemon sent nothing for": func(h *harness) {
 			// The round's ask had its turn, which ended without an answer, and a turn of the
 			// agent's own starts after it.
-			h.must(StreamTurnStart{Claim: h.token, DeliveryID: h.pending().ID})
+			h.must(StreamTurnStart{Claim: h.token})
 			h.must(StreamTurnEnd{Claim: h.token})
 			h.must(StreamTurnStart{Claim: h.token})
 		},
@@ -1100,7 +1100,7 @@ func TestPodUpdateAnAskKeepsItsRoundWhenItsIdRotates(t *testing.T) {
 		t.Fatalf("the rotated id = %q, want it still an ask of the round %q", rotated.ID, testRound)
 	}
 
-	h.must(PodUpdateEnded{Claim: h.token})
+	h.must(PodUpdateEnded{Claim: h.token, Round: h.claim().UpdateRound})
 
 	h.wantRound("")
 	if p := h.claim().Pending; p != nil {
@@ -1122,15 +1122,15 @@ func TestPodUpdateARoundThatReplacedNothingTellsTheWorkerThatAnswered(t *testing
 	h := updateHarness(t, PodUpdateContract)
 	h.reach(StateReady)
 	h.openUpdate(testRound, testReasons)
-	ask := h.wantPrompts(1)[0]
-	h.must(StreamTurnStart{Claim: h.token, DeliveryID: ask.DeliveryID})
+	h.wantPrompts(1)
+	h.must(StreamTurnStart{Claim: h.token})
 	h.signalUpdate("c0ffee")
 	h.must(StreamTurnEnd{Claim: h.token})
 	if p := h.claim().Pending; p != nil {
 		t.Fatalf("pending after the turn that answered = %+v, want the claim holding nothing", p)
 	}
 
-	h.must(PodUpdateEnded{Claim: h.token})
+	h.must(PodUpdateEnded{Claim: h.token, Round: h.claim().UpdateRound})
 
 	h.wantRound("")
 	h.wantState(StateIdle)
@@ -1152,14 +1152,14 @@ func TestPodUpdateARoundThatReplacedNothingSendsAHeldTaskRatherThanTellingTheWor
 	h := updateHarness(t, PodUpdateContract)
 	h.reach(StateReady)
 	h.openUpdate(testRound, testReasons)
-	ask := h.wantPrompts(1)[0]
-	h.must(StreamTurnStart{Claim: h.token, DeliveryID: ask.DeliveryID})
+	h.wantPrompts(1)
+	h.must(StreamTurnStart{Claim: h.token})
 	h.signalUpdate("c0ffee")
 	h.must(StreamTurnEnd{Claim: h.token})
 	h.must(RequestDeliver{Claim: h.token, Task: "review the pull request"})
 	h.wantPrompts(1)
 
-	h.must(PodUpdateEnded{Claim: h.token})
+	h.must(PodUpdateEnded{Claim: h.token, Round: h.claim().UpdateRound})
 
 	released := h.wantPrompts(2)[1]
 	if released.Message != "review the pull request" {
@@ -1180,12 +1180,12 @@ func TestPodUpdateARoundThatReplacedThePodTellsItsWorkerNothing(t *testing.T) {
 	h := updateHarness(t, PodUpdateContract)
 	h.reach(StateReady)
 	h.openUpdate(testRound, testReasons)
-	ask := h.wantPrompts(1)[0]
-	h.must(StreamTurnStart{Claim: h.token, DeliveryID: ask.DeliveryID})
+	h.wantPrompts(1)
+	h.must(StreamTurnStart{Claim: h.token})
 	h.signalUpdate("c0ffee")
 	h.must(StreamTurnEnd{Claim: h.token})
 
-	h.must(PodUpdateEnded{Claim: h.token, Replaced: true})
+	h.must(PodUpdateEnded{Claim: h.token, Round: h.claim().UpdateRound, Replaced: true})
 
 	h.wantRound("")
 	h.wantPrompts(1)
@@ -1204,8 +1204,8 @@ func TestPodUpdateARoundThatEndsUnderATurnReleasesItsWorkerOnceTheTurnIsOver(t *
 	h := updateHarness(t, PodUpdateContract)
 	h.reach(StateReady)
 	h.openUpdate(testRound, testReasons)
-	ask := h.wantPrompts(1)[0]
-	h.must(StreamTurnStart{Claim: h.token, DeliveryID: ask.DeliveryID})
+	h.wantPrompts(1)
+	h.must(StreamTurnStart{Claim: h.token})
 	h.signalUpdate("c0ffee")
 
 	h.must(PodUpdateEnded{Claim: h.token, Round: testRound})
@@ -1251,7 +1251,7 @@ func TestPodUpdateARoundThatEndsOnAnAskNoTurnConfirmedReleasesItsWorker(t *testi
 	}
 	sent := len(h.prompts())
 
-	h.must(PodUpdateEnded{Claim: h.token})
+	h.must(PodUpdateEnded{Claim: h.token, Round: h.claim().UpdateRound})
 
 	h.wantRound("")
 	told := h.wantPrompts(sent + 1)[sent]
@@ -1296,7 +1296,33 @@ func TestPodUpdateTakesNoTurnTheDaemonLearnedOfFromTheAgentAsTheAnswer(t *testin
 		}
 	})
 
-	t.Run("the start named no delivery", func(t *testing.T) {
+	t.Run("the start is the first thing a restarted daemon hears of the turn", func(t *testing.T) {
+		h := updateHarness(t, PodUpdateContract-1)
+		h.reach(StateReady)
+		h.openUpdate(testRound, testReasons)
+		h.wantPrompts(1)
+		// The daemon restarts with the ask pending and unconfirmed, so askFirst is armed and no
+		// send of its own is in flight. The start it then reads is of a turn an earlier daemon's
+		// process began.
+		h.restart()
+
+		h.must(StreamTurnStart{Claim: h.token})
+		h.must(StreamTurnEnd{Claim: h.token})
+
+		c := h.claim()
+		if c.UpdateSignalledAt != nil {
+			t.Errorf("UpdateSignalledAt = %v, want nil: only askFirst made this turn the ask's, and this daemon never saw it begin", c.UpdateSignalledAt)
+		}
+		if c.UpdateTaskedAt != nil {
+			t.Errorf("UpdateTaskedAt = %v, want nil: the ask's clock goes back so the next sweep asks again",
+				c.UpdateTaskedAt)
+		}
+	})
+
+	// The control for all three: the turn of a live worker, whose agent_start names no delivery
+	// because no agent_start ever does, is the turn the daemon sent the ask for and saw begin.
+	// Its end is the answer.
+	t.Run("a live turn of the ask this daemon sent", func(t *testing.T) {
 		h := updateHarness(t, PodUpdateContract-1)
 		h.reach(StateReady)
 		h.openUpdate(testRound, testReasons)
@@ -1305,13 +1331,8 @@ func TestPodUpdateTakesNoTurnTheDaemonLearnedOfFromTheAgentAsTheAnswer(t *testin
 		h.must(StreamTurnStart{Claim: h.token})
 		h.must(StreamTurnEnd{Claim: h.token})
 
-		c := h.claim()
-		if c.UpdateSignalledAt != nil {
-			t.Errorf("UpdateSignalledAt = %v, want nil: the start named no delivery, so the daemon confirmed it against what it had in flight", c.UpdateSignalledAt)
-		}
-		if c.UpdateTaskedAt != nil {
-			t.Errorf("UpdateTaskedAt = %v, want nil: the ask's clock goes back so the next sweep asks again",
-				c.UpdateTaskedAt)
+		if c := h.claim(); c.UpdateSignalledAt == nil {
+			t.Error("the end of the update task's turn recorded no answer; no agent_start of a live turn names a delivery")
 		}
 	})
 }
