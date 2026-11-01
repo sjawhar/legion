@@ -1,4 +1,5 @@
--- 0164 inserts one row for each document into document_search, the table 0162 creates, which
--- holds only the rows 0163's trigger has written since the deploy began. It reads
--- artifact_versions and writes no row of it: it refuses and rewrites no existing row.
+-- A new table, document_search_backfill, whose one row this migration inserts: it writes no
+-- document_search row, reads no other table, and refuses and rewrites nothing already stored.
+-- The fill whose progress that row records runs at boot, in committed batches outside every
+-- migration transaction (store.FillDocumentSearch).
 select 0;

@@ -55,10 +55,15 @@ func TestTableSizeExemptionReadsStatementsAsPostgresParsesThem(t *testing.T) {
 		"a trigger only in a string literal":        {"update things set kind = 'create trigger t after insert on things for each row execute function owe()'", ""},
 		"a trigger only in a dollar-quoted literal": {"select $$; create trigger t after insert on things for each row execute function owe(); $$", ""},
 		"a trigger inside a DO block":               {"do $$ begin create trigger t after insert on things for each row execute function owe(); end $$;", ""},
-		"a set before a trigger":                    {"set local lock_timeout = '1s'; create trigger t after insert on things for each row execute function owe();", ""},
-		"a comment and nothing else":                {"-- create trigger t after insert on things for each row execute function owe();\n", ""},
-		"no text":                                   {"", ""},
-		"a statement Postgres refuses":              {"create trigger t after insert on things for each row", ""},
+		// A set is a parameter of the transaction: it takes no lock and reads no row, so it
+		// cannot make a lock window grow with a table, and a migration that bounds its own lock
+		// wait keeps the exemption its other statements earn.
+		"a set before a trigger":       {"set local lock_timeout = '1s'; create trigger t after insert on things for each row execute function owe();", "set and create trigger"},
+		"a set and nothing else":       {"set local lock_timeout = '1s';", "set"},
+		"a set before an index":        {"set local lock_timeout = '1s'; create index i on things (kind);", ""},
+		"a comment and nothing else":   {"-- create trigger t after insert on things for each row execute function owe();\n", ""},
+		"no text":                      {"", ""},
+		"a statement Postgres refuses": {"create trigger t after insert on things for each row", ""},
 	} {
 		if got := tableSizeExemption(tc.sql); got != tc.want {
 			t.Errorf("%s: tableSizeExemption = %q, want %q", name, got, tc.want)

@@ -11,7 +11,8 @@ import (
 
 // The three migrations of the document-search table: 0162 creates it with its GIN index, 0163
 // adds the function and the trigger that keep it at each document's latest version, and 0164
-// fills it for the documents already stored.
+// creates the one row that records how far the boot's fill of it has got
+// (store.FillDocumentSearch).
 const (
 	documentSearchTable    = 162
 	documentSearchTrigger  = 163
@@ -46,9 +47,10 @@ func TestCensusExemptsTheDocumentSearchTriggerFromTheTableLimit(t *testing.T) {
 
 // What each of the three migrations locks above ACCESS SHARE, read as the census reads it. The
 // table's own migration declares no foreign key, since a `references` to artifacts or to
-// artifact_versions would have the census size that table and refuse every deploy; the backfill
-// only reads artifact_versions, which the census does not size either. The trigger's migration is
-// the one that touches artifact_versions, and the test above is why it may.
+// artifact_versions would have the census size that table and refuse every deploy; the fill's
+// progress table names neither of them, because the fill reads artifact_versions outside every
+// migration. The trigger's migration is the one that touches artifact_versions, and the test
+// above is why it may.
 func TestTheDocumentSearchMigrationsTouchOnlyWhatTheyMustLock(t *testing.T) {
 	for _, migration := range []struct {
 		name  string
@@ -57,7 +59,7 @@ func TestTheDocumentSearchMigrationsTouchOnlyWhatTheyMustLock(t *testing.T) {
 	}{
 		{"0162, the table and its index", "0162_document_search.up.sql", []string{"document_search"}},
 		{"0163, the function and the trigger", "0163_artifact_versions_document_search_trigger.up.sql", []string{"artifact_versions"}},
-		{"0164, the backfill", "0164_document_search_backfill.up.sql", []string{"document_search"}},
+		{"0164, the fill's progress row", "0164_document_search_backfill.up.sql", []string{"document_search_backfill"}},
 	} {
 		t.Run(migration.name, func(t *testing.T) {
 			sql, err := migrationFiles.ReadFile("migrations/" + migration.files)
