@@ -495,10 +495,7 @@ reads as a clean answer, so check that the thing you counted had something to co
   non-zero yourself, rather than passing the wrapper's exit code on. And write a verdict that
   matters to durable storage as it is produced, not at the end: a node can vanish within a minute
   of a pod ending, so an unpersisted log is gone even when nothing killed anything, and a
-  terminating pod's grace period can be as short as 25 seconds, which is no time to flush. Read
-  back what you mounted, too: a directory you mounted can be empty, or a write into it can fail,
-  for reasons that have nothing to do with your work, and neither shows up as an error in your
-  own output.
+  terminating pod's grace period can be as short as 25 seconds, which is no time to flush.
 - **gVisor.** Every pod runs under gVisor, which does not give a test every interface the Linux
   kernel does. In `packages/envoy` the tests of `cmd/agent-secrets`, `cmd/agent-secrets-helper`
   and `internal/broker/helper` fail: the helper identifies its peer with `SO_PEERPIDFD`, which
