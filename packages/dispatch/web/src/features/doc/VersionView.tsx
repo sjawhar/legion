@@ -7,6 +7,7 @@ import { whoAmIQuery } from "../../api/queries";
 import type { Ask, BlockSchema } from "../../api/types";
 import { warmMarkdownRenderer } from "../refs/markdown-engine";
 import { Timestamp } from "../refs/Timestamp";
+import { EditorViewBlocks } from "../view/ViewBlock";
 import { AskBlockCard } from "./AskBlockCard";
 import { installTypedBlocks } from "./ask-block";
 import { changeMarksAgainst } from "./change-marks";
@@ -189,6 +190,7 @@ export function VersionView({
             />
           );
         })}
+        <EditorViewBlocks />
       </article>
     </section>
   );

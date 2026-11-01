@@ -47,6 +47,7 @@ import {
 } from "../refs/routes";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
+import { EditorViewBlocks } from "../view/ViewBlock";
 import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AskBlockCard } from "./AskBlockCard";
@@ -976,6 +977,7 @@ export function ProofDocument({
             />
           );
         })}
+        <EditorViewBlocks />
         {blockReferencesQuery.data?.some(
           (block) => block.references.comments + block.references.asks > 0
         ) ? (

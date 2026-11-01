@@ -73,13 +73,24 @@ export function RefLink({
 
 const excludedRefAncestorTags: Record<string, true> = { A: true, CODE: true, PRE: true };
 
+/**
+ * A `view` block's frame slot, which the block mounted in it owns
+ * (`features/view/ViewBlock.tsx`). The rule: no pass that runs after a body is painted writes
+ * inside the slot. The link passes would otherwise rewrite the block's "not granted to this
+ * page" link and empty it for a portal, inside DOM React renders and owns.
+ */
+const VIEW_FRAME_SLOT = "[data-dispatch-view-frame]";
+
 function isInsideExcludedAncestor(node: Node, root: Node): boolean {
   for (
     let current = node.parentNode;
     current !== null && current !== root;
     current = current.parentNode
   ) {
-    if (current instanceof HTMLElement && excludedRefAncestorTags[current.tagName] === true) {
+    if (
+      current instanceof HTMLElement &&
+      (excludedRefAncestorTags[current.tagName] === true || current.matches(VIEW_FRAME_SLOT))
+    ) {
       return true;
     }
   }
@@ -174,6 +185,10 @@ export function collectReferenceAnchors(
   const targets: ReferenceAnchor[] = [];
   let index = 0;
   for (const anchor of root.querySelectorAll<HTMLAnchorElement>("a:not([data-dispatch-picture])")) {
+    // A link the mounted `view` block renders is React's, not a reference this pass titles.
+    if (anchor.closest(VIEW_FRAME_SLOT) !== null) {
+      continue;
+    }
     const href = anchor.getAttribute("data-dispatch-href") ?? anchor.getAttribute("href");
     if (href === null) {
       continue;
