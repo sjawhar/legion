@@ -185,6 +185,11 @@ func (h *harness) sweep(opts redeliver.Options) redeliver.Report {
 	return report
 }
 
+// backoffs is the sweep's doubling backoff from the first request to the sixth: the waits a
+// delivery GitHub keeps refusing passes through before its next request is an hour away, which is
+// the longest the sweep leaves between two requests.
+var backoffs = []time.Duration{2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 16 * time.Minute, 32 * time.Minute}
+
 // toTheLongestBackoff takes every delivery whose redelivery requests GitHub is refusing to the
 // longest backoff: a sweep at each due time the doubling leaves, from the first request to the
 // sixth, after which the next request is an hour away. A refused request adds no attempt to
@@ -192,7 +197,8 @@ func (h *harness) sweep(opts redeliver.Options) redeliver.Report {
 // the time this returns and so still inside the sweep's window (Lookback).
 func (h *harness) toTheLongestBackoff() {
 	h.t.Helper()
-	for _, wait := range []time.Duration{0, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 16 * time.Minute, 32 * time.Minute} {
+	h.sweep(redeliver.Options{})
+	for _, wait := range backoffs {
 		h.clock.advance(wait)
 		h.sweep(redeliver.Options{})
 	}
@@ -229,10 +235,17 @@ func (h *harness) cursor() time.Time {
 	return stored.At
 }
 
-// pending is the index entry key for guid due at at, `pending.<YYYYMMDD>.<HH>.<MM>.<GUID>` in UTC
-// (index.go).
-func pending(at time.Time, guid string) string {
-	return "pending." + at.UTC().Format("20060102.15.04") + "." + guid
+// indexEntries counts the index entries the bucket holds for guid: the one its record names, and
+// any stray a sweep has yet to repair.
+func (h *harness) indexEntries(guid string) int {
+	h.t.Helper()
+	entries := 0
+	for _, key := range h.keys() {
+		if strings.HasPrefix(key, redeliver.PendingPrefix) && strings.HasSuffix(key, "."+guid) {
+			entries++
+		}
+	}
+	return entries
 }
 
 func (h *harness) requests() []int64 { return h.webhook.Requests() }
@@ -340,7 +353,7 @@ func TestADeliveryRecoveredDuringTheLongestBackoffIsDeliveredAndAskedForNoMore(t
 	if got := outcome(h.sweep(redeliver.Options{}), "guid-recovered"); got != redeliver.RequestRefused {
 		t.Fatalf("first sweep: outcome %q, want %q", got, redeliver.RequestRefused)
 	}
-	for _, wait := range []time.Duration{2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 16 * time.Minute, 32 * time.Minute} {
+	for _, wait := range backoffs {
 		h.clock.advance(wait)
 		if got := outcome(h.sweep(redeliver.Options{}), "guid-recovered"); got != redeliver.RequestRefused {
 			t.Fatalf("after backoff %s: outcome %q, want %q", wait, got, redeliver.RequestRefused)
@@ -1270,7 +1283,7 @@ func TestDryRunReportsWithoutActing(t *testing.T) {
 	want := []string{
 		"cursor", "index",
 		"guid.guid-expiring", "guid.guid-backlog", "guid.guid-refused",
-		pending(due, "guid-backlog"), pending(due, "guid-refused"),
+		redeliver.PendingKey(due, "guid-backlog"), redeliver.PendingKey(due, "guid-refused"),
 	}
 	slices.Sort(want)
 	if got := slices.Sorted(slices.Values(h.keys())); !slices.Equal(got, want) {
@@ -1284,9 +1297,9 @@ func TestDryRunReportsWithoutActing(t *testing.T) {
 // what repairs it.
 func TestAContinuousDryRunLeavesAStrayIndexEntry(t *testing.T) {
 	h := newHarness(t)
-	// The key is the index's own, `pending.<YYYYMMDD>.<HH>.<MM>.<GUID>` in UTC (index.go): a
-	// minute inside the sweep's window, and a GUID the bucket holds no record for.
-	stray := "pending." + h.clock.Now().UTC().Add(-time.Minute).Format("20060102.15.04") + ".guid-gone"
+	// The key is the index's own (redeliver.PendingKey): a minute inside the sweep's window, and a
+	// GUID the bucket holds no record for.
+	stray := redeliver.PendingKey(h.clock.Now().Add(-time.Minute), "guid-gone")
 	if _, err := h.state.Put(stray, nil); err != nil {
 		t.Fatalf("write the stray index entry: %v", err)
 	}
@@ -1299,22 +1312,14 @@ func TestAContinuousDryRunLeavesAStrayIndexEntry(t *testing.T) {
 		t.Fatalf("a dry run requested %v", got)
 	}
 	// A bucket with nothing in it answers ErrNoKeysFound rather than an empty list, and that is
-	// just what a dry run that deleted the entry leaves, so the keys are read through here and
-	// the failure below names the defect rather than the read.
-	keys := func() []string {
-		t.Helper()
-		held, err := h.state.Keys()
-		if err != nil && !errors.Is(err, natsgo.ErrNoKeysFound) {
-			t.Fatalf("read the state bucket: %v", err)
-		}
-		return held
-	}
-	if held := keys(); !slices.Contains(held, stray) {
+	// just what a dry run that deleted the entry leaves, so the keys are read through the harness
+	// and the failures below name the defect rather than the read.
+	if held := h.keys(); !slices.Contains(held, stray) {
 		t.Fatalf("a dry run deleted the stray index entry %s, leaving %v", stray, held)
 	}
 
 	h.sweep(redeliver.Options{})
-	if held := keys(); slices.Contains(held, stray) {
+	if held := h.keys(); slices.Contains(held, stray) {
 		t.Fatalf("the running sweep left the stray index entry %s", stray)
 	}
 }
@@ -1370,7 +1375,7 @@ type refusingIndex struct {
 }
 
 func (r refusingIndex) Put(key string, value []byte) (uint64, error) {
-	if strings.HasPrefix(key, "pending.") {
+	if strings.HasPrefix(key, redeliver.PendingPrefix) {
 		return 0, r.refused
 	}
 	return r.KeyValue.Put(key, value)
@@ -1438,8 +1443,8 @@ func TestAStaleIndexEntryIsDeletedAndTheDeliveryIsNotLost(t *testing.T) {
 	// Both strays fall in the window the sweep below reads: one names a record the sweep closed
 	// five minutes after its first request, the other a record whose own entry is an hour on.
 	strays := []string{
-		pending(h.clock.Now().Add(-5*time.Minute), "guid-closed"),
-		pending(h.clock.Now().Add(-5*time.Minute), "guid-waiting"),
+		redeliver.PendingKey(h.clock.Now().Add(-5*time.Minute), "guid-closed"),
+		redeliver.PendingKey(h.clock.Now().Add(-5*time.Minute), "guid-waiting"),
 	}
 	for _, stray := range strays {
 		if _, err := h.state.Put(stray, nil); err != nil {
@@ -1465,13 +1470,7 @@ func TestAStaleIndexEntryIsDeletedAndTheDeliveryIsNotLost(t *testing.T) {
 			t.Fatalf("the sweep left the stray index entry %s", stray)
 		}
 	}
-	entries := 0
-	for _, key := range held {
-		if strings.HasPrefix(key, "pending.") && strings.HasSuffix(key, ".guid-waiting") {
-			entries++
-		}
-	}
-	if entries != 1 {
+	if entries := h.indexEntries("guid-waiting"); entries != 1 {
 		t.Fatalf("guid-waiting has %d index entries after the sweep, want the one its record names: %v", entries, held)
 	}
 }
@@ -1550,13 +1549,7 @@ func TestARecordWithNoIndexEntryIsBackfilledOnTheFirstSweep(t *testing.T) {
 	if _, err := h.state.Get("index"); err != nil {
 		t.Fatalf("read the index marker the back-fill writes: %v", err)
 	}
-	entries := 0
-	for _, key := range h.keys() {
-		if strings.HasPrefix(key, "pending.") && strings.HasSuffix(key, ".guid-unindexed") {
-			entries++
-		}
-	}
-	if entries != 1 {
+	if entries := h.indexEntries("guid-unindexed"); entries != 1 {
 		t.Fatalf("guid-unindexed has %d index entries after the back-fill, want one: %v", entries, h.keys())
 	}
 	if scans, windows := counting.counts(); scans != 1 || windows != 1 {
@@ -1639,7 +1632,9 @@ func (g *listingGitHub) Redeliver(context.Context, int64) error {
 // there are: index is the running sweep, which reads the window its cursor leaves and so should
 // cost the same whatever n is, and fullScan is the sweep an operator's --since still gets, which
 // reads every record the bucket holds and so should cost ten times as much at ten times the
-// records. The old loop beside the new one is what shows the benchmark can see growth at all.
+// records. The full scan beside the index read is what shows the benchmark can detect growth at
+// all: it is the live path of `envoy-dispatch redeliver-webhooks`, and its cost rises with n where
+// the index read's does not.
 func BenchmarkSweepWithLongPendingRecords(b *testing.B) {
 	for _, n := range []int{1_000, 10_000} {
 		b.Run(fmt.Sprintf("records=%d", n), func(b *testing.B) {
@@ -1653,7 +1648,7 @@ func BenchmarkSweepWithLongPendingRecords(b *testing.B) {
 					Status: "Invalid HTTP Response: 503", StatusCode: http.StatusServiceUnavailable,
 					Event: "pull_request", Action: "opened", RepositoryID: 7,
 				}
-				entry := pending(next, delivery.GUID)
+				entry := redeliver.PendingKey(next, delivery.GUID)
 				data, err := json.Marshal(map[string]any{
 					"attempts": 1, "refusals": 1, "last_attempt_at": now.Add(-time.Minute),
 					"next_attempt_at": next, "first_delivered_at": delivery.DeliveredAt,

@@ -93,9 +93,6 @@ type fakeSource struct {
 	// treeShaFollowsCommit makes every commit answer a distinct subtree sha
 	// even for identical files, so a test can force the full projection path.
 	treeShaFollowsCommit bool
-	// blobHold makes every blob read block until the request is cancelled: a
-	// GitHub that never answers, for the sync deadline.
-	blobHold bool
 	// holdArchBlobs is fakeRepo.holdBlobs for archRepo, whose repository repo
 	// builds from the fields above.
 	holdArchBlobs bool
@@ -303,10 +300,6 @@ func (f *fakeSource) handler() http.Handler {
 		f.mu.Lock()
 		f.blobReads++
 		f.mu.Unlock()
-		if f.blobHold {
-			<-r.Context().Done()
-			return
-		}
 		repo, _ := f.repo(r)
 		if repo.holdBlobs {
 			f.blobs.wait(f.t, r)
@@ -346,7 +339,9 @@ func newGitHubClient(t *testing.T, handler http.Handler) *githubapp.Client {
 }
 
 // newImporterFixture seeds project CORE with an architecture source pointing
-// at the fake GitHub, and returns the importer plus the database.
+// at the fake GitHub, and returns the importer plus the database. The importer
+// is closed when the test ends, so a flight a cancelled caller left behind
+// does not outlive the pool it writes to.
 func newImporterFixture(t *testing.T, fake *fakeSource) (*Importer, *store.Store) {
 	t.Helper()
 	if fake.installationID == 0 {
@@ -368,7 +363,11 @@ func newImporterFixture(t *testing.T, fake *fakeSource) (*Importer, *store.Store
 	`, fake.installationID); err != nil {
 		t.Fatalf("seed source: %v", err)
 	}
-	return NewImporter(database, client, events.NewBroker()), database
+	importer := NewImporter(database, client, events.NewBroker())
+	// Cleanups run last registered first, and the pool's is storetest.Open's
+	// above, so this one ends the flights before the pool closes under them.
+	t.Cleanup(importer.Close)
+	return importer, database
 }
 
 func projectEvents(t *testing.T, database *store.Store) []string {
@@ -1400,7 +1399,7 @@ func TestSyncDeadlineIsRecordedOnTheRow(t *testing.T) {
 	syncTimeout = 300 * time.Millisecond
 	t.Cleanup(func() { syncTimeout = previous })
 
-	fake := &fakeSource{t: t, files: validFiles(), blobHold: true}
+	fake := &fakeSource{t: t, files: validFiles(), holdArchBlobs: true}
 	importer, database := newImporterFixture(t, fake)
 
 	source, err := importer.Sync(context.Background(), "CORE", archRepo)
@@ -1416,7 +1415,7 @@ func TestSyncDeadlineIsRecordedOnTheRow(t *testing.T) {
 
 	// A caller that goes away is answered at once with its own cancellation,
 	// and the flight it left behind still records the deadline it meets.
-	fake2 := &fakeSource{t: t, files: validFiles(), blobHold: true}
+	fake2 := &fakeSource{t: t, files: validFiles(), holdArchBlobs: true}
 	importer2, database2 := newImporterFixture(t, fake2)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancelled := make(chan time.Time, 1)
@@ -1990,23 +1989,20 @@ func TestSyncProjectLeavesOutASourceDeletedMidCall(t *testing.T) {
 // blob read of one commit — until the test releases it, so another process's sync lands while
 // the held one is mid-fetch.
 type movingBranch struct {
-	t       *testing.T
-	release chan struct{}
-	held    chan struct{}
+	t *testing.T
+	// hold is the one read held open at a time, with the channels and the cleanup that releases
+	// them (releasableHold).
+	hold releasableHold
 
 	mu          sync.Mutex
 	head        string
 	commits     map[string]map[string]string
 	holdHead    bool
 	holdBlobsOf string
-	heldOnce    sync.Once
-	released    sync.Once
 }
 
 func newMovingBranch(t *testing.T, head string, commits map[string]map[string]string) *movingBranch {
-	branch := &movingBranch{t: t, head: head, commits: commits, release: make(chan struct{}), held: make(chan struct{})}
-	t.Cleanup(branch.releaseHeld)
-	return branch
+	return &movingBranch{t: t, head: head, commits: commits}
 }
 
 // moveHead pushes commit as the branch's new head.
@@ -2032,23 +2028,13 @@ func (b *movingBranch) holdBlobs(commit string) {
 // waitHeld returns once a held read has arrived.
 func (b *movingBranch) waitHeld(t *testing.T) {
 	t.Helper()
-	select {
-	case <-b.held:
-	case <-time.After(10 * time.Second):
-		t.Fatal("no read reached the hold within 10s")
-	}
+	b.hold.waitHeld(t)
 }
 
-func (b *movingBranch) releaseHeld() { b.released.Do(func() { close(b.release) }) }
+func (b *movingBranch) releaseHeld() { b.hold.releaseHeld(b.t) }
 
 // wait blocks a held read until the release or the request's end.
-func (b *movingBranch) wait(r *http.Request) {
-	b.heldOnce.Do(func() { close(b.held) })
-	select {
-	case <-b.release:
-	case <-r.Context().Done():
-	}
-}
+func (b *movingBranch) wait(r *http.Request) { b.hold.wait(b.t, r) }
 
 // handler serves the branch's reads, and the installation and token routes from fakeSource.
 func (b *movingBranch) handler() http.Handler {
@@ -2111,7 +2097,8 @@ func (b *movingBranch) handler() http.Handler {
 }
 
 // twoProcesses seeds CORE's source from archRepo and returns two importers on one database, as
-// two server processes are: no mutex in common, one GitHub.
+// two server processes are: no mutex in common, one GitHub. Both are closed when the test ends,
+// so a flight a cancelled caller left behind does not outlive the pool it writes to.
 func twoProcesses(t *testing.T, branch *movingBranch) (a, b *Importer, database *store.Store) {
 	t.Helper()
 	client := newGitHubClient(t, branch.handler())
@@ -2123,7 +2110,12 @@ func twoProcesses(t *testing.T, branch *movingBranch) (a, b *Importer, database 
 	`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	return NewImporter(database, client, events.NewBroker()), NewImporter(database, client, events.NewBroker()), database
+	a, b = NewImporter(database, client, events.NewBroker()), NewImporter(database, client, events.NewBroker())
+	// Cleanups run last registered first, and the pool's is storetest.Open's above, so these end
+	// the flights before the pool closes under them.
+	t.Cleanup(a.Close)
+	t.Cleanup(b.Close)
+	return a, b, database
 }
 
 // syncAnswer is what one Sync returned.

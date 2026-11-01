@@ -26,8 +26,13 @@ import (
 const pendingPrefix = "pending."
 
 // pendingLayout is the time in an entry's key, in the tokens a filter selects by: the day, then the
-// hour, then the minute.
-const pendingLayout = "20060102.15.04"
+// hour, then the minute. pendingDayLayout and pendingHourLayout are its leading tokens, which are
+// what a filter over a whole day or a whole hour selects by (pendingFilters).
+const (
+	pendingLayout     = "20060102.15.04"
+	pendingDayLayout  = "20060102"
+	pendingHourLayout = "20060102.15"
+)
 
 // pendingKey is the index entry for guid, due at at.
 func pendingKey(at time.Time, guid string) string {
@@ -59,7 +64,7 @@ func parsePendingKey(key string) (at time.Time, guid string, ok bool) {
 // made -- is due now.
 func attention(r record, now time.Time) time.Time {
 	if r.InFlight {
-		return r.ClaimedAt.Add(claimDeadline())
+		return r.claimEndsAt()
 	}
 	if r.NextAttemptAt.IsZero() {
 		return now
@@ -75,7 +80,7 @@ func attention(r record, now time.Time) time.Time {
 // before the moment it was written, so an entry waiting to be acted on can fall behind the cursor
 // of the sweep that wrote it by less than the minute it was truncated to.
 func pendingFor(r record, guid string, now time.Time) string {
-	if r.Delivered || r.Expired {
+	if r.closed() {
 		return ""
 	}
 	at := attention(r, now)
@@ -105,13 +110,16 @@ func pendingFilters(floor, ceiling time.Time) []string {
 		from = to
 	}
 	filters := make([]string, 0, maxPendingFilters)
+	// end is the window's exclusive end: a whole day or hour belongs to it only if it reaches no
+	// further than the minute after the ceiling.
+	end := to.Add(time.Minute)
 	for !from.After(to) {
 		switch {
-		case from.Hour() == 0 && from.Minute() == 0 && !from.Add(24*time.Hour).After(to.Add(time.Minute)):
-			filters = append(filters, pendingPrefix+from.Format("20060102")+".>")
+		case from.Hour() == 0 && from.Minute() == 0 && !from.Add(24*time.Hour).After(end):
+			filters = append(filters, pendingPrefix+from.Format(pendingDayLayout)+".>")
 			from = from.Add(24 * time.Hour)
-		case from.Minute() == 0 && !from.Add(time.Hour).After(to.Add(time.Minute)):
-			filters = append(filters, pendingPrefix+from.Format("20060102.15")+".>")
+		case from.Minute() == 0 && !from.Add(time.Hour).After(end):
+			filters = append(filters, pendingPrefix+from.Format(pendingHourLayout)+".>")
 			from = from.Add(time.Hour)
 		default:
 			filters = append(filters, pendingPrefix+from.Format(pendingLayout)+".>")

@@ -1,31 +1,11 @@
 package redeliver
 
 import (
-	"strings"
 	"testing"
 	"time"
-)
 
-// selects reports whether a NATS subject filter selects key, as the server does when it builds the
-// consumer behind a watch: dots separate a key's tokens, `*` stands for one of them and `>` for
-// one or more (internal/bus/kv.go). The window below is judged by matching keys with this rather
-// than by deriving the days, hours and minutes a decomposition should hold, which would only
-// restate pendingFilters.
-func selects(filter, key string) bool {
-	tokens, parts := strings.Split(filter, "."), strings.Split(key, ".")
-	for i, token := range tokens {
-		switch {
-		case token == ">":
-			return i < len(parts)
-		case i >= len(parts):
-			return false
-		case token == "*", token == parts[i]:
-		default:
-			return false
-		}
-	}
-	return len(tokens) == len(parts)
-}
+	"github.com/sjawhar/envoy/internal/routing"
+)
 
 // A sweep reads its index through the filters pendingFilters answers, so those filters are the
 // window: a minute none of them selects loses every delivery due in it until something else brings
@@ -33,6 +13,12 @@ func selects(filter, key string) bool {
 // growth the index exists to hold down. They also have to be pairwise disjoint, since the server
 // refuses a consumer whose filter subjects overlap outright, and no more than maxPendingFilters,
 // which is what bounds one index read whatever a sweep's cursor says.
+//
+// Which keys a filter selects is routing.Match, the matcher the listener's own routing is built on
+// (internal/routing): dots separate a key's tokens, `*` stands for one of them and `>` for one or
+// more, as the server reads the consumer behind a watch (internal/bus/kv.go). The window is judged
+// by matching keys with it rather than by deriving the days, hours and minutes a decomposition
+// should hold, which would only restate pendingFilters.
 func TestPendingFiltersCoverTheWindowWithoutOverlapping(t *testing.T) {
 	base := time.Date(2025, 3, 14, 9, 26, 53, 0, time.UTC)
 	day := time.Date(2025, 3, 14, 0, 0, 0, 0, time.UTC)
@@ -61,7 +47,7 @@ func TestPendingFiltersCoverTheWindowWithoutOverlapping(t *testing.T) {
 				key := pendingKey(at, "guid-a")
 				var matched []string
 				for i, filter := range filters {
-					if selects(filter, key) {
+					if routing.Match(filter, key) {
 						matched = append(matched, filter)
 						used[i] = true
 					}
@@ -88,7 +74,7 @@ func TestPendingFiltersCoverTheWindowWithoutOverlapping(t *testing.T) {
 				for _, at := range []time.Time{from.Add(-away), to.Add(away)} {
 					key := pendingKey(at, "guid-a")
 					for _, filter := range filters {
-						if selects(filter, key) {
+						if routing.Match(filter, key) {
 							t.Fatalf("the filter %s selects %s, %s from the window %s", filter, key, away, window)
 						}
 					}
@@ -99,7 +85,7 @@ func TestPendingFiltersCoverTheWindowWithoutOverlapping(t *testing.T) {
 			dotted := pendingKey(from, "guid.a.b")
 			matched := 0
 			for _, filter := range filters {
-				if selects(filter, dotted) {
+				if routing.Match(filter, dotted) {
 					matched++
 				}
 			}
