@@ -228,12 +228,51 @@ func TestSessionsImportRefusesSymlinkedSessionFiles(t *testing.T) {
 
 			code, out, _ := r.run("--tree", "LEGION-1")
 
-			if code != 1 || !strings.Contains(out, token+" failed ") ||
-				!strings.Contains(out, "symbolic link") && !strings.Contains(out, "resolves outside") {
+			if code != 1 || !strings.Contains(out, token+" failed ") || !strings.Contains(out, "read the session file") {
 				t.Fatalf("import = %d, stdout %q; want the symlink refusal", code, out)
 			}
 			if _, found := r.held(recorded); found {
 				t.Fatal("the table contains the symlink target")
+			}
+		})
+	}
+}
+
+func TestSessionsImportRefusesSymlinkedSessionDirectory(t *testing.T) {
+	const (
+		token   = "legion-legion-legion-1-architect"
+		session = "01a18950-3b61-70b7-82d4-c80464927f8e"
+	)
+	name := "2026-10-29T20-18-19-105Z_" + session + ".jsonl"
+	recorded := agentSessions + "/--legion-workspaces-sjawhar-legion-legion-1--/" + name
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, name), []byte("outside session\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		claim map[string]string
+	}{
+		{"recorded path", map[string]string{"token": token, "tree": "LEGION-1", "sessionFile": recorded}},
+		{"closed claim fallback", map[string]string{"token": token, "tree": "LEGION-1", "session": session, "sessionFile": ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newSessionsImportRig(t, []map[string]string{tc.claim})
+			link := filepath.Join(r.volume, "sessions", "--legion-workspaces-sjawhar-legion-legion-1--")
+			if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, link); err != nil {
+				t.Fatal(err)
+			}
+
+			code, out, _ := r.run("--tree", "LEGION-1")
+
+			if code != 1 || !strings.Contains(out, token+" failed ") || !strings.Contains(out, "read the session file") {
+				t.Fatalf("import = %d, stdout %q; want the symlink-directory refusal", code, out)
+			}
+			if _, found := r.held(recorded); found {
+				t.Fatal("the table contains the symlink-directory target")
 			}
 		})
 	}

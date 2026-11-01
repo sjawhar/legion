@@ -315,27 +315,30 @@ func importSession(ctx context.Context, conn *pgx.Conn, file, treeVolume string)
 	return importedSession{Outcome: outcome, Summary: ompsessions.Summarize(content)}, nil
 }
 
-// readSessionFile reads one regular, non-symlinked session file. When root
-// names a mounted legacy sessions directory, its resolved target must stay
-// below that directory.
+// readSessionFile reads one regular session file. When root names a mounted
+// legacy sessions directory, os.Root resolves source beneath its descriptor so
+// a path or symlink cannot escape between validation and the read.
 func readSessionFile(source, root string) ([]byte, os.FileInfo, error) {
-	if root != "" {
-		resolvedRoot, err := filepath.EvalSymlinks(root)
+	var (
+		opened *os.File
+		err    error
+	)
+	if root == "" {
+		opened, err = os.OpenFile(source, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, nil, errors.New("refuses a symbolic link")
+		}
+	} else {
+		volume, err := os.OpenRoot(root)
 		if err != nil {
 			return nil, nil, err
 		}
-		resolvedSource, err := filepath.EvalSymlinks(source)
+		defer volume.Close()
+		relative, err := filepath.Rel(root, source)
 		if err != nil {
 			return nil, nil, err
 		}
-		relative, err := filepath.Rel(resolvedRoot, resolvedSource)
-		if err != nil || !filepath.IsLocal(relative) {
-			return nil, nil, fmt.Errorf("%s resolves outside %s", source, resolvedRoot)
-		}
-	}
-	opened, err := os.OpenFile(source, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if errors.Is(err, syscall.ELOOP) {
-		return nil, nil, errors.New("refuses a symbolic link")
+		opened, err = volume.Open(relative)
 	}
 	if err != nil {
 		return nil, nil, err
