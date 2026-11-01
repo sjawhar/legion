@@ -41,7 +41,8 @@ same transaction as the trigger, so no record is written between the two.
 
 sjawhar/legion#2546's derived table is an ask's stored blocks.
 
-- The trigger is `packages/envoy/internal/dispatch/store/migrations/0151_asks_block_parts_trigger.up.sql`:
+- The trigger is
+  `packages/envoy/internal/dispatch/store/migrations/20261101143212_asks_block_parts_trigger.up.sql`:
   `create trigger asks_item_blocks_owed after insert or update of question, options, answer on
   asks` (`:36`), with the shared `item_blocks_owe()` function (`:18-28`) and the seed of every
   stored row below it (`:39`). Its header states the lock and seed ordering at `:14-16`.

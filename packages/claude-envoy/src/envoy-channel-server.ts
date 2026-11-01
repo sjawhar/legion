@@ -57,6 +57,7 @@ import {
   type EnvoyClient,
   expandSubscriptionTopics,
   mergeInterestSources,
+  newClientInstanceID,
 } from "@legion/envoy-client/transport"
 import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
 import { findHandoffCommit } from "@legion/pi-shared/handoff-commit"
@@ -121,7 +122,7 @@ import { type SessionTitle, sessionTitle } from "./session-title"
 
 const CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel" as const
 const CHANNEL_INSTRUCTIONS =
-  "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay."
+  "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is how soon the sender asks you to act (it does not change when or in what order deliveries arrive), from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay."
 const CHANNEL_INBOX_LIMIT = 50
 const EMPTY_RECEIPT = new Uint8Array()
 const ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -268,6 +269,15 @@ export interface ChannelSessionOptions {
    * replay state per session id.
    */
   readonly stateDirectory: string
+  /**
+   * The channel-server process this session runs in, as a random 128-bit hex id minted once per
+   * process (`runEnvoyChannelServer`). Every registration and every deregistration carries it,
+   * so the listener can tell this process's registry entry from one another process made under
+   * the same session id: a soft role claim against a live predecessor is granted only to the
+   * instance that registered it, and a deregistration removes an entry only while it is this
+   * instance's.
+   */
+  readonly clientInstanceID: string
   /**
    * The `claude` process this server belongs to. When set, the server polls that
    * process's handoff file and rebinds to the id it names; unset under the QA override.
@@ -752,13 +762,23 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       capabilities: options.capabilities,
       driving: false,
       selfSubscribed: true,
+      clientInstanceID: options.clientInstanceID,
       plugin: { name: packageName, version: options.pluginVersion },
     })
   }
 
   /**
    * Take back the role persisted for `previousSessionID` (this id on `--resume`,
-   * the pre-`/clear` id on a handoff) with a soft claim naming that predecessor.
+   * the pre-`/clear` id on a handoff) with a soft claim naming that predecessor. The listener
+   * grants such a claim only when that predecessor has no live registry entry, when its entry
+   * carries this process's own client instance id, or when either side carries none; a
+   * predecessor still live under another client instance keeps the role.
+   *
+   * Which is why a refusal naming the predecessor itself keeps the record: it belongs to that
+   * live holder, another process sharing this state directory, and deleting it would cost that
+   * process its only way back to the role. A refusal naming any other session says the
+   * predecessor demonstrably no longer holds it, so its record goes — the one path that removes
+   * a role record by hand.
    */
   const restoreRole = async (previousSessionID = identity.id): Promise<void> => {
     const previousFile = roleStateFile(options.stateDirectory, previousSessionID)
@@ -771,7 +791,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       previousSessionID: persisted.session_id,
     })
     if (!claim.claimed) {
-      await rm(previousFile, { force: true })
+      if (claim.holder !== persisted.session_id) await rm(previousFile, { force: true })
       return
     }
     heldRole = persisted.role
@@ -891,6 +911,11 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * subject is consumed before anything is advertised under the new id, and the
    * old one leaves the topic list before the first registration under it. Runs
    * only inside `serialized`.
+   *
+   * The deregistration of the old id carries this process's client instance id, so the listener
+   * removes that entry only while it is still this instance's: a later process that resumed the
+   * old session id and registered it keeps its registration, and this handoff takes nothing
+   * from it.
    */
   const adoptHandoff = async (): Promise<void> => {
     if (handoffFile === undefined) return
@@ -908,7 +933,10 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         options.handoffFlushTimeoutMs ?? HANDOFF_FLUSH_TIMEOUT_MS,
         "flushing NATS",
       )
-      await options.client.unregisterSession(previous)
+      await options.client.unregisterSession({
+        sessionID: previous,
+        clientInstanceID: options.clientInstanceID,
+      })
     } catch (error) {
       // The session stays on the old id until a later tick retries, so the new
       // subject leaves the topic list; otherwise the next registration would
@@ -1213,13 +1241,16 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       clearInterval(heartbeatTimer)
       if (handoffFile !== undefined) unwatchFile(handoffFile, handoffFileChanged)
       await forwarder.close()
-      await serialized(() => options.client.unregisterSession(identity.id)).catch(
-        (error: unknown) => {
-          process.stderr.write(
-            `envoy-channel: session deregistration failed — ${messageFor(error)}\n`,
-          )
-        },
-      )
+      await serialized(() =>
+        options.client.unregisterSession({
+          sessionID: identity.id,
+          clientInstanceID: options.clientInstanceID,
+        }),
+      ).catch((error: unknown) => {
+        process.stderr.write(
+          `envoy-channel: session deregistration failed — ${messageFor(error)}\n`,
+        )
+      })
       // The handoff directory stays: Claude Code restarts this server inside the
       // same `claude` process (plugin reload, changed config), and the hook does
       // not rewrite the file until the next SessionStart. Startup pruning removes
@@ -1455,6 +1486,13 @@ export async function runEnvoyChannelServer(): Promise<void> {
     fetch: globalThis.fetch,
     token: envoy.token,
   })
+  // INFRA-404: this process, as the listener knows it. Minted once here and sent on every
+  // registration and every deregistration, so the listener can tell the entry this process made
+  // from one another process made under the same session id: a soft role claim against a live
+  // predecessor goes only to the instance that registered it, and a deregistration removes only
+  // this instance's entry. One per process, not per session id: this server drives one session
+  // at a time, and a restart is a new instance with a new id.
+  const clientInstanceID = newClientInstanceID()
   let runtime: ChannelToolRuntime | undefined
   let claim: LegionClaim | undefined
   const daemon = pane === undefined ? undefined : createLegionDaemonClient(pane.daemonUrl)
@@ -1586,6 +1624,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
         heartbeatMs: envoy.heartbeatMs,
         configFile,
         stateDirectory,
+        clientInstanceID,
         title,
         pluginVersion: installedPluginVersion(bundlePath) ?? "source",
         ...(stamping ? { stampTitle } : {}),

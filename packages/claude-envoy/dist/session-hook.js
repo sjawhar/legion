@@ -14601,7 +14601,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_whoami",
     example: {},
-    description: "Who Dispatch takes this session for: {session, owner}. owner is the lowercase email of the person whose personal token you run under (the first choice of assignee for issues you create), or null under the shared token, in which case a create with no assignee falls back to the parent's assignee and then to the project's default assignee.",
+    description: "Who Dispatch takes this session for: {session, owner, service, project}. session is the session Dispatch records your writes as. It is the session your credential proved, and the tool says so when that is not the session you run in. owner is the lowercase email of the person you act for, and is the first choice of assignee for issues you create. owner is null under the shared token. With a null owner, a create with no assignee falls back to the parent's assignee and then to the project's default assignee. service is the subject of the verified service-account token that authenticated you, or null. project is the one project key your credential may write, or null when it names none.",
     arguments: () => ({}),
     strict: true
   }
@@ -19125,10 +19125,16 @@ async function executeDispatchTool(input) {
     const identity = await client.whoami();
     const owner = identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
     const service = identity.kind === "agent" ? identity.service ?? null : null;
+    const proved = identity.kind === "agent" ? identity.session ?? null : null;
+    const project = identity.kind === "agent" ? identity.project ?? null : null;
+    const session = proved ?? sessionId;
     const unowned = "no owner, so an issue you create without an assignee takes its parent's assignee, else the project's default assignee, else nobody.";
+    const acting = owner !== null ? `Session ${session} acts for ${owner}: issues you create without an assignee are assigned to ${owner}.` : service !== null ? `Session ${session} runs as service ${serviceSubjectLabel(service)}: ${unowned}` : `Session ${session} runs under the shared token: ${unowned}`;
+    const elsewhere = proved !== null && proved !== sessionId ? ` Your credential names session ${proved}, which is not this host session (${sessionId}): Dispatch records every write you make as ${proved}.` : "";
+    const writable = project !== null ? ` It may write project ${project} and no other.` : "";
     return {
-      text: owner !== null ? `Session ${sessionId} acts for ${owner}: issues you create without an assignee are assigned to ${owner}.` : service !== null ? `Session ${sessionId} runs as service ${serviceSubjectLabel(service)}: ${unowned}` : `Session ${sessionId} runs under the shared token: ${unowned}`,
-      details: { session: sessionId, owner, service }
+      text: acting + elsewhere + writable,
+      details: { session, owner, service, project }
     };
   }
   const args = checked.args;
@@ -20320,8 +20326,7 @@ function neutralConfig(env) {
 }
 var HARNESS_DIRECTORY_VARIABLE = {
   omp: "PI_CODING_AGENT_DIR",
-  claude: "CLAUDE_CONFIG_DIR",
-  opencode: "OPENCODE_CONFIG_DIR"
+  claude: "CLAUDE_CONFIG_DIR"
 };
 var PLUGIN_HARNESSES = Object.keys(HARNESS_DIRECTORY_VARIABLE);
 function namedDirectory(harness, env) {

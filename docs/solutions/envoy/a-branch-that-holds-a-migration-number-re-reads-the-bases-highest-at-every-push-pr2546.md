@@ -38,6 +38,10 @@ days.
 sjawhar/legion#2546 paid three forward merges for the migration number alone and nothing else:
 `0145/0146` → `0148/0149` (`5012e1a9ac07`) → `0149/0150` (`c50588e7588d`) → `0150/0151`
 (`1b191490e1ba`), each described `merge: take main's migration numbers`.
+A fourth forward merge ended the sequence instead of advancing it: main closed the numbered
+series at `0157` and now requires a UTC timestamp for every migration added since, so the two
+became `20261101143211_ask_blocks` and `20261101143212_asks_block_parts_trigger`, which no later
+merge can collide with and so no later merge renames.
 
 The middle one is the clean measurement, since it changed nothing else: eleven files, 24 lines.
 The number lives in the two migration files and their two `.census.sql` headers, and is cited by

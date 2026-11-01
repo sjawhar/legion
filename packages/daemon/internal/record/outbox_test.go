@@ -23,6 +23,7 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 	now := time.Date(2026, 9, 23, 1, 0, 0, 0, time.UTC)
 	payloads := []OutboxPayload{
 		StatusWrite{Status: "testing", ObservedStatus: "in_progress"},
+		StatusWrite{Status: "todo", ObservedStatus: "triage", PersonHandover: true},
 		MessagePost{Body: "Pull request checks are blocked."},
 		Notice{Kind: "phase-finished", Role: claim.RoleTester, Phase: phase.Testing, Summary: "Tests passed", Verdict: "pass", Version: 4, Reason: ""},
 		ControllerNotice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning, Reason: "escalated"},
@@ -43,6 +44,8 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		CheckLook{Look: 2, OpenedAt: now},
 		CheckLook{Look: 1},
 		CheckBound{},
+		PhaseEnded{Role: claim.RoleTester, From: phase.Testing, To: phase.Implementing, Reason: "CI is red at head: pytest"},
+		PhaseEnded{Role: claim.RoleImplementer, From: phase.Retro, To: phase.Implementing, Reason: "CI is red at head: pytest", TaskFollows: true},
 	}
 	for _, payload := range payloads {
 		t.Run(string(payload.OutboxKind()), func(t *testing.T) {
@@ -81,14 +84,81 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 	}
 }
 
+// A person's handover is one dispatch_status row marked PersonHandover: while it is pending, the
+// issue has a person's handover pending, and no second row is queued for it. The workflow's other
+// status rows suppress nothing, so a hand-over row (HandOver, also a todo) on another issue, and
+// an unmarked todo on the same issue, count for nothing; a finished row is deleted, so once the
+// marked row is gone nothing is pending.
+func TestPersonHandoverPendingCountsOnlyMarkedStatusRows(t *testing.T) {
+	now := time.Date(2026, 10, 14, 17, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	enqueue := func(issue string, payload OutboxPayload) {
+		t.Helper()
+		row, err := NewOutboxRow(issue, payload, now)
+		if err != nil {
+			t.Fatalf("NewOutboxRow: %v", err)
+		}
+		inTx(t, st, func(tx pgx.Tx) {
+			must(t, records.Enqueue(ctx, tx, row))
+		})
+	}
+	pending := func(issue string) bool {
+		t.Helper()
+		var got bool
+		inTx(t, st, func(tx pgx.Tx) {
+			var err error
+			got, err = records.PersonHandoverPending(ctx, tx, issue)
+			must(t, err)
+		})
+		return got
+	}
+
+	enqueue("LEGION-208", StatusWrite{Status: "todo", ObservedStatus: "triage", PersonHandover: true})
+	enqueue("LEGION-209", StatusWrite{Status: "todo", ObservedStatus: "backlog", HandOver: true, HandOverTree: "LEGION-200", HandOverLinger: 3})
+	enqueue("LEGION-210", StatusWrite{Status: "todo", ObservedStatus: "triage"})
+	enqueue("LEGION-210", ControllerNotice{Kind: TriageNotice})
+
+	if !pending("LEGION-208") {
+		t.Fatalf("PersonHandoverPending(LEGION-208) = false, want true while its marked row is in the outbox")
+	}
+	if pending("LEGION-209") {
+		t.Fatalf("PersonHandoverPending(LEGION-209) = true, want false for an issue whose only pending row is a hand-over")
+	}
+	if pending("LEGION-210") {
+		t.Fatalf("PersonHandoverPending(LEGION-210) = true, want false for an unmarked todo and a triage wake")
+	}
+	if pending("LEGION-211") {
+		t.Fatalf("PersonHandoverPending(LEGION-211) = true, want false for an issue with no row")
+	}
+
+	inTx(t, st, func(tx pgx.Tx) {
+		rows, err := records.DueRows(ctx, tx, "LEGION", "LEGION-208", nil, now)
+		must(t, err)
+		if len(rows) != 1 || rows[0].Kind != OutboxKindDispatchStatus {
+			t.Fatalf("DueRows of LEGION-208 = %#v, want the one marked row", rows)
+		}
+		claimed, ok, err := records.ClaimRow(ctx, tx, rows[0].ID, now, time.Minute)
+		must(t, err)
+		if !ok {
+			t.Fatalf("ClaimRow of the marked row claimed nothing")
+		}
+		must(t, records.FinishOutbox(ctx, tx, claimed.ID, claimed.LeaseToken))
+	})
+	if pending("LEGION-208") {
+		t.Fatalf("PersonHandoverPending(LEGION-208) = true after its row finished, want false")
+	}
+}
+
 // Every kind the outbox stores runs on exactly one lane, and LaneOf names the lane whose kinds
 // list it: a kind on neither lane would be queued and never run, one on both would run twice over.
 func TestEveryOutboxKindIsInExactlyOneLane(t *testing.T) {
 	every := []OutboxKind{OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindSupervise,
 		OutboxKindGateSeed, OutboxKindLingerClose, OutboxKindIssueSuspend, OutboxKindWorkspaceRemove, OutboxKindMergeQueuePublish, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge,
-		OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound}
+		OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindPhaseEnded}
 	lanes := map[OutboxKind][]OutboxLane{}
-	for _, lane := range []OutboxLane{LaneLifecycle, LaneBoard} {
+	for _, lane := range []OutboxLane{LaneLifecycle, LaneBoard, LaneRoleMessage} {
 		for _, kind := range LaneKinds(lane) {
 			lanes[kind] = append(lanes[kind], lane)
 		}
@@ -151,6 +221,12 @@ func TestNewOutboxRowRefusesInvalidPayloads(t *testing.T) {
 		{name: "a deploy run without a workflow", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Workflow = "" })}, reason: deployRunRefusal},
 		{name: "a deploy run without a step", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Step = "" })}, reason: deployRunRefusal},
 		{name: "a deploy run without a branch", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Branch = "" })}, reason: deployRunRefusal},
+		{name: "a phase-ended message to an architect", payload: PhaseEnded{Role: claim.RoleArchitect, From: phase.Accepting, To: phase.Implementing, Reason: "CI is red at head: pytest"}, reason: "never to an architect"},
+		{name: "a phase-ended message to no role", payload: PhaseEnded{From: phase.Testing, To: phase.Implementing, Reason: "CI is red at head: pytest"}, reason: "never to an architect"},
+		{name: "a phase-ended message without the phase that ended", payload: PhaseEnded{Role: claim.RoleTester, To: phase.Implementing, Reason: "CI is red at head: pytest"}, reason: "names the phase that ended and the different phase"},
+		{name: "a phase-ended message out of the phase the issue is in", payload: PhaseEnded{Role: claim.RoleImplementer, From: phase.Implementing, To: phase.Implementing, Reason: "CI is red at head: pytest"}, reason: "names the phase that ended and the different phase"},
+		{name: "a phase-ended message without a reason", payload: PhaseEnded{Role: claim.RoleTester, From: phase.Testing, To: phase.Implementing}, reason: "carries the reason the architect's notice carries"},
+		{name: "a phase-ended task that follows for another role", payload: PhaseEnded{Role: claim.RoleTester, From: phase.Testing, To: phase.Implementing, Reason: "CI is red at head: pytest", TaskFollows: true}, reason: "only the implementer is told its task follows"},
 		{name: "a check look bound without a look", payload: CheckLook{}, reason: "check look bound requires the look it bounds"},
 		{name: "unsupported payload", payload: unsupportedOutboxPayload{}, reason: "unknown outbox payload"},
 	} {
@@ -184,6 +260,8 @@ func TestDecodeOutboxPayloadRefusesInvalidRows(t *testing.T) {
 		{name: "a deploy run without a step", row: OutboxRow{ID: 44, Kind: OutboxKindCheckCompare, Payload: json.RawMessage(`{"look":1,"cause":"deploy run","deploy":{"run":7,"attempt":1,"workflow":".github/workflows/envoy.yaml","branch":"main"}}`)}, reason: deployRunRefusal},
 		{name: "a deploy run with an unknown field", row: OutboxRow{ID: 45, Kind: OutboxKindCheckCompare, Payload: json.RawMessage(`{"look":1,"cause":"deploy run","deploy":{"run":7,"attempt":1,"workflow":".github/workflows/envoy.yaml","step":"Apply","branch":"main","job":3}}`)}, reason: "unknown field"},
 		{name: "a check bound with a field", row: OutboxRow{ID: 41, Kind: OutboxKindCheckBound, Payload: json.RawMessage(`{"look":1}`)}, reason: "unknown field"},
+		{name: "a phase-ended message to an architect", row: OutboxRow{ID: 46, Kind: OutboxKindPhaseEnded, Payload: json.RawMessage(`{"role":"architect","from":"accepting","to":"implementing","reason":"CI is red at head: pytest"}`)}, reason: "never to an architect"},
+		{name: "a phase-ended message with an unknown field", row: OutboxRow{ID: 47, Kind: OutboxKindPhaseEnded, Payload: json.RawMessage(`{"role":"tester","from":"testing","to":"implementing","reason":"CI is red at head: pytest","quiesce":"tester"}`)}, reason: "unknown field"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := DecodeOutboxPayload(tc.row)

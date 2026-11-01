@@ -81,22 +81,19 @@ describe("envoyConfigPath", () => {
     ).toBe("/handed/envoy.json");
   });
 
-  test("claude reads CLAUDE_CONFIG_DIR and opencode reads OPENCODE_CONFIG_DIR, each ignoring the others", () => {
+  test("claude reads CLAUDE_CONFIG_DIR, ignoring the other harnesses'", () => {
     const all = {
       HOME: home,
       OMP_PROFILE: "work",
       PI_CODING_AGENT_DIR: "/profiles/work/agent",
       CLAUDE_CONFIG_DIR: "/claude",
-      OPENCODE_CONFIG_DIR: "/opencode",
     };
     expect(envoyConfigPath("claude", all)).toBe("/claude/envoy.json");
-    expect(envoyConfigPath("opencode", all)).toBe("/opencode/envoy.json");
     expect(envoyConfigPath("claude", { ...all, CLAUDE_CONFIG_DIR: undefined })).toBe(neutral);
-    expect(envoyConfigPath("opencode", { ...all, OPENCODE_CONFIG_DIR: undefined })).toBe(neutral);
   });
 
   test("a plugin whose harness names no directory reads ENVOY_CONFIG_FILE, else the neutral file", () => {
-    for (const harness of ["omp", "claude", "opencode"] as const) {
+    for (const harness of ["omp", "claude"] as const) {
       expect(
         envoyConfigPath(harness, { HOME: home, ENVOY_CONFIG_FILE: "/handed/envoy.json" })
       ).toBe("/handed/envoy.json");
@@ -116,7 +113,7 @@ describe("envoyConfigPath", () => {
   });
 
   test("a relative XDG_CONFIG_HOME is refused naming it; an empty one reads as unset", () => {
-    for (const harness of ["omp", "claude", "opencode", "command"] as const) {
+    for (const harness of ["omp", "claude", "command"] as const) {
       expect(() =>
         envoyConfigPath(harness, { HOME: home, XDG_CONFIG_HOME: "relative/config" })
       ).toThrow("XDG_CONFIG_HOME is relative/config, which is not an absolute path");
@@ -144,7 +141,6 @@ describe("envoyConfigPath", () => {
         "PI_CODING_AGENT_DIR is agent",
       ],
       ["claude", { CLAUDE_CONFIG_DIR: "~/.claude" }, "CLAUDE_CONFIG_DIR is ~/.claude"],
-      ["opencode", { OPENCODE_CONFIG_DIR: "config" }, "OPENCODE_CONFIG_DIR is config"],
       [
         "command",
         { CLAUDE_CODE_CHILD_SESSION: "1", CLAUDE_CONFIG_DIR: "claude" },
@@ -168,14 +164,13 @@ describe("envoyConfigPath", () => {
     expect(envoyConfigPath("command", { HOME: home, CLAUDE_CONFIG_DIR: "relative" })).toBe(neutral);
   });
 
-  test("a command reads ENVOY_CONFIG_FILE, else the omp, Claude Code and OpenCode rules in turn, else the neutral file", () => {
+  test("a command reads ENVOY_CONFIG_FILE, else the omp and Claude Code rules in turn, else the neutral file", () => {
     const harnesses = {
       HOME: home,
       OMP_PROFILE: "work",
       PI_CODING_AGENT_DIR: "/profiles/work/agent",
       CLAUDE_CODE_CHILD_SESSION: "1",
       CLAUDE_CONFIG_DIR: "/claude",
-      OPENCODE_CONFIG_DIR: "/opencode",
     };
     expect(
       envoyConfigPath("command", { ...harnesses, ENVOY_CONFIG_FILE: "/handed/envoy.json" })
@@ -192,9 +187,6 @@ describe("envoyConfigPath", () => {
         CLAUDE_CONFIG_DIR: "/claude",
       })
     ).toBe("/claude/envoy.json");
-    expect(envoyConfigPath("command", { HOME: home, OPENCODE_CONFIG_DIR: "/opencode" })).toBe(
-      "/opencode/envoy.json"
-    );
     expect(envoyConfigPath("command", { HOME: home })).toBe(neutral);
   });
 
@@ -213,10 +205,6 @@ describe("envoyConfigPath", () => {
         neutral
       );
     }
-    // Passed over, Claude Code's step leaves OpenCode's next.
-    expect(envoyConfigPath("command", { ...shell, OPENCODE_CONFIG_DIR: "/opencode" })).toBe(
-      "/opencode/envoy.json"
-    );
     // The Claude Code plugin's own rule reads CLAUDE_CONFIG_DIR with no marker.
     expect(envoyConfigPath("claude", shell)).toBe("/claude/envoy.json");
   });
@@ -343,7 +331,6 @@ describe("readEnvoyConfig", () => {
     const profiles = [
       ["omp", { OMP_PROFILE: "work", PI_CODING_AGENT_DIR: path.join(home, "omp") }],
       ["claude", { CLAUDE_CONFIG_DIR: path.join(home, "claude") }],
-      ["opencode", { OPENCODE_CONFIG_DIR: path.join(home, "opencode") }],
     ] as const;
 
     for (const [harness, profile] of profiles) {
@@ -474,7 +461,6 @@ describe("readEnvoyConfig", () => {
     const profiles = [
       ["omp", { OMP_PROFILE: "work", PI_CODING_AGENT_DIR: directory }],
       ["claude", { CLAUDE_CONFIG_DIR: directory }],
-      ["opencode", { OPENCODE_CONFIG_DIR: directory }],
     ] as const;
 
     // The file's path decides, so a relocated XDG_CONFIG_HOME does not change it.

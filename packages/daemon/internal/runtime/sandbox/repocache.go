@@ -857,8 +857,7 @@ func (r *Runtime) sweepCache(ctx context.Context, u *unstructured.Unstructured, 
 	if kept := now.Sub(at); kept < r.cacheConfig.Retain {
 		return nil
 	}
-	uid, version := s.UID, s.ResourceVersion
-	return r.deleteFenced(ctx, s.Name, metav1.Preconditions{UID: &uid, ResourceVersion: &version},
+	return r.deleteFenced(ctx, s,
 		"sandbox runtime: retired a repository cache no longer mapped", "repo", repo.String(), "kept", now.Sub(at).Truncate(time.Second).String())
 }
 

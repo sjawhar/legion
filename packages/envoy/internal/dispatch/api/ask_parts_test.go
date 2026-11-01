@@ -22,8 +22,8 @@ import (
 // askPartLayout reads an ask's parts as one line: its current parts in order, each as
 // <id>@<changed_revision>, then each removed part as -<id>@<changed_revision>, by id. It returns
 // the ask's revision too, and fails the test while the ask is still owed an index: migration
-// 0151's trigger owes one on every write of an ask, and every writer of this build clears it in
-// the transaction that wrote the ask.
+// 20261101143212's trigger owes one on every write of an ask, and every writer of this build
+// clears it in the transaction that wrote the ask.
 func askPartLayout(t *testing.T, database *store.Store, askID string) (string, int) {
 	t.Helper()
 	rows, err := database.Pool.Query(context.Background(), `
