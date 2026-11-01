@@ -494,8 +494,9 @@ func TestBacklinkCountStatementReadsEveryArmThroughAnIndex(t *testing.T) {
 			prepared++
 			name := fmt.Sprintf("backlink_count_%d", prepared)
 			for mode, plan := range map[string]json.RawMessage{
-				"custom":  customPlan(t, connection, statement, args),
-				"generic": genericPlan(t, connection, name, statement, literals),
+				"custom": customPlan(t, connection, statement, args),
+				"generic": explaintest.GenericPlan(t, ctx, connection, name, statement,
+					slices.Repeat([]string{"text[]"}, len(literals)), literals, planSettings...),
 			} {
 				if unkeyed := explaintest.ScansWithoutIndexCond(t, plan); len(unkeyed) > 0 {
 					t.Errorf("the %s backlink count excluding %v reads %s under its %s plan, which no index serves:\n%s",
@@ -507,18 +508,11 @@ func TestBacklinkCountStatementReadsEveryArmThroughAnIndex(t *testing.T) {
 				// check above still passes, because the planner then reads the table through
 				// ask_followers_pkey, (ask_id, session_id), as a full index scan with the
 				// session_id qual in its Index Cond. So every scan is held to its index's own
-				// first key column, the one column an index narrows on.
-				for _, scan := range explaintest.IndexScans(t, plan) {
-					if scan.Cond == "" {
-						// A scan carrying no condition at all is the check above's to name.
-						continue
-					}
-					firstKey := firstKeys.FirstKey(t, scan.Index)
-					if !explaintest.CondNamesFirstKey(scan.Cond, firstKey) {
-						t.Errorf("the %s backlink count excluding %v reads %s under its %s plan on `%s`, which names nothing of that index's first key column `%s`:\n%s",
-							toKind, exclusions, scan, mode, scan.Cond, firstKey, plan)
-					}
-				}
+				// first key column, the one column an index narrows on; a scan carrying no
+				// condition at all is the check above's to name.
+				firstKeys.RequireIndexKeyed(t, plan, explaintest.AnyIndex,
+					fmt.Sprintf("the %s backlink count excluding %v under its %s plan", toKind, exclusions, mode),
+					explaintest.CondOptional)
 			}
 		}
 	}
@@ -541,40 +535,6 @@ func customPlan(t *testing.T, connection *pgxpool.Conn, statement string, args [
 	var raw []byte
 	if err := tx.QueryRow(ctx, "explain (format json) "+statement, args...).Scan(&raw); err != nil {
 		t.Fatalf("explain the backlink count: %v", err)
-	}
-	return explaintest.OnePlan(t, raw)
-}
-
-// genericPlan is the plan Postgres builds for statement without knowing the values it will be
-// executed with, the plan a prepared statement settles on. EXECUTE takes no bind parameters, so
-// each argument is written into it as a literal; the prepared statement outlives its transaction
-// and is deallocated by name on the one connection that holds it.
-func genericPlan(t *testing.T, connection *pgxpool.Conn, name, statement string, literals []string) json.RawMessage {
-	t.Helper()
-	ctx := context.Background()
-	tx, err := connection.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin the generic plan's transaction: %v", err)
-	}
-	defer tx.Rollback(ctx)
-	for _, setting := range append(planSettings, "set local plan_cache_mode = force_generic_plan") {
-		if _, err := tx.Exec(ctx, setting); err != nil {
-			t.Fatalf("%s: %v", setting, err)
-		}
-	}
-	types := strings.Repeat("text[], ", len(literals))
-	if _, err := tx.Exec(ctx, "prepare "+name+" ("+strings.TrimSuffix(types, ", ")+") as "+statement); err != nil {
-		t.Fatalf("prepare the backlink count: %v", err)
-	}
-	var raw []byte
-	if err := tx.QueryRow(ctx, "explain (format json) execute "+name+"("+strings.Join(literals, ", ")+")").Scan(&raw); err != nil {
-		t.Fatalf("explain the prepared backlink count: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit the generic plan's transaction: %v", err)
-	}
-	if _, err := connection.Exec(ctx, "deallocate "+name); err != nil {
-		t.Fatalf("deallocate the prepared backlink count: %v", err)
 	}
 	return explaintest.OnePlan(t, raw)
 }

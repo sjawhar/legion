@@ -455,20 +455,16 @@ func (m anchoredMark) markRef() pmdoc.MarkRef {
 }
 
 // openAnchoredMarksQuery is the statement openAnchoredMarks runs over target's table: every row
-// anchored on the document bound to $1 whose mark is still open, oldest first. The open filter -
-// an ask's state, a comment's resolved flag - is this read's own, not a fact of the table's
-// anchor index, so it is written here rather than in anchorTargets.
+// anchored on the document bound to $1 whose mark is still open, oldest first. The open filter
+// is the target's own (anchorTarget.open), so a table added to anchorTargets brings the
+// predicate that holds its rows open with it.
 func openAnchoredMarksQuery(target anchorTarget) string {
-	open := "state = 'open'"
-	if target.table == "comments" {
-		open = "not resolved"
-	}
 	return fmt.Sprintf(`
 			select id::text, anchor, %s
 			from %s
 			where %s and %s
 			order by created_at, id
-		`, commentMarkType(target.table), target.table, target.anchoredOn(), open)
+		`, commentMarkType(target.table), target.table, target.anchoredOn(), target.open)
 }
 
 // openAnchoredMarks lists the open anchored asks, then the unresolved anchored comments, each by
@@ -768,23 +764,27 @@ func loadAnchorRefreshedCommentDeliveries(ctx context.Context, tx pgx.Tx, id str
 }
 
 // anchorTarget is one table a document's anchored rows live in: its name, the SQL expression
-// that reads an anchor's artifact_id as a uuid there, and the anchor index that carries exactly
-// that expression. The expression differs per table because the index does: an ask's is
-// store.CanonicalUUID's guarded cast, written out in migration 0148, a comment's the plain cast
-// of comments_anchor_artifact (0032).
+// that reads an anchor's artifact_id as a uuid there, the anchor index that carries exactly
+// that expression, and the predicate that holds one of its rows open. The expression differs
+// per table because the index does: an ask's is store.CanonicalUUID's guarded cast, written out
+// in migration 0148, a comment's the plain cast of comments_anchor_artifact (0032). The open
+// predicate differs because the state does: an ask carries a state column, a comment a resolved
+// flag.
 type anchorTarget struct {
 	table      string
 	artifactID string
 	index      string
+	open       string
 }
 
 // asksAnchorTarget and commentsAnchorTarget are the two tables every anchor read of this package
 // finds a document's rows in. Each table's facts are written once, here: the uuid expression,
-// which must stay byte-identical to the one its index is built on, and that index's name, which
-// the plan tests hold each read to. A read names its target instead of spelling either again.
+// which must stay byte-identical to the one its index is built on, that index's name, which the
+// plan tests hold each read to, and the predicate that holds a row of the table open. A read
+// names its target instead of spelling any of them again.
 var (
-	asksAnchorTarget     = anchorTarget{table: "asks", artifactID: store.CanonicalUUID(`anchor->>'artifact_id'`), index: "asks_anchor_artifact_id"}
-	commentsAnchorTarget = anchorTarget{table: "comments", artifactID: `(anchor->>'artifact_id')::uuid`, index: "comments_anchor_artifact"}
+	asksAnchorTarget     = anchorTarget{table: "asks", artifactID: store.CanonicalUUID(`anchor->>'artifact_id'`), index: "asks_anchor_artifact_id", open: "state = 'open'"}
+	commentsAnchorTarget = anchorTarget{table: "comments", artifactID: `(anchor->>'artifact_id')::uuid`, index: "comments_anchor_artifact", open: "not resolved"}
 
 	// anchorTargets are both, in the order the reads that read both tables read them.
 	anchorTargets = []anchorTarget{asksAnchorTarget, commentsAnchorTarget}

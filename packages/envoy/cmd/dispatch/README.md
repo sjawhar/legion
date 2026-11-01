@@ -465,7 +465,7 @@ It ends with one full `search_term_stats` build for every project, so no measure
 a freshly loaded table has no all-visible pages, so the planner avoids an index-only scan on it however good the statistics are.
 
 That build is the one the database's own schema carries, read once from the catalogue rather than by running a build and catching its error, which could not tell a missing column from a real failure:
-a database holding `search_term_totals.snapshot` (migration 0166) is built by the server's own pass (`api.BuildEverySearchTermStats`, which calls `api.RefreshEverySearchTermStats`), so the row carries the snapshot that makes the first measured pass a step pass;
+a database holding `search_term_totals.snapshot` (migration 0166) is built by the server's own pass (`api.RefreshEverySearchTermStats`, which the command's `buildEverySearchTermStats` calls), so the row carries the snapshot that makes the first measured pass a step pass;
 a database migrated from an older commit, which is what `--no-migrate` seeds for the "before" side of a two-commit measurement, is built by that release's four statements, which write `items` and `refreshed_at` alone.
 Either way the step fails the command when it built fewer projects than the seed wrote.
 
@@ -1323,7 +1323,7 @@ Nothing is lost by leaving it out, because every reader joins `artifacts` on `a.
 there is no delete path and no trigger for one, since no production code path deletes an artifact or a version.
 Both statements lock only the table this same migration creates, which no other session can reach before the commit, so the transaction holds nothing of `artifacts` or `artifact_versions` and takes milliseconds.
 Its census answers `0`: the table is new and holds no row, and the migration reads no other table.
-No operator follow-up — `0163` keeps the table in step and `0164` fills it for the documents already stored, both in the same boot.
+No operator follow-up — `0163` keeps the table in step and the boot's fill (`0164` below) covers the documents already stored, both in the same boot.
 
 Migration `0163_artifact_versions_document_search_trigger` creates `artifact_versions_document_search`, the function and the `after insert or update of markdown, search` trigger on `artifact_versions` that writes each version into `0162`'s table under `on conflict (artifact_id) do update … where excluded.number >= document_search.number`, so a late write of an older version and an edit of an old version both leave the latest version's vector in place.
 It fires after `0058`'s BEFORE trigger has filled `search`, and `when (new.markdown is not null)` keeps a version with no markdown
@@ -1341,14 +1341,19 @@ A holder that outlives all three fails the migration and the boot with it:
 that pod never serves, the release before it keeps serving every request, and the deployment reports the new pod crash-looping.
 A retry is safe — the failed attempt's transaction rolled back, so nothing of it is in the database and no version record was written, and the next boot applies the migration again from the same state.
 
-Migration `0164_document_search_backfill` fills `document_search` for the documents already stored:
-`insert … select distinct on (artifact_id) … from artifact_versions where markdown is not null order by artifact_id, number desc`, under the same write guard as `0163`'s trigger, so a version written between the two migrations keeps its higher number.
-It reads `artifact_versions` and writes no row of it, so the census does not size that table and the migration is not refused over its 5.2 GiB;
-the read takes `ACCESS SHARE`, which waits only behind an `ACCESS EXCLUSIVE` holder, and the order `distinct on` asks for is the one `artifact_versions_artifact_id_number_key` already holds, so the plan can walk that index rather than sort the table.
-Its own lock is on `document_search`, which only this release's build reads.
-Its census answers `0`: it rewrites no row already stored and refuses none.
-The operator follow-up is the wait: a migration runs inside `pg_advisory_xact_lock(8150001)`, so this backfill holds the runner's advisory lock for its whole run, and every other Dispatch process booting meanwhile waits on it before it can apply or check a migration of its own.
-The pull request records the run time on the larger test database; a boot that looks stuck during a deploy of this release is this statement.
+Migration `0164_document_search_backfill` creates `document_search_backfill`, the one row that records how far the fill of `0162`'s table has got: the keyset cursor (`artifact_id`, the highest document the pass has covered, the all-zero uuid before its first batch) and `done`.
+It writes no `document_search` row and reads no large table, so it locks only the table it creates and commits in milliseconds.
+Its census answers `0`: a new table, whose one row the migration inserts.
+
+The fill itself is `store.FillDocumentSearch`, which the boot runs immediately after the migrations and before the server serves (`cmd/dispatch/main.go`), not a migration.
+A migration is one transaction, and the single statement this used to be — `insert … select distinct on (artifact_id) … from artifact_versions where markdown is not null order by artifact_id, number desc` — measured 35.5 s on a production-shaped database (`artifact_versions` 3337 MB, 200,000 versions, 40,000 documents), with every row it wrote uncommitted for those 35.5 s.
+`0163`'s trigger is live by then, so a version write to a document the statement had already written ran its own `insert … on conflict (artifact_id) do update` on that key and waited for the whole statement; that writer holds its issue row (`for no key update`) and its document's room for the whole wait, every other write on that issue queues behind it, and an API writer sets no `lock_timeout`.
+Each batch is instead one short transaction that takes the next `store.DocumentSearchFillBatch` documents by keyset above the cursor, writes their latest versions under the same write guard as `0163`'s trigger (`on conflict (artifact_id) do update … where excluded.number >= document_search.number`, so a row the trigger wrote while the pass runs is never replaced by an older one), moves the cursor and commits.
+The batch is 1,000 documents, about 0.9 ms a document on the shape above, so a batch is about a second and the pass about forty of them, and a writer that meets a key the pass holds waits for one batch rather than for the whole fill.
+The cursor is taken from the ids the batch read and never from the insert's `returning`, because a row the guard skips returns nothing and the cursor would stall on it; the pass is finished when a batch takes no further id, and each batch is idempotent, so running it twice, or from two processes at once, writes the same table.
+A boot after the pass has finished reads that one row and stops, so it costs no read of `artifact_versions` at all.
+A failure stops the boot (`slog.Error`, then exit 1), unlike the `asks_anchor_artifact_id` count beside it: this release's search reads `document_search` alone, so a process serving with the table unfilled would answer a search with documents missing.
+The rolling deploy keeps that correct — the release before this one serves every request until the new process has filled the table and begins serving — and the operator follow-up is that wait: a pod of this release takes the fill's time (about 35 s on production's shape) to become ready on the first boot after the deploy, and the boot logs each batch and the total.
 
 Migration `0165_search_term_queue` creates `search_term_queue`, the items whose search text has changed since each project's word counts were last written.
 The related-terms refresh counted every issue, document, comment, ask and message of every project every ten minutes, 1,882 s of database time in the 24 hours to 2026-10-30;

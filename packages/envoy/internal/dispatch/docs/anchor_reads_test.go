@@ -2,13 +2,10 @@ package docs
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -148,7 +145,9 @@ func TestAnchorReadsSearchTheirTablesAnchorIndex(t *testing.T) {
 	defer connection.Release()
 	for number, read := range anchorReads() {
 		t.Run(read.name, func(t *testing.T) {
-			plan := anchorReadPlan(t, ctx, connection, fmt.Sprintf("anchor_read_%d", number), read.query)
+			parameters, literals := anchorReadArguments(read.query)
+			plan := explaintest.GenericPlan(t, ctx, connection, fmt.Sprintf("anchor_read_%d", number),
+				read.query, parameters, literals, "set local enable_seqscan = off")
 			if unkeyed := explaintest.ScansWithoutIndexCond(t, plan); len(unkeyed) > 0 {
 				t.Errorf("%s reads %s, which no index condition keys:\n%s",
 					read.name, strings.Join(unkeyed, ", "), plan)
@@ -168,53 +167,16 @@ func TestAnchorReadsSearchTheirTablesAnchorIndex(t *testing.T) {
 	}
 }
 
-// anchorReadPlan is the plan Postgres builds for statement without knowing the values it will
-// be executed with, the plan a prepared statement settles on, with sequential scans off.
-// EXECUTE takes no bind parameters, so the document and the mark ids are written into it as
-// literals. The prepared statement outlives the transaction that explains it and is deallocated
-// by name on the one connection that holds it, as refs' own plan test does it.
-func anchorReadPlan(t *testing.T, ctx context.Context, connection *pgxpool.Conn, name, statement string) json.RawMessage {
-	t.Helper()
-	tx, err := connection.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin the plan's transaction: %v", err)
-	}
-	defer tx.Rollback(ctx)
-	for _, setting := range []string{
-		"set local enable_seqscan = off",
-		"set local plan_cache_mode = force_generic_plan",
-	} {
-		if _, err := tx.Exec(ctx, setting); err != nil {
-			t.Fatalf("%s: %v", setting, err)
-		}
-	}
-	parameters, literals := anchorReadArguments(statement)
-	if _, err := tx.Exec(ctx, "prepare "+name+" ("+parameters+") as "+statement); err != nil {
-		t.Fatalf("prepare the anchor read: %v", err)
-	}
-	var raw []byte
-	if err := tx.QueryRow(ctx, "explain (format json) execute "+name+"("+literals+")").Scan(&raw); err != nil {
-		t.Fatalf("explain the anchor read: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit the plan's transaction: %v", err)
-	}
-	if _, err := connection.Exec(ctx, "deallocate "+name); err != nil {
-		t.Fatalf("deallocate the anchor read: %v", err)
-	}
-	return explaintest.OnePlan(t, raw)
-}
-
 // anchorReadArguments are the parameter types a read is prepared with and the literals it is
 // executed with: the document alone, or the document and a list of mark ids for a read that
 // names marks. A read's own text says which it is, so no case of the list above declares it
 // twice.
-func anchorReadArguments(statement string) (parameters, literals string) {
+func anchorReadArguments(statement string) (parameters, literals []string) {
 	document := "'00000000-0000-4000-8000-00000000000a'"
 	if !strings.Contains(statement, "$2") {
-		return anchorReadParameters[0], document
+		return anchorReadParameters[:1], []string{document}
 	}
-	return strings.Join(anchorReadParameters, ", "), document + ", '{a-mark,another-mark}'"
+	return anchorReadParameters, []string{document, "'{a-mark,another-mark}'"}
 }
 
 // anchorFixture is one document with every anchored row shape the reads must tell apart, and

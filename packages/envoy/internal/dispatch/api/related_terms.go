@@ -122,8 +122,12 @@ from search_term_totals where project_key = $1 for update`
 // which is R1.
 //
 // A row whose owner is gone names no project. No pass can tell whose counts held that item, so
-// searchTermQueueSweep drops the row and the project's next full build is what restores its
-// counts; no production code path deletes an issue or an artifact.
+// searchTermQueueSweep drops the row, and the counts it was to correct stay as they are: a
+// project that holds a snapshot is counted by step passes alone (searchTermTotalsMode), and
+// nothing in this build clears a snapshot, so no full build comes to repair them. Clearing the
+// project's snapshot is what asks for one - `update search_term_totals set snapshot = null where
+// project_key = $1`, after which the next pass counts every item of that project again. No
+// production code path deletes an issue or an artifact, so no row reaches this sweep today.
 const searchTermQueueProjectSQL = `coalesce(
            (select i.project_key from issues i where i.key = q.issue_key),
            (select a.project_key from artifacts a where a.id = q.artifact_id and (q.kind <> 'document' or a.kind = 'doc')))`
@@ -335,9 +339,9 @@ func refreshSearchTermStats(ctx context.Context, pool *store.Pool, project strin
 
 // RefreshEverySearchTermStats is one pass of RunSearchTermStatsRefresh: every project, each in its
 // own transaction, so one project's failure leaves the others' rows fresh, and then one sweep of
-// the queued changes no project can apply. It is exported for BuildEverySearchTermStats, which
-// cmd/dispatch-seed runs at the end of a seed so that `search_term_totals` holds a row for every
-// project and no measured refresh is a first-use full build.
+// the queued changes no project can apply. It is exported for cmd/dispatch-seed, which runs it
+// at the end of a seed of a database at this head so that `search_term_totals` holds a row for
+// every project and no measured refresh is a first-use full build.
 //
 // Every project it changes is logged on a line of its own, with the mode it ran in and how many
 // items it applied, which is what says on a running server that the pass read a queue rather than
@@ -374,8 +378,8 @@ func RefreshEverySearchTermStats(ctx context.Context, pool *store.Pool) {
 }
 
 // searchTermStatsProjects is every project a whole pass builds, in key order: the pass of this
-// release and the pass of the release before its snapshot columns
-// (buildEverySearchTermStatsBeforeSnapshots) read the same list in the same order.
+// release and the pass cmd/dispatch-seed runs on the schema of the release before its snapshot
+// columns read the same list in the same order.
 func searchTermStatsProjects(ctx context.Context, pool *store.Pool) ([]string, error) {
 	rows, err := pool.Query(ctx, `select key from projects order by key`)
 	if err != nil {

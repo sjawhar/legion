@@ -140,8 +140,11 @@ func TestTheIssueChildrenReadEveryIssueThroughTheParentIndex(t *testing.T) {
 	if unkeyed := explaintest.ScansWithoutIndexCond(t, plan); len(unkeyed) > 0 {
 		t.Errorf("the children statement reads %v, which no index serves:\n%s", unkeyed, plan)
 	}
+	// Every scan of the plan reads through an index that leads with the column the scan is
+	// keyed on; a scan carrying no condition at all is the check above's to name.
+	explaintest.NewIndexKeys(fixture.database.Pool).RequireIndexKeyed(t, plan,
+		explaintest.AnyIndex, "the children statement", explaintest.CondOptional)
 	const index = "issues_parent_key"
-	firstKeys := explaintest.NewIndexKeys(fixture.database.Pool)
 	walked := false
 	for _, scan := range explaintest.IndexScans(t, plan) {
 		switch scan.Index {
@@ -149,14 +152,6 @@ func TestTheIssueChildrenReadEveryIssueThroughTheParentIndex(t *testing.T) {
 			walked = true
 		case "issues_pkey":
 			t.Errorf("the children statement reads %s, a second read of an issue the walk already read:\n%s", scan, plan)
-		}
-		if scan.Cond == "" {
-			// A scan carrying no condition at all is the check above's to name.
-			continue
-		}
-		if firstKey := firstKeys.FirstKey(t, scan.Index); !explaintest.CondNamesFirstKey(scan.Cond, firstKey) {
-			t.Errorf("the children statement reads %s on `%s`, which names nothing of that index's first key column `%s`:\n%s",
-				scan, scan.Cond, firstKey, plan)
 		}
 	}
 	if !walked {

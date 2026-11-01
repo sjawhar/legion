@@ -3,7 +3,9 @@
 // anywhere in the plan, whether any scan in it reads a relation without an index condition, and
 // which index each index scan reads through, under which condition. It also answers, from the
 // catalog, the first key column of a named index and whether a scan's condition names it, which
-// is what tells a read served by an index from one that reads the whole index and filters it.
+// is what tells a read served by an index from one that reads the whole index and filters it,
+// and it holds a whole plan to that (RequireIndexKeyed) and builds the generic plan a prepared
+// statement settles on (GenericPlan), which is the plan an index is lost in.
 // dispatch/api, dispatch/refs and broker/requests each pin an index's reach with these checks,
 // so they live here once rather than as a second (or third) hand copy of the same recursive
 // walk; it is an ordinary package rather than a _test.go file because Go cannot share test-only
@@ -15,9 +17,11 @@ import (
 	"encoding/json"
 	"regexp"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // indexScanTypes is every plan node that reads a relation through an index, and so every node
@@ -213,4 +217,98 @@ func CondNamesFirstKey(cond, firstKey string) bool {
 		}
 	}
 	return false
+}
+
+// AnyIndex is RequireIndexKeyed's index for a plan held to no index in particular: every index
+// scan of it is held to the first key column of whatever index it reads, and a plan holding no
+// index scan at all is no failure.
+const AnyIndex = ""
+
+// CondRule is what RequireIndexKeyed makes of a scan carrying no index condition at all.
+type CondRule int
+
+const (
+	// CondRequired fails such a scan: it reads the whole of its index.
+	CondRequired CondRule = iota
+	// CondOptional leaves it to the caller: a read whose index is partial on the read's own
+	// filter wants the whole of that index, and a caller that has already named every unkeyed
+	// read through ScansWithoutIndexCond would otherwise name it twice.
+	CondOptional
+)
+
+// RequireIndexKeyed holds every index scan of plan that reads through index to that index's own
+// first key column, the one column an index scan narrows on: a scan whose condition names a
+// column its index does not lead with reads the whole index and filters it, and carries an
+// "Index Cond" all the same. A plan that searches index nowhere is a failure too, since a read
+// pinned to an index that no longer reaches it would otherwise pass this check in silence; pass
+// AnyIndex to hold each scan to its own index instead and require none. Every failure names
+// subject, the read under test, and prints the plan.
+func (k *IndexKeys) RequireIndexKeyed(t testing.TB, plan json.RawMessage, index, subject string, rule CondRule) {
+	t.Helper()
+	searched := false
+	for _, scan := range IndexScans(t, plan) {
+		if index != AnyIndex && scan.Index != index {
+			continue
+		}
+		searched = true
+		if scan.Cond == "" {
+			if rule == CondRequired {
+				t.Errorf("%s reads all of %s, under no index condition:\n%s", subject, scan.Index, plan)
+			}
+			continue
+		}
+		if firstKey := k.FirstKey(t, scan.Index); !CondNamesFirstKey(scan.Cond, firstKey) {
+			t.Errorf("%s reads %s on `%s`, which names nothing of that index's first key column `%s`:\n%s",
+				subject, scan, scan.Cond, firstKey, plan)
+		}
+	}
+	if index != AnyIndex && !searched {
+		t.Errorf("%s searches no %s:\n%s", subject, index, plan)
+	}
+}
+
+// GenericPlan is the plan Postgres builds for statement without knowing the values it will be
+// executed with, the plan a prepared statement settles on. It is the plan at risk: an index
+// whose eligibility depends on the bound value is lost there, and a fixture small enough for a
+// test never reaches a generic plan on its own, so the mode is forced.
+//
+// The statement is prepared under name with the parameter types parameters, and EXECUTE takes
+// no bind parameter, so literals are written into it. settings are the `set local` statements
+// the plan is read under, the caller's own: sequential scans off is every caller's, and a plan
+// the planner can hash or merge a whole relation into needs those two off as well. The prepared
+// statement outlives the transaction that explains it and is deallocated by name on connection,
+// the one connection that holds it.
+func GenericPlan(
+	t testing.TB,
+	ctx context.Context,
+	connection *pgxpool.Conn,
+	name, statement string,
+	parameters, literals []string,
+	settings ...string,
+) json.RawMessage {
+	t.Helper()
+	tx, err := connection.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin %s's transaction: %v", name, err)
+	}
+	defer tx.Rollback(ctx)
+	for _, setting := range append(slices.Clone(settings), "set local plan_cache_mode = force_generic_plan") {
+		if _, err := tx.Exec(ctx, setting); err != nil {
+			t.Fatalf("%s: %v", setting, err)
+		}
+	}
+	if _, err := tx.Exec(ctx, "prepare "+name+" ("+strings.Join(parameters, ", ")+") as "+statement); err != nil {
+		t.Fatalf("prepare %s: %v", name, err)
+	}
+	var raw []byte
+	if err := tx.QueryRow(ctx, "explain (format json) execute "+name+"("+strings.Join(literals, ", ")+")").Scan(&raw); err != nil {
+		t.Fatalf("explain %s: %v", name, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit %s's transaction: %v", name, err)
+	}
+	if _, err := connection.Exec(ctx, "deallocate "+name); err != nil {
+		t.Fatalf("deallocate %s: %v", name, err)
+	}
+	return OnePlan(t, raw)
 }

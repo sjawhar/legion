@@ -1,4 +1,4 @@
-package api
+package main
 
 import (
 	"context"
@@ -7,24 +7,26 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // The term-statistics build of the release before migration 0166, and the choice between it and
-// this release's. cmd/dispatch-seed ends a seed with one build for every project, and the
-// measurement protocol runs that tool with --no-migrate against a database migrated from main as
-// well as against one migrated to this head. Main's search_term_totals carries no snapshot
-// column and its schema no search_term_queue, so this release's build reads columns and tables
-// that are not there: every project of such a database would fail, and the seed would report a
-// data set whose term statistics were never built.
+// this release's. This command ends a seed with one build for every project, and the measurement
+// protocol runs it with --no-migrate against a database migrated from main as well as against one
+// migrated to this head. Main's search_term_totals carries no snapshot column and its schema no
+// search_term_queue, so this release's build reads columns and tables that are not there: every
+// project of such a database would fail, and the seed would report a data set whose term
+// statistics were never built.
 //
 // The statements below are a literal copy of main's refreshSearchTermStats, nothing built from
-// this release's own constants. A copy that shared a constant with the statements it is compared
-// against (searchTermItemsSQL, searchTermStatsStep, searchTermStatsRebuild) would move with them,
-// and the equality tests of related_terms_refresh_test.go, which hold this release's build to
-// what main's writes, would hold nothing. They are both the build cmd/dispatch-seed runs on
-// main's schema and the oracle those tests read (runMainSearchTermStatsRebuild), so the text the
-// seed runs and the text the tests call main's cannot drift apart.
+// this release's own constants: built from them, an edit to one would move this copy with it and
+// the server's equality tests, which hold this release's build to what main's writes, would hold
+// nothing. api/related_terms_oracle_test.go holds the same copy as the oracle of those tests. Two
+// copies of a released text cannot drift, because the text they copy is frozen: main's release is
+// out and this is what it ran.
 
 // searchTermItemsBeforeSnapshotsSQL is main's searchTermItemsSQL, which {project} stands in for
 // the project key of as it does there. It differs from this release's in its document arm alone,
@@ -71,8 +73,7 @@ on conflict (project_key) do nothing`,
 // searchTermStatsRebuildBeforeSnapshots is main's searchTermStatsRebuild, the statement the
 // release before this one runs for every project every ten minutes. It writes items and
 // refreshed_at and nothing else: it takes no snapshot, leaves whatever snapshot the row holds in
-// place, and drops no queued change. That is why a pass of this release's build reads a row whose
-// refreshed_at is not its own snapshot_at as somebody else's and counts the project in full.
+// place, and drops no queued change.
 //
 // Parameters: $1 the project key, $2 searchTermItemsBeforeSnapshotsTSStat.
 var searchTermStatsRebuildBeforeSnapshots = `
@@ -100,23 +101,23 @@ const searchTermTotalsSnapshotColumn = `select exists (
    where table_schema = current_schema() and table_name = 'search_term_totals'
      and column_name = 'snapshot')`
 
-// BuildEverySearchTermStats builds every project's term statistics on whichever of the two
-// schemas the database carries, and is what cmd/dispatch-seed's last step calls: a database
-// migrated to this head is built by RefreshEverySearchTermStats, exactly as a running server
-// builds it, so the first measured pass over the seeded data is a step pass and not a first-use
-// full build; a database migrated from main, which the measurement protocol seeds with
-// --no-migrate, is built by main's own four statements.
+// buildEverySearchTermStats builds every project's term statistics on whichever of the two
+// schemas the database carries, and is what this command's last step calls: a database migrated
+// to this head is built by api.RefreshEverySearchTermStats, exactly as a running server builds
+// it, so the first measured pass over the seeded data is a step pass and not a first-use full
+// build; a database migrated from main, which the measurement protocol seeds with --no-migrate,
+// is built by main's own four statements.
 //
 // A project whose build fails is logged and the rest are built, as a server's pass does it. The
 // caller's own count of the rows built is what fails the command: a build runs in one
 // transaction, so a project that failed has no search_term_totals row to count.
-func BuildEverySearchTermStats(ctx context.Context, pool *store.Pool) error {
+func buildEverySearchTermStats(ctx context.Context, pool *store.Pool) error {
 	var snapshots bool
 	if err := pool.QueryRow(ctx, searchTermTotalsSnapshotColumn).Scan(&snapshots); err != nil {
 		return fmt.Errorf("read whether search_term_totals carries a snapshot column: %w", err)
 	}
 	if snapshots {
-		RefreshEverySearchTermStats(ctx, pool)
+		api.RefreshEverySearchTermStats(ctx, pool)
 		return nil
 	}
 	return buildEverySearchTermStatsBeforeSnapshots(ctx, pool)
@@ -149,6 +150,16 @@ func buildEverySearchTermStatsBeforeSnapshots(ctx context.Context, pool *store.P
 		"projects", built, "failed", len(projects)-built, "items", items,
 		"duration", time.Since(started).Round(time.Millisecond))
 	return nil
+}
+
+// searchTermStatsProjects is every project the build above covers, in key order, which is the
+// list and the order a server's own pass reads (api's searchTermStatsProjects).
+func searchTermStatsProjects(ctx context.Context, pool *store.Pool) ([]string, error) {
+	rows, err := pool.Query(ctx, `select key from projects order by key`)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
 // refreshSearchTermStatsBeforeSnapshots rebuilds one project's statistics as the release before

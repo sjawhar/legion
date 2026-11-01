@@ -220,21 +220,8 @@ func TestTheClosureProbesDocumentBlocksThroughItsNodeIndex(t *testing.T) {
 	if explaintest.SeqScansRelation(t, plan, "document_blocks") {
 		t.Errorf("the closure reads document_blocks whole:\n%s", plan)
 	}
-	firstKeys := explaintest.NewIndexKeys(fixture.database.Pool)
-	probed := false
-	for _, scan := range explaintest.IndexScans(t, plan) {
-		if scan.Index != "document_blocks_node_id" {
-			continue
-		}
-		probed = true
-		if firstKey := firstKeys.FirstKey(t, scan.Index); !explaintest.CondNamesFirstKey(scan.Cond, firstKey) {
-			t.Errorf("the closure reads %s on `%s`, which names nothing of that index's first key column `%s`:\n%s",
-				scan, scan.Cond, firstKey, plan)
-		}
-	}
-	if !probed {
-		t.Errorf("the closure reads no document_blocks row through document_blocks_node_id:\n%s", plan)
-	}
+	explaintest.NewIndexKeys(fixture.database.Pool).RequireIndexKeyed(t, plan,
+		"document_blocks_node_id", "the closure", explaintest.CondRequired)
 	for _, scan := range explaintest.IndexScans(t, plan) {
 		if scan.Relation == "refs" && scan.Cond == "" {
 			t.Errorf("the closure reads %s with no index condition, so it reads every refs row:\n%s", scan, plan)

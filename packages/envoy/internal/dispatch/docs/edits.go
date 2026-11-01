@@ -880,16 +880,16 @@ func (s *Service) validateTableEditAnchors(ctx context.Context, artifactID strin
 // activeTableAnchorsQuery names every open ask and unresolved comment that is anchored on the
 // document bound to $1 and records one of the marks bound to $2 - the anchors an edit would
 // take with the table row it removes. Each arm finds its table's rows through that table's
-// anchor index (anchorTarget.anchoredOn), and the text is built once, as
-// tableAnchorRecordsQuery's is.
+// anchor index (anchorTarget.anchoredOn) and holds the row open by that table's own predicate
+// (anchorTarget.open), and the text is built once, as tableAnchorRecordsQuery's is.
 var activeTableAnchorsQuery = `
 		select 'ask', id::text, anchor->>'mark_id'
 		from asks
-		where ` + asksAnchorTarget.anchoredOn() + ` and state = 'open' and anchor->>'mark_id' = any($2::text[])
+		where ` + asksAnchorTarget.anchoredOn() + ` and ` + asksAnchorTarget.open + ` and anchor->>'mark_id' = any($2::text[])
 		union all
 		select 'comment', id::text, anchor->>'mark_id'
 		from comments
-		where ` + commentsAnchorTarget.anchoredOn() + ` and not resolved and anchor->>'mark_id' = any($2::text[])
+		where ` + commentsAnchorTarget.anchoredOn() + ` and ` + commentsAnchorTarget.open + ` and anchor->>'mark_id' = any($2::text[])
 		order by 1, 2
 	`
 

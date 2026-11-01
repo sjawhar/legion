@@ -107,21 +107,7 @@ func TestTheAgentsLastActivityReadsEventsThroughTheSessionActorIndex(t *testing.
 		t.Errorf("the last activity reads %v, which no index serves:\n%s", unkeyed, plan)
 	}
 	const index = "events_session_actor_created_at_idx"
-	firstKey := explaintest.NewIndexKeys(database.Pool).FirstKey(t, index)
-	searched := false
-	for _, scan := range explaintest.IndexScans(t, plan) {
-		if scan.Index != index {
-			continue
-		}
-		searched = true
-		if !explaintest.CondNamesFirstKey(scan.Cond, firstKey) {
-			t.Errorf("the last activity reads %s on `%s`, which names nothing of that index's first key column `%s`:\n%s",
-				scan, scan.Cond, firstKey, plan)
-		}
-	}
-	if !searched {
-		t.Errorf("the last activity reads no event through %s:\n%s", index, plan)
-	}
+	explaintest.NewIndexKeys(database.Pool).RequireIndexKeyed(t, plan, index, "the last activity", explaintest.CondRequired)
 
 	// `Actual Rows` is the average over the loops, so a read that stops at one row answers at
 	// most one however many of the sessions have an event; main's one grouped read answers

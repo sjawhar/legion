@@ -10,19 +10,19 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/dispatch/api"
 )
 
-// buildTermStatistics runs one full term-statistics build for every project, the build the server
-// runs itself (api.BuildEverySearchTermStats), so `search_term_totals` holds a row for each. The
-// refresh builds a project with no totals row in full whatever else it is asked to do, so a
-// measured pass on a database with no rows here would be measuring a first-use full build.
+// buildTermStatistics runs one full term-statistics build for every project, the build the
+// server runs itself where the schema carries it (buildEverySearchTermStats), so
+// `search_term_totals` holds a row for each. The refresh builds a project with no totals row in
+// full whatever else it is asked to do, so a measured pass on a database with no rows here would
+// be measuring a first-use full build.
 //
 // The build is the one the database's own schema carries: the measurement protocol seeds a
 // database migrated from main with --no-migrate and this tool, where the refresh of this release
 // reads a search_term_totals column and a queue table that are not there.
 func (r *seedRun) buildTermStatistics(ctx context.Context) error {
-	if err := api.BuildEverySearchTermStats(ctx, r.database.Pool); err != nil {
+	if err := buildEverySearchTermStats(ctx, r.database.Pool); err != nil {
 		return err
 	}
 	var built int

@@ -34,11 +34,11 @@ func TestCensusExemptsTheSearchTermQueueTriggersFromTheTableLimit(t *testing.T) 
 	if report.Refused() {
 		t.Errorf("the search term queue triggers were refused: %v", refusals(report))
 	}
-	if len(report.Pending) != 1 || report.Pending[0].TableSizeExemption != "create function and create trigger" {
-		t.Errorf("pending = %+v, want 0167 alone, exempt as functions and triggers", report.Pending)
+	if len(report.Pending) != 1 || report.Pending[0].TableSizeExemption != "set and create function and create trigger" {
+		t.Errorf("pending = %+v, want 0167 alone, exempt as its set, functions and triggers", report.Pending)
 	}
 	if out := reportText(report); !strings.Contains(out, "touches comments: ") ||
-		!strings.Contains(out, "from which the migration is exempt because its statements are only create function and create trigger") {
+		!strings.Contains(out, "from which the migration is exempt because its statements are only set and create function and create trigger") {
 		t.Errorf("report:\n%s", out)
 	}
 }

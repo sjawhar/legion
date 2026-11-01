@@ -211,27 +211,11 @@ func (f documentSearchFixture) statements() []documentSearchStatement {
 // which is the claim under test.
 func TestEveryDocumentArmSearchesTheDocumentSearchIndex(t *testing.T) {
 	fixture := newDocumentSearchFixture(t)
-	firstKey := explaintest.NewIndexKeys(fixture.database.Pool).FirstKey(t, documentSearchIndex)
+	firstKeys := explaintest.NewIndexKeys(fixture.database.Pool)
 	for _, statement := range fixture.statements() {
 		t.Run(statement.name, func(t *testing.T) {
 			plan := planWithoutSeqScans(t, fixture.database, statement.statement, statement.arguments...)
-			searched := false
-			for _, scan := range explaintest.IndexScans(t, plan) {
-				if scan.Index != documentSearchIndex {
-					continue
-				}
-				if scan.Cond == "" {
-					t.Fatalf("%s reads all of %s, under no index condition:\n%s", statement.name, documentSearchIndex, plan)
-				}
-				if !explaintest.CondNamesFirstKey(scan.Cond, firstKey) {
-					t.Fatalf("%s reads %s on `%s`, which names nothing of its first key column `%s`:\n%s",
-						statement.name, documentSearchIndex, scan.Cond, firstKey, plan)
-				}
-				searched = true
-			}
-			if !searched {
-				t.Fatalf("%s searches no %s:\n%s", statement.name, documentSearchIndex, plan)
-			}
+			firstKeys.RequireIndexKeyed(t, plan, documentSearchIndex, statement.name, explaintest.CondRequired)
 			if matched := artifactVersionsTestingATSQuery(t, plan); len(matched) > 0 {
 				t.Fatalf("%s still tests a tsquery against artifact_versions at %s:\n%s",
 					statement.name, strings.Join(matched, ", "), plan)

@@ -195,21 +195,7 @@ func TestTheListingReadsOpenAsksThroughTheirIndex(t *testing.T) {
 		if explaintest.SeqScansRelation(t, plan, "asks") {
 			t.Fatalf("%s scans asks sequentially; want a search of asks_open:\n%s", name, plan)
 		}
-		searched := false
-		for _, scan := range explaintest.IndexScans(t, plan) {
-			if scan.Index != "asks_open" {
-				continue
-			}
-			searched = true
-			firstKey := firstKeys.FirstKey(t, scan.Index)
-			if scan.Cond != "" && !explaintest.CondNamesFirstKey(scan.Cond, firstKey) {
-				t.Errorf("%s reads asks_open on `%s`, which names nothing of its first key column `%s`:\n%s",
-					name, scan.Cond, firstKey, plan)
-			}
-		}
-		if !searched {
-			t.Errorf("%s searches no asks_open:\n%s", name, plan)
-		}
+		firstKeys.RequireIndexKeyed(t, plan, "asks_open", name, explaintest.CondOptional)
 	}
 }
 
