@@ -2,7 +2,6 @@
  "schemaVersion": 1,
  "phase": "implement",
  "issue": "INFRA-636",
- "completed": "2026-10-31T16:30:38Z",
  "proof": [
   {
    "criterion": "Acceptance 1: each write route that records an event takes its transaction id only for its database statements; document rendering, anchor work and write advice run before the first write; a test on each changed route shows no statement-free gap inside the transaction longer than the round trips (D6: every gap <= 5 ms and the gaps' sum <= the statement time, on a 42 KB spec with 20 open anchors)",
@@ -67,6 +66,22 @@
    "observed": "One conflict, .dispatch/architecture/dispatch-docs.md: main's new first paragraph (ygo's awareness echo, #2526) kept with this branch's read/write-phase paragraph after it. Build and vet clean. docs ok 1839.266s; api focus ok 147.451s; cmd/dispatch ok in 2 of 3 full runs (312.8s, 314.3s). The first run failed once on TestEditNoticeRestart ('the person's settled edit wrote no edit notice within 10s'), a test this pull request does not change. The same test then passed 25 of 25 runs alone, and passed in CI's dispatch-multiprocess at b6fbe4d8. Unchanged-diff fingerprint before 6e009303bcf1feed..., after fa8ecfd6e9b7f7bc... (the conflicted paragraph is now main's own).",
    "headSha": "7717f5d6c34f4955e29d2583ec205e2ae9ce6739",
    "negativeControl": "grep for conflict markers over packages and .dispatch finds none; jj status reports no conflict at the merge commit 6732e47c."
+  },
+  {
+   "criterion": "Review round 1, findings 1 and 2: a close or reopen answers and stores the sequence its write phase committed, and its advice describes the asks as the patch leaves them.",
+   "surface": "The real Dispatch binary built at head, over HTTP, on a fresh Postgres 18 on the pod (smoke.sh: a session closes then reopens an issue holding a decision block, its two open asks and a comment whose stored quote is stale)",
+   "command": "go build -o $TMPDIR/smoke/dispatch-head ./cmd/dispatch; $TMPDIR/smoke/smoke.sh $TMPDIR/smoke/dispatch-head head",
+   "observed": "Close: answered last_seq 10, GET reads 10, issue.closed seq 10 with payload last_seq 10, one comment.anchor_refreshed appended before it, your_open_asks []. Reopen: 15/15/15/15, your_open_asks [\"Which region?\",\"Which owner?\"].",
+   "headSha": "6a9939499a53777d72f7e9b07c65e3255baf4f0c",
+   "negativeControl": "The same script on the previous head 3675b8e6 (git archive, built alike): close answered 9 while the issue reads 10, issue.closed payload 9, your_open_asks naming both withdrawn asks; reopen 14 against 15, your_open_asks []."
+  },
+  {
+   "criterion": "Review round 1, finding 3 (and the same gap in the grammar re-index): the owed item-block reconciliation and the grammar re-index take the item's owner lock, so neither writes between an edit's unlocked plan and its write phase.",
+   "surface": "refs package tests against Postgres on the pod, with the reconciliation running against a transaction that holds the comment's owner lock and does an edit's read phase",
+   "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:16130/postgres?sslmode=disable go test -p 2 -parallel 4 ./internal/dispatch/api/ ./internal/dispatch/docs/ ./internal/dispatch/refs/ -run 'XidWindow|TestClosingAndReopening|TestCloseAndReopenAdvice|OwnerLock|TestADrainedItem|TestTwoPatches|TestTwoWriters' -count=1 -v",
+   "observed": "ok api 94.2s, docs 14.6s, refs 3.6s; 44 tests passed, the 27 TestXidWindow* among them, plus TestOwedItemBlocksWaitForTheCommentsOwnerLock and TestTheGrammarReindexWaitsForTheCommentsOwnerLock (each waits on the owner lock holding no transaction id; afterwards the index is the edited body, one revision row, no stale block ref). Full suites at this code before the pod restart: api fails only TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (collation); docs passes after TestADrainedItemKeepsAConcurrentEdit was moved from the comment row to the owner lock; rest of dispatch fails only files' S3 test (no Docker) and pmdoc's bun-module tests; cmd/dispatch ok 350.6s.",
+   "headSha": "6a9939499a53777d72f7e9b07c65e3255baf4f0c",
+   "negativeControl": "Both owner-lock tests on the base code of each function: 'the reconciliation answered (indexed true, error <nil>) without waiting for the comment's owner lock, which the edit holds through its read phase'."
   }
  ],
  "filesChanged": [
@@ -76,14 +91,14 @@
   ".dispatch/architecture/dispatch-store.md",
   "docs/site/media/legion/shots.config.ts",
   "docs/site/media/walkthroughs/legion-issue-journey.ts",
-  "go.work.sum",
-  "packages/envoy/.changes/unreleased/INFRA-636-Added-20261029-020000.yaml",
-  "packages/envoy/.changes/unreleased/INFRA-636-Changed-20261028-210500.yaml",
-  "packages/envoy/.changes/unreleased/INFRA-636-Changed-20261029-030000.yaml",
+  "packages/envoy/.changes/unreleased/pr2468-Added-20261029-020000.yaml",
+  "packages/envoy/.changes/unreleased/pr2468-Changed-20261028-210500.yaml",
+  "packages/envoy/.changes/unreleased/pr2468-Changed-20261029-030000.yaml",
   "packages/envoy/AGENTS.md",
   "packages/envoy/cmd/dispatch/shutdown_test.go",
   "packages/envoy/internal/dispatch/api/agent_artifacts.go",
   "packages/envoy/internal/dispatch/api/anchors.go",
+  "packages/envoy/internal/dispatch/api/approval_versions_test.go",
   "packages/envoy/internal/dispatch/api/artifact_files.go",
   "packages/envoy/internal/dispatch/api/artifact_no_project_test.go",
   "packages/envoy/internal/dispatch/api/artifact_rebuild.go",
@@ -108,10 +123,12 @@
   "packages/envoy/internal/dispatch/api/issue_ask_repair.go",
   "packages/envoy/internal/dispatch/api/issue_claim.go",
   "packages/envoy/internal/dispatch/api/issue_claim_test.go",
+  "packages/envoy/internal/dispatch/api/issue_close_answer_test.go",
   "packages/envoy/internal/dispatch/api/issue_create.go",
   "packages/envoy/internal/dispatch/api/issue_dependencies_test.go",
   "packages/envoy/internal/dispatch/api/issue_parent.go",
   "packages/envoy/internal/dispatch/api/issue_patch.go",
+  "packages/envoy/internal/dispatch/api/issue_rank.go",
   "packages/envoy/internal/dispatch/api/keyed_detached_test.go",
   "packages/envoy/internal/dispatch/api/live_events_horizon_test.go",
   "packages/envoy/internal/dispatch/api/live_write_test.go",
@@ -144,6 +161,9 @@
   "packages/envoy/internal/dispatch/docs/ask_blocks.go",
   "packages/envoy/internal/dispatch/docs/ask_row.go",
   "packages/envoy/internal/dispatch/docs/block_index.go",
+  "packages/envoy/internal/dispatch/docs/block_index_test.go",
+  "packages/envoy/internal/dispatch/docs/closed_version_blocks.go",
+  "packages/envoy/internal/dispatch/docs/closed_version_blocks_test.go",
   "packages/envoy/internal/dispatch/docs/copied_asks.go",
   "packages/envoy/internal/dispatch/docs/copied_asks_test.go",
   "packages/envoy/internal/dispatch/docs/decided_wording.go",
@@ -182,10 +202,17 @@
   "packages/envoy/internal/dispatch/events/horizon.go",
   "packages/envoy/internal/dispatch/events/horizon_test.go",
   "packages/envoy/internal/dispatch/events/thread_logins.go",
+  "packages/envoy/internal/dispatch/model/model.go",
+  "packages/envoy/internal/dispatch/pmdoc/parse.go",
+  "packages/envoy/internal/dispatch/refs/block_texts.go",
   "packages/envoy/internal/dispatch/refs/blocks.go",
+  "packages/envoy/internal/dispatch/refs/blocks_test.go",
   "packages/envoy/internal/dispatch/refs/derived_test.go",
   "packages/envoy/internal/dispatch/refs/excerpts.go",
+  "packages/envoy/internal/dispatch/refs/grammar_reindex_owner_lock_test.go",
   "packages/envoy/internal/dispatch/refs/item_blocks.go",
+  "packages/envoy/internal/dispatch/refs/item_blocks_owner_lock_test.go",
+  "packages/envoy/internal/dispatch/refs/rebuild.go",
   "packages/envoy/internal/dispatch/refs/refs.go",
   "packages/envoy/internal/dispatch/refs/reply_blocks.go",
   "packages/envoy/internal/dispatch/store/ownerlock.go",
@@ -193,6 +220,7 @@
   "packages/envoy/internal/dispatch/store/storetest/xidwindow.go",
   "packages/envoy/internal/dispatch/store/title_lexemes_test.go",
   "packages/envoy/internal/dispatch/store/writebatch.go",
+  "packages/envoy/internal/dispatch/text/refs.go",
   "packages/envoy/loadtest/README.md",
   "packages/envoy/loadtest/run-series.sh",
   "packages/envoy/loadtest/run-step.sh",
@@ -217,15 +245,17 @@
   "To meet the frame bar this PR also changes INFRA-591's horizon cadence (immediate re-observation, eager notification read, self-proof) and the relay's coalescing window (25 ms to 2 ms), as the architect assigned on 2026-10-28.",
   "Rollout: an earlier release's pod and this one's do not exclude each other's writes to one owner; serve this release at one pod with Recreate before adding pods (changelog fragment).",
   "Main's TestARepeatedSubReplacesAnotherKind flakes about 1 in 5 on main in this pod; reported to the controller and the /ws/live owner.",
-  "storetest.WaitForStatementBehind removed: its one caller moved to waitForRenameBehind in cmd/dispatch/shutdown_test.go."
+  "storetest.WaitForStatementBehind removed: its one caller moved to waitForRenameBehind in cmd/dispatch/shutdown_test.go.",
+  "Round 1: the grammar re-index (refs.ReindexOwedItem) had finding 3's gap too and now takes its source's owner lock; TestADrainedItemKeepsAConcurrentEdit holds the owner lock in place of the comment row it waited on.",
+  "Round 1: the structural items were applied as the reviewer proposed; createArtifactReview now joins a ledger, so its answer and review go in one batch in the same order."
  ],
  "openQuestions": [
-  "The tester's third unproven item, the block-index backfill and decided-wording restoration without an xid-window test: kept as docs/xid_window_test.go:22-26 records; the backfill keeps D6 at base so a test of it cannot be red now, and the restoration does no document work under its xid.",
-  "TestEditNoticeRestart failed once in 3 full cmd/dispatch runs on this pod after the merge, then passed 25 of 25 runs alone. This pull request does not change the test."
+  "Leftover check before this handoff: ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|smoke.sh|dispatch-head|dispatch-old|go test' printed nothing.",
+  "No -race run this round."
  ],
  "discoveredComplexity": [
   "Every forward merge of main moved code this PR splits into read and write halves (item-block index, reply blocks, keyed-request recovery, close/reopen ask withdrawal, superseded-approval advice); each was brought into the batch or the read phase in the merge, with the fingerprint comment on the PR.",
   "Owner-lock inventory and row-lock audit: dispatch://INFRA-636/artifact/owner-lock-audit-md."
  ],
- "previousHandoff": "8cac12cca166b6276a24ab67220b20e37abd44da"
+ "previousHandoff": "3675b8e686e7bc82845f4c05cff84b1319b967d8"
 }
