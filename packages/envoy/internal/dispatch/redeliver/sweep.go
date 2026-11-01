@@ -32,7 +32,9 @@
 // what one sweep costs follows what is due and not what three days of deliveries left behind. The
 // summary line's deliveries= counts the listing's deliveries and the ones the index says are due,
 // so a delivery waiting out its backoff outside the listing's window is not among them; waiting is
-// counted for a delivery the listing does return before its next request is due.
+// counted for a delivery the listing does return before its next request is due, and for one whose
+// index entry is keyed to the sweep's own minute with its request later in that minute, since an
+// entry is keyed by the minute and a sweep's window reaches to its own (openDue).
 //
 // Dispatch runs the sweep because it holds the App's private key, which the list and redeliver
 // endpoints require (they take only an App JWT).
@@ -44,7 +46,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 	"time"
 
@@ -90,10 +91,6 @@ const (
 	defaultRequests = 300
 	cursorKey       = "cursor"
 	recordPrefix    = "guid."
-	// indexKey marks the bucket as one whose open records all have an index entry, so the
-	// back-fill a build that writes entries runs over a bucket an older build filled happens once
-	// (backfillIndex) rather than every two minutes.
-	indexKey = "index"
 
 	// redeliveryScope is the sweep's own scope in the shared GitHub rate limits: its doubling
 	// backoff after a rate-limited answer. A sweep checks it together with githubapp.AppScope, the
@@ -486,13 +483,17 @@ func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
 			return report, nil
 		}
 		switch {
-		case errors.Is(err, errPendingNotWritten):
+		case errors.Is(err, errNotWritten):
 			// Nothing was written for this delivery, so it is decided again: the cursor stays
-			// where it was, and the rest of the window is still worth deciding now. Its decision
-			// settled nothing, and on every path but the closing ones carries no outcome at all,
-			// so it is left out of the report rather than counted as a delivery no outcome
+			// where it was, and the rest of the window is still worth deciding now. A decision
+			// that carries an outcome is one GitHub answered before the write failed, and that
+			// outcome is what became of the delivery, so it is reported; one that carries none
+			// settled nothing, and is left out rather than counted as a delivery no outcome
 			// accounts for.
 			report.Complete = false
+			if decision.Outcome != "" {
+				report.Decisions = append(report.Decisions, decision)
+			}
 		case err != nil:
 			return report, err
 		default:
@@ -560,21 +561,6 @@ func (s *Sweeper) rateLimited(ctx context.Context, report *Report, limited *gith
 	s.Logger.Warn("webhook redelivery rate-limited by GitHub", "status", limited.Status, "until", next.Until.Format(time.RFC3339), "strikes", next.Strikes, "error", limited.Error())
 }
 
-// openRecord is one open delivery a sweep decides from its record rather than from a listing: the
-// GUID the record is keyed by, the record, and the revision it was read at.
-type openRecord struct {
-	guid     string
-	record   record
-	revision uint64
-}
-
-// sortOpenRecords puts the newest delivery first, the order a listing returns them in.
-func sortOpenRecords(open []openRecord) {
-	slices.SortFunc(open, func(a, b openRecord) int {
-		return b.record.Delivery.DeliveredAt.Compare(a.record.Delivery.DeliveredAt)
-	})
-}
-
 // scanOpenRecords reads every record the bucket holds and returns the deliveries, newest first,
 // whose record is open (neither Delivered nor Expired) and whose failed attempts the listing did
 // not return. A refused request adds no attempt to GitHub's log, and a failed attempt leaves the
@@ -587,9 +573,9 @@ func sortOpenRecords(open []openRecord) {
 // back.
 //
 // A sweep given a window of its own reads this rather than the index, so `envoy-dispatch
-// redeliver-webhooks`, dry run or not, answers exactly as it did before there was one: it reports
-// every open delivery, due or not, and pays three days of records for it. The index's back-fill
-// reads it too (backfillIndex).
+// redeliver-webhooks`, dry run or not, reports every open delivery, due or not, whatever the index
+// holds, and pays three days of records for it. The index's back-fill reads it too
+// (backfillIndex).
 //
 // nats.go ends a watch three ways and only one of them is a complete read -- the watch that
 // delivered its nil end marker -- so this drains it through the one place that tells them apart
@@ -631,123 +617,6 @@ func (s *Sweeper) scanOpenRecords(listed map[string][]githubapp.Delivery) ([]ope
 	}
 	sortOpenRecords(open)
 	return open, nil
-}
-
-// openDue returns the open deliveries the index says need a sweep in the window from floor to now,
-// newest first, and how many entries its watch delivered. One the listing returned is left to the
-// listing, which has its attempts, and an entry no record claims is deleted as it is read: a
-// sweeper that died between its index write and its record write, or between a record write and the
-// delete of the entry before it, leaves one stray entry, and the sweep that reads it repairs it. A
-// dry run repairs nothing, since it writes nothing at all: it leaves the delivery out of what it
-// returns, the record naming no entry of its own, and leaves the entry itself to the next sweep
-// that acts.
-//
-// A floor is safe because of what a complete sweep leaves behind. After one that started at T,
-// every entry still in the bucket names a record whose attention time is at or after T: every entry
-// that sweep selected was either acted on, which moved the entry forward, or left in place with an
-// entry already at or after T. The floor is taken down to its own minute because an entry is keyed
-// by the minute: one due at 10:00:30 is keyed 10:00, and a sweep that started at 10:00:10 and found
-// it not yet due must still be able to select it afterwards.
-//
-// The completeness check matters more here than anywhere else in the sweep. nats.go ends a watch
-// three ways and only one is a complete read (kvwatch.DrainExistingKeys); a sweep that read some of
-// its due entries and called itself complete would advance its cursor past the rest, and nothing
-// would ever bring those deliveries back. That is the one way this design could lose a delivery.
-func (s *Sweeper) openDue(listed map[string][]githubapp.Delivery, floor, now time.Time, dryRun bool) ([]openRecord, int, error) {
-	watcher, err := s.state.WatchFiltered(pendingFilters(floor, now), nats.MetaOnly(), nats.IgnoreDeletes())
-	if err != nil {
-		return nil, 0, fmt.Errorf("list the due redelivery index entries: %w", err)
-	}
-	// An entry's value is empty and its record is read by its own key, so the watch asks for no
-	// value, and the keys are taken first: a Get for each inside the watch's loop would hold the
-	// watch open for as long as the records take to read.
-	var keys []string
-	scan, err := kvwatch.DrainExistingKeys(watcher, "webhook redelivery index", s.Logger, func(entry nats.KeyValueEntry) {
-		keys = append(keys, entry.Key())
-	})
-	if err != nil {
-		return nil, 0, err
-	}
-	var open []openRecord
-	seen := map[string]bool{}
-	for _, key := range keys {
-		_, guid, ok := parsePendingKey(key)
-		if !ok {
-			continue
-		}
-		current, revision, err := s.readRecord(guid)
-		if err != nil {
-			return nil, scan.Puts, err
-		}
-		if revision == 0 || !current.open() || current.Pending != key {
-			if !dryRun {
-				s.dropPending(key)
-			}
-			continue
-		}
-		// The filters are disjoint, so every key reaches this loop once, and of two keys naming
-		// one GUID at most one is the Pending its record names: no GUID reaches here twice today.
-		// The map is what holds one delivery to one decision if that ever stops being so.
-		if seen[guid] {
-			continue
-		}
-		seen[guid] = true
-		if _, listedNow := listed[guid]; listedNow {
-			continue
-		}
-		open = append(open, openRecord{guid: guid, record: current, revision: revision})
-	}
-	sortOpenRecords(open)
-	return open, scan.Puts, nil
-}
-
-// backfillIndex gives an index entry, and the Pending that names it, to every open record that has
-// none, marks the bucket indexed, and answers whether it finished: a record it could not index
-// leaves the bucket unmarked and the sweep incomplete (Sweep), so the next sweep reads every
-// record again and repairs what this one left. A build that writes entries meets a bucket an older
-// one filled with records that have none at all, and an index read would never return them.
-//
-// The marker lives in the same bucket under its 72-hour TTL, so it expires and this runs again at
-// most once every three days: a standing repair rather than a one-off, which is also what covers a
-// sweeper that died in the middle of one. A delivery an older build still writes records for is
-// listed within Lookback and indexed by the sweep that decides it (decide), so a rolling deploy's
-// overlap needs nothing more than that; a rollback needs no rule at all, since an older build
-// ignores these entries and derives its open deliveries from the records itself. A dry run writes
-// neither the entries nor the marker.
-func (s *Sweeper) backfillIndex(listed map[string][]githubapp.Delivery, now time.Time, dryRun bool) (bool, error) {
-	if dryRun {
-		return true, nil
-	}
-	marked, err := s.indexMarked()
-	if err != nil {
-		return false, err
-	}
-	if marked {
-		return true, nil
-	}
-	open, err := s.scanOpenRecords(listed)
-	if err != nil {
-		return false, err
-	}
-	indexed := true
-	for _, stored := range open {
-		if stored.record.Pending != "" {
-			continue
-		}
-		next := stored.record
-		if _, _, err := s.writeRecord(stored.guid, &next, stored.revision, now); err != nil {
-			s.Logger.Warn("webhook redelivery record not back-filled into the index; the next sweep reads every record again",
-				"guid", stored.guid, "error", err)
-			indexed = false
-		}
-	}
-	if !indexed {
-		return false, nil
-	}
-	if _, err := s.state.Put(indexKey, nil); err != nil {
-		s.Logger.Warn("webhook redelivery index not marked back-filled; the next sweep reads every record again", "error", err)
-	}
-	return true, nil
 }
 
 // decide settles one delivery from its failed attempts (newest first), whether GitHub recorded an
@@ -973,10 +842,15 @@ func (s *Sweeper) outcomeNotRecorded(claimedAt time.Time, decision Decision) {
 // attempt already older than the window never happens.
 func (s *Sweeper) undoClaim(guid string, before record, claim record, claimRevision uint64, decision Decision) {
 	before.Pending = claim.Pending
-	if _, written := s.putRecord(guid, before, claimRevision); !written {
-		s.Logger.Error("webhook redelivery claim not undone after a rate limit; the delivery is decided again once its claim expires",
-			append(s.attrs(decision), "claim_expires_at", claim.claimEndsAt().Format(time.RFC3339))...)
+	_, written, err := s.putRecord(guid, before, claimRevision)
+	if written {
+		return
 	}
+	attrs := append(s.attrs(decision), "claim_expires_at", claim.claimEndsAt().Format(time.RFC3339))
+	if err != nil {
+		attrs = append(attrs, "error", err)
+	}
+	s.Logger.Error("webhook redelivery claim not undone after a rate limit; the delivery is decided again once its claim expires", attrs...)
 }
 
 // heldLimit is a limit already recorded in the shared GitHub rate limits, found right before a
@@ -1116,80 +990,21 @@ func (s *Sweeper) readRecord(guid string) (record, uint64, error) {
 // putRecord writes next only if the record is still at revision (absent when zero), so two
 // sweepers never both request one attempt, and returns the new revision. It is the record write on
 // its own; every caller but undoClaim goes through writeRecord, which keeps the index with it.
-func (s *Sweeper) putRecord(guid string, next record, revision uint64) (uint64, bool) {
+//
+// A write that loses its compare-and-set is written false and no error: another sweeper decided
+// the delivery first, and what that sweeper wrote carries the delivery on. A write the bucket
+// refused is that error, and carries nothing on at all: the record still holds what it held, so
+// its caller is what keeps the delivery from being lost (writeRecord, undoClaim).
+func (s *Sweeper) putRecord(guid string, next record, revision uint64) (uint64, bool, error) {
 	written, err := writeState(s.state, recordPrefix+guid, next, revision)
-	if err != nil {
-		if !isConflict(err) {
-			s.Logger.Warn("webhook redelivery record not written", "guid", guid, "error", err)
-		}
-		return 0, false
-	}
-	return written, true
-}
-
-// errPendingNotWritten is a write whose index entry the bucket refused. The record was not written
-// either, and the sweep that met it is incomplete (Sweep).
-var errPendingNotWritten = errors.New("webhook redelivery index entry not written")
-
-// writeRecord writes next over revision and keeps the delivery's index entry with it, which is why
-// every record write but undoClaim's comes through here: the order lives in one place. The entry
-// the record named before this write is the Pending next arrives with, and next.Pending is left as
-// the entry this one wrote.
-//
-// The order is the new entry, then the record, then the entry the record named before it. Entries
-// are written with Put and Delete and never Create or Update, so two sweepers writing one entry is
-// nothing to settle, and the first Create against a delivery is still its claim.
-//
-//   - An entry that cannot be written stops the write there and returns errPendingNotWritten. The
-//     record is left as it was, the sweep is marked incomplete, its cursor stays where it was and
-//     the delivery is decided again by the sweep after it. That is what keeps a lost index write
-//     from turning into a lost delivery, and why nothing here reads the whole bucket from time to
-//     time looking for records the index forgot.
-//   - A record write that loses its compare-and-set is written false and no error: another sweeper
-//     decided the delivery first, and the entry this one wrote is a stray the sweep that reads it
-//     deletes (openDue).
-//   - A delete that fails is logged and no more: what it leaves is that same stray.
-func (s *Sweeper) writeRecord(guid string, next *record, revision uint64, now time.Time) (uint64, bool, error) {
-	previous := next.Pending
-	want := pendingFor(*next, guid, now)
-	next.Pending = want
-	if want != "" && want != previous {
-		if _, err := s.state.Put(want, nil); err != nil {
-			s.Logger.Error("webhook redelivery index entry not written; the delivery is decided again by the next sweep",
-				"guid", guid, "key", want, "error", err)
-			return 0, false, fmt.Errorf("%w: %s: %w", errPendingNotWritten, guid, err)
-		}
-	}
-	written, ok := s.putRecord(guid, *next, revision)
-	if !ok {
+	switch {
+	case err == nil:
+		return written, true, nil
+	case isConflict(err):
 		return 0, false, nil
+	default:
+		return 0, false, err
 	}
-	if previous != "" && previous != want {
-		s.dropPending(previous)
-	}
-	return written, true, nil
-}
-
-// dropPending deletes an index entry no record names any more: the record it named is closed, gone,
-// or indexed elsewhere, so nothing is owed a sweep by it. A delete that fails leaves an entry a
-// later sweep reads once more and repairs then, so it is logged and not raised.
-func (s *Sweeper) dropPending(key string) {
-	if err := s.state.Delete(key); err != nil {
-		s.Logger.Warn("webhook redelivery index entry not deleted", "key", key, "error", err)
-	}
-}
-
-// indexMarked reports whether a sweep has back-filled the index since the marker last expired
-// (backfillIndex).
-func (s *Sweeper) indexMarked() (bool, error) {
-	_, err := s.state.Get(indexKey)
-	if errors.Is(err, nats.ErrKeyNotFound) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("read the redelivery index marker: %w", err)
-	}
-	return true, nil
 }
 
 func isConflict(err error) bool {

@@ -269,7 +269,8 @@ So redelivering a delivery that did reach the stream adds nothing to the stream.
   `closed` is a delivery an earlier sweep settled (GitHub recorded it `OK`, or it expired):
   its failed attempt stays listed until it is older than the sweep's look-back, so after a burst of failures is redelivered, the sweeps of the next hour and six minutes count the burst as `closed`.
   `waiting` is a delivery whose next request is not due yet:
-  in the running sweep one the listing returned, since its index brings back only the deliveries that are due, and in the operator command every open delivery it reads that is not due and not claimed, listed or not.
+  in the running sweep one the listing returned, or one whose index entry is keyed to the sweep's own minute with its request later in that minute, since the index is keyed by the minute and brings back only the deliveries due by it;
+  and in the operator command every open delivery it reads that is not due and not claimed, listed or not.
   `claimed_elsewhere` is a delivery another sweep is asking GitHub for.
   A delivery the sweep's cap of 300 requests left over is not counted; the next sweep takes it.
 

@@ -248,6 +248,26 @@ func (h *harness) indexEntries(guid string) int {
 	return entries
 }
 
+// pendingOf is the index entry the record of guid names, empty when it names none and when the
+// bucket holds no record for it at all.
+func (h *harness) pendingOf(guid string) string {
+	h.t.Helper()
+	entry, err := h.state.Get("guid." + guid)
+	if errors.Is(err, natsgo.ErrKeyNotFound) {
+		return ""
+	}
+	if err != nil {
+		h.t.Fatalf("read the record of %s: %v", guid, err)
+	}
+	var stored struct {
+		Pending string `json:"pending"`
+	}
+	if err := json.Unmarshal(entry.Value(), &stored); err != nil {
+		h.t.Fatalf("decode the record of %s (%q): %v", guid, entry.Value(), err)
+	}
+	return stored.Pending
+}
+
 func (h *harness) requests() []int64 { return h.webhook.Requests() }
 
 func outcome(report redeliver.Report, guid string) redeliver.Outcome {
@@ -1297,9 +1317,10 @@ func TestDryRunReportsWithoutActing(t *testing.T) {
 // what repairs it.
 func TestAContinuousDryRunLeavesAStrayIndexEntry(t *testing.T) {
 	h := newHarness(t)
-	// The key is the index's own (redeliver.PendingKey): a minute inside the sweep's window, and a
-	// GUID the bucket holds no record for.
-	stray := redeliver.PendingKey(h.clock.Now().Add(-time.Minute), "guid-gone")
+	// The key is the index's own (redeliver.PendingKey): a minute inside the sweep's window and
+	// older than the margin the repair leaves an entry another sweeper may be about to name
+	// (cursorOverlap), and a GUID the bucket holds no record for.
+	stray := redeliver.PendingKey(h.clock.Now().Add(-5*time.Minute), "guid-gone")
 	if _, err := h.state.Put(stray, nil); err != nil {
 		t.Fatalf("write the stray index entry: %v", err)
 	}
@@ -1326,8 +1347,8 @@ func TestAContinuousDryRunLeavesAStrayIndexEntry(t *testing.T) {
 
 // What the running sweep reads is the index entries its window holds, and nothing else: a
 // delivery whose next request is an hour away costs it nothing until that hour is up. That is the
-// whole of why the index exists -- the sweep used to read every record in the bucket, three days
-// of them, every two minutes -- so a delivery that is not due is absent from the report
+// whole of why the index exists -- reading every record in the bucket, three days of them, every
+// two minutes, is what it saves -- so a delivery that is not due is absent from the report
 // altogether rather than reported as waiting, and the entries the index watch delivered are
 // counted (Report.IndexEntries) so the cost of a window is something a test can hold.
 func TestASweepReadsOnlyDuePendingEntries(t *testing.T) {
@@ -1407,6 +1428,69 @@ func TestAFailedIndexWriteLeavesTheDeliveryForTheNextSweep(t *testing.T) {
 	}
 	if _, err := h.state.Get("guid.guid-unwritten"); !errors.Is(err, natsgo.ErrKeyNotFound) {
 		t.Fatalf("reading the record of guid-unwritten gave %v, want %v: it was written over an entry that was not", err, natsgo.ErrKeyNotFound)
+	}
+	if got := h.cursor(); !got.Equal(cursor) {
+		t.Fatalf("the cursor moved to %s, want the %s it was at", got, cursor)
+	}
+
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-unwritten"); got != redeliver.Redelivered {
+		t.Fatalf("the sweep after it: outcome %q, want %q", got, redeliver.Redelivered)
+	}
+	if got, want := h.requests(), []int64{failed.ID}; !slices.Equal(got, want) {
+		t.Fatalf("redelivery requests %v, want %v", got, want)
+	}
+}
+
+// refusingRecord is the sweep's state bucket whose record writes NATS will not take: every write
+// of a `guid.` key fails with an error that is not a conflict, and every other write is the
+// bucket's own. Such a refusal is not a compare-and-set lost to another sweeper: no other writer
+// moved the delivery on, and the record keeps exactly what it held.
+type refusingRecord struct {
+	natsgo.KeyValue
+	refused error
+}
+
+func (r refusingRecord) Create(key string, value []byte) (uint64, error) {
+	if strings.HasPrefix(key, "guid.") {
+		return 0, r.refused
+	}
+	return r.KeyValue.Create(key, value)
+}
+
+func (r refusingRecord) Update(key string, value []byte, last uint64) (uint64, error) {
+	if strings.HasPrefix(key, "guid.") {
+		return 0, r.refused
+	}
+	return r.KeyValue.Update(key, value, last)
+}
+
+// A record write the bucket refused moved nothing: the record keeps the Pending it had, and that
+// entry is behind the floor of the sweep after this one. A sweep that read the refusal as another
+// sweeper's compare-and-set -- which really does move the delivery on -- would count itself
+// complete and carry its cursor past the entry, and nothing would read that delivery again. So a
+// refused write leaves the sweep incomplete, its cursor where it was, and the delivery to the
+// sweep after it.
+func TestARefusedRecordWriteLeavesTheDeliveryForTheNextSweep(t *testing.T) {
+	h := newHarness(t)
+	h.sweep(redeliver.Options{}) // the cursor the refused write must leave where it is
+	cursor := h.cursor()
+	h.clock.advance(redeliver.Interval)
+	failed := h.fail("guid-unwritten", http.StatusServiceUnavailable, time.Minute)
+
+	refused := errors.New("nats: no responders available for request")
+	sweeper := h.sweeper()
+	sweeper.Open = func() (bus.KeyValue, error) {
+		return bus.KeyValue{KeyValue: refusingRecord{KeyValue: h.state, refused: refused}}, nil
+	}
+	report, err := sweeper.Sweep(context.Background(), redeliver.Options{})
+	if err != nil {
+		t.Fatalf("the sweep whose record write was refused: %v", err)
+	}
+	if report.Complete {
+		t.Fatalf("the sweep reported itself complete: %+v", report)
+	}
+	if got := h.requests(); len(got) != 0 {
+		t.Fatalf("the sweep asked GitHub for %v under a claim the bucket refused", got)
 	}
 	if got := h.cursor(); !got.Equal(cursor) {
 		t.Fatalf("the cursor moved to %s, want the %s it was at", got, cursor)
@@ -1562,6 +1646,108 @@ func TestARecordWithNoIndexEntryIsBackfilledOnTheFirstSweep(t *testing.T) {
 	}
 	if scans, windows := counting.counts(); scans != 1 || windows != 2 {
 		t.Fatalf("after two sweeps the bucket was scanned whole %d times and read by window %d, want 1 and 2: the second sweep scanned it again", scans, windows)
+	}
+}
+
+// recordWithoutPending is a delivery's record in the shape a build without the sweep's index
+// writes it: the JSON carries no `pending` field at all, since that build's record has none. It
+// is written out as the other build's own JSON rather than taken from a record this build
+// encodes, so what the test holds is the shape a rolling deploy really leaves behind.
+func recordWithoutPending(tb testing.TB, now time.Time, failed githubapptest.Delivery) []byte {
+	tb.Helper()
+	stored, err := json.Marshal(map[string]any{
+		"attempts": 1, "refusals": 0, "last_attempt_at": now.Add(-2 * time.Hour),
+		"next_attempt_at": now.Add(-time.Hour), "first_delivered_at": failed.DeliveredAt,
+		"delivery": failed,
+	})
+	if err != nil {
+		tb.Fatalf("encode the record a build without the index wrote: %v", err)
+	}
+	return stored
+}
+
+// The back-fill's marker holds the whole-record scan off until it expires, up to three days on,
+// so a back-fill that did not write a record must leave the bucket unmarked whatever stopped the
+// write: a write the bucket refused indexed nothing at all, and a compare-and-set it lost may
+// have been lost to a build that writes no index entry.
+func TestABackfillWhoseRecordWriteIsRefusedLeavesTheIndexUnmarked(t *testing.T) {
+	h := newHarness(t)
+	// The bucket as a build without the index left it: its cursor, and an open record that names
+	// no index entry, whose failed attempt is two hours old and so outside the window this sweep
+	// lists.
+	now := h.clock.Now().UTC()
+	if _, err := h.state.Put("cursor", fmt.Appendf(nil, `{"at":%q}`, now.Format(time.RFC3339))); err != nil {
+		t.Fatalf("write the cursor a build without the index left: %v", err)
+	}
+	failed := h.fail("guid-unindexed", http.StatusServiceUnavailable, 2*time.Hour)
+	if _, err := h.state.Create("guid.guid-unindexed", recordWithoutPending(t, now, failed)); err != nil {
+		t.Fatalf("write the record a build without the index wrote: %v", err)
+	}
+
+	refused := errors.New("nats: no responders available for request")
+	sweeper := h.sweeper()
+	sweeper.Open = func() (bus.KeyValue, error) {
+		return bus.KeyValue{KeyValue: refusingRecord{KeyValue: h.state, refused: refused}}, nil
+	}
+	report, err := sweeper.Sweep(context.Background(), redeliver.Options{})
+	if err != nil {
+		t.Fatalf("the sweep whose back-fill write was refused: %v", err)
+	}
+	if report.Listed != 0 {
+		t.Fatalf("the sweep listed %d failed attempts, so the back-fill is not what read the record", report.Listed)
+	}
+	if _, err := h.state.Get("index"); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("reading the index marker gave %v, want %v: a back-fill that indexed no record marked the bucket, and nothing reads that record again for three days", err, natsgo.ErrKeyNotFound)
+	}
+	if report.Complete {
+		t.Fatalf("the sweep reported itself complete: %+v", report)
+	}
+}
+
+// A build without the sweep's index rewrites a record without the Pending that names its index
+// entry, which an ordinary rolling deploy makes and a rollback and roll-forward inside the
+// marker's three days makes again. The entry naming such a record is not a stray: a record that
+// names no entry disowns none, so the entry is adopted, its delivery is decided like any other
+// due one, and the write that decides it gives the record an entry of its own again. Deleting it
+// as a stray would lose the delivery until the marker expired and a back-fill found the record,
+// up to 72 hours later.
+func TestAnIndexEntryWhoseRecordNamesNoneIsAdopted(t *testing.T) {
+	h := newHarness(t)
+	h.sweep(redeliver.Options{}) // the cursor, and the marker that says every open record is indexed
+	if _, err := h.state.Get("index"); err != nil {
+		t.Fatalf("read the index marker the first sweep writes: %v", err)
+	}
+	// The delivery's failed attempt is two hours old, so no window this sweep lists returns it:
+	// its index entry is all that brings it back.
+	now := h.clock.Now().UTC()
+	failed := h.fail("guid-rewritten", http.StatusServiceUnavailable, 2*time.Hour)
+	if _, err := h.state.Create("guid.guid-rewritten", recordWithoutPending(t, now, failed)); err != nil {
+		t.Fatalf("write the record the other build rewrote: %v", err)
+	}
+	entry := redeliver.PendingKey(now.Add(-time.Minute), "guid-rewritten")
+	if _, err := h.state.Put(entry, nil); err != nil {
+		t.Fatalf("write the index entry that names it: %v", err)
+	}
+
+	report := h.sweep(redeliver.Options{})
+	if report.Listed != 0 {
+		t.Fatalf("the sweep listed %d failed attempts, so the index is not what found the delivery", report.Listed)
+	}
+	if got := outcome(report, "guid-rewritten"); got != redeliver.Redelivered {
+		t.Fatalf("guid-rewritten outcome %q, want %q", got, redeliver.Redelivered)
+	}
+	if got, want := h.requests(), []int64{failed.ID}; !slices.Equal(got, want) {
+		t.Fatalf("redelivery requests %v, want %v", got, want)
+	}
+	if held := h.keys(); !slices.Contains(held, entry) {
+		t.Fatalf("the sweep deleted the index entry %s as a stray, leaving %v", entry, held)
+	}
+	pending := h.pendingOf("guid-rewritten")
+	if pending == "" {
+		t.Fatalf("the record names no index entry after the sweep, so nothing brings its delivery back: %v", h.keys())
+	}
+	if held := h.keys(); !slices.Contains(held, pending) {
+		t.Fatalf("the record names the index entry %s, which the bucket does not hold: %v", pending, held)
 	}
 }
 
