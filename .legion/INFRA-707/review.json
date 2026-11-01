@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-707",
+  "previousHandoff": "efd263bacf8593783a89a99abe520eeba0a7457f",
+  "round": 6,
+  "headReviewed": "67ac05a4a0c143056bc0c68fad08ca37798b6be8",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 3,
+  "fingerprint": "d88134be 8cb51c95... -> 272dc896 1241ec25...: changed, so a new round. The delta is the forward merge 67ac05a4 of main d04cb867 after READY was withdrawn for the conflict.",
+  "merge": "livewrite.go/mutation.go conflicts against #2522 resolved by keeping this PR's structure (readFork(ctx, write) is the once-per-transaction room read; captureLiveTextAndAuthors keeps readPoint+flushThrough+stateTree; main's write branch lives in captureWrite) and adopting #2522's ValidDocument return under the name readForkTree; all six callers handle it as main does. The fork has one goroutine until commit installs it as the shadow, so pmdoc.ReadUnshared's precondition holds. browsertype now connects as people through the identity header because main's #2541 admits only the identity service's person to a document room.",
+  "thermonuclear": {
+    "deepReview": "Verdict: APPROVE at 67ac05a4.",
+    "codeQuality": "Verdict: CHANGES at 67ac05a4: comments merged from #2522 named readFork for the tree reader (tree.go:186, :269, edits.go:559, AGENTS.md:510) and AGENTS.md cited pre-merge mutation.go lines. Both prose; fixed in my commit 248b5563 with the README's DISPATCH_IDENTITY_HEADER_TRUSTED=1."
+  },
+  "proseFix": "248b5563",
+  "ci": "Required set (rulesets): ci-ok, pr-title. Run 41266722253 at 67ac05a4 was still running at 05:30Z; my prose push follows its end, and I approve the head it makes only once ci-ok and pr-title are green there.",
+  "keyFindings": [
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/tree.go", "description": "Comments named readFork (now the room read) as the fork's tree reader; fixed in 248b5563."},
+    {"severity": "minor", "file": "packages/envoy/AGENTS.md", "description": "readFork named as the tree reader, and four mutation.go line references from main's tree; fixed in 248b5563."},
+    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/README.md", "description": "browsertype's server needs DISPATCH_IDENTITY_HEADER_TRUSTED=1 too; fixed in 248b5563."}
+  ]
+}
