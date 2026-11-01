@@ -2,45 +2,42 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-562",
-  "completed": "2026-11-01T10:19:41Z",
-  "round": 28,
-  "testedHead": "cbaf4783b68a396e245d5ab821418f0a65311749",
-  "codeHead": "e7f4a1f4a385",
-  "scope": "Conflict return after the fourth retro: the merge with main 225f2bea (#2391, background loops woken by Postgres NOTIFY, migrations 0151-0157), six conflicts kept both sides, this PR's migrations renumbered 0151-0154 -> 0158-0161. The architect's five checks.",
-  "fingerprint": {
-    "previousVerifiedHead": "6aa492b65f0bf376b8b10508119c3ebefe858f3c",
-    "previous": "93849d4fadd6eef1221eb6dc75b0f5cc186b1b91c738d82a24a873d3d7bf6f6d",
-    "current": "fe99bbe947e2e01195afac4b8f39e281509062e8572535c7ea4dc3a96ed61fb2",
-    "verdict": "(1) With migration numbers normalised, the PR's own diff changes only in packages/envoy/AGENTS.md, cmd/dispatch/README.md, cmd/dispatch/main.go, internal/dispatch/store/pool.go and internal/pglisten/listener.go (the sixth conflict file, cmd/dispatch/multiprocess_test.go, has the same branch diff as before); a scan of every changed Go line finds 0 that is not a comment. Since the PR's diff is the head against main's fork 225f2bea, no line of main's code is removed."
+  "completed": "2026-11-01T11:57:13Z",
+  "round": 29,
+  "testedHead": "58902d6d9d27a34dbdc0ca9860b6774615d58f54",
+  "codeHead": "d7db0bfdc47e",
+  "scope": "Review round 21's red (CI run 41293708339, job 124811971054): TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy failed when the delivery reconcile's jittered first pass landed in its window against a GitHub fake that answered [] everywhere. The architect's amended scope: the test hook DISPATCH_TEST_RECONCILE_AT_START is the only production change, it is refused without DISPATCH_TEST_HOOKS=1, the jitter is kept when unset, nothing deployed sets it, TestEverySettingReachesItsReader passes; then the old fake fails, the new fake passes 20 of 20, and ci-ok and pr-title.",
+  "productionChange": {
+    "verdict": "only the test hook",
+    "evidence": "`jj diff --from 61aedbda --to d7db0bfd --stat`: cmd/dispatch/multiprocess_test.go and settings_test.go (tests), plus three production files whose changed lines are all the hook: settings.go one DISPATCH_TEST_RECONCILE_AT_START row; main.go a bootConfig.ReconcileAtStart field, its parse in boot config (refused unless boot.TestHooksEnabled), and the reconcile's start calling FirstPassAtStart() when it is set; internal/dispatch/delivery/reconcile.go an atStart field, FirstPassAtStart(), and at the head of Run `if r.atStart && r.HasApp() { r.leasedPass(ctx, leases, time.Now()) }` before the unchanged duty.RunJittered call. With the setting unset, atStart is false and Run is the jittered loop as before."
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "(2) Migrations: each of the eight files 0158-0161 .up.sql/.census.sql is byte-identical to its 0151-0154 predecessor at 6aa492b6 once the number in its first line is normalised; the file-name references name 0158_message_delivery_urgency, 0159_route_roster, 0160_github_rate_limits, 0161_delivery_run_warnings once each; every 'migration 0151'..'0154' left in the tree is one main's own tree carries word for word (main's embeddings_notify, refs_excerpts_owed_notify, suggestion_outcome_cursor), none of this PR's. On the pod's Postgres 17: `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -count=1 -v -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' ./internal/dispatch/store/` -> both PASS. (3) Lease and NOTIFY together, two real envoy-dispatch processes on one Postgres and one NATS: `go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses|TestALeasedLoopRunsOnceAcrossAStaggeredStart|TestTheSuggestionOutcomeSweepSerialisesOnTheCursorAcrossBothProcesses|TestADeliveryAKilledProcessLeftPendingIsSentByTheOther|TestASendDuringAListenerTakeOverReachesItsSession' ./cmd/dispatch` -> ok 530.012s, all five PASS (lease no-overlap 30.76s, staggered start 32.03s, suggestion-sweep cursor 30.14s, killed_while_sending 94.38s, killed_before_the_claim 104.54s, killed_during_the_wait 110.22s), 0 SKIP. (4) pool.go and pglisten/listener.go: against main 225f2bea each differs only in comment text, naming both main's shared wake hub and this PR's test-hooks listener; 0 non-comment lines differ, as at the previous head; leasePoolSize 13 and dispatchConnectionsPerPod 90 equal main's, and `cd packages/envoy/infra && go test -count=1 -run Connections ./gcp/...` -> ok. Log: $TMPDIR/mp-cbaf4783.log."
+    "how": "(2) Refusal on a real start: envoy-dispatch built at d7db0bfd, own database, DISPATCH_TEST_RECONCILE_AT_START=1 without DISPATCH_TEST_HOOKS -> exit 1, 'dispatch: resolve boot config error=\"DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_RECONCILE_AT_START\"'; with DISPATCH_TEST_HOOKS=1 as well -> 'dispatch: listening' (stopped by the 20 s timeout). (4) `git grep -l DISPATCH_TEST_RECONCILE_AT_START` lists only main.go, settings.go, settings_test.go, multiprocess_test.go, reconcile.go and the handoff: no deploy, compose or infra/gcp file in this repository sets it; GitHub code search for it in theorem-labs/agent-infra answers total_count 0. (5) `cd packages/envoy && go test -count=1 -v -run TestEverySettingReachesItsReader ./cmd/dispatch` -> PASS 43.13s. New fake, 20 runs on two real envoy-dispatch processes over Postgres 17 and NATS: `DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=20 -timeout 50m -v -run 'TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy$' ./cmd/dispatch` -> ok 482.505s, 20 PASS, 0 FAIL, 0 SKIP. Log: $TMPDIR/bind20-d7db0bfd.log."
   },
   "failed": 0,
   "failures": [],
-  "negativeControl": "Before the renumbering the merged tree held two migrations at each of 0151-0154, which TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny refuses (implementer's record; rounds 11 and 18 showed the refusal on real binaries and in the guard). The layout tool's two R1 findings at packages/envoy/AGENTS.md:3940 are main's own text: the same tool on main 225f2bea's copy reports the same two sentences at :3889.",
-  "ci": "Read on GitHub at 10:19Z at code head e7f4a1f4: CI run 41293708339 attempt 1 in progress (lint success, typecheck success, test and envoy-go in progress, dispatch queued; ci-ok not yet reported); PR Title run 41293708282 success. Not waited for. A merge-tree of the head with main@origin d86f8de8 shows no conflict.",
+  "negativeControl": "The same row with the hook on and the old fake restored (a throwaway edit making the handler answer \"[]\" for every path, as before d7db0bfd; restored after, byte-equal, nothing committed): `go test -tags multiprocess -count=1 -run 'TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy$' ./cmd/dispatch` -> FAIL on the first run, 'multiprocess_test.go:603: A logged a delivery error while the reconcile read GitHub: ... msg=\"dispatch delivery: GitHub App permission check\" error=\"decode installation: json: cannot unmarshal array into Go value of type githubapp.installationPayload\"', CI's failure.",
+  "ci": "Read on GitHub at 11:57Z at code head d7db0bfd: CI run 41303159329 and PR Title run 41303159396 queued; pr-title queued; ci-ok not yet reported, so the architect's exceptions have no result to apply to. Not waited for. Round 28's results stand.",
   "observations": [
-    "The fourth retro removed .legion/INFRA-562/ (412024b4); this handoff writes test.json back, so the next retro removes it again before READY.",
     "Unchanged and not failures: a person's Retry during a take-over wait opens attempt 2 beside the renewed attempt 1 (existing rule); a resumed comment attempt opened by another person's Retry names the comment's author as actor; the test-hook fan-out (DISPATCH_TEST_HOOKS only) can miss a process whose LISTEN connection redials between the caller's pg_locks read and its NOTIFY; a claim or ask follow made during a comment request mid take-over can still give that session two copies."
   ],
   "proof": [
     {
-      "criterion": "Main's NOTIFY-woken leased loops and this PR's delivery resume work together across two processes",
-      "surface": "two real envoy-dispatch processes over one Postgres 17 and one NATS, with a fake Envoy listener",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses|TestALeasedLoopRunsOnceAcrossAStaggeredStart|TestTheSuggestionOutcomeSweepSerialisesOnTheCursorAcrossBothProcesses|TestADeliveryAKilledProcessLeftPendingIsSentByTheOther|TestASendDuringAListenerTakeOverReachesItsSession' ./cmd/dispatch",
-      "observed": "ok 530.012s, five PASS, 0 FAIL, 0 SKIP",
-      "headSha": "cbaf4783b68a396e245d5ab821418f0a65311749",
-      "negativeControl": "sent_to_a_session_the_listener_never_knows: a session the listener never knows settles failed: no live session after the real 12 s window; rounds 11 and 14 showed the kill rows failing with the sweep off"
+      "criterion": "The two-process delivery row meets a reconcile pass every run and passes against a GitHub fake that answers in GitHub's shapes",
+      "surface": "two real envoy-dispatch processes over one Postgres 17 and one NATS (-tags multiprocess), against the loopback GitHub fake",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=20 -timeout 50m -v -run 'TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy$' ./cmd/dispatch",
+      "observed": "ok 482.505s, 20 of 20 PASS",
+      "headSha": "58902d6d9d27a34dbdc0ca9860b6774615d58f54",
+      "negativeControl": "the old fake with the hook on -> FAIL at multiprocess_test.go:603, 'decode installation: json: cannot unmarshal array'"
     },
     {
-      "criterion": "Migrations 0158-0161 are the same SQL under the next free numbers, with no reference to the old ones",
-      "surface": "the migration files and their references at the head; the Dispatch migration guard on Postgres 17",
-      "command": "normalised byte comparison of the eight files against 6aa492b6; git grep of every migration reference against main's tree; go test -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' ./internal/dispatch/store/",
-      "observed": "SQL byte-identical; every remaining 0151-0154 reference is main's own; both guards PASS",
-      "headSha": "cbaf4783b68a396e245d5ab821418f0a65311749",
-      "negativeControl": "two migrations at each of 0151-0154 before the renumbering -> refused by the guard"
+      "criterion": "DISPATCH_TEST_RECONCILE_AT_START is refused without the test hooks, so no deployment can set it",
+      "surface": "the envoy-dispatch binary built at d7db0bfd, started for real against its own database",
+      "command": "start with DISPATCH_TEST_RECONCILE_AT_START=1 and no DISPATCH_TEST_HOOKS; then with DISPATCH_TEST_HOOKS=1",
+      "observed": "with the hooks: 'dispatch: listening'",
+      "headSha": "58902d6d9d27a34dbdc0ca9860b6774615d58f54",
+      "negativeControl": "without the hooks -> exit 1, 'DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_RECONCILE_AT_START'"
     }
   ]
 }
