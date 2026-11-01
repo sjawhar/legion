@@ -5,10 +5,17 @@ import (
 	"fmt"
 )
 
-// Splice returns a copy of doc with r replaced by with using Proof's
-// ProseMirror-compatible range-fitting rules.
-func Splice(doc *Node, r Range, with *Node) (*Node, error) {
-	if err := validateSplice(doc, r, with); err != nil {
+// Splice returns a copy of d's tree with r replaced by with, using Proof's
+// ProseMirror-compatible range-fitting rules. It reads the splice's shape (spliceShape), then
+// validates with, the replacement, in that order, and only then fits the replacement into the
+// range; the document itself was validated once, when the ValidDocument was made. The zero
+// ValidDocument is a splice whose shape cannot be read.
+func (d ValidDocument) Splice(r Range, with *Node) (*Node, error) {
+	if err := spliceShape(d.doc, r, with); err != nil {
+		return nil, err
+	}
+	doc := d.doc
+	if err := with.Validate(); err != nil {
 		return nil, err
 	}
 	if r.From == r.To {
@@ -27,14 +34,13 @@ func Splice(doc *Node, r Range, with *Node) (*Node, error) {
 	return ascend(doc, selection, r, with)
 }
 
-func validateSplice(doc *Node, r Range, with *Node) error {
+// spliceShape refuses a splice whose document, replacement or range cannot be read: Splice's first
+// check, which it runs before it validates the replacement.
+func spliceShape(doc *Node, r Range, with *Node) error {
 	if doc == nil || with == nil || doc.Type != "doc" || with.Type != "doc" || r.From > r.To {
 		return fmt.Errorf("%w: invalid splice", ErrSchema)
 	}
-	if err := doc.Validate(); err != nil {
-		return err
-	}
-	return with.Validate()
+	return nil
 }
 
 var ErrTableWidth = errors.New("table row exceeds table width")
@@ -50,10 +56,13 @@ var ErrReplacementDoesNotFit = errors.New("replacement does not fit document")
 // repaired.
 var ErrJoinEmptiesTypedBlock = errors.New("the range runs into a typed block from the text before it, and joining them would leave that block empty")
 
-// BlockBoundary returns the document-level boundary before or after the block
-// containing target.
-func BlockBoundary(doc *Node, target Range, after bool) (int, error) {
-	_, start, end, err := documentBlock(doc, target, "BlockBoundary")
+// BlockBoundary is the document-level boundary before or after the block containing target, over
+// the tree d validated. The zero ValidDocument wants a document.
+func (d ValidDocument) BlockBoundary(target Range, after bool) (int, error) {
+	if d.doc == nil {
+		return 0, wantsDocument("BlockBoundary")
+	}
+	_, start, end, err := documentBlock(d.doc, target)
 	if err != nil {
 		return 0, err
 	}
@@ -63,16 +72,9 @@ func BlockBoundary(doc *Node, target Range, after bool) (int, error) {
 	return start, nil
 }
 
-// BlockIndex returns the index, among the document's children, of the block containing target.
-func BlockIndex(doc *Node, target Range) (int, error) {
-	index, _, _, err := documentBlock(doc, target, "BlockIndex")
-	return index, err
-}
-
-func documentBlock(doc *Node, target Range, caller string) (index, start, end int, err error) {
-	if _, err := ValidateDocument(doc, caller); err != nil {
-		return 0, 0, 0, err
-	}
+// documentBlock is the index and the ProseMirror range of the document-level block holding target,
+// the first whose range holds it, over a document its caller has validated.
+func documentBlock(doc *Node, target Range) (index, start, end int, err error) {
 	position := 0
 	for index, block := range doc.Children {
 		end := position + nodeSize(block)
@@ -84,15 +86,44 @@ func documentBlock(doc *Node, target Range, caller string) (index, start, end in
 	return 0, 0, 0, ErrTargetNotFound
 }
 
+// BlockIndexes is the index of the document-level block holding target's start and of the one
+// holding its end, both by documentBlock's rule - the first block whose range holds the position -
+// found in one pass over the document's children. A write reads the blocks it changed from the
+// two, so it walks the document once rather than once an endpoint. Either endpoint lying in no
+// block is ErrTargetNotFound, as a lookup of that endpoint alone gives it, and the zero
+// ValidDocument wants a document.
+func (d ValidDocument) BlockIndexes(target Range) (first, last int, err error) {
+	if d.doc == nil {
+		return 0, 0, wantsDocument("BlockIndexes")
+	}
+	first, last = -1, -1
+	position := 0
+	for index, block := range d.doc.Children {
+		end := position + nodeSize(block)
+		if first < 0 && target.From >= position && target.From <= end {
+			first = index
+		}
+		if last < 0 && target.To >= position && target.To <= end {
+			last = index
+		}
+		if first >= 0 && last >= 0 {
+			break
+		}
+		position = end
+	}
+	if first < 0 || last < 0 {
+		return 0, 0, ErrTargetNotFound
+	}
+	return first, last, nil
+}
+
 // InsertTableRows inserts a pipe-table row fragment beside the row containing target, its rows
 // padded to the table's width on budget, the caller write's. It reports inserted=false when target
 // is outside a table or markdown is not exclusively table rows.
-func InsertTableRows(doc *Node, target Range, markdown string, after bool, budget *WriteBudget) (*Node, bool, error) {
-	if doc == nil || doc.Type != "doc" {
-		return nil, false, fmt.Errorf("%w: InsertTableRows wants a document", ErrSchema)
-	}
-	if err := doc.Validate(); err != nil {
-		return nil, false, err
+func (d ValidDocument) InsertTableRows(target Range, markdown string, after bool, budget *WriteBudget) (*Node, bool, error) {
+	doc := d.doc
+	if doc == nil {
+		return nil, false, wantsDocument("InsertTableRows")
 	}
 
 	var tablePath []int
