@@ -16,9 +16,9 @@ Envoy owns transport, routing, delivery, and the native Dispatch event path:
 - publishes ordinary notifications through JetStream and ad-hoc topics (any `notifications.` topic no stream subject captures) through core NATS;
   `POST /v1/messages/publish` forwards a role message to its holder, and an ad-hoc topic's message to each self-subscribed session registered on it, with a receipt, answering once each recipient confirmed it, or 504
 
-- resolves target OpenCode sessions
+- resolves target agent sessions
 
-- delivers to a session registered with a serve port (OpenCode) by hot `prompt_async`, ordinary events staying in JetStream for retry while that session is unavailable;
+- delivers to a session registered with a serve port by hot `prompt_async`, ordinary events staying in JetStream for retry while that session is unavailable;
   a self-subscribed session (Oh My Pi, Claude Code) receives on its own NATS subscriptions, the listener skips its push to it (`internal/session/session.go`), and it reads back what it missed while those were down from the stream through `POST /v1/replay` ("Listener API")
 
 - publishes retained `notifications.dispatch.issue.<KEY>.<type>`, `notifications.dispatch.document.<PROJECT>.<slug>.<type>`, and `notifications.dispatch.project.<PROJECT>.<type>` envelopes
@@ -2403,8 +2403,8 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   Neither event is published to the ask's followers:
   `publishFollowerRoutes` routes `ask.answered`, `ask.edited`, `ask.handed_back`, `ask.resolved` and `comment.created`/`resolved`/`reopened`/`edited` with an `ask_id`, and no other type.
 
-- Keep Envoy API-level with OpenCode.
-  Do not add DB introspection or OpenCode-specific hidden coupling unless there is no API path.
+- Keep Envoy API-level with the agent harnesses it serves.
+  Do not add DB introspection or harness-specific hidden coupling unless there is no API path.
 
 - Dispatch caps (`CAP_EXCEEDED` 400) read `<field> is N characters over the M-character limit (L/M)` (`capExceededError`, UTF-16 units) or `<field> is N over the M-item limit (C/M)` for counts;
   `GET /asks/{id}`, `/comments/{id}`, and `/issues/{key}/messages/{id}` answer a non-uuid id with 400 `<KIND>_ID_INPUT` (`requireUUIDPath`);
@@ -3388,6 +3388,7 @@ a cleanup that failed is logged at WARN (`registry role claim old holder cleanup
 
 `send` and `publish` accept optional `in_reply_to`, `supersedes`, `urgency`, `expects_reply`, and `expires_at`, and `publish` additionally `dedupe_key`; empty optional fields are omitted.
 `urgency` is `low`, `med`, `high`, or `blocking`; `expects_reply` is `none`, `optional`, or `required`.
+`urgency` is informational: the renderers show it to the reader, and no part of Envoy orders, holds or delivers a message by it.
 A session id or role that becomes a KV key NATS would refuse (`bus.EnsureKeyValue`) is a 413 naming its size when too long and a 400 naming the key when it holds an empty token or whitespace, or a character outside nats.go's key alphabet (`ses:bad`, `bus.ErrInvalidKey`), on every route that reads or writes one.
 Every `/v1` 4xx/5xx response, including the startup gate's 503, is JSON: `{"error":"<message>","expected":["field"]}`.
 `expected` appears when the caller must provide a field.
@@ -3852,7 +3853,7 @@ a token the issuer never signed, one naming a key id the issuer publishes nothin
   it is not a failed delivery to the others.
   A session with a NATS connection of its own (pi-envoy, claude-envoy) receives it directly and through the forward, and drops the second copy by its `event_id`;
   the forward's copy is stored on its agent subject (once, by `Nats-Msg-Id`), which is how its replay recovers one it missed while disconnected.
-  A session the listener delivers to on its serve port (the OpenCode plugin) is not confirmed:
+  A session the listener delivers to on its serve port is not confirmed:
   it holds no NATS connection to answer a receipt, and receives the topic through its machine's listener when that listener runs with `ENVOY_SUBSCRIBE_ALL_TOPICS=1`:
   the live topics lane (`openLiveTopics`, `liveDeliveryHandler`) is a second bus client holding one core queue subscription on `notifications.>` in the group `envoy-listener-live-<machine id>` (`bus.ListenerLiveQueue`), which leaves a subject under `notifications.role.` to the role lane and a subject the stream captures (`bus.StreamCaptures`) to the durable, and fans every other topic out to the sessions on its machine subscribed to it, by the same `prompt_async`.
   A refused delivery publishes its exception over core NATS, which the lane reads back and fans out like any topic;

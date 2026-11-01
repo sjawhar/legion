@@ -297,8 +297,8 @@ test("named versions, the version picker, and the diff stay current across users
     await expect.poll(sockets).toBe(1);
 
     await page.getByRole("button", { name: "Diff vs current" }).click();
-    await expect(page.getByTestId("version-diff").locator("del")).toContainText("SQLite");
-    await expect(page.getByTestId("version-diff").locator("ins")).toContainText("Postgres");
+    await expect(page.getByTestId("change-view").locator("del")).toHaveText("SQLite");
+    await expect(page.getByTestId("change-view").locator("ins")).toHaveText("Postgres");
 
     await versionPicker.selectOption("");
     await expect(documentEditor(page)).toBeVisible();

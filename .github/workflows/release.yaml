@@ -12,7 +12,6 @@ on:
       - "packages/pi-envoy/package.json"
       - "packages/pi-legion/package.json"
       - "packages/pi-shared/package.json"
-      - "packages/envoy-plugin/package.json"
       - "packages/claude-envoy/**"
       - "packages/proof-editor/package.json"
       - "packages/dispatch/package.json"

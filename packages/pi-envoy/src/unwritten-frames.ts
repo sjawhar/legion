@@ -4,15 +4,16 @@ import type { ContentBlock } from "@legion/pi-shared/pi-types";
 import { type HeldReplayNotice, writtenCardIdentity } from "./missed-messages";
 
 /**
- * How a card is handed to the host: as a steer or an aside, each starting a turn when the host is
- * idle, or `inert`, a steer that starts no turn (`triggerTurn: false`). An idle host writes an
+ * How a card is handed to the host: `card` and `aside` each go as an aside that starts a turn when
+ * the host is idle (`CardWake.deliveryFor`; `aside` is a targeted Aside, which the wake never
+ * covers), or `inert`, a steer that starts no turn (`triggerTurn: false`). An idle host writes an
  * inert card at once and runs nothing for it; one handed while a turn streams is steered into
  * that turn, and the agent loop runs another model turn for it (measured on omp 18.12.2). So an
  * inert card is handed only to a settled host (`UnwrittenFramesHost.settled`): one sent while the
  * host is busy is held until the first settled heartbeat (`handBackWithdrawn`), as is a replay
  * notice (`sendNotice`), which is handed the same way. A card handed again keeps its delivery.
  */
-export type CardDelivery = "steer" | "aside" | "inert";
+export type CardDelivery = "card" | "aside" | "inert";
 
 /**
  * A frame handed to the host that the host has not written to the session's transcript yet. Oh
