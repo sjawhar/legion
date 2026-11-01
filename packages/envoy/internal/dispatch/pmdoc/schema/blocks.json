@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "types": [
     {
       "name": "callout",
@@ -64,6 +64,21 @@
         "copied_from_document": {
           "kind": "string",
           "server": true
+        }
+      }
+    },
+    {
+      "name": "view",
+      "content": "paragraph+",
+      "render": "host",
+      "attributes": {
+        "page": {
+          "kind": "string",
+          "default": ""
+        },
+        "data": {
+          "kind": "string",
+          "default": ""
         }
       }
     }

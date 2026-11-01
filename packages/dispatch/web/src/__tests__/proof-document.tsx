@@ -4,7 +4,7 @@ import { act, render, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
 import { api } from "../api/client";
-import type { Artifact, ArtifactText } from "../api/types";
+import type { Artifact, ArtifactText, BlockSchema } from "../api/types";
 import { type DocumentToolbar, ProofDocument } from "../features/doc/ProofDocument";
 import { DocumentRuntime } from "../features/doc/runtime";
 import { MarginProvider, useMargin } from "../features/margin/margin-context";
@@ -28,16 +28,25 @@ export const artifact: Artifact = {
   versions: [],
 };
 
-const blockSchema = {
+const blockSchema: BlockSchema = {
   types: [
     {
       attributes: {
-        kind: { choices: ["note", "warning"], default: "note", kind: "enum" as const },
-        title: { default: "", kind: "string" as const },
+        kind: { choices: ["note", "warning"], default: "note", kind: "enum" },
+        title: { default: "", kind: "string" },
       },
-      content: "paragraph+" as const,
+      content: "paragraph+",
       name: "callout",
-      render: "host" as const,
+      render: "host",
+    },
+    {
+      attributes: {
+        data: { default: "", kind: "string" },
+        page: { default: "", kind: "string" },
+      },
+      content: "paragraph+",
+      name: "view",
+      render: "host",
     },
   ],
   version: 1,
