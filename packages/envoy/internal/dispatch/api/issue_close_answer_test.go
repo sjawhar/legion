@@ -17,7 +17,9 @@ import (
 // asks' document write queues an event of its own - the refresh of a comment whose stored quote is
 // stale - before the status event. The patch's response, the status event's stored payload and a
 // later read of the issue must all name the sequence that event took, which a count of the events
-// the route itself queued answers short.
+// the route itself queued answers short. The reopen moves the issue the close left done, so the
+// two moves run in order against the one issue, not as subtests a reader could run alone, and
+// each failure names the move it came from.
 func TestClosingAndReopeningAnswerTheSequenceTheWritePhaseCommitted(t *testing.T) {
 	f := newCloseAsksFixture(t)
 	anchored := createThreadComment(t, f.handler, f.issue, map[string]any{
@@ -32,27 +34,25 @@ func TestClosingAndReopeningAnswerTheSequenceTheWritePhaseCommitted(t *testing.T
 		{name: "the close", status: "done", eventType: "issue.closed"},
 		{name: "the reopen", status: "todo", eventType: "issue.updated"},
 	} {
-		t.Run(move.name, func(t *testing.T) {
-			staleAnchorQuote(t, f.database, anchored.ID)
-			before := readIssueDetail(t, f.handler, f.issue)
-			patched := dispatchRequest(t, f.handler, http.MethodPatch, "/api/v1/issues/"+f.issue, map[string]any{
-				"status": move.status,
-			}, "alice")
-			if patched.Code != http.StatusOK {
-				t.Fatalf("%s: status=%d body=%s", move.name, patched.Code, patched.Body.String())
-			}
-			response := decodeBody[model.Issue](t, patched)
-			event := latestIssueEvent(t, f.database, f.issue, move.eventType)
-			if refreshes := anchorRefreshesWithin(t, f.database, f.issue, before.LastSeq, event.seq); refreshes != 1 {
-				t.Fatalf("%s appended %d comment.anchor_refreshed events of its own, want 1: the stale quote no longer makes the asks' document write queue one",
-					move.name, refreshes)
-			}
-			detail := readIssueDetail(t, f.handler, f.issue)
-			if response.LastSeq != event.seq || event.payloadLastSeq != event.seq || detail.LastSeq != event.seq {
-				t.Fatalf("%s answered last_seq %d and stored %s at seq %d with payload last_seq %d, and a read of the issue answers %d: want all four at %d, the sequence the write phase committed",
-					move.name, response.LastSeq, move.eventType, event.seq, event.payloadLastSeq, detail.LastSeq, event.seq)
-			}
-		})
+		staleAnchorQuote(t, f.database, anchored.ID)
+		before := readIssueDetail(t, f.handler, f.issue)
+		patched := dispatchRequest(t, f.handler, http.MethodPatch, "/api/v1/issues/"+f.issue, map[string]any{
+			"status": move.status,
+		}, "alice")
+		if patched.Code != http.StatusOK {
+			t.Fatalf("%s: status=%d body=%s", move.name, patched.Code, patched.Body.String())
+		}
+		response := decodeBody[model.Issue](t, patched)
+		event := latestIssueEvent(t, f.database, f.issue, move.eventType)
+		if refreshes := anchorRefreshesWithin(t, f.database, f.issue, before.LastSeq, event.seq); refreshes != 1 {
+			t.Fatalf("%s appended %d comment.anchor_refreshed events of its own, want 1: the stale quote no longer makes the asks' document write queue one",
+				move.name, refreshes)
+		}
+		detail := readIssueDetail(t, f.handler, f.issue)
+		if response.LastSeq != event.seq || event.payloadLastSeq != event.seq || detail.LastSeq != event.seq {
+			t.Fatalf("%s answered last_seq %d and stored %s at seq %d with payload last_seq %d, and a read of the issue answers %d: want all four at %d, the sequence the write phase committed",
+				move.name, response.LastSeq, move.eventType, event.seq, event.payloadLastSeq, detail.LastSeq, event.seq)
+		}
 	}
 }
 

@@ -80,7 +80,21 @@ type BlockIndexing struct {
 // PlanBlocks plans version's block index of artifactID against index, what the document's block
 // index holds: one ReadBlockIndex read, or the Held of the caller's own earlier indexing of the
 // document that is not written yet. It does the indexing's whole work - each block's text sum, its
-// excerpt, the links its mentions and its pointers write - and reads nothing.
+// excerpt, the links its mentions and its pointers write - and reads nothing. A version writer
+// plans the indexing in its read phase and queues it in its write phase (docs.indexDocument).
+//
+// The plan makes the version's blocks graph nodes, and each mention written inside a block an edge
+// out of the innermost block holding its start. blocks are the version's rendered blocks in
+// document order, each parent before its children, and the first holder of a repeated id is the
+// node; located must be text.ExtractAt(markdown, …). A block whose id is longer than
+// text.MaxBlockIDBytes, which no key of the index can hold, is no node: a mention inside it starts
+// at the innermost node holding it, if any, and the plan logs a warning naming the document, the
+// longest such id's length and the bound.
+//
+// A block whose text (markdown[From:To]) is unchanged keeps the version its text last changed in;
+// a new, changed or restored block takes this version, dated versionAt, and its excerpt is its
+// text cut to BlockExcerptRunes, the excerpt a document's mention has shown since migration 0092.
+// A block the version no longer holds is deleted.
 //
 // pointers are the version's `block[]` values (pmdoc.BlockPointers, which lists none of a typed
 // block repeating the id of a typed block before it): each whose block is a node is an edge of its
@@ -163,16 +177,18 @@ func PlanBlocks(
 }
 
 // Moved is the targets of the links the indexing inserts or deletes, and of those whose block
-// types it changes, whose counts move, and of the links it writes in a block whose text it
-// changes, whose excerpts move.
+// types it changes, whose counts move - a node is counted once for each block citing it - and of
+// the links it writes in a block whose text it changes, whose excerpts move, a link's excerpt
+// being the text of the block holding it.
 func (b BlockIndexing) Moved() []Target {
 	return b.moved
 }
 
 // Cited is, of the blocks the indexing changes, restores or deletes (textIDs), each that a source
-// cites (citedBlocks), as q holds them before the indexing is written: a block whose citing link
-// the indexing itself inserts or deletes is among Moved already, so the read names the same
-// targets the written index would.
+// cites (citedBlocks), as q holds them before the indexing is written: such a block's text is what
+// every link to it and its own Referenced by panel show, so the version moved what they show. A
+// block whose citing link the indexing itself inserts or deletes is among Moved already, so the
+// read names the same targets the written index would.
 func (b BlockIndexing) Cited(ctx context.Context, q Queryer) ([]Target, error) {
 	return citedBlocks(ctx, q, b.artifactID, b.textIDs)
 }
@@ -182,9 +198,18 @@ func (b BlockIndexing) Held() BlockIndex {
 	return b.held
 }
 
-// Queue queues the indexing's writes on a write phase's batch: the blocks the version deleted and
-// changed, their texts, the links its blocks hold, and the version recorded as indexed and as the
-// one the blocks stand at.
+// Queue queues the indexing's writes on a write phase's batch, which its caller runs in the
+// transaction holding the document's owner lock: the blocks the version deleted, which
+// document_blocks loses, and the blocks it changed, with their excerpts; the text each of those
+// blocks has at this version, recorded in document_block_texts, a deleted block's as no text,
+// after which the edges at it stop resolving until a version holds its id again; the links its
+// blocks hold; and the version recorded as indexed (document_indexed_versions) and as the version
+// the document's blocks stand at (document_block_versions).
+//
+// A pair (block, target) that survives keeps its created version, time and source event. A new
+// pair takes this version and versionAt, and the source event Stamp gives it. On the document's
+// first indexing (no block rows yet), a new pair dates instead from the document's own refs row
+// for that target, when one exists.
 func (b BlockIndexing) Queue(batch *store.WriteBatch) {
 	artifactID, version := b.artifactID, b.version
 	if len(b.deleted) > 0 {
@@ -412,8 +437,8 @@ func (b BlockIndexing) queueBlockRefs(batch *store.WriteBatch) {
 	if len(pairs) == 0 {
 		return
 	}
-	// A surviving pair keeps its dates and source event and takes this version's to_types, so a
-	// change of an attribute's targets reaches it here; PlanBlocks named the targets it moves.
+	// A surviving pair takes this version's to_types, so a change of an attribute's targets
+	// reaches it here; PlanBlocks named the targets it moves.
 	batch.Queue(fmt.Sprintf("record the block mentions of version %d of %s", b.version, b.artifactID), `
 		insert into block_refs (artifact_id, block_id, from_node, to_kind, to_id, kind, to_types, created_version, created_at, source_seq)
 		select $1::uuid, p.block_id, a.ref_key || '#' || p.block_id, p.to_kind, p.to_id, p.kind, string_to_array(p.to_types, ' '), $6,
