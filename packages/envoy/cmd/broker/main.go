@@ -40,13 +40,13 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/proof"
-	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 	"github.com/sjawhar/envoy/internal/broker/reread"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/wake"
 	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/ratelimit"
 	"github.com/sjawhar/envoy/internal/redact"
 )
 
@@ -222,9 +222,15 @@ func main() {
 	}
 	slog.Info("secret store", "store", cfg.SecretsStore, "credentials", credentials)
 	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: serviceNames(cfg)}
+	// One key source per issuer, read by everything that needs that issuer's keys: the verifiers
+	// discoverVerifiers builds and, for the cluster's issuer, the RFC 8693 exchange below, which
+	// resolves a subject token's own key through the same *oidc.Keys. So the boot makes one
+	// discovery read for the cluster rather than two, one set is held in memory, and a rotation
+	// becomes visible to both at the same moment.
+	//
 	// Discovery is bounded: an issuer that accepts the connection and never answers refuses the
 	// boot instead of hanging it with no health endpoint serving.
-	pod, vm, err := discoverVerifiers(ctx, cfg, oidc.Discover)
+	pod, vm, k8sKeys, err := discoverVerifiers(ctx, cfg, issuerKeys)
 	fatal(err)
 
 	// The context the work that has to outlive the drain runs on: the five-minute policy reload
@@ -424,12 +430,15 @@ func main() {
 	fatal(err)
 	exchangeConfig := oauth.ExchangeConfig{Policy: exchangePolicy}
 	if cfg.ExchangeK8sAudience != "" {
-		keys, err := exchangeKeys(serving, cfg.K8sOIDCIssuer)
-		fatal(err)
-		exchangeConfig.Kubernetes = oauth.IssuerConfig{Issuer: cfg.K8sOIDCIssuer, Audience: cfg.ExchangeK8sAudience, Keys: keys}
+		// The key source the account verifier already reads: a subject token is the same
+		// cluster's projected token, for an audience of its own (BROKER_EXCHANGE_K8S_AUDIENCE),
+		// and BROKER_EXCHANGE_K8S_AUDIENCE needs BROKER_K8S_OIDC_ISSUER, so this is never nil.
+		exchangeConfig.Kubernetes = oauth.IssuerConfig{Issuer: cfg.K8sOIDCIssuer, Audience: cfg.ExchangeK8sAudience, Keys: k8sKeys}
 	}
 	if cfg.ExchangeGitHubIssuer != "" {
-		keys, err := exchangeKeys(serving, cfg.ExchangeGitHubIssuer)
+		// The GitHub issuer has no second reader, so it keeps a key source of its own, read here
+		// rather than at the boot's start: nothing before the bind needs it.
+		keys, err := issuerKeys(serving, cfg.ExchangeGitHubIssuer)
 		fatal(err)
 		exchangeConfig.GitHub = oauth.IssuerConfig{Issuer: cfg.ExchangeGitHubIssuer, Audience: cfg.ExchangeGitHubAudience, Keys: keys}
 	}
@@ -713,42 +722,47 @@ func serviceNames(cfg config.Config) []string {
 	return slices.Compact(names)
 }
 
-// discoverFunc is oidc.Discover's shape, a seam for a test that must not reach a real issuer.
-type discoverFunc func(ctx context.Context, issuer, audience string, timeout time.Duration) (*oidc.Verifier, error)
+// keysFunc is issuerKeys' shape, a seam for a test that must not reach a real issuer.
+type keysFunc func(ctx context.Context, issuer string) (*oidc.Keys, error)
 
-// discoverVerifiers discovers the token issuers the broker trusts, each under
-// oidc.DiscoveryTimeout: the cluster's (BROKER_K8S_OIDC_ISSUER and BROKER_K8S_OIDC_AUDIENCE), one
-// verifier for both a pod's enrollment token and a service's login token, which are the same
-// cluster's projected tokens for the same audience; and Google's (config.GoogleOIDCIssuer), for a
-// VM's identity token, only when BROKER_GOOGLE_OIDC_AUDIENCE is set, logging one line that names
-// the issuer, the audience and the VM services. With no Google audience it reads and logs nothing
+// discoverVerifiers reads the key sets of the token issuers the broker trusts (keysFor, issuerKeys
+// in production) and builds a verifier on each: the cluster's (BROKER_K8S_OIDC_ISSUER and
+// BROKER_K8S_OIDC_AUDIENCE), one verifier for both a pod's enrollment token and a service's login
+// token, which are the same cluster's projected tokens for the same audience, whose key set it
+// also answers for the RFC 8693 exchange; and Google's (config.GoogleOIDCIssuer), for a VM's
+// identity token, only when BROKER_GOOGLE_OIDC_AUDIENCE is set, logging one line that names the
+// issuer, the audience and the VM services. With no Google audience it reads and logs nothing
 // about Google, and answers a nil VM verifier, so the broker enrolls no VM and serves no VM login.
-func discoverVerifiers(ctx context.Context, cfg config.Config, discover discoverFunc) (enroll.PodVerifier, enroll.VMVerifier, error) {
+func discoverVerifiers(ctx context.Context, cfg config.Config, keysFor keysFunc) (enroll.PodVerifier, enroll.VMVerifier, *oidc.Keys, error) {
 	var pod enroll.PodVerifier
-	cluster, err := discover(ctx, cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience, oidc.DiscoveryTimeout)
-	if err != nil {
-		return nil, nil, err
-	}
-	if cluster != nil {
-		pod = enroll.K8sPodVerifier{Verifier: cluster}
+	var k8sKeys *oidc.Keys
+	if cfg.K8sOIDCIssuer != "" {
+		var err error
+		if k8sKeys, err = keysFor(ctx, cfg.K8sOIDCIssuer); err != nil {
+			return nil, nil, nil, err
+		}
+		pod = enroll.K8sPodVerifier{Verifier: oidc.NewWithKeys(cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience, k8sKeys)}
 	}
 	if cfg.GoogleOIDCAudience == "" {
-		return pod, nil, nil
+		return pod, nil, k8sKeys, nil
 	}
-	google, err := discover(ctx, config.GoogleOIDCIssuer, cfg.GoogleOIDCAudience, oidc.DiscoveryTimeout)
+	googleKeys, err := keysFor(ctx, config.GoogleOIDCIssuer)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	services := slices.Sorted(maps.Values(cfg.VMServicesByAccount))
 	slog.Info("google vm identity", "issuer", config.GoogleOIDCIssuer, "audience", cfg.GoogleOIDCAudience, "services", strings.Join(slices.Compact(services), ","))
-	return pod, enroll.GoogleVMVerifier{Verifier: google}, nil
+	return pod, enroll.GoogleVMVerifier{Verifier: oidc.NewWithKeys(config.GoogleOIDCIssuer, cfg.GoogleOIDCAudience, googleKeys)}, k8sKeys, nil
 }
 
-// exchangeKeys reads issuer's published signing keys, the source the RFC 8693 exchange resolves a
-// subject token's own key against. It takes the same boot deadline discovery does: an issuer that
-// accepts the connection and never answers refuses the boot rather than hanging it with no health
-// endpoint serving. No key is fetched here; the first subject token reads the set.
-func exchangeKeys(ctx context.Context, issuer string) (*oidc.Keys, error) {
+// issuerKeys reads issuer's published signing keys: the source a token's own key is resolved
+// against, both for the verifier that answers whether a token verifies (a projected
+// service-account token, or a Google VM's identity token) and for the RFC 8693 exchange, which
+// needs the key itself. It takes the same boot deadline
+// discovery does: an issuer that accepts the connection and never answers refuses the boot rather
+// than hanging it with no health endpoint serving. No key is fetched here; the first token read
+// reads the set.
+func issuerKeys(ctx context.Context, issuer string) (*oidc.Keys, error) {
 	discovery, cancel := context.WithTimeout(ctx, oidc.DiscoveryTimeout)
 	defer cancel()
 	return oidc.NewKeys(discovery, issuer)

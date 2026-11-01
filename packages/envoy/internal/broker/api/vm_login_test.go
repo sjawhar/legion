@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/api"
+	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
@@ -34,14 +35,16 @@ const (
 	strangerAccount = "example-stranger@example-project.iam.gserviceaccount.com"
 )
 
-// vmServer is a testServer that also trusts the VM issuer, with the issuer and its key, and the
+// vmServer is a testServer that also trusts the VM issuer, with the issuer and its key, the
 // broker's live BROKER_VM_PROJECTS and BROKER_VM_INSTANCES, which a test edits to narrow the fleet
-// as an operator changing them and redeploying does.
+// as an operator changing them and redeploying does, and its enrollment service, whose verifiers a
+// test may remove.
 type vmServer struct {
 	*testServer
 	vmIssuer            *oidctest.Issuer
 	vmKey               *oidctest.Key
 	projects, instances map[string]string
+	enrollment          *enroll.Service
 }
 
 // newVMTestServer is newTestServer as cmd/broker/main.go wires it with BROKER_GOOGLE_OIDC_AUDIENCE
@@ -56,6 +59,7 @@ func newVMTestServer(t *testing.T) *vmServer {
 		t.Fatalf("oidc.New(the VM issuer): %v", err)
 	}
 	var projects, instances map[string]string
+	var enrollment *enroll.Service
 	ts := newTestServerWith(t, func(d *api.Deps) {
 		local := d.Machine.Secrets.(secrets.AWS).Client.(*secrets.Local)
 		local.Put(policytest.Secret("FLEET_KEY", fleetService, policy.TierAgent, "fleet-v1"))
@@ -66,9 +70,9 @@ func newVMTestServer(t *testing.T) *vmServer {
 		d.Enroll.VMProjects = map[string]string{fleetAccount: fleetProject}
 		d.Enroll.VMInstancePatterns = map[string]string{fleetAccount: fleetInstances}
 		d.Machine.VMServicesByAccount, d.Machine.VMProjects, d.Machine.VMInstancePatterns = d.Enroll.VMServicesByAccount, d.Enroll.VMProjects, d.Enroll.VMInstancePatterns
-		projects, instances = d.Enroll.VMProjects, d.Enroll.VMInstancePatterns
+		projects, instances, enrollment = d.Enroll.VMProjects, d.Enroll.VMInstancePatterns, d.Enroll
 	})
-	return &vmServer{testServer: ts, vmIssuer: issuer, vmKey: key, projects: projects, instances: instances}
+	return &vmServer{testServer: ts, vmIssuer: issuer, vmKey: key, projects: projects, instances: instances, enrollment: enrollment}
 }
 
 // fleetVM is one VM: an account, project, zone, instance name and id. Its token is the one its
@@ -668,6 +672,30 @@ func TestACopiedTokenNeitherEndsNorTakesOverALiveVM(t *testing.T) {
 	}
 	if status, body := ts.askAs(t, copierSession, copierEnrollment, "FLEET_KEY"); status != http.StatusUnauthorized {
 		t.Fatalf("the copier asking once the VM is out of the fleet = %d %s, want 401", status, body)
+	}
+}
+
+// TestAVMTokenAuthenticatesNoDaemonRoute: the routes a deployment's daemon calls with its own
+// ServiceAccount token (serviceAuth: POST /v1/oauth/exchange/pod-sessions) take a Kubernetes
+// ServiceAccount token alone. A fleet VM's identity token, which logs that VM in as its service at
+// the token-login route, is refused there as another issuer's token, 401 ACCOUNT_TOKEN_INVALID;
+// and on a broker that trusts Google's issuer but no cluster's, the class authenticates no one,
+// 401 ACCOUNT_TOKENS_OFF, rather than reaching a handler that needs the cluster's verifier.
+func TestAVMTokenAuthenticatesNoDaemonRoute(t *testing.T) {
+	ts := newVMTestServer(t)
+	vm := member("example-zone-a", "1001")
+	if status, body := ts.vmLogin(t, vm, ts.current(t, vm), newSigningKey(t)); status != http.StatusOK {
+		t.Fatalf("the VM's token login = %d %s, want 200", status, body)
+	}
+	podToken := ts.accountToken(t, brokertest.ExchangeAccount, "pod-uid-registrar", time.Hour)
+	status, body := ts.registerPodSession(t, ts.current(t, vm), podToken, "example-session")
+	if status != http.StatusUnauthorized || decode[wireError](t, body).Code != "ACCOUNT_TOKEN_INVALID" {
+		t.Fatalf("a VM's token registering a pod session = %d %s, want 401 ACCOUNT_TOKEN_INVALID", status, body)
+	}
+	ts.enrollment.Pod = nil
+	status, body = ts.registerPodSession(t, ts.current(t, vm), podToken, "example-session")
+	if status != http.StatusUnauthorized || decode[wireError](t, body).Code != "ACCOUNT_TOKENS_OFF" {
+		t.Fatalf("a VM's token registering a pod session on a broker with no cluster issuer = %d %s, want 401 ACCOUNT_TOKENS_OFF", status, body)
 	}
 }
 

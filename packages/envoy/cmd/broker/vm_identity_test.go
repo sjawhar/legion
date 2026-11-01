@@ -7,6 +7,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"log/slog"
 	"maps"
 	"os"
@@ -14,7 +16,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
@@ -54,17 +55,27 @@ func vmConfig(t *testing.T, audience string) config.Config {
 	return cfg
 }
 
-// discovery is a discoverFunc that records each issuer and audience asked for and answers a
-// verifier for every configured pair, reading nothing, and nil for an unconfigured one, as
-// oidc.Discover does.
-type discovery struct{ asked [][2]string }
+// discovery is a keysFunc that records each issuer whose keys are asked for and answers a key
+// source of its own for each, reading nothing.
+type discovery struct {
+	asked []string
+	keys  map[string]*oidc.Keys
+}
 
-func (d *discovery) discover(_ context.Context, issuer, audience string, _ time.Duration) (*oidc.Verifier, error) {
-	d.asked = append(d.asked, [2]string{issuer, audience})
-	if issuer == "" {
-		return nil, nil
+func (d *discovery) keysFor(_ context.Context, issuer string) (*oidc.Keys, error) {
+	d.asked = append(d.asked, issuer)
+	if d.keys == nil {
+		d.keys = map[string]*oidc.Keys{}
 	}
-	return &oidc.Verifier{}, nil
+	d.keys[issuer] = &oidc.Keys{}
+	return d.keys[issuer], nil
+}
+
+// issuedBy is an unsigned token naming issuer, enough for oidc.Verifier.Issues, which reads the
+// claim without verifying anything.
+func issuedBy(issuer string) string {
+	payload, _ := json.Marshal(map[string]string{"iss": issuer})
+	return "e30." + base64.RawURLEncoding.EncodeToString(payload) + ".c2ln"
 }
 
 // captureLog sends slog's default logger to a buffer until t ends.
@@ -77,20 +88,25 @@ func captureLog(t *testing.T) *bytes.Buffer {
 	return &logged
 }
 
-// TestWithNoGoogleAudienceTheBrokerDiscoversOneIssuer: with no Google audience the broker
-// discovers the cluster's issuer alone, holds no VM verifier, and logs nothing about Google.
+// TestWithNoGoogleAudienceTheBrokerDiscoversOneIssuer: with no Google audience the broker reads
+// the cluster's key set alone, builds the pod verifier on it, answers that same key set for the
+// token exchange, holds no VM verifier, and logs nothing about Google.
 func TestWithNoGoogleAudienceTheBrokerDiscoversOneIssuer(t *testing.T) {
 	logged := captureLog(t)
 	d := &discovery{}
-	pod, vm, err := discoverVerifiers(context.Background(), vmConfig(t, ""), d.discover)
+	pod, vm, k8sKeys, err := discoverVerifiers(context.Background(), vmConfig(t, ""), d.keysFor)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := [][2]string{{"https://cluster.example", "example-broker-pod"}}; !slices.Equal(d.asked, want) {
-		t.Fatalf("discovered %v, want the cluster's issuer alone, %v", d.asked, want)
+	if want := []string{"https://cluster.example"}; !slices.Equal(d.asked, want) {
+		t.Fatalf("read the key sets of %v, want the cluster's issuer alone, %v", d.asked, want)
 	}
-	if pod == nil || vm != nil {
-		t.Fatalf("verifiers = pod %v, vm %v; want a pod verifier and no VM verifier", pod, vm)
+	cluster, ok := pod.(enroll.K8sPodVerifier)
+	if !ok || !cluster.Verifier.Issues(issuedBy("https://cluster.example")) || vm != nil {
+		t.Fatalf("verifiers = pod %#v, vm %v; want a pod verifier for the cluster's issuer and no VM verifier", pod, vm)
+	}
+	if k8sKeys == nil || k8sKeys != d.keys["https://cluster.example"] {
+		t.Fatalf("the exchange's key source = %p, want the cluster's own, %p", k8sKeys, d.keys["https://cluster.example"])
 	}
 	if strings.Contains(strings.ToLower(logged.String()), "google") {
 		t.Fatalf("log with no Google audience names Google:\n%s", logged)
@@ -98,21 +114,22 @@ func TestWithNoGoogleAudienceTheBrokerDiscoversOneIssuer(t *testing.T) {
 }
 
 // TestAGoogleAudienceDiscoversGooglesIssuer: with BROKER_GOOGLE_OIDC_AUDIENCE set the broker also
-// discovers config.GoogleOIDCIssuer for that audience, verifies VM tokens with it
-// (enroll.GoogleVMVerifier), and logs one line naming the issuer, the audience and the VM services.
+// reads config.GoogleOIDCIssuer's key set, verifies VM tokens on it (enroll.GoogleVMVerifier, for
+// that issuer and not the cluster's), and logs one line naming the issuer, the audience and the VM
+// services.
 func TestAGoogleAudienceDiscoversGooglesIssuer(t *testing.T) {
 	logged := captureLog(t)
 	d := &discovery{}
-	_, vm, err := discoverVerifiers(context.Background(), vmConfig(t, "example-vm-audience"), d.discover)
+	_, vm, _, err := discoverVerifiers(context.Background(), vmConfig(t, "example-vm-audience"), d.keysFor)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := [][2]string{{"https://cluster.example", "example-broker-pod"}, {config.GoogleOIDCIssuer, "example-vm-audience"}}
-	if !slices.Equal(d.asked, want) {
-		t.Fatalf("discovered %v, want %v", d.asked, want)
+	if want := []string{"https://cluster.example", config.GoogleOIDCIssuer}; !slices.Equal(d.asked, want) {
+		t.Fatalf("read the key sets of %v, want %v", d.asked, want)
 	}
-	if google, ok := vm.(enroll.GoogleVMVerifier); !ok || google.Verifier == nil {
-		t.Fatalf("VM verifier = %#v, want an enroll.GoogleVMVerifier", vm)
+	google, ok := vm.(enroll.GoogleVMVerifier)
+	if !ok || google.Verifier == nil || !google.Issues(issuedBy(config.GoogleOIDCIssuer)) || google.Issues(issuedBy("https://cluster.example")) {
+		t.Fatalf("VM verifier = %#v, want an enroll.GoogleVMVerifier for Google's issuer alone", vm)
 	}
 	lines := strings.Count(logged.String(), "google vm identity")
 	wantLine := `msg="google vm identity" issuer=https://accounts.google.com audience=example-vm-audience services=example-fleet`

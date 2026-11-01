@@ -78,6 +78,16 @@ func (s *Service) VerifyServiceToken(ctx context.Context, token string) (Service
 		}
 		return s.verifyVM(claims)
 	}
+	return s.VerifyKubernetesServiceToken(ctx, token)
+}
+
+// VerifyKubernetesServiceToken is VerifyServiceToken for a Kubernetes ServiceAccount's projected
+// token alone: the check a route whose callers are a deployment's daemons makes
+// (api's serviceAuth class, POST /v1/oauth/exchange/pod-sessions), since a Google VM of a fleet logs
+// in as a service but is no daemon and registers no pod. With no Kubernetes issuer it is
+// ErrTokenLoginsOff whatever else the broker trusts, and a VM's token is refused by the cluster's
+// verifier as any other issuer's token is (ErrTokenInvalid).
+func (s *Service) VerifyKubernetesServiceToken(ctx context.Context, token string) (ServiceAccount, error) {
 	if s.Enroll.Pod == nil {
 		return ServiceAccount{}, ErrTokenLoginsOff
 	}
