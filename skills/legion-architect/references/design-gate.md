@@ -47,27 +47,35 @@ When the gate is armed, run this exact sequence before the tree's work starts:
    [Approval](skill://dispatch-writing-specs/SKILL.md#approval) says;
    `dispatch request-approval` refuses while one is open. Each answer reaches you, since you follow
    every ask you open.
-3. Before every approval request, give two fresh reviewers the current root spec, the code and
-   command output it relies on, and the human's words: `task(agent="plan-gap-analyst")` finds its
-   gaps, and `task(agent="plan-reviewer")`, told the document is a spec, checks each factual claim
-   against the code, the docs or a read-only command it runs. Each runs as a job of its own, so
-   `wait` for its result and read what it found before you act on it. Resolve every finding in the
-   root spec. Check with a command each claim either reviewer marks unverified: fix it when it is
-   false, or take it out. Then run the two reviews in step 2 of `skill://following-best-practices`
-   on the same spec, and fix or record each of their findings as that skill says.
+3. Before every approval request, run these reviews in order. Give the gap and claim reviewers the
+   current root spec, the code and command output it relies on, and the human's words. Each review
+   runs as a job of its own, so `wait` for its result and read it before you act on it:
+
+   1. `task(agent="plan-gap-analyst")` finds gaps in the current root spec. Resolve every finding.
+   2. `task(agent="plan-reviewer")`, told the document is a spec, checks every factual claim against
+      the code, the docs or a read-only command. Resolve every finding; check each claim it marks
+      unverified, fixing it when false or taking it out.
+   3. Run the two reviews in step 2 of `skill://following-best-practices`. In each first-round
+      reviewer's first message, send only the problem; send the root spec only as that skill's
+      follow-up. Fix or record each finding in the spec's `### Best practice and world-class` entry
+      with the fact or cost that requires it.
+   4. Run `task(agent="plan-reviewer")` again on the final root spec, told it is a spec, so its
+      check 2 sees that entry with both final verdicts. It is final only once it approves; resolve
+      every finding and check or remove each factual claim it leaves unverified.
 4. Request approval only once the human has agreed to every point in the spec, because the human
    approves what they already agreed to and a point new in the request has no decision block for
    them to answer: give such a point its own decision block first, or take it out of the spec.
 
    ```bash
-   dispatch request-approval --issue <root issue> --summary '<what the human is approving> Reviews: <gap result>, <claim result>; <what they do not show>.'
+   dispatch request-approval --issue <root issue> --summary '<what the human is approving> Reviews: <gap result>, <claim result>, <best-practice verdict>, <world-class verdict>; <what they do not show>.'
    ```
 
    `--summary` says in one to three sentences what the human is approving and nothing else (no
-   commentary and no open question), then one sentence with both reviews' results and what they do
-   not show, for example `Reviews: no open gap, 14 of 14 claims verified; neither shows that the
-   design works once built.` The primary document is the default; the
-   command prints `Approval requested for spec.md (document id <UUID>) at version <N> (ask <id>)`.
+   commentary and no open question), then one sentence with the gap review, claim review,
+   best-practice verdict and world-class verdict, and what the reviews do not show, for example
+   `Reviews: no open gap, 14 of 14 claims verified, FOLLOWS BEST PRACTICE, WORLD-CLASS; none shows
+   that the design works once built.` The primary document is the default; the command prints
+   `Approval requested for spec.md (document id <UUID>) at version <N> (ask <id>)`.
 5. Register that document version with the daemon:
 
    ```ts
@@ -114,12 +122,14 @@ root waits on a question instead, the human's approval or changes request of the
 wait too, and the task says how the spec stands. Release no wave until a delivered wake shows
 `design-approved` on the root, or a task says its design gate is open: the daemon sends a root
 waiting on a person no `design-approved` notice, and "this resume is your design-approved wake" is
-that wake. On `design-changes-requested`: revise the spec as the human's reason asks, run step 3's
-two reviews on the new version, resolve every finding, request approval again and end your turn. A
-`design-changes-requested` may name a version below the latest, or arrive after another for the
-same version: it is a request the human made that reached the daemon late, and no approval came
-after it. Each request arrives once. The gate is as the newest review left it; still read the
-reason, and answer it in the spec if the latest version does not already.
+that wake. On `design-changes-requested`: revise the spec as the human's reason asks, run the
+complete step 3 review sequence on the new version — gap review, claim review, the best-practice
+and world-class reviews, then the final `plan-reviewer` review — resolve every finding, request
+approval again and end your turn. A `design-changes-requested` may name a version below the latest,
+or arrive after another for the same version: it is a request the human made that reached the
+daemon late, and no approval came after it. Each request arrives once. The gate is as the newest
+review left it; still read the reason, and answer it in the spec if the latest version does not
+already.
 
 ## After approval
 
@@ -142,7 +152,8 @@ to the version it writes. Once they have answered:
   daemon sent opens nothing new. Carry on, and release no wave because of it.
 - When the answer changes the Summary, the Acceptance or the tree's scope, rewrite that text and
   repeat steps 3 to 5 on the new version, with a one-sentence `--summary` naming what changed since
-  the earlier approval, then the reviews' sentence (the card shows that approval, `Approved at
+  the earlier approval, then the sentence with the four review results and what they do not show
+  (the card shows that approval, `Approved at
   version N on <date> by <who>.`, and its `Show diff` control carries the detail). The rewrite
   closes the gate until they approve;
   work the daemon started at the answer keeps running. Release no new wave until the `design-approved`

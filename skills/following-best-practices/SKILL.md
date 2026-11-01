@@ -1,6 +1,6 @@
 ---
 name: following-best-practices
-description: "Use before you choose a design, write options, or ask a person to approve a design, spec or plan."
+description: "Use before choosing a design, writing options, a spec or plan, or requesting approval."
 ---
 
 # Following best practices
@@ -21,13 +21,13 @@ Before you write a design, a recommendation or options, research and write down 
 Then:
 
 - Follow every best practice unless a fact of this case rules it out, and write that fact in the design. Less work, less money, no new credential, or a precedent here that does it another way is not such a fact.
-- Design the world-class answer. Fall short of it only for a strong reason, a fact of this case, and name each shortfall with its reason. Name a cost the person must accept as a cost, for them to decide.
+- Design the world-class answer. Fall short of it only when a fact of this case requires it, and name each shortfall with its reason. Name a cost the person must accept as a cost, for them to decide.
 - Settle a disputed fact with evidence: the documentation, the code or a probe. Ask the person only for a cost to accept or a choice of priority.
 - In a spec, open the `Design` part with a `### Best practice and world-class` entry: each best practice with its source and whether the design follows it, the world-class answer, and each place the design falls short with its reason. The approver then sees the comparison without asking for it.
 
 ## 2. Before each approval request
 
-Start two fresh subagents, one per brief. A fresh subagent starts with no history and gets only the text you send it. In each first message, give only the problem: what must work, for whom, the constraints and numbers, the person's own words, and the setup. Do not include the proposal's title, design, options, decisions, recommendation or conclusion: a reviewer that reads the design first tends to accept it. After each answers, send that same subagent the whole proposal, never a path, and ask it to compare. If your harness cannot message a finished subagent, give a second fresh subagent the proposal and the first one's answer. Where your harness offers a subagent on a different model family, use it for these reviews, because a reviewer on the author's model shares its blind spots.
+Start two fresh subagents, one per brief. A fresh subagent starts with no history and gets only the text you send it. In each first-round reviewer's first message, give only the problem: what must work, for whom, the constraints and numbers, the person's words that describe the problem, and the setup. Do not include the proposal's title, design, options, decisions, recommendation or conclusion, or a person's words that state a proposal: a reviewer that reads the design first tends to accept it. After it answers, send that same subagent the whole proposal, never a path, and ask it to compare. If your harness cannot message a finished subagent, give a second fresh subagent the first reviewer's answer and the whole proposal, and ask it only to make that comparison. Where your harness offers a subagent on a different model family, use it for these reviews, because a reviewer on the author's model shares its blind spots.
 
 Best practice:
 
