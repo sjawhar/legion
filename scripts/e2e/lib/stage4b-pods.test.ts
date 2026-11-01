@@ -230,6 +230,48 @@ describe("the pod shape, whole, on the pod the runtime builds under the operator
   });
 });
 
+// pod_account is the ServiceAccount every pod of a run must run as: the run's own under the
+// operator route, and the block's own under LEGION_E2E_POD_FILE, where shape_problems holds every
+// pod to it and the deployment-pod-block checkpoint builds the identity it expects
+// `kubectl auth whoami` to answer from it. A block naming no service_account, and one naming it
+// empty, both run their pods as the namespace's `default`: that is the rule
+// lib/deployment-pod-block-verdict.jq reads the same field by (`def account`) and the rule the
+// daemon reads an unset service_account by (serviceAccountOr, internal/runtime/sandbox/sandbox.go).
+// jq's `//` keeps an empty string, so a run that takes the field raw holds every pod of such a
+// deployment to a nameless account and fails the pod-shape checkpoint on a pod that is right.
+describe("the account a deployment's pod block names", () => {
+  // The script's own rule, run as the script runs it: on the block it copied into the run.
+  function accountOf(block: object): string {
+    const path = join(dir, `block-${++runs}.json`);
+    writeFileSync(path, JSON.stringify(block));
+    const result = Bun.spawnSync([
+      "bash",
+      "-c",
+      `set -Eeuo pipefail
+pod_block=${JSON.stringify(path)}
+${fn("block_account")}
+block_account`,
+    ]);
+    if (result.exitCode !== 0)
+      throw new Error(`block_account exited ${result.exitCode}: ${result.stderr}`);
+    return result.stdout.toString().trim();
+  }
+
+  test("a block naming an account runs its pods as that account", () => {
+    expect(accountOf({ service_account: "legion-infra-worker" })).toBe("legion-infra-worker");
+  });
+
+  test("a block naming no account runs its pods as the namespace's default", () => {
+    expect(accountOf({ env: {}, volumes: [], volume_mounts: [] })).toBe("default");
+  });
+
+  test("a block naming an empty account runs its pods as the namespace's default", () => {
+    expect(accountOf({ service_account: "", env: {}, volumes: [], volume_mounts: [] })).toBe(
+      "default"
+    );
+  });
+});
+
 describe("the pod shape's --connect rule", () => {
   test("a pod whose launcher dials advertise_host at the worker stream port passes it", () => {
     expect(connectProblems(pod())).toEqual([]);
