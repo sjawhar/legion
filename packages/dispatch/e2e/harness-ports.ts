@@ -119,6 +119,24 @@ export interface HarnessPort {
   readonly variable: string;
 }
 
+/** `env` with `listener`'s port unset under every name a child this process starts would read it
+ *  under: the plain variable and the one this process's lane carries it under. A spec that starts
+ *  a second listener of its own wants the OS to choose its port (`e2e/fake-envoy.e2e.ts`,
+ *  `e2e/plain-http-proxy.e2e.ts`), and in a lane's run both names are set, so dropping the plain
+ *  one alone would still hand the child the port the harness listener holds, and it would die on
+ *  `EADDRINUSE` before it printed its listening line. The child keeps `TEST_PARALLEL_INDEX`, so
+ *  the lane it resolves is the one cleared here. */
+export function withoutHarnessPort(
+  listener: HarnessListenerKey,
+  env: NodeJS.ProcessEnv = process.env
+): NodeJS.ProcessEnv {
+  const variable = harnessVariables[listener];
+  const rest = { ...env };
+  delete rest[variable];
+  delete rest[laneVariable(laneIndex(env), variable)];
+  return rest;
+}
+
 function harnessPort(env: NodeJS.ProcessEnv, variable: string): HarnessPort {
   const given = laneValue(env, variable) ?? "";
   if (given === "") return { port: 0, variable };

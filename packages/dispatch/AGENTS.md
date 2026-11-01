@@ -1632,7 +1632,12 @@ It resolves the lane too: `workerCount` reads `DISPATCH_E2E_WORKERS`,
 lane's name with the plain name as its fallback, which is how `harnessPorts()`
 reads a port and `e2e/psql.ts` its database. `refuseLaneConflicts` holds the
 refusals a run of more than one lane makes, so the message names the variable
-and says which thing one lane owns.
+and says which thing one lane owns. `withoutHarnessPort` is the other side of
+that lookup: a spec that starts a second listener of its own and wants the OS to
+choose its port (`e2e/fake-envoy.e2e.ts`, `e2e/plain-http-proxy.e2e.ts`) must
+clear the port under both names, since dropping the plain one alone still leaves
+the lane's own, and the child would die on `EADDRINUSE` before it printed its
+listening line.
 
 `e2e/harness-start.ts` is the harness's one starter. It starts the rows of
 `e2e/harness-listeners.ts` a run needs, in the table's order — the fakes, then the server (its

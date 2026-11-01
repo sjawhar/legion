@@ -9,6 +9,7 @@ import {
   laneValue,
   laneVariable,
   refuseLaneConflicts,
+  withoutHarnessPort,
   workerCount,
 } from "../harness-ports";
 
@@ -52,6 +53,27 @@ test("a worker reads its own lane's variable, and the plain name when its lane s
   const lane0 = { ...env, DISPATCH_E2E_LANE_0_FAKE_ENVOY_PORT: "9102", TEST_PARALLEL_INDEX: "" };
   expect(laneValue(lane0, "FAKE_ENVOY_PORT")).toBe("9102");
   expect(laneValue(asLane(1, lane0), "FAKE_ENVOY_PORT")).toBe("9101");
+});
+
+test("a spec that starts a listener of its own clears the port under both of its names", () => {
+  const env = {
+    DISPATCH_E2E_LANE_1_FAKE_ENVOY_PORT: "9101",
+    DISPATCH_E2E_LANE_1_PLAIN_HTTP_PORT: "9301",
+    DISPATCH_E2E_LANES: "2",
+    FAKE_ENVOY_PORT: "9100",
+    PLAIN_HTTP_PORT: "9300",
+    TEST_PARALLEL_INDEX: "1",
+  };
+  // Both names gone, so the child binds port 0 rather than the port the harness listener holds,
+  // and the other listeners' ports reach it untouched.
+  const cleared = withoutHarnessPort("fakeEnvoy", env);
+  expect(harnessPorts(cleared).fakeEnvoy.port).toBe(0);
+  expect(harnessPorts(cleared).plainHttp.port).toBe(9301);
+  expect(cleared.TEST_PARALLEL_INDEX).toBe("1");
+  // A one-lane run names the port once, under the plain name, and lane 0 is what a process with
+  // no index resolves.
+  const one = { FAKE_ENVOY_PORT: "9100" };
+  expect(harnessPorts(withoutHarnessPort("fakeEnvoy", one)).fakeEnvoy.port).toBe(0);
 });
 
 test("harnessPorts resolves the lane's ports and keeps both of its refusals", () => {
