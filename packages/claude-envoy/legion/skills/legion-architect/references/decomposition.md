@@ -42,7 +42,8 @@ EOF
   child list, each child's title and whole spec. Its mandate: *"You did not write this list. Argue
   that each child should not exist. Name every child that is a to-do, a fix found in review, a
   proof of the root's acceptance, or a part of the architect's own work, and say where it folds:
-  the root's pull request or an open child's."* A child survives only when it cannot ride in the
+  the root's pull request or an open child's."* `wait` for its verdict, since it runs as a job of
+  its own. A child survives only when it cannot ride in the
   root's pull request or an open child's: its code is in a repository no open pull request of this
   tree is in, or it is its own deploy: it must be applied on its own before other work of the tree
   can build on it.
@@ -55,7 +56,8 @@ EOF
   who wrote the list reads every child on it as needed, and the comment stops a later session
   filing the same children again.
 - Then paste each survivor's whole spec into a fresh `task(agent="plan-gap-analyst")` to check it
-  against `skill://dispatch-writing-specs`, and fix what it flags: your own reread misses the terms
+  against `skill://dispatch-writing-specs`, `wait` for its result, and fix what it flags: your own
+  reread misses the terms
   and item numbers you already know. File only the survivors, and reply under the verdict comment
   with each one's key.
 - Before `release_children`, check that every child you filed is named under a verdict comment,
