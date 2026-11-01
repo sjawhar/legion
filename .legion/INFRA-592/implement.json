@@ -1,65 +1,65 @@
 {
-  "schemaVersion": 1,
-  "phase": "implement",
-  "issue": "INFRA-592",
-  "completed": "2026-11-01T06:57:14Z",
-  "proof": [
-    {
-      "criterion": "A queued write whose client hangs up is logged 499 and gives its queue slot up at once (architect round 13, item 1)",
-      "surface": "go test against a real Postgres 16 (UTF-8), -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB, a real httptest.Server connection",
-      "command": "go test -run 'TestAQueuedWriteWhoseClientHangsUpIsLoggedClientGone$' ./internal/dispatch/api/ (the tester's red test 0e2b3ea9, unmodified)",
-      "observed": "passes; request_bounds_test.go differs from 0e2b3ea9 only by the new TestAWriteWhoseBodyOutlastsItsWaitIsAdmittedAfterIt",
-      "headSha": "b7312fc12916d748b53d8ecaffa2d27bf557e711",
-      "negativeControl": "At 1176657a: 'the queued write whose client hung up left the queue 10.009456118s later and logged: ... status=429 elapsed_ms=10000 ... want status=499'"
-    },
-    {
-      "criterion": "A write waits for admission once, in arrival order: a parked write resumes ahead of later arrivals and its total queue wait is bounded once (item 2)",
-      "surface": "go test against a real Postgres 16 (UTF-8), -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB",
-      "command": "go test -run 'TestAnEarlierArrivalIsQueuedAheadOfLaterOnesAlreadyWaiting|TestAResumedTicketIsGrantedAheadOfLaterArrivals|TestAQueuedThenParkedRequestWaitsOnceOverAll' ./internal/dispatch/admission/; CGO_ENABLED=1 go test -race -count=1 -timeout 20m ./internal/dispatch/admission/; go test -run TestAWriteWhoseBodyOutlastsItsWaitIsAdmittedAfterIt ./internal/dispatch/api/",
-      "observed": "all pass; admission -race ok",
-      "headSha": "b7312fc12916d748b53d8ecaffa2d27bf557e711",
-      "negativeControl": "With the old queue (PushBack, sequence at queue time, a full wait per ask): 'a queued request was never answered', 'the parked ticket never resumed', 'the parked write waited 1.00127111s more after 600ms in the queue, want no more than the 400ms left of its 1s wait'"
-    },
-    {
-      "criterion": "10x write refusal latency remeasured on the tester's pair shape (item 2)",
-      "surface": "INFRA-589's 2-core load reproduction, fresh stack seeded by base main 072a7d34, adjacent base/head 10x pairs on pod 5be9ec7a-cae5-48b9-98ff-2df107a9930c, nothing else of the implementer's running",
-      "command": "run-step.sh r13-{base,head}-10x-{a,b} --events 40 --sessions 1000 --requests 600 (/legion/scratch/tmp/infra-592/pairs13.sh)",
-      "observed": "head: write refusals 6,064 and 6,083, all 429 OVERLOADED, p50 1,032 ms, p90 1,090-1,091, p99 1,204-1,209, max 3,009-3,579; read refusal p99 175-178 ms; 0 connection failures; 6.01-6.12 events/s committed. Base (main): 1.49-1.52 events/s, about 30,000 write timeouts. Written in the PR body's risk line. Artifacts infra-592-implementer-r13-r13-*-tar-gz. Sampled memory peak 10.58 GiB of 19 (1,187 samples)",
-      "headSha": "b7312fc12916d748b53d8ecaffa2d27bf557e711",
-      "negativeControl": "The tester's round 12 at 1176657a: write refusal p99 2,126-2,157 ms, max 5,283-5,791 ms"
-    },
-    {
-      "criterion": "editArtifact publishes before it releases its writer gate, pinned by a test",
-      "surface": "go test against a real Postgres 16 (UTF-8), -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB",
-      "command": "go test -run 'TestAnEditHoldsItsDocumentsGateUntilItsEventsArePublished$' ./internal/dispatch/api/",
-      "observed": "passes",
-      "headSha": "b7312fc12916d748b53d8ecaffa2d27bf557e711",
-      "negativeControl": "With release() and s.publish swapped: 'a second writer of the document answered 200 while the first edit's events were still unpublished'"
-    },
-    {
-      "criterion": "The suites pass at the head, after the forward merge of main 072a7d34",
-      "surface": "go test against a real Postgres 16 (UTF-8), -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB",
-      "command": "go test ./internal/dispatch/api/ ./internal/dispatch/admission/ ./cmd/dispatch/ ./internal/dispatch/docs/ ./internal/dispatch/store/ ./internal/dispatch/routes/ ./loadtest/; check-ci-filters.sh; infra gcp ConnectionsPer; semantic-line-breaks on packages/envoy/AGENTS.md",
-      "observed": "api: every test but TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (collation); admission, cmd/dispatch, docs (1272 s), store, routes, loadtest ok; filters 28 gates; 89 connections; layout ok; the merged route table holds main's routes exactly",
-      "headSha": "b7312fc12916d748b53d8ecaffa2d27bf557e711",
-      "negativeControl": "Before the merge resolution the PR conflicted with main in seven files"
-    }
-  ],
-  "filesChanged": [
-    "packages/envoy/internal/dispatch/admission/admission.go and tests",
-    "packages/envoy/internal/dispatch/api/{server,body_drain,request_keys,project_scope}.go and tests",
-    "packages/envoy/AGENTS.md",
-    "packages/envoy/cmd/dispatch/README.md",
-    "packages/envoy/.changes/unreleased/INFRA-592-{admission,request-body-and-answer-bounds}.yaml",
-    "merge: routes_table.go, server.go, server_test.go, storable_text.go, suggestion_outcomes.go, docs/service.go, AGENTS.md"
-  ],
-  "trickyParts": [
-    "The body is read before admission only when there is no room and the client did not ask to continue; an admitted write still parks while its body arrives, and its resume returns to its arrival place within its one wait",
-    "The merge with main was resolved by a worker in a session the pod restart ended; it came back through legion/INFRA-592-rescue(-jj); its build, the route set against main and the suites were checked here"
-  ],
-  "deviations": [
-    "Leftover check after the runs (ps -eo pid,args | grep -E 'memory.usage_in_bytes|sleep 2|go test|run-step|loadgen|pairs13'): it listed nothing",
-    "Main's #2549, #2599, #2609 landed after the merge; they merge cleanly (git merge-tree) and add no api call sites, so they are not taken this round"
-  ],
-  "openQuestions": []
+ "schemaVersion": 1,
+ "phase": "implement",
+ "issue": "INFRA-592",
+ "previousHandoff": "105903a37f94a2c024afbeae8fa88715aa8a2d18",
+ "proof": [
+  {
+   "criterion": "The tester's round-13 failure: TestIdenticalViewsShareOneRecompute no longer recomputes one view twice",
+   "surface": "go test against a real Postgres 16 (UTF-8, DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:25433/postgres), TMPDIR=/legion/scratch/tmp GOMAXPROCS=4 GOMEMLIMIT=12GiB, on pod 5be9ec7a-cae5-48b9-98ff-2df107a9930c",
+   "command": "go test -p 1 -count=200 -run '^TestIdenticalViewsShareOneRecompute$' ./internal/dispatch/api/; CGO_ENABLED=1 go test -race -p 1 -count=100 -run '^TestIdenticalViewsShareOneRecompute$' ./internal/dispatch/api/; go test -p 1 -count=1 -run 'Hub|Live|Delivery|Reconnect|Recompute' ./internal/dispatch/api/",
+   "observed": "0 failures in 200 runs and 0 in 100 under -race (no DATA RACE); the hub/live/delivery tests pass. Cause, read with the hub's notes printed on failure: a change the hub caught up between a view's recompute marking it computing and the read recording its change position marked the view dirty against readingSeq 0, so a second recompute ran; the hub now holds such a change (startingSeq) until the read records its position, and marks the view only if the change lies past it (commit 6c4847f0).",
+   "headSha": "a1581b1b858b285217eba59c7e0379c38c896cef",
+   "negativeControl": "Before the fix, at b7312fc1, 8 of 100 runs failed ('recomputes for two identical views = 2, want 1'); main 072a7d34 0 of 100."
+  },
+  {
+   "criterion": "The tester's real-process regression test for INFRA-644's defect: a REST edit whose client leaves mid-transaction leaves its room open, and one that leaves mid-COMMIT is committed",
+   "surface": "go test against a real Postgres 16 (UTF-8, DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:25433/postgres), TMPDIR=/legion/scratch/tmp GOMAXPROCS=4 GOMEMLIMIT=12GiB, on pod 5be9ec7a-cae5-48b9-98ff-2df107a9930c",
+   "command": "go test -p 1 -count=1 -run 'TestARestEditWhoseClientLeavesMidTransactionLeavesItsRoomOpen' ./cmd/dispatch/",
+   "observed": "PASS for both subtests (during the commit, during a statement before the commit); the edit's text is read back after the client left mid-COMMIT (commit 08719730).",
+   "headSha": "a1581b1b858b285217eba59c7e0379c38c896cef",
+   "negativeControl": "On main the same test fails: Dispatch logs 'failed document room' and the editor's socket is closed (the tester's round-13 artifact room-base.log)."
+  },
+  {
+   "criterion": "10x on the 2-core reproduction after the forward merge of main's #2391: excess refused with 429, no collapse",
+   "surface": "INFRA-589's load reproduction (packages/envoy/loadtest), stack on ports 11250-11257, fresh seed by base main afaec766, two adjacent base/head pairs on pod 5be9ec7a-cae5-48b9-98ff-2df107a9930c with nothing else of mine running",
+   "command": "LOADTEST_SRC=<base|head> bash loadtest/run-step.sh r14-{base,head}-10x-{a,b} --events 40 --sessions 1000 --requests 600",
+   "observed": "Head a1581b1b (clean): every refusal 429 OVERLOADED, 0 connection failures, 5.66 / 5.87 events/s committed, 11,704 / 12,243 reads served (65-68/s), write refusal p99 1,239 / 1,197 ms (max 4,690 / 2,570), read refusal p99 242 / 215 ms. Memory peak 11.20 GiB of 19. Runs: dispatch://INFRA-592/artifact/infra-592-implementer-r14-r14-head-10x-a-tar-gz, dispatch://INFRA-592/artifact/infra-592-implementer-r14-r14-head-10x-b-tar-gz.",
+   "headSha": "a1581b1b858b285217eba59c7e0379c38c896cef",
+   "negativeControl": "Base main afaec766 in the same pairs: 1.49 / 1.51 events/s committed, 6,943 / 6,944 write timeouts, 5 / 14 reads served of 107,355 (read p50 30 s): dispatch://INFRA-592/artifact/infra-592-implementer-r14-r14-base-10x-a-tar-gz, dispatch://INFRA-592/artifact/infra-592-implementer-r14-r14-base-10x-b-tar-gz."
+  },
+  {
+   "criterion": "The live-socket test no longer drops its socket under load (it failed the full api suite after the merge)",
+   "surface": "go test against a real Postgres 16 (UTF-8, DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:25433/postgres), TMPDIR=/legion/scratch/tmp GOMAXPROCS=4 GOMEMLIMIT=12GiB, on pod 5be9ec7a-cae5-48b9-98ff-2df107a9930c",
+   "command": "go test -p 1 -count=600 -run '^TestTheLiveSocketOutlivesTheReadDeadline$' ./internal/dispatch/api/",
+   "observed": "0 of 600 fail with a 250 ms heartbeat against a 20 ms read deadline (commit 1fbd2d68).",
+   "headSha": "a1581b1b858b285217eba59c7e0379c38c896cef",
+   "negativeControl": "With the old 20 ms heartbeat (40 ms to answer a ping) 6 of 400 runs failed with 'close 1006 (abnormal closure)'; the socket's access-log line showed it ending at 116-215 ms instead of the test's 300 ms."
+  },
+  {
+   "criterion": "The suites pass at the head, after the forward merge of main (#2391, #2549, #2599, #2608, #2615, #2617)",
+   "surface": "go test against a real Postgres 16 (UTF-8, DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:25433/postgres), TMPDIR=/legion/scratch/tmp GOMAXPROCS=4 GOMEMLIMIT=12GiB, on pod 5be9ec7a-cae5-48b9-98ff-2df107a9930c",
+   "command": "go test -p 1 -count=1 ./internal/dispatch/api/ (at a1581b1b); at the merge 1f6822bf: ./cmd/dispatch/ ./internal/dispatch/store/ ./internal/dispatch/delivery/... ./internal/dispatch/redeliver/... ./internal/dispatch/duty/ ./internal/dispatch/docs/; infra: go test -run ConnectionsPer ./gcp/; check-ci-filters.sh; bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md",
+   "observed": "api: every test passes but TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses to run on this pod's byte-order database; cmd/dispatch, store, delivery, redeliver, duty, docs and infra/gcp ok; ConnectionsPerProcess = 90 = dispatchConnectionsPerPod; CI filters and the guide's layout pass.",
+   "headSha": "a1581b1b858b285217eba59c7e0379c38c896cef",
+   "negativeControl": "The one api failure is the test's own refusal ('this test's database already orders \"a\" after \"B\"'), the same on main."
+  }
+ ],
+ "filesChanged": [
+  "packages/envoy/internal/dispatch/api/delivery_live_hub.go, delivery_live_hub_intake.go, delivery_live_hub_worker.go (a change caught up while a read starts waits for the read's position)",
+  "packages/envoy/cmd/dispatch/room_commit_client_gone_test.go (the tester's regression test, plus the committed-edit assertion)",
+  "packages/envoy/internal/dispatch/api/request_bounds_test.go (live-socket test heartbeat)",
+  "Forward merge of main: store/pools.go, store/acquire.go, cmd/dispatch/main.go, shutdown.go, delivery/intakes.go, suggestion_outcomes.go, the four .dispatch/architecture pages, docs/site running-dispatch.md, packages/envoy/AGENTS.md, cmd/dispatch/README.md and the tests the merge touched",
+  "packages/envoy/AGENTS.md (the VM enrollment paragraph, one sentence per line)"
+ ],
+ "trickyParts": [
+  "The merge of #2391 adds a shared wake hub (pglisten.Hub) on Pool.Listener: a fourth permanent listener, so ConnectionsPerProcess is 90, equal to main's dispatchConnectionsPerPod.",
+  "horizon.Behind(safe) replaces main's Pending() || Proven() > safe at the sites #2391 touched; equivalent because newest >= safe for any safe the Horizon returned."
+ ],
+ "deviations": [
+  "TestAnUploadHoldsNoIssueLockWhileTheStoreWrites was suspected after the merge; main's version passed 300 of 300 at the merge, so it is left as main has it.",
+  "Main's #2619 and #2622 landed after the merge; they merge cleanly (git merge-tree) and are not taken.",
+  "Leftover check after the runs (ps for the sampler, go test, run-step, loadgen, pairs14, envoy-dispatch, nats-server): it listed nothing."
+ ],
+ "openQuestions": []
 }
