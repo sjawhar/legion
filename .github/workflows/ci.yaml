@@ -1434,7 +1434,7 @@ jobs:
 
       - uses: ./.github/actions/install-crane
 
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -1910,7 +1910,7 @@ jobs:
             fi
           done
         working-directory: packages/pi-envoy
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pi-envoy-pr
           path: out/pr-artifacts/*.tgz
@@ -1995,7 +1995,7 @@ jobs:
             fi
           done
         working-directory: packages/pi-legion
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pi-legion-pr
           path: out/pr-artifacts/*.tgz
@@ -2125,7 +2125,7 @@ jobs:
         env:
           DISPATCH_E2E_FILE_STORE_ENDPOINT: http://127.0.0.1:18333
           DISPATCH_E2E_FILE_STORE_BUCKET: dispatch-e2e-files
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: dispatch-e2e-test-results-${{ github.run_attempt }}
@@ -2206,7 +2206,7 @@ jobs:
         # step before built the dashboard; B serves A's build, which this spec does not tell apart.
         run: DISPATCH_E2E_PROCESSES=2 DISPATCH_E2E_SIGNIN=oidc bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts
         working-directory: packages/dispatch
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: dispatch-browser-multiprocess-test-results-${{ github.run_attempt }}
@@ -2248,7 +2248,7 @@ jobs:
       - name: Pack Claude Envoy plugin
         run: bun pm pack --destination ../../out/pr-artifacts
         working-directory: packages/claude-envoy
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: claude-envoy-pr
           path: out/pr-artifacts/*.tgz
@@ -2376,7 +2376,7 @@ jobs:
             tar tzvf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz"
           done
         working-directory: packages/envoy
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: legion-envoy-binaries-pr
           path: |
@@ -3010,7 +3010,7 @@ jobs:
       - name: Local end-to-end acceptance
         run: bash scripts/e2e-local.sh
         working-directory: packages/envoy
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: envoy-e2e-local-evidence-${{ github.run_attempt }}
