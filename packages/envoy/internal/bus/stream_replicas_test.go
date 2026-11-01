@@ -322,7 +322,7 @@ func TestAFullStreamRefusesAPublishAndKeepsEveryStoredMessage(t *testing.T) {
 		t.Fatalf("stream state = %+v, want sequences 1 through %d", before.State, stored)
 	}
 
-	if err := <-client.Window().PublishAsync(envelope(stored)); !errors.Is(err, ErrStreamFull) || errors.Is(err, ErrRefused) {
+	if err := <-client.WindowUntil(nil).PublishAsync(envelope(stored)); !errors.Is(err, ErrStreamFull) || errors.Is(err, ErrRefused) {
 		t.Fatalf("a window's send into the full stream = %v, want ErrStreamFull and no ErrRefused", err)
 	}
 	if err := client.Publish(envelope(stored + 1)); !errors.Is(err, ErrStreamFull) {

@@ -46,6 +46,7 @@ type connectOpts struct {
 	reconnectErrClock           func() time.Time
 	environment                 func(string) (string, bool)
 	reconnectWaitTick           func()
+	beforeRequestFlush          func()
 	background                  bool
 	silentCutDetection          bool
 }
@@ -253,12 +254,19 @@ type Client struct {
 	dialer                      *socks5Dialer
 	publishAcknowledgementClock AcknowledgementClock
 	reconnectErrClock           func() time.Time
-	// reconnectWaitTick, when not nil, runs after each tick of ensureConnWithContext's wait for a
-	// reconnect, before the connection is read again. It is nil outside tests: a test sets it
+	// reconnectWaitTick, when not nil, runs at each pass of ensureConnWithContext's wait for a
+	// reconnect, before the pass blocks; a connection event it causes is read before the wait looks
+	// at its context, as one that wakes the wait would be. It is nil outside tests: a test sets it
 	// (WithReconnectWaitTick, export_test.go) to know a publish is inside that wait, or to act at
 	// the moment the wait ends.
 	reconnectWaitTick func()
-	mu                sync.Mutex
+	// beforeRequestFlush, when not nil, runs on the goroutine that flushes a Request's publish,
+	// right before that flush begins, while the wait for the request's answer runs beside it
+	// (window.request). It is nil outside tests: a test sets it (WithBeforeRequestFlush,
+	// export_test.go) to hold the flush until the connection it would flush is gone, the
+	// interleaving a flush begun after the connection turned reconnecting has.
+	beforeRequestFlush func()
+	mu                 sync.Mutex
 
 	// deniedPublishes holds, under mu, the server's refusals of publishes per subject it refused a
 	// publish to, as the connection reported them (recordPublishDenial), queued in arrival order
@@ -315,6 +323,14 @@ type Client struct {
 	// background (WithConnectInBackground) until nats.go has connected its connection for the
 	// first time (onConnect), and false for every other client.
 	awaitingConnection bool
+	// connChanged, under mu, is closed at the client's next connection event and cleared: a
+	// connection installed, and a disconnect, reconnect or close of a connection the client dialled.
+	// ConnectionChanged makes the next one when a caller takes it.
+	connChanged chan struct{}
+
+	// reconnectWaits counts the waits ensureConnWithContext makes for a connection nats.go is
+	// reconnecting, one per pass of its loop that waits; a test reads it to bound them.
+	reconnectWaits atomic.Uint64
 
 	// slowConsumers counts the slow-consumer errors the client's connections reported
 	// (SlowConsumers).
@@ -361,7 +377,7 @@ func Dial(name string, urls []string, environment func(string) (string, bool), o
 	}
 	settings := opts.connectionSettings(credential)
 	dial := func(first nats.Option) (*nats.Conn, error) {
-		return connect(name, urls, allOf(settings, first), dialer, nil, nil, nil, opts.reconnectErrClock)
+		return connect(name, urls, allOf(settings, first), dialer, nil, nil, nil, nil, opts.reconnectErrClock)
 	}
 	if opts.background {
 		return connectFirstInBackground(name, urls, opts.reconnectErrClock, dial, nil, nil)
@@ -426,11 +442,12 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		publishAcknowledgementClock: opts.publishAcknowledgementClock,
 		reconnectErrClock:           opts.reconnectErrClock,
 		reconnectWaitTick:           opts.reconnectWaitTick,
+		beforeRequestFlush:          opts.beforeRequestFlush,
 		stopCh:                      make(chan struct{}),
 	}
 	stream := opts.streamConfig()
 	dial := func(first nats.Option) (*nats.Conn, error) {
-		return connect(c.name, urls, allOf(c.connectionSettings, first), dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
+		return connect(c.name, urls, allOf(c.connectionSettings, first), dialer, c.onReconnect, c.connectionChanged, c.onClosed, c.onAsyncError, c.reconnectErrClock)
 	}
 	if opts.background {
 		c.awaitingConnection = true
@@ -480,7 +497,8 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 }
 
 // install makes nc the client's connection, with the JetStream context taken from it, once it has
-// reconciled stream on nc (ensureStreamWithConfig) when stream is not nil.
+// reconciled stream on nc (ensureStreamWithConfig) when stream is not nil. Installing it is a
+// connection event (ConnectionChanged).
 func (c *Client) install(nc *nats.Conn, stream *nats.StreamConfig) error {
 	js, err := nc.JetStream(nats.MaxWait(10*time.Second), nats.PublishAsyncTimeout(publishAcknowledgementTimeout))
 	if err != nil {
@@ -493,6 +511,7 @@ func (c *Client) install(nc *nats.Conn, stream *nats.StreamConfig) error {
 	}
 	c.mu.Lock()
 	c.Conn, c.js = nc, js
+	c.connectionChangedLocked()
 	// install runs only from the constructor, before any connection is c.Conn, so nothing has
 	// been recorded (recordPublishDenial records only for c.Conn) and this clear finds it empty.
 	c.clearPublishDenials()
@@ -551,6 +570,43 @@ func (c *Client) currentConn() *nats.Conn {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.Conn
+}
+
+// ConnectionChanged returns a channel that is closed at the client's next connection event: a
+// connection the client installs, the first or one it dialled to replace a closed one, and a
+// disconnect, a reconnect in place or a close of a connection it dialled. A caller that waits for
+// the connection to change takes the channel before it reads the connection's state, so an event
+// between the read and the wait still wakes it.
+func (c *Client) ConnectionChanged() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.connChangedLocked()
+}
+
+// connChangedLocked returns the channel ConnectionChanged returns, making it when none is taken,
+// for a caller that holds c.mu.
+func (c *Client) connChangedLocked() chan struct{} {
+	if c.connChanged == nil {
+		c.connChanged = make(chan struct{})
+	}
+	return c.connChanged
+}
+
+// connectionChanged closes the channel ConnectionChanged returned, if one was taken, so that each
+// caller waiting on it reads the connection again.
+func (c *Client) connectionChanged() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.connectionChangedLocked()
+}
+
+// connectionChangedLocked is connectionChanged for a caller that holds c.mu. The next channel is
+// made when one is next taken, so an event nobody waits for allocates nothing.
+func (c *Client) connectionChangedLocked() {
+	if c.connChanged != nil {
+		close(c.connChanged)
+		c.connChanged = nil
+	}
 }
 
 // HookedConnectionEvents is how many connection events this client's reconnect hooks have run to
@@ -1162,23 +1218,35 @@ func (c *Client) ensureConn() error {
 	return c.ensureConnWithContext(context.Background())
 }
 
+// reconnectRecheck is how long ensureConnWithContext's wait for a reconnect goes without reading
+// the connection's own status again. nats.go runs a connection's callbacks one after another on
+// one goroutine, so the reconnect's event (ConnectionChanged) can wait behind a slow callback
+// queued before it while the connection is already connected; the re-read finds it then.
+const reconnectRecheck = time.Second
+
 // ensureConnWithContext returns once the client has a usable connection. A connection nats.go is
-// reconnecting is waited for, until it reconnects, ctx ends or the client stops: with the
-// reconnect buffer off, a publish while reconnecting would otherwise fail at once, and a webhook
-// that fails answers 503 to a sender that does not redeliver. A closed connection is replaced by
-// dialling a new one, unless the client is stopped. Callers that find the same connection closed
-// at once (the recovery its ClosedCB starts, and a publish) each dial one, and only the first to
-// finish replaces it: the others close theirs and serve with that one. So every connection the
-// client dials is either c.Conn, which Close and Drain close, or closed already; one left open
-// beside it would outlive Close, and, with MaxReconnect -1, reconnect forever once its server is
-// gone. A client that connects in the background (WithConnectInBackground) holds, from its
-// constructor on, a connection nats.go has yet to connect for the first time and does not close
-// before then, so a caller waits for that first connection as for a reconnect, and nothing here
-// dials beside nats.go before it; a connection dialled later to replace a closed one is an
+// reconnecting is waited for, until it reconnects, ctx ends or the client stops, and read again at
+// each connection event (ConnectionChanged) and at least every reconnectRecheck, rather than
+// polled: with the reconnect buffer off, a publish while reconnecting would otherwise fail at once,
+// and a webhook that fails answers 503 to a sender that does not redeliver. A closed connection is
+// replaced by dialling a new one, unless the client is stopped. Callers that find the same
+// connection closed at once (the recovery its ClosedCB starts, and a publish) each dial one, and
+// only the first to finish replaces it: the others close theirs and serve with that one. So every
+// connection the client dials is either c.Conn, which Close and Drain close, or closed already; one
+// left open beside it would outlive Close, and, with MaxReconnect -1, reconnect forever once its
+// server is gone. A client that connects in the background (WithConnectInBackground) holds, from
+// its constructor on, a connection nats.go has yet to connect for the first time and does not
+// close before then, so a caller waits for that first connection as for a reconnect, and nothing
+// here dials beside nats.go before it; a connection dialled later to replace a closed one is an
 // ordinary one, connected before it is installed.
 func (c *Client) ensureConnWithContext(ctx context.Context) error {
 	for {
-		conn := c.currentConn()
+		c.mu.Lock()
+		conn := c.Conn
+		// The channel is taken with the connection, before its state is read, so an event that
+		// lands between the read and the wait below closes the channel the wait is on.
+		changed := c.connChangedLocked()
+		c.mu.Unlock()
 		// A live connection serves even a stopped client: deliveries still in their handlers during
 		// Drain publish their receipts and exceptions through it.
 		if conn != nil && (conn.IsConnected() || conn.IsDraining()) {
@@ -1188,20 +1256,31 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 			return errStopped
 		}
 		if conn != nil && !conn.IsClosed() {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("bus: waiting for NATS to reconnect: %w", ctx.Err())
-			case <-c.stopCh:
-				return errStopped
-			case <-time.After(10 * time.Millisecond):
-			}
+			c.reconnectWaits.Add(1)
 			if c.reconnectWaitTick != nil {
 				c.reconnectWaitTick()
+				select {
+				case <-changed:
+					continue
+				default:
+				}
 			}
+			recheck := time.NewTimer(reconnectRecheck)
+			select {
+			case <-ctx.Done():
+				recheck.Stop()
+				return fmt.Errorf("bus: waiting for NATS to reconnect: %w", ctx.Err())
+			case <-c.stopCh:
+				recheck.Stop()
+				return errStopped
+			case <-changed:
+			case <-recheck.C:
+			}
+			recheck.Stop()
 			continue
 		}
 
-		nc, err := connectWithContext(ctx, c.name, c.urls, c.connectionSettings, c.dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
+		nc, err := connectWithContext(ctx, c.name, c.urls, c.connectionSettings, c.dialer, c.onReconnect, c.connectionChanged, c.onClosed, c.onAsyncError, c.reconnectErrClock)
 		if err != nil {
 			return err
 		}
@@ -1236,6 +1315,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 		c.Conn = nc
 		c.js = js
 		c.markHooksDueLocked()
+		c.connectionChangedLocked()
 		c.mu.Unlock()
 		return nil
 	}
@@ -1611,16 +1691,20 @@ func (c *Client) PublishCoreContext(ctx context.Context, subject string, item co
 // as the client's own error, never this one, because that forward is not known
 // to have left this process; so is a forward the server denied
 // (ErrPublishDenied), or one during which the server reported another error or
-// the connection dropped, since either may have hidden its denial.
+// the connection dropped, since either may have hidden its denial. A window's
+// Request wraps it, with ErrNotAcknowledged, when no answer came within its
+// timeout on a connection that stayed current (window.Request).
 var ErrReceiptTimeout = errors.New("bus: no receipt inside the request window")
 
-// ForwardMsgID is the Nats-Msg-Id of an envelope whose dedupe key is dedupeKey published or
-// forwarded to subject: the dedupe key, a colon, the subject. publishJetStream stores an envelope
-// that earns a MsgId under it, so each topic one upstream event is published on keeps its own
-// copy, and every forward to a session's subject (startForward, for RequestCoreTo and
-// StartRequestStoredTo alike) sets its header through it, so the stream, which captures every
-// agent subject, keeps one copy of a message per recipient however many times a sender forwards
-// it, and a forward of the same message to another recipient is a copy of its own.
+// ForwardMsgID is the Nats-Msg-Id of an envelope whose dedupe key is dedupeKey
+// sent to subject: the key, a colon, the subject. A publish and a window's
+// JetStream send stamp an envelope that earns a MsgId with it
+// (publishJetStream, window.sendJetStream), so each topic one upstream event
+// is published on keeps its own copy, and a forward passes it to startForward
+// (for RequestCoreTo, StartRequestCoreTo and StartRequestStoredTo alike) as
+// the forward's Nats-Msg-Id. A stream that captures subject stores a forward
+// sent again to the same subject once, within its duplicate window, and one
+// sent to another subject again, as a message of its own there.
 func ForwardMsgID(dedupeKey, subject string) string {
 	return dedupeKey + ":" + subject
 }
@@ -1636,13 +1720,15 @@ var ErrForwardNotStored = errors.New("bus: the stream did not acknowledge storin
 // notification stream's acknowledgement that it stored the forward (agent subjects are captured by
 // the stream, which answers a core publish with a reply subject as it answers a JetStream publish)
 // and the holder's empty receipt, a reply with no data and no header field. The server's
-// no-responders answer carries a Status header, so it is neither. The forward carries a
-// Nats-Msg-Id of item's dedupe key and subject (ForwardMsgID), so a sender that forwards one
-// envelope again until a receipt arrives leaves the stream one copy per message and recipient,
+// no-responders answer carries a Status header, so it is neither. The forward carries msgID as its
+// Nats-Msg-Id header when msgID is not empty, and no header when it is: whether a forward is one
+// the stream may store once is its caller's choice. A sender that forwards one envelope again
+// under one MsgId until a receipt arrives leaves the stream one copy per message and recipient,
 // however many attempts it makes, and the stream acknowledges each repeat as a duplicate, which
-// counts as stored; every attempt still reaches the core subscribers on subject. Because the
-// forward has headers, the server hands its replies to this client with a header block, empty for
-// a receipt, so the receipt is told by its header holding no field rather than by its having none.
+// counts as stored; a forward without one is stored each time it is sent. Every attempt still
+// reaches the core subscribers on subject. A forward with a MsgId has headers, so the server hands
+// its replies to this client with a header block, empty for a receipt, so the receipt is told by
+// its header holding no field rather than by its having none.
 // No receipt by the deadline is ErrReceiptTimeout; a receipt without the stream's acknowledgement
 // is ErrForwardNotStored. The flush is bounded by the same window as the receipt wait, so the call
 // never outlives timeout by the client's default 10 s flush. A forward the server denied returns
@@ -1651,8 +1737,8 @@ var ErrForwardNotStored = errors.New("bus: the stream did not acknowledge storin
 // arrives.
 //
 // It is StartRequestCoreTo followed by the returned forward's Wait.
-func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout time.Duration) error {
-	forward, err := c.StartRequestCoreTo(subject, item, timeout)
+func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, msgID string, timeout time.Duration) error {
+	forward, err := c.StartRequestCoreTo(subject, item, msgID, timeout)
 	if err != nil {
 		return err
 	}
@@ -1665,19 +1751,19 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout 
 // An error is RequestCoreTo's own before any reply could arrive (a denied or invalid forward, a
 // connection that never came back within timeout); every returned forward must be waited for, which
 // releases its reply subscription.
-func (c *Client) StartRequestCoreTo(subject string, item contracts.Envelope, timeout time.Duration) (*PendingForward, error) {
-	return c.startForward(subject, item, timeout, false)
+func (c *Client) StartRequestCoreTo(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (*PendingForward, error) {
+	return c.startForward(subject, item, msgID, timeout, false)
 }
 
-// StartRequestStoredTo publishes a forward as StartRequestCoreTo does, Nats-Msg-Id included, for a
-// holder with no NATS subscriber to answer it: a serving-port session whose stored messages its
-// session consumer delivers, with acknowledgement and redelivery, through the listener's relay. Its
-// Wait succeeds on the stream's acknowledgement alone, which is that delivery's one lasting copy,
-// and ignores any receipt. No acknowledgement by the deadline, the stream's error answer, or the
-// server's no-responders answer (nothing captured the subject) is ErrForwardNotStored (wrapping the
-// reason, and the one publishConfirmed could not confirm the publish for, when it could not).
-func (c *Client) StartRequestStoredTo(subject string, item contracts.Envelope, timeout time.Duration) (*PendingForward, error) {
-	return c.startForward(subject, item, timeout, true)
+// StartRequestStoredTo publishes a forward as StartRequestCoreTo does, under the same msgID rule,
+// for a holder with no NATS subscriber to answer it: a serving-port session whose stored messages
+// its session consumer delivers, with acknowledgement and redelivery, through the listener's relay.
+// Its Wait succeeds on the stream's acknowledgement alone, which is that delivery's one lasting
+// copy, and ignores any receipt. No acknowledgement by the deadline, the stream's error answer, or
+// the server's no-responders answer (nothing captured the subject) is ErrForwardNotStored (wrapping
+// the reason, and the one publishConfirmed could not confirm the publish for, when it could not).
+func (c *Client) StartRequestStoredTo(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (*PendingForward, error) {
+	return c.startForward(subject, item, msgID, timeout, true)
 }
 
 // PendingForward is a forward StartRequestCoreTo or StartRequestStoredTo published, whose replies
@@ -1692,7 +1778,7 @@ type PendingForward struct {
 	storedOnly bool
 }
 
-func (c *Client) startForward(subject string, item contracts.Envelope, timeout time.Duration, storedOnly bool) (*PendingForward, error) {
+func (c *Client) startForward(subject string, item contracts.Envelope, msgID string, timeout time.Duration, storedOnly bool) (*PendingForward, error) {
 	if err := checkSubject(subject); err != nil {
 		return nil, err
 	}
@@ -1712,10 +1798,12 @@ func (c *Client) startForward(subject string, item contracts.Envelope, timeout t
 	if err != nil {
 		return nil, err
 	}
-	forward := &nats.Msg{Subject: subject, Reply: inbox, Data: data, Header: nats.Header{}}
-	forward.Header.Set(nats.MsgIdHdr, ForwardMsgID(item.DedupeKey, subject))
+	forward := &nats.Msg{Subject: subject, Reply: inbox, Data: data}
+	if msgID != "" {
+		forward.Header = nats.Header{nats.MsgIdHdr: []string{msgID}}
+	}
 	err = c.publishConfirmed(ctx, conn, forward, conn.PublishMsg)
-	if err != nil && !errors.Is(err, errPublishUnconfirmed) {
+	if err != nil && !errors.Is(err, ErrPublishUnconfirmed) {
 		_ = receipt.Unsubscribe()
 		return nil, err
 	}

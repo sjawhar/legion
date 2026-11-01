@@ -17,17 +17,19 @@ import (
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
 
 // roleForwardDedupePrefix marks an envelope already sent from the role arbiter, or the publish
-// route, to its selected agent subject. A role lane that takes one again (an operator re-publishing
-// a received frame) does not re-enter the arbiter with it, and a session's dedupe reads it as a
-// forward. The durable acknowledges the stored forward copy by its subject (listenerDeliveryHandler)
-// for every holder that has it another way; a serving-port holder of this listener has no
-// subscriber, so its copy is its delivery (roleForwardCopyDelivery).
-const roleForwardDedupePrefix = "envoy.role.forward."
+// route, to its selected agent subject (contracts.RoleForwardDedupePrefix). A role lane that takes
+// one again (an operator re-publishing a received frame) does not re-enter the arbiter with it,
+// and a session's dedupe reads it as a forward. The durable acknowledges the stored forward copy
+// by its subject (listenerDeliveryHandler) for every holder that has it another way; a
+// serving-port holder of this listener has no subscriber, so its copy is its delivery
+// (roleForwardCopyDelivery).
+const roleForwardDedupePrefix = contracts.RoleForwardDedupePrefix
 
 const roleReceiptTimeout = 2 * time.Second
 
@@ -42,14 +44,15 @@ func shouldNAKFanoutDelivery(sessionLive bool, err error) bool {
 
 type listenerDeliveryHandlerConfig struct {
 	client *bus.Client
-	// forwardRole publishes a role-lane envelope to the holder's agent subject and returns the wait
-	// for its outcome; main.go wires startRoleForward(client). The wait's bus.ErrReceiptTimeout
-	// means the forward was flushed to the server and no receipt arrived inside timeout;
-	// bus.ErrForwardNotStored that the stream did not acknowledge storing it; any other error — a
-	// raw nats.ErrTimeout from the flush included, returned by the publish or the wait — means the
-	// forward is not known to have reached the holder. storedOnly asks for a forward that counts as
-	// delivered on the stream's acknowledgement alone (roleForwardStoredOnly).
-	forwardRole func(subject string, item contracts.Envelope, timeout time.Duration, storedOnly bool) (wait func() error, err error)
+	// forwardRole publishes a role-lane envelope to the holder's agent subject under msgID, its
+	// Nats-Msg-Id when not empty, and returns the wait for its outcome; main.go wires
+	// startRoleForward(client). The wait's bus.ErrReceiptTimeout means the forward was flushed to
+	// the server and no receipt arrived inside timeout; bus.ErrForwardNotStored that the stream
+	// did not acknowledge storing it; any other error — a raw nats.ErrTimeout from the flush
+	// included, returned by the publish or the wait — means the forward is not known to have
+	// reached the holder. storedOnly asks for a forward that counts as delivered on the stream's
+	// acknowledgement alone (roleForwardStoredOnly).
+	forwardRole func(subject string, item contracts.Envelope, msgID string, timeout time.Duration, storedOnly bool) (wait func() error, err error)
 	// roleForwards runs the role lane's forwards off its handler (roleForwarder), and servePorts
 	// pushes the durable path's messages to serving-port sessions off its handler, one worker per
 	// session (servePortWorkers); every delivery path hands its forwards and pushes to them, so
@@ -414,25 +417,29 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 
 // laneHolderFresh is role delivery's liveness test of a holder's session entry, which
 // resolveRoleHolder applies for the role lane and the publish route's attempts: the entry
-// heartbeated within session.ClaimStaleAfter as of now, read at each test, so the cached entry and
-// the entry read again from the bucket are each judged at the moment they are checked. The plugin
-// heartbeats every 90 seconds (DEFAULT_HEARTBEAT_MS, packages/envoy-client/src/envoy-settings.ts),
-// so three missed heartbeats means the claiming process is very likely gone.
+// heartbeated within session.ClaimStaleAfter as of now (roles.Fresh, the test Dispatch's outbox
+// makes too), read at each test, so the cached entry and the entry read again from the bucket are
+// each judged at the moment they are checked. The plugin heartbeats every 90 seconds
+// (DEFAULT_HEARTBEAT_MS, packages/envoy-client/src/envoy-settings.ts), so three missed heartbeats
+// means the claiming process is very likely gone.
 func laneHolderFresh(entry session.SessionEntry) bool {
-	now := time.Now().UnixMilli()
-	return entry.UpdatedAt > 0 && now-entry.UpdatedAt < int64(session.ClaimStaleAfter/time.Millisecond)
+	return roles.Fresh(entry, time.Now())
 }
 
 // resolveCoreRoleHolder resolves the current live holder for a role-lane delivery by role
-// delivery's rule (resolveRoleHolder with laneHolderFresh), applying the terminal
-// no_holder/delivery_failed outcome itself and reporting ok=false when there is nobody to deliver
-// to. An unclaimed role is no_holder; a lapsed holder and every failed read are delivery_failed,
-// each under a log line that names which it was. Role delivery answers no caller, so it resolves
-// under context.Background(): the holder's session read keeps roleHolderReadTimeout
-// (roleHolderSession's bound) as its own cap. Its first claim read is the registry's watched copy
-// of the role bucket (store.Registry.CachedRoleHolder, passed as the resolution's firstHolder), so
-// a role message costs no bucket round trip; a retry after a superseded release reads the bucket
-// itself, since the copy can trail the claim that superseded it.
+// delivery's rule (resolveRoleHolderFrom with laneHolderFresh, over roles.ResolveHolderFrom),
+// applying the terminal no_holder/delivery_failed outcome itself and reporting ok=false when there
+// is nobody to deliver to. An unclaimed role is no_holder; a lapsed holder and every failed read
+// are delivery_failed, each under a log line that names which it was. A claim whose release finds
+// it superseded is resolved again, bounded, so a claim raced by a live replacement is re-resolved
+// to that replacement here exactly as it is for GET /v1/roles/<role>, instead of reporting
+// delivery_failed about a session a fresh claim has already superseded. Role delivery answers no
+// caller, so it resolves under context.Background(): the holder's session read keeps
+// roleHolderReadTimeout (roleHolderSessions' bound) as its own cap. Its first claim read is the
+// registry's watched copy of the role bucket (store.Registry.CachedRoleHolder, passed as the
+// resolution's firstHolder), so a role message costs no bucket round trip; a retry after a
+// superseded release reads the bucket itself, since the copy can trail the claim that superseded
+// it.
 func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Envelope, role string) (string, session.SessionEntry, bool) {
 	resolved, err := resolveRoleHolderFrom(context.Background(), cfg.registry, cfg.registry.CachedRoleHolder, cfg.sessions, role, laneHolderFresh)
 	sessionID := resolved.holder
@@ -716,7 +723,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	// reaches the retry decision only as ReasonNoSessionRecord, which already holds the retry
 	// open (session.HandleAgentMessage: the registry path reports that reason, and the interest
 	// path NAKs with an error, which never reaches that branch).
-	entry, entryErr := liveSessionEntry(context.Background(), cfg.sessions, sessionID, deliverySessionReadTimeout, registered)
+	entry, entryErr := liveSessionEntry(context.Background(), cfg.sessions, sessionID, deliverySessionReadTimeout, roles.Registered)
 	var entryPtr *session.SessionEntry
 	if entryErr == nil {
 		entryPtr = &entry

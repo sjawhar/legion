@@ -285,7 +285,7 @@ func receivedDuringTakeOver(
 }
 
 // A person's comment on an issue that session s1 claims and that has no route reaches s1 from the
-// claimant route (the outbox's publishClaimantRoute) unless the comment's mention of s1 delivered
+// claimant route (the outbox's addClaimantRoute) unless the comment's mention of s1 delivered
 // it. A mention that only resolves on its post-commit take-over retry names no session in the
 // comment.created payload, so the claimant route cannot leave s1's copy to it: the comment must
 // resolve its mentions through the take-over before it commits, as a routed issue's comment does.
@@ -309,7 +309,7 @@ func TestACommentDuringAListenerTakeOverReachesTheClaimantOnce(t *testing.T) {
 }
 
 // A person's reply on an ask's thread reaches every session that follows the ask - its asker s1
-// here - from the follower route (the outbox's publishFollowerRoutes) unless the reply's mention
+// here - from the follower route (the outbox's addFollowerRoutes) unless the reply's mention
 // of s1 delivered it. The reply names the ask, not a comment to reply to, so it is in a thread with
 // an agent even with no route, no reply_to, no anchor and no document: it must resolve its mentions
 // through the take-over before it commits too.
@@ -337,7 +337,7 @@ func TestAnAskReplyDuringAListenerTakeOverReachesTheFollowerOnce(t *testing.T) {
 
 // A person's comment on an issue with no route and no session claimant reaches every session the
 // issue's primary document credits - s1, which wrote it, here - from the primary document route
-// (the outbox's publishPrimaryDocumentAuthors) unless the comment's mention of s1 delivered it. A
+// (the outbox's addPrimaryDocumentAuthors) unless the comment's mention of s1 delivered it. A
 // comment on the issue's conversation is on no document itself, so it must resolve its mentions
 // through the take-over before it commits once the issue's primary document credits a session.
 func TestACommentDuringAListenerTakeOverReachesThePrimaryDocumentAuthorOnce(t *testing.T) {

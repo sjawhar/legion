@@ -1,0 +1,16 @@
+-- One nullable column with no default, three partial index builds and two index drops: no row is
+-- refused or rewritten. The census reports events itself, the table every statement here locks,
+-- with its row count and size.
+--
+-- What the deploy changes is which unpublished events wait: from this release on, an event that
+-- has not reached a destination holds back the later events of its owner bound for that
+-- destination (internal/dispatch/outbox, readBatch). The rows that start doing so at the deploy are
+-- the unpublished, non-pending ones, which the pull request lists by attempt count from:
+--
+--   select attempt_count, count(*) from events
+--   where published_at is null and (payload ->> 'pending') is distinct from 'true'
+--   group by attempt_count order by attempt_count;
+--
+-- A census answers one integer and refuses its migration on any other than 0, so that list is not
+-- this census's answer: a stuck row is a reason to look, not to refuse the deploy.
+select 0;

@@ -133,7 +133,7 @@ func (s *server) loadAskThreads(ctx context.Context, askIDs []string) (map[strin
 }
 
 // loadAskReaches reads every listed ask's askReach, keyed by ask id: the claimant only while a
-// session holds the claim on the ask's issue (the same rule the outbox's scanPendingEvents
+// session holds the claim on the ask's issue (the same rule the outbox's readBatch
 // reads), the issue's route, and that route's reach now (status and holder). The reach comes
 // from one listener read for the whole batch (routeRosterOrUnknown), made only when some ask has
 // a route and only once scanAskReaches has released its pooled connection, so the listener call

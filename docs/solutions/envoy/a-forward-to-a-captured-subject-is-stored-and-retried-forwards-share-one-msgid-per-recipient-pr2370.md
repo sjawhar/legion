@@ -32,7 +32,9 @@ stream captures that subject:
 
 ## Evidence
 
-- `packages/envoy/internal/bus/nats.go`: `ForwardMsgID`, set on every `RequestCoreTo` forward;
+- `packages/envoy/internal/bus/nats.go`: `ForwardMsgID`, which `RequestCoreTo` sets when its caller
+  passes it (since #2395: the publish route on every forward, the role lane only for a key that
+  names its event);
   the receipt test is `len(response.Data) == 0 && len(response.Header) == 0`.
 - `packages/envoy/internal/bus/request_core_test.go`,
   `TestRequestCoreToStoresOneCopyPerMessageAndRecipientAcrossAttempts`: two forwards to one

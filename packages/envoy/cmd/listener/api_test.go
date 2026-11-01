@@ -23,6 +23,7 @@ import (
 	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -723,7 +724,7 @@ func TestResolveRoleHolderReresolvesSupersededClaim(t *testing.T) {
 		},
 	}
 
-	result, err := resolveRoleHolder(context.Background(), resolver, sessions, "reviewer", registered)
+	result, err := resolveRoleHolder(context.Background(), resolver, sessions, "reviewer", roles.Registered)
 	if err != nil {
 		t.Fatalf("resolve superseded role holder: %v", err)
 	}
@@ -750,7 +751,7 @@ func TestRoleHolderLapsedResponseDoesNotClaimConcurrentRemoval(t *testing.T) {
 		},
 	}
 
-	result, err := resolveRoleHolder(context.Background(), resolver, sessions, role, registered)
+	result, err := resolveRoleHolder(context.Background(), resolver, sessions, role, roles.Registered)
 	if err != nil {
 		t.Fatalf("resolve concurrently removed role holder: %v", err)
 	}
@@ -1028,7 +1029,7 @@ func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
 		stallSessionReads(t, harness.sessions)
 		var forwards atomic.Int32
 		cfg := harness.config
-		cfg.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error {
+		cfg.forwardRole = inlineForward(func(string, contracts.Envelope, string, time.Duration) error {
 			forwards.Add(1)
 			return nil
 		})

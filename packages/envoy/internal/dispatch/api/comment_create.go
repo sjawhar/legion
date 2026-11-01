@@ -432,9 +432,9 @@ func (s *server) resolveCommentDeliveries(
 // transaction re-reads it under the owner's lock (lockCommentOwner). sessionRoutes reports, from
 // the same read, whether the outbox reaches a session of the issue beyond the route and the
 // comment's mentions whatever the comment's thread or anchor: the issue's claimant is a session
-// (the outbox's publishClaimantRoute), the ask the comment replies to by askID has a follower
-// (publishFollowerRoutes), or the issue's primary document credits a session
-// (publishPrimaryDocumentAuthors, which reads the credits through the outbox's documentCreditsSQL
+// (the outbox's addClaimantRoute), the ask the comment replies to by askID has a follower
+// (addFollowerRoutes), or the issue's primary document credits a session
+// (addPrimaryDocumentAuthors, which reads the credits through the outbox's documentCreditsSQL
 // and sessionCreditSQL; the query below reads them the same way). Like the route, these are read
 // before the transaction and not rechecked under the lock: the outbox reads them again when it
 // publishes in any case.

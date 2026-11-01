@@ -36,7 +36,7 @@ func TestRoleLaneForwarderPublishesEachHoldersForwardsInOrderWithoutWaitingForOu
 	published := map[string][]string{}
 	var settled atomic.Int32
 	cfg := harness.config
-	cfg.forwardRole = func(subject string, item contracts.Envelope, _ time.Duration, _ bool) (func() error, error) {
+	cfg.forwardRole = func(subject string, item contracts.Envelope, _ string, _ time.Duration, _ bool) (func() error, error) {
 		mu.Lock()
 		published[subject] = append(published[subject], item.EventID)
 		mu.Unlock()
@@ -393,7 +393,8 @@ func TestRoleLaneSilentHolderDoesNotDelayAnotherRole(t *testing.T) {
 // On a hub whose grant predates the shared queue group, each listener subscribes the role lane in
 // its machine's group, so each of two listeners on two machine ids forwards every role message:
 // the holder receives each live twice, and the stream still stores one forward per message, since
-// each forward carries the message's dedupe key and the holder's subject as its Nats-Msg-Id.
+// each forward carries the message's event id and the holder's subject as its Nats-Msg-Id (its
+// dedupe key is the sender's choice, so roleForward.msgID names it by its event id).
 func TestRoleLaneRefusedSharedQueueFallsBackToMachineGroupsAndStoresOneCopy(t *testing.T) {
 	const messages = 20
 	machines := []string{"role-lane-grant-a", "role-lane-grant-b"}

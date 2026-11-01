@@ -64,6 +64,23 @@ func (f roleForward) forwarded() contracts.Envelope {
 	return forwarded
 }
 
+// msgID is the forward's Nats-Msg-Id on subject: the name under which the stream keeps one copy
+// of this message for this holder, however often it is forwarded - by a retry, or by each
+// listener of the machine groups an older grant leaves the lane in, which all forward the same
+// message. A forward whose envelope's own key names its event
+// (contracts.DedupeKeyNamesTheUpstreamEvent, asked of the message as it arrived: the forward's
+// prefix hides a webhook key's shape) is named by the forward's dedupe key and the subject, as
+// the publish route's forwards are (bus.ForwardMsgID). Any other key is its sender's choice and
+// two distinct envelopes can share one, so such a forward is named by its event id and the
+// subject instead: a repeat of one message is still stored once, and two messages under one key
+// are two messages, which the stream stores both of.
+func (f roleForward) msgID(subject string) string {
+	if contracts.DedupeKeyNamesTheUpstreamEvent(f.item) {
+		return bus.ForwardMsgID(f.forwarded().DedupeKey, subject)
+	}
+	return bus.ForwardMsgID(f.item.EventID, subject)
+}
+
 // enqueue queues forward behind its holder's earlier forwards, starting the holder's worker when it
 // has none, once a slot is free.
 func (f *roleForwarder) enqueue(forward roleForward) {
@@ -95,7 +112,7 @@ func (f *roleForwarder) publish(sessionID string) {
 		f.queues[sessionID] = queue[1:]
 		f.mu.Unlock()
 
-		wait, err := f.cfg.forwardRole(subject, forward.forwarded(), roleReceiptTimeout, forward.storedOnly)
+		wait, err := f.cfg.forwardRole(subject, forward.forwarded(), forward.msgID(subject), roleReceiptTimeout, forward.storedOnly)
 		if err != nil {
 			f.finish(forward, err)
 			continue
@@ -127,13 +144,13 @@ func (f *roleForwarder) wait(ctx context.Context) bool {
 // startRoleForward is forwardRole over client: a forward to a holder that answers receipts waits
 // for the stream's acknowledgement and the receipt (bus.Client.StartRequestCoreTo), and one to a
 // holder that answers none for the acknowledgement alone (bus.Client.StartRequestStoredTo).
-func startRoleForward(client *bus.Client) func(subject string, item contracts.Envelope, timeout time.Duration, storedOnly bool) (func() error, error) {
-	return func(subject string, item contracts.Envelope, timeout time.Duration, storedOnly bool) (func() error, error) {
+func startRoleForward(client *bus.Client) func(subject string, item contracts.Envelope, msgID string, timeout time.Duration, storedOnly bool) (func() error, error) {
+	return func(subject string, item contracts.Envelope, msgID string, timeout time.Duration, storedOnly bool) (func() error, error) {
 		start := client.StartRequestCoreTo
 		if storedOnly {
 			start = client.StartRequestStoredTo
 		}
-		forward, err := start(subject, item, timeout)
+		forward, err := start(subject, item, msgID, timeout)
 		if err != nil {
 			return nil, err
 		}

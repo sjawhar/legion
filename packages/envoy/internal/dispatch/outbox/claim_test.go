@@ -3,201 +3,53 @@ package outbox
 import (
 	"context"
 	"fmt"
-	"sync"
+	"slices"
 	"testing"
 	"time"
 
-	"github.com/sjawhar/envoy/internal/bus"
-	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// rendezvousPublisher is one process's publisher in a two-process test: it records every event it
-// is asked to publish, and holds its own first publish until the other process has started a
-// publish of its own. Without that hold the two scans could run one after the other and the test
-// would prove nothing about a claim; with it, each process is demonstrably mid-batch while the
-// other claims. The wait has a deadline so a process that never publishes fails the assertions
-// below rather than hanging the package.
-type rendezvousPublisher struct {
-	mu      sync.Mutex
-	ids     []string
-	once    sync.Once
-	started chan struct{}
-	peer    chan struct{}
-}
-
-// rendezvousDeadline bounds that hold: long enough that a loaded box still gets both processes
-// into a batch together, short enough to fail as a test rather than as a package timeout.
-const rendezvousDeadline = 10 * time.Second
-
-func newRendezvousPair() (*rendezvousPublisher, *rendezvousPublisher) {
-	first := &rendezvousPublisher{started: make(chan struct{})}
-	second := &rendezvousPublisher{started: make(chan struct{})}
-	first.peer, second.peer = second.started, first.started
-	return first, second
-}
-
-func (p *rendezvousPublisher) Publish(item contracts.Envelope) error {
-	p.mu.Lock()
-	p.ids = append(p.ids, item.SourceEventID)
-	p.mu.Unlock()
-	p.once.Do(func() {
-		close(p.started)
-		select {
-		case <-p.peer:
-		case <-time.After(rendezvousDeadline):
-		}
-	})
-	return nil
-}
-
-func (p *rendezvousPublisher) Window() bus.Sender { return p }
-
-func (p *rendezvousPublisher) PublishAsync(item contracts.Envelope) <-chan error {
-	return answered(p.Publish(item))
-}
-
-func (p *rendezvousPublisher) published() []string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return append([]string(nil), p.ids...)
-}
-
-// Two envoy-dispatch processes serve one Postgres and one NATS, and an event published twice is
-// delivered twice on the role lanes, which carry no nats.MsgId. scanPendingEvents claims each row
-// before it publishes it, so this drives two processes - each on its own store, as each process
-// has its own pool - over one backlog at once: every seeded event is published exactly once, by
-// exactly one of them, and every row ends marked published with its claim cleared.
-func TestTwoProcessesPublishEveryEventExactlyOnce(t *testing.T) {
+// Reading a batch writes no row: one process publishes at a time (the publisher hold), so nothing
+// is claimed, and a second read finds the same events, each with its retry state untouched.
+func TestReadingABatchWritesNoRow(t *testing.T) {
 	ctx := context.Background()
 	database := storetest.Open(t)
-	second := storetest.SecondProcess(t, database)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
-	// Two full batches, so neither process can take the whole backlog in one claim.
-	seeded := seedUnpublishedEvents(t, database, broker, 2*batchSize)
+	seeded := seedUnpublishedEvents(t, database, broker, 3)
 
-	first, other := newRendezvousPair()
-	start := make(chan struct{})
-	var scanning sync.WaitGroup
-	for _, process := range []struct {
-		database  *store.Store
-		publisher *rendezvousPublisher
-	}{{database, first}, {second, other}} {
-		scanning.Add(1)
-		go func() {
-			defer scanning.Done()
-			<-start
-			scan(ctx, Deps{Store: process.database, Publisher: process.publisher, Broker: broker})
-		}()
-	}
-	close(start)
-	scanning.Wait()
-
-	mine, theirs := first.published(), other.published()
-	if len(mine) == 0 || len(theirs) == 0 {
-		t.Fatalf("the two processes published %d and %d events: one of them did no work at all", len(mine), len(theirs))
-	}
-	times := map[string]int{}
-	for _, id := range append(append([]string(nil), mine...), theirs...) {
-		times[id]++
-	}
-	for _, id := range seeded {
-		if count := times[fmt.Sprint(id)]; count != 1 {
-			t.Fatalf("event %d was published %d times across the two processes, want exactly once", id, count)
+	for read := range 2 {
+		pending, stopped, _, err := readBatch(ctx, Deps{Store: database})
+		if err != nil || stopped {
+			t.Fatalf("read %d: stopped=%v err=%v", read, stopped, err)
+		}
+		if ids := pendingIDs(pending); !slices.Equal(ids, seeded) {
+			t.Fatalf("read %d found %v, want the seeded %v", read, ids, seeded)
 		}
 	}
-	if len(times) != len(seeded) {
-		t.Fatalf("the processes published %d distinct events, want the %d seeded", len(times), len(seeded))
-	}
-	taken := map[string]struct{}{}
-	for _, id := range mine {
-		taken[id] = struct{}{}
-	}
-	for _, id := range theirs {
-		if _, both := taken[id]; both {
-			t.Fatalf("both processes published event %s", id)
-		}
-	}
-
-	var unpublished, claimed, retried int
-	if err := database.Pool.QueryRow(ctx, `
-		select count(*) filter (where published_at is null),
-		       count(*) filter (where next_attempt_at is not null),
-		       count(*) filter (where attempt_count <> 0)
-		from events
-	`).Scan(&unpublished, &claimed, &retried); err != nil {
-		t.Fatalf("read the events' final state: %v", err)
-	}
-	if unpublished != 0 || claimed != 0 || retried != 0 {
-		t.Fatalf("after both scans: %d events unpublished, %d still claimed, %d backed off, want 0, 0 and 0",
-			unpublished, claimed, retried)
-	}
-}
-
-// A claimed event is the process that claimed it to publish: no other scan reads it again until
-// the claim lapses. The lapse is made by moving next_attempt_at back, the way embedqueue's own
-// claim tests do, rather than by waiting out claimWindow's minute.
-func TestAClaimedEventIsReadAgainOnlyOnceItsClaimLapses(t *testing.T) {
-	ctx := context.Background()
-	database := storetest.Open(t)
-	second := storetest.SecondProcess(t, database)
-	broker := events.NewBroker()
-	seedIssue(t, database, "T-1", nil)
-	seeded := seedUnpublishedEvents(t, database, broker, 1)
-	before := time.Now()
-
-	claimed, blocked, err := scanPendingEvents(ctx, Deps{Store: database})
-	if err != nil || blocked {
-		t.Fatalf("claim the pending event: blocked=%v err=%v", blocked, err)
-	}
-	if len(claimed) != 1 || claimed[0].event.ID != seeded[0] {
-		t.Fatalf("first process claimed %d events, want event %d alone", len(claimed), seeded[0])
-	}
-
-	held, _, err := scanPendingEvents(ctx, Deps{Store: second})
-	if err != nil {
-		t.Fatalf("second process's scan: %v", err)
-	}
-	if len(held) != 0 {
-		t.Fatalf("second process read %d of the first's claimed events, want none", len(held))
-	}
-	var nextAttempt time.Time
+	var written int
 	if err := database.Pool.QueryRow(ctx,
-		`select next_attempt_at from events where id = $1`, seeded[0]).Scan(&nextAttempt); err != nil {
-		t.Fatalf("read the claimed event's next_attempt_at: %v", err)
+		`select count(*) from events where next_attempt_at is not null or attempt_count <> 0`).Scan(&written); err != nil {
+		t.Fatalf("read the events' retry state: %v", err)
 	}
-	if nextAttempt.Before(before.Add(claimWindow - time.Second)) {
-		t.Fatalf("claimed next_attempt_at = %v, want at least claimWindow (%v) past %v", nextAttempt, claimWindow, before)
-	}
-
-	// What a crashed claimer leaves behind once its window passes.
-	if _, err := database.Pool.Exec(ctx,
-		`update events set next_attempt_at = now() - interval '1 second' where id = $1`, seeded[0]); err != nil {
-		t.Fatalf("lapse the claim: %v", err)
-	}
-	lapsed, _, err := scanPendingEvents(ctx, Deps{Store: second})
-	if err != nil {
-		t.Fatalf("second process's scan after the claim lapsed: %v", err)
-	}
-	if len(lapsed) != 1 || lapsed[0].event.ID != seeded[0] {
-		t.Fatalf("after the claim lapsed the second process read %d events, want the one the first never published", len(lapsed))
+	if written != 0 {
+		t.Fatalf("%d events had their retry state written by a read", written)
 	}
 }
 
 // A subscription removal is written pending until the listener removal succeeds, and the outbox
-// must not publish it before then (subscriptionRemovedPayload). The claim must not reach it
-// either: a claim moves next_attempt_at, which is the row's retry schedule, and a row the scan
-// may never publish is a row the scan may never touch.
-func TestAPendingEventIsNeverClaimed(t *testing.T) {
+// must not publish it before then (subscriptionRemovedPayload). No read of a batch reaches it: it
+// is in none of the indexes the read goes through, and holds back none of its issue's events.
+func TestAPendingEventIsNeverRead(t *testing.T) {
 	ctx := context.Background()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
-	pending := appendEvent(t, database, broker, model.Event{
+	appendEvent(t, database, broker, model.Event{
 		IssueKey: new("T-1"),
 		Type:     "subscription.remove_requested",
 		Actor:    model.Actor{Kind: "user", ID: "alice"},
@@ -210,21 +62,128 @@ func TestAPendingEventIsNeverClaimed(t *testing.T) {
 	})
 	ready := seedUnpublishedEvents(t, database, broker, 1)
 
-	claimed, blocked, err := scanPendingEvents(ctx, Deps{Store: database})
-	if err != nil || blocked {
-		t.Fatalf("claim past the pending command: blocked=%v err=%v", blocked, err)
+	pending, stopped, _, err := readBatch(ctx, Deps{Store: database})
+	if err != nil || stopped {
+		t.Fatalf("read past the pending command: stopped=%v err=%v", stopped, err)
 	}
-	if len(claimed) != 1 || claimed[0].event.ID != ready[0] {
-		t.Fatalf("scan claimed %d events, want only the ready event %d", len(claimed), ready[0])
+	if ids := pendingIDs(pending); !slices.Equal(ids, ready) {
+		t.Fatalf("the batch read %v, want only the ready event %v", ids, ready)
 	}
-	var nextAttempt *time.Time
-	if err := database.Pool.QueryRow(ctx,
-		`select next_attempt_at from events where id = $1`, pending.ID).Scan(&nextAttempt); err != nil {
-		t.Fatalf("read the pending command's retry state: %v", err)
+}
+
+// An owner's event that is not due is read beside its owner's due events, and only as a blocker:
+// it is not sent, and the later event is held back from the destinations it has not reached while
+// still sent to the rest. An owner with no due event is not read at all.
+func TestAnEventThatIsNotDueIsReadOnlyAsABlockerOfItsOwner(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	route := "session:reviewer"
+	seedIssue(t, database, "T-1", &route)
+	if _, err := database.Pool.Exec(ctx, `
+		insert into issues (key, project_key, number, title, created_by, rank)
+		values ('T-2', 'TT', 2, 'Other issue', '{"kind":"user","id":"alice"}', 'V')
+	`); err != nil {
+		t.Fatalf("create the other issue: %v", err)
 	}
-	if nextAttempt != nil {
-		t.Fatalf("the claim moved the pending command's next_attempt_at to %v, want it untouched", *nextAttempt)
+	message := func(issue, body string) model.Event {
+		return appendEvent(t, database, broker, model.Event{
+			IssueKey: new(issue), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+			Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: new(issue), Body: body},
+		})
 	}
+	waiting := message("T-1", "waiting")
+	otherWaiting := message("T-2", "other waiting")
+	// The first event reached its issue's topic and still owes the reviewer's.
+	if _, err := database.Pool.Exec(ctx, `
+		update events set next_attempt_at = now() + interval '1 hour', attempt_count = 1,
+		       published_destinations = array['notifications.dispatch.issue.T-1.message.created']
+		where id = $1
+	`, waiting.ID); err != nil {
+		t.Fatalf("back the first event off: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx,
+		`update events set next_attempt_at = now() + interval '1 hour', attempt_count = 1 where id = $1`, otherWaiting.ID); err != nil {
+		t.Fatalf("back the other issue's event off: %v", err)
+	}
+	fresh := message("T-1", "fresh")
+
+	pending, _, _, err := readBatch(ctx, Deps{Store: database})
+	if err != nil {
+		t.Fatalf("read the batch: %v", err)
+	}
+	if ids := pendingIDs(pending); !slices.Equal(ids, []int64{waiting.ID, fresh.ID}) {
+		t.Fatalf("the batch read %v, want T-1's waiting event and its fresh one, and nothing of T-2", ids)
+	}
+	if pending[0].due || !pending[1].due {
+		t.Fatalf("due = %v, %v, want the waiting event not due and the fresh one due", pending[0].due, pending[1].due)
+	}
+
+	publisher := &recordingPublisher{}
+	holding(t, Deps{Store: database, Publisher: publisher}).scan(ctx, unfenced{})
+	if got := topicsOf(publisher.all()); !slices.Equal(got, []string{"notifications.dispatch.issue.T-1.message.created"}) {
+		t.Fatalf("sent %v, want the fresh event's issue topic alone: its route waits on the earlier event", got)
+	}
+	var waitingUntil, freshUntil time.Time
+	var freshAttempts int
+	if err := database.Pool.QueryRow(ctx, `
+		select w.next_attempt_at, f.next_attempt_at, f.attempt_count
+		from events w, events f where w.id = $1 and f.id = $2
+	`, waiting.ID, fresh.ID).Scan(&waitingUntil, &freshUntil, &freshAttempts); err != nil {
+		t.Fatalf("read the two events: %v", err)
+	}
+	if !freshUntil.Equal(waitingUntil) || freshAttempts != 0 {
+		t.Fatalf("the fresh event waits until %v with %d attempts, want the earlier event's %v and none", freshUntil, freshAttempts, waitingUntil)
+	}
+	if destinations, _ := publishedDestinations(t, database, fresh.ID); !slices.Equal(destinations, []string{"notifications.dispatch.issue.T-1.message.created"}) {
+		t.Fatalf("the fresh event recorded %v, want the issue topic it reached", destinations)
+	}
+}
+
+// An owner whose first batchSize unpublished events all wait out a back-off cannot send the due
+// event behind them, which the batch never reads: that event waits on the earliest of their
+// back-offs, rather than leave the owner chosen, and read again, at every wake.
+func TestADueEventPastItsOwnersWindowWaitsOnTheWindow(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	waiting := seedUnpublishedEvents(t, database, broker, batchSize)
+	if _, err := database.Pool.Exec(ctx, `
+		update events set next_attempt_at = now() + interval '1 hour' + make_interval(secs => id), attempt_count = 1
+		where id = any($1)
+	`, waiting); err != nil {
+		t.Fatalf("back the window off: %v", err)
+	}
+	past := seedUnpublishedEvents(t, database, broker, 1)
+
+	publisher := &recordingPublisher{}
+	outbox := holding(t, Deps{Store: database, Publisher: publisher})
+	outbox.scan(ctx, unfenced{})
+	if sent := publisher.all(); len(sent) != 0 {
+		t.Fatalf("sent %d envelopes, want none: the due event is past its owner's window", len(sent))
+	}
+	var pastUntil, earliest time.Time
+	if err := database.Pool.QueryRow(ctx, `
+		select (select next_attempt_at from events where id = $1),
+		       (select min(next_attempt_at) from events where id = any($2))
+	`, past[0], waiting).Scan(&pastUntil, &earliest); err != nil {
+		t.Fatalf("read the events: %v", err)
+	}
+	if !pastUntil.Equal(earliest) {
+		t.Fatalf("the event past the window waits until %v, want the window's earliest back-off %v", pastUntil, earliest)
+	}
+	if wait, ok := outbox.nextRetry(ctx, false); !ok || wait < 50*time.Minute {
+		t.Fatalf("the next retry is due in %v (%v), want the window's back-off, about an hour away", wait, ok)
+	}
+}
+
+func pendingIDs(pending []pendingEvent) []int64 {
+	ids := make([]int64, 0, len(pending))
+	for _, item := range pending {
+		ids = append(ids, item.event.ID)
+	}
+	return ids
 }
 
 // seedUnpublishedEvents appends count unpublished message events on T-1, lowest id first. Each
@@ -239,7 +198,7 @@ func seedUnpublishedEvents(t *testing.T, database *store.Store, broker *events.B
 			Type:     "message.created",
 			Actor:    model.Actor{Kind: "user", ID: "alice"},
 			Payload: model.Message{
-				ID: fmt.Sprintf("message-%d", index), IssueKey: new("T-1"), Body: "claim me",
+				ID: fmt.Sprintf("message-%d", index), IssueKey: new("T-1"), Body: "read me",
 			},
 		})
 		ids = append(ids, event.ID)
