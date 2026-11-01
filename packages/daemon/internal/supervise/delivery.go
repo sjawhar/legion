@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -484,18 +486,38 @@ func interruptedTask(cause string) string {
 // for a refused session the provider's own, the size it refused at among them — and then the two
 // things that outlive a session: the issue's branch, and the handoffs committed on it. The
 // controller is told neither, since it works no checkout.
+//
+// The reason is the provider's own text read into an agent's prompt, so it is quoted as a Go
+// string (strconv.Quote), the way a check run's name is where the daemon reads one into a prompt
+// (workflow's namedConclusions): the quotes bound it, and a newline or a quote inside it is
+// escaped rather than ending the sentence that carries it, so no refusal text can read as an
+// instruction of the daemon's own.
 func abandonedTask(c Claim) string {
 	read := "read the issue"
 	if c.Role != claim.RoleController {
 		read = fmt.Sprintf("read the issue, then your branch %s and the handoffs committed on it under "+
-			"$LEGION_WORKSPACE/.legion/%s/ (plan.json, implement.json, test.json, review.json)",
-			claim.IssueBranch(c.Issue), c.Issue)
+			"$LEGION_WORKSPACE/.legion/%s/ (%s)",
+			claim.IssueBranch(c.Issue), c.Issue, handoffFiles())
 	}
 	return fmt.Sprintf("The session this claim ran before this one, %s, was abandoned where it stood: %s. "+
 		"This session is a new one: the turns, tool calls, subagents and background jobs of that session are "+
 		"gone, and only what it pushed and committed survives. Before you repeat any of that work, %s, and "+
 		"tell your architect what you found. Then continue the task.\n\n",
-		c.Abandoned.Session, c.Abandoned.Why, read)
+		c.Abandoned.Session, strconv.Quote(c.Abandoned.Why), read)
+}
+
+// handoffFiles is every handoff an issue's phases are committed with, in the transition table's
+// order: the files the replacement of an abandoned session is told to read. It is built from the
+// phases themselves (phase.All, phase.HandoffFile) rather than spelled here, so a phase that
+// gains a handoff later is named in this prompt without anyone remembering to come back.
+func handoffFiles() string {
+	names := make([]string, 0, len(phase.All))
+	for _, p := range phase.All {
+		if word, ok := phase.HandoffFile(p); ok {
+			names = append(names, word+".json")
+		}
+	}
+	return strings.Join(names, ", ")
 }
 
 // interrupted takes back the pending task whose turn the claim's process can no longer finish — it
