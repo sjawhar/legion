@@ -3876,7 +3876,8 @@ A wake that arrives while the release runs cancels it, up to the moment the firs
 Each woken role is given one task or message that names the wake, so an agent reads why its pod came back.
 From the wake to the woken role's first turn is 5 minutes or less for 90% of wakes and 10 minutes or less for each one; a resume with no first turn 10 minutes after its wake writes a warning naming the issue, the role and the step it waits on.
 
-What the saved bundle holds is every visible commit no remote branch holds, on any head, the working copy's own change, and each local bookmark that points at such a commit.
+What the saved bundle holds is every visible commit the remote does not already hold, on any head, the working copy's own change, and each local bookmark that points at such a commit.
+A commit a remote bookmark or a tag reaches is left out: the new pod's workspace fetch brings it back, and a clone of this repository holds thousands of tags, each of which jj makes a visible head.
 Its base commits are the ones a new pod's workspace fetch already has: the default branch and the issue's branch on the remote.
 It never reaches GitHub.
 sjawhar/legion is public and a working copy holds every file that is not ignored, so a save to a branch would publish files no agent chose to push and could start CI; the daemon's database is private and starts nothing.

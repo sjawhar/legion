@@ -75,7 +75,8 @@ func workingPhase(issue record.Issue) phase.Phase {
 // suspend, issue close and tree close, and StartFor of every queued stop, so all read one rule. A
 // tree close acts while its tree lingers at the root generation it names (record.Issue.LingersAt):
 // never once re-admission has moved the root on. A suspend — an issue's close, a child's leave, or
-// a re-entered child's interrupted run — and an issue close — a child's leave as done — act unless
+// a re-entered child's interrupted run — a release — the idle pod's, which keeps the session and
+// the phase — and an issue close — a child's leave as done — act unless
 // a newer start has already run: that start replaced the run the stop was written for, so acting
 // would stop the run it began and retire the task with it, whatever the retry timing was. A row
 // with no id is not older than anything: the store gives every row one, and an unknown id must not
@@ -84,7 +85,7 @@ func StopActs(id int64, stop record.SuperviseRequest, lastStart int64, root *rec
 	switch stop.Op {
 	case "tree_close":
 		return root != nil && root.LingersAt(stop.Linger)
-	case "suspend", "issue_close":
+	case "suspend", "release", "issue_close":
 		return id <= 0 || id >= lastStart
 	default:
 		return false

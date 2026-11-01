@@ -1372,7 +1372,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		},
 		{
 			key: "worker_idle_retire_seconds", line: "worker_idle_retire_seconds: 600", class: tossed,
-			wantPrefix: "unknown key worker_idle_retire_seconds: ",
+			want: "unknown key worker_idle_retire_seconds: an idle window retires no worker: it releases the worker's issue pod, and the key for it is runtime.kubernetes.idle_release (idle_minutes, backstop_minutes), which suspends every claim of the released pod with the source released and brings them back on the next wake (INFRA-945)",
 		},
 		{
 			key: "resync_interval_seconds", line: "resync_interval_seconds: 600", class: tossed,

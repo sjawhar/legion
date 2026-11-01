@@ -130,9 +130,15 @@ type outbox struct {
 }
 
 // outboxTrees is the store's tree barrier (store.Store) as the outbox runs it: an issue close's
-// suspension, a stop's wait for a stored claim's machine, and a workflow tree close's cleanup.
+// suspension, an idle release's own two decisions and the bundle it saves, a stop's wait for a
+// stored claim's machine, and a workflow tree close's cleanup.
 type outboxTrees interface {
 	IssueSuspension(ctx context.Context, project string, closing store.IssueClose, outOfWorkflow func(status string) bool) (bool, error)
+	IssueRelease(ctx context.Context, project string, release store.IssueReleased, outOfWorkflow func(status string) bool) (bool, error)
+	IssueReleaseStop(ctx context.Context, project, issue string, row int64) (bool, error)
+	ClearIssueRelease(ctx context.Context, project, issue string) error
+	PutWorkspaceBundle(ctx context.Context, issue string, bundle runtime.WorkspaceBundle) error
+	DeleteWorkspaceBundle(ctx context.Context, issue string) error
 	StoredClaimMayRun(ctx context.Context, token claim.Token, row int64) (bool, error)
 	ReserveWorkflowTreeCleanup(ctx context.Context, project, tree string, rootGeneration uint64) (treelifecycle.Lifecycle, bool, error)
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
@@ -476,6 +482,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return suspender.SuspendIssue(ctx, row.Issue, value.Tree, func(ctx context.Context) (bool, error) {
 			return r.trees.IssueSuspension(ctx, r.project, closing, record.OutOfWorkflow)
 		})
+	case record.IssueRelease:
+		return r.releaseIssue(ctx, row, value)
 	case record.WorkspaceRemove:
 		return r.removeWorkspace(ctx, row, value)
 	case record.MergeQueuePublish:
@@ -1037,6 +1045,34 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			return fmt.Errorf("suspend claim %s: %w", token, err)
 		}
 		return nil
+	case "release":
+		// One role stop of an idle pod's release. Its fence is the release's own boundary and
+		// nothing else (store.IssueReleaseStop), where a suspend reads workflow.StopActs: the
+		// release's rows were queued in one transaction with the view they rest on, and the
+		// issue's lifecycle lane runs them in that order, so the only start that can have
+		// overtaken this stop is one queued below the boundary — which is exactly what the
+		// boundary cancels the whole release on, rather than skipping one role of it.
+		if !found {
+			return r.stopWithoutMachine(ctx, row, token)
+		}
+		switch machine.Claim().State {
+		case supervise.StateFailed, supervise.StateRetired:
+			// The claim runs nothing, so there is nothing to release.
+			return nil
+		}
+		acts, err := r.trees.IssueReleaseStop(ctx, r.project, row.Issue, row.ID)
+		if err != nil {
+			return err
+		}
+		if !acts {
+			r.log.Info("outbox release finished without acting: the pod's release was cancelled or is over",
+				"row", row.ID, "issue", issue.Key, "role", payload.Role)
+			return nil
+		}
+		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token, Reason: payload.Reason, By: supervise.SuspendedByReleased}); err != nil {
+			return fmt.Errorf("release claim %s: %w", token, err)
+		}
+		return nil
 	case "issue_close":
 		// A child's close as done: the claim is closed as a tree close closes it, its session dropped
 		// with it, since the issue is finished and its next run, should a person set it todo again,
@@ -1207,6 +1243,85 @@ func (r *outbox) stopWithoutMachine(ctx context.Context, row record.OutboxRow, t
 		return wait.Errorf("stop claim %s: waiting for its stored claim's supervising machine", token)
 	}
 	return nil
+}
+
+// releaseIssue is the last act of an idle pod's release, run once every role stop of the release
+// has suspended its claim: it asks a launcher of the pod — a process that lives as long as the
+// pod does, not the agent the stops ended — for the git bundle of the workspace's unpushed work,
+// saves it in the daemon's own database, and only then suspends the issue's Sandbox, waits its
+// pod out and deletes the Sandbox with the role Secrets it owns. Nothing of the disk survives
+// otherwise, so the bundle is saved before anything is deleted and never after.
+//
+// A bundle that cannot be built, one above runtime.MaxWorkspaceBundleBytes, and a save that
+// fails each stop the release: the pod stays, every claim the release suspended is resumed, and
+// the work a role has not pushed is kept at the cost of a pod. A release the store no longer
+// authorizes — one a role stop cancelled at the boundary, or one whose issue has left the
+// workflow since — stops the same way.
+func (r *outbox) releaseIssue(ctx context.Context, row record.OutboxRow, payload record.IssueRelease) error {
+	if r.supervisor == nil {
+		return errors.New("issue release executor has no claim supervisor")
+	}
+	suspender, ok := r.supervisor.deps.Runtime.(runtime.IssueSuspender)
+	if !ok {
+		// A runtime with no shared issue resources has no pod to release.
+		return nil
+	}
+	releasing := store.IssueReleased{Issue: row.Issue, Tree: payload.Tree, IssueGeneration: payload.Generation,
+		TreeGeneration: payload.TreeGeneration, Row: row.ID}
+	authorize := func(ctx context.Context) (bool, error) {
+		return r.trees.IssueRelease(ctx, r.project, releasing, record.OutOfWorkflow)
+	}
+	act, err := authorize(ctx)
+	if err != nil {
+		return err
+	}
+	if !act {
+		return r.cancelRelease(ctx, row.Issue, workflow.IdleHoldReleasing, "the store no longer authorizes it")
+	}
+	bundler, ok := r.supervisor.deps.Runtime.(runtime.WorkspaceBundler)
+	if !ok {
+		return r.cancelRelease(ctx, row.Issue, workflow.IdleHoldBundleSave, "the runtime bundles no workspace")
+	}
+	bundle, err := bundler.BundleWorkspace(ctx, row.Issue, payload.Role)
+	if err != nil {
+		return r.cancelRelease(ctx, row.Issue, workflow.IdleHoldBundleSave, err.Error())
+	}
+	if size := bundle.Size(); size > runtime.MaxWorkspaceBundleBytes {
+		return r.cancelRelease(ctx, row.Issue, workflow.IdleHoldBundleTooLarge,
+			fmt.Sprintf("the workspace's unpushed work is %d bytes, over the %d a release carries", size, runtime.MaxWorkspaceBundleBytes))
+	}
+	if err := r.trees.PutWorkspaceBundle(ctx, row.Issue, bundle); err != nil {
+		return r.cancelRelease(ctx, row.Issue, workflow.IdleHoldBundleSave, err.Error())
+	}
+	if err := suspender.SuspendIssue(ctx, row.Issue, payload.Tree, authorize); err != nil {
+		return err
+	}
+	r.log.Info("outbox: released the idle pod of an issue; its roles resume in the same sessions at the next wake",
+		"issue", row.Issue, "tree", payload.Tree, "generation", payload.Generation, "bundle", bundle.Size())
+	return r.trees.ClearIssueRelease(ctx, r.project, row.Issue)
+}
+
+// cancelRelease undoes a release that did not finish: the bundle it may have stored is deleted,
+// every claim it suspended with the source `released` is resumed by rule into the pod that is
+// still there, and the release's mark is forgotten, so the next idle tick decides the pod again.
+// Resuming by rule is what a wake does, so a cancelled release leaves the pod exactly as a wake
+// would have left it.
+func (r *outbox) cancelRelease(ctx context.Context, issue string, hold workflow.IdleHold, why string) error {
+	if err := r.trees.DeleteWorkspaceBundle(ctx, issue); err != nil {
+		return err
+	}
+	for _, machine := range r.supervisor.supervised() {
+		c := machine.Claim()
+		if c.Issue != issue || c.SuspendedBy != supervise.SuspendedByReleased || c.State != supervise.StateSuspended {
+			continue
+		}
+		if err := machine.Handle(ctx, supervise.RequestRuleResume{Claim: c.Token, Reason: "idle release cancelled"}); err != nil {
+			return fmt.Errorf("resume claim %s after its pod's release was cancelled: %w", c.Token, err)
+		}
+	}
+	r.log.Info("outbox: the idle release of an issue's pod did not finish; its roles go on in the same pod",
+		"issue", issue, "hold", hold.String(), "reason", why)
+	return r.trees.ClearIssueRelease(ctx, r.project, issue)
 }
 
 // podsProvision is whether the runtime provisions each claim's workspace in the claim's own pod
