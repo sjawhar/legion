@@ -491,7 +491,10 @@ reach any work a pod runs, a test or a tool of your own, not a test suite alone.
   non-zero yourself, rather than passing the wrapper's exit code on. And write a verdict that
   matters to durable storage as it is produced, not at the end: a node can vanish within a minute
   of a pod ending, so an unpersisted log is gone even when nothing killed anything, and a
-  terminating pod's grace period can be as short as 25 seconds, which is no time to flush.
+  terminating pod's grace period can be as short as 25 seconds, which is no time to flush. Read
+  back what you mounted, too: a directory you mounted can be empty, or a write into it can fail,
+  for reasons that have nothing to do with your work, and neither shows up as an error in your
+  own output.
 - **gVisor.** Every pod runs under gVisor, which does not give a test every interface the Linux
   kernel does. In `packages/envoy` the tests of `cmd/agent-secrets`, `cmd/agent-secrets-helper`
   and `internal/broker/helper` fail: the helper identifies its peer with `SO_PEERPIDFD`, which
@@ -543,16 +546,6 @@ reach any work a pod runs, a test or a tool of your own, not a test suite alone.
   budget for a whole job: a lane measured two real builds of the same work faster in a pod than
   on a virtual machine (1,014 s against 1,546 s, and 620 s against 1,117 s), with system time
   roughly doubled and user time lower, so compute-bound work can run as fast or faster there.
-- **A pod's mounts are not interchangeable.** An operation that works on one can fail on another,
-  or silently do nothing, because the failure comes from the mount's backend and not from your
-  tool. Two cases a lane measured on 2026-11-01: a directory creation that returned `ENOSYS` on
-  one persistent volume while the same work succeeded on the pod's own scratch and on an
-  `emptyDir`, and a `subPath` mount of a pod's own volume that came up empty with no error at
-  all, which a job that reads it and carries on turns into a clean-looking wrong answer. So read
-  back what is in a directory before you trust it, and when something fails on one path try the
-  same work on another mount before you change tool: a tool that succeeds may only be avoiding
-  the operation the mount lacks. This reaches a role that starts a workload of its own in the
-  cluster (`docs/kubernetes.md`, "Running a workload in the cluster from a role").
 - **No Docker.** The image carries no container runtime, so a test that starts one through
   testcontainers panics `rootless Docker not found`: in `packages/envoy`, the tests that use
   `internal/tests3` (`internal/dispatch/files`, which `DISPATCH_TEST_NO_CONTAINERS=1` skips) and
