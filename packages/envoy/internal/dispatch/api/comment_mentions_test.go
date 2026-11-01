@@ -69,12 +69,15 @@ func settledCommentDeliveries(t *testing.T, database *store.Store, commentID str
 }
 
 // waitForCommentDeliveries reads the comment's attempts, by target and attempt, until done accepts
-// them, for at most 10 s; want says what done waits for.
+// them; want says what done waits for. Its patience covers a whole take-over window and ten
+// seconds past it, because a send on the mention sender's lanes may wait one out after the
+// comment's response - a mention of an ended session does, under a server running the production
+// window (listenerTakeoverWindow) - before its attempt settles.
 func waitForCommentDeliveries(
 	t *testing.T, database *store.Store, commentID, want string, done func([]model.CommentDelivery) bool,
 ) []model.CommentDelivery {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(listenerTakeoverWindow + 10*time.Second)
 	for {
 		rows, err := database.Pool.Query(context.Background(), `
 			select `+commentDeliveryColumns+` from comment_deliveries where comment_id = $1 order by target, attempt

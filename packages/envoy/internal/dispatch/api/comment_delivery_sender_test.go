@@ -156,7 +156,8 @@ func newMentionListener(t *testing.T) (*httptest.Server, *mentionListener) {
 				}
 			}
 			if refused {
-				w.WriteHeader(http.StatusServiceUnavailable)
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":"the recipient's host refused the frame"}`))
 				return
 			}
 			if repeat {
@@ -207,8 +208,11 @@ func (l *mentionListener) dropRepeats() {
 	l.dedupe = true
 }
 
-// refuseSends makes every send to session from now on answer 503, so the attempt behind it fails
-// as one whose recipient's host refused it does.
+// refuseSends makes every send to session from now on answer the refusal its host gave, so the
+// attempt behind it fails on that one try: the refusal is the listener's own answer, which
+// retryableDeliveryFailure settles at once, rather than a 503, which a sender reads as a listener
+// being replaced and tries again inside the take-over window, so a test counting the sends of one
+// comment would count a try the take-over timing decides.
 func (l *mentionListener) refuseSends(session string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
