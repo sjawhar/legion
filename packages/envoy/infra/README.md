@@ -66,7 +66,10 @@ pulumi package add envoy-infra@<version> --server 'https://github.com/sjawhar/le
 
 Keep the single quotes: Pulumi fills in `${VERSION}` itself and downloads
 `pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz` from the GitHub release tagged
-`envoy-infra-v<version>`. `pulumi package add` records the package in `Pulumi.yaml`:
+`envoy-infra-v<version>`. The address after `--server` is the one the release built into the
+plugin from the repository it ran in,
+`https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}` today.
+`pulumi package add` records the package in `Pulumi.yaml`:
 
 ```yaml
 packages:
