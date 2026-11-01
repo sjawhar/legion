@@ -113,8 +113,8 @@ const roleKeepHandoverWindow = 10 * time.Minute
 // holder's session read, and at most one release of a lapsed claim. Every pass that resolves at
 // all resolves within it, which is every pass whose lane holds copies to hand over
 // (handOverKeptRole). It answers no caller - the keep's own answer is written by
-// then - so it ends rather than waiting out a bus that is not answering, and a resolution that did
-// not answer costs only this copy's wait for the role's next claim.
+// then - so it ends rather than waiting out a bus that is not answering, and what a resolution that
+// did not answer costs is the rule handOverKeptRole states.
 const roleKeepHolderWindow = 5 * time.Second
 
 // roleKeptDeliveryStatus is the delivery_status of a role message kept instead of delivered: the
@@ -474,9 +474,8 @@ func drainKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role 
 // the lane busy waits the claim out, since the walk holding it can still be forwarding; and one
 // whose holder moved is followed at once, for the holder the next pass resolves.
 //
-// What a failure earns is stated here once, which roleKeepDrainRetryCap and retry point to
-// rather than restate. A walk that failed is not one that made no progress: it is waited out on
-// a widening cadence (roleKeepDrainBackoff) and its error is carried out of the handover. A read
+// A walk that failed is not one that made no progress: it is waited out on a widening cadence
+// (roleKeepDrainBackoff) and its error is carried out of the handover. A read
 // that did not answer - the lane head's, on whichever pass it was made, or the holder's
 // resolution behind one - says nothing about the holder, so the role's cached claim decides
 // whether the handover reads again (retry, store.Registry.CachedRoleHolder, the read the sweep

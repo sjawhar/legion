@@ -2534,10 +2534,11 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
 - The role's next claim hands the kept lane over off the claim's own request (`runKeptRoleDrain`, `drainKeptRole`), after the claim is answered.
   One walk of the lane (`walkKeptRole`) hands the new holder at most `roleKeepDrainMax` (20) copies, each once and in the order they were kept, reads at most `roleKeepScanMax` (200) of them, lives `roleKeepDrainWindow` (60 s), and moves the role's cursor, `notifications.envoy.kept.cursor.<role>`, which holds the listener's own bookkeeping rather than an envelope and carries one walk's claim of the lane, so two listeners walking it never forward one copy twice.
   The handover walks the lane again - for the role's holder as it resolves it at the top of every pass, after the pause the walk before it earned - until the lane is empty, the role has no live holder, or `roleKeepDrainIdleRounds` (3) walks running forward nothing and pass nothing over.
-  A walk that failed is waited out on a widening cadence (`roleKeepDrainBackoff`, 1 s to 30 s) and its error is the handover's, reported at Error.
+  A walk that failed is waited out on a widening cadence (`roleKeepDrainBackoff`, 1 s to 30 s), and the error of the handover's last walk is the handover's, reported at Error.
   A read of the lane or of the holder that did not answer, on any pass including the first, is waited out the same way while the role's cached claim names a session, live or lapsed, and ends the handover at Debug otherwise.
-  Both wait inside `roleKeepHandoverWindow` (10 min), whose passing inside a read or a walk carries that failure out as any other does;
-  only a handover the listener's shutdown cancelled ends with nothing above Debug, and then only while no walk of it left a copy it forwarded unconfirmed, which the next walk forwards again.
+  Both wait inside `roleKeepHandoverWindow` (10 min), whose passing inside a read or a walk carries that failure out as any other does.
+  A shutdown that cancels a read ends the handover with nothing above Debug, and so does one that cancels a walk that left no copy it forwarded unconfirmed, which the next walk forwards again;
+  a shutdown that lands in a pause still reports the failure that pause was waiting out.
   A handover this process loses - a restart, a rolling deploy - is picked up by `sweepKeptRoleLanes`, which runs at the listener's start and every five minutes beside the reapers and hands over every lane holding copies after its cursor whose role has a live holder (`bus.Client.KeptRoleLanes`, one `STREAM.INFO` with a `notifications.envoy.kept.role.>` filter), so no lane waits for a claim a live holder will not make.
   Each forwarded copy carries `kept_at`, the Unix-millisecond time the listener kept it, so the holder can judge the message's age.
   A copy older than `roleKeepWindow` (one hour) when the claim reads it is not forwarded:
@@ -3320,6 +3321,8 @@ Each item below names an endpoint and its method, then its contract, and an item
   It answers `504 {"error":…,"reason":…,"event_id":…,"dedupe_key":…,"holder":…,"attempts":N}` when the window ended without a receipt, keeping nothing, since that forward is already stored on the holder's agent subject:
   `reason` is `receipt_timeout` when the last forward reached the server and drew no receipt (a holder that stopped running while its registration lives gives it), else `delivery_failed` (no live holder to forward to, a later attempt's read that failed or ran out of time, a forward not shown to have reached the server);
   `holder` is the holder last resolved, empty when none was, and `attempts` counts the forwards, every one the same envelope.
+
+- An ad-hoc topic's answers, and a publish or forward the bus denies.
   An ad-hoc topic answers `200` with the envelope once it was published and every recipient confirmed or there was none.
   Its own publish not reaching NATS is `504 {"error":"<topic> was not published within 4s: <cause>; no session was sent it","reason":"publish_failed","event_id":…,"dedupe_key":…}`, with no recipient list since none was forwarded it, whether the window ended first (the wait for a reconnecting connection used it up) or the publish failed at once on a connection that is down:
   the status does not depend on how soon the failure came.
