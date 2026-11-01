@@ -59,6 +59,7 @@ import {
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
   serviceSubjectLabel,
+  typedBlockIdAttribute,
   zodSchemaApi,
 } from "@legion/contracts";
 import { canonicalRepo } from "@legion/contracts/repo";
@@ -1914,9 +1915,9 @@ function routeHeldBySession(issue: RoutedIssue): boolean {
 /**
  * An issue's route as every agent surface reads it: where its messages go and whether that
  * reaches anyone, from the `route_status` the server resolved on this read. A route to a role
- * nobody holds, or to a session that is not running, reaches nobody as of the server's copy of
- * the listener's session list, at most 5 s old,
- * so it says so - and says "right now", because a restarting session is absent for minutes.
+ * nobody holds, or to a session that is not running, reaches nobody as of the listener's session
+ * list Dispatch last stored, at most 5 s old and the same on every server process, so it says
+ * so - and says "right now", because a restarting session is absent for minutes.
  */
 function routeText(issue: RoutedIssue, titles?: ReadonlyMap<string, string>): string {
   if (issue.route === null) return "none";
@@ -2867,11 +2868,13 @@ async function refuseOpenDecisionBlocks(
       : `${named}, ${state} but still open in version ${latest}: write the decision into the text with dispatch doc-edit, which writes a version that carries it`;
   const open = blocks.flatMap((block): string[] => {
     const ask = asks.get(block.id);
-    // The block's opening lines, `:::ask{#<id> … state="…"}`. Every match counts, so a line that
-    // quotes the opener (in code, say) can add an open block but never hide one; a block none of
-    // whose lines carries a state is open.
+    // The block's opening lines, `:::ask{<id> … state="…"}`, the id as the renderer writes it
+    // (`typedBlockIdAttribute`: `#<id>`, or `id="…"` for an id the shortcut cannot hold). Every
+    // match counts, so a line that quotes the opener (in code, say) can add an open block but
+    // never hide one; a block none of whose lines carries a state is open.
+    const id = typedBlockIdAttribute(block.id);
     const openers = lines.filter(
-      (line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`)
+      (line) => line.includes(`ask{${id} `) || line.includes(`ask{${id}}`)
     );
     const states = openers.map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
     const named =

@@ -102,7 +102,7 @@ func startUnboundDurableMonitor(t *testing.T, client *bus.Client, consumer strin
 			func() error { return checkSelfHealth(caches, probe) },
 			func(err error) bool { return isUnrecoverableSelfHealthFailure(err, client, caches) },
 			client.Connected,
-			func() error { return rebuildListenerDependencies(ctx, client, caches, probe, consumer, handler) },
+			func() error { return rebuildListenerDependencies(ctx, client, caches, probe, consumer, handler, nil) },
 			func() { terminated.Store(true) },
 			50*time.Millisecond,
 			3,

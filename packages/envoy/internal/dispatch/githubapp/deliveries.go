@@ -52,7 +52,7 @@ func (c *Client) Deliveries(ctx context.Context, since time.Time, before func() 
 		if err != nil {
 			return nil, err
 		}
-		body, status, header, err := c.request(ctx, http.MethodGet, target, "Bearer "+jwt, mediaTypeJSON, nil, responseLimit)
+		body, status, header, err := c.request(ctx, AppScope, http.MethodGet, target, "Bearer "+jwt, mediaTypeJSON, nil, responseLimit)
 		if err != nil {
 			return nil, err
 		}
@@ -98,7 +98,7 @@ func (c *Client) Redeliver(ctx context.Context, deliveryID int64) error {
 		return err
 	}
 	target := c.base + "/app/hook/deliveries/" + strconv.FormatInt(deliveryID, 10) + "/attempts"
-	body, status, header, err := c.request(ctx, http.MethodPost, target, "Bearer "+jwt, mediaTypeJSON, nil, responseLimit)
+	body, status, header, err := c.request(ctx, AppScope, http.MethodPost, target, "Bearer "+jwt, mediaTypeJSON, nil, responseLimit)
 	if err != nil {
 		return err
 	}
@@ -117,13 +117,29 @@ func (c *Client) Redeliver(ctx context.Context, deliveryID int64) error {
 // RateLimitError is GitHub refusing a request because the App is over a rate limit. Wait is how
 // long GitHub asks for before the next request. GitHub warns that requests made while limited
 // may get the integration banned.
+//
+// A held error is a limit already recorded for Scope in the limits every process shares
+// (Limits): the request was never sent, Status and Body are empty, Wait is what the recorded
+// limit has left, and Recorded is when that limit was last recorded.
+//
+// A held error's text names the limit by Scope and Recorded, never by Wait: a caller that keeps
+// the text and compares it with the last one (the architecture importer's one sync_failed event
+// per failure) reads one limit as one failure however much of it has passed, and a new or
+// extended limit as a new failure. Anything that needs the remaining wait reads Wait.
 type RateLimitError struct {
-	Status int
-	Wait   time.Duration
-	Body   string
+	Status   int
+	Wait     time.Duration
+	Body     string
+	Scope    string
+	Held     bool
+	Recorded time.Time
 }
 
 func (e *RateLimitError) Error() string {
+	if e.Held {
+		return fmt.Sprintf("GitHub rate limit on %s recorded at %s is in force; the request was not sent",
+			e.Scope, e.Recorded.UTC().Format(time.RFC3339Nano))
+	}
 	return fmt.Sprintf("rate-limited by GitHub (status %d), next request in %s: %s", e.Status, e.Wait, e.Body)
 }
 

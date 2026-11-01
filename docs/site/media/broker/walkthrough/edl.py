@@ -50,7 +50,9 @@ NARRATION: dict[str, str] = json.loads((Path(__file__).parent / "narration.json"
 CLIPS: list[Clip] = [
     # The payoff: the command's line, just after the key reached it.
     Clip("open", "t4-ran.cast", At("key", 0.05), At("key", 4.35), (("open", At("key", 0.1)),)),
-    Clip("login", "t1-login.cast", At("start", 0.05), At("end"), (("login", At("start", 0.06)),)),
+    # The narration runs with the typing, so the cast's frozen tail after the code does not hold
+    # the clip in silence.
+    Clip("login", "t1-login.cast", At("start", 0.05), At("end"), (("login", At("typing", -0.4)),)),
     Clip("machine", "b1-machine.webm", At("page", 0.2), At("result", 1.4),
          (("machine-code", At("typing", -1.2)), ("machine-approve", At("record", 0.6)))),
     Clip("session", "t2-session.cast", At("status-typing", -0.3), At("self", 4.6),
@@ -58,9 +60,12 @@ CLIPS: list[Clip] = [
           ("session-self", At("self-typing", -0.3)))),
     Clip("request", "t3-request.cast", At("typing", -0.4), At("end"),
          (("request-ask", At("typing", -0.2)), ("request-wait", At("waiting", 0.3)))),
-    # Opens on the request in the Inbox: before `inbox` the page may still be loading.
-    Clip("approve", "b2-approve.webm", At("inbox"), At("result", 1.3),
-         (("approve-inbox", At("inbox", 0.0)), ("approve-record", At("record", -0.2)), ("approve-click", At("approve", -0.6)))),
+    # Opens on the request in the Inbox: before `inbox` the page may still be loading. The row's
+    # link passes through the broker's sign-in, which `approve-signin` speaks over, and lands on
+    # the broker's own page at `record`.
+    Clip("approve", "b2-approve.webm", At("inbox"), At("result", 1.0),
+         (("approve-inbox", At("inbox", 0.0)), ("approve-signin", At("record", -2.9)),
+          ("approve-record", At("record", 1.75)), ("approve-click", At("approve", -1.1)))),
     # The waiting command, still waiting just after the approval, gets the key and runs.
     Clip("ran", "t4-ran.cast", At("key", -1.5), At("key", 2.7), (("ran-runs", At("key", -1.3)),)),
     Clip("ran-status", "t4-ran.cast", At("status-typing", -0.2), At("status-word", -0.04)),
