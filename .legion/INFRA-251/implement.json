@@ -2,27 +2,34 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-251",
-  "previousHandoff": "cab1b1affbe3d6480b953b6d284ae8f2b1bfd26a",
+  "previousHandoff": "18ad8b69262281aded93a5d8725b601f65077e9f",
   "proof": [
     {
-      "criterion": "The red ci-ok at cab1b1af: both reds are main's newer rules",
-      "surface": "CI run 41324560168. (1) test: every store-backed test refused 'migration 0068_parked_decisions.up.sql takes version 68: the numbered migrations ended at 67, and every migration added since is named for the UTC moment it was created, 14 digits YYYYMMDDHHMMSS'. That is main's packages/envoy/migrationid rule, under which the daemon's numbered series closed at 0067. This change's migrations are renamed 20261101163106_parked_decisions.up.sql and 20261101163107_claim_delivered_rows.up.sql (date -u +%Y%m%d%H%M%S, the second a second later), the test is now migration_20261101163106_test.go (TestParkedDecisionsArriveWith20261101163106AndGoWithTheirIssue), and every comment naming them is updated. (2) lint: release-push.sh fold-orphans refused packages/daemon/.changes/unreleased/INFRA-251-kept-decision-once.yaml, since packages/daemon has no fold. It is removed. packages/pi-legion's fragment, which named the issue key against AGENTS.md's changelog rule, is now pr2163-parked-decision-controller.yaml with Issue: pr2163.",
-      "command": "a throwaway merge of this head with main 816e03f8, then: bash .github/scripts/release-push.sh fold-orphans $(<.github/changelog-packages); cd packages/daemon && go build ./... && go vet ./internal/store/... ./internal/admit/; go test -count=1 -p 1 ./internal/store/... ./internal/admit/ ./internal/record/ (LEGION_TEST_PG_DSN on a database legion_test owns)",
-      "observed": "Under main's rule: store ok (109 s), store/migrations ok (main's embed_test and next_number_test), record ok. admit failed one subtest of TestAnArchitectsHandBackReturnsTheSlotToWaitOnThePerson; run alone three times it passes (ok in 11.5 s), so it is the pod's cleanup or a flake, not the rename. fold-orphans reads git HEAD, which was this branch's tip, so it named only main's three old daemon fragments that this branch still carries from an earlier merge. The merge ref has none of them (packages/daemon/.changes is absent in the probe merge), and INFRA-251-kept-decision-once.yaml is gone. The throwaway merge was abandoned; no merge of main is pushed.",
-      "headSha": "702c4ee9b2961de13b949b7fae350d0a865e09ee",
-      "negativeControl": "At cab1b1af CI refused the 0068/0069 names and the daemon fragment (run 41324560168)."
+      "criterion": "The branch builds a daemon that migrates its database (the tester's round-24 failure)",
+      "surface": "the daemon's store package and the property model at the merge head, which now carries main's timestamp-aware migration loader",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u OMP_SESSION_SQL_DSN_FILE LEGION_TEST_PG_DSN=<own Postgres on the issue volume> LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -count=1 ./internal/store/... ./internal/record/ ./internal/supervise/",
+      "observed": "Merge bc514a0d84a0dd5a4b5c2071f8b9ed912b786755 (jj new legion/INFRA-251 main, main 6b1524cdb8aa, no conflict). store 215s ok (TestMigrateAppliesEveryEmbeddedMigration among them), store/migrations ok, record ok, supervise ok; the property model's seeds migrate and run. Changed lines of the branch diff are identical before and after the merge (sha256 of the +/- lines 3fd71f3b41125e75 both sides; 78 files, 12233 insertions, 259 deletions both sides).",
+      "headSha": "0094662cca8a6fd8acac61c2509cc14a8a6bd10a",
+      "negativeControl": "At the tester's d90356ab (the renamed migrations without main's loader) TestMigrateAppliesEveryEmbeddedMigration fails: 'unable to encode 20261101163106 into binary format for int4' (tester's evidence)."
+    },
+    {
+      "criterion": "The property oracle accepts a second telling exactly when the first catch-up's own telling write failed (or its task was taken back), citing the ruling, and every other double telling stays a failure; seed 41 is pinned and passes",
+      "surface": "kept_decision_property_test.go keptRun.tell/held with keptForgetStore.failedTellings; kept_decision_regression_seeds_test.go",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u OMP_SESSION_SQL_DSN_FILE LEGION_TEST_PG_DSN=<own Postgres on the issue volume> LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -count=1 -run '^TestKeptDecisionsRegressionSeeds$' ./internal/daemon/ ; LEGION_KEPT_PROPERTY_RUNS=150 LEGION_KEPT_PROPERTY_STEPS=300 go test -run '^TestKeptDecisionsReachTheCurrentArchitectOnce$' ./internal/daemon/",
+      "observed": "Pinned seeds 39 of 39 pass, seed-41-at-300-steps among them (4.12 s). 150 seeds x 300 steps pass. A throwaway driver of tell() (deleted) showed: failed catch-up 112 then catch-up 115 accepted; the same with the write not failed rejected 'told 2 times'; failed 112 and 115 then 118 rejected 'told 3 times'; prompt then non-retold prompt rejected; prompt then retold prompt accepted; failed catch-up then a retold prompt rejected; a telling to another tree's architect unaffected. The tester's seed-41 trace (row 112's forget errored at step 288, row 115 named ask-0015 at step 304) matches the case the oracle now accepts.",
+      "headSha": "0094662cca8a6fd8acac61c2509cc14a8a6bd10a",
+      "negativeControl": "With tellingFailed forced false, the throwaway driver's accept case fails 'ask-0015 was told 2 times'. Seed 41 itself did not reproduce on this pod in 50 runs (25 at 100 steps, 25 at 300) nor in a 150x300 sweep under the old oracle: it reaches the case only on some schedules, as the tester's single failure in 150 did."
     }
   ],
   "filesChanged": [
-    "packages/daemon/internal/store/migrations/20261101163106_parked_decisions.up.sql (renamed from 0068)",
-    "packages/daemon/internal/store/migrations/20261101163107_claim_delivered_rows.up.sql (renamed from 0069)",
-    "packages/daemon/internal/store/migration_20261101163106_test.go (renamed)",
-    "packages/daemon/internal/store/kept_decisions.go, daemon/outbox.go, daemon/workflow.go, daemon/root_hears_main_paths_test.go (comments)",
-    "packages/daemon/.changes/unreleased/INFRA-251-kept-decision-once.yaml (removed)",
-    "packages/pi-legion/.changes/unreleased/pr2163-parked-decision-controller.yaml (renamed from INFRA-251-\u2026, Issue pr2163)"
+    "packages/daemon/internal/daemon/kept_decision_property_test.go",
+    "packages/daemon/internal/daemon/kept_decision_regression_seeds_test.go",
+    "merge of main 6b1524cdb8aa (no conflict)"
   ],
   "deviations": [
-    "The pi-legion fragment's rename to pr2163 is beyond the two reds: AGENTS.md says no Dispatch issue key goes in a fragment's name or Issue field."
+    "Seed 41's failure is schedule-dependent and did not recur here, so its pin proves the run passes, not that it reaches the failed write each time; the oracle's accept and reject cases were exercised directly by a throwaway driver instead."
   ],
-  "openQuestions": []
+  "openQuestions": [
+    "In the four daemon packages run together on this pod, the only failures were environmental: dropping a test database ('permission denied to terminate process', SQLSTATE 42501), no rootless Docker, gVisor's empty SigIgn, and NATS streams shared between packages run in parallel."
+  ]
 }
