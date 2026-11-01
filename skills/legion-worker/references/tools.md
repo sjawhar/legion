@@ -476,11 +476,13 @@ Some tests fail in a Kubernetes issue pod whatever your change, because of the p
 A tmux pane runs on its host, and none of this holds there. Their proof is CI's run at the head:
 cite that run, and name in your handoff each package the pod could not run. The cases below are
 the known ones, not every one: a failure they do not name is yours to explain. Several of them
-reach any work a pod runs, a test or a tool of your own, not a test suite alone. One rule holds
-them together: set it, read it back, and refuse on a mismatch. A call's exit code answers a
-different question than the one you asked. An empty result is evidence only when you know the
-tool ran: a missing binary, a refused permission, or a truncated search gives you silence that
-reads as a clean answer, so check that the thing you counted had something to count.
+reach any work a pod runs, a test or a tool of your own, not a test suite alone. One habit holds
+them together: check the result, never the request. A call's exit code, a reported limit and a
+job's phase each answer a different question than the one you asked, so where you set something,
+read it back and refuse on a mismatch, and where you read something, confirm the tool ran. An
+empty result is evidence only then: a missing binary, a refused permission, or a truncated
+search gives you silence that reads as a clean answer, so check that the thing you counted had
+something to count.
 
 - **Read the summary your work wrote, never the Job's phase.** A Kubernetes Job that reports
   `Succeeded` says its container exited 0, and nothing more: read the artefact your work was to
@@ -529,30 +531,46 @@ reads as a clean answer, so check that the thing you counted had something to co
   ```sh
   b=$(readlink -f "$(command -v <tool>)")
   n=$(nm -D --undefined-only "$b" | wc -l)
-  bad=$(nm -D --undefined-only "$b" | grep -c openat2)
+  bad=$(nm -D --undefined-only "$b" | grep -c openat2 || true)   # grep -c exits 1 on no match
   [ "$n" -gt 0 ] || { echo "no dynamic symbols: static binary or nm failed, use a tracer"; exit 2; }
   [ "$bad" -eq 0 ] || { echo "this binary calls openat2 and fails under gVisor"; exit 2; }
   ```
 
   The total count is the control: a total of zero is a static binary or a failed `nm`, not a
-  clean result. An undefined `openat2` symbol means the binary fails under gVisor; its absence
-  means it is safe.
-- **Set the stack with `ulimit -s 131072` and read both limits back.** The check, not the number,
-  is the durable part:
+  clean result. **An undefined `openat2` symbol proves the binary calls it. Its absence proves
+  nothing**, so the check is a positive test only: a caller can reach the syscall through
+  `syscall(SYS_openat2, …)`, which leaves `syscall` in the table and never `openat2`, and a libc
+  that exports no `openat2` wrapper produces the symbol for no binary at all — measured on a
+  glibc 2.39 host, where no binary in `/usr/bin` carries it and `tar` shows 227 undefined
+  symbols, `openat2` zero and `syscall` one. To establish that a binary is safe rather than
+  suspect, trace it.
+- **Set the stack with `ulimit -s`, then read both limits back.** The check, not the number,
+  is the durable part. 131072 is the number for an ordinary job; name a larger one when a tool
+  you run polices its own limit and demands it:
 
   ```sh
-  ulimit -s 131072
+  want=131072   # a tool with its own stack guard may demand more; use its minimum
+  ulimit -S -s "$want"   # soft first: see below
+  ulimit -H -s "$want"
   soft=$(ulimit -Ss); hard=$(ulimit -Hs)
-  [ "$soft $hard" = "131072 131072" ] || { echo "stack is $soft/$hard, refusing"; exit 2; }
+  [ "$soft" = "$want" ] || { echo "soft stack is $soft, wanted $want; refusing"; exit 2; }
+  [ "$hard" != unlimited ] || { echo "hard stack is unlimited; refusing"; exit 2; }
+  [ "$hard" -ge "$want" ] || { echo "hard stack is $hard, under $want; refusing"; exit 2; }
   ```
 
-  Never `unlimited`, which reports `unlimited` and gives 8 MiB. One command sets soft and hard
-  together and is legal whether the pod starts at 8 MiB or at `unlimited`; a two-command form
-  that lowers the hard limit first returns `EINVAL` from a soft `unlimited` and, chained with
-  `&&`, leaves the process where it was. Both limits matter: a helper that raises the stack by
+  The soft limit must be what you asked for, and the hard limit must be finite and no lower —
+  a hard limit **above** your number is fine and a pod may hand you one, so do not refuse it.
+  Never `unlimited`, which reports `unlimited` and gives 8 MiB.
+  **Set the soft limit before the hard one.** A pod can start with both `unlimited`, and
+  lowering the hard limit below a soft `unlimited` is `EINVAL`: measured in `bash`, `ulimit -H
+  -s 131072` from that state fails with `cannot modify limit: Invalid argument`, and chained
+  with `&&` the soft set never runs, so the process keeps `unlimited` and gets 8 MiB — the
+  failure the rule exists to stop. Soft first succeeded from every starting state measured.
+  Do not rely on the single `ulimit -s <n>` either: it set both limits in a fresh shell here
+  and left the hard limit `unlimited` in a long-lived one, which is why the read-back is the
+  rule and the setting form is not. Both limits matter: a helper that raises the stack by
   setting the soft limit to the hard limit otherwise lands on the pod's `unlimited` hard limit
-  and gets 8 MiB, and a tool that checks the limit itself may refuse to start when the hard
-  limit is below its own minimum. The ceiling is 128 MiB whichever finite value you choose —
+  and gets 8 MiB. The ceiling is 128 MiB whichever finite value you choose —
   gVisor maps the whole stack at exec and caps it at `maxStackSize = 128 << 20` in `MapStack`
   (`pkg/sentry/mm/syscalls.go`), with `RLIM_INFINITY` falling back to the 8 MiB default — and a
   larger soft limit costs rather than buys, since glibc sizes a default thread stack from it and
