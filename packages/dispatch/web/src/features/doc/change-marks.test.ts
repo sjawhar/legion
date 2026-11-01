@@ -2,7 +2,7 @@ import { beforeAll, expect, test } from "bun:test";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 import * as Y from "yjs";
 
-import { renderWithEngine, warmMarkdownRenderer } from "../refs/markdown-engine";
+import { loadedEngine, warmMarkdownRenderer } from "../refs/markdown-engine";
 import {
   ADDED_WORDS_CLASS,
   CHANGED_BLOCK_CLASS,
@@ -16,10 +16,7 @@ import { blockSchemaCache } from "./schema";
 /** The document the editor would render for `markdown`: `changeMarksAgainst` reads the editor's
  *  own document, and the headless engine builds the same one. */
 function render(markdown: string): ProseMirrorNode {
-  let doc: ProseMirrorNode | undefined;
-  renderWithEngine((engine) => {
-    doc = engine?.parse(markdown);
-  });
+  const doc = loadedEngine()?.parse(markdown);
   if (doc === undefined) throw new Error(`the engine rendered nothing for "${markdown}"`);
   return doc;
 }

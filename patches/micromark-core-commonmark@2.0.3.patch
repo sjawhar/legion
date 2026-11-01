@@ -1,0 +1,405 @@
+diff --git a/dev/lib/label-end.js b/dev/lib/label-end.js
+index 492756f04eb7e5f0b77d0c4283692ef7457e6d7c..751a512de58921c916817ecfbb8c854228caa97d 100644
+--- a/dev/lib/label-end.js
++++ b/dev/lib/label-end.js
+@@ -2,6 +2,7 @@
+  * @import {
+  *   Construct,
+  *   Event,
++ *   Point,
+  *   Resolver,
+  *   State,
+  *   TokenizeContext,
+@@ -67,6 +68,8 @@ function resolveAllLabelEnd(events) {
+ 
+ /** @type {Resolver} */
+ function resolveToLabelEnd(events, context) {
++  // The events below are rewritten: where a label end stopped looking no longer holds.
++  context._labelEndSeen = undefined
+   let index = events.length
+   let offset = 0
+   /** @type {Token} */
+@@ -187,24 +190,60 @@ function resolveToLabelEnd(events, context) {
+  */
+ function tokenizeLabelEnd(effects, ok, nok) {
+   const self = this
+-  let index = self.events.length
++  const entryLength = self.events.length
++  let index = entryLength
+   /** @type {Token} */
+   let labelStart
++  /** @type {number} */
++  let labelStartIndex
+   /** @type {boolean} */
+   let defined
+ 
+   // Find an opening.
+-  while (index--) {
++  //
++  // The events between the opening a label end before this one found and where it stopped
++  // looking hold no other opening: it looked at them, and an event there is never added or
++  // changed afterwards, other than being marked balanced. So the scan looks at the events added
++  // since (`_labelEndSeen` and up), and then goes on below that opening (`_labelEndFrom`),
++  // which that label end marked balanced. `resolveToLabelEnd` rewrites the events a label end
++  // that matched covers, so it drops the hint, and the hint is used only while the event below
++  // where it stopped is the one it was.
++  const seen = self._labelEndSeen
++  const floor =
++    seen !== undefined &&
++    seen <= index &&
++    self.events[seen - 1] === self._labelEndSeenAt
++      ? seen
++      : 0
++
++  while (index-- > floor) {
+     if (
+       (self.events[index][1].type === types.labelImage ||
+         self.events[index][1].type === types.labelLink) &&
+       !self.events[index][1]._balanced
+     ) {
+       labelStart = self.events[index][1]
++      labelStartIndex = index
+       break
+     }
+   }
+ 
++  if (!labelStart && floor > 0) {
++    index = self._labelEndFrom
++
++    while (index-- > 0) {
++      if (
++        (self.events[index][1].type === types.labelImage ||
++          self.events[index][1].type === types.labelLink) &&
++        !self.events[index][1]._balanced
++      ) {
++        labelStart = self.events[index][1]
++        labelStartIndex = index
++        break
++      }
++    }
++  }
++
+   return start
+ 
+   /**
+@@ -243,11 +282,7 @@ function tokenizeLabelEnd(effects, ok, nok) {
+       return labelEndNok(code)
+     }
+ 
+-    defined = self.parser.defined.includes(
+-      normalizeIdentifier(
+-        self.sliceSerialize({start: labelStart.end, end: self.now()})
+-      )
+-    )
++    defined = isDefined(self, labelStart.end, self.now())
+     effects.enter(types.labelEnd)
+     effects.enter(types.labelMarker)
+     effects.consume(code)
+@@ -359,10 +394,83 @@ function tokenizeLabelEnd(effects, ok, nok) {
+    */
+   function labelEndNok(code) {
+     labelStart._balanced = true
++    // Where the next label end can stop looking for an opening, and go on below this one.
++    self._labelEndFrom = labelStartIndex
++    self._labelEndSeen = entryLength
++    self._labelEndSeenAt = self.events[entryLength - 1]
+     return nok(code)
+   }
+ }
+ 
++/**
++ * Whether a label is one of the identifiers a definition in this document defines.
++ *
++ * @param {TokenizeContext} context
++ *   Context.
++ * @param {Point} start
++ *   Start of the label.
++ * @param {Point} end
++ *   End of the label.
++ * @returns {boolean}
++ *   Whether it is defined.
++ */
++function isDefined(context, start, end) {
++  const defined = context.parser.defined
++
++  if (defined.length === 0) return false
++
++  let max = context.parser._definedMax
++
++  if (max === undefined || context.parser._definedCount !== defined.length) {
++    max = 0
++    let index = -1
++
++    while (++index < defined.length) {
++      if (defined[index].length > max) max = defined[index].length
++    }
++
++    context.parser._definedMax = max
++    context.parser._definedCount = defined.length
++  }
++
++  // `normalizeIdentifier` keeps every character that is not markdown whitespace, and collapses
++  // or drops the whitespace, so a label with more than `max` of them is longer than every
++  // identifier defined and cannot be one. Counting them is cheaper than serializing a long
++  // label on every `]`, and it stops as soon as there are too many.
++  if (end.offset - start.offset > max) {
++    const chunks = context.sliceStream({start, end})
++    let index = -1
++    let size = 0
++
++    while (++index < chunks.length) {
++      const chunk = chunks[index]
++
++      // A chunk that is not a string is a virtual line ending, tab, or space.
++      if (typeof chunk === 'string') {
++        let at = -1
++
++        while (++at < chunk.length) {
++          const code = chunk.charCodeAt(at)
++
++          if (
++            code !== codes.horizontalTab &&
++            code !== codes.lineFeed &&
++            code !== codes.carriageReturn &&
++            code !== codes.space &&
++            ++size > max
++          ) {
++            return false
++          }
++        }
++      }
++    }
++  }
++
++  return defined.includes(
++    normalizeIdentifier(context.sliceSerialize({start, end}))
++  )
++}
++
+ /**
+  * @this {TokenizeContext}
+  *   Context.
+diff --git a/dev/lib/list.js b/dev/lib/list.js
+index 55671e12ec43194115cecf4e58c23bc4b2e5fcb5..0de401bc8b59d4015292292e490a6f162fc2e761 100644
+--- a/dev/lib/list.js
++++ b/dev/lib/list.js
+@@ -11,7 +11,7 @@
+ 
+ import {ok as assert} from 'devlop'
+ import {factorySpace} from 'micromark-factory-space'
+-import {asciiDigit, markdownSpace} from 'micromark-util-character'
++import {asciiDigit, markdownLineEnding, markdownSpace} from 'micromark-util-character'
+ import {codes, constants, types} from 'micromark-util-symbol'
+ import {blankLine} from './blank-line.js'
+ import {thematicBreak} from './thematic-break.js'
+@@ -172,7 +172,27 @@ function tokenizeListContinuation(effects, ok, nok) {
+   assert(self.containerState, 'expected state')
+   self.containerState._closeFlow = undefined
+ 
+-  return effects.check(blankLine, onBlank, notBlank)
++  return start
++
++  /** @type {State} */
++  function start(code) {
++    // Where the line is already over - the code is a line ending or the end of the document -
++    // it is blank, so the check below answers yes and `onBlank` consumes nothing: `factorySpace`
++    // takes no space from a line ending. A line of only spaces or tabs is over here too, once
++    // the continuations above have taken their indentation. Every open list item runs the check
++    // once per blank line, so a body of D nested items and N blank lines runs D*N of them, and
++    // the check's store and restore, and the `blankLine` dispatch, are then work for nothing: on
++    // a body of 50 nested items and 32 KB of blank lines, about two fifths of what micromark
++    // spends.
++    if (code === codes.eof || markdownLineEnding(code)) {
++      self.containerState.furtherBlankLines =
++        self.containerState.furtherBlankLines ||
++        self.containerState.initialBlankLine
++      return ok(code)
++    }
++
++    return effects.check(blankLine, onBlank, notBlank)(code)
++  }
+ 
+   /** @type {State} */
+   function onBlank(code) {
+diff --git a/lib/label-end.js b/lib/label-end.js
+index 927808f648bac3803c8149d3b24c97e6def7e103..e87326955606ec400db5ba4b08a77fcb2f856834 100644
+--- a/lib/label-end.js
++++ b/lib/label-end.js
+@@ -64,6 +64,8 @@ function resolveAllLabelEnd(events) {
+ 
+ /** @type {Resolver} */
+ function resolveToLabelEnd(events, context) {
++  // The events below are rewritten: where a label end stopped looking no longer holds.
++  context._labelEndSeen = undefined;
+   let index = events.length;
+   let offset = 0;
+   /** @type {Token} */
+@@ -160,19 +162,43 @@ function resolveToLabelEnd(events, context) {
+  */
+ function tokenizeLabelEnd(effects, ok, nok) {
+   const self = this;
+-  let index = self.events.length;
++  const entryLength = self.events.length;
++  let index = entryLength;
+   /** @type {Token} */
+   let labelStart;
++  /** @type {number} */
++  let labelStartIndex;
+   /** @type {boolean} */
+   let defined;
+ 
+   // Find an opening.
+-  while (index--) {
++  //
++  // The events between the opening a label end before this one found and where it stopped
++  // looking hold no other opening: it looked at them, and an event there is never added or
++  // changed afterwards, other than being marked balanced. So the scan looks at the events added
++  // since (`_labelEndSeen` and up), and then goes on below that opening (`_labelEndFrom`),
++  // which that label end marked balanced. `resolveToLabelEnd` rewrites the events a label end
++  // that matched covers, so it drops the hint, and the hint is used only while the event below
++  // where it stopped is the one it was.
++  const seen = self._labelEndSeen;
++  const floor = seen !== undefined && seen <= index && self.events[seen - 1] === self._labelEndSeenAt ? seen : 0;
++  while (index-- > floor) {
+     if ((self.events[index][1].type === "labelImage" || self.events[index][1].type === "labelLink") && !self.events[index][1]._balanced) {
+       labelStart = self.events[index][1];
++      labelStartIndex = index;
+       break;
+     }
+   }
++  if (!labelStart && floor > 0) {
++    index = self._labelEndFrom;
++    while (index-- > 0) {
++      if ((self.events[index][1].type === "labelImage" || self.events[index][1].type === "labelLink") && !self.events[index][1]._balanced) {
++        labelStart = self.events[index][1];
++        labelStartIndex = index;
++        break;
++      }
++    }
++  }
+   return start;
+ 
+   /**
+@@ -208,10 +234,7 @@ function tokenizeLabelEnd(effects, ok, nok) {
+     if (labelStart._inactive) {
+       return labelEndNok(code);
+     }
+-    defined = self.parser.defined.includes(normalizeIdentifier(self.sliceSerialize({
+-      start: labelStart.end,
+-      end: self.now()
+-    })));
++    defined = isDefined(self, labelStart.end, self.now());
+     effects.enter("labelEnd");
+     effects.enter("labelMarker");
+     effects.consume(code);
+@@ -311,10 +334,71 @@ function tokenizeLabelEnd(effects, ok, nok) {
+    */
+   function labelEndNok(code) {
+     labelStart._balanced = true;
++    // Where the next label end can stop looking for an opening, and go on below this one.
++    self._labelEndFrom = labelStartIndex;
++    self._labelEndSeen = entryLength;
++    self._labelEndSeenAt = self.events[entryLength - 1];
+     return nok(code);
+   }
+ }
+ 
++/**
++ * Whether a label is one of the identifiers a definition in this document defines.
++ *
++ * @param {TokenizeContext} context
++ *   Context.
++ * @param {Point} start
++ *   Start of the label.
++ * @param {Point} end
++ *   End of the label.
++ * @returns {boolean}
++ *   Whether it is defined.
++ */
++function isDefined(context, start, end) {
++  const defined = context.parser.defined;
++  if (defined.length === 0) return false;
++  let max = context.parser._definedMax;
++  if (max === undefined || context.parser._definedCount !== defined.length) {
++    max = 0;
++    let index = -1;
++    while (++index < defined.length) {
++      if (defined[index].length > max) max = defined[index].length;
++    }
++    context.parser._definedMax = max;
++    context.parser._definedCount = defined.length;
++  }
++
++  // `normalizeIdentifier` keeps every character that is not markdown whitespace, and collapses
++  // or drops the whitespace, so a label with more than `max` of them is longer than every
++  // identifier defined and cannot be one. Counting them is cheaper than serializing a long
++  // label on every `]`, and it stops as soon as there are too many.
++  if (end.offset - start.offset > max) {
++    const chunks = context.sliceStream({
++      start,
++      end
++    });
++    let index = -1;
++    let size = 0;
++    while (++index < chunks.length) {
++      const chunk = chunks[index];
++      // A chunk that is not a string is a virtual line ending, tab, or space.
++      if (typeof chunk === 'string') {
++        let at = -1;
++        while (++at < chunk.length) {
++          const code = chunk.charCodeAt(at);
++          if (code !== 9 && code !== 10 && code !== 13 && code !== 32 && ++size > max) {
++            return false;
++          }
++        }
++      }
++    }
++  }
++  return defined.includes(normalizeIdentifier(context.sliceSerialize({
++    start,
++    end
++  })));
++}
++
+ /**
+  * @this {TokenizeContext}
+  *   Context.
+diff --git a/lib/list.js b/lib/list.js
+index dd3368ecbc8a1995cfdaab38b08738f01b4c02b1..d7081cf036b7977506f6867d08636481ac3a30cc 100644
+--- a/lib/list.js
++++ b/lib/list.js
+@@ -10,7 +10,7 @@
+  */
+ 
+ import { factorySpace } from 'micromark-factory-space';
+-import { asciiDigit, markdownSpace } from 'micromark-util-character';
++import { asciiDigit, markdownLineEnding, markdownSpace } from 'micromark-util-character';
+ import { blankLine } from './blank-line.js';
+ import { thematicBreak } from './thematic-break.js';
+ 
+@@ -133,7 +133,24 @@ function tokenizeListStart(effects, ok, nok) {
+ function tokenizeListContinuation(effects, ok, nok) {
+   const self = this;
+   self.containerState._closeFlow = undefined;
+-  return effects.check(blankLine, onBlank, notBlank);
++  return start;
++
++  /** @type {State} */
++  function start(code) {
++    // Where the line is already over - the code is a line ending or the end of the document -
++    // it is blank, so the check below answers yes and `onBlank` consumes nothing: `factorySpace`
++    // takes no space from a line ending. A line of only spaces or tabs is over here too, once
++    // the continuations above have taken their indentation. Every open list item runs the check
++    // once per blank line, so a body of D nested items and N blank lines runs D*N of them, and
++    // the check's store and restore, and the `blankLine` dispatch, are then work for nothing: on
++    // a body of 50 nested items and 32 KB of blank lines, about two fifths of what micromark
++    // spends.
++    if (code === null || markdownLineEnding(code)) {
++      self.containerState.furtherBlankLines = self.containerState.furtherBlankLines || self.containerState.initialBlankLine;
++      return ok(code);
++    }
++    return effects.check(blankLine, onBlank, notBlank)(code);
++  }
+ 
+   /** @type {State} */
+   function onBlank(code) {

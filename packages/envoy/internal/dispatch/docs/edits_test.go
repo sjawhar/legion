@@ -2671,7 +2671,7 @@ func TestApplyOperationReplaceEscapesBlockSyntaxBesideAnEmptiedParagraph(t *test
 			if !strings.Contains(markdown, test.escaped) {
 				t.Fatalf("replace with %q beside an emptied paragraph stored %q, want it to hold %q", test.with, markdown, test.escaped)
 			}
-			if err := pmdoc.BlockShapeError(next.Children[1]); err != nil {
+			if err := pmdoc.ReadBackBlock(next.Children[1]).Shape; err != nil {
 				t.Fatalf("replace with %q beside an emptied paragraph stored %q, which reads back as another block: %v", test.with, markdown, err)
 			}
 			back, err := parseInput(markdown)
