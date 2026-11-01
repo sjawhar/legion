@@ -2,7 +2,7 @@
  "schemaVersion": 1,
  "phase": "implement",
  "issue": "INFRA-625",
- "completed": "2026-11-01T06:05:00Z",
+ "completed": "2026-11-01T08:05:00Z",
  "proof": [
   {
    "criterion": "Round 3's second failure: the dispatch-memory lane. The tester's red (a four-column table at 260 MiB against 256) is not a regression of this change, and the lane's distribution is moved away from its bound rather than left where it was.",
@@ -195,6 +195,30 @@
    "observed": "MERGEABLE at c25b344b. The first merge (f93dd689) was two import hunks plus the onLoadDocument interaction above; the second (c656fc4f) was fifteen hunks across five files, each this change's `backs` read-back parameter meeting main's ValidDocument/matchBlocks shape, both sides kept, plus three TypeScript test helpers the text merge could not see as conflicting, which now call main's own loadedEngine().",
    "headSha": "c25b344b0e7037e3aaa697625e2d893c475fad4c",
    "negativeControl": "Before the three helpers were corrected, `bunx tsc --noEmit` failed on all three with TS2554: Expected 3-4 arguments, but got 1, so the merged tree did not typecheck."
+  },
+  {
+   "criterion": "Review round 4, D3: a load's failure answers for its own load, and no caller can fail or drop the record of the next load of that room.",
+   "surface": "The document service's Go package against a real Postgres (the pod harness lane), through a store fake whose read panics - no test-only seam in the service.",
+   "command": "source /legion/harness/env.sh && export DISPATCH_TEST_DATABASE_URL=\"$DATABASE_URL\" && cd packages/envoy && go test -count=1 -timeout 25m ./internal/dispatch/docs/ -run 'TestALoadThatPanicsFailsItsRoomWhereThePanicIsMet|TestTheStoreJudgesAnUpdateByItsHeader|TestLoadFailureMakesDocumentServiceUnavailable|TestCorruptLoadRefusesTheSocketAndReadsAsUnloadable'; and go test -p 1 -timeout 50m ./internal/dispatch/docs/",
+   "observed": "ok in 4.170s for the four rows and ok 1415.602s for the package. LoadDoc has one defer that recovers a panic out of its own body and calls the existing failRoomLoad on any error, so the store's refusal, loadableHistory's refusal and a panic all fail the room on the load's own goroutine before ygo's ready barrier closes. applyRoom, failUnfinishedLoad, roomLoadWaitedOn/names, roomLoadNumber, loadsBegun, roomLoad.number/after, roomLoad.unfinished and beforeFailUnfinishedLoad are deleted; the ten call sites are s.srv.Apply again and websocket.go is 884 lines, 91 fewer. New row TestALoadThatPanicsFailsItsRoomWhereThePanicIsMet, two cases: a caller still waiting, and a caller whose context ended while the load ran.",
+   "headSha": "3c7c64c189d0b9ffd7a0fad80d8aef99d746593f",
+   "negativeControl": "This head's websocket_test.go against 66d570f5's seven source files, copied under $TMPDIR with the workspace untouched: 'a caller whose context ended while the load ran' fails with 'the panicking load left the room healthy, so nothing reloads the document' and 'the panicking load left its record behind, which no instance will take'. The row drives a store fake alone and names no symbol the fix introduces, so it runs at either head."
+  },
+  {
+   "criterion": "Review round 4, minors: the write spec's first-write sentence is true in every project it runs in, the streamed-turn row's guards can fail, and the suite file is back under its size.",
+   "surface": "The browser suite against the real Go server and Postgres in Chromium, WebKit and Firefox.",
+   "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/heavy-streamed-turn.e2e.ts; then the same for e2e/heavy-bodies.e2e.ts e2e/heavy-document-writes.e2e.ts --project=chromium; and DISPATCH_STREAM_PROBE_PARAGRAPHS=2 for the guard",
+   "observed": "3 passed (42.3s) for the streamed-turn spec across the three engines, with 72-108 samples an engine, 17-94 of them a batch landing in a part-built body mid-stream and 17-88 of those following a frame published inside that paint; 18 passed (2.8m) for heavy-bodies plus the write row in Chromium, ratios 1.97x, 2.13x, 2.10x. heavy-document-writes runs in Chromium alone now, since it drives no browser and the second and third project made its own 'first write of this shape in a fresh server' annotation false. heavy-bodies.e2e.ts is 793 lines, heavy-streamed-turn.e2e.ts 332, heavy-bodies-page.ts 38.",
+   "headSha": "3c7c64c189d0b9ffd7a0fad80d8aef99d746593f",
+   "negativeControl": "The shipped streamed-turn row with DISPATCH_STREAM_PROBE_PARAGRAPHS=2 reds on its own guard: 'no paint of this turn ran across tasks, so this row measured none of the window it is about: no batch landed in a body already holding blocks in 63 recorded samples, at 2 paragraphs and 80 ms a frame'. The old frame-text guard was deleted rather than narrowed, because every fresh mount shows the first frame's text before any paint, so it could never fail."
+  },
+  {
+   "criterion": "Review round 4: the changelog's allocation figure is what this change measures against main as main now stands.",
+   "surface": "A throwaway Go benchmark rig under $TMPDIR against two revisions, five fresh processes each.",
+   "command": "go test -run XXX -bench BenchmarkOneWordEditAtTheCap -benchmem -benchtime=5x -count=1 -timeout 20m ./internal/dispatch/docs/ in $TMPDIR/rig-head and $TMPDIR/rig-main (git archive origin/main e622d943)",
+   "observed": "A 1 MiB document written as one paragraph: 102,820,580 B/op and 992 allocs on main against 55,404,238 B/op and 713 allocs here - 46 % less. The same mebibyte in ordinary paragraphs: 99,111,886 against 99,088,436 - 0.02 %, nil. Both cuts are the size of the one document-level block the edit lands in, so the fragment now gives the measured number and names the shape it holds for.",
+   "headSha": "3c7c64c189d0b9ffd7a0fad80d8aef99d746593f",
+   "negativeControl": "The replaced figure, 'about a third less', was measured with this branch's own quote finder and against the base before main's #2522, which merge 66d570f5 took in its place: it was too small for a document held in one block and far too large for prose, which the two measurements above bracket."
   }
  ],
  "filesChanged": [
@@ -232,5 +256,5 @@
   "The reader's-place row's 1-in-10 WebKit failure was not the late paint: the deep link marks the conversation read, every card loses its 24 px unread pill, the page loses 312 px and WebKit's scroll anchoring absorbs it. The failing run's own log shows the late paint moved the content 0 px. The row now takes its first measurement once the page has held it for 600 ms.",
   "goldmark's blank-line bookkeeping is superlinear in depth times lines for a body that holds blocks open across thousands of blank lines. It is the one shape of this issue's family left unfixed, and it is in the vendored parser."
  ],
- "previousHandoff": "e3b97935392484af607da29d8dcec1e19d50d3c5"
+ "previousHandoff": "83440b1b701e8bd4df7d8046205721a2cadcc960"
 }
