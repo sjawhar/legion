@@ -1,0 +1,5 @@
+kind: Added
+body: 'An issue''s decision records: `GET /api/v1/issues/{key}/decisions` reads each `##` section of its `decisions.md` over the block graph, with the spec blocks each decision shaped and which of them are out of date; `POST /api/v1/artifacts/{id}/blocks/{block_id}/keep` records a person''s agreement at the decision''s current version; and `GET` and `PUT /api/v1/me/documents/{id}/read` keep each person''s last read version of a document.'
+time: 2026-11-01T06:25:03.857348832Z
+custom:
+    Issue: pr2626

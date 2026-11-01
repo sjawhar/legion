@@ -722,6 +722,12 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
   if (changesReferenceGraph(event)) {
     targets.push({ exact: true, queryKey: ["issue", key, "references"] });
   }
+  if (event.type === "decision.kept") {
+    // A Keep moves one decision's row of the issue's Decisions view and nothing else: it writes
+    // no document version, no ask and no issue field.
+    targets.push({ exact: true, queryKey: ["decisions", key] });
+    return targets;
+  }
 
   if (
     event.type === "issue.created" ||
