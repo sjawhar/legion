@@ -862,6 +862,31 @@ func (s *Postgres) Gate(ctx context.Context, tx pgx.Tx, issue string) (*DesignGa
 	return &gate, nil
 }
 
+// Gates is the design gate of each of issues, by issue, in one read; an issue with no gate has no
+// entry.
+func (s *Postgres) Gates(ctx context.Context, tx pgx.Tx, issues []string) (map[string]DesignGate, error) {
+	gates := make(map[string]DesignGate, len(issues))
+	if len(issues) == 0 {
+		return gates, nil
+	}
+	rows, err := tx.Query(ctx, `select `+gateColumns+` from design_gates where issue = any($1) order by issue`, issues)
+	if err != nil {
+		return nil, fmt.Errorf("read the design gates of %d issues: %w", len(issues), err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		gate, err := scanGate(rows)
+		if err != nil {
+			return nil, fmt.Errorf("read the design gates of %d issues: %w", len(issues), err)
+		}
+		gates[gate.Issue] = gate
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the design gates of %d issues: %w", len(issues), err)
+	}
+	return gates, nil
+}
+
 func (s *Postgres) GatesForArtifact(ctx context.Context, tx pgx.Tx, artifactID string) ([]DesignGate, error) {
 	rows, err := tx.Query(ctx, `select `+gateColumns+` from design_gates where artifact_id = $1 order by issue`, artifactID)
 	if err != nil {
@@ -1126,6 +1151,15 @@ func (s *Postgres) DisarmPending(ctx context.Context, tx pgx.Tx, issue string) (
 	if err := tx.QueryRow(ctx, "select exists (select 1 from outbox where kind = $1 and issue = $2)",
 		string(OutboxKindAutoMergeDisable), issue).Scan(&pending); err != nil {
 		return false, fmt.Errorf("read whether %s has a disarm pending: %w", issue, err)
+	}
+	return pending, nil
+}
+
+func (s *Postgres) PersonHandoverPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error) {
+	var pending bool
+	if err := tx.QueryRow(ctx, "select exists (select 1 from outbox where kind = $1 and issue = $2 and payload->>'personHandover' = 'true')",
+		string(OutboxKindDispatchStatus), issue).Scan(&pending); err != nil {
+		return false, fmt.Errorf("read whether %s has a person's handover pending: %w", issue, err)
 	}
 	return pending, nil
 }

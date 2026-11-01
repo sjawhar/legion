@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -94,15 +95,20 @@ func TestCoreRoleDeliveryReresolvesSupersededLapsedHolder(t *testing.T) {
 		t.Fatalf("flush exception subscription: %v", err)
 	}
 
+	var forwardedMu sync.Mutex
 	forwardedSubjects := []string{}
 	config := harness.config
-	config.forwardRole = func(subject string, item contracts.Envelope, timeout time.Duration) error {
+	config.forwardRole = inlineForward(func(subject string, item contracts.Envelope, timeout time.Duration) error {
+		forwardedMu.Lock()
+		defer forwardedMu.Unlock()
 		forwardedSubjects = append(forwardedSubjects, subject)
 		return nil
-	}
+	})
+	config = wireTestDeliveryWorkers(t, config)
 
 	item := listenerTestEnvelope(roleSubject, "core-role-supersession-race")
 	roleTopicDelivery(config, deliveryMessage{mode: coreDelivery}, item)
+	config.roleForwards.settled(t)
 	if err := harness.client.Conn.Flush(); err != nil {
 		t.Fatalf("flush post-delivery publications: %v", err)
 	}
