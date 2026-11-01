@@ -1,6 +1,6 @@
 kind: Added
 body: |-
-    `AskOption.id` and `AskAnswer.id` carry the part an ask's option or answer is stored as, and `Ask.revision` the revision a reference to one pins; the block grammar reads a part of an ask (`dispatch://KEY/ask/<id>#b-<part>[@v<N>]`, and an ask's dashboard page with a `#b-` fragment) wherever it reads a block of a comment, and `dispatch comment --reply-to-ask` takes such a reference to answer one part of an ask.
+    `AskOption.id` and `AskAnswer.id` carry the part an ask's option or answer is stored as, and `Ask.revision` the revision a reference to one pins; the block grammar reads a part of an ask (`dispatch://KEY/ask/<id>#b-<part>[@v<N>]`, and an ask's dashboard page with a `#b-` fragment) wherever it reads a block of a comment, and `dispatch comment --reply-to-ask` takes such a reference to answer one part of an ask. A typed block's `block[]` attribute points only at a block of a document, so `blockPointersProblem` refuses a pointer naming a part of an ask as it refuses one naming a block of a comment or a message, each kind named with the article it takes (`"…" is a block of an ask: a block[] attribute points only at a block of a document`).
 time: 2026-10-30T00:00:00.000000000Z
 custom:
     Issue: pr2546

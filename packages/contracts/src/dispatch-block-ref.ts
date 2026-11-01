@@ -126,33 +126,35 @@ const BLOCK_REFERENCE = new RegExp(
   `^dispatch://(?:(${ISSUE_KEY})/spec|(${ISSUE_KEY}|${PROJECT_KEY})/artifact/(${DOCUMENT_SLUG}))#b-(.*)$`,
   "s"
 );
-// A block of a comment or of an issue message, in the two shapes Go's `text.parseDispatch` reads
-// with a `#b-` fragment: `<ISSUE>/comment/<id>` or `<ISSUE>/message/<id>`, and a project
-// document's `<PROJECT>/artifact/<slug>/comment/<id>` (a project key only, as Go reads an issue
-// key's `artifact/` tail as a document alone). The id is checked by itemBlockKind.
+// A part of an ask, or a block of a comment or of an issue message, in the two shapes Go's
+// `text.parseDispatch` reads with a `#b-` fragment: `<ISSUE>/ask/<id>`, `<ISSUE>/comment/<id>` or
+// `<ISSUE>/message/<id>`, and a project document's `<PROJECT>/artifact/<slug>/ask/<id>` or
+// `<PROJECT>/artifact/<slug>/comment/<id>` (a project key only, as Go reads an issue key's
+// `artifact/` tail as a document alone). The id is checked by itemBlockKind.
 const ITEM_BLOCK_REFERENCE = new RegExp(
-  `^dispatch://(?:${ISSUE_KEY}/(comment|message)|${PROJECT_KEY}/artifact/${DOCUMENT_SLUG}/(comment))/([^/?#]+)#b-(.*)$`,
+  `^dispatch://(?:${ISSUE_KEY}/(ask|comment|message)|${PROJECT_KEY}/artifact/${DOCUMENT_SLUG}/(ask|comment))/([^/?#]+)#b-(.*)$`,
   "s"
 );
 
 /**
- * The kind of item (`comment` or `message`) whose block `value` names, or undefined when it names
- * no block of a comment or message. It applies the rules of Go's `text.parseDispatch` to the whole
- * value: the item id is written with no whitespace (JavaScript's `\s`, as Go's `itemSegment`), then
- * decoded as `decodeBlockId` decodes a block id, which refuses a `%` two hex digits do not follow,
- * a decoding that is not UTF-8 or holds a control character, and an `@`, which Go refuses anywhere
- * before a block's fragment. Go's validator reads the value through `text.ParseRef`, which first
- * ends it at a character no reference holds (`referenceEnd`: `'`, `"`, `<`, `>`, a backtick, `[`,
- * `]`, `|` or whitespace) and trims trailing punctuation, so such a value may be refused here with
- * a different reason than Go gives; both refuse it. A message never changes, so a pinned message
- * block is no reference.
+ * The kind of item (`ask`, `comment` or `message`) whose block `value` names - a part of an ask,
+ * as a block of a comment - or undefined when it names no block of an ask, a comment or a message.
+ * It applies the rules of Go's `text.parseDispatch` to the whole value: the item id is written
+ * with no whitespace (JavaScript's `\s`, as Go's `itemSegment`), then decoded as `decodeBlockId`
+ * decodes a block id, which refuses a `%` two hex digits do not follow, a decoding that is not
+ * UTF-8 or holds a control character, and an `@`, which Go refuses anywhere before a block's
+ * fragment. Go's validator reads the value through `text.ParseRef`, which first ends it at a
+ * character no reference holds (`referenceEnd`: `'`, `"`, `<`, `>`, a backtick, `[`, `]`, `|` or
+ * whitespace) and trims trailing punctuation, so such a value may be refused here with a different
+ * reason than Go gives; both refuse it. A message never changes, so a pinned message block is no
+ * reference.
  */
-function itemBlockKind(value: string): "comment" | "message" | undefined {
+function itemBlockKind(value: string): "ask" | "comment" | "message" | undefined {
   const match = ITEM_BLOCK_REFERENCE.exec(value);
   if (match === null) {
     return undefined;
   }
-  const kind = (match[1] ?? match[2]) as "comment" | "message";
+  const kind = (match[1] ?? match[2]) as "ask" | "comment" | "message";
   const id = match[3] ?? "";
   if (/\s/.test(id) || decodeBlockId(id) === undefined) {
     return undefined;
@@ -247,18 +249,21 @@ export function blockPointerValueProblem(value: string): string | undefined {
 }
 
 /**
- * Why `values` are not the pointers of a `block[]` attribute - one is a block of a comment or a
- * message, which a pointer never names (a `block[]` attribute points at blocks of documents, whose
- * types its targets limit, and an item's block has no type), one is otherwise not a canonical
- * block reference (`parseCanonicalBlockReference`), or one is named twice - following the wording
- * of Go's `pmdoc.validateBlockPointerValues`, quoted as above, or undefined when they are.
+ * Why `values` are not the pointers of a `block[]` attribute - one is a part of an ask or a block
+ * of a comment or a message, which a pointer never names (a `block[]` attribute points at blocks
+ * of documents, whose types its targets limit, and an item's block has no type), one is otherwise
+ * not a canonical block reference (`parseCanonicalBlockReference`), or one is named twice -
+ * following the wording of Go's `pmdoc.validateBlockPointerValues`, quoted as above, or undefined
+ * when they are.
  */
 export function blockPointersProblem(values: readonly string[]): string | undefined {
   const seen = new Set<string>();
   for (const value of values) {
     const item = itemBlockKind(value);
     if (item !== undefined) {
-      return `${JSON.stringify(value)} is a block of a ${item}: a block[] attribute points only at a block of a document`;
+      // The kind takes the article its noun does: an ask, a comment, a message.
+      const article = item === "ask" ? "an" : "a";
+      return `${JSON.stringify(value)} is a block of ${article} ${item}: a block[] attribute points only at a block of a document`;
     }
     if (parseCanonicalBlockReference(value) === undefined) {
       return `${JSON.stringify(value)} is not a block reference as Dispatch writes one: dispatch://<ISSUE>/spec#b-<id>, or dispatch://<ISSUE or PROJECT>/artifact/<slug>#b-<id>, the id percent-encoded in upper-case hex except ASCII letters, digits and -, optionally pinned @v<N>`;
@@ -380,25 +385,49 @@ export const DISPATCH_BLOCK_POINTER_VALUES: readonly {
     value: "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2",
     ok: false,
     why: "a block of an issue's comment",
-    problem: "a block[] attribute points only at a block of a document",
+    problem: "is a block of a comment: a block[] attribute points only at a block of a document",
   },
   {
     value: "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2@v1",
     ok: false,
     why: "a block of a revision of an issue's comment",
-    problem: "a block[] attribute points only at a block of a document",
+    problem: "is a block of a comment: a block[] attribute points only at a block of a document",
   },
   {
     value: "dispatch://CORE/artifact/handbook-md/comment/88888888-8888-4888-8888-888888888888#b-b2",
     ok: false,
     why: "a block of a project document's comment",
-    problem: "a block[] attribute points only at a block of a document",
+    problem: "is a block of a comment: a block[] attribute points only at a block of a document",
   },
   {
     value: "dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2",
     ok: false,
     why: "a block of an issue message",
-    problem: "a block[] attribute points only at a block of a document",
+    problem: "is a block of a message: a block[] attribute points only at a block of a document",
+  },
+  {
+    value: "dispatch://CORE-1/ask/22222222-2222-4222-8222-222222222222#b-b2",
+    ok: false,
+    why: "a part of an issue's ask",
+    problem: "is a block of an ask: a block[] attribute points only at a block of a document",
+  },
+  {
+    value: "dispatch://CORE-1/ask/22222222-2222-4222-8222-222222222222#b-b2@v1",
+    ok: false,
+    why: "a part of a revision of an issue's ask",
+    problem: "is a block of an ask: a block[] attribute points only at a block of a document",
+  },
+  {
+    value: "dispatch://CORE/artifact/handbook-md/ask/99999999-9999-4999-8999-999999999999#b-b2",
+    ok: false,
+    why: "a part of a project document's ask",
+    problem: "is a block of an ask: a block[] attribute points only at a block of a document",
+  },
+  {
+    value: "dispatch://CORE-1/artifact/notes-md/ask/a1#b-b2",
+    ok: false,
+    why: "an issue document's ask, a shape no reference has",
+    problem: "is not a block reference as Dispatch writes one",
   },
   {
     value: "dispatch://CORE-1/artifact/notes-md/comment/c1#b-x",
@@ -417,7 +446,7 @@ export const DISPATCH_BLOCK_POINTER_VALUES: readonly {
       "dispatch://CORE-1/spec#b-x dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2",
     ok: false,
     why: "a document's block, then an issue message's",
-    problem: "a block[] attribute points only at a block of a document",
+    problem: "is a block of a message: a block[] attribute points only at a block of a document",
   },
 ];
 
