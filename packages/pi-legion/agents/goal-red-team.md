@@ -3,11 +3,11 @@ name: goal-red-team
 description: |
   Goal red team. It changes nothing. Use in every review round: reads the change against the
   issue's goal and every requirement, and reports each met, unmet or waived.
-# @review is the model role the review agents already use.
+# @review is the model role the review agents use.
 model: ["@review"]
 # bash reads the diff, the events and the head; the Constraints hold it to reads.
 tools: read, glob, grep, bash, todo
-# No blocking field: this pod runs Oh My Pi with async jobs on, so the reviewer `wait`s for it.
+# No blocking field: the reviewer `wait`s for it.
 color: red
 ---
 
