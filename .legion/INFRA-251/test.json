@@ -2,55 +2,51 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-251",
-  "completed": "2026-10-31T17:42:00Z",
-  "round": 17,
-  "headSha": "d758447861ee",
-  "handoffHead": "e1ebb3b08cef7c61f4b618a5b7489c1d7b5c9cc3",
+  "completed": "2026-11-01T00:26:00Z",
+  "round": 18,
+  "headSha": "9dda974d2bc7",
+  "handoffHead": "31ac9c554a23ddcba6638765b540b2463144c6a1",
   "provider": "Every turn of this round ran on anthropic/claude-opus-5-5, this session's model; no subagent ran. No model ran inside any run: the agents are test shims.",
+  "rig": "The pod was recreated again, and my PostgreSQL went with it. I used the pod's own test PostgreSQL 18.6, which LEGION_TEST_PG_DSN names (login legion_test, createdb, not superuser), and a new nats-server 2.10.29 on the issue volume. I rebuilt my whole-daemon drivers by replaying every recorded write and edit from this session's transcript, read-only from the session table. Copies are at $TMPDIR/tester/*.round18.go; none is committed.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "At d7584478 on my PostgreSQL 17.2 and nats-server 2.10.29, each of the three store tests fails when its own fix is reverted, and passes with it. (1) Without holdKeptDecisions' put-back insert: TestADeliveryWrittenBackUnconfirmedHoldsWhatItsConfirmationTold FAILS. (2) Without the ownership filter on the hold: TestADeliveryRewriteDoesNotTakeARowAnotherTreeHolds FAILS ('... is held by \"legion-legion-LEGION-310-architect\"/\"outbox:1-interrupted\" after the old tree's task was rewritten'). (3) With releaseKeptDecisions clearing claimed_by again and ClaimKeptDecisions leaving the hold: TestAHoldReleaseLeavesAClaimThatCounts FAILS ('claimed by 2, held by \"legion-legion-LEGION-320-architect\"'). Each mutation was reverted with jj restore. TestKeptDecisionsRegressionSeeds (seed 427 and every pinned seed), the rewritten confirmation test, and my red tests from rounds 9, 10 and 13 all pass."
+    "how": "At 9dda974d, each new deterministic test passes, and fails when its fix is reverted. (1) TestTwoComposersNeverBothNameOneKeptDecision (store): with UnclaimedKept's lock statements removed, it fails 3 of 3 runs: 'the second composer named [dispatch://LEGION-330/ask/ask-1] while the first claimed ...'. It also fails with the lock and ClaimKeptDecisions' count check both removed. The count check alone does not stop the race, because a blocked UPDATE re-checks with its old snapshot and takes the claim over, as the implementer's deviation says. The lock is the load-bearing part. (2) TestACatchUpWhoseReholdsAreSpentHandsOverWhatItNamed (daemon): with reholdNotice's spentKept call removed, it fails: 'the catch-ups left after the spent catch-up name dispatch://LEGION-1/ask/ask-2 0 times'. Each mutation was reverted with jj restore."
   },
-  "failures": [
-    {
-      "criterion": "No double telling with no failed write or taken-back confirmation behind it (the architect's rule for this round)",
-      "evidence": "My bounded sweep (LEGION_KEPT_PROPERTY_RUNS=400 LEGION_KEPT_PROPERTY_STEPS=300 ./daemon17.test -test.run '^TestKeptDecisionsReachTheCurrentArchitectOnce$', binary built from e1ebb3b0) failed 1 of 400 seeds: seed 262 at step 232 (kept_decision_property_test.go:3121): 'dispatch://LEGION-1/ask/ask-0014 was told 2 times to the architect of LEGION-1: first at step 226 by the catch-up published under legion-outbox:69, now by the catch-up published under legion-outbox:72'. The whole message and trace are committed at .legion/INFRA-251/sweep-seed262-told-twice.txt. The two tellings are two different catch-ups that each named ask-0014. Row 69 ran at step 222 in a run-together with stale start row 47; its publish hit a receipt timeout, and its re-held copy 71 told ask-0014 at 226. Row 72 (names=3, resends=0, the same generation 11 and launch 13) was composed after 71 and also named ask-0014. Row 72's first run at 227 lost its finish to a crash, and it delivered at 232 in a race with the root's re-admission. The model's own rule (keptRun.tell) accepts a second telling only for a task the machine took back, and nothing was taken back here. A failed write is in the window (72's lost finish), but by the trace it is not the cause: 72 already named ask-0014 when it was composed, before that crash, and its re-held copy 73 named it too. The seed does not replay deterministically: I ran seed 262 alone 3 times, 24 times 8-way parallel, and 64 times 16-way parallel with GOMAXPROCS 1 to 3, and all passed, because the run diverges from step 0 on concurrent outcomes. I have no deterministic red test: the failing model run is the evidence, and its trace names the rows."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "On the whole daemon, a root task confirmed by a foreign turn and then refused busy still tells its decision on the resend; a delivery taken back after a death does the same",
-      "surface": "The whole Legion daemon (startDaemonWithin) on real PostgreSQL and nats-server; Dispatch events as envelopes on ENVOY_NOTIFICATIONS; the architect a shim on the daemon's worker stream that sends the frames by hand; the death a runtime Gone observation",
-      "command": "go test -tags e2e -count=1 -run '^TestTesterTakenBackConfirmationLive$' -v ./internal/daemon/ (throwaway driver)",
-      "observed": "PASS, 3 steps. (a) The prompt naming ask-a arrived. An AgentStart of the agent's own confirmed it (kept 0), then the prompt was refused 'Agent is already processing': kept=1 unheld=0 pending=1 (put back, held). After the turn ended, the resend named ask-a once, and the decision was told. (b) The same foreign turn, then the prompt accepted: no second prompt, ask-b told once. (c) Prompt accepted, its turn started (kept 0), then the shim closed and the pane went Gone: kept=1 pending=1. On the relaunch the architect got 1 prompt naming ask-c, and the decision was then told.",
-      "headSha": "d758447861ee",
-      "negativeControl": "Without holdKeptDecisions' put-back insert, step (a) FAILS: after the busy refusal kept=0, and 'the decision ... ask-a was not sent again after the confirmation was taken back: []' (lost)."
+      "criterion": "Seed 262's trace cannot recur: composers over one kept decision, concurrently on real PostgreSQL",
+      "surface": "record.Store's UnclaimedKept, EnqueueID, ClaimKeptDecisions and ForgetKeptDecisions on the pod's PostgreSQL 18.6, each composer in a transaction of its own as workflow.ParkedDecisionTask and EnqueueNaming run them",
+      "command": "go test -count=3 -run TestTesterManyComposersOneTree -v ./internal/store/ (throwaway zz_tester_composer_stress_test.go)",
+      "observed": "PASS 3 of 3. Each run: 40 rounds keep 3 decisions on 3 issues of one tree, then 12 composers run at once, while the previous round's tellings forget what they named. All 120 decisions were named exactly once, none was left kept, and no transaction failed: no deadlock, and no 'a row names only what it claims' error.",
+      "headSha": "9dda974d2bc7",
+      "negativeControl": "With UnclaimedKept's lock removed, the same stress FAILS on its first run: e.g. 'dispatch://LEGION-342/ask/r38-117 named 3 times', 'dispatch://LEGION-341/ask/r6-20 named 2 times'."
     },
     {
-      "criterion": "Seed 427 and every pinned seed, and the round's tests",
-      "surface": "The daemon and store packages on real PostgreSQL",
+      "criterion": "Seed 701 and every pinned seed pass",
+      "surface": "The daemon and store packages",
       "command": "go test -count=1 -run 'TestKeptDecisionsRegressionSeeds|TestADeliveryWrittenBack|TestADeliveryRewrite|TestAHoldRelease|TestADecisionToldInATurnWhoseConfirmationFailedIsToldAgain|TestADecisionHeldInTheOldArchitectsTaskAtAHandOverReachesTheChild|...' -v ./internal/daemon/ ./internal/store/",
-      "observed": "All PASS: TestKeptDecisionsRegressionSeeds (keptLongRegressionSeeds includes 427; 195 s), the three new store tests, and the existing kept-decision tests. My throwaway telling-window tests now also pass on the round-15 oddity: after the old confirmation, the child's start keeps its claim.",
-      "headSha": "d758447861ee",
-      "negativeControl": "The three revert mutations above."
+      "observed": "All 38 pinned-seed subtests PASS, among them seed-262-at-300-steps and seed-701-at-300-steps, as do every other kept-decision test and my telling-window tests. One test, TestAReadyLeavesTheCatchUpThatIsPublishingWhatItNamed, was marked FAIL only by its cleanup: 'drop legion_outbox_test_...: permission denied to terminate process (SQLSTATE 42501)'. Run again alone 3 times, it passed every time.",
+      "headSha": "9dda974d2bc7",
+      "negativeControl": "The two revert mutations above."
     },
     {
-      "criterion": "The round-7 run and every whole-daemon drive once",
-      "surface": "The whole daemon as above",
+      "criterion": "My own bounded sweep of at least 400 seeds x 300 steps, with invariant failures and cleanup drops counted apart",
+      "surface": "TestKeptDecisionsReachTheCurrentArchitectOnce on the pod's PostgreSQL, binary built from 31ac9c55",
+      "command": "LEGION_KEPT_PROPERTY_RUNS=450 LEGION_KEPT_PROPERTY_STEPS=300 timeout 7000 ./daemon18.test -test.run '^TestKeptDecisionsReachTheCurrentArchitectOnce$' -test.timeout=115m -test.v",
+      "observed": "PASS in 1773 s: 450 of 450 seeds. Invariant failures: 0 (no 'was told N times', 'still kept' or 'told 0 times'). Cleanup drops (SQLSTATE 42501): 0 in this run. Deadlocks: 0. Claim-count errors: 0. Across the seeds: 690 members handed over (80 without their run), 210 orphans, 450 adoptions, 1750 trees closed, 400 streaming restarts, 410 foreign turns, 112 receipt timeouts with no copy queued (superseded or spent), 15 hand-overs inside a publish, 45 between a held task and its confirmation, 138 sends refused busy after a foreign turn confirmed them, 445 replayed refusals that took a confirmation back, and 242 processes that died in a task's turn.",
+      "headSha": "9dda974d2bc7",
+      "negativeControl": "Round 17's failing seed 262 is pinned and passes."
+    },
+    {
+      "criterion": "The round-7 run, and every whole-daemon drive once",
+      "surface": "The whole Legion daemon (startDaemonWithin) on the pod's PostgreSQL and nats-server; Dispatch events as envelopes on ENVOY_NOTIFICATIONS; architect shims on the daemon's worker stream",
       "command": "TESTER_REAL_EVENTS=... go test -tags e2e -count=1 -run '^TestTester.*Live$' -v ./internal/daemon/",
-      "observed": "All 12 drives PASS (211 s): round-7 (14 steps; 13 real Dispatch events relay 3; verdict jq unmatched []), crash window (now asserts told again after the failed confirmation write, per the ruling), stale start, RootHears, closing tree, orphan hand-over, held-task hand-over, hand-over without its run, orphaned parked child, grandchild in both orders, adopted queued root, and the taken-back confirmation drive.",
-      "headSha": "d758447861ee",
-      "negativeControl": "Step (a)'s put-back mutation above."
-    },
-    {
-      "criterion": "The bounded sweep, apart from seed 262",
-      "surface": "TestKeptDecisionsReachTheCurrentArchitectOnce",
-      "command": "LEGION_KEPT_PROPERTY_RUNS=400 LEGION_KEPT_PROPERTY_STEPS=300 timeout 6600 ./daemon17.test ...",
-      "observed": "399 of 400 seeds passed in 2344 s; seed 262 failed (failures[0]).",
-      "headSha": "d758447861ee",
-      "negativeControl": "Seed 262 is itself the failing case."
+      "observed": "All 12 drives PASS (208 s). Round-7 passed its 14 steps: of 13 real Dispatch events re-fetched from INFRA-251 and INFRA-168, the 3 a person made are relayed. Verdict jq: undelivered 2, sent 1, unrelayed ['its root is not parked'], unmatched []. Also passing: crash window, stale start, RootHears, closing tree, orphan hand-over, held-task hand-over, hand-over without its run, orphaned parked child, grandchild in both orders, adopted queued root, and the taken-back confirmation (busy refusal, accepted, death). The daemon log has no deadlock and no 'names only what it claims' error.",
+      "headSha": "9dda974d2bc7",
+      "negativeControl": "Round 17's put-back control and round 15's adoption control are on code this round did not move."
     }
   ],
-  "ci": "Head e1ebb3b0 (no skip-checks trailer), read 2026-10-31T17:40Z: changes success; every other lane queued. Not waited on. GitHub: MERGEABLE, BLOCKED."
+  "ci": "Head 31ac9c55 (no skip-checks trailer), read 2026-11-01T00:24Z: changes and pr-title queued; nothing else started. Not waited on. GitHub: MERGEABLE, BLOCKED."
 }
