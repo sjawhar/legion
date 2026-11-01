@@ -25,7 +25,7 @@ var (
 
 // TestOnlyWriteReviewWritesReviews enforces what docs.ReviewOrder's `event_seq desc nulls last`
 // rests on: every review committed after migration 0120 carries the sequence of its artifact.*
-// event, so a row without one is older than every row with one. docs.WriteReview inserts the row
+// event, so a row without one is older than every row with one. docs.QueueReview inserts the row
 // and then writes the sequence of the event it appended; the migration's trigger covers the
 // release before 0120 alone, and only when the inserting transaction appended that event on the
 // document's owner. A review inserted anywhere else, with no event or with the event appended
@@ -75,14 +75,14 @@ func TestOnlyWriteReviewWritesReviews(t *testing.T) {
 		}
 	}
 	if len(offences) > 0 {
-		t.Fatalf("only docs.WriteReview (%s) may write artifact_reviews, and these statements also do:\n\t%s\n"+
-			"Record a review through docs.WriteReview instead. It writes the sequence of the review's "+
+		t.Fatalf("only docs.QueueReview (%s) may write artifact_reviews, and these statements also do:\n\t%s\n"+
+			"Record a review through docs.QueueReview instead. It writes the sequence of the review's "+
 			"artifact.* event in the review's own transaction, and docs.ReviewOrder ranks a review "+
 			"without one below every review with one.", reviewWriter, strings.Join(offences, "\n\t"))
 	}
 	if inserts != 1 || updates != 1 {
 		t.Fatalf("%s holds %d review inserts and %d review updates the scan can see, want 1 of each: "+
-			"if WriteReview's statements moved or were written around a value this scan cannot "+
+			"if QueueReview's statements moved or were written around a value this scan cannot "+
 			"resolve, this guard now passes by seeing nothing", reviewWriter, inserts, updates)
 	}
 }

@@ -58,16 +58,22 @@ func openApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.
 // hand it back before a human sees it in Waiting on you again. Only the first move since the
 // request was opened or handed back wakes anyone, even when a thread reply already left it waiting
 // on its agent; a later one, while requested_version is already below the version it named, is
-// quiet (RewriteApprovalAsk). The event it appends goes to the ledger of the transaction it runs
-// in, as every document operation's does (eventSink), which publishes it after its Commit.
+// quiet (RewriteApprovalAsk). It runs in the transaction ctx joined (errUnjoined otherwise), as
+// every other document operation does, so its writes reach that transaction's write queue and the
+// event it appends reaches its ledger (eventSink), which publishes it after its Commit.
 func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, mover model.Actor, serverURL string) error {
-	return moveApprovalAsk(ctx, tx, broker, artifactID, version, mover, serverURL, eventSink(ctx))
+	if _, joined := txFromContext(ctx); !joined {
+		return errUnjoined
+	}
+	return moveApprovalAsk(ctx, tx, broker, artifactID, version, mover, serverURL)
 }
 
-// moveApprovalAsk is MoveApprovalAsk handing the event it appends to sink. Where its writes are
+// moveApprovalAsk is MoveApprovalAsk without that refusal, for the version write every document
+// version goes through (writeVersionTx): it runs in a transaction a caller joined and in the one a
+// settlement or the block-id backfill owns, which no caller joins (Ledger). Where its writes are
 // queued, the ledger records the request as moved (pendingApproval), so the carry that follows in
 // the same version write reads the request as this move leaves it.
-func moveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, mover model.Actor, serverURL string, sink func(model.Event)) error {
+func moveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, mover model.Actor, serverURL string) error {
 	ask, err := openApprovalAsk(ctx, tx, artifactID)
 	if err != nil {
 		return err
@@ -79,7 +85,7 @@ func moveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, arti
 	if err != nil {
 		return err
 	}
-	if err := rewriteApprovalAsk(ctx, tx, broker, ask, mover, version.Number, summary, serverURL, sink); err != nil {
+	if err := RewriteApprovalAsk(ctx, tx, broker, ask, mover, version.Number, summary, serverURL); err != nil {
 		return err
 	}
 	recordPendingApproval(ctx, tx, artifactID, pendingApproval{ask: ask})
@@ -92,10 +98,15 @@ func moveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, arti
 // stays as it was. A move of a request that an earlier version already moved since it was opened
 // or handed back, requested_version below the version it named, is recorded quiet
 // (model.AskEditEventPayload.Quiet): it changes only that version, so like a human's unnamed version
-// it wakes nobody. It returns the event it appended, which its caller publishes: the one route
-// that rewords a request of its own (renewApprovalAsk) queues no writes, so the append has run by
-// the time this returns. A version move, whose transaction does queue them, rewords through
-// moveApprovalAsk instead.
+// it wakes nobody. The event it appends goes to the ledger of the transaction it runs in, as every
+// document operation's does (eventSink), which publishes it after its Commit; no caller reads it
+// back, since where the writes are queued the append has not run when this returns.
+//
+// The new question, the approval it encodes, the references it cites and its edited_at are worked
+// out here; the update, the references' writes, the append and the stamp are one step (write).
+// edited_at is clock_timestamp(), read here rather than in the update, so the event's copy of the
+// row carries it before the write phase runs, and so does ask, which a later step of the same
+// transaction queues from (carryApproval's answer).
 func RewriteApprovalAsk(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -104,32 +115,8 @@ func RewriteApprovalAsk(
 	actor model.Actor,
 	version int,
 	summary, serverURL string,
-) (model.Event, error) {
-	var rewritten model.Event
-	if err := rewriteApprovalAsk(ctx, tx, broker, ask, actor, version, summary, serverURL, func(event model.Event) {
-		rewritten = event
-	}); err != nil {
-		return model.Event{}, err
-	}
-	return rewritten, nil
-}
-
-// rewriteApprovalAsk is RewriteApprovalAsk handing the event it appends to sink. The new question,
-// the approval it encodes, the references it cites and its edited_at are worked out where it is
-// called; the update, the references' writes, the append and the stamp are one step (write).
-// edited_at is clock_timestamp(), read here rather than in the update, so the event's copy of the
-// row carries it before the write phase runs, and so does ask, which a later step of the same
-// transaction queues from (carryApproval's answer).
-func rewriteApprovalAsk(
-	ctx context.Context,
-	tx pgx.Tx,
-	broker *events.Broker,
-	ask *model.Ask,
-	actor model.Actor,
-	version int,
-	summary, serverURL string,
-	sink func(model.Event),
 ) error {
+	sink := eventSink(ctx)
 	previous := model.NewAskEditPrevious(*ask)
 	quiet := version != ask.Approval.Version && ask.Approval.RequestedVersion < ask.Approval.Version
 	ask.Question = ApprovalQuestion(ask.Approval.Name, version, summary)

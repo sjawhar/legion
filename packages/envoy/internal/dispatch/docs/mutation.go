@@ -2052,7 +2052,7 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID stri
 	sink := eventSink(ctx)
 	// The open approval request follows the document version without leaving its thread or opening
 	// another Inbox row. The request remains waiting on its agent until it is handed back.
-	if err := moveApprovalAsk(ctx, tx, s.events, artifactID, version, actor, s.serverURL, sink); err != nil {
+	if err := moveApprovalAsk(ctx, tx, s.events, artifactID, version, actor, s.serverURL); err != nil {
 		return versionWriteResult{}, err
 	}
 	// A human's answer to a decision block carries his approval to the version it writes, when

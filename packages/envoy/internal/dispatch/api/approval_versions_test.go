@@ -837,15 +837,18 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 			t.Fatalf("begin: %v", err)
 		}
 		defer tx.Rollback(ctx)
+		joined, ledger := doc.documentService.Join(ctx, tx)
+		defer ledger.Discard()
 		edits := askEventCount(t, doc.database, doc.askID, "ask.edited")
-		if err := docs.MoveApprovalAsk(ctx, tx, events.NewBroker(), doc.artifactID, model.Version{Number: 2}, docs.SettlementActor, ""); err != nil {
+		if err := docs.MoveApprovalAsk(joined, tx, events.NewBroker(), doc.artifactID, model.Version{Number: 2}, docs.SettlementActor, ""); err != nil {
 			t.Fatalf("move with no known writer: %v", err)
 		}
-		if err := tx.Commit(ctx); err != nil {
+		// The move queues its writes on the ledger and appends its event to it, as every document
+		// operation does, so the ledger's Commit is what sends them and publishes the event; the
+		// row it wrote is read back from the table below.
+		if err := ledger.Commit(ctx); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
-		// The move appends its event to the ledger of the transaction it runs in; this one has
-		// none, so the event is read back from the table the move wrote it to.
 		if appended := askEventCount(t, doc.database, doc.askID, "ask.edited") - edits; appended != 1 {
 			t.Fatalf("the move appended %d ask.edited events, want one", appended)
 		}

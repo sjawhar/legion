@@ -14,7 +14,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -27,7 +26,7 @@ import (
 // human through the Inbox like any question; one opened on a document with an
 // earlier approval carries that approval's version, time and approver
 // (approval.approved: version, at, by). Answering it, or reviewing from
-// the document header, writes the review (docs.WriteReview) and emits
+// the document header, writes the review (docs.QueueReview) and emits
 // artifact.approved / artifact.changes_requested on the document's owner.
 
 var approvalAskOptions = []model.AskOption{
@@ -353,6 +352,12 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	defer tx.Rollback(r.Context())
+	// The row this request opens or hands back, the references its question cites and its events
+	// are this route's writes, queued on the ledger in the order it makes them and sent as one
+	// batch by Commit. Everything the request is decided on - the document, its settled version,
+	// the open request and the turn it waits on - is read before the first of them.
+	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
+	defer ledger.Discard()
 	artifact, err := s.loadArtifact(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -403,62 +408,93 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	ask := open
-	var events []model.Event
+	var appended []*model.Event
+	var opened *model.Event
 	if open != nil {
-		if events, err = s.renewApprovalAsk(r.Context(), tx, open, actor, version, summary); err != nil {
+		if appended, err = s.renewApprovalAsk(documentCtx, tx, ledger, open, actor, version, summary); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
 	} else {
-		var opened model.Event
-		if ask, opened, err = s.openApprovalAsk(r.Context(), tx, owner, artifact, actor, version, question); err != nil {
+		if ask, opened, err = s.openApprovalAsk(documentCtx, tx, ledger, owner, artifact, actor, version, question); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		events = []model.Event{opened}
+		appended = []*model.Event{opened}
 	}
 	// The approval as this request leaves it: awaiting, waiting on whom the request now waits on.
-	if err := s.attachApproval(r.Context(), tx, &artifact); err != nil {
+	approval := approvalAfterRequest(*artifact.Approval, *ask)
+	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := tx.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
-		return
+	if opened != nil {
+		// The id of the event that opened the request is known once the write phase has run.
+		ask.OpenedEventID = &opened.ID
 	}
-	s.publish(events...)
+	s.publish(appendedEvents(appended...)...)
 	// 201 says this request opened the request, reworded it or handed it to the human; 200 says the
-	// open request already stood as asked.
+	// open request already stood as asked. A rewording is never this route's only write: the
+	// hand-back that follows it appends an event of its own, which is published here, while the
+	// rewording's goes to the ledger and is published by Commit.
 	status := http.StatusOK
-	if len(events) > 0 {
+	if len(appended) > 0 {
 		status = http.StatusCreated
 	}
-	WriteJSON(w, status, response{Ask: ask, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
+	WriteJSON(w, status, response{Ask: ask, ArtifactID: artifact.ID, Version: version, Approval: approval})
 }
 
-// openApprovalAsk inserts the document's approval request at version, asking question, and appends
-// its ask.opened event; the requester follows it. A document a human approved before carries that
-// approval's version, time and approver on the request (approval.approved), so the human reads
-// what the re-approval follows; a first request carries none.
+// approvalAfterRequest is the document's approval as this request's writes leave it: the approval
+// read before them (attachApprovals) with the request this route opened or handed back written
+// over it. Those writes are queued, so the rows hold none of it until Commit and no read of this
+// transaction can answer from them; the overlay applies the rule such a read would
+// (waitingOnExpression). A request waits on its agent while a version it has not handed back has
+// moved it past the version it names, and on the human otherwise: a request this route opened or
+// handed back names the document's settled version, and the reply its hand-back recorded is the
+// thread's newest one, which the owner lock this transaction holds keeps newest until it commits.
+func approvalAfterRequest(approval model.ArtifactApproval, ask model.Ask) model.ArtifactApproval {
+	requester := ask.Author
+	id := ask.ID
+	approval.State = "awaiting"
+	approval.RequestedBy = &requester
+	approval.AskID = &id
+	approval.WaitingOn = "human"
+	if ask.Approval.RequestedVersion < ask.Approval.Version {
+		approval.WaitingOn = "agent"
+	}
+	return approval
+}
+
+// openApprovalAsk queues the insert of the document's approval request at version, asking
+// question, and the append of its ask.opened event; the requester follows it. A document a human
+// approved before carries that approval's version, time and approver on the request
+// (approval.approved), so the human reads what the re-approval follows; a first request carries
+// none. The event is filled in once Commit has run the write phase (queueLoggedEvent), and so is
+// the ask's OpenedEventID, which its caller takes from the event then.
 func (s *server) openApprovalAsk(
 	ctx context.Context,
 	tx pgx.Tx,
+	ledger *docs.Ledger,
 	owner owner,
 	artifact model.Artifact,
 	actor model.Actor,
 	version int,
 	question string,
-) (*model.Ask, model.Event, error) {
+) (*model.Ask, *model.Event, error) {
+	// The row's created_at is the transaction's now(), its column default, read with its id and
+	// written explicitly, so the request this route answers with carries the time the row will
+	// hold.
 	var rowID string
-	if err := tx.QueryRow(ctx, `select gen_random_uuid()::text`).Scan(&rowID); err != nil {
-		return nil, model.Event{}, err
+	var createdAt time.Time
+	if err := tx.QueryRow(ctx, `select gen_random_uuid()::text, now()`).Scan(&rowID, &createdAt); err != nil {
+		return nil, nil, err
 	}
 	approval := &model.AskApproval{
 		ArtifactID: artifact.ID, Name: artifact.Name, Version: version, RequestedVersion: version,
 	}
 	approved, err := docs.LatestApprovedReview(ctx, tx, artifact.ID)
 	if err != nil {
-		return nil, model.Event{}, err
+		return nil, nil, err
 	}
 	if approved != nil {
 		approval.Approved = &model.AskApprovalApproved{Version: approved.Version, At: timestampValue(approved.CreatedAt), By: approved.Actor}
@@ -475,68 +511,68 @@ func (s *server) openApprovalAsk(
 		Urgency:    "high",
 		Anchor:     nil,
 		State:      "open",
+		CreatedAt:  createdAt,
 		Approval:   approval,
 	}
 	options, err := encodeJSON(ask.Options)
 	if err != nil {
-		return nil, model.Event{}, err
+		return nil, nil, err
 	}
 	author, err := encodeJSON(actor)
 	if err != nil {
-		return nil, model.Event{}, err
+		return nil, nil, err
 	}
 	encodedApproval, err := docs.EncodeApproval(ask.Approval)
 	if err != nil {
-		return nil, model.Event{}, err
+		return nil, nil, err
 	}
-	if err := tx.QueryRow(ctx, `
-		insert into asks (id, issue_key, artifact_id, author, question, options, multiple, urgency, anchor, kind, approval)
-		values ($1, $2, $3, $4, $5, $6, false, 'high', null, 'approval', $7)
-		returning created_at
-	`, ask.ID, owner.IssueKey, owner.ArtifactID, author, ask.Question, options, encodedApproval).Scan(&ask.CreatedAt); err != nil {
-		return nil, model.Event{}, err
+	if err := queueExec(ledger, `
+		insert into asks (id, issue_key, artifact_id, author, question, options, multiple, urgency, anchor, kind, approval, created_at)
+		values ($1, $2, $3, $4, $5, $6, false, 'high', null, 'approval', $7, $8)
+	`, ask.ID, owner.IssueKey, owner.ArtifactID, author, ask.Question, options, encodedApproval, ask.CreatedAt); err != nil {
+		return nil, nil, err
 	}
-	if err := asks.FollowAuthor(ctx, tx, ask.ID, actor); err != nil {
-		return nil, model.Event{}, err
+	if err := ledger.Queue(func(b *store.WriteBatch) error {
+		asks.QueueFollowAuthor(b, ask.ID, actor)
+		return nil
+	}); err != nil {
+		return nil, nil, err
 	}
-	askChanges, err := s.replaceReferences(ctx, tx, "ask", ask.ID, ask.Question)
+	askChanges, err := s.queueReferences(ctx, tx, ledger, "ask", ask.ID, ask.Question)
 	if err != nil {
-		return nil, model.Event{}, err
+		return nil, nil, err
 	}
-	payload, err := events.AskEventPayload(ctx, tx, ask, askChanges)
+	// The request's thread_logins are read by its event's insert, after the row's own insert and
+	// the user_threads trigger it fires.
+	event, err := s.queueLoggedEvent(ledger, owner.event(
+		"ask.opened", actor, model.NewAskEventPayload(ask, askChanges),
+	), events.ThreadLoginsOf(ask.ID), "ask", ask.ID)
 	if err != nil {
-		return nil, model.Event{}, err
+		return nil, nil, err
 	}
-	event, err := s.appendEvent(ctx, tx, owner.event("ask.opened", actor, payload))
-	if err != nil {
-		return nil, model.Event{}, err
-	}
-	if err := refs.Stamp(ctx, tx, "ask", ask.ID, event.ID); err != nil {
-		return nil, model.Event{}, err
-	}
-	ask.OpenedEventID = &event.ID
 	return &ask, event, nil
 }
 
 // renewApprovalAsk answers a request on a document whose approval request is already open, and
-// returns the events it appended. summary is the request's, "" when it named none, which keeps the
-// open request's own.
+// returns the events it queued for this route to publish after Commit. summary is the request's,
+// "" when it named none, which keeps the open request's own.
 //
 // The turn decides, read once before anything is written. A request waiting on its agent - moved
 // to a later version, or answered in its thread - goes back to the human: a new summary first
-// rewords it (docs.RewriteApprovalAsk, ask.edited), then handBackApprovalAsk hands it back. A
-// request already waiting on the human is left as it stands. The same summary, or none, is a retry
-// and records nothing. A different one is refused, since an approval request carries nothing new:
-// rewording it would rewrite the card the human is reading, with no turn of theirs, and refuse an
-// answer they had started (ASK_EDITED).
+// rewords it (docs.RewriteApprovalAsk, ask.edited, whose event goes to the ledger, which publishes
+// it), then handBackApprovalAsk hands it back. A request already waiting on the human is left as
+// it stands. The same summary, or none, is a retry and records nothing. A different one is
+// refused, since an approval request carries nothing new: rewording it would rewrite the card the
+// human is reading, with no turn of theirs, and refuse an answer they had started (ASK_EDITED).
 func (s *server) renewApprovalAsk(
 	ctx context.Context,
 	tx pgx.Tx,
+	ledger *docs.Ledger,
 	open *model.Ask,
 	actor model.Actor,
 	version int,
 	summary string,
-) ([]model.Event, error) {
+) ([]*model.Event, error) {
 	openSummary, err := docs.ApprovalAskSummary(*open)
 	if err != nil {
 		return nil, err
@@ -550,7 +586,7 @@ func (s *server) renewApprovalAsk(
 	if err != nil {
 		return nil, err
 	}
-	var events []model.Event
+	var appended []*model.Event
 	switch {
 	case waitingOn == "human" && summary != openSummary:
 		return nil, errorf(http.StatusConflict, "APPROVAL_WAITS_ON_HUMAN",
@@ -558,49 +594,51 @@ func (s *server) renewApprovalAsk(
 			open.Question)
 	case waitingOn == "agent":
 		if summary != openSummary {
-			edited, err := docs.RewriteApprovalAsk(ctx, tx, s.deps.Events, open, actor, version, summary, s.deps.ServerURL)
-			if err != nil {
+			if err := docs.RewriteApprovalAsk(ctx, tx, s.deps.Events, open, actor, version, summary, s.deps.ServerURL); err != nil {
 				return nil, err
 			}
-			events = append(events, edited)
 		}
-		handedBack, err := s.handBackApprovalAsk(ctx, tx, open, actor, version)
+		handedBack, err := s.handBackApprovalAsk(ledger, open, actor, version)
 		if err != nil {
 			return nil, err
 		}
-		events = append(events, handedBack)
+		appended = append(appended, handedBack)
 	}
-	if err := asks.FollowAuthor(ctx, tx, open.ID, actor); err != nil {
+	if err := ledger.Queue(func(b *store.WriteBatch) error {
+		asks.QueueFollowAuthor(b, open.ID, actor)
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	if err := s.attachOpenedEventIDs(ctx, tx, []*model.Ask{open}); err != nil {
 		return nil, err
 	}
-	return events, nil
+	return appended, nil
 }
 
-// handBackApprovalAsk returns the open approval request to the human at version and appends its
-// ask.handed_back event. It records version as the one handed back and the thread's newest reply as
-// the one this hand-back answered (waitingOnExpression). The caller holds the owner lock every reply
-// takes before it inserts, so no reply commits between that read and this transaction's commit, and
-// a reply that inserts after it gets a later created_at (the insert time, migration 0065), sorts
-// after the one recorded and decides the turn, however early its own transaction began. The
-// question is left as it stands: a request that changes it rewords first through
-// docs.RewriteApprovalAsk, which ask.edited records.
-func (s *server) handBackApprovalAsk(ctx context.Context, tx pgx.Tx, ask *model.Ask, actor model.Actor, version int) (model.Event, error) {
+// handBackApprovalAsk queues the return of the open approval request to the human at version and
+// the append of its ask.handed_back event, which is filled in once Commit has run the write phase
+// (queueEvent). It records version as the one handed back and the thread's newest reply as the one
+// this hand-back answered (waitingOnExpression), which its own statement reads in that phase. The
+// caller holds the owner lock every reply takes before it inserts, so no reply commits between the
+// turn it read and this transaction's commit, and a reply that inserts after it gets a later
+// created_at (the insert time, migration 0065), sorts after the one recorded and decides the turn,
+// however early its own transaction began. The question is left as it stands: a request that
+// changes it rewords first through docs.RewriteApprovalAsk, which ask.edited records.
+func (s *server) handBackApprovalAsk(ledger *docs.Ledger, ask *model.Ask, actor model.Actor, version int) (*model.Event, error) {
 	ask.Approval.RequestedVersion = version
 	approval, err := docs.EncodeApproval(ask.Approval)
 	if err != nil {
-		return model.Event{}, err
+		return nil, err
 	}
-	if _, err := tx.Exec(ctx, `
+	if err := queueExec(ledger, `
 		update asks a
 		set approval = $2, handed_back_reply_id = (select lr.id from (`+newestReply+`) lr)
 		where a.id = $1
 	`, ask.ID, approval); err != nil {
-		return model.Event{}, fmt.Errorf("hand approval ask back: %w", err)
+		return nil, err
 	}
-	return s.appendEvent(ctx, tx, ownerOf(ask.IssueKey, ask.ArtifactID).event(
+	return s.queueEvent(ledger, ownerOf(ask.IssueKey, ask.ArtifactID).event(
 		"ask.handed_back", actor, model.NewAskEventPayload(*ask, model.ReferenceChanges{}),
 	))
 }

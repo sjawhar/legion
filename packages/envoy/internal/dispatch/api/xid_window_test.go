@@ -20,12 +20,13 @@ import (
 // ran with storetest's xid rig: from the statement that gave the transaction its xid to its
 // COMMIT, no statement-free gap over 5 ms, and no more time in gaps than in statements (plan D6).
 // A route that runs an advisory read in its transaction (write advice, the claim's Legion-managed
-// walk) is also held to running none inside the window (refuseAdvisoryReadsInXidWindow): those
-// reads are queries, back to back, which D6 alone would pass. Each request runs under a marked
-// context (storetest.MarkXid), so only the transactions the request itself ran are judged; the
-// server's background work shares the pool but not the verdict. The server settles documents
-// after an hour, so no settlement races the measured request, except where a route needs
-// settlement to have run first (the block ask).
+// walk) is also held to running none inside the window (refuseAdvisoryReadsInXidWindow), and a
+// route whose writes are one queued batch to holding nothing else in it
+// (refuseStatementsBesideTheWriteBatch): those reads are queries, back to back, which D6 alone
+// would pass. Each request runs under a marked context (storetest.MarkXid), so only the
+// transactions the request itself ran are judged; the server's background work shares the pool
+// but not the verdict. The server settles documents after an hour, so no settlement races the
+// measured request, except where a route needs settlement to have run first (the block ask).
 
 // xidProject is the fixture's project key.
 const xidProject = "XID"
@@ -143,6 +144,14 @@ func (f *xidFixture) measureAdvised(t *testing.T, want int, request func(http.Ha
 	refuseAdvisoryReadsInXidWindow(t, f.measure(t, want, request))
 }
 
+// measureBatched is measure for a write whose route runs the two phases as one batch
+// (write_queue.go): it also refuses every statement inside the window but that batch and the
+// COMMIT ending it.
+func (f *xidFixture) measureBatched(t *testing.T, want int, request func(http.Handler) *httptest.ResponseRecorder) {
+	t.Helper()
+	refuseStatementsBesideTheWriteBatch(t, f.measure(t, want, request))
+}
+
 // advisoryStatement opens the savepoint of each advisory read a write runs in its transaction: a
 // session's write advice (writeAdvice, write_advice.go) and a claim's Legion-managed walk
 // (claimLegionManagedStatus, issue_claim.go). Each bounds its queries with it.
@@ -162,6 +171,24 @@ func refuseAdvisoryReadsInXidWindow(t *testing.T, report *storetest.XidReport) {
 				break
 			}
 		}
+	}
+}
+
+// refuseStatementsBesideTheWriteBatch fails t when a route that queues its writes ran anything
+// inside its xid window but the one batch its write phase sends and the COMMIT that ends it. A
+// read a route runs after its first write is what D6 cannot see on this fixture: each is a fast
+// query back to back with the next, so the window passes on timing while every reader's snapshot
+// waits for those reads all the same. A route whose writes are queued on a ledger sends them as
+// one batch, with the settlement credit's statements after them, and commits (Ledger.Commit), so
+// two statements are all such a window may hold.
+func refuseStatementsBesideTheWriteBatch(t *testing.T, report *storetest.XidReport) {
+	t.Helper()
+	for _, window := range report.Windows {
+		if len(window.Statements) <= 2 {
+			continue
+		}
+		t.Errorf("XID WINDOW VIOLATION (INFRA-636) %s\n  the transaction ran %d statements inside its xid window, want the write phase's one batch and its COMMIT: a read it runs there holds back every reader's snapshot\n%s",
+			window.Summary(), len(window.Statements), window.Detail())
 	}
 }
 
@@ -391,6 +418,42 @@ func TestXidWindowDocumentRebuild(t *testing.T) {
 	revised := strings.Replace(f.spec, "Revision token r0", "Revision token r1", 1)
 	f.measure(t, http.StatusOK, func(h http.Handler) *httptest.ResponseRecorder {
 		return dispatchRequest(t, h, http.MethodPost, "/api/v1/artifacts/"+f.specID+"/rebuild", map[string]any{"markdown": revised}, "alice")
+	})
+}
+
+// An approval request on a document with no open request inserts the ask, follows its author,
+// indexes its question and appends ask.opened. What it decides on - the document, its settled
+// version and the approval it already carries - is read before the first of those writes.
+func TestXidWindowApprovalRequestOpened(t *testing.T) {
+	f := newXidFixture(t, testServerOptions{}, "")
+	f.measureBatched(t, http.StatusCreated, func(h http.Handler) *httptest.ResponseRecorder {
+		return sessionRequest(t, h, http.MethodPost, "/api/v1/artifacts/"+f.specID+"/approval-requests", map[string]any{
+			"summary": "The migration section is rewritten; the rest of the spec stands.", "actor": sessionActor(),
+		})
+	})
+}
+
+// A version moved the open request, so it waits on its agent: a request naming a new summary
+// rewords it (docs.RewriteApprovalAsk) and hands it back. The rewording plans the question's
+// references and reads the row's edit time in the read phase, and the hand-back's update and both
+// events follow in the write phase.
+func TestXidWindowApprovalRequestHandedBack(t *testing.T) {
+	f := newXidFixture(t, testServerOptions{}, "")
+	if opened := sessionRequest(t, f.handler, http.MethodPost, "/api/v1/artifacts/"+f.specID+"/approval-requests", map[string]any{
+		"summary": "The first pass is ready to read.", "actor": sessionActor(),
+	}); opened.Code != http.StatusCreated {
+		t.Fatalf("open the approval request: status=%d body=%s", opened.Code, opened.Body.String())
+	}
+	revised := strings.Replace(f.spec, "Revision token r0", "Revision token r1", 1)
+	if uploaded := sessionRequest(t, f.handler, http.MethodPost, "/api/v1/issues/"+f.issueKey+"/artifacts", map[string]any{
+		"name": "spec.md", "content": revised, "summary": "Bump the revision", "actor": sessionActor(),
+	}); uploaded.Code != http.StatusCreated {
+		t.Fatalf("version the spec under the open request: status=%d body=%s", uploaded.Code, uploaded.Body.String())
+	}
+	f.measureBatched(t, http.StatusCreated, func(h http.Handler) *httptest.ResponseRecorder {
+		return sessionRequest(t, h, http.MethodPost, "/api/v1/artifacts/"+f.specID+"/approval-requests", map[string]any{
+			"summary": "Only the revision token moved; the rest stands as you read it.", "actor": sessionActor(),
+		})
 	})
 }
 

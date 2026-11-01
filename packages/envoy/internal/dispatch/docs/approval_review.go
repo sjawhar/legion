@@ -28,12 +28,12 @@ const ReviewColumns = `id::text, artifact_id::text, version, state, actor, reaso
 // ReviewOrder sorts a document's reviews newest first by the order their events committed: the
 // event sequence each review kept on its document's owner, then, for a review recorded before the
 // sequence was kept, its own time and id. Every review written once migration 0120 committed
-// carries a sequence, whichever release wrote it: this release's WriteReview writes it, and the
+// carries a sequence, whichever release wrote it: this release's QueueReview writes it, and the
 // migration's deferred trigger gives one to a review the release before it writes during a
 // rollout or a rollback. A row without one was committed before that migration, so every row that
 // carries a sequence is newer than every row without one, which `nulls last` says. created_at is
 // the review's transaction start, so it places two reviews only when neither carries a sequence.
-// This holds only while WriteReview is the one writer of the table: the api package's
+// This holds only while QueueReview is the one writer of the table: the api package's
 // TestOnlyWriteReviewWritesReviews refuses an insert into or update of artifact_reviews anywhere
 // else in the module. Its id is the table's column, artifact_reviews.id: a bare `id` in an order by
 // names the output column ReviewColumns selects, `id::text`, which orders the same and which no
@@ -54,37 +54,26 @@ func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 	return review, nil
 }
 
-// WriteReview records a review of artifact pinned to version and appends its event,
+// QueueReview records a review of artifact pinned to version and appends its event,
 // artifact.approved or artifact.changes_requested, on the document's owner: its issue when it
 // belongs to one, else the document itself. askID is the approval ask the review answers, nil
 // when it was given from the document header with no request open. The review row keeps the
 // event's sequence on that owner (event_seq), which places a read of the review among the owner's
-// events. Every caller already holds the owner's lock before it calls this; inside WriteReview the
-// row is inserted before the event is appended and its sequence written after. The update that
-// writes the sequence runs the foreign-key checks again, since Postgres re-checks a row its own
-// transaction inserted, and so asks for the same FOR KEY SHARE locks the insert took: the
-// transaction already holds them, so the request never waits. Migration 0120's trigger, which gives
-// the release before this one's reviews their sequence, would give this row its sequence too, but
-// only at the commit, the first moment the event exists for every release; so WriteReview writes it
-// itself, and the row is right for any read the caller makes before it commits. The trigger then
-// finds the row sequenced and leaves it. The caller owns the transaction and publishes the event.
-func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact model.Artifact, version int, state string, actor model.Actor, reason *string, askID *string) (model.ArtifactReview, model.Event, error) {
-	var review model.ArtifactReview
-	var event model.Event
-	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
-		return QueueReview(b, broker, artifact, version, state, actor, reason, askID, func(written model.ArtifactReview, appended model.Event) {
-			review, event = written, appended
-		})
-	}); err != nil {
-		return model.ArtifactReview{}, model.Event{}, err
-	}
-	return review, event, nil
-}
-
-// QueueReview is WriteReview queued on a write phase's batch. The review's id is chosen here, so
-// the statement that writes its event's sequence names the row, and takes the sequence from the
-// event the statements before it appended (store.LatestEventID): nothing is read back in Go
-// between them. written receives the review and its event as the batch leaves them.
+// events.
+//
+// Every caller already holds the owner's lock before it queues this, and its statements go on one
+// write phase's batch: the row is inserted before the event is appended and its sequence written
+// after. The review's id is chosen here, so the statement that writes that sequence names the row,
+// and takes the sequence from the event the statements before it appended (store.LatestEventID):
+// nothing is read back in Go between them. The update that writes the sequence runs the
+// foreign-key checks again, since Postgres re-checks a row its own transaction inserted, and so
+// asks for the same FOR KEY SHARE locks the insert took: the transaction already holds them, so
+// the request never waits. Migration 0120's trigger, which gives the release before this one's
+// reviews their sequence, would give this row its sequence too, but only at the commit, the first
+// moment the event exists for every release; so the batch writes it itself, and the row is right
+// for any read the caller makes before it commits. The trigger then finds the row sequenced and
+// leaves it. written receives the review and its event as the batch leaves them, and the caller,
+// which owns the transaction, publishes the event after its commit.
 func QueueReview(b *store.WriteBatch, broker *events.Broker, artifact model.Artifact, version int, state string, actor model.Actor, reason *string, askID *string, written func(model.ArtifactReview, model.Event)) error {
 	actorJSON, err := json.Marshal(actor)
 	if err != nil {
@@ -210,7 +199,7 @@ func changesRequestedSince(ctx context.Context, q Queryer, review model.Artifact
 	return requested, nil
 }
 
-// reviewedArtifact reads the document a review names as WriteReview takes it: its id, name and
+// reviewedArtifact reads the document a review names as QueueReview takes it: its id, name and
 // issue.
 func reviewedArtifact(ctx context.Context, q Queryer, artifactID string) (model.Artifact, error) {
 	artifact := model.Artifact{ID: artifactID}

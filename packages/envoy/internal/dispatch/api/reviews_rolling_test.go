@@ -16,8 +16,9 @@ import (
 )
 
 // previousReleaseReview writes a review in tx exactly as the release before migration 0120 does
-// (docs.WriteReview before it kept the sequence): the review row, naming no event_seq, then its
-// artifact.* event appended through the real broker. It returns the row's id and the event.
+// (docs.QueueReview's statements before they kept the sequence): the review row, naming no
+// event_seq, then its artifact.* event appended through the real broker. It returns the row's id
+// and the event.
 func previousReleaseReview(t *testing.T, ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact model.Artifact, version int, state string, reason *string) (string, model.Event) {
 	t.Helper()
 	actor := model.Actor{Kind: "user", ID: "alice"}

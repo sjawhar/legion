@@ -11,8 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -576,9 +578,10 @@ func TestTheApprovalReadNamesTheReviewThatCommittedLast(t *testing.T) {
 		t.Fatalf("request changes: status=%d body=%s", response.Code, response.Body.String())
 	}
 	first := decodeBody[model.ArtifactReview](t, response)
-	// The production writer, so no time or sequence is fabricated.
+	// The production statements, sent as one batch of their own, so no time or sequence is
+	// fabricated: a route sends them in its write phase instead (docs.Ledger.Commit).
 	reason := "And name who runs the restore."
-	second, event, err := docs.WriteReview(ctx, delayed, deps.Events, artifact, first.Version, "changes_requested",
+	second, event, err := writeReviewInTx(ctx, delayed, deps.Events, artifact, first.Version, "changes_requested",
 		model.Actor{Kind: "user", ID: "alice"}, &reason, nil)
 	if err != nil {
 		t.Fatalf("write the delayed review: %v", err)
@@ -615,4 +618,31 @@ func TestTheApprovalReadNamesTheReviewThatCommittedLast(t *testing.T) {
 		}
 		t.Fatalf("reviews listed %v, want the delayed review %s, which committed last, before %s", ids, second.ID, first.ID)
 	}
+}
+
+// writeReviewInTx writes one review in tx through the statements every production review goes
+// through (docs.QueueReview), sent as a batch of their own (store.RunWrite) rather than in a
+// route's write phase, for a test that holds a transaction of its own open. It returns the review
+// and its event as the batch left them; the caller commits tx and publishes the event.
+func writeReviewInTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	broker *events.Broker,
+	artifact model.Artifact,
+	version int,
+	state string,
+	actor model.Actor,
+	reason *string,
+	askID *string,
+) (model.ArtifactReview, model.Event, error) {
+	var review model.ArtifactReview
+	var event model.Event
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		return docs.QueueReview(b, broker, artifact, version, state, actor, reason, askID, func(written model.ArtifactReview, appended model.Event) {
+			review, event = written, appended
+		})
+	}); err != nil {
+		return model.ArtifactReview{}, model.Event{}, err
+	}
+	return review, event, nil
 }
