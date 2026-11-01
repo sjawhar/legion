@@ -2,43 +2,27 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-251",
-  "previousHandoff": "dde47991848a7c8800af3f91d982ebcf93757f15",
+  "previousHandoff": "cab1b1affbe3d6480b953b6d284ae8f2b1bfd26a",
   "proof": [
     {
-      "criterion": "Review 5728675512 Important (admit.go:1016): after #2619 queues a person's approval of V as their handover, the re-admission names no stale approval pair",
-      "surface": "workflow/gate.go: dispatchArtifact now passes the parked root's own gate to recordHandover instead of skipping it. recordHandover writes the approval onto the gate (classify.ApplyDesignGateEvent, PutGate) and nothing else: no notice, no answered wait, no log line. Under gates.design off, for a stale review, or for a version older than the gate's latest, it records nothing, as applyArtifact does. So admit's keepStaleApproval, reading the gate at the re-admission the queued todo brings, finds approved >= latest and drops the pair, and ClearTreeGeneration then clears the gate. This is the person's queued approval of V, read from the gate where it is recorded: the handover's status row carries no version and is gone by the re-admission. New test admit/parked_decision_test.go TestARootAPersonsApprovalHandsOverIsToldNoStaleApproval: gate approved at 2 and latest 3, a parked labelled root, the person approves 3 (a prepared approval with Dispatch's view), the root re-admitted.",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u OMP_SESSION_SQL_DSN_FILE LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/<a database legion_test owns>?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -count=1 -run 'TestARootAPersonsApprovalHandsOverIsToldNoStaleApproval|TestARootReadmittedOnAnOlderApproval' ./internal/admit/",
-      "observed": "Pass at the head: no parked-decision notice, the start's task names no approval pair, and nothing is kept in readmitted_approvals. Before the fix it failed: 'the start's task \"The spec is approved at version 2 and is now at version 3: request approval of version 3, \u2026\" (kept \u2026 Approved:2, Latest:3) names an approval pair, want none'. Main's #2619 tests in workflow/person_handover_test.go asserted the gate 'as the park left it'. TestAPersonsApprovalOfARecordedParkedRootsSpecQueuesItAndRecordsItQuietly (renamed) and TestACarriedCopyOfAParkedRootsGateTakesTheApprovalWhileTheOwnerIsQueued now assert the approval recorded at version 2, and still assert no notice. The scratch-Dispatch test's prose says the same.",
-      "headSha": "dcc5effb868dc71bb8a80e105801eea45fa41420",
-      "negativeControl": "The before failure above, at the same test with gate.go's `continue` (main's skip) in place."
-    },
-    {
-      "criterion": "Review 5728675512 Minors",
-      "surface": "skills/legion-controller/references/parked-decisions.md walk step 3 skips an artifact.approved of the root's own spec, and the approval request's ask.answered at the same time, as the person's handover, pointing at the paragraph under The notice. scripts/e2e/parked-decision-devbox.sh drops the check that could not fail (relayed_logged design-approved) and undelivered_logged, which had no caller, and the remaining undelivered check's message no longer says the gate took the approval.",
-      "command": "bash -n scripts/e2e/parked-decision-devbox.sh; uvx --from shellcheck-py==0.10.0.1 shellcheck -x scripts/e2e/parked-decision-devbox.sh; (cd packages/pi-legion && bun test src/skills-guard.test.ts)",
-      "observed": "bash -n ok, shellcheck clean, skills guard 14/14.",
-      "headSha": "dcc5effb868dc71bb8a80e105801eea45fa41420",
-      "negativeControl": "none: a prose change and a removed dead check."
-    },
-    {
-      "criterion": "Pinned seeds, a bounded sweep and the packages at the head",
-      "surface": "TestKeptDecisionsRegressionSeeds; TestKeptDecisionsReachTheCurrentArchitectOnce at 400 seeds x 300 steps; ./internal/{workflow,admit,daemon,store,record}",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u OMP_SESSION_SQL_DSN_FILE LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/<a database legion_test owns>?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -count=1 -run TestKeptDecisionsRegressionSeeds ./internal/daemon/; LEGION_KEPT_PROPERTY_RUNS=400 LEGION_KEPT_PROPERTY_STEPS=300 go test -count=1 -timeout 58m -v -run '^TestKeptDecisionsReachTheCurrentArchitectOnce$' ./internal/daemon/; go test -count=1 -p 1 ./internal/workflow/ ./internal/admit/ ./internal/daemon/ ./internal/store/ ./internal/record/ -skip '<Docker-only, tmux, scratch Dispatch, keeper flake, the two property tests>'",
-      "observed": "Pinned seeds ok (127.8 s). Sweep: 400 of 400 seeds in 1696.1 s. admit, store and record ok. workflow failed one test only in its cleanup drop (engine_test.go:1075, 42501, the pod Postgres fault ruled not #2163's). In the first daemon package run the test database disappeared mid-run (3D000 'database infra251_r23 does not exist' from every boot test). On a fresh database the daemon package passed: ok in 659.8 s.",
-      "headSha": "dcc5effb868dc71bb8a80e105801eea45fa41420",
-      "negativeControl": "none: these runs check for regressions and change nothing."
+      "criterion": "The red ci-ok at cab1b1af: both reds are main's newer rules",
+      "surface": "CI run 41324560168. (1) test: every store-backed test refused 'migration 0068_parked_decisions.up.sql takes version 68: the numbered migrations ended at 67, and every migration added since is named for the UTC moment it was created, 14 digits YYYYMMDDHHMMSS'. That is main's packages/envoy/migrationid rule, under which the daemon's numbered series closed at 0067. This change's migrations are renamed 20261101163106_parked_decisions.up.sql and 20261101163107_claim_delivered_rows.up.sql (date -u +%Y%m%d%H%M%S, the second a second later), the test is now migration_20261101163106_test.go (TestParkedDecisionsArriveWith20261101163106AndGoWithTheirIssue), and every comment naming them is updated. (2) lint: release-push.sh fold-orphans refused packages/daemon/.changes/unreleased/INFRA-251-kept-decision-once.yaml, since packages/daemon has no fold. It is removed. packages/pi-legion's fragment, which named the issue key against AGENTS.md's changelog rule, is now pr2163-parked-decision-controller.yaml with Issue: pr2163.",
+      "command": "a throwaway merge of this head with main 816e03f8, then: bash .github/scripts/release-push.sh fold-orphans $(<.github/changelog-packages); cd packages/daemon && go build ./... && go vet ./internal/store/... ./internal/admit/; go test -count=1 -p 1 ./internal/store/... ./internal/admit/ ./internal/record/ (LEGION_TEST_PG_DSN on a database legion_test owns)",
+      "observed": "Under main's rule: store ok (109 s), store/migrations ok (main's embed_test and next_number_test), record ok. admit failed one subtest of TestAnArchitectsHandBackReturnsTheSlotToWaitOnThePerson; run alone three times it passes (ok in 11.5 s), so it is the pod's cleanup or a flake, not the rename. fold-orphans reads git HEAD, which was this branch's tip, so it named only main's three old daemon fragments that this branch still carries from an earlier merge. The merge ref has none of them (packages/daemon/.changes is absent in the probe merge), and INFRA-251-kept-decision-once.yaml is gone. The throwaway merge was abandoned; no merge of main is pushed.",
+      "headSha": "702c4ee9b2961de13b949b7fae350d0a865e09ee",
+      "negativeControl": "At cab1b1af CI refused the 0068/0069 names and the daemon fragment (run 41324560168)."
     }
   ],
   "filesChanged": [
-    "packages/daemon/internal/workflow/gate.go",
-    "packages/daemon/internal/workflow/person_handover_test.go",
-    "packages/daemon/internal/daemon/person_handover_scratch_dispatch_test.go",
-    "packages/daemon/internal/admit/parked_decision_test.go",
-    "skills/legion-controller/references/parked-decisions.md",
-    "scripts/e2e/parked-decision-devbox.sh"
+    "packages/daemon/internal/store/migrations/20261101163106_parked_decisions.up.sql (renamed from 0068)",
+    "packages/daemon/internal/store/migrations/20261101163107_claim_delivered_rows.up.sql (renamed from 0069)",
+    "packages/daemon/internal/store/migration_20261101163106_test.go (renamed)",
+    "packages/daemon/internal/store/kept_decisions.go, daemon/outbox.go, daemon/workflow.go, daemon/root_hears_main_paths_test.go (comments)",
+    "packages/daemon/.changes/unreleased/INFRA-251-kept-decision-once.yaml (removed)",
+    "packages/pi-legion/.changes/unreleased/pr2163-parked-decision-controller.yaml (renamed from INFRA-251-\u2026, Issue pr2163)"
   ],
   "deviations": [
-    "The fix records the handover's approval on the root's own gate, the review's first option, rather than reading Dispatch at re-admission: the gate is where the person's queued approval and its version can still be read at re-admission, and the gate is cleared in the same transaction. It changes main's #2619 behaviour only in that the gate now holds the approval; #2619's two workflow assertions are updated to say so, and no notice, answered wait or log line is added."
+    "The pi-legion fragment's rename to pr2163 is beyond the two reds: AGENTS.md says no Dispatch issue key goes in a fragment's name or Issue field."
   ],
   "openQuestions": []
 }
