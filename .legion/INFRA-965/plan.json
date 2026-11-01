@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-965",
+  "previousHandoff": "",
+  "plan": "dispatch://INFRA-965/artifact/plan-md (version 1). Two halves that share no file: A, one bash script .github/scripts/repo-paths.sh that derives every image path, the plugin download address, the npm repository URL and the docs site address from GITHUB_REPOSITORY, read by worker-image.yaml, release-envoy-listener.yaml, release-envoy-infra.yaml, release.yaml and the Astro build through a ten-line adapter; and B, a top-level legion.yaml key repository_renames that the daemon applies as a read-side equivalence at every repository comparison, plus one gh bundle entry shared by a renamed pair. Tasks A1-A7, B1-B5, C1-C3, with the order, the risks and the five items for the architect, are in that document.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase mechanics this change is delivered under - the handoff, the push and its skip-checks trailer, the pull-request body's proof entries, and the rule that a clear defect in a file this pull request touches is fixed in it rather than deferred.",
+      "legion-worker/references/pr-body.md: the implementer must record a proof per acceptance line with a surface, a command, an observation, a head SHA and a negative control, and the release workflows this change edits run only on main, so what counts as a production-like surface before the merge has to be read there.",
+      "legion-worker/references/tools.md: the Go daemon tests need a database; LEGION_TEST_PG_DSN is already set in this pod and nothing may point a test at the sessions database OMP_SESSION_SQL_DSN_FILE names.",
+      "plain-words: the new legion.yaml key is documented in deploy/kubernetes/daemon/legion.yaml.example, which generates the published configuration reference an operator reads."
+    ],
+    "test": [
+      "legion-worker: the tester's evidence rules, and the handoff's proof shape (criterion, surface, command, observed, headSha, negativeControl), which every acceptance line of this issue is written against.",
+      "legion-worker/references/tools.md: the daemon suite needs Postgres, and the acceptance commands in the plan run `go test` over internal/workflow, internal/intake, internal/daemon, internal/config, internal/appauth and internal/ghrepo.",
+      "plain-words: the test handoff and the pull-request evidence are read by a person deciding whether the transfer can proceed."
+    ],
+    "review": [
+      "legion-worker: the merge gate, review threads, and the rule that a prose-only finding is fixed by the reviewer in its own commit.",
+      "legion-worker/references/merge-gate.md: this change edits the release workflows and the attestation subjects, so the reviewer judges work that decides what a published artifact is signed as.",
+      "plain-words: the review's comments are read by a person."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "The one script cannot run in the credential-holding jobs that need its value: check-release-credentials.sh:230 refuses any scripts/ path in such a job except release-push.sh, and worker-image.yaml's workflow-level env cannot call a script at all, while its attest job is reached with build skipped.",
+        "answer": "A-D2: the gate is not touched. The script runs in a job that holds none of the four write scopes and every credentialed consumer reads that job's output. release-envoy-listener.yaml's targets job produces envoy_image and docker, image_index, attest and release_publish each name targets in their own needs. worker-image.yaml gains an optional workflow_call input image, which attest prefers over needs.build.outputs.image; release.yaml's worker_image_attest passes needs.worker_image.outputs.image."
+      },
+      {
+        "finding": "The rename has no path to legion gh and legion git-credential, which run in the pod and read no legion.yaml; ghTargetOf answers an owner, not a repository; and a pod's GH_CONFIG_DIR is fixed at launch from the recorded default owner.",
+        "answer": "B-D3: nothing in the pod changes. The daemon writes the renamed pair's lease into both owners' directories, so the directory the pod already names holds the right token. Recorded as a departure from acceptance line 4."
+      },
+      {
+        "finding": "Pointing the lookup at the new owner's directory while the tree's default owner stays the old one gives the worker a read-only token (appauth/credential.go:34-69 mints the write lease for one owner only), so acceptance 4 as written passes with a token that cannot push.",
+        "answer": "B-D3: the pair shares one bundle entry, and it carries the write lease whenever either owner is the bundle's Default; GitHubCredential mints for the renamed owner and accepts an alias owner as a default. The test asserts the token, not the directory."
+      },
+      {
+        "finding": "Neither child issue owns the Dispatch mapping of cybermonklabs/legion or the NATS permission for notifications.github.cybermonklabs.legion.>, and the plan needs to say what the daemon does when a configured rename names an owner it has no directory for.",
+        "answer": "Out of this issue's code, reported to the architect as item 2. In the daemon, a configured rename whose target the project does not serve is logged once at mapping load and changes nothing else."
+      },
+      {
+        "finding": "A rename configured before the transfer names a repository GitHub does not have yet; if the new name entered the accepted set, nameAccepted's read would fail the whole mapping read until the transfer.",
+        "answer": "B-D2: the rename never enters the served set. It adds subscription partners, comparison equivalence, the credential entry and a fall-through in lookup, none of which reads GitHub. A test covers the window: rename configured, target absent from the mapping, mapping read succeeds, both subjects in the filters."
+      },
+      {
+        "finding": "'Accepts production checks from either' is two code paths with different fixes: the boot wake (check.go:463 against BuiltFrom, from the const in main.go:56) and the deploy-run wake (check.go:498 after intake.DeployOf matched the configured deploys entry).",
+        "answer": "B-D4 and B3: builtFromRepository stays a constant and check.go:463 goes through the equivalence, since a stamp would not remove the need for it in either direction; DeployOf takes the equivalence too, so a deploys entry on the old repository matches a run on the new one. B5 names the two as separate tests."
+      },
+      {
+        "finding": "The spec's list of comparison sites is shorter than the code's: NoteRepositoryKept, backfill.go, repositories.go's kept and lookup, and engine.go's two are not named, and acceptance 3 exercises five facts only.",
+        "answer": "B3 enumerates every site and says what happens to each, including record/store.go, which is deliberately left alone. NoteRepositoryKept is included with its reason: the parent's transfer-day step 10 re-points every open INFRA issue, which would otherwise post a note on every open tree."
+      },
+      {
+        "finding": "The ci-images job pushes to ghcr.io/sjawhar/legion/ci with the repository's GITHUB_TOKEN, which the parent's transfer map says stops working after the transfer, while the spec keeps that package out of scope.",
+        "answer": "Kept out of scope, as the spec says, and reported to the architect as item 4 with the measured narrowing: mirror-ci-images.sh copies only rows the package does not hold, so the first failure is the first pull request that adds an image row."
+      },
+      {
+        "finding": "Acceptance 5's npm view reads the last published version, so it passes whatever the change did if that release published no new plugin, and all three of its readings happen after a release from main rather than on the pull request.",
+        "answer": "A6 adds the machine check at the moment that matters: the build job asserts the packed tarball's repository.url before the publish. Acceptance 5 is named in the plan's table as the implementer's production check after the close, with npm view pinned to the version that run published."
+      },
+      {
+        "finding": "ldflags -X writes a variable, not a constant, and two places assert the literal download URL (provider_test.go:74 and release-envoy-infra.yaml:217).",
+        "answer": "A-D4: const becomes var keeping today's literal as its default, so provider_test.go:74 and every unstamped build are unchanged; the release workflow's expectation comes from the script, and ci.yaml's existing schema check in envoy-smoke is extended to prove the stamp on the pull request itself."
+      },
+      {
+        "finding": "The docs site's value is read by JavaScript and the workflows' by a shell script, so one of the two would duplicate the derivation; and a new .github/scripts test is not run until ci.yaml lists it and the filters cover it.",
+        "answer": "A-D3: a ten-line adapter, docs/site/repo-paths.ts, runs the script with execFileSync and derives nothing of its own, so a local build with GITHUB_REPOSITORY unset keeps today's address. A2 adds the test step and extends the docs job's filter, and names check-ci-filters.sh and check-image-trigger-paths.sh as the gates that catch a filter that misses a read."
+      },
+      {
+        "finding": "Where the rename key lives is undecided, and the analyst reported that the loader ignores an unknown key, which would make INFRA-966's ordering free.",
+        "answer": "B-D1: top-level repository_renames, with its exact shape, because the equivalence is not per project. The analyst's claim is false: config.go:423-428 falls through to classify, which refuses an unknown key, so the daemon does not start. That is reported to the architect as item 3, since it fixes INFRA-966's deploy order."
+      },
+      {
+        "finding": "Two claims the analyst could not settle: whether the daemon picks up GitHub's new name after the transfer, and that the spec locates GH_CONFIG_DIR in config/config.go when the runtimes set it.",
+        "answer": "GitHub reads go through http.DefaultClient (githubrest.go:265), which follows redirects, so nameAccepted would read the new spelling; the plan marks GitHub's 301 as an inference and rests nothing on it, because INFRA-966 maps both names. GH_CONFIG_DIR is set in sandbox/podkind.go and tmux/spawn.go, which B-D3 cites and leaves unchanged."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 2
+  },
+  "specDepartures": [
+    {
+      "spec": "Acceptance: 'A test of legion git-credential, and of the worker's GH_CONFIG_DIR, shows that with the rename configured a remote or issue under sjawhar/legion gets the cybermonklabs owner's directory, and without it the sjawhar one.'",
+      "plan": "The issue keeps its own owner's directory and that directory holds the renamed owner's write token: the daemon writes one gh bundle entry for the renamed pair into both owners' directories, carrying the lease minted for the new owner, and it is the write lease whenever either owner is the bundle's Default. legion gh, legion git-credential and both runtimes are unchanged. The test asserts the token rather than the directory.",
+      "evidence": "ghconfig/bundle.go:85-90 removes every directory of the bundle root the bundle does not name, and a pod's GH_CONFIG_DIR is fixed at launch from the recorded default owner (sandbox/podkind.go:325-327, relaunch.go:754, tmux/spawn.go:258-262), so moving the lookup to the new owner's directory points every live pod at a deleted directory until the tree is relaunched - against the parent's acceptance that a tree open at the transfer keeps working with no restart (dispatch://INFRA-479/artifact/spec). Reaching the new directory from inside the pod would also need a new daemon-to-pod variable, a worker-image rebuild and a second pin in INFRA-966, and cmd/legion/gh.go:207-262 answers an owner, not a repository, so what the pod could act on is an owner-level rename that would misroute every other repository of the owner sjawhar. appauth/credential.go:34-69 shows the directory's name authorises nothing; the token in it does.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A test of legion git-credential, and of the gh bundle the daemon writes, shows that with the rename configured a remote or issue under sjawhar/legion gets the cybermonklabs owner's write token from its own directory, and without it the sjawhar token."
+        ]
+      }
+    }
+  ]
+}
