@@ -12,6 +12,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/ratelimit"
 )
 
 // deviceAuthorization is POST /v1/oauth/device_authorization: a machine login's device
@@ -79,7 +80,7 @@ func rateLimitedRefusal(every time.Duration) *oauth.Refusal {
 	return &oauth.Refusal{
 		Status: http.StatusTooManyRequests, Code: "RATE_LIMITED",
 		Message:    "too many launcher credential requests; try again later",
-		RetryAfter: retryAfterSeconds(every),
+		RetryAfter: ratelimit.RetryAfterSeconds(every),
 	}
 }
 
@@ -97,7 +98,7 @@ func (s *server) oauthToken(w http.ResponseWriter, r *http.Request) {
 		oauth.WriteRefusal(w, &oauth.Refusal{
 			Status: http.StatusTooManyRequests, Code: "RATE_LIMITED",
 			Message:    "too many token requests; try again later",
-			RetryAfter: retryAfterSeconds(s.tokenLimiter.Every()),
+			RetryAfter: ratelimit.RetryAfterSeconds(s.tokenLimiter.Every()),
 		})
 		return
 	}

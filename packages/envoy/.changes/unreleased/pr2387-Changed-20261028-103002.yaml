@@ -1,7 +1,7 @@
 kind: Changed
 body: |-
     GitHub's rate limits are shared by every Dispatch process. A limit one process meets is written
-    to the new table `github_rate_limits` (migration `0152`), under the App's scope (`app`: token
+    to the new table `github_rate_limits` (migration `0153`), under the App's scope (`app`: token
     mints, installation lookups, the webhook delivery endpoints) or one installation's
     (`installation:<id>`), for the wait GitHub asked, and until it passes by the database's clock no
     process sends GitHub a request under that scope. The webhook redelivery sweep's own doubling

@@ -20,7 +20,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
-	"github.com/sjawhar/legion/daemon/internal/podsafety"
 )
 
 // operator-token: the root pod runs as the operator's ServiceAccount with no API server token —
@@ -135,8 +134,8 @@ func projectedToken(pod Pod) (fixtureToken, error) {
 }
 
 // pod-baseline: the agent the root's shim started runs on Legion's pod baseline (internal/
-// podsafety): the turn-scoping overlay on the pod's state volume is PI_CONFIG_FILES' first element,
-// ahead of the operator's; PI_CONFIG_DIR is set, which the operator left unset, and the operator's
+// podsafety): PI_CONFIG_FILES is the operator's own, which the baseline hands through untouched;
+// PI_CONFIG_DIR is set, which the operator left unset, and the operator's
 // own variables are kept; Oh My Pi's two session variables are the runtime's, not the baseline's
 // file default — under the session database the daemon requires (the run's session_store is
 // postgres) the runtime sets OMP_SESSION_STORAGE=sql and points OMP_SESSION_SQL_DSN_FILE at the
@@ -146,9 +145,9 @@ func projectedToken(pod Pod) (fixtureToken, error) {
 // under it (podsafety.EnsureStateHome) before Oh My Pi started, since Oh My Pi reads the variable
 // only where that directory exists; the shim itself (the agent's parent; the container's PID 1 is
 // its launcher) runs on the operator's value alone. Then the image's Oh My Pi, under the agent's
-// environment, reads a repository's remote compaction endpoint as the repository set it, reads
-// bash.autoBackground.enabled off though the repository turns it on, and reads an operator
-// overlay's endpoint over the repository's once one named after the agent's overlays sets it.
+// environment, reads a repository's remote compaction endpoint as the repository set it, and reads
+// an operator overlay's endpoint over the repository's once one named after the agent's overlays
+// sets it.
 func (r *liveRig) checkPodBaseline() error {
 	root := r.claim("root")
 	if err := r.ensureRunning(root); err != nil {
@@ -156,7 +155,7 @@ func (r *liveRig) checkPodBaseline() error {
 	}
 	operatorOverlays := r.pod.Env["PI_CONFIG_FILES"]
 	if operatorOverlays == "" {
-		return errors.New("the operator's pod sets no PI_CONFIG_FILES; the check compares the baseline with it")
+		return errors.New("the operator's pod sets no PI_CONFIG_FILES; the check compares the agent's and the shim's overlays with it")
 	}
 	pid, err := r.agentPid(root)
 	if err != nil {
@@ -174,19 +173,15 @@ func (r *liveRig) checkPodBaseline() error {
 	if err != nil {
 		return err
 	}
-	overlay := path.Join(StateDir, podsafety.TurnScopeFile)
 	stateHome := roleStateHome(claim.RoleArchitect)
 	want := map[string]string{
-		"PI_CONFIG_FILES":           overlay + ":" + operatorOverlays,
 		"PI_CONFIG_DIR":             ".omp",
 		ompsessions.StorageVariable: ompsessions.SQLStorage,
 		ompsessions.DSNFileVariable: providersDSNFile,
 		"XDG_STATE_HOME":            stateHome, "TMPDIR": scratchRoot + "/tmp",
 	}
 	for name, value := range r.pod.Env {
-		if name != "PI_CONFIG_FILES" {
-			want[name] = value
-		}
+		want[name] = value
 	}
 	for _, name := range slices.Sorted(maps.Keys(want)) {
 		if agent[name] != want[name] {
@@ -214,23 +209,15 @@ func (r *liveRig) checkPodBaseline() error {
 		return fmt.Errorf("the shim (pid %s) has PI_CONFIG_FILES=%q, want the operator's %q alone", shimPid, shim["PI_CONFIG_FILES"], operatorOverlays)
 	}
 	note("operator", "/proc/%s/environ (the shim): PI_CONFIG_FILES=%s, the operator's alone", shimPid, shim["PI_CONFIG_FILES"])
-	mode, err := r.exec(root, "stat", "-c", "%a", overlay)
-	if err != nil {
-		return err
-	}
-	if mode != "444" {
-		return fmt.Errorf("%s has mode %s, want 444", overlay, mode)
-	}
-	note("operator", "stat %s: mode %s", overlay, mode)
 	// One `omp config get` under the agent's environment, verbatim, in a scratch repository whose
-	// .omp/config.yml sets remote compaction and turns autoBackground on. With "operator" as $3 a
+	// .omp/config.yml sets remote compaction. With "operator" as $3 a
 	// scratch operator overlay setting the endpoint is named after the agent's own overlays, where
 	// the fixture's overlay stands (the fixture's, the production example, names no endpoint).
 	const read = `set -e
 export SETTING=$2
 repo=$(mktemp -d)
 mkdir "$repo/.omp"
-printf 'compaction:\n  remoteEndpoint: https://repository.example/compact\nbash:\n  autoBackground:\n    enabled: true\n' >"$repo/.omp/config.yml"
+printf 'compaction:\n  remoteEndpoint: https://repository.example/compact\n' >"$repo/.omp/config.yml"
 printf 'compaction:\n  remoteEndpoint: https://operator.example/compact\n' >"$repo/operator.yml"
 OVERLAYS=$(tr '\0' '\n' <"/proc/$1/environ" | sed -n 's/^PI_CONFIG_FILES=//p')
 [ "$3" != operator ] || OVERLAYS="$OVERLAYS:$repo/operator.yml"
@@ -242,7 +229,6 @@ xargs -0 sh -c 'exec env -i "$@" PI_CONFIG_FILES="$OVERLAYS" omp config get "$SE
 		want              any
 	}{
 		{"compaction.remoteEndpoint", "agent", "https://repository.example/compact"},
-		{"bash.autoBackground.enabled", "agent", false},
 		{"compaction.remoteEndpoint", "operator", "https://operator.example/compact"},
 	} {
 		out, err := r.exec(root, "sh", "-c", read, "read-setting", pid, tc.setting, tc.overlays)
