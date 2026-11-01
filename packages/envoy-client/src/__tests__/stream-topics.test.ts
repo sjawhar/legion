@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { controllerToken, legionControllerNoticeSubject } from "@legion/contracts";
+import {
+  uncapturedTopicRefusal as contractsUncapturedTopicRefusal,
+  controllerToken,
+  legionControllerNoticeSubject,
+} from "@legion/contracts";
 import { deliverSubject } from "../consumer-delivery";
 import {
   controllerNoticeRole,
@@ -11,6 +15,8 @@ import {
   replayFollowedSubjects,
   streamDeliversNothing,
   streamStores,
+  subscribeRefusesTopic,
+  uncapturedTopicRefusal,
 } from "../stream-topics";
 
 test("the stream stores agent, producer and team topics, wildcards read literally", () => {
@@ -31,7 +37,8 @@ test("an uncaptured topic, bare prefixes and the relay subject are not stored", 
 });
 
 test("a topic nothing would be delivered on is one no stream subject captures, a role lane apart", () => {
-  // What the listener refuses the whole registration for (`bus.ReachesNoSession`).
+  // What the listener leaves out of a registration, and refuses a publish to by name
+  // (`bus.ReachesNoSession`).
   expect(streamDeliversNothing("notifications.team")).toBe(true);
   expect(streamDeliversNothing("notifications.github")).toBe(true);
   expect(streamDeliversNothing("notifications.lxspec.probe.all")).toBe(true);
@@ -42,6 +49,40 @@ test("a topic nothing would be delivered on is one no stream subject captures, a
   expect(streamDeliversNothing("notifications.agent.ses_a")).toBe(false);
   // Only a notifications. topic is the listener's to refuse by name.
   expect(streamDeliversNothing("team.deploys")).toBe(false);
+});
+
+test("a host refuses such a topic in the listener's own words", () => {
+  // The sentence a host's explicit subscribe refuses with is written once, in @legion/contracts,
+  // and the listener's warning for the same topic is generated from it
+  // (contracts.UncapturedTopicRefusal in packages/envoy/internal/contracts/generated.go): the two
+  // are one wording, so a caller reads the same reason whether its topic was refused here or
+  // dropped there.
+  expect(uncapturedTopicRefusal("notifications.team", "ses_a")).toBe(
+    contractsUncapturedTopicRefusal("notifications.team", "ses_a")
+  );
+  expect(uncapturedTopicRefusal("notifications.team", "ses_a")).toContain("notifications.team");
+  expect(uncapturedTopicRefusal("notifications.lxspec.probe", "ses_b")).toContain(
+    "notifications.lxspec.probe"
+  );
+  expect(uncapturedTopicRefusal("notifications.lxspec.probe", "ses_b")).toContain("ses_b");
+});
+
+test("a host's subscribe refuses an uncaptured topic, and no private subject", () => {
+  const own = "notifications.agent.ses_a";
+  // The listener leaves these out of a registration with no caller to tell; its tool refuses
+  // them, since a caller named them.
+  expect(subscribeRefusesTopic(own, "notifications.team")).toBe(true);
+  expect(subscribeRefusesTopic(own, "notifications.lxspec.probe")).toBe(true);
+  // A private stream subject is judged as one, by the listener and here alike: a host opens one
+  // itself, so it stays followed and is left out of the registration without a refusal.
+  expect(subscribeRefusesTopic(own, "notifications.>")).toBe(false);
+  expect(subscribeRefusesTopic(own, "notifications.*.x")).toBe(false);
+  expect(subscribeRefusesTopic(own, "notifications.agent.*")).toBe(false);
+  // A stored topic, the session's own subject and a role lane are no one's to refuse.
+  expect(subscribeRefusesTopic(own, own)).toBe(false);
+  expect(subscribeRefusesTopic(own, "notifications.team.deploys")).toBe(false);
+  expect(subscribeRefusesTopic(own, "notifications.role.reviewer")).toBe(false);
+  expect(subscribeRefusesTopic(own, "team.deploys")).toBe(false);
 });
 
 describe("a controller notice lane", () => {

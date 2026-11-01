@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { rm } from "node:fs/promises"
+import { uncapturedTopicRefusal } from "@legion/contracts"
 import { EnvoyApiError } from "@legion/envoy-client/transport"
 import { startChannelSession } from "../src/envoy-channel-server"
 import { SessionIdentity } from "../src/session-identity"
@@ -558,10 +559,11 @@ test("a Dispatch subscription removal that names no topics removes nothing", asy
   }
 })
 
-// A topic the stream captures nothing of is refused by the listener with the whole registration,
-// so a session that follows one — through the tool, or from the interest row a resume reads —
-// would be refused at every heartbeat, for as long as that row holds it (INFRA-771 review). It is
-// followed all the same, and left out of every registration (`registrationTopics`).
+// A topic the stream captures nothing of is left out of every registration
+// (`registrationTopics`), since the listener stores none: it drops such a topic from the row and
+// names it in a warning (INFRA-771). It is followed all the same when it came back from the
+// interest row a resume reads, and `follow`, which is the tool's call and nothing else, refuses
+// one its caller named itself, in the listener's own words.
 test("never registers a topic no stream subject captures, however it was followed", async () => {
   const calls: string[] = []
   const nats = new FakeNats(calls)
@@ -576,22 +578,6 @@ test("never registers a topic no stream subject captures, however it was followe
     }),
     subscribe: async (input) => {
       subscribes.push(input.topics)
-      // The listener's own rule: a `notifications.` topic no stream subject captures is refused
-      // by name, with the whole registration (cmd/listener's subscribeHandler).
-      const uncaptured = input.topics.find(
-        (topic) => topic === "notifications.team" || topic === "notifications.lxspec.probe",
-      )
-      if (uncaptured !== undefined) {
-        throw new EnvoyApiError({
-          method: "POST",
-          url: "http://127.0.0.1:4000/v1/interests/subscribe",
-          status: 400,
-          responseBody: JSON.stringify({
-            error: `no stream subject captures ${uncaptured}`,
-            expected: ["topics"],
-          }),
-        })
-      }
       return noInterest()
     },
   })
@@ -603,8 +589,7 @@ test("never registers a topic no stream subject captures, however it was followe
   )
 
   try {
-    // The bare base came back with the row and is followed; no registration carried it, so none
-    // was refused.
+    // The bare base came back with the row and is followed; no registration carried it.
     expect(session.topics()).toEqual([
       directSubject,
       "notifications.team",
@@ -612,11 +597,14 @@ test("never registers a topic no stream subject captures, however it was followe
     ])
     expect(subscribes).toEqual([[directSubject, "notifications.team.deploys"]])
 
-    expect(await session.follow(["notifications.lxspec.probe", "notifications.team.>"])).toEqual([
-      "notifications.lxspec.probe",
-      "notifications.team.>",
-    ])
-    expect(session.topics()).toContain("notifications.lxspec.probe")
+    // The caller named the uncaptured topic itself, so the call is refused by name, in the one
+    // sentence the listener's own warning is generated from, and follows nothing of that call.
+    await expect(
+      session.follow(["notifications.lxspec.probe", "notifications.team.>"]),
+    ).rejects.toThrow(uncapturedTopicRefusal("notifications.lxspec.probe", "ses_claude"))
+    expect(session.topics()).not.toContain("notifications.lxspec.probe")
+
+    expect(await session.follow(["notifications.team.>"])).toEqual(["notifications.team.>"])
     expect(subscribes.at(-1)).toEqual([
       directSubject,
       "notifications.team.deploys",

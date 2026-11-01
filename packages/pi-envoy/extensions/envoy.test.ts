@@ -25,7 +25,11 @@ import {
 import { createServer } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { dispatchIssueSubject, type SessionAnswer } from "@legion/contracts";
+import {
+  dispatchIssueSubject,
+  type SessionAnswer,
+  uncapturedTopicRefusal,
+} from "@legion/contracts";
 import { askgateState } from "@legion/envoy-client/askgate-marker";
 import { deliverSubject, RelayHeader } from "@legion/envoy-client/consumer-delivery";
 import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
@@ -9781,32 +9785,27 @@ console.log(JSON.stringify(args));
     ]);
   });
 
-  // A topic the stream captures nothing of is refused by the listener with the whole
-  // registration, so a session that follows one — through the tool, or from the interest row and
-  // the transcript a restore reads — would be refused at every heartbeat, for as long as that row
-  // holds it (INFRA-771 review). It is followed all the same, and left out of every registration
-  // (`registrationTopics`).
+  // A topic the stream captures nothing of is left out of every registration
+  // (`registrationTopics`), since the listener stores none: it drops such a topic from the row
+  // and names it in a warning (INFRA-771). It is followed all the same when it came back from
+  // the interest row or the transcript a restore reads, and refused by name when a caller named
+  // it itself, in the listener's own words.
   test("never registers a topic no stream subject captures, however it was followed", async () => {
     const registrations: string[][] = [];
-    const refused: string[] = [];
+    const carried: string[] = [];
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
       if (url.pathname === "/v1/interests/subscribe") {
         const topics: string[] = Array.isArray(body?.topics) ? body.topics : [];
         registrations.push(topics);
-        // The listener's own rule: a `notifications.` topic no stream subject captures is
-        // refused by name, with the whole registration (cmd/listener's subscribeHandler).
-        const uncaptured = topics.find(
-          (topic) => topic === "notifications.team" || topic === "notifications.lxspec.probe"
+        // What the listener would drop from the row it stores and warn about (cmd/listener's
+        // subscribeHandler); none is expected to reach it at all.
+        carried.push(
+          ...topics.filter(
+            (topic) => topic === "notifications.team" || topic === "notifications.lxspec.probe"
+          )
         );
-        if (uncaptured !== undefined) {
-          refused.push(uncaptured);
-          return new Response(
-            JSON.stringify({ error: `no stream subject captures ${uncaptured}` }),
-            { status: 400 }
-          );
-        }
       }
       if (url.pathname === "/v1/interests/ses_uncaptured") {
         // The row an earlier build left: it expanded `notifications.team.>` to the bare base
@@ -9834,21 +9833,28 @@ console.log(JSON.stringify(args));
     const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
     if (subscribeTool === undefined) throw new Error("envoy_subscribe was not registered");
 
-    const subscribed = await subscribeTool.execute("", {
+    const refused = await subscribeTool.execute("", {
       topics: ["notifications.lxspec.probe", "notifications.team.>"],
     });
 
+    // The caller named the uncaptured topic itself, so the tool refuses it by name, in the one
+    // sentence the listener's own warning is generated from, and follows nothing of that call.
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0]?.text).toContain(
+      uncapturedTopicRefusal("notifications.lxspec.probe", "ses_uncaptured")
+    );
+    expect(await followedTopics(fixture.tools, context)).not.toContain(
+      "notifications.lxspec.probe"
+    );
+
+    const subscribed = await subscribeTool.execute("", { topics: ["notifications.team.>"] });
+
     expect(subscribed.isError).toBeFalsy();
-    expect(subscribed.details).toMatchObject({
-      added: ["notifications.lxspec.probe", "notifications.team.>"],
-    });
-    // Both the restored bare base and the tool's uncaptured topic are followed, and neither
-    // reached the listener, so no registration was refused.
+    expect(subscribed.details).toMatchObject({ added: ["notifications.team.>"] });
+    // The bare base the restore brought back is followed, and never carried to the listener.
     const followed = await followedTopics(fixture.tools, context);
-    for (const topic of ["notifications.team", "notifications.lxspec.probe"]) {
-      expect(followed).toContain(topic);
-    }
-    expect(refused).toEqual([]);
+    expect(followed).toContain("notifications.team");
+    expect(carried).toEqual([]);
     expect(registrations.length).toBeGreaterThan(0);
     for (const topics of registrations) {
       expect(topics).not.toContain("notifications.team");

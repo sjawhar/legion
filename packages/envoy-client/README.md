@@ -116,7 +116,12 @@ holding that role registers its own project's lane, since its consumer is the on
 reaches it (`controllerNoticeRole` names the role a lane is for). `rememberedTopics(topics)` is what
 a restore follows again from a persisted state: every subject but agent subjects and role lanes.
 `streamDeliversNothing(topic)` is the topic a registration must not carry: a `notifications.` topic
-no stream subject captures and no role lane, which the listener refuses the whole registration for.
+no stream subject captures and no role lane, which the listener leaves out of the row it stores,
+naming it in a warning. `uncapturedTopicRefusal(topic, sessionID)` is that warning's own wording,
+which a host's subscribe tool refuses such a topic with when a caller names it by hand. The
+sentence is `@legion/contracts`'s, re-exported here: `packages/contracts/scripts/gen-go.ts` emits
+it as the `contracts.UncapturedTopicRefusal` the listener's warning returns, so a reword reaches
+both languages from one place.
 
 ## NATS connection
 

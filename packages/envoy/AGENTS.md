@@ -3204,10 +3204,11 @@ Each item below names an endpoint and its method, then its contract, and an item
   It stores `client_instance_id` the same way: the client instance driving the session, which is one Oh My Pi Envoy extension instance or one Claude Code channel-server process, each minting a random id when it starts.
   Every registration replaces the stored id with the one it carries, or with none when it carries none, and `/v1/roles/set`'s refresh of the claimant's entry keeps the stored id.
   That id is what decides a soft claim naming a predecessor and a deregistration that carries one, as those two entries say.
-  A `notifications.` topic that would deliver to no session (`bus.ReachesNoSession`) refuses the whole registration `400 {"error":"no stream subject captures <topic>, so nothing would be delivered to <session> on it; follow a notifications.team.<name> topic instead","expected":["topics"]}`:
-  a session receives only what its own consumer holds, so such an interest would be stored and deliver nothing, and the plugin that asked for it would never learn why.
-  It is the whole registration, unlike a private-subject topic below, because no live caller names one
-  — a census of production on 2026-10-30 read all 596 interest rows and found every uncaptured non-role topic in use to be a `notifications.team.*` topic, which this build stores.
+  A `notifications.` topic that would deliver to no session (`bus.ReachesNoSession`) is left out of the registration, which keeps its other topics and answers 200, and `warnings` names it (`<topic> was not registered: no stream subject captures it, so nothing would be delivered to <session> on it; follow a notifications.team.<name> topic instead`, `uncapturedTopicWarning`):
+  a session receives only what its own consumer holds, so such an interest would be stored and deliver nothing, and a refusal of the whole registration would leave that session no consumer at all, at every heartbeat.
+  It is the topic and not the registration, as for a private-subject topic below, because a registration carries topics nobody typed:
+  a session on an older plugin build registers the bare `notifications.team` its stored row holds, the topic that build expanded `notifications.team.>` to.
+  A caller that names one itself is still refused by name, where it is there to read the refusal: `/v1/messages/publish` refuses such a publish, and each plugin's explicit subscribe (`envoy_subscribe`, claude-envoy's `follow`) refuses such a topic in that warning's own words (`uncapturedTopicRefusal` in `@legion/envoy-client`).
 
 - A topic reaching a private stream subject (`bus.privateStreamSubjects`:
   each session's inbox `notifications.agent.>`, the failed-delivery lane `notifications.envoy.exceptions.notifications.agent.>`, the Legion controller notice lane `notifications.legion.>`) that is not the session's own — another session's agent subject, any failed-delivery lane (its own included), the controller notice lane of a project whose controller role the session does not hold, or a wildcard overlapping one (`notifications.agent.*`, `notifications.envoy.>`, `notifications.>`, `notifications.*.<x>`;
@@ -3217,7 +3218,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   `store.Registry.RolesHeldBy` says who holds it).
   Its holder registers that lane because a Legion controller receives those notices from its own consumer, the lane's core subscription having gone with the rest of the core receive path;
   a registration naming a lane, in its topics or in its row, is answered the bus-unavailable 503 while that view cannot answer, rather than stored without the lane, and one naming none reads no view.
-  That one is not refused whole because a released pi-envoy registers every subject it has open, a fork parent's agent subject and any topic its `envoy_subscribe` took included.
+  Such a topic is left out on its own, as an uncaptured one above is, because a released pi-envoy registers every subject it has open, a fork parent's agent subject and any topic its `envoy_subscribe` took included.
   A row an earlier build stored with such a topic is cleaned at the session's next registration:
   the registry drops every such topic from the merged row, not only from the incoming topics (`store.Registry.Upsert`, which `/v1/roles/set` writes through too;
   `/v1/interests/unsubscribe` drops them from the row it rewrites as well), so `Match` stops fanning those messages out to the session after its next heartbeat, and so does the lane of a session that has since lost the controller role.
@@ -3941,10 +3942,11 @@ a token the issuer never signed, one naming a key id the issuer publishes nothin
   one that was disconnected, restarting or not running gets it when it comes back, within the stream's 72 hours, like any other stored topic.
   The route forwards it to nobody and confirms it with nobody: the stored copy is the delivery.
 
-- Every other `notifications.` topic that would deliver to no session is refused by name, with the whole call:
-  `400` at `/v1/messages/publish` and at `/v1/interests/subscribe` (the Listener API).
+- Every other `notifications.` topic that would deliver to no session is refused by name wherever a caller named it itself:
+  `400` at `/v1/messages/publish`, and at each plugin's explicit subscribe (`envoy_subscribe`, claude-envoy's `follow`), which answers the listener's own warning for it.
+  A registration naming one is not refused: `/v1/interests/subscribe` leaves that topic out of the row, keeps the registration's other topics, answers 200 and names the topic in `warnings`, since a registration carries topics nobody typed and a refusal would leave its session no consumer at all.
   A session receives only what its own consumer holds, so a topic no stream subject captures would deliver to nobody and leave the caller believing otherwise.
-  A role lane is the exception both routes make, registered by its holder through `/v1/roles/set` and carried on core NATS, and the one predicate both read says so (`bus.ReachesNoSession`).
+  A role lane is the exception every one of them makes, registered by its holder through `/v1/roles/set` and carried on core NATS, and the one predicate they read says so (`bus.ReachesNoSession`).
 
 - A session the listener delivers to on its serve port (the OpenCode plugin) takes a team topic from the durable path like any stored topic, and takes an uncaptured topic published straight onto NATS, bypassing the API, only through its machine's listener when that listener runs with `ENVOY_SUBSCRIBE_ALL_TOPICS=1`:
   the live topics lane (`openLiveTopics`, `liveDeliveryHandler`) is a second bus client holding one core queue subscription on `notifications.>` in the group `envoy-listener-live-<machine id>` (`bus.ListenerLiveQueue`), which leaves a subject under `notifications.role.` to the role lane and a subject the stream captures (`bus.StreamCaptures`) to the durable, and fans every other topic out to the sessions on its machine subscribed to it, by the same `prompt_async`.

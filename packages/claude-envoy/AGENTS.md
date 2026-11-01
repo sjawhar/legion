@@ -65,10 +65,13 @@ session's own agent subject and every followed topic the listener will store for
 one reaching a private stream subject that is not this session's — `reachesPrivateStreamSubject`,
 the listener's rule: another session's agent subject, a failed-delivery lane, a controller notice
 lane of a project whose controller role this session does not hold, or a wildcard reaching one —
-and one nothing would ever be delivered on, `streamDeliversNothing`, which the listener refuses
-the whole registration for, so a topic the session follows from its row or its remembered state
-wedges nothing); those rules are `@legion/envoy-client/stream-topics`'s, and this server keeps
-only how it shows a card, where it warns, and its file.
+and one nothing would ever be delivered on, `streamDeliversNothing`, which the listener stores
+for no session: it leaves such a topic out of the row and warns about it, so a topic the session
+follows from its row or its remembered state wedges nothing); those rules are
+`@legion/envoy-client/stream-topics`'s, and this server keeps only how it shows a card, where it
+warns, and its file. A caller that names such a topic itself is refused by name: `follow`, which
+is the `envoy_subscribe` tool's call and nothing else, throws `uncapturedTopicRefusal`, the
+listener's own warning for that topic, and follows nothing of that call.
 
 `runEnvoyChannelServer` dials NATS with the shared options of
 `@legion/envoy-client/nats-connection` (`natsConnectionOptions`): a ping every 10 s and the

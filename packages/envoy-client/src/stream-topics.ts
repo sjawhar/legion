@@ -13,8 +13,8 @@ export const EXCEPTION_TOPIC_PREFIX = "notifications.envoy.exceptions.";
  * The literal prefixes of the subjects the notification stream (`ENVOY_NOTIFICATIONS`) stores, as
  * the listener's binary compiles them (`streamSubjects` in packages/envoy/internal/bus/stream.go,
  * each a prefix followed by `>`). A session's consumer relays its agent subject and every followed
- * topic under one of them; a topic under none is one the listener's publish and subscribe routes
- * refuse by name, since nothing would store it.
+ * topic under one of them; a topic under none is one the listener's publish route refuses by
+ * name and its registration route stores for nobody, since nothing would store it.
  */
 const STREAM_SUBJECT_PREFIXES = [
   AGENT_TOPIC_PREFIX,
@@ -41,12 +41,15 @@ export function streamStores(topic: string): boolean {
 }
 
 /**
- * Whether nothing would ever be delivered to a session on `topic`, so the listener refuses the
- * whole registration naming it by name (`bus.ReachesNoSession` in packages/envoy/internal/bus,
- * applied by POST /v1/interests/subscribe): a `notifications.` topic no stream subject captures
- * and that is no role lane. A session takes its messages from its own consumer, which holds what
- * the stream stored, so such an interest would be stored and deliver nothing. A role lane still
- * travels over core NATS and is registered by its holder (POST /v1/roles/set).
+ * Whether nothing would ever be delivered to a session on `topic`: a `notifications.` topic no
+ * stream subject captures and that is no role lane (`bus.ReachesNoSession` in packages/envoy/
+ * internal/bus). A session takes its messages from its own consumer, which holds what the stream
+ * stored, so such an interest would be stored and deliver nothing. A role lane still travels over
+ * core NATS and is registered by its holder (POST /v1/roles/set).
+ *
+ * POST /v1/interests/subscribe leaves such a topic out of the registration and names it in a
+ * warning, the rest of the registration stored; POST /v1/messages/publish refuses such a publish
+ * by name.
  */
 export function streamDeliversNothing(topic: string): boolean {
   return (
@@ -54,6 +57,35 @@ export function streamDeliversNothing(topic: string): boolean {
     !topic.startsWith(ROLE_TOPIC_PREFIX) &&
     !streamStores(topic)
   );
+}
+
+/**
+ * What a caller that names a topic nothing would be delivered on (`streamDeliversNothing`) is
+ * told, in the listener's own words: the sentence is written once, as `uncapturedTopicRefusal` in
+ * `@legion/contracts`, which `packages/contracts/scripts/gen-go.ts` emits as
+ * `contracts.UncapturedTopicRefusal` for the listener's `uncapturedTopicWarning`
+ * (packages/envoy/cmd/listener/api.go), the warning POST /v1/interests/subscribe answers when it
+ * leaves such a topic out of a registration. A host's own subscribe tool refuses such a topic
+ * with this sentence (`envoy_subscribe` in pi-envoy, `follow` in claude-envoy), so the two read
+ * alike: a registration carries topics nobody typed — a stored row, a restored transcript — and
+ * is told in a warning, where a tool call is a caller asking for this one topic by name and is
+ * answered by name.
+ */
+export { uncapturedTopicRefusal } from "@legion/contracts";
+
+/**
+ * Whether a host's subscribe tool refuses `topic` outright, with `uncapturedTopicRefusal`: the
+ * caller named a topic nothing would ever be delivered on (`streamDeliversNothing`) and the
+ * listener would not have left it out as a private stream subject first
+ * (`reachesPrivateStreamSubject`, which covers a wildcard such as `notifications.>` or
+ * `notifications.*.x`). The listener judges a registration's topics in that order too, warning
+ * about a private one as a private one (`subscribeHandler` in
+ * packages/envoy/cmd/listener/api.go). A private subject stays followed and merely unregistered,
+ * as it always was: a host opens one itself, a fork parent's agent subject among them, where
+ * nothing but a caller ever names a topic the stream captures nothing of.
+ */
+export function subscribeRefusesTopic(ownAgentSubject: string, topic: string): boolean {
+  return streamDeliversNothing(topic) && !reachesPrivateStreamSubject(ownAgentSubject, topic);
 }
 
 /**
@@ -143,13 +175,15 @@ export function reachesPrivateStreamSubject(
  * row itself, answering a warning.
  *
  * A topic nothing would ever be delivered on (`streamDeliversNothing`) is left out because the
- * listener refuses the *whole* registration naming one, `400`, so a single such topic would
- * leave the session with no consumer at all, at every heartbeat, for as long as anything still
- * names it. A host cannot refuse it where a topic is first followed and be done: a topic also
- * comes back from the listener's own stored row and from the transcript the host restores
+ * listener stores none: it leaves such a topic out of the row and names it in a warning, so a
+ * registration carrying one would draw that warning at every heartbeat, for as long as anything
+ * still names it. A host cannot refuse it where a topic is first followed and be done: a topic
+ * also comes back from the listener's own stored row and from the transcript the host restores
  * (INFRA-771 review), and a row written by an earlier build holds `notifications.team`, the bare
  * base that build expanded `notifications.team.>` to, which this build's stream captures
- * nothing of. Filtering here is the one place every registration passes through.
+ * nothing of. Filtering here is the one place every registration passes through. A caller that
+ * names such a topic itself is refused by name instead, at the host's own subscribe tool
+ * (`uncapturedTopicRefusal`).
  */
 export function registrationTopics(
   ownAgentSubject: string,

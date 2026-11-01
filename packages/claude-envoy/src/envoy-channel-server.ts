@@ -48,6 +48,8 @@ import {
   registrationTopics,
   rememberedTopics,
   replayFollowedSubjects,
+  subscribeRefusesTopic,
+  uncapturedTopicRefusal,
 } from "@legion/envoy-client/stream-topics"
 import {
   EnvoyToolOperation,
@@ -1363,6 +1365,19 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     delivery,
     topics: () => followedTopics.topics(),
     async follow(topics) {
+      // A topic no stream subject captures is followed but never registered, since the listener
+      // stores none: it drops such a topic from the row and names it in a warning
+      // (`registrationTopics`). This call is a caller naming the topic by hand — the tool, and
+      // nothing else: a stored row and a restored state reach `followedTopics.follow` instead —
+      // so it is refused by name, in the listener's own words, rather than leaving the session
+      // following a subject nothing is ever delivered on. A private stream subject is left out
+      // of the registration without a word, as it always was (`subscribeRefusesTopic`).
+      const uncaptured = topics.filter((topic) => subscribeRefusesTopic(directSubject, topic))
+      if (uncaptured.length > 0) {
+        throw new Error(
+          uncaptured.map((topic) => uncapturedTopicRefusal(topic, identity.id)).join("; "),
+        )
+      }
       if (shuttingDown) return []
       const fresh: string[] = []
       for (const topic of expandSubscriptionTopics(topics)) {

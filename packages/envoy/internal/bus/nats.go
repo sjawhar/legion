@@ -1173,9 +1173,10 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 // had already received the message. A subject outside NotificationTopicPrefix keeps JetStream, as
 // before. The capture is judged on the subjects this binary compiles in, not the deployed stream's:
 // a topic under a subject only a newer build adds (which reconciliation keeps) goes over core NATS
-// from an older one, so the stream still stores it but without a MsgId, and the older listener's
-// own publish and subscribe routes refuse it by name: on that build nothing would store it, and
-// a session reads only what its own consumer holds (ReachesNoSession, cmd/listener/api.go).
+// from an older one, so the stream still stores it but without a MsgId, while that older
+// listener's publish route refuses it by name and its registration route leaves it out of the
+// row: on that build nothing would store it, and a session reads only what its own consumer
+// holds (ReachesNoSession, cmd/listener/api.go).
 func UsesCoreTransport(topic string) bool {
 	return strings.HasPrefix(topic, NotificationTopicPrefix) && !StreamCaptures(topic)
 }
@@ -1184,11 +1185,13 @@ func UsesCoreTransport(topic string) bool {
 // notification topic no stream subject captures (UsesCoreTransport) that is not a role lane. A
 // session receives what its own consumer delivers, which is what the stream stored, so a publish
 // to such a topic reaches nobody, now or later, and an interest in it would be stored and deliver
-// nothing. The listener refuses both by name, at POST /v1/messages/publish and at
-// POST /v1/interests/subscribe (cmd/listener/api.go), which is the one place this question is
-// asked. A role lane is the exception the name's "no session" turns on: it travels over core NATS
-// to the listener, which forwards the message to its holder's agent subject, where the stream
-// stores it for the holder's own consumer.
+// nothing. POST /v1/messages/publish refuses such a publish by name, since its sender is there to
+// read the answer, and POST /v1/interests/subscribe leaves such a topic out of the registration
+// and names it in a warning, the rest of the registration stored, since refusing a registration
+// whole leaves its session no consumer at all (cmd/listener/api.go, the one place this question
+// is asked). A role lane is the exception the name's "no session" turns on: it travels over core
+// NATS to the listener, which forwards the message to its holder's agent subject, where the
+// stream stores it for the holder's own consumer.
 func ReachesNoSession(topic string) bool {
 	return UsesCoreTransport(topic) && !strings.HasPrefix(topic, contracts.RoleTopicPrefix)
 }

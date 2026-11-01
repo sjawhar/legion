@@ -256,9 +256,9 @@ export type UnsubscribeInput = {
 /**
  * The concrete subjects a registration carries for each topic: a `<base>.>` wildcard, and its
  * base as a subject of its own when the stream stores a publish to that base. A base no stream
- * subject captures is left out: nothing can be published on it, and a registration naming it is
- * refused whole by the listener (`streamDeliversNothing`), which would leave the session with no
- * interest at all.
+ * subject captures is left out: nothing can be published on it, and the listener would leave it
+ * out of the row it stores and warn about it at every registration
+ * (`streamDeliversNothing`).
  */
 export function expandSubscriptionTopics(topics: readonly string[]): readonly string[] {
   const expanded = new Set<string>();

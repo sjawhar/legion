@@ -113,10 +113,10 @@ func registerServingSession(t *testing.T, listener *listenerProcess, serving *se
 
 // seedUncapturedTopics writes sessionID's interest row with topics straight into the registry, as
 // a build before team topics were stored wrote one through /v1/interests/subscribe: that route
-// now refuses by name a notifications. topic no stream subject captures (api.go), and a row left
-// by such a build is all the live topics lane has left to fan out. It replaces the row the
-// registration wrote, so it names every topic the session is to follow, and returns once the
-// listener reads each of them back.
+// now leaves a notifications. topic no stream subject captures out of the row it stores (api.go),
+// and a row left by such a build is all the live topics lane has left to fan out. It replaces
+// the row the registration wrote, so it names every topic the session is to follow, and returns
+// once the listener reads each of them back.
 func seedUncapturedTopics(t *testing.T, listener *listenerProcess, uri, machineID, sessionID string, topics ...string) {
 	t.Helper()
 	conn := testnats.Connect(t, uri)

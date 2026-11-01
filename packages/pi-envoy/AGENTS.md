@@ -453,9 +453,12 @@ subject, a failed-delivery lane, another project's Legion controller lane, or a 
 one, the listener's own rule, which it would leave out of the row and warn about on every
 heartbeat), and one nothing would ever be delivered on (`streamDeliversNothing`: a
 `notifications.` topic the stream does not capture, a role lane apart), which the listener
-refuses the whole registration for. The session still follows such a topic — the tool, the stored
-interest row and the transcript all bring one back — and it never reaches the listener, so it
-wedges no later registration. Which subjects a restore follows again is the sibling rule
+stores for no session: it leaves such a topic out of the row and warns about it. The session
+still follows such a topic — the stored interest row and the transcript both bring one back —
+and it never reaches the listener, so it draws no warning of its own. A caller that names one
+itself is refused by name instead: `envoy_subscribe` answers `uncapturedTopicRefusal`, the
+listener's own warning for that topic, and follows nothing of that call. Which subjects a
+restore follows again is the sibling rule
 `replayFollowedSubjects`. The listener filters the session's consumer on exactly the registered
 subjects, so a followed topic that got there is one the consumer can deliver. A topic followed
 now brings up no older history: the consumer keeps its position when its filter changes, so the

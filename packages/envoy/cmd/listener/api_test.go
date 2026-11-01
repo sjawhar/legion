@@ -2949,12 +2949,14 @@ func TestAServingPortRegistrationWithAMalformedHostIsRefused(t *testing.T) {
 	}
 }
 
-// A registration naming a notifications. topic no stream subject captures is refused whole, by
-// that topic's name, and nothing is written: the session would otherwise hold an interest that
-// delivers nothing, since its consumer carries only what the stream stored, and never learn why.
-// A role lane is no such topic: its holder registers it and the listener forwards it over core
-// NATS. A team topic and a topic outside notifications. are stored as they always were.
-func TestSubscribeHandlerRefusesAnUncapturedNotificationTopicByName(t *testing.T) {
+// A registration naming a notifications. topic no stream subject captures keeps every other
+// topic: that topic is left out of the stored row and named in a warning, and the answer stays
+// 200. The session would otherwise hold an interest that delivers nothing, since its consumer
+// carries only what the stream stored; refusing the whole registration would leave it no
+// consumer at all. A role lane is no such topic: its holder registers it and the listener
+// forwards it over core NATS. A team topic and a topic outside notifications. are stored as they
+// always were.
+func TestSubscribeHandlerDropsAnUncapturedNotificationTopicByName(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	handler := subscribeHandler(&listenerDeps{registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}, "test-machine", logging.New("test"))
 	subscribe := func(t *testing.T, sessionID string, topics ...string) *httptest.ResponseRecorder {
@@ -2971,22 +2973,29 @@ func TestSubscribeHandlerRefusesAnUncapturedNotificationTopicByName(t *testing.T
 		t.Run(topic, func(t *testing.T) {
 			sessionID := fmt.Sprintf("ses_uncaptured_%d", index)
 			recorder := subscribe(t, sessionID, "notifications.team.kept", topic)
-			if recorder.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
 			}
-			var answer apiError
+			var answer interestSubscribeAnswer
 			if err := json.NewDecoder(recorder.Body).Decode(&answer); err != nil {
-				t.Fatalf("decode the refusal: %v", err)
+				t.Fatalf("decode the answer: %v", err)
 			}
-			if !strings.Contains(answer.Error, topic) || !strings.Contains(answer.Error, "no stream subject captures") ||
-				!reflect.DeepEqual(answer.Expected, []string{"topics"}) {
-				t.Fatalf("refusal = %+v, want it to name %s and the topics field", answer, topic)
+			want := []string{contracts.AgentSubject(sessionID), "notifications.team.kept"}
+			if !slices.Equal(answer.Topics, want) {
+				t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
 			}
-			if interest, err := registry.Get(context.Background(), sessionID); err == nil {
-				t.Fatalf("a refused registration wrote interests %+v", interest)
+			if len(answer.Warnings) != 1 || answer.Warnings[0] != uncapturedTopicWarning(topic, sessionID) {
+				t.Fatalf("warnings = %q, want only %q", answer.Warnings, uncapturedTopicWarning(topic, sessionID))
 			}
-			if entry, err := sessions.Get(sessionID); err == nil {
-				t.Fatalf("a refused registration wrote the session entry %+v", entry)
+			stored, err := registry.Get(context.Background(), sessionID)
+			if err != nil {
+				t.Fatalf("read the stored interest: %v", err)
+			}
+			if !slices.Equal(stored.Topics, want) {
+				t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
+			}
+			if _, err := sessions.Get(sessionID); err != nil {
+				t.Fatalf("the registration wrote no session entry: %v", err)
 			}
 		})
 	}
@@ -3126,6 +3135,95 @@ func TestInterestSubscribeLeavesOutEveryPrivateStreamSubject(t *testing.T) {
 	}
 	if !slices.Equal(notRegistered, refused) {
 		t.Fatalf("warnings = %q, want exactly %v named as not registered", answer.Warnings, refused)
+	}
+}
+
+// A registration naming a topic no stream subject captures keeps the rest of itself: the topic
+// is left out, the answer stays 200 and one warning names it, as a private stream subject beside
+// it is handled. The body here is the one a session on an older plugin build sends during the
+// rollout of INFRA-771: its stored row holds the bare notifications.team that build expanded
+// notifications.team.> to, so it registers that topic beside the team topic it follows, and a
+// refusal would leave it with no session consumer at all, at every heartbeat.
+func TestInterestSubscribeDropsAnUncapturedTopicAndStoresTheRest(t *testing.T) {
+	rig := newInterestRig(t)
+	own := contracts.AgentSubject(interestSession)
+	const stale, team = "notifications.team", "notifications.team.deploy-squad"
+
+	answer := subscribeInterest(t, rig.mux, []string{stale, team})
+
+	want := []string{own, team}
+	if !slices.Equal(answer.Topics, want) {
+		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
+	}
+	if len(answer.Warnings) != 1 || answer.Warnings[0] != uncapturedTopicWarning(stale, interestSession) {
+		t.Fatalf("warnings = %q, want only %q", answer.Warnings, uncapturedTopicWarning(stale, interestSession))
+	}
+	stored, err := rig.deps.registry.Get(context.Background(), interestSession)
+	if err != nil {
+		t.Fatalf("read the stored interest: %v", err)
+	}
+	if !slices.Equal(stored.Topics, want) {
+		t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
+	}
+}
+
+// A registration whose every named topic is one no stream subject captures is answered 200 too,
+// with the session's own agent subject stored and nothing else: the session is registered, so its
+// consumer is created and its entry written, and the warning tells it what was left out.
+func TestInterestSubscribeStoresOnlyTheAgentSubjectWhenEveryTopicIsUncaptured(t *testing.T) {
+	rig := newInterestRig(t)
+	own := contracts.AgentSubject(interestSession)
+	const stale = "notifications.team"
+
+	answer := subscribeInterest(t, rig.mux, []string{stale})
+
+	if want := []string{own}; !slices.Equal(answer.Topics, want) {
+		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
+	}
+	if len(answer.Warnings) != 1 || answer.Warnings[0] != uncapturedTopicWarning(stale, interestSession) {
+		t.Fatalf("warnings = %q, want only %q", answer.Warnings, uncapturedTopicWarning(stale, interestSession))
+	}
+	stored, err := rig.deps.registry.Get(context.Background(), interestSession)
+	if err != nil {
+		t.Fatalf("read the stored interest: %v", err)
+	}
+	if want := []string{own}; !slices.Equal(stored.Topics, want) {
+		t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
+	}
+	if _, err := rig.deps.sessions.Get(interestSession); err != nil {
+		t.Fatalf("the registration wrote no session entry: %v", err)
+	}
+}
+
+// The two kinds of topic a registration drops are told apart: one reaching another session's
+// inbox and one no stream subject captures each draw their own warning, naming themselves, and
+// the topics the listener does store are stored.
+func TestInterestSubscribeWarnsAboutAnUncapturedTopicAndAPrivateOneTogether(t *testing.T) {
+	rig := newInterestRig(t)
+	own, other := contracts.AgentSubject(interestSession), contracts.AgentSubject("ses_other")
+	const stale, team = "notifications.team", "notifications.team.deploy-squad"
+
+	answer := subscribeInterest(t, rig.mux, []string{stale, other, team})
+
+	want := []string{own, team}
+	if !slices.Equal(answer.Topics, want) {
+		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
+	}
+	if len(answer.Warnings) != 2 {
+		t.Fatalf("warnings = %q, want one for %s and one for %s", answer.Warnings, stale, other)
+	}
+	if answer.Warnings[0] != uncapturedTopicWarning(stale, interestSession) {
+		t.Fatalf("warning for %s = %q, want %q", stale, answer.Warnings[0], uncapturedTopicWarning(stale, interestSession))
+	}
+	if !strings.HasPrefix(answer.Warnings[1], other+" was not registered: it reaches a private stream subject") {
+		t.Fatalf("warning for %s = %q, want it named as reaching a private stream subject", other, answer.Warnings[1])
+	}
+	stored, err := rig.deps.registry.Get(context.Background(), interestSession)
+	if err != nil {
+		t.Fatalf("read the stored interest: %v", err)
+	}
+	if !slices.Equal(stored.Topics, want) {
+		t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
 	}
 }
 

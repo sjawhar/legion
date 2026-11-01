@@ -1447,6 +1447,20 @@ func unwiredRepositoryWarning(ctx context.Context, d *listenerDeps, topic string
 	return ""
 }
 
+// uncapturedTopicWarning is what a registration naming topic, a notification topic no stream
+// subject captures that is no role lane (bus.ReachesNoSession), is told: the topic is left out of
+// the registration and the rest of it is stored. A session receives what its own consumer
+// delivers, which is what the stream stored, so an interest in such a topic would be stored and
+// deliver nothing. Both plugins refuse an explicit subscribe to one in these same words
+// (envoy_subscribe in pi-envoy's extensions/envoy.ts and follow in claude-envoy's
+// src/envoy-channel-server.ts, both through uncapturedTopicRefusal in @legion/envoy-client's
+// stream-topics.ts), so a caller that named one reads the same sentence wherever it is told: the
+// sentence itself is written once, as uncapturedTopicRefusal in packages/contracts, which
+// scripts/gen-go.ts emits as contracts.UncapturedTopicRefusal.
+func uncapturedTopicWarning(topic, sessionID string) string {
+	return contracts.UncapturedTopicRefusal(topic, sessionID)
+}
+
 // subscribeHandler answers POST /v1/interests/subscribe. Its store work - the interest record's
 // read and write (store.Registry.PlanInterest, then UpsertPlanned), the session entry's write and
 // the unwired-repository checks - runs within sendRequestBudget of the request's own context, so a
@@ -1498,48 +1512,54 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		// cache's on every heartbeat, and one that fails refuses the registration as the write
 		// it precedes would.
 		requested := append(slices.Clone(body.Topics), contracts.AgentSubject(body.SessionID))
-		plan, err := d.registry.PlanInterest(ctx, body.SessionID, requested)
+		// A topic that would deliver to no session (bus.ReachesNoSession) is left out of what is
+		// planned, so it is neither stored nor filtered on, and the loop below names it in a
+		// warning; the merge itself drops a private-subject topic from the plan
+		// (store.MergedTopics).
+		plan, err := d.registry.PlanInterest(ctx, body.SessionID, slices.DeleteFunc(slices.Clone(requested), bus.ReachesNoSession))
 		if err != nil {
 			logger.Warn("listener could not plan the session's interest row",
 				slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
 			writeStoreError(ctx, w, err, http.StatusServiceUnavailable)
 			return
 		}
+		// A topic this registration will not store is named in a warning, with the rest of the
+		// registration stored, rather than refusing the registration whole: a session reads only
+		// what its own consumer holds and a refusal leaves it no consumer at all, while neither
+		// kind of topic need have been typed by anyone. A released pi-envoy registers every
+		// subject it has open, a fork parent's agent subject and any topic its envoy_subscribe
+		// took included, and a session registers the topics of the row an earlier build stored
+		// for it, the bare notifications.team such a build expanded notifications.team.> to
+		// included.
+		//
 		// A topic reaching a private stream subject that is not this session's (another session's
 		// inbox, a failed-delivery lane, another project's controller notice lane;
-		// bus.ReachesPrivateStreamSubject) is out of the plan (store.MergedTopics) and named in a
-		// warning here, the rest of the registration stored: the topics stored drive the
-		// listener's fan-out to serve-port sessions (`store.Registry.Match`) and the filters of
-		// the session's own consumer (`sessionConsumerFilter`), and such a topic would hand this
-		// session messages meant for another session or for another project's controller. A
-		// registration naming one is not refused whole, since a released pi-envoy registers every
-		// subject it has open, a fork parent's agent subject and any topic its envoy_subscribe
-		// took included. The plan drops such a topic from the stored row too, so a row an earlier
+		// bus.ReachesPrivateStreamSubject) is out of the plan (store.MergedTopics): the topics
+		// stored drive the listener's fan-out to serve-port sessions (`store.Registry.Match`) and
+		// the filters of the session's own consumer (`sessionConsumerFilter`), and such a topic
+		// would hand this session messages meant for another session or for another project's
+		// controller. The plan drops such a topic from the stored row too, so a row an earlier
 		// build stored with one, and the lane of a session that has since lost the controller
 		// role, are cleaned by this registration.
+		//
+		// A topic that would deliver to no session (bus.ReachesNoSession) was left out of the
+		// plan above: such an interest would be stored and deliver nothing. What a caller names
+		// by hand is still refused by name, where the caller is there to read it:
+		// /v1/messages/publish refuses such a publish, and either plugin's explicit subscribe
+		// refuses such a topic in this warning's own words (uncapturedTopicWarning).
 		warnings := make([]string, 0)
 		for _, topic := range requested {
-			if bus.ReachesPrivateStreamSubject(body.SessionID, topic, plan.Roles) {
+			switch {
+			case bus.ReachesPrivateStreamSubject(body.SessionID, topic, plan.Roles):
 				warnings = append(warnings, fmt.Sprintf("%s was not registered: it reaches a private stream subject (another session's inbox, a failed-delivery lane, or a Legion controller notice lane), and of those a session registers only its own agent subject, %s, and the notice lane of a project whose controller role it holds",
 					topic, contracts.AgentSubject(body.SessionID)))
-				continue
-			}
-			// A topic that would deliver to no session (bus.ReachesNoSession) is refused by name
-			// with the whole registration: such an interest would be stored and deliver nothing,
-			// and the plugin that asked for it would never learn why. It is the registration and
-			// not the topic alone, unlike a private-subject topic above, because no live caller
-			// names one: a census of production on 2026-10-30 read all 596 interest rows and
-			// found every uncaptured non-role topic in use to be a notifications.team.* topic,
-			// which this build stores.
-			if bus.ReachesNoSession(topic) {
-				writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("no stream subject captures %s, so nothing would be delivered to %s on it; follow a notifications.team.<name> topic instead",
-					topic, body.SessionID), "topics")
-				return
+			case bus.ReachesNoSession(topic):
+				warnings = append(warnings, uncapturedTopicWarning(topic, body.SessionID))
 			}
 		}
 		if len(warnings) > 0 {
-			logger.Warn("listener subscribe refused topics reaching private stream subjects",
-				slog.String("session_id", body.SessionID), slog.Any("refused", warnings))
+			logger.Warn("listener subscribe left topics out of the registration",
+				slog.String("session_id", body.SessionID), slog.Any("dropped", warnings))
 		}
 		// The delivery decision comes before both writes: a session is delivered to through its
 		// own consumer alone, so a registration this listener cannot give one is refused and must

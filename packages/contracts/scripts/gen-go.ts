@@ -47,6 +47,7 @@ import {
   legionControllerNoticeSubject,
   SUBJECT_MAX_BYTES,
   SUBJECT_SEGMENT_REPLACED,
+  uncapturedTopicRefusal,
 } from "../src/subject";
 
 type ScalarKind = "string" | "integer" | "boolean";
@@ -75,28 +76,62 @@ const map = {
   boolean: "bool",
 } satisfies Record<ScalarKind, string>;
 
-// splitAtSentinel is the text a builder puts before and after the one value it interpolates,
-// read by building it with a sentinel: a builder that stopped interpolating that value, or
-// interpolated it twice, throws here rather than generating Go that reads nothing like it.
-function splitAtSentinel(built: string, sentinel: string): [string, string] {
-  const parts = built.split(sentinel);
-  const [before, after] = parts;
-  if (parts.length !== 2 || before === undefined || after === undefined) {
-    throw new Error(`cannot split ${JSON.stringify(built)} at the sentinel ${sentinel}`);
+// splitAtSentinels is the text a builder puts around the values it interpolates: what comes
+// before the first value, between each pair of them, and after the last, read by building it with
+// one sentinel per value. A builder that stopped interpolating one of them, interpolated one
+// twice, or interpolated them in another order throws here rather than generating Go that reads
+// nothing like it.
+function splitAtSentinels(built: string, ...sentinels: string[]): string[] {
+  const parts: string[] = [];
+  let rest = built;
+  for (const sentinel of sentinels) {
+    const at = rest.indexOf(sentinel);
+    if (built.split(sentinel).length !== 2 || at < 0) {
+      throw new Error(`cannot split ${JSON.stringify(built)} at the sentinel ${sentinel}`);
+    }
+    parts.push(rest.slice(0, at));
+    rest = rest.slice(at + sentinel.length);
   }
-  return [before, after];
+  parts.push(rest);
+  return parts;
+}
+
+// goConcat is the Go expression a builder's text becomes: its literal parts, read by
+// splitAtSentinels, with each Go value between them. A part the builder left empty is left out
+// rather than written as "".
+function goConcat(parts: string[], values: string[]): string {
+  const terms = parts.flatMap((part, index) => {
+    const value = values[index];
+    return [
+      ...(part === "" ? [] : [JSON.stringify(part)]),
+      ...(value === undefined ? [] : [value]),
+    ];
+  });
+  return terms.join(" + ");
 }
 
 // A Legion project token is lowercase alphanumeric (PROJECT_TOKEN in src/legion-roles.ts), which
 // this sentinel is, so both builders below accept it.
 const projectSentinel = "zzprojectzz";
-const [legionNoticeTopicPrefix, controllerNoticeSuffix] = splitAtSentinel(
+const [legionNoticeTopicPrefix, controllerNoticeSuffix] = splitAtSentinels(
   legionControllerNoticeSubject(projectSentinel),
   projectSentinel
 );
-const [controllerRolePrefix, controllerRoleSuffix] = splitAtSentinel(
-  controllerToken(projectSentinel),
-  projectSentinel
+const controllerRoleToken = goConcat(
+  splitAtSentinels(controllerToken(projectSentinel), projectSentinel),
+  ["project"]
+);
+// The refusal interpolates a topic and a session id, reading neither, so any text that appears
+// nowhere else in the sentence stands in for them.
+const topicSentinel = "zztopiczz";
+const sessionSentinel = "zzsessionzz";
+const uncapturedTopicRefusalText = goConcat(
+  splitAtSentinels(
+    uncapturedTopicRefusal(topicSentinel, sessionSentinel),
+    topicSentinel,
+    sessionSentinel
+  ),
+  ["topic", "sessionID"]
 );
 
 const keep = `func ValidateWire(raw []byte) error {
@@ -150,7 +185,18 @@ const LegionNoticeTopicPrefix = ${JSON.stringify(legionNoticeTopicPrefix)}
 const ControllerNoticeSuffix = ${JSON.stringify(controllerNoticeSuffix)}
 
 func ControllerRoleToken(project string) string {
-	return ${JSON.stringify(controllerRolePrefix)} + project + ${JSON.stringify(controllerRoleSuffix)}
+	return ${controllerRoleToken}
+}
+
+// UncapturedTopicRefusal is what a caller that named topic, a notification topic no stream
+// subject captures and no role lane (bus.ReachesNoSession), is told: nothing would ever be
+// delivered to sessionID on it. POST /v1/interests/subscribe leaves such a topic out of the
+// registration and names it in this warning (uncapturedTopicWarning in cmd/listener), and either
+// plugin's explicit subscribe refuses such a topic in the same words. Generated from
+// uncapturedTopicRefusal in packages/contracts, which both plugins build their refusal from, so
+// the listener and the hosts cannot word it apart.
+func UncapturedTopicRefusal(topic, sessionID string) string {
+	return ${uncapturedTopicRefusalText}
 }
 
 // DeliveryDuplicateWindow is how long a repeated delivery is recognised as a duplicate, by the

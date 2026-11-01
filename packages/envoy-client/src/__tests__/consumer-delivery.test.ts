@@ -666,8 +666,8 @@ describe("one registration", () => {
     const result = await registerWithRelay({
       relay,
       ownAgentSubject: AGENT,
-      // The bare base a stored row or a transcript brings back: the listener refuses the whole
-      // registration naming it, so it never goes out (INFRA-771 review).
+      // The bare base a stored row or a transcript brings back: the listener stores it for no
+      // session and warns about it, so it never goes out (INFRA-771 review).
       followed: [TEAM, UNCAPTURED, "notifications.agent.ses_b"],
       outage: inboundUnavailable((why) => told.push(why)),
       send: (topics, delivery) => {

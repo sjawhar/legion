@@ -93,7 +93,11 @@ import {
   sessionSettings,
 } from "@legion/envoy-client/session-settings";
 import { postSlackReply } from "@legion/envoy-client/slack-post";
-import { replayFollowedSubjects } from "@legion/envoy-client/stream-topics";
+import {
+  replayFollowedSubjects,
+  subscribeRefusesTopic,
+  uncapturedTopicRefusal,
+} from "@legion/envoy-client/stream-topics";
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -3611,6 +3615,20 @@ export default function envoyExtension(pi: PiApi): void {
           // on, so the tool refuses here, saying why.
           requireInbound();
           const requested = topicsFor(parameters);
+          // A topic no stream subject captures is followed but never registered, since the
+          // listener stores none: it drops such a topic from the row and names it in a warning
+          // (`registrationTopics`). A caller that names one here asked for this topic by name,
+          // so it is told by name, in the listener's own words, rather than left following a
+          // subject nothing is ever delivered on. A private stream subject is left out of the
+          // registration without a word, as it always was (`subscribeRefusesTopic`).
+          const uncaptured = requested.filter((topic) =>
+            subscribeRefusesTopic(agentSubject(sessionID), topic)
+          );
+          if (uncaptured.length > 0) {
+            throw new Error(
+              uncaptured.map((topic) => uncapturedTopicRefusal(topic, sessionID)).join("; ")
+            );
+          }
           const added: string[] = [];
           const already: string[] = [];
           for (const topic of requested) {
