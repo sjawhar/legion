@@ -2,22 +2,36 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-251",
-  "previousHandoff": "f8925f0cb9e7959d7cc12f5809d673933fb8dac3",
+  "previousHandoff": "2bfe17dfabf0df1767e0d0c7d29c313ee168fc96",
   "proof": [
     {
-      "criterion": "The red ci-ok at 079532ed: its one failing test, read and fixed by merging main",
-      "surface": "CI run 41279179715, job 124768258283 (pi-legion). legion-background-subagent-omp.test.ts:477 `expect(read.arrivedAt).toBeLessThan(releasedAt)` received two equal millisecond stamps (1793514903922): a strict `<` between Date.now() values, which fails whenever both moments fall in one millisecond. This branch changes no code in that test or in pi-legion, only a changelog fragment. main fixed the test in #2621 (081e9e60, 'the background-subagent case orders its moments by a counter, not by a millisecond clock'). So this round merges main forward, with `jj new legion/INFRA-251 main`, at 695ee39d, which the architect named as the allowed case. The merge is clean.",
-      "command": "jj diff --from <fork point> --to <head> --git '~(.legion | docs/solutions)' | sha256sum, before and after; cd packages/pi-legion && LEGION_TEST_OMP=<omp v18.13.3-sami.20261029-115123, the .omp-pin release> LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 bun test ./extensions/legion-background-subagent-omp.test.ts, 20 times",
-      "observed": "Fingerprint before (079532ed) and after (695ee39d): 3f7d4072131be37f3b5cb0ed080cb0b2fbfbf58b84185d8e88c2f227b6fb5558, unchanged, 77 files on both sides. The test passed 20 of 20 on the pinned Oh My Pi. One run measured: 'the subagent started 35 ms before the role's turn ended; the role's turn ended 105 ms before the subagent's request was released'. pi-legion typecheck ok. bun test, leaving out controller-start-omp (CI runs that file in its own invocation) and scripts/skill-scenarios/rig.test.ts (its judge-omp cases need Docker, which the pod lacks): 680 pass, 0 fail.",
-      "headSha": "695ee39dea13551b75d43b0a6ae5e8b1ca4445d6",
-      "negativeControl": "The same test at 079532ed failed in CI on equal millisecond stamps (run 41279179715). main's #2621 is the change that replaces those stamps with an ordering counter."
+      "criterion": "scripts/e2e/parked-decision-devbox.sh runs on main's rig (#2229 removed pick_port and log_size) and proves the deployment's own Apps (A3/A4 acceptance blocker)",
+      "surface": "scripts/e2e/parked-decision-devbox.sh at code head 1ff14783191d; every rig call set against stage3-devbox-workflow.sh at main (see riggedCalls)",
+      "command": "bash -n scripts/e2e/parked-decision-devbox.sh; uvx --from shellcheck-py==0.10.0.1 shellcheck -x scripts/e2e/parked-decision-devbox.sh; bash scripts/e2e/parked-decision-devbox.sh --help; a command-word check: every command word of the script resolved against the functions of the script and of lib/{rig,omp-home,workflow,leftovers,transcript,github-apps,port-file}.sh, builtins and PATH; a pod smoke of the ported start_listener and start_dispatch, extracted from the script, with lib/rig.sh, lib/workflow.sh and require_app_inputs/write_github_apps, against a local nats-server and the pod's test PostgreSQL",
+      "observed": "bash -n ok and shellcheck -x clean (exit 0; it had also flagged SC2120/SC2119 on wait_for_run_processes, now called with its bounds 600 10). --help lists the App inputs. The command-word check finds no unresolved command; on the script at 8d19216c it names pick_port and log_size. The smoke: the listener served on a kernel-chosen port (30755) held by the listener alone (held_only_by), and Dispatch served on its keeper's port (46970) held by Dispatch and its keeper alone, answering /api/v1. github-apps.yaml named app_id 5341240 (implement) and 5341243 (review). Not run here: docker, the daemon and the controller, the GitHub GET /app proof (read_app_logins) and every later checkpoint. The merge lane's run on the devbox is the proof of those.",
+      "headSha": "1ff14783191d98a0a283afb980cde614bec99776",
+      "negativeControl": "The old start_listener, in the same smoke: './old_funcs.sh: line 5: pick_port: command not found', which is the merge lane's 'line 194 exited 127: pick_port port_listener'."
     }
   ],
+  "riggedCalls": [
+    "start_listener: before, pick_port port_listener, log_size and start_process listener \u2026 PORT=$port_listener, retried five times. Now start_held listener port_listener ENVOY_LISTEN_FD --env 'PORT={port}' -- env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT \"${app_key_unsets[@]}\" \"$work/envoy-listener\", then await_start listener \"$listener_pid\" 60 \u2026 curl -fsS -H @envoy-auth-header /v1/sessions. This is Stage 3's call, except the run's ENVOY_MACHINE_ID (legion-e2e-pd-$$).",
+    "start_dispatch: before, pick_port port_dispatch and log_size, retried five times. Now keep_port dispatch_keeper port_dispatch, then start_kept dispatch dispatch_keeper DISPATCH_LISTEN_FD --env 'DISPATCH_PORT={port}' --env 'DISPATCH_SERVER_URL=http://127.0.0.1:{port}' -- env -u \u2026 HOME=dispatch-home XDG_CONFIG_HOME=\u2026 \"$work/envoy-dispatch\", then await_start dispatch \u2026 60 curl --max-time 5 /api/v1. This is Stage 3's call. The keeper is unconditional because this proof never restarts Dispatch; Stage 3 skips it on a `keep` restart.",
+    "write_legion_config: `port: $port_daemon` and `$(<\"$work/github-apps.yaml\")`, as Stage 3 writes it. worker_stream_port is gone: Stage 3 names none, and only the kubernetes runtime reads WorkerStreamPort (config.go:103, kubernetes.go:1550). The tmux runtime's worker stream is a unix socket.",
+    "start_daemon: before, pick_port port_daemon and port_worker_stream, write_legion_config and log_size, retried five times. Now start_kept daemon daemon_keeper LEGION_LISTEN_FD -- env -u LEGION_OMP_PATH -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT \"${app_key_unsets[@]}\" HOME OMP_PROFILE PATH=$realbin:$PATH legion start, then await_start daemon \u2026 180 curl --max-time 5 /healthz. This is Stage 3's call. keep_port daemon_keeper port_daemon and write_legion_config run in `boot` before `legion start --check-config` (lines 588-589, where pick_port stood), as Stage 3's start_daemon runs them before its first start. Stage 3's daemon_runs_the_pinned_omp check is not added: this proof never had it, and adding it is not this round's port.",
+    "await_start: main's signature is NAME PID SECONDS DESCRIPTION COMMAND, with no log offset, so all three calls drop the offset.",
+    "prerequisites: require_app_inputs implement review, write_github_apps implement review, read_app_logins, as Stage 3's prerequisites (lines 627-629). The App ids come from lib/github-apps.sh's defaults (5341240, 5341243) and the keys through agent-secrets, replacing the hand-written 3202636/3202653 block on `secrets`. The tool list adds python3 (lib/held-port.py) and agent-secrets, and drops secrets and ss, which no call uses now.",
+    "the containers: Stage 3's pgvector digest (sha256:2358fcba\u2026), tmpfs at /var/lib/postgresql, and --cpus/--memory limits on both containers. NATS keeps mirror.gcr.io/library/nats:2.10, Google's mirror, which AGENTS.md says the devbox live proofs keep; Stage 3 names nats:2.10.",
+    "install-plugin-profile.sh: --omp \"$pin\" as Stage 3, with pin read before it. It names the same .omp-pin build the installer defaults to.",
+    "teardown: cleanup and cleanup-is-complete stop daemon_keeper_pid and dispatch_keeper_pid, as Stage 3's cleanup does, and the latter checks that neither still runs.",
+    "unchanged, with the same signatures on main: until_true, real_bin_path, stop_pid, run_processes, make_omp_home, transcript_to, refuse_leftovers, require_proof_human, and the lib/workflow.sh Dispatch and daemon readers (dispatch_*, daemon_state, issue_phase, new_issue, set_status, notice_needle, session_actor_body, close_unpassed_run_pull_requests), each read against its definition. lib/install-model-gateway.sh's and lib/install-key-file-model-route.sh's flags are unchanged."
+  ],
   "filesChanged": [
-    "none of this branch's own: the merge brings main's #2621 (packages/pi-legion/extensions/legion-background-subagent-omp.test.ts) and main's other commits since e622d943"
+    "scripts/e2e/parked-decision-devbox.sh",
+    "scripts/e2e/README.md (the inputs: the App pair and its inputs; the prerequisites, rig and boot rows)"
   ],
   "deviations": [
-    "No daemon code changed. The fix is main's own, reached by merging main forward rather than by editing the test here."
+    "No daemon code changed.",
+    "The containers, the plugin installer's --omp and the tool list were also aligned with Stage 3, beyond the two named faults, so the rig matches Stage 3's call for call. NATS stays on Google's mirror."
   ],
   "openQuestions": []
 }
