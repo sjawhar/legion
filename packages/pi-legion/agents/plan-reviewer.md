@@ -35,8 +35,9 @@ it out without getting stuck? You find blockers, not improvements.
 4. **Runnable checks.** Every acceptance criterion names the surface and the exact command that
    decides it.
 5. **The goal and the requirements.** The plan delivers the issue's goal and every requirement of
-   its spec. One left out or narrowed, with no act of the issue's owner letting it go, is a
-   rejection that names it. This one is never "approve when in doubt".
+   its spec. One left out or narrowed with no act of the owner letting it go is a rejection that
+   names it, and so is a plan whose own text says it leaves out work the goal covers: where two
+   parts of the spec disagree on scope, take the broader. Never "approve when in doubt" here.
 
 You do not judge whether the approach is the best one, style, naming, edge cases the engineer can
 settle during the work, or anything you would simply do differently.
