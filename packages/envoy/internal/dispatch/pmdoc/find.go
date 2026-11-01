@@ -459,7 +459,7 @@ func flattenedTextSize(doc *Node) (units, bytes int) {
 // through. The string and the index are allocated once, at the size the document measures
 // (flattenedTextSize), rather than grown: growing the index copied the whole of it at every
 // doubling, which on a document whose paragraph is a mebibyte long was most of what a cold
-// one-word edit allocated (sjawhar/legion#2519).
+// one-word edit allocated (sjawhar/legion#2522).
 func buildFlattenedText(doc *Node) flattenedText {
 	units, bytes := flattenedTextSize(doc)
 	var out strings.Builder

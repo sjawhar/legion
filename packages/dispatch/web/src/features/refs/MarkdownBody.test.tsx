@@ -1461,8 +1461,8 @@ describe("A long body parsed in the worker", () => {
 
       // The frame arrives in the middle of that paint.
       view.rerender(<MarkdownBody markdown={grown} />);
-      // No text of that frame stands beside the blocks still arriving: 20,000 characters of it
-      // would otherwise read in front of them, so the count is what this asserts.
+      // No text of that frame stands beside the blocks still arriving: about 2,800 characters
+      // of it would otherwise read in front of them, so the count is what this asserts.
       expect(looseText(view.container).length).toBe(0);
       expect(topParagraphs(view.container).length).toBeGreaterThanOrEqual(landed);
 

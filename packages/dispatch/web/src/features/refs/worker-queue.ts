@@ -143,10 +143,11 @@ export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
    * (`markdown-engine.ts`): every frame cancels the frame before it, and the frame the worker is
    * holding carries the only parse the reader can be shown before the stream ends
    * (sjawhar/legion#2519). Such an owner must expect an answer to a source it has moved on from,
-   * and must say for itself when that answer stops being worth painting. The place a cancel
-   * leaves that way is worth the worker's own answer alone (`Waiter`): a deadline, or a worker
-   * that never runs, answers the job for whoever is still waiting on it and leaves that place
-   * unanswered, so a body the page has moved on from is never worked on here instead.
+   * and must say for itself when that answer stops being worth painting. A deadline, or a worker
+   * that never runs, answers a job on the page only while a place that has not been cancelled
+   * still waits on it (`anyoneIsWaiting`), and the places a cancel kept then take that answer
+   * too; a job that only kept places wait on is answered by the worker or not at all, so a body
+   * the page has moved on from is never worked on here instead.
    */
   wait(
     key: string,
