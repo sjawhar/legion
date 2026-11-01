@@ -74,9 +74,8 @@ func TestARelaunchReplacesAPodRunningAnotherServiceAccount(t *testing.T) {
 			if newLoc.Sandbox.Generation != 2 {
 				t.Fatalf("resumed at %+v, want generation 2", newLoc.Sandbox)
 			}
-			// The replacement is the Sandbox's next pod, never another Sandbox: the issue keeps
-			// its Sandbox and its address record across it; its disk, the pod's own ephemeral
-			// volume, does not.
+			// The replacement is the Sandbox's next pod, never another Sandbox: the Sandbox and
+			// its address record are kept across it.
 			if after := g.sandbox(loc.Sandbox.Name); after == nil || after.UID != sandboxUID {
 				t.Fatalf("the Sandbox is %+v, want the one the launch spawned (%s) kept", after, sandboxUID)
 			}

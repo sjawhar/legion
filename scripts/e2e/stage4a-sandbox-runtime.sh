@@ -442,8 +442,8 @@ account_placeholder='${POD_SERVICE_ACCOUNT}'
 pod=$(<"$work/pod.yml")
 printf '%s\n' "${pod//"$account_placeholder"/"$pod_service_account"}" >"$work/pod.yml"
 grep -qF "service_account: $pod_service_account" "$work/pod.yml" ||
-  fail "the operator route's pod fixture has no ServiceAccount $account_placeholder to fill with the run's"
-note "operator pod $work/pod.yml: its ServiceAccount from LEGION_E2E_POD_SERVICE_ACCOUNT"
+  fail "the $model_route route's operator pod fixture has no ServiceAccount $account_placeholder to fill with the run's"
+note "operator pod: $work/pod.yml, its ServiceAccount from LEGION_E2E_POD_SERVICE_ACCOUNT"
 op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$operator_route/overlay.yml" \
   --dry-run=client -o yaml | op label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
   fail "the operator could not create ConfigMap $route_configmap"
