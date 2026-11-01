@@ -338,6 +338,7 @@ func splitRuns(seed string) string {
 // document past the cap is refused on its own count, which no copy of it could be made from; one
 // at it, on what the sweep added to a copy.
 func TestTheMarkSweepLeavesADocumentAtOrPastTheDecodeCapAsItWas(t *testing.T) {
+	skipAtTheBoundsUnderRace(t)
 	for _, test := range []struct {
 		name   string
 		push   func(t *testing.T, service *Service, artifactID string) *crdt.Doc
@@ -370,6 +371,7 @@ func TestTheMarkSweepLeavesADocumentAtOrPastTheDecodeCapAsItWas(t *testing.T) {
 // adds no struct, so the sweep takes it off a document at the decode cap: the copy it counted shows
 // the sweep adding nothing, and the document it leaves is still within the cap.
 func TestTheMarkSweepStillSweepsADocumentAtTheDecodeCapWhereItAddsNoStruct(t *testing.T) {
+	skipAtTheBoundsUnderRace(t)
 	logs := captureLogs(t)
 	service, artifactID := sweepableDocument(t, func(seed string) string { return seed })
 	room := pushToTheCap(t, service, artifactID)
@@ -468,6 +470,7 @@ var stampWrites = []stampWrite{
 // carries on with the ids unrepaired and counts no failure, and the backfill reports the document
 // skipped (LEGION-545).
 func TestTheBlockIDStampLeavesADocumentAtOrPastTheDecodeCapAsItWas(t *testing.T) {
+	skipAtTheBoundsUnderRace(t)
 	for _, document := range []struct {
 		name   string
 		push   func(t *testing.T, service *Service, artifactID string) *crdt.Doc
@@ -587,6 +590,7 @@ func withheldAnswerLines(logs *storetest.LockedLog) string {
 // document is left byte for byte as it was, settlement logs that it withheld the answer and why,
 // and the settlement counts no failure, so the room it runs on does not fail (LEGION-545).
 func TestSettlementWithholdsAnAnswerFromADocumentAtOrPastTheDecodeCapAndCountsNoFailure(t *testing.T) {
+	skipAtTheBoundsUnderRace(t)
 	for _, document := range []struct {
 		name   string
 		push   func(t *testing.T, service *Service, artifactID string) *crdt.Doc
@@ -736,6 +740,7 @@ func parkedFork(t *testing.T, parked int) *crdt.Doc {
 // and one fork short of the cap is still let through. The forks here have no room behind them, as a
 // cold write's has not (coldFork), so the fork's own total is what answers.
 func TestAWriteLeavingParkedStructsPastTheDecodeCapIsRefusedAsUndecodable(t *testing.T) {
+	skipAtTheBoundsUnderRace(t)
 	service := &Service{}
 	cold := &liveWrite{cold: true}
 	past := parkedFork(t, maxUpdateItems/(1+splitsAStructCanCause)+1)
@@ -809,6 +814,7 @@ func liveWriteOn(t *testing.T, live *crdt.Doc, write func(fork *crdt.Doc)) (*liv
 // on the ceiling alone, with no count of anything.
 func TestAWriteIsRefusedAsUndecodableByTheRoomItsForkUndercounts(t *testing.T) {
 	t.Run("past the cap on the room, within it on the fork", func(t *testing.T) {
+		skipAtTheBoundsUnderRace(t)
 		const runs, inserted = 30_000, 100_000
 		live := typedRoom(t, maxUpdateItems-120_000+runs, runs)
 		var forkedBefore uint64

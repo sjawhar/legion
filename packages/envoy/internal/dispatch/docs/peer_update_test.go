@@ -414,6 +414,7 @@ func TestTheHeaviestWholeStateFrameFitsTheMessageFloor(t *testing.T) {
 // random client ids move it from run to run: 12,555,674 and 12,630,814 bytes were measured on
 // 2026-10-26 and 2026-10-27, and four times either is still under a quarter more than F.
 func TestTheHeaviestWholeStateFrameTheServerStoresFitsTheMessageFloor(t *testing.T) {
+	skipAtTheBoundsUnderRace(t)
 	state, refusal := agentRewrittenState(t)
 	if !errors.Is(refusal, ErrDocumentTooLarge) {
 		t.Fatalf("the agent's last write was refused with %v, want ErrDocumentTooLarge", refusal)
@@ -579,6 +580,7 @@ func heaviestDocument(t *testing.T) *crdt.Doc {
 // service's measurer: the hook reads the byte half alone). It fails once four times the grown
 // document's whole-state frame passes the floor.
 func TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor(t *testing.T) {
+	skipAtTheBoundsUnderRace(t)
 	const pair = "- \n\n* \n\n"
 	room := heaviestDocument(t)
 	rendering, err := renderDocument(room)
@@ -2228,6 +2230,7 @@ const heaviestHandoffMeasurement = "DISPATCH_MEASURE_HEAVIEST_HANDOFF"
 // MiB; set DISPATCH_MEASURE_HEAVIEST_HANDOFF=1 for the others, which reach 905 MiB, about 30 s
 // together with the agent's state cached (DISPATCH_AGENT_REWRITTEN_CACHE).
 func TestAnHonestHandoffAtTheHeaviestFrameIsNeverRefusedAsTooHeavy(t *testing.T) {
+	skipUnderRace(t)
 	heavy := os.Getenv(heaviestHandoffMeasurement) != ""
 	for _, row := range []struct {
 		name  string

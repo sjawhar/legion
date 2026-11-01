@@ -143,6 +143,7 @@ const agentRewritesEnv = "DISPATCH_REBUILD_AGENT_REWRITES"
 // it was already at, as logPastDecodeCap's comment allows for. What no document at the cap takes
 // is a write that adds a struct, and that is what a rebuild has to make room for.
 func TestRebuildingADocumentAtTheDecodeCapLeavesItSmallAndReadingTheSame(t *testing.T) {
+	skipAtTheBoundsUnderRace(t)
 	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	for _, row := range []struct {
 		name  string
@@ -779,7 +780,10 @@ func TestABrowserHoldingAHistoryARebuildReplacedIsClosedThoughTheWalkRefusesItBe
 // the cap. Measured on 2026-10-28, both documents at the cap load at 1,048,576 structs exactly,
 // the long-edited one's handoff carrying 1,345 delete ranges and the agent's 32,793; the
 // long-edited one took 33 s here, the one a keystroke short 30 s, and the agent's 229 s, which
-// runs with DISPATCH_REBUILD_AGENT_REWRITES=1, as its rebuild does.
+// runs with DISPATCH_REBUILD_AGENT_REWRITES=1, as its rebuild does. The row a keystroke short of
+// the cap types a million keystrokes of its own, where the rows before it share one fixture, and
+// a -race build leaves it out (skipAtTheBoundsUnderRace): the row at the cap drives the same
+// sockets over the same document.
 func TestAWholeStateHandoffOfADocumentAtTheDecodeCapIsAdmitted(t *testing.T) {
 	const editAdds = 1 + splitsAStructCanCause
 	for _, row := range []struct {
@@ -788,6 +792,9 @@ func TestAWholeStateHandoffOfADocumentAtTheDecodeCapIsAdmitted(t *testing.T) {
 		state func(t *testing.T) []byte
 		// edits is whether the room's total leaves room for the offline edit.
 		edits bool
+		// typedAfresh is whether the row types a million keystrokes of its own rather than
+		// taking the fixture the rows before it share.
+		typedAfresh bool
 	}{
 		{"an agent's whole rewrites until the cap refused one", agentRewritesEnv, func(t *testing.T) []byte {
 			state, refusal := agentRewrittenState(t)
@@ -795,15 +802,18 @@ func TestAWholeStateHandoffOfADocumentAtTheDecodeCapIsAdmitted(t *testing.T) {
 				t.Fatalf("the agent's last write was refused with %v, want ErrDocumentTooLarge", refusal)
 			}
 			return state
-		}, false},
-		{"a long-edited document typed on until the cap", "", longEditedAtCapState, false},
+		}, false, false},
+		{"a long-edited document typed on until the cap", "", longEditedAtCapState, false, false},
 		{"a long-edited document typed on until a keystroke short of the cap", "", func(t *testing.T) []byte {
 			return longEditedTypedTo(t, maxUpdateItems-editAdds)
-		}, true},
+		}, true, true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if row.gate != "" && os.Getenv(row.gate) == "" {
 				t.Skip("set " + row.gate + "=1 to run this document")
+			}
+			if row.typedAfresh {
+				skipAtTheBoundsUnderRace(t)
 			}
 			state := row.state(t)
 			service, artifactID := newTestService(t)

@@ -123,6 +123,7 @@ func copyTransient(cost loadCost) int64 {
 // also fit in the whole bound alone, since a stored document must always load. They took 597 to
 // 623 s together here on 2026-10-28.
 func TestEveryFullStateDecodesTransientHeapIsWithinItsGrant(t *testing.T) {
+	skipUnderRace(t)
 	heavy := os.Getenv(copyHeapMeasurement) != ""
 	var keystrokes, scanned []byte
 	runStates := func(t *testing.T) {

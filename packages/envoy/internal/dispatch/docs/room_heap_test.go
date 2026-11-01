@@ -41,6 +41,7 @@ import (
 // are not a number to the byte; the per-element bound is the budget's own, and fails once a copy's
 // heap an element leaves leastPerElement to mostPerElement of bytesOfHeapAnElement.
 func TestAResidentRoomsHeapPerByteOfItsMarkdown(t *testing.T) {
+	skipUnderRace(t)
 	const leastPerElement, mostPerElement = 0.85, 1.3
 	for _, size := range []int{51 << 10, 524 << 10, 1 << 20} {
 		state, rendering := residentRoomState(t, size)
@@ -115,6 +116,7 @@ const (
 // keystrokes (keystrokeRunStates), 26.9 to 29.4, 26.6 to 38.5 and 20.5 to 27.0 s with the agent's
 // state cached, about 100 s together.
 func TestAResidentRoomsHeapPerStructOfItsState(t *testing.T) {
+	skipUnderRace(t)
 	const dense, run, most = 0.85, 0.75, 1.0
 	heavy := os.Getenv(structHeapMeasurement) != ""
 	for _, shape := range []struct {
