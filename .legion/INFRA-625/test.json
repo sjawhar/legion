@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-625",
+  "completed": "2026-11-01T17:40:00Z",
+  "round": 9,
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "The merge alone, as the architect scoped it. Main's roomcursor.go is kept whole - the merge changes nothing of its code, only two comments - no declaration is duplicated between it and pending_authors.go, and LoadDoc's recovery still fails the room through failRoomLoad with the load's own record, on the load's goroutine, before ygo's own recovery wakes any waiter. The behaviour behind that reading is green here: the whole docs package passes against my own Postgres in 1,523 s, the five named load rows pass, and MarkdownBody.test.tsx is 51 pass, 0 fail. CI at the merge head has lint, typecheck, test and dispatch-memory green; its one red is main's migration-numbering test, and the dispatch lane is still running."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "The merge's one conflict, pending_authors.go, is resolved so that main's #2496 block is kept whole, nothing is declared twice, and the branch's own load-failure behaviour survives.",
+      "surface": "The merged tree against both parents, read file by file, and the Go package that compiles them.",
+      "command": "git diff 67901f79a (main's side) 2898fcf0 -- packages/envoy/internal/dispatch/docs/roomcursor.go; grep of the top-level declarations of roomcursor.go and pending_authors.go; and the read of websocket.go's LoadDoc.",
+      "observed": "roomcursor.go differs from main's by 5 added and 4 removed lines, all of them inside two doc comments (beginRoomLoad's and keepInstance's), which now say a record also goes where the failure that ended its load was met; no statement of main's cursor-gate rewrite is touched. The two files share no declaration: roomcursor.go holds roomInstance, roomLoad and its methods, beginRoomLoad, tookResidentVersion, keepInstance, instanceOf, cursorOf, roomCursor and the cursor helpers, while pending_authors.go holds inflightCredit, UpdateCredit, roomHold, heldUpdates, authorCapture, uploadHold and the author helpers - so the block the branch had moved beside LoadDoc is gone from it rather than living in both. LoadDoc (websocket.go:88) begins the load's record, and its own defer recovers the panic, turns it into an error and calls failRoomLoad(room, load, err) with that record - on the load's goroutine, before ygo's recovery hands waiters the error with the room still healthy, which is the shadow the comment names.",
+      "headSha": "9412cdb5580236eac31a6c4abba55c0fa6575010",
+      "negativeControl": "A duplicate declaration would not compile, and the package does: the whole docs suite builds and runs below. For the parts a compiler cannot catch, the control is main's own side of the diff - had the resolution taken the branch's copy of the block, roomcursor.go would differ from main's by its statements and not by two comments."
+    },
+    {
+      "criterion": "The load rows the architect named pass at the merge head, against a real Postgres, and so does the rest of the document service.",
+      "surface": "The Go document service package against the harness Postgres lane of this role.",
+      "command": "export LEGION_ROLE=tester && source /legion/harness/env.sh && export DISPATCH_TEST_DATABASE_URL=\"$DATABASE_URL\" && cd packages/envoy && go test ./internal/dispatch/docs -count=1 -timeout 45m; then the same with -run over the named rows and -v.",
+      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/docs 1522.997s. The named rows, each PASS: TestALoadThatPanicsFailsItsRoomWhereThePanicIsMet (0.75s), TestPanickingColdLoadFailsTheRoomAndRecovers (2.03s), TestLoadFailureMakesDocumentServiceUnavailable (0.48s), TestCorruptLoadRefusesTheSocketAndReadsAsUnloadable (0.49s), TestTheStoreJudgesAnUpdateByItsHeader (1.59s). TestALoadFailureAnswersForItsOwnLoadAndNotTheLoadAfterIt is not at this head: the round that rewrote the load-identity work around ygo's recovered LoadDoc panic replaced it with the panics row, and nothing of that name remains in the package. A wider sweep (-run 'Load|Room') is green too, 25 rows including the room-load, stored-history and cursor rows main's #2496 rewrote.",
+      "headSha": "9412cdb5580236eac31a6c4abba55c0fa6575010",
+      "negativeControl": "These same rows are the ones that caught the earlier merge: when main's #2496 first came in, TestTheStoreJudgesAnUpdateByItsHeader went red with 'the refused load left the room healthy, so nothing reloads the document', which is the failure this resolution has to keep fixed - and it is the row I ran first."
+    },
+    {
+      "criterion": "The render path's unit rows are unaffected by the merge.",
+      "surface": "The markdown render path's unit surface in this workspace.",
+      "command": "cd packages/dispatch && bun test web/src/features/refs/MarkdownBody.test.tsx",
+      "observed": "51 pass, 0 fail, 433 expect() calls in 7.9 s - the same shape as the twenty runs of round 8, with the waits that round added still holding after the merge.",
+      "headSha": "9412cdb5580236eac31a6c4abba55c0fa6575010",
+      "negativeControl": "Round 8's forced-lag seam is the standing control for this file: the reviewed file reds 16 of 51 under one task of lag where this one is 51 of 51."
+    }
+  ],
+  "ciRead": [
+    "Run 41328402117 at the merge head 2898fcf0, read at 17:36Z: lint, typecheck and test green - three of the four required checks - along with dispatch-memory, dispatch-browser-multiprocess, dispatch-multiprocess, envoy-e2e-local, envoy-smoke, envoy-session-stall, envoy-client, envoy-infra-go, listener-server-change, contracts, claude-envoy, pi-envoy, pi-legion, pi-shared, docs, ci-filters, ci-images, conflicts-script, broker-multiprocess and worker-image / build. The dispatch lane and envoy-go, envoy-go-race-docs are still running, so the dispatch lane is unjudged, at that run id. pr-title reports on the pull request's head rather than this commit and is not in this run.",
+    "The run's one red is envoy-go-race, and it is main's, not this change's: job 124914080116, store_test.go:391, 'migration 0158_message_delivery_urgency.up.sql takes version 158: the numbered migrations ended at 157…'. That is TestMigrationSetTakesNumbersThenTimestamps, which the controller reported red on main since 15:45Z from #2387's numbered migrations 0158-0161, with a one-line fix in the merge lane. Per the architect's instruction I spent no fix round on it and record it with the run id; this branch adds no migration of its own.",
+    "dispatch-memory is green again at a code head, and its shapes read: ')_' 245 MiB, two-column table 172, four-column table 215, headings 159, 'a_b*' 106 - all under the 256 MiB bound, with the four-column table in the same band as the 220 MiB of the last settled run and far from the 260 that was red in round 3."
+  ],
+  "observations": [
+    "This round touched no browser surface and no Go behaviour of this change, so rounds 7 and 8's measurements stand where they were taken; what is new here is only that main's cursor-gate rewrite and this branch's load-failure work hold together.",
+    "The merge is a large one - 58 files and about 5,800 added lines in internal/dispatch alone against the branch's side - and the docs package takes 1,523 s on this pod, which is worth knowing before anyone re-runs it under a shorter deadline: go test's default 10 minutes is not enough and -timeout 45m is what I used."
+  ]
+}
