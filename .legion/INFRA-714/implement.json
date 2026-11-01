@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-714",
-  "completed": "2026-11-01T13:40:00Z",
+  "completed": "2026-11-01T16:10:00Z",
   "proof": [
     {
       "criterion": "A3 / R1 - a red CI settlement moves no issue and reaches the phase holder, the implementer and the architect as one message naming each check and its conclusion, and the result they are told is the code head's latest attempt, carried by a handoff-only head.",
@@ -283,6 +283,14 @@
       "observed": "Every Go package ok. biome exit 0; four typechecks OK; contracts, pi-shared and claude-envoy suites whole; the stall suite 10 pass 0 fail with LEGION_TEST_OMP set, which is how CI runs it; docs/site build OK; all seven gates PASS. Two files conflicted: main added PersonHandoverPending beside DisarmPending, which this branch deletes with the daemon's own merge (R2), so main's new method stays and the deleted one stays deleted in record.go and store.go alike. internal/workflow then held two statusWrites helpers, this branch's reading two columns and main's decoding the whole payload; main's is kept, being the same answer and carrying the new PersonHandover field, and the branch's copy goes. The numbering holds: this branch's migrations are 0069 to 0081, above main's highest at 0067 and above the 0068 INFRA-484's pull request takes, and the contract is 46 against main's 44 and #2538's 45.",
       "headSha": "b5f0a334f4f67b3cae31f628ee509d34784ee869",
       "negativeControl": "The merge's own control is the file-set comparison the architect asked for, which is what would show a resolution dropping something: 417 changed files before the merge and 417 after, with none leaving the set and none joining it, so no file of the branch was lost to a resolution and none of main's was swept in. The fingerprint moved (9dc3ac4a8c15… to 35fed3ba6a6a…) for the two resolutions alone, each of which the compiler then held to: the first build after them failed `statusWrites redeclared in this block`, which is the duplicate being found rather than assumed."
+    },
+    {
+      "criterion": "Review round 5's one important finding: a person's handover was lost when its status write met a single ISSUE_CHANGED, a defect the forward merge created where main's LEGION-755 row meets this branch's retry rule.",
+      "surface": "The real outbox runner over the pod's PostgreSQL with the workflow engine and admission wired as handlers, which is what would queue the triage wake the defect also caused.",
+      "command": "cd packages/daemon && go test ./internal/daemon/ ./internal/admit/ ./internal/workflow/ ./internal/record/ ./internal/store/ -count=1 -p 1 -timeout 60m -skip '<the names this pod cannot run>'",
+      "observed": "All five packages ok. A person's handover is queued todo and observed from triage, backlog or icebox, and it is the one status row that brings an issue into the workflow rather than moving one along inside it; statusStillWanted asks record.OutOfWorkflow first, which is true for exactly those three, so one comment landing between the read and the write dropped the row and logged that its issue had left a workflow it never entered. The retry on the triage path also applied the re-read, whose intake.ReadIssue carries no LabelSetter, so admission read the root as unlabelled and queued a triage wake the controller's own skill tells it to ignore. Such a row is now judged by personHandoverStands, which is the rule the first attempt already applied and which both attempts ask in one place — the check living in two is how main's clause reached only one of them — and nothing of its re-read is applied. TestAPersonsHandoverIsWrittenAfterDispatchRefusesItsFirstWrite drives all four cases: the three sources, each refused once with a *dispatch.Error of code ISSUE_CHANGED and re-read at a higher sequence, writing todo with zero controller_notice rows of kind triage; and a label taken off between the queue and the retry, which writes nothing and logs the existing line once.",
+      "headSha": "39e832e38db43dd8168eb153781a78c8969a16b3",
+      "negativeControl": "The rule reverted in a copy under $TMPDIR, never in the shared workspace — applyRead called unconditionally and the retry judged by statusStillWanted again — takes every case of the new test red: `outbox_integration_test.go:586: status writes = [], want [todo]` for triage, for backlog and for icebox alike, and `logged \"outbox: a person's handover is not written; the label is gone\" 0 times, want 1`, the reverted run's own log line reading `outbox status write finished without writing: its issue left the workflow while the write was on its way`, which is the false sentence the finding named. Main's own TestOutboxWritesAPersonsHandoverOnlyWhileItsLabelAndStatusStand cannot catch this, since its fake's SetStatusAt never refuses."
     }
   ],
   "filesChanged": [
@@ -327,5 +335,5 @@
     "cmd/legion's TestProbeImageReadsEachRolesOwnOverlaysAsTheRoleStarts fails in a Kubernetes issue pod on this branch's base as well; it was reproduced at the parent commit with every changed file restored. internal/intake's TestConsumerLagCountsEveryConsumerWhileNATSRefusesTheOldestMessageRead starts a NATS container and internal/runtime/tmux's TestNewRefusesLaunchersItCannotRun wants tmux on PATH, neither of which a pod has, and nine internal/daemon tests are the known gVisor and Docker cases. CI's run at this head is the proof for all of them.",
     "TestTheKeeperRetriesAControllerWhoseLaunchesRanOut was a race rather than a pre-existing failure, which two workers reported it as. Its three refused launches and the keeper's retry all fell between two ten-millisecond polls, so the wait read zero spawns and then four and never the failure it exists to prove. The retry is now two seconds; the test ran five times green."
   ],
-  "previousHandoff": "6a0869f1d850f092938858bcbf9339cb5e8d5917"
+  "previousHandoff": "15c215e87cb479a7a64b189e4b7c34b586a2be15"
 }
