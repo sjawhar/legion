@@ -1,0 +1,11 @@
+kind: Fixed
+body: |-
+    The relay of a session's consumer refuses a pod-local address another pod accepted the
+    session's registration for, instead of pushing to it forever. Such an address is unreachable
+    from this pod whatever it tries (`address not reachable from this listener pod`), so the
+    relay now reports the delivery `delivery_failed`, gives up the pair's ledger attempt and acks
+    the message, as the durable path and the live and core lanes already did; the session's later
+    messages no longer wait behind it.
+time: 2026-11-02T02:31:00.000000000Z
+custom:
+    Issue: pr2404

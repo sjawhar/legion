@@ -183,11 +183,15 @@ func TestTwoPodsStartedTogetherElectOneActivePod(t *testing.T) {
 }
 
 // SIGKILL of the active pod while it has a message in hand, on a port session T whose prompt never
-// answers, and a message for session S queued behind it. The standby takes over: S's message and
-// every message published after the kill reach their sessions within 15 s, each session's in the
-// order they were published, and the standby lists the registered sessions throughout. Before
-// INFRA-557 the durable's 60 s ack wait holds S's message with the killed pod (and any message the
-// server pushed to it as it died), so those come after the newer ones, and late.
+// answers, and a second message to T queued behind it on T's own consumer. The standby takes over:
+// both of T's messages and every message published after the kill reach their sessions within
+// 15 s, each session's in the order they were published, and the standby lists the registered
+// sessions throughout. Before INFRA-557 the durable's 60 s ack wait holds the queued message with
+// the killed pod (and any message the server pushed to it as it died), so those come after the
+// newer ones, and late. What waits behind the prompt in hand is T's own consumer's since main's
+// per-session consumers: another session's messages no longer queue behind it, and the standby's
+// relay restarts that consumer at its ack floor, which is what brings both messages back at once
+// rather than at the consumer's own 60 s ack wait.
 func TestTwoPodsSIGKILLHandsOverInOrderWithin15s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -201,21 +205,23 @@ func TestTwoPodsSIGKILLHandsOverInOrderWithin15s(t *testing.T) {
 	publisher := mpConnectPublisher(t, uri)
 
 	inHand := serving.hold(blocked)
-	publisher.mustPublish(t, blocked)
+	first := publisher.mustPublish(t, blocked)
 	select {
 	case <-inHand:
 	case <-time.After(10 * time.Second):
 		t.Fatalf("%s never prompted %s", a.instance, blocked)
 	}
-	behind := publisher.mustPublish(t, queued)
-	mpEventually(t, 10*time.Second, a.instance+" to hold the queued message too", func() bool { return publisher.ackPending() >= 2 })
+	behind := publisher.mustPublish(t, blocked)
+	mpEventually(t, 10*time.Second, a.instance+" to hold the queued message too", func() bool {
+		return publisher.sessionAckPending(blocked) >= 2
+	})
 
 	killed := a.kill(t)
 	stop := publisher.every(100*time.Millisecond, queued, other)
 	time.Sleep(3 * time.Second) // publish for a while after the kill
 	stop()
 
-	messages := append([]mpMessage{behind}, publisher.since(killed)...)
+	messages := append([]mpMessage{first, behind}, publisher.since(killed)...)
 	serving.awaitAll(t, messages, mpHardBound+5*time.Second)
 	serving.requireWithin(t, messages, mpHardBound, killed)
 	serving.requireOrder(t, messages)
@@ -223,6 +229,50 @@ func TestTwoPodsSIGKILLHandsOverInOrderWithin15s(t *testing.T) {
 	serving.requireOnce(t, messages)
 	mpWaitActive(t, b, time.Second)
 	watch.requireServed(t, killed)
+}
+
+// A serving port that refuses its session's prompts: the relay of that session's consumer keeps
+// the message at the head of the session's queue and pushes it again (pushUntilAccepted), and the
+// pod that takes delivery over pushes it again in its turn, because the message is its session's
+// consumer's and no pod's memory. Across a graceful stop and then a SIGKILL of the pod holding it,
+// each refused message reaches its session exactly once, within the take-over bound of the event
+// that moved delivery: 10 s of the stop, 15 s of the kill. Before main's per-session consumers a
+// refused push was the durable's to NAK and its message came back to the machine's durable, which
+// is why the hand-back rows park their outstanding messages elsewhere (mpRetryOutstanding).
+func TestTwoPodsAPortRetryReachesItsSessionAcrossAStopAndAKill(t *testing.T) {
+	uri := mpNATS(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a, b := mpStartPair(t, binary, uri)
+	serving := mpStartServingPort(t)
+	const sessionID = "ses_mp_port_retry"
+	a.registerPort(t, serving, sessionID)
+	publisher := mpConnectPublisher(t, uri)
+
+	serving.fail(sessionID)
+	overTheStop := publisher.mustPublish(t, sessionID)
+	mpEventually(t, 10*time.Second, a.instance+"'s push to be refused", func() bool { return serving.failures(sessionID) > 0 })
+	signalled := a.Terminate(t)
+	a.WaitExit(t, "SIGTERM")
+	mpWaitActive(t, b, mpGracefulBound)
+	serving.accept(sessionID)
+	serving.awaitAll(t, []mpMessage{overTheStop}, mpGracefulBound+5*time.Second)
+	serving.requireWithin(t, []mpMessage{overTheStop}, mpGracefulBound, signalled)
+
+	// The next standby starts only now, so each take-over has one pod to go to.
+	c := mpStartPod(t, binary, uri, "pod-c")
+	mpWaitStandby(t, c, 30*time.Second)
+	serving.fail(sessionID)
+	refused := serving.failures(sessionID)
+	overTheKill := publisher.mustPublish(t, sessionID)
+	mpEventually(t, 10*time.Second, b.instance+"'s push to be refused", func() bool { return serving.failures(sessionID) > refused })
+	killed := b.kill(t)
+	mpWaitActive(t, c, mpHardBound)
+	serving.accept(sessionID)
+	serving.awaitAll(t, []mpMessage{overTheKill}, mpHardBound+5*time.Second)
+	serving.requireWithin(t, []mpMessage{overTheKill}, mpHardBound, killed)
+
+	time.Sleep(mpQuiet)
+	serving.requireOnce(t, []mpMessage{overTheStop, overTheKill})
 }
 
 // Node loss: the active pod's link freezes, its sockets left open, so the server keeps its

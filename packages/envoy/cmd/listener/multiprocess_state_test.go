@@ -192,10 +192,13 @@ func mpNextException(t *testing.T, subscription *natsgo.Subscription, within tim
 }
 
 // The machine's pods share one delivery ledger. The active pod prompts session S, the prompt
-// lands, and the pod is SIGKILLed before the durable has its acknowledgement (the relay swallows
-// it). The standby takes over, the durable gives it the message again, and it finds the delivery
-// in the ledger: S is not prompted a second time. Before INFRA-557 each pod remembers only its own
-// deliveries, so the standby prompts S again once the message comes back after the 60 s ack wait.
+// lands, and the pod is SIGKILLed before the acknowledgement of the message it pushed reaches the
+// server (the relay swallows it). The standby takes over, restarts S's consumer at its ack floor
+// and is handed that message again, and it finds the delivery in the ledger: S is not prompted a
+// second time, so the serving port takes the message exactly once in all. Before INFRA-557 each
+// pod remembers only its own deliveries, so the standby prompts S again with the message it takes
+// back. The copy comes back on S's own consumer, whose relay pushed it (main's per-session
+// consumers), not on the machine's durable, which acked it as relayed.
 func TestTwoPodsDoNotPromptAgainWhatAKilledPodDelivered(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -212,14 +215,14 @@ func TestTwoPodsDoNotPromptAgainWhatAKilledPodDelivered(t *testing.T) {
 	killed := a.kill(t)
 
 	// Long enough for a build before INFRA-557 to take the message back, after its 60 s ack wait.
-	b.awaitEventLine(t, 90*time.Second, "listener received", m.event)
+	skipped := b.awaitEventLine(t, 90*time.Second, "session relay skipped a copy the session already has", m.event)
 	tookBack := time.Since(killed)
-	time.Sleep(2 * time.Second) // a prompt goes out the moment the message is received
+	time.Sleep(2 * time.Second) // a prompt goes out the moment the message is pushed
 	serving.requireOnce(t, []mpMessage{m})
-	if line := mpLineWith(b.Output.String(), `"msg":"listener dedupe skip"`, `"event_id":"`+m.event+`"`); line == "" {
-		t.Fatalf("%s took %s back and did not skip it as delivered", b.instance, m.event)
+	if prompts := serving.promptsTo(sessionID); prompts != 1 {
+		t.Fatalf("%s took %d prompts for %s in all, want the one %s made before it was killed", sessionID, prompts, m.event, a.instance)
 	}
-	t.Logf("%s took %s back %s after the kill and skipped it as delivered", b.instance, m.event, tookBack.Round(time.Millisecond))
+	t.Logf("%s took %s back %s after the kill and skipped it as delivered: %s", b.instance, m.event, tookBack.Round(time.Millisecond), skipped)
 }
 
 // An attempt, then a crash: the active pod records in the shared ledger that it is prompting

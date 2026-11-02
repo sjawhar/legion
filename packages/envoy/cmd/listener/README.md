@@ -453,9 +453,12 @@ but two, which are local to the pod that dials them: a loopback bridge (`ENVOY_H
 registration with `accepted_host`, the accepting pod's host name. A pod that would dial a
 pod-local address for a session another pod accepted sends nothing: it reports the delivery as
 `delivery_failed` (the log names `address not reachable from this listener pod`) and does not
-retry. A registration without `accepted_host` (written by an earlier build) is delivered as
-before, and pods that share a host name (host networking) deliver normally. A session on a serve
-port that needs every pod to reach it registers a host every pod reaches.
+retry. Every route to the port refuses it alike -- the durable path, the live and core lanes, and
+the relay of the session's consumer, which acks the message rather than pushing it again, since
+no later pull of that consumer would reach the session either. A registration without
+`accepted_host` (written by an earlier build) is delivered as before, and pods that share a host
+name (host networking) deliver normally. A session on a serve port that needs every pod to reach
+it registers a host every pod reaches.
 
 ## Environment
 

@@ -3648,6 +3648,8 @@ The session's own user, such as a `gcp:NatsHub`'s credential-free `sessionUser`,
   each waits for a read that began after it was made, so a gap is still reported exactly when a start lies below the stream's first sequence.
   A pull sends its own pull requests (`$JS.API.CONSUMER.MSG.NEXT`, 1,024 messages, 30 s expiry, 15 s idle heartbeat) and costs no consumer info:
   its first `Next` reports a missing consumer (`ErrSessionConsumerNotFound`), and a pull that hears nothing for 30 s ends (`ErrSessionPullStalled`) and the relay restarts.
+  A reconnect ends every pull at once (`ErrSessionPullReconnected`, the client's reconnect hook):
+  the server drops a pull request with the connection it was sent on, so the relay restarts at the ack floor rather than waiting the 30 s of silence out.
 
 - **Relay over NATS:** the owner pulls the consumer and publishes each message, in stream order, as a core frame on `notifications.envoy.deliver.<session id>` (`bus.DeliverSubject`;
   the stream does not store it, and the live topics lane skips it).

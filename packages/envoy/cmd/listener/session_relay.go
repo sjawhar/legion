@@ -865,6 +865,9 @@ func (m *sessionRelays) relayServingPort(ctx context.Context, run *relayRun) rel
 // kept in progress so its ack wait never runs out. It returns false when the relay was stopped
 // first.
 //
+// An address no attempt of this pod can reach (session.ErrAddressNotReachable) is refused for
+// good instead, as the durable path refuses it (refuseUnreachableAddress).
+//
 // A message on a topic a session follows (not its own agent subject or a role) is judged as the
 // durable path's fan-out judges it (followedTopicVerdict): one the session already has is acked
 // unpushed, and one another path is already pushing is held until that push lands or ends
@@ -888,6 +891,10 @@ func (m *sessionRelays) pushUntilAccepted(ctx context.Context, sessionID string,
 	}
 	return pushWithBackoff(ctx, m.logger, sessionID, item, func(attempt int) (bool, error) {
 		if err := m.push(ctx, sessionID, item, msg); err != nil {
+			if errors.Is(err, session.ErrAddressNotReachable) {
+				m.refuseUnreachableAddress(sessionID, item, msg, claim, err)
+				return true, nil
+			}
 			_ = msg.InProgress()
 			return false, err
 		}
@@ -904,6 +911,39 @@ func (m *sessionRelays) pushUntilAccepted(ctx context.Context, sessionID string,
 		m.logger.DeliveryLog(slog.LevelInfo, "session relay pushed", sessionID, item.Topic, item.EventID, "delivered", slog.Int("attempts", attempt))
 		return true, nil
 	})
+}
+
+// refuseUnreachableAddress gives up a push the session's address refuses before any request is
+// made: that address is local to another pod of the machine, the one that accepted the session's
+// registration, so no attempt of this pod reaches it and a retry loop would hold the session's
+// messages behind this one for as long as the registration stands. The durable path reports such
+// a refusal as a terminal delivery_failed and retries nothing (delivery.go, both the agent
+// subject's branch and the fan-out's), and this is that refusal on the relay: the exception is
+// published as the path the message is stored for publishes it, the ledger attempt is given up so
+// a resend after the session registers through this pod is pushed rather than skipped as one in
+// flight, and the message is acked, since no later pull of this consumer would reach the session
+// either.
+func (m *sessionRelays) refuseUnreachableAddress(sessionID string, item contracts.Envelope, msg bus.SessionMessage, claim dedupe.Attempt, err error) {
+	m.logger.DeliveryLog(slog.LevelError, "session relay refused a message the session's address does not accept", sessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
+	if publishErr := publishDeliveryException(m.client, item, "delivery_failed", sessionID, !isControlTopic(item.Topic), storedMessageOrigin(msg)); publishErr != nil {
+		m.logger.Warn("session relay could not publish a delivery exception", slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("error", publishErr.Error()))
+	}
+	if clearErr := m.rules.ledger.Clear(claim); clearErr != nil {
+		m.logger.Warn(ledgerUnavailableLine, slog.String("operation", "clear"), slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("error", clearErr.Error()))
+	}
+	if ackErr := msg.Ack(); ackErr != nil {
+		m.logger.Warn("session relay could not ack a refused message", slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("error", ackErr.Error()))
+	}
+}
+
+// storedMessageOrigin identifies the stored message msg for an exception's Nats-Msg-Id, as
+// exceptionOrigin identifies a durable one: its own Nats-Msg-Id, else its stream sequence. Two
+// pods that refuse the same stored message therefore raise one stored exception.
+func storedMessageOrigin(msg bus.SessionMessage) string {
+	if msgID := msg.Header.Get(nats.MsgIdHdr); msgID != "" {
+		return msgID
+	}
+	return strconv.FormatUint(msg.StreamSeq, 10)
 }
 
 // push makes one prompt_async push of item to the session's port at the address its current entry

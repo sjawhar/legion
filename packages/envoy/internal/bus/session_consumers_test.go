@@ -609,30 +609,95 @@ func TestAPullRequestsAgainAfterABatchAndAnExpiry(t *testing.T) {
 	}
 }
 
-// JetStream refuses one consumer two filters that overlap and takes two that do not, which is why
-// Ensure reduces them first (ReduceFilterSubjects); the overlapping set reduced is taken.
-func TestConsumerFiltersMustNotOverlap(t *testing.T) {
-	_, consumers := sessionConsumersOnStream(t)
+// A pull whose connection reconnected ends at once: the server drops a pull request with the
+// connection it was sent on and delivers nothing for it, so a pull that waited for it would hand
+// its caller nothing until twice the idle heartbeat of silence ended it (ErrSessionPullStalled),
+// which is a 30 s stall of the relay of that session's consumer after an outage of 2 s.
+func TestAPullEndsAtOnceWhenItsConnectionReconnects(t *testing.T) {
+	owner, consumers := sessionConsumersOnStream(t)
+	ctx := context.Background()
+	const session = "ses_pull_reconnect"
+	agent := contracts.AgentSubject(session)
+	if _, err := consumers.Ensure(ctx, session, []string{agent}, 0); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	pull := pullSession(t, consumers, session)
+	before := publishStored(t, owner, agent, "before the reconnect")
+	msg := next(t, pull)
+	if msg.StreamSeq != before {
+		t.Fatalf("before the reconnect got %d, want %d", msg.StreamSeq, before)
+	}
+	if err := msg.Ack(); err != nil {
+		t.Fatalf("ack %d: %v", msg.StreamSeq, err)
+	}
+
+	if err := consumers.client.Conn.ForceReconnect(); err != nil {
+		t.Fatalf("reconnect in place: %v", err)
+	}
+	began := time.Now()
+	waited, cancel := context.WithTimeout(ctx, 2*sessionPullHeartbeat)
+	defer cancel()
+	if _, err := pull.Next(waited); !errors.Is(err, ErrSessionPullReconnected) {
+		t.Fatalf("Next after a reconnect = %v, want %v", err, ErrSessionPullReconnected)
+	}
+	if took := time.Since(began); took > 5*time.Second {
+		t.Fatalf("Next after a reconnect ended %s in, want it at the reconnect rather than at the %s of silence", took.Round(time.Millisecond), 2*sessionPullHeartbeat)
+	}
+	pull.Stop()
+
+	// The caller pulls again, on the connection that came back, and takes what was published
+	// while no pull request stood.
+	after := publishStored(t, owner, agent, "after the reconnect")
+	if msg := next(t, pullSession(t, consumers, session)); msg.StreamSeq != after {
+		t.Fatalf("after the reconnect got %d, want %d", msg.StreamSeq, after)
+	}
+}
+
+// nats-server 2.15 takes a consumer whose filters overlap, where 2.10 refused it
+// (jetstream.ErrOverlappingFilterSubjects, which this row asserted until the test server was
+// bumped), and it delivers a message two of those filters match once, not once per filter. So an
+// overlapping set reaching the server costs this repository no duplicate delivery on 2.15; what
+// it would cost is a consumer 2.10 refuses to create, and a filter set larger than the subjects
+// it stands for. Ensure asks for neither: it reduces the set first (ReduceFilterSubjects), which
+// this row keeps pinned on the server that no longer enforces it.
+func TestTheServerTakesOverlappingFiltersAndEnsureReducesThemAnyway(t *testing.T) {
+	owner, consumers := sessionConsumersOnStream(t)
 	ctx := context.Background()
 	disjoint := []string{contracts.AgentSubject("ses_filters"), "notifications.github.o.r.>"}
 	if _, err := consumers.create(ctx, "s-ses_disjoint", disjoint, 0); err != nil {
 		t.Fatalf("create with filters that do not overlap: %v", err)
 	}
+	const session = "ses_overlapping"
 	overlapping := []string{"notifications.github.o.r.>", "notifications.github.*.r.pull"}
-	_, err := consumers.create(ctx, "s-ses_overlapping", overlapping, 0)
-	if !errors.Is(err, jetstream.ErrOverlappingFilterSubjects) {
-		t.Fatalf("create with overlapping filters = %v, want the server's overlapping filters error", err)
+	if _, err := consumers.create(ctx, "s-"+session, overlapping, 0); err != nil {
+		t.Fatalf("create with overlapping filters = %v, want the server to take them (nats-server 2.15; 2.10 answered %v)", err, jetstream.ErrOverlappingFilterSubjects)
 	}
-	if _, err := consumers.Ensure(ctx, "ses_overlapping", overlapping, 0); err != nil {
+	both := publishStored(t, owner, "notifications.github.o.r.pull", "a message both filters match")
+	pull := pullSession(t, consumers, session)
+	if msg := next(t, pull); msg.StreamSeq != both {
+		t.Fatalf("the overlapping filters' message = %d, want %d", msg.StreamSeq, both)
+	} else if err := msg.Ack(); err != nil {
+		t.Fatalf("ack %d: %v", msg.StreamSeq, err)
+	}
+	requireNoMessage(t, pull, 2*time.Second) // one copy for the two filters that match it, not one each
+	pull.Stop()
+
+	if _, err := consumers.Ensure(ctx, session, overlapping, 0); err != nil {
 		t.Fatalf("Ensure with the overlapping filters: %v", err)
 	}
-	info, err := consumers.Info(ctx, "ses_overlapping")
+	info, err := consumers.Info(ctx, session)
 	if err != nil {
 		t.Fatalf("info: %v", err)
 	}
 	if want := []string{"notifications.github.>"}; !slices.Equal(info.Config.FilterSubjects, want) {
 		t.Fatalf("filters = %q, want %q", info.Config.FilterSubjects, want)
 	}
+	once := publishStored(t, owner, "notifications.github.o.r.pull", "a message the reduced filter matches")
+	reduced := pullSession(t, consumers, session)
+	if msg := next(t, reduced); msg.StreamSeq != once {
+		t.Fatalf("after the reduction got %d, want %d", msg.StreamSeq, once)
+	}
+	requireNoMessage(t, reduced, 2*time.Second)
 }
 
 // A filter Ensure adds starts at the consumer's position, which an update keeps: a message stored on

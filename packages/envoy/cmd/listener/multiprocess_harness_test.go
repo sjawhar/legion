@@ -750,12 +750,21 @@ func (s *mpServingPort) hold(sessionID string) <-chan struct{} {
 	return arrived
 }
 
-// fail answers every prompt to sessionID 500 from now on, so the listener counts each a failed
-// prompt and NAKs its message for a retry 30 s later.
+// fail answers every prompt to sessionID 500 from now on, so the push that sent it is refused:
+// the serving-port worker of the durable path, and the relay of the session's consumer, each keep
+// the message at the head of that session's queue and push it again (pushWithBackoff).
 func (s *mpServingPort) fail(sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failing[sessionID] = true
+}
+
+// accept takes sessionID's prompts again after fail, so the push waiting at the head of its queue
+// lands on its next try.
+func (s *mpServingPort) accept(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.failing, sessionID)
 }
 
 // failures is how many prompts to sessionID the serving port answered 500.
@@ -1090,6 +1099,22 @@ func (p *mpPublisher) quiesce(t *testing.T, serving *mpServingPort, fault func()
 // ackPending is how many messages the machine's durable has handed out and not had acknowledged.
 func (p *mpPublisher) ackPending() int {
 	info, err := p.client.JS().ConsumerInfo(bus.Stream, p.consumer)
+	if err != nil {
+		return -1
+	}
+	return info.NumAckPending
+}
+
+// sessionAckPending is how many messages sessionID's own consumer has had delivered and not
+// acknowledged: what the relay of that consumer holds, where ackPending above is the machine's
+// durable. A serving-port session's stored messages are its consumer's since INFRA-557 took main's
+// per-session consumers in, so a row that waits for a pod to hold a message in hand waits here.
+func (p *mpPublisher) sessionAckPending(sessionID string) int {
+	name, ok := bus.SessionConsumerName(sessionID)
+	if !ok {
+		return -1
+	}
+	info, err := p.client.JS().ConsumerInfo(bus.Stream, name)
 	if err != nil {
 		return -1
 	}

@@ -118,9 +118,17 @@ func TestTwoPodsGracefulStopWithNoStandbyAfterANodeLossKeepsOrder(t *testing.T) 
 	serving.awaitAll(t, messages, mpHardBound+20*time.Second)
 	serving.requireKnown(t, messages)
 	serving.requireOrder(t, messages)
-	if line := mpLineWith(c.Output.String(), "settle hold ended", `"hand_back_marked":false`); line == "" {
-		t.Fatalf("%s did not hold for an ack wait after a stop that marked no hand-back:\n%s",
-			c.instance, mpTail(mpLinesWithout(c.Output.String()), 40))
+	// The messages are in before the hold ends: pod-c's relay of each session's consumer pushes
+	// them as soon as its term starts, where the durable path's own messages wait out the hold.
+	// So the line comes after them, and the row waits for it rather than reading it once.
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(mpPoll) {
+		if mpLineWith(c.Output.String(), "settle hold ended", `"hand_back_marked":false`) != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s did not hold for an ack wait after a stop that marked no hand-back:\n%s",
+				c.instance, mpTail(mpLinesWithout(c.Output.String()), 40))
+		}
 	}
 }
 
@@ -237,25 +245,56 @@ func TestTwoPodsSIGKILLMidPromptKeepsTheSessionsOrderWithin15s(t *testing.T) {
 	mpWaitActive(t, b, time.Second)
 }
 
-// mpRetryOutstanding registers on pod a a session whose prompts fail and two healthy sessions,
-// named after row, and has a prompt the failing session and NAK its message for the delivery
-// handler's 30 s retry, which keeps that message in the durable's pending until its delay ends. It
-// returns the serving port, the publisher and the healthy sessions.
+// mpParkedMessages is how many messages mpRetryOutstanding parks on one session whose serving
+// port refuses them: servePortQueueLimit of them fill that session's worker queue, where each is
+// kept in progress and acknowledged by nobody, and the four over that limit are handed back to
+// the durable (handOverOrRetry), which redelivers each durableRetryDelay (30 s) later.
+const mpParkedMessages = servePortQueueLimit + 4
+
+// mpRetryOutstanding registers on pod a two healthy sessions, named after row, and leaves the
+// machine's durable holding messages no pod of it can settle. A parked session whose serving port
+// refuses every prompt is registered only after its messages are stored, so they lie below its
+// consumer's start and are no consumer's to relay (session.SessionEntry.ConsumerHoldsStored): the
+// durable path hands each to that session's serving-port worker, which keeps servePortQueueLimit
+// of them in progress while the port refuses them, and hands the rest back to the durable with
+// the 30 s retry delay. Neither kind is in the hands of the pod that takes delivery over next,
+// and both are outstanding on the durable, so that pod's settle hold never finds every
+// outstanding message in hand, however long the hand-over takes:
+//   - what a worker holds is settled by nobody while the port refuses it, and reaches the next
+//     pod only once the durable's ack wait runs out, a second after that pod's hand-back hold;
+//   - what the durable took back waits out its 30 s there, in nobody's hands at all.
+//
+// Before main's per-session consumers this was one message to a session whose prompts failed,
+// which the durable path NAKed for the same 30 s. A serving-port session's refused push is its
+// relay's now, repeated until the port accepts and never NAKed back to the shared durable
+// (TestTwoPodsAPortRetryReachesItsSessionAcrossAStopAndAKill), so the messages a hand-over must
+// not lose are parked where the merge still defers them. A session with no record at all, which
+// the unplaceable branch defers too (unplaceable_delivery.go), is no use here: its NAK comes back
+// after unplaceableRetryDelay (5 s), inside the holds these rows measure, and a redelivery that
+// lands during a hold is in that pod's hands and ends the hold early.
+//
+// It returns the serving port, the publisher and the healthy sessions.
 func mpRetryOutstanding(t *testing.T, uri string, a *mpPod, row string) (serving *mpServingPort, publisher *mpPublisher, healthy []string) {
 	t.Helper()
 	serving = mpStartServingPort(t)
-	failing := "ses_mp_" + row + "_failing"
 	healthy = []string{"ses_mp_" + row + "_one", "ses_mp_" + row + "_two"}
-	for _, sessionID := range append([]string{failing}, healthy...) {
+	for _, sessionID := range healthy {
 		a.registerPort(t, serving, sessionID)
 	}
 	publisher = mpConnectPublisher(t, uri)
-	serving.fail(failing)
-	retry := publisher.mustPublish(t, failing)
-	a.awaitEventLine(t, 10*time.Second, "listener agent delivery failed", retry.event)
-	time.Sleep(500 * time.Millisecond) // past the NAK that follows the failure's record
-	if pending := publisher.ackPending(); pending != 1 {
-		t.Fatalf("the durable has %d messages outstanding after the failed prompt, want its retry alone", pending)
+	parked := "ses_mp_" + row + "_parked"
+	serving.fail(parked)
+	for range mpParkedMessages {
+		publisher.mustPublish(t, parked)
+	}
+	a.registerPort(t, serving, parked)
+	// The worker takes its queue's worth in whatever order the durable delivers them, so the
+	// message handed back is any of the parked ones, not the last published.
+	mpEventually(t, 30*time.Second, a.instance+" to hand a parked message back to the durable", func() bool {
+		return mpLineWith(a.Output.String(), `"msg":"listener serving-port workers cannot take the push`, `"session_id":"`+parked+`"`) != ""
+	})
+	if pending := publisher.ackPending(); pending < mpParkedMessages {
+		t.Fatalf("the durable has %d messages outstanding with %d parked at a port that refuses them, want them all", pending, mpParkedMessages)
 	}
 	return serving, publisher, healthy
 }
@@ -271,14 +310,14 @@ func mpTo(messages []mpMessage, sessions ...string) []mpMessage {
 	return to
 }
 
-// A graceful stop of the active pod while a message to a session whose prompts fail waits out its
-// 30 s retry delay, with a message published every 100 ms to two healthy sessions. The retry stays
-// in the durable's pending until its delay ends, so the standby's settle hold never finds every
-// outstanding message in hand: it ends on the stopping pod's clean-hand-back mark, at what that
-// pod can still have outstanding, the 2 s hand-back delay and a second after the subscribe, and
-// every message to a healthy session published after the SIGTERM reaches it within 10 s, each
-// session's in order. Without that mark the hold would run to its 7 s cap and those messages
-// would arrive about 14 s after the SIGTERM.
+// A graceful stop of the active pod while messages parked at a serving port that refuses them are
+// outstanding on the machine's durable (mpRetryOutstanding), with a message published every
+// 100 ms to two healthy sessions. Those messages reach no pod's hands over the hand-over, so
+// the standby's settle hold never finds every outstanding message in hand: it ends on the stopping
+// pod's clean-hand-back mark, at what that pod can still have outstanding, the 2 s hand-back delay
+// and a second after the subscribe, and every message to a healthy session published after the
+// SIGTERM reaches it within 10 s, each session's in order. Without that mark the hold would run to
+// its 7 s cap and those messages would arrive about 14 s after the SIGTERM.
 func TestTwoPodsGracefulStopWithARetryOutstandingDeliversWithin10s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -310,17 +349,16 @@ func TestTwoPodsGracefulStopWithARetryOutstandingDeliversWithin10s(t *testing.T)
 }
 
 // Graceful stops one after another, A to B to C to D, each with a prompt in hand that the serving
-// port never answers and a message to a session whose prompts fail waiting out its 30 s retry
-// delay, with a message published every 100 ms to two healthy sessions. Each stop comes a second
-// into the prompt, with the healthy sessions' messages queued behind it; the stopping pod cancels
-// the prompt after the 3 s grace and NAKs it for a retry, so with the failing session's retry it
-// holds every next pod's settle hold open: each hand-over must end on the stopping pod's
-// clean-hand-back mark, 3 s after the subscribe, and every message to a healthy session must
-// reach it within 10 s of its publish, each session's in order. The pod taking over subscribes
-// beside the stopping pod's own linger and records stale_binding for it, which the mark clears
-// again; were it left standing, the next stop in the chain would mark nothing and the hand-over
-// after it would hold to the 7 s cap of a hard take-over, with the messages queued at the SIGTERM
-// arriving about 11 s after their publish.
+// port never answers -- the relay of that session's consumer holds it -- and messages parked at a
+// port that refuses them outstanding on the machine's durable (mpRetryOutstanding), with a
+// message published every 100 ms to two healthy sessions. Each stop comes a second into the
+// prompt, and the parked messages hold every next pod's settle hold open: each hand-over must end
+// on the stopping pod's clean-hand-back mark, 3 s after the subscribe, and every message to a
+// healthy session must reach it within 10 s of its publish, each session's in order. The pod
+// taking over subscribes beside the stopping pod's own linger and records stale_binding for it,
+// which the mark clears again; were it left standing, the next stop in the chain would mark
+// nothing and the hand-over after it would hold to the 7 s cap of a hard take-over, with the
+// messages queued at the SIGTERM arriving about 11 s after their publish.
 func TestTwoPodsEveryGracefulStopWithAPromptInHandAndARetryOutstandingDeliversWithin10s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -422,13 +460,13 @@ func mpGracefulStopsInTurn(t *testing.T, binary, uri string, serving *mpServingP
 	}
 }
 
-// SIGKILL of the active pod while a message to a session whose prompts fail waits out its 30 s
-// retry delay, with a message published every 100 ms to two healthy sessions. The standby takes the
-// expired lease and its settle hold never finds every outstanding message in hand: it ends at what
-// the killed pod can still have outstanding, one 6 s ack wait and a second after the subscribe, and
-// every message to a healthy session published after the kill reaches it within 15 s, each
-// session's in order. A hold that ran to its 13 s cap instead would let those messages arrive
-// about 19 s after the kill.
+// SIGKILL of the active pod while messages parked at a serving port that refuses them are
+// outstanding on the machine's durable (mpRetryOutstanding), with a message published every
+// 100 ms to two healthy sessions. The standby takes the expired lease and its settle hold never
+// finds every outstanding message in hand: it ends at what the killed pod can still have
+// outstanding, one 6 s ack wait and a second after the subscribe, and every message to a healthy
+// session published after the kill reaches it within 15 s, each session's in order. A hold that
+// ran to its 13 s cap instead would let those messages arrive about 19 s after the kill.
 func TestTwoPodsSIGKILLWithARetryOutstandingHandsOverInOrderWithin15s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")

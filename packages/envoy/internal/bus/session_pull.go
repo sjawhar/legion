@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -54,9 +55,15 @@ const (
 )
 
 // ErrSessionPullStalled ends a pull (SessionPull.Next) that heard nothing from the server, no
-// message and no heartbeat, for twice sessionPullHeartbeat: its pull request is lost, as on a
-// connection nats.go replaced.
+// message and no heartbeat, for twice sessionPullHeartbeat.
 var ErrSessionPullStalled = errors.New("bus: the session consumer's pull heard nothing from the server")
+
+// ErrSessionPullReconnected ends a pull (SessionPull.Next) whose connection reconnected: the
+// server drops a pull request with the connection it was sent on, and the pull would hear nothing
+// on the new one, so it ends as soon as the client reports the reconnect
+// (SessionConsumers.pullsLost) rather than after the twice sessionPullHeartbeat of silence that
+// would otherwise find it.
+var ErrSessionPullReconnected = errors.New("bus: the session consumer's pull request was lost when its connection reconnected")
 
 // SessionPull is a pull of one session consumer's messages, which arrive in stream order, a
 // redelivery included. It sends the consumer's pull requests ($JS.API.CONSUMER.MSG.NEXT) itself,
@@ -75,7 +82,13 @@ type SessionPull struct {
 	remaining int
 	// heartbeat is the pull requests' idle heartbeat (sessionPullHeartbeat).
 	heartbeat time.Duration
-	// wake holds a token once receive has queued a message for Next.
+	// consumers is the SessionConsumers the pull was started from: it holds the pulls in progress
+	// (pullsLost) and Stop takes this one out of them.
+	consumers *SessionConsumers
+	// lost is set once the connection the pull request was sent on reconnected, so the request is
+	// gone and Next ends with ErrSessionPullReconnected.
+	lost atomic.Bool
+	// wake holds a token once receive has queued a message for Next, or the pull was lost.
 	wake chan struct{}
 
 	// mu guards queue and heard.
@@ -107,10 +120,15 @@ func (s *SessionConsumers) Pull(ctx context.Context, sessionID string) (*Session
 		return nil, err
 	}
 	conn := s.client.currentConn()
-	p := &SessionPull{conn: conn, name: name, next: consumerAPI("MSG.NEXT", name), inbox: conn.NewInbox(), request: request, heartbeat: s.pullHeartbeat, wake: make(chan struct{}, 1)}
+	p := &SessionPull{conn: conn, name: name, next: consumerAPI("MSG.NEXT", name), inbox: conn.NewInbox(), request: request, heartbeat: s.pullHeartbeat, consumers: s, wake: make(chan struct{}, 1)}
 	if p.sub, err = conn.Subscribe(p.inbox, p.receive); err != nil {
 		return nil, err
 	}
+	// The pull joins the pulls in progress before its request goes out, so a reconnect between the
+	// two ends it rather than leaving it waiting on a request the server dropped. A reconnect
+	// before the request, which nats.go then sends on the new connection, ends it too: the cost is
+	// one restart at the ack floor, where the cost of missing the reconnect is a stalled relay.
+	s.trackPull(p)
 	if err := p.pull(); err != nil {
 		p.Stop()
 		return nil, err
@@ -166,9 +184,21 @@ func (p *SessionPull) pull() error {
 	return nil
 }
 
+// reconnected tells the pull that the connection its request was sent on reconnected: Next ends
+// with ErrSessionPullReconnected, at once rather than when the silence runs out, and its caller
+// pulls again (SessionConsumers.pullsLost).
+func (p *SessionPull) reconnected() {
+	p.lost.Store(true)
+	select {
+	case p.wake <- struct{}{}:
+	default:
+	}
+}
+
 // Next returns the next message the pull holds, waiting for one until ctx ends. It returns
-// ErrSessionConsumerNotFound once the stream holds no such consumer, and ErrSessionPullStalled
-// once the server has sent nothing for twice sessionPullHeartbeat.
+// ErrSessionConsumerNotFound once the stream holds no such consumer, ErrSessionPullReconnected
+// once the connection the pull request was sent on reconnected, and ErrSessionPullStalled once
+// the server has sent nothing for twice sessionPullHeartbeat.
 func (p *SessionPull) Next(ctx context.Context) (SessionMessage, error) {
 	for {
 		if p.remaining == 0 {
@@ -196,7 +226,9 @@ func (p *SessionPull) Next(ctx context.Context) (SessionMessage, error) {
 }
 
 // take returns the first message the server sent that Next has not read, waiting until one comes,
-// ctx ends, or the server has sent nothing for twice sessionPullHeartbeat.
+// ctx ends, the pull's connection reconnected, or the server has sent nothing for twice
+// sessionPullHeartbeat. The messages the server already sent are handed out first: they are the
+// consumer's, not the lost request's, and acking one is a publish like any other.
 func (p *SessionPull) take(ctx context.Context) (*nats.Msg, error) {
 	for {
 		p.mu.Lock()
@@ -209,6 +241,9 @@ func (p *SessionPull) take(ctx context.Context) (*nats.Msg, error) {
 		}
 		stalled := time.Until(p.heard.Add(2 * p.heartbeat))
 		p.mu.Unlock()
+		if p.lost.Load() {
+			return nil, ErrSessionPullReconnected
+		}
 		if stalled <= 0 {
 			return nil, ErrSessionPullStalled
 		}
@@ -251,4 +286,7 @@ func (a sessionAck) InProgress() error                      { return a.msg.InPro
 func (a sessionAck) NakWithDelay(delay time.Duration) error { return a.msg.NakWithDelay(delay) }
 
 // Stop ends the pull; the messages it held and Next had not returned are delivered again later.
-func (p *SessionPull) Stop() { _ = p.sub.Unsubscribe() }
+func (p *SessionPull) Stop() {
+	p.consumers.untrackPull(p)
+	_ = p.sub.Unsubscribe()
+}

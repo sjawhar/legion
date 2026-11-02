@@ -637,8 +637,13 @@ func (r *SessionRegistry) write(ctx context.Context, sessionID string, merge fun
 			return err
 		}
 		r.mu.Lock()
-		r.cacheSessionLocked(sessionID, entry, r.expiryFor(time.Time{}, entry.UpdatedAt), written)
+		applied := r.cacheSessionLocked(sessionID, entry, r.expiryFor(time.Time{}, entry.UpdatedAt), written)
 		r.mu.Unlock()
+		// The watcher's copy of this write finds the revision already cached and reports nothing
+		// (applyWatched), so the write reports its own change, as OnChange promises.
+		if applied {
+			r.notifyChanged(sessionID)
+		}
 		r.recordSeen(ctx, kv, sessionID, written)
 		return nil
 	}

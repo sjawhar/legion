@@ -1,0 +1,11 @@
+kind: Fixed
+body: |-
+    A session consumer's relay no longer stalls for 30 s after its connection reconnects. The
+    server drops a pull request with the connection it was sent on, and nothing sent another
+    until the pull had heard nothing for twice its idle heartbeat, so a 2 s outage cost every
+    message of that machine's relayed sessions about 30 s. Every pull in progress now ends at the
+    reconnect (`ErrSessionPullReconnected`, on the session-consumer client's reconnect hook) and
+    its relay restarts at the session's ack floor at once.
+time: 2026-11-02T02:30:00.000000000Z
+custom:
+    Issue: pr2404
