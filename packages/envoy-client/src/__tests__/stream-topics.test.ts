@@ -55,11 +55,11 @@ test("a host refuses such a topic in the listener's own words", () => {
   // and the listener's warning for the same topic is generated from it
   // (contracts.UncapturedTopicRefusal in packages/envoy/internal/contracts/generated.go): the two
   // are one wording, so a caller reads the same reason whether its topic was refused here or
-  // dropped there.
+  // dropped there. What this pins is the sentence itself, which the generated Go copy is checked
+  // against by packages/contracts' own `bun run check:go`.
   expect(uncapturedTopicRefusal("notifications.team", "ses_a")).toBe(
-    uncapturedTopicRefusal("notifications.team", "ses_a")
+    "notifications.team was not registered: no stream subject captures it, so nothing would be delivered to ses_a on it; follow a notifications.team.<name> topic instead"
   );
-  expect(uncapturedTopicRefusal("notifications.team", "ses_a")).toContain("notifications.team");
   expect(uncapturedTopicRefusal("notifications.lxspec.probe", "ses_b")).toContain(
     "notifications.lxspec.probe"
   );

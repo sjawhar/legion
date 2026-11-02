@@ -1312,7 +1312,7 @@ func TestUpsertPlannedKeepsAnUnsubscribeThatOutranItsPlan(t *testing.T) {
 	if _, err := reg.UpsertPlanned(ctx, Interest{SessionID: sessionID, MachineID: "m1"}, plan); !errors.Is(err, ErrInterestPlanConflict) {
 		t.Fatalf("the write of a plan the unsubscribe outran answered %v, want %v", err, ErrInterestPlanConflict)
 	}
-	again, err := reg.PlanInterestAfterConflict(ctx, sessionID, plan.Requested)
+	again, err := reg.PlanInterestAfterConflict(ctx, sessionID, []string{own})
 	if err != nil {
 		t.Fatalf("plan the heartbeat again after the refused write: %v", err)
 	}

@@ -668,28 +668,20 @@ func (r *Registry) planInterest(ctx context.Context, sessionID string, requested
 		return InterestPlan{}, err
 	}
 	return InterestPlan{
-		Roles:     roles,
-		Topics:    MergedTopics(sessionID, roles, cur.Topics, requested),
-		Requested: requested,
-		Revision:  revision,
+		Roles:    roles,
+		Topics:   MergedTopics(sessionID, roles, cur.Topics, requested),
+		Revision: revision,
 	}, nil
 }
 
 // ErrInterestPlanConflict is a write whose interest row was rewritten under the plan it was made
 // for: another writer stored the row between the plan and the write, so the compare-and-swap
-// found a revision that is not the plan's. Its caller plans again
-// (PlanInterestAfterConflict), filters the session's consumer on the new plan and writes again,
-// InterestPlanAttempts times in all; past that the listener answers the bus-unavailable 503 and
-// the plugin's next heartbeat registers again. Nothing is stored for a refused write, so the row
-// keeps whatever the write that won it holds.
+// found a revision that is not the plan's. Its caller plans again (PlanInterestAfterConflict),
+// filters the session's consumer on the new plan and writes again, a bounded number of times
+// (registrationPlanAttempts in cmd/listener, whose loop this error belongs to); past that the
+// listener answers the bus-unavailable 503 and the plugin's next heartbeat registers again.
+// Nothing is stored for a refused write, so the row keeps whatever the write that won it holds.
 var ErrInterestPlanConflict = errors.New("the interest record changed under the plan of this registration")
-
-// InterestPlanAttempts bounds the plans one registration makes. Each conflict means another
-// writer stored the session's row between a plan and its write, which only an unsubscribe, a
-// role claim or another registration of the same session does; three attempts cover a burst of
-// those and still end, rather than letting one session's registration spin against a writer that
-// keeps winning.
-const InterestPlanAttempts = 3
 
 // UpsertPlanned is UpsertWithin for a caller holding a plan (PlanInterest): it writes the row
 // that plan decided, under the roles that decided it, rather than reading the session's roles

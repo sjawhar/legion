@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { ROLE_TOPIC_PREFIX } from "@legion/contracts";
 import { messageFor } from "@legion/envoy-client/errors";
+import { consumerDelivery } from "@legion/envoy-client/test/subscribe-answer";
 import {
   EnvoyApiError,
   type EnvoyClient,
@@ -48,12 +49,7 @@ const interestFor = (sessionID: string): Interest => ({
 // the answer through untouched, and no test here reads it.
 const subscribeResultFor = (sessionID: string): SubscribeResult => ({
   ...interestFor(sessionID),
-  delivery: {
-    mode: "consumer",
-    subject: `notifications.envoy.deliver.${sessionID}`,
-    stream_id: "stream-1",
-    gap: false,
-  },
+  delivery: consumerDelivery(sessionID),
 });
 
 const registrationFor = (sessionID: string): RegistrationInput => ({

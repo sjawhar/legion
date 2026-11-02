@@ -364,7 +364,7 @@ export type Subject =
  * this warning (`splitUncapturedTopics` in packages/envoy/cmd/listener/api.go, which names it with
  * `contracts.UncapturedTopicRefusal` `scripts/gen-go.ts` emits from this builder), and each
  * plugin's explicit subscribe refuses such a topic in the same words (`envoy_subscribe` in
- * pi-envoy, `follow` in claude-envoy, both through `uncapturedTopicRefusal` in
+ * pi-envoy, `follow` in claude-envoy, both through `refuseUncapturedTopics` in
  * `@legion/envoy-client`). So a caller reads one sentence wherever it is told: a registration
  * carries topics nobody typed — a stored row, a restored transcript — and is answered with a
  * warning, where a tool call is a caller asking for this one topic by name.

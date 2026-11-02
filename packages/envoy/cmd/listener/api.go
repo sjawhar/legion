@@ -1451,12 +1451,14 @@ func unwiredRepositoryWarning(ctx context.Context, d *listenerDeps, topic string
 // stores and the set it leaves out: a notification topic no stream subject captures that is no
 // role lane (bus.ReachesNoSession). A session receives what its own consumer delivers, which is
 // what the stream stored, so an interest in such a topic would be stored and deliver nothing.
-// It is asked once per topic, here, and the answer carries to the warning each dropped topic
-// earns (contracts.UncapturedTopicRefusal) as well as to the plan.
+// It is asked once per topic, here, and the answer carries to the plan as well as to the warning
+// each dropped topic earns (contracts.UncapturedTopicRefusal) — the warning a topic in this set
+// earns only when the private rule has nothing to say about it, since a wildcard such as
+// notifications.> is both, and what it earns is the private warning (subscribeHandler).
 //
 // Both plugins refuse an explicit subscribe to one in those same words (envoy_subscribe in
 // pi-envoy's extensions/envoy.ts and follow in claude-envoy's src/envoy-channel-server.ts, both
-// through uncapturedTopicRefusal in @legion/envoy-client's stream-topics.ts), so a caller that
+// through refuseUncapturedTopics in @legion/envoy-client's stream-topics.ts), so a caller that
 // named one reads the same sentence wherever it is told: the sentence itself is written once, as
 // uncapturedTopicRefusal in packages/contracts, which scripts/gen-go.ts emits as
 // contracts.UncapturedTopicRefusal.
@@ -1471,6 +1473,93 @@ func splitUncapturedTopics(requested []string) ([]string, map[string]struct{}) {
 		planned = append(planned, topic)
 	}
 	return planned, uncaptured
+}
+
+// registrationPlanAttempts bounds the plans one registration makes. Each conflict or no-op write
+// means another writer stored the session's row between a plan and its write, which only an
+// unsubscribe, a role claim or another registration of the same session does; three attempts
+// cover a burst of those and still end, rather than letting one session's registration spin
+// against a writer that keeps winning. Past them the registration is answered the
+// bus-unavailable 503 and the plugin's next heartbeat registers again, with nothing stored.
+const registrationPlanAttempts = 3
+
+// registeredSession is what a registration left behind: the interest row stored, the plan that
+// decided it — whose Roles the warnings are read against — and the session's consumer.
+type registeredSession struct {
+	row      store.Interest
+	plan     store.InterestPlan
+	delivery sessionDeliveryOutcome
+}
+
+// registerSession plans the session's interest row, filters its consumer on that plan and writes
+// it, until the topics the consumer was filtered on are the topics the row holds
+// (store.InterestPlan). Two things can part them, and both are another writer storing this
+// session's row in the seconds the consumer call takes: the write is refused the revision its
+// plan read (store.ErrInterestPlanConflict), or it finds the row already holds everything the
+// plan would add and stores nothing, leaving a row wider than the filter. Either way it plans
+// again from the row that is there, filters on that plan, and writes again, and what the first
+// pass learned of the consumer is carried across (sessionDeliveryOutcome.carrying). Answering
+// 200 with the filter of an earlier plan would leave a topic the registration was answered 200
+// for out of the consumer until the session's next heartbeat, and every message published on it
+// in that window undelivered.
+//
+// A registration this listener can give no consumer is refused, which the caller answers by
+// name: a session is delivered to through its own consumer alone, so such a registration must
+// leave no interest row and no session entry behind - the row would make the listener deliver to
+// a session nothing reaches, and the entry would say a session is here that receives nothing.
+// The consumer is created, or has its filter set to the topics about to be stored, before the
+// registration answers, so a message published on a newly followed stored topic after the answer
+// is the consumer's to deliver.
+//
+// ctx bounds the store work (sendRequestBudget) and registerCtx the consumer calls, which take
+// the request's own context as they always have.
+func (d *listenerDeps) registerSession(
+	ctx, registerCtx context.Context,
+	machineID string,
+	body subscribeBody,
+	planned []string,
+	logger *logging.Logger,
+) (registeredSession, *deliveryRefusal, error) {
+	var registered registeredSession
+	for attempt := 1; attempt <= registrationPlanAttempts; attempt++ {
+		plan := store.InterestPlan{}
+		var err error
+		if attempt == 1 {
+			plan, err = d.registry.PlanInterest(ctx, body.SessionID, planned)
+		} else {
+			plan, err = d.registry.PlanInterestAfterConflict(ctx, body.SessionID, planned)
+		}
+		if err != nil {
+			return registeredSession{}, nil, err
+		}
+		registered.plan = plan
+		pass, refusal := d.consumers.register(registerCtx, body, plan.Topics)
+		if refusal != nil {
+			return registeredSession{}, refusal, nil
+		}
+		registered.delivery = pass.carrying(registered.delivery)
+		row, err := d.registry.UpsertPlanned(ctx, store.Interest{
+			SessionID: body.SessionID,
+			MachineID: machineID,
+			Dir:       body.Dir,
+		}, plan)
+		switch {
+		case err == nil:
+			registered.row = row
+			if slices.Equal(row.Topics, plan.Topics) {
+				return registered, nil, nil
+			}
+			logger.Warn("listener plans the session's interest again: the row it stored is not the one it filtered on",
+				slog.String("session_id", body.SessionID), slog.Int("plans", attempt))
+		case errors.Is(err, store.ErrInterestPlanConflict):
+			logger.Warn("listener plans the session's interest again: another writer stored the row",
+				slog.String("session_id", body.SessionID), slog.Int("plans", attempt))
+		default:
+			return registeredSession{}, nil, err
+		}
+	}
+	return registeredSession{}, nil, fmt.Errorf("write %s's interest record: %w after %d plans",
+		body.SessionID, store.ErrInterestPlanConflict, registrationPlanAttempts)
 }
 
 // subscribeHandler answers POST /v1/interests/subscribe. Its store work - the interest record's
@@ -1526,82 +1615,25 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		requested := append(slices.Clone(body.Topics), contracts.AgentSubject(body.SessionID))
 		// The topics that would deliver to no session are split off once, here
 		// (splitUncapturedTopics): they are neither planned, stored nor filtered on, and the
-		// loop below names each in its warning. The merge itself drops a private-subject topic
-		// from the plan (store.MergedTopics).
+		// loop below names each in its warning, after the private rule has had its say. The
+		// merge itself drops a private-subject topic from the plan (store.MergedTopics).
 		planned, uncaptured := splitUncapturedTopics(requested)
-		// Plan, filter and write are one loop, and it ends only when the topics the consumer was
-		// filtered on are the topics the row holds (store.InterestPlan). Two things can part
-		// them, and both are another writer storing this session's row in the seconds the
-		// consumer call takes: the write is refused the revision its plan read
-		// (store.ErrInterestPlanConflict), or it finds the row already holds everything the plan
-		// would add and stores nothing, leaving a row wider than the filter. Either way the
-		// route plans again from the row that is there, filters on that plan, and writes again.
-		// Answering 200 with the filter of an earlier plan would leave a topic the registration
-		// was answered 200 for out of the consumer until the session's next heartbeat, and every
-		// message published on it in that window undelivered.
-		var (
-			plan     store.InterestPlan
-			item     store.Interest
-			delivery sessionDeliveryOutcome
-			agreed   bool
-		)
-		for attempt := 1; attempt <= store.InterestPlanAttempts && !agreed; attempt++ {
-			var err error
-			if attempt == 1 {
-				plan, err = d.registry.PlanInterest(ctx, body.SessionID, planned)
-			} else {
-				plan, err = d.registry.PlanInterestAfterConflict(ctx, body.SessionID, planned)
-			}
-			if err != nil {
-				logger.Warn("listener could not plan the session's interest row",
-					slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
-				writeStoreError(ctx, w, err, http.StatusServiceUnavailable)
-				return
-			}
-			// The delivery decision comes before the write: a session is delivered to through its
-			// own consumer alone, so a registration this listener cannot give one is refused and
-			// must leave no interest row and no session entry behind - the row would make the
-			// listener deliver to a session nothing reaches, and the entry would say a session is
-			// here that receives nothing. The consumer is created, or has its filter set to the
-			// topics about to be stored, before the registration answers, so a message published
-			// on a newly followed stored topic after the answer is the consumer's to deliver.
-			var refusal *deliveryRefusal
-			delivery, refusal = d.consumers.register(r.Context(), body, plan.Topics)
-			if refusal != nil {
-				logger.Warn("listener refused a registration it can give no session consumer",
-					slog.String("session_id", body.SessionID), slog.String("reason", refusal.Reason), slog.Int("status", refusal.status))
-				writeJSON(w, refusal.status, refusal)
-				return
-			}
-			item, err = d.registry.UpsertPlanned(ctx, store.Interest{
-				SessionID: body.SessionID,
-				MachineID: machineID,
-				Dir:       body.Dir,
-			}, plan)
-			switch {
-			case err == nil:
-				agreed = slices.Equal(item.Topics, plan.Topics)
-			case errors.Is(err, store.ErrInterestPlanConflict):
-			default:
-				logger.Warn("listener upsert failed",
-					slog.String("session_id", body.SessionID),
-					slog.Any("topics", body.Topics),
-					slog.Int("plans", attempt),
-					slog.String("error", err.Error()))
-				writeStoreError(ctx, w, err, http.StatusServiceUnavailable)
-				return
-			}
-		}
-		if !agreed {
-			logger.Warn("listener upsert failed",
-				slog.String("session_id", body.SessionID),
-				slog.Any("topics", body.Topics),
-				slog.Int("plans", store.InterestPlanAttempts),
-				slog.String("error", store.ErrInterestPlanConflict.Error()))
-			writeStoreError(ctx, w, fmt.Errorf("write %s's interest record: %w after %d plans",
-				body.SessionID, store.ErrInterestPlanConflict, store.InterestPlanAttempts), http.StatusServiceUnavailable)
+		registered, refusal, err := d.registerSession(ctx, r.Context(), machineID, body, planned, logger)
+		if refusal != nil {
+			logger.Warn("listener refused a registration it can give no session consumer",
+				slog.String("session_id", body.SessionID), slog.String("reason", refusal.Reason), slog.Int("status", refusal.status))
+			writeJSON(w, refusal.status, refusal)
 			return
 		}
+		if err != nil {
+			logger.Warn("listener could not register the session's interest",
+				slog.String("session_id", body.SessionID),
+				slog.Any("topics", body.Topics),
+				slog.String("error", err.Error()))
+			writeStoreError(ctx, w, err, http.StatusServiceUnavailable)
+			return
+		}
+		item, plan, delivery := registered.row, registered.plan, registered.delivery
 		// A topic this registration did not store is named in a warning, with the rest of the
 		// registration stored, rather than refusing the registration whole: a session reads only
 		// what its own consumer holds and a refusal leaves it no consumer at all, while neither
@@ -1626,16 +1658,23 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		// the caller is there to read it: /v1/messages/publish refuses such a publish, and either
 		// plugin's explicit subscribe refuses such a topic in this warning's own words.
 		//
+		// The private rule is asked first, as the plugins' own refusal asks it
+		// (subscribeRefusesTopic in @legion/envoy-client's stream-topics.ts): a wildcard such as
+		// notifications.> or notifications.*.x reaches a private stream subject and is captured
+		// by no stream subject at all, and what it earns is the private warning. The uncaptured
+		// sentence tells such a caller to follow a notifications.team.<name> topic instead,
+		// which is no answer to a wildcard over every session's inbox.
+		//
 		// The roles are the last plan's, which decided the row that was stored.
 		warnings := make([]string, 0)
 		for _, topic := range requested {
-			if _, dropped := uncaptured[topic]; dropped {
-				warnings = append(warnings, contracts.UncapturedTopicRefusal(topic, body.SessionID))
-				continue
-			}
 			if bus.ReachesPrivateStreamSubject(body.SessionID, topic, plan.Roles) {
 				warnings = append(warnings, fmt.Sprintf("%s was not registered: it reaches a private stream subject (another session's inbox, a failed-delivery lane, or a Legion controller notice lane), and of those a session registers only its own agent subject, %s, and the notice lane of a project whose controller role it holds",
 					topic, contracts.AgentSubject(body.SessionID)))
+				continue
+			}
+			if _, dropped := uncaptured[topic]; dropped {
+				warnings = append(warnings, contracts.UncapturedTopicRefusal(topic, body.SessionID))
 			}
 		}
 		if len(warnings) > 0 {

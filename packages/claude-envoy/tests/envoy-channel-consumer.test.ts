@@ -3,6 +3,7 @@ import { rm } from "node:fs/promises"
 import { createServer, type Socket } from "node:net"
 import { join } from "node:path"
 import { agentSubject } from "@legion/contracts"
+import { consumerDelivery } from "@legion/envoy-client/test/subscribe-answer"
 import {
   type DeliveryRequest,
   EnvoyApiError,
@@ -33,12 +34,7 @@ const SESSION = "ses_claude"
 const DIRECT = agentSubject(SESSION)
 const STREAM = "stream-1"
 
-const CONSUMER = {
-  mode: "consumer",
-  subject: `notifications.envoy.deliver.${SESSION}`,
-  stream_id: STREAM,
-  gap: false,
-} as const
+const CONSUMER = consumerDelivery(SESSION, { streamID: STREAM })
 
 /** A peer session's message to this session, `label` naming its event. */
 function peerMessage(

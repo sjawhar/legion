@@ -10,6 +10,8 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import * as os from "node:os";
 import * as path from "node:path";
 import { deliverSubject, RelayHeader } from "@legion/envoy-client/consumer-delivery";
+import { consumerDelivery } from "@legion/envoy-client/test/subscribe-answer";
+import type { DeliveryAnswer } from "@legion/envoy-client/transport";
 import { Terminal } from "@xterm/headless";
 import { linkOmpNatives } from "./omp-natives";
 
@@ -88,37 +90,26 @@ export function serveStandin(
 export const STANDIN_STREAM_ID = "standin-stream";
 
 /**
- * The delivery answer a listener gives a registration it can give a consumer: the session's own
- * relay subject, which is the one path a message reaches it by (INFRA-771). A registration
- * answered without one is refused in the client (`parseSubscribeAnswer`), as the listener's own
- * refusal is, and leaves the session deaf until a later registration is accepted.
- */
-export interface ConsumerDeliveryAnswer {
-  readonly mode: "consumer";
-  readonly subject: string;
-  readonly stream_id: string;
-  readonly gap: boolean;
-}
-
-/**
  * What a registration answer carries beyond the interest: the consumer, on
  * `/v1/interests/subscribe`, and nothing on any other listener route, which answers an interest
- * alone. The session is the one the request names, `fallbackSessionID` when it names none.
+ * alone. The session is the one the request names, `fallbackSessionID` when it names none. The
+ * answer itself is `@legion/envoy-client/test/subscribe-answer`'s, which every stand-in listener
+ * in this repository builds its consumer answer with, so none of them drifts from what the
+ * client accepts: a registration answered without one is refused in the client
+ * (`parseSubscribeAnswer`), as the listener's own refusal is, and leaves the session deaf until
+ * a later registration is accepted.
  */
 export function deliveryFor(
   pathname: string,
   body: { readonly session_id?: unknown } | undefined,
   fallbackSessionID: string
-): { readonly delivery?: ConsumerDeliveryAnswer } {
+): { readonly delivery?: DeliveryAnswer } {
   if (pathname !== "/v1/interests/subscribe") return {};
   const named = typeof body?.session_id === "string" ? body.session_id : fallbackSessionID;
   return {
-    delivery: {
-      mode: "consumer",
-      subject: deliverSubject(named === "" ? fallbackSessionID : named),
-      stream_id: STANDIN_STREAM_ID,
-      gap: false,
-    },
+    delivery: consumerDelivery(named === "" ? fallbackSessionID : named, {
+      streamID: STANDIN_STREAM_ID,
+    }),
   };
 }
 

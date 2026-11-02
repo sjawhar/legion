@@ -105,6 +105,30 @@ func (o sessionDeliveryOutcome) relayed() bool {
 	return o.answer != nil && o.answer.Mode == deliveryModeConsumer
 }
 
+// carrying is what this pass of a registration answers once what an earlier pass of the same
+// registration learned is kept (subscribeHandler re-plans and registers again when another
+// writer stores the session's row in between). Two facts an earlier pass alone can hold:
+//
+//   - The gap. Only the pass that creates the consumer is told its start fell below the stream's
+//     first sequence (bus.SessionConsumers.Ensure); a later pass finds that consumer and reports
+//     none. A session that was away long enough to lose messages is told so by this answer and
+//     by nothing else, so the flag is true once any pass reported it.
+//   - The consumer itself, for a serving-port body. A refusal of one leaves register an empty
+//     outcome and no refusal, since its port is pushed to instead, and that would drop the
+//     consumer an earlier pass created from the answer.
+func (o sessionDeliveryOutcome) carrying(earlier sessionDeliveryOutcome) sessionDeliveryOutcome {
+	if o.answer == nil {
+		return earlier
+	}
+	if earlier.answer != nil && earlier.answer.Gap != nil && *earlier.answer.Gap {
+		gap := true
+		answer := *o.answer
+		answer.Gap = &gap
+		o.answer = &answer
+	}
+	return o
+}
+
 // sessionRelay is what the relay of session consumers hears from registrations.
 type sessionRelay interface {
 	// registered reports a registration of sessionID that recorded consumer delivery on its entry.

@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/session"
+	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -375,6 +376,104 @@ func TestSessionConsumerFiltersAgainWhenItsWriteLosesTheCompareAndSwap(t *testin
 	// A message on the topic the lost write would have left out of the filter is the consumer's.
 	rig.store(t, "notifications.dispatch.issue.CAS-2.comment")
 	rig.awaitPending(t, sessionID, 1)
+}
+
+// The gap a registration reports is the gap any pass of it found, and the pass that finds one is
+// the pass that creates the consumer: a later pass finds that consumer and reports none
+// (bus.SessionConsumers.Ensure). A session returning from a long absence, whose row another
+// writer rewrites while it registers, is told by this answer and by nothing else that messages
+// it would have been delivered are gone, so the flag has to survive the re-plan. The re-plan
+// here is the refused compare-and-swap: the unsubscribe in the window removes a topic the plan
+// merged, so the write at that plan's revision is refused and the route plans, filters and
+// writes again.
+func TestSessionConsumerCarriesTheGapAndTheUnsubscribeAcrossARefusedWrite(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+	const (
+		sessionID = "ses_gap_carry"
+		kept      = "notifications.dispatch.issue.GAP-1.>"
+		dropped   = "notifications.dispatch.issue.GAP-2.>"
+	)
+	// A row the registration will merge, and no consumer yet: the first pass creates it.
+	if _, err := rig.harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{kept, dropped}); err != nil {
+		t.Fatalf("seed the session's interest row: %v", err)
+	}
+	// Two messages gone from the stream's head, as aged-out ones are, so a resume point below
+	// its first sequence is a gap.
+	gone := []uint64{rig.store(t, kept), rig.store(t, kept)}
+	rig.store(t, kept)
+	for _, seq := range gone {
+		if err := rig.harness.client.JS().DeleteMsg(bus.Stream, seq); err != nil {
+			t.Fatalf("delete the stored message at %d: %v", seq, err)
+		}
+	}
+	registration := `{"session_id":"` + sessionID + `","self_subscribed":true,"topics":["` + kept + `"],
+		"delivery":{"consumer":true,"epoch":"e","resume":{"stream_id":"` + rig.streamID(t) + `","seq":` + jsonUint(gone[0]) + `}}}`
+
+	// The unsubscribe lands between the first pass's plan and its write, which is what refuses
+	// that write. Once: the second pass must run against a settled row.
+	fired := false
+	rig.deps.consumers.beforeRegister = func() {
+		if fired {
+			return
+		}
+		fired = true
+		if err := rig.harness.registry.Remove(context.Background(), sessionID, []string{dropped}); err != nil {
+			t.Errorf("unsubscribe from %s: %v", dropped, err)
+		}
+	}
+	answer := rig.subscribe(t, registration)
+	rig.deps.consumers.beforeRegister = nil
+
+	if answer.Delivery == nil || answer.Delivery.Gap == nil || !*answer.Delivery.Gap {
+		t.Fatalf("answer %s, want gap true: the pass that created the consumer found one, and the re-plan must not drop it", answer.raw)
+	}
+	stored, err := rig.harness.registry.Get(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("read the stored interest row: %v", err)
+	}
+	if slices.Contains(stored.Topics, dropped) {
+		t.Fatalf("stored topics %v; the unsubscribe removed %s, so the registration must not write it back", stored.Topics, dropped)
+	}
+	want := slices.Compact(slices.Sorted(slices.Values(sessionConsumerFilter(sessionID, stored.Topics))))
+	if got := rig.filters(t, sessionID); !slices.Equal(got, want) {
+		t.Fatalf("consumer filters %v, want %v: the filter is the plan that was stored", got, want)
+	}
+}
+
+// A registration whose row is rewritten under every plan it makes is answered the
+// bus-unavailable 503 and writes nothing: the plugin's next heartbeat registers again, rather
+// than this one spinning against a writer that keeps winning (registrationPlanAttempts).
+func TestSessionConsumerRefusesARegistrationEveryPlanOfWhichIsOutrun(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+	const sessionID = "ses_plan_exhausted"
+	// Every pass's plan is outrun: the writer stores another topic between the plan and its
+	// write, so that write is refused the revision its plan read.
+	passes := 0
+	rig.deps.consumers.beforeRegister = func() {
+		passes++
+		topic := fmt.Sprintf("notifications.dispatch.issue.OUTRUN-%d.>", passes)
+		if _, err := rig.harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{topic}); err != nil {
+			t.Errorf("store %s under the registration's plan: %v", topic, err)
+		}
+	}
+	recorder := httptest.NewRecorder()
+	rig.mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe",
+		strings.NewReader(`{"session_id":"`+sessionID+`","self_subscribed":true,"topics":["notifications.team.outrun"],"delivery":{"consumer":true,"epoch":"e"}}`)))
+	rig.deps.consumers.beforeRegister = nil
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body = %s", recorder.Code, recorder.Body.String())
+	}
+	if passes != registrationPlanAttempts {
+		t.Fatalf("the registration made %d plans, want %d", passes, registrationPlanAttempts)
+	}
+	stored, err := rig.harness.registry.Get(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("read the stored interest row: %v", err)
+	}
+	if slices.Contains(stored.Topics, "notifications.team.outrun") {
+		t.Fatalf("stored topics %v, want none of the refused registration's own", stored.Topics)
+	}
 }
 
 func TestSessionConsumerOverlappingFollowsAreAccepted(t *testing.T) {

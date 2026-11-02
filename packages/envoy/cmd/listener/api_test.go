@@ -3014,6 +3014,56 @@ func TestSubscribeHandlerDropsAnUncapturedNotificationTopicByName(t *testing.T) 
 	}
 }
 
+// Which warning a dropped topic earns, sentence for sentence. A wildcard such as
+// notifications.> is both uncaptured (no stream subject captures it, read literally) and a reach
+// into every session's inbox, and what it earns is the private one: the uncaptured sentence
+// tells its caller to follow a notifications.team.<name> topic instead, which is no answer to a
+// wildcard over every private subject there is. The hosts' own refusal asks the two rules in
+// that order too (subscribeRefusesTopic in @legion/envoy-client), so a caller reads one rule
+// wherever it is told.
+func TestSubscribeHandlerNamesThePrivateRuleBeforeTheUncapturedOne(t *testing.T) {
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	handler := subscribeHandler(&listenerDeps{registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}, "test-machine", logging.New("test"))
+	private := func(topic, sessionID string) string {
+		return fmt.Sprintf("%s was not registered: it reaches a private stream subject (another session's inbox, a failed-delivery lane, or a Legion controller notice lane), and of those a session registers only its own agent subject, %s, and the notice lane of a project whose controller role it holds",
+			topic, contracts.AgentSubject(sessionID))
+	}
+	for index, tc := range []struct {
+		topic string
+		want  func(topic, sessionID string) string
+	}{
+		{topic: "notifications.>", want: private},
+		{topic: "notifications.*.x", want: private},
+		{topic: "notifications.agent.ses_other", want: private},
+		{topic: "notifications.lxspec.probe.all", want: contracts.UncapturedTopicRefusal},
+		{topic: "notifications.teamx.deploy", want: contracts.UncapturedTopicRefusal},
+	} {
+		t.Run(tc.topic, func(t *testing.T) {
+			sessionID := fmt.Sprintf("ses_warned_%d", index)
+			encoded, err := json.Marshal(map[string]any{
+				"session_id": sessionID, "topics": []string{"notifications.team.kept", tc.topic},
+				"self_subscribed": true, "delivery": map[string]any{"consumer": true, "epoch": "e"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(string(encoded))))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+			}
+			var answer interestSubscribeAnswer
+			if err := json.NewDecoder(recorder.Body).Decode(&answer); err != nil {
+				t.Fatalf("decode the answer: %v", err)
+			}
+			want := tc.want(tc.topic, sessionID)
+			if len(answer.Warnings) != 1 || answer.Warnings[0] != want {
+				t.Fatalf("warnings = %q, want only %q", answer.Warnings, want)
+			}
+		})
+	}
+}
+
 // interestSession is the session the three registration tests below register topics for, and
 // interestIssueTopic a Dispatch issue topic it follows.
 const (

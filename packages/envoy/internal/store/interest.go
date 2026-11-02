@@ -93,16 +93,14 @@ func MergedTopics(sessionID string, roles []string, cur []string, topics []strin
 // the listener's registration route builds the filter from the plan and hands the same plan back
 // to Registry.UpsertPlanned, so no second read can decide the row differently from the filter.
 //
-// Requested is what the registration asked for, and Revision the bucket revision of the row the
-// plan merged it into, 0 for a session with no row: Registry.UpsertPlanned writes at that
-// revision and refuses the write when another writer has stored the row since
-// (ErrInterestPlanConflict), and the route then plans again from Requested
-// (Registry.PlanInterestAfterConflict), filters the consumer on the new plan and writes that, so
-// an unsubscribe that landed in the seconds between a plan and its write is not undone and the
-// filter is never left standing for a plan the row does not hold.
+// Revision is the bucket revision of the row the plan merged its topics into, 0 for a session
+// with no row: Registry.UpsertPlanned writes at that revision and refuses the write when another
+// writer has stored the row since (ErrInterestPlanConflict), and the route then plans again from
+// the topics it asked for (Registry.PlanInterestAfterConflict), filters the consumer on the new
+// plan and writes that, so an unsubscribe that landed in the seconds between a plan and its
+// write is not undone and the filter is never left standing for a plan the row does not hold.
 type InterestPlan struct {
-	Roles     []string
-	Topics    []string
-	Requested []string
-	Revision  uint64
+	Roles    []string
+	Topics   []string
+	Revision uint64
 }
