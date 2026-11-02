@@ -101,8 +101,8 @@ type IdleRoot struct {
 // which is no pod of the workflow's to release.
 //
 // It is a record type rather than a store type because the rule that reads it is the workflow's
-// (workflow.IdleRelease) and the store is what fills it: the workflow reaches Postgres through
-// this package alone.
+// (workflow.IdleRelease) and the store is what fills it, so neither of the two imports the other
+// for it.
 type IdleView struct {
 	Issue       string
 	Tree        string

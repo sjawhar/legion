@@ -55,10 +55,11 @@ const (
 	IdleHoldBundleTooLarge
 	// IdleHoldBundleSave: the bundle could not be built or could not be saved, so the pod is kept.
 	IdleHoldBundleSave
-	// IdleHoldOvertaken: the pod was given work after its release was marked and before the
-	// first role process of the pod was stopped — a turn started, a claim was resumed, or a
-	// task, notice, message or start reached a role of the pod — so one of the release's own
-	// role stops cancelled it and the roles go on in the same pod.
+	// IdleHoldOvertaken: the pod was given work after its release was marked — a claim of it was
+	// started or resumed, or holds a process, at any of the release's role stops, or, at the
+	// first of them, before any role process was stopped, a task, notice, message or start
+	// reached a role of the pod — so that role stop cancelled the release and the roles go on in
+	// the same pod.
 	IdleHoldOvertaken
 	// IdleHoldUnauthorized: the store no longer authorized the teardown when it asked — the run
 	// the release was taken against has moved on, the issue has left the workflow, its tree

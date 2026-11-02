@@ -491,6 +491,6 @@ package api
 // daemon. No session-facing body carries the new `suspendedBy` value: the state's
 // `strandedClaims` keeps the three keys it has had since 23, and an operator reads a released
 // claim apart from a suspended one on the operator claim routes, which no plugin calls. This
-// change adds six store migrations. (This branch took 47; main then landed 45, which put #2538
+// change adds eight store migrations. (This branch took 47; main then landed 45, which put #2538
 // on 46 and #2539 on 47, so this branch takes the number above them, as the collision note says.)
 const DaemonAPIVersion = 48

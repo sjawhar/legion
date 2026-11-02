@@ -73,11 +73,11 @@ type wakeReport struct {
 // waits for it: the 404 it was raised beside is answered whatever the bus does, and is answered
 // without waiting for it (reportRoleWake).
 //
-// Each attempt is published under a dedupe key of its own, as the stream keeps no duplicate
-// window for these: an attempt the stream stored and failed to acknowledge is reported twice,
-// and a wake the daemon has taken already is taken no second time (its mark's key is the
-// report's event id, and the role and agent reports of one message carry the same name
-// whichever attempt the daemon reads).
+// Every attempt publishes the one envelope built below, under the one event id and dedupe key,
+// as the stream keeps no duplicate window for these: an attempt the stream stored and failed to
+// acknowledge is reported twice, and a wake the daemon has taken already is taken no second time
+// (its mark's key is the report's event id, which every attempt of one report carries, and the
+// role and agent reports of one message carry the same name whichever attempt the daemon reads).
 func publishWakeReport(lifetime context.Context, client *bus.Client, logger *logging.Logger, report wakeReport) {
 	if client == nil {
 		return
