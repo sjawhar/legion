@@ -14061,7 +14061,7 @@ var messageValidation = {
   },
   message: "issue is required unless in_reply_to names a message delivered to this session, which is the one message with no issue."
 };
-var readOwner = documentOwnerValidation(true);
+var readOwner = documentOwnerValidation(false);
 var readValidation = {
   check: (value) => {
     const input = value;
@@ -14069,7 +14069,7 @@ var readValidation = {
       return readOwner.check(value);
     return input.issue === undefined && input.project === undefined && input.artifact === undefined && input.ref === undefined;
   },
-  message: `${readOwner.message} message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.`
+  message: "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one. " + "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it."
 };
 var ISSUE_COMPONENTS_MODES = ["inherit", "explicit", "none"];
 function componentsArgument(z) {
@@ -14452,7 +14452,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "A block read prints `Block:`, `Document:`, `Changed in version:` and `Text:`, then those two sections; a pinned one adds " + "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " + "reads `No block <id> in <document>.` " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
+    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), project plus artifact, or project alone, which lists the project's documents on no issue and nothing more; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An issue read lists every document, picture and file the issue holds under `Documents:`, each by slug, filename and kind. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "A block read prints `Block:`, `Document:`, `Changed in version:` and `Text:`, then those two sections; a pinned one adds " + "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " + "reads `No block <id> in <document>.` " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -18690,7 +18690,7 @@ async function resolveArtifact(client, owner, artifactReference, { canonical = f
     const artifacts = routed === undefined ? unlinked : [routed, ...unlinked.filter((candidate) => candidate.id !== routed.id)];
     return {
       owner,
-      artifact: artifactByReference(artifacts, artifactReference, "project", canonical)
+      artifact: artifactByReference(artifacts, artifactReference, owner, canonical)
     };
   }
   const issue = await client.getIssue(owner.issue);
@@ -18698,10 +18698,13 @@ async function resolveArtifact(client, owner, artifactReference, { canonical = f
   if (artifactReference === undefined || artifactReference === "spec") {
     artifact = issue.artifacts.find((candidate) => candidate.primary || candidate.id === issue.primary_artifact_id);
   } else {
-    artifact = artifactByReference(issue.artifacts, artifactReference, "issue", canonical);
+    artifact = artifactByReference(issue.artifacts, artifactReference, { kind: "issue", issue: issue.key }, canonical);
   }
   if (!artifact) {
-    throw new DocumentNotFoundError(documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, "issue"));
+    throw new DocumentNotFoundError(documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, {
+      kind: "issue",
+      issue: issue.key
+    }));
   }
   return { owner, issue, artifact };
 }
@@ -18722,9 +18725,67 @@ async function documentTargets(client, resolution) {
 }
 var documentHintLimit = 8;
 function documentReferenceProblem(reference, documents, owner, ambiguous = false) {
-  const hints = documents.slice(0, documentHintLimit).map((document) => `${document.slug} (${document.name})`);
+  const scope = owner.kind;
+  const busy = !ambiguous && documents.length > documentHintLimit;
+  const hints = (busy ? documentsNearest(reference, documents) : documents).slice(0, documentHintLimit).map((document) => `${document.slug} (${document.name})`);
   const list = hints.length === 0 ? "none" : hints.join(", ");
-  return ambiguous ? `"${reference}" names ${documents.length} documents on this ${owner}; use a slug: ${list}` : `document "${reference}" not found by slug; this ${owner}'s documents: ${list}`;
+  if (busy) {
+    const read = owner.kind === "issue" ? `dispatch read --issue ${owner.issue}` : `dispatch read --project ${owner.project}`;
+    const counted = documents.every((document) => (document.kind ?? "doc") === "doc") ? "documents" : "documents and files";
+    return `document "${reference}" not found by slug; this ${scope}'s ${documents.length} ${counted} include: ${list}; ${read} lists them all`;
+  }
+  return ambiguous ? `"${reference}" names ${documents.length} documents on this ${scope}; use a slug: ${list}` : `document "${reference}" not found by slug; this ${scope}'s documents: ${list}`;
+}
+function documentsNearest(reference, documents) {
+  return documents.map((document, index) => ({
+    document,
+    index,
+    ...documentCloseness(reference, document.slug, document.name)
+  })).sort((a, b) => {
+    if (a.near !== b.near)
+      return a.near ? -1 : 1;
+    if (a.near && a.distance !== b.distance)
+      return a.distance - b.distance;
+    return b.index - a.index;
+  }).map(({ document }) => document);
+}
+function documentListLines(documents) {
+  return documents.length === 0 ? ["- none"] : documents.map((document) => `- ${document.slug} (${document.name}, ${document.kind})`);
+}
+function documentCloseness(reference, slug, name) {
+  const wanted = [...reference.replace(/[A-Z]/g, (letter) => letter.toLowerCase())];
+  const limit = Math.max(2, Math.floor(wanted.length / 3));
+  let distance = Number.POSITIVE_INFINITY;
+  for (const candidate of [slug, name]) {
+    const label = [...candidate.replace(/[A-Z]/g, (letter) => letter.toLowerCase())];
+    let edits = boundedEditDistance(wanted, label, limit);
+    if (wanted.length >= 4 && label.join("").includes(wanted.join("")) || label.length >= 4 && wanted.join("").includes(label.join(""))) {
+      edits = Math.abs(label.length - wanted.length);
+    } else if (edits > limit) {
+      continue;
+    }
+    distance = Math.min(distance, edits);
+  }
+  return distance === Number.POSITIVE_INFINITY ? { distance: limit + 1, near: false } : { distance, near: true };
+}
+function boundedEditDistance(a, b, limit) {
+  if (Math.abs(a.length - b.length) > limit)
+    return limit + 1;
+  let previous = Array.from({ length: b.length + 1 }, (_, j) => j);
+  let current = new Array(b.length + 1).fill(0);
+  for (let i = 1;i <= a.length; i++) {
+    current[0] = i;
+    let smallest = i;
+    for (let j = 1;j <= b.length; j++) {
+      const substitution = previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1);
+      current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, substitution);
+      smallest = Math.min(smallest, current[j]);
+    }
+    if (smallest > limit)
+      return limit + 1;
+    [previous, current] = [current, previous];
+  }
+  return Math.min(previous[b.length], limit + 1);
 }
 var askHintLimit = 8;
 function askIDInputProblem(asks, scope) {
@@ -18887,6 +18948,8 @@ function issueSummary(issue, events, references, graph, linkBase, titles) {
     ...specApproval === undefined ? [] : [`Spec ${specApproval.replace(/^Approval/, "approval")}`],
     "External links:",
     ...issue.external_links.length === 0 ? ["- none"] : issue.external_links.map((link) => `- ${link.url}${link.kind === undefined ? "" : ` (${link.kind})`}`),
+    "Documents:",
+    ...documentListLines(issue.artifacts ?? []),
     "Open asks:",
     ...asks.length === 0 ? ["- none"] : asks.map((ask) => `- ${ask.id}: ${ask.question}`),
     "References:",
@@ -20606,6 +20669,19 @@ ${handoff.body}`,
             ...ref.owner.kind === "project" ? { project: ref.owner.project } : { issue: ref.owner.issue },
             block: incoming.node.block_id ?? ref.block
           }
+        };
+      }
+      const projectOwner = documentOwner();
+      if (projectOwner.kind === "project" && optionalString(args, "artifact") === undefined) {
+        const documents = await client.listProjectArtifacts(projectOwner.project, true);
+        return {
+          text: [
+            `Project: ${projectOwner.project}`,
+            "Documents:",
+            ...documentListLines(documents)
+          ].join(`
+`),
+          details: { project: projectOwner.project }
         };
       }
       const documentReference = optionalString(args, "artifact");
