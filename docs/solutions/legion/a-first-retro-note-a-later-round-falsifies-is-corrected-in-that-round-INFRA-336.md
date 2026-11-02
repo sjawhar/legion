@@ -48,10 +48,12 @@ The case that reconciles them is the one where the falsifying round is still ope
 
 INFRA-336's first retro wrote five pages. A later round measured one of their claims false: the
 page on a field that is load-bearing through its bytes said `previousHandoff` is "the commit that
-carried the role's previous handoff of the phase", and the revset the prompt gives answers retro's
-own removal commit after a retro. The reviewer's prose commit `59a4e931` corrected the prompt, the
-four role residues, the changelog fragment, `score.ts`'s doc comment **and that retro page**, in
-one commit at the head that ships.
+carried the role's previous handoff of the phase", while the revset the prompt then gave answered
+retro's own removal commit after a retro. The reviewer's prose commit `59a4e931` corrected the
+prompt, the four role residues, the changelog fragment, `score.ts`'s doc comment **and that retro
+page**, in one commit at the head that ships. Both the field and that revset are gone since
+sjawhar/legion#2354, which made each handoff a versioned record on its Dispatch issue; the rule
+above is about correcting a falsified page, not about the field.
 
 The second retro therefore edited none of the five. It re-read them, found one more claim that the
 rounds since had narrowed — the first page calls the transcript provenance check binary, and a

@@ -26,20 +26,17 @@ const PassGeneration int64 = -1
 // What a settlement comes to is the base branch's required set's to say
 // (record.PullRequest.Required, HeadVerdict); the runs of a workflow the base branch requires are
 // read apart (record.PullRequest.Workflows), since no settlement carries them by workflow. The
-// daemon takes a settlement for the head when it is the head's own or a head the current one
-// replaced through pushes that each changed only .legion/ (SettlementFor), since a handoff push
-// can carry GitHub's skip-checks trailer and run no CI; a settlement of another head than the
-// recorded one starts the fence afresh. A check_run delivery the listener lost is recovered by
-// Dispatch's webhook redelivery sweep (packages/envoy/internal/dispatch/redeliver: it runs only
-// where Dispatch has the App key and NATS, every two minutes, and asks GitHub again for each
-// delivery GitHub recorded as failed until GitHub records it OK or 72 hours after its first failed
-// attempt; its listing starts at the last hour while it runs without a gap, at its stored cursor
-// after one, and 72 hours back on a first sweep with no cursor), by the check's next run, or, while
-// no settlement stands for the head, by the pass's read, which also sees the runs with no
-// pull_requests the listener never records. Nothing corrects the rest: a deleted check's failure
-// stands for the life of the head and of the handoff heads after it, and a rerun on a head a
-// settlement stands for whose completion is never observed holds the last verdict until the check
-// runs again.
+// daemon takes a settlement only for the head itself (SettlementFor); a settlement of another head
+// than the recorded one starts the fence afresh. A check_run delivery the listener lost is
+// recovered by Dispatch's webhook redelivery sweep (packages/envoy/internal/dispatch/redeliver: it
+// runs only where Dispatch has the App key and NATS, every two minutes, and asks GitHub again for
+// each delivery GitHub recorded as failed until GitHub records it OK or 72 hours after its first
+// failed attempt; its listing starts at the last hour while it runs without a gap, at its stored
+// cursor after one, and 72 hours back on a first sweep with no cursor), by the check's next run,
+// or, while no settlement stands for the head, by the pass's read, which also sees the runs with
+// no pull_requests the listener never records. Nothing corrects the rest: a deleted check's
+// failure stands for the life of the head, and a rerun on a head a settlement stands for whose
+// completion is never observed holds the last verdict until the check runs again.
 type SettlementCandidate struct {
 	// Head is the commit the settlement is for, which need not be the pull request's head
 	// (SettlementFor).
