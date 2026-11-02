@@ -1,0 +1,3 @@
+kind: Added
+body: |-
+  `dispatch comment --artifact <file>` with no `--quote` comments on an uploaded file that is not a document, at its latest version or the one `--version` (or a `@vN` ref) names; `--box left,top,width,height` comments on part of a picture, and a box outside the picture is refused before anything is sent. `dispatch doc-read` of a file lists its open and resolved threads after the file, each with its version and box.

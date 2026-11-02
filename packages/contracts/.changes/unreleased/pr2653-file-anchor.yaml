@@ -1,0 +1,3 @@
+kind: Added
+body: |-
+  `Anchor` gains `kind` (`"file"`) and `box` (`AnchorBox`: `left`, `top`, `width`, `height`, fractions of a picture), and `AnchorInput` a third form, `{ artifact, version?, box? }`, for a comment on an uploaded file or on part of a picture. `CommentEventPayloadSchema` keeps the anchor's `kind` and `box`, which it used to strip. `dispatch_comment` takes `box` (`left,top,width,height`) and `version`.
