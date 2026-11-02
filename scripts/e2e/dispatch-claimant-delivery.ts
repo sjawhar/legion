@@ -27,15 +27,20 @@ const origin = new URL(dispatchUrl).origin;
  *  missing from the settle window is one this binary did not publish. A new comment's copy for a
  *  session its mention resolved to is the exception: while the mention's send is still pending the
  *  outbox holds that copy back, defers the event two seconds and re-checks it on its next
- *  five-second tick, so the mention cases listen `mentionWaitMs` instead. */
+ *  five-second tick, so the mention cases listen `mentionWaitMs` instead: one take-over window
+ *  (`mentionSettleMs`, below) before the attempt settles, then that defer and tick. */
 const publishWaitMs = 10_000;
 const settleMs = 2_000;
-const mentionWaitMs = 15_000;
+const mentionWaitMs = 35_000;
 /** How long a mention's delivery row may stay `pending` after the comment's 201. The comment
- *  answers every mention attempt pending, and its sender sends after the response: one listener
- *  call, bounded by the listener client's 5-second window, then the settle. Ten seconds is two of
- *  those windows; a row still pending past it is a send this binary never settled. */
-const mentionSettleMs = 10_000;
+ *  answers every mention attempt pending, and its sender sends after the response. A send the
+ *  listener answers "no live session", as the refused cases below make it, is a listener
+ *  take-over's answer: the sender tries again inside `listenerTakeoverWindow` (12 s,
+ *  packages/envoy/internal/dispatch/api/envoy_resolve.go) and settles with the last try's
+ *  outcome, so the row settles about one window after the 201 rather than one listener call
+ *  after it. Twenty seconds is that window, the listener client's five, and margin; a row still
+ *  pending past it is a send this binary never settled. */
+const mentionSettleMs = 20_000;
 
 const person = "alice";
 const sessionP = "claimant-e2e-p";

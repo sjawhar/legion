@@ -601,8 +601,10 @@ func (s *server) recordCommentDeliveryResolution(
 // resume binds the claim (claimCommentDeliveryAttempt): the attempt the mention sender's lane was
 // queued for and the claim this process has held on it since its comment committed, an owed
 // attempt's number for the delivery sweep, and nothing for a Retry. takeover is the pacing the
-// sends start in; every caller starts a window of its own, since a mention's sends run after the
-// comment's response rather than inside it.
+// sends start in. A send the comment's own lane makes carries on in the window its mention's
+// resolution before the transaction opened (resolveThroughTakeover, mentionSend.takeover), so a
+// resolution that waited a take-over out is not given a second window and the comment costs one
+// in all, now spent after its response rather than inside it; every other caller starts one.
 //
 // A send that meets a listener take-over tries again under the attempt it claimed
 // (takeoverRetry.retry): it resolves again only the recipient the attempt names - the session its
