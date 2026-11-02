@@ -55,14 +55,14 @@
 //     call's working directory (then its `cd`, as the call will) and environment, its
 //     here-document still on stdin and without its `2>&1` and its pipe stage, and reviews the
 //     JSON it prints. The reads (the dry run, and the `cd`'s `pwd -P` probe) take at most half
-//     the call's deadline: each run is cut at 20 s, or sooner when that half ends sooner, and a
-//     run cut there is run once more with what is left of that half, when at least 2 s is
-//     (`DRY_RUN_TIMEOUT_MS`). A dry-run that fails, times out again or prints no JSON object
-//     is recorded as `error` and the call runs (the CLI refuses arguments it cannot parse,
-//     before it sends anything); a dry run that timed out tells the agent it contacts no
-//     Dispatch server, so the machine was busy, and to read back what the write posted. A
-//     `dispatch` command with `--dry-run` or `--help` sends nothing and is not
-//     reviewed. An upload given with `--path` prints the path, not the text. Every file whose
+//     the call's deadline: the first run of each is cut at 20 s, or sooner when that half ends
+//     sooner, and a run cut there is run once more with what is left of that half, when at
+//     least 2 s of it is left (`DRY_RUN_TIMEOUT_MS`). A dry-run that fails, times out again or
+//     prints no JSON object is recorded as `error` and the call runs (the CLI refuses arguments
+//     it cannot parse, before it sends anything); a dry run that timed out tells the agent it
+//     contacts no Dispatch server, so the likely cause is a busy machine, and to read back what
+//     the write posted. A `dispatch` command with `--dry-run` or `--help` sends nothing and is
+//     not reviewed. An upload given with `--path` prints the path, not the text. Every file whose
 //     text the write posts, that path and each `--<field>-file`, is read in place before the
 //     model is asked, and the call runs as written. The model reviews those bytes (an upload's
 //     as `content`), and the marker binds the sha256 of each file in argv order. The CLI reads
@@ -318,13 +318,13 @@ const INDIRECT_FLAGS = ["--name-file", "--path-file"];
 const NO_SEND_FLAGS = ["--dry-run", "--help"];
 const REBUTTAL_KEY = "advisor_rebuttal";
 const REBUTTAL_FLAG = "--advisor-rebuttal";
-// A read script (the dry run, and the `cd`'s `pwd -P` probe) contacts no Dispatch server: what
-// slows it is a busy machine. Its first run is cut at DRY_RUN_TIMEOUT_MS, above every dry run the
-// gate saw finish in the week of 2026-10-27 (p99 7.2 s, longest 12.3 s, under a load average of
-// six runnable processes per core). A run cut there is run once more with what is left of the
-// reads' share of the call's deadline (READ_SHARE), when that is at least MIN_RETRY_MS; the
-// review keeps the rest, which at the 90 s default is 45 s, above the p95 of a reviewed call's
-// whole gate time (42 s, its dry run included).
+// A read script (the dry run, and the `cd`'s `pwd -P` probe) contacts no Dispatch server, so a
+// slow one most likely means a busy machine. Its first run is cut at DRY_RUN_TIMEOUT_MS, above
+// every dry run the gate saw finish on a shared dev box in the week of 2026-10-27 (p99 7.2 s,
+// longest 12.3 s; that box ran at about six runnable processes per core while it was measured).
+// A run cut there is run once more with what is left of the reads' share of the call's deadline
+// (READ_SHARE), when that is at least MIN_RETRY_MS; the review keeps the rest, which at the 90 s
+// default is 45 s, above the p95 of a reviewed call's whole gate time (42 s, its dry run included).
 export const DRY_RUN_TIMEOUT_MS = 20_000;
 const READ_SHARE = 0.5;
 const MIN_RETRY_MS = 2_000;

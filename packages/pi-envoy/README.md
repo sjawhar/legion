@@ -314,10 +314,11 @@ Every other Dispatch command is outside the gate, and its text posts unreviewed:
 `dispatch issue-update --reason`, `dispatch resolve-ask --reason` and `dispatch suggest`.
 
 The gate reads the arguments from the command's own `--dry-run`. The dry run sends nothing and
-contacts no Dispatch server, so only a busy machine slows it. The reads, the dry run and the
-`cd`'s `pwd -P` probe, take at most half the call's deadline: each run is cut at 20 s, or sooner
-when that half ends sooner, and a run cut there is run once more with what is left of that half,
-when at least 2 s is left. The review keeps the other half. An upload that reads its name
+contacts no Dispatch server, so a slow one most likely means a busy machine. The reads, the dry
+run and the `cd`'s `pwd -P` probe, take at most half the call's deadline: the first run of each
+is cut at 20 s, or sooner when that half ends sooner, and a run cut there is run once more with
+what is left of that half (25 s at the 90 s default), when at least 2 s of it is left. The
+review keeps the other half. An upload that reads its name
 from a file (`--name-file`) is decided from the name the dry run prints. `--path-file` is refused:
 its content names a file the gate does not read before Dispatch opens it. An upload whose name or
 path holds an expansion (`"$NAME"`) is outside the form the gate reads. The gate reads each file
