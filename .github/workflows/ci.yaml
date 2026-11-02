@@ -609,6 +609,8 @@ jobs:
               - 'packages/contracts/src/**'
               # src/__tests__/delivery.test.ts:16-17 and dispatch-config.test.ts:5.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
+              # src/__tests__/transport.test.ts:13.
+              - 'packages/contracts/fixtures/envoy-session-no-interests.json'
               - 'packages/contracts/fixtures/dispatch-public-url.json'
               # The Go copy its test holds the TypeScript to: src/__tests__/askgate-new-asks.test.ts
               # reads the Dispatch server's decision-block table, which the Go API test reads too.
@@ -783,12 +785,13 @@ jobs:
               # The pmdoc fixture check and pmdoc's tests run pmdoc/gen, which imports the editor
               # (internal/dispatch/pmdoc/update_test.go:236-239).
               - 'packages/proof-editor/**'
-              # Fixtures its Go tests read: cmd/listener/api_test.go:191,
+              # Fixtures its Go tests read: cmd/listener/api_test.go:191,3017,
               # internal/contracts/dedupe_test.go:14, golden_test.go:72,
               # internal/dispatch/api/delivery_live_diff_test.go:982,1011,
               # internal/dispatch/docs/approval_carry_test.go:26,
               # internal/cistore/settlement_fixture_test.go:56.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
+              - 'packages/contracts/fixtures/envoy-session-no-interests.json'
               - 'packages/contracts/fixtures/dedupe-keys.json'
               - 'packages/contracts/fixtures/github-envelopes/**'
               - 'packages/contracts/fixtures/live/**'
@@ -829,8 +832,9 @@ jobs:
               - '.github/workflows/ci.yaml'
               - *go_workspace
               - 'packages/envoy/**'
-              # The fixture cmd/listener/api_test.go:191,436,480 reads.
+              # The fixtures cmd/listener/api_test.go:191,436,480 and :3017 read.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
+              - 'packages/contracts/fixtures/envoy-session-no-interests.json'
             # The pmdoc race job: the closure of `go test -race ./internal/dispatch/pmdoc/...`,
             # and the Bun install its tests need. pmdoc's tests run pmdoc/gen, which imports the
             # proof editor (internal/dispatch/pmdoc/update_test.go:236-239,
@@ -978,8 +982,9 @@ jobs:
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/internal/testpg/*'
               - 'packages/envoy/internal/webhook/testdata/**'
-              # cmd/listener/api_test.go:191,436,480, which the soak's run compiles too.
+              # cmd/listener/api_test.go:191,436,480 and :3017, which the soak's run compiles too.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
+              - 'packages/contracts/fixtures/envoy-session-no-interests.json'
             # `go test -tags multiprocess ./cmd/broker`, and the agent-secrets binary
             # cmd/broker/outage_test.go:317-318 builds.
             broker_multiprocess:
