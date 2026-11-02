@@ -540,7 +540,7 @@ func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*cha
 		case forward.err != nil:
 			send.answer = failedAnswer(forward.err)
 		default:
-			send.answer = forward.send(sender, routed)
+			send.answer = forward.send(ctx, deps, sender, routed)
 		}
 		inflight = append(inflight, c)
 	}

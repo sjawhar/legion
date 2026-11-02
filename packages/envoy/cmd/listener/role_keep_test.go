@@ -764,9 +764,9 @@ func TestAKeptRoleMessageCarriesTheSenderThePublishStamped(t *testing.T) {
 	}
 }
 
-// A role token POST /v1/roles/set refuses (rolePattern) is a role no session can ever claim, so a
-// copy kept under it would expire unread. Keeping is off for it, and its sender gets the 404 it
-// can act on, with nothing stored.
+// A role token POST /v1/roles/set refuses (roles.PatternString) is a role no session can ever
+// claim, so a copy kept under it would expire unread. Keeping is off for it, and its sender gets
+// the 404 it can act on, with nothing stored.
 func TestAPublishToARoleNoClaimCanNameIsRefusedAndKeepsNothing(t *testing.T) {
 	d, client := keptRoleDeps(t)
 	const role = "legion-infra-INFRA-839-architect"

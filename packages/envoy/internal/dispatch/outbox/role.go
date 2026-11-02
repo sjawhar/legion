@@ -30,8 +30,9 @@ var errNoRoleReaders = errors.New("the outbox has no role-claim or session reade
 // to the holder's agent subject, so nothing of Dispatch's crosses notifications.role.*. Exactly one
 // of four holds:
 //
-//   - keep names a role no live holder can take, whose copy is kept on that role's kept lane for
-//     the holder that claims it next (keptOrSkipped, send);
+//   - keptFor names a role no live holder can take, whose copy is kept on that role's kept lane
+//     for the holder that claims it next (keptOrSkipped, send), and is empty for every other
+//     forward;
 //   - skip names why the destination counts as reached with nothing sent: the holder is the
 //     event's own actor (the listener's echo skip), or the role token is one no claim can name,
 //     which is kept for nobody;
@@ -43,13 +44,11 @@ var errNoRoleReaders = errors.New("the outbox has no role-claim or session reade
 //
 // holder is the claim's holder whenever it is known, so the destination's key is the holder's agent
 // subject (destination.key) even while it stays pending; a keep carries none, since it reaches no
-// session. role is the role the copy is kept for, set for a keep alone. streamAck is a holder
-// with a serving port.
+// session. streamAck is a holder with a serving port.
 type roleForward struct {
 	holder    string
-	role      string
+	keptFor   string
 	streamAck bool
-	keep      bool
 	skip      string
 	err       error
 }
@@ -167,8 +166,9 @@ func forwardOf(role string, item contracts.Envelope, resolution roles.Resolution
 
 // keptOrSkipped is how a role route no live holder can take reaches the role's next holder: a
 // keep of the copy on the role's kept lane, which the holder that claims the role next is handed
-// (cmd/listener/role_keep.go). The keep carries no holder, so the route is keyed on its role
-// topic as the skip it replaced was, and holds back no session's later events.
+// (cmd/listener/role_keep.go), and which a holder that claimed the role while the keep was in
+// flight is handed by the keep itself (handOverKept). The keep carries no holder, so the route is
+// keyed on its role topic as the skip it replaced was, and holds back no session's later events.
 //
 // One role token is not kept for and skips as it did before the kept lane, under skipped: one no
 // claim can ever name (roles.Valid, the pattern POST /v1/roles/set refuses), since a copy kept
@@ -179,19 +179,13 @@ func keptOrSkipped(role, skipped string) *roleForward {
 	if !roles.Valid(role) {
 		return &roleForward{skip: skipped}
 	}
-	return &roleForward{role: role, keep: true}
+	return &roleForward{keptFor: role}
 }
 
-// send sends item, routed to a role destination, as forward names.
+// send sends item, routed to a role destination, as forward names, within ctx.
 //
-// A keep stores it on the role's kept lane (bus.KeptRoleSubject) with one JetStream publish,
-// under the id every writer of that lane keeps this message under (bus.KeptMsgID, the dedupe key
-// and the role), so the stream holds one copy of it however often the outbox retries and whether
-// the listener kept a copy of it too. The envelope is stored as it is, its topic the role's and
-// its dedupe key the original's, which is what the listener's own keep stores and what the
-// drain's forward to the next holder reads (keepRoleMessage, walkKeptRole). The stream's
-// acknowledgement is the answer: acknowledged, the route is reached; anything else leaves the
-// item pending for the outbox's own retry, which the MsgId makes idempotent at the stream.
+// A keep stores it on the role's kept lane and hands it on to a holder that claimed the role
+// under the keep (keep, handOverKept).
 //
 // A forward goes to the holder as a listener's role forward carries it: its topic the role's, its
 // dedupe key contracts.RoleForwardDedupePrefix and the original's, its event id unchanged, so the
@@ -203,9 +197,9 @@ func keptOrSkipped(role, skipped string) *roleForward {
 // acknowledgement of the stored copy, since a holder delivered by its listener from the stream
 // never answers the request itself; that is true once the listener delivers to such holders from
 // the stream and acknowledges each stored copy.
-func (f *roleForward) send(sender bus.Sender, item contracts.Envelope) <-chan error {
-	if f.keep {
-		return sender.PublishStoredAsync(bus.KeptRoleSubject(f.role), item, bus.KeptMsgID(item.DedupeKey, f.role))
+func (f *roleForward) send(ctx context.Context, deps Deps, sender bus.Sender, item contracts.Envelope) <-chan error {
+	if f.keptFor != "" {
+		return f.keep(ctx, deps, sender, item)
 	}
 	item.DedupeKey = contracts.RoleForwardDedupePrefix + item.DedupeKey
 	subject := contracts.AgentSubject(f.holder)
@@ -214,4 +208,83 @@ func (f *roleForward) send(sender bus.Sender, item contracts.Envelope) <-chan er
 		AcceptStreamAck: f.streamAck,
 		Timeout:         roleReceiptTimeout,
 	})
+}
+
+// keep stores item on the role's kept lane (bus.KeptRoleSubject) with one JetStream publish,
+// under the id every writer of that lane keeps this message under (bus.KeptMsgID, the dedupe key
+// and the role), so the stream holds one copy of it however often the outbox retries and whether
+// the listener kept a copy of it too. The envelope is stored as it is, its topic the role's and
+// its dedupe key the original's, which is what the listener's own keep stores and what the
+// drain's forward to the next holder reads (keepRoleMessage, walkKeptRole). The stream's
+// acknowledgement is the answer: acknowledged, the route is reached; anything else leaves the
+// item pending for the outbox's own retry, which the MsgId makes idempotent at the stream.
+//
+// Acknowledged, the copy is handed to a holder that claimed the role while the keep was in
+// flight, before that answer is given (handOverKept), so the route's own answer stays the keep's
+// and the handover is behind it. The publish is made on the batch's own goroutine, which issues
+// every send of a window without waiting for any of them (sendChains), so the wait for the
+// acknowledgement and the handover behind it run on a goroutine of their own.
+func (f *roleForward) keep(ctx context.Context, deps Deps, sender bus.Sender, item contracts.Envelope) <-chan error {
+	stored := sender.PublishStoredAsync(bus.KeptRoleSubject(f.keptFor), item, bus.KeptMsgID(item.DedupeKey, f.keptFor))
+	answer := make(chan error, 1)
+	go func() {
+		err := <-stored
+		if err == nil {
+			handOverKept(ctx, deps, sender, f.keptFor, item)
+		}
+		answer <- err
+	}()
+	return answer
+}
+
+// handOverKept hands the copy just kept on role's kept lane to the session holding the role now,
+// when one claimed it while the keep was in flight.
+//
+// The batch resolves a role's holder as it opens (resolveRoleHolders) and publishes the keep at
+// its end (sendChains), and a claim that lands between the two leaves the copy on a lane with a
+// live holder and nothing draining it: that claim's own drain read the lane before the copy was
+// on it and ended (cmd/listener/role_keep.go, drainKeptRole), and nothing walks it again until
+// the listener's sweep, up to its interval later (sweepKeptRoleLanes), while the issue's next
+// event resolves that holder live and is forwarded straight to its agent subject. The holder
+// would be handed event N + 1 minutes before event N. The listener closes the same race at its
+// own keep, by starting a handover after every one of them (keepForNextHolder); the outbox is
+// that lane's second writer and has no drain of its own, so it reads the claim again - it holds
+// the role readers already - and forwards the copy itself, under the id the drain's forward of it
+// would carry (bus.ForwardMsgID of the role-forward dedupe key and the holder's agent subject,
+// roleForward.msgID in cmd/listener/role_lane.go). Whichever of the two copies arrives second is
+// collapsed by the stream's duplicate window and by the holder's own dedupe key, so the holder
+// takes exactly one, in order, without waiting for the sweep. It needs no NATS grant the outbox
+// does not hold, no change to the lane's cursor and no second publisher.
+//
+// The copy stays on the lane as it is: the cursor and the drain stay the authority for a holder
+// that claims later.
+//
+// The handover is made before the keep's answer rather than beside it, so that the holder's later
+// events - which the batch after this one forwards to its agent subject, once this owner is
+// settled and given back (publishBatch, lanes) - follow it, which a handover of its own would
+// race. What it costs the route is one claim read, one session read and one forward, and only
+// for a keep whose role is claimed. A keep is keyed on its role topic, no holder being known when
+// the batch planned its chains (destination.key), so an event of the same owner that this batch
+// sends to that session on a key of its own - an author or follower route among them - races the
+// handover as any two keys of one owner do; before it, the kept copy waited for the sweep and
+// lost to every such event.
+//
+// The resolution is the route's own (forwardOf), so a holder that is the event's actor, one that
+// has stopped heartbeating, a claim that lapsed again and a role still unclaimed are each read
+// here as they are read there, and none of them is forwarded to. A handover that failed is
+// logged and nothing else: the route was reached when the stream acknowledged the keep, and the
+// copy on the lane is what the role's next claim, keep or sweep hands over.
+func handOverKept(ctx context.Context, deps Deps, sender bus.Sender, role string, item contracts.Envelope) {
+	if deps.RoleClaims == nil || deps.Sessions == nil {
+		return
+	}
+	resolution, err := roles.ResolveHolder(ctx, deps.RoleClaims, deps.Sessions, role, roles.Registered)
+	handover := forwardOf(role, item, resolution, err, time.Now())
+	if handover.holder == "" || handover.keptFor != "" || handover.skip != "" || handover.err != nil {
+		return
+	}
+	if err := <-handover.send(ctx, deps, sender, item); err != nil {
+		slog.Warn("dispatch outbox: the copy kept for a role did not reach the holder that claimed it",
+			"role", role, "holder", handover.holder, "event_id", item.EventID, "error", err)
+	}
 }

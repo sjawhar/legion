@@ -58,55 +58,62 @@ func (r *roleRig) publisherOn(publisher Publisher) Deps {
 	return deps
 }
 
-// keptOnce is a client whose first kept publish is made and then answered as a lost
+// firstKeep is a client whose first kept publish is the test's own and whose every later send is
+// the client's: first is handed the publish the outbox made, to make or to leave unmade, and
+// answers the outbox in its place, which is how one wrapper drives each of the ways a keep can
+// go. keeps counts the kept publishes the outbox has made.
+type firstKeep struct {
+	*bus.Client
+	keeps atomic.Int32
+	first func(publish func() <-chan error) <-chan error
+}
+
+func (p *firstKeep) WindowUntil(deadline func() time.Time) bus.Sender {
+	return firstKeepWindow{Sender: p.Client.WindowUntil(deadline), publisher: p}
+}
+
+type firstKeepWindow struct {
+	bus.Sender
+	publisher *firstKeep
+}
+
+func (w firstKeepWindow) PublishStoredAsync(subject string, item contracts.Envelope, msgID string) <-chan error {
+	publish := func() <-chan error { return w.Sender.PublishStoredAsync(subject, item, msgID) }
+	if w.publisher.keeps.Add(1) > 1 {
+		return publish()
+	}
+	return w.publisher.first(publish)
+}
+
+// lostKeepAck is a client whose first kept publish is made and then answered as a lost
 // acknowledgement: the stream stores the copy and the outbox is told nothing came back, which is
 // what a connection lost between the publish and its acknowledgement leaves behind
-// (bus.ErrNotAcknowledged). Every later send is the client's own.
-type keptOnce struct {
-	*bus.Client
-	keeps atomic.Int32
+// (bus.ErrNotAcknowledged).
+func lostKeepAck(client *bus.Client) *firstKeep {
+	return &firstKeep{Client: client, first: func(publish func() <-chan error) <-chan error {
+		// The publish is made and its answer dropped, as a lost connection drops it.
+		answer := publish()
+		go func() { <-answer }()
+		return answered(fmt.Errorf("the acknowledgement of the kept copy was lost: %w", bus.ErrNotAcknowledged))
+	}}
 }
 
-func (p *keptOnce) WindowUntil(deadline func() time.Time) bus.Sender {
-	return lostAckWindow{Sender: p.Client.WindowUntil(deadline), publisher: p}
-}
-
-type lostAckWindow struct {
-	bus.Sender
-	publisher *keptOnce
-}
-
-func (w lostAckWindow) PublishStoredAsync(subject string, item contracts.Envelope, msgID string) <-chan error {
-	answer := w.Sender.PublishStoredAsync(subject, item, msgID)
-	if w.publisher.keeps.Add(1) > 1 {
-		return answer
-	}
-	// The publish is made and its answer dropped, as a lost connection drops it.
-	go func() { <-answer }()
-	return answered(fmt.Errorf("the acknowledgement of the kept copy was lost: %w", bus.ErrNotAcknowledged))
-}
-
-// keepFailsOnce is a client whose first kept publish sends nothing and fails, and whose later
-// sends are its own: the keep that failed left the stream holding nothing of the copy.
-type keepFailsOnce struct {
-	*bus.Client
-	keeps atomic.Int32
-}
-
-func (p *keepFailsOnce) WindowUntil(deadline func() time.Time) bus.Sender {
-	return failingKeepWindow{Sender: p.Client.WindowUntil(deadline), publisher: p}
-}
-
-type failingKeepWindow struct {
-	bus.Sender
-	publisher *keepFailsOnce
-}
-
-func (w failingKeepWindow) PublishStoredAsync(subject string, item contracts.Envelope, msgID string) <-chan error {
-	if w.publisher.keeps.Add(1) == 1 {
+// failedKeep is a client whose first kept publish sends nothing and fails: the keep that failed
+// left the stream holding nothing of the copy.
+func failedKeep(client *bus.Client) *firstKeep {
+	return &firstKeep{Client: client, first: func(func() <-chan error) <-chan error {
 		return answered(fmt.Errorf("the kept copy was not stored: %w", bus.ErrNotAcknowledged))
-	}
-	return w.Sender.PublishStoredAsync(subject, item, msgID)
+	}}
+}
+
+// claimedUnderTheKeep is a client that runs claim before its first kept publish, so the claim
+// lands inside the window the keep's own race leaves open: after the batch resolved the role
+// unheld and before the copy is on its lane (handOverKept).
+func claimedUnderTheKeep(client *bus.Client, claim func()) *firstKeep {
+	return &firstKeep{Client: client, first: func(publish func() <-chan error) <-chan error {
+		claim()
+		return publish()
+	}}
 }
 
 // keptPublish is one stored publish a test publisher took, with the subject and the Nats-Msg-Id it
@@ -144,44 +151,38 @@ func (p *keepRecorder) keeps() []keptPublish {
 	return append([]keptPublish(nil), p.kept...)
 }
 
-// retainedClaim is a role-claim store whose claim the restart grace retained: the holder's session
-// is gone and the release keeps the claim, which is the grace a listener gives a claim it restored
-// (store.Registry.ReleaseExpiredRoleClaim).
-type retainedClaim struct{}
+// roleClaimStub is a role-claim store and session reader with one claim and no session at all,
+// for a test that resolves a role without a NATS server: holder is the session the claim names,
+// empty for a role no session claims, and release is what the release of that claim comes to.
+// Every session read answers "gone", so a claim this store names is always a lapsed one.
+type roleClaimStub struct {
+	holder  string
+	release envoystore.ExpiredRoleClaimRelease
+}
 
 const retainedHolder = "ses_restored"
 
-func (retainedClaim) RoleClaim(context.Context, string) (envoystore.RoleClaim, error) {
-	return envoystore.RoleClaim{HolderSessionID: retainedHolder}, nil
+// retainedClaim is the claim the restart grace retained: the holder's session is gone and the
+// release keeps the claim, which is the grace a listener gives a claim it restored
+// (store.Registry.ReleaseExpiredRoleClaim).
+var retainedClaim = roleClaimStub{holder: retainedHolder, release: envoystore.ExpiredRoleClaimRetained}
+
+// unclaimedRoles is the store in which no role is claimed, which releases nothing.
+var unclaimedRoles = roleClaimStub{release: envoystore.ExpiredRoleClaimMissing}
+
+func (s roleClaimStub) RoleClaim(context.Context, string) (envoystore.RoleClaim, error) {
+	return envoystore.RoleClaim{HolderSessionID: s.holder}, nil
 }
 
-func (retainedClaim) ReleaseExpiredRoleClaim(context.Context, string, string, time.Duration) (envoystore.ExpiredRoleClaimRelease, error) {
-	return envoystore.ExpiredRoleClaimRetained, nil
+func (s roleClaimStub) ReleaseExpiredRoleClaim(context.Context, string, string, time.Duration) (envoystore.ExpiredRoleClaimRelease, error) {
+	return s.release, nil
 }
 
-func (retainedClaim) Holder(context.Context, string, func(session.SessionEntry) bool) (session.SessionEntry, error) {
+func (roleClaimStub) Holder(context.Context, string, func(session.SessionEntry) bool) (session.SessionEntry, error) {
 	return session.SessionEntry{}, natsgo.ErrKeyNotFound
 }
 
-func (retainedClaim) TTL() time.Duration { return 5 * time.Minute }
-
-// unclaimedRoles is a role-claim store in which no role is claimed, for a test that keeps without
-// a NATS server.
-type unclaimedRoles struct{}
-
-func (unclaimedRoles) RoleClaim(context.Context, string) (envoystore.RoleClaim, error) {
-	return envoystore.RoleClaim{}, nil
-}
-
-func (unclaimedRoles) ReleaseExpiredRoleClaim(context.Context, string, string, time.Duration) (envoystore.ExpiredRoleClaimRelease, error) {
-	return envoystore.ExpiredRoleClaimMissing, nil
-}
-
-func (unclaimedRoles) Holder(context.Context, string, func(session.SessionEntry) bool) (session.SessionEntry, error) {
-	return session.SessionEntry{}, natsgo.ErrKeyNotFound
-}
-
-func (unclaimedRoles) TTL() time.Duration { return 5 * time.Minute }
+func (roleClaimStub) TTL() time.Duration { return 5 * time.Minute }
 
 // keptRoleEvent seeds an event of its own issue routed to role, for a test publisher with no NATS.
 func keptRoleEvent(t *testing.T, key, role string) (*store.Store, *events.Broker, model.Event) {
@@ -241,7 +242,7 @@ func TestAKeptRoleRouteRetriedAfterALostAcknowledgementIsKeptOnce(t *testing.T) 
 	const role = "kept-retried"
 	rig.silent(t, contracts.RoleTopicPrefix+role)
 	event := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
-	publisher := &keptOnce{Client: rig.client}
+	publisher := lostKeepAck(rig.client)
 	outbox := holding(t, rig.publisherOn(publisher))
 
 	outbox.scan(context.Background(), unfenced{})
@@ -279,7 +280,7 @@ func TestAKeptRoleRouteWhoseKeepFailedStaysPendingAndIsKeptOnTheRetry(t *testing
 	const role = "kept-failed"
 	rig.silent(t, contracts.RoleTopicPrefix+role)
 	event := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
-	outbox := holding(t, rig.publisherOn(&keepFailsOnce{Client: rig.client}))
+	outbox := holding(t, rig.publisherOn(failedKeep(rig.client)))
 
 	outbox.scan(context.Background(), unfenced{})
 
@@ -315,7 +316,7 @@ func TestARoleRouteWhoseClaimTheGraceRetainedErrsWithNothingKept(t *testing.T) {
 	const role = "kept-retained"
 	database, broker, event := keptRoleEvent(t, "T-1", role)
 	publisher := &keepRecorder{}
-	deps := Deps{Store: database, Publisher: publisher, Broker: broker, RoleClaims: retainedClaim{}, Sessions: retainedClaim{}}
+	deps := Deps{Store: database, Publisher: publisher, Broker: broker, RoleClaims: retainedClaim, Sessions: retainedClaim}
 
 	holding(t, deps).scan(context.Background(), unfenced{})
 
@@ -341,7 +342,7 @@ func TestARoleTokenNoClaimCanNameIsSkippedWithNothingKept(t *testing.T) {
 	const role = "-reviewer"
 	database, broker, event := keptRoleEvent(t, "T-1", role)
 	publisher := &keepRecorder{}
-	deps := Deps{Store: database, Publisher: publisher, Broker: broker, RoleClaims: unclaimedRoles{}, Sessions: unclaimedRoles{}}
+	deps := Deps{Store: database, Publisher: publisher, Broker: broker, RoleClaims: unclaimedRoles, Sessions: unclaimedRoles}
 	instance := holding(t, deps).instance
 	// The first batch has no role reader, so it reaches the issue's topic and leaves the role
 	// route pending; the batch under test is the one whose only route left is that role, as
@@ -380,7 +381,7 @@ func TestAKeptRoleRouteIsPublishedOnTheRolesKeptLaneUnderTheKeptMsgID(t *testing
 	const role = "kept-named"
 	database, broker, event := keptRoleEvent(t, "T-1", role)
 	publisher := &keepRecorder{}
-	deps := Deps{Store: database, Publisher: publisher, Broker: broker, RoleClaims: unclaimedRoles{}, Sessions: unclaimedRoles{}}
+	deps := Deps{Store: database, Publisher: publisher, Broker: broker, RoleClaims: unclaimedRoles, Sessions: unclaimedRoles}
 
 	holding(t, deps).scan(context.Background(), unfenced{})
 
@@ -397,4 +398,116 @@ func TestAKeptRoleRouteIsPublishedOnTheRolesKeptLaneUnderTheKeptMsgID(t *testing
 		t.Fatalf("the kept envelope is topic %q dedupe key %q, want the message as its sender sent it under %q",
 			kept[0].item.Topic, kept[0].item.DedupeKey, key)
 	}
+}
+
+// claimUnder makes holder role's holder, registered with entry, as roleRig.claim does, and
+// reports what failed rather than failing the test: it is called on the goroutine the outbox
+// publishes its keep on, where a t.Fatalf would end that goroutine alone.
+func (r *roleRig) claimUnder(role, holder string, entry session.SessionEntry) error {
+	if _, err := r.registry.SetRole(holder, "test-machine", role, false); err != nil {
+		return fmt.Errorf("claim %s for %s: %w", role, holder, err)
+	}
+	if err := r.sessions.Put(holder, entry); err != nil {
+		return fmt.Errorf("register %s: %w", holder, err)
+	}
+	return nil
+}
+
+// handedNow is the forward the holder has already taken, read without waiting: a forward the
+// outbox made inside a scan is on this channel by the time that scan returned, since the holder
+// records it before it answers the receipt and the send waits for that receipt. So a scan that
+// forwarded nothing fails here at once rather than on a timeout.
+func handedNow(t *testing.T, recv *receiver, what string) contracts.Envelope {
+	t.Helper()
+	select {
+	case forward := <-recv.arrived:
+		return forward
+	default:
+		t.Fatalf("%s: the holder had taken no forward by the time the scan returned", what)
+		return contracts.Envelope{}
+	}
+}
+
+// A role claimed while the keep was in flight is handed the kept copy by the keep itself, in the
+// scan that kept it. The batch resolved the role unheld as it opened and published the keep at
+// its end, so the claim landed between the two: that claim's own drain read the role's lane
+// before the copy was on it and ended with nothing to hand over (cmd/listener/role_keep.go,
+// drainKeptRole), and nothing walks that lane again until the listener's sweep, up to its
+// interval later. Meanwhile the issue's next event resolves the holder live and is forwarded
+// straight to its agent subject, so the holder would take event N + 1 before event N. The
+// outbox's own handover closes that: it reads the claim again once the stream acknowledged the
+// keep and forwards the copy itself (handOverKept).
+//
+// Nothing sweeps here - no listener runs in this test - so the keep's handover is the only way
+// the copy can reach the holder, and the holder takes exactly one copy of it: the forward goes
+// under the id the drain's own forward would carry, which is what collapses the two.
+func TestACopyKeptForARoleClaimedUnderTheKeepReachesThatHolderBeforeTheIssuesNextEvent(t *testing.T) {
+	rig := newRoleRig(t)
+	const role, holder = "kept-claimed-under-the-keep", "ses_claimed_under_the_keep"
+	const key = "T-1"
+	rig.silent(t, contracts.RoleTopicPrefix+role)
+	recv := rig.receiver(t, holder, true)
+	kept := rig.routedEvent(t, key, role, model.Actor{Kind: "user", ID: "alice"})
+	claimed := make(chan error, 1)
+	publisher := claimedUnderTheKeep(rig.client, func() {
+		claimed <- rig.claimUnder(role, holder, session.SessionEntry{SelfSubscribed: true})
+	})
+	outbox := holding(t, rig.publisherOn(publisher))
+
+	started := time.Now()
+	outbox.scan(context.Background(), unfenced{})
+	keptScan := time.Since(started)
+
+	if err := <-claimed; err != nil {
+		t.Fatalf("the claim made under the keep: %v", err)
+	}
+	if publishedAt(t, rig.database, kept.ID) == nil {
+		attempts, failure, _ := eventState(t, rig.database, kept.ID)
+		t.Fatalf("the kept event was not published: attempt_count %d, publish_error %v", attempts, failure)
+	}
+	keptKey := fmt.Sprintf("dispatch-%d", kept.ID)
+	handed := handedNow(t, recv, "the copy kept for a role claimed under the keep")
+	if handed.EventID != keptKey || handed.DedupeKey != contracts.RoleForwardDedupePrefix+keptKey {
+		t.Fatalf("the holder was handed event id %q under dedupe key %q, want the role forward of the kept %q",
+			handed.EventID, handed.DedupeKey, keptKey)
+	}
+	if copies := keptCopies(t, rig.client, role); len(copies) != 1 || copies[0].EventID != keptKey {
+		t.Fatalf("role %s's kept lane holds %d copies, want the one the outbox kept: the lane stays the authority for a later holder", role, len(copies))
+	}
+
+	// The issue's next event, which resolves the holder live and is forwarded straight to its
+	// agent subject: it is seeded and sent after the kept copy was handed over, which is what
+	// the holder must receive in that order.
+	next := appendEvent(t, rig.database, rig.broker, model.Event{
+		IssueKey: new(key), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.Message{ID: "3b2f1a8c-5d44-4e7a-9b61-2c8f0a6d1e52", IssueKey: new(key), Body: "the issue's next event"},
+	})
+	nextStarted := time.Now()
+	outbox.scan(context.Background(), unfenced{})
+	nextScan := time.Since(nextStarted)
+	handedNext := handedNow(t, recv, "the issue's next event")
+
+	nextKey := fmt.Sprintf("dispatch-%d", next.ID)
+	if handedNext.EventID != nextKey {
+		t.Fatalf("the holder was handed event id %q after the kept copy, want the issue's next event %q", handedNext.EventID, nextKey)
+	}
+	received := recv.received()
+	if len(received) != 2 || received[0].EventID != keptKey || received[1].EventID != nextKey {
+		t.Fatalf("the holder received %d forwards (%v), want the kept %s first and the issue's next event %s after it",
+			len(received), eventIDs(received), keptKey, nextKey)
+	}
+	if copies := storedCopies(t, rig.client, contracts.AgentSubject(holder)); copies != 2 {
+		t.Fatalf("the stream holds %d copies on %s, want one of the kept event and one of the next", copies, contracts.AgentSubject(holder))
+	}
+	t.Logf("the holder had the kept copy when the scan that kept it returned, %s after that scan began; the issue's next event reached it in the scan that began %s later, which took %s. The copy is on the role's kept lane as well, where nothing but the listener's sweep, minutes apart, would have read it.",
+		keptScan, nextStarted.Sub(started), nextScan)
+}
+
+// eventIDs is the event id of each envelope, for a failure that reports what a holder received.
+func eventIDs(received []contracts.Envelope) []string {
+	ids := make([]string, 0, len(received))
+	for _, item := range received {
+		ids = append(ids, item.EventID)
+	}
+	return ids
 }

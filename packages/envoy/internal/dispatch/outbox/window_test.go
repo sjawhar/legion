@@ -213,14 +213,6 @@ func assertKeptLaneInOrder(t *testing.T, url, role string, seeded []model.Event,
 		t.Fatalf("connect the reader: %v", err)
 	}
 	defer reader.Close()
-	js, err := reader.JetStream()
-	if err != nil {
-		t.Fatalf("open JetStream: %v", err)
-	}
-	info, err := js.StreamInfo(bus.Stream)
-	if err != nil {
-		t.Fatalf("read the stream: %v", err)
-	}
 	issueOf := make(map[int64]string, len(seeded))
 	for _, event := range seeded {
 		issueOf[event.ID] = *event.IssueKey
@@ -228,22 +220,18 @@ func assertKeptLaneInOrder(t *testing.T, url, role string, seeded []model.Event,
 	subject := bus.KeptRoleSubject(role)
 	byIssue := map[string][]int64{}
 	kept := 0
-	for sequence := info.State.FirstSeq; sequence <= info.State.LastSeq && info.State.Msgs > 0; sequence++ {
-		message, err := js.GetMsg(bus.Stream, sequence)
-		if err != nil {
-			t.Fatalf("read stream message %d: %v", sequence, err)
-		}
+	for _, message := range streamMessages(t, reader) {
 		if message.Subject != subject {
 			continue
 		}
 		var envelope contracts.Envelope
 		if err := json.Unmarshal(message.Data, &envelope); err != nil {
-			t.Fatalf("decode the copy kept at %d: %v", sequence, err)
+			t.Fatalf("decode the copy kept at %d: %v", message.Sequence, err)
 		}
 		if got, want := message.Header.Get(natsgo.MsgIdHdr), bus.KeptMsgID(envelope.DedupeKey, role); got != want {
-			t.Fatalf("the copy kept at %d is stored under %q, want %q", sequence, got, want)
+			t.Fatalf("the copy kept at %d is stored under %q, want %q", message.Sequence, got, want)
 		}
-		id := envelopeEventID(t, message.Data)
+		id := sourceEventID(t, envelope)
 		kept++
 		byIssue[issueOf[id]] = append(byIssue[issueOf[id]], id)
 	}

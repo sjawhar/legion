@@ -1145,7 +1145,7 @@ func main() {
 	// for a claim that seldom comes inside roleKeepWindow: a live holder claims no second time.
 	// This is the backstop over them, on the reapers' cadence and under their context, with a
 	// pass as the listener starts. It costs one stream read a pass while no role has a kept lane
-	// (startKeptRoleSweep, role_keep.go).
+	// (startKeptRoleSweep, role_keep_sweep.go).
 	kvLoopsDone = append(kvLoopsDone, startKeptRoleSweep(kvLoopsCtx, deliveryConfig, 5*time.Minute))
 
 	// Phase 6b1: Collect the interest bucket's delete markers, which the reaper above leaves one of

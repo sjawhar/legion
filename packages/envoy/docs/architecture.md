@@ -103,7 +103,7 @@ resolution (the claim read, the holder's session read and the release of a lapse
 inside the same 3.5 s budget, and one the budget runs out on is that 503 too, naming the call that
 did not answer. Its 413, its 400s and its 403 for a denied publish are unchanged. Its role 404s
 (`unclaimed`, `holder_lapsed`) keep their bodies, and a role send gives one only when the listener
-kept nothing: the request sent `keep: false`; the role's token is one `rolePattern` refuses, which
+kept nothing: the request sent `keep: false`; the role's token is one `roles.Valid` refuses, which
 no claim can ever name; the claim lapsed and the restart grace retained it, whose holder keeps the
 role and writes no new claim for a handover to follow; or the keep itself failed. A role send whose
 message
