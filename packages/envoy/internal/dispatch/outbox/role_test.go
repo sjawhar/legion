@@ -612,3 +612,109 @@ func TestAForwardNoHolderAnsweredIsCountedUnanswered(t *testing.T) {
 		t.Fatalf("/metrics body = %q counts a forward NATS took as a publish failure", body)
 	}
 }
+
+// unclaimedRoles is a role-claim store in which no role is claimed, so a role destination is
+// reached with nothing to send (forwardOf). Its holder and release reads are heldRoles', which
+// an unclaimed role never asks.
+type unclaimedRoles struct{ heldRoles }
+
+func (unclaimedRoles) RoleClaim(context.Context, string) (envoystore.RoleClaim, error) {
+	return envoystore.RoleClaim{}, nil
+}
+
+// seedHeldRoleFallbackCopy writes a comment on issue T-1, routed to role, that mentions s1 - the
+// session the route resolved to when the comment was written - whose attempt the delivery sweep
+// resends; scans its comment.created event through deps, which holds the route's copy as a
+// fallback row on the role's own topic; and fails the resend, so the next fallback pass publishes
+// that copy (seedHeldFallbackCopy, which holds a session route's copy the same way). It returns
+// the comment's id.
+func seedHeldRoleFallbackCopy(ctx context.Context, t *testing.T, deps Deps, role string) string {
+	t.Helper()
+	route := "role:" + role
+	seedIssue(t, deps.Store, "T-1", &route)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	commentID := seedComment(t, deps.Store, "T-1", alice, "@s1 are you there?", nil)
+	appendEvent(t, deps.Store, deps.Broker, model.Event{
+		IssueKey: new("T-1"), Type: "comment.created", Actor: alice,
+		Payload: model.CommentEventPayload{
+			Comment: model.Comment{
+				ID: commentID, IssueKey: new("T-1"), Body: "@s1 are you there?", Mentions: mentionOf("s1"),
+			},
+			SuppressRoute: true, SuppressedRoute: route, SuppressedRouteSessionID: new("s1"),
+		},
+	})
+	seedMentionDelivery(t, deps.Store, commentID, "s1", "resumed")
+	holding(t, deps).scan(ctx, unfenced{})
+	if held := readHeldCopy(t, deps.Store, commentID, contracts.RoleTopicPrefix+role); held.settled {
+		t.Fatalf("the scan left the role route's held copy %+v, want it unsettled for the pass", held)
+	}
+	if _, err := deps.Store.Pool.Exec(ctx, `
+		update comment_deliveries set state = 'failed' where comment_id = $1
+	`, commentID); err != nil {
+		t.Fatalf("fail the resend: %v", err)
+	}
+	return commentID
+}
+
+// A copy held back for a role route reaches the role's holder. The pass resolves the role as a
+// batch resolves one its events route to and forwards the copy to the holder's agent subject
+// (fallbackRoleForward, roleForward.send); published to notifications.role.* instead it would be
+// refused by the stream, which captures no role subject, and the row would count a failed attempt
+// and back off for ever with the holder never given the comment. A role nobody claims is reached
+// with nothing to send, which settles the row unpublished.
+func TestAHeldCopyOfARoleRouteReachesTheRolesHolder(t *testing.T) {
+	const role = "reviewer"
+	roleTopic := contracts.RoleTopicPrefix + role
+
+	t.Run("the holder is forwarded the copy", func(t *testing.T) {
+		ctx := store.WithTransactionTracking(context.Background())
+		database := storetest.Open(t)
+		publisher := &recordingPublisher{}
+		deps := withHeldRoles(Deps{Store: database, Publisher: publisher, Broker: events.NewBroker()})
+		commentID := seedHeldRoleFallbackCopy(ctx, t, deps, role)
+
+		publishFallbackCopies(ctx, deps, unfenced{})
+
+		held := readHeldCopy(t, database, commentID, roleTopic)
+		if !held.published || !held.settled || held.attempts != 0 {
+			t.Fatalf("the role route's held copy is attempts=%d settled=%v published=%v, want it published by the one pass",
+				held.attempts, held.settled, held.published)
+		}
+		// recordingPublisher answers a publish to a subject the stream does not capture with
+		// bus.ErrNotCaptured, and takes a Request only to roleHolder's agent subject under a role
+		// forward's dedupe key, so a copy recorded on the role's topic is one that was forwarded.
+		var forwarded []contracts.Envelope
+		for _, item := range publisher.all() {
+			if item.Topic == roleTopic {
+				forwarded = append(forwarded, item)
+			}
+		}
+		if len(forwarded) != 1 {
+			t.Fatalf("the pass sent %v, want the held copy forwarded once to %s's holder", topicsOf(publisher.all()), role)
+		}
+		if !strings.HasPrefix(forwarded[0].DedupeKey, contracts.RoleForwardDedupePrefix) {
+			t.Fatalf("the forwarded copy's dedupe key is %q, want a role forward's", forwarded[0].DedupeKey)
+		}
+	})
+
+	t.Run("a role nobody claims settles the copy with nothing sent", func(t *testing.T) {
+		ctx := store.WithTransactionTracking(context.Background())
+		database := storetest.Open(t)
+		publisher := &recordingPublisher{}
+		deps := Deps{Store: database, Publisher: publisher, Broker: events.NewBroker(),
+			RoleClaims: unclaimedRoles{}, Sessions: unclaimedRoles{}}
+		commentID := seedHeldRoleFallbackCopy(ctx, t, deps, role)
+		sentByTheScan := len(publisher.all())
+
+		publishFallbackCopies(ctx, deps, unfenced{})
+
+		held := readHeldCopy(t, database, commentID, roleTopic)
+		if !held.settled || held.published || held.attempts != 0 {
+			t.Fatalf("the held copy of an unclaimed role is attempts=%d settled=%v published=%v, want it settled with nothing sent",
+				held.attempts, held.settled, held.published)
+		}
+		if sent := publisher.all()[sentByTheScan:]; len(sent) != 0 {
+			t.Fatalf("the pass sent %v for a role nobody claims, want nothing", topicsOf(sent))
+		}
+	})
+}

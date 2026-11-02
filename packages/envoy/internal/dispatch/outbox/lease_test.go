@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/retry"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -580,5 +581,104 @@ func TestAHolderWhoseRecordFindsTheHoldAnothersStopsItsRenewal(t *testing.T) {
 	time.Sleep(publisherHoldOptions.Renew + publisherHoldOptions.Renew/4)
 	if got := len(tracer.matching("update duty_holds set expires_at")) - renewals; got != 1 {
 		t.Fatalf("%s after the hold was taken again, %d renewals were sent, want the new hold's one", publisherHoldOptions.Renew+publisherHoldOptions.Renew/4, got)
+	}
+}
+
+// seedFallbackBacklog seeds one comment on issue T-1, whose comment.created event the outbox has
+// published already, and count copies of it held as comment_fallback_copies rows, each on an
+// agent subject of its own and none of them claimed yet (next_attempt_at null, the state a row
+// the batch just held back is in). It returns the comment's id.
+func seedFallbackBacklog(t *testing.T, database *store.Store, broker *events.Broker, count int) string {
+	t.Helper()
+	const body = "a comment the outbox held copies of"
+	ctx := context.Background()
+	seedIssue(t, database, "T-1", nil)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	commentID := seedComment(t, database, "T-1", alice, body, nil)
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"), Type: "comment.created", Actor: alice,
+		Payload: model.CommentEventPayload{Comment: model.Comment{ID: commentID, IssueKey: new("T-1"), Body: body}},
+	})
+	if _, err := database.Pool.Exec(ctx, `update events set published_at = now() where id = $1`, event.ID); err != nil {
+		t.Fatalf("publish the comment's event: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		insert into comment_fallback_copies (comment_id, destination, event_id, session_id)
+		select $1, 'notifications.agent.s' || i, $2, 's' || i from generate_series(1, $3::int) i
+	`, commentID, event.ID, count); err != nil {
+		t.Fatalf("hold %d fallback copies: %v", count, err)
+	}
+	return commentID
+}
+
+// publishedCopies is how many of commentID's held copies a pass has published.
+func publishedCopies(t *testing.T, database *store.Store, commentID string) int {
+	t.Helper()
+	var count int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from comment_fallback_copies
+		where comment_id = $1 and settled_at is not null and published
+	`, commentID).Scan(&count); err != nil {
+		t.Fatalf("count the published copies: %v", err)
+	}
+	return count
+}
+
+// A pass whose claim filled its batch leaves the holder due again. A row held back by a batch has
+// no next_attempt_at, so no retry timer is armed to it (Outbox.nextRetry): were the pass to report
+// nothing, the rows past the first batchSize its claim took would wait for an unrelated event's
+// insert to wake the holder. The holder scans and passes again instead, as it does after a full
+// batch, until nothing is left.
+func TestAFallbackPassThatFilledItsClaimLeavesTheHolderDueAgain(t *testing.T) {
+	ctx, cancel := context.WithCancel(store.WithTransactionTracking(context.Background()))
+	defer cancel()
+	database := storetest.Open(t)
+	deps := Deps{Store: database, Publisher: &recordingPublisher{}, Broker: events.NewBroker()}
+	const copies = batchSize + 1
+	commentID := seedFallbackBacklog(t, database, deps.Broker, copies)
+
+	outbox := New(deps)
+	hold, _ := outbox.tryHold(ctx)
+	if hold == nil {
+		t.Fatal("the outbox did not take the free publisher hold")
+	}
+	t.Cleanup(func() { _ = hold.Release(context.Background()) })
+	served := make(chan holdEnd, 1)
+	go func() { served <- outbox.serve(ctx, hold) }()
+
+	waitFor(t, 30*time.Second, fmt.Sprintf("all %d held copies published", copies), func() bool {
+		return publishedCopies(t, database, commentID) == copies
+	})
+	cancel()
+	select {
+	case end := <-served:
+		if end != stopping {
+			t.Fatalf("serve ended %q, want it to stop with its context", end)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve did not return once its context ended")
+	}
+}
+
+// A pass whose claim failed backs the holder off rather than leaving it to pass again at once:
+// the claim read no row, so no row's next_attempt_at holds the wait, and a claim that keeps
+// failing would re-pass on every wake. The holder waits retry.BaseDelay, as it does after a scan
+// whose statement failed.
+func TestAFallbackPassWhoseClaimFailedBacksTheHolderOff(t *testing.T) {
+	database := storetest.Open(t)
+	deps := Deps{Store: database, Publisher: &recordingPublisher{}, Broker: events.NewBroker()}
+	outbox := New(deps)
+	// A claim the pool refuses, as it refuses every read a caller makes while it holds a
+	// connection of its own (store.ErrNestedAcquire).
+	held, release := store.HoldsConnection(store.WithTransactionTracking(context.Background()))
+	defer release()
+
+	full, failed := publishFallbackCopies(held, deps, unfenced{})
+
+	if full || !failed {
+		t.Fatalf("a pass whose claim failed reports full=%v failed=%v, want a failure and no full claim", full, failed)
+	}
+	if wait, ok := outbox.nextRetry(context.Background(), failed); !ok || wait != retry.BaseDelay {
+		t.Fatalf("the holder's next pass is armed to %s (armed=%v), want retry.BaseDelay = %s", wait, ok, retry.BaseDelay)
 	}
 }

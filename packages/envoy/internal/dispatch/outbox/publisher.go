@@ -761,9 +761,12 @@ func recordBatch(ctx context.Context, deps Deps, outcomes []outcome, holder uuid
 //
 // The second pass is the one that acts on a mention: a copy held back for a mention past its
 // lease is written as a fallback row, and an attempt the outbox finds abandoned is settled failed
-// (destinations.leftTo). Both run on the batch's own context and store, outside the lookups' gate,
-// each a statement or a short transaction of its own; the first pass, which answers nothing,
-// writes nothing.
+// (destinations.leftTo). Both run on the batch's own context and store, each a statement or a
+// short transaction of its own, and each takes the gate the lookups take for the whole of its own
+// run (lanes.statement): they share the scan's one mark of the pool's one-connection-per-caller
+// rule with every other batch, and a settle waiting on the comment owner's lock would otherwise
+// refuse, or be refused by, whatever another batch runs beside it (store.ErrNestedAcquire). The
+// first pass, which answers nothing, writes nothing.
 func resolveDestinations(ctx context.Context, deps Deps, events []*batchEvent) error {
 	var resolvable []*batchEvent
 	want := newWanted()

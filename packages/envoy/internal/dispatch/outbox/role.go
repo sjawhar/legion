@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -82,16 +83,7 @@ func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 	var wg sync.WaitGroup
 	for _, role := range routed {
 		wg.Go(func() {
-			result := roleResolution{err: errNoRoleReaders}
-			if deps.RoleClaims != nil && deps.Sessions != nil {
-				// Any registered session is the holder here: one that has stopped heartbeating
-				// is found stale by forwardOf, and stays pending rather than losing its claim.
-				result.resolution, result.err = roles.ResolveHolder(ctx, deps.RoleClaims, deps.Sessions, role, roles.Registered)
-			}
-			if result.err == nil && result.resolution.State == roles.Lapsed {
-				slog.Info("dispatch outbox: a role's holder is gone", "role", role, "holder", result.resolution.Holder,
-					"claim_released", result.resolution.Release == store.ExpiredRoleClaimReleased)
-			}
+			result := resolveRoleHolder(ctx, deps, role)
 			mu.Lock()
 			resolved[role] = result
 			mu.Unlock()
@@ -107,6 +99,39 @@ func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 			}
 		}
 	}
+}
+
+// resolveRoleHolder is the one resolution of one role's holder the outbox makes, which a batch
+// makes for every role its events route to (resolveRoleHolders) and a fallback pass for the role
+// a held copy's destination names (fallbackRoleForward). Any registered session is the holder
+// here: one that has stopped heartbeating is found stale by forwardOf, and stays pending rather
+// than losing its claim. A Deps with no role-claim or session reader resolves nothing
+// (errNoRoleReaders).
+func resolveRoleHolder(ctx context.Context, deps Deps, role string) roleResolution {
+	result := roleResolution{err: errNoRoleReaders}
+	if deps.RoleClaims != nil && deps.Sessions != nil {
+		result.resolution, result.err = roles.ResolveHolder(ctx, deps.RoleClaims, deps.Sessions, role, roles.Registered)
+	}
+	if result.err == nil && result.resolution.State == roles.Lapsed {
+		slog.Info("dispatch outbox: a role's holder is gone", "role", role, "holder", result.resolution.Holder,
+			"claim_released", result.resolution.Release == store.ExpiredRoleClaimReleased)
+	}
+	return result
+}
+
+// fallbackRoleForward is how a fallback copy whose destination is a role topic reaches the role's
+// holder: the role is resolved as a batch's role route is and the copy forwarded to the holder's
+// agent subject (resolveRoleHolder, forwardOf, roleForward.send), so nothing of the outbox's
+// crosses notifications.role.*, which the stream does not capture - a copy published there would
+// be refused (bus.ErrNotCaptured) and the row backed off for ever. It is nil for every other
+// destination, which the pass publishes to its topic as before (publishFallbackCopies).
+func fallbackRoleForward(ctx context.Context, deps Deps, item contracts.Envelope, destination string) *roleForward {
+	role, ok := strings.CutPrefix(destination, contracts.RoleTopicPrefix)
+	if !ok || role == "" {
+		return nil
+	}
+	result := resolveRoleHolder(ctx, deps, role)
+	return forwardOf(item, result.resolution, result.err, time.Now())
 }
 
 // forwardOf maps a role's resolution to how item reaches it, as the listener's role lane maps the

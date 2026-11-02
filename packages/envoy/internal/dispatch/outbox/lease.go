@@ -348,7 +348,10 @@ func (o *Outbox) publish(ctx context.Context, hold *duty.Hold) holdEnd {
 // while a batch is still sending. Each scan is followed by the fallback pass over the copies the
 // outbox held back for a mention it waits no longer on (publishFallbackCopies), which runs under
 // the same hold and after the scan rather than beside it, so that a copy the scan has just held
-// back is read by the pass that follows and not by the one it is held back in. It returns why it
+// back is read by the pass that follows and not by the one it is held back in. A pass whose
+// claim filled its batch leaves the holder due again, as a full batch does, and one whose claim
+// failed is a failed scan's back-off, so rows it never reached are not left waiting on an
+// unrelated event's insert and a claim that keeps failing does not spin. It returns why it
 // stopped: ctx ended, the hold was lost or its deadline passed mid-batch, or NATS was lost - down
 // for natsLossGrace without a break and still down when the grace ends, or a batch's sends failed
 // for the connection and a probe of that connection failed too.
@@ -378,15 +381,16 @@ func (o *Outbox) serve(ctx context.Context, hold *duty.Hold) holdEnd {
 				case end.natsLost:
 					return natsLost
 				}
-				publishFallbackCopies(ctx, o.deps, hold)
+				fullPass, failedPass := publishFallbackCopies(ctx, o.deps, hold)
 				if ctx.Err() != nil {
 					return stopping
 				}
+				due = fullPass
 				if retryTimer != nil {
 					retryTimer.Stop()
 					retryTimer, retryDue = nil, nil
 				}
-				if wait, ok := o.nextRetry(ctx, end.failed); ok {
+				if wait, ok := o.nextRetry(ctx, end.failed || failedPass); ok {
 					retryTimer = time.NewTimer(wait)
 					retryDue = retryTimer.C
 				}
@@ -550,8 +554,12 @@ type lanes struct {
 	inFlight map[string]struct{}
 	// statements is the outbox pool's one statement at a time. The pool has two connections, one
 	// of them the publisher hold's renewal, so a renewal would queue behind two batches running a
-	// statement each. It is held around a statement, the drain of its rows included, and around
-	// the sequence of statements one lookup read makes (loadLookups), and never across a send.
+	// statement each. It is held around a statement, the drain of its rows included, around the
+	// sequence of statements one lookup read makes (loadLookups), and around the transaction a
+	// settle of an abandoned mention makes (mentionComment.settleAbandoned), which waits on the
+	// comment owner's lock - every use of the pool a batch makes, since the batches of one scan
+	// share one mark of its one-connection-per-caller rule (store.ErrNestedAcquire) - and never
+	// across a send.
 	statements sync.Mutex
 	// wake is the scan's wake (Outbox.signal), given when an owner is released, so its next events
 	// and the owners a full batch left behind are read at once.
@@ -627,8 +635,10 @@ func (l *lanes) unlock() {
 }
 
 // statement runs fn on the outbox's pool with no other batch's statement beside it: one
-// statement, or the run of them a lookup read makes, which holds the gate from its first to its
-// last.
+// statement, the run of them a lookup read makes, or the transaction a settle of an abandoned
+// mention makes, each holding the gate from its first act to its last. A batch run with no lanes
+// - one by itself, and the fallback pass, which is no batch at all - runs fn with no gate to
+// take.
 func (l *lanes) statement(fn func() error) error {
 	l.lock()
 	defer l.unlock()

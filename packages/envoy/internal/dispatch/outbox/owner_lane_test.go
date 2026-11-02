@@ -292,3 +292,99 @@ func TestAnOwnerLeftForTheBatchsEndLogsItsFailureOnce(t *testing.T) {
 		t.Fatalf("event %d has attempt_count %d, want it released with no attempt counted", unreachable.ID, attempts)
 	}
 }
+
+// A settle that waits on the comment owner's lock neither fails the scan nor the batch running
+// beside it. mentionComment.settleAbandoned opens a transaction and takes that lock before any
+// attempt row, so it waits for as long as whoever holds the lock takes; the batches of one scan
+// share one context, and so one mark of the pool's one-connection-per-caller rule
+// (store.ErrNestedAcquire), so a second batch reading while that transaction is open would be
+// refused its connection - failing that batch, and with it the scan, which ends every batch still
+// running - unless both run inside the scan's statement gate (lanes.statement). The other owner's
+// event is published, and the settled mention's own event with it.
+func TestASettleWaitingOnTheOwnerLockDoesNotFailTheBatchBesideIt(t *testing.T) {
+	ctx := store.WithTransactionTracking(context.Background())
+	database := storetest.Open(t)
+	publisher := &recordingPublisher{}
+	deps := Deps{Store: database, Publisher: publisher, Broker: events.NewBroker()}
+	route := "session:s1"
+	seedIssue(t, database, "T-1", &route)
+	if _, err := database.Pool.Exec(ctx, `
+		insert into issues (key, project_key, number, title, route, created_by, rank)
+		values ('T-2', 'TT', 2, 'Another owner', null, '{"kind":"user","id":"alice"}', 'V')
+	`); err != nil {
+		t.Fatalf("create the other owner's issue: %v", err)
+	}
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	commentID := seedComment(t, database, "T-1", alice, "@s1 are you there?", nil)
+	mentioning := appendEvent(t, database, deps.Broker, model.Event{
+		IssueKey: new("T-1"), Type: "comment.created", Actor: alice,
+		Payload: model.CommentEventPayload{
+			Comment: model.Comment{
+				ID: commentID, IssueKey: new("T-1"), Body: "@s1 are you there?", Mentions: mentionOf("s1"),
+			},
+			SuppressRoute: true, SuppressedRoute: route, SuppressedRouteSessionID: new("s1"),
+		},
+	})
+	seedMentionDelivery(t, database, commentID, "s1", "abandoned")
+
+	// The comment owner's lock, held as the API's own claim of that attempt holds it, so the
+	// outbox's settle of the abandoned attempt waits on it.
+	claim, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin the transaction holding the owner's lock: %v", err)
+	}
+	defer claim.Rollback(context.Background())
+	if _, err := claim.Exec(context.Background(), `select 1 from issues where key = 'T-1' for no key update`); err != nil {
+		t.Fatalf("take the owner's lock: %v", err)
+	}
+
+	outbox := holding(t, deps)
+	ended := make(chan scanEnd, 1)
+	go func() { ended <- outbox.scan(ctx, unfenced{}) }()
+	waitFor(t, 10*time.Second, "the settle waiting on the comment owner's lock", func() bool {
+		var waiting int
+		if err := database.Pool.QueryRow(context.Background(), `
+			select count(*) from pg_stat_activity
+			where datname = current_database() and wait_event_type = 'Lock'
+		`).Scan(&waiting); err != nil {
+			t.Fatalf("read the lock waiters: %v", err)
+		}
+		return waiting > 0
+	})
+
+	// Another owner's event, which a second batch of the same scan reads while the settle waits.
+	otherComment := seedComment(t, database, "T-2", alice, "a comment of another owner", nil)
+	other := appendEvent(t, database, deps.Broker, model.Event{
+		IssueKey: new("T-2"), Type: "comment.created", Actor: alice,
+		Payload: model.CommentEventPayload{
+			Comment: model.Comment{ID: otherComment, IssueKey: new("T-2"), Body: "a comment of another owner"},
+		},
+	})
+	outbox.signal()
+	waitFor(t, 10*time.Second, "a second batch beside the settle", func() bool { return outbox.claims.Load() >= 2 })
+	// Long enough for that batch to reach its read, which the gate holds back and the pool's rule
+	// would refuse.
+	time.Sleep(500 * time.Millisecond)
+	if err := claim.Commit(context.Background()); err != nil {
+		t.Fatalf("release the owner's lock: %v", err)
+	}
+
+	var end scanEnd
+	select {
+	case end = <-ended:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the scan did not return")
+	}
+	if end.failed || end.fenced || end.natsLost {
+		t.Fatalf("the scan ended %+v, want it to end with nothing failed", end)
+	}
+	for _, event := range []model.Event{other, mentioning} {
+		if publishedAt(t, database, event.ID) == nil {
+			attempts, failure, _ := eventState(t, database, event.ID)
+			t.Fatalf("event %d was not published: attempt_count %d, publish_error %v", event.ID, attempts, failure)
+		}
+		if attempts, failure, _ := eventState(t, database, event.ID); attempts != 0 || failure != nil {
+			t.Fatalf("event %d was published with attempt_count %d and publish_error %v, want neither", event.ID, attempts, failure)
+		}
+	}
+}

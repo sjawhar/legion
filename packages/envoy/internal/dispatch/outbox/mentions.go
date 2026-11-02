@@ -328,12 +328,21 @@ func payloadMentionedSessions(payload any) map[string]struct{} {
 // holdFallbackCopy records the fallback row of the copy of the comment at destination, decided by
 // the attempts under key of kind, unless the destination has one already (publishFallbackCopies).
 // It commits before the batch that holds the copy back can mark the event published.
+//
+// Its insert runs inside the statement gate the batches of one scan share (lanes.statement): the
+// scan's batches read and write on one tracked context, so a statement run beside another's would
+// be refused a second connection (store.ErrNestedAcquire) and fail whichever of the two asked for
+// it. The gate is a no-op for a batch run by itself and for the fallback pass, neither of which
+// has lanes.
 func (c mentionComment) holdFallbackCopy(kind mentionKind, key, destination string) error {
-	if _, err := c.deps.Store.Pool.Exec(c.ctx, `
+	if err := c.deps.lanes.statement(func() error {
+		_, err := c.deps.Store.Pool.Exec(c.ctx, `
 		insert into comment_fallback_copies (comment_id, destination, event_id, `+kind.fallbackColumn()+`)
 		values ($1, $2, $3, $4)
 		on conflict (comment_id, destination) do nothing
-	`, c.id, destination, c.event.ID, key); err != nil {
+	`, c.id, destination, c.event.ID, key)
+		return err
+	}); err != nil {
 		return fmt.Errorf("hold the fallback copy of comment %q at %s: %w", c.id, destination, err)
 	}
 	return nil
@@ -351,6 +360,14 @@ func (c mentionComment) holdFallbackCopy(kind mentionKind, key, destination stri
 // pending; an attempt this settles first is no longer pending when the claim reads it, and the
 // claim takes it as settled and sends nothing. The receipts reach the event log in the same
 // commit, so a reader sees the attempt fail, and the outbox publishes them like any event.
+//
+// The transaction runs inside the statement gate the batches of one scan share (lanes.statement):
+// it waits on the owner's lock for as long as whoever holds that lock takes, and a batch beside it
+// reading or recording meanwhile on the scan's one tracked context would be refused a second
+// connection (store.ErrNestedAcquire), which fails that batch and the scan with it - or, the other
+// way round, fails this settle and backs its event off. The gate is a no-op for a batch run by
+// itself and for the fallback pass, neither of which has lanes. The receipts are published once
+// the transaction has committed, outside the gate.
 func (c mentionComment) settleAbandoned(kind mentionKind, key string) (state mentionState, err error) {
 	ctx, deps, event, commentID := c.ctx, c.deps, c.event, c.id
 	defer func() {
@@ -358,64 +375,71 @@ func (c mentionComment) settleAbandoned(kind mentionKind, key string) (state men
 			err = fmt.Errorf("settle the abandoned mention attempts of comment %q for %q: %w", commentID, key, err)
 		}
 	}()
-	tx, err := deps.Store.Pool.Begin(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback(ctx)
-	owner := model.Event{IssueKey: event.IssueKey, ArtifactID: event.ArtifactID}
-	if err := deps.Broker.LockOwners(ctx, tx, owner); err != nil {
-		return 0, err
-	}
-	rows, err := tx.Query(ctx, `
+	var receipts []model.Event
+	if err := deps.lanes.statement(func() error {
+		tx, err := deps.Store.Pool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+		owner := model.Event{IssueKey: event.IssueKey, ArtifactID: event.ArtifactID}
+		if err := deps.Broker.LockOwners(ctx, tx, owner); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, `
 		update comment_deliveries set state = 'failed', error = $3
 		where comment_id = $1 and `+kind.attemptKey()+` = $2 and state = 'pending' and `+model.MentionAbandonedSQL("comment_deliveries")+`
 		returning target, attempt, delivery, session_id, reply_id::text
 	`, commentID, key, mentionAbandonedError)
-	if err != nil {
-		return 0, err
-	}
-	var askID *string
-	if id := payloadString(event.Payload, "ask_id"); id != "" {
-		askID = &id
-	}
-	settled, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.CommentDeliveryEventPayload, error) {
-		receipt := model.CommentDeliveryEventPayload{
-			CommentID: commentID, AskID: askID, State: "failed", Error: mentionAbandonedError,
-		}
-		err := row.Scan(&receipt.Target, &receipt.Attempt, &receipt.Delivery, &receipt.SessionID, &receipt.ReplyID)
-		return receipt, err
-	})
-	if err != nil {
-		return 0, err
-	}
-	receipts := make([]model.Event, 0, len(settled))
-	for _, payload := range settled {
-		receipt := owner
-		receipt.Type, receipt.Actor, receipt.Payload = "comment.delivery", event.Actor, payload
-		appended, err := deps.Broker.Append(ctx, tx, receipt)
 		if err != nil {
-			return 0, err
+			return err
 		}
-		receipts = append(receipts, appended)
-	}
-	var sent, resending, pending bool
-	if err := tx.QueryRow(ctx, `
+		var askID *string
+		if id := payloadString(event.Payload, "ask_id"); id != "" {
+			askID = &id
+		}
+		settled, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.CommentDeliveryEventPayload, error) {
+			receipt := model.CommentDeliveryEventPayload{
+				CommentID: commentID, AskID: askID, State: "failed", Error: mentionAbandonedError,
+			}
+			err := row.Scan(&receipt.Target, &receipt.Attempt, &receipt.Delivery, &receipt.SessionID, &receipt.ReplyID)
+			return receipt, err
+		})
+		if err != nil {
+			return err
+		}
+		receipts = make([]model.Event, 0, len(settled))
+		for _, payload := range settled {
+			receipt := owner
+			receipt.Type, receipt.Actor, receipt.Payload = "comment.delivery", event.Actor, payload
+			appended, err := deps.Broker.Append(ctx, tx, receipt)
+			if err != nil {
+				return err
+			}
+			receipts = append(receipts, appended)
+		}
+		var sent, resending, pending bool
+		if err := tx.QueryRow(ctx, `
 		select coalesce(bool_or(state = 'sent'), false),
 		       coalesce(bool_or(state = 'pending' and `+model.MentionResumedSQL("comment_deliveries")+`), false),
 		       coalesce(bool_or(state = 'pending'), false)
 		from comment_deliveries
 		where comment_id = $1 and `+kind.attemptKey()+` = $2
 	`, commentID, key).Scan(&sent, &resending, &pending); err != nil {
-		return 0, err
-	}
-	if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		state = mentionStateOf(sent, resending, pending, false)
+		return nil
+	}); err != nil {
 		return 0, err
 	}
 	for _, receipt := range receipts {
 		deps.Broker.Publish(receipt)
 	}
-	return mentionStateOf(sent, resending, pending, false), nil
+	return state, nil
 }
 
 // fallbackCopy is one comment_fallback_copies row a fallback pass claimed: the copy of the comment
@@ -503,7 +527,7 @@ func failedFallbackCopy(held fallbackCopy) fallbackRecord {
 // destinations.addDestination), so the event never sends it too, and the event is published and
 // recorded as it would be had the mention been sent.
 //
-// The pass runs on every scan the publisher hold's holder makes, beside the event scan
+// The pass runs on every scan the publisher hold's holder makes, after the event scan
 // (Outbox.serve), and under that hold: it claims a bounded batch of unsettled rows, oldest first
 // (next_attempt_at pushed out by fallbackClaim under for update skip locked, so a second process
 // skips them), and decides each by its key's attempts, read as leftTo reads them
@@ -514,7 +538,12 @@ func failedFallbackCopy(held fallbackCopy) fallbackRecord {
 // or before under the owner lock) and the row decided again; and when no attempt was sent and none
 // is pending, the comment.created event's envelope is published to the row's destination alone,
 // carrying the dedupe key of the failed attempt's send (mentionDeliveries.fallbackKeys for a
-// session, targetFallbackKeys for a target), and the row is marked published. The pass never
+// session, targetFallbackKeys for a target), and the row is marked published. A row whose
+// destination is a role topic is not published there - the stream captures no role subject - but
+// resolved and forwarded to the role's holder, as a batch's role route is (fallbackRoleForward,
+// roleForward.send): a resolution that reaches the destination with nothing to send settles the
+// row unpublished, and one that leaves it pending counts an attempt and backs the row off, as a
+// failed publish does. The pass never
 // writes the events row: the event's published_at, published_destinations and payload stay as its
 // own publish left them, and no destination but the row's is reached, whatever the issue's route,
 // claimant, followers or authors are by then. A decision or a publish that fails counts an attempt
@@ -549,26 +578,35 @@ func failedFallbackCopy(held fallbackCopy) fallbackRecord {
 // the mention's own dedupe key, which the host drops. The API's failed settle appends a
 // comment.delivery receipt, an event insert that wakes the holder, and the pass runs on the scan
 // that wake starts.
-func publishFallbackCopies(ctx context.Context, deps Deps, hold fence) {
+//
+// It reports what the holder does next, as a batch reports it (Outbox.scan): full, the claim
+// filled its batch, so rows it did not reach are due now and the holder scans and passes again
+// rather than waiting for a wake of its own - a fresh row's next_attempt_at is null, which no
+// retry timer is armed to (Outbox.nextRetry); and failed, the claim itself failed, so the holder
+// waits retry.BaseDelay before its next pass rather than spinning on a claim that keeps failing.
+// A row the pass decided and failed needs neither: its record moves its next_attempt_at out, and
+// the timer is armed to that.
+func publishFallbackCopies(ctx context.Context, deps Deps, hold fence) (full, failed bool) {
 	if ctx.Err() != nil {
 		// Nothing this pass claimed could be decided: every row would be read and handed straight
 		// back, and the events behind them read on a context that is already done. The rows are
 		// left for whatever process runs next, as a pass that claimed them would leave them.
-		return
+		return false, false
 	}
 	if !time.Now().Before(hold.Deadline()) {
 		// Past the publisher hold's loss deadline this process publishes nothing: the hold is
 		// another's to take, and its pass decides these rows.
-		return
+		return false, false
 	}
 	copies, err := claimFallbackCopies(ctx, deps)
 	if err != nil {
 		slog.Error("dispatch outbox: claim fallback copies", "error", err)
-		return
+		return false, true
 	}
 	if len(copies) == 0 {
-		return
+		return false, false
 	}
+	full = len(copies) == batchSize
 	var records []fallbackRecord
 	// Written even when ctx has ended: a process stopping mid-pass records what NATS accepted and
 	// releases what it did not decide, rather than leave those rows claimed for fallbackClaim.
@@ -602,10 +640,11 @@ func publishFallbackCopies(ctx context.Context, deps Deps, hold fence) {
 		for _, held := range copies {
 			fail(held)
 		}
-		return
+		return full, false
 	}
 	type sentCopy struct {
 		held   fallbackCopy
+		out    fallbackSend
 		answer <-chan error
 	}
 	sender := deps.Publisher.WindowUntil(hold.Deadline)
@@ -621,13 +660,13 @@ func publishFallbackCopies(ctx context.Context, deps Deps, hold fence) {
 			fail(held)
 			continue
 		}
-		decision, item, err := decideFallbackCopy(ctx, deps, held, event)
+		decision, out, err := decideFallbackCopy(ctx, deps, held, event)
 		switch {
 		case err != nil:
 			slog.Error("dispatch outbox: decide fallback copy", "comment_id", held.commentID, "destination", held.destination, "error", err)
 			fail(held)
 		case decision == fallbackPublishes:
-			sent = append(sent, sentCopy{held: held, answer: sender.PublishAsync(item)})
+			sent = append(sent, sentCopy{held: held, out: out, answer: out.send(sender)})
 		case decision == fallbackSettles:
 			records = append(records, fallbackRecord{held: held, settled: true})
 		default:
@@ -662,11 +701,19 @@ func publishFallbackCopies(ctx context.Context, deps Deps, hold fence) {
 			release(item.held, 0)
 			continue
 		default:
-			// Counted as a batch counts a destination that did not reach NATS (sendChains), except
-			// an answer a stopping process stopped waiting for, which says nothing of NATS.
-			switch {
+			// Counted as a batch counts a destination that did not reach NATS (sendChains): a
+			// role forward its holder's resolution held pending sent nothing at all and is
+			// counted under that holder, a forward NATS took whose holder sent no receipt is
+			// unanswered, and a send the server refused under this connection's own publish
+			// permissions is a denial. An answer a stopping process stopped waiting for says
+			// nothing of NATS and counts nothing.
+			switch forward := item.out.forward; {
 			case errors.Is(err, bus.ErrPublishDenied):
 				deps.countPublishFailure("denied")
+			case forward != nil && forward.err != nil:
+				deps.countPublishFailure("holder")
+			case errors.Is(err, bus.ErrReceiptTimeout) && !errors.Is(err, bus.ErrPublishUnconfirmed):
+				deps.countPublishFailure("unanswered")
 			case ctx.Err() == nil || !errors.Is(err, ctx.Err()):
 				deps.countPublishFailure("failed")
 			}
@@ -680,6 +727,7 @@ func publishFallbackCopies(ctx context.Context, deps Deps, hold fence) {
 		}
 		records = append(records, fallbackRecord{held: item.held, settled: true, published: true})
 	}
+	return full, false
 }
 
 // fallbackDecision is what a fallback pass does with one row (decideFallbackCopy).
@@ -695,41 +743,72 @@ const (
 	fallbackPublishes
 )
 
+// fallbackSend is the copy a pass publishes for one row: the envelope, and the forward that
+// carries it when the row's destination is a role topic, nil for every other destination
+// (fallbackRoleForward).
+type fallbackSend struct {
+	item    contracts.Envelope
+	forward *roleForward
+}
+
+// send starts the copy's send through sender: a role destination forwarded to the role's holder
+// with a Request, every other published to its topic. A forward that resolved to no holder it
+// could reach answers its own error, as a batch's chain does (sendChains), so the row counts an
+// attempt and backs off.
+func (s fallbackSend) send(sender bus.Sender) <-chan error {
+	switch {
+	case s.forward == nil:
+		return sender.PublishAsync(s.item)
+	case s.forward.err != nil:
+		return failedAnswer(s.forward.err)
+	}
+	return s.forward.send(sender, s.item)
+}
+
 // decideFallbackCopy decides one claimed row by its key's attempts (publishFallbackCopies), and
-// returns, when the copy is to be published, the envelope to publish.
+// returns, when the copy is to be published, the send to make: the envelope, and the role
+// forward that carries it to a role destination's holder. A role whose resolution reaches the
+// destination with nothing to send (no claim, a holder gone and its claim released, the holder
+// the event's own actor) settles the row as a sent mention does, with nothing published.
 func decideFallbackCopy(
 	ctx context.Context, deps Deps, held fallbackCopy, event fallbackEvent,
-) (fallbackDecision, contracts.Envelope, error) {
+) (fallbackDecision, fallbackSend, error) {
 	deliveries, err := mentionDeliveriesOf(ctx, deps.Store.Pool, held.commentID)
 	if err != nil {
-		return 0, contracts.Envelope{}, err
+		return 0, fallbackSend{}, err
 	}
 	outcomes, keys := deliveries.of(held.kind)
 	state := outcomes.state(held.key)
 	if state == mentionAbandoned {
 		comment := mentionComment{ctx: ctx, deps: deps, event: event.event, id: held.commentID}
 		if state, err = comment.settleAbandoned(held.kind, held.key); err != nil {
-			return 0, contracts.Envelope{}, err
+			return 0, fallbackSend{}, err
 		}
 	}
 	switch state {
 	case mentionSent:
-		return fallbackSettles, contracts.Envelope{}, nil
+		return fallbackSettles, fallbackSend{}, nil
 	case mentionResending, mentionSending:
-		return fallbackWaits, contracts.Envelope{}, nil
+		return fallbackWaits, fallbackSend{}, nil
 	}
 	item, err := envelope(event.event, event.slug)
 	if err != nil {
-		return 0, contracts.Envelope{}, err
+		return 0, fallbackSend{}, err
 	}
 	item.Topic = held.destination
 	if key, ok := keys[held.key]; ok {
 		item.DedupeKey = key
 	}
 	if err := item.Validate(); err != nil {
-		return 0, contracts.Envelope{}, fmt.Errorf("validate envelope: %w", err)
+		return 0, fallbackSend{}, fmt.Errorf("validate envelope: %w", err)
 	}
-	return fallbackPublishes, item, nil
+	forward := fallbackRoleForward(ctx, deps, item, held.destination)
+	if forward != nil && forward.skip != "" {
+		slog.Info("dispatch outbox: a fallback copy's role destination is reached with nothing sent",
+			"comment_id", held.commentID, "destination", held.destination, "reason", forward.skip)
+		return fallbackSettles, fallbackSend{}, nil
+	}
+	return fallbackPublishes, fallbackSend{item: item, forward: forward}, nil
 }
 
 // claimFallbackCopies claims at most batchSize unsettled fallback rows that are due - never
