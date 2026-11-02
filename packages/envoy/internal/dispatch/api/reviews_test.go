@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -249,9 +251,11 @@ func TestApprovalRequestSummaryAndARepeatWithANewSummary(t *testing.T) {
 		}
 	}
 	// "Approve spec.md (version 9999999999)?", the question at the longest version a request can
-	// reach, and the space after it leave the rest of the ask cap for the summary; each "é" is one
-	// UTF-16 unit and two bytes, and the padding around a summary is not part of it.
-	room := maxAskQuestion16 - len16(docs.ApprovalQuestion("spec.md", maxApprovalVersion, "")) - 1
+	// reach, the space after it and the fixed options leave the rest of the ask bound for the
+	// summary; each "é" is one UTF-16 unit and two bytes, and the padding around a summary is
+	// not part of it.
+	room := contracts.DispatchEventBodyMax -
+		docs.AskWordingUnits(docs.ApprovalQuestion("spec.md", maxApprovalVersion, ""), approvalAskOptions) - 1
 	over := strings.Repeat("é", room+1)
 	overCap := "summary is 1 characters over the " + strconv.Itoa(room) + "-character limit (" + strconv.Itoa(room+1) + "/" + strconv.Itoa(room) + ")"
 	if refused := request(issue.PrimaryArtifactID, &over); refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(refused.Body.String(), overCap) {
@@ -307,38 +311,40 @@ func TestApprovalRequestSummaryAndARepeatWithANewSummary(t *testing.T) {
 
 // A version move rebuilds an approval request's question at the document's new version without
 // asking again, so the summary is budgeted against the longest version a request can reach: the
-// longest summary the route accepts keeps the question within the ask cap however many digits the
-// version gains, and that budget is the tightest that does.
-func TestTheLongestAcceptedSummaryFitsTheCapAtEveryVersion(t *testing.T) {
+// longest summary the route accepts keeps the ask's question and options within the ask bound
+// however many digits the version gains, and that budget is the tightest that does.
+func TestTheLongestAcceptedSummaryFitsTheBoundAtEveryVersion(t *testing.T) {
 	for _, name := range []string{"spec.md", "a", strings.Repeat("n", 100)} {
 		for _, requested := range []int{1, 9, 12345} {
-			limit := 0
-			for length := 1; length <= maxAskQuestion16; length++ {
-				if _, err := approvalQuestion(name, requested, strings.Repeat("é", length)); err != nil {
-					break
-				}
-				limit = length
-			}
+			// The longest summary approvalQuestion accepts, by binary search over its verdict:
+			// it accepts every length up to that one and refuses every length past it.
+			refused := sort.Search(contracts.DispatchEventBodyMax+2, func(length int) bool {
+				_, err := approvalQuestion(name, requested, strings.Repeat("é", length))
+				return err != nil
+			})
+			limit := refused - 1
 			summary := strings.Repeat("é", limit)
 			if _, err := approvalQuestion(name, requested, summary+"é"); err == nil || !strings.Contains(err.Error(), "summary is 1 characters over") {
 				t.Fatalf("%s at version %d: one past the %d-unit limit = %v, want CAP_EXCEEDED", name, requested, limit, err)
 			}
 			// A move to the first version of each digit count, then to the longest of all.
 			for boundary := 9; boundary < maxApprovalVersion; boundary = boundary*10 + 9 {
-				if length := len16(docs.ApprovalQuestion(name, boundary+1, summary)); length > maxAskQuestion16 {
-					t.Fatalf("%s requested at version %d, moved to %d: question is %d units, past the %d cap", name, requested, boundary+1, length, maxAskQuestion16)
+				moved := docs.ApprovalQuestion(name, boundary+1, summary)
+				if units := docs.AskWordingUnits(moved, approvalAskOptions); units > contracts.DispatchEventBodyMax {
+					t.Fatalf("%s requested at version %d, moved to %d: question and options are %d units, past the %d bound", name, requested, boundary+1, units, contracts.DispatchEventBodyMax)
 				}
 			}
-			if length := len16(docs.ApprovalQuestion(name, maxApprovalVersion, summary)); length != maxAskQuestion16 {
-				t.Fatalf("%s requested at version %d, moved to the longest version: question is %d units, want exactly the %d cap", name, requested, length, maxAskQuestion16)
+			longest := docs.ApprovalQuestion(name, maxApprovalVersion, summary)
+			if units := docs.AskWordingUnits(longest, approvalAskOptions); units != contracts.DispatchEventBodyMax {
+				t.Fatalf("%s requested at version %d, moved to the longest version: question and options are %d units, want exactly the %d bound", name, requested, units, contracts.DispatchEventBodyMax)
 			}
 		}
 	}
 }
 
-// The longest summary the route accepts at version 1 still fits the ask cap once a version move
-// rebuilds the question at version 10, whose number is one character longer.
-func TestAVersionMoveKeepsTheLongestAcceptedSummaryWithinTheAskCap(t *testing.T) {
+// The longest summary the route accepts at version 1 still fits the ask bound once a version
+// move rebuilds the question at version 10, whose number is one character longer.
+func TestAVersionMoveKeepsTheLongestAcceptedSummaryWithinTheAskBound(t *testing.T) {
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -351,7 +357,7 @@ func TestAVersionMoveKeepsTheLongestAcceptedSummaryWithinTheAskCap(t *testing.T)
 			"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests",
 			map[string]any{"actor": sessionActor(), "summary": summary})
 	}
-	refused := request(strings.Repeat("é", maxAskQuestion16))
+	refused := request(strings.Repeat("é", contracts.DispatchEventBodyMax))
 	match := regexp.MustCompile(`the (\d+)-character limit`).FindStringSubmatch(refused.Body.String())
 	if refused.Code != http.StatusBadRequest || match == nil {
 		t.Fatalf("summary past the cap: status=%d body=%s, want CAP_EXCEEDED naming the limit", refused.Code, refused.Body.String())
@@ -389,8 +395,8 @@ func TestAVersionMoveKeepsTheLongestAcceptedSummaryWithinTheAskCap(t *testing.T)
 	if moved.Question != "Approve spec.md (version 10)? "+summary {
 		t.Fatalf("moved question = %q, want version 10 with the summary unchanged", moved.Question)
 	}
-	if length := len16(moved.Question); length > maxAskQuestion16 {
-		t.Fatalf("moved question is %d units, past the %d-unit ask cap", length, maxAskQuestion16)
+	if units := docs.AskWordingUnits(moved.Question, approvalAskOptions); units > contracts.DispatchEventBodyMax {
+		t.Fatalf("the moved question and its options are %d units, past the %d-unit ask bound", units, contracts.DispatchEventBodyMax)
 	}
 }
 

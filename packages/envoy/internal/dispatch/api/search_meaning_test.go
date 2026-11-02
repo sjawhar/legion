@@ -465,22 +465,22 @@ func (r *recordingEmbedder) Embed(ctx context.Context, texts []string, inputType
 	return r.fakeEmbedder.Embed(ctx, texts, inputType)
 }
 
-// maxBody is a body of exactly contracts.DispatchBodyMax characters: word repeated, then filler
-// up to the cap, ending in a letter so no trimming can shorten it.
-func maxBody(word string) string {
-	body := strings.Repeat(word+" ", contracts.DispatchBodyMax/(len(word)+1))
-	return body + strings.Repeat("x", contracts.DispatchBodyMax-len(body))
+// maxBlock is a body of one block of exactly contracts.DispatchBlockUnits characters: word
+// repeated, then filler up to the bound, ending in a letter so no trimming can shorten it.
+func maxBlock(word string) string {
+	body := strings.Repeat(word+" ", contracts.DispatchBlockUnits/(len(word)+1))
+	return body + strings.Repeat("x", contracts.DispatchBlockUnits-len(body))
 }
 
-// TestTheLongestCommentAndMessageReachTheEmbedderWhole: a comment and a message at
-// DISPATCH_BODY_MAX, written through the API, reach the embedder whole once the queue drains -
-// the body cap and the embedder's input bound (embed's maxInputChars) agree, so no tail of a
-// body the server accepted goes unsearched.
-func TestTheLongestCommentAndMessageReachTheEmbedderWhole(t *testing.T) {
+// TestACommentAndMessageOfOneLongestBlockReachTheEmbedderWhole: a comment and a message of one
+// block at DISPATCH_BLOCK_UNITS, written through the API, reach the embedder whole once the
+// queue drains - the block bound and the embedder's input bound (embed.MaxInputRunes) agree, so
+// no tail of a block the server accepted goes unsearched.
+func TestACommentAndMessageOfOneLongestBlockReachTheEmbedderWhole(t *testing.T) {
 	embedder := &recordingEmbedder{fakeEmbedder: &fakeEmbedder{}}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
 	issue := createInteractionIssue(t, handler, "LONG", "Longest bodies", "Body text.")
-	commentBody, messageBody := maxBody("astrolabe"), maxBody("sextant")
+	commentBody, messageBody := maxBlock("astrolabe"), maxBlock("sextant")
 	if comment := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{"body": commentBody}, "alice"); comment.Code != http.StatusCreated {
 		t.Fatalf("create comment: status=%d body=%s", comment.Code, comment.Body.String())
 	}
@@ -494,8 +494,8 @@ func TestTheLongestCommentAndMessageReachTheEmbedderWhole(t *testing.T) {
 		embedded[text] = true
 	}
 	for name, body := range map[string]string{"comment": commentBody, "message": messageBody} {
-		if len(body) != contracts.DispatchBodyMax {
-			t.Fatalf("%s body is %d characters, want %d", name, len(body), contracts.DispatchBodyMax)
+		if len(body) != contracts.DispatchBlockUnits {
+			t.Fatalf("%s body is %d characters, want %d", name, len(body), contracts.DispatchBlockUnits)
 		}
 		if !embedded[body] {
 			t.Errorf("the %d-character %s never reached the embedder whole", len(body), name)

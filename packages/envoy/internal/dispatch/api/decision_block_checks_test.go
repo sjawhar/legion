@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -338,7 +339,7 @@ func TestDecisionBlockChecksEachReadTheirAskStatesAndRecord(t *testing.T) {
 		}
 		asks[block.id] = decodeBody[testAskWithSuggestions](t, opened).ID
 		answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+asks[block.id]+"/answer",
-			map[string]any{"selected": []string{"Brass"}, "text": strings.Repeat("ballast ", 40_000)}, "alice")
+			map[string]any{"selected": []string{"Brass"}, "text": strings.Repeat("ballast ", contracts.DispatchEventBodyMax/len("ballast "))}, "alice")
 		if answered.Code != http.StatusOK {
 			t.Fatalf("answer the %s ask: status=%d body=%s", block.id, answered.Code, answered.Body.String())
 		}

@@ -10,8 +10,26 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
+
+// An answer holds at most contracts.DispatchEventBodyMax UTF-16 units (INFRA-370), so what
+// settlement's weighing of a returning answer turns on is the document it returns to rather
+// than the answer: boundedAnswer is an answer at that bound, and roomForOneAnswer a spec long
+// enough that the document has room for one such answer and not for two. The headroom covers
+// the ask blocks the spec carries beside the prose and the attributes an answered block gains,
+// a few hundred bytes against the 32,000 an answer spends.
+const answerRoomHeadroom = 2000
+
+func boundedAnswer() string {
+	return strings.Repeat("word ", contracts.DispatchEventBodyMax/len("word "))
+}
+
+func roomForOneAnswer() string {
+	return strings.Repeat("word ", (pmdoc.MaxDocumentBytes-contracts.DispatchEventBodyMax-2*answerRoomHeadroom)/len("word "))
+}
 
 // Writes add up, so a write may not leave a document's markdown past what one upload may hold, by
 // an upload's own measures - 1 MiB, and 65,536 elements as an upload's parse counts them - and
@@ -162,10 +180,12 @@ func TestAnAcceptCannotGrowADocumentPastWhatOneDocumentMayHold(t *testing.T) {
 // would pass the bound is refused with 413 CAP_EXCEEDED, saying what to do; the ask keeps its text
 // and stays open, and the document still reads.
 func TestAskEditsCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
-	prose := strings.Repeat("word ", 180_000)
+	// The description takes the ask bound less its question and its label, since an edit is
+	// held to the ask's whole wording (validateAskWording) before the document weighs it.
+	prose := strings.Repeat("word ", (contracts.DispatchEventBodyMax-len("Question 0?")-len("A"))/len("word "))
 	handler, _ := blockAskHandler(t)
 	const asks = 3
-	issue := createInteractionIssue(t, handler, "TEST", "Ask growth", openAsksSpec(asks))
+	issue := createInteractionIssue(t, handler, "TEST", "Ask growth", openAsksSpecWithRoomForOne(asks))
 	refused := 0
 	for index := range asks {
 		blockID := fmt.Sprintf("ask-%d", index)
@@ -202,17 +222,21 @@ func TestAskEditsCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 }
 
 // An ask's question and options are plain text the server makes into nodes, renders escaped and
-// reads back, so they are weighed before that, as caller markdown is weighed while goldmark reads
-// it: an option description whose syntax characters or line feeds alone weigh more elements than
-// one write may make is refused with 413 CAP_EXCEEDED, saying so, before it is rendered, and the
-// refusal allocates a fraction of what rendering it took. A 920 KB description of `)_` held 417 MiB
-// before its edit was weighed, 400 KB of it was taken, and one of 330,000 lines did not finish its
-// edit in twenty minutes. An ordinary long description is taken.
+// reads back, so they are bounded before any of that: a description that would weigh more
+// elements than one write may make is refused before it is rendered, and the refusal allocates a
+// fraction of what rendering it took. A 920 KB description of `)_` held 417 MiB before its edit
+// was weighed, 400 KB of it was taken, and one of 330,000 lines did not finish its edit in
+// twenty minutes. The ask's whole wording now holds at most contracts.DispatchEventBodyMax
+// units, which refuses each of these sooner and as cheaply, naming the field. A description at
+// that bound is taken.
 func TestAnAsksTextIsWeighedBeforeItIsRendered(t *testing.T) {
 	handler, _ := blockAskHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Ask text", openAsksSpec(1))
 	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "ask-0", "Question 0?")
 	askID := blockAskID(t, handler, issue.Key, "ask-0")
+	// An accepted description stands at the ask bound less the question and the label, which
+	// validateAskWording counts beside it.
+	room := contracts.DispatchEventBodyMax - len("Question 0?") - len("A")
 	edit := func(description string) *httptest.ResponseRecorder {
 		return dispatchRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
 			"options": []map[string]string{{"label": "A", "description": description}},
@@ -227,9 +251,8 @@ func TestAnAsksTextIsWeighedBeforeItIsRendered(t *testing.T) {
 		runtime.ReadMemStats(&before)
 		response := edit(description.text)
 		runtime.ReadMemStats(&after)
-		if !refusedTooLarge(t, response) || !strings.Contains(response.Body.String(), "this write's text weighs at least") {
-			t.Fatalf("an option description of %s: status=%d body=%.500s, want 413 CAP_EXCEEDED refusing the text's weight", description.name, response.Code, response.Body.String())
-		}
+		assertCapExceeded(t, "an option description of "+description.name, response, "question and options",
+			len16(description.text)+len("Question 0?")+len("A"), contracts.DispatchEventBodyMax, "")
 		if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 160<<20 {
 			t.Errorf("refusing an option description of %s allocated %d MiB, want at most 160 MiB", description.name, allocated>>20)
 		}
@@ -237,8 +260,8 @@ func TestAnAsksTextIsWeighedBeforeItIsRendered(t *testing.T) {
 			t.Fatalf("the ask after its refused edit = %#v, want it as it was", ask)
 		}
 	}
-	if response := edit(strings.Repeat("word, ", 100_000)); response.Code != http.StatusOK {
-		t.Fatalf("an option description of 600 KB of prose: status=%d body=%.300s, want 200", response.Code, response.Body.String())
+	if response := edit(strings.Repeat("word, ", room/len("word, "))); response.Code != http.StatusOK {
+		t.Fatalf("an option description at the ask bound: status=%d body=%.300s, want 200", response.Code, response.Body.String())
 	}
 }
 
@@ -250,10 +273,10 @@ func TestAnAsksTextIsWeighedBeforeItIsRendered(t *testing.T) {
 // and an answer of 900 KB to a document with no room for it was refused and recorded nowhere.
 func TestAnAnswerTheDocumentHasNoRoomForIsKeptOnItsAskAndLeftOutOfItsBlock(t *testing.T) {
 	t.Run("words", func(t *testing.T) {
-		prose := strings.Repeat("word ", 180_000)
+		prose := boundedAnswer()
 		handler, _ := blockAskHandler(t)
 		const asks = 3
-		issue := createInteractionIssue(t, handler, "TEST", "Answer growth", openAsksSpec(asks))
+		issue := createInteractionIssue(t, handler, "TEST", "Answer growth", openAsksSpecWithRoomForOne(asks))
 		for index := range asks {
 			blockID := fmt.Sprintf("ask-%d", index)
 			awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, blockID, fmt.Sprintf("Question %d?", index))
@@ -278,15 +301,19 @@ func TestAnAnswerTheDocumentHasNoRoomForIsKeptOnItsAskAndLeftOutOfItsBlock(t *te
 			}
 		}
 	})
-	t.Run("a choice of a 1,000,000-character option", func(t *testing.T) {
+	t.Run("a choice of an option at the ask bound", func(t *testing.T) {
 		handler, _ := blockAskHandler(t)
-		label := "a" + strings.Repeat(">", 1_000_000)
+		// The label takes the ask bound less the question, since an upload is held to an ask's
+		// wording as a route is (validateWrittenAskBlocks). Each ">" renders escaped as seven
+		// bytes, so the choice alone weighs some 224 KB in the block, which the prose before
+		// the ask leaves the document no room for.
+		label := "a" + strings.Repeat(">", contracts.DispatchEventBodyMax-len("Which?")-1)
 		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "TEST", "name": "TEST project"}, "alice"); response.Code != http.StatusCreated {
 			t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
 		}
 		created := literalRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
 			"project": "TEST", "title": "A long option",
-			"spec": ":::ask{#ask-0 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n- " + label + "\n:::\n",
+			"spec": strings.Repeat("word ", 180_000) + "\n\n:::ask{#ask-0 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n- " + label + "\n:::\n",
 		})
 		if created.Code != http.StatusCreated {
 			t.Fatalf("create issue: status=%d body=%.300s", created.Code, created.Body.String())
@@ -313,6 +340,45 @@ func TestAnAnswerTheDocumentHasNoRoomForIsKeptOnItsAskAndLeftOutOfItsBlock(t *te
 	})
 }
 
+// A document uploaded whole is held to the same bound on a decision's wording as the ask routes
+// hold one to, so no spec carries in a decision nobody may answer: a spec whose block's question
+// and options total one unit past contracts.DispatchEventBodyMax is refused 400
+// INVALID_ASK_BLOCK naming the block, and no issue is written; the same spec at the bound is
+// taken, and it is the project's first issue.
+func TestAnUploadedDecisionBlockIsHeldToTheSameBoundAsAnAskRoute(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "TEST", "name": "TEST project"}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	const option = "- Ship: Release it"
+	spec := func(units int) string {
+		return ":::ask{#ask-0 urgency=\"med\" multiple=\"false\" state=\"open\"}\n" +
+			strings.Repeat("q", units-len("Ship")-len("Release it")) + "\n\n" + option + "\n:::\n"
+	}
+	upload := func(title, text string) *httptest.ResponseRecorder {
+		return literalRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+			"project": "TEST", "title": title, "spec": text,
+		})
+	}
+	refused := upload("One unit over", spec(contracts.DispatchEventBodyMax+1))
+	body := refused.Body.String()
+	want := fmt.Sprintf(`ask block \"ask-0\" is 1 characters over the %d-character limit on its question and options (%d/%d)`,
+		contracts.DispatchEventBodyMax, contracts.DispatchEventBodyMax+1, contracts.DispatchEventBodyMax)
+	if refused.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_ASK_BLOCK"`) || !strings.Contains(body, want) {
+		t.Fatalf("a spec one unit over the ask bound: status=%d body=%.400s, want 400 INVALID_ASK_BLOCK %q", refused.Code, body, want)
+	}
+	accepted := upload("At the bound", spec(contracts.DispatchEventBodyMax))
+	if accepted.Code != http.StatusCreated {
+		t.Fatalf("a spec at the ask bound: status=%d body=%.400s", accepted.Code, accepted.Body.String())
+	}
+	issue := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, accepted)
+	if issue.Key != "TEST-1" {
+		t.Fatalf("the accepted spec is issue %s, want TEST-1: the refused upload wrote an issue", issue.Key)
+	}
+}
+
 // openAsksSpec is a spec of asks open ask blocks, ask-0 asking "Question 0?" and on.
 func openAsksSpec(asks int) string {
 	var spec strings.Builder
@@ -321,6 +387,14 @@ func openAsksSpec(asks int) string {
 		fmt.Fprintf(&spec, "\n:::ask{#ask-%d urgency=\"med\" multiple=\"false\" state=\"open\"}\nQuestion %d?\n:::\n", index, index)
 	}
 	return spec.String()
+}
+
+// openAsksSpecWithRoomForOne is openAsksSpec with prose enough that the document has room for
+// one text at the ask bound and not for two: an ask's words are at most
+// contracts.DispatchEventBodyMax units (INFRA-370), so what a write of one weighs against is the
+// document it joins rather than its own length.
+func openAsksSpecWithRoomForOne(asks int) string {
+	return roomForOneAnswer() + "\n" + openAsksSpec(asks)
 }
 
 // askDirective is the directive line of the ask block blockID in markdown.
@@ -445,14 +519,15 @@ func refusedTooLarge(t *testing.T, response *httptest.ResponseRecorder) bool {
 // the document would pass what one upload may hold and grow, it restores the block's state and
 // withholds the answer's text, which the ask keeps. A 75-byte insert of an answered ask's block
 // left a 225 KB document, and twenty-four answers of 900 KB, each weighed against a document their
-// deleted blocks had left small, came back in one 1,852-byte edit as a 21.6 MB document.
+// deleted blocks had left small, came back in one 1,852-byte edit as a 21.6 MB document. The
+// document here has room for one answer at the bound and not for two (roomForOneAnswer).
 func TestSettlementCannotGrowADocumentPastWhatOneUploadMayHoldByRestoringAnswers(t *testing.T) {
 	handler, _ := blockAskHandler(t)
-	prose := strings.Repeat("word ", 180_000)
+	prose := boundedAnswer()
 	block := func(index int) string {
 		return fmt.Sprintf(":::ask{#ask-%d urgency=\"med\" multiple=\"false\"}\nQuestion %d?\n:::\n", index, index)
 	}
-	issue := createInteractionIssue(t, handler, "TEST", "Restored answers", "Context\n\n"+block(0)+"\n"+block(1))
+	issue := createInteractionIssue(t, handler, "TEST", "Restored answers", roomForOneAnswer()+"\n\n"+block(0)+"\n"+block(1))
 	ids := make([]string, 2)
 	for index := range ids {
 		blockID := fmt.Sprintf("ask-%d", index)
@@ -520,14 +595,14 @@ func TestSettlementCannotGrowADocumentPastWhatOneUploadMayHoldByRestoringAnswers
 }
 
 // Settlement weighs each answer it writes back into a returning block on its own, in document
-// order: two answers of 400 KB returned in one edit to a 300 KB document, which has room for one,
-// leave the first block with its answer and the second saying who answered and when without it,
-// and the second's answer comes back once the document has room for it. Withheld together, neither
-// came back until both fit.
+// order: two answers at the ask bound returned in one edit to a document with room for one leave
+// the first block with its answer and the second saying who answered and when without it, and the
+// second's answer comes back once the document has room for it. Withheld together, neither came
+// back until both fit.
 func TestSettlementGivesBackEachReturnedAnswerTheDocumentHasRoomFor(t *testing.T) {
 	handler, _ := blockAskHandler(t)
-	prose := strings.Repeat("words ", 50_000)
-	answerText := strings.Repeat("word ", 80_000)
+	prose := roomForOneAnswer()
+	answerText := boundedAnswer()
 	block := func(index int) string {
 		return fmt.Sprintf(":::ask{#ask-%d urgency=\"med\" multiple=\"false\"}\nQuestion %d?\n:::\n", index, index)
 	}

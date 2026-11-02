@@ -13,17 +13,17 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// capBody is a body of exactly contracts.DispatchBodyMax UTF-16 units at its worst case in bytes:
-// a character outside ASCII but inside the Basic Multilingual Plane is one unit and three bytes,
-// so the cap buys three times as many bytes as units, more than any other shape of text can. The
-// markers at its ends make a truncation at either end visible in a failure.
+// capBody is a body of exactly contracts.DispatchEventBodyMax UTF-16 units at its worst case in
+// bytes: a character outside ASCII but inside the Basic Multilingual Plane is one unit and three
+// bytes, so the cap buys three times as many bytes as units, more than any other shape of text
+// can. The markers at its ends make a truncation at either end visible in a failure.
 func capBody(t *testing.T) string {
 	t.Helper()
 	// ASCII, so each marker's bytes are its UTF-16 units.
 	const head, tail = "HEAD:", ":TAIL"
-	body := head + strings.Repeat("あ", contracts.DispatchBodyMax-len(head)-len(tail)) + tail
-	if units := len(utf16.Encode([]rune(body))); units != contracts.DispatchBodyMax {
-		t.Fatalf("the body is %d UTF-16 units, want the cap of %d", units, contracts.DispatchBodyMax)
+	body := head + strings.Repeat("あ", contracts.DispatchEventBodyMax-len(head)-len(tail)) + tail
+	if units := len(utf16.Encode([]rune(body))); units != contracts.DispatchEventBodyMax {
+		t.Fatalf("the body is %d UTF-16 units, want the cap of %d", units, contracts.DispatchEventBodyMax)
 	}
 	return body
 }
@@ -57,7 +57,7 @@ func TestRunDeliversACommentBodyAtTheCapThroughNATS(t *testing.T) {
 	select {
 	case message := <-received:
 		t.Logf("a body of %d UTF-16 units arrived in an envelope of %d bytes, against a maximum payload of %d",
-			contracts.DispatchBodyMax, len(message.Data), subscriber.MaxPayload())
+			contracts.DispatchEventBodyMax, len(message.Data), subscriber.MaxPayload())
 		var envelope contracts.Envelope
 		if err := json.Unmarshal(message.Data, &envelope); err != nil {
 			t.Fatalf("decode the issue envelope: %v", err)
@@ -76,6 +76,6 @@ func TestRunDeliversACommentBodyAtTheCapThroughNATS(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatalf("nothing arrived on %s, though the event is marked published: a body of %d UTF-16 units was recorded delivered and reached no one",
-			issueTopic, contracts.DispatchBodyMax)
+			issueTopic, contracts.DispatchEventBodyMax)
 	}
 }

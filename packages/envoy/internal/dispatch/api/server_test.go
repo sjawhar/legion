@@ -23,6 +23,7 @@ import (
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/brokertoken"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -503,6 +504,32 @@ func assertCapExceeded(t *testing.T, request string, response *httptest.Response
 	if hint != "" {
 		want += "; " + hint
 	}
+	assertRefusalMessage(t, request, response, want)
+}
+
+// assertBlockCapExceeded requires response to be the 400 CAP_EXCEEDED a body whose block at
+// position (counted from 1) holds units UTF-16 units is refused with, the block being of
+// blockType.
+func assertBlockCapExceeded(t *testing.T, request string, response *httptest.ResponseRecorder, field string, position int, blockType string, units int) {
+	t.Helper()
+	limit := contracts.DispatchBlockUnits
+	want := fmt.Sprintf("%s block %d (%s) is %d characters over the %d-character block limit (%d/%d)",
+		field, position, blockType, units-limit, limit, units, limit)
+	assertRefusalMessage(t, request, response, want)
+}
+
+// assertBlockCountExceeded requires response to be the 400 CAP_EXCEEDED a body of blocks blocks
+// is refused with.
+func assertBlockCountExceeded(t *testing.T, request string, response *httptest.ResponseRecorder, field string, blocks int) {
+	t.Helper()
+	limit := contracts.DispatchItemBlocks
+	want := fmt.Sprintf("%s is %d blocks over the %d-block limit (%d/%d)", field, blocks-limit, limit, blocks, limit)
+	assertRefusalMessage(t, request, response, want)
+}
+
+// assertRefusalMessage requires response to be 400 CAP_EXCEEDED reading want.
+func assertRefusalMessage(t *testing.T, request string, response *httptest.ResponseRecorder, want string) {
+	t.Helper()
 	body := response.Body.String()
 	refusal := decodeBody[struct {
 		Code  string `json:"code"`

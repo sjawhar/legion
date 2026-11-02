@@ -1162,6 +1162,26 @@ func blockCountExceededError(err *itemblocks.CountExceeded) *apiError {
 	return errorf(http.StatusBadRequest, "CAP_EXCEEDED", "%s", err.Error())
 }
 
+// blockBoundError is what a route answers an itemblocks.Check with: nil where the body passed
+// both bounds, else the refusal the typed error words, through the builder above that owns it.
+// Every route that bounds a body calls this one helper, so a route added later cannot word the
+// same refusal differently. Check answers only those two types or nil; another error, which no
+// caller can produce, still comes back as a refusal rather than a panic.
+func blockBoundError(err error) *apiError {
+	var countExceeded *itemblocks.CountExceeded
+	var capExceeded *itemblocks.CapExceeded
+	switch {
+	case err == nil:
+		return nil
+	case errors.As(err, &countExceeded):
+		return blockCountExceededError(countExceeded)
+	case errors.As(err, &capExceeded):
+		return blockCapExceededError(capExceeded)
+	default:
+		return errorf(http.StatusBadRequest, "CAP_EXCEEDED", "%s", err)
+	}
+}
+
 func capExceeded(w http.ResponseWriter, field string, length, limit int) {
 	err := capExceededError(field, length, limit)
 	writeError(w, err.code, err.status, err.message)

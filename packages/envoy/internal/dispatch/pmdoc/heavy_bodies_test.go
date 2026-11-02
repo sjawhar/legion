@@ -11,11 +11,11 @@ import (
 )
 
 // The bodies a reader's browser tab froze on (sjawhar/legion#2519) are read here through the
-// parser a caller's write takes, at the longest body one may write: a plain list of 8,000 items, a
-// quote and a list item each followed by lines that carry no marker of their own, a run of
-// brackets, items nested by indentation and then blank lines, a chain of list markers on one line,
-// and a typed fence whose label opens a run of brackets. Each is stored or refused here as the
-// browser's own suites expect it to be, so the two read the same body the same way.
+// parser a caller's write takes, at the longest one block of a body may be: a plain list of
+// 8,000 items, a quote and a list item each followed by lines that carry no marker of their own,
+// a run of brackets, items nested by indentation and then blank lines, a chain of list markers
+// on one line, and a typed fence whose label opens a run of brackets. Each is stored or refused
+// here as the browser's own suites expect it to be, so the two read the same body the same way.
 //
 // Each shape is asserted three ways: the verdict a write of it gets; the CPU time the parse spends
 // on it, under heavyBodyCPUBudget outside -race (heavy_body_budget.go, and no time bound under it,
@@ -29,10 +29,11 @@ import (
 // parse's own costs - the block ids a document's blocks are minted from, and the tab-indentation
 // check each open block runs on each line - which a regression would make superlinear again.
 
-// bodyCap is the longest body a caller may write, in characters: the cap the comment, message and
-// broadcast routes refuse a longer body against (contracts.DispatchBodyMax). Every shape here
-// stands at it, so what is measured is the worst one reader can be sent.
-const bodyCap = contracts.DispatchBodyMax
+// blockCap is the longest one block of a body may be, in characters: the bound the comment,
+// message and broadcast routes refuse a longer block against (contracts.DispatchBlockUnits).
+// Every shape here is one or two blocks standing at it, so what is measured is the worst one
+// reader can be sent in a block.
+const blockCap = contracts.DispatchBlockUnits
 
 // heavyBody is one of the shapes, as a test reads it.
 type heavyBody struct {
@@ -87,17 +88,17 @@ func heavyBodyShapes() []heavyBody {
 		{
 			name:  "a plain list of 8,000 items",
 			body:  func(size int) string { return strings.Repeat("- x\n", size/4) },
-			grown: bodyCap,
+			grown: blockCap,
 		},
 		{
 			name:  "a quote then lines carrying no marker",
 			body:  func(size int) string { return "> x\n" + strings.Repeat("x\n", size/2) },
-			grown: bodyCap - len("> x\n"),
+			grown: blockCap - len("> x\n"),
 		},
 		{
 			name:  "a list item then lines carrying no marker",
 			body:  func(size int) string { return "- x\n" + strings.Repeat("x\n", size/2) },
-			grown: bodyCap - len("- x\n"),
+			grown: blockCap - len("- x\n"),
 		},
 		{
 			name: "a run of 15,000 brackets and as many closers",
@@ -109,18 +110,18 @@ func heavyBodyShapes() []heavyBody {
 		{
 			name:  "49 items nested by indentation then blank lines",
 			body:  func(size int) string { return nest49 + strings.Repeat("\n", size) },
-			grown: bodyCap - len(nest49),
+			grown: blockCap - len(nest49),
 		},
 		{
 			name:    "100 items nested by indentation then blank lines",
 			body:    func(size int) string { return nest100 + strings.Repeat("\n", size) },
-			grown:   bodyCap - len(nest100),
+			grown:   blockCap - len(nest100),
 			refusal: nestedRefusal(51),
 		},
 		{
 			name:    "a chain of 15,999 list markers on one line",
 			body:    func(size int) string { return strings.Repeat("- ", size/2) + "x" },
-			grown:   bodyCap - len("x"),
+			grown:   blockCap - len("x"),
 			refusal: nestedRefusal(1),
 		},
 		{
@@ -135,14 +136,14 @@ func heavyBodyShapes() []heavyBody {
 	}
 }
 
-// Every shape at the body cap is stored or refused as it is, and the parse of it spends less CPU
-// time than heavyBodyCPUBudget allows outside -race.
-func TestHeavyBodiesAtTheBodyCapAreStoredOrRefusedInTime(t *testing.T) {
+// Every shape at the block bound is stored or refused as it is, and the parse of it spends less
+// CPU time than heavyBodyCPUBudget allows outside -race.
+func TestHeavyBodiesAtTheBlockCapAreStoredOrRefusedInTime(t *testing.T) {
 	for _, shape := range heavyBodyShapes() {
 		t.Run(shape.name, func(t *testing.T) {
 			body := shape.body(shape.grown)
-			if len(body) > bodyCap {
-				t.Fatalf("%s is %d characters, past the %d a caller may write", shape.name, len(body), bodyCap)
+			if len(body) > blockCap {
+				t.Fatalf("%s is %d characters, past the %d one block may hold", shape.name, len(body), blockCap)
 			}
 			var err error
 			took := timedWithDeadline(t, "parsing "+shape.name, perCallDeadline, func() (time.Duration, error) {
@@ -168,7 +169,7 @@ func TestHeavyBodiesAtTheBodyCapAreStoredOrRefusedInTime(t *testing.T) {
 // what the shape grows and then at the whole of it, in both builds: a shape whose cost grew with
 // the square of its length would grow growthStep² times where a linear one may grow
 // linearSlack*growthStep (growthStep, linear_test.go).
-func TestHeavyBodiesAtTheBodyCapParseInTimeProportionalToTheirLength(t *testing.T) {
+func TestHeavyBodiesAtTheBlockCapParseInTimeProportionalToTheirLength(t *testing.T) {
 	for _, shape := range heavyBodyShapes() {
 		if shape.refusal != "" {
 			continue

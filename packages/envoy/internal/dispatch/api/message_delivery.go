@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -825,9 +826,16 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "REPLY_FORBIDDEN", http.StatusForbidden, "reply requires one body or error for a delivery attempt")
 		return
 	}
-	if input.Body != nil && strings.TrimSpace(*input.Body) == "" {
-		writeError(w, "MESSAGE_INPUT", http.StatusBadRequest, "message body is required")
-		return
+	if input.Body != nil {
+		if strings.TrimSpace(*input.Body) == "" {
+			writeError(w, "MESSAGE_INPUT", http.StatusBadRequest, "message body is required")
+			return
+		}
+		// A reply is stored as a message of its own, so it takes the message route's bound.
+		if err := blockBoundError(itemblocks.Check("body", *input.Body)); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	if input.InReplyToBlock != nil && input.Body == nil {
 		writeError(w, "INVALID_MESSAGE", http.StatusBadRequest, "in_reply_to_block names the block a reply's body answers; an error report has none")
