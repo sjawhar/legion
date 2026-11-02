@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -365,15 +366,34 @@ func requireRevokedClose(t *testing.T, connection *gws.Conn, what string) {
 	}
 }
 
-// bigDocumentMarkdown is a document whose sync message is far past 64 KB, so the server writes it
-// to a page in many writes and cannot hold it in the socket's buffers.
-func bigDocumentMarkdown() string {
+// paragraphMarkdown is a document of paragraphs paragraphs, each of 161 characters whose every
+// word is "document ", the word an edit replaces to tell its own text from the seed's.
+func paragraphMarkdown(paragraphs int) string {
 	var markdown strings.Builder
 	markdown.WriteString("# First\n")
-	for paragraph := range 4_000 {
+	for paragraph := range paragraphs {
 		fmt.Fprintf(&markdown, "\nParagraph %d: %s\n", paragraph, strings.Repeat("document ", 16))
 	}
 	return markdown.String()
+}
+
+// bigDocumentMarkdown is a document whose sync message is far past 64 KB, so the server writes it
+// to a page in many writes and cannot hold it in the socket's buffers.
+func bigDocumentMarkdown() string { return paragraphMarkdown(4_000) }
+
+// syncMessageBytesPerParagraph is how many bytes one of paragraphMarkdown's paragraphs adds to the
+// sync message a room sends a page that asks for the whole document: its 161 characters and the
+// block the document's tree holds them in. Measured at 257 on documents of 200 to 1,600
+// paragraphs, whose messages ran from 51 KB to 407 KB, and used only to size a document to a
+// socket's send buffer; the test below logs the message the server really wrote, so a build that
+// encodes a paragraph differently shows it there.
+const syncMessageBytesPerParagraph = 257
+
+// slowPageMarkdown is a document whose sync message is about size bytes. The slow page below is
+// owed a message its socket's send buffer holds whole, so the document is cut to that buffer
+// rather than made as big as a test can write.
+func slowPageMarkdown(size int) string {
+	return paragraphMarkdown(max(size/syncMessageBytesPerParagraph, 1))
 }
 
 // dialSlowPage is dialPage on a connection whose receive buffer holds far less than the document's
@@ -484,19 +504,21 @@ const (
 )
 
 // postRevokeMarker is the word the edit made straight after the revoke writes into every
-// paragraph, so that edit is told apart from the eight rounds before it in both places it
-// matters: the bytes the server writes to the revoked socket, where it must never appear, and the
-// document the page's reconnect syncs, where it must.
+// paragraph, so that edit is told apart from the seeded text in both places it matters: the bytes
+// the server writes to the revoked socket, where it must never appear, and the document the
+// page's reconnect syncs, where it must.
 const postRevokeMarker = "afterrevoke"
 
 // A page on a slow link takes nothing from its socket for longer than the revoked close waits, so
 // it reads the connection's end as 1006 rather than 4412 and loses nothing by it; the rule is in
 // packages/envoy/cmd/dispatch/README.md, "Two builds at once". This pins what the revoke promises
-// a page owed a document far bigger than its buffers, on real sockets, and nothing else. A writer
-// page sends the room eight whole-document replacements of about 1 MB each; the slow page then
-// connects to that room with a 4096-byte receive buffer and never reads a byte, so when the
-// re-check revokes its socket the whole document - about 1.6 MB - is on the wire to a page that
-// has taken none of it. Of the revoke alone, this requires:
+// a page owed a document far bigger than its buffers, on real sockets, and nothing else. The
+// server accepts every socket with the send buffer serverSendBufferRequest asks for, and the
+// document is seeded at the size that grant holds whole (slowPageMessageSize): past 64 KB, and
+// hundreds of times what the slow page's 4096-byte receive buffer takes. That page connects and
+// never reads a byte, so when the re-check revokes its socket the whole document is queued on the
+// wire to a page that has taken none of it, and the server's write of it has returned, so every
+// byte of it is in the record this test reads. Of the revoke alone, this requires:
 //
 //   - the re-check returns that page's admission and no other, and the revoke is taken within
 //     revokeAfterDialBound of the dial;
@@ -517,15 +539,22 @@ const postRevokeMarker = "afterrevoke"
 //
 // The end is read off the bytes the server wrote, never off the page's socket, and the page's own
 // drain is never timed. The server closes the socket at once, so its kernel holds what it had
-// already queued - about 1.6 MB - as an orphaned FIN-WAIT-1 socket, draining into a receive window
-// the page's 4096-byte SO_RCVBUF clamped when it connected and no later SetReadBuffer reopens. On
-// a GitHub runner that is one 8 KB segment per zero-window probe, about 200 ms apart, so the page
-// needs some 40 s to reach the FIN: timing it measures the runner's TCP pacing and nothing of the
-// revoke. TCP delivers the server's bytes in order and then that FIN, so the stream checked here
-// is exactly what the page reads.
+// already queued as an orphaned FIN-WAIT-1 socket, draining into a receive window the page's
+// 4096-byte SO_RCVBUF clamped when it connected and no later SetReadBuffer reopens: a few
+// kilobytes per zero-window probe, some 200 ms apart on a loaded runner, so a page owed a
+// hundred kilobytes still needs many seconds to reach the FIN, and timing that would measure the
+// runner's TCP pacing and nothing of the revoke. TCP delivers the server's bytes in order and
+// then that FIN, so the stream checked here is exactly what the page reads.
 func TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole(t *testing.T) {
+	// The document is cut to the send buffer this host's kernel grants, read back before anything
+	// is seeded: the server's one write of it has to return with every byte queued, since a write
+	// that blocked would have put nothing in the record below.
+	grant := sendBufferGrant(t)
+	message := slowPageMessageSize(t, grant)
+	markdown := slowPageMarkdown(message)
+	t.Logf("the kernel grants a send buffer of %d bytes, so the slow page is owed a document message of about %d bytes", grant, message)
 	service, artifactID := newTestService(t)
-	seedServiceText(t, service, artifactID, bigDocumentMarkdown())
+	seedServiceText(t, service, artifactID, markdown)
 	// The server accepts through a listener that hands out connections recording what the server
 	// writes to them, so the slow page's own stream can be read below: httptest's Start takes
 	// server.URL from this listener, and gorilla's Hijack hands ygo the very connection it
@@ -537,16 +566,11 @@ func TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	// The writer presents this build's numbers, which the fleet below still admits writable, so
-	// the re-check leaves its socket open. Its rounds leave the room holding megabytes of document
-	// and history, which is what the slow page is then owed.
+	// the re-check leaves its socket open. It stays connected to make the edit after the revoke.
 	writer := connectBrowser(t, server.URL, artifactID, "bob")
-	for round := range 8 {
-		editAsBrowser(t, service, artifactID, writer,
-			strings.ReplaceAll(bigDocumentMarkdown(), "document ", fmt.Sprintf("round%d ", round)))
-	}
 
-	// The slow page connects last and reads nothing, so everything the rounds left in the room is
-	// owed to it. ygo queues the whole document to a new peer at once (its sync step 2), and the
+	// The slow page connects last and reads nothing, so the whole document the room holds is owed
+	// to it. ygo queues that document to a new peer at once (its sync step 2), and the
 	// revoke is taken once that document is on the wire and unread, not after a fixed wait: a run
 	// that revoked before it would be revoking a socket the page was owed nothing on.
 	dialed := time.Now()
@@ -581,7 +605,7 @@ func TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole(t *testing.T) {
 	// One more edit, straight after the revoke. The room broadcasts each update to every socket it
 	// still serves, so a revoke that has not ended this one sends this edit down it too.
 	editAsBrowser(t, service, artifactID, writer,
-		strings.ReplaceAll(bigDocumentMarkdown(), "document ", postRevokeMarker+" "))
+		strings.ReplaceAll(markdown, "document ", postRevokeMarker+" "))
 
 	// The revoke's own work, and all of it: the server has closed that socket and its ServeHTTP
 	// has returned. Within revokedServerEndBound of the revoke this is the revoke's doing, since
@@ -605,8 +629,8 @@ func TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole(t *testing.T) {
 	if read.biggestMessage <= 64*1024 {
 		t.Fatalf("the biggest document message the server wrote to the revoked page is %d bytes; this test needs a page owed more than its buffers can take", read.biggestMessage)
 	}
-	t.Logf("the server had the document on the wire %v after the dial; the revoked page's socket ends %s, after a document message of %d bytes",
-		onTheWire, read.end, read.biggestMessage)
+	t.Logf("the server had the document on the wire %v after the dial; the revoked page's socket ends %s, after a document message of %d bytes in a send buffer of %d",
+		onTheWire, read.end, read.biggestMessage, grant)
 
 	want, err := service.Text(context.Background(), artifactID)
 	if err != nil {
@@ -808,13 +832,87 @@ func TestARevokedPagesReconnectIsAdmittedBesideItsLateToken(t *testing.T) {
 	}
 }
 
-// serverSendBuffer is the send buffer the test gives each accepted connection. The pod's default
-// (net.ipv4.tcp_wmem's middle value, 1 MB) is right at the size of the document below, so whether
-// the server's write of it returns or blocks on a page that reads nothing turns on a few kilobytes
-// either way; the CI runner's kernel took the whole of it (its socket held 1.6 MB queued with the
-// page reading none of it). This buffer takes the document outright, as that one did, so what the
-// test then watches is the revoke and not the sockets' own capacity.
-const serverSendBuffer = 4 << 20
+// serverSendBufferRequest is the send buffer the test asks the kernel for on every connection the
+// server accepts: stock Linux's default net.core.wmem_max. A stock kernel caps a SO_SNDBUF
+// request at that value and grants twice what it kept; a kernel whose cap is raised grants twice
+// this request. Both therefore grant 425984 bytes, so no host runs this test on a buffer of its
+// own choosing, and the test reads back what it was granted rather than trusting either (an
+// explicit SO_SNDBUF also turns the kernel's own send-buffer tuning off, so the grant is all the
+// socket ever holds).
+const serverSendBufferRequest = 212992
+
+// setSendBuffer asks for serverSendBufferRequest on tcp and returns the SO_SNDBUF the kernel
+// granted, which is how many bytes that socket holds for a page that reads nothing.
+func setSendBuffer(tcp *net.TCPConn) (int, error) {
+	if err := tcp.SetWriteBuffer(serverSendBufferRequest); err != nil {
+		return 0, err
+	}
+	raw, err := tcp.SyscallConn()
+	if err != nil {
+		return 0, err
+	}
+	var granted int
+	var readErr error
+	if err := raw.Control(func(fd uintptr) {
+		granted, readErr = syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF)
+	}); err != nil {
+		return 0, err
+	}
+	return granted, readErr
+}
+
+// sendBufferGrant is the send buffer the kernel grants a connection the server accepts, measured
+// on a loopback connection of this test's own: the slow page's document is sized from it before
+// it is seeded, since a write the buffer cannot take blocks, and a blocked write has put no bytes
+// on the wire for the test to read.
+func sendBufferGrant(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen to measure the send buffer the kernel grants: %v", err)
+	}
+	defer listener.Close()
+	dialed, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("connect to measure the send buffer the kernel grants: %v", err)
+	}
+	defer dialed.Close()
+	accepted, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("accept to measure the send buffer the kernel grants: %v", err)
+	}
+	defer accepted.Close()
+	tcp, ok := accepted.(*net.TCPConn)
+	if !ok {
+		t.Fatalf("the loopback listener accepted a %T, want a TCP connection whose send buffer this can set", accepted)
+	}
+	granted, err := setSendBuffer(tcp)
+	if err != nil {
+		t.Fatalf("set and read back a send buffer of %d bytes: %v", serverSendBufferRequest, err)
+	}
+	return granted
+}
+
+// slowPageLeastMessage is the smallest document message the test below works with: past the 64 KB
+// it requires of the message it watches go out, and far past the slow page's 4096-byte receive
+// buffer.
+const slowPageLeastMessage = 96 << 10
+
+// slowPageMessageSize is how big that test makes the document's sync message on a socket whose
+// send buffer the kernel granted grant bytes: a quarter of the buffer, and never under
+// slowPageLeastMessage. The server's one write of the document then returns with every byte of it
+// queued while the page reads none, and the buffer still has room for the edit the test makes
+// after the revoke, which a revoke that has not ended the socket sends down it. A grant too small
+// to hold such a message with as much again free is reported rather than worked around.
+func slowPageMessageSize(t *testing.T, grant int) int {
+	t.Helper()
+	size := max(grant/4, slowPageLeastMessage)
+	if 2*size > grant {
+		t.Fatalf("the kernel granted a send buffer of %d bytes, too small for a document message of %d bytes - the least this test needs, past the 64 KB a page's buffers cannot take - with as much again free for the edit after the revoke",
+			grant, size)
+	}
+	return size
+}
 
 // recordingListener hands every accepted connection out as a serverSocket, so a test can find
 // the one belonging to a page it dialled and read exactly what the server wrote to it. gorilla's
@@ -831,7 +929,7 @@ func (l *recordingListener) Accept() (net.Conn, error) {
 		return nil, err
 	}
 	if tcp, ok := connection.(*net.TCPConn); ok {
-		if err := tcp.SetWriteBuffer(serverSendBuffer); err != nil {
+		if _, err := setSendBuffer(tcp); err != nil {
 			_ = tcp.Close()
 			return nil, err
 		}

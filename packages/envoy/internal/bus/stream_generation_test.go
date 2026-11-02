@@ -35,8 +35,8 @@ func rawJetStream(t *testing.T, url string) nats.JetStreamContext {
 // build starts, whether it names a replica count (the listener) or not (Dispatch): the older build
 // does not revert what the newer one set.
 func TestAnOwningClientLeavesAStreamANewerGenerationStampedUntouched(t *testing.T) {
-	urls := startJetStreamCluster(t)
-	js := rawJetStream(t, urls[0])
+	cluster, js := startClusterJetStream(t)
+	urls := cluster.URLs()
 	newer := nats.StreamConfig{
 		Name:       Stream,
 		Subjects:   []string{"notifications.github.>", "notifications.newer.>"},
@@ -44,7 +44,7 @@ func TestAnOwningClientLeavesAStreamANewerGenerationStampedUntouched(t *testing.
 		MaxAge:     time.Hour,
 		Duplicates: time.Minute,
 		Storage:    nats.FileStorage,
-		Replicas:   clusterSize,
+		Replicas:   3,
 		Metadata:   map[string]string{generationKey: "2"},
 	}
 	if _, err := js.AddStream(&newer); err != nil {
