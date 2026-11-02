@@ -135,7 +135,7 @@ func TestLoadControllerRefuses(t *testing.T) {
 			`project "/-_/" must include at least one alphanumeric character`},
 		{"a broken daemon_url", strings.Replace(requiredControllerKeys, "http://daemon.test:13370", "daemon", 1), "daemon_url must be a valid URL"},
 		{"a broken envoy_url", strings.Replace(requiredControllerKeys, "http://envoy.test:9020", "envoy", 1), "envoy_url must be a valid URL"},
-		{"dispatch_url alone", requiredControllerKeys + "dispatch_url: https://d.test\n", "dispatch_token_file is required when dispatch_url is configured"},
+		{"dispatch_token_file alone", requiredControllerKeys + "dispatch_token_file: ./t\n", "dispatch_token_file is set but dispatch_url is not"},
 		{"a daemon_url with a query string", strings.Replace(requiredControllerKeys, "http://daemon.test:13370", "http://daemon.test:13370?token=token", 1),
 			"daemon_url must not include a query string or fragment"},
 		{"a daemon_url with a fragment", strings.Replace(requiredControllerKeys, "http://daemon.test:13370", "http://daemon.test:13370#fragment", 1),
@@ -149,7 +149,6 @@ func TestLoadControllerRefuses(t *testing.T) {
 			`nats_urls entry "nats://a:4222?token=token" must not include a query string or fragment; use URL userinfo or a secret for credentials`},
 		{"a nats_urls entry with a fragment", strings.Replace(requiredControllerKeys, "nats_urls: [nats://a:4222]", `nats_urls: ["nats://a:4222#fragment"]`, 1),
 			`nats_urls entry "nats://a:4222#fragment" must not include a query string or fragment; use URL userinfo or a secret for credentials`},
-		{"dispatch_token_file alone", requiredControllerKeys + "dispatch_token_file: ./t\n", "dispatch_token_file is set but dispatch_url is not"},
 		{"the Dispatch MCP endpoint", requiredControllerKeys + "dispatch_url: https://d.test/mcp/\ndispatch_token_file: ./t\n",
 			"dispatch_url must be the dispatch service base URL, not the /mcp endpoint"},
 		{"a blank omp_invocation", requiredControllerKeys + "omp_invocation: \"\"\n", "omp_invocation must not be empty"},
@@ -162,6 +161,21 @@ func TestLoadControllerRefuses(t *testing.T) {
 				t.Fatalf("err = %v\nwant %s", err, tc.want)
 			}
 		})
+	}
+}
+
+// A controller whose machine proves an identity of its own mints its own Dispatch token and
+// writes it under its state directory, so its configuration names no token file at all
+// (dispatch://INFRA-884/spec: the controller writes to Dispatch with its own token and its
+// configuration names no token file). Loading reads no environment, so dispatch_url alone is a
+// configuration the loader takes and the start decides on.
+func TestLoadControllerTakesADispatchURLWithNoTokenFile(t *testing.T) {
+	got, err := LoadController(controllerFile(t, requiredControllerKeys+"dispatch_url: https://d.test\n"), "")
+	if err != nil {
+		t.Fatalf("LoadController: %v", err)
+	}
+	if got.DispatchURL != "https://d.test" || got.DispatchTokenFile != "" {
+		t.Fatalf("DispatchURL = %q, DispatchTokenFile = %q, want the URL and no token file", got.DispatchURL, got.DispatchTokenFile)
 	}
 }
 
