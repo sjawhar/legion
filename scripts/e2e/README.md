@@ -3470,7 +3470,7 @@ DATABASE_URL=postgres://<user>@127.0.0.1:<port>/<database>?sslmode=disable \
 ```
 
 Runs on any Linux host with `go`, `bun`, `curl`, `psql` and `openssl` — no Docker.
-It proves `publishClaimantRoute` (`packages/envoy/internal/dispatch/outbox/publisher.go`) on the wire:
+It proves `addClaimantRoute` (`packages/envoy/internal/dispatch/outbox/publisher.go`) on the wire:
 the real `envoy-dispatch` publishes each event, and the run reads which `notifications.agent.*` topics carried its envelope, `dispatch-<event id>`.
 
 Each item below names an input and its default, then what it means.
