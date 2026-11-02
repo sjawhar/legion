@@ -30,11 +30,10 @@ const defaultBranchTTL = 10 * time.Minute
 // it. So the read is made of the repository GitHub holds that one under now (repos, the project's
 // mapping, through repositories.serving): the token is minted for that repository's owner and the
 // call addresses it. The mapping is read here, where the token is minted, so that no caller hands
-// an owner in and none can forget — the backfill's two reads, the mapping's own (nameAccepted) and
-// an unrecorded issue's default repository (issueRepository) all pass through this one place. A
-// repository the mapping serves is its own serving repository, so its read is the read it always
-// was, and a nil mapping — a test that builds no mapping, a deployment that configures no rename —
-// maps nothing.
+// an owner in and none can forget. A repository the mapping serves is its own serving repository,
+// so its read is the read it always was, and a nil mapping maps nothing — which only a test
+// passes, since the boot builds a mapping whatever the deployment configures (newRepositories, in
+// daemon.go's plan).
 //
 // What is kept is keyed by the name the caller asked for, never the served one, since that is the
 // name the caller holds and asks Kept for; the answer itself carries GitHub's own spelling of the
