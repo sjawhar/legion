@@ -12,7 +12,7 @@ import { CHANGED_BLOCK_CLASS, changeMarksAgainst } from "../doc/change-marks";
 import type { CreateEditor, EditorHandle } from "../doc/editor";
 import { DocumentRuntime } from "../doc/runtime";
 import { MarginProvider } from "../margin/margin-context";
-import { renderWithEngine, warmMarkdownRenderer } from "../refs/markdown-engine";
+import { loadedEngine, warmMarkdownRenderer } from "../refs/markdown-engine";
 import { installInboxApiMocks, issueAsk } from "./inbox-fixture";
 import { ReadingPane } from "./ReadingPane";
 
@@ -105,10 +105,7 @@ function seedDocument(
 /** The document the headless engine builds for `markdown`: what the editor would hold, which is
  *  what the version marks its baseline against. */
 function renderedDocument(markdown: string): ProseMirrorNode {
-  let parsed: ProseMirrorNode | undefined;
-  renderWithEngine((engine) => {
-    parsed = engine?.parse(markdown);
-  });
+  const parsed = loadedEngine()?.parse(markdown);
   if (parsed === undefined) throw new Error(`the engine rendered nothing for "${markdown}"`);
   return parsed;
 }
