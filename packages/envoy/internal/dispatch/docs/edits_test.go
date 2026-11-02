@@ -2427,13 +2427,13 @@ func TestApplyOperationQuoteOpeningWithAListMarkerSelectsTheItem(t *testing.T) {
 
 	// The marker selects an item of its own kind whose text starts with the rest: a bullet does not
 	// select an ordered item, and text inside an item is not where its marker stands.
-	for _, find := range []string{"- A fresh reviewer", "2. point."} {
+	for find, kind := range map[string]string{"- A fresh reviewer": "an item of a bullet list", "2. point.": "an item of an ordered list"} {
 		_, err := applyAlone(tree, model.EditOp{Op: "replace", Find: find, With: "x"})
 		var missing *ErrQuoteNotFound
 		if !errors.As(err, &missing) {
 			t.Fatalf("list-marker quote %q = %v, want *ErrQuoteNotFound", find, err)
 		}
-		for _, want := range []string{"a leading list marker is no text the item holds", "without the marker"} {
+		for _, want := range []string{"a leading list marker is no text the item holds", kind, "without the marker"} {
 			if !strings.Contains(missing.Error(), want) {
 				t.Fatalf("list-marker miss = %q, want it to contain %q", missing.Error(), want)
 			}

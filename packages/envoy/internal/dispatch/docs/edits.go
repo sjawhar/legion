@@ -87,13 +87,16 @@ func (e *ErrQuoteNotFound) Error() string {
 		// The marker, and a task box after it, are no text the item holds: they select an item of
 		// their kind whose text starts with the rest, so a miss is the rest's, the kind's or the
 		// box's, and the rest alone is the quote that matches the text anywhere.
-		selects := "an item of a " + string(item.Kind)
+		list := "a bullet list"
+		if item.Kind == pmdoc.MarkerOrdered {
+			list = "an ordered list"
+		}
+		selects := "an item of " + list
 		if item.Checked != nil {
-			state := "unchecked"
+			selects = "an unchecked task item of " + list
 			if *item.Checked {
-				state = "checked"
+				selects = "a checked task item of " + list
 			}
-			selects = "a " + state + " task item of a " + string(item.Kind)
 		}
 		return fmt.Sprintf(
 			"%squote %q not found; a leading list marker is no text the item holds: it selects %s, its number not matched, whose text starts with the rest; quote the item's text without the marker (%q) to match it anywhere; nearest blocks: %s",
