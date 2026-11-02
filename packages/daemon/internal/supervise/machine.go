@@ -184,6 +184,19 @@ type Claim struct {
 	// UpdateToldAt is when this round was last reported to the operator's side, so one round is
 	// not reported again at every sweep that finds it open.
 	UpdateToldAt *time.Time
+	// UpdateLeftRound is the pod round this claim left, and "" when it has left none: the daemon
+	// started the claim's process again in another pod than the one that round was opened over
+	// (launchAfter). UpdateLeftAnswered is whether the claim had answered that round by then.
+	//
+	// They are the round's own record of the claim's part in it, and every reader of that part
+	// reads them rather than the locator: the locator moves under a relaunch and goes with a
+	// suspension (letGo), so a part derived from it thaws the moment a claim is suspended, and a
+	// late answer from the process in the new pod counts for a round it took no part in.
+	// UpdateRound is left as it was when a claim leaves, so the claim is still a member of the
+	// round it left and the report of what that round's pod took with it still weighs the claim.
+	// Only the round's end clears the two (clearUpdate).
+	UpdateLeftRound    string
+	UpdateLeftAnswered bool
 }
 
 // The two kinds of round Claim.UpdateRound spells, each with what identifies it: a pod's, which
@@ -221,20 +234,19 @@ func (c Claim) InPluginRound() bool { return IsPluginRound(c.UpdateRound) }
 func IsPluginRound(round string) bool { return strings.HasPrefix(round, PluginRoundPrefix) }
 
 // leftPodRound is a claim whose process no longer runs in the pod its pod round was opened over:
-// that pod died and the claim was relaunched into another one while the round was still recorded
-// on it. The work the round asks about went with the dead pod's disk, so the process now running
-// takes no part in the round at all — it cannot answer for that work, and no turn of it may
-// withdraw an answer given for it. The claim's part stands as the dead pod left it, answered or
-// not, until the round ends.
+// that pod died and the claim was started again in another one while the round was still
+// recorded on it. The work the round asks about went with the dead pod's disk, so the process
+// now running takes no part in the round at all — it cannot answer for that work, and no turn of
+// it may withdraw an answer given for it. The claim's part stands as the dead pod left it,
+// answered or not, until the round ends.
 //
-// A claim that records no process is not in this state. launchAfter persists a launching claim
-// with no locator before the Resume that gives it one, and nothing is known then about the pod
-// the claim comes up in, so its part in the round must stay exactly as it was.
+// It is read from the round's own record and from nothing else (UpdateLeftRound, written by
+// leftPodRoundAt where the launch records the pod its process came up in). Derived from the
+// locator, it would be a fact about where the claim's process is now rather than about the
+// round: a suspension clears the locator (letGo), the claim would read as one that had never
+// left, and the answer its new pod's process gives late would be taken for the round.
 func (c Claim) leftPodRound() bool {
-	if !c.InPodRound() || c.Locator == nil || c.Locator.Sandbox == nil {
-		return false
-	}
-	return PodRound(c.Locator.Sandbox.PodUID) != c.UpdateRound
+	return c.InPodRound() && c.UpdateLeftRound == c.UpdateRound
 }
 
 // RuleMayResume says whether the rule may resume this suspended claim: every suspension but the
@@ -506,11 +518,12 @@ var ErrRootStop = errors.New("the tree's root claim ends only when its tree clos
 // refusal adds both rounds and what the worker does next.
 var ErrForeignUpdateRound = errors.New("the answer names an update round this claim is not in")
 
-// ErrLeftPodRound is a ready_for_update from a process that runs in another pod than the one the
-// claim's round was opened over (Claim.leftPodRound). The answer says the round's work is pushed,
-// and this process never held that work: it came up in a pod the round asks nothing of. It is
-// refused rather than counted for a pod nobody pushed for. The refusal adds both rounds and what
-// the worker does next.
+// ErrLeftPodRound is a ready_for_update from a claim the daemon started again in another pod
+// than the one its round was opened over (Claim.leftPodRound). The answer says the round's work
+// is pushed, and the process that gives it never held that work: it came up in a pod the round
+// asks nothing of. It is refused rather than counted for a pod nobody pushed for. The refusal
+// adds the round the claim left, the round of the pod it came up in where the claim still
+// records a process, and what the worker does next.
 var ErrLeftPodRound = errors.New("the answer comes from a process in another pod than the update round's own")
 
 // ErrRetryArchitectOnly is the operator's retry of a failed claim that is not an architect's: a
@@ -1152,6 +1165,7 @@ func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 		if err == nil {
 			m.previous = nil
 			m.claim.Locator = &loc
+			m.leftPodRoundAt(loc)
 			m.armBoot()
 			m.log.Info("supervise: launched", "generation", m.claim.Generation, "incarnation", loc.Incarnation,
 				"resumed", m.claim.SessionFile != "")
@@ -1173,6 +1187,32 @@ func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 		}
 		charged = true
 	}
+}
+
+// leftPodRoundAt records that the claim has left its pod round, in the one decision that records
+// which pod the claim's process runs in (launchAfter). The round was opened over a pod this
+// process did not come up in, so the work it asks about is on a disk that is gone: the claim's
+// part in the round is frozen here, as the dead pod left it, and the round the claim left with
+// whether it had answered by then is the whole of what any reader of that part needs
+// (Claim.leftPodRound, the sweep's report of what the pod took with it).
+//
+// It is written once. A claim is asked nothing of a round it has left (askForUpdate), so it can
+// answer nothing between one launch and the next, and the first launch out of the round's own
+// pod is the one that says what was lost. Only the round's end clears it (clearUpdate), so a
+// later relaunch, a suspension and a restart each leave it exactly as it is.
+//
+// A process in no pod leaves no pod round: a tmux pane runs outside one, and a claim in a plugin
+// round or in no round at all has no pod round to leave.
+func (m *Machine) leftPodRoundAt(loc runtime.Locator) {
+	if !m.claim.InPodRound() || m.claim.leftPodRound() {
+		return
+	}
+	if loc.Sandbox == nil || PodRound(loc.Sandbox.PodUID) == m.claim.UpdateRound {
+		return
+	}
+	m.claim.UpdateLeftRound, m.claim.UpdateLeftAnswered = m.claim.UpdateRound, m.claim.UpdateSignalledAt != nil
+	m.log.Warn("supervise: this claim's process came up in another pod than its update round's; its part in that round stands as the round's own pod left it",
+		"round", m.claim.UpdateRound, "pod", loc.Sandbox.PodUID, "answered", m.claim.UpdateLeftAnswered)
 }
 
 // backOff waits before a try that follows a charged launch failure: backoff.Wait from

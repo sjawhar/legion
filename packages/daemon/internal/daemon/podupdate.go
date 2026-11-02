@@ -113,9 +113,17 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 	// The pod went without the round: it was replaced where it stood for a failure of its own — a
 	// terminal pod, a failed init container, a superseded disk, a lost launcher binding — and its
 	// disk went with it while a worker still had work to push. The claims record the pod that
-	// replaced it, which is the evidence. A round every blocking claim answered lost nothing, and
-	// ends below with the drift or the replacement.
-	if open != "" && open != supervise.PodRound(pod) && len(waitingClaims(group, open)) > 0 {
+	// replaced it, which is the evidence. A round that lost nothing — every member of it pushed
+	// its work before the pod went — is written on no issue, and ends below with the drift or
+	// the replacement.
+	//
+	// What was lost is counted here exactly as the message counts it (lostClaims), so the branch
+	// is taken when, and only when, there is a role to name. Counted as the claims the
+	// replacement waits for (waitingClaims), it would take this branch for a claim of the issue
+	// that is in no round at all — one an earlier sweep's end has already taken out of this
+	// round, or a role first started in the pod that replaced this one — and write a message
+	// naming either nobody or a worker that lost nothing.
+	if open != "" && open != supervise.PodRound(pod) && len(lostClaims(group, open)) > 0 {
 		s.podWentWithoutItsRound(ctx, issue, group, open, pod)
 		return
 	}
@@ -489,8 +497,15 @@ func (s *supervision) tellPodlessRound(ctx context.Context, issue string, group 
 // answering that the pod is not there is the other (endRoundOverAGonePod). What was lost is read
 // from the group this is given, so the caller's own reading of the claims is the one the issue
 // is told of and the one the round ends on.
+//
+// What was lost is the round's own question, which is why it is lostClaims and never
+// waitingClaims: the members of the round that neither answered nor left having answered. A
+// claim this issue holds that is in no round of its own — one an earlier sweep's end already
+// took out of this round, or a role first started in the pod that replaced this round's own —
+// was never in the pod whose disk went, and naming it would tell the issue it lost work that
+// nobody wrote.
 func (s *supervision) podWentWithoutItsRound(ctx context.Context, issue string, group []supervise.Claim, round, pod string) {
-	lost := waitingClaims(group, round)
+	lost := lostClaims(group, round)
 	reasons := roundReasons(group, round)
 	s.log.Warn("supervise: the pod of an open update round is gone; the roles that had not answered lost what they had not pushed",
 		"issue", issue, "round", round, "pod", pod, "lost", namesOf(lost))
@@ -502,14 +517,15 @@ func (s *supervision) podWentWithoutItsRound(ctx context.Context, issue string, 
 }
 
 // endRoundOverAGonePod ends the round the sweep has just read the pod of as gone. The report is
-// decided from the parts of the round its claims hold: a claim whose process now runs in another
-// pod keeps the part the dead pod left it (Claim.leftPodRound), so no turn or answer of the
-// process that replaced it changes the report.
+// decided from the parts of the round its claims hold: a claim the daemon started again in
+// another pod keeps the part the dead pod left it (Claim.leftPodRound, the round and the answer
+// it left with), so no turn or answer of the process that replaced it changes the report.
 //
-// What was lost is the claims of the round that had not answered by now, so a round every
-// blocking claim answered lost nothing and is told to nobody: the workers pushed everything they
-// wanted kept before the pod went, and a message naming no role would say an issue lost work it
-// did not lose.
+// What was lost is the members of the round that neither answered it nor left it having
+// answered (lostClaims), so a round every member of which pushed its work lost nothing and is
+// told to nobody: a message naming no role would say an issue lost work it did not lose. A
+// claim of this issue that is in no round at all is a member of none, and is named by nothing
+// here.
 //
 // Those answers are read from the machines as they stand rather than from the tick's snapshot,
 // and unmasked (noticeGroup): an answer recorded is an answer whatever its machine is deciding
@@ -527,7 +543,7 @@ func (s *supervision) endRoundOverAGonePod(ctx context.Context, issue string, gr
 		return
 	}
 	told := s.noticeGroup(group)
-	if len(waitingClaims(told, round)) > 0 {
+	if len(lostClaims(told, round)) > 0 {
 		s.podWentWithoutItsRound(ctx, issue, told, round, pod)
 		return
 	}
@@ -929,16 +945,67 @@ func blockingClaims(group []supervise.Claim) []supervise.Claim {
 	return blocking
 }
 
-// waitingClaims is every blocking claim that has not answered this round. A claim the round has
-// not reached yet — one whose recorded round is another, or none — has not answered it either.
+// waitingClaims is whom the replacement waits for: every blocking claim that has not answered
+// this round and has not left it. It is deliberately the conservative of the round's two
+// questions, because what it decides is the deletion of a disk. A claim the round has not
+// reached yet — one whose recorded round is another, or none — has not answered it either, and
+// it holds the pod until it does: the round asks it at the next tick, and a replacement made
+// before that would end a turn of a worker the round asked nothing of.
+//
+// A claim that has left the round waits for nothing (supervise's Claim.leftPodRound). The pod it
+// was in is gone, the round asks it nothing more, and a replacement held for its answer would be
+// held for an answer no process will give. What that claim lost is the other question
+// (lostClaims), and the two are never the same set.
 func waitingClaims(group []supervise.Claim, round string) []supervise.Claim {
 	var waiting []supervise.Claim
 	for _, c := range blockingClaims(group) {
-		if !answered(c, round) {
+		if !answered(c, round) && c.UpdateLeftRound != round {
 			waiting = append(waiting, c)
 		}
 	}
 	return waiting
+}
+
+// memberOf is whether c is one of round's claims: the round it records is this one, or this one
+// is the round it left. Membership survives the leaving, because a claim that leaves keeps the
+// round it records (supervise's leftPodRoundAt), and it is what the report below is read from.
+//
+// A claim in no round and a claim in another round are members of this one in neither sense.
+// Each of the two is why the report may not be read from "has not answered": a claim an earlier
+// sweep's end already took out of the round (supervise's clearUpdate) and a role first started
+// in the pod that replaced the round's own have both answered nothing, and neither of them was
+// ever in the pod whose disk went.
+func memberOf(c supervise.Claim, round string) bool {
+	return c.UpdateRound == round || c.UpdateLeftRound == round
+}
+
+// lostClaims is what the round's pod took with it: every member of the round with a worker that
+// neither answered it nor left it having answered. It is the gone-pod report and nothing else
+// (podWentWithoutItsRound, endRoundOverAGonePod), which is a different question from whom the
+// replacement waits for (waitingClaims): this one is about work that is already gone, and it is
+// read from the round's own record of each member rather than from where any claim's process is
+// now.
+//
+// A member that left the round having answered pushed its work before the pod went and lost
+// nothing; one that left without answering lost whatever it had not pushed. No turn and no
+// answer of the process that replaced it changes either reading.
+func lostClaims(group []supervise.Claim, round string) []supervise.Claim {
+	var lost []supervise.Claim
+	for _, c := range blockingClaims(group) {
+		if !memberOf(c, round) {
+			continue
+		}
+		if c.UpdateLeftRound == round {
+			if !c.UpdateLeftAnswered {
+				lost = append(lost, c)
+			}
+			continue
+		}
+		if !answered(c, round) {
+			lost = append(lost, c)
+		}
+	}
+	return lost
 }
 
 // workingClaims is every claim of the group whose worker runs a turn now, by role.

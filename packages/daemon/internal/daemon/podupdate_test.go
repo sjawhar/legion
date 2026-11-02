@@ -306,12 +306,14 @@ func (r *podUpdateRig) endTurn(role claim.Role, delivery string) {
 	r.handle(role, supervise.StreamPromptResult{Claim: token, DeliveryID: delivery, AgentInvoked: true})
 }
 
-// startInPod is the daemon starting a role into the issue's pod while a round holds that pod: the
-// launch keeps the drifted pod rather than replacing it where it stands, so the process it returns
-// is in that same pod, and the role registers and readies from it as any other worker does. The
-// role runs degraded there — the pod carries neither the overlay nor the enrollment a pod created
-// now is built with — and is a worker of the round all the same.
-func (r *podUpdateRig) startInPod(role claim.Role) {
+// startInPod is the daemon starting a role into pod: with the issue's own pod, the launch keeps
+// the drifted pod a round holds rather than replacing it where it stands, so the process it
+// returns is in that same pod and the role is a worker of the round all the same, running
+// degraded there — the pod carries neither the overlay nor the enrollment a pod created now is
+// built with. With the pod that replaced the issue's own, it is the next role the workflow
+// starts after the pod went, which was never in the round's pod and never in its round. The
+// role registers and readies from whichever it is, as any other worker does.
+func (r *podUpdateRig) startInPod(role claim.Role, pod string) {
 	r.t.Helper()
 	token := r.tokens[role]
 	m, ok := r.sup.Machine(token)
@@ -329,8 +331,39 @@ func (r *podUpdateRig) startInPod(role claim.Role) {
 			r.t.Fatalf("release the %s's unfinished launch: %v", role, err)
 		}
 	}
-	r.rt.ScriptSpawn(fake.SpawnResult{Locator: *podUpdateLocator(token, podUpdateIssue, podUpdatePod)})
+	r.rt.ScriptSpawn(fake.SpawnResult{Locator: *podUpdateLocator(token, podUpdateIssue, pod)})
 	r.handle(role, supervise.RequestSpawn{Claim: token})
+	r.registerInto(role, pod)
+}
+
+// displacedInto is the role's process ending with the pod it ran in and the daemon starting the
+// role again in pod: the runtime's verdict that the process ended with a pod that is gone
+// (runtime.Observation), which relaunches the claim on its own session wherever the runtime
+// builds the pod. It is how a role of a dead pod really comes back in the one that replaced it,
+// and so the one path that writes what that claim left behind in its round
+// (supervise's leftPodRoundAt).
+func (r *podUpdateRig) displacedInto(role claim.Role, pod string) {
+	r.t.Helper()
+	token := r.tokens[role]
+	ended := r.claimOf(role).Locator
+	if ended == nil {
+		r.t.Fatalf("the %s records no process to end with its pod", role)
+	}
+	conn := fake.NewConn()
+	r.conns.Register(token, conn)
+	r.workers[role] = conn
+	r.rt.ScriptResume(fake.SpawnResult{Locator: *podUpdateLocator(token, podUpdateIssue, pod)})
+	r.handle(role, supervise.RuntimeObservation{Observation: runtime.Observation{
+		Locator: *ended, Kind: runtime.Gone, At: r.clock.Now(), Displaced: true,
+	}})
+	r.registerInto(role, pod)
+}
+
+// registerInto is the walk from a started process to a ready worker, which every launch of a
+// role in these tests takes, and the check that it came up in the pod the caller started it in.
+func (r *podUpdateRig) registerInto(role claim.Role, pod string) {
+	r.t.Helper()
+	token := r.tokens[role]
 	generation := r.claimOf(role).Generation
 	for _, ev := range []supervise.Event{
 		supervise.StreamHello{Claim: token, Generation: generation},
@@ -340,8 +373,8 @@ func (r *podUpdateRig) startInPod(role claim.Role) {
 	} {
 		r.handle(role, ev)
 	}
-	if c := r.claimOf(role); c.State != supervise.StateReady || podOf(c.Locator) != podUpdatePod {
-		r.t.Fatalf("the %s started into the kept pod is %s at %+v, want it ready in pod %s", role, c.State, c.Locator, podUpdatePod)
+	if c := r.claimOf(role); c.State != supervise.StateReady || podOf(c.Locator) != pod {
+		r.t.Fatalf("the %s is %s at %+v, want it ready in pod %s", role, c.State, c.Locator, pod)
 	}
 }
 
@@ -511,7 +544,7 @@ func TestPodUpdateEndsTheRoundOnceTheRoleStartedIntoTheKeptPodAnswers(t *testing
 	// The launch keeps the drifted pod and starts the architect in it, degraded: the pod carries
 	// neither the overlay the role's configuration now names nor what a pod created now is built
 	// with, and the role runs there until this round replaces the pod.
-	rig.startInPod(claim.RoleArchitect)
+	rig.startInPod(claim.RoleArchitect, podUpdatePod)
 	rig.tick()
 
 	degraded := rig.awaitRound(claim.RoleArchitect, podUpdateRound)
@@ -1829,7 +1862,7 @@ func TestPodUpdateAbortsTheReplacementForAClaimTheGroupNeverHeld(t *testing.T) {
 	group := rig.snapshotWithout(claim.RoleTester)
 	// Minutes later in that same tick, the next phase's role is started into the kept pod. It
 	// registers there, holds a session from that moment, and has answered nothing.
-	rig.startInPod(claim.RoleTester)
+	rig.startInPod(claim.RoleTester, podUpdatePod)
 
 	rig.s.reconcilePodUpdates(rig.ctx, group)
 
@@ -2245,5 +2278,133 @@ func (r *podUpdateRig) settleAll() {
 		}
 		m.Wait()
 		testwait.Eventually(r.t, string(role)+" to be deciding nothing", func() bool { return m.Deciding() == nil })
+	}
+}
+
+// The report names the members of the round that lost work, and nothing else of the issue. Two
+// claims of the issue are no members of it at all, and each was named before the round kept a
+// record of its own.
+//
+// The first is the claim an earlier sweep's end has already landed on. The end is posted to each
+// machine and handled there, so a machine held in a launch handles it a minute after its
+// neighbour does: the sweep that runs in between reads one claim out of the round and one still
+// in it, takes the round from the one still in it, and read as "has not answered this round" the
+// claim that is out of it is a worker that lost its work — though it answered before the pod
+// went.
+//
+// The second is the role the workflow first started after the pod went. It never ran in the pod
+// the round was opened over, it is in no round, and it has answered nothing, which is the same
+// reading again.
+//
+// What each really left is the round's own record, written where the launch records the pod the
+// claim came up in: the round it left, and whether it had answered it by then.
+func TestPodUpdateNamesOnlyTheRoundsOwnMembersAsHavingLostWork(t *testing.T) {
+	rig := newPodUpdateRig(t,
+		readyWorker(claim.RoleImplementer),
+		readyWorker(claim.RoleTester),
+		podUpdateRole{role: claim.RoleReviewer, state: supervise.StateQueued},
+	)
+	rig.drifts(podUpdateDrift)
+
+	rig.tick()
+	rig.awaitRound(claim.RoleImplementer, podUpdateRound)
+	rig.awaitRound(claim.RoleTester, podUpdateRound)
+	// The tester pushes its work and answers; the implementer never does.
+	rig.signal(claim.RoleTester, "a1b2c3d")
+	rig.settleAll()
+
+	// The pod goes for a failure of its own, and the displaced path brings both workers back in
+	// the pod that replaced it. Each leaves the round where that pod left it.
+	for _, role := range []claim.Role{claim.RoleImplementer, claim.RoleTester} {
+		rig.displacedInto(role, podUpdateReplacementPod)
+	}
+	if c := rig.claimOf(claim.RoleTester); c.UpdateLeftRound != podUpdateRound || !c.UpdateLeftAnswered {
+		t.Fatalf("the tester left %q with answered=%t, want the round left with its answer standing",
+			c.UpdateLeftRound, c.UpdateLeftAnswered)
+	}
+	if c := rig.claimOf(claim.RoleImplementer); c.UpdateLeftRound != podUpdateRound || c.UpdateLeftAnswered {
+		t.Fatalf("the implementer left %q with answered=%t, want the round left unanswered",
+			c.UpdateLeftRound, c.UpdateLeftAnswered)
+	}
+
+	// An earlier sweep ended the round, and only the tester's machine has handled that end so
+	// far: the implementer's is still to come.
+	rig.handle(claim.RoleTester, supervise.PodUpdateEnded{Claim: rig.tokens[claim.RoleTester], Round: podUpdateRound})
+	rig.awaitClaim(claim.RoleTester, "the end of its round to land", func(c supervise.Claim) bool { return c.UpdateRound == "" })
+	// The workflow starts the next phase's role, which comes up in the pod that replaced the
+	// round's own and has answered nothing.
+	rig.startInPod(claim.RoleReviewer, podUpdateReplacementPod)
+	rig.settleAll()
+
+	rig.tick()
+
+	messages := rig.messages()
+	if len(messages) != 1 {
+		t.Fatalf("the issue was written on %d times, want once for the pod that went: %q", len(messages), messages)
+	}
+	if !strings.Contains(messages[0], string(claim.RoleImplementer)) {
+		t.Errorf("the message does not name the implementer, which had not answered when the pod went: %s", messages[0])
+	}
+	if strings.Contains(messages[0], string(claim.RoleTester)) {
+		t.Errorf("the message names the tester, which answered before the pod went and whose round has already ended: %s", messages[0])
+	}
+	if strings.Contains(messages[0], string(claim.RoleReviewer)) {
+		t.Errorf("the message names the reviewer, which was first started in the pod that replaced the round's own: %s", messages[0])
+	}
+	rig.awaitClaim(claim.RoleImplementer, "its round to end with the report",
+		func(c supervise.Claim) bool { return c.UpdateRound == "" })
+	if calls := rig.replacements(); len(calls) != 0 {
+		t.Fatalf("ReplacePod called %d times for a pod that is already gone", len(calls))
+	}
+}
+
+// A worker suspended in the middle of a turn in the pod that replaced its round's own, and then
+// answering that round. The suspension lets the process go and clears the claim's locator
+// (letGo), which is where the claim's part in the round used to thaw: read from the locator, the
+// claim stopped counting as one that had left, and this answer was taken for the round. It names
+// work the dead pod's disk held, which no process of this claim has seen, so it is refused.
+func TestPodUpdateRefusesALateAnswerFromAClaimSuspendedAfterItLeftTheRound(t *testing.T) {
+	rig := newPodUpdateRig(t, readyWorker(claim.RoleImplementer))
+	rig.drifts(podUpdateDrift)
+
+	rig.tick()
+	rig.awaitRound(claim.RoleImplementer, podUpdateRound)
+
+	// The pod goes, and the implementer comes back in the pod that replaced it, having answered
+	// nothing.
+	rig.displacedInto(claim.RoleImplementer, podUpdateReplacementPod)
+	// The worker is in a turn of its own in that new pod when its operator suspends it, so the
+	// suspension waits for the turn and takes the process when the turn ends.
+	token := rig.tokens[claim.RoleImplementer]
+	rig.handle(claim.RoleImplementer, supervise.StreamTurnStart{Claim: token})
+	held, _ := rig.sup.Machine(token)
+	// A suspension asked for during a turn answers ErrSuspendHeld: it is a wait, and the end of
+	// the turn is what runs it (holdSuspension).
+	if err := held.Handle(rig.ctx, supervise.RequestSuspend{Claim: token, By: supervise.SuspendedByOperator}); !errors.Is(err, supervise.ErrSuspendHeld) {
+		t.Fatalf("the operator's suspension during the turn returned %v, want it held for that turn", err)
+	}
+	rig.handle(claim.RoleImplementer, supervise.StreamTurnEnd{Claim: token})
+	suspended := rig.awaitClaim(claim.RoleImplementer, "the suspension to take its process",
+		func(c supervise.Claim) bool { return c.State == supervise.StateSuspended && c.Locator == nil })
+	if suspended.UpdateLeftRound != podUpdateRound || suspended.UpdateLeftAnswered {
+		t.Fatalf("the suspended claim left %q with answered=%t, want the round it left standing unanswered",
+			suspended.UpdateLeftRound, suspended.UpdateLeftAnswered)
+	}
+
+	m, ok := rig.sup.Machine(token)
+	if !ok {
+		t.Fatal("the implementer is not supervised")
+	}
+	err := m.Handle(rig.ctx, supervise.PodUpdateSignalled{
+		Claim: token, Generation: suspended.Generation, Session: suspended.Session,
+		Round: podUpdateRound, Head: "e4f5a6b",
+	})
+
+	if !errors.Is(err, supervise.ErrLeftPodRound) {
+		t.Fatalf("the late answer from the suspended claim returned %v, want the refusal of a claim that left the round", err)
+	}
+	if c := rig.claimOf(claim.RoleImplementer); c.UpdateSignalledAt != nil || c.UpdateHead != "" {
+		t.Fatalf("the claim after the refused answer = answered %v head %q, want nothing of that answer recorded",
+			c.UpdateSignalledAt, c.UpdateHead)
 	}
 }

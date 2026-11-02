@@ -1,0 +1,19 @@
+-- 20261102022056_claim_left_pod_round.up.sql — the round's own record of a claim that left it
+-- (INFRA-484), which the daemon reads in place of the claim's locator. The locator moves under a
+-- relaunch and goes with a suspension, so a fact derived from it thaws: a claim frozen out of its
+-- round came back into it the moment an operator suspended the claim, and the report of what the
+-- pod took with it named a worker that had answered.
+--
+-- claims.update_left_round is the pod round this claim left: the daemon started the claim's
+-- process again in another pod than the one that round was opened over, so the work the round
+-- asks about is on a disk this process never saw, and no turn and no answer of it takes any part
+-- in the round. '' means the claim left no round. It is written once, where the launch records
+-- the pod the new process came up in.
+-- claims.update_left_answered is whether the claim had answered the round when it left it. What
+-- the round's pod took with it is the members of the round that neither answered nor left having
+-- answered, so this says which of those two a claim that left is.
+-- claims.update_round is left as it was when a claim leaves, so a claim is still a member of the
+-- round it left, and only the end of that round clears these two columns, with every other field
+-- the round wrote.
+alter table claims add column update_left_round text not null default '';
+alter table claims add column update_left_answered boolean not null default false;
