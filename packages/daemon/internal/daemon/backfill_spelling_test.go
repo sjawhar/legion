@@ -57,7 +57,7 @@ func TestTheBackfillKeepsTheSpellingOfAnExistingClone(t *testing.T) {
 			github := newNamedGitHub(t, map[string]string{"acme/widgets": "Acme/Widgets@release/v7.1"})
 			w := &workflowRuntime{pool: pool, records: records, defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}
 			client := &listingDispatch{summaries: []dispatch.IssueSummary{{Key: "LEGION-301", ResolvedRepo: "acme/widgets"}}}
-			if err := backfillRepositories(ctx, pool, records, client, "LEGION", state, w.defaultBranches, quietLogger()); err != nil {
+			if err := backfillRepositories(ctx, pool, records, client, "LEGION", state, w.defaultBranches, ghrepo.Renames{}, quietLogger()); err != nil {
 				t.Fatal(err)
 			}
 			repo, branch, err := w.issueRepository(ctx, "LEGION-301")
@@ -105,7 +105,7 @@ func TestTheBackfillRefusesTwoClonesOfOneRepository(t *testing.T) {
 	github := newNamedGitHub(t, map[string]string{"acme/widgets": "Acme/Widgets@main"})
 	client := &listingDispatch{summaries: []dispatch.IssueSummary{{Key: "LEGION-301", ResolvedRepo: "acme/widgets"}}}
 	err := backfillRepositories(ctx, pool, record.NewStore(), client, "LEGION", state,
-		newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now), quietLogger())
+		newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now), ghrepo.Renames{}, quietLogger())
 	want := "fill the repository of LEGION-301: two shared clones spell acme/widgets (" + clones[1] + ", " + clones[0] + "); remove the one no issue works in and restart"
 	if err == nil || err.Error() != want {
 		t.Fatalf("backfill = %v, want %q", err, want)
@@ -141,7 +141,7 @@ func TestTheBackfillRefusesARecordWhosePullRequestIsOnAnotherRepository(t *testi
 			}
 			w := &workflowRuntime{pool: pool, records: records, log: quietLogger()}
 			err := backfillRepositories(ctx, pool, records, client, "LEGION", t.TempDir(),
-				newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now), quietLogger())
+				newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now), ghrepo.Renames{}, quietLogger())
 			got := recordedIssue(t, w, "LEGION-1")
 			if tc.want != "" {
 				if err == nil || err.Error() != tc.want {
@@ -192,7 +192,7 @@ func TestTheBackfillRefusesARecordWhoseWorkspaceIsInAnotherRepository(t *testing
 			records := record.NewStore()
 			w := &workflowRuntime{pool: pool, records: records, log: quietLogger()}
 			err = backfillRepositories(ctx, pool, records, client, "LEGION", state,
-				newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now), quietLogger())
+				newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now), ghrepo.Renames{}, quietLogger())
 			got := recordedIssue(t, w, "LEGION-1")
 			if tc.want != "" {
 				if want := fmt.Sprintf(tc.want, location.Dir); err == nil || err.Error() != want {
@@ -230,7 +230,7 @@ func TestTheBackfillOfARepositoryGitHubRenamedNamesTheFix(t *testing.T) {
 			defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}, t.TempDir()
 	}
 	backfill := func(w *workflowRuntime, state string) error {
-		return backfillRepositories(ctx, w.pool, w.records, client, "LEGION", state, w.defaultBranches, quietLogger())
+		return backfillRepositories(ctx, w.pool, w.records, client, "LEGION", state, w.defaultBranches, ghrepo.Renames{}, quietLogger())
 	}
 
 	t.Run("no shared clone", func(t *testing.T) {

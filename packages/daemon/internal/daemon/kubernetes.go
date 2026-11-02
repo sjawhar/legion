@@ -182,7 +182,7 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 	if err != nil {
 		return err
 	}
-	p.newRuntime = sandboxRuntime(reads.client, reads.opts, p.repositories.Owners)
+	p.newRuntime = sandboxRuntime(reads.client, reads.opts, p.repositories.Owners, cfg.RepositoryRenames)
 	p.clusterCheck = boot.clusterCheck
 	p.claimsCheck = func(ctx context.Context, st *store.Store) error {
 		legacy, err := st.HasLegacySandboxClaims(ctx, p.project)
@@ -474,13 +474,13 @@ func requirements(key string, reservation config.Reservation) (corev1.ResourceRe
 // sandbox.New's own refusal names what is missing. Boot has already run the cluster check
 // (plan.clusterCheck): Agent Sandbox is installed and no Sandbox of a layout before this one —
 // per-claim pods, or issue pods on one tree volume — remains.
-func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []string) runtimeFactory {
+func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []string, renames ghrepo.Renames) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens,
 		_ func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store, mapped func() []ghrepo.Repository) (runtime.Runtime, error) {
 		opts.Conns, opts.StreamURL, opts.Store, opts.Mapped = listener, address, st, mapped
 		if apps != nil {
 			opts.Tokens = implementTokens{apps}
-			opts.GitHubCredential = appauth.GitHubCredential(apps, owners)
+			opts.GitHubCredential = appauth.GitHubCredential(apps, owners, renames, opts.Log)
 		}
 		rt, err := sandbox.New(ctx, rc, opts)
 		if err != nil {

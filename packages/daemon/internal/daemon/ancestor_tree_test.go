@@ -135,7 +135,7 @@ func TestPrepareReadsTheDispatchChainAboveAParent(t *testing.T) {
 			for _, issue := range tc.recorded {
 				putOutboxIssue(t, pool, records, issue)
 			}
-			repos := newRepositories("LEGION")
+			repos := newRepositories("LEGION", ghrepo.Renames{})
 			repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
 			branches := newDefaultBranches(roleTokens{}, "", defaultBranchTTL, time.Now)
 			branches.read["acme/widgets"] = defaultBranchRead{repository: ghbranch.Repository{Name: ghrepo.MustParse("acme/widgets"), DefaultBranch: "main"}, at: time.Now()}
@@ -216,7 +216,7 @@ func TestBootReconcileHoldsATodoUnderAnUnreleasedChildOfALiveTree(t *testing.T) 
 	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	admission := admit.New(records, engine, 2, "CAPTURE", log)
 	w := &workflowRuntime{
-		pool: pool, records: records, admission: admission, engine: engine, handlers: []intake.Handler{engine, admission}, repositories: newRepositories("CAPTURE"),
+		pool: pool, records: records, admission: admission, engine: engine, handlers: []intake.Handler{engine, admission}, repositories: newRepositories("CAPTURE", ghrepo.Renames{}),
 		dispatch: client, dispatchProject: "CAPTURE", bootID: "ancestor-boot", log: log, consumers: consumers,
 	}
 	if err := w.reconcile(ctx); err != nil {
@@ -280,7 +280,7 @@ func TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree(t *
 	}); err != nil {
 		t.Fatalf("seed the running tree's slot: %v", err)
 	}
-	repos := newRepositories("LEGION")
+	repos := newRepositories("LEGION", ghrepo.Renames{})
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
 	branches := newDefaultBranches(roleTokens{}, "", defaultBranchTTL, time.Now)
 	branches.read["acme/widgets"] = defaultBranchRead{repository: ghbranch.Repository{Name: ghrepo.MustParse("acme/widgets"), DefaultBranch: "main"}, at: time.Now()}
@@ -355,7 +355,7 @@ func newAncestryLine(t *testing.T, tree string, recorded ...record.Issue) *ances
 	}); err != nil {
 		t.Fatalf("seed the running tree's slot: %v", err)
 	}
-	repos := newRepositories("LEGION")
+	repos := newRepositories("LEGION", ghrepo.Renames{})
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
 	branches := newDefaultBranches(roleTokens{}, "", defaultBranchTTL, time.Now)
 	branches.read["acme/widgets"] = defaultBranchRead{repository: ghbranch.Repository{Name: ghrepo.MustParse("acme/widgets"), DefaultBranch: "main"}, at: time.Now()}

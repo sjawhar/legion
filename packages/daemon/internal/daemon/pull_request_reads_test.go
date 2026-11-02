@@ -488,7 +488,7 @@ func TestThePassRecordsAnOpenPullRequestWhoseOpenedHasNotArrived(t *testing.T) {
 			var listed atomic.Int32
 			w := requiredRuntime(pool, pullRequestStandIn(t, "handoff", opened, "", &listed).URL, quietLogger())
 			if tc.served != "" {
-				w.repositories = newRepositories("CAPTURE")
+				w.repositories = newRepositories("CAPTURE", ghrepo.Renames{})
 				w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse(tc.served), Default: true}}, nil)
 			}
 			w.readRequiredChecks(context.Background())

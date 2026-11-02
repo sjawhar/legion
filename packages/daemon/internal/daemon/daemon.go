@@ -700,7 +700,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		pluginRelaunchable = *o.pluginRelaunchable
 	}
 	p := plan{
-		repositories: newRepositories(cfg.Project),
+		repositories: newRepositories(cfg.Project, cfg.RepositoryRenames),
 		project:      reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, nats: reads.nats, instructions: instructions,
 		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: prompts.RoleReferences(),
 		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep, controllerRetry: controllerRetry, stopBudget: stop,
@@ -833,7 +833,7 @@ func tmuxRuntime(cfg config.Config, project string, launchers map[runtime.Backen
 		opts := tmuxOptions(cfg, project, launchers, providerEnvDir, dispatchTokenFile, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
 		if tokens != nil {
-			opts.GitHubCredential, opts.GH = appauth.GitHubCredential(tokens, owners), gh
+			opts.GitHubCredential, opts.GH = appauth.GitHubCredential(tokens, owners, cfg.RepositoryRenames, log), gh
 			opts.RepositoryOwner = claimRepositoryOwner(st.ClaimIssue, repository)
 		}
 		rt, err := tmux.New(opts)
@@ -1519,6 +1519,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Dispatch:           client,
 		Tokens:             tokens,
 		GitHubOwners:       p.repositories.Owners,
+		RepositoryRenames:  cfg.RepositoryRenames,
 		GitHubAPI:          githubAPI,
 		MergeRules:         projectMergeRules(cfg),
 		Grants:             grants,

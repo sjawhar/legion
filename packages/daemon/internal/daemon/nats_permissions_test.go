@@ -180,7 +180,7 @@ func daemonGrantConfig(uri string) config.Config {
 // stand-in GitHub names it, as preparing the Dispatch fixture's todo issue reads it.
 func grantWorkflow(t *testing.T, logs *syncBuffer) *workflowRuntime {
 	t.Helper()
-	repos := newRepositories("CAPTURE")
+	repos := newRepositories("CAPTURE", ghrepo.Renames{})
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("sjawhar/legion"), Default: true}}, nil)
 	github := newNamedGitHub(t, map[string]string{"sjawhar/legion": "sjawhar/legion@main"})
 	return &workflowRuntime{pool: isolatedOutboxPool(t), records: projectRecords{Store: record.NewStore(), project: "CAPTURE"},

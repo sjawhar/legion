@@ -10,6 +10,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -56,7 +57,7 @@ func bundleTokens(t *testing.T, bundle ghconfig.Bundle) map[string]string {
 // fails the bundle, naming the owner; a project with no owner at all has no bundle.
 func TestGitHubCredentialBundlesEveryOwnerOfTheProject(t *testing.T) {
 	owners := func() []string { return []string{"sjawhar", "Acme"} }
-	credential := GitHubCredential(ownerTokens{}, owners)
+	credential := GitHubCredential(ownerTokens{}, owners, ghrepo.Renames{}, nil)
 	for _, tc := range []struct {
 		name    string
 		role    claim.Role
@@ -98,17 +99,17 @@ func TestGitHubCredentialBundlesEveryOwnerOfTheProject(t *testing.T) {
 		})
 	}
 
-	refused := GitHubCredential(ownerTokens{refuse: "sjawhar"}, owners)
+	refused := GitHubCredential(ownerTokens{refuse: "sjawhar"}, owners, ghrepo.Renames{}, nil)
 	if _, err := refused(context.Background(), claim.RoleImplementer, "acme"); err == nil ||
 		!strings.Contains(err.Error(), "sjawhar") || !strings.Contains(err.Error(), string(claim.RoleImplementer)) {
 		t.Errorf("a refused read mint = %v, want an error naming the owner and the role", err)
 	}
-	none := GitHubCredential(ownerTokens{}, func() []string { return nil })
+	none := GitHubCredential(ownerTokens{}, func() []string { return nil }, ghrepo.Renames{}, nil)
 	if _, err := none(context.Background(), claim.RoleController, ""); !errors.Is(err, runtime.ErrNoGitHubOwner) {
 		t.Errorf("a bundle with no owner = %v, want runtime.ErrNoGitHubOwner", err)
 	}
 	var minted []string
-	counting := GitHubCredential(countingTokens{minted: &minted}, owners)
+	counting := GitHubCredential(countingTokens{minted: &minted}, owners, ghrepo.Renames{}, nil)
 	if _, err := counting(context.Background(), claim.RoleController, "Outside-Project"); !errors.Is(err, ErrOwnerOutsideProject) ||
 		!strings.Contains(err.Error(), `"outside-project"`) || len(minted) != 0 {
 		t.Errorf("the controller asking for an owner outside the project = %v, minted %q; want ErrOwnerOutsideProject naming it and no mint", err, minted)

@@ -121,7 +121,7 @@ func TestARetainedEventKeepsTheSessionFenceOfItsActor(t *testing.T) {
 			client := &detailDispatch{resolved: map[string]string{root.Key: "acme/gadgets"}}
 			spec := intake.ConsumerSpec{Project: "LEGION", Repositories: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")}, AckWait: time.Second, Logger: quietLogger()}
 			if tc.prepared {
-				w := &workflowRuntime{pool: pool, records: records, dispatch: client, repositories: newRepositories("LEGION")}
+				w := &workflowRuntime{pool: pool, records: records, dispatch: client, repositories: newRepositories("LEGION", ghrepo.Renames{})}
 				spec.PrepareRepository = w.prepareRepository
 			}
 			consumers, err := intake.OpenConsumers(ctx, js, pool, spec)
@@ -200,7 +200,7 @@ func TestARetainedEventOfAnUnrecordedIssueReadsItsRepositoryFromDispatch(t *test
 	}
 	client := &detailDispatch{resolved: map[string]string{"LEGION-301": "acme/widgets"}, seq: 4, failures: 1}
 	github := newNamedGitHub(t, map[string]string{"acme/widgets": "acme/widgets@release/v7.1"})
-	repos := newRepositories("LEGION")
+	repos := newRepositories("LEGION", ghrepo.Renames{})
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
 	w := &workflowRuntime{pool: pool, records: records, dispatch: client, repositories: repos,
 		defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}
@@ -262,7 +262,7 @@ func TestAnAdmissionWhoseApplyFailedIsAppliedAsDispatchNowShowsIt(t *testing.T) 
 	}
 	client := &detailDispatch{resolved: map[string]string{"LEGION-310": "acme/widgets"}, seq: 5}
 	github := newNamedGitHub(t, map[string]string{"acme/widgets": "acme/widgets@main"})
-	repos := newRepositories("LEGION")
+	repos := newRepositories("LEGION", ghrepo.Renames{})
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
 	w := &workflowRuntime{pool: pool, records: records, dispatch: client, repositories: repos,
 		defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}

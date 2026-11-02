@@ -152,7 +152,7 @@ func (d *mappingDispatch) set(mappings ...dispatch.RepoProject) {
 // GitHub names it, at its default branch.
 func TestTheMappingServesOnlyRepositoriesBothAppsAreInstalledOn(t *testing.T) {
 	github := newNamedGitHub(t, map[string]string{"acme/widgets": "Acme/Widgets@release/v7.1", "zeta/tools": "zeta/tools@main"})
-	repos := newRepositories("LEGION")
+	repos := newRepositories("LEGION", ghrepo.Renames{})
 	installs := &installations{missing: map[string]bool{"review acme/gadgets": true}}
 	client := &mappingDispatch{mappings: []dispatch.RepoProject{
 		{Repo: "acme/widgets", Project: "LEGION", Default: true},
@@ -285,7 +285,7 @@ func TestTheBootRefusesOnlyAnEmptyMapping(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := &workflowRuntime{dispatch: &mappingDispatch{mappings: tc.mappings}, dispatchProject: "LEGION", installs: &installations{missing: tc.missing},
-				repositories: newRepositories("LEGION"), log: quietLogger()}
+				repositories: newRepositories("LEGION", ghrepo.Renames{}), log: quietLogger()}
 			err := w.loadMapping(context.Background())
 			if tc.want != "" {
 				if err == nil || err.Error() != tc.want {
@@ -332,7 +332,7 @@ func TestTheBootWaitsForTheMappingWhileDispatchRefusesEveryDial(t *testing.T) {
 	client := &unreadyDispatch{mappingDispatch: mappingDispatch{mappings: mapped}, refusals: int64(refusals)}
 	var logged bytes.Buffer
 	w := &workflowRuntime{dispatch: client, dispatchProject: "LEGION", installs: &installations{},
-		repositories: newRepositories("LEGION"), log: slog.New(slog.NewTextHandler(&logged, nil))}
+		repositories: newRepositories("LEGION", ghrepo.Renames{}), log: slog.New(slog.NewTextHandler(&logged, nil))}
 	if err := w.loadMapping(context.Background()); err != nil {
 		t.Fatalf("loadMapping = %v, want it to wait out %d refused dials and serve acme/widgets", err, refusals)
 	}
@@ -360,7 +360,7 @@ func TestABootServesTheRepositoriesWhoseInstallationReadsAnswer(t *testing.T) {
 		installs.setFailing(failure, "implement acme/gadgets")
 		var logged bytes.Buffer
 		w := &workflowRuntime{dispatch: &mappingDispatch{mappings: []dispatch.RepoProject{{Repo: "acme/widgets", Project: "LEGION", Default: true}, {Repo: "acme/gadgets", Project: "LEGION"}}},
-			dispatchProject: "LEGION", installs: installs, repositories: newRepositories("LEGION"), log: slog.New(slog.NewTextHandler(&logged, nil))}
+			dispatchProject: "LEGION", installs: installs, repositories: newRepositories("LEGION", ghrepo.Renames{}), log: slog.New(slog.NewTextHandler(&logged, nil))}
 		if err := w.loadMapping(context.Background()); err != nil {
 			t.Fatalf("loadMapping with %v on acme/gadgets = %v, want the boot to go on", failure, err)
 		}
@@ -385,7 +385,7 @@ func TestABootWhoseEveryInstallationReadFailsServesNoneAndLogsOneError(t *testin
 	installs.setFailing(errors.New("GitHub answered 403: Resource not accessible by integration"), "implement acme/widgets", "review acme/widgets", "implement acme/gadgets", "review acme/gadgets")
 	var logged bytes.Buffer
 	w := &workflowRuntime{dispatch: &mappingDispatch{mappings: []dispatch.RepoProject{{Repo: "acme/widgets", Project: "LEGION", Default: true}, {Repo: "acme/gadgets", Project: "LEGION"}}},
-		dispatchProject: "LEGION", installs: installs, repositories: newRepositories("LEGION"), log: slog.New(slog.NewTextHandler(&logged, nil))}
+		dispatchProject: "LEGION", installs: installs, repositories: newRepositories("LEGION", ghrepo.Renames{}), log: slog.New(slog.NewTextHandler(&logged, nil))}
 	if err := w.loadMapping(context.Background()); err != nil {
 		t.Fatalf("loadMapping with every installation read failing = %v, want a boot serving none", err)
 	}
@@ -583,7 +583,7 @@ func newNamedGitHub(t *testing.T, repos map[string]string) *namedGitHub {
 // case, with its last health read; a cache whose repository the mapping no longer names is listed
 // apart with when the sweep retires it; a mapped repository with no cache carries none.
 func TestTheMappingsViewCarriesTheRepositoryCaches(t *testing.T) {
-	repos := newRepositories("LEGION")
+	repos := newRepositories("LEGION", ghrepo.Renames{})
 	repos.set([]mappedRepository{
 		{Repo: ghrepo.MustParse("Acme/Widgets"), Default: true},
 		{Repo: ghrepo.MustParse("zeta/tools")},
@@ -619,7 +619,7 @@ func TestTheMappingsViewCarriesTheRepositoryCaches(t *testing.T) {
 func TestAnUnrecordedIssueWorksTheProjectsDefaultRepository(t *testing.T) {
 	ctx := context.Background()
 	github := newNamedGitHub(t, map[string]string{"acme/widgets": "Acme/Widgets@release/v7.1", "zeta/tools": "zeta/tools@main"})
-	w := &workflowRuntime{pool: isolatedOutboxPool(t), records: record.NewStore(), dispatchProject: "LEGION", repositories: newRepositories("LEGION"),
+	w := &workflowRuntime{pool: isolatedOutboxPool(t), records: record.NewStore(), dispatchProject: "LEGION", repositories: newRepositories("LEGION", ghrepo.Renames{}),
 		defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}
 	w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}, {Repo: ghrepo.MustParse("zeta/tools")}}, nil)
 	if repo, branch, err := w.issueRepository(ctx, "LEGION-9"); err != nil || repo.String() != "Acme/Widgets" || branch != "release/v7.1" {
@@ -638,7 +638,7 @@ func TestAnUnrecordedIssueWorksTheProjectsDefaultRepository(t *testing.T) {
 func TestAnAdoptedPanesWriteOwnerIsTheOwnerItsIssueWorks(t *testing.T) {
 	ctx := context.Background()
 	github := newNamedGitHub(t, map[string]string{"acme/widgets": "Acme/Widgets@main"})
-	w := &workflowRuntime{pool: isolatedOutboxPool(t), records: record.NewStore(), dispatchProject: "LEGION", repositories: newRepositories("LEGION"),
+	w := &workflowRuntime{pool: isolatedOutboxPool(t), records: record.NewStore(), dispatchProject: "LEGION", repositories: newRepositories("LEGION", ghrepo.Renames{}),
 		defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}
 	w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {

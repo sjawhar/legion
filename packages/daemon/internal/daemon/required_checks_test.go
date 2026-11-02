@@ -124,7 +124,7 @@ const testReviewAppID = "271000"
 // servedAcme is a repository mapping that serves acme/widgets alone, the repository whose open
 // pull requests a pass lists.
 func servedAcme() *repositories {
-	served := newRepositories("CAPTURE")
+	served := newRepositories("CAPTURE", ghrepo.Renames{})
 	served.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
 	return served
 }

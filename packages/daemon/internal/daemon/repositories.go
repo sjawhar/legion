@@ -38,6 +38,15 @@ import (
 // same. Readers take the read lock; the readers of the mapping swap it whole under the write lock.
 type repositories struct {
 	project string
+	// renames is the deployment's repository equivalence (`repository_renames`,
+	// config.Config.RepositoryRenames): a configured pair's two names are one repository wherever
+	// the mapping is read (lookup, kept), so an issue Dispatch resolves to the repository as it
+	// was is served by the one it moved to. It never widens the served set itself, which stays
+	// Dispatch's mapping: a rename configured before the transfer names a repository GitHub does
+	// not have yet, and the mapping's read of GitHub (nameAccepted) fails whole on the first
+	// repository it cannot read. The zero value, which answers as a comparison without case does,
+	// while the deployment configures none.
+	renames ghrepo.Renames
 
 	mu                sync.RWMutex
 	accepted          map[string]mappedRepository
@@ -72,8 +81,8 @@ type webhookAppGap struct {
 	Reason string
 }
 
-func newRepositories(project string) *repositories {
-	return &repositories{project: project, accepted: map[string]mappedRepository{}, refused: map[string]refusedRepository{}}
+func newRepositories(project string, renames ghrepo.Renames) *repositories {
+	return &repositories{project: project, renames: renames, accepted: map[string]mappedRepository{}, refused: map[string]refusedRepository{}}
 }
 
 // set replaces the mapping with accepted and refused, and reports the repositories that became
@@ -158,17 +167,35 @@ func (r *repositories) Refused() []refusedRepository {
 // lookup is the served repository resolved names, in any spelling, or why Legion does not serve
 // it: left out (leftOut) with its reason, or not mapped to the project at all. unread is a
 // repository left out for now because its installation read failed (refusedRepository.readErr).
+// A name the mapping does not hold falls through a configured rename (renames) to its partner,
+// and the answer is the partner the mapping holds, so an issue resolved to the repository as it
+// was is recorded on the one the project serves, under one name: Resolution.Repo and
+// Resolution.GitHubRepo agree, as a record demands (record.Store.PutIssue).
 func (r *repositories) lookup(resolved string) (mapped mappedRepository, refusal string, leftOut, unread bool) {
-	key := strings.ToLower(resolved)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if mapped, ok := r.accepted[key]; ok {
-		return mapped, "", false, false
+	if mapped, refusal, leftOut, unread, held := r.held(resolved); held {
+		return mapped, refusal, leftOut, unread
 	}
-	if refused, ok := r.refused[key]; ok {
-		return mappedRepository{}, refused.Reason, true, refused.readErr != nil
+	if partner, renamed := r.renames.Partner(resolved); renamed {
+		if mapped, refusal, leftOut, unread, held := r.held(partner.String()); held {
+			return mapped, refusal, leftOut, unread
+		}
 	}
 	return mappedRepository{}, fmt.Sprintf("%s is not mapped to project %s in Dispatch", resolved, r.project), false, false
+}
+
+// held is the mapping's answer for the repository name names exactly, in any spelling, and
+// whether the mapping names it at all. Its caller holds the read lock.
+func (r *repositories) held(name string) (mapped mappedRepository, refusal string, leftOut, unread, held bool) {
+	key := strings.ToLower(name)
+	if mapped, ok := r.accepted[key]; ok {
+		return mapped, "", false, false, true
+	}
+	if refused, ok := r.refused[key]; ok {
+		return mappedRepository{}, refused.Reason, true, refused.readErr != nil, true
+	}
+	return mappedRepository{}, "", false, false, false
 }
 
 // setUnverified records the served repositories the last read of the mapping kept on their last
@@ -179,11 +206,12 @@ func (r *repositories) setUnverified(names []string) {
 	r.unverified = names
 }
 
-// kept is whether repo, in any spelling, is served on its last answer (setUnverified).
+// kept is whether repo, in any spelling or under a configured rename, is served on its last
+// answer (setUnverified).
 func (r *repositories) kept(repo string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return slices.ContainsFunc(r.unverified, func(name string) bool { return strings.EqualFold(name, repo) })
+	return slices.ContainsFunc(r.unverified, func(name string) bool { return r.renames.Same(name, repo) })
 }
 
 // setWithoutWebhookApp records the served repositories the last read of the mapping found
@@ -525,7 +553,23 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 	}
 	w.repositories.set(accepted, refused)
 	w.repositories.setWithoutWebhookApp(servedGaps(gaps, refused))
+	w.logUnservedRenames(accepted)
 	return nil
+}
+
+// logUnservedRenames says, once at the boot's mapping load, that a configured rename names a
+// repository the project does not serve, naming both names: the pair is read wherever a name is
+// compared, but nothing is heard or served under the repository it moved to until Dispatch maps
+// it, which is how a pair configured before the transfer stands. It changes nothing else: the
+// served set is Dispatch's mapping alone, and no rename is ever read from GitHub.
+func (w *workflowRuntime) logUnservedRenames(accepted []mappedRepository) {
+	for _, pair := range w.repositories.renames.Pairs() {
+		if slices.ContainsFunc(accepted, func(mapped mappedRepository) bool { return strings.EqualFold(mapped.Repo.String(), pair.To.String()) }) {
+			continue
+		}
+		w.log.Warn("workflow: a configured repository rename names a repository this project does not serve, so the pair is read wherever a name is compared but nothing is served under it",
+			"from", pair.From.String(), "to", pair.To.String(), "project", w.dispatchProject)
+	}
 }
 
 // nameMapping replaces the served repositories with GitHub's spelling of each, on the boot's
@@ -1091,16 +1135,20 @@ func (w *workflowRuntime) heardAtBoot(ctx context.Context) ([]ghrepo.Repository,
 	return heard, err
 }
 
-// heardRepositories is what GitHub intake hears: every repository of served and every repository
-// a record of the project names, as tx reads the records, once each, sorted. A record is heard
+// heardRepositories is what GitHub intake hears: every repository of served, every repository a
+// record of the project names, as tx reads the records, and every configured rename's partner of
+// those (`repository_renames`), once each, sorted. A record is heard
 // whatever its tree's state, since a root that lingers or closed comes back, by re-admission, a
 // hand-over or an orphan's carry, on the repository it keeps, with no refresh between; a fact
 // from a repository an issue is recorded on reaches only that issue (workflow's issueForBranch
-// and ownPullRequest). Each is spelled as GitHub spells it, which Envoy's subjects carry and NATS
+// and ownPullRequest). A rename's partner is heard in both directions, so the consumer's
+// FilterSubjects carry both subjects over a transfer: the events arrive under the name GitHub now
+// has while the records keep the name they were written under, and neither side may be deaf.
+// Each is spelled as GitHub spells it, which Envoy's subjects carry and NATS
 // matches case-sensitively, whatever spelling a record keeps for its workspace (a backfilled
-// record keeps its clone's): a served repository as GitHub names it (nameAccepted), and any other
-// as its record keeps GitHub's spelling (record.Issue.GitHubRepo), so a restart subscribes with
-// no read of GitHub.
+// record keeps its clone's): a served repository as GitHub names it (nameAccepted), any other
+// as its record keeps GitHub's spelling (record.Issue.GitHubRepo), and a partner as the pair
+// configures it, so a restart subscribes with no read of GitHub.
 func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, served []ghrepo.Repository) ([]ghrepo.Repository, error) {
 	heard := map[string]ghrepo.Repository{}
 	for _, repo := range served {
@@ -1119,6 +1167,13 @@ func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, serv
 			return nil, err
 		}
 		heard[strings.ToLower(repo.String())] = repo
+	}
+	for _, repo := range slices.Collect(maps.Values(heard)) {
+		partner, renamed := w.repositories.renames.Partner(repo.String())
+		if !renamed {
+			continue
+		}
+		heard[strings.ToLower(partner.String())] = partner
 	}
 	repos := make([]ghrepo.Repository, 0, len(heard))
 	for _, repo := range heard {

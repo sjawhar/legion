@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -95,6 +96,10 @@ type Options struct {
 	// GitHubOwners are the GitHub owners of the project's repositories, every one of which the
 	// controller's gh bundle holds a read-only token for (appauth.GitHubCredential).
 	GitHubOwners func() []string
+	// RepositoryRenames is the deployment's repository equivalence
+	// (config.Config.RepositoryRenames): the controller's gh bundle holds one entry for a
+	// configured rename's two owners (appauth.GitHubCredential). The zero value configures none.
+	RepositoryRenames ghrepo.Renames
 	// Releaser releases what the runtime holds for a tree whose operator close reserved and
 	// finished its cleanup: the daemon's runtime.
 	Releaser store.TreeReleaser
@@ -181,6 +186,7 @@ type server struct {
 	controllerMu sync.Mutex
 	tokens       appauth.Tokens
 	githubOwners func() []string
+	renames      ghrepo.Renames
 	githubAPI    string
 	mergeRules   func(project string) config.MergeRules
 	grants       *credential.Grants
@@ -230,6 +236,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		pluginRelaunchable: opts.PluginRelaunchable,
 		tokens:             opts.Tokens,
 		githubOwners:       opts.GitHubOwners,
+		renames:            opts.RepositoryRenames,
 		githubAPI:          opts.GitHubAPI,
 		mergeRules:         opts.MergeRules,
 		releaser:           opts.Releaser,

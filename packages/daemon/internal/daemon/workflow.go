@@ -314,7 +314,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// blocked-by-only edit this mirror exists for, and admission runs second in any case.
 	w.handlers, w.reviewAppLogin = []intake.Handler{blockers.NewMirror(w.records, cfg.Project), w.engine, w.admission}, reviewAppLogin
 	w.pool = st.Pool()
-	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, cfg.StateDir, w.defaultBranches, log); err != nil {
+	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, cfg.StateDir, w.defaultBranches, cfg.RepositoryRenames, log); err != nil {
 		return nil, err
 	}
 	return w, nil
@@ -341,6 +341,7 @@ func engineConfig(cfg config.Config, reviewAppLogin string, build Build) workflo
 		Project: cfg.Project, DesignGate: cfg.Gates.Design, ReviewRoundCap: cfg.ReviewRoundCap,
 		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger, ProductionCheckBound: cfg.ProductionCheckBound,
 		ReviewAppLogin: reviewAppLogin, MergeQueueRole: project.MergeQueueRole, Deploys: project.Deploys,
+		RepositoryRenames: cfg.RepositoryRenames,
 	}
 	if build.Revision != "" {
 		engine.BuiltFrom = build.Repository
@@ -380,7 +381,8 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 		return err
 	}
 	w.consumers, err = intake.OpenConsumers(ctx, js, w.pool, intake.ConsumerSpec{
-		Project: cfg.Project, Repositories: heard, Deploys: cfg.Projects[cfg.Project].Deploys, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
+		Project: cfg.Project, Repositories: heard, Deploys: cfg.Projects[cfg.Project].Deploys, Renames: cfg.RepositoryRenames,
+		AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
 		ReviewPermission: w.reviewerCanWrite, ReviewBody: w.reviewBody,
 		RepositoryMapping: w.mappingChange, PrepareRepository: w.prepareRepository, PrepareArtifact: w.prepareArtifact,
 	})

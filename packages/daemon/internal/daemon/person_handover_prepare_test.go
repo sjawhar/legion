@@ -110,7 +110,7 @@ func TestPrepareIssueReadsWhoSetTheLabelOfAnUnrecordedTriageRoot(t *testing.T) {
 			}
 			// acme/widgets is served at main, so the labelled todo root is prepared for admission
 			// as today, with no wait for a read of the mapping.
-			repos := newRepositories("LEGION")
+			repos := newRepositories("LEGION", ghrepo.Renames{})
 			repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
 			branches := newDefaultBranches(roleTokens{}, "", defaultBranchTTL, time.Now)
 			branches.read["acme/widgets"] = defaultBranchRead{repository: ghbranch.Repository{Name: ghrepo.MustParse("acme/widgets"), DefaultBranch: "main"}, at: time.Now()}
@@ -262,7 +262,7 @@ func TestBootReconcileReadsWhoSetTheLabelOfAnUnrecordedTriageRoot(t *testing.T) 
 	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	admission := admit.New(records, engine, 2, "CAPTURE", log)
 	w := &workflowRuntime{
-		pool: pool, records: records, admission: admission, engine: engine, handlers: []intake.Handler{engine, admission}, repositories: newRepositories("CAPTURE"),
+		pool: pool, records: records, admission: admission, engine: engine, handlers: []intake.Handler{engine, admission}, repositories: newRepositories("CAPTURE", ghrepo.Renames{}),
 		dispatch: client, dispatchProject: "CAPTURE", bootID: "handover-boot", log: log, consumers: consumers,
 	}
 

@@ -35,7 +35,12 @@ type ConsumerSpec struct {
 	// Deploys are the project's deploy workflows (`projects.<KEY>.deploys`), fixed for the boot:
 	// only a completed run of one of them is decoded (decodeWorkflowRun), since only such a run can
 	// wake a production check; every other workflow run is acknowledged without a transaction.
-	Deploys  []config.Deploy
+	Deploys []config.Deploy
+	// Renames is the deployment's repository equivalence (`repository_renames`,
+	// config.Config.RepositoryRenames): a deploy entry naming the repository as it was matches a
+	// run on the one it moved to (DeployOf). The zero value, which answers as a comparison
+	// without case does, while the deployment configures none.
+	Renames  ghrepo.Renames
 	AckWait  time.Duration
 	NakDelay time.Duration
 	Logger   *slog.Logger
@@ -564,7 +569,7 @@ func (l *lagWatch) observe(message jetstream.Msg) {
 // terminated as poison, with JetStream taking the acknowledgement or the termination, the two ways
 // a message leaves its consumer's waiting count. A nak is not handled: the message waits again.
 func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpec, repositories []ghrepo.Repository, pool *pgxpool.Pool, handlers []Handler) bool {
-	decoded, err := decodeMessage(message.Subject(), spec.Project, repositories, spec.Deploys, message.Data())
+	decoded, err := decodeMessage(message.Subject(), spec.Project, repositories, spec.Deploys, spec.Renames, message.Data())
 	if err != nil {
 		logMessage(spec.Logger, slog.LevelError, "poison JetStream message", message, "error", err)
 		if termErr := message.Term(); termErr != nil {
