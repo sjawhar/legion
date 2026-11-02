@@ -5,16 +5,19 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -244,4 +247,325 @@ func logField(line, key string) string {
 		}
 	}
 	return ""
+}
+
+// awaitRequestPoolIdle returns how long it took the request pool to hold no connection, and fails
+// the test when it still holds one after wait.
+func awaitRequestPoolIdle(t *testing.T, pool *store.Pool, wait time.Duration) time.Duration {
+	t.Helper()
+	started := time.Now()
+	for held := pool.Stat().AcquiredConns(); held != 0; held = pool.Stat().AcquiredConns() {
+		if time.Since(started) > wait {
+			t.Fatalf("%d request-pool connections were still held %v after the client stopped reading", held, wait)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return time.Since(started)
+}
+
+// A pinned read whose client stops reading its answer gives its request-pool connection back
+// within the idle bound that answer is written under: the answer is larger than the sockets
+// between the two buffer, so the handler blocks in Write, and the bound (boundedAnswer) is what
+// ends that wait. The read's own deadline is far past it here, so only the idle bound can.
+// Without it the read held its pinned connection, and the admission unit around it, for as long
+// as the client cared to leave the answer unread.
+func TestAPinnedReadGivesItsConnectionBackWhenItsClientStopsReading(t *testing.T) {
+	const idle, deadline = 500 * time.Millisecond, 30 * time.Second
+	_, database, _, served := newRegisteredTestServer(t, testServerOptions{})
+	served.transfer = transferBounds{idle: idle}
+	const pattern = "/api/v1/stalled-reader-test"
+	pinned := make(chan struct{})
+	route := apiRoute{routeRow: routeRow{Method: http.MethodGet, Pattern: pattern, Auth: authAny, Handler: func(w http.ResponseWriter, r *http.Request) {
+		var one int
+		if err := database.Pool.QueryRow(r.Context(), "select 1").Scan(&one); err != nil {
+			t.Errorf("take the read's pinned connection: %v", err)
+			return
+		}
+		close(pinned)
+		// Far past what the sockets hold between a handler and a client that reads none of it.
+		chunk := make([]byte, 64<<10)
+		for written := 0; written < 64<<20; written += len(chunk) {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}}}
+	if !route.pinsConnection() {
+		t.Fatal("the test's route is not pinned, so it does not hold a request-pool connection to give back")
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc(route.Method+" "+pattern, served.serveRoute(route, admission.New(admission.DefaultLimits()), deadline))
+	httpServer := httptest.NewServer(mux)
+	t.Cleanup(httpServer.Close)
+	awaitQuietRequestPool(t, database.Pool)
+
+	connection, err := net.Dial("tcp", httpServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial the server: %v", err)
+	}
+	t.Cleanup(func() { connection.Close() })
+	if _, err := fmt.Fprintf(connection, "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n", pattern, httpServer.Listener.Addr()); err != nil {
+		t.Fatalf("send the read: %v", err)
+	}
+	<-pinned
+	// The client reads nothing of the answer; only its idle bound can end the handler's write.
+	if held := awaitRequestPoolIdle(t, database.Pool, 10*time.Second); held < idle {
+		t.Fatalf("the pinned connection went back after %v, want it held until the answer's %v idle bound", held, idle)
+	}
+}
+
+// A client that reads a large answer slowly but steadily is answered all of it: the bound on an
+// answer is on the silence of each write, not on the answer's length, so a page or a download on
+// a slow downlink is served however long it takes, while one that stops reading is cut within the
+// idle bound (TestAPinnedReadGivesItsConnectionBackWhenItsClientStopsReading). Here the client
+// takes several times that bound to read the answer, which the total bound this replaced cut off
+// at it. It reads far faster than the bound asks, because what one write of the handler's waits
+// for is not one read of the client's: the kernel takes the answer into its send buffer and wakes
+// the blocked write only once a good part of that buffer has drained.
+func TestASlowButSteadyReaderOfALargeAnswerIsAnsweredInFull(t *testing.T) {
+	const idle, deadline, answer, chunk = time.Second, 30 * time.Second, 32 << 20, 256 << 10
+	_, _, _, served := newRegisteredTestServer(t, testServerOptions{})
+	served.transfer = transferBounds{idle: idle}
+	const pattern = "/api/v1/steady-reader-test"
+	route := apiRoute{routeRow: routeRow{Method: http.MethodGet, Pattern: pattern, Auth: authAny, Handler: func(w http.ResponseWriter, r *http.Request) {
+		block := make([]byte, chunk)
+		began := time.Now()
+		for written := 0; written < answer; written += len(block) {
+			wrote := time.Now()
+			if _, err := w.Write(block); err != nil {
+				t.Errorf("write the answer at %d bytes, %v into the answer and %v into this write: %v",
+					written, time.Since(began), time.Since(wrote), err)
+				return
+			}
+		}
+	}}}
+	mux := http.NewServeMux()
+	mux.HandleFunc(route.Method+" "+pattern, served.serveRoute(route, admission.New(admission.DefaultLimits()), deadline))
+	httpServer := httptest.NewServer(mux)
+	t.Cleanup(httpServer.Close)
+
+	connection, err := net.Dial("tcp", httpServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial the server: %v", err)
+	}
+	t.Cleanup(func() { connection.Close() })
+	if _, err := fmt.Fprintf(connection, "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n", pattern, httpServer.Listener.Addr()); err != nil {
+		t.Fatalf("send the read: %v", err)
+	}
+	if err := connection.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	if err != nil {
+		t.Fatalf("read the answer's head: %v", err)
+	}
+	defer response.Body.Close()
+
+	started := time.Now()
+	block := make([]byte, chunk)
+	for read := 0; read < answer; {
+		// A chunk every 20 ms: the whole answer takes about two and a half seconds, several
+		// times the idle bound, and every write of the handler's wakes well inside it.
+		time.Sleep(20 * time.Millisecond)
+		n, err := io.ReadFull(response.Body, block)
+		read += n
+		if err != nil {
+			t.Fatalf("the answer stopped %v in, after %d of %d bytes: %v", time.Since(started), read, answer, err)
+		}
+	}
+	if elapsed := time.Since(started); elapsed < idle {
+		t.Fatalf("the answer was read in %v, want a reader slower than its %v idle bound", elapsed, idle)
+	}
+}
+
+// A slow but steady reader is answered in full however the handler wrote the answer: one Write
+// of the whole thing is bounded as many small ones are, the silence between its bytes and the
+// rate they keep (boundedAnswer.Write, which sends it in slices). Most answers are written in
+// one call - WriteJSON encodes the whole answer and writes it once, and a file version held in
+// its row is served in one Write - and one call had to finish inside a single idle bound, so a
+// 25 MiB download was cut for every client below about 1.3 MB/s. Here the reader takes several
+// times the idle bound to read an answer the handler wrote in one call, and reads far faster
+// than the floor.
+func TestASlowButSteadyReaderOfAnAnswerWrittenInOneWriteIsAnsweredInFull(t *testing.T) {
+	const idle, deadline, answer, chunk = time.Second, 30 * time.Second, 32 << 20, 256 << 10
+	_, _, _, served := newRegisteredTestServer(t, testServerOptions{})
+	served.transfer = transferBounds{idle: idle, grace: 2 * time.Second, floor: 32 << 10}
+	const pattern = "/api/v1/one-write-answer-test"
+	route := apiRoute{routeRow: routeRow{Method: http.MethodGet, Pattern: pattern, Auth: authAny, Handler: func(w http.ResponseWriter, r *http.Request) {
+		began := time.Now()
+		if _, err := w.Write(make([]byte, answer)); err != nil {
+			t.Errorf("write the whole answer in one call, %v in: %v", time.Since(began), err)
+		}
+	}}}
+	mux := http.NewServeMux()
+	mux.HandleFunc(route.Method+" "+pattern, served.serveRoute(route, admission.New(admission.DefaultLimits()), deadline))
+	httpServer := httptest.NewServer(mux)
+	t.Cleanup(httpServer.Close)
+
+	connection, err := net.Dial("tcp", httpServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial the server: %v", err)
+	}
+	t.Cleanup(func() { connection.Close() })
+	if _, err := fmt.Fprintf(connection, "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n", pattern, httpServer.Listener.Addr()); err != nil {
+		t.Fatalf("send the read: %v", err)
+	}
+	if err := connection.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	if err != nil {
+		t.Fatalf("read the answer's head: %v", err)
+	}
+	defer response.Body.Close()
+
+	started := time.Now()
+	block := make([]byte, chunk)
+	for read := 0; read < answer; {
+		// A chunk every 20 ms: the whole answer takes about two and a half seconds, several
+		// times the idle bound, at about 13 MB/s, which is far above the 32 KiB/s floor.
+		time.Sleep(20 * time.Millisecond)
+		n, err := io.ReadFull(response.Body, block)
+		read += n
+		if err != nil {
+			t.Fatalf("the answer stopped %v in, after %d of %d bytes: %v", time.Since(started), read, answer, err)
+		}
+	}
+	if elapsed := time.Since(started); elapsed < idle {
+		t.Fatalf("the answer was read in %v, want a reader slower than its %v idle bound", elapsed, idle)
+	}
+}
+
+// A reader that keeps reading at several times the floor is answered in full over a real
+// connection, however large the answer: the rule is no silence longer than the idle bound and
+// the floor after the grace, and this reader is never silent and always above the floor. Over a
+// TCP connection the kernel takes a write's bytes into a send buffer of megabytes and wakes a
+// blocked writer only once much of that buffer has drained, so a slice's write can wait far
+// longer than the reader is ever silent, and a deadline armed per slice cuts the reader anyway.
+// On the real binary at a7d8b26b, a 4-8 MiB file version (one Write, serveFileVersion) read at
+// 40, 60, 100 and 150 KB/s was cut 20.0-20.2 s in, every time, after 1.7-6.3 MB.
+func TestAReaderSteadilyAboveTheFloorIsAnsweredInFullOverARealConnection(t *testing.T) {
+	const idle, answer, chunk, every = 2 * time.Second, 4 << 20, 16 << 10, 80 * time.Millisecond
+	_, _, _, served := newRegisteredTestServer(t, testServerOptions{})
+	served.transfer = transferBounds{idle: idle, grace: 2 * time.Second, floor: 32 << 10}
+	const pattern = "/api/v1/steady-reader-test"
+	route := apiRoute{routeRow: routeRow{Method: http.MethodGet, Pattern: pattern, Auth: authAny, Handler: func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(make([]byte, answer))
+	}}}
+	mux := http.NewServeMux()
+	mux.HandleFunc(route.Method+" "+pattern, served.serveRoute(route, admission.New(admission.DefaultLimits()), 5*time.Minute))
+	httpServer := httptest.NewServer(mux)
+	t.Cleanup(httpServer.Close)
+
+	connection, err := net.Dial("tcp", httpServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial the server: %v", err)
+	}
+	t.Cleanup(func() { connection.Close() })
+	if err := connection.(*net.TCPConn).SetReadBuffer(chunk); err != nil {
+		t.Fatalf("size the reader's receive buffer: %v", err)
+	}
+	if _, err := fmt.Fprintf(connection, "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n", pattern, httpServer.Listener.Addr()); err != nil {
+		t.Fatalf("send the read: %v", err)
+	}
+	if err := connection.SetDeadline(time.Now().Add(2 * time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	if err != nil {
+		t.Fatalf("read the answer's head: %v", err)
+	}
+	defer response.Body.Close()
+
+	// 16 KiB every 80 ms is 200 KiB/s, six times the 32 KiB/s floor, and the reader is never
+	// silent for more than 80 ms; the whole answer takes about 20 s, ten idle bounds.
+	started := time.Now()
+	block := make([]byte, chunk)
+	for read := 0; read < answer; {
+		time.Sleep(every)
+		n, err := io.ReadFull(response.Body, block)
+		read += n
+		if err != nil {
+			t.Fatalf("a reader at 200 KiB/s was cut %v in, after %d of %d bytes: %v", time.Since(started).Round(time.Millisecond), read, answer, err)
+		}
+	}
+}
+
+// A reader that stops reading a large answer is still cut, within the idle bound and the time
+// the kernel's send buffer takes to drain at the floor: what a slice's write is given for that
+// buffer (movingDeadline.drain) is a bound and not a reprieve. This is the other side of
+// TestAReaderSteadilyAboveTheFloorIsAnsweredInFullOverARealConnection, where a reader at six
+// times the floor drains the buffer well inside that time; here the reader drains none of it, so
+// the write that filled the buffer waits out the whole bound and fails. The deployment's bounds
+// make that wait 20 s plus 4 MiB at 32 KiB/s, about two and a half minutes; the floor here is
+// 1 MiB/s, so it is a second plus four.
+func TestAReaderThatStopsReadingIsCutWithinTheSendBuffersDrain(t *testing.T) {
+	const idle, floor, chunk, deadline = time.Second, 1 << 20, 16 << 10, 5 * time.Minute
+	// Larger than the send buffer and the reader's receive buffer together, so the handler's one
+	// Write blocks with the whole of that buffer handed over.
+	answer := 2 * int(maxSendBuffer())
+	// The bound the answer is cut within: the idle bound and the drain the write is allowed for
+	// what the kernel holds, with a margin for a loaded pod's scheduling.
+	const margin = 3 * time.Second
+	bound := idle + time.Duration(min(int64(answer), maxSendBuffer()))*time.Second/floor
+
+	_, _, _, served := newRegisteredTestServer(t, testServerOptions{})
+	// The grace outlasts the test, so what cuts the answer is the write's own deadline rather
+	// than the floor judgment on the bytes already handed over (movingDeadline.tooSlow).
+	served.transfer = transferBounds{idle: idle, grace: time.Minute, floor: floor}
+	const pattern = "/api/v1/stopped-reader-test"
+	cut := make(chan error, 1)
+	route := apiRoute{routeRow: routeRow{Method: http.MethodGet, Pattern: pattern, Auth: authAny, Handler: func(w http.ResponseWriter, r *http.Request) {
+		_, err := w.Write(make([]byte, answer))
+		cut <- err
+	}}}
+	mux := http.NewServeMux()
+	mux.HandleFunc(route.Method+" "+pattern, served.serveRoute(route, admission.New(admission.DefaultLimits()), deadline))
+	httpServer := httptest.NewServer(mux)
+	t.Cleanup(httpServer.Close)
+
+	connection, err := net.Dial("tcp", httpServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial the server: %v", err)
+	}
+	t.Cleanup(func() { connection.Close() })
+	if err := connection.(*net.TCPConn).SetReadBuffer(chunk); err != nil {
+		t.Fatalf("size the reader's receive buffer: %v", err)
+	}
+	if _, err := fmt.Fprintf(connection, "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n", pattern, httpServer.Listener.Addr()); err != nil {
+		t.Fatalf("send the read: %v", err)
+	}
+	started := time.Now()
+	if err := connection.SetDeadline(time.Now().Add(bound + margin)); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	if err != nil {
+		t.Fatalf("read the answer's head: %v", err)
+	}
+	defer response.Body.Close()
+	// The reader takes the answer's first bytes and then stops, leaving the rest to fill the
+	// kernel's buffers; nothing but the bound can end the handler's write.
+	if _, err := io.ReadFull(response.Body, make([]byte, chunk)); err != nil {
+		t.Fatalf("read the answer's first %d bytes: %v", chunk, err)
+	}
+
+	select {
+	case err := <-cut:
+		elapsed := time.Since(started)
+		switch {
+		case err == nil:
+			t.Fatalf("the whole %d-byte answer was written %v in to a reader that read %d bytes of it", answer, elapsed, chunk)
+		case !errors.Is(err, os.ErrDeadlineExceeded):
+			t.Fatalf("the answer failed %v in with %v, want the bound's own deadline", elapsed, err)
+		case elapsed < idle:
+			t.Fatalf("the answer was cut %v in, want it given its %v idle bound at the least", elapsed, idle)
+		case elapsed > bound+margin:
+			t.Fatalf("a reader that stopped reading was cut %v in, want within %v: the %v idle bound and the %d-byte send buffer draining at %d bytes a second",
+				elapsed, bound+margin, idle, maxSendBuffer(), int64(floor))
+		}
+	case <-time.After(bound + margin):
+		t.Fatalf("a reader that stopped reading was not cut within %v: the %v idle bound and the %d-byte send buffer draining at %d bytes a second",
+			bound+margin, idle, maxSendBuffer(), int64(floor))
+	}
 }

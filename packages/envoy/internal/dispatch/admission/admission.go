@@ -56,7 +56,7 @@ const (
 	// QueueFull is a request that arrived with its class's wait queue already full.
 	QueueFull Reason = "queue_full"
 	// WaitExceeded is a request that waited in the queue for its class's wait
-	// (Limits.Wait, Limits.WriteWait) without room coming free.
+	// (Limits.ReadWait, Limits.WriteWait) without room coming free.
 	WaitExceeded Reason = "wait_exceeded"
 )
 
@@ -161,14 +161,13 @@ func perCPULimit(procs, perCPU, ceiling int) int {
 	return min(ceiling, perCPU*max(procs, 1))
 }
 
-// DefaultWait is how long a read waits in the read queue for room before it is refused: 1 s.
-// At 1x on INFRA-589's 2-core reproduction every read slot stays busy for over a second in a stall
-// and a write can be in flight for over a second (the measurements above), so a shorter wait
-// refuses requests at a load the server serves: with 8 reads a 75 ms wait refused 34 writes in
-// 180 s at 1x and a 1 s wait 6, and with 28 reads, 12 writes and a queue of twice the limit a 1 s
-// wait refused 0-9 reads and 5-11 writes. A refused request is answered once its wait has run out,
+// DefaultReadWait is how long a read waits in the read queue for room before it is refused: 1 s.
+// At 1x on INFRA-589's 2-core reproduction every read slot stays busy for over a second in a
+// stall (the measurements above), so a shorter wait refuses reads whose slot is about to come
+// free, at a load the server serves: with 28 reads, 12 writes and a queue of twice the limit a
+// 1 s wait refused 0-9 reads in 180 s. A refused request is answered once its wait has run out,
 // so a refusal's p99 is about the wait.
-const DefaultWait = time.Second
+const DefaultReadWait = time.Second
 
 // DefaultWriteWait is how long a write waits in the write queue for room before it is refused:
 // 2 s, twice a read's. At 1x on the same reproduction the seeded open-loop schedule (rng seed 1)
@@ -177,10 +176,12 @@ const DefaultWait = time.Second
 // both classes are at their caps - reads 22 in flight and 19 queued, writes 18-21 in flight and 2
 // queued - and a write takes 2-6 s, so a 1 s wait refuses 0-2 of those writes 429 OVERLOADED
 // (one measured run refused 2, three others 1, 0 and 0) where the server goes on to serve them.
-// A refused write is sent again after Retry-After: 1, so from the client's side the second second
-// of waiting costs nothing that a refusal would save it, and the write is served rather than
-// retried. Reads keep the 1 s: a read's slot comes free within it, and a read's work is the
-// shorter of the two to redo.
+// A shorter wait refuses more of them: with 8 reads a 75 ms wait refused 34 writes in 180 s at
+// 1x where a 1 s wait refused 6, and with 28 reads, 12 writes and a queue of twice the limit a
+// 1 s wait refused 5-11 writes. A refused write is sent again after Retry-After: 1, so from the
+// client's side the second second of waiting costs nothing that a refusal would save it, and the
+// write is served rather than retried. Reads keep the 1 s: a read's slot comes free within it,
+// and a read's work is the shorter of the two to redo.
 const DefaultWriteWait = 2 * time.Second
 
 // queueFactor is how many requests each class's queue holds per unit of its limit: twice the
@@ -202,8 +203,8 @@ type Limits struct {
 	// class then reaches its own limit only while the other class is empty, and never past
 	// the total.
 	Total int
-	// Wait is how long a read may wait in the read queue for room; zero is DefaultWait.
-	Wait time.Duration
+	// ReadWait is how long a read may wait in the read queue for room; zero is DefaultReadWait.
+	ReadWait time.Duration
 	// WriteWait is how long a write may wait in the write queue for room; zero is
 	// DefaultWriteWait. A write waits longer than a read because a refused write costs its
 	// client a whole retry of work the server was about to serve (DefaultWriteWait).
@@ -219,13 +220,13 @@ type Limits struct {
 
 // DefaultLimits are the limits the server runs with: reads and writes by the CPUs the process may
 // use (readLimit and writeLimit of runtime.GOMAXPROCS), MaxAdmittedUnits over the two of them,
-// ReservedReadUnits of those kept for the reads, DefaultWait for a read and DefaultWriteWait for
-// a write.
+// ReservedReadUnits of those kept for the reads, DefaultReadWait for a read and
+// DefaultWriteWait for a write.
 func DefaultLimits() Limits {
 	procs := runtime.GOMAXPROCS(0)
 	return Limits{
 		Read: readLimit(procs), Write: writeLimit(procs), Total: MaxAdmittedUnits,
-		ReservedReads: ReservedReadUnits, Wait: DefaultWait, WriteWait: DefaultWriteWait,
+		ReservedReads: ReservedReadUnits, ReadWait: DefaultReadWait, WriteWait: DefaultWriteWait,
 	}
 }
 
@@ -233,9 +234,9 @@ func DefaultLimits() Limits {
 // classes together are under their limits; a write while its class is and its units fit under
 // Limits.Total beside the read units Limits.ReservedReads still keeps for waiting reads. One
 // that finds no room waits in its class's queue, in the order the requests arrived (Arrive),
-// for at most its class's wait over the whole request - Limits.Wait for a read, Limits.WriteWait
-// for a write - and one that finds that queue already holding queueFactor times the class's
-// limit is refused at once. A Limiter is safe for concurrent use.
+// for at most its class's wait over the whole request - Limits.ReadWait for a read,
+// Limits.WriteWait for a write - and one that finds that queue already holding queueFactor times
+// the class's limit is refused at once. A Limiter is safe for concurrent use.
 type Limiter struct {
 	// mu guards every count and queue below: the combined cap is one number over both
 	// classes, so granting reads and moves the two together.
@@ -250,12 +251,12 @@ type Limiter struct {
 
 // New returns a Limiter with limits. A limit below one is one, a Total of zero is Read plus
 // Write (no combined cap beyond the classes' own), a zero wait is its class's default
-// (DefaultWait, DefaultWriteWait), and a ReservedReads is kept within zero and the smaller of
+// (DefaultReadWait, DefaultWriteWait), and a ReservedReads is kept within zero and the smaller of
 // the read limit and the total, which is all the reads could ever hold.
 func New(limits Limits) *Limiter {
 	l := &Limiter{}
-	waits := [classCount]time.Duration{Read: limits.Wait, Write: limits.WriteWait}
-	defaults := [classCount]time.Duration{Read: DefaultWait, Write: DefaultWriteWait}
+	waits := [classCount]time.Duration{Read: limits.ReadWait, Write: limits.WriteWait}
+	defaults := [classCount]time.Duration{Read: DefaultReadWait, Write: DefaultWriteWait}
 	for class, limit := range [classCount]int{Read: limits.Read, Write: limits.Write} {
 		wait := waits[class]
 		if wait <= 0 {
@@ -467,10 +468,10 @@ func TicketFrom(ctx context.Context) *Ticket {
 
 // gate is one class's units, wait and wait queue: a weighted semaphore whose waiters are served
 // in arrival order, so a heavy request at the head is not overtaken by light ones behind it. Its
-// wait is the class's own (Limits.Wait, Limits.WriteWait), so each class is refused at the bound
-// its own requests are worth waiting out. Its Limiter's mutex guards its counts and its queue,
-// since the combined cap ties the classes together; only the refusal counters, which no decision
-// reads, stand on their own.
+// wait is the class's own (Limits.ReadWait, Limits.WriteWait), so each class is refused at the
+// bound its own requests are worth waiting out. Its Limiter's mutex guards its counts and its
+// queue, since the combined cap ties the classes together; only the refusal counters, which no
+// decision reads, stand on their own.
 type gate struct {
 	class   Class
 	limit   int
@@ -630,8 +631,11 @@ func (l *Limiter) reservedFor(class Class) int {
 
 // heldByTotal is the earliest waiter at the head of a class's queue that fits its own class but
 // not the combined cap itself, or nil when neither head is one. A write the read reservation
-// alone holds up is not one: the reads it waits for must be able to take that room, so it holds
-// back the writes queued behind it and nothing else. l.mu is held.
+// refuses as well is not one: the reads it waits for must be able to take that room, so it holds
+// back the writes queued behind it and nothing else. That covers the write the reservation alone
+// holds up and the one both it and the cap refuse - a weight-2 head with the cap a unit short of
+// it - whose room is the reads' until they have taken their reservation: a read queued behind
+// such a head, which the cap has room for, is granted rather than held. l.mu is held.
 func (l *Limiter) heldByTotal() *waiter {
 	var earliest *waiter
 	for _, g := range l.classes {
@@ -640,8 +644,13 @@ func (l *Limiter) heldByTotal() *waiter {
 			continue
 		}
 		head := front.Value.(*waiter)
-		if g.used+head.units <= g.limit && l.used+head.units > l.total &&
-			(earliest == nil || head.seq < earliest.seq) {
+		if g.used+head.units > g.limit || l.used+head.units <= l.total {
+			continue
+		}
+		if reserved := l.reservedFor(g.class); reserved > 0 && l.used+head.units+reserved > l.total {
+			continue
+		}
+		if earliest == nil || head.seq < earliest.seq {
 			earliest = head
 		}
 	}

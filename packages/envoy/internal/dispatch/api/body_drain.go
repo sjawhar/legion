@@ -163,6 +163,15 @@ var maxSendBuffer = sync.OnceValue(func() int64 {
 
 // tooSlow reports whether the transfer has moved its bytes slower than the floor allows, once it
 // has had its grace. A transfer with no floor (a test's) is never too slow.
+//
+// The bytes it judges are the ones the server has handed off - the ones the connection's writes
+// accepted - which run ahead of what the client has read by what the kernel still holds for it:
+// up to the send buffer and the client's receive window. A reader below the floor is therefore
+// cut later than the grace, and the later the larger the answer: with a 4 MiB send buffer a
+// multi-MiB answer's reader is cut about three minutes in rather than a minute. Subtracting what
+// the kernel holds would cut such a reader at the floor itself, but that queue is the one this
+// layer cannot see (drain), and the floor is here to end the transfer that would otherwise never
+// end rather than to time a client's own pace.
 func (d *movingDeadline) tooSlow(now time.Time) bool {
 	elapsed := now.Sub(d.started)
 	return d.bounds.floor > 0 && elapsed > d.bounds.grace &&
@@ -264,14 +273,14 @@ type drainedBody struct {
 	io.ReadCloser
 	movingDeadline
 	// ticket is the request's admission hold, which admitted hands to the body on the request it
-	// was given (the drain sits outside admission, serveRoute); nil for a request admission did
-	// not count or has not admitted yet, whose body parks nothing.
+	// was given (admit; the drain sits outside admission, serveRoute); nil for a request
+	// admission did not count or has not admitted yet, whose body parks nothing.
 	ticket *admission.Ticket
 	// refuse cancels the handler's own context with the refusal that would not let the request
-	// take its units back (resume), which admitted gives the body beside the ticket; nil for a
-	// request admission did not count. The handler then writes nothing and commits nothing,
-	// whether or not it read that refusal from the Read that ended its body, and its answer is
-	// the refusal (admission.WriteUnserved).
+	// take its units back (resume). admitted hands it over with the ticket (admit), so a body
+	// that holds one holds the other, and a request admission did not count holds neither. The
+	// handler then writes nothing and commits nothing, whether or not it read that refusal from
+	// the Read that ended its body, and its answer is the refusal (admission.WriteUnserved).
 	refuse context.CancelCauseFunc
 	// ctx is the request's own context, which the units are taken back under (resume). It is
 	// the one outside the handler's, so a refusal of those units does not cancel it.
@@ -351,6 +360,14 @@ func (b *drainedBody) close() { b.held.close() }
 // byte past the limit tells it.
 func (b *drainedBody) oversize() bool { return b.moved > b.limit }
 
+// admit takes the ticket the request was admitted with and the cancellation that ends its
+// handler where the units the body asks back are refused (resume), which the layer outside the
+// drain hands over together (admitted). A body given them parks the ticket while the rest of
+// the body arrives.
+func (b *drainedBody) admit(ticket *admission.Ticket, refuse context.CancelCauseFunc) {
+	b.ticket, b.refuse = ticket, refuse
+}
+
 // park gives the request's admission units back while its body arrives, since what a client
 // still sending holds is the connection and not the server's room to work: the units an admitted
 // request holds are otherwise held until its handler returns (admitted), so clients trickling
@@ -392,9 +409,7 @@ func (b *drainedBody) resume() error {
 	var refusal *admission.Refusal
 	if errors.As(err, &refusal) {
 		b.refusal = refusal
-		if b.refuse != nil {
-			b.refuse(refusal)
-		}
+		b.refuse(refusal)
 	}
 	return err
 }

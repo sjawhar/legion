@@ -276,11 +276,21 @@ func (s *server) keyedWrites(route apiRoute, handler http.HandlerFunc) http.Hand
 			s.writeHandlerError(w, r, err)
 			return
 		case err != nil:
-			// A client that went away while its body arrived is written nothing and its line
-			// carries 499, as every gone client's does: this wrote it a 400 nobody was left to
-			// read, and the line carried that 400. A client still there is answered the 400 as
-			// before, and a body cut off by a refusal of the units its request asked back is
-			// answered that refusal (admission.WriteUnserved).
+			// A body the drain wrapped and saw fail is the drain's to answer: it tells the
+			// bound's own deadline from a client that went away (drainedBody.clientGone) and
+			// answers each once this layer has returned - nothing and a 499 line for a client
+			// that left, the 429 for units refused, the 400 of an unreadable body for one that
+			// stopped arriving under a client still there (drainingWriter.refuseUnreadBody).
+			// Answering here as well read a body the idle bound cut as a client that had gone,
+			// since net/http cancels the request of a connection whose read fails, so the line
+			// carried 499 while the drain wrote that client its 400.
+			//
+			// Every other read failure is answered here as before: nothing for a client that
+			// went away, and the refusal of the units the request asked back where that is what
+			// ended the body (admission.WriteUnserved).
+			if body, drained := r.Body.(*drainedBody); drained && (body.failure != nil || body.refusal != nil) {
+				return
+			}
 			if admission.WriteUnserved(w, r.Context(), err) {
 				return
 			}

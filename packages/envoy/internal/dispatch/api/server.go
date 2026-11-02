@@ -788,11 +788,10 @@ func admitted(limiter *admission.Limiter, weight int, handler http.HandlerFunc) 
 		defer ticket.Release()
 		ctx := admission.WithTicket(r.Context(), ticket)
 		if body, drained := r.Body.(*drainedBody); drained {
-			body.ticket = ticket
 			var refused context.CancelCauseFunc
 			ctx, refused = context.WithCancelCause(ctx)
 			defer refused(nil)
-			body.refuse = refused
+			body.admit(ticket, refused)
 		}
 		handler(w, r.WithContext(ctx))
 	}

@@ -249,7 +249,7 @@ func TestWritersQueuedOnADocumentLeaveAdmissionRoomForOthers(t *testing.T) {
 // once the gate passes to it, is answered 429 OVERLOADED, and hands the gate on.
 func TestAQueuedWriterThatFindsNoAdmissionRoomIsRefusedOverloaded(t *testing.T) {
 	limiter := admission.New(admission.Limits{
-		Read: 4, Write: 1, Wait: 20 * time.Millisecond, WriteWait: 20 * time.Millisecond,
+		Read: 4, Write: 1, ReadWait: 20 * time.Millisecond, WriteWait: 20 * time.Millisecond,
 	})
 	gate := &gatedMarkQuote{entered: make(chan struct{}), release: make(chan struct{})}
 	handler, service, _ := writerGateHandler(t, 8, limiter, func(service *docs.Service) docs.API {

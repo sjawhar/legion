@@ -43,6 +43,15 @@ func captureLog(t *testing.T) *logBuffer {
 	return logged
 }
 
+// captureDebugLog is captureLog at DEBUG, for a test that reads the lines the layers answering a
+// request the server could not serve write there (admission.WriteUnserved).
+func captureDebugLog(t *testing.T) *logBuffer {
+	t.Helper()
+	logged := &logBuffer{}
+	logtest.SetDefault(t, slog.NewTextHandler(logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	return logged
+}
+
 // accessLines are the access-log lines a buffer holds, in order.
 func accessLines(t *testing.T, logged *logBuffer) []string {
 	t.Helper()

@@ -760,7 +760,7 @@ func refusedAtResume(t *testing.T, limiter *admission.Limiter, address, target, 
 // the file a second time.
 func TestAWriteRefusedWhenItAsksItsUnitsBackCommitsNothing(t *testing.T) {
 	limiter := admission.New(admission.Limits{
-		Read: 4, Write: 1, Wait: 250 * time.Millisecond, WriteWait: 250 * time.Millisecond,
+		Read: 4, Write: 1, ReadWait: 250 * time.Millisecond, WriteWait: 250 * time.Millisecond,
 	})
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{
 		admission: limiter, files: filestest.NewMemory(),
@@ -874,5 +874,42 @@ func TestAWriteWhoseBodyFramingFailsIsRefusedRatherThanAnsweredEmpty(t *testing.
 	}
 	if response.StatusCode != http.StatusBadRequest || refusalCode(answer) != "REQUEST_BODY_UNREADABLE" {
 		t.Fatalf("status=%d body=%s, want 400 REQUEST_BODY_UNREADABLE", response.StatusCode, answer)
+	}
+}
+
+// A keyed write whose body stops arriving, its client still there, is answered the 400 of a body
+// that did not arrive and nothing else: the keyed layer, which reads the body itself to judge the
+// key by its digest, leaves that answer to the drain, which tells the bound's own deadline from a
+// client that went away (drainedBody.clientGone, drainingWriter.refuseUnreadBody). net/http
+// cancels the request of a connection whose read fails, the idle bound's deadline among them, so
+// the keyed layer took the cancellation for a client that had gone and recorded one
+// (admission.WriteUnserved) while the drain wrote the client that was still there its 400.
+func TestAKeyedWriteWhoseBodyStopsArrivingIsNotTakenForAGoneClient(t *testing.T) {
+	handler, _, _, served := newRegisteredTestServer(t, testServerOptions{})
+	served.transfer = transferBounds{idle: 500 * time.Millisecond}
+	issue := createInteractionIssue(t, handler, "TEST", "Keyed body that stops", "A spec")
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	logged := captureDebugLog(t)
+
+	header := http.Header{}
+	header.Set("Content-Type", "application/json")
+	header.Set("X-Dispatch-User", "alice")
+	header.Set(contracts.IdempotencyKeyHeader, "stopped-mid-body")
+	// The head and the first part of the body go out; the rest never does, and the client stays
+	// to read the answer.
+	stopped := sendPartOfBody(t, httpServer.Listener.Addr().String(), "/api/v1/issues/"+issue.Key+"/comments",
+		header, 200, []byte(`{"body":"half of this comment`))
+	response, answer := stopped.answer()
+	if response.StatusCode != http.StatusBadRequest || refusalCode(answer) != "REQUEST_BODY_UNREADABLE" {
+		t.Fatalf("the keyed write whose body stopped: status=%d body=%s, want 400 REQUEST_BODY_UNREADABLE",
+			response.StatusCode, answer)
+	}
+	if line := awaitAccessLineOfRoute(t, logged, "/api/v1/issues/{key}/comments"); !strings.Contains(line, "status=400") {
+		t.Fatalf("the keyed write whose body stopped logged:\n%s\nwant status=400, the answer its client read", line)
+	}
+	if strings.Contains(logged.String(), "request's client went away") {
+		t.Fatalf("the keyed write whose body stopped logged:\n%s\nwant nothing taking its client for gone: it was there to read the 400",
+			logged.String())
 	}
 }

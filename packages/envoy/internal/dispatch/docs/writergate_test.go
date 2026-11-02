@@ -151,7 +151,7 @@ func TestOverlappingMultiDocumentWritersDoNotDeadlock(t *testing.T) {
 func TestAWriterQueuedForADocumentGivesItsAdmissionBack(t *testing.T) {
 	service, artifactID := newTestService(t)
 	limiter := admission.New(admission.Limits{
-		Read: 1, Write: 1, Wait: 50 * time.Millisecond, WriteWait: 50 * time.Millisecond,
+		Read: 1, Write: 1, ReadWait: 50 * time.Millisecond, WriteWait: 50 * time.Millisecond,
 	})
 	_, release, err := service.AcquireDocumentWriter(context.Background(), artifactID)
 	if err != nil {
@@ -190,7 +190,7 @@ func TestAWriterQueuedForADocumentGivesItsAdmissionBack(t *testing.T) {
 func TestAWriterThatCannotResumeItsAdmissionReleasesTheGate(t *testing.T) {
 	service, artifactID := newTestService(t)
 	limiter := admission.New(admission.Limits{
-		Read: 1, Write: 1, Wait: 20 * time.Millisecond, WriteWait: 20 * time.Millisecond,
+		Read: 1, Write: 1, ReadWait: 20 * time.Millisecond, WriteWait: 20 * time.Millisecond,
 	})
 	_, release, err := service.AcquireDocumentWriter(context.Background(), artifactID)
 	if err != nil {
