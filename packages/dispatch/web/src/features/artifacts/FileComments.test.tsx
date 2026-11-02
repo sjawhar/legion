@@ -113,10 +113,12 @@ function MarginProbe(): ReactNode {
 }
 
 function renderFile({
+  artifact = chart,
   isClosed = false,
   path = "/issues/CORE-1/artifacts/chart-png",
   version: shown,
 }: {
+  artifact?: Artifact;
   isClosed?: boolean;
   path?: string;
   version?: number;
@@ -124,7 +126,7 @@ function renderFile({
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
-  return render(
+  const page = (file: Artifact) => (
     <MemoryRouter
       future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
       initialEntries={[path]}
@@ -132,7 +134,7 @@ function renderFile({
       <QueryClientProvider client={queryClient}>
         <MarginProvider>
           <ArtifactBlobView
-            artifact={chart}
+            artifact={file}
             comments={{ isClosed, owner: { issueKey: "CORE-1", kind: "issue" } }}
             version={shown}
           />
@@ -142,6 +144,8 @@ function renderFile({
       </QueryClientProvider>
     </MemoryRouter>
   );
+  const view = render(page(artifact));
+  return Object.assign(view, { rerenderFile: (file: Artifact) => view.rerender(page(file)) });
 }
 
 function picture(): HTMLElement {
@@ -364,6 +368,134 @@ test("a closed issue's file takes no new comment and draws no box", async () => 
     expect(screen.queryByTestId("picture-box-draft")).toBeNull();
     expect(screen.queryByRole("button", { name: "Draw a box" })).toBeNull();
     expect(screen.queryByLabelText("Comment")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+const results: Artifact = {
+  ...chart,
+  id: "results-id",
+  kind: "file",
+  name: "results.csv",
+  slug: "results-csv",
+  versions: [
+    { ...version(1), mime: "text/csv" },
+    { ...version(2), mime: "text/csv" },
+  ],
+};
+const onResults = (id: string, number: number): Comment =>
+  boxComment(id, "2026-11-01T02:00:00Z", { artifact_id: "results-id", version: number });
+
+// A file that is not a picture is the margin's document too: choosing its thread written on an
+// older version opens that version, as a picture's box does.
+test("on a file that is not a picture, a thread on another version opens that version", async () => {
+  stubComments([onResults("old", 1)]);
+  const view = renderFile({ artifact: results, path: "/issues/CORE-1/artifacts/results-csv" });
+  try {
+    await waitFor(() =>
+      expect(screen.getByLabelText("Registered document").textContent).toBe("results-id")
+    );
+    expect(screen.queryByTestId("picture-boxes")).toBeNull();
+    await waitFor(() => {
+      fireEvent.click(screen.getByRole("button", { name: "Focus old" }));
+      expect(screen.getByLabelText("Location").textContent).toBe(
+        "/issues/CORE-1/artifacts/results-csv?v=1&comment=old"
+      );
+    });
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a link to a whole-file thread on another version opens that version", async () => {
+  stubComments([onResults("old", 1)]);
+  const view = renderFile({
+    artifact: results,
+    path: "/issues/CORE-1/artifacts/results-csv?comment=old",
+  });
+  try {
+    await waitFor(() =>
+      expect(screen.getByLabelText("Location").textContent).toBe(
+        "/issues/CORE-1/artifacts/results-csv?v=1&comment=old"
+      )
+    );
+  } finally {
+    view.unmount();
+  }
+});
+
+// A box drawn while the page shows the newest version stays about that part of that version when
+// a newer version arrives before the comment is sent.
+test("a drawn box keeps the version it was drawn on when a newer version arrives", async () => {
+  stubComments([]);
+  const createComment = spyOn(api, "createComment").mockResolvedValue(
+    boxComment("new", "2026-11-01T07:00:00Z", { box })
+  );
+  restores.push(() => createComment.mockRestore());
+  const view = renderFile();
+  try {
+    layOut(picture());
+    fireEvent.pointerDown(picture(), {
+      button: 0,
+      clientX: 140,
+      clientY: 70,
+      pointerId: 1,
+      pointerType: "mouse",
+    });
+    fireEvent.pointerUp(picture(), {
+      clientX: 260,
+      clientY: 120,
+      pointerId: 1,
+      pointerType: "mouse",
+    });
+    expect(screen.getByText(/On the box you drew, version 2/)).toBeDefined();
+
+    view.rerenderFile({ ...chart, versions: [version(1), version(2), version(3)] });
+    expect(screen.getByText(/On the box you drew, version 2/)).toBeDefined();
+    // The newest picture is shown, and the box, which is about version 2, is not drawn on it.
+    expect(screen.queryByTestId("picture-box-draft")).toBeNull();
+    const form = screen.getByRole("region", { name: "Comment on chart.png" });
+    fireEvent.change(within(form).getByLabelText("Comment"), { target: { value: "Still low." } });
+    fireEvent.click(within(form).getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          anchor: {
+            artifact: "chart-id",
+            box: { height: 0.25, left: 0.1, top: 0.1, width: 0.3 },
+            version: 2,
+          },
+          body: "Still low.",
+        },
+        keyedAttempt
+      )
+    );
+  } finally {
+    view.unmount();
+  }
+});
+
+// A box drawn over the whole picture must not stop the next one: a drag may start over a box, and
+// a press there that draws nothing chooses the box's thread.
+test("a drag that starts over a box draws a box, and a press on a box chooses it", async () => {
+  stubComments([
+    boxComment("all", "2026-11-01T02:00:00Z", { box: { height: 1, left: 0, top: 0, width: 1 } }),
+  ]);
+  const view = renderFile();
+  try {
+    const whole = await within(picture()).findByRole("button", { name: /^Box 1/ });
+    layOut(picture());
+    const mouse = { pointerId: 3, pointerType: "mouse" };
+    fireEvent.pointerDown(whole, { ...mouse, button: 0, clientX: 140, clientY: 70 });
+    fireEvent.pointerUp(picture(), { ...mouse, clientX: 141, clientY: 71 });
+    expect(screen.getByLabelText("Focused mark").textContent).toBe("all");
+    expect(screen.queryByTestId("picture-box-draft")).toBeNull();
+
+    fireEvent.pointerDown(whole, { ...mouse, button: 0, clientX: 140, clientY: 70 });
+    fireEvent.pointerUp(picture(), { ...mouse, clientX: 260, clientY: 120 });
+    expect(screen.getByTestId("picture-box-draft").style.width).toBe("30%");
   } finally {
     view.unmount();
   }

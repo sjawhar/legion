@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
-import type { AnchorBox, Artifact, Version } from "../../api/types";
+import type { Artifact, Version } from "../../api/types";
 import {
   borderDefault,
   card,
@@ -31,7 +31,13 @@ import {
   documentRoute,
 } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { FileCommentBox, type FileCommentOwner, PictureBoxes } from "./FileComments";
+import {
+  type DraftBox,
+  FileCommentBox,
+  type FileCommentOwner,
+  PictureBoxes,
+  useFileDocument,
+} from "./FileComments";
 
 export function artifactVersionUrl(artifactID: string, version: number): string {
   return `/api/v1/artifacts/${encodeURIComponent(artifactID)}/versions/${version}`;
@@ -240,16 +246,21 @@ export function ArtifactBlobView({
   const latest = versionsNewestFirst(artifact.versions)[0];
   const selected =
     version === undefined ? latest : artifact.versions.find((item) => item.number === version);
-  const shownVersion = selected?.number;
-  // The box a comment being written is about, drawn on the version shown: another version or file
-  // takes it away, since its fractions name part of this picture.
-  const [draft, setDraft] = useState<AnchorBox>();
+  // The box a comment being written is about, with the version it was drawn on: a newer version
+  // shown meanwhile leaves it about that part of that version, and another file takes it away.
+  const [draft, setDraft] = useState<DraftBox>();
   const [drawing, setDrawing] = useState(false);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the box belongs to this file and version
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the box belongs to this file
   useEffect(() => {
     setDraft(undefined);
     setDrawing(false);
-  }, [artifact.id, shownVersion]);
+  }, [artifact.id]);
+  const fileDocument = useFileDocument({
+    artifact,
+    enabled: comments !== undefined,
+    owner: comments?.owner ?? { issueKey: "", kind: "issue" },
+    version: selected?.number,
+  });
 
   if (selected === undefined) {
     return version === undefined ? (
@@ -275,10 +286,11 @@ export function ArtifactBlobView({
           alt={`${artifact.name} version ${selected.number}`}
           artifact={artifact}
           canDraw={!comments.isClosed}
-          draft={draft}
+          document={fileDocument}
+          draft={draft?.version === selected.number ? draft.box : undefined}
           drawing={drawing}
           onDraw={(box) => {
-            setDraft(box);
+            setDraft({ box, version: selected.number });
             setDrawing(false);
           }}
           owner={comments.owner}

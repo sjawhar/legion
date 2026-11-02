@@ -6541,6 +6541,60 @@ describe("executeDispatchTool", () => {
     ]);
   });
 
+  // A reply keeps its thread's anchor, so the server refuses a quote on one; the command sends
+  // the quote rather than posting the reply without it.
+  test("dispatch_comment sends a reply's quote for Dispatch to refuse, never drops it", async () => {
+    const posted: unknown[] = [];
+    await executeDispatchTool({
+      tool: "dispatch_comment",
+      args: {
+        issue: "DSP-42",
+        artifact: "spec",
+        quote: "the passage",
+        reply_to: "cccccccc-0000-4000-8000-000000000042",
+        body: "Agreed.",
+      },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fileServer([], posted),
+    });
+    expect(posted).toEqual([
+      expect.objectContaining({
+        anchor: { artifact: "artifact-42", quote: "the passage" },
+        reply_to: "cccccccc-0000-4000-8000-000000000042",
+      }),
+    ]);
+  });
+
+  // A file's own read never depended on its comments: a comment read that fails leaves the file
+  // shown, and says what could not be read.
+  test("dispatch_doc_read shows a file whose comments cannot be read, and says so", async () => {
+    const files = fileServer([]);
+    const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (new URL(String(url)).pathname === "/api/v1/issues/DSP-42/comments") {
+        return response({ code: "INTERNAL", error: "internal server error" }, 500);
+      }
+      return files(url, init);
+    }) as typeof fetch;
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { issue: "DSP-42", artifact: "sweep-json" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    });
+    expect(result.text.startsWith("File sweep.json: application/json, version 2, 17 bytes.")).toBe(
+      true
+    );
+    expect(result.text).toContain("The comments on sweep.json could not be read:");
+  });
+
   test("dispatch_comment refuses a box on a file that is not a picture, and a box or version on a document", async () => {
     const refused = (args: Record<string, unknown>) =>
       executeDispatchTool({

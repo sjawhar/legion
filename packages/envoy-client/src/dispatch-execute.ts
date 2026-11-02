@@ -2675,11 +2675,21 @@ function openCommentThreads(
 async function fileThreads(
   client: DispatchClient,
   resolved: ResolvedArtifact
-): Promise<{ open: string[]; resolved: string[] }> {
-  const comments =
-    resolved.owner.kind === "project"
-      ? await client.getArtifactComments(resolved.artifact.id)
-      : await client.getComments(resolved.issue?.key ?? "");
+): Promise<{ open: string[]; resolved: string[]; failure?: string }> {
+  let comments: Comment[];
+  try {
+    comments =
+      resolved.owner.kind === "project"
+        ? await client.getArtifactComments(resolved.artifact.id)
+        : await client.getComments(resolved.issue?.key ?? "");
+  } catch (error) {
+    // The file is read whatever its comments do: a read of them that fails is said, not thrown.
+    return {
+      failure: `The comments on ${resolved.artifact.name} could not be read: ${messageFor(error)}`,
+      open: [],
+      resolved: [],
+    };
+  }
   const isOn = (comment: Comment) =>
     comment.anchor?.artifact_id === resolved.artifact.id ||
     (resolved.owner.kind === "project" && comment.anchor === null);
@@ -4140,10 +4150,15 @@ export async function executeDispatchTool(
           issueDocumentDropped("dispatch comment", artifactReference ?? resolved.artifact.slug),
         ]);
       }
-      // A reply joins its thread, whose anchor it keeps; the static check refused a box or version
-      // on one, and a project document names the reply's owner.
+      // A reply joins its thread, whose anchor it keeps: the static check refused a box or version
+      // on one, a quote on one is sent for Dispatch to refuse rather than dropped, and a project
+      // document names the reply's owner.
       const anchored =
-        resolved && !replying ? commentAnchor(resolved.artifact, args, ref?.version) : undefined;
+        resolved === undefined
+          ? undefined
+          : replying
+            ? anchor(resolved.artifact, args)
+            : commentAnchor(resolved.artifact, args, ref?.version);
       const replyToAsk =
         replyToAskReference === undefined ? undefined : normalizeUUID(replyToAskReference);
       if (replyToAskReference !== undefined && replyToAsk === undefined) {
@@ -4495,6 +4510,7 @@ export async function executeDispatchTool(
           ...read,
           text: [
             read.text,
+            ...(threads.failure === undefined ? [] : [threads.failure]),
             ...(threads.open.length === 0
               ? []
               : [`Open threads on ${artifact.name}:`, ...threads.open]),

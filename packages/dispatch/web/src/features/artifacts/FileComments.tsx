@@ -39,31 +39,128 @@ export function fileVersionPath(artifact: Artifact, version: number, id: string)
   return documentItemPath(artifact, { id, kind: "comment" }, version);
 }
 
+/** A box being drawn on the picture, and the version it is drawn on: the comment is about that
+ *  part of that version, even if a newer version is shown before it is sent. */
+export interface DraftBox {
+  readonly box: AnchorBox;
+  readonly version: number;
+}
+
 interface Drag {
   readonly current: Point;
   readonly pointerId: number;
   readonly rect: { left: number; top: number; width: number; height: number };
   readonly start: Point;
+  /** The box thread the press began on: a press that draws nothing chooses it. */
+  readonly startedOn: string | undefined;
 }
 
 const NO_ACTIVE: ReadonlySet<string> = new Set();
 
+/** The file's side of the margin: the threads it lights and the box elements it scrolls to. */
+export interface FileDocument {
+  readonly active: ReadonlySet<string>;
+  readonly boxes: { readonly current: Map<string, HTMLButtonElement> };
+}
+
+/**
+ * Makes an uploaded file the margin's document while its page shows it, as a Markdown document's
+ * editor is: each thread on the file is a mark whose id is its comment's, so a chosen or hovered
+ * card lights its box (`setActiveMarks`), and focusing a card scrolls to its box or, for a thread
+ * written on another version, opens that version (`focusMark`); a link to such a thread opens its
+ * version too. It writes no text mark, so the rest of the bridge refuses or does nothing, and a
+ * held margin send for another document is told that document is closed. A picture reports its
+ * boxes' places itself (`PictureBoxes`); any other file has none, and says so at once, so a link
+ * landing on it is not held waiting for a layout.
+ */
+export function useFileDocument({
+  artifact,
+  enabled,
+  owner,
+  version,
+}: {
+  artifact: Artifact;
+  enabled: boolean;
+  owner: FileCommentOwner;
+  version: number | undefined;
+}): FileDocument {
+  const comments = useQuery({ ...fileCommentsQuery(owner), enabled });
+  const { registerDocument, setBlockPlacements, setMarkPlacements } = useMargin();
+  const navigate = useNavigate();
+  const { search } = useLocation();
+  const [active, setActive] = useState<ReadonlySet<string>>(NO_ACTIVE);
+  const boxes = useRef(new Map<string, HTMLButtonElement>());
+  const picture = artifact.kind === "image";
+
+  const openVersion = useCallback(
+    (target: number, id: string, replace: boolean) => {
+      navigate(fileVersionPath(artifact, target, id), { replace });
+    },
+    [artifact, navigate]
+  );
+  // What the bridge reads when the margin calls it, which may be long after it registered.
+  const latest = useRef({ comments: comments.data, openVersion, version });
+  latest.current = { comments: comments.data, openVersion, version };
+
+  useEffect(() => {
+    if (!enabled) return;
+    registerDocument({
+      artifactId: artifact.id,
+      focusBlock: () => {},
+      focusMark: (markId) => {
+        const anchor = latest.current.comments?.find((comment) => comment.id === markId)?.anchor;
+        if (
+          isFileAnchor(anchor) &&
+          latest.current.version !== undefined &&
+          anchor.version !== latest.current.version
+        ) {
+          latest.current.openVersion(anchor.version, markId, false);
+          return;
+        }
+        boxes.current.get(markId)?.scrollIntoView?.({ block: "nearest" });
+      },
+      removeMark: () => {},
+      remarkMark: () => ({ refused: "unmarkable" }),
+      retypeMark: () => ({ refused: "missing" }),
+      setActiveBlocks: () => {},
+      setActiveMarks: (markIds) => setActive(markIds.length === 0 ? NO_ACTIVE : new Set(markIds)),
+      whenSent: async () => {},
+    });
+    if (!picture) {
+      setMarkPlacements(new Map());
+      setBlockPlacements(new Map());
+    }
+    return () => registerDocument(undefined);
+  }, [artifact.id, enabled, picture, registerDocument, setBlockPlacements, setMarkPlacements]);
+
+  // A link to a thread written on another version of this file opens that version.
+  useEffect(() => {
+    if (!enabled || version === undefined) return;
+    const item = itemFromSearch(search);
+    if (item?.kind !== "comment") return;
+    const anchor = comments.data?.find((comment) => comment.id === item.id)?.anchor;
+    if (!isFileAnchor(anchor) || anchor.artifact_id !== artifact.id) return;
+    if (anchor.version === version) return;
+    openVersion(anchor.version, item.id, true);
+  }, [artifact.id, comments.data, enabled, openVersion, search, version]);
+
+  return { active, boxes };
+}
+
 /**
  * A picture with every open box thread written on the version shown drawn over it, numbered as
  * its card is (`fileBoxNumbers`). A drag over the picture - with a mouse or pen, or with a finger
- * while **Draw a box** is on - draws the box the next comment is about (`onDraw`).
- *
- * It is the margin's document while it is on the page, as a Markdown document's editor is: each
- * box is a mark whose id is its comment's, so choosing a box opens its card (`focusItemForMark`),
- * a chosen or hovered card lights its box (`setActiveMarks`), focusing a card scrolls to its box or
- * opens the version the box was drawn on (`focusMark`), and the boxes' places order and align the
- * cards (`setMarkPlacements`). It writes no text mark, so the rest of the bridge refuses or does
- * nothing, and a held margin send for another document is told that document is closed.
+ * while **Draw a box** is on - draws the box the next comment is about (`onDraw`); it may start
+ * over a box already drawn, and a press there that draws nothing chooses that box's thread. Each
+ * box is the mark of its comment in the file's margin document (`useFileDocument`): choosing it
+ * opens its card (`focusItemForMark`), and the boxes' places order and align the cards
+ * (`setMarkPlacements`).
  */
 export function PictureBoxes({
   alt,
   artifact,
   canDraw,
+  document,
   draft,
   drawing,
   onDraw,
@@ -74,6 +171,8 @@ export function PictureBoxes({
   alt: string;
   artifact: Artifact;
   canDraw: boolean;
+  document: FileDocument;
+  /** The box being drawn, when it is on the version shown. */
   draft: AnchorBox | undefined;
   /** Whether a touch draws a box; a mouse or pen always does. */
   drawing: boolean;
@@ -107,58 +206,13 @@ export function PictureBoxes({
   const {
     focusItemForMark,
     hoverItemForMark,
-    registerDocument,
     setBlockPlacements,
     setMarkPlacements,
     withdrawPlacements,
   } = useMargin();
-  const navigate = useNavigate();
-  const { search } = useLocation();
-  const [active, setActive] = useState<ReadonlySet<string>>(NO_ACTIVE);
+  const { active, boxes } = document;
   const [drag, setDrag] = useState<Drag>();
   const frame = useRef<HTMLDivElement>(null);
-  const boxes = useRef(new Map<string, HTMLButtonElement>());
-
-  const openVersion = useCallback(
-    (target: number, id: string, replace: boolean) => {
-      navigate(fileVersionPath(artifact, target, id), { replace });
-    },
-    [artifact, navigate]
-  );
-  // What the bridge reads when the margin calls it, which may be long after it registered.
-  const latest = useRef({ comments: comments.data, openVersion, version });
-  latest.current = { comments: comments.data, openVersion, version };
-
-  useEffect(() => {
-    registerDocument({
-      artifactId: artifact.id,
-      focusBlock: () => {},
-      focusMark: (markId) => {
-        const anchor = latest.current.comments?.find((comment) => comment.id === markId)?.anchor;
-        if (isFileAnchor(anchor) && anchor.version !== latest.current.version) {
-          latest.current.openVersion(anchor.version, markId, false);
-          return;
-        }
-        boxes.current.get(markId)?.scrollIntoView?.({ block: "nearest" });
-      },
-      removeMark: () => {},
-      remarkMark: () => ({ refused: "unmarkable" }),
-      retypeMark: () => ({ refused: "missing" }),
-      setActiveBlocks: () => {},
-      setActiveMarks: (markIds) => setActive(markIds.length === 0 ? NO_ACTIVE : new Set(markIds)),
-      whenSent: async () => {},
-    });
-    return () => registerDocument(undefined);
-  }, [artifact.id, registerDocument]);
-
-  // A link to a box drawn on another version opens that version, where the box is.
-  useEffect(() => {
-    const item = itemFromSearch(search);
-    if (item?.kind !== "comment") return;
-    const anchor = comments.data?.find((comment) => comment.id === item.id)?.anchor;
-    if (!numbers.has(item.id) || !isFileAnchor(anchor) || anchor.version === version) return;
-    openVersion(anchor.version, item.id, true);
-  }, [comments.data, numbers, openVersion, search, version]);
 
   useLayoutEffect(() => {
     const element = frame.current;
@@ -195,12 +249,16 @@ export function PictureBoxes({
       cancelAnimationFrame(request);
       observer?.disconnect();
     };
-  }, [setBlockPlacements, setMarkPlacements, shown, withdrawPlacements]);
+  }, [boxes, setBlockPlacements, setMarkPlacements, shown, withdrawPlacements]);
 
   const startDrag = (event: PointerEvent<HTMLDivElement>) => {
-    // A press on a box chooses its thread; only the picture itself starts a box.
-    if (!canDraw || event.button !== 0 || event.target !== event.currentTarget) return;
+    if (!canDraw || event.button !== 0) return;
+    // A finger scrolls the page unless Draw a box is on; its tap on a box is a click.
     if (event.pointerType === "touch" && !drawing) return;
+    const onBox =
+      event.target instanceof Element
+        ? event.target.closest<HTMLElement>("[data-id]")?.dataset.id
+        : undefined;
     event.preventDefault();
     event.currentTarget.setPointerCapture?.(event.pointerId);
     const rect = event.currentTarget.getBoundingClientRect();
@@ -210,6 +268,7 @@ export function PictureBoxes({
       pointerId: event.pointerId,
       rect: { height: rect.height, left: rect.left, top: rect.top, width: rect.width },
       start,
+      startedOn: onBox,
     });
   };
   const moveDrag = (event: PointerEvent<HTMLDivElement>) => {
@@ -221,6 +280,7 @@ export function PictureBoxes({
     setDrag(undefined);
     const box = boxFromDrag(drag.start, { x: event.clientX, y: event.clientY }, drag.rect);
     if (box !== undefined) onDraw(box);
+    else if (drag.startedOn !== undefined) focusItemForMark(drag.startedOn);
   };
   const live = drag === undefined ? undefined : boxFromDrag(drag.start, drag.current, drag.rect);
   const pending = live ?? draft;
@@ -249,6 +309,8 @@ export function PictureBoxes({
               className={`absolute rounded-sm ${chosen ? pictureBoxActive : pictureBox}`}
               data-id={comment.id}
               key={comment.id}
+              // A keyboard's Enter or Space, or a tap while Draw a box is off; a mouse press is
+              // the drag's, which chooses the box when it draws nothing.
               onClick={() => focusItemForMark(comment.id)}
               onMouseEnter={() => hoverItemForMark(comment.id)}
               onMouseLeave={() => hoverItemForMark(null)}
@@ -300,7 +362,7 @@ export function FileCommentBox({
   version,
 }: {
   artifact: Artifact;
-  draft: AnchorBox | undefined;
+  draft: DraftBox | undefined;
   drawing: boolean;
   isClosed: boolean;
   onClearDraft(): void;
@@ -310,7 +372,10 @@ export function FileCommentBox({
 }): ReactNode {
   const picture = artifact.kind === "image";
   const fileAnchor = useMemo(
-    () => ({ artifact: artifact.id, version, ...(draft === undefined ? {} : { box: draft }) }),
+    () =>
+      draft === undefined
+        ? { artifact: artifact.id, version }
+        : { artifact: artifact.id, box: draft.box, version: draft.version },
     [artifact.id, draft, version]
   );
   const mutationKey = useMemo(() => ["file-composer", artifact.id], [artifact.id]);
@@ -324,7 +389,7 @@ export function FileCommentBox({
               ? picture
                 ? `On the whole picture, version ${version}. Drag over the picture to comment on part of it.`
                 : `On the whole file, version ${version}.`
-              : `On the box you drew, version ${version}.`}
+              : `On the box you drew, version ${draft.version}.`}
           </p>
           {picture ? (
             <button

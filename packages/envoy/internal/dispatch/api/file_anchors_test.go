@@ -132,6 +132,10 @@ func TestACommentOnAWholeFileRecordsItsVersion(t *testing.T) {
 	requireRefused(t, postFileComment(t, handler, owner+"/comments", map[string]any{
 		"body": "Where?", "anchor": map[string]any{"artifact": "results-csv", "version": 0},
 	}), "INVALID_ANCHOR", "version 0 is not a version of results.csv")
+	// A version past what the versions column holds is the caller's number, not a server fault.
+	requireRefused(t, postFileComment(t, handler, owner+"/comments", map[string]any{
+		"body": "Where?", "anchor": map[string]any{"artifact": "results-csv", "version": 3000000000},
+	}), "INVALID_ANCHOR", "version 3000000000 is not a version of results.csv")
 	requireRefused(t, postFileComment(t, handler, owner+"/comments", map[string]any{
 		"body": "This cell.",
 		"anchor": map[string]any{

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 	"strings"
 
@@ -126,9 +127,13 @@ func (s *server) resolveFileAnchor(ctx context.Context, tx pgx.Tx, owner owner, 
 	version := latest
 	if input.Version != nil {
 		version = *input.Version
-		var exists bool
-		if err := tx.QueryRow(ctx, `select exists (select 1 from artifact_versions where artifact_id = $1 and number = $2)`, artifact.ID, version).Scan(&exists); err != nil {
-			return nil, "", err
+		// artifact_versions.number is an integer column, so a number past it is no version, and is
+		// refused here rather than as a parameter Postgres cannot take.
+		exists := version >= 1 && version <= math.MaxInt32
+		if exists {
+			if err := tx.QueryRow(ctx, `select exists (select 1 from artifact_versions where artifact_id = $1 and number = $2)`, artifact.ID, version).Scan(&exists); err != nil {
+				return nil, "", err
+			}
 		}
 		if !exists {
 			return nil, "", errorf(http.StatusBadRequest, "INVALID_ANCHOR", "version %d is not a version of %s, whose latest is version %d", version, artifact.Name, latest)
