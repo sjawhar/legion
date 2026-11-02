@@ -27,13 +27,13 @@ import (
 //     conservative reading of the text's own gain. Seam 7's two-commit run takes the whole gain
 //     under protocol 2.
 //
-//   - The two backlink counts are protocol 2, head text alone. The release before this change
-//     counted over the whole graph_edges view (this package holds that read as
-//     backlinkCountOracle), and the before side of record is that statement on a schema without
-//     ask_followers_session_id, which migration 20261101182419 adds and this release's schema
-//     therefore has. One database cannot be both, so the pair is seam 7's two-commit run and
-//     what is measured here is the head side of it, with its plan, under the same protocol as
-//     every other reading.
+//   - The two backlink counts are protocol 1 pairs since main's #2546. The release before this
+//     change counts over the whole graph_edges view (this package holds that read as
+//     backlinkCountOracle, with the arm over a counted item's own current blocks that #2546
+//     added), and that text runs on this release's schema, so one database holds both sides.
+//     The before side is read with ask_followers_session_id present, the index migration
+//     20261101182419 adds for the followed_by arm, which only helps it, so each pair is the
+//     conservative reading of the head text's own gain.
 func TestStatementTimings(t *testing.T) {
 	runner := benchtime.Open(t, os.Getenv(benchtime.DatabaseURLEnv))
 	subjects := runner.Subjects()
@@ -51,19 +51,23 @@ func TestStatementTimings(t *testing.T) {
 	if !ok {
 		t.Fatal("backlinkArms declares no arm for an issue, so the issue read's count has no statement")
 	}
-	runner.Head(t, "refs.BacklinkCounts over an issue",
-		benchtime.Statement{SQL: issueCount, Args: []any{[]string{subjects.Issue}, nodeKinds}})
+	issueIDs := []string{subjects.Issue}
+	runner.Pair(t, "refs.BacklinkCounts over an issue",
+		benchtime.Statement{SQL: oracleBacklinkCountSQL("issue", false), Args: []any{"issue", issueIDs, nodeKinds}},
+		benchtime.Statement{SQL: issueCount, Args: []any{issueIDs, nodeKinds}})
 
 	// The ask page's count: every ask of one issue at once, each ask's own clarification thread
-	// excluded, which is what the page's cards show. Its subject is the issue carrying the most
-	// asks, read from the database rather than taken from subjects.Issue: the heavily linked
-	// issue the other readings bind is linked by children and blockers, and carries no ask.
+	// and its own parts excluded, which is what the page's cards show. Its subject is the issue
+	// carrying the most asks, read from the database rather than taken from subjects.Issue: the
+	// heavily linked issue the other readings bind is linked by children and blockers, and
+	// carries no ask.
 	askIDs := askPageSubject(t, runner)
 	askCount, ok := backlinkCountSQL("ask", AskBacklinkExclusions)
 	if !ok {
 		t.Fatal("backlinkArms declares no arm for an ask, so the ask page's count has no statement")
 	}
-	runner.Head(t, "refs.BacklinkCounts over an issue's asks",
+	runner.Pair(t, "refs.BacklinkCounts over an issue's asks",
+		benchtime.Statement{SQL: oracleBacklinkCountSQL("ask", true), Args: []any{"ask", askIDs, nodeKinds, AskBacklinkExclusions}},
 		benchtime.Statement{SQL: askCount, Args: []any{askIDs, nodeKinds, AskBacklinkExclusions}})
 }
 

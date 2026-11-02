@@ -352,21 +352,31 @@ const backlinkCountOracleNarrow = `
 const backlinkCountOracleExcluded = `
   and not (g.kind = any($4))`
 
-// oracleBacklinkCounts counts the inbound edges of ids over the whole view (backlinkCountOracle),
-// with the edges at a counted item's own current blocks (backlinkCountOracleAtItsBlocks).
-func oracleBacklinkCounts(t *testing.T, q Queryer, toKind string, ids, excludeKinds []string) map[string]int {
-	t.Helper()
+// oracleBacklinkCountSQL is main's whole statement for toKind: the view's own arm, the arm over
+// the item's current blocks where the kind has one, and the group. excluded says whether the
+// caller binds excluded edge kinds as $4. The timing harness measures this text as the before
+// side of the backlink pair, so it is built in one place rather than assembled twice.
+func oracleBacklinkCountSQL(toKind string, excluded bool) string {
 	narrow := backlinkCountOracleNarrow
-	args := []any{toKind, ids, nodeKinds}
-	if len(excludeKinds) > 0 {
+	if excluded {
 		narrow += backlinkCountOracleExcluded
-		args = append(args, excludeKinds)
 	}
 	arms := backlinkCountOracle + narrow
 	if atBlocks, ok := backlinkCountOracleAtItsBlocks[toKind]; ok {
 		arms += "\nunion all\n" + atBlocks + narrow
 	}
-	rows, err := q.Query(context.Background(), `select id, count(*)::int from (`+arms+`) e (id) group by id`, args...)
+	return `select id, count(*)::int from (` + arms + `) e (id) group by id`
+}
+
+// oracleBacklinkCounts counts the inbound edges of ids over the whole view (backlinkCountOracle),
+// with the edges at a counted item's own current blocks (backlinkCountOracleAtItsBlocks).
+func oracleBacklinkCounts(t *testing.T, q Queryer, toKind string, ids, excludeKinds []string) map[string]int {
+	t.Helper()
+	args := []any{toKind, ids, nodeKinds}
+	if len(excludeKinds) > 0 {
+		args = append(args, excludeKinds)
+	}
+	rows, err := q.Query(context.Background(), oracleBacklinkCountSQL(toKind, len(excludeKinds) > 0), args...)
 	if err != nil {
 		t.Fatalf("count %s backlinks over the view: %v", toKind, err)
 	}
