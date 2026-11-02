@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-644",
-  "previousHandoff": "ed3403537b52885e92a3a50afa82fc57bb455500",
+  "previousHandoff": "555414e938d5684bce0021d615768e5675eab38f",
   "proof": [
     {
       "criterion": "Round 4 (round-cap scope): main merged twice, keeping main's behaviour and this branch's change both; at the second merge the head uses no more Dispatch CPU than the base and both replay runs end in the same state",
@@ -58,7 +58,7 @@
     "merge 9cc41e31 (main 99565624, #2519): docs/websocket.go onLoadDocument"
   ],
   "trickyParts": [
-    "CI at 9cc41e31: envoy-go-race-docs failed because GitHub's runner received a shutdown signal (exit 143, no test output); its failed jobs were re-run once (attempt 2)."
+    "CI at 9cc41e31: attempt 1 of run 41373550397 failed envoy-go-race-docs because GitHub's runner received a shutdown signal (exit 143, no test output), which made ci-ok red; attempt 2, a re-run of the failed jobs, completed success at 2026-11-02 06:19Z with every job green: lint, typecheck, test, envoy-go-race, envoy-go-race-api, envoy-go-race-docs, envoy-go-race-pmdoc and ci-ok. The code head is unchanged, so the round-4 confirming pairs carry."
   ],
   "deviations": [
     "The replica code main's #2496 rewrote in tree.go lives in replica.go on this branch, so main's changes were ported there; renderingAt is deleted because warmFork now takes the rendering from readPoint.",
