@@ -16,6 +16,7 @@ import {
 import { join } from "node:path";
 import { askgateState, sweepStores } from "./askgate-marker";
 import { adviceMemory } from "./dispatch-execute";
+import { keyedLayerMemory, rememberKeyedLayer } from "./dispatch-http";
 import { shownPictures } from "./dispatch-picture-tools";
 import type { PictureType, ToolImage } from "./dispatch-pictures";
 import { writeAtomically } from "./dispatch-session-directory";
@@ -24,12 +25,15 @@ import { hasErrnoCode, messageFor } from "./errors";
 /**
  * The `dispatch` CLI's state, one directory per host session under `<root>/sessions/<session id>`
  * (`dispatch-session-directory.ts` names it): what a long-lived host kept in memory across calls
- * (the triage lines and pictures already shown, the asks whose follow notice was printed) in
- * `state.json`, a ledger of every call's result in `results.jsonl`, and the pictures and long
- * results the CLI wrote for the agent to open. The state names issue keys and picture addresses,
- * so every file is the owner's alone.
+ * (the triage lines and pictures already shown, the asks whose follow notice was printed, which
+ * Dispatch lately showed it runs the keyed layer) in `state.json`, a ledger of every call's result
+ * in `results.jsonl`, and the pictures and long results the CLI wrote for the agent to open. The
+ * state names issue keys and picture addresses, so every file is the owner's alone.
  *
- * Two calls racing in one session can lose a memory entry; that costs one repeated line.
+ * Two calls racing in one session can lose a memory entry; that costs one repeated line, or one
+ * `/healthz` read before a failed write is asked again. They can also bring back a keyed-layer
+ * sighting the other call set aside on an answer its layer did not judge; that sighting still
+ * ends `KEYED_LAYER_MEMORY_MS` after the answer that showed it.
  */
 
 export interface ResultEntry {
@@ -56,6 +60,8 @@ interface SessionMemory {
   readonly advice: readonly string[];
   readonly pictures: readonly string[];
   readonly follows: readonly string[];
+  /** `keyedLayerMemory()`: each Dispatch origin with when a call last saw its keyed layer. */
+  readonly keyedLayer: Readonly<Record<string, string>>;
 }
 
 const PRIVATE_DIR = 0o700;
@@ -92,9 +98,10 @@ function stringList(value: unknown): string[] {
 }
 
 /**
- * Reads `state.json`, seeds the advice and picture memories the library consults, and returns the
- * asks this session already printed a follow notice for. A missing file is an empty memory; one
- * that is not JSON throws, naming it.
+ * Reads `state.json`, seeds the advice, picture and keyed-layer memories the library consults, and
+ * returns the asks this session already printed a follow notice for. A missing file is an empty
+ * memory; one that is not JSON throws, naming it. A keyed-layer entry that is stale or not a
+ * sighting is passed over (`rememberKeyedLayer`).
  */
 export function loadSessionMemory(dir: string, sessionId: string): Set<string> {
   const path = join(dir, "state.json");
@@ -112,10 +119,11 @@ export function loadSessionMemory(dir: string, sessionId: string): Set<string> {
   for (const key of stringList(state.advice)) advice.add(key);
   const pictures = shownPictures(sessionId);
   for (const address of stringList(state.pictures)) pictures.add(address);
+  rememberKeyedLayer(state.keyedLayer);
   return new Set(stringList(state.follows));
 }
 
-/** Writes the advice and picture memories and `follows` back to `state.json`. */
+/** Writes the advice, picture and keyed-layer memories and `follows` back to `state.json`. */
 export function saveSessionMemory(dir: string, sessionId: string, follows: Set<string>): void {
   ensureDirectory(dir);
   writeMemory(dir, sessionId, follows);
@@ -126,6 +134,7 @@ function writeMemory(dir: string, sessionId: string, follows: Set<string>): void
     advice: [...adviceMemory()],
     pictures: [...shownPictures(sessionId)],
     follows: [...follows],
+    keyedLayer: keyedLayerMemory(),
   };
   writeAtomically(join(dir, "state.json"), `${JSON.stringify(state)}\n`);
 }

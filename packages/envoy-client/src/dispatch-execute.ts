@@ -1613,8 +1613,8 @@ class DocumentNotFoundError extends Error {}
 
 /** The document `artifactReference` names among `artifacts`. A bare reference is an id, a slug,
  * then a filename; a `canonical` one, the document part of a dispatch:// reference, is a slug by
- * definition (the address the dashboard and Dispatch's own routes use), so its slug match is the
- * document even where another document's filename is the same text. */
+ * definition (the address the dashboard and Dispatch's own routes use), so its slug match comes
+ * before an id. */
 function artifactByReference(
   artifacts: readonly Artifact[],
   artifactReference: string,
@@ -1625,22 +1625,14 @@ function artifactByReference(
   if (canonical && bySlug !== undefined) return bySlug;
   const byId = artifacts.find((candidate) => candidate.id === artifactReference);
   if (byId !== undefined) return byId;
+  // A slug names one document, and wins over another document's filename, as on Dispatch's own
+  // routes (resolveDocumentReference): an older Dispatch could store a document whose filename is
+  // another's slug (`plan-md-2` named `plan-md` beside `plan.md`), and Dispatch reads and edits the
+  // slug's document by that reference. Only a filename two documents share names neither.
+  if (bySlug !== undefined) return bySlug;
   const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
-  // Dispatch suffixes a slug two documents would share, so one document's filename can be
-  // another's slug; a bare reference both answer to names two documents, and only an id tells
-  // them apart. Only a document answers to its filename there, as in Dispatch's own fallback, so
-  // an image or file of that name names no second document.
-  if (bySlug !== undefined) {
-    const named = byName.filter(
-      (candidate) => candidate.id !== bySlug.id && candidate.kind === "doc"
-    );
-    if (named.length > 0) {
-      throw new Error(documentReferenceProblem(artifactReference, [bySlug, ...named], owner, "id"));
-    }
-    return bySlug;
-  }
   if (byName.length > 1) {
-    throw new Error(documentReferenceProblem(artifactReference, byName, owner, "slug"));
+    throw new Error(documentReferenceProblem(artifactReference, byName, owner, true));
   }
   const [artifact] = byName;
   if (artifact === undefined) {
@@ -1670,8 +1662,8 @@ async function resolveArtifact(
     if (canonical && routed !== undefined) return { owner, artifact: routed };
     // A bare reference is matched as an issue's is, over the project's unlinked documents with the
     // route's answer among them: an id outranks another document's slug, and a slug another
-    // document's filename also answers to is refused. The unlinked-only collection keeps an
-    // issue-attached artifact of the same name from becoming the document owner.
+    // document's filename. The unlinked-only collection keeps an issue-attached artifact of the
+    // same name from becoming the document owner.
     const unlinked = await client.listProjectArtifacts(owner.project, true);
     const artifacts =
       routed === undefined
@@ -1752,26 +1744,21 @@ export async function resolveIssueDocumentId(
 
 const documentHintLimit = 8;
 
-/** The refusal of a document reference: none matched, or several did, in which case `use` names
- * what tells them apart (a slug, when several share a filename; the id, when one's slug is
- * another's filename). */
+/** The refusal of a document reference: none matched, or, `ambiguous`, several share it as their
+ * filename, which their slugs tell apart. */
 function documentReferenceProblem(
   reference: string,
-  documents: readonly Pick<Artifact, "id" | "slug" | "name">[],
+  documents: readonly Pick<Artifact, "slug" | "name">[],
   owner: "issue" | "project",
-  use?: "slug" | "id"
+  ambiguous = false
 ): string {
   const hints = documents
     .slice(0, documentHintLimit)
-    .map((document) =>
-      use === "id"
-        ? `${document.id} (${document.slug}, ${document.name})`
-        : `${document.slug} (${document.name})`
-    );
+    .map((document) => `${document.slug} (${document.name})`);
   const list = hints.length === 0 ? "none" : hints.join(", ");
-  return use === undefined
-    ? `document "${reference}" not found by slug; this ${owner}'s documents: ${list}`
-    : `"${reference}" names ${documents.length} documents on this ${owner}; use ${use === "id" ? "the id" : "a slug"}: ${list}`;
+  return ambiguous
+    ? `"${reference}" names ${documents.length} documents on this ${owner}; use a slug: ${list}`
+    : `document "${reference}" not found by slug; this ${owner}'s documents: ${list}`;
 }
 
 const askHintLimit = 8;
@@ -2762,25 +2749,27 @@ export interface DocumentBlock {
   readonly text: string;
 }
 
-/** A live document's blocks, and the document's own name as Dispatch stores it. */
+/** A live document's blocks, and the document's own name and slug as Dispatch stores them. */
 export interface DocumentBlocks {
   /**
    * The document's name. The reference that found it may be a slug, an id or `spec`, while
-   * Dispatch finds the document an upload replaces by its exact name; a caller reading for an
-   * upload compares the two.
+   * Dispatch finds the document an upload replaces by its exact name or its exact slug; a caller
+   * reading for an upload compares the upload's name with both.
    */
   readonly name: string;
+  /** The document's slug, the other reference an upload's name finds it by. */
+  readonly slug: string;
   readonly blocks: DocumentBlock[];
 }
 
 /**
  * The blocks of the live document `target` names, in document order, each with its markdown: the
  * byte range Dispatch reports, sliced from the text it was computed over (`liveBlocks`), and the
- * document's own name. The document is the one `dispatch doc-edit` edits for the same arguments:
- * its owner from the target, its ref or `LEGION_ISSUE`, and its document by id, slug, filename,
- * the ref's slug, or `spec` for an issue's primary document. A target naming no document of its
- * owner answers "not-found", which is what the first upload of a file reads. Everything else
- * throws: a refused target, a filename two documents answer to, a failed read, and a document
+ * document's own name and slug. The document is the one `dispatch doc-edit` edits for the same
+ * arguments: its owner from the target, its ref or `LEGION_ISSUE`, and its document by id, slug,
+ * filename, the ref's slug, or `spec` for an issue's primary document. A target naming no document
+ * of its owner answers "not-found", which is what the first upload of a file reads. Everything
+ * else throws: a refused target, a filename two documents answer to, a failed read, and a document
  * that changed between its two text reads. Every request carries the client's signal, so a stop
  * ends the read.
  */
@@ -2822,6 +2811,7 @@ export async function readDocumentBlocks(
   const decoder = new TextDecoder();
   return {
     name: resolved.artifact.name,
+    slug: resolved.artifact.slug,
     blocks: live.blocks.map((block) => ({
       id: block.id,
       text: decoder.decode(live.bytes.subarray(block.from, block.to)),

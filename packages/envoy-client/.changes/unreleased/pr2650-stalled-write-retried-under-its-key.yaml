@@ -1,0 +1,12 @@
+kind: Fixed
+body: |-
+    A `dispatch` write that stalls (cut off after 20 s without progress, or failed in transport)
+    is sent again under its `Idempotency-Key` when an earlier call of the same session saw,
+    within the last five minutes, that the Dispatch runs the keyed layer. Each call is a new
+    process, so before this fix every such write probed `/healthz`, and under load the probe's
+    5 s bound ran out, so the write was reported as perhaps taken effect instead. The session's
+    `state.json` now carries that sighting (`keyedLayer`), and it still expires five minutes
+    after the answer that showed it.
+time: 2026-11-02T00:39:27.000000000Z
+custom:
+    Issue: pr2650
