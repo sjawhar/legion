@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -400,9 +401,10 @@ func TestAKeptRoleRouteIsPublishedOnTheRolesKeptLaneUnderTheKeptMsgID(t *testing
 	}
 }
 
-// claimUnder makes holder role's holder, registered with entry, as roleRig.claim does, and
-// reports what failed rather than failing the test: it is called on the goroutine the outbox
-// publishes its keep on, where a t.Fatalf would end that goroutine alone.
+// claimUnder makes holder role's holder, registered with entry, as a session plugin's
+// registration does, and reports what failed rather than failing the test: it is called on the
+// goroutine the outbox publishes its keep on, where a t.Fatalf would end that goroutine alone.
+// roleRig.claim is this call made from a test's own goroutine.
 func (r *roleRig) claimUnder(role, holder string, entry session.SessionEntry) error {
 	if _, err := r.registry.SetRole(holder, "test-machine", role, false); err != nil {
 		return fmt.Errorf("claim %s for %s: %w", role, holder, err)
@@ -471,8 +473,15 @@ func TestACopyKeptForARoleClaimedUnderTheKeepReachesThatHolderBeforeTheIssuesNex
 		t.Fatalf("the holder was handed event id %q under dedupe key %q, want the role forward of the kept %q",
 			handed.EventID, handed.DedupeKey, keptKey)
 	}
-	if copies := keptCopies(t, rig.client, role); len(copies) != 1 || copies[0].EventID != keptKey {
-		t.Fatalf("role %s's kept lane holds %d copies, want the one the outbox kept: the lane stays the authority for a later holder", role, len(copies))
+	// The handover's copy carries the time of the keep, as the drain's own forward of a copy
+	// carries the stream's store time of it: for a holder with a serving port the stream keeps
+	// whichever of the two reached its agent subject first, which is this one.
+	if handed.KeptAt == nil || *handed.KeptAt < started.UnixMilli() || *handed.KeptAt > time.Now().UnixMilli() {
+		t.Fatalf("the holder was handed kept_at %v, want the time the outbox kept the copy, between %d and now",
+			handed.KeptAt, started.UnixMilli())
+	}
+	if copies := keptCopies(t, rig.client, role); len(copies) != 1 || copies[0].EventID != keptKey || copies[0].KeptAt != nil {
+		t.Fatalf("role %s's kept lane holds %d copies, want the one the outbox kept with no kept_at of its own: the lane stays the authority for a later holder, and the time is stamped on the forward", role, len(copies))
 	}
 
 	// The issue's next event, which resolves the holder live and is forwarded straight to its
@@ -496,11 +505,80 @@ func TestACopyKeptForARoleClaimedUnderTheKeepReachesThatHolderBeforeTheIssuesNex
 		t.Fatalf("the holder received %d forwards (%v), want the kept %s first and the issue's next event %s after it",
 			len(received), eventIDs(received), keptKey, nextKey)
 	}
-	if copies := storedCopies(t, rig.client, contracts.AgentSubject(holder)); copies != 2 {
-		t.Fatalf("the stream holds %d copies on %s, want one of the kept event and one of the next", copies, contracts.AgentSubject(holder))
+	subject := contracts.AgentSubject(holder)
+	stored := storedMsgIDs(t, rig.conn, subject)
+	forwards := []string{
+		bus.ForwardMsgID(contracts.RoleForwardDedupePrefix+keptKey, subject),
+		bus.ForwardMsgID(contracts.RoleForwardDedupePrefix+nextKey, subject),
+	}
+	if !slices.Equal(stored, forwards) {
+		t.Fatalf("the stream holds %v on %s, want the handover's copy of the kept event and the next event's forward, each under the id the drain's own forward of it would carry: %v",
+			stored, subject, forwards)
 	}
 	t.Logf("the holder had the kept copy when the scan that kept it returned, %s after that scan began; the issue's next event reached it in the scan that began %s later, which took %s. The copy is on the role's kept lane as well, where nothing but the listener's sweep, minutes apart, would have read it.",
 		keptScan, nextStarted.Sub(started), nextScan)
+}
+
+// A copy kept for a role whose lane already holds older copies is not handed over: the holder
+// that claimed the role under the keep takes a lane strictly in order from its cursor, and only
+// the role's own drain hands it over (cmd/listener/role_keep.go, walkKeptRole). A handover of the
+// copy just kept would overtake the copies before it - it is made a few round trips after the
+// claim, while that claim's drain is still on its first reads - and since a role token names one
+// tree role of one issue, those are this issue's own earlier events: the holder would see its
+// later event first. The copies waiting there are also why nothing is lost by leaving this one:
+// the claim's drain finds them and this one behind them and sends the lot, without waiting for
+// the listener's sweep.
+//
+// Nothing drains the lane here - no listener runs in this test - so what the handover left is
+// read on the lane itself: both copies in the order a drain hands them over, the earlier first,
+// and nothing taken by the holder or stored on its agent subject.
+func TestACopyKeptForARoleClaimedUnderTheKeepWaitsBehindTheCopiesOnItsLane(t *testing.T) {
+	rig := newRoleRig(t)
+	const role, holder = "kept-behind-older-copies", "ses_claimed_behind_older_copies"
+	const key = "T-1"
+	rig.silent(t, contracts.RoleTopicPrefix+role)
+	recv := rig.receiver(t, holder, true)
+	earlier := rig.routedEvent(t, key, role, model.Actor{Kind: "user", ID: "alice"})
+
+	// The issue's earlier event is kept while the role is unheld and stays on the lane: no
+	// claim lands in this scan, so its keep hands nothing over and no drain walks the lane.
+	holding(t, rig.deps()).scan(context.Background(), unfenced{})
+
+	if publishedAt(t, rig.database, earlier.ID) == nil {
+		attempts, failure, _ := eventState(t, rig.database, earlier.ID)
+		t.Fatalf("the earlier event was not kept: attempt_count %d, publish_error %v", attempts, failure)
+	}
+	later := appendEvent(t, rig.database, rig.broker, model.Event{
+		IssueKey: new(key), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.Message{ID: "6c1d9f20-7a83-4f15-8de4-19b70c3a5e88", IssueKey: new(key), Body: "the issue's later event"},
+	})
+	claimed := make(chan error, 1)
+	publisher := claimedUnderTheKeep(rig.client, func() {
+		claimed <- rig.claimUnder(role, holder, session.SessionEntry{SelfSubscribed: true})
+	})
+
+	holding(t, rig.publisherOn(publisher)).scan(context.Background(), unfenced{})
+
+	if err := <-claimed; err != nil {
+		t.Fatalf("the claim made under the keep: %v", err)
+	}
+	if publishedAt(t, rig.database, later.ID) == nil {
+		attempts, failure, _ := eventState(t, rig.database, later.ID)
+		t.Fatalf("the later event was not kept: attempt_count %d, publish_error %v", attempts, failure)
+	}
+	earlierKey, laterKey := fmt.Sprintf("dispatch-%d", earlier.ID), fmt.Sprintf("dispatch-%d", later.ID)
+	if taken := recv.received(); len(taken) != 0 {
+		t.Fatalf("the holder was handed %v in the scan that kept %s, want nothing: %s reaches it first, and only the drain of the role's lane hands either over",
+			eventIDs(taken), laterKey, earlierKey)
+	}
+	if copies := storedCopies(t, rig.client, contracts.AgentSubject(holder)); copies != 0 {
+		t.Fatalf("the stream holds %d copies on %s, want none: nothing was forwarded to the holder", copies, contracts.AgentSubject(holder))
+	}
+	kept := keptCopies(t, rig.client, role)
+	if len(kept) != 2 || kept[0].EventID != earlierKey || kept[1].EventID != laterKey {
+		t.Fatalf("role %s's kept lane holds %v, want %s before %s: the order the role's drain hands the issue's events to the holder in",
+			role, eventIDs(kept), earlierKey, laterKey)
+	}
 }
 
 // eventIDs is the event id of each envelope, for a failure that reports what a holder received.
@@ -508,6 +586,20 @@ func eventIDs(received []contracts.Envelope) []string {
 	ids := make([]string, 0, len(received))
 	for _, item := range received {
 		ids = append(ids, item.EventID)
+	}
+	return ids
+}
+
+// storedMsgIDs is the Nats-Msg-Id of every copy the stream holds on subject, in stream order. A
+// forward's id is what collapses the copies of one message sent to one subject into the one the
+// holder is delivered (bus.ForwardMsgID), so it says which message a stored copy is a forward of.
+func storedMsgIDs(t *testing.T, conn *natsgo.Conn, subject string) []string {
+	t.Helper()
+	var ids []string
+	for _, message := range streamMessages(t, conn) {
+		if message.Subject == subject {
+			ids = append(ids, message.Header.Get(natsgo.MsgIdHdr))
+		}
 	}
 	return ids
 }

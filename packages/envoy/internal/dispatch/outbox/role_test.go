@@ -107,14 +107,12 @@ func (r *roleRig) deps() Deps {
 	return Deps{Store: r.database, Publisher: r.client, Broker: r.broker, RoleClaims: holders, Sessions: holders}
 }
 
-// claim makes holder role's holder, registered with entry, as a session plugin's registration does.
+// claim makes holder role's holder, registered with entry, as a session plugin's registration
+// does (claimUnder), and fails the test when that did not come off.
 func (r *roleRig) claim(t *testing.T, role, holder string, entry session.SessionEntry) {
 	t.Helper()
-	if _, err := r.registry.SetRole(holder, "test-machine", role, false); err != nil {
-		t.Fatalf("claim %s for %s: %v", role, holder, err)
-	}
-	if err := r.sessions.Put(holder, entry); err != nil {
-		t.Fatalf("register %s: %v", holder, err)
+	if err := r.claimUnder(role, holder, entry); err != nil {
+		t.Fatal(err)
 	}
 }
 
