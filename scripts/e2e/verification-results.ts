@@ -15,6 +15,7 @@
 // Each later case seeds the issue it drives, with the spec and the Verification document that
 // case needs. A step outside the cases that fails (the sign-in, the projects, the fake GitHub's
 // seed, the delivery settings, the probe issue) exits 2 naming it.
+import type { CheckBlock, CheckResultRecorded } from "@legion/contracts";
 import { connect, StringCodec } from "nats";
 
 const [dispatchUrl, natsUrl, githubUrl] = process.argv.slice(2);
@@ -54,18 +55,6 @@ const commits = {
 };
 
 type Json = Record<string, unknown>;
-interface CheckResultRow {
-  readonly commit_sha: string;
-  readonly currency: string | null;
-  readonly observed: string;
-  readonly role: string;
-  readonly verdict: string;
-}
-interface CheckRow {
-  readonly block_id: string;
-  readonly when: string;
-  readonly results: readonly CheckResultRow[];
-}
 
 const codec = StringCodec();
 const nats = await connect({ name: "verification-results", servers: natsUrl });
@@ -143,13 +132,13 @@ function issuePath(key: string, rest = ""): string {
 
 /** The checks of an issue's Verification document, each with the results recorded against it and
  *  each result's currency, as `GET /api/v1/issues/{key}/results` answers. */
-async function checksOf(key: string): Promise<readonly CheckRow[]> {
-  const body = (await asSession("GET", issuePath(key, "/results"))) as { checks: CheckRow[] };
+async function checksOf(key: string): Promise<readonly CheckBlock[]> {
+  const body = (await asSession("GET", issuePath(key, "/results"))) as { checks: CheckBlock[] };
   return body.checks;
 }
 
 /** One check of an issue, by its block id. */
-async function checkOf(key: string, blockID: string): Promise<CheckRow> {
+async function checkOf(key: string, blockID: string): Promise<CheckBlock> {
   const found = (await checksOf(key)).find((check) => check.block_id === blockID);
   if (found === undefined) throw new Error(`${key} has no check ${blockID}`);
   return found;
@@ -178,15 +167,14 @@ async function awaitCurrency(
   return seen;
 }
 
-/** Records one result through `POST /api/v1/issues/{key}/results`, and answers the line Dispatch
- *  says the pull-request body carries. */
-async function record(key: string, input: Json): Promise<string> {
-  const answer = (await asSession("POST", issuePath(key, "/results"), {
+/** Records one result through `POST /api/v1/issues/{key}/results`, and answers what Dispatch
+ *  says about it: the stored row and the line the pull-request body carries. */
+async function record(key: string, input: Json): Promise<CheckResultRecorded> {
+  return (await asSession("POST", issuePath(key, "/results"), {
     role: "tester",
     verdict: "pass",
     ...input,
-  })) as { line: string };
-  return answer.line;
+  })) as CheckResultRecorded;
 }
 
 /** Publishes one normalized `pull_request` envelope, the shape Envoy relays and the shape
@@ -357,7 +345,7 @@ The result read back under this check is the one that was recorded.
 `
   );
   note(`${a2Issue} holds the check a2`);
-  const line = await record(a2Issue, {
+  const answered = await record(a2Issue, {
     check: "a2",
     commit: commits.a2,
     negative_control: "Recorded nothing and the check read no result.",
@@ -365,7 +353,8 @@ The result read back under this check is the one that was recorded.
     run: "bash scripts/e2e/verification-results.sh",
     surface: "cli",
   });
-  note(`the pull-request body line is ${JSON.stringify(line)}`);
+  note(`the pull-request body line is ${JSON.stringify(answered.line)}`);
+  note(`the record's answer says it was stored at ${answered.result.created_at}`);
   const check = await checkOf(a2Issue, "a2");
   note(
     `${a2Issue} check a2 (${check.when}) holds ${check.results.length} result(s): ${check.results
@@ -382,6 +371,16 @@ The result read back under this check is the one that was recorded.
   }
   if (recorded.observed !== "the record route answered 201") {
     return `the result's observed reads ${JSON.stringify(recorded.observed)}`;
+  }
+  // The record's own answer carries the moment the row was stored, not the zero time: a reader
+  // of `dispatch result` takes it for when the run happened, and only the later read was ever
+  // right about it.
+  const stored = Date.parse(answered.result.created_at);
+  if (Number.isNaN(stored) || stored <= 0) {
+    return `the record's answer carries created_at ${JSON.stringify(answered.result.created_at)}`;
+  }
+  if (answered.result.created_at !== recorded.created_at) {
+    return `the record answered created_at ${answered.result.created_at}, the read gives ${recorded.created_at}`;
   }
   return undefined;
 });
@@ -472,14 +471,14 @@ The pre-merge check runs before it.
   await asSession("PATCH", issuePath(a5Issue), { status: "done" });
   const closed = (await asSession("GET", issuePath(a5Issue))) as Json;
   note(`${a5Issue} is ${String(closed.status)}`);
-  const line = await record(a5Issue, {
+  const afterMerge = await record(a5Issue, {
     check: "after",
     commit: commits.closed,
     observed: "the production route answered",
     run: "curl the production route",
     surface: "api",
   });
-  note(`the after-merge result recorded: ${JSON.stringify(line)}`);
+  note(`the after-merge result recorded: ${JSON.stringify(afterMerge.line)}`);
   const check = await checkOf(a5Issue, "after");
   if (check.results.length !== 1)
     return `the after-merge check holds ${check.results.length} results, want 1`;

@@ -184,8 +184,8 @@ begin nats
 # The port is the kernel's pick (`-p -1`), read back from the line the server logs once it listens.
 start_process nats "$work/bin/natsd" -p -1 -store_dir "$work/nats-store"
 await_start nats "$nats_pid" 60 "natsd to be ready" grep -q 'Server is ready' "$work/logs/nats.log"
-nats_port=$(sed -n 's/.*Listening for client connections on .*:\([0-9][0-9]*\)$/\1/p' "$work/logs/nats.log" | sed -n 1p)
-[ -n "$nats_port" ] || fail "natsd logged no client port; see $work/logs/nats.log"
+nats_port=$(report_port "$work/logs/nats.log" 'Listening for client connections on [^ ]*:') ||
+  fail "natsd logged no client port; see $work/logs/nats.log"
 nats_url=nats://127.0.0.1:$nats_port
 note "JetStream on $nats_url"
 pass
