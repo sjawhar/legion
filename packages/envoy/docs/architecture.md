@@ -41,7 +41,7 @@ Agent messages  --/       |
 - Session consumers: a session that asks at registration (`delivery`) gets a durable pull consumer `s-<session id>` on the stream, filtered on its agent subject and its stored followed topics, 72h inactive threshold; the listener that owns the session relays it on `notifications.envoy.deliver.<session id>` (core NATS, not stored) and acks a message only on the session's `done` (`packages/envoy/AGENTS.md`, "Session consumers").
 - The stream and every KV bucket hold the deployment's replica count, `ENVOY_NATS_REPLICAS` (1 to 5, default 1; more than 1 needs a clustered NATS), and the stream at least the byte limit `ENVOY_STREAM_MAX_BYTES` when set: a start creates them at that count and limit, raises one found with fewer copies or a smaller limit (or none), and never lowers either, and every program that owns the stream (each listener, the Dispatch server) runs a keeper that every 30 seconds raises the stream's copies and byte limit back to its settings, puts back the discard policy and `envoy_stream_id`, and raises its own buckets' copies. An operator's raise of the limit stands, and programs with different settings do not fight: the largest stands. JetStream's stream update has no compare-and-swap, so a start with other or no settings can put back what it read until the next keeper pass; a clustered deployment sets the same `ENVOY_NATS_REPLICAS` and `ENVOY_STREAM_MAX_BYTES` in every program
 - JetStream KV bucket `envoy_interests` for session subscriptions
-- JetStream KV bucket `envoy_sessions` with 5m TTL for session port/host data, plus the `plugin` and `plugin_version` each registration names (the npm package the session registers through and that plugin's build; absent for a session whose plugin predates them)
+- JetStream KV bucket `envoy_sessions` with 5m TTL for session host data, plus the `plugin` and `plugin_version` each registration names (the npm package the session registers through and that plugin's build; absent for a session whose plugin predates them)
 
 ## Listener API
 
@@ -65,8 +65,8 @@ requires a bearer checks no `Host`.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/v1/sessions` | GET | Lists all sessions across all machines — joins `envoy_interests` (topics, dir) with `envoy_sessions` (port, self-subscribed delivery mode, `plugin`, `plugin_version`), and reports as each session's `roles` those whose claims in `envoy_roles` name it, from the listener's watched view of that bucket, whatever role topics its record carries. A cache view, and a list cannot be made authoritative key by key, so a caller holding one session id asks `/v1/registry/{session_id}` instead. Interest records the cache misses are read from the bucket within one 3.5 s budget. A read counts as answered only for its named answers: no key (the session has no topics), a record this build cannot decode (`store.ErrMalformedInterest`, logged by the registry) or an id the interest bucket refuses as a key (`bus.ErrRefused`: an earlier listener's id past its get bound that `envoy_sessions` still lists, or one outside nats.go's key alphabet, logged at WARN naming it); the last two list that session with no topics. Any other error, a cap or the budget running out, a nats.go connection error, a raw socket error or a claims view that is not complete among them, is a read that did not answer: a 503 with `Retry-After: 1`, never a row with no topics or roles. The claims view answers only while it is complete (`store.Registry.RolesHeldBy`): the role claim watcher's first scan delivered every claim, and after a recreated bucket's reset only once the refill's scan has; until then it is `store.ErrRoleViewNotReady`, never a holder without its role. A first scan nats.go's idle timer ended is scanned again a second later until one completes (`kvwatch.WithRescan`) |
-| `/v1/interests/subscribe` | POST | Persist a session's subscribed topics; `self_subscribed: true` marks a portless session, one the listener relays its consumer to rather than pushes to a port (`packages/envoy/AGENTS.md`, "Session consumers", states how a session's messages reach it). A stored record this build cannot decode (`store.ErrMalformedInterest`) is replaced, not merged, logged at WARN by the registry; the session's role claims are kept. A write route (see “Write route answers” below). A topic that reaches a private stream subject other than the session's own agent subject (another session's `notifications.agent.<other>`, a failed-delivery lane `notifications.envoy.exceptions.notifications.agent.<id>` including its own, a Legion daemon notice under `notifications.legion.>` such as the controller lane `notifications.legion.<project>.controller`, or a wildcard such as `notifications.agent.>`, `notifications.envoy.>` or `notifications.>`) is not stored and is named in `warnings`, so neither the fan-out nor `/v1/replay` hands a session another session's inbox, a failed delivery's payload or the controller's notices. An optional `delivery` object (`consumer`, `epoch`, `resume`) asks for a session consumer, created or refiltered before the call answers; the answer's `delivery` says `consumer` (with the relay `subject` and `stream_id`) or `core` with a `reason`, and a serving-port registration always gets it |
+| `/v1/sessions` | GET | Lists all sessions across all machines — joins `envoy_interests` (topics, dir) with `envoy_sessions` (self-subscribed delivery mode, `plugin`, `plugin_version`), and reports as each session's `roles` those whose claims in `envoy_roles` name it, from the listener's watched view of that bucket, whatever role topics its record carries. Every row's `port` is 0, since a registration naming a port is refused and the field stays only because every released client parses it. A cache view, and a list cannot be made authoritative key by key, so a caller holding one session id asks `/v1/registry/{session_id}` instead. Interest records the cache misses are read from the bucket within one 3.5 s budget. A read counts as answered only for its named answers: no key (the session has no topics), a record this build cannot decode (`store.ErrMalformedInterest`, logged by the registry) or an id the interest bucket refuses as a key (`bus.ErrRefused`: an earlier listener's id past its get bound that `envoy_sessions` still lists, or one outside nats.go's key alphabet, logged at WARN naming it); the last two list that session with no topics. Any other error, a cap or the budget running out, a nats.go connection error, a raw socket error or a claims view that is not complete among them, is a read that did not answer: a 503 with `Retry-After: 1`, never a row with no topics or roles. The claims view answers only while it is complete (`store.Registry.RolesHeldBy`): the role claim watcher's first scan delivered every claim, and after a recreated bucket's reset only once the refill's scan has; until then it is `store.ErrRoleViewNotReady`, never a holder without its role. A first scan nats.go's idle timer ended is scanned again a second later until one completes (`kvwatch.WithRescan`) |
+| `/v1/interests/subscribe` | POST | Persist a session's subscribed topics; `self_subscribed: true` marks a session that takes its messages off a NATS subscription of its own (`packages/envoy/AGENTS.md`, "Session consumers", states how a session's messages reach it). A registration whose `port` is above 0 is refused `400 {"error":"port is not supported: …","expected":["port"]}` before anything is stored: the listener delivers to no port. A stored record this build cannot decode (`store.ErrMalformedInterest`) is replaced, not merged, logged at WARN by the registry; the session's role claims are kept. A write route (see “Write route answers” below). A topic that reaches a private stream subject other than the session's own agent subject (another session's `notifications.agent.<other>`, a failed-delivery lane `notifications.envoy.exceptions.notifications.agent.<id>` including its own, a Legion daemon notice under `notifications.legion.>` such as the controller lane `notifications.legion.<project>.controller`, or a wildcard such as `notifications.agent.>`, `notifications.envoy.>` or `notifications.>`) is not stored and is named in `warnings`, so neither the fan-out nor `/v1/replay` hands a session another session's inbox, a failed delivery's payload or the controller's notices. An optional `delivery` object (`consumer`, `epoch`, `resume`) asks for a session consumer, created or refiltered before the call answers; the answer's `delivery` says `consumer` (with the relay `subject` and `stream_id`) or `core` with a `reason` |
 | `/v1/interests/unsubscribe` | POST | Remove persisted topics for a session; a consumer-delivery session's consumer stops filtering on them. A stored record this build cannot decode is left as it is (it routes none of its topics), logged at WARN; the role claims the topics name are released. A write route |
 | `/v1/interests/` | GET | List persisted interests |
 | `/v1/interests/{session_id}` | GET/DELETE | Get or delete a session's persisted interests. A GET reads a cache miss from the bucket within 3.5 s: 404 only for a key the bucket does not hold, 413 or 400 for an id NATS will not take as a key, `500 {"error":"envoy: the interest record of session <id> is unreadable: <reason>"}` with no `Retry-After` for a record this build cannot decode (`store.ErrMalformedInterest`), 503 with `Retry-After: 1` for a read that did not answer. A DELETE removes a record this build cannot decode too, releasing the session's role claims, with 204; it is a write route |
@@ -176,13 +176,12 @@ writes, and a request the starting gate turns away while the routes are still op
 
 | `delivery_status` | Attempt it counts |
 | --- | --- |
-| `delivered` | Pushed to the session, or forwarded to a role holder that receipted it |
-| `skipped` | Nothing to push: the session consumes its own subscription, or the envelope would echo back to the session that sent it |
+| `delivered` | Delivered to the session, or forwarded to a role holder that receipted it |
+| `skipped` | Nothing to deliver: the session's own consumer holds the message, the session consumes its own subscription, or the envelope would echo back to the session that sent it |
 | `dedupe` | A repeat the dedupe cache recognised as already delivered, or the attempt cache as already attempted |
-| `failed` | The push, the role forward, or the delivery-mode guard before either, failed |
+| `failed` | The delivery, the role forward, or the delivery-mode guard before either, failed |
 | `receipt_timeout` | A role forward reached the server and its live holder sent no receipt within two seconds |
 | `unplaceable_no_record` | An agent delivery given up: no session record this listener could read |
-| `unplaceable_no_push_target` | An agent delivery given up: a record that names nothing to push to |
 
 `envoy_delivery_duration_seconds` carries the same label for the attempts it times.
 
@@ -246,9 +245,8 @@ consumer, which the listener relays (`packages/envoy/AGENTS.md`, "Session consum
 sends a receipt-backed request with the original role topic to `notifications.agent.<session_id>`,
 and the extension's agent pump replies after accepting that envelope. Without a reply inside two
 seconds the route resolves the holder again and forwards the same envelope (one `event_id`)
-100 ms later, until a reply arrives or four seconds from the request's arrival have passed. A
-holder served on a port answers no receipt, so its forward counts as delivered once the stream
-acknowledges storing it, and the stored copy is what reaches its port. It answers `200` with the
+100 ms later, until a reply arrives or four seconds from the request's arrival have passed. It
+answers `200` with the
 `holder` once the holder replied; `404` with `reason` `unclaimed` or
 `holder_lapsed` when no live session holds the role; the 503 or 500 `GET /v1/roles/<role>` gives
 when its first resolution of the holder, within 3.5 s of the request's arrival, fails (see "Send
@@ -272,13 +270,11 @@ first or the publish failed at once for any reason but a refusal, since nothing 
 and otherwise `504` with `reason: "not_confirmed"`, `delivered` and `undelivered` (each
 `{session_id, reason}`). Only a receipt that arrived through the route counts as a confirmation:
 the route keeps its own record of who confirmed each dedupe key, apart from the delivery handlers'
-dedupe cache, where the live topics lane records a self-subscribed session whose push it skipped.
+dedupe cache, where the durable path records a self-subscribed session whose delivery it skipped.
 A session that stopped without unregistering stays registered for up to five minutes and is
-named in `undelivered` in that time; it is not a failed delivery to the others. A session served
-on a port is not confirmed. Every forward carries a `Nats-Msg-Id`, so the stream keeps one copy
-per message and recipient; a listener acknowledges that stored copy without delivering it, except
-for a serving-port session of its own, which has no subscriber and takes the stored copy as its
-delivery.
+named in `undelivered` in that time; it is not a failed delivery to the others. Every forward
+carries a `Nats-Msg-Id`, so the stream keeps one copy per message and recipient, and a listener
+acknowledges that stored copy without delivering it.
 
 The role lane, a core-NATS queue subscriber in each listener, carries a role topic a client
 publishes straight onto NATS rather than through the route. It resolves the holder at delivery
@@ -287,8 +283,7 @@ session claims the role, `delivery_failed` or `receipt_timeout` as above. A role
 subscribe directly to its role subject, and a role message is not retained for a future claimant.
 The forward is stored on the holder's agent subject (one copy per message and holder, by its
 `Nats-Msg-Id`), so a holder on consumer delivery that was away gets it from its session consumer
-when it is back; a serving-port holder counts the stream's acknowledgement alone, since its relay,
-or the owning listener's durable, pushes the stored copy to its port.
+when it is back.
 
 Dispatch's outbox forwards its own role-routed events to the holder itself: it resolves the
 holder with the resolution the listener's lane uses (`roles.ResolveHolder`) and sends the
@@ -317,20 +312,13 @@ the original delivery fields:
 
 An agent subject's `no_holder` is published once per message, at give-up rather than on the first
 attempt that failed to place it, and only after the give-up itself is recorded. A delivery this
-listener cannot place — no session record it could read, a record naming nothing to push to, or a
-push that failed — is NAKed for redelivery every five seconds, counted from the message's first
-delivery rather than from its age in the stream: `ENVOY_UNPLACEABLE_RETRY_WINDOW` (default 60 s) is
+listener cannot place — no session record it could read — is NAKed for redelivery every five
+seconds, counted from the message's first delivery rather than from its age in the stream:
+`ENVOY_UNPLACEABLE_RETRY_WINDOW` (default 60 s) is
 spent as whole five-second deferrals, so it buys twelve of them at that default, and the delivery
-count stops the retries at 18 whatever the window says. The first two causes push nothing, so
-retrying them repeats nothing, and they keep the window's whole allowance. A push that failed is
-deferred once, however long the window, and the give-up after it is terminal whether or not its
-notice can be published, so it is pushed at most twice: it may have landed — the session server
-refusing the prompt, a connection that never reached it and an answer lost after the server took
-the prompt all come back as the same failure — and a deferral clears the attempt-cache entry that
-otherwise keeps a redelivery from pushing again, so each retry can repeat an instruction the
-session already has. One retry covers a peer restarting or a connection refused for a moment;
-twelve would let the same
-instruction arrive thirteen times. At most 64 agent deliveries are held deferred at once — a
+count stops the retries at 18 whatever the window says. That cause delivers nothing, so
+retrying it repeats nothing, and it keeps the window's whole allowance.
+At most 64 agent deliveries are held deferred at once — a
 quarter of the durable's 256 ack-pending slots, one of which a deferred message holds for its whole
 window — and a message that arrives while that cap is reached is given up at once. The 64 is one
 budget for the whole listener: a single set, made once at start and shared by every delivery
@@ -344,7 +332,7 @@ the longest a deferred message can legitimately stay pending, so such slots cann
 for longer than that. Each deferral logs
 `listener agent delivery deferred` with `reason`, `attempt` and `window_deferrals`, the deferrals
 that message's cause is allowed; only the give-up counts
-`unplaceable_no_record` or `unplaceable_no_push_target`, logs WARN
+`unplaceable_no_record`, logs WARN
 `listener agent delivery given up`, and then publishes the exception. A notice that cannot be
 published — it embeds the original payload, so an envelope near the server's max payload has its
 notice refused as too large on every attempt — logs ERROR `listener exception publish failed`
@@ -354,10 +342,7 @@ and it is ACKed. No other path NAKs on a notice it could not publish: the generi
 that still could, owes no `no_holder` notice at all, since the handler routes every role and agent
 topic elsewhere and a topic reaching the fanout is never a control topic.
 A role lane publishes its exception on the attempt itself, since nothing redelivers a core message.
-On the durable path a push to a serving-port session this listener owns goes to that session's
-serving-port worker, which pushes it again (1 s doubling to 30 s) until the port answers 204, so
-its later messages keep their stream order; the one-retry bound on a push that failed applies to a
-push the handler makes inline. The `no_holder` exception the durable path stores carries
+The `no_holder` exception the durable path stores carries
 `Nats-Msg-Id` `exception.no_holder.<origin>` (the message's own `Nats-Msg-Id`, else its stream
 sequence), so the stream keeps one copy however many listeners give the message up.
 

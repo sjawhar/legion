@@ -122,6 +122,13 @@ describe("envoyToolSpecs", () => {
     expect(publish?.description).toContain(
       "a role message errs when its holder did not confirm it within the listener's window"
     );
+    expect(publish?.description).toContain(
+      "A session that holds its own NATS connection receives such a live topic directly, yours included."
+    );
+    // The listener delivers to no session port, so the description names neither a serve port
+    // nor the listener environment variable that fed one (dispatch://INFRA-889).
+    expect(publish?.description).not.toContain("serve port");
+    expect(publish?.description).not.toMatch(/ENVOY_[A-Z_]+/);
   });
 });
 
