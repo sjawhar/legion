@@ -45,6 +45,7 @@ const knownEventTypes: Record<EventType, true> = {
   "ask.follower_removed": true,
   "block.repaired": true,
   "block.invalid": true,
+  "result.recorded": true,
   "comment.created": true,
   "comment.anchor_refreshed": true,
   "comment.delivery": true,

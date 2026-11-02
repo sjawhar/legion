@@ -11,12 +11,17 @@ import { harnessPorts } from "./harness-ports";
 
 const ARCHITECTURE_DIR = ".dispatch/architecture";
 
-/** A pull request the GitHub link reads: its title, state and head commit. */
+/** A pull request the GitHub link reads: its title, state and head commit, and the branch,
+ *  base and body Dispatch's pull-request head tracking attributes it by. */
 interface FakePull {
   readonly head_sha: string;
   readonly merged?: boolean;
   readonly state: string;
   readonly title: string;
+  readonly body?: string;
+  readonly head_ref?: string;
+  readonly base_ref?: string;
+  readonly updated_at?: string;
 }
 
 /** One check run of a commit, in the check suite `check_suite_id` names. */
@@ -64,6 +69,17 @@ interface FakeRepo {
   readonly check_runs?: Record<string, readonly FakeCheckRun[]>;
   /** Workflow runs keyed by head sha. */
   readonly workflow_runs?: Record<string, readonly FakeWorkflowRun[]>;
+  /** The repository's default branch; "main" when unset. */
+  readonly default_branch?: string;
+  /** The pull request numbers GitHub names for a commit, keyed by commit sha: what
+   *  `GET /repos/{o}/{r}/commits/{sha}/pulls` answers, read from `pulls`. */
+  readonly commit_pulls?: Record<string, readonly number[]>;
+  /** The commits each branch holds, keyed by branch name: what the compare read answers
+   *  `behind` (or `identical`, for the last of them) about, and `diverged` about any other. */
+  readonly branch_commits?: Record<string, readonly string[]>;
+  /** A repository Dispatch's App is not installed on: every read of it answers, but the
+   *  installation lookup is GitHub's 404, so the server can reach no token for it. */
+  readonly installation_missing?: boolean;
 }
 
 /** Deterministic commit sha for a repository's current files. */
@@ -98,7 +114,9 @@ const server = Bun.serve({
     const installation = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/installation$/);
     if (request.method === "GET" && installation !== null) {
       const repo = repos.get(`${installation[1]}/${installation[2]}`);
-      if (repo === undefined) {
+      // A repository nobody seeded, and one seeded as not installed on: both are GitHub's 404,
+      // the answer the Go client reads as ErrNoInstallation.
+      if (repo === undefined || repo.installation_missing === true) {
         return Response.json({ message: "Not Found" }, { status: 404 });
       }
       return Response.json({
@@ -216,6 +234,54 @@ const server = Bun.serve({
       });
     }
 
+    // The pull requests GitHub names for a commit, which Dispatch reads through when a result
+    // names a commit that is the head of no pull request it has an event for. It must match
+    // before the bare `commits/{ref}` route below.
+    const commitPulls = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/commits\/([^/]+)\/pulls$/);
+    if (request.method === "GET" && commitPulls !== null) {
+      const repo = repos.get(`${commitPulls[1]}/${commitPulls[2]}`);
+      if (repo === undefined) {
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      const numbers = repo.commit_pulls?.[commitPulls[3] ?? ""] ?? [];
+      return Response.json(
+        numbers.flatMap((number) => {
+          const seeded = repo.pulls?.[String(number)];
+          if (seeded === undefined) return [];
+          return [
+            {
+              base: { ref: seeded.base_ref ?? "main" },
+              body: seeded.body ?? "",
+              head: { ref: seeded.head_ref ?? `branch-${number}`, sha: seeded.head_sha },
+              html_url: `https://github.com/${commitPulls[1]}/${commitPulls[2]}/pull/${number}`,
+              merged: seeded.merged ?? false,
+              number,
+              state: seeded.state,
+              title: seeded.title,
+              updated_at: seeded.updated_at ?? "2026-01-01T00:00:00Z",
+            },
+          ];
+        })
+      );
+    }
+
+    // `compare/{base}...{head}`, of which Dispatch decodes only `status`: a branch that holds
+    // the commit is `behind` it (`identical` when it is the branch's last commit), and one that
+    // does not is `diverged`.
+    const compare = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/compare\/(.+)$/);
+    if (request.method === "GET" && compare !== null) {
+      const repo = repos.get(`${compare[1]}/${compare[2]}`);
+      const [base, head] = decodeURIComponent(compare[3] ?? "").split("...", 2);
+      if (repo === undefined || base === undefined || head === undefined) {
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      const commits = repo.branch_commits?.[base] ?? [];
+      const held = commits.indexOf(head);
+      return Response.json({
+        status: held === -1 ? "diverged" : held === commits.length - 1 ? "identical" : "behind",
+      });
+    }
+
     // The exact branch read a source's save makes (`git/ref/heads/{branch}`, a `/` in the name
     // percent-encoded by the Go client): a branch the repository was seeded with answers its ref
     // at the commit the commits read answers, and any other name 404, as GitHub does.
@@ -292,7 +358,10 @@ const server = Bun.serve({
       if (!repos.has(`${repository[1]}/${repository[2]}`)) {
         return Response.json({ message: "Not Found" }, { status: 404 });
       }
-      return Response.json({ full_name: `${repository[1]}/${repository[2]}` });
+      return Response.json({
+        default_branch: repos.get(`${repository[1]}/${repository[2]}`)?.default_branch ?? "main",
+        full_name: `${repository[1]}/${repository[2]}`,
+      });
     }
 
     if (url.pathname === "/healthz") return Response.json({ ok: true });

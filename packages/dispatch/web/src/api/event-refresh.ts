@@ -776,6 +776,21 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     }
     return targets;
   }
+  // A result is recorded against a check of this issue's Verification document, by the issue the
+  // payload names, which is this one only when the result was recorded here. Both issues' results
+  // reads move: the check's issue lists the new result under its check, and the recording issue
+  // lists the results it recorded. Nothing else reads a result, so no document, ask or inbox read
+  // is refreshed; this switch has a default, so the branch is deliberate and its test pins it.
+  if (event.type === "result.recorded") {
+    targets.push({ queryKey: ["results", key] });
+    if (event.payload.issue !== key) {
+      targets.push(
+        { queryKey: ["results", event.payload.issue] },
+        { exact: true, queryKey: ["issue", event.payload.issue] }
+      );
+    }
+    return targets;
+  }
   if (isAskEvent(event)) {
     targets.push({ queryKey: inboxKey });
     appendAskReads(targets, event);

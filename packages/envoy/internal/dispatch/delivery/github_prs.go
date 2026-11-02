@@ -54,7 +54,7 @@ type githubUser struct {
 }
 
 // pullRequestPayload is GET /repos/{owner}/{repo}/pulls/{number}'s answer, limited to the fields
-// FetchPullRequest reads.
+// FetchPullRequest and the pull request head reader (pull_request_heads.go) read.
 type pullRequestPayload struct {
 	Number         int           `json:"number"`
 	Title          string        `json:"title"`
@@ -62,14 +62,21 @@ type pullRequestPayload struct {
 	User           githubUser    `json:"user"`
 	Labels         []githubLabel `json:"labels"`
 	Body           string        `json:"body"`
+	State          string        `json:"state"`
+	Merged         bool          `json:"merged"`
 	CreatedAt      time.Time     `json:"created_at"`
+	UpdatedAt      *time.Time    `json:"updated_at"`
 	MergedAt       *time.Time    `json:"merged_at"`
 	MergeCommitSHA *string       `json:"merge_commit_sha"`
 	Additions      int           `json:"additions"`
 	Deletions      int           `json:"deletions"`
 	Head           struct {
 		Ref string `json:"ref"`
+		SHA string `json:"sha"`
 	} `json:"head"`
+	Base struct {
+		Ref string `json:"ref"`
+	} `json:"base"`
 }
 
 // commitPayload is one element of GET /repos/{owner}/{repo}/pulls/{number}/commits, limited to

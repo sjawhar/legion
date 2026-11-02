@@ -156,6 +156,7 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 
 	record("reconcile merged pull requests", r.reconcileMergedPullRequests(ctx, settings, searchScope, now))
 	record("reconcile partial pull requests", r.reconcilePartialPullRequests(ctx))
+	record("reconcile pull request heads", r.reconcilePullRequestHeads(ctx, now))
 	record("reconcile deploy workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, production, now))
 	if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
 		record("reconcile PR-checks workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, DeliveryRunKindPRChecks, production, now))
@@ -450,6 +451,36 @@ func (r *Reconcile) reconcilePartialPullRequests(ctx context.Context) error {
 	}
 	if err := boundedFanOut(ctx, reconcilePartialConcurrency, partials, r.completePartialPullRequest); err != nil {
 		return fmt.Errorf("rate-limited completing partial pull requests: %w", err)
+	}
+	return nil
+}
+
+// reconcilePullRequestHeads re-reads the open pull requests whose head Dispatch last checked
+// over PullRequestHeadStaleAfter ago, at most PullRequestHeadBatch of them a pass, the longest
+// unread first. GitHub's `pull_request` events carry every head move, so this is the backstop
+// for an event that never arrived — a delivery Dispatch was down for, a repository whose
+// webhook was installed late — and the one way a merge that happened while Dispatch was not
+// listening reaches the head row at all. A rate limit stops the batch and fails the pass, as
+// every other GitHub step's does; any other per-row failure is logged and leaves the row for
+// the next pass.
+func (r *Reconcile) reconcilePullRequestHeads(ctx context.Context, now time.Time) error {
+	stale, err := ListStalePullRequestHeads(ctx, r.pool, PullRequestHeadBatch, now)
+	if err != nil {
+		return err
+	}
+	refresh := func(ctx context.Context, head PullRequestHead) error {
+		err := RefreshPullRequestHead(ctx, r.pool, r.github, head.Repo, head.Number, now)
+		if err == nil {
+			return nil
+		}
+		if limited, ok := githubapp.AsRateLimit(err); ok {
+			return limited
+		}
+		slog.Warn("dispatch delivery: re-read a pull request head", "repo", head.Repo, "number", head.Number, "error", err)
+		return nil
+	}
+	if err := boundedFanOut(ctx, reconcilePartialConcurrency, stale, refresh); err != nil {
+		return fmt.Errorf("rate-limited re-reading pull request heads: %w", err)
 	}
 	return nil
 }

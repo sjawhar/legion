@@ -2401,6 +2401,23 @@ Each item below names a path with its method and identity, then its purpose.
   a bearer reading a direct message names its session in `?session=` (`400 SESSION_REQUIRED`, `403 THREAD_FORBIDDEN`).
   While the message is owed a block index, `indexed` is `false` and `blocks` empty; the read writes nothing.
 
+- `/api/v1/issues/{key}/results` (GET, POST; cookie, trusted header, or bearer)
+
+  GET lists the `check` blocks of the issue's Verification document in document order:
+  `{issue, verification_artifact_id, checks}`, each check with its attributes (`when`, `surface`, `run`, `negative_control`), the version its words last changed in, their digest, and every result recorded against it from any issue, newest first.
+  Each result carries `currency`: `current`, `older`, or `unknown` when the check's issue resolves to no repository or Dispatch's GitHub App cannot read it.
+  A `before_merge` result is current while its commit is the head of an `open` pull request attributed to the check's issue, or the final head of a `merged` one, and the check's words are the ones it proved; an `after_merge` or `default_branch` result while its commit is on the default branch of that repository.
+  Nothing is written on a push: a push that moves a pull request's head makes the result at the old head older by itself.
+  An issue with no Verification document answers no checks.
+
+  POST records one result: `{check, role, verdict, commit, surface?, run?, observed?, negative_control?, failed?, skipped?, excluded?, screenshots?, actor?}`.
+  `{key}` is the issue the result is recorded on; `check` names a check of its Verification document or of one of its ancestors', by block id or, when a block id is not unique in that set, by its canonical block reference (`409 CHECK_AMBIGUOUS`); any other id is `400 UNKNOWN_CHECK`.
+  `role` is at most 32 characters of `[a-z-]`, `verdict` is `pass` or `fail`, `commit` is 40 lowercase hex, and absent counts are 0; a `pass` counting any failed, skipped or excluded case is `400 RESULT_CONTRADICTS`, and any other malformed field `400 RESULT_INPUT`.
+  A screenshot names an image document of the recording issue or of the check's issue.
+  The result is appended as `result.recorded` on the check's own issue, naming the recording issue.
+  A closed issue, the recording one or the check's, takes a result only for a check whose `when` is `after_merge` or `default_branch` — the production check after the merge — and refuses every other with `409 ISSUE_CLOSED`; every other write on a closed issue stays refused.
+  The answer is `{result, line}`, `line` the pull-request body line the result implies, which carries no link to Dispatch.
+
 - `/api/v1/issues/{key}/artifacts` (GET, POST; cookie, trusted header, or bearer)
 
   List issue artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`.

@@ -24,6 +24,7 @@ import type {
   GraphNode,
   GraphReferences,
   Issue,
+  IssueCheckResults,
   IssueClaim,
   IssueComponents,
   IssueComponentsInput,
@@ -1946,6 +1947,27 @@ function progressText(progress: IssueProgress | undefined, sep: string): string 
     parts.push(`children ${progress.children.done}/${progress.children.total}`);
   }
   return parts.join(sep);
+}
+
+/** What `dispatch results` prints: each check of the issue's Verification document with its
+ *  latest result and whether that result is current. A check with no result says so, and an
+ *  issue with no Verification document says that instead of printing an empty list. */
+function formatCheckResults(results: IssueCheckResults): string {
+  if (results.verification_artifact_id === null) {
+    return `${results.issue} has no Verification document, so it has no checks. Write one (verification.md) with a check block per thing that must be proved.`;
+  }
+  if (results.checks.length === 0) {
+    return `${results.issue}'s Verification document holds no check blocks.`;
+  }
+  const lines = results.checks.map((check) => {
+    const head = `- ${check.block_id} (${check.when}): `;
+    const latest = check.results[0];
+    if (latest === undefined) {
+      return `${head}no result yet. ${check.text}`;
+    }
+    return `${head}${latest.verdict} at ${latest.commit_sha.slice(0, 12)} by ${latest.role}, ${latest.currency ?? "unknown"}. ${check.text}`;
+  });
+  return [`Checks of ${results.issue}:`, ...lines].join("\n");
 }
 
 /** Which repository the issue targets and where it came from: its own, or resolved through its
@@ -4393,6 +4415,42 @@ export async function executeDispatchTool(
           artifact: resolved.artifact.id,
           version: review.version,
         },
+      };
+    }
+    case "dispatch_result": {
+      const issue = stringArg(args, "issue");
+      const recorded = await client.recordResult(issue, {
+        actor,
+        check: stringArg(args, "check"),
+        role: stringArg(args, "role"),
+        verdict: stringArg(args, "verdict") as "pass" | "fail",
+        commit: stringArg(args, "commit"),
+        surface: optionalString(args, "surface"),
+        run: optionalString(args, "run"),
+        observed: optionalString(args, "observed"),
+        negative_control: optionalString(args, "negative_control"),
+        failed: optionalNumber(args, "failed"),
+        skipped: optionalNumber(args, "skipped"),
+        excluded: optionalNumber(args, "excluded"),
+        screenshots: Array.isArray(args.screenshots) ? (args.screenshots as string[]) : undefined,
+      });
+      return {
+        text: `Recorded ${recorded.result.verdict} for check ${recorded.result.check_block_id} of ${recorded.result.check_issue_key} at ${recorded.result.commit_sha.slice(0, 12)}, as ${recorded.result.role}.\n\nPull request body line:\n${recorded.line}`,
+        details: {
+          issue,
+          result: recorded.result.id,
+          check: recorded.result.check_block_id,
+          verdict: recorded.result.verdict,
+          line: recorded.line,
+        },
+      };
+    }
+    case "dispatch_results": {
+      const issue = stringArg(args, "issue");
+      const results = await client.issueResults(issue);
+      return {
+        text: formatCheckResults(results),
+        details: { issue, checks: results.checks.length },
       };
     }
     case "dispatch_artifact": {

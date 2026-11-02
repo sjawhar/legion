@@ -2329,6 +2329,110 @@ export interface ArtifactReviewEventPayload {
   readonly ask_id: string | null;
 }
 
+/** Whether a recorded result still speaks for the work as it stands: `current` at the commit the
+ *  work stands at and the words the result proved, `older` at an earlier commit or against words
+ *  that have changed since, and `unknown` when the check's issue resolves to no repository or
+ *  Dispatch's GitHub App cannot read it. */
+export type CheckResultCurrency = "current" | "older" | "unknown";
+
+/** One result recorded against a `check` block of an issue's Verification document.
+ *  `issue_key` is the issue it was recorded on, which may be a descendant of `check_issue_key`,
+ *  the issue whose Verification document holds the check. `check_version` and `check_sha256` are
+ *  the block's version and digest when the result was recorded, so a reworded check makes its
+ *  earlier results older. `currency` is computed when the results are read and is absent from
+ *  the record's own answer. */
+export interface CheckResult {
+  readonly id: string;
+  readonly issue_key: string;
+  readonly check_issue_key: string;
+  readonly check_artifact_id: string;
+  readonly check_block_id: string;
+  readonly check_version: number;
+  readonly check_sha256: string;
+  readonly role: string;
+  readonly surface: string;
+  readonly run: string;
+  readonly observed: string;
+  readonly commit_sha: string;
+  readonly negative_control: string;
+  readonly failed: number;
+  readonly skipped: number;
+  readonly excluded: number;
+  readonly verdict: "pass" | "fail";
+  readonly screenshots: readonly string[];
+  readonly session: string;
+  readonly actor: Actor;
+  readonly created_at: string;
+  readonly event_seq?: number;
+  readonly currency?: CheckResultCurrency;
+}
+
+/** One `check` block of a Verification document with every result recorded against it, newest
+ *  first. `when` is `before_merge`, `after_merge` or `default_branch`. */
+export interface CheckBlock {
+  readonly block_id: string;
+  readonly ref: string;
+  readonly issue_key: string;
+  readonly artifact_id: string;
+  readonly text: string;
+  readonly when: string;
+  readonly surface: string;
+  readonly run: string;
+  readonly negative_control: string;
+  readonly version: number;
+  readonly sha256: string;
+  readonly results: readonly CheckResult[];
+}
+
+/** `GET /api/v1/issues/{key}/results`: the issue's Verification document and its checks in
+ *  document order. An issue with no Verification document answers no checks. */
+export interface IssueCheckResults {
+  readonly issue: string;
+  readonly verification_artifact_id: string | null;
+  readonly checks: readonly CheckBlock[];
+}
+
+/** `POST /api/v1/issues/{key}/results`: the stored result and the pull-request body line it
+ *  implies, which Dispatch writes so every writer writes one grammar and which carries no link
+ *  to Dispatch. */
+export interface CheckResultRecorded {
+  readonly result: CheckResult;
+  readonly line: string;
+}
+
+/** What `POST /api/v1/issues/{key}/results` takes. Absent counts are 0; a `pass` counting any of
+ *  them is refused `400 RESULT_CONTRADICTS`. */
+export interface RecordCheckResultInput {
+  readonly actor?: Actor;
+  readonly check: string;
+  readonly role: string;
+  readonly verdict: "pass" | "fail";
+  readonly commit: string;
+  readonly surface?: string;
+  readonly run?: string;
+  readonly observed?: string;
+  readonly negative_control?: string;
+  readonly failed?: number;
+  readonly skipped?: number;
+  readonly excluded?: number;
+  readonly screenshots?: readonly string[];
+}
+
+/** `result.recorded`: one result recorded against a check, appended on the **check's** issue and
+ *  naming in `issue` the issue it was recorded on. */
+export interface CheckResultEventPayload {
+  readonly result_id: string;
+  readonly issue: string;
+  readonly check_issue: string;
+  readonly check_artifact_id: string;
+  readonly check_block_id: string;
+  readonly check_version: number;
+  readonly when: string;
+  readonly verdict: "pass" | "fail";
+  readonly role: string;
+  readonly commit_sha: string;
+}
+
 /** A server-owned typed-block attribute was restored from its indexed row. */
 export interface BlockRepairedEventPayload {
   readonly block_id: string;
@@ -2641,6 +2745,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "block.invalid";
       readonly payload: BlockInvalidEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "result.recorded";
+      readonly payload: CheckResultEventPayload;
     })
   | (DispatchEventBase & {
       readonly type: "comment.created";

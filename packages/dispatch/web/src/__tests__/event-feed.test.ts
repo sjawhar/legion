@@ -1006,6 +1006,43 @@ test("an architecture event refreshes the source lists and the project's model",
   }
 });
 
+// A recorded result moves two reads and no more: the results of the check's issue, where the
+// event sits, and the results of the issue that recorded it, which lists what it recorded. A
+// result recorded on the check's own issue names one. event-refresh's switches all have a
+// default, so this pins the decision rather than the compiler.
+test("a recorded result refreshes the results of the check's issue and of the recording issue", () => {
+  const own = event("result.recorded", {
+    check_block_id: "k1",
+    check_issue: "CORE-1",
+    commit_sha: "1111111111111111111111111111111111111111",
+    issue: "CORE-1",
+    role: "implementer",
+    verdict: "pass",
+  });
+  expect(eventRefreshTargets(own, "alice").map((target) => target.queryKey)).toEqual([
+    ["issue", "CORE-1"],
+    ["events", "CORE-1"],
+    ["issues", "project", "CORE"],
+    ["results", "CORE-1"],
+  ]);
+  const child = event("result.recorded", {
+    check_block_id: "k1",
+    check_issue: "CORE-1",
+    commit_sha: "1111111111111111111111111111111111111111",
+    issue: "CORE-9",
+    role: "tester",
+    verdict: "pass",
+  });
+  expect(eventRefreshTargets(child, "alice").map((target) => target.queryKey)).toEqual([
+    ["issue", "CORE-1"],
+    ["events", "CORE-1"],
+    ["issues", "project", "CORE"],
+    ["results", "CORE-1"],
+    ["results", "CORE-9"],
+    ["issue", "CORE-9"],
+  ]);
+});
+
 /** One event of every type the feed can carry, keyed by type so a new one fails to compile here
  *  until it has a row. */
 const eventsByType: Record<EventType, Event> = {
@@ -1055,6 +1092,14 @@ const eventsByType: Record<EventType, Event> = {
   "message.delivery": event("message.delivery", { target: "session:planner" }),
   "project.created": event("project.created", {}, { issue_key: null }),
   "project.updated": event("project.updated", {}, { issue_key: null }),
+  "result.recorded": event("result.recorded", {
+    check_block_id: "k1",
+    check_issue: "CORE-1",
+    commit_sha: "1111111111111111111111111111111111111111",
+    issue: "CORE-1",
+    role: "implementer",
+    verdict: "pass",
+  }),
   "settings.architecture_source.updated": event(
     "settings.architecture_source.updated",
     {},

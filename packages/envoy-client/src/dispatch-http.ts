@@ -14,6 +14,7 @@ import type {
   ArtifactVersionText,
   Ask,
   AskRead,
+  CheckResultRecorded,
   ClaimedIssue,
   Comment,
   CommentRead,
@@ -33,6 +34,7 @@ import type {
   GraphEdgeKind,
   GraphReferences,
   Issue,
+  IssueCheckResults,
   IssueDetails,
   IssuePriority,
   IssueRead,
@@ -47,6 +49,7 @@ import type {
   MessageReplyResult,
   OpenAsksResponse,
   Project,
+  RecordCheckResultInput,
   RelatedCheckInput,
   ResolveAskInput,
   SearchResponse,
@@ -1075,6 +1078,24 @@ export class DispatchClient {
     input: { actor: Actor; version: number }
   ): Promise<ArtifactReview> {
     return this.#json("POST", ["api", "v1", "artifacts", artifactID, "plan-reviews"], input);
+  }
+
+  /**
+   * Records one result of one check of an issue's Verification document, and answers it beside
+   * the pull-request body line it implies. `issue` is the issue the result is recorded on; the
+   * check may be one of an issue above it, and the result is recorded against that issue.
+   */
+  async recordResult(issue: string, input: RecordCheckResultInput): Promise<CheckResultRecorded> {
+    return this.#json(
+      "POST",
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "results"],
+      input
+    );
+  }
+
+  /** Each check of an issue's Verification document with every result recorded against it. */
+  async issueResults(issue: string): Promise<IssueCheckResults> {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "results"]);
   }
 
   async editAsk(id: string, input: EditAskInput): Promise<Ask> {

@@ -735,6 +735,82 @@ type ArtifactReviewEventPayload struct {
 	AskID      *string `json:"ask_id"`
 }
 
+// CheckCurrency is whether a recorded result still speaks for the work as it stands:
+// CurrencyCurrent at the commit the work stands at and the words the result proved,
+// CurrencyOlder at an earlier commit or against words that have changed since, and
+// CurrencyUnknown when Dispatch cannot read the repository the check's issue resolves to.
+const (
+	CurrencyCurrent = "current"
+	CurrencyOlder   = "older"
+	CurrencyUnknown = "unknown"
+)
+
+// CheckResult is one result recorded against a `check` block of an issue's Verification
+// document (check_results). IssueKey is the issue it was recorded on, which may be a descendant
+// of CheckIssueKey, the issue whose Verification document holds the check. CheckVersion and
+// CheckSHA256 are the block's changed_version and text_sha256 when the result was recorded, so
+// a read can tell a result whose check has been reworded since. Currency is computed when the
+// results are read and is empty on the record's own answer.
+type CheckResult struct {
+	ID              string    `json:"id"`
+	IssueKey        string    `json:"issue_key"`
+	CheckIssueKey   string    `json:"check_issue_key"`
+	CheckArtifactID string    `json:"check_artifact_id"`
+	CheckBlockID    string    `json:"check_block_id"`
+	CheckVersion    int       `json:"check_version"`
+	CheckSHA256     string    `json:"check_sha256"`
+	Role            string    `json:"role"`
+	Surface         string    `json:"surface"`
+	Run             string    `json:"run"`
+	Observed        string    `json:"observed"`
+	CommitSHA       string    `json:"commit_sha"`
+	NegativeControl string    `json:"negative_control"`
+	Failed          int       `json:"failed"`
+	Skipped         int       `json:"skipped"`
+	Excluded        int       `json:"excluded"`
+	Verdict         string    `json:"verdict"`
+	Screenshots     []string  `json:"screenshots"`
+	Session         string    `json:"session"`
+	Actor           Actor     `json:"actor"`
+	CreatedAt       time.Time `json:"created_at"`
+	EventSeq        *int64    `json:"event_seq,omitempty"`
+	Currency        string    `json:"currency,omitempty"`
+}
+
+// CheckBlock is one `check` block of a Verification document as a result read shows it: where it
+// lives, its attributes, the version its words last changed in and their digest, and every
+// result recorded against it from any issue, newest first.
+type CheckBlock struct {
+	BlockID         string        `json:"block_id"`
+	Ref             string        `json:"ref"`
+	IssueKey        string        `json:"issue_key"`
+	ArtifactID      string        `json:"artifact_id"`
+	Text            string        `json:"text"`
+	When            string        `json:"when"`
+	Surface         string        `json:"surface"`
+	Run             string        `json:"run"`
+	NegativeControl string        `json:"negative_control"`
+	Version         int           `json:"version"`
+	SHA256          string        `json:"sha256"`
+	Results         []CheckResult `json:"results"`
+}
+
+// CheckResultEventPayload is the payload of result.recorded, appended on the check's issue: the
+// result, the issue it was recorded on (Issue, which is the check's issue only when the result
+// was recorded there) and the check it proves.
+type CheckResultEventPayload struct {
+	ResultID        string `json:"result_id"`
+	Issue           string `json:"issue"`
+	CheckIssue      string `json:"check_issue"`
+	CheckArtifactID string `json:"check_artifact_id"`
+	CheckBlockID    string `json:"check_block_id"`
+	CheckVersion    int    `json:"check_version"`
+	When            string `json:"when"`
+	Verdict         string `json:"verdict"`
+	Role            string `json:"role"`
+	CommitSHA       string `json:"commit_sha"`
+}
+
 // ArtifactHumanEditedEventPayload is the payload of artifact.human_edited, which Dispatch appends
 // once a document has been quiet for a while after a person's settled browser edit: the versions
 // the quiet window spans (FromVersion is the one before the window's first person's version,

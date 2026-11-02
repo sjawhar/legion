@@ -1181,6 +1181,86 @@ export const dispatchToolSpecs = [
     }),
   },
   {
+    name: "dispatch_result",
+    example: {
+      issue: "DSP-1",
+      check: "k1",
+      role: "implementer",
+      verdict: "pass",
+      commit: "1111111111111111111111111111111111111111",
+    },
+    description:
+      "Record one result of one check of an issue's Verification document, and print the " +
+      "pull-request body line it implies. The check is named by its block id, or, when two " +
+      "Verification documents in reach share that id, by its canonical reference " +
+      "(dispatch://KEY/artifact/verification-md#b-<id>); 409 CHECK_AMBIGUOUS names them, and an " +
+      "id no Verification document of the issue or of an issue above it holds is 400 " +
+      "UNKNOWN_CHECK. A pass counting any failed, skipped or excluded case contradicts itself " +
+      "and is 400 RESULT_CONTRADICTS. The result is recorded against the check's own issue, so " +
+      "a child's run of a parent's check appears under that check. A closed issue takes a " +
+      "result only for a check whose when is after_merge or default_branch — the production " +
+      "check after the merge — and refuses every other one with 409 ISSUE_CLOSED, as it refuses " +
+      "every other write. Write the printed line into the pull-request body unchanged: it is " +
+      "the one grammar every writer uses, and it carries no link to Dispatch. " +
+      ISSUE_REFERENCE,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      check: z
+        .string()
+        .describe(
+          "The check block's id, or its canonical reference dispatch://KEY/artifact/verification-md#b-<id> when the id is not unique among the issue's Verification document and those of the issues above it."
+        ),
+      role: z
+        .string({ max: 32 })
+        .describe(
+          "Who ran it: implementer, tester, reviewer. At most 32 characters of a-z and -, printed in the pull-request line."
+        ),
+      verdict: z.enum(["pass", "fail"]).describe("Whether the check passed."),
+      commit: z.string().describe("The 40-character lowercase hex commit the check ran at."),
+      surface: z.string().describe("Where a person reaches the change.").optional(),
+      run: z.string().describe("The command that proved it.").optional(),
+      observed: z.string().describe("What the command printed.").optional(),
+      negative_control: z
+        .string()
+        .describe("The deliberately broken input and the refusal seen.")
+        .optional(),
+      failed: z
+        .number({ int: true, min: 0 })
+        .describe("Cases the run failed; 0 by default.")
+        .optional(),
+      skipped: z
+        .number({ int: true, min: 0 })
+        .describe("Cases the run skipped; 0 by default.")
+        .optional(),
+      excluded: z
+        .number({ int: true, min: 0 })
+        .describe("Cases the run excluded; 0 by default.")
+        .optional(),
+      screenshots: z
+        .array(z.string())
+        .describe(
+          "dispatch:// references to image documents of this issue or of the check's issue."
+        )
+        .optional(),
+    }),
+  },
+  {
+    name: "dispatch_results",
+    example: { issue: "DSP-1" },
+    description:
+      "Print each check of an issue's Verification document with its latest result and whether " +
+      "that result is current. A result is current when it ran at the commit the work stands at " +
+      "— the head of an open pull request of the check's issue, the final head of a merged one, " +
+      "or, for an after_merge or default_branch check, a commit on the repository's default " +
+      "branch — and the check's words have not changed since; older otherwise, and unknown when " +
+      "Dispatch cannot read the repository. A push that moves the pull request's head makes a " +
+      "result older with no write of anyone's: record it again at the new head. " +
+      ISSUE_REFERENCE,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+    }),
+  },
+  {
     name: "dispatch_artifact",
     example: { issue: "DSP-1", name: "design.md", content: "# Design\n" },
     description:

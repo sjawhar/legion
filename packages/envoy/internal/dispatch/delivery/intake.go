@@ -721,19 +721,29 @@ func negativelyAcknowledge(msg *natsgo.Msg) {
 	}
 }
 
-// handlePullRequestEnvelope processes one `kind:"pr"` envelope. Only a merge (action "closed",
-// merged "true") does anything; author and excluded-repository checks run on the envelope's own
-// fields first, with no GitHub call, so a merge by anyone outside the population costs nothing.
-// It reports whether it stored the pull request's row: a row it deleted, a pull request outside
-// the population, ships with nothing.
+// handlePullRequestEnvelope processes one `kind:"pr"` envelope. Every action — opened,
+// synchronize, reopened, edited and closed — records the pull request's head first
+// (recordPullRequestHead, pull_request_heads.go), for any author and any repository, since a
+// check result is measured against that head. Only a merge (action "closed", merged "true")
+// does anything for the delivery timeline after that; its author and excluded-repository checks
+// run on the envelope's own fields, with no further GitHub call, so a merge by anyone outside
+// the population costs nothing. It reports whether it stored the pull request's delivery row: a
+// head write is not one, and neither is a row it deleted or a pull request outside the
+// population, so neither ships with anything.
 func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings DeliverySettings, payload map[string]string) (wrote bool, err error) {
-	if payload["kind"] != "pr" || payload["action"] != "closed" || payload["merged"] != "true" {
+	if payload["kind"] != "pr" {
 		return false, nil
 	}
 	repoFull := payload["repo"]
 	number, err := strconv.Atoi(payload["number"])
 	if err != nil {
-		return false, fmt.Errorf("merged-PR envelope: malformed number %q: %w", payload["number"], err)
+		return false, fmt.Errorf("pull-request envelope: malformed number %q: %w", payload["number"], err)
+	}
+	if err := in.recordPullRequestHead(ctx, payload, number); err != nil {
+		return false, err
+	}
+	if payload["action"] != "closed" || payload["merged"] != "true" {
+		return false, nil
 	}
 	author := payload["author"]
 
