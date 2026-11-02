@@ -29,8 +29,8 @@ func RepositoryAPI(endpoint string, repository ghrepo.Repository) string {
 }
 
 // Client calls GitHub with an installation token. Its API is either a repository's REST base
-// (RepositoryAPI), which Get, Post, GetPages and GetListPages take paths under, or GitHub's GraphQL
-// route (GraphQLAPI), which GraphQL posts to; an empty endpoint is api.github.com for both.
+// (RepositoryAPI), which Get, Post, Patch, GetPages and GetListPages take paths under, or GitHub's
+// GraphQL route (GraphQLAPI), which GraphQL posts to; an empty endpoint is api.github.com for both.
 type Client struct {
 	Token string
 	API   string
@@ -45,11 +45,22 @@ func (c Client) Get(ctx context.Context, path string, into any) error {
 // Post sends body, as JSON, to path under the client's API, and reads GitHub's answer into into
 // when into is not nil. An answer other than 2xx is an *Answer.
 func (c Client) Post(ctx context.Context, path string, body, into any) error {
+	return c.send(ctx, http.MethodPost, path, body, into)
+}
+
+// Patch is Post with PATCH, as GitHub's ref update takes it.
+func (c Client) Patch(ctx context.Context, path string, body, into any) error {
+	return c.send(ctx, http.MethodPatch, path, body, into)
+}
+
+// send sends body, as JSON, to path under the client's API with method, and reads GitHub's answer
+// into into when into is not nil.
+func (c Client) send(ctx context.Context, method, path string, body, into any) error {
 	encoded, err := json.Marshal(body)
 	if err != nil {
-		return fmt.Errorf("encode POST %s: %w", path, err)
+		return fmt.Errorf("encode %s %s: %w", method, path, err)
 	}
-	_, _, err = c.call(ctx, http.MethodPost, c.API+path, encoded, BudgetCore, into)
+	_, _, err = c.call(ctx, method, c.API+path, encoded, BudgetCore, into)
 	return err
 }
 
@@ -392,4 +403,11 @@ type Answer struct {
 
 func (a *Answer) Error() string {
 	return fmt.Sprintf("GitHub answered %s %s with %d: %s", a.Method, a.Path, a.Status, a.Body)
+}
+
+// NotFound says whether err carries GitHub's 404, the answer it gives a ref, a file or a
+// repository it does not have.
+func NotFound(err error) bool {
+	var answer *Answer
+	return errors.As(err, &answer) && answer.Status == http.StatusNotFound
 }

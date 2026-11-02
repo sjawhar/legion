@@ -47,7 +47,16 @@ func (s *server) putUploadedFile(w http.ResponseWriter, r *http.Request, kind, s
 // authenticated and no shared cache may hold them. A document version is not served here and
 // keeps its headers.
 func (s *server) serveFileVersion(w http.ResponseWriter, r *http.Request, artifactID string, number int, content []byte, contentType, sha *string, size *int64) {
-	s.serveVersionBytes(w, r, artifactID, number, content, sha, size, func(length int64) {
+	s.serveVersionBytes(w, r, artifactID, number, content, sha, size, downloadHeaders(w, contentType, sha))
+}
+
+// downloadHeaders is the download answer's headers, written once with the body's length:
+// serveFileVersion hands it to serveVersionBytes, which calls it after the last refusal and
+// before the first byte, and a HEAD calls it itself on the length of the version's bytes, having
+// read none of them (getArtifactVersion). Both answers carry the same headers, Content-Length
+// included.
+func downloadHeaders(w http.ResponseWriter, contentType, sha *string) func(length int64) {
+	return func(length int64) {
 		w.Header().Set("Content-Type", cmp.Or(deref(contentType), "application/octet-stream"))
 		if sha != nil {
 			w.Header().Set("ETag", *sha)
@@ -57,7 +66,7 @@ func (s *server) serveFileVersion(w http.ResponseWriter, r *http.Request, artifa
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 		w.WriteHeader(http.StatusOK)
-	})
+	}
 }
 
 // pageContentSecurityPolicy is the policy the page route sends with every answer it makes, the

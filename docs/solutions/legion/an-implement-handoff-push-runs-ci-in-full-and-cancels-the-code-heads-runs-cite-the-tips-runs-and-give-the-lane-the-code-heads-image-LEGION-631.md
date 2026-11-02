@@ -9,7 +9,7 @@ tags:
   - worker-image
   - operator-lane
 date: 2026-10-10
-status: active
+status: superseded by sjawhar/legion#2354 — a phase's handoff is a record on its Dispatch issue, and no phase commits or pushes one; see docs/solutions/legion/handoffs-are-dispatch-records-and-the-notes-that-teach-handoff-commits-are-superseded-pr2354.md
 module: .github/workflows
 related_issues:
   - "LEGION-631"

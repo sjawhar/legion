@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The live proof that Dispatch's outbox publishes a person's answer, comment or untargeted message
 # on an issue a session has claimed to that session's own topic, `notifications.agent.<session>`
-# (publishClaimantRoute, packages/envoy/internal/dispatch/outbox/publisher.go). It runs the real
+# (addClaimantRoute, packages/envoy/internal/dispatch/outbox/publisher.go). It runs the real
 # envoy-dispatch binary against a PostgreSQL the caller names, a NATS server of the run's own
 # (internal/testnats/cmd/natsd) and the e2e harness's fake Envoy listener
 # (packages/dispatch/e2e/fake-envoy.ts), drives it over HTTP as three sessions and one person, and
