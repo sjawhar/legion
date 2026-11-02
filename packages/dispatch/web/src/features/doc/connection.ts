@@ -2,6 +2,7 @@ import type { HocuspocusProvider } from "@hocuspocus/provider";
 import {
   DOCUMENT_BUSY_CLOSE_CODE,
   DOCUMENT_NEEDS_REBUILD_CLOSE_REASON,
+  DOCUMENT_REBUILT_CLOSE_REASON,
   DOCUMENT_SCHEMA_CLOSE_CODE,
   DOCUMENT_TOO_LARGE_CLOSE_CODE,
   DOCUMENT_TOO_TANGLED_CLOSE_REASON,
@@ -69,10 +70,17 @@ export function connectionLabel(
  * `DOCUMENT_TOO_LARGE_CLOSE_CODE`, by the close's reason: an edit the server could not merge into
  * the document quickly enough (`DOCUMENT_TOO_TANGLED_CLOSE_REASON`), one the document cannot take
  * until it is rebuilt (`DOCUMENT_NEEDS_REBUILD_CLOSE_REASON`: its edit history has used up what the
- * server lets it scan, or this browser held a history a rebuild replaced), one holding content the
- * document does not take (`DOCUMENT_UPDATE_REFUSED_CLOSE_REASON`), or one that would make the
+ * server lets it scan), one this browser typed against the history someone else's rebuild replaced
+ * (`DOCUMENT_REBUILT_CLOSE_REASON`), one holding content the document does not take
+ * (`DOCUMENT_UPDATE_REFUSED_CLOSE_REASON`), or one that would make the
  * document too large. Every one of them is permanent: the refused edit is dropped and the
  * document re-read, so a reconnect cannot meet the same refusal again.
+ *
+ * The rebuilt document's notice promises no other edit is kept, because none typed against the
+ * replaced history is: the restore drops each of those rows and reports when they were saved
+ * (`pending-sync.ts`, `addsParking`). `RefusedEditNotice` offers a rebuild only for
+ * `DOCUMENT_NEEDS_REBUILD_CLOSE_REASON`, the one a rebuild helps; a rebuild of a document just
+ * rebuilt is answered 409.
  */
 export function refusedEditNotice(reason: string): string {
   switch (reason) {
@@ -80,6 +88,8 @@ export function refusedEditNotice(reason: string): string {
       return "Your last edit was not saved: Dispatch could not merge it into this document quickly enough. Your other edits are kept.";
     case DOCUMENT_NEEDS_REBUILD_CLOSE_REASON:
       return "This document has been edited so much that it must be rebuilt before it can take this edit. Your other edits are kept.";
+    case DOCUMENT_REBUILT_CLOSE_REASON:
+      return "Someone else rebuilt this document, so the edits you had not sent could not be kept. Dispatch has reloaded the rebuilt document.";
     case DOCUMENT_UPDATE_REFUSED_CLOSE_REASON:
       return "Your last edit was not saved: it holds content this document does not take.";
     default:
@@ -105,13 +115,14 @@ export interface ConnectionCallbacks {
    * Fires when the server refused this browser's edit with `DOCUMENT_TOO_LARGE_CLOSE_CODE`, with
    * the close's reason: the edit would take the document past its size bound, the server could
    * not merge it quickly enough (`DOCUMENT_TOO_TANGLED_CLOSE_REASON`), the document must be
-   * rebuilt before it can take it (`DOCUMENT_NEEDS_REBUILD_CLOSE_REASON`), or it holds content
-   * the document does not take (`DOCUMENT_UPDATE_REFUSED_CLOSE_REASON`). The connection has
-   * stopped reconnecting and the refused edit's saved row is gone; the refused text is still in
-   * this connection's document, so the host rebuilds it from a fresh read rather than let a
-   * reconnect send it again.
+   * rebuilt before it can take it (`DOCUMENT_NEEDS_REBUILD_CLOSE_REASON`), the edit was typed
+   * against a history someone else's rebuild replaced (`DOCUMENT_REBUILT_CLOSE_REASON`), or it
+   * holds content the document does not take (`DOCUMENT_UPDATE_REFUSED_CLOSE_REASON`). The
+   * connection has stopped reconnecting and the refused edit's saved row is gone; the refused
+   * text is still in this connection's document, so the host rebuilds it from a fresh read rather
+   * than let a reconnect send it again.
    */
-  onTooLarge(reason: string): void;
+  onEditRefused(reason: string): void;
   /**
    * Fires `true` when the server closed the socket because the memory it keeps for open documents
    * is full (`DOCUMENT_BUSY_CLOSE_CODE`), and `false` once it applies a frame from this browser
@@ -156,7 +167,7 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
     { HocuspocusProvider, HocuspocusProviderWebsocket },
     { Doc },
     { openPendingEdits },
-    { readSyncStatus, startPendingSync },
+    { startPendingSync },
   ] = await importWhenOnline(() =>
     Promise.all([
       import("@hocuspocus/provider"),
@@ -262,9 +273,9 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
         // later attempt finds what it has freed, so the edits it refused wait to go with it. The
         // other two are the server's decision about the document itself, so the provider stops:
         // a document outside the Proof schema the host reads again, and an edit past the
-        // document's size bound, one the server could not merge quickly enough, or one the
-        // document cannot take until it is rebuilt, is dropped before the host rebuilds the
-        // document without it.
+        // document's size bound, one the server could not merge quickly enough, one the document
+        // cannot take until it is rebuilt and one typed against a history someone else's rebuild
+        // replaced, is dropped before the host rebuilds the document without it.
         switch (event.code) {
           case DOCUMENT_SCHEMA_CLOSE_CODE:
             provider.disconnect();
@@ -275,7 +286,7 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
             // has already started a reconnect that this disconnect ends.
             void Promise.resolve(sync?.dropRefused(restored)).then(() => {
               if (!destroyed) {
-                callbacks.onTooLarge(event.reason);
+                callbacks.onEditRefused(event.reason);
               }
             });
             provider.disconnect();
@@ -292,20 +303,14 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
         if (!(event.data instanceof ArrayBuffer)) {
           return;
         }
-        const frame = new Uint8Array(event.data);
-        if (busy) {
-          let applied = false;
-          try {
-            applied = readSyncStatus(frame) === true;
-          } catch {
-            // frameReceived reports a frame that does not parse.
-          }
-          if (applied) {
+        // The pending sync parses the frame, which is the one parse of it: it answers whether the
+        // server applied the frame it acknowledges, and `undefined` for anything else.
+        void Promise.resolve(sync?.frameReceived(new Uint8Array(event.data))).then((applied) => {
+          if (busy && applied === true) {
             busy = false;
             callbacks.onBusy(false);
           }
-        }
-        void sync?.frameReceived(frame);
+        });
       },
       onStatus: ({ status }) => callbacks.onStatus(status === "disconnected" ? "offline" : status),
       // The provider sets `isSynced` before it reports a change: `true` once the socket's

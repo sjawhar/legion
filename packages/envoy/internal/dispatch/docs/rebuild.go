@@ -53,19 +53,31 @@ func historyScans(state []byte) (uint64, bool) {
 // its state (historyScans) scans at least roomScanTotal less honestHandoffScans items. Both tests
 // read the one encode of doc's state below, taken after its parked structs as countRoomStructs
 // takes them, so neither pays an encode of its own and both answer for the same state.
-func nearACap(doc *crdt.Doc) (why string, near bool) {
+//
+// The scan test decodes that state afresh, a full-state decode like any other, so the check holds
+// a grant of the copy-heap bound weighed by the state it decodes (holdCopy), taken once the state
+// is encoded and given back when the check answers: its own where ctx carries none, as the check
+// of a live room makes it, whose own copies the room budget charges (RebuildDocument), and the
+// caller's where ctx carries one sized for this decode beside the caller's own (rebuildSource). A
+// wait ctx ends is its error, and no answer.
+func nearACap(ctx context.Context, doc *crdt.Doc) (why string, near bool, err error) {
 	pending := doc.PendingStats()
 	state := crdt.EncodeStateAsUpdateV1(doc, nil)
-	tally, err := walkUpdate(state, fromRoom, nil)
-	if structs := structTotalOf(tally, err, pending); structs+smallestReplacementAdds > maxUpdateItems {
+	release, err := holdCopy(ctx, len(state))
+	if err != nil {
+		return "", false, err
+	}
+	defer release()
+	tally, refused := walkUpdate(state, fromRoom, nil)
+	if structs := structTotalOf(tally, refused, pending); structs+smallestReplacementAdds > maxUpdateItems {
 		return fmt.Sprintf("the document's live state holds %d structs, and a write's smallest replacement, %d more, would carry it past the %d ygo decodes in one update",
-			structs, smallestReplacementAdds, maxUpdateItems), true
+			structs, smallestReplacementAdds, maxUpdateItems), true, nil
 	}
 	if scans, counted := historyScans(state); counted && scans+honestHandoffScans >= roomScanTotal {
 		return fmt.Sprintf("a re-scan of the document's live state scans %d items, within %d of the %d a room's history may scan",
-			scans, honestHandoffScans, roomScanTotal), true
+			scans, honestHandoffScans, roomScanTotal), true, nil
 	}
-	return "", false
+	return "", false, nil
 }
 
 // RebuildDocument replaces a history no write can change with one fresh update, inside the
@@ -119,7 +131,7 @@ func nearACap(doc *crdt.Doc) (why string, near bool) {
 // holds the old history, and when it reconnects, the room holding none of it, its whole-state
 // message hands all of it back: applied, the old document would sit beside the rebuilt one, every
 // block twice, and the old history's structs would carry the room back toward the cap. Refused
-// with DocumentTooLargeCloseCode and DocumentNeedsRebuildCloseReason, the editor drops what it
+// with DocumentTooLargeCloseCode and DocumentRebuiltCloseReason, the editor drops what it
 // sent and builds its document afresh from the rebuilt room, and drops its saved rows typed
 // against the old history as rows of a rebuilt document (pending-sync.ts, addsParking). Before this
 // list a rebuild of a history that cannot load had no such guard: the hook took the old history
@@ -157,7 +169,14 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	// (ErrRoomBehindHead): its settlement closes the room (reloadRoomBehindHead), and its
 	// browser's append fails it outright, and either way the reload reads the rebuilt document.
 	if live := s.srv.GetDoc(artifactID); live != nil {
-		if _, near := nearACap(live); !near {
+		// The check decodes the room's whole state, so it waits for its grant of the copy-heap
+		// bound within this request (nearACap): a wait this request ends leaves the rebuild to
+		// the caller's retry, as a close the server could not make does below.
+		_, near, err := nearACap(ctx, live)
+		if err != nil {
+			return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: weigh document %s before its rebuild: %v", ErrServiceUnavailable, artifactID, err)
+		}
+		if !near {
 			return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is live in this server; close its editors and retry two minutes later, or replace it from markdown instead", ErrDocumentLive, artifactID)
 		}
 		// The loads its browsers make as they reconnect are refused until this transaction
@@ -314,12 +333,14 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 // decode's refusal - and the clients it retires. A history that loads and stands near no cap is
 // ErrDocumentLoads. The read's fold, its decode and the check's re-scan of it run under one grant
 // of the copy-heap bound, whose wait ends with ctx, given back once the history is the rebuild's.
+// The grant is weighed for two decodes of the history's bytes, since the check decodes the state
+// again while this decode's document is kept, and the two are alive at once.
 func (s *Service) rebuildSource(ctx context.Context, artifactID string) (*crdt.Doc, string, map[crdt.ClientID]uint64, error) {
 	ctx, grant, done := withCopyGrant(ctx)
 	defer done()
 	loaded, err := s.persistence.Load(ctx, artifactID)
 	if err == nil {
-		err = grant.cover(ctx, len(loaded.Update))
+		err = grant.cover(ctx, 2*len(loaded.Update))
 	}
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("%w: load document before rebuild: %v", ErrServiceUnavailable, err)
@@ -328,7 +349,10 @@ func (s *Service) rebuildSource(ctx context.Context, artifactID string) (*crdt.D
 	if validationErr != nil {
 		return nil, validationErr.Error(), undecodableHistoryClients(loaded.Update), nil
 	}
-	why, near := nearACap(history)
+	why, near, err := nearACap(ctx, history)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("%w: weigh document %s before its rebuild: %v", ErrServiceUnavailable, artifactID, err)
+	}
 	if !near {
 		return nil, "", nil, fmt.Errorf("%w: document %s", ErrDocumentLoads, artifactID)
 	}

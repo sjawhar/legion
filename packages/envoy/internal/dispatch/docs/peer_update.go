@@ -370,10 +370,12 @@ const peerWriteQueueBytes = 60 << 20
 // (walkedGroup gives why no other browser sends one, whatever the walk reads of it): applied, its
 // whole-state message would put the old document beside the rebuilt one, every block twice, and
 // carry the room back toward the cap the rebuild trimmed. It is refused before any other rule, the
-// walk's refusal included, with DocumentTooLargeCloseCode and DocumentNeedsRebuildCloseReason, so
-// the editor drops what it sent and builds its document afresh from the rebuilt room, and drops its
-// saved rows typed against the old history as rows of a rebuilt document (pending-sync.ts,
-// addsParking). An update that adds an entry to the retired clients' list, overwrites one or
+// walk's refusal included, with DocumentTooLargeCloseCode and DocumentRebuiltCloseReason, a reason
+// of its own rather than the one a used-up scan total is refused with: the document was just
+// rebuilt, so no rebuild of it would help, and the editor tells the person it was rebuilt, builds
+// its document afresh from the rebuilt room and drops its saved rows typed against the old history
+// as rows of a rebuilt document (connection.ts refusedEditNotice, pending-sync.ts addsParking).
+// An update that adds an entry to the retired clients' list, overwrites one or
 // deletes one is refused as the editor's never-sent content is: only a rebuild writes the list,
 // and nothing the editor runs writes or deletes an entry of it (update_walk.go's search).
 //
@@ -465,7 +467,7 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 	if weighed.former {
 		slog.Info("dispatch: refused a browser's update carrying the history its document's rebuild replaced",
 			"room", info.Room, "update_bytes", len(info.Update))
-		return documentNeedsRebuild()
+		return documentRebuilt()
 	}
 	if err != nil {
 		return refusedWith(documentUpdateRefused(), err)
@@ -577,12 +579,23 @@ func documentTooTangled() *websocket.PeerClose {
 }
 
 // documentNeedsRebuild is the refusal of an update the document cannot take until it is rebuilt -
-// one carrying the history a rebuild replaced - permanent as documentTooLarge is and under the same
-// code, with a reason of its own.
+// one its room's used-up scan total refuses - permanent as documentTooLarge is and under the same
+// code, with a reason of its own: the editor offers the rebuild that would take the edit.
 func documentNeedsRebuild() *websocket.PeerClose {
 	return &websocket.PeerClose{
 		Code:   contracts.DocumentTooLargeCloseCode,
 		Reason: contracts.DocumentNeedsRebuildCloseReason,
+	}
+}
+
+// documentRebuilt is the refusal of an update carrying the history a rebuild of the document
+// replaced (weighPeerUpdate), permanent as documentTooLarge is and under the same code, with a
+// reason of its own: the document has just been rebuilt, so the editor says so and offers no
+// rebuild, where documentNeedsRebuild's does.
+func documentRebuilt() *websocket.PeerClose {
+	return &websocket.PeerClose{
+		Code:   contracts.DocumentTooLargeCloseCode,
+		Reason: contracts.DocumentRebuiltCloseReason,
 	}
 }
 

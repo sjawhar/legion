@@ -3160,11 +3160,19 @@ export const DOCUMENT_TOO_TANGLED_CLOSE_REASON = "DOC_TOO_TANGLED";
 
 /** The reason the document websocket closes with `DOCUMENT_TOO_LARGE_CLOSE_CODE` when the document
  *  must be rebuilt before it can take the update: its edit history has used up what the room lets
- *  its applies scan, or the browser still holds the edit history a rebuild of the document
- *  replaced, so the update is refused whole, with nothing of it stored or relayed. Permanent like
- *  the size refusal: the dashboard drops the refused edit, re-reads the document and offers the
- *  rebuild. Generated into Go as `contracts.DocumentNeedsRebuildCloseReason`. */
+ *  its applies scan, so the update is refused whole, with nothing of it stored or relayed.
+ *  Permanent like the size refusal: the dashboard drops the refused edit, re-reads the document
+ *  and offers the rebuild. Generated into Go as `contracts.DocumentNeedsRebuildCloseReason`. */
 export const DOCUMENT_NEEDS_REBUILD_CLOSE_REASON = "DOC_NEEDS_REBUILD";
+
+/** The reason the document websocket closes with `DOCUMENT_TOO_LARGE_CLOSE_CODE` when the browser
+ *  still holds the edit history a rebuild of the document replaced: its update carries that
+ *  history back, so it is refused whole, with nothing of it stored or relayed, and the rows it
+ *  typed against that history are dropped when the browser reads the rebuilt document. Permanent
+ *  like the size refusal, and no document to rebuild: the document was just rebuilt, so the
+ *  dashboard says so, drops those edits and re-reads the document, and offers no rebuild of its
+ *  own. Generated into Go as `contracts.DocumentRebuiltCloseReason`. */
+export const DOCUMENT_REBUILT_CLOSE_REASON = "DOC_REBUILT";
 
 /** The reason the document websocket closes with `DOCUMENT_TOO_LARGE_CLOSE_CODE` when the update
  *  holds content the document does not take: bytes the server's decoder refuses, or content the

@@ -166,13 +166,13 @@ async function withProvider(
     connection = connect(artifact, {
       onAdmission: (readOnly) => admissions.push(readOnly),
       onBusy: (waiting) => busy.push(waiting),
+      onEditRefused: (reason) => refusals.push(reason),
       onOutsideSchema() {},
       onPending: (state) => pending.push(state),
       onStatus() {},
       onSynced: () => {
         synced = true;
       },
-      onTooLarge: (reason) => refusals.push(reason),
       schemaVersion: 1,
     });
     await body({
@@ -691,6 +691,12 @@ for (const refusal of [
     reason: "DOC_NEEDS_REBUILD",
     notice:
       "This document has been edited so much that it must be rebuilt before it can take this edit. Your other edits are kept.",
+  },
+  {
+    name: "typed against a history a rebuild replaced",
+    reason: "DOC_REBUILT",
+    notice:
+      "Someone else rebuilt this document, so the edits you had not sent could not be kept. Dispatch has reloaded the rebuilt document.",
   },
   {
     name: "holding content the document does not take",

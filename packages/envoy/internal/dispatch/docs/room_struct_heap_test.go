@@ -94,6 +94,13 @@ func measuredAlone(t *testing.T) bool {
 		}
 	}
 	if err != nil {
+		// The kill this deadline makes reaches the caller as "signal: killed", which says nothing
+		// of the deadline: the run's own -timeout, less measurementReportingMargin, ran out while
+		// the measurement was still going.
+		if errors.Is(measuring.Err(), context.DeadlineExceeded) {
+			t.Fatalf("the measurement in a process of its own was killed %s before the test binary's deadline (measurementReportingMargin), with the measurement still running: this looks like a misconfigured run; raise -timeout",
+				measurementReportingMargin)
+		}
 		t.Fatalf("the measurement in a process of its own failed: %v", err)
 	}
 	return false

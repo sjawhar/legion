@@ -1057,15 +1057,18 @@ cannot retain them across a reload.
 The server refuses one browser's edit two ways, and `connection.ts` answers each by its close code
 (`packages/contracts`). `4413` (`DOCUMENT_TOO_LARGE_CLOSE_CODE`) is permanent - the edit would take
 the document past a bound of its own, the server could not merge it quickly enough
-(`DOC_TOO_TANGLED`), or the document must be rebuilt before it can take it
-(`DOC_NEEDS_REBUILD`) - so the provider is stopped, the refused `Update` frame's saved row alone is
+(`DOC_TOO_TANGLED`), the document must be rebuilt before it can take it (`DOC_NEEDS_REBUILD`), or
+the edit was typed against the history someone else's rebuild replaced (`DOC_REBUILT`) - so the
+provider is stopped, the refused `Update` frame's saved row alone is
 dropped (`dropRefused`, after this admission's restore has settled; a refused `SyncStep2` names no
 row, so its rows stay and the replay after the rebuild finds the one the server refuses), and
 `ProofDocument` tears the editor down and admits again from a fresh read, since the refused text is
 still in the connection's document and any reconnect would send it again. The notice the reader
-sees is the close reason's own sentence (`refusedEditNotice`), dismissible, and says the other
-edits are kept; for `DOC_NEEDS_REBUILD` it carries the rebuild offer, a button that confirms first
-and then calls `POST /api/v1/artifacts/{id}/rebuild` with the editor suspended, as the
+sees is the close reason's own sentence (`refusedEditNotice`), shown by `RefusedEditNotice` and
+dismissible; it says the other edits are kept, except for `DOC_REBUILT`, where the rows typed
+against the replaced history are dropped as the restore reads them (`addsParking`) and the notice
+says so. For `DOC_NEEDS_REBUILD` alone the panel carries the rebuild offer, a button that confirms
+first and then calls `POST /api/v1/artifacts/{id}/rebuild` with the editor suspended, as the
 `409 DOCUMENT_UNLOADABLE` repair state does. `4503` (`DOCUMENT_BUSY_CLOSE_CODE`) is transient - the
 memory budget over the documents the server holds open is full - so nothing is dropped and the
 provider's own reconnect stands: the page shows that Dispatch is out of room and keeps trying,

@@ -16,7 +16,8 @@ import (
 // a write's fork from the store (coldFork) or a rebuilt fork of a room (warmFork), the fold of a
 // cold read, a version read or a compaction (fold), the replica's build from a base
 // (renderedReplica.start), the measurer's copy for a server write (structsAfter) and a rebuild's
-// decodes (rebuildSource, RebuildTx) - each hold copyHeapWeight of their encoded state out of
+// decodes (its check of a resident room and of the stored history, nearACap, rebuildSource,
+// RebuildTx) - each hold copyHeapWeight of their encoded state out of
 // copyHeapBound while they decode. What each leaves behind is its owner's: a room's two copies are
 // charged by the room budget, a fork is its write's, a fold's state goes back to its caller. The
 // copy a read of a resident room takes while the room's replica is busy (holdLive,

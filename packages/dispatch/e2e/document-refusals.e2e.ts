@@ -26,7 +26,9 @@ import { asUser } from "./users";
 // (DOCUMENT_TOO_LARGE_CLOSE_CODE, permanent: the edit is dropped), as one it could not merge into
 // the document quickly enough (the same code with DOC_TOO_TANGLED, permanent too: the edit is
 // dropped), as one the document cannot take until it is rebuilt (the same code with
-// DOC_NEEDS_REBUILD: the edit is dropped and the rebuild is offered), as one holding content the
+// DOC_NEEDS_REBUILD: the edit is dropped and the rebuild is offered), as one typed against the
+// history someone else's rebuild replaced (the same code with DOC_REBUILT: the edit is dropped,
+// the document is read again and no rebuild is offered), as one holding content the
 // document does not take (the same code with DOC_UPDATE_REFUSED, permanent: the edit is dropped),
 // or for want of room for open documents (DOCUMENT_BUSY_CLOSE_CODE, transient: the edit waits and
 // saves once room frees).
@@ -34,6 +36,8 @@ import { asUser } from "./users";
 const TOO_LARGE = "Your last edit was not saved: it would make this document larger";
 const NEEDS_REBUILD =
   "This document has been edited so much that it must be rebuilt before it can take this edit. Your other edits are kept.";
+const REBUILT_ELSEWHERE =
+  "Someone else rebuilt this document, so the edits you had not sent could not be kept. Dispatch has reloaded the rebuilt document.";
 const TOO_TANGLED =
   "Your last edit was not saved: Dispatch could not merge it into this document quickly enough. Your other edits are kept.";
 const UPDATE_REFUSED =
@@ -424,6 +428,67 @@ test("a used-up document refuses a larger merge as needing a rebuild, and saves 
     await expect.poll(() => pendingEditCount(page, artifactId)).toBe(0);
     // One refusal: the editor closed its connection before the rebuild, so it handed the replaced
     // history to no rebuilt room.
+    expect((await sockets()).closes.filter((code) => code === 4413)).toHaveLength(1);
+  } finally {
+    await alice.close();
+    await bob.close();
+  }
+});
+
+test("a browser holding the history someone else's rebuild replaced is told the document was rebuilt, and offered no rebuild", async ({
+  browser,
+}) => {
+  test.setTimeout(120_000);
+  await createProject({ key: "REPLACED", name: "Replaced histories" });
+  const issue = await createIssue({
+    project: "REPLACED",
+    spec: `${MEETING_POINT}\n\nThe tangle follows.\n`,
+    title: "Read a document someone else rebuilt",
+  });
+  const artifactId = issue.primary_artifact_id;
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+  try {
+    const page = await alice.newPage();
+    const transport = await documentTransport(page);
+    const sockets = await recordDocumentSockets(page);
+    // The same hook the row above uses: the document's stored history is used up, so Bob's
+    // rebuild of it is taken (docs.nearACap).
+    const usedUp = await postAsPage(page, `/api/v1/artifacts/${artifactId}/_test/used-up`);
+    expect(usedUp.status(), await usedUp.text()).toBe(204);
+    await openSpec(page, issue.key, MEETING_POINT);
+
+    // Alice goes offline and types: her browser holds the history with an edit on top of it, and
+    // its reconnect waits until the rebuild has replaced that history.
+    transport.hold();
+    await transport.sever();
+    await typeAtEnd(page, "typed before the rebuild");
+    await expect.poll(() => pendingEditCount(page, artifactId)).toBeGreaterThan(0);
+
+    const bobPage = await bob.newPage();
+    const rebuilt = await postAsPage(bobPage, `/api/v1/artifacts/${artifactId}/rebuild`, {});
+    expect(rebuilt.status(), await rebuilt.text()).toBe(200);
+
+    // Alice's socket reconnects and hands the replaced history back, which the rebuilt room
+    // refuses: she is told the document was rebuilt, her unsent edit is gone, and no rebuild is
+    // offered, since the route would answer a second rebuild of it 409.
+    await transport.release();
+    await expect(page.getByText(REBUILT_ELSEWHERE)).toBeVisible();
+    await expect(page.getByRole("button", { name: "Rebuild this document" })).toHaveCount(0);
+    await expect(connectedDot(page)).toHaveText("connected");
+    await expect(documentEditor(page)).toContainText(MEETING_POINT);
+    await expect(documentEditor(page)).not.toContainText("typed before the rebuild");
+    await expect.poll(() => pendingEditCount(page, artifactId)).toBe(0);
+    expect((await getArtifactText(artifactId)).markdown).not.toContain("typed before the rebuild");
+
+    // The reloaded document takes her next edit.
+    await typeAtEnd(page, "typed after the rebuild");
+    await expect
+      .poll(async () => (await getArtifactText(artifactId)).markdown)
+      .toContain("typed after the rebuild");
+    await expect.poll(() => pendingEditCount(page, artifactId)).toBe(0);
+    // One refusal, and no reconnect that met it again: the editor read the rebuilt document
+    // rather than hand the replaced history back once more.
     expect((await sockets()).closes.filter((code) => code === 4413)).toHaveLength(1);
   } finally {
     await alice.close();

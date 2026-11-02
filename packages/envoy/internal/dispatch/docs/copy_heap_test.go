@@ -16,6 +16,7 @@ import (
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/provider/websocket"
 
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -256,12 +257,16 @@ func measureCopyPaths(t *testing.T, state []byte, atCap bool) {
 		{"the measurer's copy for a server write", func() { fresh(); live = resident() }, liveState, func() any {
 			return service.measurer.structsAfter(live, serverWrite{apply: func(*crdt.Doc) {}})
 		}},
+		// The rebuild is granted twice this state's weight for the two decodes it holds at once
+		// (rebuildSource); the row holds them to one state's weight, the stricter figure.
 		{"a rebuild's decode and re-scan of the history", func() {}, stored, func() any {
 			history, err := decodeHistory(state)
 			if err != nil {
 				t.Fatal(err)
 			}
-			nearACap(history)
+			if _, _, err := nearACap(ctx, history); err != nil {
+				t.Fatal(err)
+			}
 			return history
 		}},
 		{"the server's load of a history it folds first", appended, history, load},
@@ -670,4 +675,74 @@ func TestAnAdmissionWhoseRequestEndsWhileItWaitsForTheCopyBoundAnswersItsErrorAn
 		t.Fatal("part of the bound is still held once both admissions have answered")
 	}
 	heaps.semaphore().Release(heaps.limit())
+}
+
+// A rebuild's check of a resident room decodes the room's whole state before the rebuild decides
+// anything (nearACap), so that decode holds a grant of the copy-heap bound like every other
+// full-state decode: with the bound smaller than the decode's weight and a byte of it held, the
+// rebuild waits for the whole bound rather than decoding beside the holder; once that byte is
+// given back it runs alone and answers that the document is live and far from both caps
+// (ErrDocumentLive), holding nothing of the bound after it.
+func TestARebuildOfAResidentDocumentTakesTheCopyBoundBeforeItWeighsIt(t *testing.T) {
+	ctx := context.Background()
+	service, artifactID := newTestService(t)
+	// No settlement or measurement of the room takes a grant of its own while the rebuild waits.
+	service.settle = time.Hour
+	service.measurer.interval = time.Hour
+	storeHistory(t, service, artifactID, proseState(t, 16<<10))
+	if err := loadRoomOf(service, artifactID); err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+	decode := copyHeapWeight(len(crdt.EncodeStateAsUpdateV1(roomDocument(t, service, artifactID), nil)))
+	heaps := useCopyHeaps(t, &copyHeaps{size: decode / 2})
+	if !heaps.semaphore().TryAcquire(1) {
+		t.Fatal("the empty bound refused a byte")
+	}
+	waited := make(chan int64, 1)
+	var waitOnce sync.Once
+	heaps.waiting = func(weight int64) { waitOnce.Do(func() { waited <- weight }) }
+	var grants heldGrants
+	heaps.granted = grants.record
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin rebuild: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	answered := make(chan error, 1)
+	go func() {
+		_, _, err := service.RebuildDocument(joined, artifactID, nil, model.Actor{Kind: "user", ID: "alice"})
+		answered <- err
+	}()
+	select {
+	case weight := <-waited:
+		if weight != heaps.limit() {
+			t.Errorf("the rebuild's check waits for %d bytes, want the whole %d-byte bound", weight, heaps.limit())
+		}
+	case err := <-answered:
+		t.Fatalf("the rebuild answered %v while a byte of the bound was held: its check decoded the resident room's state outside the bound", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("the rebuild's check neither waited for the bound nor answered in 30 s")
+	}
+	select {
+	case err := <-answered:
+		t.Fatalf("the rebuild answered %v while a byte of the bound was held", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	heaps.semaphore().Release(1)
+	select {
+	case err := <-answered:
+		if !errors.Is(err, ErrDocumentLive) {
+			t.Fatalf("the rebuild of a resident document far from both caps answered %v, want ErrDocumentLive", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the rebuild did not answer in 30 s once the bound was empty")
+	}
+	if got := grants.all(); len(got) != 1 || got[0] != heaps.limit() {
+		t.Fatalf("the rebuild's check was granted %v, want the whole %d-byte bound once", got, heaps.limit())
+	}
+	if held := heaps.held.Load(); held != 0 {
+		t.Fatalf("the refused rebuild still holds %d bytes of the bound", held)
+	}
 }

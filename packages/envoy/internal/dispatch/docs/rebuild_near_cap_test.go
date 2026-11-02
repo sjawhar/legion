@@ -328,7 +328,7 @@ func TestAnUpdateThatOverwritesOrDeletesARetiredEntryIsRefused(t *testing.T) {
 // A document at the decode cap is one people are typing into when they are refused, so its room
 // is resident when someone rebuilds it. The rebuild closes the room rather than refusing it: the
 // connected browser's socket ends; when it reconnects still holding the replaced history it is
-// closed with the document's own close and DOC_NEEDS_REBUILD; and the editor's fresh read of the
+// closed with the document's own close and DOC_REBUILT; and the editor's fresh read of the
 // document, as its 4413 path makes, reads the rebuilt text and saves a new edit. A document far
 // from both caps with a resident room is still refused, DOCUMENT_LIVE
 // (TestRebuildDocumentRefusesALiveRoom).
@@ -367,8 +367,8 @@ func TestARebuildNearACapClosesTheResidentRoomAndItsEditorsReAdmitTheRebuiltDocu
 	case <-time.After(time.Minute):
 		t.Fatal("the room never answered the browser holding the replaced history")
 	}
-	if closed := reconnected.Closed(); closed == nil || closed.Code != contracts.DocumentTooLargeCloseCode || closed.Text != contracts.DocumentNeedsRebuildCloseReason {
-		t.Fatalf("the room ended the reconnecting browser with %v, want %d %s", closed, contracts.DocumentTooLargeCloseCode, contracts.DocumentNeedsRebuildCloseReason)
+	if closed := reconnected.Closed(); closed == nil || closed.Code != contracts.DocumentTooLargeCloseCode || closed.Text != contracts.DocumentRebuiltCloseReason {
+		t.Fatalf("the room ended the reconnecting browser with %v, want %d %s", closed, contracts.DocumentTooLargeCloseCode, contracts.DocumentRebuiltCloseReason)
 	}
 
 	readmitted := connectPeer(t, server.URL, artifactID, "alice")
@@ -498,8 +498,8 @@ func TestRebuildingADocumentNearTheScanTotalLeavesItWithASmallScanTotalAndReadin
 // A browser that held a document before its rebuild still holds the history the rebuild replaced,
 // and the edits it made while disconnected. When it reconnects, the rebuilt room holds none of
 // that history, so the browser's answer to the room's sync hands all of it back with its unsent
-// edit: the room refuses it with the document's own close and the reason that the document needed
-// rebuilding (DOC_NEEDS_REBUILD), on which the editor drops what it sent and builds its document
+// edit: the room refuses it with the document's own close and the reason that the document was
+// rebuilt (DOC_REBUILT), on which the editor drops what it sent and builds its document
 // afresh from the room, and drops its saved rows typed against the old
 // history as rows of a rebuilt document. The room's struct total stays small, the document reads
 // the rebuilt text with no block twice and without the unsent edit, and a browser of the rebuilt
@@ -543,8 +543,8 @@ func TestABrowserHoldingTheHistoryARebuildReplacedCannotHandItBack(t *testing.T)
 	case <-time.After(time.Minute):
 		t.Fatal("the room never answered the browser holding the replaced history")
 	}
-	if closed := reconnected.Closed(); closed == nil || closed.Code != contracts.DocumentTooLargeCloseCode || closed.Text != contracts.DocumentNeedsRebuildCloseReason {
-		t.Fatalf("the room ended the browser holding the replaced history with %v, want %d %s", closed, contracts.DocumentTooLargeCloseCode, contracts.DocumentNeedsRebuildCloseReason)
+	if closed := reconnected.Closed(); closed == nil || closed.Code != contracts.DocumentTooLargeCloseCode || closed.Text != contracts.DocumentRebuiltCloseReason {
+		t.Fatalf("the room ended the browser holding the replaced history with %v, want %d %s", closed, contracts.DocumentTooLargeCloseCode, contracts.DocumentRebuiltCloseReason)
 	}
 	live := service.srv.GetDoc(artifactID)
 	if live == nil {
@@ -659,7 +659,7 @@ func oneClientAtCapState(t *testing.T) []byte {
 // than a *websocket.PeerClose, and ygo closes a peer whose update the hook refused only for a
 // PeerClose (sjawhar/ygo v1.51.3-sami.7, provider/websocket/peer.go:254-260, over the
 // Hocuspocus framing service.go:659 sets). The room closes it with the document's own close and
-// DOC_NEEDS_REBUILD; it reconnects from a fresh read of the rebuilt document, as the editor's
+// DOC_REBUILT; it reconnects from a fresh read of the rebuilt document, as the editor's
 // 4413 path does, not with its old state; and a new edit from it is applied and stored.
 func TestABrowserHoldingAHistoryARebuildReplacedIsClosedThoughTheWalkRefusesItBeforeReadingAnyOfIt(t *testing.T) {
 	const browserClient crdt.ClientID = 1
@@ -734,8 +734,8 @@ func TestABrowserHoldingAHistoryARebuildReplacedIsClosedThoughTheWalkRefusesItBe
 	case <-time.After(time.Minute):
 		t.Fatal("the room left the browser holding the replaced history connected")
 	}
-	if closed := reconnected.Closed(); closed == nil || closed.Code != contracts.DocumentTooLargeCloseCode || closed.Text != contracts.DocumentNeedsRebuildCloseReason {
-		t.Fatalf("the room ended the browser holding the replaced history with %v, want %d %s", closed, contracts.DocumentTooLargeCloseCode, contracts.DocumentNeedsRebuildCloseReason)
+	if closed := reconnected.Closed(); closed == nil || closed.Code != contracts.DocumentTooLargeCloseCode || closed.Text != contracts.DocumentRebuiltCloseReason {
+		t.Fatalf("the room ended the browser holding the replaced history with %v, want %d %s", closed, contracts.DocumentTooLargeCloseCode, contracts.DocumentRebuiltCloseReason)
 	}
 
 	fresh := docstest.Dial(t, url, alice, artifactID, crdt.New())
@@ -943,14 +943,14 @@ func TestAGroupOfARetiredClientBelowItsClockIsClosedWhereverTheWalkRefuses(t *te
 	} {
 		err, called := weighInto(service, room, row.update)
 		var refusal *websocket.PeerClose
-		rebuildClose := errors.As(err, &refusal) && refusal.Code == contracts.DocumentTooLargeCloseCode &&
-			refusal.Reason == contracts.DocumentNeedsRebuildCloseReason
+		rebuiltClose := errors.As(err, &refusal) && refusal.Code == contracts.DocumentTooLargeCloseCode &&
+			refusal.Reason == contracts.DocumentRebuiltCloseReason
 		switch {
-		case row.closed && (!rebuildClose || called):
-			t.Errorf("%s was answered %v (applied %t), want it closed for a rebuild and never applied", row.name, err, called)
+		case row.closed && (!rebuiltClose || called):
+			t.Errorf("%s was answered %v (applied %t), want it closed as holding a replaced history and never applied", row.name, err, called)
 		case !row.closed && row.refused == nil && (err != nil || !called):
 			t.Errorf("%s was answered %v (applied %t), want it applied", row.name, err, called)
-		case !row.closed && row.refused != nil && (!errors.Is(err, row.refused) || rebuildClose || called):
+		case !row.closed && row.refused != nil && (!errors.Is(err, row.refused) || rebuiltClose || called):
 			t.Errorf("%s was answered %v (applied %t), want %v and never applied", row.name, err, called, row.refused)
 		}
 	}

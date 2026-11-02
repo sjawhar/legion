@@ -56,17 +56,15 @@ type settlementReconciliation struct {
 
 // askRepair is one server-owned attribute repair settlement made to the ask block carrying blockID
 // in the tree it read, which set makes again on that block in the live document (repairLive).
-// attributes is how many of the block's attributes set can write, or unboundedRepair for a repair
-// that rewrites the block's content (decidedWording), which no count of attributes bounds
-// (settlementReconciliation.addedStructs).
+// attributes is how many of the block's attributes set can write; bounded is false for a repair
+// that rewrites the block's content (decidedWording), which no count of attributes bounds, as
+// serverWrite.bounded says the same of a server write (settlementReconciliation.addedStructs).
 type askRepair struct {
 	blockID    string
 	set        func(*pmdoc.Node) bool
 	attributes int
+	bounded    bool
 }
-
-// unboundedRepair is askRepair.attributes for a repair whose writes no count of attributes bounds.
-const unboundedRepair = -1
 
 // copiedBlock is one block settlement wrote a copy's attributes into: its id and its source.
 type copiedBlock struct {
@@ -95,7 +93,7 @@ func (r *settlementReconciliation) repair(node *pmdoc.Node, blockID string, set 
 	if !set(node) {
 		return false
 	}
-	r.repairs = append(r.repairs, askRepair{blockID: blockID, set: set, attributes: attributes})
+	r.repairs = append(r.repairs, askRepair{blockID: blockID, set: set, attributes: attributes, bounded: true})
 	return true
 }
 
@@ -111,7 +109,7 @@ func (r *settlementReconciliation) repairAsk(node *pmdoc.Node, blockID string, a
 		return false
 	}
 	rewrite := serverRewrite{node: node, ask: ask, copied: copied, found: found, answer: wroteAnswer, repair: len(r.repairs), event: -1}
-	r.repairs = append(r.repairs, askRepair{blockID: blockID, set: askServerAttributes(ask, copied, false), attributes: len(askServerAttributeNames)})
+	r.repairs = append(r.repairs, askRepair{blockID: blockID, set: askServerAttributes(ask, copied, false), attributes: len(askServerAttributeNames), bounded: true})
 	if event != nil {
 		rewrite.event = len(r.events)
 		r.events = append(r.events, *event)
@@ -178,7 +176,7 @@ func (r *settlementReconciliation) writeLive(doc *crdt.Doc, origin any) (bool, e
 func (r *settlementReconciliation) addedStructs() (uint64, bool) {
 	var adds uint64
 	for _, repair := range r.repairs {
-		if repair.attributes == unboundedRepair {
+		if !repair.bounded {
 			return 0, false
 		}
 		adds += uint64(repair.attributes)
@@ -395,7 +393,7 @@ func (s *Service) reconcileAskBlocks(
 				slog.Error("dispatch: cannot write a decided ask's wording back into its block",
 					"ask", ask.ID, "artifact", artifactID, "block", block.id, "error", err)
 			case changed:
-				reconciled.repairs = append(reconciled.repairs, askRepair{blockID: block.id, set: decidedWording(ask), attributes: unboundedRepair})
+				reconciled.repairs = append(reconciled.repairs, askRepair{blockID: block.id, set: decidedWording(ask)})
 				reworded = true
 				slog.Info("dispatch: wrote a decided ask's wording back into its block",
 					"ask", ask.ID, "artifact", artifactID, "block", block.id, "state", ask.State)

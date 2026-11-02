@@ -2554,7 +2554,7 @@ Each item below names a path with its method and identity, then its purpose.
   Rebuild a document whose durable history no write can change, the recovery from either cap a document can reach:
   a history that cannot load (`409 DOCUMENT_UNLOADABLE` on its reads), rebuilt from the latest saved version or optional `{markdown}`;
   and a history that loads but stands so near the decode cap (1,048,576 structs, within a write's smallest replacement of it) or the room's edit-scan total that every write is refused, rebuilt from its own text, unsettled edits included, or optional `{markdown}`.
-  It deletes the document's updates, checkpoints, and snapshots, then writes one fresh update that lists the replaced history's clients as retired, so a browser still holding that history is closed `4413` with reason `DOC_NEEDS_REBUILD` rather than handing it back.
+  It deletes the document's updates, checkpoints, and snapshots, then writes one fresh update that lists the replaced history's clients as retired, so a browser still holding that history is closed `4413` with reason `DOC_REBUILT` rather than handing it back.
   A document near a cap whose room this server holds has that room closed first, flushed into the stored history;
   the browsers connected to it reconnect to the rebuilt document and drop their unsent edits.
   A supplied markdown source that changes the document writes the next immutable version, emits `artifact.version`, and moves an open approval request to that version, where it waits on its agent, as every version does;
@@ -2943,8 +2943,13 @@ Each item below names a status and code, then its meaning.
 - `4413 DOC_NEEDS_REBUILD`
 
   The same close for an update the document cannot take until it is rebuilt:
-  the room's scan total is used up, where it still takes an update whose scans pass 64 items or fewer so that typing in place goes on, or the browser still holds the edit history a rebuild of the document replaced, which applied would put the old document beside the rebuilt one.
+  the room's scan total is used up, where it still takes an update whose scans pass 64 items or fewer so that typing in place goes on.
   The dashboard drops the refused edit and offers the rebuild (`POST /api/v1/artifacts/{id}/rebuild`), as it does for `409 DOCUMENT_UNLOADABLE`.
+
+- `4413 DOC_REBUILT`
+
+  The same close for an update carrying the edit history a rebuild of the document replaced, which applied would put the old document beside the rebuilt one.
+  The dashboard drops the refused edit, says the document was rebuilt by someone else and that the edits typed against the replaced history could not be kept, reads the rebuilt document and offers no rebuild: a rebuild of a document just rebuilt is answered `409 DOCUMENT_LOADS`.
 
 - `4413 DOC_UPDATE_REFUSED`
 

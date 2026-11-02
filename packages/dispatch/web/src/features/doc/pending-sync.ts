@@ -23,8 +23,14 @@ export interface PendingSync {
   socketOpened(): void;
   /** Counts a SyncStep2 or Update frame that actually reached the socket. */
   frameWritten(frame: Uint8Array): void;
-  /** Pairs an incoming SyncStatus frame with the next counted sent frame. */
-  frameReceived(frame: Uint8Array): Promise<void>;
+  /**
+   * Pairs an incoming SyncStatus frame with the next counted sent frame, and reports the flag it
+   * read: whether the server applied the frame it acknowledges, and `undefined` for a frame that
+   * is no SyncStatus, one that does not parse and one this sync is destroyed for. It is the one
+   * parse of the frame, so a caller watching for the server to take a frame again reads it here
+   * (`connection.ts`, `onBusy`).
+   */
+  frameReceived(frame: Uint8Array): Promise<boolean | undefined>;
   /**
    * Deletes the saved row of the Update frame this socket's server last answered as not applied,
    * once `restored` - this admission's restore (`synced`) - has settled, so the rows that restore
@@ -673,27 +679,27 @@ export function startPendingSync({
     },
     async frameReceived(frame) {
       if (destroyed) {
-        return;
+        return undefined;
       }
       let applied: boolean | undefined;
       try {
         applied = readSyncStatus(frame);
       } catch (error) {
         console.error("Could not parse a document SyncStatus frame", error);
-        return;
+        return undefined;
       }
       if (applied === undefined) {
-        return;
+        return undefined;
       }
       const entry = sent.shift();
       if (entry === undefined) {
         console.error("The document server acknowledged a frame this browser did not send.");
-        return;
+        return applied;
       }
       if (!applied) {
         refused = entry;
         await Promise.all(recorded.map((record) => record.written));
-        return;
+        return applied;
       }
       try {
         if (entry.kind === "update") {
@@ -704,6 +710,7 @@ export function startPendingSync({
       } catch (error) {
         console.error("Could not clear an acknowledged pending document edit", error);
       }
+      return applied;
     },
     async dropRefused(restored) {
       const entry = refused;

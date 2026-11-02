@@ -396,20 +396,30 @@ func (p *memoryServer) peakResident(t *testing.T, during func()) podPeak {
 	return peak
 }
 
+// heldNowWait is how long heldNow waits for the server to write a trace sample: far past the
+// memoryTraceInterval its ticker runs at, so a loaded pod whose server was kept off the processor
+// through several ticks is not mistaken for a server that stopped tracing.
+const heldNowWait = 5 * time.Second
+
 // heldNow is what the server's trace reads of what the runtime has mapped and not handed back -
-// the figure the Go memory limit bounds - at a sample taken now, with whatever the step before
-// it left standing: it waits out the sample interval so the window it reads holds at least one
-// sample, where a step shorter than one interval leaves peakResident none (tracePeaks). what
-// names the moment in the line it logs.
+// the figure the Go memory limit bounds - at a sample taken since this call, with whatever the
+// step before it left standing: it waits out three sample intervals, as a window shorter than one
+// interval can hold no sample (tracePeaks), and then, where the server's ticker was starved and
+// wrote none, goes on waiting for one up to heldNowWait. what names the moment in the line it
+// logs.
 func heldNow(t *testing.T, server *memoryServer, what string) int64 {
 	t.Helper()
 	from := time.Now()
 	time.Sleep(3 * memoryTraceInterval)
 	peak := server.tracePeaks(t, from, time.Now())
-	if peak.samples == 0 {
-		t.Fatalf("the server's memory trace holds no sample %s, want one taken in the %s since", what, 3*memoryTraceInterval)
+	for deadline := time.Now().Add(heldNowWait); peak.samples == 0; peak = server.tracePeaks(t, from, time.Now()) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the server's memory trace holds no sample %s, want one taken in the %s since", what, time.Since(from).Round(time.Millisecond))
+		}
+		time.Sleep(memoryTraceInterval)
 	}
-	t.Logf("%s the server holds %d bytes of what its %d-byte limit bounds, from %d trace samples", what, peak.held, peak.limit, peak.samples)
+	t.Logf("%s the server holds %d bytes of what its %d-byte limit bounds, from %d trace samples taken in the %s since",
+		what, peak.held, peak.limit, peak.samples, time.Since(from).Round(time.Millisecond))
 	return peak.held
 }
 

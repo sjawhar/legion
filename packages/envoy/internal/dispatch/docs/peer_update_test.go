@@ -974,7 +974,7 @@ func TestEveryRefusalOfTheHookCarriesItsOwnCodeAndReason(t *testing.T) {
 			},
 		},
 		{
-			name: "a browser still holding the history a rebuild replaced", code: contracts.DocumentTooLargeCloseCode, reason: contracts.DocumentNeedsRebuildCloseReason,
+			name: "a browser still holding the history a rebuild replaced", code: contracts.DocumentTooLargeCloseCode, reason: contracts.DocumentRebuiltCloseReason,
 			refusal: func(t *testing.T) (*Service, *crdt.Doc, []byte, any) {
 				service, room, replica := rebuiltRoom(t, ordinary, rebuilt)
 				update := newV1Frame(2).group(1, 1000, 0).gc(1).group(1, 123, 0).gc(5).noDeletes()
