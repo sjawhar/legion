@@ -576,9 +576,12 @@ the room's state lock; then the replica's; then the live document's, for a copy'
 A read of a resident room outside a write (`readLive`, through `holdLive`) only tries the replica's lock (`hold`), and its caller may hold the room's state lock.
 A version's capture, a settlement's read and a live write's fork read instead read the room at an exact commit position (`Service.readPoint`, `docs/flush.go`):
 an author the update observer credits after the capture's bound is numbered past it and stays pending for the next version, and every update through that position is stored before the version (`Ledger.flushThrough`).
+A settlement takes the replica's tree at that position rather than its state encoded (`Service.readTreeQuietly`, `renderedReplica.readTreePoint`), read under the replica's lock with `pmdoc.ReadUnshared`, since only a holder of that lock reads or writes the replica;
+it holds the lock for the walk rather than for an encode, and decodes nothing afterwards, where it used to decode that state into a document of its own to read one tree from it (`stateTree`), which was 9.67 GB of the 90 GB a 39-minute LINUX replay allocated (sjawhar/legion#2535).
+A room whose replica holds no state, or that lists none, has no tree to walk, so its copy is taken from the room itself and still decoded (`stateTree`), as every read of such a room was.
 
 Three acquisitions block on the replica's lock (`lockForUpdate`) and classify each update they drain under it, which takes the room's state lock from inside it (`observeAskBlocksForUpdate`, `creditContentChange`, `queueUpdateClass`), nested the other way around:
-the update observer's own turn (`renderedReplica.observe`), the exact read (`renderedReplica.readPoint`), and the check that the room has committed since a read point (`renderedReplica.drainedSeq`), all in `docs/tree.go`.
+the update observer's own turn (`renderedReplica.observe`), the exact read (`renderedReplica.readPoint`, `renderedReplica.readTreePoint`), and the check that the room has committed since a read point (`renderedReplica.drainedSeq`), all in `docs/tree.go`.
 This stays deadlock-free because of one rule for all three:
 their callers hold no room state lock and run inside no Yjs transaction, and only a Yjs transaction's own function holds a document's lock, taking neither of the others.
 So nothing waits on the state lock while one of them waits for the replica's, and the encode `readPoint` runs under the live document's lock never meets a held state lock.

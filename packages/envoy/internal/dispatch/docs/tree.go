@@ -198,9 +198,11 @@ func treeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
 }
 
 // treeOfUnshared is treeOf for a document nothing else reads or writes while the call runs - a
-// write transaction's fork, read on the request goroutine that holds it (readForkTree, startTree) -
-// which it reads through pmdoc.ReadUnshared, without ygo's ToDelta, and hands back validated once
-// (pmdoc.ValidDocument), so the renders and reads that follow do not validate it again.
+// write transaction's fork, read on the request goroutine that holds it (readForkTree, startTree),
+// and a room's replica, read by a holder of its mu, the only holders of which read or write it
+// (readTreePoint) - which it reads through pmdoc.ReadUnshared, without ygo's ToDelta, and hands
+// back validated once (pmdoc.ValidDocument), so the renders and reads that follow do not validate
+// it again.
 func treeOfUnshared(doc *crdt.Doc) (pmdoc.ValidDocument, error) {
 	if doc == nil {
 		return pmdoc.ValidDocument{}, errDocUnloaded
@@ -731,6 +733,68 @@ func (r *renderedReplica) readPoint(room string, live *crdt.Doc) (state []byte, 
 		settles = settles || took
 	}
 	return crdt.EncodeStateAsUpdateV1(r.doc, nil), r.seq, replicaRead{mark: r.mark(), markdown: r.markdown}, settles
+}
+
+// readTreePoint is readPoint for a caller that wants the room's tree rather than its state
+// encoded: the settlement's read of the room it versions (Service.readTreeQuietly), which took
+// that state only to decode it into a document of its own and read one tree from it. It locks,
+// drains and loops over a replica holding no state exactly as readPoint does, so it stands at the
+// same commit position, classifies the same updates, and returns the same seq and settles.
+//
+// Where the replica holds state the tree is read from r.doc while this read still holds mu,
+// through pmdoc.ReadUnshared. r.doc is unshared under mu: start and recover, the two that replace
+// it, and takeLocked, which applies each committed update to it, run holding mu, and its readers
+// are this read, readPoint, the observer's render (updateChangesMarkdown) and hold, whose caller
+// keeps mu until it releases the replica (holdLive). So no other goroutine reads or writes the
+// document while the walk runs, which is what ReadUnshared's lock-free walk of each text asks
+// for, and the tree it hands back is the caller's own (ownedValue), as pmdoc.Read's is.
+//
+// The trade is the hold: the walk of the whole tree is a longer hold than the encode readPoint
+// takes, and the room's update observer waits for whichever of them runs (lockForUpdate).
+// BenchmarkSettlementTreeRead measures both, the hold on its own and the read whole, on a
+// two-core pod: on its 200 KiB document the walk holds mu for about 54 ms against the encode's
+// 33 ms, while the settlement's whole read falls from about 260 ms, 64 MB and 731,000
+// allocations to about 54 ms, 11 MB and 135,000, since nothing decodes that state into a
+// document of its own any more; on its 51 KiB document the read falls from about 66 ms and
+// 17 MB to about 14 ms and 2.8 MB, with a hold of 13 to 26 ms, run to run, against the encode's
+// 8 ms - two cores make the shorter runs noisy. So the observer waits around half as long again
+// for a read that costs a quarter of what it did and allocates a fifth.
+//
+// A replica holding no state has no tree to walk, so the copy is taken from live as readPoint
+// takes it and handed back to be decoded and read outside mu, which is what the settlement did
+// with it before (stateTree): the same tree by the same route. readTreeOrCopy hands back a tree
+// or an error for every other read, so a read that hands back neither is that copy's.
+func (r *renderedReplica) readTreePoint(room string, live *crdt.Doc) (*pmdoc.Node, uint64, bool, error) {
+	tree, copied, seq, settles, err := r.readTreeOrCopy(room, live)
+	if tree != nil || err != nil {
+		return tree, seq, settles, err
+	}
+	tree, err = stateTree(copied)
+	return tree, seq, settles, err
+}
+
+// readTreeOrCopy is readTreePoint's turn with the replica: readPoint's lock, drain and loop over
+// a replica holding no state, ending either in the tree it read from the replica under mu or, for
+// a replica with no state to read, in the copy taken from live, which its caller decodes once mu
+// is released. The caller must not hold live's document lock.
+func (r *renderedReplica) readTreeOrCopy(room string, live *crdt.Doc) (*pmdoc.Node, []byte, uint64, bool, error) {
+	r.lockForUpdate()
+	defer r.mu.Unlock()
+	settles, _ := r.drainLocked(room)
+	for r.doc == nil {
+		copied := crdt.EncodeStateAsUpdateV1(live, nil)
+		base, updates := r.log.Drain()
+		if base == nil && len(updates) == 0 {
+			return nil, copied, r.seq, settles, nil
+		}
+		took, _ := r.takeLocked(room, base, updates)
+		settles = settles || took
+	}
+	valid, err := treeOfUnshared(r.doc)
+	if err != nil {
+		return nil, nil, r.seq, settles, err
+	}
+	return valid.Node(), nil, r.seq, settles, nil
 }
 
 // replicaRead is what a read of the replica at an exact commit position (readPoint) knows of the

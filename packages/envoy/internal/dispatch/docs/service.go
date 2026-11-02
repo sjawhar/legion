@@ -1204,31 +1204,32 @@ type settlementRead struct {
 }
 
 // readSettlementTree is a read of doc, the room instance a settlement holds, for that settlement:
-// the room at an exact commit position (readPoint), every update of the instance through which the
-// settlement stores before it versions the read (Ledger.flushThrough), so the version holds no update
-// the store lacks at the head it records. It bounds first the in-flight credits that
-// version lists: an update observer credits a change only once the room holds it, so each credit
-// observed before the read is for a change the read holds. afterTake runs between that bound and
-// the read. Holding state.mu across the read would block the update observer that credits and
-// broadcasts every peer's keystroke.
+// the room's tree at an exact commit position (readTreeQuietly), every update of the instance
+// through which the settlement stores before it versions the read (Ledger.flushThrough), so the
+// version holds no update the store lacks at the head it records. The tree is the one the room's
+// replica holds, read under the replica's lock (renderedReplica.readTreePoint) and owned by this
+// read alone, rather than the replica's state encoded and decoded into a document of its own,
+// which is what the settlement did for every read of every room. It bounds first the in-flight
+// credits that version lists: an update observer credits a change only once the room holds it, so
+// each credit observed before the read is for a change the read holds. afterTake runs between
+// that bound and the read. Holding state.mu across the read would block the update observer that
+// credits and broadcasts every peer's keystroke.
 //
 // The updates the read classifies itself, whose observers have not run yet, arm no settlement of
 // their own on the settlement's first read: their changes are in the tree it reconciles and
-// versions, and arming one would end this settlement as superseded (readPointQuietly). A read after
+// versions, and arming one would end this settlement as superseded (readTreeQuietly). A read after
 // the ask blocks were reconciled arms one (followUp), since that reconciliation did not see them.
+// A read that found the updates but could not read the tree arms that settlement all the same,
+// where a read of the state that could not be decoded armed it.
 func (s *Service) readSettlementTree(state *roomState, doc *crdt.Doc, room string, afterTake func(room string), followUp bool) (settlementRead, error) {
 	through := state.creditSeq.Load()
 	if afterTake != nil {
 		afterTake(room)
 	}
-	encoded, point, _, settles, err := s.readPointQuietly(room, doc)
-	if err != nil {
-		return settlementRead{}, err
-	}
+	tree, point, settles, err := s.readTreeQuietly(room, doc)
 	if settles && followUp {
 		s.scheduleSettle(room)
 	}
-	tree, err := stateTree(encoded)
 	if err != nil {
 		return settlementRead{}, err
 	}

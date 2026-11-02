@@ -47,10 +47,10 @@ func (s *Service) readPoint(room string, live *crdt.Doc) ([]byte, roomPoint, rep
 	return state, point, read, err
 }
 
-// readPointQuietly is readPoint for a settlement's own read of the room, which arms no settlement
-// for the updates it classified and reports instead whether any is one a settlement follows: the
-// settlement reading them is the one they would arm, and arming another moves the room's
-// generation under it, which ends it as superseded.
+// readPointQuietly is readPoint without the arming: it reports whether an update it classified is
+// one a settlement follows rather than scheduling one, which is what readPoint does with it. A
+// read that wants the room's tree takes its counterpart, readTreeQuietly, which says why a
+// settlement's own read arms nothing.
 func (s *Service) readPointQuietly(room string, live *crdt.Doc) ([]byte, roomPoint, replicaRead, bool, error) {
 	if live == nil {
 		return nil, roomPoint{}, replicaRead{}, false, errDocUnloaded
@@ -65,7 +65,39 @@ func (s *Service) readPointQuietly(room string, live *crdt.Doc) ([]byte, roomPoi
 	return state, point, read, settles, nil
 }
 
-// stateTree is the tree of state, a room's state as a read point copied it (readPoint).
+// readTreeQuietly is readPointQuietly for a settlement's own read of the room
+// (readSettlementTree), which gives the tree the room's replica holds, read under the replica's
+// lock (renderedReplica.readTreePoint), where a read point gives the room's state encoded, which
+// the settlement decoded into a document of its own only to read that one tree from it. The
+// point, the drain and what it classifies are the read point's.
+//
+// It arms no settlement for the updates it classified and reports instead whether any is one a
+// settlement follows: the settlement reading them is the one they would arm, and arming another
+// moves the room's generation under it, which ends it as superseded. It reports that whether or
+// not the tree could be read, so its caller arms what the drain classified exactly where a caller
+// of readPointQuietly would.
+//
+// A document whose load listed no replica has its state taken under its own lock, as
+// readPointQuietly takes it, and its tree read from that copy (stateTree). The caller holds no
+// state lock and is not inside a Yjs transaction on live.
+func (s *Service) readTreeQuietly(room string, live *crdt.Doc) (*pmdoc.Node, roomPoint, bool, error) {
+	if live == nil {
+		return nil, roomPoint{}, false, errDocUnloaded
+	}
+	point := roomPoint{cursor: s.cursorOf(live)}
+	replica := s.replicaOf(live)
+	if replica == nil {
+		tree, err := stateTree(crdt.EncodeStateAsUpdateV1(live, nil))
+		return tree, point, false, err
+	}
+	tree, seq, settles, err := replica.readTreePoint(room, live)
+	point.seq = seq
+	return tree, point, settles, err
+}
+
+// stateTree is the tree of state, a room's state as a read point copied it (readPoint): a write's
+// read of the room, and a tree read of a room that has no replica to read, or whose replica holds
+// no state (readTreeQuietly, renderedReplica.readTreePoint).
 func stateTree(state []byte) (*pmdoc.Node, error) {
 	doc := newDocumentCopy()
 	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
