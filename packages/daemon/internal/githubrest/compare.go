@@ -6,10 +6,12 @@ import (
 	"net/url"
 )
 
-// ChangedFile is one file GitHub lists in a change, a pull request's or a comparison's.
+// ChangedFile is one file GitHub lists in a change, a pull request's or a comparison's, with what
+// the change did to it (Status: "added", "removed", "modified", "renamed", ...).
 type ChangedFile struct {
 	Filename         string `json:"filename"`
 	PreviousFilename string `json:"previous_filename"`
+	Status           string `json:"status"`
 }
 
 // ChangedPaths is every path files touch: each file's name, and a renamed file's old name too,

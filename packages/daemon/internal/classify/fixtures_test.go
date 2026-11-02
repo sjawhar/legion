@@ -217,15 +217,6 @@ func replayFixture(function string, input json.RawMessage) ([]byte, error) {
 			return nil, err
 		}
 		return canonicalOutcome(EffectiveOutcome(decoded.PR.record(), decoded.Incoming.candidate()))
-	case "classifyPush":
-		var decoded struct {
-			PushPayload
-			Issue string `json:"issue"`
-		}
-		if err := decodeFixture(input, &decoded); err != nil {
-			return nil, err
-		}
-		return canonicalJSON(ClassifyPush(decoded.PushPayload, decoded.Issue))
 	case "reduceDispatchEvent":
 		return replayDispatchDecision(input)
 	case "reduceGithubEvent":
@@ -502,13 +493,6 @@ func timestampJSON(raw json.RawMessage) time.Time {
 func stringValue(values map[string]any, key string) string {
 	value, _ := values[key].(string)
 	return value
-}
-func optionalString(values map[string]any, key string) *string {
-	value, ok := values[key].(string)
-	if !ok {
-		return nil
-	}
-	return &value
 }
 func numberValue(values map[string]any, key string) int {
 	switch value := values[key].(type) {

@@ -642,32 +642,22 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   round.
 - **A review round stuck on an approval of an earlier head.** The architect is told `the reviewer
   approved <sha> on pull request #<n>, which does not approve head <sha>: a push since may have
-  changed code`. The approval counts at a later head only when everything above it changed only
-  the issue's own `.legion/<issue>/`; another issue's `.legion/` counts as code. The daemon
-  learns that from each push's webhook, and its read of the issue, at the daemon's start and
-  after every handoff, also asks GitHub's compare of the approved head with the head: when the
-  head is built on the approved head and only `.legion/<issue>/` changed between them, it applies
-  that push and the round ends, logged at warn as `workflow: only the issue's handoffs changed
-  above the approved head, and no recorded push says so; applying the push GitHub's compare
-  shows`. Any other answer is logged once at info as `workflow: the reviewer's approval stays set
-  aside below the head; …` with its `reason` (a path outside `.legion/<issue>/`; a head not built
-  on the approved one; 300 or no changed files; an approved head GitHub does not know), and the
-  remedy is the reviewer's approval of the head itself, which ends the round once the record
-  reaches that head, whether or not its push webhook ever arrives.
-- **The merger merges nothing.** It merges nothing while the pull request's head still carries the
-  issue's handoffs, `.legion/<issue>/`, which retro's last commit removes: it tells the architect,
-  who moves the issue back to `retro`, and it merges the head retro's push then makes. It merges
-  nothing while the head conflicts with its base either, which GitHub can neither merge nor start
-  pull-request CI for: the daemon sends such a head back to `implementing` on its own. And it
-  enqueues nothing on a merge-queue base whose `squash_merge_commit_message` still joins the
-  branch's commit messages, since the enqueue can carry no message of its own: it tells the
-  architect, and only a person can change that repository setting to `PR_BODY` or `BLANK`. A
-  merge GitHub refuses is the merger's to decide on, quoting GitHub's own answer: wait for what
-  GitHub waits for, merge again at the head it re-reads, send the issue back, or tell the
-  architect what only a person can change. A pull request a person already merged needs nothing:
-  the daemon reads that merge and closes the issue — or, for a root whose tree still runs, once
-  the last other issue of that tree is done or parked. If that merge carried `.legion/<issue>/`
-  onto the base, the architect asks whoever merged for a pull request that deletes it.
+  changed code, so only an APPROVE of <head> or a REQUEST_CHANGES ends the round`. The approval
+  counts for the head it names and no other, since any push may change code, and a push on its way
+  from that head leaves it undecided until the new head arrives. The remedy is the reviewer's
+  approval of the head itself, which ends the round once the record reaches that head and GitHub
+  reports that head one the issue may advance on.
+- **The merger merges nothing.** It merges nothing while the head conflicts with its base, which
+  GitHub can neither merge nor start pull-request CI for: the daemon sends such a head back to
+  `implementing` on its own. And it enqueues nothing on a merge-queue base whose
+  `squash_merge_commit_message` still joins the branch's commit messages, since the enqueue can
+  carry no message of its own: it tells the architect, and only a person can change that
+  repository setting to `PR_BODY` or `BLANK`. A merge GitHub refuses is the merger's to decide
+  on, quoting GitHub's own answer: wait for what GitHub waits for, merge again at the head it
+  re-reads, send the issue back, or tell the architect what only a person can change. A pull
+  request a person already merged needs nothing: the daemon reads that merge and closes the
+  issue — or, for a root whose tree still runs, once the last other issue of that tree is done or
+  parked.
 - **An implementer's completion refused `HANDOFF_NO_PULL_REQUEST`.** The implementer's completion
   of implementing reads GitHub, as the implement App, for the open pull request on the issue's
   branch, `legion/<KEY>`: the issue moves to testing only on an open pull request, or one the
@@ -687,16 +677,17 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   ([An architect is told `pull-request-missing`](#an-architect-is-told-pull-request-missing)).
 - **A worker's completion refused `HANDOFF_STALE_ASSIGNMENT`.** The phase the completing turn was
   working ended under that turn, and the role has since been handed the phase's work again: the
-  issue left the phase and came back, or CI settled red while the tester tested, while the reviewer
-  reviewed a round it had not completed, or while the merger worked toward its `READY`. The daemon
+  issue left the phase and came back, or the head started conflicting with its base while the
+  tester tested, while the reviewer reviewed a round it had not completed, or while the merger
+  worked toward the merge. The daemon
   ends no turn, so the turn reporting the completion is the earlier assignment's and nothing is
   recorded. The refusal names the issue, the role and the phase: the worker ends that turn without
-  completing, and reports that commit and that verdict no further. The phase was entered again, so
+  completing, and reports that work and that verdict no further. The phase was entered again, so
   the task the daemon queued for the assignment it hands the role now — which arrives as the
-  session's next prompt — is work of its own: a testing assignment after a red is for the head the
-  fix pushed, and the verdict on the head before it answers for nothing there. The worker does that
-  task's work, writes a handoff of its own for it, and completes in its turn. When no such task is
-  queued for it, the refusal says so and the worker tells its architect.
+  session's next prompt — is work of its own: a testing assignment after such a move is for the
+  head the fix pushed, and the verdict on the head before it answers for nothing there. The worker
+  does that task's work, writes a handoff of its own for it, and completes in its turn. When no
+  such task is queued for it, the refusal says so and the worker tells its architect.
 
 An issue back in `in_progress` from `retro` or `merging` has a head that conflicts with its base:
 GitHub computes no merge ref for such a head and runs no check on it at all, so the daemon sent

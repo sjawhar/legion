@@ -193,7 +193,7 @@ test("a state from a daemon a release ahead parses without its unknown top-level
   await expect(client.state()).resolves.toEqual(state as never);
   await expect(
     executePhaseOp(
-      { daemon: client, claim, handoffCommit: async () => "a".repeat(40) },
+      { daemon: client, claim, handoffReport: async () => ({ commit: "a".repeat(40) }) },
       { op: "read_record", issue: "LEGION-208" }
     )
   ).resolves.toEqual({ record });
@@ -239,12 +239,19 @@ test("posts every Stage 3 workflow request through its matching route", async ()
       { sessionId: "ses_208", secret: "claim-secret", tree: "LEGION-208", issue: "LEGION-209" },
       "grant.json",
     ],
-    // The completion names the pushed commit carrying the handoff, which the legion tool found
-    // in the pane; the daemon answers an empty object.
+    // An implementing round's completion names the Dispatch handoff record and the pushed tip,
+    // which the legion tool found in the pane; the daemon answers an empty object.
     [
       "handoffComplete",
       "/legion/v1/handoff/complete",
-      { grantId: "grant-208", summary: "done", verdict: "", commit: "abc123" },
+      {
+        grantId: "grant-208",
+        summary: "done",
+        verdict: "",
+        commit: "abc123",
+        handoffId: "5b1f0c2e-9d7a-4c3b-8e61-2f4a9d0c7b13",
+        handoffVersion: 2,
+      },
       "handoff-complete.json",
     ],
     [

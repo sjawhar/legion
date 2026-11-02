@@ -39,7 +39,7 @@ func (w *workflowRuntime) logReadFailure(err error, limited, failed string, attr
 // read time, no boot and nothing of who made the read, so one observation is one fact however
 // many reads, boots, daemons or outbox rows see it, and unapplied finds it applied before any
 // transaction. The per-issue read and the outbox row that make the same read of GitHub share
-// this id, which is what keeps them from applying one observation twice (approvalCarryEvent).
+// this id, which is what keeps them from applying one observation twice.
 func readEventID(kind, project, repo string, number int, observed ...string) string {
 	return fmt.Sprintf("%s:%s:%s#%d:%s", kind, project, repo, number, strings.Join(observed, ":"))
 }

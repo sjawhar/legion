@@ -18,7 +18,7 @@ alter table outbox drop constraint outbox_kind_check;
 alter table outbox add constraint outbox_kind_check check (kind in (
   'dispatch_status', 'dispatch_message', 'notice', 'controller_notice', 'supervise', 'gate_seed',
   'linger_close', 'workspace_remove', 'issue_branch', 'issue_suspend', 'check_compare',
-  'check_look', 'check_bound', 'approval_carry', 'role_message', 'phase_ended'));
+  'check_look', 'check_bound', 'role_message', 'phase_ended'));
 
 -- The notices of that merge, which only its rows wrote: merge-refused, merge-stalled and
 -- merge-removed told an architect why a submission ended without a merge, and merge-waiting that

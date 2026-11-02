@@ -29,7 +29,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   `docs/deployment.md`, "The `runtime.tmux` block").
 
 - **Skills** — guide the architect and sequential phase workers.
-  Durable `.legion/<issue>/<phase>.json` handoffs are the recovery source of truth.
+  Each phase's handoff, a versioned record on its Dispatch issue (`dispatch handoff-write`, `dispatch handoff-read`), is the recovery source of truth.
 
 ## Tech Stack
 
@@ -217,6 +217,16 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   a session the table already holds byte for byte is not copied again, and one it holds with other content is refused and left as it is;
   `scripts/sessions-import-pods.sh` runs the copy in one worker-image pod per tree, finding each tree's volume and root Sandbox by legion-v10.0.0's labels and scheduling the pod as that Sandbox's pods were, and refuses a project on a later release, one with a Sandbox not Suspended, or one with a pod that has not ended (docs/kubernetes.md "Copying file sessions before turning it on")
 
+- `legion handoffs import [--config <legion.yaml>] [--dry-run]`
+
+  the one-time, re-runnable move of the workers' committed handoff files onto their Dispatch issues (sjawhar/legion#2354), from the daemon's own file (project, dispatch_url, dispatch_token_file, the implement App, daemon_url):
+  for every issue the running daemon's `GET /legion/v1/state` holds in a phase other than done, as the implement App, writes each `.legion/<KEY>/{plan,implement,test,review}.json` on `legion/<KEY>` to Dispatch as that phase's handoff record under `legion-daemon:<PROJECT>` when the phase's newest record is absent or is the import's and differs from the file, never above a worker's record, then, once every file is on Dispatch, removes all of `.legion/` in one commit with no trailer, moved there by a non-forced ref update (a branch that moved in between read again and retried, three times at most);
+  one line per issue and phase (`imported v<n>`, `unchanged`, `kept worker record v<n>`, `removed .legion/ at <sha>`, `no branch`, `failed: <why>`), then a count of each;
+  exit 1 on a failure, or on a Dispatch without the handoff routes, which stops the run at its first handoff call naming the route;
+  `--dry-run` reads everything and writes nothing;
+  a second run with nothing changed writes and pushes nothing;
+  run as a one-shot pod of the new release's worker image under the daemon's ServiceAccount with its environment and mounts, before the daemon rolls to the release and again after (docs/kubernetes.md "Moving the handoffs onto their Dispatch issues")
+
 - `legion probe-boot [--config <legion.yaml>]`
 
   runtime: kubernetes only — the part of the daemon's boot its worker pod can refuse, from the file and with no workflow:
@@ -324,11 +334,11 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
 - `LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/claude-backend-tmux.sh`
 
   The Claude Code backend's devbox-only live proof:
-  an implementer `worker_backends` puts on claude registers its transcript, completes its phase through the `legion` MCP tool's handoff_complete with a pushed handoff commit, and resumes the same Claude Code session after its pane is killed;
+  an implementer `worker_backends` puts on claude registers its transcript, completes its phase through the `legion` MCP tool's handoff_complete with its handoff recorded on the Dispatch issue, and resumes the same Claude Code session after its pane is killed;
   LEGION_E2E_MODEL_ROUTE=key-file `LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file>` instead, for a devbox with no Hawk gateway, where that one key file serves the Claude Code pane too;
   with `LEGION_E2E_MODEL_BASE_URL=<gateway base URL>` as well, the key file holds a gateway key and both the Claude Code pane and (under key-file) the Oh My Pi agents call that Anthropic-compatible gateway, so no Anthropic key is needed (scripts/e2e/README.md)
 
-- `LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=<worker image@sha256> LEGION_E2E_STORAGE_CLASS=<StorageClass> LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> LEGION_E2E_CLAUDE_MODEL=<model id> LEGION_E2E_POD_REACHABILITY=aws-private-ip LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> LEGION_E2E_SESSION_DB_PORT=<port> bash scripts/e2e/claude-backend-sandbox.sh`
+- `LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=<worker image@sha256> LEGION_E2E_STORAGE_CLASS=<StorageClass> LEGION_E2E_POD_SERVICE_ACCOUNT=<ServiceAccount the pods run as> LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> LEGION_E2E_CLAUDE_MODEL=<model id> LEGION_E2E_POD_REACHABILITY=aws-private-ip LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> LEGION_E2E_SESSION_DB_PORT=<port> bash scripts/e2e/claude-backend-sandbox.sh`
 
   The same backend's devbox-only live proof under the Kubernetes runtime:
   the implementer runs `legion claude-bridge -- claude -p …` in its issue pod on the Claude Code its generation's start script installed from the worker image's pin (the image carries the pin and no Claude Code), resumes its own transcript in a replacement pod that installs its own copy, and is reminded when a turn ends with its phase open;
@@ -336,14 +346,14 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   — LEGION_E2E_POD_REACHABILITY=bridge LEGION_E2E_MODEL_ROUTE=key-file (no LEGION_E2E_MODEL_GATEWAY_URL/AUDIENCE) proves the same backend against a cluster whose pods cannot reach the devbox at all, and needs docker;
   `LEGION_E2E_MODEL_BASE_URL=<gateway base URL>` with a gateway key in the key file puts the pod's Claude Code and (under key-file) its Oh My Pi roles on that Anthropic-compatible gateway, so no Anthropic key is needed, and `LEGION_E2E_MODEL_PREFLIGHT_BASE_URL=<the same gateway as the devbox reaches it>` serves a gateway the pods reach at a cluster-only address (scripts/e2e/README.md names every required port and input)
 
-- `LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_RUNTIME_IDENTITY_KIND=aws-iam-role LEGION_E2E_PLATFORM=eks LEGION_E2E_POD_REACHABILITY=aws-private-ip LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_IMAGE=<worker image@sha256> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> LEGION_E2E_STORAGE_CLASS=<StorageClass> LEGION_E2E_SESSION_DB_PORT=<port> LEGION_E2E_REPO_SECOND_OWNER=<owner>/<name> LEGION_E2E_PREVIOUS_IMAGE=<worker image of main at contract 37 or 38, before one container@sha256> bash scripts/e2e/stage4a-sandbox-runtime.sh`
+- `LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_RUNTIME_IDENTITY_KIND=aws-iam-role LEGION_E2E_PLATFORM=eks LEGION_E2E_POD_REACHABILITY=aws-private-ip LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_IMAGE=<worker image@sha256> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> LEGION_E2E_STORAGE_CLASS=<StorageClass> LEGION_E2E_POD_SERVICE_ACCOUNT=<ServiceAccount the pods run as> LEGION_E2E_SESSION_DB_PORT=<port> LEGION_E2E_REPO_SECOND_OWNER=<owner>/<name> LEGION_E2E_PREVIOUS_IMAGE=<worker image of main at contract 37 or 38, before one container@sha256> bash scripts/e2e/stage4a-sandbox-runtime.sh`
 
   Stage 4a's live proof, devbox only: the Go Agent Sandbox runtime on the production cluster (namespace legion) through the Legion daemon's restricted identity, on the operator fixture's pod and a providers Secret of its own, every check of the run under `session_store: postgres` against a scratch Postgres the script starts on the devbox's private address at `LEGION_E2E_SESSION_DB_PORT` (a port the Legion nodes can reach), where each claim's session is recorded as `legion sessions import` copies one
   — install check, the image probe with the daemon's own command (and its refusal once the operator's overlay drops a role an agent names), gVisor, every container's reservation with no affinity, the operator's ServiceAccount and token, the pod baseline, the provider key reaching the agent alone, suspend/resume, same-agent refusal (a session the table lacks), kill, relaunch before registration, independent provisioning (two issues of one tree, each Sandbox owning no claim template and each pod on a disk of its own, named for the pod and owned by it), an issue on a second owner's repository reading sjawhar/legion-smoke read-only through its gh and git and refused a push there, the repository cache (the first issue pod's launch makes it and fills its feed from it alone, its Service is the one the controller made, a second pod streams its feed from it and asks GitHub for the delta alone, the cache's tar refuses a request without its token, and an issue whose pod and disk are deleted is provisioned again through it onto a commit of its pushed branch that neither the default branch nor the cache holds), re-adoption with a resume into the replacement pod on a disk of a new uid, the orphan sweep taking the swept issue's pod and the disk that pod owned, a release that ends one role and leaves the pod and its disk, a tree cleanup that takes both, an issue closed with `SuspendIssue` whose Sandbox, pod and disk all go and whose resume brings every one of them back afresh with `LEGION_WORKSPACE_RECREATED=true`, and a namespace left as it was;
   this is the aws-private-ip/gateway shape
   — LEGION_E2E_PLATFORM=gke-autopilot LEGION_E2E_RUNTIME_IDENTITY_KIND=kubernetes-service-account LEGION_E2E_POD_REACHABILITY=bridge LEGION_E2E_MODEL_ROUTE=key-file (no LEGION_E2E_MODEL_GATEWAY_URL/AUDIENCE) proves the same runtime against a cluster whose pods cannot reach the devbox at all (scripts/e2e/README.md)
 
-- `LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=<worker image@sha256> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> LEGION_E2E_DISPATCH_URL=<dispatch> LEGION_E2E_ENVOY_URL=<listener> LEGION_E2E_NATS_URL=nats://<nats>:4222 LEGION_E2E_DISPATCH_TOKEN_FILE=<0600 file> LEGION_E2E_ENVOY_TOKEN_SECRET_ID=<secret id> LEGION_E2E_SESSION_DB_PORT=<port> bash scripts/e2e/stage4b-sandbox-tree.sh`
+- `LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=<worker image@sha256> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> LEGION_E2E_POD_SERVICE_ACCOUNT=<ServiceAccount the pods run as> LEGION_E2E_DISPATCH_URL=<dispatch> LEGION_E2E_ENVOY_URL=<listener> LEGION_E2E_NATS_URL=nats://<nats>:4222 LEGION_E2E_DISPATCH_TOKEN_FILE=<0600 file> LEGION_E2E_ENVOY_TOKEN_SECRET_ID=<secret id> LEGION_E2E_SESSION_DB_PORT=<port> bash scripts/e2e/stage4b-sandbox-tree.sh`
 
   Stage 4b's live proof, devbox only: the Go daemon drives three real issue trees on the Agent Sandbox runtime in the production cluster (namespace legion), against production Dispatch (project LEGSMOKE), Envoy and NATS, with real agents, every pod keeping its Oh My Pi session in a scratch Postgres of the run's own at `LEGION_E2E_SESSION_DB_PORT` (required, no default:
   the lane's third port) — admission under the cap, specs, the daemon bound to every interface with every pod dialing its advertise_host, issue independence (a root and two of its children at once, each pod on a disk of its own with no affinity, none able to read another's workspace) and a done child's release of its Sandbox, its pod and the disk that pod owned, while its parent runs, the repository-configuration fixture, the whole workflow to done with the review pair and a review round no review decides until the architect asks, then a changes-requested round whose approval does not wait for its thread to resolve, and a merge with every thread resolved, a head that starts conflicting with its base mid-test starting the implementer at once while the tester's turn, its background job and its session run on untouched, with the tester told on its own role topic that its phase ended, every worker's phase completion answered in the live session it keeps in its first pod until its issue closes, a finished role answering while another phase runs, token rotation, kill and fence, a daemon restart mid-tree relaunching nothing, a restart with only `envoy_url` respelled relaunching every role in its own issue pod and one with the worker stream and API moved replacing every issue pod, the operator's controller, a worker that dies with its task outstanding, a merge that leaves the root open while two children of its tree still run, told to its architect once and closing the root on the last of their parks, each park taking the child's Sandbox, pod and disk, the close suspending every role and taking each pod with its disk, node release, linger close, a re-admission that comes back on a pod and disk of its own with no lost-volume line anywhere in the daemon's log, every pod's shape and reservation, the pod watch, and an audit that the run wrote nothing outside LEGSMOKE;
@@ -406,9 +416,10 @@ Each item below names a task and where its code is, then notes on it.
 
   The rules a test must follow that the code does not show: unix socket paths in Go tests
 
-- Handoff ledger — `.legion/` on issue branch
+- Handoff records — `packages/envoy/internal/dispatch/api/handoffs.go`
 
-  Committed phase output; retro's last commit removes `.legion/<issue>/` before the merge, so none reaches the default branch
+  Each phase's handoff, a versioned record on its Dispatch issue that the worker writes under its own session;
+  the daemon reads back the one a completion names (`packages/daemon/internal/api/handoff.go`)
 
 - Envoy event routing — `packages/envoy/`
 
@@ -441,7 +452,7 @@ Each item below names a task and where its code is, then notes on it.
 - Shared plugin interface — `packages/pi-shared/`
 
   `@legion/pi-shared`: the versioned in-process interface between the two plugins and the modules both bundle, among them the Legion modules pi-legion and claude-envoy's MCP server share:
-  the daemon client (`src/daemon-client.ts`), the claim boot (`src/legion-claim-core.ts`), the `legion` tool's phase ops (`src/legion-phase-ops.ts`), the handoff-commit lookup, and the endless reminder a phase worker whose turn ends with its phase open gets
+  the daemon client (`src/daemon-client.ts`), the claim boot (`src/legion-claim-core.ts`), the `legion` tool's phase ops (`src/legion-phase-ops.ts`), the handoff-record lookup (`src/handoff-record.ts`), and the endless reminder a phase worker whose turn ends with its phase open gets
   — its machine (`src/phase-stall.ts`), its runner (`src/phase-reminder.ts`) and the four `LEGION_STALL_*` numbers (`src/stall-limits.ts`), one copy for both harnesses.
   See `packages/pi-shared/AGENTS.md`
 
@@ -623,7 +634,6 @@ Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In P
 the tree's architect reads the tester's handoff, the pull request body's two `E2E` lines and the reviewer's approval of the head by SHA, then accepts with the `legion` tool's `sign_off` (→ `retro`;
 refused in every other phase, `SIGNOFF_OUTSIDE_ACCEPTING`;
 nothing beneath the issue holds it, since the tree's order is kept at the close, below) or sends the issue back to `implementing` or `testing` with `request_backward_move`, which counts a review round.
-The reviewer's push carries no `skip-checks: true` line, alone among the handoff-only pushes, because that move waits on GitHub's answer for the approved head and a head GitHub was told to skip has no checks for it to report on (`skills/legion-worker/references/skip-checks-trailer.md`).
 An architect's `handoff_complete` there is refused (`ACCEPTANCE_IS_SIGN_OFF`); CI red there moves nothing, and is the architect's own read before it accepts.
 The architect's `catch-up` at each launch names, in its `reason`, every issue of the tree in `accepting`, since the reviewer's notice that moved it there is dropped while the architect's claim has failed.
 
@@ -825,16 +835,15 @@ A registration of a newer version keeps the gate's approval of an older one, as 
 with `off` the root architect is told so in its system prompt and adds no approval step, a registration approves the gate whatever it held, and no artifact event moves the gate, so an approval does not open a carried copy that was closed before the switch either;
 a changes request is still told to the architect, once, without closing the gate.
 Whether a human must approve a pull request before it merges is the repository's own branch-protection or CODEOWNERS rule: Legion neither reads nor writes it.
-Retro's commits are the only ones that may sit above the reviewer's approved head, those that change `docs/solutions/` and its removal of `.legion/<issue>/`, and no Legion check compares the head that merges with the approved one:
+Retro's commits, those that change `docs/solutions/`, are the only ones that may sit above the reviewer's approved head, and no Legion check compares the head that merges with the approved one:
 a repository that wants a later push reviewed says so in its own rulesets.
 The merger merges the pull request itself, as the implement App and at the head it read, which it names as the head GitHub must match (`gh pr merge <n> --squash --match-head-commit <head>`;
 on a base with a merge queue it enqueues the pull request with GraphQL `enqueuePullRequest` and `expectedHeadOid` instead, since `gh pr merge` there turns auto-merge on while a required check is pending, and it then watches the pull request until GitHub merges it or takes it out of the queue).
 Merging at a named head is how bors and Prow's Tide merge only what they tested.
 The merger never turns auto-merge on, and the daemon submits no merge and changes no merge setting of any pull request.
-A head that still carries `.legion/<issue>/` goes back to retro instead of merging, since retro's last commit is what removes it.
 When a merge fails, the merger decides what to do: wait for what GitHub waits for, try again at the head it re-reads, send the issue back, or tell the architect what only a person can change.
 The repository's required reviews and checks decide when a pull request merges; Legion bypasses none, and a review only a person can give is waited for.
-The merge carries a message the merger writes itself, `--subject '<pull request title> (#<n>)' --body ''`, because GitHub's default squash message (`squash_merge_commit_message` of `COMMIT_MESSAGES`) joins every commit message of the branch and would put the tree's Dispatch keys, its `Omp-Session:` trailers and its `skip-checks: true` lines on the default branch;
+The merge carries a message the merger writes itself, `--subject '<pull request title> (#<n>)' --body ''`, because GitHub's default squash message (`squash_merge_commit_message` of `COMMIT_MESSAGES`) joins every commit message of the branch and would put the tree's Dispatch keys and its `Omp-Session:` trailers on the default branch;
 `enqueuePullRequest` can pass no message, so on a merge-queue base whose setting reads `COMMIT_MESSAGES` the merger enqueues nothing and tells the architect, since only a person can change that setting.
 The merger's completion records its phase row and moves nothing; what closes the issue is the daemon's own reading of the merged pull request.
 A head that starts conflicting with its base (GitHub computes no merge ref for such a head and runs no checks on it at all) sends the issue back to `implementing` from `testing`, `reviewing`, `accepting`, `retro` or `merging` alike, and its architect is told with a `checks-red` notice.
@@ -842,7 +851,7 @@ A red check sends nothing back from anywhere: the daemon names every check GitHu
 GitHub's own merge queue (`merge_group` trigger) is a repository setting Legion does not modify.
 No lifecycle labels exist; GitHub issues are never read or written by Legion.
 
-**Review signaling:** Native GitHub review API, tester status checks, and committed handoffs are the phase-verdict artifacts.
+**Review signaling:** Native GitHub review API, tester status checks, and the handoff records on each Dispatch issue are the phase-verdict artifacts.
 No lifecycle labels carry worker state.
 
 **Testing gate:** Behavioral testing is mandatory after every implementation phase
@@ -851,7 +860,7 @@ No lifecycle labels carry worker state.
 ## Documentation
 
 - Plans: `docs/plans/YYYY-MM-DD-<slug>.md` — human-authored design history, not a Legion artifact.
-  A Legion planner's plan lives in `.legion/<issue>/plan.json` and the issue's `plan.md` document on Dispatch; no Legion role commits a plan or spec file here.
+  A Legion planner's plan lives in its `plan` handoff record and the issue's `plan.md` document on Dispatch; no Legion role commits a plan or spec file here.
 
 - Learnings: `docs/solutions/<category>/<slug>-pr<number>.md`, `<number>` being the pull request's number (`skills/legion-retro/references/learnings.md`)
 

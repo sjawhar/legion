@@ -8,7 +8,6 @@ import (
 	"maps"
 	"math/rand/v2"
 	"os"
-	"reflect"
 	"slices"
 	"testing"
 
@@ -35,12 +34,12 @@ import (
 // against itself: a daemon running ahead of its listener judges as recorded here, so a later
 // change that moves that judgement is seen rather than deployed.
 var noMoveNamedDigests = map[string]string{
-	"run-1":          "95fe2681af7920ce2cc0b6a55a862e8628e2131d1c0d3427a5c19e3c9c2f897d",
-	"run-7":          "b676a8896374d0f0509d9a9368d8fdfd596510e55f20c00a222f5c44ddda42fa",
-	"move-1-random":  "ebecb476bf4a9bfc0c72bac4a0a161168b5dd0f86cee30908fcc96dccf6182e7",
-	"move-1-bounded": "a10d761a320284fbe4ee7452e3e7b6eaf8dbb4adb27e8195eb2244853dedfba8",
-	"move-7-random":  "5ccb7f082039de4bb57d5b7c5837b0b82955fd2209d14a68c189fe54b549c7dd",
-	"move-7-bounded": "19fe08f73426fbd139a4e5b631cbf4d88dce76293f3d103e24d162922825c0b1",
+	"run-1":          "766fbd213a31cf9c05dc3144b1a0c4f5388803fa849b83a6a2c7233fdede0b1d",
+	"run-7":          "ef6c5b97ecbfc20e021c1bc6fe243c6ed18c5af5ae8027643e39eb86bbe17a1f",
+	"move-1-random":  "4335ce7e08f659833a709cda0ceb068f8e7138fba459901fe5d098636c88d4c7",
+	"move-1-bounded": "c7b409783de5e9d58e651d0210051ccca0f39f281d6183a8418785fb432b46f4",
+	"move-7-random":  "20cab3e755524b93e8355dcad36a68492897b186d9262fed851ac207daa35454",
+	"move-7-bounded": "ea6c805dc3e6c01642afed7cc4dcad7dd5fddee3bca1f9f88c79c87740a5c83f",
 }
 
 // The same histories, every arrival naming its before but no sender, judge to these digests, made
@@ -48,12 +47,12 @@ var noMoveNamedDigests = map[string]string{
 // sender either way - and the move fuzz's are not: there the sender is what tells two pushes of
 // the same two heads apart.
 var noSenderNamedDigests = map[string]string{
-	"run-1":          "95fe2681af7920ce2cc0b6a55a862e8628e2131d1c0d3427a5c19e3c9c2f897d",
-	"run-7":          "b676a8896374d0f0509d9a9368d8fdfd596510e55f20c00a222f5c44ddda42fa",
-	"move-1-random":  "ee393d5b499e2f98fa2cb0e0a899adf26d95f8a284154d31bceee50df3fb4cee",
-	"move-1-bounded": "cbb68ad5774c6d7bed3810fe4699b5a17a6cc3ecbf106537203253ba68da75a9",
-	"move-7-random":  "897f374c666b62e9de5c4c0485e1fe2d7ede8a771b5e0fcd8befde6ee9780473",
-	"move-7-bounded": "0d7072b9597aa10822e492dec312c7099f472f71df46f38f4d838020fc8aeff1",
+	"run-1":          "766fbd213a31cf9c05dc3144b1a0c4f5388803fa849b83a6a2c7233fdede0b1d",
+	"run-7":          "ef6c5b97ecbfc20e021c1bc6fe243c6ed18c5af5ae8027643e39eb86bbe17a1f",
+	"move-1-random":  "89200283a3b20a127c13aae45628706f8daf13f666904aa81aeae61eaab52861",
+	"move-1-bounded": "de66fdbccfd11787ee1e1a0a1a2a6e6bf300eaaeaa507ed0ff34d698bee32570",
+	"move-7-random":  "881a012880d0f58147ab10e75a83ed01ae2e94e248011437f65510814fb354f0",
+	"move-7-bounded": "59205c380ed8d18029751ed247a843272057f04f983bebb5374089917e44d1c2",
 }
 
 // A daemon of this release behind a listener that sends a synchronize's before but not its sender
@@ -192,59 +191,6 @@ func TestARunALostPushOpenedClosesAtItsBoundWithNoMoveNamed(t *testing.T) {
 	}
 	if closedAt != maxRunSteps {
 		t.Errorf("the run a lost push opened closed after n%d (0: never), want n%d", closedAt, maxRunSteps)
-	}
-}
-
-// With no move named, a push of two heads already recorded by a push that carries an approval
-// across replaces it, as the release before replaced every earlier push of the same two heads: a
-// handoff push h0..h1, then h0..h1 read as forced (a listener that predates the forced field, or a
-// force push of the same commits), leaves no approval carrier behind, so an approval of h0 does not
-// stand for h1 and h0's red is not carried to it once h1 arrives.
-func TestAPushReplacesAnApprovalCarrierOfItsTwoHeads(t *testing.T) {
-	carrier := record.ClassifiedPush{SHA: "h1", Before: "h0", HandoffOnly: true}
-	forced := record.ClassifiedPush{SHA: "h1", Before: "h0", HandoffOnly: true, Forced: true}
-	pr := delivered(t, redAtH0(), pushed(carrier), pushed(forced))
-	if len(pr.Pushes) != 1 || pr.Pushes[0] != forced {
-		t.Fatalf("pushes %+v, want the forced push alone", pr.Pushes)
-	}
-	pr = delivered(t, pr, arrives("h1"))
-	if ApprovalStands(pr, "h0") || len(pr.Pushes) != 0 {
-		t.Errorf("after h1: an approval of h0 stands %v, pushes %+v, want neither", ApprovalStands(pr, "h0"), pr.Pushes)
-	}
-	again := delivered(t, redAtH0(), pushed(forced), pushed(carrier))
-	if len(again.Pushes) != 1 || again.Pushes[0] != carrier {
-		t.Errorf("the carrier after the forced push: pushes %+v, want the carrier alone", again.Pushes)
-	}
-}
-
-// The daemon rebuilds a lost push from the whole list GitHub's compare gives when it carries an
-// approval across (daemon's carryApproval), and the push webhook of the same two heads can
-// arrive after it with its list cut short, none listed, or none sent: that copy changes nothing.
-// The handoff push h0..h1 the compare rebuilt stays a handoff push, so once h1 has arrived an
-// approval of h0 still stands for it and h0's settlement is still carried to it. The other way
-// round, a rebuilt push whose list was cut is replaced by the webhook's handoff push of the same
-// two heads, as before.
-func TestALatePushWithItsPathsCutShortKeepsTheHandoffPushTheCompareRebuilt(t *testing.T) {
-	rebuilt := record.ClassifiedPush{SHA: "h1", Before: "h0", HandoffOnly: true, Sender: "implementer"}
-	pr := delivered(t, redAtH0(), pushed(rebuilt), arrivesFrom("h0", "h1"))
-	if !ApprovalStands(pr, "h0") || !Settled(pr) {
-		t.Fatalf("after the rebuilt handoff push and h1: an approval of h0 stands %v, h0's settlement carried %v, want both", ApprovalStands(pr, "h0"), Settled(pr))
-	}
-	for _, unknown := range []string{"changed_paths truncated", "no commits listed", ClassifyPush(PushPayload{}, "").Unknown} {
-		late := record.ClassifiedPush{SHA: "h1", Before: "h0", Unknown: unknown, Sender: "implementer"}
-		got := delivered(t, pr, pushed(late))
-		if !reflect.DeepEqual(got, pr) {
-			t.Errorf("the webhook's copy (%s) changed the record:\n got %+v\nwant %+v", unknown, got, pr)
-		}
-		if !ApprovalStands(got, "h0") || !Settled(got) {
-			t.Errorf("after the webhook's copy (%s): an approval of h0 stands %v, h0's settlement carried %v, want both", unknown, ApprovalStands(got, "h0"), Settled(got))
-		}
-	}
-	cut := record.ClassifiedPush{SHA: "h1", Before: "h0", Unknown: "changed_paths truncated", Sender: "implementer"}
-	again := delivered(t, redAtH0(), pushed(cut), arrivesFrom("h0", "h1"), pushed(rebuilt))
-	if len(again.Pushes) != 1 || again.Pushes[0] != rebuilt || !ApprovalStands(again, "h0") || !Settled(again) {
-		t.Errorf("the webhook's handoff push after the cut one: pushes %+v, an approval of h0 stands %v, h0's settlement carried %v, want the handoff push alone and both",
-			again.Pushes, ApprovalStands(again, "h0"), Settled(again))
 	}
 }
 

@@ -25,18 +25,23 @@ func pushOrders(pushes []record.ClassifiedPush) [][]record.ClassifiedPush {
 }
 
 // A push for a later move that arrives before the move's first link waits for its chain, keeping
-// the head run open: the review App's red tests h4..h5 arrive first, then h3 arrives over h2..h3,
-// then h5 past h4, and the handoff h3..h4 last. Only that handoff completes the chain
-// h3..h4..h5, which closes the run at the same moves the pushes arriving first would have made.
+// the head run open: the review App's red tests h4..h5 arrive first, then h3 arrives over the
+// implementer's fix h2..h3, then h5 past h4, and the review App's h3..h4 last. Only that push
+// completes the chain h3..h4..h5, which closes the run at the same moves the pushes arriving
+// first would have made.
 func TestAPushForALaterMoveWaitsForItsChain(t *testing.T) {
 	red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"},
 		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}}
-	first := record.ClassifiedPush{SHA: "h3", Before: "h2", HandoffOnly: true}
-	link := record.ClassifiedPush{SHA: "h4", Before: "h3", HandoffOnly: true}
+	first := record.ClassifiedPush{SHA: "h3", Before: "h2"}
+	link := record.ClassifiedPush{SHA: "h4", Before: "h3", ByReviewApp: true}
 	tests := record.ClassifiedPush{SHA: "h5", Before: "h4", ByReviewApp: true}
-	early := AdvancePullRequestHead(ApplyPush(ApplyPush(ApplyPush(red, first), link), tests), Arrival{}, "h3")
+	settledRed := func(pr record.PullRequest) record.PullRequest {
+		pr.CheckedHead, pr.Failing, pr.CheckRuns = pr.HeadSHA, []string{"ci"}, []record.AttemptRun{{Name: "ci", ID: 2}}
+		return pr
+	}
+	early := settledRed(AdvancePullRequestHead(ApplyPush(ApplyPush(ApplyPush(red, first), link), tests), Arrival{}, "h3"))
 	early = AdvancePullRequestHead(early, Arrival{}, "h5")
-	late := AdvancePullRequestHead(ApplyPush(ApplyPush(red, tests), first), Arrival{}, "h3")
+	late := settledRed(AdvancePullRequestHead(ApplyPush(ApplyPush(red, tests), first), Arrival{}, "h3"))
 	late = AdvancePullRequestHead(late, Arrival{}, "h5")
 	if late.Run == nil {
 		t.Fatal("h5 arrived before its chain with no head run open, want it waiting for the link")
@@ -73,8 +78,7 @@ func TestPushesAreSpentOnceTheirMoveIsJudged(t *testing.T) {
 // Dispatch's redelivery sweep can deliver a push up to three days late, after its head arrived and
 // the branch moved on, under a delivery of its own. The push is the move's the record already
 // judged, and it changes nothing: not the moves made or the settlement that stands, and not the
-// pushes the record keeps, whether it is a push the record spent or one it keeps (a handoff
-// carries an approval for good) and recorded once under its two heads. A push so old that the
+// pushes the record keeps, recorded once under its two heads. A push so old that the
 // record has let its move go (maxMoves) waits for a link no head brings and, with no head run
 // open, judges nothing and is no code on its way.
 func TestALatePushOfAMoveJudgedSinceChangesNothing(t *testing.T) {
@@ -82,16 +86,16 @@ func TestALatePushOfAMoveJudgedSinceChangesNothing(t *testing.T) {
 		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1}
 	code := record.ClassifiedPush{SHA: "h1", Before: "h0"}
 	tests := record.ClassifiedPush{SHA: "h2", Before: "h1", ByReviewApp: true}
-	handoff := record.ClassifiedPush{SHA: "h3", Before: "h2", HandoffOnly: true}
+	again := record.ClassifiedPush{SHA: "h3", Before: "h2", ByReviewApp: true}
 	pr := red
-	for i, p := range []record.ClassifiedPush{code, tests, handoff} {
+	for i, p := range []record.ClassifiedPush{code, tests, again} {
 		pr = stored(t, AdvancePullRequestHead(ApplyPush(pr, p), Arrival{}, p.SHA))
 		pr = stored(t, settles(p.SHA, int64(i+2), "ci").apply(pr))
 	}
 	if pr.Run != nil {
 		t.Fatal("after the three moves a head run is open, want every move judged with its chain and no run")
 	}
-	for _, late := range []record.ClassifiedPush{code, tests, handoff} {
+	for _, late := range []record.ClassifiedPush{code, tests, again} {
 		got := stored(t, ApplyPush(pr, late))
 		if JudgementChanged(pr, got) || got.Run != nil || !slices.Equal(got.Pushes, pr.Pushes) {
 			t.Fatalf("the late push %s..%s changed the record: judgement %+v pushes %+v run open %v; was %+v pushes %+v",
@@ -153,16 +157,13 @@ func TestPushesWaitingForALinkAreBounded(t *testing.T) {
 	}
 }
 
-// The bound counts and lets go only the pushes waiting for a link. A push that carries an approval
-// across stays for the life of the pull request, and a push still on its way forward from the head
-// stays until its move is made, however many waiting pushes arrive behind them.
-func TestTheBoundKeepsApprovalCarriesAndPushesOnTheirWay(t *testing.T) {
+// The bound counts and lets go only the pushes waiting for a link. A push still on its way forward
+// from the head stays until its move is made, however many waiting pushes arrive behind it.
+func TestTheBoundKeepsPushesOnTheirWay(t *testing.T) {
 	kept := []record.ClassifiedPush{
-		{SHA: "r1", Before: "r0", HandoffOnly: true},               // carries an approval of r0 to r1
-		{SHA: "r2", Before: "r1", HandoffOnly: true},               // and on to r2
-		{SHA: "h1", Before: "h0"},                                  // code on its way from the head
-		{SHA: "h2", Before: "h1", HandoffOnly: true},               // a handoff on its way after it
-		{SHA: "h3", Before: "h2", HandoffOnly: true, Forced: true}, // a forced push on its way
+		{SHA: "h1", Before: "h0"},                    // code on its way from the head
+		{SHA: "h2", Before: "h1", ByReviewApp: true}, // the review App's red tests on their way after it
+		{SHA: "h3", Before: "h2"},                    // and a fix after them
 	}
 	pr := record.PullRequest{HeadSHA: "h0"}
 	for _, p := range kept {
@@ -182,7 +183,7 @@ func TestTheBoundKeepsApprovalCarriesAndPushesOnTheirWay(t *testing.T) {
 			t.Fatalf("after %d waiting pushes the pushes let go are %v, want %v", i, got, want)
 		}
 		if got, want := pushKeys(pr.Pushes), append(pushKeys(kept), waiting...); !slices.Equal(got, want) {
-			t.Fatalf("after %d waiting pushes the pushes kept are %v, want %v: every approval carry and push on its way, and the newest %d waiting", i, got, want, maxWaitingPushes)
+			t.Fatalf("after %d waiting pushes the pushes kept are %v, want %v: every push on its way, and the newest %d waiting", i, got, want, maxWaitingPushes)
 		}
 	}
 }

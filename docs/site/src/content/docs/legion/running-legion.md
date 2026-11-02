@@ -129,20 +129,19 @@ applies what the lost event would have carried, as the event would.
   applied as its opened webhook would be, a reopen when the record holds that same pull request:
   the workflow records it in whatever phase the issue is, and moves an implementing issue whose
   implementer completed on to testing.
+- **A close or a merge.** A pull request recorded open that GitHub shows closed has its close
+  applied, or its merge with its merge commit: the merge closes an issue waiting on it in
+  `merging` and otherwise tells the architect `pr-merged`, and a close without merging tells
+  the architect `pr-closed-unmerged`.
 - **A head that moved.** When GitHub shows the pull request open at a head the record does not
   hold, the read applies the synchronize its webhook would have carried, under GitHub's
   `updated_at` as its clock, so the same fence decides it: a read older than the record's clock
-  moves nothing. Before that synchronize it applies the push that reached the new head when
-  GitHub's compare of the two shows it changed only the issue's own `.legion/<issue>/`; a push
-  that may change code is left to its own webhook.
+  moves nothing. Every push that took the branch there is left to its own webhook, since any push
+  may change code.
 - **A mergeability and a merge state.** GitHub's own answer for the head is recorded. It is what
   a head conflicting with its base is read from, and what an approval waits on in `reviewing`.
 - **A review.** A deciding review whose webhook never arrived is applied, whatever phase the issue
   is in.
-- **The push that carries an approval set aside.** Where the reviewer approved a head below the
-  recorded one and no recorded push carries the approval up to it, the read asks GitHub to compare
-  the two heads and, when only the issue's own handoffs changed between them, applies the push
-  that says so, so the approval carries to the head and the round ends.
 - **A missing pull request.** An issue in `implementing` whose implementer completed, with no open
   or merged pull request recorded and none GitHub lists on its branch, is told to its architect as
   `pull-request-missing`, once per handoff commit
@@ -504,7 +503,9 @@ To stand it up:
    next apply: a forced one writes its copy back, and one without force fails on any key whose value
    differs and leaves yours. Either way, stop that tool declaring the ConfigMap first.
 3. Put `pod.yml`'s contents under `runtime.kubernetes.pod` in `legion.yaml`, with your endpoint's
-   token audience in place of `${MODEL_TOKEN_AUDIENCE}`.
+   token audience in place of `${MODEL_TOKEN_AUDIENCE}` and the ServiceAccount your pods run as in
+   place of `${POD_SERVICE_ACCOUNT}`. `legion start --check-config` refuses either placeholder
+   unfilled.
 
 Name every role Legion's agents use in `modelRoles` (`default`, `review`, `oracle`, `deep`, `smol`,
 `slow`, and the rest the example names): the daemon refuses to boot when an agent's role has no

@@ -180,6 +180,9 @@ func (d *postingDispatch) Approval(context.Context, string) (dispatch.Approval, 
 	return dispatch.Approval{}, nil
 }
 func (d *postingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *postingDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *postingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
@@ -240,6 +243,9 @@ func (d *laneBoard) Approval(context.Context, string) (dispatch.Approval, error)
 	return dispatch.Approval{}, nil
 }
 func (d *laneBoard) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *laneBoard) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *laneBoard) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }

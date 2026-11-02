@@ -691,18 +691,13 @@ type PullRequestMissing struct {
 
 func (PullRequestMissing) isFact() {}
 
-// Push records a branch push. Nil ChangedPaths and Truncated preserve an omitted normalized field.
+// Push records a branch push.
 type Push struct {
 	Repo   string
 	Branch string
 	// Before is the head the push replaced, After the head it left.
-	Before       string
-	After        string
-	ChangedPaths *string
-	Truncated    *string
-	// Forced is the listener's "true" or "false" for whether the push rewrote history; absent from
-	// a listener that predates the field.
-	Forced *string
+	Before string
+	After  string
 	// Pusher is the push's pusher login (the listener's `pusher`, GitHub's pusher.name).
 	Pusher string
 	// Sender is the login of the account that pushed (the webhook's sender), which a synchronize's
@@ -760,7 +755,16 @@ type HandoffComplete struct {
 	Generation uint64
 	Summary    string
 	Verdict    string
-	Commit     string
+	// Commit is the commit the completion reports: the implementer's pushed tip for an implementing
+	// round, and the commit retro and merging stand on; none for the planner, the tester or the
+	// reviewer.
+	Commit string
+	// HandoffRecord and HandoffVersion name the Dispatch handoff record the completion of a phase
+	// with a handoff ends with (phase.Handoff): the route read it back from Dispatch and held it to
+	// the issue, the phase's word, this version and the claim's session before it applied the fact.
+	// Empty and zero for a phase that writes none.
+	HandoffRecord  string
+	HandoffVersion int
 }
 
 func (HandoffComplete) isFact() {}

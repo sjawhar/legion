@@ -96,7 +96,7 @@ type workflowRuntime struct {
 	// shortens both to bound how long the warning takes to observe.
 	reconnectPollInterval, reconnectWarnEvery time.Duration
 	// githubAPI is the GitHub REST root the workflow calls: the per-issue read reads under it, and
-	// the outbox's issue_branch and approval_carry rows call under it. Empty, in production, is
+	// the outbox's issue_branch rows call under it. Empty, in production, is
 	// https://api.github.com, and a test points it at a stand-in.
 	githubAPI string
 	// defaultBranches is each repository as GitHub names it and its default branch, read under
@@ -158,17 +158,10 @@ type workflowRuntime struct {
 	// held in memory only, so a restart's first read judges again with the permission GitHub gives
 	// then.
 	//
-	// uncarried is every comparison of an approved head with a recorded head, by repository, pull
-	// request and the two heads, that GitHub answered and that does not carry the approval
-	// (readApprovalCarry), so no read asks again: the compare of two fixed commits never
-	// changes its answer. It is held in memory only; a restart's first read asks again.
-	//
-	// readMemoMu guards both: the per-issue read (readIssuePullRequest) and the outbox's approval
-	// carry judge reviews and compare heads on goroutines of their own (reviewRefused,
-	// carryRefused).
+	// readMemoMu guards it: the per-issue read (readIssuePullRequest) judges reviews on a
+	// goroutine of its own (reviewRefused).
 	readMemoMu     sync.Mutex
 	refusedReviews map[int64]bool
-	uncarried      map[string]bool
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.

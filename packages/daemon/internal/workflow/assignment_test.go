@@ -41,12 +41,14 @@ func TestEveryPhaseStartMintsTheRoleAnAssignmentOnItsRowAndItsPayload(t *testing
 	}
 
 	// The tester's failed verdict ends testing and starts the implementer, the first start here.
-	apply("test-1", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Verdict: "fail", Commit: "test-1"})
+	apply("test-0", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Verdict: "fail",
+		HandoffRecord: "test-0", HandoffVersion: 1})
 	assertPhase(t, pool, phase.Implementing)
 	firstImplementing := assignmentOfStart(t, pool, claim.RoleImplementer, 1)
 
 	// The implementer's completion sends the issue to testing and starts the tester.
-	apply("implement-1", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "fix-1"})
+	apply("implement-1", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "fix-1",
+		HandoffRecord: "implement-1", HandoffVersion: 1})
 	assertPhase(t, pool, phase.Testing)
 	firstTesting := assignmentOfStart(t, pool, claim.RoleTester, 1)
 	if firstTesting == firstImplementing {
@@ -61,13 +63,15 @@ func TestEveryPhaseStartMintsTheRoleAnAssignmentOnItsRowAndItsPayload(t *testing
 	// The tester fails this round too and the issue goes back to implementing, where the
 	// implementer's second start mints an assignment of its own; its completion gives the tester a
 	// second one.
-	apply("test-2", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Verdict: "fail", Commit: "test-2"})
+	apply("test-1", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Verdict: "fail",
+		HandoffRecord: "test-1", HandoffVersion: 1})
 	assertPhase(t, pool, phase.Implementing)
 	secondImplementing := assignmentOfStart(t, pool, claim.RoleImplementer, 2)
 	if secondImplementing == firstImplementing {
 		t.Fatalf("the implementer's second start carries its first assignment %q, want a new one: nothing would tell the two implementing phases apart", secondImplementing)
 	}
-	apply("implement-2", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "fix-2"})
+	apply("implement-2", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "fix-2",
+		HandoffRecord: "implement-2", HandoffVersion: 2})
 	assertPhase(t, pool, phase.Testing)
 	secondTesting := assignmentOfStart(t, pool, claim.RoleTester, 2)
 	if secondTesting == firstTesting {

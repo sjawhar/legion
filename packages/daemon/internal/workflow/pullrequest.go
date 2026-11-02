@@ -90,40 +90,29 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 		return intake.Result{}, nil
 	}
 	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleImplementer)
-	if err != nil || row.HandoffCommit == "" {
+	if err != nil || !row.Completed() {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.implementationReady(ctx, tx, *issue, row, &pr)
 }
 
 // pullRequestSynchronized records the pull request's new head and what the move leaves standing
-// (classify.AdvancePullRequestHead). It reads no CI result: a settlement moves nothing,
-// in any phase, and the roles that work the issue were told what it said when it arrived (checks,
-// dispatch://INFRA-714/spec R1). In reviewing the head's arrival re-asks the round
-// (settleRound) once its push is known (classify.HeadPushKnown), since what the approval is judged
-// against is the push's paths: the approved head arriving over a handoff push lets the approval
-// stand, and the new head of a code push that was on its way shows the approval does not cover it
-// (classify.ApprovalStands, classify.CodeOnItsWay). A head whose push is still on its way is left
-// to the push's own handler, which re-asks the round the moment the push is classified. Asked
-// here, a round stuck at the previous head would be told stuck again at the new one, which the
-// push then shows to be the handoff head its approval covers - a notice the architect acts on for
-// nothing. The one exception is a head the reviewer's recorded approval names itself: no push can
-// change what an approval of the head itself approves, so the round is re-asked and ends, as it
-// would have had the head arrived before the approval; otherwise a push lost outright would leave
-// the round stuck at the previous head with an approval of the head it now stands at. Any other
-// push lost outright leaves the round reported as it was, stuck at the previous head, which is told
-// once either way, and the per-issue read's compare carries the approval when only the
-// issue's handoffs changed (daemon's readApprovalCarry). A synchronize that moves nothing - a
-// redelivery, or one carrying no head - changes nothing the round reads, and applies
-// and re-asks nothing. A synchronize of a pull request recorded merged changes nothing either:
-// GitHub synchronizes only an open pull request, so one observed after the merge is older than it,
-// a late redelivery the merge's missing clock cannot fence, as a close or a reopen of a merged pull
-// request is (closed, pullRequestOpened). A synchronize that moves no head because it is older
-// than the newest applied (classify.LateLifecycle, by GitHub's clock alone, as the release before),
-// or because it returned the branch to the recorded head, still names the
-// push its move took, by its sender, while a head run is open (classify.NameMove): an arrival whose
-// synchronize said it moved from a head the record never held waits for it. Late, it records that
-// alone, and moves and sets nothing else. In
+// (classify.AdvancePullRequestHead). It reads no CI result: a settlement moves nothing, in any
+// phase, and the roles that work the issue were told what it said when it arrived (checks,
+// dispatch://INFRA-714/spec R1). In reviewing the head's arrival re-asks the round (settleRound):
+// any push may change code, so an approval of the previous head does not approve the new one
+// (classify.ApprovalStands), whether the push that left it is known yet or not. The push's own
+// handler re-asks it again when it arrives, and a round stuck the same way at the same head is
+// told once (stuckAs). A synchronize that moves nothing - a redelivery, or one carrying no head -
+// changes nothing the round reads, and applies and re-asks nothing. A synchronize of a pull
+// request recorded merged changes nothing either: GitHub synchronizes only an open pull request,
+// so one observed after the merge is older than it, a late redelivery the merge's missing clock
+// cannot fence, as a close or a reopen of a merged pull request is (closed, pullRequestOpened). A
+// synchronize that moves no head because it is older than the newest applied
+// (classify.LateLifecycle, by GitHub's clock alone, as the release before), or because it returned
+// the branch to the recorded head, still names the push its move took, by its sender, while a head
+// run is open (classify.NameMove): an arrival whose synchronize said it moved from a head the
+// record never held waits for it. Late, it records that alone, and moves and sets nothing else. In
 // implementing a head that arrives once the implementer has completed is the pull request its
 // completion waited for.
 func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact intake.PullRequestSynchronized) (intake.Result, error) {
@@ -164,27 +153,17 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 	}
 	switch issue.Phase {
 	case phase.Reviewing:
-		// A head that moved under a round whose approval still stands re-asks it; one that did
-		// not, and one whose push is still on its way, leave the round where it is. GitHub
-		// recomputes the merge state of a pull request whose head moved either way, and the read
-		// for it is asked for after this handler whichever of them this is (Apply's
-		// askMergeState).
+		// A head that moved re-asks the round, whether its push is recorded yet or not: any push
+		// may change code, so an approval of the head before it does not approve this one. GitHub
+		// recomputes the merge state of a pull request whose head moved, and the read for it is
+		// asked for after this handler (Apply's askMergeState).
 		if !moved {
 			return intake.Result{}, nil
-		}
-		if !classify.HeadPushKnown(prior, pr.HeadSHA) {
-			reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
-			if err != nil {
-				return intake.Result{}, err
-			}
-			if reviewer.Decision == nil || reviewer.Decision.State != "approved" || reviewer.Decision.Head != pr.HeadSHA {
-				return intake.Result{}, nil
-			}
 		}
 		return intake.Result{}, e.reaskRound(ctx, tx, *issue, pr, prior)
 	case phase.Implementing:
 		row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleImplementer)
-		if err != nil || row.HandoffCommit == "" {
+		if err != nil || !row.Completed() {
 			return intake.Result{}, err
 		}
 		return intake.Result{}, e.implementationReady(ctx, tx, *issue, row, pr)
@@ -198,15 +177,9 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 		return intake.Result{}, err
 	}
 	prior := *pr
-	classification := classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated}, pr.Issue)
-	push := record.ClassifiedPush{SHA: fact.After, Before: fact.Before,
-		HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown,
-		ByReviewApp: e.byReviewApp(fact.Pusher),
-		// A push that does not say it was not forced - a listener that predates the field - is
-		// read as forced: its changed paths cannot then be trusted to describe the head it replaced.
-		Forced: fact.Forced == nil || *fact.Forced != "false", Sender: fact.Sender}
 	var dropped classify.Dropped
-	*pr, dropped = classify.ApplyPushDropping(*pr, push)
+	*pr, dropped = classify.ApplyPushDropping(*pr, record.ClassifiedPush{SHA: fact.After, Before: fact.Before,
+		ByReviewApp: e.byReviewApp(fact.Pusher), Sender: fact.Sender})
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return intake.Result{}, err
 	}
@@ -227,24 +200,17 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 		e.warnOnCommit(ctx, "workflow: a pull request holds the most pushes of the same two heads on their way; the oldest after the first is let go",
 			"issue", pr.Issue, "pullRequest", pr.Number, "before", gone.Before, "after", gone.SHA)
 	}
-	// A push changes which settlement stands for the head - it can complete the carry of a code
-	// head's settlement to the handoff head that replaced it (classify.SettlementFor) - and that
-	// moves nothing: the roles that work the issue were told what the settlement said when it
-	// arrived (checks, dispatch://INFRA-714/spec R1). In reviewing the push can be what lets an
-	// approval of an earlier head stand, or what shows the current head carries code the approved
-	// one does not, so the round is settled again; the round's re-ask is reviewing's alone.
+	// A push changes which settlement stands for the head, and that moves nothing: a CI result
+	// moves no issue, and the roles that work it were told what the settlement said when it
+	// arrived (checks, dispatch://INFRA-714/spec R1). In reviewing the push can be what shows the
+	// head the reviewer approved is about to be replaced, so the round is settled again; the
+	// round's re-ask is reviewing's alone.
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
 	if issue.Phase != phase.Reviewing {
 		return intake.Result{}, nil
-	}
-	// The carry is queued before the round is re-asked: a round the push leaves stuck below the
-	// approved head is told so now, and the row's fact ends it once GitHub answers that nothing
-	// outside the issue's handoffs changed.
-	if err := e.carryApproval(ctx, tx, *issue, pr); err != nil {
-		return intake.Result{}, err
 	}
 	return intake.Result{}, e.reaskRound(ctx, tx, *issue, pr, prior)
 }

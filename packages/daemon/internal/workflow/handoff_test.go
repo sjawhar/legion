@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -18,14 +19,16 @@ import (
 // A rework round ends with that round's own implementer handoff. The implementer's pushes during
 // the round only synchronize the pull request: before this held, round 1's handoff commit stayed
 // on the implementer's row, so the first push of every later round moved the issue to testing and
-// started the tester on the old commit.
+// started the tester on the old commit. Its handoff record is cleared with its commit when the
+// round starts, so neither reads as the new round's completion; the tester's task then names the
+// round's record, and the commit the implementer reported with it.
 func TestReworkRoundAdvancesOnlyOnThatRoundsHandoff(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-1", CheckedHead: "head-1", Failing: []string{}})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", HandoffCommit: "round-0"})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", HandoffCommit: "round-0", HandoffRecord: "implement-0", HandoffVersion: 1, LastHandoff: "implement-0"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffRecord: "review-1", HandoffVersion: 1, LastHandoff: "review-1"})
 	engine := testEngine(config.DesignGateRootIssues, nil)
 
 	apply := func(eventID string, fact intake.Fact) {
@@ -47,21 +50,44 @@ func TestReworkRoundAdvancesOnlyOnThatRoundsHandoff(t *testing.T) {
 	if _, err := pool.Exec(ctx, "delete from outbox"); err != nil {
 		t.Fatalf("clear outbox: %v", err)
 	}
-	apply("round-1-handoff", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "round-1"})
+	apply("round-1-handoff", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "round-1", HandoffRecord: "implement-1", HandoffVersion: 2})
 	assertPhase(t, pool, phase.Testing)
 	var task string
 	if err := pool.QueryRow(ctx, "select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start'").Scan(&task); err != nil {
 		t.Fatalf("read the tester's start task: %v", err)
 	}
-	if !strings.Contains(task, "Handoff commit: round-1.") {
-		t.Fatalf("tester task %q, want round 1's handoff commit", task)
+	for _, want := range []string{"Handoff: implement version 2 (dispatch handoff-read --issue LEGION-208 --phase implement --version 2).", "Handoff commit: round-1."} {
+		if !strings.Contains(task, want) {
+			t.Fatalf("tester task %q, want it to carry %q", task, want)
+		}
+	}
+}
+
+// phase.Handoff's writer of each phase with a handoff is the role the workflow starts on it
+// (RoleFor), so the route reads a record from that role's completion alone, and the task line
+// names each role's word (handoffWord).
+func TestTheHandoffWriterOfEachPhaseIsTheRoleTheWorkflowStartsOnIt(t *testing.T) {
+	handoffs := 0
+	for _, p := range phase.All {
+		word, writer, ok := phase.Handoff(p)
+		if !ok {
+			continue
+		}
+		handoffs++
+		if writer != RoleFor(p) || handoffWord(writer) != word {
+			t.Errorf("phase %s: phase.Handoff names %q written by %q; RoleFor names %q, and handoffWord(%q) is %q", p, word, writer, RoleFor(p), writer, handoffWord(writer))
+		}
+	}
+	if handoffs != 4 {
+		t.Errorf("phase.Handoff names %d phases with a handoff, want planning, implementing, testing and reviewing", handoffs)
 	}
 }
 
 // A completion the workflow does not act on is refused, not answered as though it applied: a role
 // the daemon has never started on the issue - no claim of its own, and no handoff on its row -
-// reporting a phase of it. A role the issue has moved on
-// without is the other case, and its completion is recorded instead (engine's leftItsPhase).
+// reporting a phase of it, and a file-backed phase's completion that names no handoff record. A
+// role the issue has moved on without is the other case, and its completion is recorded instead
+// (engine's leftItsPhase).
 func TestIgnoredCompletionsAreRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -71,8 +97,13 @@ func TestIgnoredCompletionsAreRefused(t *testing.T) {
 	}{
 		{
 			name: "role no longer owns the phase", current: phase.Testing,
-			fact: intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "late"},
+			fact: intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "late", HandoffRecord: "implement-late", HandoffVersion: 3},
 			code: "HANDOFF_NOT_CURRENT_PHASE",
+		},
+		{
+			name: "tester naming no handoff record", current: phase.Testing,
+			fact: intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Verdict: "pass"},
+			code: "HANDOFF_RECORD_REQUIRED",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -89,7 +120,7 @@ func TestIgnoredCompletionsAreRefused(t *testing.T) {
 			assertPhase(t, pool, tc.current)
 			assertOutboxKinds(t, pool, []string{})
 			var rows int
-			if err := pool.QueryRow(t.Context(), "select count(*) from phases where issue = 'LEGION-208' and handoff_commit <> ''").Scan(&rows); err != nil {
+			if err := pool.QueryRow(t.Context(), "select count(*) from phases where issue = 'LEGION-208' and (handoff_commit <> '' or handoff_record <> '')").Scan(&rows); err != nil {
 				t.Fatalf("count recorded handoffs: %v", err)
 			}
 			if rows != 0 {
@@ -118,7 +149,7 @@ func TestAnApprovalBeforeTheChecksSettleAdvancesWithoutThem(t *testing.T) {
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffRecord: "review-1", HandoffVersion: 1})
 	engine := testEngine(config.DesignGateRootIssues, nil)
 	if _, err := intake.ApplyFact(ctx, pool, "github", "approved", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head", Author: testReviewApp}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact approval: %v", err)
@@ -132,9 +163,10 @@ func TestAnApprovalBeforeTheChecksSettleAdvancesWithoutThem(t *testing.T) {
 	assertPhase(t, pool, phase.Accepting)
 }
 
-// A file-backed phase's completion carries the commit that last changed the role's handoff. When a
-// role reports, in a later phase, the same carrying commit it reported before, it wrote and
-// committed no handoff since its previous phase ended: the completion is refused.
+// A file-backed phase's completion names the Dispatch handoff record the role wrote for it. When a
+// role names, in a later phase, the record it named before, it wrote no handoff since its previous
+// phase ended: the completion is refused, whatever commit it reports. A new record is a new
+// handoff even at the commit the role reported before.
 func TestAHandoffMustBeNewSinceTheRolesPreviousPhase(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
@@ -149,23 +181,120 @@ func TestAHandoffMustBeNewSinceTheRolesPreviousPhase(t *testing.T) {
 		}
 		return result.Refusal
 	}
-	if refusal := complete("implement-0", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "handoff-0"}); refusal != nil {
+	if refusal := complete("implement-0", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "head", HandoffRecord: "implement-record-0", HandoffVersion: 1}); refusal != nil {
 		t.Fatalf("round 0 refused: %+v", *refusal)
 	}
 	assertPhase(t, pool, phase.Testing)
-	if refusal := complete("test-0", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Verdict: "fail", Commit: "test-0"}); refusal != nil {
+	if refusal := complete("test-0", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Verdict: "fail", HandoffRecord: "test-record-0", HandoffVersion: 1}); refusal != nil {
 		t.Fatalf("tester refused: %+v", *refusal)
 	}
 	assertPhase(t, pool, phase.Implementing)
 
-	if refusal := complete("implement-1-stale", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "handoff-0"}); refusal == nil || refusal.Status != 409 || refusal.Code != "HANDOFF_NOT_NEW" {
-		t.Fatalf("round 1 reporting round 0's handoff = %+v, want 409 HANDOFF_NOT_NEW", refusal)
+	refusal := complete("implement-1-stale", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "head-2", HandoffRecord: "implement-record-0", HandoffVersion: 1})
+	if refusal == nil || refusal.Status != 409 || refusal.Code != "HANDOFF_NOT_NEW" || !strings.Contains(refusal.Message, "handoff record implement-record-0") {
+		t.Fatalf("round 1 naming round 0's record = %+v, want 409 HANDOFF_NOT_NEW naming the record", refusal)
 	}
 	assertPhase(t, pool, phase.Implementing)
-	if refusal := complete("implement-1", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "handoff-1"}); refusal != nil {
-		t.Fatalf("round 1 with its own handoff refused: %+v", *refusal)
+	if refusal := complete("implement-1", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "head", HandoffRecord: "implement-record-1", HandoffVersion: 2}); refusal != nil {
+		t.Fatalf("round 1 with its own record, at round 0's commit, refused: %+v", *refusal)
 	}
 	assertPhase(t, pool, phase.Testing)
+}
+
+// toSecondReviewRound takes LEGION-208, seeded in its first review round (seedReviewOf at head),
+// through that round by record — its reviewer's request for changes and completion — and through
+// implementing and testing, each completed by record, into its second review round, whose reviewer
+// has not completed. The implementer's push to head-2 arrives with its synchronize, so no head run
+// holds a red at head-2. The reviewer's row then holds no handoff record, and keeps the first
+// round's as the record it last named.
+func toSecondReviewRound(t *testing.T, pool *pgxpool.Pool, engine *Engine) {
+	t.Helper()
+	applyRefusingNothing(t, pool, engine,
+		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", Author: testReviewApp, Body: "rename the widget"},
+		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", HandoffRecord: "review-1", HandoffVersion: 1})
+	assertPhase(t, pool, phase.Implementing)
+	applyRefusingNothing(t, pool, engine,
+		pushedFromTo("head", "head-2", "legion-implementer[bot]"),
+		intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-2"},
+		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "renamed", Commit: "head-2", HandoffRecord: "implement-2", HandoffVersion: 2})
+	assertPhase(t, pool, phase.Testing)
+	applyRefusingNothing(t, pool, engine,
+		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Summary: "tested", Verdict: "pass", HandoffRecord: "test-2", HandoffVersion: 1})
+	assertPhase(t, pool, phase.Reviewing)
+	reviewer := phaseRowOf(t, pool, claim.RoleReviewer)
+	if reviewer.Completed() || reviewer.HandoffVersion != 0 || reviewer.LastHandoff != "review-1" {
+		t.Fatalf("the round-2 reviewer's row = %+v, want no handoff and round 1's record kept as the last named", reviewer)
+	}
+}
+
+// phaseRowOf is LEGION-208's row of role.
+func phaseRowOf(t *testing.T, pool *pgxpool.Pool, role claim.Role) record.PhaseRow {
+	t.Helper()
+	var row record.PhaseRow
+	seedRecord(t, pool, func(tx pgx.Tx) error {
+		rows, err := record.NewStore().Phases(t.Context(), tx, "LEGION-208")
+		for _, r := range rows {
+			if r.Role == role {
+				row = r
+			}
+		}
+		return err
+	})
+	return row
+}
+
+// A reviewer whose first round completed by record starts its second round not completed: the
+// record its first completion named is cleared with the round, so a completion naming it again is
+// no completion of this round (HANDOFF_NOT_NEW), and the round's own record is what its second
+// completion names. The push to head-2 took GitHub's answer with it, as every head move does, so
+// the approval of head-2 waits on the daemon's read of the merge state for that head and the
+// round ends there rather than at either completion.
+func TestASecondReviewRoundIsNotCompletedByTheFirstRoundsRecord(t *testing.T) {
+	pool := migratedPool(t)
+	seedReviewOf(t, pool, "head", "green")
+	engine := testEngine(config.DesignGateRootIssues, nil)
+	toSecondReviewRound(t, pool, engine)
+	applyRefusingNothing(t, pool, engine,
+		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head-2", HeadSHA: "head-2", Author: testReviewApp, Body: "ship it"})
+	assertPhase(t, pool, phase.Reviewing)
+	result, err := intake.ApplyFact(t.Context(), pool, "api", "review-2-stale", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer,
+		Claim: "review-claim", Summary: "reviewed", HandoffRecord: "review-1", HandoffVersion: 1}, engine, admissionStub{})
+	if err != nil || result.Refusal == nil || result.Refusal.Code != "HANDOFF_NOT_NEW" {
+		t.Fatalf("round 2's completion naming round 1's record = %+v, %v; want HANDOFF_NOT_NEW", result.Refusal, err)
+	}
+	assertPhase(t, pool, phase.Reviewing)
+	applyRefusingNothing(t, pool, engine,
+		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", HandoffRecord: "review-2", HandoffVersion: 2})
+	if reviewer := phaseRowOf(t, pool, claim.RoleReviewer); !reviewer.Completed() || reviewer.HandoffRecord != "review-2" || reviewer.HandoffVersion != 2 {
+		t.Fatalf("the round-2 reviewer's row = %+v, want it completed at its own record review-2 version 2", reviewer)
+	}
+	assertPhase(t, pool, phase.Reviewing)
+	applyRefusingNothing(t, pool, engine,
+		intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", HeadSHA: "head-2",
+			Mergeable: record.MergeabilityMergeable, MergeState: record.MergeStateClean})
+	assertPhase(t, pool, phase.Accepting)
+}
+
+// A tester whose first run completed by record is started again not completed: the record is
+// cleared with the run, and the record it last named is kept, so its next completion must name a
+// new one.
+func TestARerunTesterIsNotCompletedByItsLastRunsRecord(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+		Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", HandoffRecord: "implement-1", HandoffVersion: 1, LastHandoff: "implement-1"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
+	engine := testEngine(config.DesignGateRootIssues, nil)
+	applyRefusingNothing(t, pool, engine,
+		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Summary: "two scenarios fail", Verdict: "fail", HandoffRecord: "test-1", HandoffVersion: 1})
+	assertPhase(t, pool, phase.Implementing)
+	applyRefusingNothing(t, pool, engine,
+		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "fixed", Commit: "head", HandoffRecord: "implement-2", HandoffVersion: 2})
+	assertPhase(t, pool, phase.Testing)
+	if tester := phaseRowOf(t, pool, claim.RoleTester); tester.Completed() || tester.LastHandoff != "test-1" {
+		t.Fatalf("the re-run tester's row = %+v, want no handoff and its last run's record kept as the last named", tester)
+	}
 }
 
 // The implementer's completion never moves its issue on a pull request closed without merging: it
@@ -177,7 +306,7 @@ func TestAnImplementerHandoffOnAPullRequestClosedWithoutMergingLeavesTheIssueInI
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestClosed, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "handoff-0", Failing: []string{}})
 	engine := testEngine(config.DesignGateRootIssues, nil)
-	result, err := intake.ApplyFact(ctx, pool, "api", "implement-0", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "handoff-0"}, engine, admissionStub{})
+	result, err := intake.ApplyFact(ctx, pool, "api", "implement-0", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "handoff-0", HandoffRecord: "implement-record-0", HandoffVersion: 1}, engine, admissionStub{})
 	if err != nil {
 		t.Fatalf("ApplyFact handoff: %v", err)
 	}
@@ -213,7 +342,7 @@ func TestAnImplementerHandoffAfterAMergeInImplementingMovesTheIssueToTesting(t *
 	}
 	assertPhase(t, pool, phase.Implementing)
 
-	result, err := intake.ApplyFact(ctx, pool, "api", "implement-0", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "handoff-0"}, engine, admissionStub{})
+	result, err := intake.ApplyFact(ctx, pool, "api", "implement-0", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "handoff-0", HandoffRecord: "implement-record-0", HandoffVersion: 1}, engine, admissionStub{})
 	if err != nil {
 		t.Fatalf("ApplyFact handoff: %v", err)
 	}

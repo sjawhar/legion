@@ -37,26 +37,21 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 		contains []string
 	}{
 		// Every architect is told what a pull-request-missing notice asks of it, whatever its tree.
-		{"root architect", claim.RoleArchitect, true, []string{"architect-root.md"}, []string{"architect-root.md", "architect-common.md"}, append([]string{"it chooses and starts the next role", "`register_gate`", "end the tree with `close_root`", "Every notice about an issue you own arrives on your own role topic", "to merge a pull request that deletes it", "A `pull-request-missing` notice"}, architectOperations...)},
-		{"sub-architect", claim.RoleArchitect, false, []string{"architect.md"}, []string{"architect.md", "architect-common.md"}, append([]string{"it chooses and starts the next role", "`register_gate` refuses a child issue", "Every notice about an issue you own arrives on your own role topic", "to merge a pull request that deletes it", "A `pull-request-missing` notice"}, architectOperations...)},
-		{"planner", claim.RolePlanner, false, []string{"core/common.md", "core/planner.md", "mechanics/headless.md", "planner.md"}, []string{"planner.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "jj -R \"$LEGION_WORKSPACE\" git push --bookmark legion/<issue>", "ends its head's commit message with `skip-checks: true` as the last line, preceded by two empty lines", "$'\\n\\n\\nskip-checks: true'", "finds, with your pane's jj, the newest commit on the issue branch carrying `.legion/<issue>/<phase>.json`", "The daemon reads no handoff file and no branch head", "A refusal records nothing"}},
-		// The implementer is told the completion of implementing the handoff route refuses with no
-		// open pull request, and what to do about it.
+		{"root architect", claim.RoleArchitect, true, []string{"architect-root.md"}, []string{"architect-root.md", "architect-common.md"}, append([]string{"it chooses and starts the next role", "`register_gate`", "end the tree with `close_root`", "Every notice about an issue you own arrives on your own role topic", "The merge carries no handoff onto the pull request's base", "A `pull-request-missing` notice"}, architectOperations...)},
+		{"sub-architect", claim.RoleArchitect, false, []string{"architect.md"}, []string{"architect.md", "architect-common.md"}, append([]string{"it chooses and starts the next role", "`register_gate` refuses a child issue", "Every notice about an issue you own arrives on your own role topic", "The merge carries no handoff onto the pull request's base", "A `pull-request-missing` notice"}, architectOperations...)},
+		{"planner", claim.RolePlanner, false, []string{"core/common.md", "core/planner.md", "mechanics/headless.md", "planner.md"}, []string{"planner.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "jj -R \"$LEGION_WORKSPACE\" git push --bookmark legion/<issue>", "dispatch handoff-write --issue <issue> --phase <word> --body-file", "dispatch handoff-read --issue <issue> --phase <word> --version <n>", "A handoff is never committed or pushed", "`HANDOFF_SESSION_MISMATCH`", "A refusal records nothing"}},
+		// A root with no code of its own pushes one empty commit to open its pull request, and a push
+		// the handoff import's commit refused is merged forward, never rewritten. The implementer is
+		// also told the completion of implementing the handoff route refuses with no open pull
+		// request, and what to do about it.
 		{"implementer", claim.RoleImplementer, false, []string{"core/common.md", "core/implementer.md", "mechanics/headless.md", "implementer.md"}, []string{"implementer.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
-			"the merger reads the head for that directory itself and merges nothing while it is there", "(`HANDOFF_NO_PULL_REQUEST`), recording nothing: open the pull request and complete again at the same commit"}},
+			"Retro removes nothing", "the root of its children; no code of its own", "chore(legion): <issue>'s handoffs are on its Dispatch issue now",
+			"(`HANDOFF_NO_PULL_REQUEST`), recording nothing: open the pull request and complete again at the same commit"}},
 		// The tester runs the application, not CI again (dispatch://LEGION-631).
 		{"tester", claim.RoleTester, false, []string{"core/common.md", "core/tester.md", "mechanics/headless.md", "tester.md"}, []string{"tester.md", "worker-common.md"}, []string{`op: "handoff_complete"`, `verdict: "pass"`, `verdict: "fail"`,
-			"read CI for everything static", "try to break it"}},
-		// The reviewer's own handoff push carries no `skip-checks: true` trailer, and its prompt
-		// says so in the one sentence every text states it in: the daemon moves the issue to
-		// accepting only once GitHub reports the approved head mergeable, and a head GitHub was
-		// told to skip runs no workflow, so it has no check for GitHub to report on. A prompt that
-		// told the reviewer to trailer its push would leave every approved head blocked on a base
-		// that requires a check, and every issue would sit in reviewing after its approval
-		// (dispatch://INFRA-714).
+			"read CI for everything static", "try to break it", "dispatch handoff-write --issue <issue> --phase test"}},
 		{"reviewer", claim.RoleReviewer, false, []string{"core/common.md", "core/reviewer.md", "mechanics/headless.md", "reviewer.md"}, []string{"reviewer.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
-			"Retro's last commit removes that directory above your approved head", "`pullRequest.head` is the commit you pushed",
-			"The reviewer's push never carries the `skip-checks: true` line, whatever paths it touches, because the daemon moves the issue to `accepting` only once GitHub reports the approved head mergeable, and a base that requires a check answers `blocked` for a head GitHub was told to skip."}},
+			"Retro's `docs/solutions/` commits may land above your approved head", "`pullRequest.head` is the commit the pull request stands on"}},
 		// The merge the merger is told to run names the head GitHub must match, on a queue base and
 		// off it, and carries the message it writes itself; its completion is an ordinary phase
 		// completion, refused only on the grounds every phase worker's is (dispatch://INFRA-714, R2).
@@ -195,13 +190,14 @@ func composedText(t *testing.T, composer *Composer, role claim.Role, isRoot bool
 	return text.String()
 }
 
-// No role's handoffs reach the default branch: retro's last commit removes the issue's own
-// .legion/<issue>/ from the head that merges (dispatch://LEGION-605). No phase worker's composed
-// prompt still carries the rule this replaced: that the approved and the merged head keep .legion/,
-// and that the daemon strips the leftovers from the next issue's branch. The merger reads the head
-// for the directory itself before it merges (dispatch://INFRA-714, R2), and no prompt holds the
-// head that merges to the head a review approved: the repository's own rulesets decide that.
-func TestNoComposedPromptKeepsTheIssuesHandoffsOnTheMergedHead(t *testing.T) {
+// No role's handoff is a commit: each is a record on the Dispatch issue, so no phase worker's
+// composed prompt still teaches the committed handoff file, its commit and push, the trailer that
+// kept a handoff-only push from starting CI, or retro's removal of the handoffs from the head that
+// merges. Nor does any carry the rules that removal replaced: that the approved and the merged
+// head keep .legion/, and that the daemon strips the leftovers from the next issue's branch. No
+// prompt names READY either: the merger submits the merge itself (dispatch://INFRA-714, R2), so
+// the refusals READY answered with went with it.
+func TestNoComposedPromptCommitsAHandoff(t *testing.T) {
 	stateDir := t.TempDir()
 	composer, err := New(stateDir)
 	if err != nil {
@@ -209,16 +205,14 @@ func TestNoComposedPromptKeepsTheIssuesHandoffsOnTheMergedHead(t *testing.T) {
 	}
 	retired := []string{"No role pushes a `.legion/` deletion", "No role removes `.legion/`", "nobody removes it before the merge", "strips whatever `.legion/`", "still carries `.legion/`",
 		"Retro then commits only `docs/solutions/`", "no file changes above the approved head", "the same sha when retro added nothing", "Retro's `docs/solutions/` commit is never",
-		"'~(docs/solutions | .legion/<issue>)'", "`READY_UNREVIEWED_CHANGE`", "`READY_NOT_APPROVED`", "Approved head:"}
+		"'~(docs/solutions | .legion/<issue>)'", ".legion/<issue>/<phase>.json", "record handoff", "handoff-only", "Retro's last commit removes",
+		"committed handoff", "`READY_UNREVIEWED_CHANGE`", "`READY_NOT_APPROVED`", "Approved head:"}
 	for _, role := range []claim.Role{claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer, claim.RoleMerger} {
 		text := composedText(t, composer, role, false)
 		for _, phrase := range retired {
 			if strings.Contains(text, phrase) {
 				t.Errorf("the composed %s prompt still says %q", role, phrase)
 			}
-		}
-		if want := "repos/{owner}/{repo}/contents/.legion/<issue>?ref=<head>"; role == claim.RoleMerger && !strings.Contains(text, want) {
-			t.Errorf("the merger's prompt does not name %s, its own read of the head for the issue's handoffs", want)
 		}
 	}
 }

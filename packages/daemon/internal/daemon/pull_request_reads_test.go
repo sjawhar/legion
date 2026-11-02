@@ -1,12 +1,15 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,45 +20,27 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
-	"github.com/sjawhar/legion/daemon/internal/githubrest"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
-// compareFails, as pullRequestStandIn's changed, has every comparison answer 502.
-const compareFails = "<502>"
-
 // pullRequestStandIn is GitHub's REST API for acme/widgets as the per-issue read reads it:
-// pull request 86 on base main, open on legion/CAPTURE-1 at head, last updated at updated, with
-// no reviews, whose base requires pr-checks-result and is unprotected. Compared with any earlier
-// head, head is that head with commits on top changing the files changed names, comma-separated;
-// with none named, GitHub has no such comparison (404), and with compareFails it fails (502).
+// pull request 86 on base main, open on legion/CAPTURE-1 of acme/widgets itself at head, last
+// updated at updated, with no reviews, whose base requires pr-checks-result and is unprotected.
 // Listed by its branch (GET /pulls?head=acme:legion/CAPTURE-1&state=open), it is the one open pull
-// request there; each such list is counted in listed.
-func pullRequestStandIn(t *testing.T, head string, updated time.Time, changed string, listed *atomic.Int32) *httptest.Server {
+// request there; each such list is counted in listed. Paths match in any case, as GitHub's do.
+func pullRequestStandIn(t *testing.T, head string, updated time.Time, listed *atomic.Int32) *httptest.Server {
 	t.Helper()
 	pull := `{"number":86,"state":"open","html_url":"https://github.com/acme/widgets/pull/86","body":"Dispatch: CAPTURE-1",` +
-		`"base":{"ref":"main"},"head":{"ref":"legion/CAPTURE-1","sha":"` + head + `"},"updated_at":"` + updated.Format(time.RFC3339) + `","mergeable":true,"mergeable_state":"clean"}`
-	files := []string{}
-	for _, name := range strings.Split(changed, ",") {
-		if name != "" {
-			files = append(files, `{"filename":"`+name+`"}`)
-		}
-	}
+		`"base":{"ref":"main"},"head":{"ref":"legion/CAPTURE-1","sha":"` + head + `","repo":{"full_name":"acme/widgets"}},"updated_at":"` + updated.Format(time.RFC3339) + `","mergeable":true,"mergeable_state":"clean"}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer outbox-token" {
 			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/repos/acme/widgets/compare/") && changed == compareFails {
-			http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway)
-			return
-		}
-		if strings.HasPrefix(r.URL.Path, "/repos/acme/widgets/compare/") && strings.HasSuffix(r.URL.Path, "..."+head) && len(files) > 0 {
-			w.Write([]byte(`{"status":"ahead","files":[` + strings.Join(files, ",") + `]}`))
-			return
-		}
-		switch r.URL.Path {
+		switch strings.ToLower(r.URL.Path) {
 		case "/repos/acme/widgets/pulls":
 			if r.URL.Query().Get("head") != "acme:legion/CAPTURE-1" || r.URL.Query().Get("state") != "open" {
 				t.Errorf("listed pull requests by %q, want the open ones on acme:legion/CAPTURE-1", r.URL.RawQuery)
@@ -119,7 +104,7 @@ func TestTheReadFollowsAHeadWhoseSynchronizeHasNotArrived(t *testing.T) {
 					t.Fatalf("seed the record's clock: %v", err)
 				}
 			}
-			w := readRuntime(pool, pullRequestStandIn(t, tc.github, read, "src/widget.go", &atomic.Int32{}).URL, quietLogger())
+			w := readRuntime(pool, pullRequestStandIn(t, tc.github, read, &atomic.Int32{}).URL, quietLogger())
 			readCapture(t, w)
 			_, pr := capturePhase(t, pool)
 			if pr.HeadSHA != tc.head || !pr.HeadUpdatedAt.Equal(tc.clock) {
@@ -132,43 +117,26 @@ func TestTheReadFollowsAHeadWhoseSynchronizeHasNotArrived(t *testing.T) {
 	}
 }
 
-// A reviewer approves the head it read, then pushes its handoff (.legion/<issue>/ only) and
-// completes. With the push webhook still in the backlog, a head followed alone would leave the
-// approval judged against a head no known push reaches from it, and the round stuck for nothing. So
-// the read also applies the push, when GitHub's comparison shows it changed only the issue's own
-// .legion/<issue>/, and the approval stands for the new head; a push that changed code, or another
-// issue's handoffs, is left to its webhook, and an approval of the head before it does not stand
-// for what is above it.
-func TestTheReadFollowsAHandoffPushSoAnApprovalBeneathItStands(t *testing.T) {
+// A reviewer approves the head it read, and the implementer pushes above it; the push webhook is
+// lost with the synchronize. The read rebuilds the push from the branch's activity and follows the
+// new head with it, so the push the webhook would have carried is recorded, and that webhook
+// arriving afterwards decides nothing.
+func TestTheReadFollowsAPushAboveAnApprovalAsANewHead(t *testing.T) {
 	read := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
-	for _, tc := range []struct {
-		name    string
-		changed string
-		stands  bool
-		pushes  int
-	}{
-		{"the push changed only the issue's handoffs", ".legion/CAPTURE-1/review.json", true, 1},
-		{"the push changed code", ".legion/CAPTURE-1/review.json,src/widget.go", false, 0},
-		{"the push changed another issue's handoffs", ".legion/CAPTURE-2/review.json", false, 0},
-		{"GitHub has no comparison", "", false, 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := isolatedOutboxPool(t)
-			seedCapture(t, pool, phase.Reviewing, "needs_review", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim"})
-			w := readRuntime(pool, pullRequestStandIn(t, "handoff", read, tc.changed, &atomic.Int32{}).URL, quietLogger())
-			readCapture(t, w)
-			_, pr := capturePhase(t, pool)
-			if pr.HeadSHA != "handoff" {
-				t.Fatalf("after the read the record is at %q, want handoff", pr.HeadSHA)
-			}
-			if got := classify.ApprovalStands(*pr, "code"); got != tc.stands {
-				t.Fatalf("an approval of code stands for the followed head: %t, want %t (pushes %+v)", got, tc.stands, pr.Pushes)
-			}
-			if got := headReads(t, pool, "push-read"); got != tc.pushes {
-				t.Fatalf("the read applied %d push facts, want %d", got, tc.pushes)
-			}
-		})
+	pool := isolatedOutboxPool(t)
+	seedCapture(t, pool, phase.Reviewing, "needs_review", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim"})
+	github := &activityGitHub{}
+	github.moved("pushed", read, activityEntry("legion/CAPTURE-1", "push", "code", "pushed", implementerLogin, read.Add(-time.Minute)))
+	w := reviewAppRuntime(pool, github.serve(t).URL, quietLogger())
+	readCapture(t, w)
+	_, pr := capturePhase(t, pool)
+	if pr.HeadSHA != "pushed" {
+		t.Fatalf("after the read the record is at %q, want pushed", pr.HeadSHA)
 	}
+	if n := headReads(t, pool, "push-read"); n != 1 {
+		t.Fatalf("the read applied %d pushes it rebuilt from the branch's activity, want the one code..pushed", n)
+	}
+	lateWebhookPushDecidesNothing(t, pool, w, webhookPush("code", "pushed", implementerLogin))
 }
 
 // The read lists its records once, when it starts, and a webhook can move one before the read
@@ -182,7 +150,7 @@ func TestFollowHeadComparesWithTheRecordAsItStandsNow(t *testing.T) {
 	if _, err := pool.Exec(context.Background(), "update pull_requests set head_sha = 'pushed' where issue = 'CAPTURE-1'"); err != nil {
 		t.Fatalf("move the record as the webhook would: %v", err)
 	}
-	w := readRuntime(pool, pullRequestStandIn(t, "pushed", read, "src/widget.go", &atomic.Int32{}).URL, quietLogger())
+	w := readRuntime(pool, pullRequestStandIn(t, "pushed", read, &atomic.Int32{}).URL, quietLogger())
 	github, pull, err := w.readPullRequest(context.Background(), *listed)
 	if err != nil {
 		t.Fatalf("read the pull request: %v", err)
@@ -196,79 +164,6 @@ func TestFollowHeadComparesWithTheRecordAsItStandsNow(t *testing.T) {
 	}
 }
 
-// handoffPush lets an approval of the recorded head ride to the new one, so it says a push changed
-// only .legion/ only when GitHub's comparison proves the code at the new head is the code at the
-// recorded one: the new head descends from the recorded one (ahead), the list is not one GitHub may
-// have cut, and every path a commit touched, a rename's old name too, is under .legion/. Anything
-// else is left to the push webhook.
-func TestHandoffPushTakesOnlyAComparisonThatProvesTheCodeUnchanged(t *testing.T) {
-	legionFiles := func(n int) string {
-		files := make([]string, n)
-		for i := range files {
-			files[i] = `{"filename":".legion/CAPTURE-1/note-` + strconv.Itoa(i) + `.md"}`
-		}
-		return strings.Join(files, ",")
-	}
-	for _, tc := range []struct {
-		name    string
-		compare string
-		handoff bool
-	}{
-		{"only .legion/ on top of the recorded head", `{"status":"ahead","files":[{"filename":".legion/CAPTURE-1/review.json"}]}`, true},
-		{"the most files GitHub lists in full, all under .legion/", `{"status":"ahead","files":[` + legionFiles(githubrest.CompareFilesLimit-1) + `]}`, true},
-		{"diverged from the recorded head", `{"status":"diverged","files":[{"filename":".legion/CAPTURE-1/review.json"}]}`, false},
-		{"behind the recorded head", `{"status":"behind","files":[{"filename":".legion/CAPTURE-1/review.json"}]}`, false},
-		{"a list GitHub may have cut", `{"status":"ahead","files":[` + legionFiles(githubrest.CompareFilesLimit) + `]}`, false},
-		{"a rename into .legion/ from code", `{"status":"ahead","files":[{"filename":".legion/CAPTURE-1/widget.go","previous_filename":"src/widget.go"}]}`, false},
-		{"code changed", `{"status":"ahead","files":[{"filename":"src/widget.go"}]}`, false},
-		{"another issue's handoffs", `{"status":"ahead","files":[{"filename":".legion/CAPTURE-2/review.json"}]}`, false},
-		{"no files", `{"status":"ahead","files":[]}`, false},
-		{"no file list", `{"status":"ahead"}`, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/repos/acme/widgets/compare/code...handoff" {
-					http.NotFound(w, r)
-					return
-				}
-				w.Write([]byte(tc.compare))
-			}))
-			t.Cleanup(server.Close)
-			github := githubrest.Client{Token: "token", API: githubrest.RepositoryAPI(server.URL, ghrepo.MustParse("acme/widgets"))}
-			pr := record.PullRequest{Issue: "CAPTURE-1", Repo: "acme/widgets", Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: "code"}
-			push, notHandoff, err := handoffPush(context.Background(), github, pr, pr.HeadSHA, "handoff")
-			handoff := notHandoff == ""
-			if err != nil {
-				t.Fatalf("handoffPush: %v", err)
-			}
-			if handoff != tc.handoff {
-				t.Fatalf("handoffPush says the push changed only .legion/: %t, want %t (push %+v)", handoff, tc.handoff, push)
-			}
-			if handoff && (push.Before != "code" || push.After != "handoff" || push.Branch != "legion/CAPTURE-1") {
-				t.Fatalf("the push is %+v, want legion/CAPTURE-1 from code to handoff", push)
-			}
-		})
-	}
-}
-
-// A comparison GitHub fails to answer leaves the head where the record holds it, for a later read
-// to follow, and the read still reads the pull request's mergeability, reviews and required checks
-// against that record, as it did before it followed heads at all.
-func TestAFailedComparisonStillReadsThePullRequest(t *testing.T) {
-	read := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
-	pool := isolatedOutboxPool(t)
-	seedCapture(t, pool, phase.Testing, "testing", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim"})
-	w := readRuntime(pool, pullRequestStandIn(t, "handoff", read, compareFails, &atomic.Int32{}).URL, quietLogger())
-	readCapture(t, w)
-	_, pr := capturePhase(t, pool)
-	if pr.HeadSHA != "code" {
-		t.Fatalf("after the read the record is at %q, want code: the comparison failed", pr.HeadSHA)
-	}
-	if pr.Mergeability != record.MergeabilityMergeable {
-		t.Fatalf("after the read the recorded mergeability is %q, want %q: the read skipped the pull request's reads", pr.Mergeability, record.MergeabilityMergeable)
-	}
-}
-
 // A pull request GitHub shows open on an issue's branch that the workflow does not record - here an
 // opened older than the closed record's clock - is found again by every read of the issue, applied
 // and declined again, and the issue stays where it is. Once the record changes (a new generation
@@ -279,7 +174,7 @@ func TestAnOpenedTheWorkflowDoesNotRecordIsAppliedAgainByEveryRead(t *testing.T)
 	seedDeclinedOpened(t, pool, opened)
 	var logs syncBuffer
 	var listed atomic.Int32
-	w := readRuntime(pool, pullRequestStandIn(t, "handoff", opened, "", &listed).URL, slog.New(slog.NewTextHandler(&logs, nil)))
+	w := readRuntime(pool, pullRequestStandIn(t, "handoff", opened, &listed).URL, slog.New(slog.NewTextHandler(&logs, nil)))
 	warnings := func() int {
 		return strings.Count(logs.String(), "GitHub holds an open pull request for an issue")
 	}
@@ -363,7 +258,7 @@ func TestFollowHeadKeepsARecordMovedSinceTheListByWhatItReadNoLater(t *testing.T
 			if _, err := pool.Exec(context.Background(), "update pull_requests set head_sha = 'pushed', head_updated_at = $1 where issue = 'CAPTURE-1'", at); err != nil {
 				t.Fatalf("move the record as the webhook would: %v", err)
 			}
-			w := readRuntime(pool, pullRequestStandIn(t, "older", tc.read, "src/widget.go", &atomic.Int32{}).URL, quietLogger())
+			w := readRuntime(pool, pullRequestStandIn(t, "older", tc.read, &atomic.Int32{}).URL, quietLogger())
 			github, pull, err := w.readPullRequest(context.Background(), *listed)
 			if err != nil {
 				t.Fatalf("read the pull request: %v", err)
@@ -435,7 +330,7 @@ func TestTheReadRecordsAnOpenPullRequestWhoseOpenedHasNotArrived(t *testing.T) {
 				}
 			}
 			var listed atomic.Int32
-			w := readRuntime(pool, pullRequestStandIn(t, "handoff", opened, "", &listed).URL, quietLogger())
+			w := readRuntime(pool, pullRequestStandIn(t, "handoff", opened, &listed).URL, quietLogger())
 			if tc.served != "" {
 				w.repositories = newRepositories("CAPTURE")
 				w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse(tc.served), Default: true}}, nil)
@@ -459,6 +354,264 @@ func TestTheReadRecordsAnOpenPullRequestWhoseOpenedHasNotArrived(t *testing.T) {
 			}
 			if got := headReads(t, pool, "opened-read"); got != 1 {
 				t.Fatalf("the read applied %d opened facts, want 1", got)
+			}
+		})
+	}
+}
+
+// pathReads counts a stand-in's requests by path, its query left out.
+type pathReads struct {
+	mu    sync.Mutex
+	paths map[string]int
+}
+
+func (r *pathReads) add(path string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.paths == nil {
+		r.paths = map[string]int{}
+	}
+	r.paths[path]++
+}
+
+// counts is every path read, with how many times.
+func (r *pathReads) counts() map[string]int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	counts := map[string]int{}
+	for path, n := range r.paths {
+		counts[path] = n
+	}
+	return counts
+}
+
+// tablesSnapshot is every row of tables as JSON.
+func tablesSnapshot(t *testing.T, pool *pgxpool.Pool, tables ...string) string {
+	t.Helper()
+	var texts []string
+	for _, table := range tables {
+		var rows string
+		if err := pool.QueryRow(context.Background(), "select coalesce(json_agg(to_jsonb(t) order by to_jsonb(t)::text), '[]')::text from "+table+" t").Scan(&rows); err != nil {
+			t.Fatalf("read the %s: %v", table, err)
+		}
+		texts = append(texts, table+": "+rows)
+	}
+	return strings.Join(texts, "\n")
+}
+
+// lateWebhookPushDecidesNothing applies push as the webhook of a push the read already rebuilt
+// would carry it, arriving afterwards, and fails t when it changed the issues, their phases, the
+// production checks, the outbox, or the pull request's judgement, pushes or head run. The record's
+// moves may change: the copy is kept as its move's push or a repeat of it (classify.ApplyPush),
+// which only a head's next arrival by that move reads.
+func lateWebhookPushDecidesNothing(t *testing.T, pool *pgxpool.Pool, w *workflowRuntime, push intake.Push) {
+	t.Helper()
+	others := []string{"issues", "phases", "production_checks", "outbox"}
+	before := tablesSnapshot(t, pool, others...)
+	_, prBefore := capturePhase(t, pool)
+	if _, err := intake.ApplyFact(context.Background(), pool, "github", "late-webhook", push, w.handlers...); err != nil {
+		t.Fatalf("apply the late webhook: %v", err)
+	}
+	if after := tablesSnapshot(t, pool, others...); after != before {
+		t.Fatalf("the late push webhook %s..%s changed the records:\nbefore %s\nafter  %s", push.Before, push.After, before, after)
+	}
+	_, prAfter := capturePhase(t, pool)
+	if classify.JudgementChanged(*prBefore, *prAfter) || !slices.Equal(prAfter.Pushes, prBefore.Pushes) || (prAfter.Run == nil) != (prBefore.Run == nil) {
+		t.Fatalf("the late push webhook %s..%s changed the pull request: judgement or pushes %+v, run open %t; was %+v, run open %t",
+			push.Before, push.After, prAfter.Pushes, prAfter.Run != nil, prBefore.Pushes, prBefore.Run != nil)
+	}
+}
+
+// reviewAppLogin and implementerLogin are the bot accounts GitHub names the review App's and the
+// implement App's pushes by, in the push webhook's pusher.name and in the branch's activity alike.
+const (
+	reviewAppLogin   = "legion-review[bot]"
+	implementerLogin = "legion-implementer[bot]"
+)
+
+// activityEntry is one entry of GitHub's activity of branch (GET /activity) as GitHub answers it:
+// its kind (push, force_push, branch_creation, branch_deletion), the commits the branch held before
+// and after it, when, and its actor, of type Bot for an App's <slug>[bot].
+func activityEntry(branch, kind, before, after, actor string, at time.Time) string {
+	actorType := "User"
+	if strings.HasSuffix(actor, "[bot]") {
+		actorType = "Bot"
+	}
+	return fmt.Sprintf(`{"id":%d,"node_id":"RA_%s","before":%q,"after":%q,"ref":"refs/heads/%s","timestamp":%q,"activity_type":%q,`+
+		`"actor":{"login":%q,"id":41898282,"node_id":"BOT_1","type":%q,"site_admin":false}}`,
+		at.Unix(), after, before, after, branch, at.Format(time.RFC3339), kind, actor, actorType)
+}
+
+// activityGitHub is GitHub's REST API for acme/widgets as the per-issue read reads it after push
+// webhooks of legion/CAPTURE-1 were lost: pull request 86 open on that branch at head, last
+// updated at updated, with no reviews, on base main, which requires pr-checks-result and is
+// unprotected; and the branch's activity, newest first, is activity, or GitHub answers
+// activityStatus when it is set. Every request is counted in reads.
+type activityGitHub struct {
+	mu             sync.Mutex
+	head           string
+	updated        time.Time
+	activity       []string
+	activityStatus int
+	reads          pathReads
+}
+
+// moved has GitHub show pull request 86 at head, last updated at updated, and the branch's
+// activity as activity, newest first.
+func (g *activityGitHub) moved(head string, updated time.Time, activity ...string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.head, g.updated, g.activity = head, updated, activity
+}
+
+func (g *activityGitHub) serve(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		g.reads.add(r.URL.Path)
+		if r.Header.Get("Authorization") != "Bearer outbox-token" {
+			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+			return
+		}
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		pull := fmt.Sprintf(`{"number":86,"state":"open","html_url":"https://github.com/acme/widgets/pull/86","body":"","base":{"ref":"main"},`+
+			`"head":{"ref":"legion/CAPTURE-1","sha":%q,"repo":{"full_name":"acme/widgets"}},"updated_at":%q,"mergeable":true,"mergeable_state":"clean"}`,
+			g.head, g.updated.Format(time.RFC3339))
+		switch r.URL.Path {
+		case "/repos/acme/widgets/activity":
+			if ref, perPage := r.URL.Query().Get("ref"), r.URL.Query().Get("per_page"); ref != "refs/heads/legion/CAPTURE-1" || perPage != "100" {
+				t.Errorf("read the activity of %q, %q to a page; want refs/heads/legion/CAPTURE-1, 100", ref, perPage)
+			}
+			if g.activityStatus != 0 {
+				http.Error(w, `{"message":"Server Error"}`, g.activityStatus)
+				return
+			}
+			w.Write([]byte("[" + strings.Join(g.activity, ",") + "]"))
+		case "/repos/acme/widgets/pulls":
+			w.Write([]byte("[" + pull + "]"))
+		case "/repos/acme/widgets/pulls/86":
+			w.Write([]byte(pull))
+		case "/repos/acme/widgets/pulls/86/reviews":
+			w.Write([]byte(`[]`))
+		case "/repos/acme/widgets/rules/branches/main":
+			w.Write([]byte(`[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"pr-checks-result"}]}}]`))
+		case "/repos/acme/widgets/branches/main":
+			w.Write([]byte(`{"name":"main","protected":false}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// reviewAppRuntime is readRuntime whose workflow knows the review App by reviewAppLogin, as a
+// workflow boot always does.
+func reviewAppRuntime(pool *pgxpool.Pool, api string, log *slog.Logger) *workflowRuntime {
+	w := readRuntime(pool, api, log)
+	w.engine = workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories,
+		ReviewAppLogin: reviewAppLogin, ReadMergeState: w.queueMergeState}, log)
+	w.handlers, w.reviewAppLogin = []intake.Handler{w.engine}, reviewAppLogin
+	return w
+}
+
+// webhookPush is the intake.Push the push webhook of legion/CAPTURE-1 from before to after carries
+// (intake's decodePush): its two commits and its pusher.
+func webhookPush(before, after, pusher string) intake.Push {
+	return intake.Push{Repo: "acme/widgets", Branch: "legion/CAPTURE-1", Before: before, After: after, Pusher: pusher}
+}
+
+// The review App pushes the tester's red tests twice, and both push webhooks are lost, with the
+// synchronize. The read reads the branch's activity, follows it back from GitHub's head to the
+// recorded one, and applies each push, oldest first, as its webhook would have carried it, then
+// the synchronize, so the head is judged with its chain of pushes and no head run stays open. The
+// push webhooks arriving afterwards decide nothing.
+func TestTheReadRebuildsTheReviewAppsRedTestPushesLost(t *testing.T) {
+	at := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
+	pool := isolatedOutboxPool(t)
+	seedCapture(t, pool, phase.Testing, "testing", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim"})
+	github := &activityGitHub{}
+	github.moved("more-red-tests", at,
+		activityEntry("legion/CAPTURE-1", "push", "red-tests", "more-red-tests", reviewAppLogin, at.Add(-time.Minute)),
+		activityEntry("legion/CAPTURE-1", "push", "code", "red-tests", reviewAppLogin, at.Add(-2*time.Minute)),
+		activityEntry("legion/CAPTURE-1", "push", "base", "code", implementerLogin, at.Add(-time.Hour)))
+	w := reviewAppRuntime(pool, github.serve(t).URL, quietLogger())
+	readCapture(t, w)
+	_, pr := capturePhase(t, pool)
+	if pr.HeadSHA != "more-red-tests" || pr.Run != nil {
+		t.Fatalf("after the read the record is at %q with a head run %+v, want more-red-tests judged with its pushes", pr.HeadSHA, pr.Run)
+	}
+	if got := headReads(t, pool, "push-read"); got != 2 {
+		t.Fatalf("the read applied %d push facts, want 2", got)
+	}
+	if counts := github.reads.counts(); counts["/repos/acme/widgets/activity"] != 1 {
+		t.Fatalf("the read read %v, want the branch's activity once", counts)
+	}
+	lateWebhookPushDecidesNothing(t, pool, w, webhookPush("code", "red-tests", reviewAppLogin))
+	lateWebhookPushDecidesNothing(t, pool, w, webhookPush("red-tests", "more-red-tests", reviewAppLogin))
+}
+
+// The implementer pushes onto the recorded head and the push webhook is lost with the synchronize,
+// whether the branch's activity calls the move a push or a force push. The read rebuilds it from
+// that activity, so the head is judged with its push, and the push webhook arriving afterwards
+// decides nothing.
+func TestTheReadRebuildsAPushLostWhateverTheActivityCallsIt(t *testing.T) {
+	at := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
+	for _, kind := range []string{"push", "force_push"} {
+		t.Run(kind, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			seedCapture(t, pool, phase.Implementing, "in_progress")
+			github := &activityGitHub{}
+			github.moved("rewritten", at, activityEntry("legion/CAPTURE-1", kind, "code", "rewritten", implementerLogin, at.Add(-time.Minute)))
+			w := reviewAppRuntime(pool, github.serve(t).URL, quietLogger())
+			readCapture(t, w)
+			_, pr := capturePhase(t, pool)
+			if pr.HeadSHA != "rewritten" || pr.Run != nil || headReads(t, pool, "push-read") != 1 {
+				t.Fatalf("after the read head %q run %+v, want rewritten judged with the push the read rebuilt", pr.HeadSHA, pr.Run)
+			}
+			lateWebhookPushDecidesNothing(t, pool, w, webhookPush("code", "rewritten", implementerLogin))
+		})
+	}
+}
+
+// When the branch's activity does not lead back from GitHub's head to the recorded one - the
+// recorded head is not on the page, the way back is no push (the branch was deleted and pushed
+// again), or GitHub fails the read - the read applies no push, logs a WARN saying why, and applies
+// the synchronize as it did before it read the activity.
+func TestTheReadAppliesNoPushWhenTheActivityCannotBeFollowed(t *testing.T) {
+	at := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
+	zero := strings.Repeat("0", 40)
+	for _, tc := range []struct {
+		name     string
+		activity []string
+		status   int
+	}{
+		{"the recorded head is not on the page", []string{activityEntry("legion/CAPTURE-1", "push", "other", "pushed", implementerLogin, at)}, 0},
+		{"the way back is no push", []string{activityEntry("legion/CAPTURE-1", "branch_creation", zero, "pushed", implementerLogin, at),
+			activityEntry("legion/CAPTURE-1", "branch_deletion", "code", zero, implementerLogin, at.Add(-time.Minute))}, 0},
+		{"GitHub fails the read", nil, http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			seedCapture(t, pool, phase.Testing, "testing", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim"})
+			github := &activityGitHub{activityStatus: tc.status}
+			github.moved("pushed", at, tc.activity...)
+			var logged bytes.Buffer
+			w := reviewAppRuntime(pool, github.serve(t).URL, slog.New(slog.NewJSONHandler(&logged, nil)))
+			readCapture(t, w)
+			_, pr := capturePhase(t, pool)
+			if pr.HeadSHA != "pushed" || headReads(t, pool, "head-read") != 1 {
+				t.Fatalf("after the read the record is at %q, want pushed by the synchronize", pr.HeadSHA)
+			}
+			if got := headReads(t, pool, "push-read"); got != 0 || len(pr.Pushes) != 0 {
+				t.Fatalf("the read applied %d push facts and the record holds %+v, want none", got, pr.Pushes)
+			}
+			warned := false
+			for _, line := range strings.Split(logged.String(), "\n") {
+				warned = warned || (strings.Contains(line, `"level":"WARN"`) && strings.Contains(line, "the read cannot rebuild from GitHub") && strings.Contains(line, `"head":"pushed"`))
+			}
+			if !warned {
+				t.Fatalf("the read logged %s, want a WARN that it cannot rebuild the pushes", logged.String())
 			}
 		})
 	}

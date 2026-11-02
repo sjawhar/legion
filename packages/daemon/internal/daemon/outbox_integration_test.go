@@ -309,6 +309,9 @@ func (d *blockingDispatch) Approval(context.Context, string) (dispatch.Approval,
 	return dispatch.Approval{}, nil
 }
 func (d *blockingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *blockingDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *blockingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
@@ -472,6 +475,9 @@ func (d *refusingDispatch) Approval(context.Context, string) (dispatch.Approval,
 	return dispatch.Approval{}, nil
 }
 func (d *refusingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *refusingDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *refusingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
@@ -516,6 +522,9 @@ func (d *boardDispatch) Approval(context.Context, string) (dispatch.Approval, er
 	return dispatch.Approval{}, nil
 }
 func (d *boardDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *boardDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *boardDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
@@ -666,12 +675,28 @@ func TestTheDaemonsReassertIsWrittenAfterDispatchRefusesItsFirstWrite(t *testing
 	}
 }
 
-// Every kind of status row has a rule its retry is judged by, and stillWanted has a case for
-// each. A kind added without one reaches the default and fails its row rather than being judged
-// by another kind's rule, which is the mistake this case exists to make loud. The kinds are read
-// from record.StatusRowKinds rather than written out here, so a kind added to that list and left
-// out of the switch is asked here too; and each is asked for real, against a record and a read
-// that stand, so none may answer with that refusal.
+// Every kind of status row has a rule, and ruleFor is the one place a kind is read to find it.
+// The kinds are read from record.StatusRowKinds rather than written out here, so a kind added to
+// that list and left out of the switch reaches its default and fails here rather than borrowing
+// another kind's rule at runtime.
+func TestEveryStatusRowKindHasARule(t *testing.T) {
+	for _, kind := range record.StatusRowKinds {
+		rule, err := ruleFor(kind)
+		if err != nil {
+			t.Fatalf("the rule of status row kind %q = %v, want a rule of its own", kind, err)
+		}
+		if rule == nil {
+			t.Fatalf("status row kind %q answered no rule and no error", kind)
+		}
+	}
+}
+
+// Every kind of status row has a rule its retry is judged by, and the value ruleFor answers for
+// the kind carries it. A kind added without one reaches ruleFor's default and fails its row
+// rather than being judged by another kind's rule, which is the mistake this case exists to make
+// loud. The kinds are read from record.StatusRowKinds rather than written out here, so a kind
+// added to that list and left out of the switch is asked here too; and each is asked for real,
+// against a record and a read that stand, so none may answer with that refusal.
 func TestEveryStatusRowKindHasAStillWantedRule(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -693,10 +718,98 @@ func TestEveryStatusRowKindHasAStillWantedRule(t *testing.T) {
 		if payload.Kind != kind {
 			t.Fatalf("the row built for status row kind %q carries kind %q", kind, payload.Kind)
 		}
+		rule, err := ruleFor(kind)
+		if err != nil {
+			t.Fatalf("the rule of status row kind %q = %v, want a rule of its own", kind, err)
+		}
 		read := dispatch.Issue{Key: "LEGION-208", Status: payload.ObservedStatus, HandedOver: true}
-		if _, err := runner.stillWanted(context.Background(), record.OutboxRow{Issue: "LEGION-208"}, payload, read); err != nil {
+		if _, err := rule.stillWanted(context.Background(), runner, record.OutboxRow{Issue: "LEGION-208"}, payload, read); err != nil {
 			t.Fatalf("the rule of status row kind %q answered %v, want it to answer at all", kind, err)
 		}
+	}
+}
+
+// probeStatusRowKind is a kind of status row the probe below adds to record.StatusRowKinds and
+// gives no value in ruleFor: the kind somebody will one day add to that list and nowhere else.
+const probeStatusRowKind = record.StatusRowKind("probe")
+
+// A kind record.StatusRowKinds names and ruleFor has no value for fails its row, naming the
+// kind, on both paths a status row takes — its first attempt, and the retry an ISSUE_CHANGED
+// refusal sends it to — and reaches Dispatch with no write at all. Until the two decisions were
+// folded onto one value, such a row matched no branch of the first attempt and fell through to
+// the tail every ordinary row ends with: it wrote its status and answered nil, and only the
+// retry, which most rows never make, named it. The list and the switch are made to disagree from
+// this file rather than in the production list, so the hole is probed without one being left
+// open.
+func TestAStatusRowKindWithNoRuleFailsBothPathsWithoutWriting(t *testing.T) {
+	listed := record.StatusRowKinds
+	record.StatusRowKinds = append(slices.Clone(listed), probeStatusRowKind)
+	t.Cleanup(func() { record.StatusRowKinds = listed })
+	payload := record.StatusWrite{Kind: probeStatusRowKind, Status: "testing", ObservedStatus: "in_progress"}
+	// The row is built the way every row is, which the patched list now lets through: a kind
+	// nothing refuses at the door is the one the outbox itself has to refuse.
+	row := mustOutboxRow(t, "LEGION-208", payload, time.Now())
+	row.ID = 9
+	shown := dispatch.Issue{Key: row.Issue, Status: payload.ObservedStatus, HandedOver: true}
+	const named = `status row kind "probe" has no rule`
+
+	for _, tc := range []struct {
+		name string
+		// refuseFirst is whether this case's Dispatch refuses the row's first write with
+		// ISSUE_CHANGED, which is the only thing that sends a row to the retry. The first
+		// attempt's own case must not: a Dispatch that refuses would hide the write a kind with
+		// no rule used to make, which is the defect this probe exists for.
+		refuseFirst bool
+		run         func(context.Context, *outbox) error
+	}{
+		{name: "the first attempt, through execute", run: func(ctx context.Context, runner *outbox) error {
+			return runner.execute(ctx, row)
+		}},
+		{name: "the retry an ISSUE_CHANGED refusal sends the row to", refuseFirst: true,
+			run: func(ctx context.Context, runner *outbox) error {
+				return runner.writeStatus(ctx, row, payload, shown)
+			}},
+		{name: "the drop a permanent refusal makes", run: func(ctx context.Context, runner *outbox) error {
+			// finishRefused asks the kind what it leaves behind, so a kind with no rule fails
+			// there before the finishing transaction opens: the runner holds no pool, and the
+			// failure arriving all the same is what says the question is asked first.
+			return runner.finishRefused(ctx, row, &dispatch.Error{Status: http.StatusConflict, Code: "ISSUE_CLOSED"})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plain := outboxDispatch{issue: shown}
+			var client dispatch.Client = &plain
+			if tc.refuseFirst {
+				client = &refusedOnceDispatch{outboxDispatch: plain, reread: shown}
+			}
+			runner := &outbox{dispatch: client, log: quietLogger()}
+
+			err := tc.run(context.Background(), runner)
+
+			if err == nil || !strings.Contains(err.Error(), named) {
+				t.Fatalf("running the probe row = %v, want it failed naming the kind (%s)", err, named)
+			}
+			if want := fmt.Sprintf("outbox row %d", row.ID); !strings.Contains(err.Error(), want) {
+				t.Fatalf("the failure is %v, want it to name the row (%s)", err, want)
+			}
+			wrote, handedOver := writesOf(client)
+			if len(wrote) != 0 || len(handedOver) != 0 {
+				t.Fatalf("status writes = %v and hand-overs = %v, want a kind with no rule to reach Dispatch with nothing",
+					wrote, handedOver)
+			}
+		})
+	}
+}
+
+// writesOf is what the probe's Dispatch recorded, whichever of the two fakes it ran against.
+func writesOf(client dispatch.Client) (statuses, handOvers []string) {
+	switch fake := client.(type) {
+	case *outboxDispatch:
+		return fake.statuses, fake.handOvers
+	case *refusedOnceDispatch:
+		return fake.statuses, fake.handOvers
+	default:
+		return nil, nil
 	}
 }
 
@@ -785,7 +898,11 @@ func TestAMigratedStatusRowRunsUnderItsOwnRule(t *testing.T) {
 			t.Fatalf("%s carries kind %q after the migration, want %q", row.name, write.Kind, row.want)
 		}
 		read := dispatch.Issue{Key: row.issue, Status: write.ObservedStatus, HandedOver: true}
-		if _, err := runner.stillWanted(ctx, stored, write, read); err != nil {
+		rule, err := ruleFor(write.Kind)
+		if err != nil {
+			t.Fatalf("%s has no rule after the migration: %v", row.name, err)
+		}
+		if _, err := rule.stillWanted(ctx, runner, stored, write, read); err != nil {
 			t.Fatalf("the rule judging %s answered %v, want the rule of its own kind to answer", row.name, err)
 		}
 	}

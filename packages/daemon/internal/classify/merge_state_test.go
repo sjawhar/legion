@@ -6,30 +6,26 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// GitHub's verdict on merging a head - its mergeability and its merge state - is a verdict about
-// the tree that head carries, not about the commit. So a move the pushes say changed only the
-// issue's own handoffs keeps it, the same test that carries an approval across (ApprovalStands),
-// and every other move takes it: a move they say changed code, since GitHub would check something
-// else at the new head and has not been asked yet, and a move no recorded push links yet, since
-// nothing says which of the two it is and a verdict of another head must never move an approval
-// (dispatch://INFRA-714 R2). The push that links it judges it again: the arrival replays with that
-// push (replayRun), which gives the verdict back from the run's anchor, so the order the webhooks
-// arrive in decides nothing once both have arrived.
-func TestTheMergeVerdictFollowsAHandoffMoveAndNotACodeMove(t *testing.T) {
-	handoff := record.ClassifiedPush{SHA: "h3", Before: "h2", HandoffOnly: true}
+// GitHub's verdict on merging a head - its mergeability and its merge state - is its answer about
+// the tree that head carries, so a move to another head leaves nothing to read: any push may have
+// changed the code GitHub answered about, and a verdict of another head must never move an
+// approval (dispatch://INFRA-714 R2). A synchronize that moves no head keeps it, since GitHub
+// answered about that very tree. The push that links a move judges it again: the arrival replays
+// with that push (replayRun), which gives the verdict back from the run's anchor, so the order
+// the webhooks arrive in decides nothing once both have arrived.
+func TestEveryMoveTakesTheMergeVerdictAndNoMoveKeepsIt(t *testing.T) {
 	code := record.ClassifiedPush{SHA: "h3", Before: "h2"}
-	forced := record.ClassifiedPush{SHA: "h3", Before: "h2", HandoffOnly: true, Forced: true}
+	tests := record.ClassifiedPush{SHA: "h3", Before: "h2", ByReviewApp: true}
 	for _, tc := range []struct {
 		name  string
 		facts []runFact
 		state record.MergeState
 	}{
-		{"a handoff push, then its head", []runFact{pushed(handoff), arrivesFrom("h2", "h3")}, record.MergeStateClean},
-		{"a head, then its handoff push", []runFact{arrivesFrom("h2", "h3"), pushed(handoff)}, record.MergeStateClean},
 		{"a code push, then its head", []runFact{pushed(code), arrivesFrom("h2", "h3")}, record.MergeStateUnread},
 		{"a head, then its code push", []runFact{arrivesFrom("h2", "h3"), pushed(code)}, record.MergeStateUnread},
-		{"a forced handoff push, then its head", []runFact{pushed(forced), arrivesFrom("h2", "h3")}, record.MergeStateUnread},
+		{"the review App's push, then its head", []runFact{pushed(tests), arrivesFrom("h2", "h3")}, record.MergeStateUnread},
 		{"a head whose push has not arrived", []runFact{arrivesFrom("h2", "h3")}, record.MergeStateUnread},
+		{"a synchronize back to the recorded head", []runFact{arrivesFrom("h1", "h2")}, record.MergeStateClean},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pr := record.PullRequest{HeadSHA: "h2", Failing: []string{},
@@ -62,7 +58,7 @@ func TestAVerdictReadWhileAHeadRunIsOpenStandsOverTheAnchors(t *testing.T) {
 	// The read the arrival asks for, answering for h3 (workflow's askMergeState, mergeability).
 	pr.Mergeability, pr.MergeState = record.MergeabilityMergeable, record.MergeStateBlocked
 
-	pr = stored(t, pushed(record.ClassifiedPush{SHA: "h3", Before: "h2", HandoffOnly: true}).apply(pr))
+	pr = stored(t, pushed(record.ClassifiedPush{SHA: "h3", Before: "h2"}).apply(pr))
 	if pr.Run != nil || pr.MergeState != record.MergeStateBlocked {
 		t.Fatalf("after the push closed the run the verdict is %q with the run open %v, want h3's own blocked and the run closed", pr.MergeState, pr.Run != nil)
 	}

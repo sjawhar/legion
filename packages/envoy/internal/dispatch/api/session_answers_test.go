@@ -9,11 +9,15 @@ import (
 	"testing"
 	"time"
 
+	natsgo "github.com/nats-io/nats.go"
+
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/session"
+	envoystore "github.com/sjawhar/envoy/internal/store"
 )
 
 // The session whose list each test reads, and another session beside it.
@@ -112,6 +116,27 @@ func (f *answersFixture) route(t *testing.T, route string) {
 	}
 }
 
+// unclaimedRoles is the role reader the fixture's outbox resolves a role route through: no role
+// is claimed here, so such a destination counts as reached with nothing sent and the role's topic
+// is what the publisher records (outbox's roleForward). An outbox with no reader at all leaves
+// every role route pending, which would leave a routed event unpublished.
+type unclaimedRoles struct{}
+
+func (unclaimedRoles) RoleClaim(context.Context, string) (envoystore.RoleClaim, error) {
+	return envoystore.RoleClaim{}, nil
+}
+
+func (unclaimedRoles) ReleaseExpiredRoleClaim(context.Context, string, string, time.Duration) (envoystore.ExpiredRoleClaimRelease, error) {
+	return envoystore.ExpiredRoleClaimMissing, nil
+}
+
+// Holder is read only for a claimed role, so here it answers that the session is gone.
+func (unclaimedRoles) Holder(context.Context, string, func(session.SessionEntry) bool) (session.SessionEntry, error) {
+	return session.SessionEntry{}, natsgo.ErrKeyNotFound
+}
+
+func (unclaimedRoles) TTL() time.Duration { return 5 * time.Minute }
+
 // publishOutbox runs the real outbox until every event that can carry a person's words to a session
 // is published, so each one's published_destinations holds every topic the publisher reached.
 func (f *answersFixture) publishOutbox(t *testing.T) {
@@ -120,7 +145,11 @@ func (f *answersFixture) publishOutbox(t *testing.T) {
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		outbox.Run(ctx, outbox.Deps{Store: f.database, Publisher: acceptingPublisher{}, Broker: events.NewBroker(), Docs: f.deps.Docs})
+		outbox.New(outbox.Deps{
+			Store: f.database, Publisher: acceptingPublisher{}, Broker: events.NewBroker(),
+			Listen: f.database.Pool.Listener, Docs: f.deps.Docs,
+			RoleClaims: unclaimedRoles{}, Sessions: unclaimedRoles{},
+		}).Run(ctx)
 	}()
 	defer func() {
 		cancel()

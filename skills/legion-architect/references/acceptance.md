@@ -5,10 +5,10 @@ at.
 
 ## Retro's result
 
-Retro output is `docs/solutions/`, a last commit removing the issue's `.legion/<issue>/` from the
-head that merges, the PR body content the repository's instructions derive from the pull request's
-changed paths at that head, and one `dispatch message` on the issue. Retro writes no handoff and
-never rewrites the reviewer-approved head.
+Retro output is `docs/solutions/`, the PR body content the repository's instructions derive from
+the pull request's changed paths at that head, and one `dispatch message` on the issue. Retro
+removes nothing, since every handoff is a record on the Dispatch issue, and a retro with no
+learnings pushes nothing. Retro writes no handoff and never rewrites the reviewer-approved head.
 
 When the implementer reports that it cannot compute that body content or do the work a line of it
 affirms, that its read of the body failed or came back empty, or that GitHub refused the body, it
@@ -88,19 +88,18 @@ The daemon keeps this order from its fixed table; you start none of its steps:
 
 1. The tester's last result is green and the reviewer approves the head.
 2. The reviewer's approval of the head by SHA moves the issue to `accepting`; your `sign_off` moves
-   it to `retro`. The approved head still carries `.legion/<issue>/`.
-3. Retro commits its learnings under `docs/solutions/` on top of the approved head, then, as the
-   one final commit, the removal of `.legion/<issue>/`, so no merge carries a handoff onto the
-   default branch. Those commits do not void the approval and never return the tree to the tester
-   or reviewer.
+   it to `retro`.
+3. Retro commits its learnings under `docs/solutions/` on top of the approved head, when it has
+   any. Those commits do not void the approval and never return the tree to the tester or
+   reviewer. No merge carries a handoff onto the default branch, since every handoff is a record
+   on the Dispatch issue and no commit carries one.
 4. The merger reads the pull request and merges that head itself, as the implement App and with the
    head it read as the head GitHub must match
    (`gh pr merge <n> --squash --match-head-commit <head> --subject '<pull request title> (#<n>)' --body ''`,
    whose explicit message keeps GitHub's default squash message from joining the branch's commit
    messages onto the base; or `expectedHeadOid` on a
    merge-queue base, where it enqueues the pull request); it never turns auto-merge on, and the
-   daemon submits no merge and changes no merge setting. A head that still carries
-   `.legion/<issue>/` goes back to retro instead of merging. The repository's required reviews and
+   daemon submits no merge and changes no merge setting. The repository's required reviews and
    checks decide when it lands; Legion neither reads nor writes those rules, and a review only a
    person can give is waited for, never bypassed. Nothing compares that head with the approved one:
    a repository that wants a later push reviewed says so in its own rulesets. The merger's
@@ -119,8 +118,6 @@ yours: from `accepting` you send an issue back only to `implementing` or `testin
   `squash_merge_commit_message` joins the branch's commit messages among them: the merger tells
   you, and only a person can change it. Ask one with `dispatch ask`, naming the pull request, the
   head and GitHub's refusal; never bypass a rule.
-- A head that still carries `.legion/<issue>/`: the merger moves it back to `retro`,
-  so the implementer's retro removes it.
 
 ## A conflicting head
 
@@ -143,7 +140,7 @@ The daemon then runs the phases from `implementing`: the implementer merges the 
 with the destination (`jj new legion/<KEY> <destination>`, the forward-merge procedure in
 `skill://legion-worker/references/conflicts-and-rewrites.md`; never a rebase, which rewrites every
 descendant of the fork point, including another tree's stacked branch), pushes it with
-`jj git push` (a genuine fast-forward and a code push, so no `skip-checks: true` line) and posts the
+`jj git push` (a genuine fast-forward and a code push like any other) and posts the
 before and after fingerprints; the tester re-runs the bare gates only; the reviewer approves the
 new head by SHA, or continues its round if it had not approved; the daemon carries the issue
 through your acceptance and retro to the merger's merge.

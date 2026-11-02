@@ -505,8 +505,8 @@ func interruptedTask(cause string) string {
 // start and does again what is already pushed (dispatch://INFRA-714, item 4 of the refusal
 // section). It names the session that was left behind and why in the words the claim recorded —
 // for a refused session the provider's own, the size it refused at among them — and then the two
-// things that outlive a session: the issue's branch, and the handoffs committed on it. The
-// controller is told neither, since it works no checkout.
+// things that outlive a session: the issue's branch, and the handoff records its phases wrote on
+// the Dispatch issue. The controller is told neither, since it works no checkout.
 //
 // The reason is the provider's own text read into an agent's prompt, so it is quoted as a Go
 // string (strconv.Quote), the way a check run's name is where the daemon reads one into a prompt
@@ -516,9 +516,9 @@ func interruptedTask(cause string) string {
 func abandonedTask(c Claim) string {
 	read := "read the issue"
 	if c.Role != claim.RoleController {
-		read = fmt.Sprintf("read the issue, then your branch %s and the handoffs committed on it under "+
-			"$LEGION_WORKSPACE/.legion/%s/ (%s)",
-			claim.IssueBranch(c.Issue), c.Issue, handoffFiles())
+		read = fmt.Sprintf("read the issue, then your branch %s and the handoff records its phases wrote on "+
+			"the issue, which `dispatch handoff-read --issue %s --phase <word>` reads (%s)",
+			claim.IssueBranch(c.Issue), c.Issue, handoffWords())
 	}
 	return fmt.Sprintf("The session this claim ran before this one, %s, was abandoned where it stood: %s. "+
 		"This session is a new one: the turns, tool calls, subagents and background jobs of that session are "+
@@ -527,15 +527,16 @@ func abandonedTask(c Claim) string {
 		c.Abandoned.Session, strconv.Quote(c.Abandoned.Why), read)
 }
 
-// handoffFiles is every handoff an issue's phases are committed with, in the transition table's
-// order: the files the replacement of an abandoned session is told to read. It is built from the
-// phases themselves (phase.All, phase.HandoffFile) rather than spelled here, so a phase that
-// gains a handoff later is named in this prompt without anyone remembering to come back.
-func handoffFiles() string {
+// handoffWords is every phase word an issue's handoff records are written under, in the
+// transition table's order: the records the replacement of an abandoned session is told to read.
+// It is built from the phases themselves (phase.All, phase.Handoff) rather than spelled here, so
+// a phase that gains a handoff later is named in this prompt without anyone remembering to come
+// back.
+func handoffWords() string {
 	names := make([]string, 0, len(phase.All))
 	for _, p := range phase.All {
-		if word, ok := phase.HandoffFile(p); ok {
-			names = append(names, word+".json")
+		if word, _, ok := phase.Handoff(p); ok {
+			names = append(names, word)
 		}
 	}
 	return strings.Join(names, ", ")
