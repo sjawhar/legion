@@ -7,4 +7,4 @@ body: |-
   `(generation, sequence)`, so a report that arrives late lands in its own place and a repeat
   writes the same cell, and it fails the claim once the trailing run of refusals reaches
   `launch_failure_limit`, which is what moves the work to a session the provider can answer.
-  `legion.daemonApiVersion` is 46, the contract that adds the route.
+  `legion.daemonApiVersion` is 47, the contract that adds the route.

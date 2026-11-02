@@ -487,7 +487,7 @@ package api
 // a turn. `settings` drops `max_fix_attempts` for `review_round_cap`. `HandoffCompleteRequest`
 // drops `ready` and `HandoffCompleteResponse` is an empty object: the flag and the `note` went
 // with READY and the daemon's merge, since the merger merges and the daemon submits none. Every
-// contract response is a `z.strictObject`, so a 44 plugin refuses a state carrying `mergeState`,
+// contract response is a `z.strictObject`, so a plugin of an older contract refuses a state carrying `mergeState`,
 // `pass`, `lastTurnStart` or `lastTurnEnd`, and a plugin from this contract refuses an older
 // daemon's `checksVerdict` and `fixAttempts`; the boot gate and `legion probe-image` refuse the
 // mixed pair. (This branch took 42, then 43 when main landed the consumer-lag state at 43;
@@ -505,8 +505,8 @@ package api
 // keyed by (generation, sequence), derives the trailing run of refused turns from them on every
 // report, and fails the claim once that run reaches `launch_failure_limit` — the fault that left an
 // implementer's every turn refused by its provider with its claim never failing. A plugin built
-// before 46 reports no turn, so its session's refusals are counted by nobody, and a plugin from
-// this contract posting to a daemon before 46 is answered "no route" for every turn it ends; the
+// before 47 reports no turn, so its session's refusals are counted by nobody, and a plugin from
+// this contract posting to a daemon before 47 is answered "no route" for every turn it ends; the
 // boot gate and `legion probe-image` refuse the mixed pair. `legion claims retry` gains the
 // optional body `{freshSession}` (`--fresh-session`), which starts the claim in a new session
 // rather than resuming the recorded one; a claim the provider refused out of its budget takes one

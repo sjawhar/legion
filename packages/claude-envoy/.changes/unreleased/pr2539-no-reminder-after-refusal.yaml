@@ -10,5 +10,5 @@ body: |-
   and the reminder's record check drops every reminder once the daemon has failed this role's
   claim. The bridge reports a turn refused only for the step subtype the provider refused
   (`error_during_execution`): Claude Code's own `error_max_turns`, and a failed step a later one
-  ran past, count toward nothing. `legion.daemonApiVersion` is 46, the contract that adds
+  ran past, count toward nothing. `legion.daemonApiVersion` is 47, the contract that adds
   `POST /legion/v1/claims/turn-outcome`.

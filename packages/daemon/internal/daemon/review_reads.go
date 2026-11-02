@@ -179,9 +179,8 @@ func (w *workflowRuntime) reviewToApply(ctx context.Context, pr record.PullReque
 
 // reviewRefused is whether this process has already judged the review GitHub lists under id and
 // found the workflow does not let it decide, and refuseReview records one it has. The per-issue
-// read (readIssuePullRequest) and the outbox's approval carry both judge reviews, each on a
-// goroutine of its own, so the set is kept under readMemoMu rather than by whichever read touched
-// it last.
+// read (readIssuePullRequest) judges reviews on a goroutine of its own for each issue, so the set
+// is kept under readMemoMu rather than by whichever read touched it last.
 func (w *workflowRuntime) reviewRefused(id int64) bool {
 	w.readMemoMu.Lock()
 	defer w.readMemoMu.Unlock()
