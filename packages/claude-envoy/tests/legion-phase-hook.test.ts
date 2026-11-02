@@ -23,6 +23,8 @@ const SESSION = "6f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f"
  * `implementing`, so the reminder's record check says this role still works this phase. */
 const implementer: ClaimCapability = {
   sessionID: SESSION,
+  claimToken: "legion-legion-legion-208-implementer",
+  generation: 5,
   tree: "LEGION-208",
   issue: "LEGION-208",
   role: "implementer",
@@ -264,6 +266,47 @@ test("a successful handoff_complete closes the phase, and the next settle blocks
     await Bun.sleep(60)
     expect(inbox).toEqual([])
     expect(await record()).toEqual({ state: "closed", count: 0, reported: false })
+  } finally {
+    await close()
+  }
+})
+
+// INFRA-484: the update task reaches Claude Code as a prompt, which opens the phase as an
+// assignment does, and `ready_for_update` closes no phase. The `Stop` of the turn the worker
+// answers in must still block nothing: a blocked `Stop` continues that same turn, so the work it
+// did would go with the pod, and the daemon would see no turn end.
+test("a ready_for_update answer blocks no Stop: the answering turn ends, with the phase still open", async () => {
+  const { endpoint, record, inbox, close } = await harness({
+    record: recorded("open", 1),
+    claim: implementer,
+  })
+  try {
+    // What the server's CallTool handler does once `ready_for_update` returned without throwing
+    // (`./src/envoy-channel-server`): the worker has pushed what it wants kept and waits for its
+    // process to be replaced.
+    endpoint.updateAnswered()
+    expect(await record()).toEqual({ state: "waiting", count: 0, reported: false })
+    // Claude Code's own `PostToolUse` for the call that answered: the worker ran a real tool
+    // call, which does not take the wait back.
+    expect(await endpoint.handle({ event: "PostToolUse" })).toEqual({})
+    expect(await record()).toEqual({ state: "waiting", count: 0, reported: false })
+
+    const answered = "Pushed everything and answered; waiting for the new pod."
+    expect(await endpoint.handle({ event: "Stop", lastAssistantMessage: answered })).toEqual({})
+    const said = { reported: false, lastMessage: answered }
+    expect(await record()).toEqual({ state: "waiting", count: 0, ...said })
+    // Nothing is written into the wait the answer created, and nothing ever will be: it arms no
+    // timer at all. The daemon's update round is its watchdog, and a reminder fired here would be
+    // a prompt, which starts a turn the daemon reads as the answer retracted — the round would
+    // restart at every wait and never converge (INFRA-484, the `awaiting-update` state of
+    // `@legion/pi-shared/phase-stall`, which a record holds as the plain `waiting`). A case
+    // asserting that nothing happens has no condition to wait for, so this is one of the file's
+    // fixed waits, over the quiet wait itself and so over every wait this endpoint arms, and the
+    // endpoint's own `setTimeout` is what runs on the real clock. The WAITING reply's own wait
+    // keeps its reminder, which its own case holds.
+    await Bun.sleep(200)
+    expect(inbox).toEqual([])
+    expect(await record()).toEqual({ state: "waiting", count: 0, ...said })
   } finally {
     await close()
   }
