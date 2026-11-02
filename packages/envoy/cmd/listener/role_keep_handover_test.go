@@ -52,7 +52,7 @@ func newKeptLaneUnderClaim(t *testing.T, harness listenerDeliveryHarness, forwar
 	lane := &keptLaneUnderClaim{harness: harness, forwards: make(chan keptHandover, 64)}
 	var attempts atomic.Int32
 	cfg := harness.config
-	cfg.forwardRole = inlineForward(func(subject string, item contracts.Envelope, _ time.Duration) error {
+	cfg.forwardRole = inlineForward(func(subject string, item contracts.Envelope, _ string, _ time.Duration) error {
 		holder := strings.TrimPrefix(subject, contracts.AgentTopicPrefix)
 		if err := forward(int(attempts.Add(1)), holder, item); err != nil {
 			return err
@@ -264,7 +264,7 @@ func TestAHandoverWalksPastMoreExpiredCopiesThanItsIdleWalksAllow(t *testing.T) 
 	)
 	cfg := harness.config
 	var forwarded []string
-	cfg.forwardRole = inlineForward(func(_ string, item contracts.Envelope, _ time.Duration) error {
+	cfg.forwardRole = inlineForward(func(_ string, item contracts.Envelope, _ string, _ time.Duration) error {
 		forwarded = append(forwarded, item.DedupeKey)
 		return nil
 	})
@@ -358,7 +358,7 @@ func TestAHandoverResolvesTheHolderOfAWalkAfterThePauseBeforeIt(t *testing.T) {
 	var attempts []string
 	failed, released := make(chan struct{}), make(chan struct{})
 	cfg := harness.config
-	cfg.forwardRole = inlineForward(func(_ string, item contracts.Envelope, _ time.Duration) error {
+	cfg.forwardRole = inlineForward(func(_ string, item contracts.Envelope, _ string, _ time.Duration) error {
 		attempts = append(attempts, item.DedupeKey)
 		if len(attempts) > 1 {
 			return nil
@@ -405,7 +405,7 @@ func TestTheSweepHandsOverALaneNoHandoverIsDraining(t *testing.T) {
 	)
 	cfg := harness.config
 	forwards := make(chan string, 16)
-	cfg.forwardRole = inlineForward(func(_ string, item contracts.Envelope, _ time.Duration) error {
+	cfg.forwardRole = inlineForward(func(_ string, item contracts.Envelope, _ string, _ time.Duration) error {
 		forwards <- item.DedupeKey
 		return nil
 	})

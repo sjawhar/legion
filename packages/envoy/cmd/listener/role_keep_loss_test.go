@@ -47,7 +47,7 @@ func TestAKeptCopyItsDrainNeverForwardedStillReachesTheRolesHolder(t *testing.T)
 	lostCtx, cancelLost := context.WithTimeout(ctx, 2*time.Second)
 	defer cancelLost()
 	lost := harness.config
-	lost.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error {
+	lost.forwardRole = inlineForward(func(string, contracts.Envelope, string, time.Duration) error {
 		return errors.New("this listener ended between its claim of the copy and its forward")
 	})
 	if err := drainKeptRole(lostCtx, lost, role, time.Now); err == nil {
@@ -59,7 +59,7 @@ func TestAKeptCopyItsDrainNeverForwardedStillReachesTheRolesHolder(t *testing.T)
 	var handed []string
 	replacement := harness.config
 	replacement.roleKeepDrains = newRoleKeepGuards()
-	replacement.forwardRole = inlineForward(func(_ string, forwarded contracts.Envelope, _ time.Duration) error {
+	replacement.forwardRole = inlineForward(func(_ string, forwarded contracts.Envelope, _ string, _ time.Duration) error {
 		handed = append(handed, forwarded.DedupeKey)
 		return nil
 	})

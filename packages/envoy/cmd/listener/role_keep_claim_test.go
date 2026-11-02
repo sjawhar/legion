@@ -54,7 +54,7 @@ func TestADrainThatFailedAForwardLeavesThatCopyAndTheRestToTheNextDrain(t *testi
 
 	var attempted []string
 	failing := harness.config
-	failing.forwardRole = inlineForward(func(_ string, forwarded contracts.Envelope, _ time.Duration) error {
+	failing.forwardRole = inlineForward(func(_ string, forwarded contracts.Envelope, _ string, _ time.Duration) error {
 		attempted = append(attempted, forwarded.DedupeKey)
 		if len(attempted) < 2 {
 			return nil
@@ -79,7 +79,7 @@ func TestADrainThatFailedAForwardLeavesThatCopyAndTheRestToTheNextDrain(t *testi
 	var handed []string
 	next := harness.config
 	next.roleKeepDrains = newRoleKeepGuards()
-	next.forwardRole = inlineForward(func(_ string, forwarded contracts.Envelope, _ time.Duration) error {
+	next.forwardRole = inlineForward(func(_ string, forwarded contracts.Envelope, _ string, _ time.Duration) error {
 		handed = append(handed, forwarded.DedupeKey)
 		return nil
 	})
@@ -123,10 +123,10 @@ func TestADrainThatEndedBetweenItsForwardAndItsConfirmLeavesTheHolderOneStoredCo
 	defer cancel()
 	claimRoleWith(t, harness, holder, role, entry)
 	var handed []string
-	record := func(cfg listenerDeliveryHandlerConfig, after func()) func(string, contracts.Envelope, time.Duration, bool) (func() error, error) {
+	record := func(cfg listenerDeliveryHandlerConfig, after func()) func(string, contracts.Envelope, string, time.Duration, bool) (func() error, error) {
 		forward := cfg.forwardRole
-		return func(subject string, forwarded contracts.Envelope, timeout time.Duration, storedOnly bool) (func() error, error) {
-			wait, err := forward(subject, forwarded, timeout, storedOnly)
+		return func(subject string, forwarded contracts.Envelope, msgID string, timeout time.Duration, storedOnly bool) (func() error, error) {
+			wait, err := forward(subject, forwarded, msgID, timeout, storedOnly)
 			if err != nil {
 				return nil, err
 			}
@@ -217,7 +217,7 @@ func TestAClaimNoDrainReleasedHoldsTheLaneUntilItsWindowHasPassed(t *testing.T) 
 	claimRoleWith(t, harness, holder, role, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true})
 	var handed []string
 	cfg := harness.config
-	cfg.forwardRole = inlineForward(func(_ string, forwarded contracts.Envelope, _ time.Duration) error {
+	cfg.forwardRole = inlineForward(func(_ string, forwarded contracts.Envelope, _ string, _ time.Duration) error {
 		handed = append(handed, forwarded.DedupeKey)
 		return nil
 	})

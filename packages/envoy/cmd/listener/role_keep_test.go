@@ -351,7 +351,7 @@ func TestAKeptRoleMessageOlderThanTheKeepWindowIsDroppedAndTheCursorMovesPastIt(
 	)
 	var forwards atomic.Int32
 	cfg := harness.config
-	cfg.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error {
+	cfg.forwardRole = inlineForward(func(string, contracts.Envelope, string, time.Duration) error {
 		forwards.Add(1)
 		return nil
 	})
@@ -529,7 +529,7 @@ func TestADrainSpendsItsBudgetOnForwardsRatherThanOnExpiredCopies(t *testing.T) 
 
 	cfg := harness.config
 	var forwarded []string
-	cfg.forwardRole = inlineForward(func(_ string, item contracts.Envelope, _ time.Duration) error {
+	cfg.forwardRole = inlineForward(func(_ string, item contracts.Envelope, _ string, _ time.Duration) error {
 		forwarded = append(forwarded, item.DedupeKey)
 		return nil
 	})
@@ -585,8 +585,8 @@ func TestTwoDrainsOfOneRoleHandEachKeptCopyToExactlyOneHolder(t *testing.T) {
 
 	var mu sync.Mutex
 	handed := map[string][]string{}
-	hand := func(listener string) func(string, contracts.Envelope, time.Duration) error {
-		return func(_ string, item contracts.Envelope, _ time.Duration) error {
+	hand := func(listener string) func(string, contracts.Envelope, string, time.Duration) error {
+		return func(_ string, item contracts.Envelope, _ string, _ time.Duration) error {
 			mu.Lock()
 			defer mu.Unlock()
 			handed[item.DedupeKey] = append(handed[item.DedupeKey], listener)
@@ -597,14 +597,14 @@ func TestTwoDrainsOfOneRoleHandEachKeptCopyToExactlyOneHolder(t *testing.T) {
 	var once sync.Once
 	toFirst := hand("first")
 	first := harness.config
-	first.forwardRole = inlineForward(func(subject string, item contracts.Envelope, window time.Duration) error {
+	first.forwardRole = inlineForward(func(subject string, item contracts.Envelope, msgID string, window time.Duration) error {
 		// The first drain holds its first forward until the second has walked the lane, which
 		// is the moment two listeners drain one role at once.
 		once.Do(func() {
 			close(started)
 			<-release
 		})
-		return toFirst(subject, item, window)
+		return toFirst(subject, item, msgID, window)
 	})
 	// The second drain stands in for a second listener: it has guards of its own, where one
 	// listener's guard for the role would hold it until the first drain had finished. One guard
@@ -684,7 +684,7 @@ func TestTheDrainJudgesAKeptCopyByTheRulesEveryForwardPathApplies(t *testing.T) 
 			holder := "ses_" + strings.ReplaceAll(tc.role, "-", "_") + "_claimant"
 			cfg := harness.config
 			var forwards atomic.Int32
-			cfg.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error {
+			cfg.forwardRole = inlineForward(func(string, contracts.Envelope, string, time.Duration) error {
 				forwards.Add(1)
 				return nil
 			})
@@ -802,7 +802,7 @@ func TestAKeptCopyReachesTheHolderThatClaimedTheRoleUnderTheKeep(t *testing.T) {
 	)
 	cfg := harness.config
 	forwards := make(chan contracts.Envelope, 4)
-	cfg.forwardRole = inlineForward(func(_ string, item contracts.Envelope, _ time.Duration) error {
+	cfg.forwardRole = inlineForward(func(_ string, item contracts.Envelope, _ string, _ time.Duration) error {
 		forwards <- item
 		return nil
 	})
@@ -938,7 +938,7 @@ func TestAKeptCopyThatDrewNoReceiptIsReportedReceiptTimeout(t *testing.T) {
 	)
 	cfg := harness.config
 	var forwarded []string
-	cfg.forwardRole = inlineForward(func(_ string, item contracts.Envelope, _ time.Duration) error {
+	cfg.forwardRole = inlineForward(func(_ string, item contracts.Envelope, _ string, _ time.Duration) error {
 		forwarded = append(forwarded, item.DedupeKey)
 		if len(forwarded) == 1 {
 			return fmt.Errorf("role %s's holder answered no receipt: %w", role, bus.ErrReceiptTimeout)

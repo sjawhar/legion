@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
@@ -315,8 +316,9 @@ func keepRoleMessage(client *bus.Client, logger *logging.Logger, role string, it
 // none, so a keep for a role nobody holds costs one resolution.
 //
 // One message is not kept at all, and leaves its caller's give-up exactly as it was before the
-// kept lane: one whose role token no claim can name (isValidRole, the pattern POST /v1/roles/set
-// refuses), which both give-up paths must agree on, since a copy kept under such a token waits
+// kept lane: one whose role token no claim can name (roles.Valid, the pattern POST /v1/roles/set
+// refuses), which both give-up paths must agree on, and Dispatch's outbox with them
+// (keptOrSkipped, internal/dispatch/outbox/role.go), since a copy kept under such a token waits
 // for a claim that cannot be made and expires unread.
 //
 // A sender that keeps a queue of its own and redelivers from it - the Legion daemon's notice
@@ -325,7 +327,7 @@ func keepRoleMessage(client *bus.Client, logger *logging.Logger, role string, it
 // address: nothing publishes a raw role message it would redeliver, so the role lane always
 // keeps.
 func keepForNextHolder(cfg listenerDeliveryHandlerConfig, role string, item contracts.Envelope) bool {
-	if !isValidRole(role) {
+	if !roles.Valid(role) {
 		return false
 	}
 	if !keepRoleMessage(cfg.client, cfg.logger, role, item) {
@@ -871,6 +873,7 @@ func walkKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, 
 			result.end, err = roleKeepWriteFailed(err)
 			return result, err
 		}
+		handed := roleForward{item: item, sessionID: holder, storedOnly: storedOnly}
 		forward := item
 		forward.DedupeKey = roleForwardDedupePrefix + item.DedupeKey
 		keptAt := stored.Time.UnixMilli()
@@ -881,7 +884,10 @@ func walkKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, 
 		// the lane's failure does (finishRoleForward), since the copy stays on the lane and the
 		// next walk must offer it rather than pass it over as one the holder already took.
 		cfg.attemptCache.Record(item.DedupeKey, holder)
-		forwarded := cfg.forwardAndWait(subject, forward, roleReceiptTimeout, storedOnly)
+		// The forward is named as the lane's own forward of this message to this holder is
+		// (roleForward.msgID), so the stream keeps one copy of it for this holder however many
+		// walks forward it.
+		forwarded := cfg.forwardAndWait(subject, forward, handed.msgID(subject), roleReceiptTimeout, storedOnly)
 		if forwarded != nil && !errors.Is(forwarded, bus.ErrReceiptTimeout) {
 			// This walk is ending with the copy claimed and unforwarded, so it releases the
 			// claim: the cursor goes back to what it was before the claim, and the role's next
@@ -905,7 +911,7 @@ func walkKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, 
 		// recorded in the dedupe cache, and logged on the role forward's own line, with the role
 		// and the time the copy was kept beside it. A forward that drew no receipt is reported
 		// there as the lane's own is, under receipt_timeout.
-		finishRoleForward(cfg, roleForward{item: item, sessionID: holder, storedOnly: storedOnly}, forwarded,
+		finishRoleForward(cfg, handed, forwarded,
 			slog.String("role", role),
 			slog.String("dedupe_key", forward.DedupeKey),
 			slog.Int64("kept_at", keptAt))
