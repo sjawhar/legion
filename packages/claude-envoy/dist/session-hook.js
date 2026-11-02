@@ -13995,6 +13995,25 @@ function documentOwnerValidation(requireArtifact, alwaysRequireArtifact = false)
     message: alwaysRequireArtifact ? "Exactly one of issue and project is required; artifact or ref must name the document." : "Exactly one of issue and project is required; with project, artifact names the document."
   };
 }
+var ARTIFACT_OWNER_AND_SOURCE_RULE = "Exactly one of path or content is required. Exactly one of issue and project is required; with project, artifact names the document.";
+var CONTENT_IS_MARKDOWN = "content is stored as a Markdown document, which rewrites other text (a JSONL file's lines come back joined into one paragraph)";
+var PATH_KEEPS_BYTES = "path (--path <file>), which stores a file whose path does not end in .md or .markdown as its bytes, unchanged";
+var ARTIFACT_CONTENT_NAME_RULE = `${CONTENT_IS_MARKDOWN}, so with content the name ends in .md or .markdown or has no extension; upload any other file (.jsonl, .tsv, .json, .txt) with ${PATH_KEEPS_BYTES}.`;
+var NAME_EXTENSION = /\.([^\s.]+)$/u;
+var MARKDOWN_EXTENSION = /^(md|markdown)$/i;
+var artifactOwner = documentOwnerValidation(false);
+function artifactProblem(value) {
+  const input = value;
+  if (!artifactOwner.check(value) || typeof input.path === "string" === (typeof input.content === "string")) {
+    return ARTIFACT_OWNER_AND_SOURCE_RULE;
+  }
+  if (typeof input.content !== "string" || typeof input.name !== "string")
+    return;
+  const extension = NAME_EXTENSION.exec(input.name.trim())?.[1];
+  if (extension === undefined || MARKDOWN_EXTENSION.test(extension))
+    return;
+  return `${CONTENT_IS_MARKDOWN}, and ${JSON.stringify(input.name)} is not a Markdown name. Upload the file under the same name with ${PATH_KEEPS_BYTES}; content takes a name ending in .md or .markdown or with no extension.`;
+}
 var documentEditOwner = documentOwnerValidation(true);
 var documentEditValidation = {
   check: (value) => {
@@ -14415,21 +14434,19 @@ var dispatchToolSpecs = [
     name: "dispatch_artifact",
     example: { issue: "DSP-1", name: "design.md", content: `# Design
 ` },
-    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version, and so does uploading a document's slug (plan-md for plan.md). Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " + "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " + "In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
+    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version, and so does uploading a document's slug (plan-md for plan.md). Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " + `${ARTIFACT_CONTENT_NAME_RULE} ` + "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " + "In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key for an unlinked document.").optional(),
       name: z.string().describe("Artifact filename shown in Dispatch."),
       path: z.string().describe("Local path to the file to upload.").optional(),
-      content: z.string().describe("Inline text to store as a Markdown document; a CR LF or a lone carriage return in it is stored as a line feed.").optional(),
+      content: z.string().describe("Inline text to store as a Markdown document, under a name ending in .md or .markdown or with no extension; a CR LF or a lone carriage return in it is stored as a line feed.").optional(),
       summary: z.string().describe("Optional version summary.").optional()
     }),
     validation: {
-      check: (value) => {
-        const input = value;
-        return documentOwnerValidation(false).check(value) && typeof input.path === "string" !== (typeof input.content === "string");
-      },
-      message: "Exactly one of path or content is required. Exactly one of issue and project is required; with project, artifact names the document."
+      check: (value) => artifactProblem(value) === undefined,
+      message: `${ARTIFACT_OWNER_AND_SOURCE_RULE} ${ARTIFACT_CONTENT_NAME_RULE}`,
+      refusal: (value) => artifactProblem(value) ?? ARTIFACT_OWNER_AND_SOURCE_RULE
     }
   },
   {
@@ -15767,22 +15784,25 @@ class DispatchWriteUnsettledError extends Error {
   last;
   attempts;
   name = "DispatchWriteUnsettledError";
-  constructor(last, attempts, unanswered) {
+  constructor(last, attempts, unanswered, keyed = false) {
     let answer;
     let why = "an earlier attempt of the write may have reached Dispatch";
     if (last instanceof DispatchGatewayError) {
       answer = last.answer;
+    } else if (last instanceof DispatchServiceError && last.code === IDEMPOTENCY_KEY_IN_FLIGHT) {
+      answer = last.code;
+      why = "Dispatch was still running an earlier attempt of the write";
     } else if (last instanceof DispatchServiceError) {
       answer = `${last.code}: ${last.message}`;
-      if (last.code === IDEMPOTENCY_KEY_IN_FLIGHT) {
-        why = "Dispatch was still running an earlier attempt of the write";
-      }
     } else {
       answer = unanswered ?? last.message;
       why = "an attempt of the write may have reached Dispatch";
     }
     const tried = attempts === 1 ? "its only attempt" : `the last of ${attempts} attempts`;
-    super(`${answer} (${tried}), and ${why}, so it may or may not have taken effect: check whether ` + "it did before retrying it.", { cause: last });
+    const next = keyed ? ". Dispatch finishes an attempt it received whatever this command does, so read the " + "write back before you send it again: a new command sends it under a new key." : ": check whether it did before retrying it.";
+    super(`${answer} (${tried}), and ${why}, so it may or may not have taken effect${next}`, {
+      cause: last
+    });
     this.last = last;
     this.attempts = attempts;
   }
@@ -15817,7 +15837,9 @@ function requestSignal(signal) {
 var DISPATCH_WRITE_RETRY = {
   pausesMs: [1000, 2000, 4000, 8000],
   withinMs: 30000,
-  silenceMs: 20000
+  silenceMs: 20000,
+  inFlightPauseMs: 3000,
+  inFlightWithinMs: 55000
 };
 function pauseFor(ms, signal) {
   const { promise, resolve, reject } = Promise.withResolvers();
@@ -15912,7 +15934,7 @@ var NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
 async function writeAnswer(response, key) {
   const echoed = keyEchoed(response, key);
   if (response.ok || NULL_BODY_STATUSES.has(response.status)) {
-    return { response, again: false, reached: false, echoed, unjudged: false };
+    return { response, again: false, reached: false, running: false, echoed, unjudged: false };
   }
   const { status } = response;
   const text = await response.text();
@@ -15925,6 +15947,7 @@ async function writeAnswer(response, key) {
     }
   }
   const again = retriesUnderKey(status, shape.code);
+  const running = again && status === 409;
   return {
     response: new Response(text, {
       status,
@@ -15932,7 +15955,8 @@ async function writeAnswer(response, key) {
       headers: response.headers
     }),
     again,
-    reached: status >= 500 || again && status === 409,
+    reached: status >= 500 || running,
+    running,
     echoed,
     unjudged: !echoed && typeof shape.error === "string"
   };
@@ -16025,12 +16049,14 @@ class DispatchClient {
   #baseUrl;
   #resolvedIssues = new Map;
   #signal;
+  #madeAt;
   constructor(baseUrl, token, fetchImpl = fetch, signal, writeRetry = DISPATCH_WRITE_RETRY) {
     this.token = token;
     this.fetchImpl = fetchImpl;
     this.writeRetry = writeRetry;
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(signal);
+    this.#madeAt = this.#now();
   }
   async issue(input) {
     const answer = await this.#jsonAnswer("POST", ["api", "v1", "issues"], input);
@@ -16434,10 +16460,16 @@ class DispatchClient {
     }
     const key = callerKey ?? crypto.randomUUID();
     headers[IDEMPOTENCY_KEY_HEADER] = key;
-    const { pausesMs, withinMs, silenceMs, pause = pauseFor } = this.writeRetry;
+    const { pausesMs, withinMs, silenceMs, inFlightPauseMs, inFlightWithinMs } = this.writeRetry;
+    const pause = this.writeRetry.pause ?? pauseFor;
     const request = `${method} ${url}`;
     const started = this.#now();
+    const bodyBytes = body === undefined ? 0 : typeof body.content === "string" ? Buffer.byteLength(body.content) : body.content.byteLength;
+    const upload = bodyBytes >= STREAMED_BODY_MIN;
+    const lastAsk = this.#madeAt + inFlightWithinMs;
     let reached = false;
+    let running = false;
+    let sawKeyedLayer = false;
     for (let attempt = 1;; attempt++) {
       let answer;
       let thrown;
@@ -16448,33 +16480,42 @@ class DispatchClient {
         if (!answer.again)
           return answer.response;
         reached ||= answer.reached;
+        running ||= answer.running && !upload;
+        sawKeyedLayer ||= answer.echoed;
       } catch (error) {
         const name = error instanceof Error || error instanceof DOMException ? error.name : "";
         if (!(error instanceof WriteAttemptSilent) && (this.#signal.aborted || name === "AbortError" || name === "TimeoutError")) {
-          throw this.#ended(error, request, attempt, true);
+          throw this.#ended(error, request, attempt, true, sawKeyedLayer);
         }
         thrown = error;
         reached = true;
+        running ||= error instanceof WriteAttemptSilent && !upload;
       }
-      const scheduled = pausesMs[attempt - 1];
+      const scheduled = running ? Math.min(pausesMs[attempt - 1] ?? inFlightPauseMs, inFlightPauseMs) : pausesMs[attempt - 1];
       const wait = Math.max(scheduled ?? 0, answer === undefined ? 0 : retryAfterMs(answer.response));
-      const inTime = scheduled !== undefined && this.#now() - started + wait <= withinMs;
-      if (!inTime || !(answer?.echoed || await this.#runsKeyedLayer(answer?.unjudged ?? false))) {
+      const latest = Math.min(started + (running ? inFlightWithinMs : withinMs), lastAsk);
+      let again = scheduled !== undefined && this.#now() + wait <= latest;
+      if (again) {
+        again = answer?.echoed || await this.#runsKeyedLayer(answer?.unjudged ?? false);
+        sawKeyedLayer ||= again;
+        again &&= this.#now() + wait <= latest;
+      }
+      if (again) {
+        try {
+          await pause(wait, this.#signal);
+        } catch (error) {
+          throw this.#ended(error, request, attempt, reached, sawKeyedLayer);
+        }
+        again = this.#now() <= latest;
+      }
+      if (!again) {
         if (answer !== undefined) {
-          return this.#unsettled(method, url, answer.response, reached, attempt);
+          return this.#unsettled(method, url, answer.response, reached, attempt, sawKeyedLayer);
         }
         if (thrown instanceof WriteAttemptSilent) {
-          throw new DispatchWriteUnsettledError(thrown, attempt, `${request} ${thrown.message}`);
+          throw new DispatchWriteUnsettledError(thrown, attempt, `${request} ${thrown.message}`, sawKeyedLayer);
         }
         throw thrown;
-      }
-      await answer?.response.body?.cancel().catch(() => {
-        return;
-      });
-      try {
-        await pause(wait, this.#signal);
-      } catch (error) {
-        throw this.#ended(error, request, attempt, reached);
       }
     }
   }
@@ -16507,12 +16548,12 @@ class DispatchClient {
       clearTimeout(timer);
     }
   }
-  #ended(error, request, attempts, mayHaveReached) {
+  #ended(error, request, attempts, mayHaveReached, keyed) {
     const reason = this.#signal.aborted ? this.#signal.reason : error;
     const timedOut = (reason instanceof Error || reason instanceof DOMException) && reason.name === "TimeoutError";
     if (!timedOut || !mayHaveReached || !(error instanceof Error))
       return error;
-    return new DispatchWriteUnsettledError(error, attempts, `${request} had no definitive answer when its deadline ended it`);
+    return new DispatchWriteUnsettledError(error, attempts, `${request} had no definitive answer when its deadline ended it`, keyed);
   }
   async#runsKeyedLayer(unjudged) {
     const origin = this.#baseUrl;
@@ -16546,12 +16587,12 @@ class DispatchClient {
       return false;
     }
   }
-  async#unsettled(method, url, response, reached, attempts) {
+  async#unsettled(method, url, response, reached, attempts, keyed) {
     const refusal = await this.#response(method, url, response).catch((error) => error);
     if (reached && refusal instanceof DispatchServiceError) {
       const landedAlone = refusal instanceof DispatchGatewayError ? refusal.mayHaveReachedDispatch : refusal.status >= 500;
       if (!landedAlone)
-        throw new DispatchWriteUnsettledError(refusal, attempts);
+        throw new DispatchWriteUnsettledError(refusal, attempts, undefined, keyed);
     }
     throw refusal;
   }
@@ -16990,7 +17031,9 @@ async function textWithPictures(tool, text, pictures, limit, owner, upload, acto
       uploaded = await upload({ name: picture.name, file: picture.file, actor });
     } catch (error) {
       const earlier = addresses.length === 0 ? "" : `; the pictures before it are uploaded (${addresses.join(", ")})`;
-      throw new Error(`images: ${picture.path} was not uploaded: ${messageFor(error)}. Nothing was posted${earlier}.`);
+      const refused = error instanceof DispatchGatewayError ? !error.mayHaveReachedDispatch : error instanceof DispatchServiceError && error.status < 500;
+      const outcome = refused ? "was not uploaded" : "may or may not have been uploaded";
+      throw new Error(`images: ${picture.path} ${outcome}: ${messageFor(error).replace(/\.$/, "")}. Nothing ` + `was posted${earlier}.`);
     }
     const address = `dispatch://${owner}/artifact/${uploaded.artifact.slug}@v${uploaded.version.number}`;
     addresses.push(address);

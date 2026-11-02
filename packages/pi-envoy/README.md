@@ -349,10 +349,12 @@ before any call of that message runs. So the gate reads a file before an earlier
 message writes or edits it. A file that is not there yet is refused in `block` mode with the
 advice to send the call again in a later message; in `warn` mode the call runs unreviewed, with
 that advice as its note. A file that an earlier call changed is refused by the CLI in `block` mode
-(`… AskGate reviews the calls of a message before any of them runs, so it did not review that
-change. Send the call again in a later message.`); in `warn` mode it posts with a
+when a review, a rebuttal or a breaker trip stands behind the call (`… AskGate reads the files of a
+message's calls before any of them runs, so it did not see that change. Send the call again in a
+later message than the one that changes the file.`); in `warn` mode it posts with a
 `dispatch: warning:` line. Write or edit a file in one message, and send the write that posts it
-in the next.
+in the next. A call the gate reviewed nothing of (a halt, a session whose model is on another
+provider, a review that failed) checks no file, so its file posts as the CLI reads it.
 
 **The form the gate reads.** One `dispatch` call, alone in the bash call:
 
@@ -398,11 +400,12 @@ gated write only when it consumes one, so a write sent any other way is refused 
   record pi-envoy cannot write is a notice in the session, at start or at a switch.
 - **The marker.** The gate mints one file in the store for each literal call it lets run, created
   owner-only and exclusively. It binds the exact argument vector the CLI receives and, behind a
-  review or a deliberate pass (a rebuttal, a breaker trip, a halt, another provider), the digest
-  of the arguments the dry run printed and the sha256 of each file the argv names, as the gate
-  read it. A call no verdict stands behind, and a `task` subagent's literal call, get a marker of
-  the argument vector alone. Nothing of it is in the command the agent sees. A marker goes when
-  its call ends, is refused or the session shuts down; a backgrounded call keeps its marker until
+  review or a deliberate pass (a rebuttal, a breaker trip), the digest of the arguments the dry
+  run printed and the sha256 of each file the argv names, as the gate read it. A call no verdict
+  stands behind (a halt and another provider among them), and a `task` subagent's literal call,
+  get a marker of the argument vector alone. Nothing of it is in the command the agent sees. A
+  marker goes when its call ends, is refused or the session shuts down; a backgrounded call keeps
+  its marker until
   shutdown, and a marker older than two hours, longer than any tool's time limit, is refused and
   removed. The process removes its store when it exits; the CLI's daily session pruning removes
   the store of a process that is gone and that nothing changed for two hours.

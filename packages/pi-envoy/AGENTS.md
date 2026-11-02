@@ -647,14 +647,15 @@ process that crashed. `bindDispatchSession` also sets `DISPATCH_STATE_DIR` when 
 command that changes `HOME` or `XDG_STATE_HOME` still finds the record, and a record it cannot
 write after a switch is a UI notice at once. For each literal call it lets run, the gate mints one
 single-use marker in that store (`mintFor`): the argv the CLI gets, bound behind a review or a
-deliberate pass to the dry run's arguments and to the sha256 of each file the argv names
-(`fileOperands`), as the gate read it in place; argv-only for a call no verdict stands behind and
+deliberate pass (a rebuttal, a breaker trip) to the dry run's arguments and to the sha256 of each
+file the argv names (`fileOperands`), as the gate read it in place; argv-only for a call no verdict
+stands behind (`UNREVIEWED_OUTCOMES`, a halt and another provider among them) and
 for a `task` subagent's literal call. A marker goes when its call ends or at shutdown, and the CLI
 refuses one older than two hours (`MARKER_MAX_AGE_MS`). The CLI reads each named file once,
 consumes one matching marker by unlinking it before it posts a gated write under a live record,
 sends an upload's bytes from that same read, and, when the session chose block, refuses a write
 with no matching marker (`gatedWrite`, the one predicate both sides use); a file that changed after
-the review matches none and gets the advice to send the call again in a later message. In warn mode,
+the gate read it matches none and gets the advice to send the call again in a later message. In warn mode,
 the default for these checks, the CLI writes the ledger line before it posts. The gate writes the
 checks' mode into the session's own record for the CLI (`checkMode`: block only when the session
 chose it; `setRecordMode` keys it per session, so a switch never changes another session's mode),

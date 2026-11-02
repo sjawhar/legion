@@ -100,7 +100,7 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	case err != nil:
 		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: load document before rebuild: %v", ErrServiceUnavailable, err)
 	default:
-		validationErr = validateUpdate(loaded.Update)
+		validationErr = validateUpdate(loaded.Update, s.maxPendingItems)
 	}
 	if validationErr == nil {
 		latest, err := savedVersionNumber(ctx, tx, artifactID)

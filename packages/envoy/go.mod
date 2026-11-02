@@ -155,9 +155,9 @@ require (
 // stored state holding one does not load (#356); a partly applied update reaches the other
 // peers with what it parked as well as what landed (#357); Server.OnTokenAuthContext, OnTokenAuth
 // with the connection's request context, so the document socket's token is answered from the
-// admission of the socket that sent it (#351); and WithFormatCleanup
-// and Doc.SetFormatCleanup, which turn off the format cleanup a remote apply runs, so a copy that
-// replays the room's commit log (newDocumentCopy) and a room loading its stored history
-// (applyLoadedState) make no commit the room never made (#369). One is fork-only, with no upstream
-// pull request yet: a per-apply scan budget stacked on #333, which Dispatch does not set.
+// admission of the socket that sent it (#351); and WithFormatCleanup and Doc.SetFormatCleanup,
+// which turn off the format cleanup a remote apply runs, so a copy that replays the room's commit
+// log (newDocumentCopy) and a room loading its stored history (bootstrapLoadedState) make no
+// commit the room never made (#369). One is fork-only, with no upstream pull request yet: a
+// per-apply scan budget stacked on #333, which Dispatch does not set.
 replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.54.1-sami.3

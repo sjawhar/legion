@@ -3382,6 +3382,34 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
       ]);
     });
 
+    test("a session on another provider, and a halt, mint an argv-only marker: no review stands behind either", async () => {
+      const skipped = bind({
+        env: STUB,
+        cwd: work,
+        primary: { provider: "openai-codex", id: "gpt-5.5" },
+      });
+      await skipped.bash("s", ASK);
+      const halted = bind({
+        env: { ...STUB, OMP_ASKGATE_TIMEOUT_MS: "20" },
+        cwd: work,
+        complete: untilAborted,
+      });
+      for (const id of ["a", "b", "c", "d"]) await halted.bash(id, ASK);
+      expect(halted.entries.map((e) => e.outcome)).toEqual([
+        "timeout",
+        "timeout",
+        "timeout",
+        "halted",
+      ]);
+      expect([
+        markersIn(skipped.store),
+        markersIn(halted.store).filter((m) => m.toolCallId === "d"),
+      ]).toMatchObject([
+        [{ argv: argvDigest(ASK_ARGV), args: null, files: [], outcome: "skipped" }],
+        [{ argv: argvDigest(ASK_ARGV), args: null, files: [], outcome: "halted" }],
+      ]);
+    });
+
     test("a rebuttal binds the dry run's arguments, its flag gone from the argv", async () => {
       const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
       await g.bash("r", "dispatch comment --issue X-1 --body hi --advisor-rebuttal 'a link'");
@@ -5649,7 +5677,7 @@ describe("a marker the gate mints, checked by the real dispatch CLI", () => {
   const gateEnv = { ...env, OMP_ASKGATE: "block" };
   const BRIEF = "# Brief\n\nShip it on Friday.\n";
   const NOTE = "The acceptance run passed on the staging cluster.\n";
-  const CHANGED = "a file this write posts changed after AskGate reviewed it";
+  const CHANGED = "a file this write posts changed after AskGate read it";
   const LATER = "send this call again in a later message";
 
   /** Posts `command` with the real CLI, as the session whose live record names `store`. */
@@ -5749,8 +5777,34 @@ describe("a marker the gate mints, checked by the real dispatch CLI", () => {
       const posted = await post(command, g.store);
       expect(posted.code).toBe(1);
       expect(posted.stdout).toContain(`${CHANGED} (\`${form} ${file}\`)`);
-      expect(posted.stdout).toContain("Send the call again in a later message.");
+      expect(posted.stdout).toContain(
+        "Send the call again in a later message than the one that changes the file."
+      );
       expect(posted.sent).toEqual([]);
+    }, 30_000);
+
+  // A session on another provider than the gate's: the gate reviews nothing, so a file that a call
+  // later in the same message changes posts as the CLI reads it, with no refusal naming a review.
+  for (const [form, file, command] of [
+    ["--body-file", "note.md", "dispatch comment --issue DSP-1 --body-file note.md"],
+    ["--path", "brief.md", "dispatch artifact --issue DSP-1 --name brief.md --path brief.md"],
+  ] as const)
+    test(`a ${form} file edited after a call the gate did not review posts its new bytes`, async () => {
+      fs.writeFileSync(path.join(work, file), BRIEF);
+      const g = bind({
+        env: gateEnv,
+        cwd: work,
+        primary: { provider: "openai-codex", id: "gpt-5.5" },
+      });
+      expect((await g.bash("skipped", command))?.block).toBeUndefined();
+      expect(g.entries).toMatchObject([{ outcome: "skipped" }]);
+      expect(g.calls).toHaveLength(0);
+      const edited = `${BRIEF}An edit made in the same message.\n`;
+      fs.writeFileSync(path.join(work, file), edited);
+      const posted = await post(command, g.store);
+      expect(posted.stdout).not.toContain(CHANGED);
+      expect(posted.code).toBe(0);
+      expect(posted.sent).toMatchObject([{ body: form === "--path" ? edited : { body: edited } }]);
     }, 30_000);
 
   test("a file a call earlier in the same message writes is refused with what to do, then posts when sent again", async () => {

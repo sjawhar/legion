@@ -8,7 +8,7 @@ body: |-
     once and fences that holder off; a stopping process finishes the message in its handler and
     releases the hold. A durable carries its config's generation (`dispatch.consumer-generation`),
     and a take-over that finds a higher one keeps the deployed config. The lease pool grows by four
-    connections, to 17, so `store.ConnectionsPerProcess` goes from 92 to 96. A periodic
+    connections, to 17, so `store.ConnectionsPerProcess` goes from 94 to 98. A periodic
     maintenance loop records its passes per lease and period (`duty_passes` row
     `<lease>/<period_ns>`), so two builds with different intervals for one loop each run it once
     per their own period.
