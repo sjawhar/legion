@@ -1,8 +1,11 @@
 import { test } from './harness.js';
+import { DISPATCH_BLOCK_POINTER_VALUES } from '@legion/contracts';
 import { Schema } from '@milkdown/kit/prose/model';
+import { EditorState } from '@milkdown/kit/prose/state';
 
 import { typedBlockSpec, type BlockTypeSchema } from '../block-schema.js';
 import { createHeadlessProof } from '../lib-headless.js';
+import { createTypedBlockCommands } from '../typed-block-commands.js';
 
 function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -364,4 +367,147 @@ await test('a pasted rendered typed block reads its content hole, not its header
   assert(typeof rule.contentElement === 'function', 'the typed block parse rule has no contentElement');
   assert(rule.contentElement!(rendered) === content, 'the pasted typed block read its header as content');
   assert(rule.contentElement!(legacy) === legacy, 'a typed block without a content hole did not read its section');
+});
+
+const pointerSchema = {
+  version: 1,
+  types: [
+    { name: 'requirement', content: 'paragraph+', render: 'host', attributes: {} },
+    {
+      name: 'claim',
+      content: 'paragraph+',
+      render: 'host',
+      attributes: { serves: { kind: 'block[]', targets: ['requirement'] } },
+    },
+    blockSchema.types[0],
+  ],
+} as const;
+
+/** The error `run` throws, or undefined when it returns. */
+function thrownBy(run: () => unknown): Error | undefined {
+  try {
+    run();
+  } catch (error) {
+    return error as Error;
+  }
+  return undefined;
+}
+
+await test('a block pointer attribute reads and writes exactly the values the shared table accepts', async () => {
+  const proof = await createHeadlessProof({ blockSchema: pointerSchema });
+  for (const { value, ok, why } of DISPATCH_BLOCK_POINTER_VALUES) {
+    const markdown = `:::claim{#c1 serves="${value}"}\nBody.\n:::\n`;
+    if (ok) {
+      const claim = proof.parseMarkdown(markdown).child(0);
+      const want = value === '' ? [] : value.split(' ');
+      assert(claim.type.name === 'claim', `${why}: parsed node type = ${claim.type.name}`);
+      assert(JSON.stringify(claim.attrs.serves) === JSON.stringify(want), `${why}: serves = ${JSON.stringify(claim.attrs.serves)}`);
+      // The editor writes an empty attribute as its bare name, which the server reads as `=""`
+      // (pmdoc directive.go); every other value is written back exactly as it was read.
+      const expected = value === '' ? markdown.replace('serves=""', 'serves') : markdown;
+      const written = proof.serializeMarkdown(proof.parseMarkdown(markdown));
+      assert(written === expected, `${why}: wrote ${JSON.stringify(written)}, want ${JSON.stringify(expected)}`);
+      assert(proof.serializeMarkdown(proof.parseMarkdown(written)) === written, `${why}: ${JSON.stringify(written)} did not read back`);
+    } else {
+      const error = thrownBy(() => proof.parseMarkdown(markdown));
+      assert(error !== undefined, `${why}: ${JSON.stringify(value)} was accepted`);
+      assert(error!.message.includes('"serves"'), `${why}: refusal = ${error!.message}`);
+    }
+  }
+});
+
+await test('typed-block commands refuse a block pointer to a block of their document whose type it does not allow', async () => {
+  const documentRef = 'dispatch://CORE-1/spec';
+  const ref = (id: string) => `${documentRef}#b-${id}`;
+  const proof = await createHeadlessProof({ blockSchema: pointerSchema });
+  const { schema } = proof;
+  const paragraph = (id: string | null, text: string) => schema.nodes.paragraph.create({ blockId: id }, schema.text(text));
+  const doc = schema.nodes.doc.create(null, [
+    schema.nodes.requirement.create({ blockId: 'r1' }, paragraph(null, 'Need.')),
+    schema.nodes.callout.create({ blockId: 'k1' }, paragraph(null, 'Note.')),
+    paragraph('p1', 'Prose.'),
+    schema.nodes.claim.create({ blockId: 'c1' }, paragraph(null, 'Claim.')),
+  ]);
+  const commandsFor = (contextRef: string | undefined) => {
+    let state = EditorState.create({ schema, doc });
+    const commands = createTypedBlockCommands({
+      blockSchema: pointerSchema,
+      documentRef: contextRef,
+      getState: () => state,
+      dispatch: (tr) => {
+        state = state.apply(tr);
+      },
+    });
+    return { commands, state: () => state };
+  };
+
+  const allowed = commandsFor(documentRef);
+  assert(allowed.commands.setBlockAttributes('c1', { serves: [ref('r1')] }), 'a pointer to a requirement was not set');
+  const set = JSON.stringify(allowed.state().doc.child(3).attrs.serves);
+  assert(set === JSON.stringify([ref('r1')]), `serves = ${set}`);
+
+  for (const [target, type] of [['p1', 'paragraph'], ['k1', 'callout']]) {
+    const { commands, state } = commandsFor(documentRef);
+    const error = thrownBy(() => commands.setBlockAttributes('c1', { serves: [ref(target)] }));
+    assert(error !== undefined, `a pointer to the ${type} ${target} was set`);
+    for (const word of ['"serves"', `"${type}"`, 'requirement']) {
+      assert(error!.message.includes(word), `refusal of ${target} = ${error!.message}, want it to name ${word}`);
+    }
+    assert(state().doc.eq(doc), `the refused pointer to ${target} changed the document`);
+  }
+
+  const elsewhere = commandsFor(documentRef);
+  assert(elsewhere.commands.setBlockAttributes('c1', { serves: ['dispatch://CORE-1/artifact/notes-md#b-p1'] }), 'a pointer to another document was not set');
+
+  const unknown = commandsFor(undefined);
+  assert(unknown.commands.setBlockAttributes('c1', { serves: [ref('p1')] }), 'without documentRef, a pointer to p1 was not left to the server');
+
+  const malformed = commandsFor(documentRef);
+  const error = thrownBy(() => malformed.commands.setBlockAttributes('c1', { serves: ['dispatch://CORE-1/artifact/spec#b-r1'] }));
+  assert(error !== undefined && error.message.includes('"serves"'), `a non-canonical pointer: ${error?.message}`);
+  assert(malformed.state().doc.eq(doc), 'the refused non-canonical pointer changed the document');
+});
+
+await test('a retype into a type whose block pointer allows fewer targets refuses a pointer the old type held', async () => {
+  const documentRef = 'dispatch://CORE-1/spec';
+  const callout = `${documentRef}#b-k1`;
+  // A loose block points at any block; a claim, which may hold it, points only at requirements.
+  const retypeSchema = {
+    version: 1,
+    types: [
+      pointerSchema.types[0],
+      { name: 'loose', content: 'paragraph+', render: 'host', attributes: { serves: { kind: 'block[]' } } },
+      { name: 'claim', content: 'block+', render: 'host', attributes: { serves: { kind: 'block[]', targets: ['requirement'] } } },
+      blockSchema.types[0],
+    ],
+  } as const;
+  const proof = await createHeadlessProof({ blockSchema: retypeSchema });
+  const { schema } = proof;
+  const doc = schema.nodes.doc.create(null, [
+    schema.nodes.callout.create({ blockId: 'k1' }, schema.nodes.paragraph.create(null, schema.text('Note.'))),
+    schema.nodes.loose.create({ blockId: 'c1', serves: [callout] }, schema.nodes.paragraph.create(null, schema.text('Claim.'))),
+  ]);
+  let state = EditorState.create({ schema, doc });
+  const commands = createTypedBlockCommands({
+    blockSchema: retypeSchema,
+    documentRef,
+    getState: () => state,
+    dispatch: (tr) => {
+      state = state.apply(tr);
+    },
+  });
+  const error = thrownBy(() => commands.retypeBlock('c1', 'claim', { serves: [callout] }));
+  assert(error !== undefined, 'a retype into a claim kept its pointer at the callout');
+  for (const word of ['"serves"', '"callout"', 'requirement']) {
+    assert(error!.message.includes(word), `refusal = ${error!.message}, want it to name ${word}`);
+  }
+  assert(state.doc.eq(doc), 'the refused retype changed the document');
+});
+
+await test('a pasted typed block carrying a refused block pointer is not read as the typed block', async () => {
+  const rule = typedSchema(pointerSchema.types[1]).nodes.claim.spec.parseDOM![0] as { getAttrs: (dom: HTMLElement) => Record<string, unknown> | false | null };
+  const value = 'dispatch://CORE-1/spec#b-x dispatch://CORE/artifact/handbook-md#b-y';
+  const parsed = rule.getAttrs(section({ 'data-proof-block-attr-serves': value }));
+  assert(parsed !== false && parsed !== null && JSON.stringify(parsed.serves) === JSON.stringify(value.split(' ')), `parsed = ${JSON.stringify(parsed)}`);
+  assert(rule.getAttrs(section({ 'data-proof-block-attr-serves': 'dispatch://CORE-1/artifact/spec#b-x' })) === false, 'a refused pointer was parsed as the typed block');
 });

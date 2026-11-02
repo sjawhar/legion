@@ -69,11 +69,11 @@ func Render(doc *Node) (string, error) {
 }
 
 // renderSpanless is Render writing no cell for a table's spans: each cell once, and the header as
-// wide as the widest row as it holds cells (tableGrid). The checks that read one document-level
-// block at a time (BlockReadError, BlockShapeError) read it so. They run once for each block a
-// write changed, where a budget for each render would let a write across many tables add
-// maxSpanCells cells for every one of them; a render of the whole document, the one a write stores
-// or reads back (NewMisread), spends one budget in all.
+// wide as the widest row as it holds cells (tableGrid). The read-back of one document-level block
+// at a time (ReadBackBlock) reads it so. It runs once for each block a write changed, where a
+// budget for each render would let a write across many tables add maxSpanCells cells for every one
+// of them; a render of the whole document, the one a write stores or reads back (NewMisread),
+// spends one budget in all.
 func renderSpanless(doc *Node) (string, error) {
 	r, err := render(doc, 0)
 	if err != nil {
@@ -1165,7 +1165,7 @@ func attrsHoldNul(attrs Attrs) bool {
 // (nulAsReplacement). node may be asWritten's input, so the copy's attributes and marks are its
 // own before any is written. A typed block's other attributes are written quoted
 // (renderTypedAttributes), U+0000 as the escape \x00 that its parser unquotes back, so they keep
-// it; its id is written bare, `#` and the id.
+// it; its id is written as TypedBlockIDAttribute writes it, with no such escape.
 func withNulsWritten(node *Node) *Node {
 	out := &Node{Type: node.Type, Attrs: cloneAttrs(node.Attrs), Text: nulAsReplacement(node.Text), Marks: cloneMarks(node.Marks), Children: node.Children}
 	if !IsTypedBlock(out.Type) {

@@ -1,0 +1,126 @@
+[
+  {
+    "id": "callout-1",
+    "written": "#callout-1"
+  },
+  {
+    "id": "q:1",
+    "written": "#q:1"
+  },
+  {
+    "id": "décision",
+    "written": "#décision"
+  },
+  {
+    "id": "à",
+    "written": "#à"
+  },
+  {
+    "id": "a{b",
+    "written": "#a{b"
+  },
+  {
+    "id": "a\\b",
+    "written": "#a\\b"
+  },
+  {
+    "id": "a b",
+    "written": "#a b"
+  },
+  {
+    "id": "a b",
+    "written": "#a b"
+  },
+  {
+    "id": "a　b",
+    "written": "#a　b"
+  },
+  {
+    "id": "a�b",
+    "written": "#a�b"
+  },
+  {
+    "id": "a b",
+    "written": "id=\"a b\""
+  },
+  {
+    "id": " a ",
+    "written": "id=\" a \""
+  },
+  {
+    "id": "a\tb",
+    "written": "id=\"a\tb\""
+  },
+  {
+    "id": "a.b",
+    "written": "id=\"a.b\""
+  },
+  {
+    "id": "a#b",
+    "written": "id=\"a#b\""
+  },
+  {
+    "id": "a}b",
+    "written": "id=\"a}b\""
+  },
+  {
+    "id": "a'b",
+    "written": "id=\"a'b\""
+  },
+  {
+    "id": "a<b",
+    "written": "id=\"a<b\""
+  },
+  {
+    "id": "a=b",
+    "written": "id=\"a=b\""
+  },
+  {
+    "id": "a>b",
+    "written": "id=\"a>b\""
+  },
+  {
+    "id": "a`b",
+    "written": "id=\"a`b\""
+  },
+  {
+    "id": "a<b>=`c`",
+    "written": "id=\"a<b>=`c`\""
+  },
+  {
+    "id": "a\"b",
+    "written": "id=\"a&#x22;b\""
+  },
+  {
+    "id": "a\\\"b",
+    "written": "id=\"a\\&#x22;b\""
+  },
+  {
+    "id": "R&D",
+    "written": "id=\"R&amp;D\""
+  },
+  {
+    "id": "&amp;",
+    "written": "id=\"&amp;amp;\""
+  },
+  {
+    "id": "x&amp;y",
+    "written": "id=\"x&amp;amp;y\""
+  },
+  {
+    "id": "x\ny",
+    "written": "id=\"x&#xA;y\""
+  },
+  {
+    "id": "x\ry",
+    "written": "id=\"x&#xD;y\""
+  },
+  {
+    "id": "x\r\ny",
+    "written": "id=\"x&#xD;&#xA;y\""
+  },
+  {
+    "id": "",
+    "written": "id=\"\""
+  }
+]

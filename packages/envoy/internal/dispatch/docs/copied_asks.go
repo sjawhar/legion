@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
@@ -294,7 +295,8 @@ func owedCopiesOf(ctx context.Context, tx pgx.Tx, documents ...documentAsks) ([]
 // cycle, and returns, sorted and once each, every other document of each document's owner whose
 // latest version holds the block of one of that document's asks with no ask of its own under that
 // block's id (copiesOf). A document's latest version is read for the block's opener
-// (`:::ask{#<id> …}`), so one that quotes the opener elsewhere, in code, is settled for nothing.
+// (`:::ask{<id> …}`, the id as pmdoc.TypedBlockIDAttribute writes it), so one that quotes the
+// opener elsewhere, in code, is settled for nothing.
 // The caller has taken no pending row and appended no event. A copy's settlement waits on the row
 // this marks holding its own owner row and room lock, which the caller never takes, and deletes its
 // own row before it appends an event, so the two can wait on each other in only one direction.
@@ -331,9 +333,9 @@ func copiesOf(ctx context.Context, tx pgx.Tx, document documentAsks) ([]string, 
 		if ask.BlockID == nil {
 			continue
 		}
-		id := likeLiteral(*ask.BlockID)
+		opener := `%ask{` + likeLiteral(pmdoc.TypedBlockIDAttribute(*ask.BlockID))
 		blockIDs = append(blockIDs, *ask.BlockID, *ask.BlockID)
-		patterns = append(patterns, `%ask{#`+id+` %`, `%ask{#`+id+`}%`)
+		patterns = append(patterns, opener+` %`, opener+`}%`)
 	}
 	if len(blockIDs) == 0 {
 		return nil, nil

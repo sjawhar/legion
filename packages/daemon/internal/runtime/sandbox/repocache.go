@@ -417,20 +417,25 @@ func (r *Runtime) cacheURL(name string) string {
 // reconcileCachePod makes s's pod (again) when it must be: s is Suspended (a fresh create, or one a
 // failed earlier run left Suspended), s's pod template reserves other than the configuration's
 // runtime.kubernetes.repository_cache.resources (templateResized: the operator changed them), or
-// the pod it owns runs an image other than the runtime's (imageDrift) or has ended (terminal:
-// evicted, say). A pod it would replace while that pod still runs waits until the cache serves no
-// stream (cacheStreams): replacing it ends every tar it is sending, which fails each fetch reading
-// one and has the daemon make its issue pod again, so the replacement is left to a later sweep
-// while a tar is sent or queued. It then suspends s when it is not already, waits the old pod out
-// (awaitPodGone), and sets the pod template, on the runtime's image and reservation, and Running
-// in one patch, as relaunch does. The Sandbox and its volume are kept through every replacement: a
-// drifted pod costs a new pod, not a new clone. A Running Sandbox whose template reserves what the
-// configuration does, and whose pod is live on the right image or not made yet — the controller
-// makes one — is left alone.
+// the pod it owns runs an image other than the runtime's (imageDrift), runs as a ServiceAccount
+// other than the configured runtime.kubernetes.pod.service_account (accountDrift: the account is
+// fixed for the pod's life, so a cache pod reaches the new one only by being made again), or has
+// ended (terminal: evicted, say). A pod it would replace while that pod still runs waits until the
+// cache serves no stream (cacheStreams), for either drift: replacing it ends every tar it is
+// sending, which fails each fetch reading one and has the daemon make its issue pod again, so the
+// replacement is left to a later sweep while a tar is sent or queued. It then suspends s when it
+// is not already, waits the old pod out (awaitPodGone), and sets the pod template, on the
+// runtime's image and reservation, and Running in one patch, as relaunch does. The Sandbox and
+// its volume are kept through every replacement: a drifted pod costs a new pod, not a new clone.
+// A Running Sandbox whose template reserves what the configuration does, and whose pod is live on
+// the right image under the right account or not made yet — the controller makes one — is left
+// alone.
 func (r *Runtime) reconcileCachePod(ctx context.Context, s *sandbox, repo ghrepo.Repository) error {
 	pod := r.storedPod(s.Name)
 	owned := ownedBy(pod, s.UID) && pod.DeletionTimestamp == nil
-	_, drifted := imageDrift(pod, r.image)
+	_, imageDrifted := imageDrift(pod, r.image)
+	_, accountDrifted := accountDrift(pod, r.pod.ServiceAccount)
+	drifted := imageDrifted || accountDrifted
 	if s.mode() != modeSuspended && !templateResized(s, r.cacheConfig.Resources) && (!owned || (!drifted && !terminal(pod))) {
 		return nil
 	}

@@ -273,9 +273,13 @@ func parseDirectiveAttributes(value string) (Attrs, error) {
 		}
 		switch value[offset] {
 		case '#':
+			// The id runs to the first character no written `#id` holds
+			// (typedBlockIDShortcutExcluded); one that voids the shortcut in the browser editor (a
+			// quote, `<`, `=`, `>`, a backtick), or `&`, which it decodes, is then no separator, and
+			// the line is refused below.
 			start := offset + 1
 			offset = start
-			for offset < len(value) && directiveNameByte(value[offset]) {
+			for offset < len(value) && strings.IndexByte(typedBlockIDShortcutExcluded, value[offset]) < 0 {
 				offset++
 			}
 			if start == offset || attrs[BlockIDAttr] != nil {
@@ -306,6 +310,22 @@ func parseDirectiveAttributes(value string) (Attrs, error) {
 				return nil, fmt.Errorf("expected key=\"value\"")
 			}
 			name := value[start:offset]
+			if name == "id" {
+				id, end, err := quotedTypedBlockID(value, offset)
+				if err != nil {
+					return nil, err
+				}
+				if attrs[BlockIDAttr] != nil {
+					return nil, fmt.Errorf("invalid id attribute")
+				}
+				attrs[BlockIDAttr], offset = id, end
+				break
+			}
+			// The tree's name for the id is no attribute of the markdown, which the browser
+			// editor's parser refuses as undeclared.
+			if name == BlockIDAttr {
+				return nil, fmt.Errorf("attribute %q is not an id; write #id or id=\"id\"", name)
+			}
 			if attrs[name] != nil {
 				return nil, fmt.Errorf("repeated attribute %q", name)
 			}
@@ -351,6 +371,57 @@ func parseDirectiveAttributes(value string) (Attrs, error) {
 		}
 	}
 	return attrs, nil
+}
+
+// typedBlockIDShortcutExcluded is each character a typed block's written `#id` cannot hold. The
+// browser editor's parser (micromark-extension-directive) ends the shortcut at a space, a tab, a
+// line ending, `#`, `.` or `}`, and reads a line whose shortcut holds a quote, `<`, `=`, `>` or a
+// backtick as no directive. An `&` ends nothing there, but that parser decodes a character
+// reference in the shortcut and Go's reader refuses one holding `&`, so the two never read one
+// back alike.
+const typedBlockIDShortcutExcluded = "\t\n\r \"#&'.<=>`}"
+
+// typedBlockIDReferences writes the characters of an `id="…"` value that would otherwise end it or
+// decode (`"`, a line ending, `&`) as character references, which both parsers decode.
+var typedBlockIDReferences = strings.NewReplacer("&", "&amp;", `"`, "&#x22;", "\n", "&#xA;", "\r", "&#xD;")
+
+// TypedBlockIDAttribute is how a typed block's opening line writes the block's id, which both
+// parsers read back as id, whatever it holds: `#id` when the browser editor's parser reads all of
+// it as that shortcut and neither parser decodes anything in it (it holds no
+// typedBlockIDShortcutExcluded character), and `id="…"` otherwise, its `&`, `"`, line feeds and
+// carriage returns as character references (`q:1` and `décision` are written `#q:1` and
+// `#décision`, `a b` is written `id="a b"`). The browser editor writes the same but for an id
+// holding `&`, which it writes raw in either form and reads with each character reference decoded.
+// A browser's update can give a block any id (storedBlockID), and an ask row or anchor keyed on it
+// finds the block by it only while its markdown reads it back. `@legion/contracts`'
+// typedBlockIdAttribute is its twin; both are tested against DISPATCH_TYPED_BLOCK_ID_SPELLINGS,
+// whose JSON copy is `testdata/typed-block-id-spellings.json`.
+func TypedBlockIDAttribute(id string) string {
+	if id != "" && !strings.ContainsAny(id, typedBlockIDShortcutExcluded) {
+		return "#" + id
+	}
+	return `id="` + typedBlockIDReferences.Replace(id) + `"`
+}
+
+// quotedTypedBlockID reads the value of an `id` attribute, value[offset:] following its name, as
+// the browser editor's parser reads it: `="`, then everything to the next `"`, each character
+// reference decoded and a backslash kept as written. It returns the id and the offset past the
+// closing quote. An id with no value or an empty one is refused, where the browser editor would
+// mint one, as is an unterminated one.
+func quotedTypedBlockID(value string, offset int) (string, int, error) {
+	if !strings.HasPrefix(value[offset:], `="`) {
+		return "", 0, fmt.Errorf("expected id=\"value\"")
+	}
+	start := offset + len(`="`)
+	length := strings.IndexByte(value[start:], '"')
+	if length < 0 {
+		return "", 0, fmt.Errorf("unterminated value for \"id\"")
+	}
+	id := html.UnescapeString(value[start : start+length])
+	if id == "" {
+		return "", 0, fmt.Errorf("invalid id attribute")
+	}
+	return id, start + length + 1, nil
 }
 
 func directiveName(name string) bool {
