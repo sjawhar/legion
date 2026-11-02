@@ -109,7 +109,7 @@ func TestConfirmPublishedRefusesADenialAReconnectCleared(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the client never saw the server drop the connection")
 	}
-	if err := confirmPublished(conn, subject, before); !errors.Is(err, errPublishUnconfirmed) {
+	if err := confirmPublished(conn, subject, before); !errors.Is(err, ErrPublishUnconfirmed) {
 		t.Fatalf("a denied publish read as %v, want unconfirmed: last error %v, reconnecting %t",
 			err, conn.LastError(), conn.IsReconnecting())
 	}
@@ -145,7 +145,7 @@ func TestConfirmPublishedRefusesADenialACompletedReconnectCleared(t *testing.T) 
 	case <-time.After(5 * time.Second):
 		t.Fatal("the client never reconnected")
 	}
-	if err := confirmPublished(conn, subject, before); !errors.Is(err, errPublishUnconfirmed) {
+	if err := confirmPublished(conn, subject, before); !errors.Is(err, ErrPublishUnconfirmed) {
 		t.Fatalf("a denied publish read as %v, want unconfirmed: before %+v, after %+v", err, before, observe(conn))
 	}
 }
@@ -271,7 +271,7 @@ func TestAnUnconfirmedForwardTheStreamStoredIsDelivered(t *testing.T) {
 	conn := answeringServer(t, "notifications.other", true)
 	client := &Client{Conn: conn}
 
-	forward, err := client.StartRequestStoredTo("notifications.agent.holder", contracts.Envelope{EventID: "e", Topic: "notifications.role.r"}, 2*time.Second)
+	forward, err := client.StartRequestStoredTo("notifications.agent.holder", contracts.Envelope{EventID: "e", Topic: "notifications.role.r"}, "", 2*time.Second)
 	if err != nil {
 		t.Fatalf("an unconfirmed forward was refused outright: %v", err)
 	}
@@ -286,12 +286,12 @@ func TestAnUnconfirmedForwardWithoutTheStreamsAcknowledgementIsNotStored(t *test
 	conn := answeringServer(t, "notifications.other", false)
 	client := &Client{Conn: conn}
 
-	forward, err := client.StartRequestStoredTo("notifications.agent.holder", contracts.Envelope{EventID: "e", Topic: "notifications.role.r"}, 300*time.Millisecond)
+	forward, err := client.StartRequestStoredTo("notifications.agent.holder", contracts.Envelope{EventID: "e", Topic: "notifications.role.r"}, "", 300*time.Millisecond)
 	if err != nil {
 		t.Fatalf("an unconfirmed forward was refused outright: %v", err)
 	}
 	err = forward.Wait()
-	if !errors.Is(err, errPublishUnconfirmed) || !errors.Is(err, ErrForwardNotStored) {
+	if !errors.Is(err, ErrPublishUnconfirmed) || !errors.Is(err, ErrForwardNotStored) {
 		t.Fatalf("an unconfirmed forward with no acknowledgement returned %v, want the unconfirmed error wrapped by ErrForwardNotStored", err)
 	}
 }

@@ -121,7 +121,7 @@ func TestDrainLetsARoleForwardInItsHandlerFinish(t *testing.T) {
 			Topic:         "notifications.role.drain-test",
 			DedupeKey:     "drain-" + string(message.Data),
 			IssuedAt:      contracts.NowMillis(),
-		}, 2*time.Second)
+		}, "", 2*time.Second)
 		if err != nil {
 			forwards <- err
 			return

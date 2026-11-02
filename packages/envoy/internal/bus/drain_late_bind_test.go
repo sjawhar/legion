@@ -55,7 +55,7 @@ func TestDrainLetsTheDeliveriesOfABindEndingAfterTheStopFinish(t *testing.T) {
 				if tc.late {
 					return
 				}
-				forward, err := client.StartRequestStoredTo(holderSubject, contracts.Envelope{EventID: "drain-late-bind"}, 2*time.Second)
+				forward, err := client.StartRequestStoredTo(holderSubject, contracts.Envelope{EventID: "drain-late-bind"}, "", 2*time.Second)
 				if err == nil {
 					err = forward.Wait()
 				}

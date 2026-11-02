@@ -27,6 +27,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -34,6 +35,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -67,6 +69,8 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
+	"github.com/sjawhar/envoy/internal/session"
+	envoystore "github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -83,11 +87,13 @@ func multiprocessNATS(t *testing.T) string {
 // process whose key set a live peer does not share refuses to start (processes.Register).
 const multiprocessSigningKey = "multiprocess-signing-key"
 
-// dispatchPair is two envoy-dispatch processes on one database and one NATS server.
+// dispatchPair is two envoy-dispatch processes on one database and one NATS server, each reaching
+// NATS through a proxy of its own (proxies), so a row can cut one process off NATS alone.
 type dispatchPair struct {
 	a, b     *dispatchProcess
 	database *store.Store
 	nats     string
+	proxies  map[*dispatchProcess]*testnats.Proxy
 }
 
 // newPair opens the database and takes the NATS server the pair will share, and starts nothing:
@@ -96,21 +102,36 @@ type dispatchPair struct {
 // start.
 func newPair(t *testing.T) *dispatchPair {
 	t.Helper()
-	return &dispatchPair{database: storetest.Open(t), nats: multiprocessNATS(t)}
+	return &dispatchPair{database: storetest.Open(t), nats: multiprocessNATS(t), proxies: map[*dispatchProcess]*testnats.Proxy{}}
 }
 
 // start starts both processes on the pair's database and NATS, each on a port held for it from the
-// moment the kernel chose it (startDispatchProcessWith) and in a home of its own, both carrying
-// multiprocessSigningKey, and returns once each answers /healthz. The two are started together
-// rather than one after the other: several rows are about what the two do when their loops fire at
-// the same moment, which a staggered start would hide.
+// moment the kernel chose it (startDispatchProcessWith), in a home of its own and behind a NATS
+// proxy of its own, both carrying multiprocessSigningKey, and returns once each answers /healthz.
+// The two are started together rather than one after the other: several rows are about what the
+// two do when their loops fire at the same moment, which a staggered start would hide.
 func (p *dispatchPair) start(t *testing.T, env map[string]string) {
 	t.Helper()
-	options := dispatchOptions{NATSURL: p.nats, SigningKey: multiprocessSigningKey, Env: env}
-	p.a = startDispatchProcessWith(t, p.databaseURL(t), options)
-	p.b = startDispatchProcessWith(t, p.databaseURL(t), options)
+	p.a = p.startProcess(t, env)
+	p.b = p.startProcess(t, env)
 	p.a.waitHealthy(t)
 	p.b.waitHealthy(t)
+}
+
+// startProcess starts one process of the pair behind a NATS proxy of its own, and returns without
+// waiting for it to be healthy.
+func (p *dispatchPair) startProcess(t *testing.T, env map[string]string) *dispatchProcess {
+	t.Helper()
+	proxy := testnats.StartProxy(t, p.nats)
+	process := startDispatchProcessWith(t, p.databaseURL(t),
+		dispatchOptions{NATSURL: proxy.URL(), SigningKey: multiprocessSigningKey, Env: env})
+	p.proxies[process] = proxy
+	return process
+}
+
+// proxy is the NATS proxy the process reaches NATS through.
+func (p *dispatchPair) proxy(one *dispatchProcess) *testnats.Proxy {
+	return p.proxies[one]
 }
 
 // startPair is newPair and start together, for a row that seeds nothing first.
@@ -293,28 +314,452 @@ func TestALiveStreamOnOneProcessCarriesTheOtherProcessesEvent(t *testing.T) {
 	}
 }
 
+// ───── test sessions ────────────────────────────────────────────────────────
+
+const (
+	// writesInFlight bounds the comment writes a row keeps waiting on an answer, and is how many
+	// idle connections the rig's HTTP client keeps to each process.
+	writesInFlight = 32
+	// holderMachineID is the machine every session a row registers is on.
+	holderMachineID = "multiprocess-sessions"
+	// sessionHeartbeat is how often a registered session's entry is written again, as a session
+	// plugin's heartbeat writes it: well inside session.ClaimStaleAfter and the session bucket's
+	// TTL, so a role's holder stays fresh however long its row runs.
+	sessionHeartbeat = 30 * time.Second
+)
+
+// sessionRig is the test's own NATS connection, the role-claim and session buckets it registers
+// sessions in, and the HTTP client it writes comments through.
+type sessionRig struct {
+	natsURL  string
+	conn     *natsgo.Conn
+	roles    *envoystore.Registry
+	sessions *session.SessionRegistry
+	client   *http.Client
+}
+
+func newSessionRig(t *testing.T, natsURL string) *sessionRig {
+	t.Helper()
+	conn := testnats.Connect(t, natsURL)
+	t.Cleanup(conn.Close)
+	roles, err := envoystore.Open(conn)
+	if err != nil {
+		t.Fatalf("open the role registry: %v", err)
+	}
+	t.Cleanup(roles.StopWatch)
+	sessions, err := session.OpenSessionRegistry(conn)
+	if err != nil {
+		t.Fatalf("open the session registry: %v", err)
+	}
+	t.Cleanup(sessions.StopWatch)
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = writesInFlight
+	t.Cleanup(transport.CloseIdleConnections)
+	return &sessionRig{
+		natsURL:  natsURL,
+		conn:     conn,
+		roles:    roles,
+		sessions: sessions,
+		client:   &http.Client{Transport: transport, Timeout: 30 * time.Second},
+	}
+}
+
+// registerSession registers id in the session bucket as a session plugin's own registration does:
+// self-subscribed, with no port, updated now. It writes the entry again every sessionHeartbeat
+// until the test ends.
+func (r *sessionRig) registerSession(t *testing.T, id string) {
+	t.Helper()
+	entry := session.SessionEntry{
+		MachineID:      holderMachineID,
+		Title:          "Multiprocess session " + id,
+		UpdatedAt:      time.Now().UnixMilli(),
+		SelfSubscribed: true,
+	}
+	if err := r.sessions.Put(id, entry); err != nil {
+		t.Fatalf("register session %s: %v", id, err)
+	}
+	stop, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		heartbeat := time.NewTicker(sessionHeartbeat)
+		defer heartbeat.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-heartbeat.C:
+				entry.UpdatedAt = time.Now().UnixMilli()
+				_ = r.sessions.Put(id, entry)
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		close(stop)
+		<-stopped
+	})
+}
+
+// registerHolder registers holder as a session (registerSession) and makes it role's holder.
+func (r *sessionRig) registerHolder(t *testing.T, role, holder string) {
+	t.Helper()
+	r.registerSession(t, holder)
+	if err := r.claimRole(role, holder); err != nil {
+		t.Fatalf("claim role %s for %s: %v", role, holder, err)
+	}
+}
+
+// claimRole writes holder's claim of role in the role-claim bucket, a hard claim that takes the
+// role from whoever held it.
+func (r *sessionRig) claimRole(role, holder string) error {
+	_, err := r.roles.SetRole(holder, holderMachineID, role, false)
+	return err
+}
+
+// commentWrite is one comment written: its id, or the error that kept it from being written.
+type commentWrite struct {
+	commentID string
+	err       error
+}
+
+// postComment writes one comment with body on issue key through p, as the test's login, and
+// returns its id.
+func (r *sessionRig) postComment(p *dispatchProcess, key, body string) commentWrite {
+	return r.writeComment(p, key, map[string]any{"body": body}, "")
+}
+
+// writeComment writes one comment on issue key through p, whose request body is fields, and returns
+// its id. It writes as the test's login, or, when as names a session, as that session: with the
+// shared agent token, as a session plugin calls Dispatch, and the session named as the actor.
+func (r *sessionRig) writeComment(p *dispatchProcess, key string, fields map[string]any, as string) commentWrite {
+	if as != "" {
+		fields["actor"] = map[string]string{"kind": "session", "id": as}
+	}
+	payload, err := json.Marshal(fields)
+	if err != nil {
+		return commentWrite{err: err}
+	}
+	request, err := http.NewRequest(http.MethodPost, p.url("/api/v1/issues/"+key+"/comments"), bytes.NewReader(payload))
+	if err != nil {
+		return commentWrite{err: err}
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if as != "" {
+		request.Header.Set("Authorization", "Bearer "+dispatchTestAgentToken)
+	} else {
+		request.Header.Set("X-Dispatch-User", dispatchTestLogin)
+	}
+	response, err := r.client.Do(request)
+	if err != nil {
+		return commentWrite{err: err}
+	}
+	defer response.Body.Close()
+	answer, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusCreated {
+		return commentWrite{err: fmt.Errorf("comment on %s: status %d: %s", key, response.StatusCode, answer)}
+	}
+	var comment struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(answer, &comment); err != nil || comment.ID == "" {
+		return commentWrite{err: fmt.Errorf("comment on %s: no id in %s: %v", key, answer, err)}
+	}
+	return commentWrite{commentID: comment.ID}
+}
+
+// written is the ids of the writes that succeeded; the failures are reported as errors on t,
+// counted and with the first of them.
+func written(t *testing.T, what string, writes []commentWrite) (ids []string, failures int) {
+	t.Helper()
+	var first error
+	for _, write := range writes {
+		if write.err != nil {
+			failures++
+			if first == nil {
+				first = write.err
+			}
+			continue
+		}
+		ids = append(ids, write.commentID)
+	}
+	if failures > 0 {
+		t.Errorf("%s: %d of %d writes failed; the first: %v", what, failures, len(writes), first)
+	}
+	return ids, failures
+}
+
+// expectsLaneReceipt reports whether msg is a role forward waiting for its receipt, by the rule a
+// session plugin applies (expectsLaneReceipt in packages/envoy-client): a frame with a reply subject
+// on an agent subject whose envelope's topic is another subject. Every other frame there, and every
+// frame of a topic family, is a JetStream publish whose reply subject is the stream
+// acknowledgement's, which an empty receipt would answer in the stream's place.
+func expectsLaneReceipt(msg *natsgo.Msg, item contracts.Envelope) bool {
+	return msg.Reply != "" && strings.HasPrefix(msg.Subject, contracts.AgentTopicPrefix) &&
+		item.Topic != "" && item.Topic != msg.Subject
+}
+
+// testSession is one agent session as a host plugin runs it: a NATS connection of its own,
+// subscribed to its agent subject or to the topic families it follows, that answers a role forward
+// with the empty receipt (expectsLaneReceipt) and drops a repeat as the host does (createDeliveryDedupe
+// in packages/envoy-client): a frame whose event id it has taken, or whose dedupe key names an event
+// it has taken, is not taken again. A role forward's dedupe key is contracts.RoleForwardDedupePrefix
+// and its event's own key, so that prefix is what maps it to its event. Every frame is recorded in
+// arrival order.
+type testSession struct {
+	id       string
+	natsURL  string
+	subjects []string
+
+	mu   sync.Mutex
+	conn *natsgo.Conn
+	// onForward, when set, decides each role forward before its receipt: false withholds the
+	// receipt, and the session does not take the forward, as a host whose connection dropped with
+	// it never had it.
+	onForward func(sessionFrame) bool
+	frames    []sessionFrame
+	taken     map[string]bool
+}
+
+// sessionFrame is one frame as it reached a session.
+type sessionFrame struct {
+	at      time.Time
+	subject string
+	// event is the envelope's event id, dispatch-<id>; kind, owner, seq and commentID are read from
+	// the event it carries. owner is the event's document, or else its issue: each has a seq of its
+	// own.
+	event     string
+	kind      string
+	owner     string
+	seq       int
+	commentID string
+	// forward is a role forward; withheld one the session gave no receipt for and did not take;
+	// repeat a frame of an event the session had already taken.
+	forward, withheld, repeat bool
+}
+
+// eventRow is the events row the frame's event is.
+func (f sessionFrame) eventRow(t *testing.T) int64 {
+	t.Helper()
+	id, err := strconv.ParseInt(strings.TrimPrefix(f.event, "dispatch-"), 10, 64)
+	if err != nil {
+		t.Fatalf("read the event row of event id %q: %v", f.event, err)
+	}
+	return id
+}
+
+// newTestSession connects session id to the rig's NATS and subscribes it to subjects, until the
+// test ends.
+func newTestSession(t *testing.T, rig *sessionRig, id string, subjects ...string) *testSession {
+	t.Helper()
+	s := &testSession{id: id, natsURL: rig.natsURL, subjects: subjects, taken: map[string]bool{}}
+	if err := s.connect(); err != nil {
+		t.Fatalf("connect session %s: %v", id, err)
+	}
+	t.Cleanup(func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.conn.Close()
+	})
+	return s
+}
+
+// connect opens a connection with the session's subscriptions and makes it the session's.
+func (s *testSession) connect() error {
+	conn, err := natsgo.Connect(s.natsURL, natsgo.Timeout(time.Second))
+	if err != nil {
+		return err
+	}
+	for _, subject := range s.subjects {
+		if _, err := conn.Subscribe(subject, s.receive); err != nil {
+			conn.Close()
+			return fmt.Errorf("subscribe to %s: %w", subject, err)
+		}
+	}
+	if err := conn.Flush(); err != nil {
+		conn.Close()
+		return fmt.Errorf("flush the subscriptions: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.conn = conn
+	return nil
+}
+
+// reconnect drops the session's connection and opens a new one with the same subscriptions, as a
+// host whose connection broke does. A frame sent between the two reaches neither.
+func (s *testSession) reconnect() error {
+	s.mu.Lock()
+	old := s.conn
+	s.mu.Unlock()
+	old.Close()
+	return s.connect()
+}
+
+func (s *testSession) receive(msg *natsgo.Msg) {
+	at := time.Now()
+	var item contracts.Envelope
+	if err := json.Unmarshal(msg.Data, &item); err != nil {
+		return
+	}
+	var event struct {
+		Type       string  `json:"type"`
+		IssueKey   *string `json:"issue_key"`
+		ArtifactID *string `json:"artifact_id"`
+		Seq        int     `json:"seq"`
+		Payload    struct {
+			ID string `json:"id"`
+		} `json:"payload"`
+	}
+	_ = json.Unmarshal([]byte(item.Payload), &event)
+	frame := sessionFrame{
+		at: at, subject: msg.Subject, event: item.EventID, kind: event.Type, seq: event.Seq,
+		forward: expectsLaneReceipt(msg, item),
+	}
+	switch {
+	case event.ArtifactID != nil:
+		frame.owner = "document " + *event.ArtifactID
+	case event.IssueKey != nil:
+		frame.owner = "issue " + *event.IssueKey
+	}
+	if event.Type == "comment.created" {
+		frame.commentID = event.Payload.ID
+	}
+	if frame.forward {
+		s.mu.Lock()
+		decide := s.onForward
+		s.mu.Unlock()
+		if decide != nil && !decide(frame) {
+			frame.withheld = true
+		} else {
+			_ = msg.Respond(nil)
+		}
+	}
+	names := []string{item.EventID, strings.TrimPrefix(item.DedupeKey, contracts.RoleForwardDedupePrefix)}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !frame.withheld {
+		for _, name := range names {
+			frame.repeat = frame.repeat || (name != "" && s.taken[name])
+		}
+		if !frame.repeat {
+			for _, name := range names {
+				if name != "" {
+					s.taken[name] = true
+				}
+			}
+		}
+	}
+	s.frames = append(s.frames, frame)
+}
+
+// setOnForward sets the session's decision on each role forward (onForward).
+func (s *testSession) setOnForward(decide func(sessionFrame) bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onForward = decide
+}
+
+// allFrames is every frame that reached the session, in arrival order.
+func (s *testSession) allFrames() []sessionFrame {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.frames)
+}
+
+// takenFrames is the frames the session took, in arrival order: every frame but its repeats and
+// the forwards it withheld a receipt for.
+func (s *testSession) takenFrames() []sessionFrame {
+	var taken []sessionFrame
+	for _, frame := range s.allFrames() {
+		if !frame.repeat && !frame.withheld {
+			taken = append(taken, frame)
+		}
+	}
+	return taken
+}
+
+// takenComments is when the session took each comment's comment.created event, by comment id.
+func (s *testSession) takenComments() map[string]sessionFrame {
+	taken := map[string]sessionFrame{}
+	for _, frame := range s.takenFrames() {
+		if frame.commentID != "" {
+			taken[frame.commentID] = frame
+		}
+	}
+	return taken
+}
+
+// requireTakenOnce fails the test for each comment of ids whose event the session has not taken.
+// The session takes an event at most once, so each one it has is taken exactly once.
+func (s *testSession) requireTakenOnce(t *testing.T, ids []string) {
+	t.Helper()
+	taken := s.takenComments()
+	var missing []string
+	for _, id := range ids {
+		if _, ok := taken[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		t.Errorf("session %s has not taken %d of the %d comments addressed to it: %v", s.id, len(missing), len(ids), missing)
+	}
+}
+
+// requireInOrder fails the test for every event the session took out of its owner's seq order:
+// each document's and each issue's events must reach it in the order they were written.
+func (s *testSession) requireInOrder(t *testing.T) {
+	t.Helper()
+	last := map[string]sessionFrame{}
+	for _, frame := range s.takenFrames() {
+		if frame.owner == "" {
+			continue
+		}
+		if previous, ok := last[frame.owner]; ok && frame.seq <= previous.seq {
+			t.Errorf("session %s took %s's event %s (seq %d, %s) after event %s (seq %d, %s)",
+				s.id, frame.owner, frame.event, frame.seq, frame.kind, previous.event, previous.seq, previous.kind)
+		}
+		last[frame.owner] = frame
+	}
+}
+
 // ───── the outbox ───────────────────────────────────────────────────────────
 
-// outboxRoleLane is the role the outbox row's issue is routed to: its events are published on
-// notifications.role.<lane>, which travels over core NATS with no message id, so the stream's
-// duplicate window hides nothing there. It is the lane a second publish of one event shows up on.
-const outboxRoleLane = "multiprocess-outbox"
+// outboxRoleLane is the role the outbox row's issue is routed to, and outboxRoleHolder its holder:
+// each event is forwarded to the holder's agent subject with a Request, which a core subscriber of
+// that subject is handed every time it is sent, whatever the stream's duplicate window keeps. It
+// is where a second publish of one event shows up.
+const (
+	outboxRoleLane   = "multiprocess-outbox"
+	outboxRoleHolder = "ses_multiprocess_outbox"
+)
 
-// Both processes' outboxes scan one events table. Each claims its batch under
-// `for update skip locked` before it publishes, so one event is published once however many
-// processes are scanning: every row reaches published_at, the stream holds one retained message
-// per (dedupe key, topic), and the role lane - core NATS, no message id, no deduplication
-// anywhere - carries exactly one message per event.
+// Both processes run an outbox on one events table, and one of them at a time holds the publisher
+// hold and publishes, so one event is published once however many processes run: every row
+// reaches published_at, the stream holds one retained message per (dedupe key, topic), and the
+// role's holder - a core subscriber that answers every forward with its receipt, as a session
+// plugin does - takes exactly one forward per event. Nothing crosses the role's own topic.
 func TestTheOutboxPublishesEachEventOnceAcrossBothProcesses(t *testing.T) {
 	pair := startPair(t, nil)
-	conn := testnats.Connect(t, pair.nats)
+	rig := newSessionRig(t, pair.nats)
+	conn := rig.conn
 	js, err := conn.JetStream()
 	if err != nil {
 		t.Fatalf("JetStream context: %v", err)
 	}
-	// This row counts only what it publishes itself: readStreamFrom starts past this head.
+	// This row counts only what it publishes itself: readStreamMessagesFrom starts past this head.
 	head := streamHead(t, js)
 
+	forwards := make(chan contracts.Envelope, 256)
+	holderSub, err := conn.Subscribe(contracts.AgentSubject(outboxRoleHolder), func(msg *natsgo.Msg) {
+		var item contracts.Envelope
+		if err := json.Unmarshal(msg.Data, &item); err == nil && strings.HasPrefix(item.DedupeKey, contracts.RoleForwardDedupePrefix) {
+			forwards <- item
+			_ = msg.Respond(nil)
+		}
+	})
+	if err != nil {
+		t.Fatalf("subscribe the role's holder: %v", err)
+	}
+	t.Cleanup(func() { _ = holderSub.Unsubscribe() })
 	lane := make(chan contracts.Envelope, 256)
 	laneSub, err := conn.Subscribe(contracts.RoleTopicPrefix+outboxRoleLane, func(msg *natsgo.Msg) {
 		var item contracts.Envelope
@@ -323,9 +768,13 @@ func TestTheOutboxPublishesEachEventOnceAcrossBothProcesses(t *testing.T) {
 		}
 	})
 	if err != nil {
-		t.Fatalf("subscribe to the role lane: %v", err)
+		t.Fatalf("subscribe to the role's topic: %v", err)
 	}
 	t.Cleanup(func() { _ = laneSub.Unsubscribe() })
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush the subscriptions: %v", err)
+	}
+	rig.registerHolder(t, outboxRoleLane, outboxRoleHolder)
 
 	project := uniqueProjectKey(t, "OBX")
 	pair.a.createProject(t, project, "Outbox")
@@ -347,27 +796,33 @@ func TestTheOutboxPublishesEachEventOnceAcrossBothProcesses(t *testing.T) {
 
 	waitForEveryEventPublished(t, pair.database, 60*time.Second)
 
-	// The role lane's messages are read after every event is marked published, plus a settling
-	// read: a second publish of an already published event would arrive after the mark, and
-	// this is where it would be seen.
-	received := drainEnvelopes(t, lane, 3*time.Second)
+	// The holder's forwards are read after every event is marked published, plus a settling read:
+	// a second publish of an already published event would arrive after the mark, and this is
+	// where it would be seen.
+	received := drainEnvelopes(t, forwards, 3*time.Second)
 	perEvent := map[string]int{}
 	for _, item := range received {
+		if item.Topic != contracts.RoleTopicPrefix+outboxRoleLane {
+			t.Errorf("the holder received a forward of event %s on topic %q, want the role's", item.SourceEventID, item.Topic)
+		}
 		perEvent[item.SourceEventID]++
 	}
 	if len(perEvent) < comments {
-		t.Errorf("the role lane carried %d events, want at least the %d comments:\n%v", len(perEvent), comments, perEvent)
+		t.Errorf("the role's holder took %d events, want at least the %d comments:\n%v", len(perEvent), comments, perEvent)
 	}
 	for eventID, count := range perEvent {
 		if count != 1 {
-			t.Errorf("event %s reached the role lane %d times; two processes publishing one event is what the claim prevents:\n%v",
+			t.Errorf("event %s reached the role's holder %d times; two processes publishing one event is what the publisher hold prevents:\n%v",
 				eventID, count, perEvent)
 		}
 	}
+	if carried := len(lane); carried != 0 {
+		t.Errorf("the role's topic carried %d envelopes, want none: the outbox forwards to the holder itself", carried)
+	}
 
 	perMessage := map[string]int{}
-	for _, item := range readStreamFrom(t, js, head) {
-		perMessage[item.DedupeKey+" on "+item.Topic]++
+	for _, message := range readStreamMessagesFrom(t, js, head) {
+		perMessage[message.item.DedupeKey+" on "+message.item.Topic]++
 	}
 	if len(perMessage) == 0 {
 		t.Fatalf("the notification stream holds nothing this row published")
@@ -379,9 +834,9 @@ func TestTheOutboxPublishesEachEventOnceAcrossBothProcesses(t *testing.T) {
 	}
 }
 
-// waitForEveryEventPublished waits for every event row the outbox takes to carry published_at.
-// A row whose payload says `pending` is not one the outbox claims (claimPendingEvents' own
-// predicate), so it is not waited for.
+// waitForEveryEventPublished waits for every event row the outbox publishes to carry published_at.
+// A row whose payload says `pending` is a subscription command the outbox never publishes, so it
+// is not waited for; the predicate is spelled as the outbox's own (outbox.readBatchSQL).
 func waitForEveryEventPublished(t *testing.T, database *store.Store, within time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(within)
@@ -389,7 +844,7 @@ func waitForEveryEventPublished(t *testing.T, database *store.Store, within time
 		var unpublished int
 		if err := database.Pool.QueryRow(context.Background(), `
 			select count(*) from events
-			where published_at is null and coalesce(payload ->> 'pending', 'false') <> 'true'
+			where published_at is null and (payload ->> 'pending') is distinct from 'true'
 		`).Scan(&unpublished); err != nil {
 			t.Fatalf("count unpublished events: %v", err)
 		}
@@ -432,6 +887,1187 @@ func drainEnvelopes(t *testing.T, from <-chan contracts.Envelope, quiet time.Dur
 			return items
 		}
 	}
+}
+
+// ───── the outbox's publisher across two processes ──────────────────────────
+
+const (
+	// takeOverWithin bounds a take-over: from the moment the publisher is killed, cut off NATS or
+	// frozen, the other process takes the publisher hold, publishes its first batch and a session
+	// takes a comment written since, each within it.
+	takeOverWithin = 10 * time.Second
+	// outboxDeliveryWithin bounds the wait for what a row wrote to reach every session it is
+	// addressed to.
+	outboxDeliveryWithin = 60 * time.Second
+	// frozenFor is how long the frozen-publisher row holds the publisher stopped.
+	frozenFor = 10 * time.Second
+	// resumedQuiet is how long the frozen-publisher row watches the sessions once the resumed
+	// process has logged that it lost the hold: anything it sent on resuming arrives in this.
+	resumedQuiet = 3 * time.Second
+	// sceneWritesAtOnce is how many comments writeAll keeps waiting on an answer at once, so both
+	// processes commit events of one issue at the same moment.
+	sceneWritesAtOnce = 8
+
+	// outboxLogPrefix starts every message the outbox logs; the messages below follow it, each line
+	// carrying the process's instance.
+	outboxLogPrefix = "dispatch outbox: "
+	tookHold        = "took the publisher hold"
+	releasedHold    = "released the publisher hold"
+	lostHold        = "lost the publisher hold"
+	sentBatch       = "sent batch"
+)
+
+// healthReport is what a process's /healthz says of NATS and of the outbox. OutboxPublisher is nil
+// when the body has no such field.
+type healthReport struct {
+	NATS            *bool `json:"nats"`
+	OutboxPublisher *bool `json:"outbox_publisher"`
+}
+
+// publishing reports whether the report says the process publishes the outbox.
+func (r healthReport) publishing() bool { return r.OutboxPublisher != nil && *r.OutboxPublisher }
+
+func (r healthReport) String() string {
+	if r.OutboxPublisher == nil {
+		return "no outbox_publisher field"
+	}
+	return fmt.Sprintf("outbox_publisher %v", *r.OutboxPublisher)
+}
+
+// healthClient is the client /healthz is read with: a process that does not answer within its
+// timeout is a failed read, not a stuck row.
+var healthClient = &http.Client{Timeout: 2 * time.Second}
+
+// readHealthReport reads the process's /healthz, whose body a 503 carries too.
+func (p *dispatchProcess) readHealthReport() (healthReport, error) {
+	response, err := healthClient.Get(p.url("/healthz"))
+	if err != nil {
+		return healthReport{}, err
+	}
+	defer response.Body.Close()
+	var report healthReport
+	if err := json.NewDecoder(response.Body).Decode(&report); err != nil {
+		return healthReport{}, fmt.Errorf("decode /healthz (status %d): %w", response.StatusCode, err)
+	}
+	return report, nil
+}
+
+// waitForPublisher waits up to within for exactly one process of the pair to report
+// outbox_publisher true, and answers which.
+func waitForPublisher(t *testing.T, pair *dispatchPair, within time.Duration) *dispatchProcess {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	var last string
+	for {
+		a, errA := pair.a.readHealthReport()
+		b, errB := pair.b.readHealthReport()
+		if errA == nil && errB == nil && a.publishing() != b.publishing() {
+			if a.publishing() {
+				return pair.a
+			}
+			return pair.b
+		}
+		last = fmt.Sprintf("A: %v %v; B: %v %v", a, errA, b, errB)
+		if time.Now().After(deadline) {
+			t.Fatalf("no one process of the pair reported outbox_publisher true within %v; the last reads: %s", within, last)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// signal sends the process sig and returns when it was sent.
+func (p *dispatchProcess) signal(t *testing.T, sig syscall.Signal) time.Time {
+	t.Helper()
+	at := time.Now()
+	if err := p.Cmd.Process.Signal(sig); err != nil {
+		t.Fatalf("send %v to the process: %v", sig, err)
+	}
+	return at
+}
+
+// outboxLine is one line a process's outbox logged about its publisher hold or a batch: when, its
+// message after outboxLogPrefix, its instance, a release's reason and a batch's first send.
+type outboxLine struct {
+	at       time.Time
+	message  string
+	instance string
+	reason   string
+	started  time.Time
+	text     string
+}
+
+// logAttribute is one key=value of a slog text line, its value quoted or bare.
+var logAttribute = regexp.MustCompile(`(\w+)=("(?:[^"\\]|\\.)*"|\S*)`)
+
+// outboxLines is every line the process's outbox has logged, in order.
+func (p *dispatchProcess) outboxLines(t *testing.T) []outboxLine {
+	t.Helper()
+	var lines []outboxLine
+	for _, text := range p.logLines(`msg="` + outboxLogPrefix) {
+		attributes := map[string]string{}
+		for _, match := range logAttribute.FindAllStringSubmatch(text, -1) {
+			value := match[2]
+			if unquoted, err := strconv.Unquote(value); err == nil {
+				value = unquoted
+			}
+			if _, ok := attributes[match[1]]; !ok {
+				attributes[match[1]] = value
+			}
+		}
+		at, err := time.Parse(time.RFC3339Nano, attributes["time"])
+		if err != nil {
+			t.Fatalf("read the time of the line %q: %v", text, err)
+		}
+		line := outboxLine{
+			at: at, message: strings.TrimPrefix(attributes["msg"], outboxLogPrefix),
+			instance: attributes["instance"], reason: attributes["reason"], text: text,
+		}
+		if started, ok := attributes["started"]; ok {
+			if line.started, err = time.Parse(time.RFC3339Nano, started); err != nil {
+				t.Fatalf("read the batch start of the line %q: %v", text, err)
+			}
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// waitForOutboxLine waits up to within for the process to log message at or after since, and
+// returns the first such line. A line's time is in milliseconds, so since is too.
+func (p *dispatchProcess) waitForOutboxLine(t *testing.T, message string, since time.Time, within time.Duration) outboxLine {
+	t.Helper()
+	from := since.Truncate(time.Millisecond)
+	deadline := time.Now().Add(within)
+	for {
+		for _, line := range p.outboxLines(t) {
+			if line.message == message && !line.at.Before(from) {
+				return line
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the process logged no %q at or after %s within %v", outboxLogPrefix+message, since.Format(time.RFC3339Nano), within)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// publishingPeriod is one span over which a process held the publisher hold: from its took line to
+// the released or lost line after it, or still open.
+type publishingPeriod struct {
+	instance string
+	from, to time.Time
+	open     bool
+}
+
+// publishingPeriods is every period the lines, one process's, show it holding the publisher hold.
+func publishingPeriods(lines []outboxLine) []publishingPeriod {
+	var periods []publishingPeriod
+	for _, line := range lines {
+		switch line.message {
+		case tookHold:
+			periods = append(periods, publishingPeriod{instance: line.instance, from: line.at, open: true})
+		case releasedHold, lostHold:
+			if last := len(periods) - 1; last >= 0 && periods[last].open {
+				periods[last].to, periods[last].open = line.at, false
+			}
+		}
+	}
+	return periods
+}
+
+// end is when the period ended, or now while it is open.
+func (p publishingPeriod) end(now time.Time) time.Time {
+	if p.open {
+		return now
+	}
+	return p.to
+}
+
+// holds reports whether at falls inside the period.
+func (p publishingPeriod) holds(at, now time.Time) bool {
+	return !at.Before(p.from) && !at.After(p.end(now))
+}
+
+// outboxScene is a project whose issues a row writes comments on through the pair's processes, and
+// the three sessions those comments are addressed to:
+//
+//   - watcher follows every issue's topic family;
+//   - holder holds role, to which the role issues are routed, and takes each forward with its
+//     receipt;
+//   - author wrote the root comment on each reply issue, and every comment the row writes there
+//     replies to it, which reaches the author on its agent subject (an author route).
+type outboxScene struct {
+	pair       *dispatchPair
+	rig        *sessionRig
+	role       string
+	issues     []string
+	roleIssues map[string]bool
+	// roots is each reply issue's root comment.
+	roots                   map[string]string
+	watcher, holder, author *testSession
+
+	mu      sync.Mutex
+	written []sceneWrite
+}
+
+// sceneWrite is one comment a row wrote, on issue, the write started at started.
+type sceneWrite struct {
+	commentID string
+	issue     string
+	started   time.Time
+}
+
+// newOutboxScene creates a project of issues issues through A: the first roleIssues routed to the
+// scene's role, whose holder is the holder session, the next replyIssues carrying a root comment
+// the author session wrote, the rest neither. It returns once every event of the setup is
+// published.
+func newOutboxScene(t *testing.T, pair *dispatchPair, issues, roleIssues, replyIssues int) *outboxScene {
+	t.Helper()
+	rig := newSessionRig(t, pair.nats)
+	project := uniqueProjectKey(t, "OBX")
+	name := strings.ToLower(project)
+	scene := &outboxScene{pair: pair, rig: rig, role: "outbox-" + name, roleIssues: map[string]bool{}, roots: map[string]string{}}
+	pair.a.createProject(t, project, "Outbox "+project)
+	var families []string
+	for index := range issues {
+		key, _ := pair.a.createIssueIn(t, project, fmt.Sprintf("Outbox %d", index+1), "Outbox.")
+		scene.issues = append(scene.issues, key)
+		families = append(families, "notifications.dispatch.issue."+key+".>")
+	}
+	scene.watcher = newTestSession(t, rig, "ses_"+name+"_watcher", families...)
+	holder, author := "ses_"+name+"_holder", "ses_"+name+"_author"
+	scene.holder = newTestSession(t, rig, holder, contracts.AgentSubject(holder))
+	scene.author = newTestSession(t, rig, author, contracts.AgentSubject(author))
+	rig.registerHolder(t, scene.role, holder)
+	for index, key := range scene.issues {
+		switch {
+		case index < roleIssues:
+			scene.roleIssues[key] = true
+			pair.a.call(t, http.MethodPatch, "/api/v1/issues/"+key,
+				fmt.Sprintf(`{"route":"role:%s"}`, scene.role), http.StatusOK)
+		case index < roleIssues+replyIssues:
+			root := rig.writeComment(pair.a, key, map[string]any{"body": "The thread every comment here replies to."}, author)
+			if root.err != nil {
+				t.Fatalf("write the root comment on %s as %s: %v", key, author, root.err)
+			}
+			scene.roots[key] = root.commentID
+		}
+	}
+	waitForEveryEventPublished(t, pair.database, outboxDeliveryWithin)
+	return scene
+}
+
+// sessions is the scene's sessions.
+func (s *outboxScene) sessions() []*testSession {
+	return []*testSession{s.watcher, s.holder, s.author}
+}
+
+// write writes one comment on issue through p - a reply to the root comment on a reply issue, a
+// comment of its own elsewhere - and records it.
+func (s *outboxScene) write(p *dispatchProcess, issue, body string) error {
+	fields := map[string]any{"body": body}
+	if root, ok := s.roots[issue]; ok {
+		fields["reply_to"] = root
+	}
+	started := time.Now()
+	write := s.rig.writeComment(p, issue, fields, "")
+	if write.err != nil {
+		return write.err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.written = append(s.written, sceneWrite{commentID: write.commentID, issue: issue, started: started})
+	return nil
+}
+
+// writerFor is the process the index-th write of a round robin over issues goes through:
+// consecutive writes alternate between writers, and so do each issue's.
+func writerFor(index, issues int, writers []*dispatchProcess) *dispatchProcess {
+	return writers[(index/issues+index%issues)%len(writers)]
+}
+
+// writeAll writes count comments, round robin over the scene's issues, through writers in turn
+// (writerFor), sceneWritesAtOnce at a time, and fails the test for each write that failed.
+func (s *outboxScene) writeAll(t *testing.T, count int, writers ...*dispatchProcess) {
+	t.Helper()
+	failures := make(chan error, count)
+	slots := make(chan struct{}, sceneWritesAtOnce)
+	var writes sync.WaitGroup
+	for index := range count {
+		slots <- struct{}{}
+		writes.Go(func() {
+			defer func() { <-slots }()
+			issue := s.issues[index%len(s.issues)]
+			if err := s.write(writerFor(index, len(s.issues), writers), issue, fmt.Sprintf("Comment %d.", index)); err != nil {
+				failures <- err
+			}
+		})
+	}
+	writes.Wait()
+	close(failures)
+	for err := range failures {
+		t.Errorf("write a comment: %v", err)
+	}
+}
+
+// writeAtRate writes a comment rate times a second, round robin over the scene's issues, through
+// writers in turn (writerFor), until the returned stop is called. stop returns once the writing
+// has stopped and fails the test for each write that failed; calling it again does nothing.
+func (s *outboxScene) writeAtRate(t *testing.T, rate int, writers ...*dispatchProcess) (stop func()) {
+	t.Helper()
+	done, stopped := make(chan struct{}), make(chan struct{})
+	var failures []error
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(time.Second / time.Duration(rate))
+		defer ticker.Stop()
+		for index := 0; ; index++ {
+			issue := s.issues[index%len(s.issues)]
+			if err := s.write(writerFor(index, len(s.issues), writers), issue, fmt.Sprintf("Comment %d at %d a second.", index, rate)); err != nil {
+				failures = append(failures, err)
+			}
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	return sync.OnceFunc(func() {
+		close(done)
+		<-stopped
+		for _, err := range failures {
+			t.Errorf("write a comment: %v", err)
+		}
+	})
+}
+
+// writtenCount is how many comments the scene has written.
+func (s *outboxScene) writtenCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.written)
+}
+
+// addressed is each session's share of the written comments: every one for the watcher, those on
+// a role issue for the holder, those on a reply issue for the author.
+func (s *outboxScene) addressed() map[*testSession][]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	addressed := map[*testSession][]string{}
+	for _, write := range s.written {
+		addressed[s.watcher] = append(addressed[s.watcher], write.commentID)
+		if s.roleIssues[write.issue] {
+			addressed[s.holder] = append(addressed[s.holder], write.commentID)
+		}
+		if _, ok := s.roots[write.issue]; ok {
+			addressed[s.author] = append(addressed[s.author], write.commentID)
+		}
+	}
+	return addressed
+}
+
+// deliveredCount is how many of the written comments the watcher has taken.
+func (s *outboxScene) deliveredCount() int {
+	taken := s.watcher.takenComments()
+	count := 0
+	for _, id := range s.addressed()[s.watcher] {
+		if _, ok := taken[id]; ok {
+			count++
+		}
+	}
+	return count
+}
+
+// delivered reports whether every session has taken every written comment addressed to it.
+func (s *outboxScene) delivered() bool {
+	for session, ids := range s.addressed() {
+		taken := session.takenComments()
+		for _, id := range ids {
+			if _, ok := taken[id]; !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// waitDelivered waits up to outboxDeliveryWithin for every session to take every written comment
+// addressed to it, and fails the test naming what each has not taken when they do not.
+func (s *outboxScene) waitDelivered(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(outboxDeliveryWithin)
+	for !s.delivered() {
+		if time.Now().After(deadline) {
+			addressed := s.addressed()
+			for _, session := range s.sessions() {
+				session.requireTakenOnce(t, addressed[session])
+			}
+			t.Fatalf("the written comments did not reach every session they are addressed to within %v", outboxDeliveryWithin)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// requireOnceAndInOrder requires each session to have taken each written comment addressed to it,
+// once, and every event it took in its owner's seq order.
+func (s *outboxScene) requireOnceAndInOrder(t *testing.T) {
+	t.Helper()
+	addressed := s.addressed()
+	for _, session := range s.sessions() {
+		session.requireTakenOnce(t, addressed[session])
+		session.requireInOrder(t)
+	}
+}
+
+// firstArrivalSince is the first time any session took a comment whose write started at or after
+// at, and false while none has.
+func (s *outboxScene) firstArrivalSince(at time.Time) (time.Time, bool) {
+	s.mu.Lock()
+	since := map[string]bool{}
+	for _, write := range s.written {
+		if !write.started.Before(at) {
+			since[write.commentID] = true
+		}
+	}
+	s.mu.Unlock()
+	var first time.Time
+	for _, session := range s.sessions() {
+		for id, frame := range session.takenComments() {
+			if since[id] && (first.IsZero() || frame.at.Before(first)) {
+				first = frame.at
+			}
+		}
+	}
+	return first, !first.IsZero()
+}
+
+// framesSince is every frame, repeats and withheld forwards included, that reached a session at or
+// after at.
+func (s *outboxScene) framesSince(at time.Time) map[*testSession][]sessionFrame {
+	frames := map[*testSession][]sessionFrame{}
+	for _, session := range s.sessions() {
+		for _, frame := range session.allFrames() {
+			if !frame.at.Before(at) {
+				frames[session] = append(frames[session], frame)
+			}
+		}
+	}
+	return frames
+}
+
+// requireTakeOver waits for p to take the publisher hold at or after since, then to log its first
+// batch, and for a session to take a comment written since since; and requires each within
+// takeOverWithin of since, the moment what happened to the publisher before p.
+func (s *outboxScene) requireTakeOver(t *testing.T, p *dispatchProcess, since time.Time, what string) {
+	t.Helper()
+	took := p.waitForOutboxLine(t, tookHold, since, 2*takeOverWithin)
+	batch := p.waitForOutboxLine(t, sentBatch, took.at, 2*takeOverWithin)
+	var arrived time.Time
+	waitUntil(t, 2*takeOverWithin, "a session taking a comment written after "+what, func() bool {
+		var ok bool
+		arrived, ok = s.firstArrivalSince(since)
+		return ok
+	})
+	t.Logf("after %s, the other process took the publisher hold in %v and logged its first batch in %v, and a session took a comment written since in %v",
+		what, took.at.Sub(since).Round(time.Millisecond), batch.at.Sub(since).Round(time.Millisecond), arrived.Sub(since).Round(time.Millisecond))
+	for _, step := range []struct {
+		what string
+		at   time.Time
+	}{
+		{"the other process took the publisher hold", took.at},
+		{"the other process logged its first batch", batch.at},
+		{"a session took a comment written since", arrived},
+	} {
+		if after := step.at.Sub(since); after > takeOverWithin {
+			t.Errorf("%s %v after %s, past the %v bound", step.what, after.Round(time.Millisecond), what, takeOverWithin)
+		}
+	}
+}
+
+// requireRunning fails the test for each process of the pair that has exited.
+func (p *dispatchPair) requireRunning(t *testing.T) {
+	t.Helper()
+	for _, process := range []*dispatchProcess{p.a, p.b} {
+		select {
+		case <-process.Exited:
+			t.Errorf("process %s exited:\n%s", p.name(process), process.Output.String())
+		default:
+		}
+	}
+}
+
+// publisherSample is one read of both processes' /healthz, after its time into the sampling.
+type publisherSample struct {
+	after time.Duration
+	a, b  healthReport
+	err   error
+}
+
+// sampleOutboxPublisher reads both processes' /healthz every 100 ms, the two at once, for span, and
+// returns the func that waits for the last read and answers them all.
+func sampleOutboxPublisher(pair *dispatchPair, span time.Duration) func() []publisherSample {
+	started := time.Now()
+	done := make(chan []publisherSample, 1)
+	go func() {
+		var samples []publisherSample
+		tick := time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
+		for range tick.C {
+			after := time.Since(started)
+			if after > span {
+				break
+			}
+			sample := publisherSample{after: after}
+			var errA, errB error
+			var reads sync.WaitGroup
+			reads.Go(func() { sample.a, errA = pair.a.readHealthReport() })
+			reads.Go(func() { sample.b, errB = pair.b.readHealthReport() })
+			reads.Wait()
+			sample.err = errors.Join(errA, errB)
+			samples = append(samples, sample)
+		}
+		done <- samples
+	}()
+	return func() []publisherSample { return <-done }
+}
+
+// startOutboxPair is startPair for a row about the outbox's publisher, which logs both processes'
+// output when the row fails: a hand-over is told from both sides.
+func startOutboxPair(t *testing.T) *dispatchPair {
+	t.Helper()
+	pair := startPair(t, nil)
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("A's output:\n%s\nB's output:\n%s", pair.a.Output.String(), pair.b.Output.String())
+		}
+	})
+	return pair
+}
+
+// Two processes run an outbox each, and one of them at a time holds the publisher hold: /healthz,
+// read on both every 100 ms, never shows outbox_publisher true on both, and from 10 s after the
+// start shows it on exactly one. Each process's outbox lines name its own instance, the periods
+// over which the two held the hold (from a took line to the released or lost line after it) never
+// overlap, and every batch either logged was started and finished inside one of its own periods.
+// The sessions take every comment written meanwhile once and in order.
+func TestOneProcessPublishesTheOutboxAtATime(t *testing.T) {
+	pair := startOutboxPair(t)
+	samples := sampleOutboxPublisher(pair, 12*time.Second)
+	scene := newOutboxScene(t, pair, 3, 1, 1)
+	stop := scene.writeAtRate(t, 4, pair.a, pair.b)
+	sampled := samples()
+	stop()
+
+	late := 0
+	for _, sample := range sampled {
+		if sample.err != nil {
+			t.Errorf("the read of /healthz %v in failed: %v", sample.after.Round(time.Millisecond), sample.err)
+			continue
+		}
+		publishing := 0
+		for _, report := range []healthReport{sample.a, sample.b} {
+			if report.publishing() {
+				publishing++
+			}
+		}
+		if publishing > 1 {
+			t.Errorf("/healthz %v in: both processes report outbox_publisher true", sample.after.Round(time.Millisecond))
+		}
+		if sample.after >= 10*time.Second {
+			late++
+			if publishing != 1 {
+				t.Errorf("/healthz %v in: A %v, B %v; want exactly one publishing from 10 s on",
+					sample.after.Round(time.Millisecond), sample.a, sample.b)
+			}
+		}
+	}
+	if late == 0 {
+		t.Errorf("none of the %d reads of /healthz was 10 s in or later", len(sampled))
+	}
+
+	now := time.Now()
+	type processPeriod struct {
+		process *dispatchProcess
+		publishingPeriod
+	}
+	var periods []processPeriod
+	owners := map[string]*dispatchProcess{}
+	batches := 0
+	var holder *dispatchProcess
+	for _, process := range []*dispatchProcess{pair.a, pair.b} {
+		lines := process.outboxLines(t)
+		instances := map[string]bool{}
+		for _, line := range lines {
+			instances[line.instance] = true
+			if owner, ok := owners[line.instance]; ok && owner != process {
+				t.Errorf("both processes logged lines of instance %q", line.instance)
+			}
+			owners[line.instance] = process
+		}
+		if len(instances) > 1 || instances[""] {
+			t.Errorf("process %s's outbox lines name the instances %v, want its one", pair.name(process), slices.Collect(maps.Keys(instances)))
+		}
+		own := publishingPeriods(lines)
+		for _, line := range lines {
+			if line.message != sentBatch {
+				continue
+			}
+			batches++
+			inside := slices.ContainsFunc(own, func(period publishingPeriod) bool {
+				return period.instance == line.instance && period.holds(line.started, now) && period.holds(line.at, now)
+			})
+			if line.started.IsZero() || !inside {
+				t.Errorf("process %s logged a batch outside every period it held the publisher hold: %s", pair.name(process), line.text)
+			}
+		}
+		for _, period := range own {
+			periods = append(periods, processPeriod{process, period})
+			if period.open {
+				holder = process
+			}
+		}
+	}
+	for index, one := range periods {
+		for _, other := range periods[index+1:] {
+			if one.process != other.process && one.from.Before(other.end(now)) && other.from.Before(one.end(now)) {
+				t.Errorf("process %s held the publisher hold from %s to %s, and process %s from %s to %s",
+					pair.name(one.process), one.from.Format(time.RFC3339Nano), one.end(now).Format(time.RFC3339Nano),
+					pair.name(other.process), other.from.Format(time.RFC3339Nano), other.end(now).Format(time.RFC3339Nano))
+			}
+		}
+	}
+	if batches == 0 {
+		t.Errorf("neither process logged %q", outboxLogPrefix+sentBatch)
+	}
+	if last := sampled[len(sampled)-1]; holder == nil || !map[*dispatchProcess]healthReport{pair.a: last.a, pair.b: last.b}[holder].publishing() {
+		t.Errorf("the process whose publisher hold is open in the logs is not the one the last /healthz read reports publishing (A %v, B %v)", last.a, last.b)
+	}
+	scene.waitDelivered(t)
+	scene.requireOnceAndInOrder(t)
+}
+
+// 200 comments on 10 issues, written through both processes in turn and several at a time: four
+// issues routed to a role, three replying to a session's thread, three neither. Whichever process
+// publishes, every session takes each comment addressed to it once and each issue's events in seq
+// order: the watcher on the issues' topic families, the role's holder through the outbox's forward
+// with its receipt, the thread's author on its agent subject.
+func TestEachSessionTakesEachEventOnceAndInOrderAcrossTwoProcesses(t *testing.T) {
+	pair := startOutboxPair(t)
+	scene := newOutboxScene(t, pair, 10, 4, 3)
+	scene.writeAll(t, 200, pair.a, pair.b)
+	scene.waitDelivered(t)
+	scene.requireOnceAndInOrder(t)
+	addressed := scene.addressed()
+	t.Logf("the watcher took %d comments, the role's holder %d, the thread's author %d",
+		len(addressed[scene.watcher]), len(addressed[scene.holder]), len(addressed[scene.author]))
+}
+
+// The publisher is killed while comments are written through the other process at 4 a second: the
+// other process takes the publisher hold, logs its first batch, and a session takes a comment
+// written after the kill, each within 10 s of it, and every session still takes each comment once
+// and in order across the hand-over.
+func TestAKilledPublisherIsReplacedWithin10Seconds(t *testing.T) {
+	pair := startOutboxPair(t)
+	scene := newOutboxScene(t, pair, 3, 1, 1)
+	publisher := waitForPublisher(t, pair, takeOverWithin)
+	survivor := pair.other(publisher)
+	stop := scene.writeAtRate(t, 4, survivor)
+	defer stop()
+	waitUntil(t, outboxDeliveryWithin, "the publisher publishing the first comments", func() bool { return scene.deliveredCount() >= 4 })
+
+	killed := publisher.signal(t, syscall.SIGKILL)
+	publisher.WaitExit(t, "SIGKILL")
+	scene.requireTakeOver(t, survivor, killed, "the publisher was killed")
+	written := scene.writtenCount()
+	waitUntil(t, outboxDeliveryWithin, "eight more comments written", func() bool { return scene.writtenCount() >= written+8 })
+	stop()
+	scene.waitDelivered(t)
+	scene.requireOnceAndInOrder(t)
+}
+
+// restartedPublishesWithin bounds how long a restarted process takes, from the moment it is
+// healthy, to publish the events the process killed before it left unpublished.
+const restartedPublishesWithin = 10 * time.Second
+
+// The only process is killed while its batch carrying comment 1 of an issue is in flight - its NATS
+// proxy frozen, so the envelope has left the process and reached nothing - with comment 2 of the
+// same issue written behind it. Restarted on the same database and NATS, the process publishes
+// both, comment 1 first: on the issue's topic family the stream holds comment 1 at a lower sequence
+// than comment 2, a session following the issue takes comment 1 before comment 2, and both are
+// marked published within 10 s of the restarted process becoming healthy. What the killed process
+// had in flight is dropped with its connection, as a dead host's sends that never reached the
+// server are, so nothing of comment 1 reaches the stream but what the restarted process publishes.
+func TestAPublisherKilledMidBatchAndRestartedPublishesTheIssuesCommentsInOrderWithin10Seconds(t *testing.T) {
+	pair := newPair(t)
+	proxy := testnats.StartProxy(t, pair.nats)
+	tap := startNATSTap(t, proxy.URL())
+	killed := startDispatchProcessWith(t, pair.databaseURL(t),
+		dispatchOptions{NATSURL: tap.url, SigningKey: multiprocessSigningKey})
+	var restarted *dispatchProcess
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		t.Logf("the killed process's output:\n%s", killed.Output.String())
+		if restarted != nil {
+			t.Logf("the restarted process's output:\n%s", restarted.Output.String())
+		}
+	})
+	killed.waitHealthy(t)
+
+	rig := newSessionRig(t, pair.nats)
+	js, err := rig.conn.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream context: %v", err)
+	}
+	head := streamHead(t, js)
+	project := uniqueProjectKey(t, "KMB")
+	killed.createProject(t, project, "Killed mid-batch "+project)
+	key, _ := killed.createIssueIn(t, project, "Killed mid-batch", "Killed mid-batch.")
+	family := "notifications.dispatch.issue." + key + "."
+	watcher := newTestSession(t, rig, "ses_"+strings.ToLower(project)+"_watcher", family+">")
+	// The process publishes, and has nothing left to publish, when its NATS freezes.
+	waitForEveryEventPublished(t, pair.database, outboxDeliveryWithin)
+
+	proxy.Freeze()
+	first := rig.postComment(killed, key, "Comment 1.")
+	if first.err != nil {
+		t.Fatalf("write comment 1: %v", first.err)
+	}
+	firstEvent := commentEventID(t, pair.database, first.commentID)
+	waitUntil(t, 3*time.Second, "the process sending comment 1's envelope", func() bool {
+		return tap.hasSent(fmt.Sprintf(`"event_id":%q`, firstEvent))
+	})
+	second := rig.postComment(killed, key, "Comment 2.")
+	if second.err != nil {
+		t.Fatalf("write comment 2: %v", second.err)
+	}
+	secondEvent := commentEventID(t, pair.database, second.commentID)
+	killedAt := killed.signal(t, syscall.SIGKILL)
+	killed.WaitExit(t, "SIGKILL")
+	proxy.Cut()
+	proxy.Restore()
+
+	restarted = pair.startProcess(t, nil)
+	restarted.waitHealthy(t)
+	healthy := time.Now()
+	t.Logf("the restarted process was healthy %v after the kill", healthy.Sub(killedAt).Round(time.Millisecond))
+
+	published := map[string]time.Time{}
+	waitUntil(t, 2*outboxDeliveryWithin, "both comments marked published and taken by the session following the issue", func() bool {
+		for _, event := range []string{firstEvent, secondEvent} {
+			if at, ok := eventPublishedAt(t, pair.database, event); ok {
+				published[event] = at
+			}
+		}
+		taken := watcher.takenComments()
+		_, hasFirst := taken[first.commentID]
+		_, hasSecond := taken[second.commentID]
+		return len(published) == 2 && hasFirst && hasSecond
+	})
+
+	sequences := map[string]uint64{}
+	for _, message := range readStreamMessagesFrom(t, js, head) {
+		if _, seen := sequences[message.item.EventID]; !seen && strings.HasPrefix(message.item.Topic, family) {
+			sequences[message.item.EventID] = message.seq
+		}
+	}
+	firstSeq, secondSeq := sequences[firstEvent], sequences[secondEvent]
+	t.Logf("on the issue's topic family the stream holds comment 1 (%s) at sequence %d and comment 2 (%s) at %d",
+		firstEvent, firstSeq, secondEvent, secondSeq)
+	switch {
+	case firstSeq == 0 || secondSeq == 0:
+		t.Errorf("the stream does not hold both comments on the issue's topic family: comment 1 at sequence %d, comment 2 at %d", firstSeq, secondSeq)
+	case secondSeq < firstSeq:
+		t.Errorf("the stream holds comment 2 at sequence %d and comment 1 at %d: the restarted process published the issue's comments out of the order they were written",
+			secondSeq, firstSeq)
+	}
+
+	taken := watcher.takenComments()
+	firstTaken, secondTaken := taken[first.commentID], taken[second.commentID]
+	if !secondTaken.at.After(firstTaken.at) {
+		t.Errorf("the session following the issue took comment 2 (%s) %v after the restarted process was healthy and comment 1 (%s) %v after: want comment 1 first",
+			secondEvent, secondTaken.at.Sub(healthy).Round(time.Millisecond), firstEvent, firstTaken.at.Sub(healthy).Round(time.Millisecond))
+	}
+	watcher.requireInOrder(t)
+
+	for _, comment := range []struct {
+		name, event string
+	}{{"comment 1", firstEvent}, {"comment 2", secondEvent}} {
+		after := published[comment.event].Sub(healthy)
+		t.Logf("%s (%s) was marked published %v after the restarted process was healthy", comment.name, comment.event, after.Round(time.Millisecond))
+		if after > restartedPublishesWithin {
+			t.Errorf("%s (%s) was marked published %v after the restarted process was healthy, past the %v bound",
+				comment.name, comment.event, after.Round(time.Millisecond), restartedPublishesWithin)
+		}
+	}
+}
+
+// commentEventID is the event id, dispatch-<row>, of comment id's comment.created event.
+func commentEventID(t *testing.T, database *store.Store, commentID string) string {
+	t.Helper()
+	var row int64
+	if err := database.Pool.QueryRow(context.Background(),
+		`select id from events where type = 'comment.created' and payload ->> 'id' = $1`, commentID).Scan(&row); err != nil {
+		t.Fatalf("read the event row of comment %s: %v", commentID, err)
+	}
+	return fmt.Sprintf("dispatch-%d", row)
+}
+
+// eventPublishedAt is when the event of event id dispatch-<row> was marked published, and false
+// while it is not.
+func eventPublishedAt(t *testing.T, database *store.Store, eventID string) (time.Time, bool) {
+	t.Helper()
+	row, err := strconv.ParseInt(strings.TrimPrefix(eventID, "dispatch-"), 10, 64)
+	if err != nil {
+		t.Fatalf("read the event row of event id %q: %v", eventID, err)
+	}
+	var published *time.Time
+	if err := database.Pool.QueryRow(context.Background(),
+		`select published_at from events where id = $1`, row).Scan(&published); err != nil {
+		t.Fatalf("read event %s's published_at: %v", eventID, err)
+	}
+	if published == nil {
+		return time.Time{}, false
+	}
+	return *published, true
+}
+
+// natsTap relays a process's NATS connections to the NATS URL it fronts and keeps every byte the
+// process sent, so a row sees an envelope leave the process while a proxy behind the tap holds it
+// back (testnats.Proxy.Freeze).
+type natsTap struct {
+	listener net.Listener
+	target   string
+	// url is the NATS URL of the tap's address: the target's, with the host and port the tap
+	// listens on.
+	url string
+
+	mu   sync.Mutex
+	sent []byte
+}
+
+// startNATSTap relays to the NATS URL target on a loopback port of its own until the test ends.
+func startNATSTap(t *testing.T, target string) *natsTap {
+	t.Helper()
+	server, err := url.Parse(target)
+	if err != nil || server.Host == "" {
+		t.Fatalf("read the NATS URL %q the tap relays to: %v", target, err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for the NATS tap: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	tapped := *server
+	tapped.Host = listener.Addr().String()
+	tap := &natsTap{listener: listener, target: server.Host, url: tapped.String()}
+	go tap.serve()
+	return tap
+}
+
+// serve relays each connection the tap accepts until the tap's listener closes.
+func (tap *natsTap) serve() {
+	for {
+		client, err := tap.listener.Accept()
+		if err != nil {
+			return
+		}
+		go tap.relay(client)
+	}
+}
+
+// relay copies client to the target, keeping what it reads, and the target back to client, until
+// either side ends; then it closes both.
+func (tap *natsTap) relay(client net.Conn) {
+	defer client.Close()
+	server, err := net.Dial("tcp", tap.target)
+	if err != nil {
+		return
+	}
+	defer server.Close()
+	go func() {
+		_, _ = io.Copy(client, server)
+		_ = client.Close()
+	}()
+	_, _ = io.Copy(server, io.TeeReader(client, tap))
+}
+
+// Write keeps what the process sent.
+func (tap *natsTap) Write(data []byte) (int, error) {
+	tap.mu.Lock()
+	defer tap.mu.Unlock()
+	tap.sent = append(tap.sent, data...)
+	return len(data), nil
+}
+
+// hasSent reports whether the process has sent text on any of its connections.
+func (tap *natsTap) hasSent(text string) bool {
+	tap.mu.Lock()
+	defer tap.mu.Unlock()
+	return bytes.Contains(tap.sent, []byte(text))
+}
+
+// The publisher loses NATS while comments are written through both processes at 4 a second, and
+// the other process, whose NATS works, takes the publisher hold, logs its first batch and has a
+// comment written since reach a session, each within 10 s. First its proxy cuts it off, which
+// closes its connection; then, with the roles swapped, the new publisher's proxy freezes, which
+// leaves its connection open and silent. Either way the publisher releases the hold for NATS lost,
+// and every session takes each comment once and in order.
+func TestAPublisherCutFromNATSHandsOverWithin10Seconds(t *testing.T) {
+	pair := startOutboxPair(t)
+	scene := newOutboxScene(t, pair, 3, 1, 1)
+	t.Run("cut", func(t *testing.T) {
+		publisher := waitForPublisher(t, pair, takeOverWithin)
+		proxy := pair.proxy(publisher)
+		defer proxy.Restore()
+		scene.handOver(t, publisher, "its NATS connection was cut", proxy.Cut)
+	})
+	if t.Failed() {
+		return
+	}
+	t.Run("silent cut", func(t *testing.T) {
+		publisher := waitForPublisher(t, pair, takeOverWithin)
+		standby := pair.other(publisher)
+		waitUntil(t, 30*time.Second, "the standby reconnecting to NATS", func() bool {
+			report, err := standby.readHealthReport()
+			return err == nil && report.NATS != nil && *report.NATS
+		})
+		proxy := pair.proxy(publisher)
+		defer proxy.Restore()
+		scene.handOver(t, publisher, "its NATS connection went silent", proxy.Freeze)
+	})
+}
+
+// handOver writes comments at 4 a second through both processes and, once they flow, runs cut on
+// the publisher's NATS. It requires the other process to take over within takeOverWithin
+// (requireTakeOver), the publisher to release the hold for NATS lost, and every session to take
+// each comment once and in order.
+func (s *outboxScene) handOver(t *testing.T, publisher *dispatchProcess, what string, cut func()) {
+	t.Helper()
+	before := s.deliveredCount()
+	stop := s.writeAtRate(t, 4, s.pair.a, s.pair.b)
+	defer stop()
+	waitUntil(t, outboxDeliveryWithin, "the publisher publishing comments", func() bool { return s.deliveredCount() >= before+4 })
+
+	at := time.Now()
+	cut()
+	s.requireTakeOver(t, s.pair.other(publisher), at, what)
+	released := publisher.waitForOutboxLine(t, releasedHold, at, 2*takeOverWithin)
+	if released.reason != "NATS lost" {
+		t.Errorf("the publisher released the hold for %q after %s, want NATS lost: %s", released.reason, what, released.text)
+	}
+	written := s.writtenCount()
+	waitUntil(t, outboxDeliveryWithin, "eight more comments written", func() bool { return s.writtenCount() >= written+8 })
+	stop()
+	s.waitDelivered(t)
+	s.requireOnceAndInOrder(t)
+}
+
+// The publisher is stopped (SIGSTOP) for 10 s while comments are written through the other
+// process, which takes the publisher hold and publishes them. Once they are all delivered, the
+// stopped process is continued: its hold's deadline passed while it was stopped, so it logs that it
+// lost the hold and sends nothing - no session receives anything after it resumes, it logs no batch
+// started after it was stopped, and it neither takes the hold again nor releases a hold that is no
+// longer its own.
+func TestAFrozenPublisherSendsNothingWhenItResumes(t *testing.T) {
+	pair := startOutboxPair(t)
+	scene := newOutboxScene(t, pair, 3, 1, 1)
+	publisher := waitForPublisher(t, pair, takeOverWithin)
+	standby := pair.other(publisher)
+	for index := range 4 {
+		if err := scene.write(standby, scene.issues[index%len(scene.issues)], fmt.Sprintf("Before the stop %d.", index)); err != nil {
+			t.Fatalf("write a comment: %v", err)
+		}
+	}
+	// The publisher is idle when it is stopped: everything written so far has reached its sessions.
+	scene.waitDelivered(t)
+
+	stopped := publisher.signal(t, syscall.SIGSTOP)
+	stop := scene.writeAtRate(t, 4, standby)
+	defer stop()
+	scene.requireTakeOver(t, standby, stopped, "the publisher was stopped")
+	time.Sleep(time.Until(stopped.Add(frozenFor)))
+	stop()
+	scene.waitDelivered(t)
+
+	resumed := publisher.signal(t, syscall.SIGCONT)
+	lost := publisher.waitForOutboxLine(t, lostHold, resumed, takeOverWithin)
+	t.Logf("the resumed process logged that it lost the hold %v after it resumed", lost.at.Sub(resumed).Round(time.Millisecond))
+	time.Sleep(resumedQuiet)
+
+	for session, frames := range scene.framesSince(resumed) {
+		for _, frame := range frames {
+			t.Errorf("session %s received %s's event %s (%s) %v after the stopped publisher resumed, with nothing left to send but what the resumed process sent",
+				session.id, frame.owner, frame.event, frame.kind, frame.at.Sub(resumed).Round(time.Millisecond))
+		}
+	}
+	for _, line := range publisher.outboxLines(t) {
+		switch {
+		case line.message == sentBatch && line.started.After(stopped):
+			t.Errorf("the stopped publisher logged a batch started after it was stopped: %s", line.text)
+		case (line.message == tookHold || line.message == releasedHold) && !line.at.Before(resumed.Truncate(time.Millisecond)):
+			t.Errorf("the resumed process logged %q: %s", line.message, line.text)
+		}
+	}
+	for process, want := range map[*dispatchProcess]bool{publisher: false, standby: true} {
+		report, err := process.readHealthReport()
+		if err != nil || report.publishing() != want {
+			t.Errorf("process %s's /healthz reads %v (%v), want outbox_publisher %v", pair.name(process), report, err, want)
+		}
+	}
+	scene.requireOnceAndInOrder(t)
+}
+
+// A role's holder loses the first forward of event N, and the outbox, with both processes running,
+// keeps N unpublished and N+1 held back from the role's holder until a holder's receipt of N
+// arrives: N is published only after that receipt, and N+1 reaches the holder after N. In the first
+// case the holder's connection drops as the forward arrives and comes back; in the second the role
+// moves to another session while the forward waits for its receipt, and N and N+1 reach the new
+// holder, the old one taking neither.
+func TestARoleHolderWhoseConnectionMovesGetsTheEventOnceAndInOrder(t *testing.T) {
+	pair := startOutboxPair(t)
+	rig := newSessionRig(t, pair.nats)
+	project := uniqueProjectKey(t, "RHM")
+	name := strings.ToLower(project)
+	pair.a.createProject(t, project, "Role holder "+project)
+	routedIssue := func(t *testing.T, role string) string {
+		t.Helper()
+		key, _ := pair.a.createIssueIn(t, project, "Routed to "+role, "Routed.")
+		pair.a.call(t, http.MethodPatch, "/api/v1/issues/"+key, fmt.Sprintf(`{"route":"role:%s"}`, role), http.StatusOK)
+		waitForEveryEventPublished(t, pair.database, outboxDeliveryWithin)
+		return key
+	}
+	// withholdFirstComment has session withhold its receipt of the first comment's forward, and run
+	// then; every other forward it answers. It returns that forward's frame once it has arrived.
+	withholdFirstComment := func(session *testSession, then func()) func() sessionFrame {
+		var mu sync.Mutex
+		var withheld sessionFrame
+		session.setOnForward(func(frame sessionFrame) bool {
+			mu.Lock()
+			defer mu.Unlock()
+			if frame.kind != "comment.created" || withheld.event != "" {
+				return true
+			}
+			withheld = frame
+			then()
+			return false
+		})
+		return func() sessionFrame {
+			mu.Lock()
+			defer mu.Unlock()
+			return withheld
+		}
+	}
+	writeTwo := func(t *testing.T, key string) (first, second string) {
+		t.Helper()
+		n := rig.postComment(pair.a, key, "Event N.")
+		next := rig.postComment(pair.b, key, "Event N+1.")
+		if n.err != nil || next.err != nil {
+			t.Fatalf("write the two comments: %v, %v", n.err, next.err)
+		}
+		return n.commentID, next.commentID
+	}
+	takesBoth := func(session *testSession, first, second string) func() bool {
+		return func() bool {
+			taken := session.takenComments()
+			_, hasFirst := taken[first]
+			_, hasSecond := taken[second]
+			return hasFirst && hasSecond
+		}
+	}
+
+	t.Run("the holder's connection drops", func(t *testing.T) {
+		role := "drop-" + name
+		holder := newTestSession(t, rig, "ses_"+name+"_dropping", contracts.AgentSubject("ses_"+name+"_dropping"))
+		rig.registerHolder(t, role, holder.id)
+		key := routedIssue(t, role)
+		reconnected := make(chan error, 1)
+		withheld := withholdFirstComment(holder, func() { go func() { reconnected <- holder.reconnect() }() })
+		first, second := writeTwo(t, key)
+		waitUntil(t, outboxDeliveryWithin, "the holder taking both comments", takesBoth(holder, first, second))
+		if err := receiveWithin(t, reconnected, "the holder's reconnect"); err != nil {
+			t.Fatalf("reconnect the holder: %v", err)
+		}
+		requirePublishedAfterReceipt(t, pair, holder, withheld(), first, second)
+	})
+
+	t.Run("the role moves to another session", func(t *testing.T) {
+		role := "move-" + name
+		leaving := newTestSession(t, rig, "ses_"+name+"_leaving", contracts.AgentSubject("ses_"+name+"_leaving"))
+		arriving := newTestSession(t, rig, "ses_"+name+"_arriving", contracts.AgentSubject("ses_"+name+"_arriving"))
+		rig.registerHolder(t, role, leaving.id)
+		rig.registerSession(t, arriving.id)
+		key := routedIssue(t, role)
+		moved := make(chan error, 1)
+		withheld := withholdFirstComment(leaving, func() { moved <- rig.claimRole(role, arriving.id) })
+		first, second := writeTwo(t, key)
+		waitUntil(t, outboxDeliveryWithin, "the new holder taking both comments", takesBoth(arriving, first, second))
+		if err := receiveWithin(t, moved, "the role's move"); err != nil {
+			t.Fatalf("move the role: %v", err)
+		}
+		for id := range leaving.takenComments() {
+			if id == first || id == second {
+				t.Errorf("the session the role moved from took comment %s", id)
+			}
+		}
+		requirePublishedAfterReceipt(t, pair, arriving, withheld(), first, second)
+	})
+}
+
+// receiveWithin is what a row's hook sent on done, waiting up to 10 s for it, and fails the test
+// naming what when nothing comes.
+func receiveWithin(t *testing.T, done <-chan error, what string) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s never happened", what)
+		return nil
+	}
+}
+
+// requirePublishedAfterReceipt requires the forward of the first comment withheld to have been the
+// first comment's, the holder to have taken the first comment after that and the second after the
+// first, the first comment's event to have been marked published only after the holder took it -
+// after its receipt - and both processes of the pair to be running. The batch that took the
+// receipts records them once every answer of the batch is in, which can land after the holder has
+// taken both comments, so event N's record is waited for, up to outboxDeliveryWithin, before its
+// time is judged.
+func requirePublishedAfterReceipt(t *testing.T, pair *dispatchPair, holder *testSession, withheld sessionFrame, first, second string) {
+	t.Helper()
+	taken := holder.takenComments()
+	n, next := taken[first], taken[second]
+	if withheld.commentID != first {
+		t.Fatalf("the withheld forward was of comment %q, want the first comment, %s", withheld.commentID, first)
+	}
+	if !n.at.After(withheld.at) {
+		t.Errorf("the holder took event N at %s, not after its withheld forward at %s", n.at.Format(time.RFC3339Nano), withheld.at.Format(time.RFC3339Nano))
+	}
+	if !next.at.After(n.at) {
+		t.Errorf("the holder took event N+1 (%s) at %s, not after event N (%s) at %s",
+			next.event, next.at.Format(time.RFC3339Nano), n.event, n.at.Format(time.RFC3339Nano))
+	}
+	holder.requireInOrder(t)
+	row := n.eventRow(t)
+	var published *time.Time
+	waitUntil(t, outboxDeliveryWithin, fmt.Sprintf("event N (%s) being marked published once its holder took it", n.event), func() bool {
+		if err := pair.database.Pool.QueryRow(context.Background(),
+			`select published_at from events where id = $1`, row).Scan(&published); err != nil {
+			t.Fatalf("read event N's published_at: %v", err)
+		}
+		return published != nil
+	})
+	if published.Before(n.at) {
+		t.Errorf("event N (%s) was marked published at %s, before its holder took it at %s and sent its receipt",
+			n.event, published.Format(time.RFC3339Nano), n.at.Format(time.RFC3339Nano))
+	} else {
+		t.Logf("event N was forwarded at %s with no receipt, taken at %s, marked published at %s",
+			withheld.at.Format(time.RFC3339Nano), n.at.Format(time.RFC3339Nano), published.Format(time.RFC3339Nano))
+	}
+	pair.requireRunning(t)
 }
 
 // ───── the delivery durables ────────────────────────────────────────────────

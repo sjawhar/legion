@@ -35,7 +35,7 @@ func TestStartRequestStoredToCountsTheStreamsAcknowledgementAlone(t *testing.T) 
 	subject := contracts.AgentSubject("ses_serving_port")
 	for range 2 {
 		started := time.Now()
-		forward, err := client.StartRequestStoredTo(subject, item, window)
+		forward, err := client.StartRequestStoredTo(subject, item, bus.ForwardMsgID(item.DedupeKey, subject), window)
 		if err != nil {
 			t.Fatalf("StartRequestStoredTo: %v", err)
 		}
@@ -55,7 +55,7 @@ func TestStartRequestStoredToCountsTheStreamsAcknowledgementAlone(t *testing.T) 
 	}
 
 	const uncaptured = "test.uncaptured.serving-port"
-	forward, err := client.StartRequestStoredTo(uncaptured, item, 300*time.Millisecond)
+	forward, err := client.StartRequestStoredTo(uncaptured, item, bus.ForwardMsgID(item.DedupeKey, uncaptured), 300*time.Millisecond)
 	if err != nil {
 		t.Fatalf("StartRequestStoredTo on %s: %v", uncaptured, err)
 	}
@@ -90,7 +90,7 @@ func TestStartRequestStoredToIsBoundedByItsWindowWhenTheFlushTimesOut(t *testing
 		TraceID:        "trace_stalled",
 	}
 	// Control: the same subject and envelope are stored while the server runs.
-	forward, err := client.StartRequestStoredTo(subject, item, 2*time.Second)
+	forward, err := client.StartRequestStoredTo(subject, item, bus.ForwardMsgID(item.DedupeKey, subject), 2*time.Second)
 	if err != nil {
 		t.Fatalf("StartRequestStoredTo against a healthy server: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestStartRequestStoredToIsBoundedByItsWindowWhenTheFlushTimesOut(t *testing
 
 	const window = 500 * time.Millisecond
 	started := time.Now()
-	_, err = client.StartRequestStoredTo(subject, item, window)
+	_, err = client.StartRequestStoredTo(subject, item, bus.ForwardMsgID(item.DedupeKey, subject), window)
 	elapsed := time.Since(started)
 	if err == nil {
 		t.Fatal("StartRequestStoredTo against a frozen server returned no error; the forward cannot have been flushed")
