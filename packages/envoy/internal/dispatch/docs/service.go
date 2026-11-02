@@ -48,6 +48,15 @@ const (
 	// last Server.Apply on a room no peer is in returns (New). A peer that returns within it
 	// rejoins the warm room rather than reloading the document.
 	roomIdleTimeout = time.Minute
+	// peerWriteQueueBytes is how many bytes ygo may queue for one browser beyond its handshake
+	// before it closes the browser (Server.PeerWriteQueueBytes). Most of what it queues is other
+	// browsers' updates it relays, each at most the 64 MiB ygo reads in one frame
+	// (Server.MaxMessageBytes' default), so a browser is closed only once it has fallen two whole
+	// largest edits behind. A frame that crosses the budget is still queued and the budget is
+	// credited as frames are written, so a browser that reads keeps up whatever its document's
+	// size, and one that stops reading holds a bounded queue rather than every update the room
+	// sends it.
+	peerWriteQueueBytes = 128 << 20
 )
 
 // Deps configures the live document service.
@@ -643,6 +652,7 @@ func New(deps Deps) *Service {
 	// update the service broadcasts (Server.BroadcastUpdate) takes no pending queue: the room has
 	// already applied the update (reearth/ygo#268, in the pinned fork).
 	srv.MaxPendingItems = maxUpdateItems
+	srv.PeerWriteQueueBytes = peerWriteQueueBytes
 	// A room whose last peer leaves, or that only Server.Apply touches, stays resident until it has
 	// been idle for roomIdleTimeout: ygo stamps a room idle when its last peer leaves, and when an
 	// Apply on a room no peer is in returns (reearth/ygo#269). Idle eviction refuses a room any
