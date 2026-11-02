@@ -53,7 +53,7 @@ func TestASavedWorkspaceBundleReachesThePodsLauncherBeforeItStartsAnyRole(t *tes
 		t.Fatalf("save the released workspace's bundle: %v", err)
 	}
 	g := newRig(t, nil, withOptions(func(o *Options) {
-		o.SavedWorkspaceBundle, o.WorkspaceBundleRestored = st.WorkspaceBundle, st.DeleteRestoredWorkspaceBundle
+		o.SavedWorkspaceBundle, o.WorkspaceBundleRestored = st.TakeWorkspaceBundleForRestore, st.DeleteRestoredWorkspaceBundle
 	}))
 	spec := workerSpec(t)
 	g.spawn(spec)
@@ -99,18 +99,23 @@ func TestASavedWorkspaceBundleReachesThePodsLauncherBeforeItStartsAnyRole(t *tes
 		t.Fatalf("the bundle crossed as taken at %s, want %s", read.At, saved.At)
 	}
 	// The launcher restored it and said so, so the daemon's copy has done its work.
-	if _, held, err := st.WorkspaceBundle(g.ctx, testTree); err != nil || held {
+	if _, held, err := st.WorkspaceBundleSize(g.ctx, testTree); err != nil || held {
 		t.Fatalf("after the launcher reported its restore the store holds the bundle = %t (%v), want it deleted", held, err)
 	}
 }
 
 // Held says the launcher holds the body, not that the restore ran: the restore runs later, at the
 // first role start, and it can fail — a prerequisite commit the bundle needs that the new pod's
-// clone does not have, a jj step that will not run, the restore's own budget. The daemon keeps
-// the saved work until the launcher reports that the restore put it back, so a restore that
-// failed leaves it where the launcher's notice says it is: in the daemon's database, for the
-// issue's next pod.
-func TestAFailedRestoreKeepsTheSavedWorkForTheIssuesNextPod(t *testing.T) {
+// clone does not have, a jj step that will not run, the restore's own budget. The work is kept
+// where the launcher's notice says it is, in the daemon's database, and it is sent to no pod
+// again: that send was the bundle's one restore attempt.
+//
+// The pod it was sent to is the case the rule is for. Its roles container restarts, which is a
+// launcher process of its own, holding no record of the restore that already ran, on the pod's
+// own disk, whose workspace the roles have worked in since. The bundle sent there a second time
+// would `jj edit` that workspace back to the saved head and move each bookmark
+// `--allow-backwards` over all of it.
+func TestAFailedRestoreKeepsTheSavedWorkAndSendsItToNoPodAgain(t *testing.T) {
 	st := migratedStore(t)
 	saved := savedWorkspaceBundle()
 	if err := st.PutWorkspaceBundle(context.Background(), testTree, saved.Release, saved); err != nil {
@@ -118,7 +123,7 @@ func TestAFailedRestoreKeepsTheSavedWorkForTheIssuesNextPod(t *testing.T) {
 	}
 	const refusal = "git bundle unbundle: object not found"
 	g := newRig(t, nil, withFailedRestore(refusal), withOptions(func(o *Options) {
-		o.SavedWorkspaceBundle, o.WorkspaceBundleRestored = st.WorkspaceBundle, st.DeleteRestoredWorkspaceBundle
+		o.SavedWorkspaceBundle, o.WorkspaceBundleRestored = st.TakeWorkspaceBundleForRestore, st.DeleteRestoredWorkspaceBundle
 	}))
 	spec := workerSpec(t)
 	loc := g.spawn(spec)
@@ -126,17 +131,32 @@ func TestAFailedRestoreKeepsTheSavedWorkForTheIssuesNextPod(t *testing.T) {
 		t.Fatalf("the failed restore left the launch at %+v, want generation %d", loc, spec.Generation)
 	}
 
-	frames := g.sent(spec.Claim)
-	if start := slices.IndexFunc(frames, func(f shimwire.Frame) bool { _, ok := f.(shimwire.LauncherStart); return ok }); start < 1 {
-		t.Fatalf("the launcher was sent %v, want the bundle's slices and then the role's start", frameTypes(frames))
+	sent := g.sent(spec.Claim)
+	if start := slices.IndexFunc(sent, func(f shimwire.Frame) bool { _, ok := f.(shimwire.LauncherStart); return ok }); start < 1 {
+		t.Fatalf("the launcher was sent %v, want the bundle's slices and then the role's start", frameTypes(sent))
 	}
-	kept, held, err := st.WorkspaceBundle(g.ctx, testTree)
+	size, held, err := st.WorkspaceBundleSize(g.ctx, testTree)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !held || !bytes.Equal(kept.Bundle, saved.Bundle) {
-		t.Fatalf("after a restore the launcher could not run the store holds %d bytes (held=%t), want the %d saved kept for the next pod",
-			len(kept.Bundle), held, len(saved.Bundle))
+	if !held || size != len(saved.Bundle) {
+		t.Fatalf("after a restore the launcher could not run the store holds %d bytes (held=%t), want the %d saved kept",
+			size, held, len(saved.Bundle))
+	}
+
+	// The roles container restarts in the same pod, and the start of the next role is what
+	// would send the bundle again.
+	before := len(sent)
+	g.connect(spec.Claim)
+	g.r.launchers.restoreWorkspace(g.ctx, spec.Claim, string(g.pod(SandboxName(spec.Claim)).UID))
+	for _, frame := range g.sent(spec.Claim)[before:] {
+		if slice, ok := frame.(shimwire.LauncherBundle); ok {
+			t.Fatalf("the pod's second launcher was sent slice %d of %d of release %d, want nothing: the bundle has had its one restore attempt",
+				slice.Index, slice.Count, slice.Release)
+		}
+	}
+	if size, held, err := st.WorkspaceBundleSize(g.ctx, testTree); err != nil || !held || size != len(saved.Bundle) {
+		t.Fatalf("after the restart the store holds %d bytes (held=%t, %v), want the %d saved kept", size, held, err, len(saved.Bundle))
 	}
 }
 
@@ -160,7 +180,7 @@ func TestALateRestoreReportLeavesTheBundleOfANewerRelease(t *testing.T) {
 		t.Fatalf("save the second release's bundle: %v", err)
 	}
 
-	d := newLaunchers(st.WorkspaceBundle, st.DeleteRestoredWorkspaceBundle, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d := newLaunchers(st.TakeWorkspaceBundleForRestore, st.DeleteRestoredWorkspaceBundle, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	spec := workerSpec(t)
 	session := d.accept(spec.Claim, testTree, shimwire.LauncherHello{LauncherID: "late", PodUID: "pod-uid"})
 	frames, err := bundleFrames(testTree, first)
@@ -169,7 +189,7 @@ func TestALateRestoreReportLeavesTheBundleOfANewerRelease(t *testing.T) {
 	}
 	d.restoreReported(session, shimwire.LauncherRestored{ID: frames[0].ID, Release: first.Release, OK: true})
 
-	kept, held, err := st.WorkspaceBundle(ctx, testTree)
+	kept, held, err := st.TakeWorkspaceBundleForRestore(ctx, testTree, "pod-uid")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,15 +203,17 @@ func TestALateRestoreReportLeavesTheBundleOfANewerRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.restoreReported(session, shimwire.LauncherRestored{ID: later[0].ID, Release: second.Release, OK: true})
-	if _, held, err := st.WorkspaceBundle(ctx, testTree); err != nil || held {
+	if _, held, err := st.WorkspaceBundleSize(ctx, testTree); err != nil || held {
 		t.Fatalf("after the second release's report the store holds the bundle = %t (%v), want it deleted", held, err)
 	}
 }
 
 // A launcher that refuses a slice costs the restore and nothing else: the role starts on the
 // workspace the pod's own fetch provisioned, the launcher writes the agent the notice of what was
-// lost, and the saved work stays in the daemon's database for the issue's next pod. A pod that
-// never starts would be the worse mistake.
+// lost, and the saved work stays in the daemon's database. A pod that never starts would be the
+// worse mistake. The refusal costs the bundle its one attempt all the same: the daemon records
+// the attempt before it sends a slice, because a send it could not finish leaves it knowing
+// nothing of what that pod's workspace now holds.
 func TestARefusedBundleSliceStillStartsTheRoleAndKeepsTheSavedWork(t *testing.T) {
 	st := migratedStore(t)
 	saved := savedWorkspaceBundle()
@@ -200,7 +222,7 @@ func TestARefusedBundleSliceStillStartsTheRoleAndKeepsTheSavedWork(t *testing.T)
 	}
 	const refusal = "launcher_bundle sequence rebuilt to another digest than its slices declared"
 	g := newRig(t, nil, withRefusedBundle(refusal), withOptions(func(o *Options) {
-		o.SavedWorkspaceBundle, o.WorkspaceBundleRestored = st.WorkspaceBundle, st.DeleteRestoredWorkspaceBundle
+		o.SavedWorkspaceBundle, o.WorkspaceBundleRestored = st.TakeWorkspaceBundleForRestore, st.DeleteRestoredWorkspaceBundle
 	}))
 	spec := workerSpec(t)
 	loc := g.spawn(spec)
@@ -226,12 +248,11 @@ func TestARefusedBundleSliceStillStartsTheRoleAndKeepsTheSavedWork(t *testing.T)
 	if bundleSlices != 1 {
 		t.Fatalf("the launcher was sent %v, want one slice and no more after its refusal", frameTypes(frames))
 	}
-	kept, held, err := st.WorkspaceBundle(g.ctx, testTree)
+	size, held, err := st.WorkspaceBundleSize(g.ctx, testTree)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !held || !bytes.Equal(kept.Bundle, saved.Bundle) {
-		t.Fatalf("after the refusal the store holds %d bytes (held=%t), want the %d saved kept for the next pod",
-			len(kept.Bundle), held, len(saved.Bundle))
+	if !held || size != len(saved.Bundle) {
+		t.Fatalf("after the refusal the store holds %d bytes (held=%t), want the %d saved kept", size, held, len(saved.Bundle))
 	}
 }

@@ -27,13 +27,13 @@ func TestAWorkspaceBundleRoundTripsAndIsDeletedOnConfirmation(t *testing.T) {
 		Bookmarks: map[string]string{"legion/INFRA-945": "dffe88ae2f793e13436cef3921adc988433fbd4e", "side": "da4f9f492e9f8349389c243743e0a000cd1c676f"},
 		At:        at,
 	}
-	if _, ok, err := s.WorkspaceBundle(ctx, "INFRA-945"); err != nil || ok {
+	if _, ok, err := s.TakeWorkspaceBundleForRestore(ctx, "INFRA-945", "pod-0"); err != nil || ok {
 		t.Fatalf("an issue never released reads %v, %v; want no bundle", ok, err)
 	}
 	if err := s.PutWorkspaceBundle(ctx, "INFRA-945", 11, saved); err != nil {
 		t.Fatal(err)
 	}
-	read, ok, err := s.WorkspaceBundle(ctx, "INFRA-945")
+	read, ok, err := s.TakeWorkspaceBundleForRestore(ctx, "INFRA-945", "pod-1")
 	if err != nil || !ok {
 		t.Fatalf("read the saved bundle: %v, %v", ok, err)
 	}
@@ -51,12 +51,13 @@ func TestAWorkspaceBundleRoundTripsAndIsDeletedOnConfirmation(t *testing.T) {
 	}
 
 	// A second release of the same issue replaces the row: the older work must not be restored
-	// in place of the newer.
+	// in place of the newer, and the new bundle has had no restore attempt, whatever became of
+	// the one the row it replaced had.
 	again := runtime.WorkspaceBundle{Bundle: []byte("PACK newer"), Head: "0a8f0aee63b13682fefe975ba0cc51da6f2ba9e9", At: at.Add(time.Hour)}
 	if err := s.PutWorkspaceBundle(ctx, "INFRA-945", 12, again); err != nil {
 		t.Fatal(err)
 	}
-	read, ok, err = s.WorkspaceBundle(ctx, "INFRA-945")
+	read, ok, err = s.TakeWorkspaceBundleForRestore(ctx, "INFRA-945", "pod-2")
 	if err != nil || !ok || string(read.Bundle) != "PACK newer" || read.Head != again.Head || read.Release != 12 {
 		t.Fatalf("after a second release the bundle is %q at %s of release %d (%v, %v), want the newer one", read.Bundle, read.Head, read.Release, ok, err)
 	}
@@ -67,7 +68,7 @@ func TestAWorkspaceBundleRoundTripsAndIsDeletedOnConfirmation(t *testing.T) {
 	if err := s.DeleteWorkspaceBundle(ctx, "INFRA-945"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := s.WorkspaceBundle(ctx, "INFRA-945"); err != nil || ok {
+	if _, ok, err := s.TakeWorkspaceBundleForRestore(ctx, "INFRA-945", "pod-3"); err != nil || ok {
 		t.Fatalf("after the launcher confirmed the restore the bundle reads %v, %v; want none", ok, err)
 	}
 	// A confirmation that arrives twice finishes rather than failing.
@@ -103,7 +104,7 @@ func TestARestoreConfirmationDeletesOnlyTheBundleOfTheReleaseItNames(t *testing.
 	if err := s.DeleteRestoredWorkspaceBundle(ctx, "INFRA-945", 11); err != nil {
 		t.Fatal(err)
 	}
-	kept, ok, err := s.WorkspaceBundle(ctx, "INFRA-945")
+	kept, ok, err := s.TakeWorkspaceBundleForRestore(ctx, "INFRA-945", "pod-2")
 	if err != nil || !ok || string(kept.Bundle) != "PACK second" || kept.Release != 12 {
 		t.Fatalf("a report of release 11 left %q of release %d (%v, %v), want the second release's bundle kept",
 			kept.Bundle, kept.Release, ok, err)
@@ -113,11 +114,58 @@ func TestARestoreConfirmationDeletesOnlyTheBundleOfTheReleaseItNames(t *testing.
 	if err := s.DeleteRestoredWorkspaceBundle(ctx, "INFRA-945", 12); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := s.WorkspaceBundle(ctx, "INFRA-945"); err != nil || ok {
+	if _, ok, err := s.TakeWorkspaceBundleForRestore(ctx, "INFRA-945", "pod-3"); err != nil || ok {
 		t.Fatalf("after the report of release 12 the bundle reads %v, %v; want none", ok, err)
 	}
 	if err := s.DeleteRestoredWorkspaceBundle(ctx, "INFRA-945", 12); err != nil {
 		t.Fatalf("a repeated confirmation: %v", err)
+	}
+}
+
+// A bundle is sent to one pod's launcher once. The launcher's own record of the restore it ran
+// is in the process that ran it, so a roles container that restarts comes back to the same disk
+// with that record gone and the workspace hours of work past the save: a bundle sent there a
+// second time would put the saved head and the saved bookmarks over that work. The daemon's
+// record is the one that survives, and it is written in the read itself, before a slice leaves
+// the daemon.
+func TestABundleIsTakenForOneRestoreAttemptAndThenKept(t *testing.T) {
+	ctx := context.Background()
+	s := migratedStore(t)
+	at := time.Date(2026, 11, 2, 9, 30, 0, 0, time.UTC)
+	saved := runtime.WorkspaceBundle{Bundle: []byte("PACK the released work"), Head: "f2f134541b30dfa5160a5d1ce5e17b76c967c661", At: at}
+	if err := s.PutWorkspaceBundle(ctx, "INFRA-945", 11, saved); err != nil {
+		t.Fatal(err)
+	}
+	first, ok, err := s.TakeWorkspaceBundleForRestore(ctx, "INFRA-945", "pod-uid-1")
+	if err != nil || !ok || string(first.Bundle) != string(saved.Bundle) {
+		t.Fatalf("the pod that replaces the released one was answered %q (%v, %v), want the saved work", first.Bundle, ok, err)
+	}
+	// The same pod again, which is its roles container restarting, and then the pod that
+	// replaces it, and then a third after an eviction.
+	for _, pod := range []string{"pod-uid-1", "pod-uid-2", "pod-uid-3"} {
+		again, ok, err := s.TakeWorkspaceBundleForRestore(ctx, "INFRA-945", pod)
+		if err != nil || ok {
+			t.Fatalf("%s was answered %q (%v, %v) after the bundle's one attempt, want nothing to send", pod, again.Bundle, ok, err)
+		}
+	}
+	// The work is kept, and it holds the issue's pod until the issue's work is over.
+	size, held, err := s.WorkspaceBundleSize(ctx, "INFRA-945")
+	if err != nil || !held || size != len(saved.Bundle) {
+		t.Fatalf("after the attempt the store holds %d bytes (held=%t, %v), want the %d saved kept", size, held, err, len(saved.Bundle))
+	}
+	// The issue's next release saves work of its own, which has an attempt of its own.
+	newer := runtime.WorkspaceBundle{Bundle: []byte("PACK the work of the next release"), Head: "0a8f0aee63b13682fefe975ba0cc51da6f2ba9e9", At: at.Add(time.Hour)}
+	if err := s.PutWorkspaceBundle(ctx, "INFRA-945", 12, newer); err != nil {
+		t.Fatal(err)
+	}
+	read, ok, err := s.TakeWorkspaceBundleForRestore(ctx, "INFRA-945", "pod-uid-4")
+	if err != nil || !ok || string(read.Bundle) != string(newer.Bundle) || read.Release != 12 {
+		t.Fatalf("the pod after the next release was answered %q of release %d (%v, %v), want that release's own work", read.Bundle, read.Release, ok, err)
+	}
+	// A send with no pod to name is refused: the record is what the rule rests on, and a row
+	// marked by no pod names nothing an operator can read.
+	if _, ok, err := s.TakeWorkspaceBundleForRestore(ctx, "INFRA-945", ""); err == nil || ok {
+		t.Fatalf("a take that named no pod was answered %v, %v; want it refused", ok, err)
 	}
 }
 

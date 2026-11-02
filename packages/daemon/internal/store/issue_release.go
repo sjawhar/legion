@@ -103,6 +103,9 @@ type ReleaseDecision struct {
 type releaseMark struct {
 	id                             int64
 	first, boundary, last, started int64
+	// wake is the newest wake this pod had when the mark was written (max pod_resumes.id), so a
+	// resume row above it is a wake taken since (releaseOvertaken).
+	wake int64
 	// suspended are the roles whose claims this release's own role stops have suspended as
 	// `released`, each appended once its stop has suspended it (ReleaseSuspendedClaim).
 	suspended []string
@@ -117,9 +120,9 @@ func (m releaseMark) holds(row int64) bool { return row >= m.first && row <= m.l
 // row no mark holds, which is a row of a release that is over, and otherwise the mark is the one
 // the row belongs to.
 func readReleaseMark(ctx context.Context, tx pgx.Tx, project, issue string, row int64) (mark releaseMark, held bool, err error) {
-	err = tx.QueryRow(ctx, `select id, first_row, boundary_row, last_row, started_row, suspended from issue_releases
+	err = tx.QueryRow(ctx, `select id, first_row, boundary_row, last_row, started_row, wake_row, suspended from issue_releases
 		where project = $1 and issue = $2`, project, issue).Scan(&mark.id, &mark.first, &mark.boundary,
-		&mark.last, &mark.started, &mark.suspended)
+		&mark.last, &mark.started, &mark.wake, &mark.suspended)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return releaseMark{}, false, nil
 	}
@@ -144,22 +147,33 @@ func (m releaseMark) roles() []claim.Role {
 	return roles
 }
 
-// releaseOvertaken is whether the pod went on working after its release was marked, which is what
-// cancels the release. Three things say it did:
+// releaseOvertaken is whether the pod was woken or went on working after its release was marked,
+// which is what cancels the release. Four things say it was:
 //
+//   - a wake of the pod taken since the mark: one pod_resumes row above the mark's own
+//     (TakePodWake writes one in the wake's own transaction). The wake is read rather than what
+//     it did to a claim, because what it did to a claim says too little. The outbox's wake of a
+//     delivery it holds resumes its role by rule (RequestRuleResume), which queues no start row
+//     and moves no last_start_row; and a wake for a claim an earlier release left `released` —
+//     a notice for an architect this release never stopped — touches no claim of the mark's own
+//     set. Either way the pod is coming back, so the release goes rather than the pod, whichever
+//     claim the wake was for and whatever that claim looks like by the time this reads it;
 //   - a claim of the issue started since the newest start the mark was taken at;
 //   - a live claim in a turn, starting, or whose launch is not yet known — the states the idle
 //     rule refuses to release a pod in (workflow's idleStateReleasable);
 //   - a claim this release suspended that is no longer suspended as `released`: something
-//     resumed it or took its suspension over. A wake's resume by rule (RequestRuleResume) moves
-//     no start row — only a start row does — and leaves the claim ready or idle, so without this
-//     the resumed role would read as a pod still standing still, the teardown would wait on it
-//     for good, and the mark would keep every later idle tick off the pod.
+//     resumed it or took its suspension over — an operator's resume, a close, a linger — which
+//     leaves no wake of its own to read.
 //
 // A claim the release itself suspended and still holds is none of those, so the release's own
 // stops never read as work.
 func releaseOvertaken(ctx context.Context, tx pgx.Tx, project, issue string, mark releaseMark) (bool, error) {
 	var overtaken bool
+	if err := tx.QueryRow(ctx, `select exists (
+		select 1 from pod_resumes where project = $1 and issue = $2 and id > $3)`,
+		project, issue, mark.wake).Scan(&overtaken); err != nil || overtaken {
+		return overtaken, err
+	}
 	err := tx.QueryRow(ctx, `select exists (
 		select 1 from claims where project = $1 and issue = $2
 		and (last_start_row > $3 or state not in ('ready', 'idle', 'suspended', 'failed', 'retired')

@@ -171,6 +171,12 @@ func newIdleWakeRig(t *testing.T, issues ...string) *idleWakeRig {
 			return idleRigDialer{address: idleRigHostPort(t, pool)}, nil
 		})
 	rig.kube.serve(t)
+	// Boot reads runtime.kubernetes' kubeconfig whatever runtime it is given (readSandbox,
+	// kubeClient), and with none it reads the pod's in-cluster credentials, so the rig names its
+	// own stand-in API: it runs the same way outside a cluster as in one, and never holds a
+	// credential of the cluster it runs in. Nothing dials this client, since the runtime the
+	// boot is given is the rig's own (prepareSandbox returns before it builds one).
+	rig.cfg.Runtime.Kubernetes.Kubeconfig = writeKubeconfig(t, rig.kube.url, "test")
 	rig.kube.onPodReady = rig.podReady
 	rig.kube.onPodGone = rig.pods.podGone
 	rig.kube.run(t)

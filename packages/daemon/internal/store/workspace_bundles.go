@@ -16,8 +16,9 @@ import (
 // ran again after a wake cancelled the first must not leave the older work behind to be restored
 // instead. release is the id of the idle release making the save (issue_releases.id), which the
 // restore of the issue's next pod carries to that pod's launcher and back, so the report that
-// confirms a restore names the release whose work it put back
-// (DeleteRestoredWorkspaceBundle).
+// confirms a restore names the release whose work it put back (DeleteRestoredWorkspaceBundle).
+// The save clears the restore attempt the row carried with the rest of it: the work of this
+// release is another bundle, and it gets an attempt of its own (TakeWorkspaceBundleForRestore).
 func (s *Store) PutWorkspaceBundle(ctx context.Context, issue string, release int64, b runtime.WorkspaceBundle) error {
 	if issue == "" {
 		return errors.New("a workspace bundle needs its issue")
@@ -33,7 +34,8 @@ func (s *Store) PutWorkspaceBundle(ctx context.Context, issue string, release in
 		values ($1, $2, $3, $4, $5, $6, $7, $8)
 		on conflict (issue) do update set release_id = excluded.release_id, bundle = excluded.bundle,
 			size_bytes = excluded.size_bytes, at = excluded.at, head = excluded.head,
-			tips = excluded.tips, bookmarks = excluded.bookmarks`,
+			tips = excluded.tips, bookmarks = excluded.bookmarks,
+			attempt_pod_uid = null, attempt_at = null`,
 		issue, release, b.Bundle, b.Size(), b.At, b.Head, tips, bookmarks)
 	if err != nil {
 		return fmt.Errorf("save the workspace bundle of %s: %w", issue, err)
@@ -41,19 +43,38 @@ func (s *Store) PutWorkspaceBundle(ctx context.Context, issue string, release in
 	return nil
 }
 
-// WorkspaceBundle is the bundle issue's last release saved, with the id of that release, and false
-// when the issue has none: one never released, one whose restore was confirmed, or one whose
-// release a wake cancelled.
-func (s *Store) WorkspaceBundle(ctx context.Context, issue string) (runtime.WorkspaceBundle, bool, error) {
+// TakeWorkspaceBundleForRestore answers the bundle issue's last release saved and records, in the
+// same statement, that it has had its one restore attempt, against the pod of podUID whose
+// launcher it is about to be sent to. It answers false when the issue has no bundle — one never
+// released, one whose restore the launcher confirmed, one whose release a wake cancelled — and
+// when the row already carries an attempt.
+//
+// One attempt per bundle is the rule, and this statement is where it is kept. The launcher's own
+// record of the restore it ran lives in the process that ran it: a roles container that restarts
+// on the pod's own disk comes back with that record gone and the workspace as the roles left it,
+// hours of work past the save, and a bundle sent again there would `jj edit` back to the saved
+// head and move each bookmark `--allow-backwards` over all of it. The attempt is written before
+// any slice leaves the daemon, so a send that fails halfway, a restore that fails and a restore
+// whose report never arrived all leave the same row: one no pod is sent again.
+//
+// The row stays. A bundle nothing restored holds the issue's pod (workflow.IdleHoldBundleUnrestored)
+// and keeps the work in the database until the issue's own work is over (outbox's
+// dropReleasedWork), which is what the launcher's notice tells the roles.
+func (s *Store) TakeWorkspaceBundleForRestore(ctx context.Context, issue, podUID string) (runtime.WorkspaceBundle, bool, error) {
+	if podUID == "" {
+		return runtime.WorkspaceBundle{}, false, fmt.Errorf("the restore attempt of the workspace bundle of %s needs the pod it is sent to", issue)
+	}
 	var b runtime.WorkspaceBundle
 	var tips, bookmarks []byte
-	err := s.pool.QueryRow(ctx, `select bundle, at, head, tips, bookmarks, release_id from workspace_bundles where issue = $1`,
-		issue).Scan(&b.Bundle, &b.At, &b.Head, &tips, &bookmarks, &b.Release)
+	err := s.pool.QueryRow(ctx, `update workspace_bundles set attempt_pod_uid = $2, attempt_at = now()
+		where issue = $1 and attempt_pod_uid is null
+		returning bundle, at, head, tips, bookmarks, release_id`,
+		issue, podUID).Scan(&b.Bundle, &b.At, &b.Head, &tips, &bookmarks, &b.Release)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return runtime.WorkspaceBundle{}, false, nil
 	}
 	if err != nil {
-		return runtime.WorkspaceBundle{}, false, fmt.Errorf("read the workspace bundle of %s: %w", issue, err)
+		return runtime.WorkspaceBundle{}, false, fmt.Errorf("take the workspace bundle of %s for the pod %s to restore: %w", issue, podUID, err)
 	}
 	if err := json.Unmarshal(tips, &b.Tips); err != nil {
 		return runtime.WorkspaceBundle{}, false, fmt.Errorf("read the workspace bundle of %s: its tips: %w", issue, err)
@@ -111,7 +132,10 @@ func (s *Store) DeleteRestoredWorkspaceBundle(ctx context.Context, issue string,
 // workflow.IdleHoldBundleUnrestored). The row's own presence is that record: a restore the pod's
 // launcher confirmed deletes it (DeleteRestoredWorkspaceBundle), and it does so before any role of
 // the pod starts, so a row still here when the idle rule reads it is work no pod has put back —
-// the release that would overwrite it is the release the hold stops.
+// the release that would overwrite it is the release the hold stops. A bundle whose one attempt
+// failed is such a row, and it holds the issue's pod until the issue's work is over: the work is
+// in the database alone, and a release of that pod would take the disk the roles have worked on
+// since.
 func workspaceBundleUnrestored(ctx context.Context, tx pgx.Tx, issue string) (bool, error) {
 	var unrestored bool
 	if err := tx.QueryRow(ctx, `select exists (select 1 from workspace_bundles where issue = $1)`, issue).Scan(&unrestored); err != nil {

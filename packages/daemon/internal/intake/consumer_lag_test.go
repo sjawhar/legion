@@ -169,12 +169,12 @@ func TestConsumerLagNamesWhatNATSDidNotAnswer(t *testing.T) {
 
 // A NATS server refuses a publish its user lacks with an asynchronous -ERR alone and never answers
 // the request, so a stored-message get (STREAM.MSG.GET, which a deployment's daemon user lacks
-// until its envoy-infra release grants it) waits out its bound. The three consumers are read at the
-// same time, each within a bound of its own: the Dispatch and GitHub consumers each have messages
-// waiting, so each one's get waits consumerOldestBound out inside its own consumerLagBound while
-// the other's info answers all the same, and the server consumer has nothing waiting and reads no
-// message. Each consumer whose oldest message could not be read keeps its waiting count and
-// stalled flag and names that read, and Lag as a whole stays within one consumerLagBound.
+// same time, each within a bound of its own: the Dispatch, GitHub and wake consumers each have
+// messages waiting, so each one's get waits consumerOldestBound out inside its own
+// consumerLagBound while the others' infos answer all the same, and the Dispatch-server consumer
+// has nothing waiting and reads no message. Each consumer whose oldest message could not be read
+// keeps its waiting count and stalled flag and names that read, and Lag as a whole stays within
+// one consumerLagBound.
 func TestConsumerLagCountsEveryConsumerWhileNATSRefusesTheOldestMessageRead(t *testing.T) {
 	ctx := context.Background()
 	daemonSeed, daemonPublic := testnats.User(t)
@@ -197,6 +197,8 @@ func TestConsumerLagCountsEveryConsumerWhileNATSRefusesTheOldestMessageRead(t *t
 	for number := 1; number <= 3; number++ {
 		publish(t, admin, fmt.Sprintf("notifications.github.sjawhar.legion.pr.%d", number), pullRequestOpenedEnvelope(t, number))
 	}
+	publish(t, admin, legionWakeSubject, envelopeJSON(t, "wake-1", "envoy",
+		fmt.Sprintf(`{"kind":"listener_ready","at":%d}`, clock.Now().UnixMilli())))
 	clock.advance(consumerStallAfter + time.Second)
 
 	started := time.Now()
@@ -209,6 +211,7 @@ func TestConsumerLagCountsEveryConsumerWhileNATSRefusesTheOldestMessageRead(t *t
 		{Name: dispatchConsumerName(spec.Project), Waiting: 1, Stalled: true, Unavailable: refused},
 		{Name: dispatchServerConsumerName(spec.Project)},
 		{Name: githubConsumerName(spec.Project), Waiting: 3, Stalled: true, Unavailable: refused},
+		{Name: wakeConsumerName(spec.Project), Waiting: 1, Stalled: true, Unavailable: refused},
 	}
 	if !slices.Equal(lags, want) {
 		t.Fatalf("Lag with the stored-message get refused =\n%+v\nwant\n%+v", lags, want)

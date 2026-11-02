@@ -151,10 +151,24 @@ func (v IdleView) RootStanding() Standing {
 	return Standing{Phase: v.Root.Phase, Status: v.Root.Status, Lingers: v.Root.LingerUntil != nil}
 }
 
-// InWorkflowNotLingering is whether an issue and its tree root are both still the workflow's to
-// run: neither carries a status that takes an issue out of the workflow (outOfWorkflow, which is
+// InWorkflow is whether one issue's status and phase alone are still the workflow's: it carries
+// no status that takes an issue out of the workflow (outOfWorkflow, which is
 // record.OutOfWorkflow — this package sits below record, so the rule is passed in rather than
-// restated), neither is done, and neither lingers after its close.
+// restated) and its phase is short of done. A linger is not read here, because a lingering
+// issue is still one the workflow runs for every reader of this rule but the pod gate.
+//
+// It is the one statement of that rule in the daemon: workflow.InWorkflow is this call, which
+// is what admission, the linger, the production check and awaiting-person read, and
+// InWorkflowNotLingering is this call and the linger, which is what every path that acts on an
+// idle or released pod reads. A new terminal phase added here moves all of them together, where
+// two copies of the rule would have let the release gate and admission disagree about one issue.
+func (s Standing) InWorkflow(outOfWorkflow func(status string) bool) bool {
+	return !outOfWorkflow(s.Status) && s.Phase != phase.Done
+}
+
+// InWorkflowNotLingering is whether an issue and its tree root are both still the workflow's to
+// run: neither is out of the workflow by status or phase (InWorkflow), and neither lingers after
+// its close.
 //
 // It is the one gate every path that acts on an idle or released pod reads — the idle rule, a
 // wake applied inside a fact, a wake the outbox takes for a delivery it holds, and the store's
@@ -162,11 +176,12 @@ func (v IdleView) RootStanding() Standing {
 // workflow's is a close's to stop, never a release's to take or a wake's to bring back. The store
 // is one of the four and sits below workflow, so the rule lives here, where both reach it.
 func InWorkflowNotLingering(issue, root Standing, outOfWorkflow func(status string) bool) bool {
-	return issue.inWorkflow(outOfWorkflow) && root.inWorkflow(outOfWorkflow)
+	return issue.live(outOfWorkflow) && root.live(outOfWorkflow)
 }
 
-func (s Standing) inWorkflow(outOfWorkflow func(status string) bool) bool {
-	return !outOfWorkflow(s.Status) && s.Phase != phase.Done && !s.Lingers
+// live is one issue's half of InWorkflowNotLingering.
+func (s Standing) live(outOfWorkflow func(status string) bool) bool {
+	return s.InWorkflow(outOfWorkflow) && !s.Lingers
 }
 
 // QuietSince is when anything of the pod was last recorded — the newest claim write of any of its

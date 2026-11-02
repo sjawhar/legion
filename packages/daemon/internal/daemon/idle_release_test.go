@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -92,6 +95,7 @@ func (r *releaseRuntime) refusals() int {
 type idleRig struct {
 	pool    *pgxpool.Pool
 	st      *store.Store
+	issues  record.Store
 	runner  *outbox
 	sup     *supervisor
 	rt      *releaseRuntime
@@ -166,7 +170,8 @@ func newIdleRig(t *testing.T) *idleRig {
 	}
 	w := &workflowRuntime{pool: pool, projectID: "legion", log: quietLogger(),
 		idleStore: st, idleImages: rt, idlePeriod: 10 * time.Minute}
-	return &idleRig{pool: pool, st: st, runner: runner, sup: sup, rt: rt, w: w, issue: issue, token: token, machine: machine}
+	return &idleRig{pool: pool, st: st, issues: records, runner: runner, sup: sup, rt: rt, w: w,
+		issue: issue, token: token, machine: machine}
 }
 
 // drain runs the issue's lifecycle lane until it has nothing left to do.
@@ -224,7 +229,7 @@ func (r *idleRig) marked(t *testing.T) bool {
 
 func (r *idleRig) bundled(t *testing.T) bool {
 	t.Helper()
-	_, held, err := r.st.WorkspaceBundle(context.Background(), r.issue.Key)
+	_, held, err := r.st.WorkspaceBundleSize(context.Background(), r.issue.Key)
 	if err != nil {
 		t.Fatalf("read the saved bundle: %v", err)
 	}
@@ -612,5 +617,72 @@ func TestTheIdleTickDoesNothingWhenReleaseIsOff(t *testing.T) {
 				t.Fatal("tickIdle kept running with release off")
 			}
 		})
+	}
+}
+
+// A release cancelled because its issue left the workflow queues no resume, and the issue's
+// close then deletes its Sandbox, which is what takes the pod's role Secrets — its launcher
+// tokens and its `gh` credentials — with it.
+//
+// The sequence is the one the lane runs. The release's save and role stop have run, so the
+// implementer is suspended as `released`; the root is parked under the teardown's pod lock, so
+// the linger's own rows — the role suspends and the issue_suspend that deletes the Sandbox —
+// are queued above the release's; the teardown then reads the issue as no longer the workflow's
+// and cancels. A resume queued for the claim the release suspended would land above the close's
+// rows and supersede them: store.IssueSuspension would read a start newer than its own row,
+// finish the close without acting, and leave the roles of a parked issue running in a Sandbox
+// nothing deletes.
+func TestACancelOfAnIssueThatLeftTheWorkflowLetsItsCloseDeleteTheSandbox(t *testing.T) {
+	rig := newIdleRig(t)
+	ctx := context.Background()
+	engine := workflow.New(rig.issues, workflow.Config{Project: "LEGION", Repositories: testRepositories,
+		Linger: time.Hour}, quietLogger())
+	// The cancel names the roles it queued a resume for, which is the one place that set is
+	// read after the fact: a resume the lane has already run leaves no row behind.
+	logs := &syncBuffer{}
+	rig.runner.log = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	rig.runner.handlers = []intake.Handler{engine}
+	rig.w.releaseIdlePod(ctx, rig.issue.Key)
+
+	// Under the teardown's pod lock, before the store is asked: a person parks the root, which
+	// lingers its tree and queues the close's own rows. The close's SuspendIssue runs through
+	// the same hook, and parks nothing a second time.
+	var parked sync.Once
+	rig.rt.beforeAuthorize = func() {
+		parked.Do(func() {
+			if _, err := intake.ApplyFact(ctx, rig.pool, "dispatch", "park", intake.DispatchIssue{
+				Key: rig.issue.Key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated",
+				Status: "backlog", Title: rig.issue.Title, Rank: rig.issue.Rank}, engine); err != nil {
+				t.Errorf("park the root: %v", err)
+			}
+		})
+	}
+
+	rig.drain(t)
+
+	if !strings.Contains(logs.String(), "resumed=[]") {
+		t.Fatalf("the cancel queued a resume; want none, since the claims of a parked issue are its close's and a start above the close's rows supersedes them: %s",
+			logs.String())
+	}
+	if _, suspended := rig.rt.reads(); suspended != 1 {
+		t.Fatalf("Sandbox teardowns = %d, want the close's one: its role Secrets go with the Sandbox", suspended)
+	}
+	if rig.marked(t) {
+		t.Fatal("the cancelled release left its mark behind")
+	}
+	if rig.bundled(t) {
+		t.Fatal("the cancelled release left its bundle behind")
+	}
+	var left int
+	if err := rig.pool.QueryRow(ctx, `select count(*) from outbox where issue = $1
+		and kind in ('supervise', 'issue_suspend', 'issue_release')`, rig.issue.Key).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Fatalf("%d stop rows of the pod remain, want the release's and the close's every one finished", left)
+	}
+	if got := rig.machine.Claim(); got.State != supervise.StateSuspended || got.SuspendedBy != supervise.SuspendedByDaemon {
+		t.Fatalf("the implementer = %s by %s, want it suspended by the close that took its pod",
+			got.State, got.SuspendedBy)
 	}
 }

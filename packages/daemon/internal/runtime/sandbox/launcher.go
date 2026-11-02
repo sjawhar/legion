@@ -317,8 +317,14 @@ const bundleRestoreBound = 2 * time.Minute
 // sent, a store that cannot be read and a connection that fails are each logged and left: a pod
 // that never starts is worse than one whose workspace holds only what was pushed, and the
 // launcher writes the agent its own notice of what was lost (internal/launcher's restoreWorkspace).
-// The bundle stays in the database until a launcher has restored it, so the issue's next pod is
-// sent it again.
+//
+// One attempt per bundle, and the read is it: the store records the pod this send is for before
+// it answers the body, and answers nothing for that bundle afterwards
+// (store.TakeWorkspaceBundleForRestore). So a roles container that restarts, a pod that replaces
+// this one and a third pod after an eviction are each sent nothing, and no bundle is ever applied
+// over work a running pod's roles have done since the save. The work itself stays in the
+// database, which holds the issue's pod (workflow.IdleHoldBundleUnrestored) until the issue's
+// work is over.
 func (d *launchers) restoreWorkspace(ctx context.Context, token claim.Token, podUID string) {
 	if d.saved == nil || d.restored == nil {
 		return
@@ -332,15 +338,15 @@ func (d *launchers) restoreWorkspace(ctx context.Context, token claim.Token, pod
 	issue := session.issue
 	restoring, cancel := context.WithTimeout(ctx, bundleRestoreBound)
 	defer cancel()
-	bundle, saved, err := d.saved(restoring, issue)
+	bundle, saved, err := d.saved(restoring, issue, podUID)
 	if err != nil {
-		d.log.Warn("launcher bundle: the saved workspace bundle could not be read, so the pod starts on what was pushed",
-			"issue", issue, "launcher", token, "error", err)
+		d.log.Warn("launcher bundle: the saved workspace bundle could not be taken for this pod's one restore attempt, so the pod starts on what was pushed",
+			"issue", issue, "launcher", token, "pod", podUID, "error", err)
 		return
 	}
-	// Nothing was released, the restore is already confirmed, or the release saved a workspace
-	// that had nothing unpushed: the pod starts on what its fetch provisioned, as every pod of an
-	// issue that was never released does.
+	// Nothing was released, the restore is already confirmed, the release saved a workspace that
+	// had nothing unpushed, or this bundle has had its one attempt: the pod starts on what its
+	// fetch provisioned, as every pod of an issue that was never released does.
 	if !saved || len(bundle.Bundle) == 0 {
 		return
 	}
@@ -374,7 +380,8 @@ func (d *launchers) restoreWorkspace(ctx context.Context, token claim.Token, pod
 		// Held ends the sequence: the launcher has the whole, digest-checked body and applies it
 		// before its first role runs. The daemon's copy stays until the launcher reports what
 		// the restore itself did (restoreReported) — a restore can still fail, and the work is
-		// then in the daemon's database alone, which is where the launcher's notice says it is.
+		// then in the daemon's database alone, which is where the launcher's notice says it is,
+		// and where it stays: this send was the bundle's one attempt.
 		d.log.Info("launcher bundle: the released workspace's saved work reached the pod that replaces it",
 			"issue", issue, "launcher", token, "bytes", len(bundle.Bundle), "slices", len(frames))
 		return
@@ -386,9 +393,9 @@ func (d *launchers) restoreWorkspace(ctx context.Context, token claim.Token, pod
 // restoreReported drops the saved bundle of the release a launcher's report names, once that
 // launcher reports that its restore put the work back. It is the one confirmation a bundle is
 // deleted on: a restore that failed, and a pod no role ever started in, leave the work in the
-// daemon's database for the issue's next pod, which is sent it again. Nothing else ever deletes
-// it, so the issue's close and its tree's close are what end a bundle no pod restores (outbox's
-// dropReleasedWork).
+// daemon's database, where it stays, since the bundle's one attempt has been recorded and no pod
+// is sent it again (restoreWorkspace). Nothing else ever deletes it, so the issue's close and its
+// tree's close are what end a bundle no pod restored (outbox's dropReleasedWork).
 //
 // The release's own id is what the delete reads. A launcher keeps its report until some
 // connection carries it (internal/launcher's bundleRestore.owed), so one can reach the daemon
@@ -405,7 +412,7 @@ func (d *launchers) restoreReported(s *launcherSession, report shimwire.Launcher
 		return
 	}
 	if !report.OK {
-		d.log.Warn("launcher bundle: the pod's launcher could not restore the released workspace's saved work, which stays in the database for the issue's next pod",
+		d.log.Warn("launcher bundle: the pod's launcher could not restore the released workspace's saved work, which had its one attempt and stays in the database until the issue's work is over",
 			"issue", s.issue, "launcher", s.token, "sequence", report.ID, "release", report.Release, "error", report.Error)
 		return
 	}

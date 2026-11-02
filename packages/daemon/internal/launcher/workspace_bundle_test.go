@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -245,18 +246,23 @@ func TestARestoreWhoseBaseCommitIsGoneStartsTheRolesWithANotice(t *testing.T) {
 	if !strings.Contains(notice, saved.At.UTC().Format(time.RFC3339)) {
 		t.Fatalf("the notice is %q, want it to name when the lost work was saved", notice)
 	}
+	// The notice names the bundle the work is in, because that is where it stays: the daemon
+	// records one restore attempt per bundle and sends it to no pod again.
+	if !strings.Contains(notice, fmt.Sprintf("bundle of release %d", bundleRelease)) || !strings.Contains(notice, "sends to no pod again") {
+		t.Fatalf("the notice is %q, want it to name the bundle the work stays in and that no pod is sent it again", notice)
+	}
 	if log := f.run(workspace, "jj", "log", "-R", workspace, "--ignore-working-copy", "-r", "all()", "--no-graph", "-T", "commit_id ++ \"\\n\""); strings.Contains(log, saved.Head) {
 		t.Fatalf("a restore that failed left the saved working copy in the workspace:\n%s", log)
 	}
 }
 
 // A bundle is restored into a workspace provisioned after it was saved, and into no other. The
-// workspace a save was taken from is on the released pod's disk, and a roles container that
-// restarts on a disk of its own comes back to it with a launcher process that holds no record of
-// the restore it ran: it is sent the bundle again, at the start of every role, and applying it
-// there would `jj edit` back to the saved head and move each bookmark `--allow-backwards` over
-// what the roles have done since. The creation record provisioning leaves is what tells that
-// workspace from the one the issue's next pod made (workspace.Created).
+// daemon holds that rule with a record of its own — one restore attempt per bundle, against the
+// pod it is sent to (store.TakeWorkspaceBundleForRestore) — and this is the workspace's own half
+// of it, which catches what the daemon cannot see: a bundle that reached the very workspace the
+// save was taken from, whose creation record is older than the save (workspace.Created).
+// Applying it there would `jj edit` back to the saved head and move each bookmark
+// `--allow-backwards` over what the roles have done since.
 func TestARestoreRefusesAWorkspaceOlderThanTheWorkItHolds(t *testing.T) {
 	testbin.RequireJJFilters(t)
 	f := newBundleFixture(t)

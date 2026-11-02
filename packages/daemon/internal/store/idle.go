@@ -127,10 +127,17 @@ func (s *Store) ReleaseIdleIssue(ctx context.Context, project, issue string, dec
 		for _, c := range view.Claims {
 			started = max(started, c.LastStartRow)
 		}
+		// The newest wake this pod has had: a wake recorded above it is one this release never
+		// saw, and cancels it (releaseOvertaken).
+		var wake int64
+		if err := tx.QueryRow(ctx, `select coalesce(max(id), 0) from pod_resumes where project = $1 and issue = $2`,
+			project, issue).Scan(&wake); err != nil {
+			return fmt.Errorf("read the newest wake of %s: %w", issue, err)
+		}
 		if _, err := tx.Exec(ctx, `insert into issue_releases
-			(project, issue, generation, first_row, boundary_row, last_row, started_row, role, marked_at)
-			values ($1, $2, $3, $4, $5, $6, $7, $8, now())`,
-			project, issue, int64(mark.Generation), first, boundary, last, started, string(mark.Role)); err != nil {
+			(project, issue, generation, first_row, boundary_row, last_row, started_row, wake_row, role, marked_at)
+			values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())`,
+			project, issue, int64(mark.Generation), first, boundary, last, started, wake, string(mark.Role)); err != nil {
 			return fmt.Errorf("mark the release of %s: %w", issue, err)
 		}
 		marked = true
@@ -174,11 +181,22 @@ type ReleaseResumeRow func(role claim.Role, generation uint64) (IdleReleaseRow, 
 // suspended as `released`. A claim another path took over — a close, a linger, an operator —
 // is left to that path, which is what the source on the suspension says; one an earlier release
 // left `released` is no business of this release, which is why the mark's own set is read and
-// never every released claim of the issue. An issue the record no longer holds is given no
-// resume at all: its claims are a close's to end.
-func (s *Store) CancelIssueRelease(ctx context.Context, project, issue string, resume ReleaseResumeRow) ([]claim.Role, error) {
-	if project == "" || issue == "" || resume == nil {
-		return nil, errors.New("cancelling a release needs its project, its issue and the row that resumes a claim")
+// never every released claim of the issue.
+//
+// An issue the record no longer holds, one that has left the workflow, and one whose tree
+// lingers are given no resume at all, and the mark goes all the same: those claims are a close's
+// to end. The gate is the one every path that acts on a released pod reads
+// (pods.InWorkflowNotLingering), read here inside the cancel's own transaction, because the
+// cancel of a release whose issue left the workflow runs beside that issue's close — the close's
+// rows are queued above the release's and the teardown answers Unauthorized for the same leave —
+// and a resume queued above them supersedes the close: the close's own suspension then finishes
+// without acting, its Sandbox is never deleted, and the roles of a done issue run on in it with
+// their launcher tokens and `gh` credentials. outOfWorkflow is the workflow's rule for a status
+// that takes an issue out of it (record.OutOfWorkflow), which the store does not restate.
+func (s *Store) CancelIssueRelease(ctx context.Context, project, issue string, resume ReleaseResumeRow,
+	outOfWorkflow func(status string) bool) ([]claim.Role, error) {
+	if project == "" || issue == "" || resume == nil || outOfWorkflow == nil {
+		return nil, errors.New("cancelling a release needs its project, its issue, the row that resumes a claim and the workflow's own rule for a status")
 	}
 	var resumed []claim.Role
 	err := s.Tx(ctx, func(tx pgx.Tx) error {
@@ -196,17 +214,19 @@ func (s *Store) CancelIssueRelease(ctx context.Context, project, issue string, r
 		if err != nil {
 			return err
 		}
-		var generation int64
+		var generation uint64
 		if len(roles) > 0 {
-			err := tx.QueryRow(ctx, `select generation from issues where key = $1`, issue).Scan(&generation)
-			if errors.Is(err, pgx.ErrNoRows) {
-				roles = nil
-			} else if err != nil {
+			var live bool
+			generation, live, err = resumeStanding(ctx, tx, issue, outOfWorkflow)
+			if err != nil {
 				return err
+			}
+			if !live {
+				roles = nil
 			}
 		}
 		for _, role := range roles {
-			row, err := resume(role, uint64(generation))
+			row, err := resume(role, generation)
 			if err != nil {
 				return err
 			}
@@ -221,6 +241,30 @@ func (s *Store) CancelIssueRelease(ctx context.Context, project, issue string, r
 		return nil, fmt.Errorf("cancel the release of %s: %w", issue, err)
 	}
 	return resumed, nil
+}
+
+// resumeStanding is what a cancel reads of issue before it queues a resume: the generation the
+// resume names, and whether the issue and its tree root are both still the workflow's to run
+// (pods.InWorkflowNotLingering). An issue or a root the record no longer holds is neither.
+func resumeStanding(ctx context.Context, tx pgx.Tx, issue string, outOfWorkflow func(status string) bool) (uint64, bool, error) {
+	var generation int64
+	var issuePhase, status, rootPhase, rootStatus string
+	var lingering, rootLingering bool
+	err := tx.QueryRow(ctx, `select i.generation, i.phase, i.status, i.linger_until is not null,
+		root.phase, root.status, root.linger_until is not null
+		from issues i join issues root on root.key = i.tree where i.key = $1`, issue).Scan(
+		&generation, &issuePhase, &status, &lingering, &rootPhase, &rootStatus, &rootLingering)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("read %s for the resumes of its cancelled release: %w", issue, err)
+	}
+	live := pods.InWorkflowNotLingering(
+		pods.Standing{Phase: phase.Phase(issuePhase), Status: status, Lingers: lingering},
+		pods.Standing{Phase: phase.Phase(rootPhase), Status: rootStatus, Lingers: rootLingering},
+		outOfWorkflow)
+	return uint64(generation), live, nil
 }
 
 // stillReleasedRoles are the roles among suspended whose claims are still suspended as

@@ -161,7 +161,7 @@ func recordableHold(hold workflow.IdleHold) bool {
 // record that cannot be written is logged and nothing else: the records are a deployment's
 // measurement, and a release is a saving, so nothing waits on either.
 func recordIdleHold(ctx context.Context, st *store.Store, project, issue string, hold workflow.IdleHold, detail string, at time.Time, log *slog.Logger) {
-	if st == nil || !recordableHold(hold) {
+	if st == nil {
 		return
 	}
 	if err := st.RecordPodHold(ctx, store.PodHold{Project: project, Issue: issue, Reason: hold.String(), Detail: detail, At: at}); err != nil {
@@ -213,15 +213,13 @@ func (r *outbox) recordPodRelease(ctx context.Context, issue string, generation 
 // releaseHold is the hold a cancel the store decided is recorded under, and the sentence the
 // log line carries. The cause is the store's answer and not the row's, so a pod taken up again
 // is one reason in the records wherever the release read it: at a role stop, where the start or
-// the delivery arrives, and at the teardown, where the same read runs again.
+// the delivery arrives, and at the teardown, where the same read runs again. The store names a
+// cause on every cancel it decides, and those two are all it names.
 func releaseHold(cause store.ReleaseCause) (workflow.IdleHold, string) {
-	switch cause {
-	case store.ReleaseCauseOvertaken:
+	if cause == store.ReleaseCauseOvertaken {
 		return workflow.IdleHoldOvertaken, "the pod was given work after its release was marked"
-	case store.ReleaseCauseUnauthorized:
-		return workflow.IdleHoldUnauthorized, "the store no longer authorizes it"
 	}
-	return workflow.IdleHoldUnauthorized, "the store did not authorize it and named no cause"
+	return workflow.IdleHoldUnauthorized, "the store no longer authorizes it"
 }
 
 // recordPodHold writes the hold of a release that did not finish (cancelRelease): the pod was

@@ -171,9 +171,10 @@ func (r *bundleRestore) apply(ctx context.Context, env []string) restoreResult {
 	// whole life; nothing reads it again, since every later apply is answered above.
 	r.body = nil
 	if err != nil {
-		r.notice = fmt.Sprintf("the released workspace's saved work could not be read (%v); this workspace holds only what was pushed", err)
+		r.notice = fmt.Sprintf("the released workspace's saved work could not be read (%v); this workspace holds only what was pushed,"+
+			" and the bundle of release %d stays in the daemon's database, which sends it to no pod again", err, r.release)
 	} else {
-		r.restored, r.notice = restoreWorkspace(ctx, dir, env, bundle)
+		r.restored, r.notice = restoreWorkspace(ctx, dir, env, r.release, bundle)
 	}
 	r.confirm = &shimwire.LauncherRestored{ID: r.sequence, Release: r.release, OK: r.restored}
 	if !r.restored {
@@ -195,8 +196,8 @@ func (r *bundleRestore) owed() *shimwire.LauncherRestored {
 }
 
 // sent forgets the report once a connection has carried it. A report the daemon read but could
-// not act on is the daemon's to retry, not the launcher's: it keeps its copy and sends the
-// bundle to the issue's next pod.
+// not act on is the daemon's to retry, not the launcher's: it keeps its copy of the work, which
+// it sends no pod again (internal/runtime/sandbox's restoreWorkspace).
 func (r *bundleRestore) sent(report *shimwire.LauncherRestored) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -206,27 +207,32 @@ func (r *bundleRestore) sent(report *shimwire.LauncherRestored) {
 }
 
 // restoreWorkspace puts one saved bundle back into the workspace at dir and answers the notice of
-// what it restored, or of what was lost and why. A restore that fails leaves the workspace as
-// provisioning made it — what the issue's branch holds — and the roles start on that. The daemon
-// keeps the bundle of a restore that failed and releases no pod of the issue while it holds one,
-// so the work the notice names is the issue's next pod's to restore.
-func restoreWorkspace(ctx context.Context, dir string, env []string, b shimwire.WorkspaceBundle) (bool, string) {
+// what it restored, or of what was lost and why. release is the idle release whose save built the
+// bundle, which the notice of a failure names: that is the bundle an operator reads out of the
+// daemon's database, since the daemon records one restore attempt per bundle and sends it to no
+// pod again. A restore that fails leaves the workspace as provisioning made it — what the issue's
+// branch holds — and the roles start on that, with the saved work in the database alone for the
+// life of the issue's pods.
+func restoreWorkspace(ctx context.Context, dir string, env []string, release int64, b shimwire.WorkspaceBundle) (bool, string) {
 	// Every reason is written as one line (oneLine), however many lines the tool that failed
 	// wrote: the notice goes to the container's log, where one line is one notice.
 	lost := func(reason string) (bool, string) {
 		return false, fmt.Sprintf("the released workspace's saved work was not restored (%s); this workspace holds only what was pushed,"+
-			" and the work of %d head(s) and %d bookmark(s) saved at %s is in the daemon's database alone, for the issue's next pod",
-			oneLine(reason), len(b.Tips), len(b.Bookmarks), b.At.UTC().Format(time.RFC3339))
+			" and the work of %d head(s) and %d bookmark(s) saved at %s stays in the daemon's database as the bundle of release %d, which it sends to no pod again",
+			oneLine(reason), len(b.Tips), len(b.Bookmarks), b.At.UTC().Format(time.RFC3339), release)
 	}
 	// A bundle is applied to the workspace the pod that replaces the released one provisioned,
-	// and to no other. The workspace the save was taken from is on the released pod's disk, and a
-	// roles container that restarts on a disk of its own comes back to it with a launcher process
-	// that holds no record of the restore it already ran: applying there would `jj edit` back to
-	// the saved head and move bookmarks `--allow-backwards` over whatever the roles have done
-	// since the save. Provisioning records when it created the workspace (workspace.Created), so
-	// a record later than the save is the proof that this workspace is not the one the work came
-	// out of; anything else keeps the bundle for the issue's next pod rather than risking that
-	// work.
+	// and to no other. The daemon is what holds that rule: it records one restore attempt per
+	// bundle, against the pod it sends it to, and sends that bundle to no pod and no launcher
+	// again (store.TakeWorkspaceBundleForRestore), so a roles container that restarts on the
+	// pod's own disk — coming back with a launcher process that holds no record of the restore
+	// it already ran — is sent nothing to apply over the work the roles have done since.
+	//
+	// This check is the workspace's own half of it, and it catches the one thing the daemon
+	// cannot see: a bundle that reached the very workspace it was saved from, whose creation
+	// record (workspace.Created) is older than the save. Applying there would `jj edit` back to
+	// the saved head and move bookmarks `--allow-backwards` over whatever that workspace holds
+	// now.
 	created, ok, err := workspace.Created(dir)
 	switch {
 	case err != nil:
