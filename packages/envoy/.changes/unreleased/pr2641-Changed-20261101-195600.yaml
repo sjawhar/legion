@@ -1,0 +1,13 @@
+kind: Changed
+body: |-
+  Dispatch's architecture importer no longer holds a lock across its GitHub calls. The callers of
+  one source share one sync, so two Refresh clicks cost one set of GitHub calls, and a slow source
+  holds up no other source of its project. A caller that pushes and then asks for a Refresh is
+  never answered the pre-push commit, and a sync that meets its own two-minute deadline records it
+  on the source row whether or not the caller is still there.
+
+  Dispatch's webhook redelivery sweep reads the deliveries an index says are due instead of every
+  record in its KV bucket, so a sweep's cost follows what is due rather than three days of
+  deliveries. Its summary line gains `index_entries`, and `deliveries=` no longer counts an open
+  delivery that is not due and whose attempts the listing no longer returns.
+  `envoy-dispatch redeliver-webhooks`, dry run included, answers exactly as before.

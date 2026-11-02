@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-627",
+  "previousHandoff": "",
+  "headReviewed": "294358fc5c22568cee9e9071bdfd4db1ae6bb9f4",
+  "codeHead": "d74ea872eac47a3c282e7b9feaed3aede8ffc67d",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 9,
+  "ci": "Read 2026-11-01T23:16Z: required set is ci-ok and pr-title (rulesets; no branch protection). CI head d74ea872 (run 41358832794) still queued, only changes and pr-title completed success; compare d74ea872...294358fc is handoffs-only (2 files). A REQUEST_CHANGES does not wait on CI.",
+  "thermonuclear": "Both run at 294358fc: deep-review CHANGES (6 findings), code-quality CHANGES (10 findings). Each judged below; the ones not carried are listed under notCarried with the reason.",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/redeliver/sweep.go:1119", "description": "putRecord answers a non-conflict write failure exactly as a lost compare-and-set, so writeRecord returns (0, false, nil): the claim path reports ClaimedElsewhere with the sweep still Complete, the cursor moves past the record's entry, the claim's new entry is later deleted as a stray, and an unlisted open delivery is never asked for again. backfillIndex likewise counts such a record indexed and sets the marker. Before the index, the whole-bucket read re-decided it next sweep, so this is a regression of the one loss the design guards against."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/redeliver/sweep.go:682", "description": "A record an older build rewrites loses Pending (base's record struct has no such field). openDue then deletes its entry as a stray, the marker keeps backfillIndex from running for up to 72h, and decide's upgrade write reaches only listed deliveries, so a refusal-only delivery outside the listing is lost during a rolling deploy and after a rollback then roll-forward within 72h. The comment at 712-715 says neither needs a rule."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/redeliver/sweep.go:489", "description": "errPendingNotWritten after a request was made drops a Redelivered/RequestRefused/Expired decision from the report; the comment's reason is false on that path."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/redeliver/sweep.go:683", "description": "The stray repair can delete an entry another sweeper (an operator run, which takes no lease) has just Put and is about to name in its record write."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/architecture/importer.go:452", "description": "failed() records on context.WithoutCancel(parent); parent is the flight's base context, so the wrapper drops the owner cancellation Close relies on and Close can wait without bound on a database that stopped answering. parent itself has no sync deadline."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/architecture/importer.go:246", "description": "SyncProject's ctx.Err() break duplicates Sync's own first check and makes the doc's 'attempting each … answers each source's outcome' false."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/redeliver/index.go:69", "description": "Dead code: attention's NextAttemptAt.IsZero branch (pendingFor's clamp already gives now), parsePendingKey's unused at, and openDue's seen map, which its own comment says never fires."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/redeliver/sweep.go:1152", "description": "sweep.go grows to 1197 lines and importer.go to 1056 while index.go exists for the index: move the index code (openDue, backfillIndex, writeRecord, dropPending, indexMarked, errPendingNotWritten) into index.go and the flight code into its own file."},
+    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/README.md:272", "description": "Prose: 'waiting' in the running sweep is not only a listed delivery; an entry keyed to the sweep's own minute that is due later in that minute is decided Waiting too (same wording in sweep.go:34-35)."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/redeliver/index.go:10", "description": "Prose: comments that narrate the change rather than the code (index.go:10-11, 22-23; sweep.go:589-590; sweep_test.go:1329; importer_test.go:718-719)."},
+    {"severity": "minor", "file": ".github/workflows/docs-pages.yaml:33", "description": "Prose: three block labels carry wrong pattern counts: *bun_install 16 over a block of 15, *legion_command 57 over 59, *dispatch_server 42 over 50. Convention: the label counts the block below it."}
+  ],
+  "notCarried": [
+    "Deep 5 (the starter's Idempotency-Key commit hook rides into the flight): not a defect. markRequestKeyCommitted acts only while the starter's handler runs (request_keys.go:1077), a takeover needs the holder's lease to lapse, which it does not while the handler runs, and a joined caller's unmarked key re-runs an idempotent sync.",
+    "Quality 2 (syncCount copies api/server.go backgroundWork): the two differ (refuse after close), the copy is ~40 lines and says so, and sharing it means a new package plus an edit of api/server.go outside this change; not required.",
+    "Quality 3 (writeRecord mutates Pending through its pointer): the simplify pass chose this shape and each caller that patches Pending says why; not a defect.",
+    "Quality 6 (two drain styles): style, not a defect.",
+    "Quality 9 (joinInBackground sleeps 500 ms): a joining caller makes no observable call, the helper says so, and the tester's mutation of the freshness loop turned the test red; not a defect."
+  ],
+  "prose": "The three prose findings are handed to the implementer in this round rather than committed by the reviewer: the code goes back anyway, and a reviewer push now would cancel the queued CI run at d74ea872, which the architect asked not to do."
+}

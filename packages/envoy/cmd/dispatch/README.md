@@ -255,8 +255,9 @@ So redelivering a delivery that did reach the stream adds nothing to the stream.
   When the sweep had made at least one request for it, it logs `level=INFO msg="webhook delivery recovered"` once, with `requests`, the number of requests the delivery took.
 
 - A process killed between claiming a delivery and recording GitHub's answer (a SIGKILL, an OOM kill, a lost node) leaves a claim that stands for one minute, three GitHub request timeouts.
-  Until then every other sweep counts the delivery `claimed_elsewhere` (`claimed-elsewhere` in the command's table, `--dry-run` included);
-  after it the delivery is asked for again (`--dry-run` reports `would-redeliver`), even once its failed attempt is older than the sweep's hour.
+  Until then a sweep that reads the delivery counts it `claimed_elsewhere` (`claimed-elsewhere` in the command's table, `--dry-run` included):
+  the running sweep while the listing still carries its failed attempt, since the index holds an open delivery back until its claim can be void, and the operator command whether the delivery is listed or not.
+  After the claim ends the delivery is asked for again (`--dry-run` reports `would-redeliver`), even once its failed attempt is older than the sweep's look-back.
   If GitHub had already taken the dead process's request, its log shows the redelivery by then:
   an `OK` attempt closes the delivery with no second request, and a failed one is redelivered like any other.
   A claim whose answer could not be written logs `level=ERROR msg="webhook redelivery
@@ -264,19 +265,26 @@ So redelivering a delivery that did reach the stream adds nothing to the stream.
 
 - Every sweep logs an INFO `msg="webhook redelivery sweep"` line:
   `failed_attempts` (the failed attempts listed), `deliveries` (the deliveries the sweep decided:
-  the GUIDs of the listed failed attempts, plus the open deliveries the listing no longer returns, one whose claim was never answered included), and one count per outcome, which add up to `deliveries`.
+  the GUIDs of the listed failed attempts, plus the open deliveries the listing no longer returns that the index says are due, one whose claim was never answered included), `index_entries` (the entries the index read returned, none in the operator command, which reads no index), and one count per outcome, which add up to `deliveries`.
   `closed` is a delivery an earlier sweep settled (GitHub recorded it `OK`, or it expired):
-  its failed attempt stays listed until it is older than the sweep's hour, so after a burst of failures is redelivered, the next hour's sweeps count the burst as `closed`.
-  `waiting` is a delivery whose next request is not due yet.
+  its failed attempt stays listed until it is older than the sweep's look-back, so after a burst of failures is redelivered, the sweeps of the next hour and six minutes count the burst as `closed`.
+  `waiting` is a delivery whose next request is not due yet:
+  in the running sweep one the listing returned, or one whose index entry is keyed to the sweep's own minute with its request later in that minute, since the index is keyed by the minute and brings back only the deliveries due by it;
+  and in the operator command every open delivery it reads that is not due and not claimed, listed or not.
   `claimed_elsewhere` is a delivery another sweep is asking GitHub for.
   A delivery the sweep's cap of 300 requests left over is not counted; the next sweep takes it.
 
-- A sweep looks back one hour, and decides every delivery whose record is still open, neither delivered nor expired, even when its attempts are older than that.
-  After a gap in sweeping (Dispatch down), it resumes from its cursor, back to GitHub's three days.
+- The running sweep lists the last hour and six minutes (`redeliver.Lookback`, the longest backoff plus three sweep intervals), long enough that a delivery coming due still sees GitHub's answer to its last request in the listing.
+  To that it adds the open deliveries the listing no longer returns that its index says are due, one still owed a request and one whose claim has run out alike.
+  It reads the index from two minutes before its last sweep's start up to now, and over the last three days when it has no cursor yet.
+  The operator command reads every record in the bucket instead, so it decides every delivery whose record is still open, neither delivered nor expired, even when its attempts are older than its window.
+  After a gap in sweeping (Dispatch down), the running sweep resumes its listing from its cursor, back to GitHub's three days.
   The first sweep ever made, with no cursor, looks back 72 hours.
 
-The cursor and one record per delivery acted on live in the JetStream KV bucket `envoy_webhook_redelivery`.
-Its 72-hour TTL matches GitHub's horizon.
+The cursor, one record per delivery acted on, one index entry per open delivery, keyed `pending.<YYYYMMDD>.<HH>.<MM>.<GUID>` by the minute that delivery next needs a sweep, and the marker that says every open record has an entry live in the JetStream KV bucket `envoy_webhook_redelivery`.
+Its 72-hour TTL matches GitHub's horizon, and an index entry a sweeper died before deleting expires with the records.
+The running sweep reads from that index the deliveries due in its window; the operator command reads every record there is.
+A sweep that meets open records an older build wrote without entries gives each one an entry and then writes the marker, which the TTL expires, so that repair runs again at most once every three days.
 The server opens the bucket on the first sweep that finds NATS connected, not at boot, so a NATS that is down at boot skips the sweeps until it answers, each logged as failed.
 A compare-and-swap claim, written before the request and replaced by GitHub's answer after it, keeps two Dispatch processes from requesting the same attempt twice, and the operator command honours the same rate limits.
 

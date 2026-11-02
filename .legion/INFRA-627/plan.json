@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-627",
+  "previousHandoff": "",
+  "plan": {
+    "document": "the issue's plan.md document on Dispatch (artifact slug plan-md), which is the whole plan: design, ordered tasks, acceptance with a surface and a command for each criterion, risks and departures",
+    "base": "67901f79a95d, main at #2496. The branch had no commits of its own and sat on an ancestor of main, so this handoff is the first commit and it is based on the remote main tip; no forward merge is needed.",
+    "summary": "Two independent fixes in packages/envoy. Part A: Importer.Sync drops its per-project sync.Mutex for a singleflight.Group keyed on the source, so two concurrent imports of one source share one GitHub sync and a slow source never blocks a sibling source of its project; the flight runs on a detached, separately marked context with its own syncTimeout, keeps the errSuperseded retry inside, refuses to answer a caller that asked after the flight read the head, and is drained by a new Importer.Close at shutdown. Part B: the redelivery sweep stops streaming every record of its KV bucket every two minutes; each open record gets an index entry keyed by its due minute (pending.<YYYYMMDD>.<HH>.<MM>.<GUID>, empty value), read with WatchFiltered over the disjoint day/hour/minute decomposition of [floor, now], floor being the last complete sweep's cursor minus the existing two-minute overlap. The old whole-bucket read is kept, renamed and used by the operator command and by the one back-fill, so nothing an operator runs changes."
+  },
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: this is a Legion phase in a shared workspace; it carries the push rules, the handoff, the pull-request body and proof shape, and the stop rules. Read its pr-body.md (the six proof fields and the simplify pass), tools.md (a test needing Postgres uses LEGION_TEST_PG_DSN, and large installs go under $TMPDIR) and conflicts-and-rewrites.md before touching the base.",
+      "dispatch: the implementer opens the pull request and comments on the issue; this skill gives the command rules and the reference shapes, and says that .dispatch/architecture/<id>.md changes in the same review as the code it describes, which this change requires.",
+      "ce-simplify-code: part B adds a key format, a filter decomposition, a write helper, a repair and a back-fill to one file. The simplify pass on the settled change is what keeps that from becoming five parallel notions of the same thing.",
+      "plain-words: the pull request body, the changelog fragment and the comments on the issue are read by people, and the body carries the evidence tables."
+    ],
+    "test": [
+      "legion-worker: the tester's proofs use the same six fields, and the evidence must be re-runnable at the head it names; pr-body.md defines each field.",
+      "tools.md (skill://legion-worker/references/tools.md): every acceptance command here needs the pod's own Postgres through LEGION_TEST_PG_DSN mapped onto DISPATCH_TEST_DATABASE_URL, and the load reproduction's whole tree must live under $TMPDIR; it also carries the rule that durations are compared within one pod, never across pods, which the benchmark ratios depend on.",
+      "dispatch: the tester records its result on the issue and may need to read the plan document and the comments that bind this issue."
+    ],
+    "review": [
+      "legion-worker: review-threads.md (how threads are answered and resolved, and how a bot's finding is judged) and merge-gate.md (what an approval of a head means and what READY will later check).",
+      "ce-simplify-code: the review's own quality half, on a change that adds a new on-disk key format and a new concurrency primitive to two long files.",
+      "dispatch: the reviewer reads the plan document and the issue's binding comments to judge whether the departures recorded here were carried out as written."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "The spec's index key, pending.<GUID> with the due time in the value, cannot make the sweep's cost independent of entries that are open and not due, which a comment on the issue requires. A JetStream KV selects only by subject filter, so a watch of pending.* still streams one message per open entry.",
+        "answer": "The plan puts the due time in the key (pending.<YYYYMMDD>.<HH>.<MM>.<GUID>) and reads it with WatchFiltered over a disjoint day/hour/minute decomposition of the window. Recorded as departure 1 and named in the completion summary; the outcome and the acceptance are unchanged, only the key shape."
+      },
+      {
+        "finding": "The index is a second, non-atomic write. Once the sweep reads only the index, a record whose index entry was never written is never asked for again, which is the defect class the package exists to prevent. The spec says nothing about reconciliation.",
+        "answer": "An index Put that fails aborts the record write and marks the sweep incomplete, which is the existing report.Complete mechanism, so the cursor does not advance and the delivery is decided again next sweep. No periodic full re-scan is needed. B-3 is the acceptance test. The symmetric case, a stale entry, is repaired on read against record.Pending; B-4 is its test."
+      },
+      {
+        "finding": "A record written by an older build during a rolling deploy carries no index entry, and after the last old pod stops the new build cannot see it.",
+        "answer": "Two mechanisms, both in the plan: a one-time back-fill scan guarded by an index marker key in the bucket (which the 72h TTL expires, so it repeats at most once per 72h as a standing repair), and a one-time upgrade write in decide for any open record read with no Pending, which covers everything the old build wrote while GitHub still lists it. B-5 is the test. A rollback needs no rule: an older build ignores the index and re-derives the open set itself."
+      },
+      {
+        "finding": "The sweep's visible output changes and the spec does not say so: Report.Decisions and the logged deliveries= count shrink, the Waiting outcome stops being reported for records outside the listing window, and the operator command envoy-dispatch redeliver-webhooks --since would answer more narrowly than before.",
+        "answer": "The plan keeps the old whole-bucket read, renamed scanOpenRecords, and gives it to every non-continuous sweep, which is every run of the operator command including --dry-run, so nothing an operator runs changes. Only the running loop uses the index; its shrunken counts are stated in cmd/dispatch/README.md and in sweep.go's own comments as part of the documentation task."
+      },
+      {
+        "finding": "The before/after measurement line names a surface on which neither changed path runs: the load reproduction boots Dispatch with no GitHub App key, so the sweep never starts and the importer idles, and neither change touches Postgres, so database statements per second is structurally unchanged on both sides.",
+        "answer": "The plan runs the line as written, three runs a side with every run and the median, and labels it a no-regression check with that reasoning on the pull request. The numbers that show the win are E-1 (the HTTP sync routes against a booted server and a slow fake GitHub) and E-2 (a booted server against a real nats-server, reading /varz out_msgs and out_bytes across one sweep at 1,000 and 10,000 entries). Recorded as departure 3 and named in the completion summary."
+      },
+      {
+        "finding": "The benchmark criterion has no metric, no threshold and no runner: no CI job runs benchmarks, and a benchmark that prints numbers fails nothing.",
+        "answer": "The plan adds Report.IndexEntries, which makes the quantity assertable: B-1 asserts it is the due entries alone with 10,000 not-due entries in the bucket, and that is the machine-checkable half. The benchmark keeps the repository's existing rule from the pr2447 learning (medians of -count=5, the 10,000-to-1,000 ratio, ns/op <= 1.3 and B/op and allocs/op <= 1.2) with the retained whole-bucket read beside it as the control that proves the benchmark can detect growth."
+      },
+      {
+        "finding": "One shared sync per source leaves three contracts undecided: whose context the shared sync runs under and what becomes of the rule that a caller who went away records nothing; whether a joining caller may be answered from a fetch that began before its own call; and whether sharing is keyed per source or per project.",
+        "answer": "All three are settled in the plan with their reasons. The flight runs on context.WithoutCancel of its starter with a fresh store.ForConcurrentRead mark and its own syncTimeout, cancelled only by the process stopping, so a sync's own deadline is always recorded on the row; that is the one behaviour change, recorded as departure 4 and tested by A-5. A caller is served only by a flight whose head lookup began after its own call, so a Refresh after a push is never told the older head (A-4). The key is the source, forced by the return type, with the project-wide row lock and the existing cross-process tests as the evidence that two sources of one project cannot corrupt each other."
+      },
+      {
+        "finding": "The acceptance clause 'or a read of the model' is already true before the change: nothing on the read path takes the importer's mutex and no pooled connection is held across a GitHub call.",
+        "answer": "The plan says so plainly rather than writing a test that cannot fail. A-3 is a labelled guard with its reason in the comment (the pool has no connection in use while a blob read is held), and the real regression is A-2, a sibling source of the same project importing while the first is held. Recorded as departure 2 and named in the completion summary."
+      },
+      {
+        "finding": "The documentation acceptance names a class of files that is empty: no sentence left by the earlier background-loops change describes the importer's lock or the sweep's whole-bucket read. Two other sentences are already false on main from the retry-schedule change, not from this issue.",
+        "answer": "The plan replaces the class with an explicit table of ten locations, by path and line, each with the sentence that must change and why, and it fixes the two already-false 'at most five times' sentences, since one is in a file this change touches and the other is one line of prose in the subsystem this change owns. It leaves dispatch-duty.md and store/pool.go alone, since two open sibling pull requests touch them."
+      },
+      {
+        "finding": "The first acceptance line has nothing left to agree, since both prerequisite issues are merged; the live interface point it does not cover is that the index writes a new key prefix into another issue's bucket.",
+        "answer": "The plan settles it: a key prefix is not a bucket setting. The bucket's TTL, storage and replicas are untouched, and the existing NATS grant already covers the whole bucket subject space and a multi-filter consumer, so no permission change is needed either. The one consequence that is a reading rather than a setting, the extra stored bytes from entry churn, is measured in E-2 and reported on the pull request."
+      },
+      {
+        "finding": "'Tonight's step' on the load reproduction is not a named step, and two open sibling pull requests modify the harness while this one runs.",
+        "answer": "The plan fixes step-1x (4 events, 400 sessions, 60 requests) plus a zero-rate idle step for the 'with no load' half, and requires both sides to run from one named harness revision with the Dispatch binary pinned per side by run-step.sh --dispatch-commit."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "2i names the index key as pending.<GUID>, that is the GUID alone, with the due time carried in the entry's value.",
+      "plan": "The due time is in the key: pending.<YYYYMMDD>.<HH>.<MM>.<GUID>, UTC and zero-padded, with an empty value, read with WatchFiltered over a pairwise-disjoint day/hour/minute decomposition of the window the sweep is due for.",
+      "evidence": "A NATS JetStream KV offers no server-side value filter, no range scan and no secondary index; the subject filter is the only selection it has, with '.' as the token separator, '*' one token and '>' one or more (packages/envoy/internal/bus/kv.go:92-103,216-232). With the due time in the value, a watch of pending.* still delivers one message per open entry, so the sweep's cost would still grow with entries that are open and not due. A comment on the issue requires the index to read only due entries however long entries stay pending, and asks for a benchmark with many long-pending, not-due entries.",
+      "outcome": {
+        "kind": "changed",
+        "summary": "The Outcome's 2i line names the key shape pending.<GUID>; the plan builds pending.<YYYYMMDD>.<HH>.<MM>.<GUID>. The outcome itself, a sweep that reads only what is due, is unchanged."
+      }
+    },
+    {
+      "spec": "2h's acceptance asks for a test showing that a slow fake GitHub does not block another source's import or a read of the model.",
+      "plan": "The sibling-source half is a real regression test that fails against today's code. The read-of-the-model half is answered by a labelled guard with its reason written in the comment, and the pull request says plainly that it was already true before the change.",
+      "evidence": "getArchitectureTree reads the store pool directly and never touches the importer (packages/envoy/internal/dispatch/api/architecture_tree.go:18-53), and the importer holds no pooled connection across a GitHub call: the source load is one pool query, the installation resolution's transaction commits before the token call, and the head, tree and blob reads all run outside every transaction (importer.go:236-254, 328-331, 372-389). The importer's mutex has one caller, at importer.go:208.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": "The clause 'or a read of the model' is met by a guard rather than by a regression test, because no change could make it fail."
+      }
+    },
+    {
+      "spec": "Before and after: database statements per second and Dispatch CPU with no load, and at tonight's step on the committed load reproduction, at least three runs per side, every run and the median reported.",
+      "plan": "The line is run as written, at step-1x and at a zero-rate idle step, three runs per side with every run and the median, and reported as a no-regression check. Two further measurements carry the numbers that show the improvement: the HTTP architecture-sync routes against a booted server with a slow fake GitHub, and a booted server against a real nats-server reading the monitoring endpoint's message and byte counts across one sweep at 1,000 and 10,000 bucket entries.",
+      "evidence": "The reproduction's stack builds Dispatch with no GitHub App key, so the redelivery sweeper is never started and the architecture importer logs once and idles (packages/envoy/internal/dispatch/architecture/ticker.go:33-40), and the harness's route mix names no architecture route. Neither change touches Postgres: the importer's per-pass statement count is guarded unchanged by ticker_test.go:78, and the index lives in the NATS KV bucket.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": "The committed-reproduction line stands as a no-regression check; the improvement is proven by two added production-surface measurements and by the benchmark."
+      }
+    },
+    {
+      "spec": "The spec says nothing about what happens to a caller that goes away while its import runs; today the importer deliberately records nothing on the source row when its caller has gone.",
+      "plan": "The sync's own deadline is always recorded on the source row, and only the process stopping suppresses the record. A caller that goes away is answered at once with its own cancellation and the shared flight runs on.",
+      "evidence": "A shared flight has no single caller, so 'the caller is still alive' has no meaning for it (importer.go:278-288 today reads the caller's context for exactly that). The repository's own written pattern for a shared read is singleflight on a context.WithoutCancel, so that one client leaving fails none of the others. The source row is read by the five-minute ticker and by the Settings page, so losing the fact that GitHub timed out costs more than it saves. An Importer.Close, waited on before the pool closes, is what keeps an orphan flight from writing into a closing pool.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "One behaviour change not named in the spec: a cancelled caller no longer suppresses the record of its sync's deadline. The second half of the existing deadline test is replaced accordingly."
+      }
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-627",
+  "previousHandoff": "dbe40a13d2fdfda24dd95c6ddf24e1cf9299aba7",
+  "round": "2, at code head d74ea872eac4. Round 1's one failure (the required ci-filters gate red at f7d47578) is fixed and verified here with its own negative control. No Go file changed in this round, so round 1's real-surface behaviour evidence is carried, with the file set proving it carries.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Round 2's proof is the filter gate: I ran the same command the required job runs, .github/scripts/check-ci-filters.sh, in the workspace at d74ea872eac4 — exit 0, no ::error line, 28 gates each '0 uncovered', and 'docs-pages.yaml: on.push.paths equals filter docs (170 patterns)'. Its negative control, the same command over a clean `git archive f7d47578837e` export (before the three filter lines), exits 1 with '::error::55 CI filter problem(s)', which I broke down as exactly 11 files of packages/envoy/internal/kvwatch/ times the five gates docs, dispatch, dispatch-browser-multiprocess, dispatch-memory and dispatch-multiprocess — so the fix covers every gate the defect touched, the docs gate (and with it docs-pages.yaml's flattened copy) included. Round 1's carried proofs were re-verified by me then by re-running the implementer's own harness: e1.sh head/base (sibling sync 0.036 s against a 6.11 s hold, 1 installation + 1 head lookup; base blocked 6.019 s, 2 and 2) and e2.sh head|base 10000 (6 messages / 2,784 bytes against 20,006 / 11,042,364)."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Round 2's whole change: the required ci-filters gate is green at the head, and every gate the new internal/kvwatch import widened names the package.",
+      "surface": "The repository's own required filter-coverage check — the command the ci-filters job runs, which recomputes each job's read set live with `go list -deps` over that job's real go commands and holds every ci.yaml filter and docs-pages.yaml's on.push.paths to it.",
+      "command": "cd /legion/workspaces/sjawhar/legion/infra-627 && .github/scripts/check-ci-filters.sh",
+      "observed": "exit 0, zero ::error lines, 'every ci.yaml filter matches every file its job reads (28 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)'; dispatch 2524 files 0 uncovered, dispatch-browser-multiprocess 2308 0, dispatch-memory 1515 0, dispatch-multiprocess 1515 0, docs 3604 0.",
+      "headSha": "d74ea872eac4",
+      "negativeControl": "The same command over a clean `git archive f7d47578837e` export at /legion/scratch/tmp/t627/nc/f7d47578 (the tree before the three filter lines): exit 1, '::error::55 CI filter problem(s)', 11 kvwatch files x 5 gates (docs, dispatch, dispatch-browser-multiprocess, dispatch-memory, dispatch-multiprocess), each naming the go command that reads the package."
+    },
+    {
+      "criterion": "Round 1's behaviour evidence still holds at this head: no runtime file changed in round 2.",
+      "surface": "The branch's own file set, read with jj between the two code heads.",
+      "command": "cd /legion/workspaces/sjawhar/legion/infra-627 && jj diff --from f7d47578 --to d74ea872 --stat   (and the same restricted to packages/ docs/ scripts/ go.work go.work.sum)",
+      "observed": "The whole diff is 4 files: .github/workflows/ci.yaml (+2), .github/workflows/docs-pages.yaml (+1), .legion/INFRA-627/implement.json, .legion/INFRA-627/test.json. Restricted to packages/, docs/, scripts/ and the workspace module files it is '0 files changed, 0 insertions(+), 0 deletions(-)', so every Go file, test and document is byte-identical to the head my round-1 proofs ran at. .github/scripts/check-ci-filters.sh is itself untouched, so its own tests are unaffected by this round.",
+      "headSha": "d74ea872eac4",
+      "negativeControl": "The same jj diff restricted to .github/ is not empty — it is the three filter lines — so the restriction is doing work rather than silently matching nothing."
+    },
+    {
+      "criterion": "2i (carried, round 1): the running sweep reads only the deliveries the index says are due, and a delivery whose attempts left the listing window is still redelivered when due.",
+      "surface": "A booted envoy-dispatch against a real nats-server v2.10.29 and a fake GitHub whose attempt listing is empty, its bucket seeded with a due indexed record, a due record with no entry and no back-fill marker, a record due 90 s on, a record whose Pending names a key never written, and 2,000 not-due noise records.",
+      "command": "cd /legion/scratch/tmp/t627 && bash e4.sh head   (control: bash e4.sh base)",
+      "observed": "Sweep 1 deliveries=2 index_entries=2 redelivered the due indexed record and the back-filled one; sweep 2 two minutes on, deliveries=1 index_entries=1, redelivered the third as it came due. Final bucket: entries moved forward, no strays, the 2,000 noise records never read.",
+      "headSha": "f7d47578837e",
+      "negativeControl": "The record whose index entry was never written was never requested by the head build; the same bucket on base 0642a37a requested it in one sweep that read all 2,004 records."
+    },
+    {
+      "criterion": "2h / departure 4 (carried, round 1): a caller that pushes and then asks for a Refresh is never answered the pre-push commit.",
+      "surface": "POST /api/v1/projects/CORE/architecture-sources/legion/arch/sync on a booted envoy-dispatch, against a fake GitHub whose branch head can be moved while a sync is held in its blob read.",
+      "command": "cd /legion/scratch/tmp/t627 && bash e5.sh head",
+      "observed": "A (held) answered 1111…; the head moved to 3333…; B, which asked after the move, answered 3333… from a second head lookup issued after A's flight ended.",
+      "headSha": "f7d47578837e",
+      "negativeControl": "The same build with the freshness loop removed from Importer.Sync answered B the pre-push commit 1111… on a single head lookup; that mutation also turns TestACallerAfterTheHeadWasReadIsNotToldTheOlderHead red."
+    },
+    {
+      "criterion": "2i (carried, round 1): envoy-dispatch redeliver-webhooks answers as before, and an operator run followed by a running sweep keeps the index invariant.",
+      "surface": "The operator command and then a booted server over one seeded bucket on a real nats-server, with a whole-bucket invariant checker (every open record names a live entry, every entry is named by its record, a closed record names none).",
+      "command": "cd /legion/scratch/tmp/infra627 && bash e2-dryrun.sh 1000 ; cd /legion/scratch/tmp/t627 && bash e6.sh",
+      "observed": "The dry run's normalised output is byte-identical between base and head (equal sha256) and neither wrote to the bucket. The real operator run redelivered the three due deliveries and wrote the missing entry of the one that had none, leaving check: open=2004 entries=2004 lost=0 mismatched=0 strays=0, and a running sweep booted on that same bucket left it unchanged.",
+      "headSha": "f7d47578837e",
+      "negativeControl": "The dry-run comparison against base is itself the control; separately, removing the write-time floor from pendingFor turns TestARecordWithNoIndexEntryIsBackfilledOnTheFirstSweep red and setting Lookback back to one hour turns TestADeliveryRecoveredDuringTheLongestBackoffIsDeliveredAndAskedForNoMore red, both verified in a mutation copy."
+    }
+  ],
+  "ciAtHead": "Read on GitHub at 22:49Z and 23:00Z, not re-run and not waited on: the CI run for d74ea872eac4 (41358832794, pull_request, created 22:46:50Z) was still queued, with only `changes` and `pr-title` reporting. The previous run at f7d47578 (41352059014) was cancelled by this push, so the lanes that were in progress in round 1 never settled there either: test, envoy-go, envoy-go-race-api, dispatch, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess and envoy-e2e-local are unread at any head carrying this tree. What had settled green at f7d47578, over a Go tree byte-identical to this head's, was envoy-go-race (the race lane over redeliver, architecture and kvwatch), envoy-smoke, envoy-session-stall, envoy-infra-go, listener-server-change, pi-legion, docs/build, worker-image/build and pr-title. The one lane this round exists to fix, ci-filters, I ran myself at this head with its negative control rather than waiting for the queue.",
+  "observations": [
+    "Not a failure, and already disclosed by the implementer: three comments in .github/workflows/docs-pages.yaml label their flattened blocks with pattern counts that do not match the blocks — `*bun_install, 16 patterns` over 15, `*legion_command, 57 patterns` over 59, `*dispatch_server, 42 patterns` over 50 (49 before this change). I checked the anchors in ci.yaml: bun_install holds 15, legion_command 58, dispatch_server 53, so the blocks are not exact copies of their anchors either and no obviously correct number exists for two of the three. Nothing reads these comments (the check compares pattern lists, not counts), and the gate is green, so this is cosmetic; I agree with leaving it rather than writing an invented number."
+  ]
+}

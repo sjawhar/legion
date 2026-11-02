@@ -679,7 +679,14 @@ func main() {
 		slog.Error("dispatch: register this server process", "error", err)
 		os.Exit(1)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, background.Wait, waitIntakes,
+	// The importer's flights outlive the ticker's context, so they are closed inside the
+	// background wait: shutdown runs it before waitUntilIdle and pool.Close, and a sync still
+	// fetching then would write into a closing pool.
+	waitBackground := func() {
+		background.Wait()
+		appCtx.Architecture().Close()
+	}
+	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, waitBackground, waitIntakes,
 		deregisterAfterDrain(registration), registration.Lost()); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
