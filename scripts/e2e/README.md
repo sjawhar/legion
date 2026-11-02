@@ -132,6 +132,14 @@ Each item below names a script, then what it proves.
   and a listener of the run's own raising `ENVOY_SESSION_MAX_AGE` to 2 h reaches both running listeners' `/healthz`, a session stalled seven minutes after that raise reading `unresponsive` where the shipping five minutes would already have dropped its key, and the rollback reaching both the same way.
   Legion pod only
 
+- `clean-session-stop-tmux.sh`
+
+  the daemon's clean stop of a dead role's Envoy session, measured (INFRA-392), run in a Legion pod against a listener and a NATS built from this checkout, over a real `legion start` daemon under `runtime: tmux` with a private tmux server of its own:
+  an architect on Oh My Pi and an implementer `worker_backends` puts on Claude Code each register, and the agent process of each — the `omp` under `legion worker-shim`, the `claude` under `legion claude-bridge` — `SIGKILL`ed in its pane, is read `gone` by `GET /v1/registry/<session>?include=unresponsive` within ten seconds, the latency measured and printed, with the daemon's own log line naming the session it stopped;
+  while the control, a session of the run's own outside any shim, killed the same way, still reads `live` ten seconds later and reaches `gone` only past the 90-second horizon, so the ten seconds measure the clean stop and not the horizon.
+  A pod's worker image carries no tmux, which `legion start` requires, and no root or package manager to install one, so the proof's header says which sources to build under `$TMPDIR` and put first on `PATH`.
+  Legion pod only
+
 - `claude-backend-tmux.sh`
 
   `worker_backends` on tmux: an implementer the daemon runs on Claude Code (`legion claude-bridge -- claude -p`) registers its Claude Code transcript as its session, takes its phase, is reminded by Claude Code's own `Stop` hook when a turn of its ends with that phase still open, completes it through the `legion` MCP tool's `handoff_complete` with a pushed `.legion/<issue>/` handoff commit, and, its pane killed, relaunches with `claude --resume` into the same session id, its earlier turns unchanged on disk and in its context.

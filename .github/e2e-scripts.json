@@ -87,6 +87,10 @@
       "needs": "a devbox: tmux, a real Claude Code and Oh My Pi on a model route (LEGION_E2E_MODEL_ROUTE, with a gateway or a key file), and the smoke repository"
     },
     {
+      "script": "clean-session-stop-tmux.sh",
+      "needs": "a Legion pod: tmux, its own model route for both harnesses (LEGION_E2E_MODEL_BASE_URL, LEGION_E2E_MODEL_KEY_FILE, LEGION_E2E_MODEL_ID and LEGION_E2E_CLAUDE_MODEL), the worker image's Oh My Pi and Claude Code pin, and a loopback PostgreSQL (CLEAN_SESSION_STOP_PG_DSN); it starts its own NATS, listener and legion daemon"
+    },
+    {
       "script": "controller-start-tmux.sh",
       "needs": "a devbox: tmux, the pinned Oh My Pi through mise, and its own Postgres and NATS containers, which it fetches from a registry outside this repository's own package (sjawhar/legion#2512)"
     },
