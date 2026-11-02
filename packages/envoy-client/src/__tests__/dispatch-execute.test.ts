@@ -43,8 +43,18 @@ function response(body: unknown, status = 200): Response {
   });
 }
 
-/** The production attempts at each write, without waiting out the pauses between them. */
-const writeRetry: DispatchWriteRetry = { ...DISPATCH_WRITE_RETRY, pause: async () => undefined };
+/**
+ * The production attempts at each write, without waiting out the pauses between them: the write
+ * clock moves only by the pauses, so a write's windows bound its attempts as they would in time.
+ */
+let writeClock = 0;
+const writeRetry: DispatchWriteRetry = {
+  ...DISPATCH_WRITE_RETRY,
+  pause: async (ms) => {
+    writeClock += ms;
+  },
+  now: () => writeClock,
+};
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -4713,9 +4723,15 @@ describe("executeDispatchTool", () => {
       "and the close may or may not have taken effect. Read the issue's status before retrying: " +
       "done means it closed; otherwise retry with a reason that points at message message-7, " +
       "since retrying this call posts its reason again";
+    // This Dispatch runs the keyed layer, so each message also says that it finishes the close.
+    const keyedTail =
+      ". Dispatch finishes an attempt it received whatever this command does, so read the write " +
+      "back before you send it again: a new command sends it under a new key.";
     const inFlight = () =>
       refusal(409, "KEY_IN_FLIGHT", "an earlier request with this key is still running");
-    for (const [first, then, expected] of [
+    // A KEY_IN_FLIGHT says Dispatch may still be running the close, so it is asked every 3 s at
+    // most until 55 s rather than five times: 20 attempts.
+    for (const [first, then, expected, attempts] of [
       [
         () => gatewayPage(502, "Bad Gateway"),
         () => gatewayPage(429, "Too Many Requests"),
@@ -4723,16 +4739,18 @@ describe("executeDispatchTool", () => {
           'a body that is not Dispatch\'s error JSON ("429 Too Many Requests"), which looks like ' +
           "a proxy or gateway page rather than Dispatch's own answer (the last of 5 attempts), " +
           "and an earlier attempt of the write may have reached Dispatch, so it may or may not " +
-          `have taken effect: check whether it did before retrying it.${unknownSentence}`,
+          `have taken effect${keyedTail}${unknownSentence}`,
+        5,
       ],
       [
         (): Response => {
           throw new TypeError("fetch failed");
         },
         inFlight,
-        "KEY_IN_FLIGHT: an earlier request with this key is still running (the last of 5 " +
+        "KEY_IN_FLIGHT (the last of 20 " +
           "attempts), and Dispatch was still running an earlier attempt of the write, so it may " +
-          `or may not have taken effect: check whether it did before retrying it.${unknownSentence}`,
+          `or may not have taken effect${keyedTail}${unknownSentence}`,
+        20,
       ],
     ] as const) {
       let patches = 0;
@@ -4748,7 +4766,7 @@ describe("executeDispatchTool", () => {
 
       expect(failure).toBe(expected);
       expect(failure).not.toContain("did not close");
-      expect(patches).toBe(5);
+      expect(patches).toBe(attempts);
     }
   });
 
@@ -8890,6 +8908,73 @@ describe("executeDispatchTool", () => {
         fetchImpl: (async () => response({})) as unknown as typeof fetch,
       })
     ).rejects.toThrow("Exactly one of path or content is required.");
+  });
+
+  test.each([
+    "rows.jsonl",
+    "size-table-rows.tsv",
+    "mustfail.json",
+    "notes.TXT",
+    "rows.jsonl_",
+    "rows.jsonl ",
+    "отчёт.данные",
+    "rows.jsonl.1",
+    "tool.1",
+    "row data.jsonl.1",
+    "plan v1.2",
+  ])("refuses inline content named %j before it sends anything, naming --path", async (name) => {
+    const requests: string[] = [];
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_artifact",
+        args: { issue: "DSP-42", name, content: '{"row_id": 1}\n{"row_id": 2}\n' },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: (async (url: RequestInfo | URL) => {
+          requests.push(String(url));
+          return response({});
+        }) as unknown as typeof fetch,
+      })
+    ).rejects.toThrow(
+      `${JSON.stringify(name)} is not a Markdown name. Upload the file under the same name with path (--path <file>), which stores a file whose path does not end in .md or .markdown as its bytes, unchanged`
+    );
+    expect(requests).toEqual([]);
+  });
+
+  test.each([
+    "spec.md",
+    "Plan.MD",
+    "notes.markdown",
+    "Design notes",
+    "plan v1.2.md",
+    "notes v2. draft",
+    "Dr. Smith's notes",
+  ])("sends inline content named %j as a Markdown document", async (name) => {
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      requests.push({ url: String(url), init: init ?? {} });
+      return response({
+        artifact: { id: "artifact-42", issue_key: "DSP-42", name, slug: "slug" },
+        version: { number: 1 },
+      });
+    };
+
+    await executeDispatchTool({
+      tool: "dispatch_artifact",
+      args: { issue: "DSP-42", name, content: "# Notes\n" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(JSON.parse(requests[0]?.init.body as string)).toMatchObject({ name });
   });
 
   for (const input of [

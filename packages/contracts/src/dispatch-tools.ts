@@ -97,6 +97,47 @@ function documentOwnerValidation(
   };
 }
 
+const ARTIFACT_OWNER_AND_SOURCE_RULE =
+  "Exactly one of path or content is required. Exactly one of issue and project is required; with project, artifact names the document.";
+
+const CONTENT_IS_MARKDOWN =
+  "content is stored as a Markdown document, which rewrites other text (a JSONL file's lines come back joined into one paragraph)";
+
+const PATH_KEEPS_BYTES =
+  "path (--path <file>), which stores a file whose path does not end in .md or .markdown as its bytes, unchanged";
+
+const ARTIFACT_CONTENT_NAME_RULE = `${CONTENT_IS_MARKDOWN}, so with content the name ends in .md or .markdown or has no extension; upload any other file (.jsonl, .tsv, .json, .txt) with ${PATH_KEEPS_BYTES}.`;
+
+/** A name's extension: what follows its last dot when that holds no blank. Digits count, so
+ *  "rows.jsonl.1" has one, and so does a title such as "plan v1.2", which takes content once it
+ *  ends in .md. */
+const NAME_EXTENSION = /\.([^\s.]+)$/u;
+
+const MARKDOWN_EXTENSION = /^(md|markdown)$/i;
+
+const artifactOwner = documentOwnerValidation(false);
+
+/** The refusal of the part of dispatch_artifact's rule `value` breaks, or undefined when it keeps
+ *  the rule. Inline content is always stored as Markdown, so it goes only under a name that says
+ *  Markdown or says nothing: a .jsonl stored that way reads back with its lines joined. */
+function artifactProblem(value: unknown): string | undefined {
+  const input = value as {
+    readonly name?: unknown;
+    readonly path?: unknown;
+    readonly content?: unknown;
+  };
+  if (
+    !artifactOwner.check(value) ||
+    (typeof input.path === "string") === (typeof input.content === "string")
+  ) {
+    return ARTIFACT_OWNER_AND_SOURCE_RULE;
+  }
+  if (typeof input.content !== "string" || typeof input.name !== "string") return undefined;
+  const extension = NAME_EXTENSION.exec(input.name.trim())?.[1];
+  if (extension === undefined || MARKDOWN_EXTENSION.test(extension)) return undefined;
+  return `${CONTENT_IS_MARKDOWN}, and ${JSON.stringify(input.name)} is not a Markdown name. Upload the file under the same name with ${PATH_KEEPS_BYTES}; content takes a name ending in .md or .markdown or with no extension.`;
+}
+
 const documentEditOwner = documentOwnerValidation(true);
 const documentEditValidation: NonNullable<DispatchToolSpec["validation"]> = {
   check: (value) => {
@@ -1212,6 +1253,7 @@ export const dispatchToolSpecs = [
     description:
       "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " +
       "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version, and so does uploading a document's slug (plan-md for plan.md). Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " +
+      `${ARTIFACT_CONTENT_NAME_RULE} ` +
       "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " +
       "In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused. " +
       "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " +
@@ -1224,26 +1266,15 @@ export const dispatchToolSpecs = [
       content: z
         .string()
         .describe(
-          "Inline text to store as a Markdown document; a CR LF or a lone carriage return in it is stored as a line feed."
+          "Inline text to store as a Markdown document, under a name ending in .md or .markdown or with no extension; a CR LF or a lone carriage return in it is stored as a line feed."
         )
         .optional(),
       summary: z.string().describe("Optional version summary.").optional(),
     }),
     validation: {
-      check: (value) => {
-        const input = value as {
-          readonly issue?: unknown;
-          readonly project?: unknown;
-          readonly path?: unknown;
-          readonly content?: unknown;
-        };
-        return (
-          documentOwnerValidation(false).check(value) &&
-          (typeof input.path === "string") !== (typeof input.content === "string")
-        );
-      },
-      message:
-        "Exactly one of path or content is required. Exactly one of issue and project is required; with project, artifact names the document.",
+      check: (value) => artifactProblem(value) === undefined,
+      message: `${ARTIFACT_OWNER_AND_SOURCE_RULE} ${ARTIFACT_CONTENT_NAME_RULE}`,
+      refusal: (value) => artifactProblem(value) ?? ARTIFACT_OWNER_AND_SOURCE_RULE,
     },
   },
   {
