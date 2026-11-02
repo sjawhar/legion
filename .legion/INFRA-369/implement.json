@@ -2,43 +2,26 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-369",
-  "completed": "2026-11-02T01:10:16Z",
-  "round": "the review at 420ab3d4: four findings, all fixed at code head a1f7ac3e - the live-room test's unchecked read, a copied live-write helper, the missing fourth ask shape in the shared block-pointer table, and one stale sentence about numbered migrations",
-  "previousHandoff": "c27127df39e176e8f6a8b488d82e2d9b833594f6",
+  "completed": "2026-11-02T05:34:52Z",
+  "round": "the ci-ok red at 8104369c (code a1f7ac3e): one job, dispatch-memory, failed its memory bound on CI's runner; the failed jobs were re-run once and settled green, and no code changed",
+  "previousHandoff": "dc01e217d0d6618812d03630e02b2d20b592b480",
   "proof": [
     {
-      "criterion": "The live-room test can no longer pass on a failed read: all three reads go through documentMarkdown, which fails on a status other than 200, so the per-row 'the room keeps nothing of a refused write' check compares two real renderings.",
-      "surface": "The Go server against the pod's own PostgreSQL (LEGION_TEST_PG_DSN), the test's own run, and the same run covering the helper that approval_carry_test.go now shares.",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=\"$LEGION_TEST_PG_DSN\" go test ./internal/dispatch/api/ -run 'TestSetBlockAttributesRefusesABlockPointerInTheLiveRoom|ApprovalCarr|Forged|BlockPointer|Pointer' -count=1 -timeout 40m",
-      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/api 25.070s. artifactMarkdown is deleted; the reads at block_pointers_test.go:221, :261 and :274 call documentMarkdown. setLiveBlockAttributes (approval_carry_test.go:591) now calls setBlockAttributes with its session actor and its t.Fatalf, so the Begin/Docs.Join/SetBlockAttributes/Commit sequence is stated once and that file loses 17 lines.",
+      "criterion": "The red was CI's runner, not this change: the same job passes at the same commit on a re-run, and every required check of that head is green.",
+      "surface": "GitHub Actions on the pull request's own head, read as the implement App.",
+      "command": "gh run rerun 41369275473 --failed -R sjawhar/legion; then gh run view 41369275473 --json status,conclusion; gh api repos/sjawhar/legion/commits/a1f7ac3e.../check-runs; gh api 'repos/sjawhar/legion/actions/runs/41369275473/jobs?filter=all' --paginate",
+      "observed": "Run 41369275473 is completed success and ci-ok at a1f7ac3e is completed success, with no check of that head concluding failure. The job's two attempts read: attempt 1 failure (job 125044660782), attempt 2 success (job 125091654808). Attempt 2's own measurements of the subtest that failed: headings 183 MiB against the 256 MiB bound, where attempt 1 read 263 MiB; its heaviest case that run was a table at 231 MiB.",
       "headSha": "a1f7ac3ef35703d2e8fc055720b65a2707b35921",
-      "negativeControl": "With the first read pointed at an artifact id that does not exist, the test fails at block_pointers_test.go:221 with 'read document text: status=404 body={\"code\":\"ARTIFACT_NOT_FOUND\",\"error\":\"artifact not found\"}'. Under the deleted helper that read decoded as \"\" and the row's comparison passed. Restored byte for byte before the commit."
-    },
-    {
-      "criterion": "The shared block-pointer table holds all four ask shapes, so Go and TypeScript cannot drift on a pinned project-document ask part.",
-      "surface": "The three suites that read the corpus: contracts' own table test, the Go copy pmdoc walks, and the editor's schema test.",
-      "command": "cd packages/contracts && bun -e '…regeneration recipe from dispatch-block-ref.test.ts…' && bun test; cd packages/proof-editor && bun test src/tests/block-schema.test.ts; cd packages/envoy && DISPATCH_TEST_DATABASE_URL=\"$LEGION_TEST_PG_DSN\" go test ./internal/dispatch/pmdoc/ -run Pointer -count=1",
-      "observed": "contracts 411 tests, 0 fail, 3326 expect() calls (410 and 3323 before the row); the editor 19 pass; pmdoc ok. The row is dispatch://CORE/artifact/handbook-md/ask/99999999-9999-4999-8999-999999999999#b-b2@v1, refused with the sentence the other three carry, and the JSON copy was regenerated from contracts rather than edited.",
-      "headSha": "a1f7ac3ef35703d2e8fc055720b65a2707b35921",
-      "negativeControl": "contracts' own test compares the JSON copy with the TypeScript table, so a stale or hand-edited copy fails it; the row's expectation is a refusal, so a build that accepted the value fails all three suites."
+      "negativeControl": "Two facts rule the change out rather than assuming it is innocent. jj diff --from 8105eb4f --to a1f7ac3e --name-only lists only three .legion handoffs, three Go test or testdata files and packages/contracts/src/dispatch-block-ref.ts, which is TypeScript: no non-test Go file of packages/envoy changed, and the bound measures the Go document editor. And main fails the same test on its own head: job 125026395198 of run 41364743669 at 079e70fe is dispatch-memory failure, on another subtest, with its headings case reading 183 MiB."
     }
   ],
-  "filesChanged": [
-    "packages/envoy/internal/dispatch/api/block_pointers_test.go - artifactMarkdown deleted, the three reads go through documentMarkdown, and setBlockAttributes' doc names setLiveBlockAttributes as the form that fails the test on a refusal",
-    "packages/envoy/internal/dispatch/api/approval_carry_test.go - setLiveBlockAttributes delegates to setBlockAttributes",
-    "packages/contracts/src/dispatch-block-ref.ts - the pinned project-document ask part row",
-    "packages/envoy/internal/dispatch/pmdoc/testdata/block-pointer-values.json - regenerated from contracts with the recipe dispatch-block-ref.test.ts names",
-    "packages/envoy/internal/dispatch/store/ask_blocks_migrations_test.go - the constants' comment names the case that can still move beforeAskBlocks"
-  ],
-  "trickyParts": [
-    "The reviewer's prose finding named askBlockTables as the constant a late migration moves. It is beforeAskBlocks: migrateThrough(beforeAskBlocks) is what brings a test database to the state just before the pair, so the case to name is a timestamped migration sorting between 161 and 20261101143211 merging later, and the constant it moves is beforeAskBlocks."
-  ],
+  "filesChanged": [],
+  "trickyParts": [],
   "deviations": [
-    "The reviewer's non-defect judgement on the test table's `target` flag is kept: two assertion paths for two kinds of refusal, so the ask rows keep HasSuffix over the whole sentence rather than Contains.",
-    "The pod was replaced mid-round on the contract-44 image. The code commit a1f7ac3e was pushed before the restart and survived; this handoff is written again on the new pod, and every check above was re-run there against LEGION_TEST_PG_DSN rather than the scratch Postgres the old pod held."
+    "No code changed in this round, as the architect and the reviewer both ruled: a red that failed on its own is re-run once, and this one settled green. The re-run was issued before either message arrived, from the same reading of the job log."
   ],
-  "openQuestions": [],
-  "discoveredComplexity": [
-    "The new pod carries LEGION_TEST_PG_DSN (its own test PostgreSQL), so a Go test needing a database no longer needs a Postgres extracted onto the issue volume; DISPATCH_TEST_DATABASE_URL takes that value directly."
-  ]
+  "openQuestions": [
+    "The memory bound is noisy on CI's runner at this document size: 263 MiB on one attempt and 183 MiB on the next, at one commit, against a 256 MiB bound, and main crosses it too. Raising or steadying it is Dispatch's own work, not this issue's."
+  ],
+  "discoveredComplexity": []
 }
