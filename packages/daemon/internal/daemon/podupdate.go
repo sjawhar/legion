@@ -190,11 +190,15 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 // replacement no longer due is refused there, ends nothing and leaves the round open for the next
 // sweep to decide from claims it reads afresh.
 //
-// ReplacePod is called once, with the process of a claim that records this round's own pod; a
-// round whose pod is already gone replaces nothing and only ends, and a group whose claims now
-// run in two pods is left to the tick that reads the replacement in flight settled. A failed
-// ReplacePod is logged and retried at the next tick: nothing is ended, so the round still holds
-// every worker's next task.
+// ReplacePod is called once, with the process of a claim that records this round's own pod, and
+// a group whose claims now run in two pods is left to the tick that reads the replacement in
+// flight settled. A failed ReplacePod is logged and retried at the next tick: nothing is ended,
+// so the round still holds every worker's next task.
+//
+// A round no live claim records a process in the pod of replaces nothing, and ends on nothing
+// the claims say: the runtime is asked about the pod itself, and only a pod it answers gone ends
+// the round (roundWithNoProcessInItsPod). Once opened, a round ends by replacing its pod or
+// because that pod is gone, and no locator is no evidence either way.
 //
 // Neither wait is silent past the round's notice bound. A turn that never ends and a ReplacePod
 // that keeps failing each hold every answered worker's next task for as long as they last, which
@@ -233,27 +237,70 @@ func (s *supervision) completePodUpdate(ctx context.Context, issue string, snaps
 			"issue", issue, "round", round, "pod", pod)
 		return true
 	}
-	if k, running := podProcess(live, round); running {
-		bounded, done := context.WithTimeout(ctx, s.plan.orphanSweep)
-		defer done()
-		if err := s.runtime.ReplacePod(bounded, k, s.replacementDue(issue, round)); err != nil {
-			if errors.Is(err, errReplacementNotDue) {
-				s.log.Info("supervise: this update round's replacement was no longer due when its pod's launch turn came; nothing was replaced and the round stays open",
-					"issue", issue, "round", round, "pod", pod, "reason", err)
-				return true
-			}
-			if ctx.Err() == nil {
-				s.log.Error("supervise: replace the pod of a finished update round; retrying at the next sweep",
-					"issue", issue, "round", round, "pod", pod, "error", err)
-				s.tellLateRound(ctx, issue, live, round, pod, reasons, now,
-					fmt.Sprintf("every worker of the update round has answered, and the pod replacement fails: %v", err))
-			}
+	k, running := podProcess(live, round)
+	if !running {
+		return s.roundWithNoProcessInItsPod(ctx, issue, snapshot, round, pod)
+	}
+	bounded, done := context.WithTimeout(ctx, s.plan.orphanSweep)
+	defer done()
+	if err := s.runtime.ReplacePod(bounded, k, s.replacementDue(issue, round)); err != nil {
+		if errors.Is(err, errReplacementNotDue) {
+			s.log.Info("supervise: this update round's replacement was no longer due when its pod's launch turn came; nothing was replaced and the round stays open",
+				"issue", issue, "round", round, "pod", pod, "reason", err)
 			return true
 		}
+		if ctx.Err() == nil {
+			s.log.Error("supervise: replace the pod of a finished update round; retrying at the next sweep",
+				"issue", issue, "round", round, "pod", pod, "error", err)
+			s.tellLateRound(ctx, issue, live, round, pod, reasons, now,
+				fmt.Sprintf("every worker of the update round has answered, and the pod replacement fails: %v", err))
+		}
+		return true
 	}
 	s.log.Info("supervise: every worker of this update round has answered; the pod is replaced and the round is over",
 		"issue", issue, "round", round, "pod", pod)
 	s.endPodUpdates(live)
+	return true
+}
+
+// roundWithNoProcessInItsPod decides a complete round whose live claims record no process in the
+// round's own pod. There is nothing to replace the pod through, and that is no statement about
+// the pod: an operator's suspension lets the one answered worker's process go (letGo clears the
+// locator), and the relaunch of a claim can run for minutes of a fleet roll. Read as a
+// replacement made, it would end the round over a pod that is still there and still drifted,
+// which is the third way out of a round that must not exist — the task the round was holding
+// would go out, and the next tick would open the round over the same pod again.
+//
+// So the runtime is asked about the pod itself, through the claim the sweep's snapshot still
+// records it on, and only runtime.ErrPodGone ends the round, as every reading of a gone pod ends
+// one (endRoundOverAGonePod). What the pod has drifted to says nothing here: the round is open,
+// and its recorded reasons are what its task and its notice state.
+//
+// Any other answer, a read that could not be made included, leaves the round where it stands for
+// the next sweep to decide from claims it reads afresh: nothing is ended, and nothing is
+// replaced.
+//
+// The snapshot recording no process in that pod either is the claims recording another pod in
+// its place, which is the one thing that says this pod went (reconcileIssuePodUpdate): no pod of
+// the round is left to ask about, and the round ends over it with the report its answers decide.
+func (s *supervision) roundWithNoProcessInItsPod(ctx context.Context, issue string, snapshot []supervise.Claim, round, pod string) bool {
+	recorded, ok := podProcess(snapshot, round)
+	if !ok {
+		s.endRoundOverAGonePod(ctx, issue, snapshot, round, pod)
+		return true
+	}
+	switch _, err := s.runtime.PodDrift(ctx, recorded); {
+	case errors.Is(err, runtime.ErrPodGone):
+		s.endRoundOverAGonePod(ctx, issue, snapshot, round, pod)
+	case err != nil:
+		if ctx.Err() == nil {
+			s.log.Error("supervise: read whether the pod of a finished update round is still there; the round stays open and the next sweep reads it again",
+				"issue", issue, "round", round, "pod", pod, "error", err)
+		}
+	default:
+		s.log.Info("supervise: every worker of this update round has answered, and no claim of it records its pod now; the pod is there, and the round waits for a claim to record it again",
+			"issue", issue, "round", round, "pod", pod)
+	}
 	return true
 }
 
