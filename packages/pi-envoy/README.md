@@ -105,8 +105,8 @@ set -g set-clipboard on
 
 A session with Dispatch configured — a top-level session, a Legion pane or a `task` subagent —
 sends two extra user messages with every model request of its conversation. At the head, after
-any compaction summary, it sends the `dispatch-first` skill, whose text never changes. At the
-tail, after the request's last message, it sends what people wrote to the session in the last 72
+any compaction summary, it sends the `dispatch-first` skill, whose text never changes. It also
+sends what people wrote to the session in the last 72
 hours that Dispatch delivered to it: answers to its asks, replies on them and in its comment
 threads, comments on its documents and routed issues, mentions, and messages, newest first and
 word for word. A subagent reads its parent's list. The list stays under 8,000 characters (at most 7,999): the oldest
@@ -119,9 +119,15 @@ own `404 NOT_FOUND` "no route for …". Against that Dispatch a request carries 
 `dispatch answers` cannot read it either; a list read before from it is still carried, its
 left-out line naming no command; the log says once per session that the Dispatch has no answers
 route; and that Dispatch is not asked again for 5 minutes. Any other answer, a proxy's 404 page or
-a 200 that is no answers list included, is a failed read. The list sits at the tail so that a
-change in it costs only its own tokens: the cached conversation before it is sent byte for byte as
-before.
+a 200 that is no answers list included, is a failed read.
+
+The list goes after the request's last message only on the request where it first shows an item,
+or new words in one. On every request after that it stays right after the message it followed
+there, so the request ends with its own last message and the model does not take a list with
+nothing new in it for a new turn; it keeps that place when it only loses items or its header
+changes. After a compaction summarizes that message, or in a new process, the list goes after the
+last message once more. It is never at the head, so a change in it costs only the bytes after it,
+and a list that keeps its place is inside the cached prefix of the next request.
 
 Oh My Pi also builds requests that are not turns of the conversation from it; those carry the
 skill but no list, and wait on no read: a side turn (a Dispatch BTW, the stop-time self-check,
