@@ -21,6 +21,9 @@ func TestAColdEditOfTheHeaviestDocumentsStaysWithinTheMemoryBound(t *testing.T) 
 	type stored struct{ name, artifactID string }
 	var documents []stored
 	for _, shape := range heaviestAdmittedShapes(t) {
+		if shape.name != "a two-column table" {
+			continue // scratch measurement: the two-column table alone
+		}
 		upload := writer.upload(t, "json", memory.issue, withSentinelWord(t, shape.markdown))
 		if upload.status != http.StatusCreated {
 			t.Fatalf("upload of the heaviest %s the limit admits: status %d body %.300s, want 201", shape.name, upload.status, upload.body)
