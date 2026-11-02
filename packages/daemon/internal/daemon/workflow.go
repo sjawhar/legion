@@ -313,6 +313,9 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// through the runtime, since the outbox itself is built later (attach).
 	w.records = projectRecords{Store: record.NewStore(), project: cfg.Project, wake: w.wakeOutbox, log: log}
 	engineCfg := engineConfig(cfg, reviewAppLogin, build)
+	// The engine reads and writes the pod tables of the idle release under the claim token's
+	// spelling of the project, which is what those tables hold (workflow.Config.ProjectToken).
+	engineCfg.ProjectToken = projectID
 	engineCfg.Repositories, engineCfg.NoteUnread = w, w.noteUnread
 	w.engine = workflow.New(w.records, engineCfg, log)
 	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)

@@ -55,6 +55,22 @@ func (s *Store) WorkspaceBundle(ctx context.Context, issue string) (runtime.Work
 	return b, true, nil
 }
 
+// WorkspaceBundleSize is the size in bytes of the bundle issue's last release saved, and false
+// when the issue has none. The release's teardown wants the size alone, and a bundle runs to
+// tens of megabytes: reading the row's size_bytes rather than its bundle keeps those bytes out
+// of the pool and out of the daemon's memory.
+func (s *Store) WorkspaceBundleSize(ctx context.Context, issue string) (int, bool, error) {
+	var size int
+	err := s.pool.QueryRow(ctx, `select size_bytes from workspace_bundles where issue = $1`, issue).Scan(&size)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("read the size of the workspace bundle of %s: %w", issue, err)
+	}
+	return size, true, nil
+}
+
 // DeleteWorkspaceBundle drops issue's bundle: the launcher confirmed the restore, a wake cancelled
 // the release before the pod went, or the issue's work is over. Deleting one the table does not
 // hold is success, so a retried confirmation finishes.

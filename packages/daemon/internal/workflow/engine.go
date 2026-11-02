@@ -27,7 +27,17 @@ import (
 // head's own CI turns red or it starts conflicting with its base before the merge; empty, the
 // READY is posted only.
 type Config struct {
-	Project        string
+	// Project is the project key, which is what the record's own tables hold: an issue's
+	// `project`, a production check's, the Dispatch mirror's.
+	Project string
+	// ProjectToken is the same project as a claim token spells it (claim.ProjectToken), which is
+	// what every table keyed on a claim holds: `claims.project`, and with it the pod tables the
+	// idle release writes and reads — `listener_reports`, `pod_wake_marks`, `pod_releases`,
+	// `pod_resumes`, `pod_wake_backstops`. The daemon's own side of the release reads those under
+	// this spelling (workflowRuntime.projectID), so every read and write of them here uses it
+	// too; a site that used Project would file a row the daemon never finds, which is what held
+	// the release's listener gate shut (wake.go).
+	ProjectToken   string
 	DesignGate     config.DesignGate
 	ReviewRoundCap int
 	MaxFixAttempts int

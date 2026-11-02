@@ -214,17 +214,18 @@ func (r *idleRig) bundled(t *testing.T) bool {
 }
 
 // A pod that has had no turn in progress and no turn due for the idle period is released while
-// its issue is still in the workflow: the decision writes one `release` row per live role and the
-// teardown behind them, each claim goes to suspended with the source `released` keeping its phase
-// and the task it holds, the workspace's unpushed work is saved as a bundle before anything is
-// deleted, and the Sandbox teardown runs last.
+// its issue is still in the workflow: the decision writes the save of the workspace's unpushed
+// work, one `release` row per live role behind it, and the teardown last. Each claim goes to
+// suspended with the source `released` keeping its phase and the task it holds, the bundle is
+// saved before any role process is stopped — only a shim can build it — and the Sandbox teardown
+// runs last.
 func TestAnIdleIssuesPodIsReleasedWithItsClaimsKeepingTheirPhaseAndTask(t *testing.T) {
 	rig := newIdleRig(t)
 	ctx := context.Background()
 
 	rig.w.releaseIdlePods(ctx)
-	if got := rig.rows(t); len(got) != 2 || got[0] != "supervise:release" || got[1] != "issue_release" {
-		t.Fatalf("queued rows = %v, want the role stop then the teardown", got)
+	if got := rig.rows(t); len(got) != 3 || got[0] != "issue_bundle" || got[1] != "supervise:release" || got[2] != "issue_release" {
+		t.Fatalf("queued rows = %v, want the save, then the role stop, then the teardown", got)
 	}
 	if !rig.marked(t) {
 		t.Fatal("the release left no mark")
@@ -296,9 +297,11 @@ func TestADeliveryBeforeTheBoundaryCancelsTheReleaseAndOneAfterItWaits(t *testin
 			boundary := rig.boundary(t)
 
 			// The delivery's transaction took its id before the release's and committed after.
-			// It is not due yet, so the drain below runs the release's own rows and this row
-			// stays queued, which is what the boundary reads.
-			id := boundary - 1
+			// Below the boundary means below the release's own first row, the save, which sits
+			// one id under the boundary; above it, anywhere after. It is not due yet, so the
+			// drain below runs the release's own rows and this row stays queued, which is what
+			// the boundary reads.
+			id := boundary - 2
 			if !tc.before {
 				id = boundary + 10
 			}
@@ -335,7 +338,8 @@ func TestADeliveryBeforeTheBoundaryCancelsTheReleaseAndOneAfterItWaits(t *testin
 			}
 			// The delivery itself is untouched either way: it is still queued for its role.
 			var left int
-			if err := rig.pool.QueryRow(ctx, `select count(*) from outbox where issue = $1 and id = $2`, rig.issue.Key, id).Scan(&left); err != nil {
+			if err := rig.pool.QueryRow(ctx, `select count(*) from outbox where issue = $1
+				and payload->>'op' = 'start' and payload->>'role' = 'tester'`, rig.issue.Key).Scan(&left); err != nil {
 				t.Fatal(err)
 			}
 			if left != 1 {

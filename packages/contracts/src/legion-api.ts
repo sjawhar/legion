@@ -538,12 +538,13 @@ export type LegionReadyRequestBody = z.output<typeof LegionReadyRequest>;
 /** `claim.SessionActivity` — what a live role's session is doing, read at `at`: whether work of
  * its own is running in the background and of what kinds (`async-job`, `subagent`,
  * `claude-background-task`; sorted and de-duplicated, so a hold's reason reads the same every
- * time), and whether its phase is open with the moment its next reminder is due, null when no
- * armed reminder is still live. */
+ * time), and when the phase reminder armed in it is due, null when no armed reminder is still
+ * live. Whether the phase is open is the daemon's own reading of the record, not the session's
+ * to state. */
 export const LegionSessionActivity = z.strictObject({
   at: timestamp,
   backgroundWork: z.strictObject({ running: z.boolean(), kinds: z.array(nonEmptyString) }),
-  phase: z.strictObject({ open: z.boolean(), nextReminderAt: timestamp.nullable() }),
+  phase: z.strictObject({ nextReminderAt: timestamp.nullable() }),
 });
 
 export type LegionSessionActivityBody = z.output<typeof LegionSessionActivity>;
@@ -592,14 +593,20 @@ const legionResumeRecord = z.strictObject({
   stuck: z.boolean(),
 });
 
-/** `api.HoldRecord` — one pass of the idle rule that kept a pod past the idle period, with the
- * rule's own name for what held it (`workflow.IdleHold`). The daemon records no row for a pod that
- * is simply not idle yet. */
+/** `api.HoldRecord` — one streak of the idle rule keeping a pod past the idle period, with the
+ * rule's own name for what held it (`workflow.IdleHold`) and the detail that word leaves out —
+ * the kinds a background-work hold's session reported — left out where there is none. A reason
+ * the rule read again on a later pass is the same record: `firstAt` is the streak's first pass,
+ * `at` its newest and `passes` how many it has made, so a pod held for days is one row rather
+ * than one a minute. The daemon records no row for a pod that is simply not idle yet. */
 const legionHoldRecord = z.strictObject({
   id: z.number().int().positive(),
   issue: issueKey,
   reason: nonEmptyString,
+  detail: nonEmptyString.optional(),
+  firstAt: timestamp,
   at: timestamp,
+  passes: z.number().int().positive(),
 });
 
 /** `api.ReleaseRecordsResponse`, the body of `GET /legion/v1/claims/release-records`: every

@@ -1772,7 +1772,7 @@ describe("Legion OMP extension", () => {
             at: expect.any(String),
             backgroundWork: { running: true, kinds: ["async-job", "subagent"] },
             // The continuation is the first reminder of the run, so no timer is armed for it.
-            phase: { open: true, nextReminderAt: null },
+            phase: { nextReminderAt: null },
           },
         },
       ]);
@@ -1798,9 +1798,8 @@ describe("Legion OMP extension", () => {
       await worker.settles("Still pushing.");
       expect(activityReports(worker)).toHaveLength(3);
       const wake = activityReports(worker).at(-1) as {
-        activity: { phase: { open: boolean; nextReminderAt: string | null } };
+        activity: { phase: { nextReminderAt: string | null } };
       };
-      expect(wake.activity.phase.open).toBeTrue();
       expect(Date.parse(String(wake.activity.phase.nextReminderAt))).toBeGreaterThanOrEqual(
         Date.now() + DEFAULT_STALL_LIMITS.reminderMs - 1_000
       );

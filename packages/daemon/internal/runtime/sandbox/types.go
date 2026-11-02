@@ -226,6 +226,14 @@ type Options struct {
 	// sweep makes or repairs each one's cache (EnsureRepositoryCache), and retires the cache of a
 	// repository it no longer names once that cache's retention passes. Required for supervision.
 	Mapped func() []ghrepo.Repository
+	// SavedWorkspaceBundle is the bundle an issue's last release saved, and WorkspaceBundleRestored
+	// the confirmation that drops it once the issue's new pod holds it. The pair carries the work a
+	// release took off the released pod's disk back into the pod that replaces it: the runtime
+	// sends it to that pod's launcher before any role of the pod starts (launchers.restoreWorkspace),
+	// and confirms it on the launcher's Held. The daemon fills them from its store; a runtime given
+	// neither restores nothing, which is what a pod whose issue was never released does anyway.
+	SavedWorkspaceBundle    runtime.SavedWorkspaceBundle
+	WorkspaceBundleRestored runtime.WorkspaceBundleRestored
 	// Now stamps observations and ages pods and orphans; time.Now when nil.
 	Now func() time.Time
 	// Log receives what the runtime decides without being asked; slog.Default() when nil.

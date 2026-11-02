@@ -58,8 +58,9 @@ func TestAReleaseRecordsItsRolesAndTheBundleItSaved(t *testing.T) {
 }
 
 // A pod the rule read as idle and still did not release is a hold, recorded with the rule's own
-// name for the reason. A pod that is simply not idle yet is not: the idle rule reports a hold for
-// every working pod on every tick, and recording those would drown the ones that mean something.
+// name for the reason and the detail that word leaves out. A pod that is simply not idle yet is
+// not: the idle rule reports a hold for every working pod on every tick, and recording those
+// would drown the ones that mean something.
 func TestAHeldPodRecordsTheRulesOwnReason(t *testing.T) {
 	ctx := context.Background()
 
@@ -82,17 +83,25 @@ func TestAHeldPodRecordsTheRulesOwnReason(t *testing.T) {
 		}
 		hold := records.Holds[0]
 		if hold.Project != "legion" || hold.Issue != rig.issue.Key ||
-			hold.Reason != workflow.IdleHoldBackgroundWork.String() {
-			t.Fatalf("hold = %+v, want %s held for %s", hold, rig.issue.Key, workflow.IdleHoldBackgroundWork)
+			hold.Reason != workflow.IdleHoldBackgroundWork.String() || hold.Detail != "async-job" {
+			t.Fatalf("hold = %+v, want %s held for %s by an async-job", hold, rig.issue.Key, workflow.IdleHoldBackgroundWork)
+		}
+		if hold.Passes != 1 || hold.FirstAt.IsZero() || !hold.At.Equal(hold.FirstAt) {
+			t.Fatalf("hold = %+v, want one pass whose first and newest moment are the same", hold)
 		}
 		if len(records.Releases) != 0 {
 			t.Errorf("releases = %+v, want none", records.Releases)
 		}
 
-		// Each pass that keeps the pod records itself, so a deployment counts passes rather than pods.
+		// A pod held again for the same reason is the same streak with another pass counted, not
+		// another row: a pod can be held for days, and the tick runs every minute.
 		rig.w.releaseIdlePod(ctx, rig.issue.Key)
-		if records := rig.records(t); len(records.Holds) != 2 {
-			t.Fatalf("holds after a second pass = %+v, want one per pass", records.Holds)
+		records = rig.records(t)
+		if len(records.Holds) != 1 || records.Holds[0].Passes != 2 {
+			t.Fatalf("holds after a second pass = %+v, want the one streak counting two passes", records.Holds)
+		}
+		if records.Holds[0].At.Before(hold.At) || !records.Holds[0].FirstAt.Equal(hold.FirstAt) {
+			t.Fatalf("holds after a second pass = %+v, want the first pass kept and the newest moved on", records.Holds)
 		}
 	})
 

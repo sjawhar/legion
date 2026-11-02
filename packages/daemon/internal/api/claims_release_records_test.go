@@ -43,10 +43,13 @@ func TestClaimReleaseRecordsServeAPodTheProjectsWindow(t *testing.T) {
 	if err := h.store.MarkPodResumeReady(h.ctx, resumeID, woke.Add(time.Minute)); err != nil {
 		t.Fatalf("stamp the resume ready: %v", err)
 	}
-	if err := h.store.RecordPodHold(h.ctx, store.PodHold{
-		Project: testProject, Issue: "LEGION-209", Reason: "background_work", At: released.Add(time.Hour),
-	}); err != nil {
-		t.Fatalf("record the hold: %v", err)
+	held := released.Add(time.Hour)
+	for _, at := range []time.Time{held, held.Add(time.Minute)} {
+		if err := h.store.RecordPodHold(h.ctx, store.PodHold{
+			Project: testProject, Issue: "LEGION-209", Reason: "background_work", Detail: "subagent", At: at,
+		}); err != nil {
+			t.Fatalf("record the hold: %v", err)
+		}
 	}
 	// A release before the window the caller names is not in the answer.
 	if _, err := h.store.RecordPodRelease(h.ctx, store.PodRelease{
@@ -92,8 +95,16 @@ func TestClaimReleaseRecordsServeAPodTheProjectsWindow(t *testing.T) {
 		t.Errorf("resume = %+v, want no first turn and no stuck mark", resume)
 	}
 
-	if len(body.Holds) != 1 || body.Holds[0].Issue != "LEGION-209" || body.Holds[0].Reason != "background_work" {
-		t.Fatalf("holds = %+v, want LEGION-209 held for background work", body.Holds)
+	// The rule read the same reason twice: that is one record of two passes, not two records.
+	if len(body.Holds) != 1 {
+		t.Fatalf("holds = %+v, want the one streak the two passes collapse into", body.Holds)
+	}
+	hold := body.Holds[0]
+	if hold.Issue != "LEGION-209" || hold.Reason != "background_work" || hold.Detail != "subagent" || hold.Passes != 2 {
+		t.Errorf("hold = %+v, want LEGION-209 held for background work by a subagent over two passes", hold)
+	}
+	if hold.FirstAt != held.Format(time.RFC3339) || hold.At != held.Add(time.Minute).Format(time.RFC3339) {
+		t.Errorf("hold times = %q, %q; want the first and the newest pass", hold.FirstAt, hold.At)
 	}
 }
 

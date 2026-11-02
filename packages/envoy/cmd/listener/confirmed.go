@@ -235,10 +235,10 @@ func (s *roleSend) delivered(outcome sendOutcome) {
 // role_lapsed. The role lane counts an unclaimed role skipped and a lapsed holder failed.
 //
 // It is also the one place a message to a Legion role of a released issue pod is seen at all, so
-// it reports the wake before it answers: a publish with keep: false keeps nothing and is still
-// answered 404, and only the wake makes the sender's next attempt reach a live session. The
-// report names the role and nothing else; which daemon owns it, and whether any claim of that
-// role is released, is for the daemons to decide (reportRoleWake).
+// it raises the wake report beside the answer, which does not wait for it (reportRoleWake): a
+// publish with keep: false keeps nothing and is still answered 404, and only the wake makes the
+// sender's next attempt reach a live session. The report names the role and nothing else; which
+// daemon owns it, and whether any claim of that role is released, is for the daemons to decide.
 func (s *roleSend) noHolder(result roleHolderResult) {
 	reportRoleWake(s.d, s.d.delivery.logger, s.role)
 	s.record.refuseRoleHolder(s.w, s.role, result)

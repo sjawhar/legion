@@ -74,7 +74,7 @@ func WakeTask(kind, detail string) string {
 // does not know which daemon owns a session and must not learn.
 func (e *Engine) listenerWake(ctx context.Context, tx pgx.Tx, fact intake.ListenerWake) (intake.Result, error) {
 	if fact.Kind == intake.ListenerWakeReady {
-		return intake.Result{}, store.RecordListenerReady(ctx, tx, e.cfg.Project, fact.At)
+		return intake.Result{}, store.RecordListenerReady(ctx, tx, e.cfg.ProjectToken, fact.At)
 	}
 	var released store.ReleasedClaim
 	var found bool
@@ -82,9 +82,9 @@ func (e *Engine) listenerWake(ctx context.Context, tx pgx.Tx, fact intake.Listen
 	kind, detail := store.WakeRoleMessage, fact.Role
 	if fact.Kind == intake.ListenerWakeAgent {
 		kind, detail = store.WakeAgentMessage, fact.Session
-		released, found, err = store.ReleasedClaimBySession(ctx, tx, e.cfg.Project, fact.Session)
+		released, found, err = store.ReleasedClaimBySession(ctx, tx, e.cfg.ProjectToken, fact.Session)
 	} else {
-		released, found, err = store.ReleasedClaimByToken(ctx, tx, e.cfg.Project, fact.Role)
+		released, found, err = store.ReleasedClaimByToken(ctx, tx, e.cfg.ProjectToken, fact.Role)
 	}
 	if err != nil || !found {
 		return intake.Result{}, err
@@ -117,7 +117,7 @@ func (e *Engine) wakeOnSettlement(ctx context.Context, tx pgx.Tx, fact intake.Pu
 	if role == "" || role == claim.RoleArchitect {
 		return nil
 	}
-	released, found, err := store.ReleasedClaimOfRole(ctx, tx, e.cfg.Project, issue.Key, role)
+	released, found, err := store.ReleasedClaimOfRole(ctx, tx, e.cfg.ProjectToken, issue.Key, role)
 	if err != nil || !found || released.ServingGeneration != issue.Generation {
 		return err
 	}
@@ -152,7 +152,7 @@ func (e *Engine) podBackstopDue(ctx context.Context, tx pgx.Tx, fact intake.PodB
 	if err != nil || !fired {
 		return intake.Result{}, err
 	}
-	released, found, err := store.ReleasedClaimOfRole(ctx, tx, e.cfg.Project, fact.Issue, fact.Role)
+	released, found, err := store.ReleasedClaimOfRole(ctx, tx, e.cfg.ProjectToken, fact.Issue, fact.Role)
 	if err != nil || !found {
 		return intake.Result{}, err
 	}
@@ -183,19 +183,19 @@ func (e *Engine) wakeReleased(ctx context.Context, tx pgx.Tx, released store.Rel
 	if !InWorkflow(*issue) || !InWorkflow(*root) || root.Lingers() || issue.Lingers() {
 		return false, nil
 	}
-	first, err := store.MarkPodWake(ctx, tx, e.cfg.Project, issue.Key, kind, key, at)
+	first, err := store.MarkPodWake(ctx, tx, e.cfg.ProjectToken, issue.Key, kind, key, at)
 	if err != nil || !first {
 		return false, err
 	}
-	release, err := store.LatestPodRelease(ctx, tx, e.cfg.Project, issue.Key)
+	release, err := store.LatestPodRelease(ctx, tx, e.cfg.ProjectToken, issue.Key)
 	if err != nil {
 		return false, err
 	}
-	if _, err := store.RecordPodWakeTx(ctx, tx, store.PodResume{Release: release, Project: e.cfg.Project,
+	if _, err := store.RecordPodWakeTx(ctx, tx, store.PodResume{Release: release, Project: e.cfg.ProjectToken,
 		Issue: issue.Key, Role: string(released.Role), Kind: kind, At: at}); err != nil {
 		return false, err
 	}
-	if err := store.CancelPodBackstops(ctx, tx, e.cfg.Project, issue.Key); err != nil {
+	if err := store.CancelPodBackstops(ctx, tx, e.cfg.ProjectToken, issue.Key); err != nil {
 		return false, err
 	}
 	e.log.Info("wake: a released pod is coming back", "issue", issue.Key, "role", released.Role, "kind", kind, "detail", detail)

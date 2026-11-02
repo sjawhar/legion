@@ -1747,7 +1747,7 @@ func (g *rig) scriptedStartLauncher(
 	}
 	server, client := net.Pipe()
 	pod := g.pod(SandboxName(token))
-	session := g.r.launchers.accept(token, shimwire.LauncherHello{LauncherID: "scripted-" + string(token), PodUID: string(pod.UID)})
+	session := g.r.launchers.accept(token, launcherIssue(token), shimwire.LauncherHello{LauncherID: "scripted-" + string(token), PodUID: string(pod.UID)})
 	g.t.Cleanup(func() { _ = client.Close() })
 	scripted := &scriptedStartLauncher{
 		starts: make(chan shimwire.LauncherStart, 2),

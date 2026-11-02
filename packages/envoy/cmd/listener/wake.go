@@ -38,9 +38,10 @@ const (
 // daemon's window is three times this, so one report lost to a reconnect costs nothing.
 const listenerReadyInterval = 5 * time.Minute
 
-// wakeReportBound is how long a wake report's publish may take. It is short because a role 404
-// and a send 404 answer their caller behind it, and a report that does not go out costs only
-// this wake: the daemon's backstop still brings the pod back.
+// wakeReportBound is how long a wake report's publish may take. A report that does not go out in
+// it costs only this wake: the daemon's backstop still brings the pod back. No caller waits it
+// out — the two reports a 404 raises are published off that 404's path (reportRoleWake,
+// reportAgentWake) — so it bounds the report's own goroutine and nothing else.
 const wakeReportBound = 2 * time.Second
 
 // wakeReport is the wire shape of a report on bus.LegionWakeTopic. At is this listener's own
@@ -53,9 +54,9 @@ type wakeReport struct {
 	At      int64  `json:"at"`
 }
 
-// publishWakeReport publishes one report on bus.LegionWakeTopic. It never fails a caller: a
-// report the bus does not take is logged and nothing else, since the caller is answering a 404
-// it must answer whatever the bus does.
+// publishWakeReport publishes one report on bus.LegionWakeTopic. It never fails anything: a
+// report the bus does not take is logged and nothing else, since the 404 it was raised beside is
+// answered whatever the bus does, and is answered without waiting for it (reportRoleWake).
 func publishWakeReport(client *bus.Client, logger *logging.Logger, report wakeReport) {
 	if client == nil {
 		return
@@ -74,9 +75,13 @@ func publishWakeReport(client *bus.Client, logger *logging.Logger, report wakeRe
 	if report.Session != "" {
 		summary += " " + report.Session
 	}
+	// Every field contracts.Envelope.Validate requires is set here, SourceEventID included: a
+	// report that fails Validate is dropped before it is published (below), and a dropped
+	// listener_ready leaves every Legion daemon's release gate shut.
 	item := contracts.Envelope{
 		EventID:        eventID,
 		Source:         "envoy",
+		SourceEventID:  eventID,
 		Topic:          bus.LegionWakeTopic,
 		DedupeKey:      "legion.wake." + eventID,
 		IssuedAt:       report.At,
@@ -102,20 +107,25 @@ func publishWakeReport(client *bus.Client, logger *logging.Logger, report wakeRe
 // reportRoleWake reports that a message was published to role and no live session held it. The
 // role is the claim token a Legion role topic is named by, which is what the daemon matches its
 // own released claims on.
+//
+// The report is published off the caller's path. The caller is writing a 404 the report owes
+// nothing, and every role send with no holder raises one — including the common case where no
+// daemon holds a released claim of that role at all — so publishing it inline would put
+// wakeReportBound in front of each of those 404s.
 func reportRoleWake(d *listenerDeps, logger *logging.Logger, role string) {
 	if d == nil || role == "" {
 		return
 	}
-	publishWakeReport(d.client, logger, wakeReport{Kind: wakeKindRole, Role: role})
+	go publishWakeReport(d.client, logger, wakeReport{Kind: wakeKindRole, Role: role})
 }
 
 // reportAgentWake reports that a message was sent to the agent subject of sessionID and nothing
-// could place it.
+// could place it. It is published off the caller's path for the reason reportRoleWake is.
 func reportAgentWake(client *bus.Client, logger *logging.Logger, sessionID string) {
 	if sessionID == "" {
 		return
 	}
-	publishWakeReport(client, logger, wakeReport{Kind: wakeKindAgent, Session: sessionID})
+	go publishWakeReport(client, logger, wakeReport{Kind: wakeKindAgent, Session: sessionID})
 }
 
 // startListenerReadyReports publishes this listener's liveness report at once and every

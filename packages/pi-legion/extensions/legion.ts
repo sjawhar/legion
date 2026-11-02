@@ -214,13 +214,11 @@ export default function legionExtension(pi: PiApi): void {
   ): Promise<void> => {
     const claim = claimSession.capability(context.sessionManager.getSessionId());
     if (claim === undefined) return;
-    // An architect arms no phase reminder, so its phase reads closed and its pod waits on no
-    // reminder of its own; what it reports is its background work.
+    // An architect arms no phase reminder, so it waits on no reminder of its own; what it
+    // reports is its background work.
     const report = sessionActivity(
       asyncJobKinds(context.getAsyncJobSnapshot?.() ?? null),
-      phaseWorkerSession(context)
-        ? phaseReminder.phaseWake()
-        : { open: false, nextReminderAt: null }
+      phaseWorkerSession(context) ? phaseReminder.phaseWake() : { nextReminderAt: null }
     );
     if (
       options.onlyWhenChanged &&

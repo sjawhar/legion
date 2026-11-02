@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -369,6 +370,9 @@ type rig struct {
 	commandsMu sync.Mutex
 	commands   map[claim.Token][]shimwire.Frame
 	wanted     map[claim.Token]bool
+	// refuseBundle, when set, is the error every fake launcher of this rig answers each
+	// launcher_bundle slice with, as a launcher refuses one that did not arrive as it was sent.
+	refuseBundle string
 }
 
 type rigOption func(*rig, *Options)
@@ -377,6 +381,28 @@ func withOptions(edit func(*Options)) rigOption { return func(_ *rig, o *Options
 
 // withoutController runs no controller stand-in: the objects stay as the test wrote them.
 func withoutController() rigOption { return func(g *rig, _ *Options) { g.noController = true } }
+
+// withRefusedBundle has every fake launcher refuse each slice of a workspace bundle with reason.
+func withRefusedBundle(reason string) rigOption {
+	return func(g *rig, _ *Options) { g.refuseBundle = reason }
+}
+
+// testLaunchers is a launchers of its own, outside any rig, with no saved workspace bundles to
+// carry: the tests that build one drive the launcher protocol itself.
+func testLaunchers() *launchers {
+	return newLaunchers(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+// launcherIssue is the issue key a role token's pod is of, as the role Secret's annotation
+// carries it to the real resolver (launcherCredential.issue); "" for the project controller's
+// token, whose pod is of no issue.
+func launcherIssue(token claim.Token) string {
+	prefix, _, ok := token.Cut()
+	if !ok {
+		return ""
+	}
+	return strings.ToUpper(strings.TrimPrefix(prefix, "legion-"+testProject+"-"))
+}
 
 // sandboxHooks runs beforeDelete as the runtime asks to delete a Sandbox and afterGet once a get
 // of one returns, outside the fake client's lock, which the fake holds across a whole call.
@@ -740,7 +766,7 @@ func (g *rig) reportLauncher(token claim.Token, state shimwire.LauncherState) {
 	if pod == nil {
 		g.t.Fatal("cannot report launcher state without its pod")
 	}
-	s := g.r.launchers.accept(token, shimwire.LauncherHello{LauncherID: "test-" + string(token), PodUID: string(pod.UID)})
+	s := g.r.launchers.accept(token, launcherIssue(token), shimwire.LauncherHello{LauncherID: "test-" + string(token), PodUID: string(pod.UID)})
 	s.mu.Lock()
 	s.state = state
 	close(s.ready)
@@ -851,7 +877,7 @@ func (g *rig) connect(token claim.Token) { g.connectRunning(token, 0) }
 func (g *rig) connectRunning(token claim.Token, running uint64) {
 	server, client := net.Pipe()
 	pod := g.pod(SandboxName(token))
-	session := g.r.launchers.accept(token, shimwire.LauncherHello{LauncherID: "test-" + string(token), PodUID: string(pod.UID)})
+	session := g.r.launchers.accept(token, launcherIssue(token), shimwire.LauncherHello{LauncherID: "test-" + string(token), PodUID: string(pod.UID)})
 	g.t.Cleanup(func() { _ = client.Close() })
 	go session.ServeLauncher(server, bufio.NewReader(server), shimwire.NewWriter(server))
 	go func() {
@@ -861,6 +887,9 @@ func (g *rig) connectRunning(token claim.Token, running uint64) {
 			first.Child = &shimwire.LauncherChild{Generation: running, PID: 42}
 		}
 		_ = writer.WriteFrame(first)
+		// held is the slices of each bundle sequence that arrived, as the real launcher holds
+		// them: the whole of one is answered Held (internal/launcher's bundleRestore).
+		held := map[string]map[int]bool{}
 		reader := bufio.NewReader(client)
 		for {
 			line, err := reader.ReadBytes('\n')
@@ -899,6 +928,18 @@ func (g *rig) connectRunning(token claim.Token, running uint64) {
 					state.LastExit = &shimwire.LauncherExit{Generation: stopped, Code: 143, Signal: "terminated"}
 				}
 				_ = writer.WriteFrame(state)
+			case shimwire.LauncherBundle:
+				if g.refuseBundle != "" {
+					_ = writer.WriteFrame(shimwire.LauncherBundleResult{ID: command.ID, Index: command.Index, Error: g.refuseBundle})
+					continue
+				}
+				if held[command.ID] == nil {
+					held[command.ID] = map[int]bool{}
+				}
+				held[command.ID][command.Index] = true
+				_ = writer.WriteFrame(shimwire.LauncherBundleResult{
+					ID: command.ID, Index: command.Index, OK: true, Held: len(held[command.ID]) == command.Count,
+				})
 			}
 		}
 	}()

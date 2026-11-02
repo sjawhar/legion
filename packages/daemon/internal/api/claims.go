@@ -307,13 +307,19 @@ type ResumeRecord struct {
 	Stuck       bool   `json:"stuck"`
 }
 
-// HoldRecord is one pass of the idle rule that kept a pod past the idle period, with the rule's
-// own name for what held it (workflow.IdleHold's String).
+// HoldRecord is one streak of the idle rule keeping a pod past the idle period, with the rule's
+// own name for what held it (workflow.IdleHold's String) and the detail that word leaves out
+// (the kinds a background-work hold's session reported), absent where there is none. A streak
+// that the rule read again is one record, not one per pass: `firstAt` is its first pass, `at`
+// its newest, and `passes` how many it has made.
 type HoldRecord struct {
-	ID     int64  `json:"id"`
-	Issue  string `json:"issue"`
-	Reason string `json:"reason"`
-	At     string `json:"at"`
+	ID      int64  `json:"id"`
+	Issue   string `json:"issue"`
+	Reason  string `json:"reason"`
+	Detail  string `json:"detail,omitempty"`
+	FirstAt string `json:"firstAt"`
+	At      string `json:"at"`
+	Passes  int64  `json:"passes"`
 }
 
 // ReleaseRecordsResponse is the body of GET /legion/v1/claims/release-records: every release,
@@ -390,7 +396,8 @@ func releaseRecordsBody(records store.PodReleaseRecords) ReleaseRecordsResponse 
 			FirstTurnAt: recordedAt(resume.FirstTurnAt), Stuck: resume.Stuck})
 	}
 	for _, hold := range records.Holds {
-		body.Holds = append(body.Holds, HoldRecord{ID: hold.ID, Issue: hold.Issue, Reason: hold.Reason, At: recordedAt(hold.At)})
+		body.Holds = append(body.Holds, HoldRecord{ID: hold.ID, Issue: hold.Issue, Reason: hold.Reason,
+			Detail: hold.Detail, FirstAt: recordedAt(hold.FirstAt), At: recordedAt(hold.At), Passes: hold.Passes})
 	}
 	return body
 }

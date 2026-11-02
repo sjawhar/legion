@@ -90,7 +90,7 @@ func (r *Runtime) LauncherResolver() stream.LauncherResolver {
 		if err != nil || SandboxName(token) != hello.Sandbox {
 			return nil, "launcher credential does not name this pod's role"
 		}
-		return r.launchers.accept(token, hello), ""
+		return r.launchers.accept(token, credential.issue, hello), ""
 	}
 }
 

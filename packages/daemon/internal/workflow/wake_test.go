@@ -39,7 +39,7 @@ func newWakeRig(t *testing.T) wakeRig {
 	pool := migratedPool(t)
 	logged := &bytes.Buffer{}
 	clock := &checkClock{now: wakeAt}
-	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, Clock: clock.Now},
+	engine := New(record.NewStore(), Config{Project: "LEGION", ProjectToken: wakeProjectToken(t), Linger: time.Hour, Clock: clock.Now},
 		slog.New(slog.NewTextHandler(logged, nil)))
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
 		Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: wakeIssueGeneration,
@@ -51,14 +51,23 @@ func newWakeRig(t *testing.T) wakeRig {
 	return wakeRig{pool: pool, engine: engine, logged: logged, apply: applyFacts(t, pool, engine)}
 }
 
-// wakeToken is the claim token of LEGION-208's role, which a role topic is named by.
-func wakeToken(t *testing.T, role claim.Role) claim.Token {
+// wakeProjectToken is the project as a claim token spells it, which is what `claims.project` and
+// the pod tables of the release hold — never the key "LEGION", which only the record's own tables
+// hold. The two differ (claim.ProjectToken lower-cases), and a fixture that seeded the key on both
+// sides is what hid the engine reading those tables under the key.
+func wakeProjectToken(t *testing.T) string {
 	t.Helper()
 	project, err := claim.ProjectToken("LEGION")
 	if err != nil {
 		t.Fatalf("the project token: %v", err)
 	}
-	token, err := claim.NewToken(project, "LEGION-208", role)
+	return project
+}
+
+// wakeToken is the claim token of LEGION-208's role, which a role topic is named by.
+func wakeToken(t *testing.T, role claim.Role) claim.Token {
+	t.Helper()
+	token, err := claim.NewToken(wakeProjectToken(t), "LEGION-208", role)
 	if err != nil {
 		t.Fatalf("derive the %s token: %v", role, err)
 	}
@@ -72,8 +81,8 @@ func seedReleasedClaim(t *testing.T, pool *pgxpool.Pool, role claim.Role, sessio
 	token := wakeToken(t, role)
 	if _, err := pool.Exec(context.Background(), `insert into claims (token, project, tree, issue, role, generation,
 		session, session_file, state, suspended_by, serving_generation, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
-		values ($1, 'LEGION', 'LEGION-208', 'LEGION-208', $2, 1, $3, '', 'suspended', 'released', $4, 0, 0, 0, 0)`,
-		string(token), string(role), session, int64(wakeIssueGeneration)); err != nil {
+		values ($1, $5, 'LEGION-208', 'LEGION-208', $2, 1, $3, '', 'suspended', 'released', $4, 0, 0, 0, 0)`,
+		string(token), string(role), session, int64(wakeIssueGeneration), wakeProjectToken(t)); err != nil {
 		t.Fatalf("seed the released %s claim: %v", role, err)
 	}
 }
@@ -247,7 +256,7 @@ func TestAListenerReadyReportIsRecordedAndWakesNothing(t *testing.T) {
 		t.Fatalf("supervise start rows = %+v, want none for a liveness report", starts)
 	}
 	var at time.Time
-	if err := rig.pool.QueryRow(context.Background(), `select ready_at from listener_reports where project = 'LEGION'`).Scan(&at); err != nil {
+	if err := rig.pool.QueryRow(context.Background(), `select ready_at from listener_reports where project = $1`, wakeProjectToken(t)).Scan(&at); err != nil {
 		t.Fatalf("read the listener's report: %v", err)
 	}
 	if !at.UTC().Equal(wakeAt) {
@@ -260,7 +269,7 @@ func armBackstop(t *testing.T, pool *pgxpool.Pool, role claim.Role, due time.Tim
 	t.Helper()
 	var id int64
 	if err := pool.QueryRow(context.Background(), `insert into pod_wake_backstops (project, issue, role, release_id, due_at)
-		values ('LEGION', 'LEGION-208', $1, 0, $2) returning id`, string(role), due).Scan(&id); err != nil {
+		values ($3, 'LEGION-208', $1, 0, $2) returning id`, string(role), due, wakeProjectToken(t)).Scan(&id); err != nil {
 		t.Fatalf("arm the %s backstop: %v", role, err)
 	}
 	return id

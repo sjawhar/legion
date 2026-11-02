@@ -142,6 +142,7 @@ type outboxTrees interface {
 	IssueReleaseStop(ctx context.Context, project, issue string, row int64) (bool, error)
 	ClearIssueRelease(ctx context.Context, project, issue string) error
 	PutWorkspaceBundle(ctx context.Context, issue string, bundle runtime.WorkspaceBundle) error
+	WorkspaceBundleSize(ctx context.Context, issue string) (int, bool, error)
 	DeleteWorkspaceBundle(ctx context.Context, issue string) error
 	StoredClaimMayRun(ctx context.Context, token claim.Token, row int64) (bool, error)
 	ReserveWorkflowTreeCleanup(ctx context.Context, project, tree string, rootGeneration uint64) (treelifecycle.Lifecycle, bool, error)
@@ -490,6 +491,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return suspender.SuspendIssue(ctx, row.Issue, value.Tree, func(ctx context.Context) (bool, error) {
 			return r.trees.IssueSuspension(ctx, r.project, closing, record.OutOfWorkflow)
 		})
+	case record.IssueBundle:
+		return r.bundleIssueWorkspace(ctx, row, value)
 	case record.IssueRelease:
 		return r.releaseIssue(ctx, row, value)
 	case record.WorkspaceRemove:
@@ -1281,18 +1284,57 @@ func (r *outbox) stopWithoutMachine(ctx context.Context, row record.OutboxRow, t
 	return nil
 }
 
-// releaseIssue is the last act of an idle pod's release, run once every role stop of the release
-// has suspended its claim: it asks a launcher of the pod — a process that lives as long as the
-// pod does, not the agent the stops ended — for the git bundle of the workspace's unpushed work,
-// saves it in the daemon's own database, and only then suspends the issue's Sandbox, waits its
-// pod out and deletes the Sandbox with the role Secrets it owns. Nothing of the disk survives
-// otherwise, so the bundle is saved before anything is deleted and never after.
+// bundleIssueWorkspace is the first act of an idle pod's release: it asks the shim of the role
+// the release named — a process still running in the pod, because this row runs before the
+// `release` rows that stop them — for the git bundle of the unpushed work of the workspace every
+// role of the issue shares, and saves it in the daemon's own database. Only a shim can build it:
+// it runs the `jj` of the workspace it already works in, and it dies with its role's process.
 //
-// A bundle that cannot be built, one above runtime.MaxWorkspaceBundleBytes, and a save that
-// fails each stop the release: the pod stays, every claim the release suspended is resumed, and
-// the work a role has not pushed is kept at the cost of a pod. A release the store no longer
-// authorizes — one a role stop cancelled at the boundary, or one whose issue has left the
-// workflow since — stops the same way.
+// A bundle that cannot be built, and one above runtime.MaxWorkspaceBundleBytes, stop the release:
+// the pod stays, nothing having been stopped yet, and the work a role has not pushed is kept at
+// the cost of a pod. A workspace with nothing unpushed bundles to nothing, and the row the
+// previous release stored goes with it, so the next pod never restores stale work.
+func (r *outbox) bundleIssueWorkspace(ctx context.Context, row record.OutboxRow, payload record.IssueBundle) error {
+	if r.supervisor == nil {
+		return errors.New("issue bundle executor has no claim supervisor")
+	}
+	if _, ok := r.supervisor.deps.Runtime.(runtime.IssueSuspender); !ok {
+		// A runtime with no shared issue resources has no pod to release, so nothing to save.
+		return nil
+	}
+	bundler, ok := r.supervisor.deps.Runtime.(runtime.WorkspaceBundler)
+	if !ok {
+		return r.cancelRelease(ctx, row.Issue, workflow.IdleHoldBundleSave, "the runtime bundles no workspace")
+	}
+	bundle, err := bundler.BundleWorkspace(ctx, row.Issue, payload.Role)
+	if err != nil {
+		return r.cancelRelease(ctx, row.Issue, workflow.IdleHoldBundleSave, err.Error())
+	}
+	if size := bundle.Size(); size > runtime.MaxWorkspaceBundleBytes {
+		return r.cancelRelease(ctx, row.Issue, workflow.IdleHoldBundleTooLarge,
+			fmt.Sprintf("the workspace's unpushed work is %d bytes, over the %d a release carries", size, runtime.MaxWorkspaceBundleBytes))
+	}
+	if bundle.Size() == 0 {
+		if err := r.trees.DeleteWorkspaceBundle(ctx, row.Issue); err != nil {
+			return r.cancelRelease(ctx, row.Issue, workflow.IdleHoldBundleSave, err.Error())
+		}
+		return nil
+	}
+	if err := r.trees.PutWorkspaceBundle(ctx, row.Issue, bundle); err != nil {
+		return r.cancelRelease(ctx, row.Issue, workflow.IdleHoldBundleSave, err.Error())
+	}
+	return nil
+}
+
+// releaseIssue is the last act of an idle pod's release, run once the save has stored the
+// workspace's unpushed work (bundleIssueWorkspace) and every role stop of the release has
+// suspended its claim: it suspends the issue's Sandbox, waits its pod out and deletes the Sandbox
+// with the role Secrets it owns. Nothing of the disk survives it, which is why the save runs
+// first and never here.
+//
+// A release the store no longer authorizes — one a role stop cancelled at the boundary, or one
+// whose issue has left the workflow since — is cancelled: the pod stays, every claim the release
+// suspended is resumed, and the bundle the save stored goes with it.
 func (r *outbox) releaseIssue(ctx context.Context, row record.OutboxRow, payload record.IssueRelease) error {
 	if r.supervisor == nil {
 		return errors.New("issue release executor has no claim supervisor")
@@ -1314,27 +1356,16 @@ func (r *outbox) releaseIssue(ctx context.Context, row record.OutboxRow, payload
 	if !act {
 		return r.cancelRelease(ctx, row.Issue, workflow.IdleHoldReleasing, "the store no longer authorizes it")
 	}
-	bundler, ok := r.supervisor.deps.Runtime.(runtime.WorkspaceBundler)
-	if !ok {
-		return r.cancelRelease(ctx, row.Issue, workflow.IdleHoldBundleSave, "the runtime bundles no workspace")
-	}
-	bundle, err := bundler.BundleWorkspace(ctx, row.Issue, payload.Role)
+	savedBytes, _, err := r.trees.WorkspaceBundleSize(ctx, row.Issue)
 	if err != nil {
-		return r.cancelRelease(ctx, row.Issue, workflow.IdleHoldBundleSave, err.Error())
-	}
-	if size := bundle.Size(); size > runtime.MaxWorkspaceBundleBytes {
-		return r.cancelRelease(ctx, row.Issue, workflow.IdleHoldBundleTooLarge,
-			fmt.Sprintf("the workspace's unpushed work is %d bytes, over the %d a release carries", size, runtime.MaxWorkspaceBundleBytes))
-	}
-	if err := r.trees.PutWorkspaceBundle(ctx, row.Issue, bundle); err != nil {
-		return r.cancelRelease(ctx, row.Issue, workflow.IdleHoldBundleSave, err.Error())
+		return err
 	}
 	if err := suspender.SuspendIssue(ctx, row.Issue, payload.Tree, authorize); err != nil {
 		return err
 	}
 	r.log.Info("outbox: released the idle pod of an issue; its roles resume in the same sessions at the next wake",
-		"issue", row.Issue, "tree", payload.Tree, "generation", payload.Generation, "bundle", bundle.Size())
-	r.recordPodRelease(ctx, row.Issue, payload.Generation, bundle.Size())
+		"issue", row.Issue, "tree", payload.Tree, "generation", payload.Generation, "bundle", savedBytes)
+	r.recordPodRelease(ctx, row.Issue, payload.Generation, savedBytes)
 	// The pod is gone, so the backstop is armed now and not before: a release that stopped short
 	// left the pod standing and needs none. Arming forgets the previous release's wake marks
 	// too, so a head that settled before this release can wake the pod again.

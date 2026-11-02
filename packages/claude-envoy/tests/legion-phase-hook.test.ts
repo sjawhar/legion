@@ -223,7 +223,6 @@ test("the Stop hook reports what this session is doing to the daemon", async () 
       secret: implementer.secret,
       activity: {
         backgroundWork: { running: true, kinds: ["claude-background-task"] },
-        phase: { open: true },
       },
     })
     expect(Date.parse(String(reports[0]?.activity.at))).not.toBeNaN()

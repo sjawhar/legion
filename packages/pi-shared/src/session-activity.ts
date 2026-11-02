@@ -39,10 +39,11 @@ export const CLAUDE_BACKGROUND_TASK_KIND = "claude-background-task";
  */
 export type SessionActivityReport = LegionSessionActivityBody;
 
-/** The phase half of a report: whether the session's phase is open, and when the reminder armed
- * for it is due (ISO 8601), null when no armed reminder is still live. The phase reminder states
- * it (`PhaseReminder.phaseWake` in `src/phase-reminder.ts`); nothing recomputes it from the
- * limits. */
+/** The phase half of a report: when the reminder armed for the session's phase is due (ISO
+ * 8601), null when no armed reminder is still live, which a session whose phase has closed
+ * always reports. The phase reminder states it (`PhaseReminder.phaseWake` in
+ * `src/phase-reminder.ts`); nothing recomputes it from the limits, and whether the phase is open
+ * is the daemon's own reading of its record, not the session's to state. */
 export type SessionActivityPhase = SessionActivityReport["phase"];
 
 /**
@@ -98,7 +99,6 @@ export function sameSessionActivity(
     one.backgroundWork.running === other.backgroundWork.running &&
     one.backgroundWork.kinds.length === other.backgroundWork.kinds.length &&
     one.backgroundWork.kinds.every((kind, index) => kind === other.backgroundWork.kinds[index]) &&
-    one.phase.open === other.phase.open &&
     one.phase.nextReminderAt === other.phase.nextReminderAt
   );
 }

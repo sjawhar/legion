@@ -23,7 +23,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,6 +32,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 const (
@@ -641,7 +641,7 @@ func (s *shim) runAdoption(request shimwire.AdoptWorkingCopy) error {
 	defer cancel()
 	env := append(slices.Clone(s.cfg.Env), "JJ_USER="+request.JJUser, "JJ_EMAIL="+request.JJEmail)
 	started := time.Now()
-	described, err := runWorkspaceCommand(ctx, budget, started, env, workspace, nil, describedArgs(jj, workspace))
+	described, err := RunWorkspaceCommand(ctx, budget, started, env, workspace, nil, describedArgs(jj, workspace))
 	if err != nil {
 		return err
 	}
@@ -649,18 +649,23 @@ func (s *shim) runAdoption(request shimwire.AdoptWorkingCopy) error {
 	if described != "" {
 		change = []string{jj, "new", "-R", workspace}
 	}
-	_, err = runWorkspaceCommand(ctx, budget, started, env, workspace, nil, change)
+	_, err = RunWorkspaceCommand(ctx, budget, started, env, workspace, nil, change)
 	return err
 }
 
-// runWorkspaceCommand runs one jj or git command of the workspace within the caller's budget and
+// RunWorkspaceCommand runs one jj or git command of the workspace within the caller's budget and
 // returns its trimmed standard output. dir is the directory the command runs in, which is the
 // workspace its -R or --git-dir names: jj searches upward from the directory it runs in for the
 // closest .jj and reads that repository's configuration before it applies -R, so a command left
 // standing wherever the shim's process stands would read a repository nobody named
 // (docs/testing.md). stdin is fed to the command, and nil is an empty standard input. A failure's
 // report ends with a note on each stale git lock it names (staleGitLockNote).
-func runWorkspaceCommand(ctx context.Context, budget time.Duration, started time.Time, env []string, dir string, stdin []byte, args []string) (string, error) {
+//
+// The pod's launcher runs the restore's commands through it too (internal/launcher), which is why
+// it is exported: the save and the restore run the same two tools over the same workspace, and a
+// restore wedged on a stale index.lock or on a git child that holds the pipe past the budget
+// needs the same note and the same WaitDelay the save has.
+func RunWorkspaceCommand(ctx context.Context, budget time.Duration, started time.Time, env []string, dir string, stdin []byte, args []string) (string, error) {
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Env = env
 	cmd.Dir = dir
@@ -708,7 +713,7 @@ func runWorkspaceCommand(ctx context.Context, budget time.Duration, started time
 // workspace whose agent made none of them.
 const (
 	bundleKeptRevset = `(::visible_heads() | ::@) ~ ::(remote_bookmarks() | tags())`
-	bundleTipsRevset = `heads((::visible_heads() | ::@) ~ ::(remote_bookmarks() | tags()))`
+	bundleTipsRevset = "heads(" + bundleKeptRevset + ")"
 )
 
 // bundleRefPrefix is where the save's temporary refs live while `git bundle create` reads them.
@@ -766,8 +771,8 @@ func (s *shim) bundleWorkspace(request shimwire.BundleWorkspace) {
 // is --ignore-working-copy, so the whole save describes one state of the workspace. The bundle is
 // written under the process's temporary directory, never in the workspace, and removed.
 func (s *shim) runBundle(request shimwire.BundleWorkspace) (workspaceSave, error) {
-	workspace := envValue(s.cfg.Env, "LEGION_WORKSPACE")
-	if workspace == "" {
+	dir := envValue(s.cfg.Env, "LEGION_WORKSPACE")
+	if dir == "" {
 		return workspaceSave{}, errors.New("worker-shim: LEGION_WORKSPACE is not set; no workspace to bundle")
 	}
 	jj, err := exec.LookPath("jj")
@@ -778,26 +783,26 @@ func (s *shim) runBundle(request shimwire.BundleWorkspace) (workspaceSave, error
 	if err != nil {
 		return workspaceSave{}, fmt.Errorf("worker-shim: git is not on PATH (%s); no git to bundle the workspace with", os.Getenv("PATH"))
 	}
-	gitDir, err := workspaceGitDir(workspace)
+	gitDir, err := workspace.GitDir(dir)
 	if err != nil {
-		return workspaceSave{}, err
+		return workspaceSave{}, fmt.Errorf("worker-shim: %w", err)
 	}
 	budget := time.Duration(request.TimeoutMs) * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	env, started := s.cfg.Env, time.Now()
 	run := func(stdin []byte, args ...string) (string, error) {
-		return runWorkspaceCommand(ctx, budget, started, env, workspace, stdin, args)
+		return RunWorkspaceCommand(ctx, budget, started, env, dir, stdin, args)
 	}
 	read := func(revset string) ([]string, error) {
-		out, err := run(nil, jj, "log", "-R", workspace, "--ignore-working-copy", "-r", revset, "--no-graph", "-T", `commit_id ++ "\n"`)
+		out, err := run(nil, jj, "log", "-R", dir, "--ignore-working-copy", "-r", revset, "--no-graph", "-T", `commit_id ++ "\n"`)
 		if err != nil {
 			return nil, err
 		}
-		return lines(out), nil
+		return workspace.OutputLines(out), nil
 	}
 
-	head, err := run(nil, jj, "log", "-R", workspace, "-r", "@", "--no-graph", "-T", "commit_id")
+	head, err := run(nil, jj, "log", "-R", dir, "-r", "@", "--no-graph", "-T", "commit_id")
 	if err != nil {
 		return workspaceSave{}, err
 	}
@@ -820,7 +825,7 @@ func (s *shim) runBundle(request shimwire.BundleWorkspace) (workspaceSave, error
 		return workspaceSave{}, err
 	}
 	bases = slices.DeleteFunc(bases, func(commit string) bool { return commit == rootCommit })
-	listed, err := run(nil, jj, "bookmark", "list", "-R", workspace, "--ignore-working-copy",
+	listed, err := run(nil, jj, "bookmark", "list", "-R", dir, "--ignore-working-copy",
 		"-T", `if(remote, "", name ++ " " ++ normal_target.commit_id() ++ "\n")`)
 	if err != nil {
 		return workspaceSave{}, err
@@ -834,7 +839,7 @@ func (s *shim) runBundle(request shimwire.BundleWorkspace) (workspaceSave, error
 	path := file.Name()
 	_ = file.Close()
 	defer os.Remove(path)
-	if _, err := run(refUpdates("create", tips), git, "--git-dir="+gitDir, "update-ref", "--stdin"); err != nil {
+	if _, err := run(workspace.RefUpdates("create", bundleRefPrefix, tips), git, "--git-dir="+gitDir, "update-ref", "--stdin"); err != nil {
 		return workspaceSave{}, err
 	}
 	create := []string{git, "--git-dir=" + gitDir, "bundle", "create", path, "--glob=" + bundleRefPrefix}
@@ -842,67 +847,27 @@ func (s *shim) runBundle(request shimwire.BundleWorkspace) (workspaceSave, error
 		create = append(create, append([]string{"--not"}, bases...)...)
 	}
 	_, bundleErr := run(nil, create...)
-	if _, err := run(refUpdates("delete", tips), git, "--git-dir="+gitDir, "update-ref", "--stdin"); err != nil && bundleErr == nil {
+	if _, err := run(workspace.RefUpdates("delete", bundleRefPrefix, tips), git, "--git-dir="+gitDir, "update-ref", "--stdin"); err != nil && bundleErr == nil {
 		bundleErr = err
 	}
 	if bundleErr != nil {
 		return workspaceSave{}, bundleErr
 	}
+	// The bundle is measured before it is read: a workspace that bundles to hundreds of megabytes
+	// is refused on its size alone, so the bytes over the bound never enter the pod's memory.
+	info, err := os.Stat(path)
+	if err != nil {
+		return workspaceSave{}, fmt.Errorf("worker-shim: read the bundle: %w", err)
+	}
+	if info.Size() > int64(request.MaxBytes) {
+		return workspaceSave{size: int(info.Size())},
+			fmt.Errorf("worker-shim: the workspace's unpushed work is %d bytes, over the %d the release carries", info.Size(), request.MaxBytes)
+	}
 	bundle, err := os.ReadFile(path)
 	if err != nil {
 		return workspaceSave{}, fmt.Errorf("worker-shim: read the bundle: %w", err)
 	}
-	if len(bundle) > request.MaxBytes {
-		return workspaceSave{size: len(bundle)},
-			fmt.Errorf("worker-shim: the workspace's unpushed work is %d bytes, over the %d the release carries", len(bundle), request.MaxBytes)
-	}
 	return workspaceSave{bundle: bundle, head: head, tips: tips, bookmarks: bookmarks, size: len(bundle), at: time.Now().UTC()}, nil
-}
-
-// workspaceGitDir is the git directory behind a jj workspace, read from jj's own files rather
-// than from a git that would search upward from wherever it was started: <workspace>/.jj/repo
-// names the repository (a directory in the repository's own workspace, a file holding its path in
-// every other), and <repo>/store/git_target names the git directory relative to <repo>/store.
-func workspaceGitDir(workspace string) (string, error) {
-	repo := filepath.Join(workspace, ".jj", "repo")
-	info, err := os.Stat(repo)
-	if err != nil {
-		return "", fmt.Errorf("worker-shim: read %s: %w", repo, err)
-	}
-	if !info.IsDir() {
-		named, err := os.ReadFile(repo)
-		if err != nil {
-			return "", fmt.Errorf("worker-shim: read %s: %w", repo, err)
-		}
-		repo = absoluteUnder(filepath.Join(workspace, ".jj"), strings.TrimSpace(string(named)))
-	}
-	target, err := os.ReadFile(filepath.Join(repo, "store", "git_target"))
-	if err != nil {
-		return "", fmt.Errorf("worker-shim: read the workspace's git directory: %w", err)
-	}
-	return absoluteUnder(filepath.Join(repo, "store"), strings.TrimSpace(string(target))), nil
-}
-
-// absoluteUnder resolves path as jj writes it: absolute as it stands, relative to base otherwise.
-func absoluteUnder(base, path string) string {
-	if filepath.IsAbs(path) {
-		return filepath.Clean(path)
-	}
-	return filepath.Clean(filepath.Join(base, path))
-}
-
-// refUpdates is the `git update-ref --stdin` input that creates or deletes one temporary ref per
-// saved head, in the order the heads were read.
-func refUpdates(verb string, tips []string) []byte {
-	var out strings.Builder
-	for i, tip := range tips {
-		out.WriteString(verb + " " + bundleRefPrefix + strconv.Itoa(i))
-		if verb == "create" {
-			out.WriteString(" " + tip)
-		}
-		out.WriteString("\n")
-	}
-	return []byte(out.String())
 }
 
 // bookmarksInto is every local bookmark of listed that points at a commit the bundle keeps, by
@@ -910,7 +875,7 @@ func refUpdates(verb string, tips []string) []byte {
 // not the workspace's unpushed work and is left where the new pod's fetch will put it.
 func bookmarksInto(listed string, kept []string) map[string]string {
 	into := map[string]string{}
-	for _, line := range lines(listed) {
+	for _, line := range workspace.OutputLines(listed) {
 		name, commit, found := strings.Cut(line, " ")
 		if !found || !slices.Contains(kept, commit) {
 			continue
@@ -918,17 +883,6 @@ func bookmarksInto(listed string, kept []string) map[string]string {
 		into[name] = commit
 	}
 	return into
-}
-
-// lines is out's non-empty lines, trimmed.
-func lines(out string) []string {
-	var kept []string
-	for line := range strings.SplitSeq(out, "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			kept = append(kept, line)
-		}
-	}
-	return kept
 }
 
 // toDaemonChunked sends a frame that may be larger than one line: under the limit it is one line,

@@ -147,8 +147,7 @@ func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, claims []supervise
 		switch {
 		case claim.IsTreeArchitect(c.Role, issue.Key, issue.Tree):
 		case c.Role != claim.RoleArchitect && RoleFor(workingPhase(issue)) == c.Role:
-			if c.State == supervise.StateSuspended && c.SuspendedBy.ByRule() &&
-				c.SuspendedBy != supervise.SuspendedByReleased {
+			if c.State == supervise.StateSuspended && c.SuspendedBy.ByRule() {
 				continue
 			}
 			current = issue.Phase

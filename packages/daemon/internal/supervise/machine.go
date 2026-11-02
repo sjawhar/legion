@@ -89,16 +89,20 @@ const (
 	// SuspendedByReleased: the daemon released the claim's idle issue pod, whose disk and Sandbox
 	// went with it and whose unpushed work was saved as a git bundle. The claim keeps its phase and
 	// its pending task, and the next wake for its role resumes the same session; a daemon restart
-	// resumes no such claim, since only that wake brings the pod back (workflow's booted).
+	// resumes no such claim, since only that wake brings the pod back (workflow's booted). It is no
+	// source ByRule names: the rules that act on a released claim name it themselves — the wake
+	// that brings its pod back, and the stranded report once a wake has run out with no turn.
 	SuspendedByReleased SuspendSource = "released"
 )
 
-// ByRule is whether the source is one the daemon itself recorded — its own suspend, a root's exit,
-// or an idle pod's release: the sources a daemon rule resumes with no operator, and the only
-// suspended phase workers the stranded report leaves out. The boot's resume by rule acts on all of
-// them but the released one, which waits for its role's wake (workflow's booted).
+// ByRule is whether the source is one the daemon itself recorded as a stop of its own — its own
+// suspend, or a root's exit: the sources a daemon rule resumes with no operator, and the only
+// suspended phase workers the stranded report leaves out. A release is not one of them. It is a
+// stop the daemon recorded too, but no rule here acts on it: the boot's resume by rule leaves it to
+// its role's wake (workflow's booted), and the stranded report holds it to R6's one fact
+// (workflow's stranded).
 func (s SuspendSource) ByRule() bool {
-	return s == SuspendedByDaemon || s == SuspendedByExit || s == SuspendedByReleased
+	return s == SuspendedByDaemon || s == SuspendedByExit
 }
 
 // RetiresPhaseTask is whether a suspension by this source ends the claim's phase, so a task queued

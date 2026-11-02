@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -99,9 +100,10 @@ func (w *workflowRuntime) releaseIdlePod(ctx context.Context, issue string) {
 		return
 	}
 	if !marked {
-		w.log.Debug("idle release: the pod is kept", "issue", issue, "hold", decision.Hold.String())
+		detail := strings.Join(decision.HoldKinds, ",")
+		w.log.Debug("idle release: the pod is kept", "issue", issue, "hold", decision.Hold.String(), "detail", detail)
 		if quiet {
-			recordIdleHold(ctx, w.idleStore, w.projectID, issue, decision.Hold, now, w.log)
+			recordIdleHold(ctx, w.idleStore, w.projectID, issue, decision.Hold, detail, now, w.log)
 		}
 		return
 	}
@@ -137,14 +139,15 @@ func recordableHold(hold workflow.IdleHold) bool {
 	return true
 }
 
-// recordIdleHold writes one pass of the idle rule that kept a pod past the idle period. A hold
-// that cannot be written is logged and nothing else: the records are a deployment's measurement,
-// and a release is a saving, so nothing waits on either.
-func recordIdleHold(ctx context.Context, st *store.Store, project, issue string, hold workflow.IdleHold, at time.Time, log *slog.Logger) {
+// recordIdleHold records one pass of the idle rule that kept a pod past the idle period, under
+// the rule's own word for the reason and the detail that word leaves out ("" where there is
+// none). A hold that cannot be written is logged and nothing else: the records are a
+// deployment's measurement, and a release is a saving, so nothing waits on either.
+func recordIdleHold(ctx context.Context, st *store.Store, project, issue string, hold workflow.IdleHold, detail string, at time.Time, log *slog.Logger) {
 	if st == nil || !recordableHold(hold) {
 		return
 	}
-	if err := st.RecordPodHold(ctx, store.PodHold{Project: project, Issue: issue, Reason: hold.String(), At: at}); err != nil {
+	if err := st.RecordPodHold(ctx, store.PodHold{Project: project, Issue: issue, Reason: hold.String(), Detail: detail, At: at}); err != nil {
 		log.Warn("idle release: could not record a pod's hold", "issue", issue, "hold", hold.String(), "error", err)
 	}
 }
@@ -176,35 +179,53 @@ func (r *outbox) recordPodRelease(ctx context.Context, issue string, generation 
 }
 
 // recordPodHold writes the hold of a release that did not finish (cancelRelease): the pod was
-// kept, and the reason the teardown read is the same vocabulary the idle tick records.
+// kept, and the reason the teardown read is the same vocabulary the idle tick records. The
+// teardown reads a hold and not the view behind it, so its holds carry no detail.
 func (r *outbox) recordPodHold(ctx context.Context, issue string, hold workflow.IdleHold) {
 	if r.supervisor == nil {
 		return
 	}
-	recordIdleHold(ctx, r.supervisor.store, r.project, issue, hold, time.Now().UTC(), r.log)
+	recordIdleHold(ctx, r.supervisor.store, r.project, issue, hold, "", time.Now().UTC(), r.log)
 }
 
 // idleReleaseRows is the release as outbox rows, in the order the issue's lifecycle lane runs
-// them: one `release` supervise row per live role, which stops that role's process and keeps its
-// session, and then the teardown, which saves the workspace's unpushed work and deletes the pod,
-// its disk and its Sandbox. The first row is the release's boundary — the stop of the first role
-// process of the pod — and the teardown asks that same role's launcher for the bundle, a process
-// that lives as long as the pod does.
+// them — three acts, each one row a reader can name:
+//
+//  1. the save (record.IssueBundle): the shim of the first live role is asked for the git bundle
+//     of the workspace's unpushed work, which is stored in the daemon's database. It runs first
+//     because only a shim can build it and a shim dies with its role's process, which act 2
+//     stops. It stops nothing itself, so a release cancelled here costs only the save;
+//  2. the role stops: one `release` supervise row per live role, each stopping that role's
+//     process and keeping its session. The first of them is the release's boundary — the stop of
+//     the first role process of the pod — which is what R4's cancel is read against, so a
+//     delivery queued while the save ran is still below it and cancels the whole release;
+//  3. the teardown (record.IssueRelease): it deletes the pod, its disk and its Sandbox, and
+//     records the release with the size the save stored.
 func idleReleaseRows(view store.IdleView, decision workflow.IdleDecision, now time.Time) (store.IdleReleaseMark, error) {
 	mark := store.IdleReleaseMark{Generation: view.Generation, Role: decision.Roles[0]}
-	payloads := make([]record.OutboxPayload, 0, len(decision.Roles)+1)
-	for _, role := range decision.Roles {
-		payloads = append(payloads, record.SuperviseRequest{Op: "release", Tree: view.Tree, Role: role,
-			Generation: view.Generation, Reason: "the issue's pod has been idle for the release period"})
-	}
-	payloads = append(payloads, record.IssueRelease{Tree: view.Tree, Generation: view.Generation,
-		TreeGeneration: view.Root.Generation, Role: mark.Role})
-	for _, payload := range payloads {
+	rows := make([]store.IdleReleaseRow, 0, len(decision.Roles)+2)
+	add := func(payload record.OutboxPayload, boundary bool) error {
 		row, err := record.NewOutboxRow(view.Issue, payload, now)
 		if err != nil {
-			return store.IdleReleaseMark{}, fmt.Errorf("encode the %s of %s's release: %w", payload.OutboxKind(), view.Issue, err)
+			return fmt.Errorf("encode the %s of %s's release: %w", payload.OutboxKind(), view.Issue, err)
 		}
-		mark.Rows = append(mark.Rows, store.IdleReleaseRow{Kind: string(row.Kind), Payload: row.Payload})
+		rows = append(rows, store.IdleReleaseRow{Kind: string(row.Kind), Payload: row.Payload, Boundary: boundary})
+		return nil
 	}
+	if err := add(record.IssueBundle{Tree: view.Tree, Generation: view.Generation,
+		TreeGeneration: view.Root.Generation, Role: mark.Role}, false); err != nil {
+		return store.IdleReleaseMark{}, err
+	}
+	for i, role := range decision.Roles {
+		if err := add(record.SuperviseRequest{Op: "release", Tree: view.Tree, Role: role,
+			Generation: view.Generation, Reason: "the issue's pod has been idle for the release period"}, i == 0); err != nil {
+			return store.IdleReleaseMark{}, err
+		}
+	}
+	if err := add(record.IssueRelease{Tree: view.Tree, Generation: view.Generation,
+		TreeGeneration: view.Root.Generation}, false); err != nil {
+		return store.IdleReleaseMark{}, err
+	}
+	mark.Rows = rows
 	return mark, nil
 }

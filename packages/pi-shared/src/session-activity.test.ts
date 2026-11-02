@@ -31,21 +31,21 @@ function snapshot(...types: readonly string[]): RunningAsyncJobs {
 // that hold the pod; once both have ended the same session reports none, and the daemon may
 // release it.
 test("the report names the background work running, and none once it has ended", () => {
-  const closed = { open: false, nextReminderAt: null };
+  const noWake = { nextReminderAt: null };
 
-  const running = sessionActivity(asyncJobKinds(snapshot("bash", "task", "bash")), closed, AT);
-  const ended = sessionActivity(asyncJobKinds(snapshot()), closed, AT);
+  const running = sessionActivity(asyncJobKinds(snapshot("bash", "task", "bash")), noWake, AT);
+  const ended = sessionActivity(asyncJobKinds(snapshot()), noWake, AT);
 
   expect(running).toEqual({
     at: "2026-11-01T12:00:00.000Z",
     // Sorted and de-duplicated: two backgrounded commands are one kind.
     backgroundWork: { running: true, kinds: [ASYNC_JOB_KIND, SUBAGENT_KIND] },
-    phase: closed,
+    phase: noWake,
   });
   expect(ended).toEqual({
     at: "2026-11-01T12:00:00.000Z",
     backgroundWork: { running: false, kinds: [] },
-    phase: closed,
+    phase: noWake,
   });
   expect(sameSessionActivity(running, ended)).toBeFalse();
   // A host with no such member at all, and one that answers null, both report no background work.
@@ -56,7 +56,7 @@ test("the report names the background work running, and none once it has ended",
 // `at` is when the session read the report, not part of what it says: a host that sends only on a
 // change must not send one reading a second apart from the last.
 test("two readings of the same work are the same report, whenever they were read", () => {
-  const phase = { open: true, nextReminderAt: "2026-11-01T12:05:00.000Z" };
+  const phase = { nextReminderAt: "2026-11-01T12:05:00.000Z" };
   const one = sessionActivity([ASYNC_JOB_KIND], phase, AT);
   const later = sessionActivity([ASYNC_JOB_KIND], phase, new Date(AT.getTime() + 60_000));
 
@@ -67,8 +67,8 @@ test("two readings of the same work are the same report, whenever they were read
     "another kind of work is another report"
   ).toBeFalse();
   expect(
-    sameSessionActivity(one, sessionActivity([ASYNC_JOB_KIND], { ...phase, open: false }, AT)),
-    "a closed phase is another report"
+    sameSessionActivity(one, sessionActivity([ASYNC_JOB_KIND], { nextReminderAt: null }, AT)),
+    "a phase with no armed reminder is another report"
   ).toBeFalse();
 });
 
@@ -97,7 +97,6 @@ function reminderRig() {
 test("a WAITING reply moves the reported wake out by the waiting limit", async () => {
   const { reminder, timers } = reminderRig();
   expect(reminder.phaseWake(), "no timer is armed before the first settle").toEqual({
-    open: true,
     nextReminderAt: null,
   });
 
@@ -117,8 +116,8 @@ test("a WAITING reply moves the reported wake out by the waiting limit", async (
     DEFAULT_STALL_LIMITS.reminderMs,
     DEFAULT_STALL_LIMITS.waitingMs,
   ]);
-  expect(ordinary.open).toBeTrue();
-  expect(waiting.open).toBeTrue();
+  expect(ordinary.nextReminderAt, "the ordinary settle armed a reminder").not.toBeNull();
+  expect(waiting.nextReminderAt, "the WAITING settle armed one too").not.toBeNull();
   const ordinaryAt = Date.parse(String(ordinary.nextReminderAt));
   const waitingAt = Date.parse(String(waiting.nextReminderAt));
   expect(ordinaryAt).toBeGreaterThanOrEqual(beforeOrdinary + DEFAULT_STALL_LIMITS.reminderMs);
@@ -130,13 +129,13 @@ test("a WAITING reply moves the reported wake out by the waiting limit", async (
 
   // A closed phase reports no wake at all, whatever timer is still armed on the host.
   reminder.apply({ kind: "phase-closed" });
-  expect(reminder.phaseWake()).toEqual({ open: false, nextReminderAt: null });
+  expect(reminder.phaseWake()).toEqual({ nextReminderAt: null });
 });
 
 // The claim token the request carries is the one the daemon minted for this claim; a pane with no
 // project cannot spell one, and sends nothing rather than throwing inside a host's hook.
 test("the request is the claim's own, and is left unbuilt when no token can be spelled", () => {
-  const report = sessionActivity([], { open: true, nextReminderAt: null }, AT);
+  const report = sessionActivity([], { nextReminderAt: null }, AT);
 
   expect(sessionActivityRequest({ project: "legion", claim: implementer, report })).toEqual({
     claimToken: "legion-legion-legion-208-implementer",

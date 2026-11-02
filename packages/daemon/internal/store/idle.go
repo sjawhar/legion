@@ -134,17 +134,22 @@ func (v IdleView) QuietSince() (time.Time, bool) {
 }
 
 // IdleReleaseRow is one outbox row a release writes, encoded by its caller (record.NewOutboxRow),
-// in the order the issue's lifecycle lane runs them: one role stop per live claim, then the
-// teardown. The store writes them rather than record's Enqueue because the first row's id is the
-// release's boundary and must be read back under the same transaction.
+// in the order the issue's lifecycle lane runs them: the save of the workspace's unpushed work,
+// then one role stop per live claim, then the teardown. The store writes them rather than
+// record's Enqueue because the boundary row's id must be read back under the same transaction.
+//
+// Boundary marks the one row whose id is the release's boundary: the stop of the first role
+// process of the pod, which is what every later decision about this release reads
+// (IssueRelease). The save before it is not the boundary — it stops nothing, so a delivery
+// queued while it runs still cancels the whole release.
 type IdleReleaseRow struct {
-	Kind    string
-	Payload []byte
+	Kind     string
+	Payload  []byte
+	Boundary bool
 }
 
-// IdleReleaseMark is what a decision to release writes: the rows above and the role whose
-// launcher the bundle is asked of. Rows empty means the pod is not released, and nothing is
-// written.
+// IdleReleaseMark is what a decision to release writes: the rows above and the role whose shim
+// the bundle is asked of. Rows empty means the pod is not released, and nothing is written.
 type IdleReleaseMark struct {
 	Generation uint64
 	Role       claim.Role
@@ -179,8 +184,9 @@ func (s *Store) IdlePods(ctx context.Context, project string) ([]string, error) 
 // ReleaseIdleIssue is the release's one transaction: it reads issue's idle view and hands it to
 // decide, and when decide answers rows it writes them and the release's mark together, so the
 // view the decision rests on and the mark that records it are one atomic act. The mark's
-// boundary_row is the first row's id — the stop of the first role process of the pod — which is
-// the one fact every later decision about this release reads (IssueRelease).
+// boundary_row is the id of the row the mark names its boundary — the stop of the first role
+// process of the pod — which is the one fact every later decision about this release reads
+// (IssueRelease).
 //
 // It answers whether a release was marked. decide answering no rows writes nothing, which is the
 // ordinary case: nearly every tick finds a pod that is working, or one whose idle period has not
@@ -206,15 +212,18 @@ func (s *Store) ReleaseIdleIssue(ctx context.Context, project, issue string, dec
 			return nil
 		}
 		var boundary int64
-		for i, row := range mark.Rows {
+		for _, row := range mark.Rows {
 			var id int64
 			if err := tx.QueryRow(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token)
 				values ($1, $2, $3, 0, now(), '', '') returning id`, row.Kind, issue, string(row.Payload)).Scan(&id); err != nil {
 				return fmt.Errorf("queue the %s of %s's release: %w", row.Kind, issue, err)
 			}
-			if i == 0 {
+			if row.Boundary {
 				boundary = id
 			}
+		}
+		if boundary == 0 {
+			return fmt.Errorf("the release of %s named no boundary row", issue)
 		}
 		var started int64
 		for _, c := range view.Claims {
@@ -234,12 +243,21 @@ func (s *Store) ReleaseIdleIssue(ctx context.Context, project, issue string, dec
 }
 
 // ClearIssueRelease forgets the mark of issue's release, whether the release finished or was
-// cancelled. A mark already gone is success, so a retried finish finishes.
+// cancelled, on the pool: the teardown's own call, outside any transaction. A mark already gone
+// is success, so a retried finish finishes.
 func (s *Store) ClearIssueRelease(ctx context.Context, project, issue string) error {
-	if _, err := s.pool.Exec(ctx, `delete from issue_releases where project = $1 and issue = $2`, project, issue); err != nil {
+	if err := deleteIssueRelease(ctx, s.pool, project, issue); err != nil {
 		return fmt.Errorf("clear the release mark of %s: %w", issue, err)
 	}
 	return nil
+}
+
+// deleteIssueRelease forgets the mark of issue's release through db, which is the pool for the
+// teardown's own call and the caller's transaction for a role stop that cancels the release
+// where it reads the boundary (IssueReleaseStop). One mark, one delete, whichever runs it.
+func deleteIssueRelease(ctx context.Context, db execer, project, issue string) error {
+	_, err := db.Exec(ctx, `delete from issue_releases where project = $1 and issue = $2`, project, issue)
+	return err
 }
 
 // IdleView is issue's pod as the idle rule reads it, in one transaction of its own: the tick's

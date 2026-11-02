@@ -101,7 +101,7 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 		}
 		held := run.Claim
 		if held == nil || held.State != supervise.StateSuspended || !held.SuspendedBy.ByRule() ||
-			held.SuspendedBy == supervise.SuspendedByReleased || !StartFor(run, root, issue.Generation, issue.Phase) {
+			!StartFor(run, root, issue.Generation, issue.Phase) {
 			continue
 		}
 		task, err := ResumeTask(ctx, e.store, tx, issue, role)

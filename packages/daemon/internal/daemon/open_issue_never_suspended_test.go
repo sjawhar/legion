@@ -146,7 +146,8 @@ func TestAnOpenIssueThatIsWorkingHasNoClaimStopped(t *testing.T) {
 		for token := range claims {
 			machine, _ := sup.Machine(token)
 			got := machine.Claim()
-			if got.State == supervise.StateSuspended || got.SuspensionHeld && got.SuspensionHeldBy.ByRule() {
+			byRule := got.SuspensionHeldBy.ByRule() || got.SuspensionHeldBy == supervise.SuspendedByReleased
+			if got.State == supervise.StateSuspended || got.SuspensionHeld && byRule {
 				t.Fatalf("%s: %s = %+v, want live without a suspension by any daemon rule", stage, token, got)
 			}
 		}
@@ -306,8 +307,8 @@ func TestOpenIssueSuspensionInvariantKeepsTheExceptions(t *testing.T) {
 
 		rig.w.releaseIdlePods(ctx)
 
-		if got := rig.rows(t); len(got) != 2 || got[0] != "supervise:release" || got[1] != "issue_release" {
-			t.Fatalf("queued rows = %v, want the role stop then the teardown and nothing else", got)
+		if got := rig.rows(t); len(got) != 3 || got[0] != "issue_bundle" || got[1] != "supervise:release" || got[2] != "issue_release" {
+			t.Fatalf("queued rows = %v, want the save, the role stop and the teardown and nothing else", got)
 		}
 		rig.drain(t)
 		if got := rig.machine.Claim(); got.State != supervise.StateSuspended || got.SuspendedBy != supervise.SuspendedByReleased {

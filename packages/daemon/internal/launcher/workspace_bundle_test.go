@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shim"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/testbin"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // The daemon sends a released workspace's bundle in slices under the frame limit, and the
@@ -457,9 +458,9 @@ func (f *bundleFixture) restoreInto(workspace string, saved shimwire.WorkspaceBu
 }
 
 // gitDir is the git directory behind a workspace, as the restore resolves it.
-func (f *bundleFixture) gitDir(workspace string) string {
+func (f *bundleFixture) gitDir(ws string) string {
 	f.t.Helper()
-	dir, err := workspaceGitDir(workspace)
+	dir, err := workspace.GitDir(ws)
 	if err != nil {
 		f.t.Fatal(err)
 	}

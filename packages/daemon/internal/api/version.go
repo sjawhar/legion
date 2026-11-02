@@ -444,23 +444,23 @@ package api
 // migration. (This branch took 43; main then landed the consumer lag at 43, so this branch takes
 // the number above it, as the collision note says.)
 //
-// 47: an idle issue pod is released, so a plugin tells the daemon what its session is doing and a
+// 48: an idle issue pod is released, so a plugin tells the daemon what its session is doing and a
 // released claim is a new suspension source. Each session reports its activity to the daemon on
 // POST /legion/v1/claims/activity, authenticated by its claim as `claims/ready` is: whether it
-// runs background work and of which kinds, and, for a phase worker whose phase is open, when its
-// next phase reminder is due. The daemon releases an issue pod no claim of which has reported
+// runs background work and of which kinds, and when the phase reminder armed in it is due, if
+// one still is. The daemon releases an issue pod no claim of which has reported
 // background work and none of whose phase workers is due a reminder inside the idle period
 // (`runtime.kubernetes.idle_release`), suspending each of its claims with the new
 // `suspendedBy` value `released`, which keeps the claim's phase and its pending delivery and
 // which the operator routes now serve. A released pod's unpushed work travels as a git bundle,
 // which the shim builds on the daemon's `bundle-workspace` frame and the next pod's launcher
-// restores from the chunked `launcher_bundle` frames before any role starts; a launcher before 47
-// knows neither frame, and a shim before 47 answers none, so the image probe holds this daemon
+// restores from the chunked `launcher_bundle` frames before any role starts; a launcher before 48
+// knows neither frame, and a shim before 48 answers none, so the image probe holds this daemon
 // and the image that runs its roles together. A claim may read the deployment's release, resume
 // and hold records on GET /legion/v1/claims/release-records, authenticated by the claim and
 // naming the window in its query, and each entry of the state's `strandedClaims` now carries the
 // `suspendedBy` of a suspended claim, so a released one whose wake never brought its pod back
-// reads apart from one an operator suspended. This change adds four store
-// migrations. (#2538 takes 45 and #2539 takes 46, so this branch takes the number above them, as
-// the collision note says.)
-const DaemonAPIVersion = 47
+// reads apart from one an operator suspended. This change adds six store
+// migrations. (This branch took 47; main then landed 45, which put #2538 on 46 and #2539 on 47,
+// so this branch takes the number above them, as the collision note says.)
+const DaemonAPIVersion = 48

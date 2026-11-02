@@ -89,6 +89,11 @@ type IdleDecision struct {
 	Release bool
 	Hold    IdleHold
 	Roles   []claim.Role
+	// HoldKinds names the hold more closely for the one hold that has more to say:
+	// IdleHoldBackgroundWork carries the kinds the held session reported (`subagent`,
+	// `async-job`, `claude-background-task`), which is what tells an operator reading the hold
+	// whether a pod is kept by a subagent or by a background job. Every other hold leaves it nil.
+	HoldKinds []string
 }
 
 // IdleRelease decides whether an issue's pod may be released now. It is the whole rule and it is
@@ -176,7 +181,7 @@ func IdleRelease(view store.IdleView, now time.Time, idle time.Duration, onConfi
 			return IdleDecision{Hold: IdleHoldUnreported}
 		}
 		if c.ActivityBackground {
-			return IdleDecision{Hold: IdleHoldBackgroundWork}
+			return IdleDecision{Hold: IdleHoldBackgroundWork, HoldKinds: c.ActivityKinds}
 		}
 	}
 	for _, c := range view.Claims {

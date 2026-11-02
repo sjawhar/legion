@@ -9,7 +9,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
-	"github.com/sjawhar/legion/daemon/internal/wait"
 )
 
 // IssueReleased is one idle release of an issue's pod as its issue_release outbox row names it:
@@ -73,8 +72,7 @@ func (s *Store) IssueReleaseStop(ctx context.Context, project, issue string, row
 			return err
 		}
 		if queued || restarted {
-			_, err := tx.Exec(ctx, `delete from issue_releases where project = $1 and issue = $2`, project, issue)
-			return err
+			return deleteIssueRelease(ctx, tx, project, issue)
 		}
 		act = true
 		return nil
@@ -134,34 +132,11 @@ func (s *Store) IssueRelease(ctx context.Context, project string, release IssueR
 		if uint64(issueGeneration) != release.IssueGeneration || uint64(rootGeneration) != release.TreeGeneration || !inWorkflow {
 			return nil
 		}
-		var reserved bool
-		if err := tx.QueryRow(ctx, `select exists (select 1 from tree_lifecycles
-			where project = $1 and tree = $2 and cleanup_started)`, project, release.Tree).Scan(&reserved); err != nil {
+		may, err := issueStopFences(ctx, tx, project, release.Issue, release.Tree, "release", release.Row, release.IssueGeneration)
+		if err != nil {
 			return err
 		}
-		if reserved {
-			return nil
-		}
-		var stopping bool
-		if err := tx.QueryRow(ctx, `select exists (
-			select 1 from outbox where issue = $1 and id < $2 and kind = 'supervise'
-			and payload->>'op' in ('suspend', 'issue_close', 'release') and (payload->>'generation')::bigint = $3)`,
-			release.Issue, release.Row, release.IssueGeneration).Scan(&stopping); err != nil {
-			return err
-		}
-		if stopping {
-			return wait.Errorf("issue %s release waits for its role stop effects", release.Issue)
-		}
-		var pending string
-		err = tx.QueryRow(ctx, `select token || ':' || state from claims where project = $1 and issue = $2 and `+claimMayRun+`
-			order by token limit 1`, project, release.Issue).Scan(&pending)
-		if err == nil {
-			return wait.Errorf("issue %s release waits for stored claim %s", release.Issue, pending)
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return err
-		}
-		act = true
+		act = may
 		return nil
 	})
 	if err != nil {

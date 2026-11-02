@@ -106,10 +106,11 @@ type BackgroundWork struct {
 	Kinds   []string `json:"kinds"`
 }
 
-// PhaseActivity is whether the session's phase is open and when the reminder armed for it is due;
-// NextReminderAt is null when no armed reminder is still live.
+// PhaseActivity is when the reminder armed for the session's phase is due; NextReminderAt is null
+// when no armed reminder is still live, which a session whose phase has closed always reports.
+// Whether the phase is open is the daemon's own reading of the record (workflow's idlePhaseOpen),
+// not the session's to state.
 type PhaseActivity struct {
-	Open           bool       `json:"open"`
 	NextReminderAt *time.Time `json:"nextReminderAt"`
 }
 

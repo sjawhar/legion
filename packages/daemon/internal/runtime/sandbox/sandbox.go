@@ -341,7 +341,7 @@ func configureProber(opts Options) (*Runtime, error) {
 		testPostgres: opts.TestPostgres,
 		tokens:       opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{}, stranded: map[string]string{},
-		launchers: newLaunchers(), cacheConfig: opts.RepositoryCache, mapped: opts.Mapped,
+		cacheConfig: opts.RepositoryCache, mapped: opts.Mapped,
 		cacheDial: (&net.Dialer{}).DialContext, occupiedCaches: map[string]bool{}, cacheBearers: map[string]string{},
 	}
 	if len(r.agent) == 0 {
@@ -353,6 +353,9 @@ func configureProber(opts Options) (*Runtime, error) {
 	if r.log == nil {
 		r.log = slog.Default()
 	}
+	// The launchers carry one pod's saved workspace bundle to it before any of its roles start,
+	// and log what they could not carry, so they are built once the runtime's log is settled.
+	r.launchers = newLaunchers(opts.SavedWorkspaceBundle, opts.WorkspaceBundleRestored, r.log)
 	return r, nil
 }
 
@@ -895,6 +898,11 @@ var _ runtime.WorkspaceBundler = (*Runtime)(nil)
 // shim builds the bundle in the workspace it already works in, so a claim with no locator, one
 // whose pod is not the recorded one, and one with no connection are each a refusal rather than an
 // empty bundle.
+//
+// It is the role's shim that answers, never its launcher, so a release has to ask before it stops
+// the role's process: the idle release's save is a row of its own ahead of its role stops
+// (record.IssueBundle, the daemon's idleReleaseRows), and asking after them refuses with "holds
+// no role process to bundle it".
 func (r *Runtime) BundleWorkspace(ctx context.Context, issue string, role claim.Role) (runtime.WorkspaceBundle, error) {
 	token, err := claim.NewToken(r.project, issue, role)
 	if err != nil {

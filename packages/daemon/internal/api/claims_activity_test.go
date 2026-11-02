@@ -40,7 +40,7 @@ func TestClaimActivityIsWrittenOntoTheClaimAndReadBack(t *testing.T) {
 		Activity: claim.SessionActivity{
 			At:             read,
 			BackgroundWork: claim.BackgroundWork{Running: true, Kinds: []string{"async-job", "subagent"}},
-			Phase:          claim.PhaseActivity{Open: true, NextReminderAt: &wake},
+			Phase:          claim.PhaseActivity{NextReminderAt: &wake},
 		},
 	}, nil)
 	if recorder.Code != http.StatusNoContent || recorder.Body.Len() != 0 {
@@ -61,14 +61,14 @@ func TestClaimActivityIsWrittenOntoTheClaimAndReadBack(t *testing.T) {
 		t.Errorf("activity_next_reminder_at = %s, want %s", stored.ActivityNextReminderAt, wake)
 	}
 
-	// The work ended and the phase closed: an empty kind list and no wake are written as such,
-	// never left at what the last report said.
+	// The work ended and no reminder is armed any more: an empty kind list and no wake are
+	// written as such, never left at what the last report said.
 	later := read.Add(time.Minute)
 	if recorder := h.request(http.MethodPost, "/legion/v1/claims/activity", claim.ActivityRequest{
 		ClaimToken: token, SessionID: "ses_implementer", Secret: registered.Secret,
 		Activity: claim.SessionActivity{
 			At:    later,
-			Phase: claim.PhaseActivity{Open: false},
+			Phase: claim.PhaseActivity{},
 		},
 	}, nil); recorder.Code != http.StatusNoContent {
 		t.Fatalf("the second activity = %d; body %s", recorder.Code, recorder.Body)
@@ -87,7 +87,7 @@ func TestClaimActivityRefusesACallerThatCannotProveItsClaim(t *testing.T) {
 	token, bootToken := h.launch("LEGION-208", "implementer")
 	registered := h.registered(bootToken, "ses_implementer")
 	read := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
-	activity := claim.SessionActivity{At: read, Phase: claim.PhaseActivity{Open: true}}
+	activity := claim.SessionActivity{At: read, Phase: claim.PhaseActivity{}}
 
 	wrongSecret := h.request(http.MethodPost, "/legion/v1/claims/activity", claim.ActivityRequest{
 		ClaimToken: token, SessionID: "ses_implementer", Secret: "not-the-secret", Activity: activity,

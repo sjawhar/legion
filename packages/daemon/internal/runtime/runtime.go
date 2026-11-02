@@ -147,6 +147,21 @@ type WorkspaceBundler interface {
 	BundleWorkspace(ctx context.Context, issue string, role claim.Role) (WorkspaceBundle, error)
 }
 
+// SavedWorkspaceBundle answers the bundle an issue's last release saved, and false when the issue
+// has none: one never released, one whose restore the launcher has already confirmed, or one
+// whose release a wake cancelled. It is the other half of WorkspaceBundler: the save's own store
+// (store.Store.WorkspaceBundle), handed to the runtime so that the runtime, which alone knows
+// when a replacement pod's launcher is up, can carry the saved work back into the new workspace
+// before any role of that pod starts.
+type SavedWorkspaceBundle func(ctx context.Context, issue string) (WorkspaceBundle, bool, error)
+
+// WorkspaceBundleRestored is the runtime's confirmation that the issue's saved work has reached
+// the pod that replaces the released one: the launcher holds the whole, digest-checked bundle and
+// will restore it before its first role runs. It drops the saved copy
+// (store.Store.DeleteWorkspaceBundle), so it is called only on that confirmation — a bundle no
+// launcher has taken stays in the daemon's database for the issue's next pod.
+type WorkspaceBundleRestored func(ctx context.Context, issue string) error
+
 // RegistrationDeadline is the registration deadline's base Boot×RegistrationIntervals bound plus
 // grace: the supervisor's armRegistration calls it with ProvisionBound before a claim's hello and
 // with zero after, so the one computation is the deadline's.

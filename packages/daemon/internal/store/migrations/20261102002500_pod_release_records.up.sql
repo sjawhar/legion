@@ -32,12 +32,22 @@ create table pod_resumes (
 );
 create index pod_resumes_project_at on pod_resumes (project, at desc);
 
--- One row per pass of the idle rule that kept a pod, with the rule's own name for the reason.
+-- One row per streak of the idle rule keeping a pod for one reason, rather than one row per
+-- pass: a pod held by an answer nobody has given or by an old image is held for days, and at one
+-- tick a minute that would be 1,440 rows a day saying the same thing. The row is upserted on
+-- (project, issue, reason), so first_at is when the rule first read that reason for that pod, at
+-- is the newest pass, and passes counts them. reason stays the rule's own word
+-- (workflow.IdleHold's String) so a reader can group by it, and detail carries what that one word
+-- leaves out — the kinds a background-work hold's session reported — empty where there is none.
 create table pod_holds (
   id bigserial primary key,
   project text not null,
   issue text not null,
   reason text not null,
-  at timestamptz not null
+  detail text not null default '',
+  first_at timestamptz not null,
+  at timestamptz not null,
+  passes bigint not null default 1
 );
+create unique index pod_holds_project_issue_reason on pod_holds (project, issue, reason);
 create index pod_holds_project_at on pod_holds (project, at desc);

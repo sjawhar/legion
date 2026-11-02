@@ -29,6 +29,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/sessionproxy"
+	"github.com/sjawhar/legion/daemon/internal/shim"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -769,8 +770,8 @@ type bundleRestore struct {
 	// results answers a repeated slice as a repeated launcher_start id is answered: the same
 	// result for the same payload, a refusal for a different one under an id already used.
 	results map[string]shimwire.LauncherBundleResult
-	// body is the whole bundle, held until a start applies it; applied is the restore having run,
-	// and notice what it restored or could not.
+	// body is the whole bundle, joined from the slices and held until a start applies it, and
+	// released there: the slices hold the same bytes, and nothing reads the join again (apply).
 	body    []byte
 	applied bool
 	// restored is whether that run put the saved work back, which the generation is told so that
@@ -860,36 +861,45 @@ func (r *bundleRestore) apply(ctx context.Context, env []string) (bool, string) 
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.body == nil {
-		return false, ""
-	}
+	// The restore has run: it is answered from what it left, since the body it read went with
+	// it. This is read before the body, which a restore that has run no longer holds.
 	if r.applied {
 		return r.restored, r.notice
 	}
-	workspace := envValue(env, "LEGION_WORKSPACE")
-	if workspace == "" {
+	if r.body == nil {
+		return false, ""
+	}
+	dir := envValue(env, "LEGION_WORKSPACE")
+	if dir == "" {
 		return false, ""
 	}
 	r.applied = true
 	bundle, err := shimwire.ParseWorkspaceBundle(r.body)
+	// The joined body is the bundle's bytes a second time: the slices hold the same bytes, and
+	// they stay, since a repeated slice is answered by comparing it with the one held (sliceAt).
+	// The join is let go here instead, so a 40 MiB bundle is not resident twice for the pod's
+	// whole life; nothing reads it again, since every later apply is answered above.
+	r.body = nil
 	if err != nil {
 		r.notice = fmt.Sprintf("the released workspace's saved work could not be read (%v); this workspace holds only what was pushed", err)
 		return false, r.notice
 	}
-	r.restored, r.notice = restoreWorkspace(ctx, workspace, env, bundle)
+	r.restored, r.notice = restoreWorkspace(ctx, dir, env, bundle)
 	return r.restored, r.notice
 }
 
-// restoreWorkspace puts one saved bundle back into workspace and answers the notice of what it
-// restored, or of what was lost and why. A restore that fails leaves the workspace as
+// restoreWorkspace puts one saved bundle back into the workspace at dir and answers the notice of
+// what it restored, or of what was lost and why. A restore that fails leaves the workspace as
 // provisioning made it — what the issue's branch holds — and the roles start on that.
-func restoreWorkspace(ctx context.Context, workspace string, env []string, b shimwire.WorkspaceBundle) (bool, string) {
+func restoreWorkspace(ctx context.Context, dir string, env []string, b shimwire.WorkspaceBundle) (bool, string) {
+	// Every reason is written as one line (oneLine), however many lines the tool that failed
+	// wrote: the notice goes to the container's log, where one line is one notice.
 	lost := func(reason string) (bool, string) {
 		return false, fmt.Sprintf("the released workspace's saved work was not restored (%s); this workspace holds only what was pushed,"+
 			" and the work of %d head(s) and %d bookmark(s) saved at %s is in the daemon's database alone",
-			reason, len(b.Tips), len(b.Bookmarks), b.At.UTC().Format(time.RFC3339))
+			oneLine(reason), len(b.Tips), len(b.Bookmarks), b.At.UTC().Format(time.RFC3339))
 	}
-	gitDir, err := workspaceGitDir(workspace)
+	gitDir, err := workspace.GitDir(dir)
 	if err != nil {
 		return lost(err.Error())
 	}
@@ -908,8 +918,12 @@ func restoreWorkspace(ctx context.Context, workspace string, env []string, b shi
 	}
 	ctx, cancel := context.WithTimeout(ctx, restoreBudget)
 	defer cancel()
+	// The restore runs its jj and git through the shim's own runner: the save that built this
+	// bundle ran through it, and it is what names a stale git lock in a failure's report
+	// (shim's staleGitLockNote) and what stops a child holding the pipe past the budget.
+	started := time.Now()
 	run := func(stdin []byte, args ...string) (string, error) {
-		return runRestoreCommand(ctx, workspace, env, stdin, args)
+		return shim.RunWorkspaceCommand(ctx, restoreBudget, started, env, dir, stdin, args)
 	}
 	// The bundle's own prerequisites are the commits the new pod's workspace fetch was expected
 	// to hold; one that is gone — a branch force-pushed away since the release — is what git
@@ -917,115 +931,43 @@ func restoreWorkspace(ctx context.Context, workspace string, env []string, b shi
 	if _, err := run(nil, "git", "--git-dir="+gitDir, "bundle", "unbundle", path); err != nil {
 		return lost(err.Error())
 	}
-	if _, err := run(restoreRefUpdates("create", b.Tips), "git", "--git-dir="+gitDir, "update-ref", "--stdin"); err != nil {
+	if _, err := run(workspace.RefUpdates("create", restoreRefHeadPrefix, b.Tips), "git", "--git-dir="+gitDir, "update-ref", "--stdin"); err != nil {
 		return lost(err.Error())
 	}
-	if _, err := run(nil, "jj", "git", "import", "-R", workspace); err != nil {
+	if _, err := run(nil, "jj", "git", "import", "-R", dir); err != nil {
 		return lost(err.Error())
 	}
 	for _, name := range slices.Sorted(maps.Keys(b.Bookmarks)) {
-		if _, err := run(nil, "jj", "bookmark", "set", "-R", workspace, "--ignore-working-copy", "--allow-backwards", name, "-r", b.Bookmarks[name]); err != nil {
+		if _, err := run(nil, "jj", "bookmark", "set", "-R", dir, "--ignore-working-copy", "--allow-backwards", name, "-r", b.Bookmarks[name]); err != nil {
 			return lost(err.Error())
 		}
 	}
-	if _, err := run(nil, "jj", "edit", "-R", workspace, b.Head); err != nil {
+	if _, err := run(nil, "jj", "edit", "-R", dir, b.Head); err != nil {
 		return lost(err.Error())
 	}
 	// The temporary branches go through jj, which keeps each head visible; deleting the git refs
 	// under it would have jj abandon the commits they made visible, taking the restored work with
 	// them. Whatever jj did not export is deleted after, so none is left in the repository.
 	for index := range b.Tips {
-		if _, err := run(nil, "jj", "bookmark", "delete", "-R", workspace, "--ignore-working-copy", restoreRefPrefix+strconv.Itoa(index)); err != nil {
+		if _, err := run(nil, "jj", "bookmark", "delete", "-R", dir, "--ignore-working-copy", restoreRefPrefix+strconv.Itoa(index)); err != nil {
 			return lost(err.Error())
 		}
 	}
-	if _, err := run(restoreRefUpdates("delete", b.Tips), "git", "--git-dir="+gitDir, "update-ref", "--stdin"); err != nil {
+	if _, err := run(workspace.RefUpdates("delete", restoreRefHeadPrefix, b.Tips), "git", "--git-dir="+gitDir, "update-ref", "--stdin"); err != nil {
 		return lost(err.Error())
 	}
 	return true, fmt.Sprintf("the released workspace's saved work is restored: %d head(s), %d bookmark(s) and the working copy on %s, saved at %s",
 		len(b.Tips), len(b.Bookmarks), b.Head, b.At.UTC().Format(time.RFC3339))
 }
 
-// restoreRefUpdates is the `git update-ref --stdin` input that creates or deletes one temporary
-// branch per saved head, named by the head's place in the bundle.
-func restoreRefUpdates(verb string, tips []string) []byte {
-	var out strings.Builder
-	for index, tip := range tips {
-		out.WriteString(verb + " refs/heads/" + restoreRefPrefix + strconv.Itoa(index))
-		if verb == "create" {
-			out.WriteString(" " + tip)
-		}
-		out.WriteString("\n")
-	}
-	return []byte(out.String())
-}
+// restoreRefHeadPrefix is where the restore's temporary branches live while jj imports them: one
+// branch per saved head, named by the head's place in the bundle (workspace.RefUpdates).
+const restoreRefHeadPrefix = "refs/heads/" + restoreRefPrefix
 
-// runRestoreCommand runs one jj or git command of the restore in the workspace, under the
-// generation's own environment. Every one names the directory it runs in: jj searches upward from
-// there for the closest .jj and reads that repository's configuration before it applies -R, so a
-// command left standing wherever the launcher stands would read a repository nobody named
-// (docs/testing.md). A failure is returned with the command's own report.
-func runRestoreCommand(ctx context.Context, dir string, env []string, stdin []byte, args []string) (string, error) {
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	cmd.Dir = dir
-	cmd.Env = env
-	if len(stdin) > 0 {
-		cmd.Stdin = bytes.NewReader(stdin)
-	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		report := strings.TrimSpace(stderr.String())
-		if report == "" {
-			report = err.Error()
-		}
-		return "", fmt.Errorf("%s: %s", strings.Join(args, " "), oneLine(report))
-	}
-	return strings.TrimSpace(stdout.String()), nil
-}
-
-// oneLine is report as a notice carries it: its lines joined with "; ", so a notice is one line
+// oneLine is a report as a notice carries it: its lines joined with "; ", so a notice is one line
 // of the container's log however many lines git wrote.
 func oneLine(report string) string {
-	var kept []string
-	for line := range strings.SplitSeq(report, "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			kept = append(kept, line)
-		}
-	}
-	return strings.Join(kept, "; ")
-}
-
-// workspaceGitDir is the git directory behind a jj workspace, read from jj's own files rather
-// than from a git that would search upward from wherever it was started: <workspace>/.jj/repo
-// names the repository (a directory in the repository's own workspace, a file holding its path in
-// every other), and <repo>/store/git_target names the git directory relative to <repo>/store.
-func workspaceGitDir(workspace string) (string, error) {
-	repo := filepath.Join(workspace, ".jj", "repo")
-	info, err := os.Stat(repo)
-	if err != nil {
-		return "", fmt.Errorf("read %s: %v", repo, err)
-	}
-	if !info.IsDir() {
-		named, err := os.ReadFile(repo)
-		if err != nil {
-			return "", fmt.Errorf("read %s: %v", repo, err)
-		}
-		repo = absoluteUnder(filepath.Join(workspace, ".jj"), strings.TrimSpace(string(named)))
-	}
-	target, err := os.ReadFile(filepath.Join(repo, "store", "git_target"))
-	if err != nil {
-		return "", fmt.Errorf("read the workspace's git directory: %v", err)
-	}
-	return absoluteUnder(filepath.Join(repo, "store"), strings.TrimSpace(string(target))), nil
-}
-
-// absoluteUnder resolves path as jj writes it: absolute as it stands, relative to base otherwise.
-func absoluteUnder(base, path string) string {
-	if filepath.IsAbs(path) {
-		return filepath.Clean(path)
-	}
-	return filepath.Clean(filepath.Join(base, path))
+	return strings.Join(workspace.OutputLines(report), "; ")
 }
 
 // roleLog is the one container log an issue pod's roles share: every line a role's launcher or

@@ -222,13 +222,12 @@ func (s *Store) ReleasedClaimsIn(ctx context.Context, project, issue string) ([]
 
 // PodWakeBackstop is one armed backstop: the phase worker it wakes and when it comes due.
 type PodWakeBackstop struct {
-	ID         int64
-	Project    string
-	Issue      string
-	Role       claim.Role
-	Release    int64
-	DueAt      time.Time
-	Generation uint64
+	ID      int64
+	Project string
+	Issue   string
+	Role    claim.Role
+	Release int64
+	DueAt   time.Time
 }
 
 // ArmPodBackstop arms the backstop of issue's role at due, over the release release names. A role

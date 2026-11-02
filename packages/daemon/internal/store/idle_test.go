@@ -161,8 +161,9 @@ func TestReleaseIdleIssueWritesItsRowsAndItsMarkTogether(t *testing.T) {
 	marked, err := st.ReleaseIdleIssue(ctx, "legion", rootIssue, func(view IdleView) (IdleReleaseMark, error) {
 		seen = view
 		return IdleReleaseMark{Generation: view.Generation, Role: claim.RoleImplementer, Rows: []IdleReleaseRow{
-			{Kind: "supervise", Payload: []byte(`{"op":"release","tree":"LEGION-208","role":"implementer","generation":1}`)},
-			{Kind: "issue_release", Payload: []byte(`{"tree":"LEGION-208","generation":1,"treeGeneration":1,"role":"implementer"}`)},
+			{Kind: "issue_bundle", Payload: []byte(`{"tree":"LEGION-208","generation":1,"treeGeneration":1,"role":"implementer"}`)},
+			{Kind: "supervise", Payload: []byte(`{"op":"release","tree":"LEGION-208","role":"implementer","generation":1}`), Boundary: true},
+			{Kind: "issue_release", Payload: []byte(`{"tree":"LEGION-208","generation":1,"treeGeneration":1}`)},
 		}}, nil
 	})
 	if err != nil || !marked {
@@ -172,7 +173,7 @@ func TestReleaseIdleIssueWritesItsRowsAndItsMarkTogether(t *testing.T) {
 		t.Fatalf("the decision saw %+v, want the issue's one claim", seen.Claims)
 	}
 
-	var first, second int64
+	var ids []int64
 	var kinds []string
 	queued, err := st.Pool().Query(ctx, `select id, kind from outbox where issue = $1 order by id`, rootIssue)
 	if err != nil {
@@ -184,17 +185,14 @@ func TestReleaseIdleIssueWritesItsRowsAndItsMarkTogether(t *testing.T) {
 		if err := queued.Scan(&id, &kind); err != nil {
 			t.Fatal(err)
 		}
-		if first == 0 {
-			first = id
-		} else {
-			second = id
-		}
-		kinds = append(kinds, kind)
+		ids, kinds = append(ids, id), append(kinds, kind)
 	}
 	queued.Close()
-	if len(kinds) != 2 || kinds[0] != "supervise" || kinds[1] != "issue_release" || second <= first {
-		t.Fatalf("queued rows = %v (%d, %d), want the role stop then the teardown", kinds, first, second)
+	if len(kinds) != 3 || kinds[0] != "issue_bundle" || kinds[1] != "supervise" || kinds[2] != "issue_release" ||
+		ids[1] <= ids[0] || ids[2] <= ids[1] {
+		t.Fatalf("queued rows = %v (%v), want the save, then the role stop, then the teardown", kinds, ids)
 	}
+	first := ids[1]
 	var boundary, generation int64
 	var role string
 	if err := st.Pool().QueryRow(ctx, `select boundary_row, generation, role from issue_releases where project='legion' and issue=$1`,
@@ -212,7 +210,7 @@ func TestReleaseIdleIssueWritesItsRowsAndItsMarkTogether(t *testing.T) {
 			t.Error("the second decision was handed a view that does not report the release in progress")
 		}
 		return IdleReleaseMark{Generation: 1, Role: claim.RoleImplementer, Rows: []IdleReleaseRow{
-			{Kind: "supervise", Payload: []byte(`{"op":"release","tree":"LEGION-208","role":"implementer","generation":1}`)},
+			{Kind: "supervise", Payload: []byte(`{"op":"release","tree":"LEGION-208","role":"implementer","generation":1}`), Boundary: true},
 		}}, nil
 	})
 	if err != nil || again {
@@ -221,8 +219,8 @@ func TestReleaseIdleIssueWritesItsRowsAndItsMarkTogether(t *testing.T) {
 	if err := st.Pool().QueryRow(ctx, `select count(*) from outbox where issue = $1`, rootIssue).Scan(&rows); err != nil {
 		t.Fatal(err)
 	}
-	if rows != 2 {
-		t.Fatalf("outbox rows = %d, want the first release's two alone", rows)
+	if rows != 3 {
+		t.Fatalf("outbox rows = %d, want the first release's three alone", rows)
 	}
 
 	if err := st.ClearIssueRelease(ctx, "legion", rootIssue); err != nil {

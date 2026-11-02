@@ -666,7 +666,7 @@ test("the ready golden carries the session's capability report", () => {
   expect(LegionReadyRequest.safeParse(withoutReport).success).toBeTrue();
 });
 
-// The idle rule reads these four values of a session and nothing else, so each is held here: the
+// The idle rule reads these three values of a session and nothing else, so each is held here: the
 // moment of the reading, whether work of the session's own was running and what kinds, and the
 // armed wake, which is null when no reminder is armed.
 test("a session's activity report carries its reading, its work and its wake", () => {
@@ -677,7 +677,7 @@ test("a session's activity report carries its reading, its work and its wake", (
     activity: {
       at: "2026-11-01T12:00:00.000Z",
       backgroundWork: { running: true, kinds: ["async-job", "subagent"] },
-      phase: { open: true, nextReminderAt: "2026-11-01T12:05:00.000Z" },
+      phase: { nextReminderAt: "2026-11-01T12:05:00.000Z" },
     },
   };
   expect(LegionActivityRequest.safeParse(report).success).toBeTrue();
@@ -687,18 +687,18 @@ test("a session's activity report carries its reading, its work and its wake", (
     activity: {
       at: report.activity.at,
       backgroundWork: { running: false, kinds: [] },
-      phase: { open: false, nextReminderAt: null },
+      phase: { nextReminderAt: null },
     },
   };
   expect(LegionActivityRequest.safeParse(quiet).success).toBeTrue();
 
   // The wake may be absent only as null, never as a missing key or a bare date, and `at` is an
   // instant: the daemon stores both as timestamps.
-  const noWakeKey = { ...quiet, activity: { ...quiet.activity, phase: { open: false } } };
+  const noWakeKey = { ...quiet, activity: { ...quiet.activity, phase: {} } };
   expect(LegionActivityRequest.safeParse(noWakeKey).success).toBeFalse();
   const badWake = {
     ...quiet,
-    activity: { ...quiet.activity, phase: { open: true, nextReminderAt: "2026-11-01" } },
+    activity: { ...quiet.activity, phase: { nextReminderAt: "2026-11-01" } },
   };
   expect(LegionActivityRequest.safeParse(badWake).success).toBeFalse();
   const badAt = { ...quiet, activity: { ...quiet.activity, at: "now" } };
@@ -735,7 +735,17 @@ test("the release records carry a release, a resume and a hold", () => {
         stuck: false,
       },
     ],
-    holds: [{ id: 1, issue: "LEGION-209", reason: "background_work", at: "2026-11-01T13:00:00Z" }],
+    holds: [
+      {
+        id: 1,
+        issue: "LEGION-209",
+        reason: "background_work",
+        detail: "subagent",
+        firstAt: "2026-11-01T12:50:00Z",
+        at: "2026-11-01T13:00:00Z",
+        passes: 11,
+      },
+    ],
   };
   expect(LegionReleaseRecordsResponse.safeParse(records).success).toBeTrue();
 

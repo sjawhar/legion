@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // PodRelease is one release of an issue pod: which roles were in it, when their claims were
@@ -53,16 +55,29 @@ type PodResume struct {
 	Stuck bool
 }
 
-// PodHold is one pass of the idle rule that kept a pod past the idle period, with the reason it
-// read. Holds are what tell a deployment whether release is working: a pod held for background
-// work is working as designed, and one held by an old image or an unsent report is not.
+// PodHold is one streak of the idle rule keeping a pod past the idle period for one reason:
+// when the rule first read that reason for that pod, when it last did, and how many passes it
+// has made. Holds are what tell a deployment whether release is working: a pod held for
+// background work is working as designed, and one held by an old image or an unsent report is
+// not. A streak is one row because a pod can be held for days and the tick runs every minute,
+// which would otherwise be 1,440 rows a day saying the same thing.
 type PodHold struct {
 	ID      int64
 	Project string
 	Issue   string
 	// Reason is the idle rule's own name for what held the pod (workflow.IdleHold's String).
+	// Detail is what that one word leaves out, empty for a reason that has nothing to add: a
+	// background-work hold carries the kinds the session reported, which is what separates a pod
+	// kept by a subagent from one kept by a background job. The reason itself stays the rule's
+	// own word, so a reader can group holds by it.
 	Reason string
-	At     time.Time
+	Detail string
+	// FirstAt is the first pass of the streak and At the newest; Passes counts them. A streak
+	// still running reads in every window whose end is at or after At, FirstAt and Passes
+	// included, so a reader sees how long a pod has been held rather than only that it is.
+	FirstAt time.Time
+	At      time.Time
+	Passes  int64
 }
 
 // PodReleaseRecords is what the daemon serves a pod that reads the records of a window: every
@@ -90,22 +105,18 @@ func (s *Store) RecordPodRelease(ctx context.Context, rel PodRelease) (int64, er
 	return id, nil
 }
 
-// RecordPodWake writes one wake of a released pod and answers the row's id, which the pod-ready
-// and first-turn observations name. The row is written when the wake is taken, not when the pod
-// comes back, so a resume that never reaches a first turn is in the records as a stuck one
-// rather than missing.
+// RecordPodWake is RecordPodWakeTx in a transaction of its own, for a caller outside one. It
+// answers the row's id, which the pod-ready and first-turn observations name. The row is written
+// when the wake is taken, not when the pod comes back, so a resume that never reaches a first
+// turn is in the records as a stuck one rather than missing.
 func (s *Store) RecordPodWake(ctx context.Context, res PodResume) (int64, error) {
-	if res.Project == "" || res.Issue == "" || res.Kind == "" {
-		return 0, errors.New("a pod resume record needs its project, issue and wake kind")
-	}
 	var id int64
-	err := s.pool.QueryRow(ctx, `insert into pod_resumes (release_id, project, issue, role, kind, at)
-		values ($1, $2, $3, $4, $5, $6) returning id`,
-		res.Release, res.Project, res.Issue, res.Role, res.Kind, res.At).Scan(&id)
-	if err != nil {
-		return 0, fmt.Errorf("record the wake of %s: %w", res.Issue, err)
-	}
-	return id, nil
+	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		var err error
+		id, err = RecordPodWakeTx(ctx, tx, res)
+		return err
+	})
+	return id, err
 }
 
 // MarkPodResumeReady stamps when the replacement pod was Ready. It is written once, by the first
@@ -175,13 +186,20 @@ func (s *Store) podResumesWithoutAFirstTurn(ctx context.Context, project string,
 	return out, rows.Err()
 }
 
-// RecordPodHold writes one pass of the idle rule that kept a pod past the idle period.
+// RecordPodHold records one pass of the idle rule that kept a pod past the idle period, as the
+// first pass of a streak or as another pass of the one that is running: the row is keyed by the
+// pod and the rule's reason, so a reason read again only moves the streak's end on and counts
+// the pass. greatest keeps At the newest pass read, so a pass recorded out of order never moves
+// the streak's end backwards.
 func (s *Store) RecordPodHold(ctx context.Context, hold PodHold) error {
 	if hold.Project == "" || hold.Issue == "" || hold.Reason == "" {
 		return errors.New("a pod hold record needs its project, issue and reason")
 	}
-	_, err := s.pool.Exec(ctx, `insert into pod_holds (project, issue, reason, at) values ($1, $2, $3, $4)`,
-		hold.Project, hold.Issue, hold.Reason, hold.At)
+	_, err := s.pool.Exec(ctx, `insert into pod_holds (project, issue, reason, detail, first_at, at, passes)
+		values ($1, $2, $3, $4, $5, $5, 1)
+		on conflict (project, issue, reason) do update
+		set detail = excluded.detail, at = greatest(pod_holds.at, excluded.at), passes = pod_holds.passes + 1`,
+		hold.Project, hold.Issue, hold.Reason, hold.Detail, hold.At)
 	if err != nil {
 		return fmt.Errorf("record the hold of %s: %w", hold.Issue, err)
 	}
@@ -241,7 +259,7 @@ func (s *Store) PodReleaseRecords(ctx context.Context, project string, since tim
 		return out, fmt.Errorf("read the resume records of %s: %w", project, err)
 	}
 
-	holds, err := s.pool.Query(ctx, `select id, project, issue, reason, at from pod_holds
+	holds, err := s.pool.Query(ctx, `select id, project, issue, reason, detail, first_at, at, passes from pod_holds
 		where project = $1 and at >= $2 order by id`, project, since)
 	if err != nil {
 		return out, fmt.Errorf("read the hold records of %s: %w", project, err)
@@ -249,7 +267,7 @@ func (s *Store) PodReleaseRecords(ctx context.Context, project string, since tim
 	defer holds.Close()
 	for holds.Next() {
 		var h PodHold
-		if err := holds.Scan(&h.ID, &h.Project, &h.Issue, &h.Reason, &h.At); err != nil {
+		if err := holds.Scan(&h.ID, &h.Project, &h.Issue, &h.Reason, &h.Detail, &h.FirstAt, &h.At, &h.Passes); err != nil {
 			return out, fmt.Errorf("read the hold records of %s: %w", project, err)
 		}
 		out.Holds = append(out.Holds, h)

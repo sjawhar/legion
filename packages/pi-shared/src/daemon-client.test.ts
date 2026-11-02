@@ -142,7 +142,7 @@ test("activity posts the claim wire's report and accepts only the empty 204", as
     activity: {
       at: "2026-11-01T12:00:00.000Z",
       backgroundWork: { running: true, kinds: ["async-job"] },
-      phase: { open: true, nextReminderAt: "2026-11-01T12:05:00.000Z" },
+      phase: { nextReminderAt: "2026-11-01T12:05:00.000Z" },
     },
   };
 

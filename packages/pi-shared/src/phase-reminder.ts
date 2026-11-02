@@ -92,12 +92,12 @@ export interface PhaseReminder {
   ) => Promise<string | undefined>;
   /** `session_switch`, `session_branch`, `session_tree`. */
   readonly sessionChanged: () => void;
-  /** The phase half of the session's activity report (`src/session-activity.ts`): whether this
-   * session's phase is open, and when the reminder it armed last is due. This is the one
-   * statement of that moment — the delay each arming picks comes from the limits here, so
-   * nothing outside recomputes it. `nextReminderAt` is null when no armed timer is still live:
-   * none was armed, the phase has closed, or something has happened since that made it stale,
-   * which is the same generation guard the armed callback applies to itself. */
+  /** The phase half of the session's activity report (`src/session-activity.ts`): when the
+   * reminder this session armed last is due. This is the one statement of that moment — the
+   * delay each arming picks comes from the limits here, so nothing outside recomputes it.
+   * `nextReminderAt` is null when no armed timer is still live: none was armed, the phase has
+   * closed, or something has happened since that made it stale, which is the same generation
+   * guard the armed callback applies to itself. */
   readonly phaseWake: () => SessionActivityPhase;
 }
 
@@ -432,11 +432,10 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
       generation += 1;
     },
     phaseWake: () => {
-      const open = stall.state !== "closed";
-      if (!open || armed === undefined || armed.generation !== generation) {
-        return { open, nextReminderAt: null };
+      if (stall.state === "closed" || armed === undefined || armed.generation !== generation) {
+        return { nextReminderAt: null };
       }
-      return { open, nextReminderAt: new Date(armed.at).toISOString() };
+      return { nextReminderAt: new Date(armed.at).toISOString() };
     },
   };
 }
