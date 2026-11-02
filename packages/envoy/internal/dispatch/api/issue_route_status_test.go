@@ -524,6 +524,51 @@ func TestClaimLivenessDatesWhenAnUnresponsiveHoldersClaimComesFree(t *testing.T)
 	}
 }
 
+// The route_roster row the release before session states stored carries its sessions with no
+// state at all, and every process reads that one row until an answer replaces it. Left at the
+// zero state each of those sessions would be nobody: every route to one no_holder and every
+// claim it holds gone, so a rolling deploy would report the whole fleet absent. That release
+// asked the listener for the live list alone, so a session on its row is one it read live, and
+// that is how this one reads it. The empty field is the whole difference: a row this release
+// stores names a state on every session it carries - and never gone, which is a session the
+// list does not carry at all - so a state it does name is read as it stands.
+func TestAStoredRowFromBeforeSessionStatesReadsItsSessionsLive(t *testing.T) {
+	const lastSeen = 1700000000000
+	stored := []byte(`[
+		{"session_id":"ses-old","title":"worker ses-old","roles":["sre"],"last_seen":1700000000000},
+		{"session_id":"ses-stalled","title":"worker ses-stalled","roles":["planner"],
+		 "last_seen":1700000000000,"state":"unresponsive"}
+	]`)
+	cache := &rosterCache{}
+	roster, err := cache.remember(time.UnixMilli(lastSeen), true, "", "", stored)
+	if err != nil {
+		t.Fatalf("read the stored answer: %v", err)
+	}
+	for _, tc := range []struct{ route, want string }{
+		{route: "session:ses-old", want: "live ses-old"},
+		{route: "role:sre", want: "live ses-old"},
+		{route: "session:ses-stalled", want: "holder_unresponsive ses-stalled"},
+		{route: "role:planner", want: "holder_unresponsive ses-stalled"},
+		{route: "session:ses-ended", want: "no_holder null"},
+	} {
+		reach := roster.reach(&tc.route)
+		if got := reachText(reach.RouteStatus, reach.RouteHolder); got != tc.want {
+			t.Errorf("%s reaches %s, want %s", tc.route, got, tc.want)
+		}
+	}
+	// And the claim such a session holds is still its own, with no instant at which another
+	// agent may take it: nothing frees a live holder's claim by waiting.
+	now := time.UnixMilli(lastSeen).Add(time.Minute).UTC()
+	claim := &model.IssueClaim{Actor: model.Actor{Kind: "session", ID: "ses-old"}, At: now}
+	liveness := roster.claimLiveness(claim, now)
+	if liveness.HolderState == nil || *liveness.HolderState != envoy.StateLive {
+		t.Fatalf("holder_state = %v, want live", liveness.HolderState)
+	}
+	if liveness.TakeableAt != nil {
+		t.Fatalf("takeable_at = %v, want null for a live holder", liveness.TakeableAt)
+	}
+}
+
 // A route is judged against the stored listener answer, the route_roster row. When the database
 // cannot read that row, the failure is the database's: a filter for a judged state answers it as
 // one, never as the listener's silence (503 ENVOY_UNAVAILABLE, whose remedy - route_status=unknown

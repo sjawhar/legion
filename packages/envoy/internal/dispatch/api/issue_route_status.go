@@ -14,7 +14,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -302,6 +301,17 @@ func (s *server) storedRouteRoster(ctx context.Context) (roster routeRoster, fre
 // it, so a refill that process met reads as a refill here too; a row that carries no reason of
 // its own - one the release before the reason was stored wrote - reads
 // model.RouteReasonUnreachable, which is how that release answers it.
+//
+// A listed session that names no state is one the release before this change stored: that
+// release asked the listener for the live list alone, having no include=unresponsive selector,
+// so every session on its row is one it read live, and live is what that row means. Left at the
+// zero state, every route built from such a row would read no_holder and every claim holder
+// gone, for as long as that row serves every process - a rolling deploy reporting the whole
+// fleet absent. It is the rule the listener client already applies to a listener that predates
+// the field (envoy.Session's normalize), so a stateless answer means one thing wherever it is
+// read. The field alone tells the two apart: a row this release stores names a state on every
+// session it carries, and gone is never one of them, since a session the registry holds no
+// record of is absent from the list rather than listed as gone.
 func (c *rosterCache) remember(sent time.Time, answered bool, reason, retryAfter string, sessions []byte) (routeRoster, error) {
 	roster := routeRoster{
 		reason:     cmp.Or(reason, model.RouteReasonUnreachable),
@@ -315,6 +325,9 @@ func (c *rosterCache) remember(sent time.Time, answered bool, reason, retryAfter
 		var listed []envoy.Session
 		if err := json.Unmarshal(sessions, &listed); err != nil {
 			return routeRoster{}, err
+		}
+		for index := range listed {
+			listed[index].State = cmp.Or(listed[index].State, envoy.StateLive)
 		}
 		roster = buildRouteRoster(listed)
 	}
@@ -482,12 +495,16 @@ func (r routeRoster) reach(route *string) model.IssueRouteReach {
 // without a person's force. It answers the zero value - every field null - for an issue nobody
 // holds and for one a person holds, which has no session state to read.
 //
-// This is the read side of the two sources the claim rule has, and the slacker of them: the
-// roster is the server's copy of the listener's session list, up to routeRosterTTL (5 s) old,
-// while a claim write re-reads the holder's own record from the listener (fetchHolderLiveness)
-// and decides on that. The two can therefore disagree by that much; a read that cannot judge at
-// all answers model.ClaimHolderUnknown and never fails, because an issue page must render while
-// the listener is down, and only the write refuses.
+// What it says about taking the claim is the taking rule itself (judgeClaim in issue_claim.go),
+// never a second copy of it: the refusal a take gets and the instant this read shows a person
+// are one rule read twice, so a page cannot name an instant the write then disagrees with.
+//
+// This is the read side of the two sources that rule has, and the slacker of them: the roster is
+// the server's copy of the listener's session list, up to routeRosterTTL (5 s) old, while a
+// claim write re-reads the holder's own record from the listener (fetchHolderLiveness) and
+// decides on that. The two can therefore disagree by that much; a read that cannot judge at all
+// answers model.ClaimHolderUnknown and never fails, because an issue page must render while the
+// listener is down, and only the write refuses.
 func (r routeRoster) claimLiveness(claim *model.IssueClaim, now time.Time) model.IssueClaimLiveness {
 	if claim == nil || claim.Actor.Kind != "session" {
 		return model.IssueClaimLiveness{}
@@ -496,22 +513,17 @@ func (r routeRoster) claimLiveness(claim *model.IssueClaim, now time.Time) model
 		return model.IssueClaimLiveness{HolderState: new(model.ClaimHolderUnknown)}
 	}
 	held := r.state(claim.Actor.ID)
-	liveness := model.IssueClaimLiveness{HolderState: new(held)}
-	if index, found := r.entries[claim.Actor.ID]; found && r.sessions[index].LastSeen > 0 {
-		lastSeen := time.UnixMilli(r.sessions[index].LastSeen).UTC()
-		liveness.LastSeen = &lastSeen
+	var lastSeen int64
+	if index, found := r.entries[claim.Actor.ID]; found {
+		lastSeen = r.sessions[index].LastSeen
 	}
-	switch held {
-	case envoy.StateUnresponsive:
-		if liveness.LastSeen != nil {
-			takeable := liveness.LastSeen.Add(contracts.IssueClaimUnresponsiveGrace)
-			liveness.TakeableAt = &takeable
-		}
-	case envoy.StateGone:
-		// Gone is takeable now, and now is when this read said so; the registry keeps no
-		// last_seen for a session it holds no record of, so there is no earlier instant to name.
-		takeable := now.UTC()
-		liveness.TakeableAt = &takeable
+	judged := judgeClaim(held, lastSeen, now)
+	liveness := model.IssueClaimLiveness{HolderState: new(held)}
+	if !judged.lastSeen.IsZero() {
+		liveness.LastSeen = &judged.lastSeen
+	}
+	if !judged.takeableAt.IsZero() {
+		liveness.TakeableAt = &judged.takeableAt
 	}
 	return liveness
 }

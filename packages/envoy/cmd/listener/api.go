@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -118,9 +119,18 @@ func lastSeenOf(sessions *session.SessionRegistry, sessionID string, entry sessi
 	return sessions.LastSeen(sessionID)
 }
 
+// publishResponse is the 200 of POST /v1/messages/publish. Holder and HolderState name the role
+// message's holder and the state its own record puts it in, as GET /v1/roles/<role> names them
+// and under the same two field names, so a client reads one shape from every role answer; a
+// role message is answered 200 only for a holder a resolution read live, so that is the state it
+// carries. Unresponsive names every recipient of an ad-hoc topic send past the live window, which
+// the message was forwarded to and stored for and no receipt asked of (confirmTopicRecipient).
+// Each is left out when it is empty, so a stored-topic publish answers exactly as it did.
 type publishResponse struct {
 	contracts.Envelope
-	Holder string `json:"holder,omitempty"`
+	Holder       string        `json:"holder,omitempty"`
+	HolderState  session.State `json:"holder_state,omitempty"`
+	Unresponsive []string      `json:"unresponsive,omitempty"`
 }
 
 type subscribeResponse struct {
@@ -695,14 +705,18 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuse(w, http.StatusForbidden, outcomeCapabilityRefused, verdict.refusal)
 			return
 		}
-		if state == session.Unresponsive {
-			d.sendsToUnresponsive.Inc()
-		}
 		item.Sender = senderStamp(ctx, d.registry, d.sessions, item.SourceSession)
 		duplicate, err := d.client.PublishReportingDuplicateWithin(ctx, item)
 		if err != nil {
 			record.refuseBusUnavailable(w, err)
 			return
+		}
+		// Counted here, and only here: the send is accepted and the stream has stored it. A
+		// publish the bus refused stored nothing, and a duplicate the stream recognised stored
+		// nothing new, so neither is a message now waiting for a session that stopped answering,
+		// which is what the counter's name and help say it counts.
+		if state == session.Unresponsive && !duplicate {
+			d.sendsToUnresponsive.Inc()
 		}
 		record.accept(w, sendResponse{
 			Envelope:       item,
@@ -715,21 +729,35 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 }
 
 // deleteSessionHandler removes a live session registration at shutdown, and answers 200 whether or
-// not there was one to remove. A client that mints its own instance id sends it as the
-// client_instance_id query parameter, and then the registration is removed only while it carries
-// that id or carries none (session.SessionRegistry.DeleteIfInstance): a Claude Code /clear handoff
-// deregisters the session it hands off from before it claims that session's role, and the entry
-// under that id can by then be another process's live registration, which the handoff must leave
-// alone instead of clearing the predecessor its claim is then weighed against. Such a request
-// answers {"deleted":true} for a registration that is gone and {"deleted":false} with a reason for
-// one that stayed, both 200: the deregistering client has nothing to retry either way. Each of
-// DeleteIfInstance's two kept outcomes gets its own reason, because only one of them knows that
-// another client instance owns the registration: a delete that lost both compare-and-swaps read
-// an entry this very instance may own and says only that the registration changed under it. A
-// request naming no instance id removes the registration whoever wrote it, and answers 200 with
-// no body, as this route always has. The delete runs within sendRequestBudget of the request's
-// own context, so one the bus does not answer is the bus-unavailable 503 with Retry-After: 1
-// inside the caller's attempt (writeStoreError).
+// not there was one to remove. A caller that cannot afford to remove a registration another
+// process wrote names the condition its delete holds under, and then the registration is removed
+// only while the stored entry meets it (session.SessionRegistry.DeleteIf), under one
+// compare-and-swap at the revision the condition was read at. There are two:
+//
+//   - client_instance_id names the client instance that is leaving, and the registration is
+//     removed only while it carries that id or carries none. A Claude Code /clear handoff
+//     deregisters the session it hands off from before it claims that session's role, and the
+//     entry under that id can by then be another process's live registration, which the handoff
+//     must leave alone instead of clearing the predecessor its claim is then weighed against.
+//   - if_not_registered_after names the moment the delete belongs to, in unix milliseconds, and
+//     the registration is removed only while it was last written at or before it. It is the
+//     Legion daemon's clean stop of a role whose agent process a probe judged gone
+//     (dispatch://INFRA-392): the very decision that asks for the stop relaunches the claim under
+//     the same session id, so a stop that lands after the relaunch has registered must leave that
+//     live registration alone. A value that is not a positive whole number of milliseconds is a
+//     400, since a caller that names a condition and has it silently dropped would delete exactly
+//     what it asked to keep.
+//
+// A request naming either condition answers {"deleted":true} for a registration that is gone and
+// {"deleted":false} with a reason for one that stayed, both 200: the caller has nothing to retry
+// either way. Each outcome that keeps the entry gets its own reason, because they are separate
+// facts: one knows another client instance owns the registration, one that the registration is
+// newer than the delete, and the last — a delete that lost both compare-and-swaps — read an entry
+// this very caller may own and says only that the registration changed under it. A request naming
+// no condition at all removes the registration whoever wrote it, and answers 200 with no body, as
+// this route always has. The delete runs within sendRequestBudget of the request's own context, so
+// one the bus does not answer is the bus-unavailable 503 with Retry-After: 1 inside the caller's
+// attempt (writeStoreError).
 func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
@@ -741,10 +769,19 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
 			return
 		}
-		instanceID := strings.TrimSpace(r.URL.Query().Get("client_instance_id"))
+		conditions := session.DeleteConditions{ClientInstanceID: strings.TrimSpace(r.URL.Query().Get("client_instance_id"))}
+		if asked := strings.TrimSpace(r.URL.Query().Get("if_not_registered_after")); asked != "" {
+			millis, err := strconv.ParseInt(asked, 10, 64)
+			if err != nil || millis <= 0 {
+				writeJSONError(w, http.StatusBadRequest,
+					"if_not_registered_after must be a unix timestamp in milliseconds", "if_not_registered_after")
+				return
+			}
+			conditions.NotRegisteredAfter = millis
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
-		if instanceID == "" {
+		if conditions == (session.DeleteConditions{}) {
 			if err := sessions.Delete(ctx, sessionID); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
 				writeStoreError(ctx, w, err, http.StatusInternalServerError)
 				return
@@ -752,7 +789,7 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		outcome, err := sessions.DeleteIfInstance(ctx, sessionID, instanceID)
+		outcome, err := sessions.DeleteIf(ctx, sessionID, conditions)
 		if err != nil {
 			writeStoreError(ctx, w, err, http.StatusInternalServerError)
 			return
@@ -764,12 +801,16 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 			writeJSON(w, http.StatusOK, deleteSessionResponse{
 				Reason: "the registration belongs to another client instance",
 			})
+		case session.EntryKeptForALaterRegistration:
+			writeJSON(w, http.StatusOK, deleteSessionResponse{
+				Reason: "the registration was written after the moment the delete belongs to",
+			})
 		default:
-			// session.EntryKeptAfterLostRace: the entry matched and both conditional deletes
-			// lost to a write that landed under them, this client instance's own heartbeat
-			// among the likeliest, so the only true thing to say is that it stayed and
-			// changed. session.EntryUnanswered never reaches here: it comes with the error
-			// answered above.
+			// session.EntryKeptAfterLostRace: the entry met every condition and both
+			// conditional deletes lost to a write that landed under them, this caller's own
+			// heartbeat among the likeliest, so the only true thing to say is that it stayed
+			// and changed. session.EntryUnanswered never reaches here: it comes with the
+			// error answered above.
 			writeJSON(w, http.StatusOK, deleteSessionResponse{
 				Reason: "the registration changed while it was being removed",
 			})
@@ -778,8 +819,9 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 }
 
 // deleteSessionResponse is what DELETE /v1/sessions/<session_id> answers a request that named a
-// client instance id: whether the registration is gone, and for one that stayed why it did. A
-// request that named none answers 200 with no body at all, as this route always has.
+// condition (client_instance_id, if_not_registered_after): whether the registration is gone, and
+// for one that stayed why it did. A request that named none answers 200 with no body at all, as
+// this route always has.
 type deleteSessionResponse struct {
 	Deleted bool   `json:"deleted"`
 	Reason  string `json:"reason,omitempty"`
@@ -1451,7 +1493,8 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 	}
 }
 
-// roleGetHandler answers GET /v1/roles/<role> with the role's live holder. It resolves the holder
+// roleGetHandler answers GET /v1/roles/<role> with the role's live holder, its holder_state and
+// its last_seen. It resolves the holder
 // (resolveRoleHolder with sessionIsLive) within sendRequestBudget of the request's own context, as
 // a role send's first resolution through the publish route does, so a bus that does not answer is
 // reported inside the caller's attempt. A holder past the live window is the 404
@@ -1490,9 +1533,14 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 			writeRoleHolderError(w, role, result)
 			return
 		}
+		// holder_state is the state the holder's own record puts it in, live on this answer, and
+		// is named exactly as the 404 of a lapsed holder names it (roleHolderError.HolderState)
+		// and as the holder's state is named on a publish answer: a caller reads one field on
+		// every role answer rather than inferring the state from the status code.
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"role":         role,
 			"holder":       result.holder,
+			"holder_state": result.holderState,
 			"title":        result.entry.Title,
 			"dir":          result.entry.Dir,
 			"machine_id":   result.entry.MachineID,

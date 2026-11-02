@@ -1439,6 +1439,14 @@ check_every_plugin_shows_the_state() {
     claude_start "$claude_session"
   fi
   claude_turn "$ask" || return 1
+  # Claude Code's turn ends on its `result` line, and the model is free to summarise rather than
+  # quote what the tool answered, so one turn's prose is no measure of what envoy_sessions said.
+  # A second turn asking for the tool's own two fields settles it; the assertion is unchanged, and
+  # both turns' output is kept.
+  if ! shows_state "$work/claude.out"; then
+    claude_turn "Call the envoy_sessions tool again for $peer and reply with its answer's state and last_seen fields verbatim, as JSON." || return 1
+  fi
+  cp -f "$work/claude.out" "$evidence/answers/$check.claude.out"
   shows_state "$work/claude.out" ||
     refuse "Claude Code's envoy_sessions answer shows no state and last_seen" || return 1
   grep -q "$peer" "$work/claude.out" ||

@@ -1,0 +1,8 @@
+kind: Fixed
+body: |-
+    A `dispatch_issues` list row says an unresponsive holder is unresponsive, and since when, as
+    `dispatch_read` and the dashboard do. The rows judged a claim by membership of the live agent
+    list alone, and that list now carries unresponsive sessions, because an unresponsive session
+    keeps its roles and its claims: such a holder read as plainly holding. Each row now reads the
+    holder's own state and last registration from its agent row, and a Dispatch server that names
+    no state is read by membership as before.

@@ -460,6 +460,12 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
 /** Every callback the default `sessionContext()` timer ran, awaited after each test. */
 const contextTimers: Promise<void>[] = [];
 
+/** A managed timer scheduled further out than this is left pending by the fake below, as the
+ *  host's own clock leaves it in a test that lasts milliseconds: the heartbeat's extra call
+ *  after a failed registration is 20–40 s out, and a test that wants it supplies a `setTimeout`
+ *  of its own and runs the callback itself. */
+const TIMER_HORIZON_MS = 1_000;
+
 // The session-manager surface `isSubagentSession` reads. No transcript path reads as a
 // top-level session, so every fixture here registers unless a test supplies a transcript that
 // sits inside a parent's directory.
@@ -475,7 +481,8 @@ function sessionContext(sessionID = "ses_omp", hasUI = true): SessionContext {
     hasUI,
     sessionManager: { ...topLevelSession, getSessionId: () => sessionID },
     setInterval: () => undefined,
-    setTimeout: (callback) => {
+    setTimeout: (callback, delayMs) => {
+      if (delayMs > TIMER_HORIZON_MS) return;
       contextTimers.push(Promise.resolve().then(callback));
     },
     ui: {
@@ -1129,7 +1136,8 @@ async function bootAskNudge(
       getBranch: () => branch,
     },
     setInterval: (callback) => intervals.push(callback),
-    setTimeout: (callback) => {
+    setTimeout: (callback, delayMs) => {
+      if (delayMs > TIMER_HORIZON_MS) return;
       if (options.holdTimers === true) held.push(callback);
       else timers.push(Promise.resolve().then(callback));
     },
@@ -15327,8 +15335,9 @@ console.log(JSON.stringify(args));
     const notifications: string[] = [];
     const warned = Promise.withResolvers<void>();
     const context: SessionContext = {
-      cwd: "/tmp/envoy-omp-test",
-      sessionManager: { ...topLevelSession, getSessionId: () => "ses_heartbeat" },
+      // The host always carries a managed one-shot timer, and the heartbeat's extra call after a
+      // failed registration is scheduled on it; the default fake leaves that one pending.
+      ...sessionContext("ses_heartbeat"),
       setInterval: (callback) => intervals.push(callback),
       ui: {
         ...sessionContext().ui,
@@ -15361,6 +15370,99 @@ console.log(JSON.stringify(args));
       message.includes("registry heartbeat failed")
     );
     expect(warnings).toHaveLength(1);
+  });
+
+  test("a registration that times out is retried once inside forty seconds, and a success returns the cadence to the heartbeat", async () => {
+    let registryDown = false;
+    let registrations = 0;
+    let attempted = 0;
+    // A listener call this client gives up on has been attempted twice (`DEFAULT_TIMEOUT_MS`,
+    // two attempts), so a pass is over once its last attempt has been answered and the
+    // microtasks behind it have drained. Waiting on the attempts rather than on a duration is
+    // what keeps this test off the clock.
+    let reached = { at: 0, ...Promise.withResolvers<void>() };
+    const afterAttempts = async (at: number): Promise<void> => {
+      reached = { at, ...Promise.withResolvers<void>() };
+      if (attempted >= at) reached.resolve();
+      await reached.promise;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+    globalThis.fetch = async (input) => {
+      const registering = new URL(input.toString()).pathname === "/v1/interests/subscribe";
+      if (registering) {
+        attempted += 1;
+        if (attempted >= reached.at) reached.resolve();
+      }
+      // The symptom from production: the registration call itself times out under listener load.
+      if (registryDown) throw new Error("The operation timed out.");
+      if (registering) registrations += 1;
+      return response({ session_id: "ses_retry", machine_id: "test", dir: "/tmp", topics: [] });
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?heartbeat-retry");
+    const fixture = createPi();
+    const intervals: (() => void)[] = [];
+    // The host's managed timer, read rather than run: the delay is the assertion, and the call
+    // itself is fired here, so the retry costs the test none of the seconds it waits in a pane.
+    const scheduled: { readonly delayMs: number; readonly run: () => void | Promise<void> }[] = [];
+    const notifications: string[] = [];
+    let warned = Promise.withResolvers<void>();
+    const context: SessionContext = {
+      ...sessionContext("ses_retry"),
+      setInterval: (callback) => intervals.push(callback),
+      setTimeout: (callback, delayMs) => {
+        scheduled.push({ delayMs, run: callback });
+      },
+      ui: {
+        ...sessionContext().ui,
+        notify: (message) => {
+          notifications.push(message);
+          if (message.includes("registry heartbeat failed")) warned.resolve();
+        },
+      },
+    };
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+    expect(registrations).toBe(1);
+
+    // A tick whose registration times out buys one extra call, far enough out that a listener
+    // under load is not hit again at once and far short of the next 90 s tick.
+    registryDown = true;
+    intervals[0]?.();
+    await warned.promise;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(scheduled).toHaveLength(1);
+    const delayMs = scheduled[0]?.delayMs ?? 0;
+    expect(delayMs).toBeGreaterThanOrEqual(20_000);
+    expect(delayMs).toBeLessThanOrEqual(40_000);
+    expect(notifications).toEqual([
+      expect.stringContaining(`retrying once in ${Math.round(delayMs / 1000)} s`),
+    ]);
+
+    // That one call also fails: the session goes back to the plain interval rather than asking
+    // the listener again, so a session that keeps failing costs it one extra call per interval.
+    const beforeRetry = attempted;
+    await scheduled[0]?.run();
+    await afterAttempts(beforeRetry + 2);
+    expect(scheduled).toHaveLength(1);
+    expect(registrations).toBe(1);
+
+    // The next tick lands: the registration is accepted and the cadence is the interval's again.
+    registryDown = false;
+    warned = Promise.withResolvers<void>();
+    const beforeHealthy = attempted;
+    intervals[0]?.();
+    await afterAttempts(beforeHealthy + 1);
+    expect(registrations).toBe(2);
+    expect(scheduled).toHaveLength(1);
+
+    // And the success restored the budget: the failure after it buys an extra call of its own.
+    registryDown = true;
+    intervals[0]?.();
+    await warned.promise;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(scheduled).toHaveLength(2);
+    expect(scheduled[1]?.delayMs).toBeGreaterThanOrEqual(20_000);
+    expect(scheduled[1]?.delayMs).toBeLessThanOrEqual(40_000);
   });
 
   test("a rebind during a network outage notifies instead of failing the handler", async () => {
@@ -15531,6 +15633,58 @@ console.log(JSON.stringify(args));
 
     expect(requests).toContain("DELETE /v1/sessions/ses_shutdown");
     expect(registrationPendingAtDelete).toBe(false);
+  });
+
+  // The wait above is bounded on the shutdown path, because Oh My Pi abandons a shutdown handler
+  // after 2 s: a registration slower than the wait must not cost the DELETE. One never sent
+  // leaves the record behind for the whole gone horizon, where one that overtakes a registration
+  // only may (dispatch://INFRA-392).
+  test("session_shutdown sends the DELETE when the registration in flight never settles", async () => {
+    const requests: string[] = [];
+    const registration = Promise.withResolvers<Response>();
+    let registrations = 0;
+    globalThis.fetch = async (input, init) => {
+      const path = new URL(input.toString()).pathname;
+      requests.push(`${init?.method ?? "GET"} ${path}`);
+      if (path === "/v1/replay") return emptyReplay(init);
+      if (path === "/v1/sessions/ses_shutdown") return response({});
+      if (path === "/v1/interests/subscribe") {
+        registrations += 1;
+        // The session's own start registers as usual; the one the tool below sends never answers.
+        if (registrations === 1) return responseWithRegistration(input, init, []);
+        return registration.promise;
+      }
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?shutdown-bounds-settle");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_shutdown"));
+    const subscribing = fixture.tools
+      .find((tool) => tool.name === "envoy_subscribe")
+      ?.execute("", { topics: ["notifications.github.sjawhar.legion.pr.1.>"] });
+    // Real time: the registration has to be on the wire before the shutdown starts waiting it out.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const startedAt = Date.now();
+    await fixture.handlers.get("session_shutdown")?.({}, sessionContext("ses_shutdown"));
+    const elapsed = Date.now() - startedAt;
+
+    // The DELETE is on the wire at all, which the five-second settle inside a one-second deadline
+    // never managed, and the handler is still done inside the 2 s OMP gives it.
+    expect(requests).toContain("DELETE /v1/sessions/ses_shutdown");
+    expect(elapsed).toBeLessThan(1_900);
+
+    registration.resolve(
+      response({
+        session_id: "ses_shutdown",
+        machine_id: "test",
+        dir: "/tmp",
+        topics: ["notifications.agent.ses_shutdown"],
+      })
+    );
+    await subscribing;
   });
 
   // A `/new`, a fork or a branch mints a new id, and nothing heartbeats the old one from then on:

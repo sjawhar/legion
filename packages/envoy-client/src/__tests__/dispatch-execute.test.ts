@@ -2734,6 +2734,92 @@ describe("executeDispatchTool", () => {
     });
   });
 
+  // A list row has no liveness of its own, so it used to judge a claim by membership of the
+  // agent list alone - and that list carries unresponsive sessions now, because an unresponsive
+  // session keeps its claims. Such a holder then read as plainly holding on the list while
+  // dispatch_read and the dashboard said unresponsive (dispatch://INFRA-392, R5).
+  test("dispatch_issues says an unresponsive holder is unresponsive, from the holder's own agent row", async () => {
+    const stalledAt = Date.parse("2026-09-24T06:30:00Z");
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/agents") {
+        return response([
+          { session_id: "s1", title: "Implementer", state: "unresponsive", last_seen: stalledAt },
+          { session_id: "s2", title: "Reviewer", state: "live", last_seen: stalledAt },
+        ]);
+      }
+      return response({
+        issues: [
+          {
+            key: "ACME-1",
+            title: "Stalled",
+            status: "doing",
+            priority: null,
+            rank: "a",
+            labels: [],
+            parent: null,
+            assignee: null,
+            updated_at: "2026-09-24T06:00:00Z",
+            last_seq: 1,
+            open_asks: 0,
+            progress: { tasks: null, children: null },
+            claim: {
+              actor: { kind: "session", id: "s1", origin: { session_title: "Stamped" } },
+              at: "2026-09-24T06:00:00Z",
+            },
+            route: null,
+            route_status: null,
+            route_holder: null,
+          },
+          {
+            key: "ACME-2",
+            title: "Running",
+            status: "doing",
+            priority: null,
+            rank: "b",
+            labels: [],
+            parent: null,
+            assignee: null,
+            updated_at: "2026-09-24T06:00:00Z",
+            last_seq: 1,
+            open_asks: 0,
+            progress: { tasks: null, children: null },
+            claim: {
+              actor: { kind: "session", id: "s2", origin: { session_title: "Stamped" } },
+              at: "2026-09-24T06:00:00Z",
+            },
+            route: null,
+            route_status: null,
+            route_holder: null,
+          },
+        ],
+        total: 2,
+        limit: 50,
+        offset: 0,
+      });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issues",
+      args: { project: "ACME" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    // Both times, as dispatch_read gives them: since when it has been silent, and from when the
+    // server lets another agent take the issue (last_seen plus the 20-minute grace).
+    expect(result.text).toContain(
+      "claimed by Implementer since 2026-09-24T06:00:00Z · unresponsive since 2026-09-24T06:30:00.000Z, takeable at 2026-09-24T06:50:00.000Z"
+    );
+    // A live holder keeps its bare line, and nothing reads as not running.
+    expect(result.text).toEndWith("claimed by Reviewer since 2026-09-24T06:00:00Z");
+    expect(result.text).not.toContain("not running");
+  });
+
   test("dispatch_issues tells a route whose listener is refilling from one whose listener did not answer", async () => {
     const row = (key: string, reason: string | null) => ({
       key,

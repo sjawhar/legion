@@ -46,16 +46,30 @@ func TestStateOfARecordWithNoRegistrationTimeIsGone(t *testing.T) {
 	}
 }
 
-// IsLive answers on the package's own windows, for a caller holding a record and no registry.
-func TestIsLiveMeasuresThePackagesOwnLiveWindow(t *testing.T) {
+// The package's own windows are what a reader holding a record and no registry judges it by (a
+// reader that has a registry asks it, since an option may have moved them), and they read as
+// every window here does: a record exactly one LiveWindow old is still live, and the
+// millisecond after it is not.
+func TestStateOfOnThePackagesOwnWindows(t *testing.T) {
 	// A record's time is whole milliseconds, so the clock here is too: a now with nanoseconds in
-	// it would make the record below a fraction older than the window and prove nothing.
+	// it would make the records below a fraction older than their window and prove nothing.
 	now := time.UnixMilli(time.Now().UnixMilli())
-	if !IsLive(SessionEntry{Port: 1, UpdatedAt: now.Add(-LiveWindow).UnixMilli()}, now) {
-		t.Fatalf("a record exactly one live window (%v) old is not live", LiveWindow)
+	stateAt := func(age time.Duration) State {
+		return StateOf(SessionEntry{Port: 1, UpdatedAt: now.Add(-age).UnixMilli()}, now, LiveWindow, GoneHorizon)
 	}
-	if IsLive(SessionEntry{Port: 1, UpdatedAt: now.Add(-LiveWindow - time.Millisecond).UnixMilli()}, now) {
-		t.Fatalf("a record past the live window (%v) reads live", LiveWindow)
+	for _, tc := range []struct {
+		age  time.Duration
+		want State
+	}{
+		{age: LiveWindow, want: Live},
+		{age: LiveWindow + time.Millisecond, want: Unresponsive},
+		{age: GoneHorizon, want: Unresponsive},
+		{age: GoneHorizon + time.Millisecond, want: Gone},
+	} {
+		if got := stateAt(tc.age); got != tc.want {
+			t.Errorf("a record %v old is %s, want %s (live window %v, gone horizon %v)",
+				tc.age, got, tc.want, LiveWindow, GoneHorizon)
+		}
 	}
 }
 

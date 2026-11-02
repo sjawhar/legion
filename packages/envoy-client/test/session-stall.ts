@@ -35,6 +35,13 @@ const { ENVOY_SESSION_STALL_CHILD } = process.env;
 const HEARTBEAT_MS = 2_000;
 const LIVE_WINDOW_MS = 10_000;
 const GONE_HORIZON_MS = 60_000;
+/**
+ * ENVOY_SESSION_REAP_INTERVAL, the cadence of both of the listener's session loops: the session
+ * reaper, which deletes the record of a session past the horizon, and the role claim reaper,
+ * which releases that session's role claim and no earlier one's (`StartRoleClaimReaper`,
+ * packages/envoy/cmd/listener/main.go, started on this same interval). Nothing else releases a
+ * claim, so the last property below waits out one pass of it rather than five minutes.
+ */
 const REAP_INTERVAL_MS = 2_000;
 /**
  * The session bucket's maximum age, far above the gone horizon. It is the setting that makes the
@@ -43,14 +50,6 @@ const REAP_INTERVAL_MS = 2_000;
  * it could be read as unresponsive — which reads as `gone`, the very bug this rig exists for.
  */
 const SESSION_MAX_AGE_MS = 30 * 60_000;
-
-/**
- * How often the listener's role claim reaper runs: the one loop that releases a gone holder's
- * claim, on the hard-coded cadence of its every KV loop (`StartRoleClaimReaper`,
- * packages/envoy/cmd/listener/main.go). Nothing shortens it, so the last property below waits out
- * one pass of it in real time.
- */
-const ROLE_REAP_INTERVAL_MS = 5 * 60_000;
 
 /** The gap allowed between a registration the child reports and the `last_seen` the listener
  *  stamped for it: one request's latency, plus room for a registration the freeze cut off
@@ -551,6 +550,15 @@ describe.skipIf(!envoyStackEnabled)("a session its box stalls", () => {
     });
     expect(await roleClaim(claims, child.role)).toEqual(claimed);
 
+    // The role claim reaper runs on the same REAP_INTERVAL_MS pass as the session reaper, and
+    // passes over an unresponsive holder every time: for the whole horizon the claim stays the
+    // one the child made. Every read here is taken a pass short of the horizon
+    // (stalled.lastSeen + GONE_HORIZON_MS), which is the earliest moment any pass may release it.
+    while (Date.now() < stalled.lastSeen + GONE_HORIZON_MS - REAP_INTERVAL_MS) {
+      expect(await roleClaim(claims, child.role)).toEqual(claimed);
+      await Bun.sleep(REAP_INTERVAL_MS);
+    }
+
     await awaitState(
       envoyUrl,
       child.sessionID,
@@ -559,24 +567,35 @@ describe.skipIf(!envoyStackEnabled)("a session its box stalls", () => {
     );
     // It reached the horizon by its record's age, not by anything the rig did to it.
     expect(Date.now() - stalled.lastSeen).toBeGreaterThan(GONE_HORIZON_MS);
-    // Gone, and the claim is still exactly as it was: the session reaper takes the record, and
-    // a lookup of a gone holder still releases nothing.
-    expect(await roleClaim(claims, child.role)).toEqual(claimed);
-    const atGone = await roleAnswer(envoyUrl, child.role);
-    expect("refusal" in atGone ? atGone.refusal : undefined).toMatchObject({
-      holder: child.sessionID,
-      holder_state: "gone",
-      claim_released: false,
-    });
 
-    // Only the role claim reaper releases it, on its own pass, and only now that the holder is
-    // gone. Its cadence is fixed in the listener, so this waits out one whole pass.
+    // Only the role claim reaper releases the claim, and only now that the holder is gone. It
+    // runs on the listener's own reap interval, so from here its pass can fall between any two
+    // reads and no read can hold that moment still. What a lookup does is read on each side of
+    // the pass instead, and on each side it is nothing: while the claim stands a lookup answers
+    // holder_lapsed for a gone holder, says it released nothing and leaves the record byte for
+    // byte the one the child made, and once the reaper has taken it a lookup answers unclaimed.
+    // No answer ever reports a claim a lookup released.
     await until(
       "the role claim reaper to release the gone holder's claim",
-      Date.now() + ROLE_REAP_INTERVAL_MS + 90_000,
-      async () => (await roleClaim(claims, child.role)) === undefined
+      Date.now() + REAP_INTERVAL_MS + 30_000,
+      async () => {
+        const answer = await roleAnswer(envoyUrl, child.role);
+        const refusal = "refusal" in answer ? answer.refusal : undefined;
+        expect(answer.status).toBe(404);
+        expect(refusal?.claim_released ?? false).toBe(false);
+        if (refusal?.reason === "unclaimed") return true;
+        expect(refusal).toMatchObject({
+          reason: "holder_lapsed",
+          holder: child.sessionID,
+          holder_state: "gone",
+          claim_released: false,
+        });
+        // The record itself is the claim the child made until the reaper's pass takes it away:
+        // a lookup never writes a third thing into the role bucket.
+        expect([claimed, undefined]).toContainEqual(await roleClaim(claims, child.role));
+        return false;
+      }
     );
-    const released = await roleAnswer(envoyUrl, child.role);
-    expect("refusal" in released ? released.refusal.reason : undefined).toBe("unclaimed");
-  }, 480_000);
+    expect(await roleClaim(claims, child.role)).toBeUndefined();
+  }, 240_000);
 });

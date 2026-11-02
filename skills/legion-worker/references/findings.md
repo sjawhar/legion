@@ -77,9 +77,11 @@ and no controller reads it later. `envoy_publish`'s own answer tells you whether
 publish to a role answers with its live `holder`. It fails with
 `no holder for role legion-<project>-controller` when no session holds the role at all, and the
 listener delivers nothing (`packages/envoy/cmd/listener`, the test "unheld role returns 404
-without publishing"). It fails with a receipt timeout, naming the holder and its `holder_state`,
-when a controller holds the role and its session has not answered: an `unresponsive` controller is
-not a stopped one, so release nothing, take nothing from it, and publish no second copy.
+without publishing"). It fails with `role legion-<project>-controller holder <session> lapsed;
+claim retained`, naming the holder, its `holder_state` and its `last_seen`, when a controller
+holds the role and its session has not registered within the live window: an `unresponsive`
+controller is not a stopped one, so release nothing, take nothing from it, and publish no second
+copy.
 Either way the finding has not been taken yet, so make it an ask, as
 [What the ask says](#what-the-ask-says) spells it, on the first
 of these that holds, so a person sees it and the controller finds it when it returns:

@@ -8,17 +8,15 @@ import {
 } from "@legion/contracts";
 import { z } from "zod";
 import { formatZodIssues, ToolInputError } from "./tool-input-errors";
-import type { MessageMetadataInput, SessionInfo, SessionState } from "./transport";
+import {
+  type MessageMetadataInput,
+  type SessionInfo,
+  type SessionState,
+  UNRESPONSIVE_RULE,
+} from "./transport";
 
-/**
- * What an agent must do about a session that stopped answering (dispatch://INFRA-392). It reads
- * this at the moment it decides whether a peer is alive, so it says what to do and what not to
- * do: a stalled box costs a session its heartbeats, never its work.
- */
-const UNRESPONSIVE_RULE =
-  "An unresponsive session is not dead: it keeps its role claims and its issue claims, and a " +
-  "message sent to it is stored until it answers. Start no replacement for it and take no claim " +
-  "from it until it is gone, or has been unresponsive for more than 20 minutes.";
+// The rule itself lives beside the states it is about (`transport.ts`), so the tool
+// descriptions, the send confirmation and a refusal's message all say it in one wording.
 
 const SESSION_STATE_GUIDE =
   "A session is live, unresponsive or gone, by how long ago it last registered: live within 5 " +
@@ -264,17 +262,22 @@ export const envoyToolSpecs = [
   },
 ] as const satisfies readonly ToolSpec[];
 
-/** The envoy_send confirmation line both hosts show the model, naming the recipient's state:
- *  a send to an unresponsive session is stored for it, not a delivery that failed. */
+/** The envoy_send confirmation line both hosts show the model, naming the recipient's state and,
+ *  for one that stopped answering, since when (`lastSeen`, the listener's record of its last
+ *  registration): a send to an unresponsive session is stored for it, not a delivery that
+ *  failed, and how long it has been silent is what an agent judges the wait by. */
 export function sendConfirmationText(result: {
   readonly envelope: { readonly event_id: string };
   readonly recipient: string;
   readonly recipientState: SessionState;
   readonly confirmed: boolean;
+  readonly lastSeen?: number;
 }): string {
+  const since =
+    result.lastSeen === undefined ? "" : ` since ${new Date(result.lastSeen).toISOString()}`;
   const state =
     result.recipientState === "unresponsive"
-      ? `unresponsive, so it is stored until that session answers; ${UNRESPONSIVE_RULE}`
+      ? `unresponsive${since}, so it is stored until that session answers; ${UNRESPONSIVE_RULE}`
       : result.recipientState;
   return `sent ${result.envelope.event_id} to ${result.recipient} (${state})${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
 }

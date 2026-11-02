@@ -128,7 +128,22 @@ func opensDocument(tree *pmdoc.Node, position int) bool {
 // for none), refusing a block id the markdown repeats that live does not already repeat
 // (pmdoc.ParseForWrite).
 func parseReplacing(live *pmdoc.Node, markdown string) (*pmdoc.Node, error) {
-	return uploadedInput(pmdoc.ParseForWrite(markdown, live))
+	tree, _, err := parseWrittenReplacing(live, markdown)
+	return tree, err
+}
+
+// parseWrittenReplacing is parseReplacing with the read-back of the markdown the parse already
+// made (pmdoc.ParseWritten), which a write that stores that markdown and reads it again shares
+// rather than parsing it a second time (Ledger.ReadBackOf). The tree it returns is the parse's
+// as an upload is taken (asUploaded), so the read-back stands for what this write stores only
+// where the two render alike, which its caller compares markdown for.
+func parseWrittenReplacing(live *pmdoc.Node, markdown string) (*pmdoc.Node, pmdoc.WrittenReadBack, error) {
+	parsed, read, err := pmdoc.ParseWritten(markdown, live)
+	tree, err := uploadedInput(parsed, err)
+	if err != nil {
+		return nil, pmdoc.WrittenReadBack{}, err
+	}
+	return tree, read, nil
 }
 
 // uploadedInput is a tree parsed from caller markdown as an upload is taken (asUploaded). A
@@ -321,9 +336,10 @@ func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 
 // newDocumentCopy is a document to decode a document's state into: a snapshot or a write's fork of
 // a room this server holds, the document's stored history (loadTree, validateUpdate, and the
-// fold of its stored updates and its read-back, stateThrough), or one update the store appends
-// (appendUpdate, AppendUpdateTx), decoded alone. Its pending queue is maxUpdateItems, the queue
-// every decode of document bytes takes (see maxUpdateItems).
+// fold of its stored updates and its read-back, stateThrough), or one update the store decodes
+// alone: a browser's, which no document here encoded (appendUpdate), and one whose header names
+// no single client's item count (refuseUpdateItemCap). Its pending queue is maxUpdateItems, the
+// queue every decode of document bytes takes (see maxUpdateItems).
 //
 // It replays without ygo's format cleanup (crdt.WithFormatCleanup), which follows each remote
 // apply that changes formatted text with a commit of its own: every update a copy applies is one

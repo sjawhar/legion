@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/wait"
 )
 
 // noticeExceptionSubjects is where the Envoy listener reports a role-lane forward it could not
@@ -141,11 +142,15 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 // this daemon changes, so each finishes undelivered with one log line rather than holding every
 // later notice to that architect behind the fence. A holder only unresponsive — its session past
 // the listener's live window and still inside its gone horizon — holds the role yet, so its notice
-// is kept whole: no copy is spent and no slot of the re-hold schedule with it, and the row is tried
-// again on the outbox's backoff until the session's heartbeats land, which is what reaches a
-// session stalled under box load once it answers again (dispatch://INFRA-392). A role no session
-// holds is held for its architect while that architect's claim can hold it again, and finishes
-// undelivered once nobody will. Any other failure is the row's, retried on its backoff.
+// is kept whole: no copy is spent and no slot of the re-hold schedule with it, and the row waits
+// (wait.ErrWaiting), tried again on the outbox's backoff until the session's heartbeats land,
+// which is what reaches a session stalled under box load once it answers again
+// (dispatch://INFRA-392). That answer is logged as the wait it is, naming the holder and the
+// state the listener reported it in: a session that will answer for itself is no failure of the
+// row's, so it costs no error line per attempt, where a publish that did fail still costs one.
+// A role no session holds is held for its architect while that architect's claim can hold it
+// again, and finishes undelivered once nobody will. Any other failure is the row's, retried on
+// its backoff.
 func (r *outbox) noticeAnswered(ctx context.Context, row record.OutboxRow, payload, notice record.Notice,
 	tree treeSnapshot, architect claim.Token, published error,
 ) error {
@@ -172,7 +177,8 @@ func (r *outbox) noticeAnswered(ctx context.Context, row record.OutboxRow, paylo
 			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "reason", denied.Message)
 		return nil
 	case errors.Is(published, notify.ErrHolderUnresponsive):
-		return fmt.Errorf("publish notice for %s to its architect %s, whose session is unresponsive: %w", row.Issue, architect, published)
+		return wait.Errorf("the notice for %s waits for its architect %s, whose session the listener reports %s: %w",
+			row.Issue, architect, notify.StateUnresponsive, published)
 	case !errors.Is(published, notify.ErrNoHolder):
 		return fmt.Errorf("publish notice for %s to its architect %s: %w", row.Issue, architect, published)
 	}

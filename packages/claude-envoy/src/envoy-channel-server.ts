@@ -157,6 +157,32 @@ const HANDOFF_FLUSH_TIMEOUT_MS = 10_000
  */
 const REGISTRATION_SETTLE_MS = 5_000
 
+/**
+ * The whole of what the shutdown path spends settling, over both the writes the chain holds and
+ * the registration on the wire. `REGISTRATION_SETTLE_MS` on each of them is 10 s before the
+ * DELETE is even sent, and nothing gives this process that long: in a Legion pane the process
+ * group has 5 s between SIGTERM and SIGKILL (`DefaultGrace`, `packages/daemon/internal/shim`),
+ * shared with `claude` itself. A DELETE never sent leaves the record behind for the whole gone
+ * horizon, where one that overtakes a slow registration only may, so the shutdown path waits a
+ * quarter of a second — a listener round trip many times over — and sends it.
+ */
+const SHUTDOWN_SETTLE_MS = 250
+
+/**
+ * The window the one extra registration a failed heartbeat makes waits out, before the heartbeat
+ * returns to its plain interval. A registration that times out under listener load costs the
+ * session a third of its live window (`.github/scripts/check-heartbeat-margin.sh`), and three
+ * missed refreshes drop a running session out of every live listing (dispatch://INFRA-392), so
+ * one failure buys one extra call rather than a whole interval's wait. The delay is drawn fresh
+ * per call, so the sessions a slow listener failed together come back spread over twenty seconds
+ * instead of in one burst: the listener sees one extra call per failing session per interval,
+ * never a herd on the same tick. pi-envoy's pane plugin retries on the same rule
+ * (packages/pi-envoy/extensions/envoy.ts); the per-call budget is untouched by it, since the
+ * extra call is one more call and not a longer one.
+ */
+const HEARTBEAT_RETRY_MIN_MS = 20_000
+const HEARTBEAT_RETRY_MAX_MS = 40_000
+
 /** `promise`, or a rejection naming `what` once `ms` pass. */
 async function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -298,8 +324,16 @@ export interface ChannelSessionOptions {
   /** How long a handoff waits for NATS to confirm the new direct subject before it retries. */
   readonly handoffFlushTimeoutMs?: number
   /** How long a deregistration waits for a registration already on the wire (default
-   *  `REGISTRATION_SETTLE_MS`), past which the DELETE goes out anyway. */
+   *  `REGISTRATION_SETTLE_MS`), past which the DELETE goes out anyway. The shutdown path spends
+   *  at most `SHUTDOWN_SETTLE_MS` of it, over both of its waits. */
   readonly registrationSettleMs?: number
+  /**
+   * Schedules the one extra registration a failed heartbeat makes, at the delay it is handed
+   * (drawn between `HEARTBEAT_RETRY_MIN_MS` and `HEARTBEAT_RETRY_MAX_MS`), and answers how to
+   * drop it; `setTimeout` on this process's clock unless a test passes its own, so a test reads
+   * the delay the session drew and runs the call without waiting it out.
+   */
+  readonly scheduleRetry?: (run: () => void, delayMs: number) => () => void
   /**
    * `${CLAUDE_PLUGIN_DATA}`: role state per session id, the per-process handoff files, and the
    * replay state per session id.
@@ -614,10 +648,14 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    *  record behind where one that races a slow registration only may. */
   const settleMs = options.registrationSettleMs ?? REGISTRATION_SETTLE_MS
 
-  /** Resolves when `settling` settles, or when `settleMs` have passed. */
-  const settledOrGivenUp = async (settling: Promise<unknown>): Promise<void> => {
+  /** The shutdown path's whole settling budget, over both its waits (`SHUTDOWN_SETTLE_MS`). A
+   *  test that shortens `settleMs` shortens this with it. */
+  const shutdownSettleMs = Math.min(settleMs, SHUTDOWN_SETTLE_MS)
+
+  /** Resolves when `settling` settles, or when `ms` have passed. */
+  const settledOrGivenUp = async (settling: Promise<unknown>, ms = settleMs): Promise<void> => {
     const { promise, resolve } = Promise.withResolvers<void>()
-    const timer = setTimeout(resolve, settleMs)
+    const timer = setTimeout(resolve, ms)
     try {
       await Promise.race([settling.catch(() => undefined), promise])
     } finally {
@@ -626,10 +664,11 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   }
 
   /** Deregisters a session this server has stopped heartbeating: its own at shutdown, and the
-   *  pre-`/clear` id a handoff leaves behind. The DELETE carries this process's client instance
-   *  id, so the listener removes only a record this instance's registration wrote. */
-  const deregister = async (sessionID: string): Promise<void> => {
-    if (registrationInFlight !== undefined) await settledOrGivenUp(registrationInFlight)
+   *  pre-`/clear` id a handoff leaves behind, once that session's registration has settled or
+   *  `settleFor` has passed. The DELETE carries this process's client instance id, so the
+   *  listener removes only a record this instance's registration wrote. */
+  const deregister = async (sessionID: string, settleFor = settleMs): Promise<void> => {
+    if (registrationInFlight !== undefined) await settledOrGivenUp(registrationInFlight, settleFor)
     await options.client.unregisterSession({
       sessionID,
       clientInstanceID: options.clientInstanceID,
@@ -1374,8 +1413,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   // One tick at a time, and at most one pending behind it. `serialized` already
   // orders the registry writes across ticks; what these two flags buy is
   // coalescing — a tick requested while one runs (a handoff file written
-  // mid-tick) runs once, straight after — and the single immediate retry a
-  // failed tick asks for below.
+  // mid-tick) runs once, straight after.
   let heartbeatInFlight = false
   let heartbeatRequested = false
   let outageReported = false
@@ -1383,7 +1421,25 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   // "no holder" for a session whose registry entry lapsed, and only that warrants a
   // `"reregistered"` regain. Cleared once a whole tick has succeeded.
   let registrationFailed = false
-  const heartbeat = async (): Promise<void> => {
+  // Whether the one extra call a failed tick buys is already owed, and how to drop it: armed by
+  // a failed interval tick, spent by the call it schedules, and cleared by a tick that succeeds
+  // or by shutdown.
+  let retryArmed = false
+  let dropRetry: (() => void) | undefined
+  const scheduleRetry: NonNullable<ChannelSessionOptions["scheduleRetry"]> =
+    options.scheduleRetry ??
+    ((run, delayMs) => {
+      const timer = setTimeout(run, delayMs)
+      return () => {
+        clearTimeout(timer)
+      }
+    })
+  const clearRetry = (): void => {
+    retryArmed = false
+    dropRetry?.()
+    dropRetry = undefined
+  }
+  const heartbeat = async (fromRetry = false): Promise<void> => {
     if (shuttingDown || heartbeatInFlight) return
     heartbeatInFlight = true
     try {
@@ -1401,18 +1457,26 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       })
       registrationFailed = false
       outageReported = false
+      // Back to the plain interval, and a pending extra call goes with it: the registration it
+      // would refresh is fresh now, and a listener that is still slow is owed nothing.
+      clearRetry()
     } catch (error) {
+      // The extra call this failure buys, armed only from an interval tick: a retry that fails
+      // is followed by the next tick, not by a second retry, so a listener that keeps refusing
+      // sees one extra call per interval and no more. A handoff that unregistered the old id and
+      // then failed to register the new one leaves the session unreachable under both until that
+      // call, which is why it does not wait the whole interval out; the delay is drawn per
+      // session, so a listener that failed many of them is not met by all of them at once.
+      const retryIn = fromRetry ? undefined : armRetry()
       if (outageReported) return
       outageReported = true
+      const retrying =
+        retryIn === undefined
+          ? "retrying at the next heartbeat"
+          : `retrying once in ${Math.round(retryIn / 1000)} s, then every heartbeat`
       process.stderr.write(
-        `envoy-channel: registry heartbeat failed (${messageFor(error)}); retrying every heartbeat\n`,
+        `envoy-channel: registry heartbeat failed (${messageFor(error)}); ${retrying}\n`,
       )
-      // A handoff that unregistered the old id and then failed to register the new
-      // one leaves the session unreachable under both until the next attempt: one
-      // immediate retry, not the full heartbeat interval, closes that window. Bounded
-      // to once per outage: a further failure here hits the `outageReported` guard
-      // above before ever reaching this line.
-      requestHeartbeat()
     } finally {
       heartbeatInFlight = false
       // Every tick also sweeps the stream, so a missed trigger is caught up, and a listener that
@@ -1423,6 +1487,23 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         void heartbeat()
       }
     }
+  }
+  /** Schedules the extra call and answers how far out it is, or nothing when one is already
+   *  owed. */
+  const armRetry = (): number | undefined => {
+    if (retryArmed || shuttingDown) return undefined
+    retryArmed = true
+    const delayMs = Math.round(
+      HEARTBEAT_RETRY_MIN_MS + Math.random() * (HEARTBEAT_RETRY_MAX_MS - HEARTBEAT_RETRY_MIN_MS),
+    )
+    dropRetry = scheduleRetry(() => {
+      // A tick settled while the delay ran: the registration is fresh and the call is dropped.
+      if (!retryArmed) return
+      retryArmed = false
+      dropRetry = undefined
+      void heartbeat(true)
+    }, delayMs)
+    return delayMs
   }
   const requestHeartbeat = (): void => {
     if (heartbeatInFlight) heartbeatRequested = true
@@ -1510,8 +1591,8 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   // `watchFile` also calls the listener, with every stat field zeroed, when the file
   // is missing as polling begins and when it is removed. A missing file names no id
   // to adopt, and the request below already covers startup: a tick there would be a
-  // second one for the same moment, and in an outage one more attempt than the
-  // bounded retry allows.
+  // second one for the same moment, and in an outage one more attempt than the one
+  // extra call a failed tick buys.
   const handoffFileChanged = (current: Stats): void => {
     if (current.ino !== 0) requestHeartbeat()
   }
@@ -1582,17 +1663,23 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       if (shuttingDown) return
       shuttingDown = true
       clearInterval(heartbeatTimer)
+      // The extra call a failed tick scheduled goes too: nothing may register behind the DELETE,
+      // and a timer still pending would hold this process open for the whole of its delay.
+      clearRetry()
       if (handoffFile !== undefined) unwatchFile(handoffFile, handoffFileChanged)
       // The relay's unanswered frames `nak`, so the listener sends them to whoever resumes.
       closeRelay()
       await forwarder.close()
       // The heartbeat is stopped and `follow` refuses while shutting down, so no registration
       // starts from here. What the chain still holds is waited out — a registration it runs after
-      // the DELETE would write the record back — and so is one already on the wire, both bounded:
-      // a write this listener has stalled on must not keep the deregistration off the wire
-      // entirely, since a record left behind outlives this process by the whole gone horizon.
-      await settledOrGivenUp(registryWrites)
-      await deregister(identity.id).catch((error: unknown) => {
+      // the DELETE would write the record back — and so is one already on the wire, both bounded,
+      // and on this path bounded together by `shutdownSettleMs`: a write this listener has
+      // stalled on must not keep the deregistration off the wire entirely, since a record left
+      // behind outlives this process by the whole gone horizon, and the process is not given the
+      // two full waits before it is killed.
+      const settleBy = Date.now() + shutdownSettleMs
+      await settledOrGivenUp(registryWrites, shutdownSettleMs)
+      await deregister(identity.id, Math.max(0, settleBy - Date.now())).catch((error: unknown) => {
         process.stderr.write(
           `envoy-channel: session deregistration failed — ${messageFor(error)}\n`,
         )

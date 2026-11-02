@@ -158,17 +158,19 @@ An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscr
 listener. A subscription to `<subject>.>` also covers `<subject>` itself, so subscribing to a pull
 request's `.>` gets its lifecycle events as well as its comments and checks.
 
-A role message is not stored for a later holder. A publish through the API waits for the holder to
-confirm the message and answers `200` naming the holder. If no session holds the role, it is
-refused with `404`; if the holder does not take the message's delivery mode, with `403`; and if the
-holder has not confirmed it within four seconds, with `504` and the reason, `receipt_timeout` or
-`delivery_failed`. Every one of these answers names the holder's `holder_state`
-([The session list](#the-session-list)) and its `last_seen`, and says with `claim_released` whether
-the answer released the claim. A holder that is `unresponsive` keeps its role: the publish fails,
-nothing is released, and the message is published again to the same holder when the sender tries
-again. A role message published straight onto NATS, not through the API, is forwarded
-once, and if the holder does not take it the listener publishes an exception naming the reason:
-`no_holder`, `delivery_failed`, or `receipt_timeout`. Either way the forward to the holder is
+A role message is not stored for a later holder. A publish through the API resolves the role's
+holder, waits for it to confirm the message, and answers `200` naming the holder and its
+`holder_state`. If no session holds the role, it is refused `404` with the reason `unclaimed`. If
+the claim's holder is not `live`, it is refused `404` with the reason `holder_lapsed`, which names
+the holder, its `holder_state` ([The session list](#the-session-list)), its `last_seen` and
+`claim_released: false`: nothing was forwarded and nothing was released, so a holder that is
+`unresponsive` keeps its role and the sender publishes the message again once that session
+answers. If the holder does not take the message's delivery mode, the refusal is `403`; and if a
+live holder has not confirmed the message within four seconds, it is `504` naming the holder, with
+the reason `receipt_timeout` or `delivery_failed`. A role message published straight onto NATS,
+not through the API, is forwarded once, and if the holder does not take it the listener publishes
+an exception naming the reason: `no_holder`, `delivery_failed` (which a holder that is not `live`
+gives) or `receipt_timeout`. Either way the forward to the holder is
 stored on the holder's inbox, and it counts as delivered only once the stream has stored it, so a
 holder that restarts or loses its connection gets the forward once when it is back.
 
@@ -268,8 +270,11 @@ session's inbox reached through a registered topic, and every failed-delivery la
 
 ## The session list
 
-`GET /v1/sessions` lists every registered session, and `GET /v1/registry/<session_id>` answers for
-one. Besides each session's id, title, directory, topics and roles, each answer carries the
+`GET /v1/sessions` lists the `live` sessions, and the `unresponsive` ones as well when it is asked
+with `include=unresponsive`; `GET /v1/registry/<session_id>` answers for one and takes the same
+selector, so without it an `unresponsive` session is a `404` that still names that session's
+`state` and `last_seen`.
+Besides each session's id, title, directory, topics and roles, each answer carries the
 session's `state` and its `last_seen`, and the plugin the
 session registered through, which every registration sends:
 
@@ -293,13 +298,14 @@ modification time.
 | `unresponsive` | It last registered longer ago than the live window but inside the gone horizon, `ENVOY_SESSION_GONE_HORIZON` (1 hour by default). **It is not dead.** It keeps its role claims and its issue claims, a message sent to it is stored and reaches it when it answers again, and nothing starts a replacement for it. |
 | `gone` | It last registered before the gone horizon, or Envoy holds no record of it. |
 
-Only the session reaper releases a role claim, and only once that role's holder is `gone`; it runs
-every `ENVOY_SESSION_REAP_INTERVAL` (1 minute by default). No lookup, publish or failed delivery
-releases one. A Legion role whose agent process exits is `gone` at once, so its successor takes the
-role without waiting out the live window.
+Only the role claim reaper releases a role claim, and only once that role's holder is `gone`; it
+runs every `ENVOY_SESSION_REAP_INTERVAL` (1 minute by default), the period the session reaper
+keeps. No lookup, publish or failed delivery releases one. A Legion role whose agent process exits
+is `gone` at once, so its successor's soft claim takes the role without waiting out the live
+window; that claim replaces the holder, it does not release the claim.
 
-So read `state`, never the length of the list: a session absent from the list has not ended, and a
-session that reads `unresponsive` is working.
+So read `state`, never the length of the list: a session missing from the default list has not
+ended, and a session that reads `unresponsive` is working.
 
 Whether a session has the recovery of missed messages above and the 10-second connection check,
 read from its row:

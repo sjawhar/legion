@@ -4,6 +4,9 @@ body: |-
   already took, instead of a fixed five minutes. What it waits for is what that reaper decides —
   a claim is released once its holder is gone, and the session reaper is what finds a holder gone
   — so a listener told to judge records every ten seconds used to hold a gone holder's role for
-  up to five minutes after it had deleted that holder's record. The default period is unchanged.
+  up to five minutes after it had deleted that holder's record. The default is that reaper's own
+  minute, so a gone holder's role is released within a minute of its record going; a restored
+  claim's grace is measured from the listener's start against the live window, not counted in
+  passes, so it is unchanged by the shorter period.
 custom:
   Issue: pr2596

@@ -146,10 +146,18 @@ func writeRoleClaimUnreadable(w http.ResponseWriter, role string, err error) int
 }
 
 // liveSessionEntry is sessionID's record and the state that record puts its session in, for a
-// decision that acts on a session having stopped answering: a role lookup, a soft claim, the
-// reapers, a session-addressed send and an agent delivery. accept is the caller's rule about that
-// state - every caller that may not act on a stalled session passes notGone, and only the two
-// that push to a session's own port pass sessionIsLive.
+// decision that turns on whether that session is still answering: a role-holder resolution, a
+// soft claim, the reapers, a session lookup, a session-addressed send and an agent delivery.
+// accept is the caller's rule about that state.
+//
+// A caller that may act on a session which merely stopped answering passes notGone: the send
+// route, whose message is stored for such a session; the agent delivery path; both reapers
+// (sessionMayBeLive); and GET /v1/registry/<id> asked with include=unresponsive. The three that
+// may act only on a session answering now pass sessionIsLive: that same lookup asked without
+// include, a role-holder resolution (resolveRoleHolderFrom), and a soft claim weighing the
+// holder it found (roleSupersessionVerdict). No push to a session's serving port reads this
+// function at all: the push paths read session.SessionRegistry.Get, whose answer follows the
+// bucket's maximum age alone.
 //
 // The cache answers when it holds a record accept takes (session.SessionRegistry.Lookup, which
 // judges the record's own age and never its membership of the cache); otherwise the session is
@@ -293,17 +301,24 @@ func roleSupersessionVerdict(ctx context.Context, sessions *session.SessionRegis
 	}
 }
 
-// notGone is the state test of every caller that may not act on a session for having stopped
-// answering: a lookup, a soft claim's liveness read, both reapers, a session-addressed send, an
-// agent delivery and the publish route's first resolution of a role. A session within the gone
-// horizon of its last registration is unresponsive, not dead: it keeps its claims, its messages
-// are stored for it, and no replacement is started for it, so only session.Gone is an absence
-// these callers may act on.
+// notGone is the state test of every caller that may act on a session that stopped answering as
+// it acts on one that answers: a session-addressed send, an agent delivery, both reapers
+// (sessionMayBeLive), a session lookup asked for the unresponsive ones (include=unresponsive)
+// and the listing of an ad-hoc topic send's recipients (topicRecipients). A session within the
+// gone horizon of its last registration is unresponsive, not dead: it keeps its claims, its
+// messages are stored for it, and no replacement is started for it, so only session.Gone is an
+// absence these callers may act on.
 func notGone(state session.State) bool { return state != session.Gone }
 
-// sessionIsLive is the state test of the two decisions that may act only on a session that is
-// answering now: a push to a session's serving port, and a soft claim that takes a role from the
-// session that holds it.
+// sessionIsLive is the state test of the decisions that may act only on a session that is
+// answering now, because each of them waits for that session to answer or moves its role: a
+// role-holder resolution, which reaches a holder only while it can answer a forward's receipt
+// (resolveRoleHolderFrom, for the lookup route, the publish route and the role lane); a soft
+// claim weighing the holder it found and the predecessor it was given (roleSupersessionVerdict);
+// a role send's test of whether its first resolution's holder still needs resolving again
+// (sendToRole); and GET /v1/registry/<id> asked without include=unresponsive, which answers for
+// the live sessions alone. None of them is a push to a serving port: those read
+// session.SessionRegistry.Get, which judges nothing but the bucket's maximum age.
 func sessionIsLive(state session.State) bool { return state == session.Live }
 
 // roleHolderReadTimeout bounds each of the role paths' session-bucket reads, well inside the

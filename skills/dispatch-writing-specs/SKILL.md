@@ -33,7 +33,7 @@ For each spec, ask, comment and message:
 - Write about the current design, never the person or how people reached it. Never quote people or upload their words.
 - Link each source where the person wrote it, each id whole. With no link, state the design.
 - In a spec, cite code by file and symbol, never a line number: it goes stale at the next edit.
-- A sentence that cites a gate passing (a test, review, check or proof) also says what the pass does not show: "The tests pass; they catch a wrong verdict, not a proof of a contradiction."
+- A sentence that cites a gate passing (a test, review, check or proof) also says what the pass does not show.
 - Name your session only if a reader must reach it.
 - Keep only text that helps a reader understand, decide, build, check.
 - Explain each name or term a new reader may not know. Say in a clause what each issue you name does for this reader.
@@ -41,7 +41,7 @@ For each spec, ask, comment and message:
 
 ## Questions
 
-- Name the concrete case first: which machines, files, sessions or people, and the numbers. Then ask the choice in those terms, never "Which option?": a reader cannot work back from a general question to the case.
+- Name the concrete case first: which machines, files, sessions or people, and the numbers. Then ask the choice in those terms, never "Which option?".
 - Propose an answer to each point, numbers included, with a reason.
 - A choice inside what the person asked for, or one their messages favour, is settled: decide it.
 - Ask only for the person's authority, taste or risk appetite, when options differ on what they care about.

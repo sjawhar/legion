@@ -43,6 +43,8 @@ Which machines, files or people, the numbers, then "A happens to X, or B to Y?" 
 
 Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, `done` with `--reason` once driven in production. An issue with the `legion` label, or under one: never write its status with `dispatch` or route it, and claim it only as a role of its tree, whatever its claim reads. An outside claim can take the tree out of the workflow. A status write is set back or stands.
 
+A claim holds while its holder's session is `live` or `unresponsive`, which means it stopped registering, not working. Take an issue from such a holder only once its session is `gone`, or 20 minutes past its `last_seen`.
+
 A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`, which shows no event Dispatch marks quiet.
 
 ## Close what you opened
@@ -78,7 +80,7 @@ dispatch://PROJECT/artifact/<slug>/ask/<id>
 dispatch://PROJECT/artifact/<slug>/comment/<id>#b-<block>[@vN]
 ```
 
-A bare id, filename or local path is not a reference, and outside Dispatch neither is `dispatch://`: give the `https://` link `dispatch` printed. Write each id whole, from `dispatch read`'s `Ask id:` or the page URL: the command takes a prefix, a person's link does not.
+A bare id, filename or local path is not a reference, and outside Dispatch neither is `dispatch://`: give the `https://` link `dispatch` printed. Write each id whole: the command takes a prefix, a person's link does not.
 
 ## Setup and the HTTP API
 

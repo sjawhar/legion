@@ -92,7 +92,7 @@ func (c *Client) requestConfirmed(ctx context.Context, subject string, data []by
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return nil, err
 	}
-	conn := c.currentConn()
+	conn := c.Connection()
 	inbox := conn.NewInbox()
 	replies, err := conn.SubscribeSync(inbox)
 	if err != nil {
@@ -100,7 +100,7 @@ func (c *Client) requestConfirmed(ctx context.Context, subject string, data []by
 	}
 	defer replies.Unsubscribe()
 	err = c.publishConfirmed(ctx, conn, &nats.Msg{Subject: subject, Reply: inbox, Data: data}, conn.PublishMsg)
-	if err != nil && !errors.Is(err, errPublishUnconfirmed) {
+	if err != nil && !errors.Is(err, ErrPublishUnconfirmed) {
 		return nil, err
 	}
 	reply, waitErr := replies.NextMsgWithContext(ctx)

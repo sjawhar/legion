@@ -22,12 +22,13 @@ import (
 )
 
 // roleForwardDedupePrefix marks an envelope already sent from the role arbiter, or the publish
-// route, to its selected agent subject. A role lane that takes one again (an operator re-publishing
-// a received frame) does not re-enter the arbiter with it, and a session's dedupe reads it as a
-// forward. The durable acknowledges the stored forward copy by its subject (listenerDeliveryHandler)
-// for every holder that has it another way; a serving-port holder of this listener has no
-// subscriber, so its copy is its delivery (roleForwardCopyDelivery).
-const roleForwardDedupePrefix = "envoy.role.forward."
+// route, to its selected agent subject (contracts.RoleForwardDedupePrefix). A role lane that takes
+// one again (an operator re-publishing a received frame) does not re-enter the arbiter with it,
+// and a session's dedupe reads it as a forward. The durable acknowledges the stored forward copy
+// by its subject (listenerDeliveryHandler) for every holder that has it another way; a
+// serving-port holder of this listener has no subscriber, so its copy is its delivery
+// (roleForwardCopyDelivery).
+const roleForwardDedupePrefix = contracts.RoleForwardDedupePrefix
 
 const roleReceiptTimeout = 2 * time.Second
 
@@ -42,14 +43,15 @@ func shouldNAKFanoutDelivery(sessionLive bool, err error) bool {
 
 type listenerDeliveryHandlerConfig struct {
 	client *bus.Client
-	// forwardRole publishes a role-lane envelope to the holder's agent subject and returns the wait
-	// for its outcome; main.go wires startRoleForward(client). The wait's bus.ErrReceiptTimeout
-	// means the forward was flushed to the server and no receipt arrived inside timeout;
-	// bus.ErrForwardNotStored that the stream did not acknowledge storing it; any other error — a
-	// raw nats.ErrTimeout from the flush included, returned by the publish or the wait — means the
-	// forward is not known to have reached the holder. storedOnly asks for a forward that counts as
-	// delivered on the stream's acknowledgement alone (roleForwardStoredOnly).
-	forwardRole func(subject string, item contracts.Envelope, timeout time.Duration, storedOnly bool) (wait func() error, err error)
+	// forwardRole publishes a role-lane envelope to the holder's agent subject under msgID, its
+	// Nats-Msg-Id when not empty, and returns the wait for its outcome; main.go wires
+	// startRoleForward(client). The wait's bus.ErrReceiptTimeout means the forward was flushed to
+	// the server and no receipt arrived inside timeout; bus.ErrForwardNotStored that the stream
+	// did not acknowledge storing it; any other error — a raw nats.ErrTimeout from the flush
+	// included, returned by the publish or the wait — means the forward is not known to have
+	// reached the holder. storedOnly asks for a forward that counts as delivered on the stream's
+	// acknowledgement alone (roleForwardStoredOnly).
+	forwardRole func(subject string, item contracts.Envelope, msgID string, timeout time.Duration, storedOnly bool) (wait func() error, err error)
 	// roleForwards runs the role lane's forwards off its handler (roleForwarder), and servePorts
 	// pushes the durable path's messages to serving-port sessions off its handler, one worker per
 	// session (servePortWorkers); every delivery path hands its forwards and pushes to them, so
@@ -69,8 +71,10 @@ type listenerDeliveryHandlerConfig struct {
 	messagesNAKed     *metrics.Counter
 	// fanoutUnresponsiveSkips counts the topic fan-outs this listener skipped because the session
 	// that registered the interest is past the live window (fanoutDelivery), and the ad-hoc topic
-	// sends it skipped for the same reason (confirmTopicRecipient). A skip is not a failed
-	// delivery: it says how much of a box's fan-out is going to sessions that have stalled.
+	// sends whose receipt it did not wait for, for the same reason (confirmTopicRecipient): that
+	// send is forwarded and its copy stored, only unconfirmed. Neither is a failed delivery: the
+	// count says how much of a box's traffic is going to sessions that have stalled, every
+	// message of it kept for the session to read when it answers again.
 	fanoutUnresponsiveSkips *metrics.Counter
 	deliveryDuration        *metrics.Histogram
 	// unplaceableRetryWindow is how long an agent delivery this listener cannot place is held

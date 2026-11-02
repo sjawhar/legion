@@ -236,6 +236,17 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 	return nil
 }
 
+// SessionDeleted is what the listener did with a conditional clean stop: Deleted is false only
+// for a registration the listener kept because the condition the stop carried refused it, and
+// Reason is the listener's own words for why (deleteSessionResponse,
+// packages/envoy/cmd/listener/api.go). A listener of an earlier release, which judges no
+// condition and answers 200 with no body, deleted the registration and says nothing, which reads
+// as Deleted with an empty Reason.
+type SessionDeleted struct {
+	Deleted bool
+	Reason  string
+}
+
 // DeleteSession removes session's registration from the listener's registry (DELETE
 // /v1/sessions/<session>), the clean stop the daemon sends for a Legion role whose agent process
 // is gone. The listener then reads the session `gone` at once rather than at the end of its live
@@ -243,23 +254,45 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 // stopped process would otherwise cost (dispatch://INFRA-392). A registry that holds no record
 // for the session answers 404: it is already gone, which is the outcome asked for, so that is no
 // failure.
-func (p *HTTPPublisher) DeleteSession(ctx context.Context, session string) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, p.baseURL+"/v1/sessions/"+url.PathEscape(session), nil)
+//
+// goneAt is the moment the stop belongs to — when the daemon's probe judged the agent process
+// gone — and rides as if_not_registered_after, the condition the listener deletes under: a
+// registration written after it belongs to the process that replaced the dead one, and the
+// listener keeps it and says so (SessionDeleted.Deleted false). Without that condition a stop
+// slow to land would take a live session's registration, which is the loss this clean stop
+// exists to prevent.
+func (p *HTTPPublisher) DeleteSession(ctx context.Context, session string, goneAt time.Time) (SessionDeleted, error) {
+	target := fmt.Sprintf("%s/v1/sessions/%s?if_not_registered_after=%d",
+		p.baseURL, url.PathEscape(session), goneAt.UnixMilli())
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, target, nil)
 	if err != nil {
-		return fmt.Errorf("build the session delete for %s: %w", session, err)
+		return SessionDeleted{}, fmt.Errorf("build the session delete for %s: %w", session, err)
 	}
 	if p.token != "" {
 		request.Header.Set("Authorization", "Bearer "+p.token)
 	}
 	response, err := p.client.Do(request)
 	if err != nil {
-		return fmt.Errorf("delete session %s: %w", session, err)
+		return SessionDeleted{}, fmt.Errorf("delete session %s: %w", session, err)
 	}
 	defer response.Body.Close()
 	switch response.StatusCode {
-	case http.StatusOK, http.StatusNoContent, http.StatusNotFound:
-		return nil
+	case http.StatusOK:
+		// Only an answer that says whether it deleted is read as one: a 200 with no body at
+		// all is the unconditional delete of a listener that judges no condition, which
+		// removed the registration, and so is any other body this route never writes.
+		body, _ := io.ReadAll(io.LimitReader(response.Body, refusalBodyLimit))
+		var kept struct {
+			Deleted *bool  `json:"deleted"`
+			Reason  string `json:"reason"`
+		}
+		if json.Unmarshal(body, &kept) == nil && kept.Deleted != nil {
+			return SessionDeleted{Deleted: *kept.Deleted, Reason: kept.Reason}, nil
+		}
+		return SessionDeleted{Deleted: true}, nil
+	case http.StatusNoContent, http.StatusNotFound:
+		return SessionDeleted{Deleted: true}, nil
 	}
 	body, _ := io.ReadAll(io.LimitReader(response.Body, refusalBodyLimit))
-	return fmt.Errorf("delete session %s: listener returned %s: %s", session, response.Status, strings.TrimSpace(string(body)))
+	return SessionDeleted{}, fmt.Errorf("delete session %s: listener returned %s: %s", session, response.Status, strings.TrimSpace(string(body)))
 }

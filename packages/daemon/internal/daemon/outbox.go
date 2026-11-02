@@ -720,7 +720,11 @@ func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload r
 	}
 	err := r.notices.Publish(ctx, notify.RoleTopicPrefix+payload.Role, payload.Packet, payload.Packet, record.OutboxKey(row.ID))
 	if errors.Is(err, notify.ErrHolderUnresponsive) {
-		return fmt.Errorf("publish %s's READY packet or its withdrawal to merge queue role %s, whose holder is unresponsive: %w", row.Issue, payload.Role, err)
+		// A wait, not a failure: settle logs a wait.ErrWaiting at INFO then DEBUG rather than
+		// ERROR on every attempt, as the notice executor's own unresponsive branch does
+		// (notice_exceptions.go).
+		return wait.Errorf("%s's READY packet waits for merge queue role %s, whose holder's session the listener reports %s: %w",
+			row.Issue, payload.Role, notify.StateUnresponsive, err)
 	}
 	if errors.Is(err, notify.ErrNoHolder) {
 		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s had no live holder at %s", payload.Role, r.now().UTC().Format(time.RFC3339))})

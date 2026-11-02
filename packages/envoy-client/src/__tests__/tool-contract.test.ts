@@ -137,7 +137,7 @@ describe("envoyToolSpecs", () => {
         "A session is live, unresponsive or gone, by how long ago it last registered: live within 5 minutes, unresponsive after that and within an hour, gone past the hour or with no record at all."
       );
       expect(description).toContain(
-        "An unresponsive session is not dead: it keeps its role claims and its issue claims, and a message sent to it is stored until it answers. Start no replacement for it and take no claim from it until it is gone, or has been unresponsive for more than 20 minutes."
+        "An unresponsive session is not dead: it keeps its role claims and its issue claims, and a message sent to it is stored until it answers. Start no replacement for it and take no claim from it until it is gone, or until 20 minutes have passed since its last_seen, the time of its last registration."
       );
       expect(description).toContain("A session named with no state is live.");
     }
@@ -170,8 +170,23 @@ describe("sendConfirmationText", () => {
         confirmed: false,
       })
     ).toBe(
-      "sent evt_1 to ses_peer (unresponsive, so it is stored until that session answers; An unresponsive session is not dead: it keeps its role claims and its issue claims, and a message sent to it is stored until it answers. Start no replacement for it and take no claim from it until it is gone, or has been unresponsive for more than 20 minutes.) (recipient unconfirmed by listener)"
+      "sent evt_1 to ses_peer (unresponsive, so it is stored until that session answers; An unresponsive session is not dead: it keeps its role claims and its issue claims, and a message sent to it is stored until it answers. Start no replacement for it and take no claim from it until it is gone, or until 20 minutes have passed since its last_seen, the time of its last registration.) (recipient unconfirmed by listener)"
     );
+  });
+
+  // The listener sends the recipient's last registration beside an unresponsive state, and a
+  // sender deciding whether to wait reads how long the peer has been silent, not only that it is
+  // (dispatch://INFRA-392, R7).
+  test("says since when an unresponsive recipient has been silent, from the listener's last_seen", () => {
+    expect(
+      sendConfirmationText({
+        envelope,
+        recipient: "ses_peer",
+        recipientState: "unresponsive",
+        confirmed: true,
+        lastSeen: 1_762_000_000_000,
+      })
+    ).toContain("(unresponsive since 2025-11-01T12:26:40.000Z, so it is stored until");
   });
 });
 

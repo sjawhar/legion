@@ -391,7 +391,7 @@ func TestSessionRegistryDeleteIfInstance_DeletesAMalformedValueThatNamesAnotherI
 		t.Fatalf("read the deleted key: %v, want nats.ErrKeyNotFound", err)
 	}
 	waitFor(t, 5*time.Second, func() bool {
-		return strings.Contains(logs.String(), "session registry deleting a malformed value for a named client instance")
+		return strings.Contains(logs.String(), "session registry deleting a malformed value under a conditional delete")
 	})
 }
 
@@ -430,6 +430,57 @@ func TestSessionRegistryDeleteIfInstance_KeepsTheEntryAfterTwoLostCompareAndSwap
 	}
 	if _, err := reg.watcher.KV().Get(sessionID); err != nil {
 		t.Fatalf("read the entry that stayed: %v, want it still stored", err)
+	}
+}
+
+// The condition the daemon's clean stop of a dead role's session carries: the registration under
+// that session id was written after the moment the stop belongs to, so it is the relaunched
+// process's and the delete must not take it (dispatch://INFRA-392).
+func TestSessionRegistryDeleteIf_KeepsARegistrationWrittenAfterTheMoment(t *testing.T) {
+	reg := openRegistryForInstanceDelete(t)
+	const sessionID = "ses_registered_again"
+	putForInstanceDelete(t, reg, sessionID, "")
+	stored, err := reg.Get(sessionID)
+	if err != nil {
+		t.Fatalf("read the registration back: %v", err)
+	}
+
+	outcome, err := reg.DeleteIf(context.Background(), sessionID, DeleteConditions{NotRegisteredAfter: stored.UpdatedAt - 1})
+	if err != nil {
+		t.Fatalf("DeleteIf: %v", err)
+	}
+	if outcome != EntryKeptForALaterRegistration {
+		t.Fatalf("DeleteIf = %s, want %s for a registration newer than the stop", outcome, EntryKeptForALaterRegistration)
+	}
+	kept, err := reg.watcher.KV().Get(sessionID)
+	if err != nil {
+		t.Fatalf("read the registration that stayed: %v, want it still stored", err)
+	}
+	if _, err := reg.Get(sessionID); err != nil {
+		t.Fatalf("the cache dropped the registration that stayed: %v (revision %d)", err, kept.Revision())
+	}
+}
+
+// The stop's own registration: nothing has been written under that session id since the moment
+// the stop belongs to, so the entry goes and the session reads gone at once.
+func TestSessionRegistryDeleteIf_DeletesARegistrationNoNewerThanTheMoment(t *testing.T) {
+	reg := openRegistryForInstanceDelete(t)
+	const sessionID = "ses_still_the_dead_launchs"
+	putForInstanceDelete(t, reg, sessionID, "")
+	stored, err := reg.Get(sessionID)
+	if err != nil {
+		t.Fatalf("read the registration back: %v", err)
+	}
+
+	outcome, err := reg.DeleteIf(context.Background(), sessionID, DeleteConditions{NotRegisteredAfter: stored.UpdatedAt})
+	if err != nil {
+		t.Fatalf("DeleteIf: %v", err)
+	}
+	if outcome != EntryDeleted {
+		t.Fatalf("DeleteIf = %s, want %s for the registration the stop belongs to", outcome, EntryDeleted)
+	}
+	if _, err := reg.watcher.KV().Get(sessionID); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("read the deleted key: %v, want nats.ErrKeyNotFound", err)
 	}
 }
 
