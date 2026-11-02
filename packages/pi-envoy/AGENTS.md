@@ -900,7 +900,7 @@ process cannot place carries no list. Dispatch is resolved per request with `com
 so no `!` token command runs on the request path, and `readSessionAnswers` works out the cache's
 directory from `process.env`. Position: the list goes after the request's last message only when
 it shows an item, or an answer or comment a person changed, that the session's list before it did
-not (`SessionAnswersRead.words`, from `sessionAnswersWords`: each item's kind, id, author, times,
+not (`SessionAnswersRead.words`, from `sessionAnswersWords` over the items the list shows, so an item the cap left out was not seen: each item's kind, id, author, times,
 options chosen and words, so an issue title, an ask's question or a cached list's header does not
 count); on the requests after that it stays right after that message, found by role, timestamp
 and a tool result's call id, with its current text, so the request ends with its own last message
@@ -951,10 +951,7 @@ matching its whole conversion. Each session's last conversion lives in a process
 (on `globalThis` under `Symbol.for("legion.pi-envoy.session-answers-conversions.v1")`). Left
 open: a speculative compaction that keeps no tail (its kept turn right after a failed reply the
 branch still holds) beside the main loop's request matching it, which can lose that request's
-list; and a `task` subagent, which the host's registry does not list, so its compaction that
-keeps no tail carries the list, and a main-loop request of it between its speculative compaction's
-cut and whole conversion can put its list inside what that compaction keeps, one message past
-the cut. The dispatch-first skill goes on all of them as before. Not
+list. The dispatch-first skill goes on all of them as before. Not
 covered: OpenAI live steering (`providers.openaiLiveSteering`, a Codex WebSocket stream) converts
 the queued steers alone through the same handler, which no message tells apart from a first
 turn, so the skill and the list go out with a live steer there.

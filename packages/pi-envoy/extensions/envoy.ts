@@ -3333,8 +3333,7 @@ export default function envoyExtension(pi: PiApi): void {
         // `get compactionSpeculation() { return this.#C.speculationState; }`, the compaction
         // controller's `this.#i !== undefined || this.#u !== undefined || this.#l !== undefined`
         // (an automatic or manual compaction, or a handoff) and `e.armed ? "armed" : "running"`
-        // for a speculative one. A session the registry does not list (a `task` subagent's)
-        // reads as not compacting.
+        // for a speculative one. A session the registry does not list reads as not compacting.
         compacting: () => {
           const live = liveAgentSession(context.sessionManager.getSessionId());
           return (

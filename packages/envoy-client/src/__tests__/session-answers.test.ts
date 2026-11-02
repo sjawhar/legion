@@ -248,10 +248,9 @@ describe("renderSessionAnswers", () => {
 });
 
 describe("sessionAnswersWords", () => {
-  const words = (items: readonly SessionAnswer[]) => sessionAnswersWords(items, NOW);
   const isNew = (before: readonly SessionAnswer[], after: readonly SessionAnswer[]) => {
-    const shown = new Set(words(before));
-    return words(after).some((word) => !shown.has(word));
+    const shown = new Set(sessionAnswersWords(before));
+    return sessionAnswersWords(after).some((word) => !shown.has(word));
   };
 
   test("a new item, a changed answer or an edited comment is new", () => {
@@ -282,8 +281,23 @@ describe("sessionAnswersWords", () => {
     expect(isNew([answer], [retitled])).toBe(false);
   });
 
-  test("an item past 72 hours has no words", () => {
-    expect(words([message("old", hoursAgo(73), "old"), direct])).toHaveLength(1);
+  // The words are those of the items the list shows: an item the cap left out was never seen.
+  test("a read's words name only the items its list shows", async () => {
+    const items = Array.from({ length: 12 }, (_, index) =>
+      message(`item-${index}`, hoursAgo(index + 1), `${index}:${"w".repeat(1_000)}`)
+    );
+    const { fetchImpl } = fakeDispatch(() => listed(items));
+    const read = await readSessionAnswers({
+      session: newSession(),
+      dispatch: dispatchAt(),
+      env: envAt(stateDir()),
+      fetchImpl,
+      now: () => NOW,
+    });
+    const shown = items.filter((item) => read.text?.includes(item.text));
+    expect(shown.length).toBeGreaterThan(0);
+    expect(shown.length).toBeLessThan(items.length);
+    expect(read.words).toEqual(sessionAnswersWords(shown));
   });
 });
 
@@ -492,7 +506,7 @@ describe("readSessionAnswers", () => {
       text: renderSessionAnswers(recent, { now: NOW }),
       source: "fresh",
       readAt: new Date(NOW).toISOString(),
-      words: sessionAnswersWords(recent, NOW),
+      words: sessionAnswersWords(recent),
     });
     expect(calls.map((call) => call.url.pathname + call.url.search)).toEqual([
       `/api/v1/agents/${session}/answers?max_chars=8000`,
@@ -767,7 +781,7 @@ describe("readSessionAnswers", () => {
       text: renderSessionAnswers([direct], { now: NOW }),
       source: "fresh",
       readAt: new Date(NOW).toISOString(),
-      words: sessionAnswersWords([direct], NOW),
+      words: sessionAnswersWords([direct]),
     });
     expect(calls.map((call) => call.url.host)).toEqual([hostOf(a), hostOf(b)]);
     pendingA.resolve(listed(recent));
