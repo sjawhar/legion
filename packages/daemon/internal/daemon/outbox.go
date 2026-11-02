@@ -604,6 +604,8 @@ func ruleFor(kind record.StatusRowKind) (statusRowRule, error) {
 		return reassertRule{}, nil
 	case record.HandOverStatusRow:
 		return handOverRule{}, nil
+	case record.CloseStatusRow:
+		return closeRule{}, nil
 	default:
 		return nil, fmt.Errorf("status row kind %q has no rule", kind)
 	}
@@ -711,14 +713,13 @@ func (handOverRule) firstAttempt(ctx context.Context, r *outbox, row record.Outb
 	return false, r.consumeHandover(ctx, row, payload)
 }
 
-func (handOverRule) stillWanted(ctx context.Context, r *outbox, row record.OutboxRow, payload record.StatusWrite, _ dispatch.Issue) (bool, error) {
-	// A hand-over's write is made by its own first attempt, which finishes the row there, so no
-	// hand-over reaches this rule today. Its rule is nonetheless its own: the fence that attempt
-	// already passed, read again (handOverHolds) — the issue still that tree's and the root
-	// still lingering at the generation the row names — since what a refusal costs is the time
-	// for a reopen to take the child back, and the ordinary rule would read the todo this row
-	// writes as an issue out of the workflow.
-	return r.handOverHolds(ctx, row, payload)
+// stillWanted is unreachable and says so: a hand-over's write is made by its own first attempt,
+// which finishes the row whichever path it takes, so no hand-over row ever reaches the retry the
+// ISSUE_CHANGED refusal sends an ordinary write to. The interface asks every kind for both
+// halves, and the honest answer for this one is that the question cannot arise: a row that got
+// here came from a path nobody wrote, which is a defect to see rather than a write to guess at.
+func (handOverRule) stillWanted(_ context.Context, _ *outbox, row record.OutboxRow, _ record.StatusWrite, _ dispatch.Issue) (bool, error) {
+	return false, fmt.Errorf("outbox row %d: a hand-over's first attempt finishes its row, so it cannot reach the retry's rule", row.ID)
 }
 
 // refused drops the fence this hand-over left: the write that would hand the child to Legion
@@ -733,6 +734,53 @@ func (handOverRule) refused(ctx context.Context, r *outbox, row record.OutboxRow
 			"row", row.ID, "issue", row.Issue, "tree", payload.HandOverTree, "linger", payload.HandOverLinger)
 	}
 	return follow, told
+}
+
+// closeRule judges the daemon's own close of an issue (record.CloseStatusRow): the done a merge
+// or an architect's close_root writes, queued in the transaction that took the record out of the
+// workflow.
+type closeRule struct{}
+
+// firstAttempt settles nothing of its own: the close's fences are the ones every kind shares,
+// which its caller has taken, and the write that follows is the close itself.
+func (closeRule) firstAttempt(context.Context, *outbox, record.OutboxRow, record.StatusWrite, dispatch.Issue) (bool, error) {
+	return true, nil
+}
+
+// stillWanted keeps the close owed for as long as the record holds it. The caller has already
+// required Dispatch to show the status the row observed, so nobody has moved the issue since;
+// what is left to ask is whether the close this row carries is still the record's, which it is
+// while the record stands at the generation the row names. A person's reopen re-admits the issue
+// in a generation of its own, and that close is no longer owed: Dispatch holds what the person
+// put there. The ordinary rule cannot be asked here — it drops a row whose issue has left the
+// workflow, which is every close, so one refusal would leave the issue open in Dispatch while
+// the tree lingered (review round 7's finding, and the reason this kind exists).
+func (closeRule) stillWanted(ctx context.Context, r *outbox, row record.OutboxRow, payload record.StatusWrite, _ dispatch.Issue) (bool, error) {
+	if payload.CloseGeneration == 0 {
+		// A row migration 20261102003600 gave its kind, queued by a release that fenced the
+		// write on nothing: it writes as that release wrote it.
+		return true, nil
+	}
+	var issue *record.Issue
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		var err error
+		issue, err = r.records.Issue(ctx, tx, row.Issue)
+		return err
+	}); err != nil {
+		return false, fmt.Errorf("read workflow issue %s after its close changed under it: %w", row.Issue, err)
+	}
+	if issue != nil && issue.Generation != payload.CloseGeneration {
+		r.log.Info("outbox close finished without writing: the issue was taken back into the workflow in a generation of its own",
+			"row", row.ID, "issue", row.Issue, "closed", payload.CloseGeneration, "recorded", issue.Generation)
+		return false, nil
+	}
+	return true, nil
+}
+
+// refused leaves nothing behind: the close's whole effect is the write Dispatch refused, and the
+// record already stands where the close left it.
+func (closeRule) refused(context.Context, *outbox, record.OutboxRow, record.StatusWrite) (func(pgx.Tx) error, func()) {
+	return nil, nil
 }
 
 func (r *outbox) personHandoverStands(row record.OutboxRow, issue dispatch.Issue) bool {

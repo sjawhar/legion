@@ -8,13 +8,19 @@ import (
 )
 
 // A status row's kind used to be read from three marks in its payload, and a row carrying none of
-// them read as the ordinary kind: review round 6's defect, where a kind nobody gave a rule was
-// judged by the ordinary rule in silence. The kind is a stored field now and the payload no
-// longer names the marks, so a dispatch_status row the release before this one queued would fail
-// both the new validation, which refuses a row with no kind, and its decode, which refuses fields
-// the type no longer has — and a status row that cannot run holds every later write of its issue
-// behind it. The migration gives each pending row the kind its marks named and takes the three
-// marks away in the same statement, so none is left with the old shape or an empty kind.
+// them read as the ordinary kind: the defect where a kind nobody gave a rule was judged by the
+// ordinary rule in silence. The kind is a stored field now and the payload no longer names the
+// marks, so a dispatch_status row the release before this one queued would fail both the new
+// validation, which refuses a row with no kind, and its decode, which refuses fields the type no
+// longer has — and a status row that cannot run holds every later write of its issue behind it.
+// The migration gives each pending row the kind the payload names and takes the three marks away
+// in the same statement, so none is left with the old shape or an empty kind.
+//
+// Two of the shapes that release queued carry no mark at all, and the rows seeded here are those
+// it really wrote: its re-assert of its own status over one a session wrote, told by the done,
+// backlog or icebox it observes, and its own close, told by the done it writes. Read as ordinary,
+// each would be dropped by the ordinary rule at its first retry — the re-assert for being at the
+// status it exists to undo, the close for having left the workflow it is closing.
 //
 // Each migrated row is decoded here the way the outbox decodes it (record.DecodeOutboxPayload,
 // which both validates the kind and refuses an unknown field), so the row this test reads is one
@@ -38,6 +44,12 @@ func TestEveryQueuedStatusRowCarriesItsKindAfter20261102003600(t *testing.T) {
 			payload: `{"status":"todo","observedStatus":"in_progress","handOver":true,"handOverTree":"LEGION-200","handOverLinger":3}`},
 		{name: "an unmarked write", issue: "LEGION-211", want: record.OrdinaryStatusRow,
 			payload: `{"status":"testing","observedStatus":"in_progress"}`},
+		{name: "an unmarked re-assert, as the release before this one queued one", issue: "LEGION-212", want: record.ReassertStatusRow,
+			payload: `{"status":"retro","observedStatus":"done"}`},
+		{name: "an unmarked park a session wrote over, observed at backlog", issue: "LEGION-213", want: record.ReassertStatusRow,
+			payload: `{"status":"in_progress","observedStatus":"backlog"}`},
+		{name: "an unmarked close, as a merge queued one", issue: "LEGION-214", want: record.CloseStatusRow,
+			payload: `{"status":"done","observedStatus":"in_progress","reason":"merged"}`},
 	}
 	for _, row := range rows {
 		if _, err := store.Pool().Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error)

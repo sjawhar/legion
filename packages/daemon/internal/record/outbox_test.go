@@ -96,6 +96,7 @@ func TestEveryStatusRowKindHasAConstructorThatSetsIt(t *testing.T) {
 		PersonHandoverStatusRow: PersonHandoverStatusWrite("todo", "triage"),
 		ReassertStatusRow:       ReassertStatusWrite("in_progress", "done"),
 		HandOverStatusRow:       HandOverStatusWrite("todo", "in_progress", "LEGION-200", 3),
+		CloseStatusRow:          CloseStatusWrite("done", "in_progress", "merged", 7),
 	}
 	if len(built) != len(StatusRowKinds) {
 		t.Fatalf("%d constructors for the %d kinds of StatusRowKinds: one of them builds a kind the list does not name",

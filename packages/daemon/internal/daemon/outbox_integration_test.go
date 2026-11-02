@@ -696,7 +696,8 @@ func TestEveryStatusRowKindHasARule(t *testing.T) {
 // rather than being judged by another kind's rule, which is the mistake this case exists to make
 // loud. The kinds are read from record.StatusRowKinds rather than written out here, so a kind
 // added to that list and left out of the switch is asked here too; and each is asked for real,
-// against a record and a read that stand, so none may answer with that refusal.
+// against a record and a read that stand, so none may answer with that refusal — except a kind
+// whose first attempt finishes its row, which cannot reach a retry at all and says so.
 func TestEveryStatusRowKindHasAStillWantedRule(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -709,7 +710,12 @@ func TestEveryStatusRowKindHasAStillWantedRule(t *testing.T) {
 		record.PersonHandoverStatusRow: record.PersonHandoverStatusWrite("todo", "triage"),
 		record.ReassertStatusRow:       record.ReassertStatusWrite("in_progress", "done"),
 		record.HandOverStatusRow:       record.HandOverStatusWrite("todo", "in_progress", "LEGION-207", 1),
+		record.CloseStatusRow:          record.CloseStatusWrite("done", "in_progress", "merged", 0),
 	}
+	// The hand-over's first attempt makes its own Dispatch write and finishes the row on every
+	// path, so no hand-over reaches the retry: its rule answers that the question cannot arise,
+	// and a kind this table does not name is held to answering for real.
+	retryCannotArise := map[record.StatusRowKind]bool{record.HandOverStatusRow: true}
 	for _, kind := range record.StatusRowKinds {
 		payload, named := payloads[kind]
 		if !named {
@@ -723,7 +729,11 @@ func TestEveryStatusRowKindHasAStillWantedRule(t *testing.T) {
 			t.Fatalf("the rule of status row kind %q = %v, want a rule of its own", kind, err)
 		}
 		read := dispatch.Issue{Key: "LEGION-208", Status: payload.ObservedStatus, HandedOver: true}
-		if _, err := rule.stillWanted(context.Background(), runner, record.OutboxRow{Issue: "LEGION-208"}, payload, read); err != nil {
+		_, err = rule.stillWanted(context.Background(), runner, record.OutboxRow{Issue: "LEGION-208"}, payload, read)
+		switch {
+		case retryCannotArise[kind] && err == nil:
+			t.Fatalf("the rule of status row kind %q answered its retry, want it to say the retry cannot arise", kind)
+		case !retryCannotArise[kind] && err != nil:
 			t.Fatalf("the rule of status row kind %q answered %v, want it to answer at all", kind, err)
 		}
 	}
@@ -863,15 +873,25 @@ func TestAMigratedStatusRowRunsUnderItsOwnRule(t *testing.T) {
 	rows := []struct {
 		name, issue, payload string
 		want                 record.StatusRowKind
+		// wanted is whether the rule of the migrated row's kind answers that the write is still
+		// owed. The hand-over's retry cannot arise at all (its first attempt finishes the row),
+		// so its rule is asked for its refusal rather than for an answer.
+		wanted      bool
+		cannotArise bool
 	}{
-		{name: "a person's handover", issue: "LEGION-208", want: record.PersonHandoverStatusRow,
+		{name: "a person's handover", issue: "LEGION-208", want: record.PersonHandoverStatusRow, wanted: true,
 			payload: `{"status":"todo","observedStatus":"triage","personHandover":true}`},
-		{name: "a re-assert", issue: "LEGION-209", want: record.ReassertStatusRow,
+		{name: "a re-assert", issue: "LEGION-209", want: record.ReassertStatusRow, wanted: true,
 			payload: `{"status":"in_progress","observedStatus":"done","reassert":true}`},
-		{name: "a hand-over", issue: "LEGION-210", want: record.HandOverStatusRow,
+		{name: "a hand-over", issue: "LEGION-210", want: record.HandOverStatusRow, cannotArise: true,
 			payload: `{"status":"todo","observedStatus":"in_progress","handOver":true,"handOverTree":"LEGION-200","handOverLinger":3}`},
-		{name: "an unmarked write", issue: "LEGION-211", want: record.OrdinaryStatusRow,
+		{name: "an unmarked write", issue: "LEGION-211", want: record.OrdinaryStatusRow, wanted: true,
 			payload: `{"status":"testing","observedStatus":"in_progress"}`},
+		{name: "an unmarked re-assert, as the release before this one queued one", issue: "LEGION-212",
+			want: record.ReassertStatusRow, wanted: true,
+			payload: `{"status":"retro","observedStatus":"done"}`},
+		{name: "an unmarked close, as a merge queued one", issue: "LEGION-214", want: record.CloseStatusRow, wanted: true,
+			payload: `{"status":"done","observedStatus":"in_progress","reason":"merged"}`},
 	}
 	for _, row := range rows {
 		if _, err := pool.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error)
@@ -902,8 +922,16 @@ func TestAMigratedStatusRowRunsUnderItsOwnRule(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s has no rule after the migration: %v", row.name, err)
 		}
-		if _, err := rule.stillWanted(ctx, runner, stored, write, read); err != nil {
+		wanted, err := rule.stillWanted(ctx, runner, stored, write, read)
+		switch {
+		case row.cannotArise:
+			if err == nil {
+				t.Fatalf("the rule judging %s answered its retry, want it to say the retry cannot arise", row.name)
+			}
+		case err != nil:
 			t.Fatalf("the rule judging %s answered %v, want the rule of its own kind to answer", row.name, err)
+		case wanted != row.wanted:
+			t.Fatalf("the rule judging %s says the write is wanted = %v, want %v: a row the ordinary rule would drop is the defect this kind exists for", row.name, wanted, row.wanted)
 		}
 	}
 }

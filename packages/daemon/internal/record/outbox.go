@@ -129,19 +129,28 @@ const (
 	// dispatch.LegionLabel on the issue, in the same Dispatch write, and the runner makes it while
 	// the label is missing even where Dispatch already shows Status.
 	HandOverStatusRow StatusRowKind = "hand-over"
+	// CloseStatusRow is the daemon's own close of an issue: the done a merge or an architect's
+	// close_root writes, queued in the transaction that takes the record out of the workflow. The
+	// ordinary rule cannot judge it, for the reason the re-assert's cannot: one refusal — an
+	// agent's comment, a handoff record, or the done reason this row itself just posted — sends
+	// it to its retry, which would find the record already out of the workflow and drop the write
+	// that puts Dispatch there, leaving the issue open in Dispatch for good while the tree
+	// lingers and frees its slot. Its own rule asks the question that matters instead: the close
+	// still stands in the record at the generation the row names.
+	CloseStatusRow StatusRowKind = "close"
 )
 
 // StatusRowKinds is every kind of status row, listed once. The daemon's rule switch, the
 // migration that gave the stored rows their kind and the tests of both packages read this list,
-// so a kind is added in one place and every reader of it is held to the same four.
-var StatusRowKinds = []StatusRowKind{OrdinaryStatusRow, PersonHandoverStatusRow, ReassertStatusRow, HandOverStatusRow}
+// so a kind is added in one place and every reader of it is held to the same five.
+var StatusRowKinds = []StatusRowKind{OrdinaryStatusRow, PersonHandoverStatusRow, ReassertStatusRow, HandOverStatusRow, CloseStatusRow}
 
 // StatusWrite is a Dispatch status the daemon writes. ObservedStatus is the status Dispatch shows
 // until the write runs: the runner writes Status only while Dispatch still shows ObservedStatus, so a
 // move someone else made since the write was queued stands. Kind is what the write is for, set by
 // the constructor its queueing site goes through — OrdinaryStatusWrite, PersonHandoverStatusWrite,
-// ReassertStatusWrite or HandOverStatusWrite — which are the only places one is built, so no row
-// reaches the outbox without a kind (validateOutboxPayload refuses one that does).
+// ReassertStatusWrite, HandOverStatusWrite or CloseStatusWrite — which are the only places one is
+// built, so no row reaches the outbox without a kind (validateOutboxPayload refuses one that does).
 type StatusWrite struct {
 	Kind           StatusRowKind `json:"kind"`
 	Status         string        `json:"status"`
@@ -155,6 +164,13 @@ type StatusWrite struct {
 	// generation (Issue.LingersAt), so a root re-admitted since keeps the issue as its child.
 	HandOverTree   string `json:"handOverTree,omitempty"`
 	HandOverLinger uint64 `json:"handOverLinger,omitempty"`
+	// CloseGeneration fences the daemon's own close (CloseStatusRow) on the run it closed: the
+	// retry writes done only while the record still holds that generation, so a person's reopen,
+	// which re-admits the issue in a generation of its own, drops a close that has not landed
+	// rather than closing the issue the person just took back. Zero in a row no generation is
+	// known for — one migration 20261102003600 gave its kind, queued by a release that fenced
+	// such a write on nothing — which writes as that release wrote it.
+	CloseGeneration uint64 `json:"closeGeneration,omitempty"`
 }
 
 func (StatusWrite) OutboxKind() OutboxKind { return OutboxKindDispatchStatus }
@@ -183,6 +199,14 @@ func ReassertStatusWrite(status, observed string) StatusWrite {
 func HandOverStatusWrite(status, observed, tree string, linger uint64) StatusWrite {
 	return StatusWrite{Kind: HandOverStatusRow, Status: status, ObservedStatus: observed,
 		HandOverTree: tree, HandOverLinger: linger}
+}
+
+// CloseStatusWrite is the daemon's own close of an issue, to status (done) from the observed
+// status Dispatch shows, with reason posted as a message before the status lands, fenced on the
+// generation of the run the close ended (CloseStatusRow).
+func CloseStatusWrite(status, observed, reason string, generation uint64) StatusWrite {
+	return StatusWrite{Kind: CloseStatusRow, Status: status, ObservedStatus: observed, Reason: reason,
+		CloseGeneration: generation}
 }
 
 // MessagePost is a Dispatch message body. The runner posts it as Posted: the body, then its outbox

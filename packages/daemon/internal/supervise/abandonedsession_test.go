@@ -64,10 +64,10 @@ func TestTheFreshSessionsFirstTaskNamesTheSessionItReplacedAndWhatOutlivedIt(t *
 	h.must(RequestDeliver{Claim: h.token, Task: "Continue Workflow. Issue: LEGION-209. Phase: implementing."})
 
 	first := h.wantPrompts(base + 1)[base].Message
-	for _, want := range append([]string{
+	for _, want := range []string{
 		session, "abandoned", refusal,
-		"legion/LEGION-209", "dispatch handoff-read --issue LEGION-209 --phase",
-	}, handoffWordsWanted()...) {
+		"legion/LEGION-209", "dispatch handoff-read --issue LEGION-209 --phase", handoffWordsClause(),
+	} {
 		if !strings.Contains(first, want) {
 			t.Errorf("the first task of the fresh session does not name %q:\n%s", want, first)
 		}
@@ -148,7 +148,8 @@ func TestARefusedPromptLeavesTheAbandonedSessionStillToBeTold(t *testing.T) {
 	h.must(StreamHello{Claim: h.token, Generation: h.generation()})
 
 	taken := h.wantPrompts(base + 2)[base+1].Message
-	for _, want := range []string{session, "abandoned", refusal, "legion/LEGION-209", "dispatch handoff-read --issue LEGION-209 --phase"} {
+	for _, want := range []string{session, "abandoned", refusal, "legion/LEGION-209",
+		"dispatch handoff-read --issue LEGION-209 --phase", handoffWordsClause()} {
 		if !strings.Contains(taken, want) {
 			t.Errorf("the task the agent acknowledged does not name %q:\n%s", want, taken)
 		}
@@ -168,10 +169,13 @@ func TestARefusedPromptLeavesTheAbandonedSessionStillToBeTold(t *testing.T) {
 	}
 }
 
-// handoffWordsWanted is every phase word a handoff record is written under, read from the phases
-// themselves as the prompt builds its list (delivery's handoffWords): a phase that gains a handoff
-// is asserted here without anyone remembering to come back and add its word.
-func handoffWordsWanted() []string {
+// handoffWordsClause is the list of phase words exactly as the prompt renders it, read from the
+// phases themselves as delivery's handoffWords builds it: a phase that gains a handoff is
+// asserted here without anyone remembering to come back. The whole clause is asserted rather
+// than each word on its own, because the prompt carries the task behind it — "Phase:
+// implementing" names a word all by itself — so a word dropped from the list would still be
+// found somewhere in the text.
+func handoffWordsClause() string {
 	words := make([]string, 0, len(phase.All))
 	for _, p := range phase.All {
 		if word, _, ok := phase.Handoff(p); ok {
@@ -181,5 +185,5 @@ func handoffWordsWanted() []string {
 	if len(words) == 0 {
 		panic("no phase has a handoff record: the prompt would name none")
 	}
-	return words
+	return "(" + strings.Join(words, ", ") + ")"
 }

@@ -49,12 +49,13 @@ func TestAnArchitectClosesItsAdmittedRootBeforeItsFirstPhase(t *testing.T) {
 		t.Fatalf("root status=%s phase=%s linger=%v; want done, parked in done, lingering", status, rootPhase, until)
 	}
 	var write record.StatusWrite
-	if err := pool.QueryRow(context.Background(), "select payload->>'kind', payload->>'status', payload->>'observedStatus', payload->>'reason' from outbox where kind = 'dispatch_status'").
-		Scan(&write.Kind, &write.Status, &write.ObservedStatus, &write.Reason); err != nil {
+	if err := pool.QueryRow(context.Background(), `select payload->>'kind', payload->>'status', payload->>'observedStatus', payload->>'reason',
+		coalesce((payload->>'closeGeneration')::bigint, 0) from outbox where kind = 'dispatch_status'`).
+		Scan(&write.Kind, &write.Status, &write.ObservedStatus, &write.Reason, &write.CloseGeneration); err != nil {
 		t.Fatalf("read the status write: %v", err)
 	}
-	if write != record.OrdinaryStatusWrite("done", "in_progress", "Closed by its architect before its first phase: the human decided no change is needed") {
-		t.Fatalf("status write %+v; want done over in_progress with the architect's reason", write)
+	if write != record.CloseStatusWrite("done", "in_progress", "Closed by its architect before its first phase: the human decided no change is needed", 2) {
+		t.Fatalf("status write %+v; want the close of generation 2, done over in_progress with the architect's reason", write)
 	}
 	assertOutboxCount(t, pool, "linger_close", 1)
 	var reasons []string
@@ -110,12 +111,13 @@ func TestAnArchitectClosesItsRootThatWaitsOnAPerson(t *testing.T) {
 		t.Fatalf("root status=%s phase=%s linger=%v; want done, parked in done, lingering", status, rootPhase, until)
 	}
 	var write record.StatusWrite
-	if err := pool.QueryRow(context.Background(), "select payload->>'kind', payload->>'status', payload->>'observedStatus', payload->>'reason' from outbox where kind = 'dispatch_status'").
-		Scan(&write.Kind, &write.Status, &write.ObservedStatus, &write.Reason); err != nil {
+	if err := pool.QueryRow(context.Background(), `select payload->>'kind', payload->>'status', payload->>'observedStatus', payload->>'reason',
+		coalesce((payload->>'closeGeneration')::bigint, 0) from outbox where kind = 'dispatch_status'`).
+		Scan(&write.Kind, &write.Status, &write.ObservedStatus, &write.Reason, &write.CloseGeneration); err != nil {
 		t.Fatalf("read the status write: %v", err)
 	}
-	if write != record.OrdinaryStatusWrite("done", "in_progress", "Closed by its architect before its first phase: the person answered: close this") {
-		t.Fatalf("status write %+v; want done over in_progress with the architect's reason", write)
+	if write != record.CloseStatusWrite("done", "in_progress", "Closed by its architect before its first phase: the person answered: close this", 1) {
+		t.Fatalf("status write %+v; want the close of generation 1, done over in_progress with the architect's reason", write)
 	}
 	assertOutboxCount(t, pool, "linger_close", 1)
 }

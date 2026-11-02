@@ -151,9 +151,17 @@ func (e *Engine) enqueueAt(ctx context.Context, tx pgx.Tx, issue string, payload
 	return e.store.Enqueue(ctx, tx, row)
 }
 
+// status queues the Dispatch write for a status the workflow has just given issue. A status that
+// reads as out of the workflow is the daemon's own close — the done a merge writes — and it goes
+// as a close row, fenced on the run it ends (record.CloseStatusWrite): the ordinary rule drops a
+// row whose issue has left the workflow, which is every close, so a close judged by it would be
+// lost on its first ISSUE_CHANGED and leave the issue open in Dispatch for good.
 func (e *Engine) status(ctx context.Context, tx pgx.Tx, issue record.Issue, status string) error {
 	if status == "" || issue.Status == status {
 		return nil
+	}
+	if record.OutOfWorkflow(status) {
+		return e.enqueue(ctx, tx, issue.Key, record.CloseStatusWrite(status, issue.Status, "", issue.Generation))
 	}
 	return e.enqueue(ctx, tx, issue.Key, record.OrdinaryStatusWrite(status, issue.Status, ""))
 }
