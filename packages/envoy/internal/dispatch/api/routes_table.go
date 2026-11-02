@@ -72,7 +72,7 @@ const (
 
 // writeClasses is the class of every mutating route, by "<method> <pattern>". It stands beside
 // the table rather than in each row because Go leaves no field out of a positional composite
-// literal: a sixth value on the row would have to be written on all 151 rows, every GET row
+// literal: a sixth value on the row would have to be written on all 150 rows, every GET row
 // included, and a GET row needs no class. mountedRoutes stamps it onto the row, so
 // apiRoute.Scope is what every reader of a route sees, and undecidableWrites holds the two in
 // exact correspondence — a mutating row this table does not name, and a name that is no
@@ -480,7 +480,6 @@ func (s *server) routes() []apiRoute {
 		served(routeRow{http.MethodPut, "/api/v1/me/asks/{id}/snooze", authHuman, "Snooze an inbox row for the caller until snoozed_until.", s.putAskSnooze}),
 		served(routeRow{http.MethodDelete, "/api/v1/me/asks/{id}/snooze", authHuman, "Un-snooze an inbox row for the caller.", s.deleteAskSnooze}),
 		served(routeRow{http.MethodGet, "/api/v1/credential-requests", authHuman, "List credential requests the caller may decide (?approver=me only): those naming the caller, a shared secret's and a service's machine login, which anyone signed in decides, each secret request carrying approve_url, the secrets broker's page where it is decided; null without a configured secrets broker.", s.listCredentialPending}),
-		served(routeRow{http.MethodGet, "/api/v1/credential-requests/{id}", authHuman, "Read one credential request's facts; the broker is authoritative.", s.getCredentialRecord}),
 		served(routeRow{http.MethodPost, "/api/v1/credential-requests/{id}/approve", authHuman, "Approve a machine login as the caller with its typed code; the broker decides whether the caller is its approver, and refuses a secret request with 403 DECIDE_ON_BROKER_PAGE naming its page on the secrets broker.", s.approveCredentialRecord}),
 		served(routeRow{http.MethodPost, "/api/v1/credential-requests/{id}/deny", authHuman, "Deny a machine login as the caller with its typed code; the broker decides whether the caller is its approver, and refuses a secret request with 403 DECIDE_ON_BROKER_PAGE naming its page on the secrets broker.", s.denyCredentialRecord}),
 		served(routeRow{http.MethodPost, "/api/v1/credential-requests/machine-lookup", authHuman, "Resolve a pending machine login by its typed confirmation code, returning its facts.", s.lookupMachineCredential}),

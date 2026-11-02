@@ -48,6 +48,9 @@ func openEveryPool(t *testing.T, database *store.Store) (background *store.Pool)
 	if _, err := database.Pool.Settlements(); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := database.Pool.Compaction(); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := database.Pool.Horizon(); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +106,8 @@ func TestTheMetricsEndpointListsEverySeriesForEveryOpenPool(t *testing.T) {
 	stats := database.Pool.Stats()
 	pools := []string{
 		store.RequestsPool, store.RoomsPool, store.HealthPool, store.ListenPool, store.LeasesPool,
-		store.OutboxPool, store.BackgroundPool, store.LivePool, store.SettlementsPool, store.HorizonPool,
+		store.OutboxPool, store.CompactionPool, store.BackgroundPool, store.LivePool,
+		store.SettlementsPool, store.HorizonPool,
 	}
 	if len(stats) != len(pools) {
 		t.Fatalf("Stats reports %d pools, want the %d this test opened", len(stats), len(pools))

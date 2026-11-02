@@ -1,0 +1,9 @@
+kind: Fixed
+body: |-
+    AskGate binds no file of a write it did not review. A session whose model is on another
+    provider than the gate's, and a halted gate, now mint an argv-only marker, as the other
+    unreviewed outcomes do, so a file edited earlier in the same message posts instead of being
+    refused as "changed after AskGate reviewed it". A reviewed file that changes is still refused.
+time: 2026-11-02T12:33:26.987852Z
+custom:
+    Issue: pr2677

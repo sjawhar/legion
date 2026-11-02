@@ -1,6 +1,6 @@
 kind: Changed
 body: |-
-  Dispatch's database connections are one budget of 92 a process, as many as before, partitioned so that neither
+  Dispatch's database connections are one budget of 94 a process, as many as before, partitioned so that neither
   requests nor background work can starve the other: the request pool holds 48, from 64, and the
   background loops (6), the live event stream relay and delivery hub (4) and document settlements
   (4) each draw from a pool of their own. The lease pool holds a connection for each of its 13
@@ -9,10 +9,11 @@ body: |-
   a pass that finds no lease connection free within 2 seconds until its next tick. Every
   connection names its pool in `application_name` (`dispatch-requests`, `dispatch-background`,
   `dispatch-live`, `dispatch-settlements`, `dispatch-rooms`, `dispatch-health`, `dispatch-listen`,
-  `dispatch-leases`, `dispatch-outbox`, `dispatch-horizon`, `dispatch-registry`), in place of the
+  `dispatch-leases`, `dispatch-outbox`, `dispatch-compaction`, `dispatch-horizon`,
+  `dispatch-registry`), in place of the
   connection string's own, and a wait for a connection is bounded on every pool but three: 3
   seconds for a request's, a document load's, a live reader's or the event horizon's, 30 for
-  background work and settlements, 2 for a lease and 10 for a LISTEN dial. The outbox, the
+  background work, settlements and compaction, 2 for a lease and 10 for a LISTEN dial. The outbox, the
   registry and the health probe have no bound, since no caller of theirs waits behind another
   (the outbox's pool has one connection for its scan and one for its hold renewal); the health probe bounds its own wait, dial and query together at 2 seconds instead.
-  A database's connection limit must allow 92 a process.
+  A database's connection limit must allow 94 a process.

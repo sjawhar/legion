@@ -523,10 +523,10 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	// Deployment is recreated at one pod and rolled above it, so by default a roll never leaves the
 	// name to a single pod, and only the auth key's checksum is on its template: a renewed
 	// certificate in its TLS Secret rolls no pod. Without the tailnet inputs none of this is
-	// registered: nothing here has a value to render from, the auth key and the tags the Service
-	// carries among them, and readers reach the app inside the cluster instead. The gate is also
-	// what keeps a nil tailnetAuthKey away from refuseDispatchSeedInSecret, which would dial
-	// ToStringOutput on it and take the provider down with it.
+	// registered: nothing here has a value to render from, the auth key and the tags the front
+	// door's nodes advertise among them, and readers reach the app inside the cluster instead. The
+	// gate is also what keeps a nil tailnetAuthKey away from refuseDispatchSeedInSecret, which would
+	// dial ToStringOutput on it and take the provider down with it.
 	var frontDoorResources []pulumi.Resource
 	if s.frontDoor {
 		authKeyName := s.hostname + "-tailnet-auth-key"

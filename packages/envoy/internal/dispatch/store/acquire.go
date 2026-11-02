@@ -29,6 +29,8 @@ const (
 	LeasesPool = "leases"
 	// OutboxPool is the events outbox's two connections, its scan's and its hold renewal's (Pool.Outbox).
 	OutboxPool = "outbox"
+	// CompactionPool is where a document's compaction reads and writes (Pool.Compaction).
+	CompactionPool = "compaction"
 	// BackgroundPool is the background loops' pool (Pool.Background).
 	BackgroundPool = "background"
 	// LivePool is the live-update readers' pool (Pool.Live).
@@ -44,7 +46,7 @@ const (
 // poolNames is every pool name, in the order Stats reports them. The registry's pool is in Stats
 // once processes.Register has opened it (Pool.OpenRegistry).
 var poolNames = [...]string{
-	RequestsPool, RoomsPool, HealthPool, ListenPool, LeasesPool, OutboxPool,
+	RequestsPool, RoomsPool, HealthPool, ListenPool, LeasesPool, OutboxPool, CompactionPool,
 	BackgroundPool, LivePool, SettlementsPool, HorizonPool, RegistryPool,
 }
 
@@ -94,7 +96,7 @@ func defaultAcquireBound(name string) time.Duration {
 	switch name {
 	case RequestsPool, RoomsPool, LivePool, HorizonPool:
 		return requestAcquireBound
-	case BackgroundPool, SettlementsPool:
+	case BackgroundPool, SettlementsPool, CompactionPool:
 		return backgroundAcquireBound
 	case LeasesPool:
 		return leaseAcquireBound

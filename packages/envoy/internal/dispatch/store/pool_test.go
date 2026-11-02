@@ -986,7 +986,7 @@ func TestEachPoolNamesItsConnectionsInPgStatActivity(t *testing.T) {
 		holdOne(t, opened.Acquire)
 	}
 	for _, open := range []func() (*RawPool, error){
-		pool.Rooms, pool.Leases, pool.Horizon,
+		pool.Rooms, pool.Leases, pool.Horizon, pool.Compaction,
 		func() (*RawPool, error) { return pool.separate(HealthPool, healthPoolSize) },
 	} {
 		opened, err := open()

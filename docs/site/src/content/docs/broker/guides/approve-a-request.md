@@ -26,9 +26,9 @@ A **Secret request** row is a link to the request's page on the broker,
 `<broker>/approve/<record>`. Click it. When you signed in to the broker within the last day (a
 sign-in lasts a day unless the deployment set it shorter) the page opens at once. Otherwise the
 broker sends you to sign in with your Workspace account, which asks nothing when you are already
-signed in to it, and brings you back to the same request. A row that reads **Decided on the secrets
-broker.** and links nowhere comes from a broker older than that page; ask whoever runs it to
-upgrade it.
+signed in to it, and brings you back to the same request.
+A **Secret request** row that is not a link, with nothing to open, comes from a broker older than
+that page; ask whoever runs that broker to upgrade it.
 
 ## Check it
 

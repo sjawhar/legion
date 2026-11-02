@@ -297,10 +297,11 @@ a repair never waits for a close and gives the write up as for a replaced room (
 `roomServer` says why a close retiring the room's worker under a repair's commit hung (LEGION-498).
 A room's close gate lives only while a close or a repair holds or waits on it.
 A repair's suppression slot that its settlement discarded is consumed by that repair's own update alone, since another writer's update can reach the room's worker first.
-The gate removes the repair-close cycle, but `compactIfIdle` remains for non-repair worker exits:
+The gate removes the repair-close cycle, but not every worker exit passes it:
 a published live write is already durable and intentionally does not take the gate, so its room can still retire under its Apply.
-Its exit compaction is housekeeping and leaves a busy document lock to the next pass;
-a failed room's eviction is the exception and compacts under the lock before recovery.
+The worker's exit compaction (`servicePersistenceAdapter.Compact`), which runs the tail rule inline on the worker and folds with no document lock held, therefore does not wait for a busy document lock at its short write:
+it is housekeeping and leaves the room to a later compaction.
+A failed room's eviction is the exception and always waits for the document's lock before recovery, writing a compaction when rows stand older than the tail and otherwise taking the lock and letting it go, so a repair written into the failed room commits before the room reloads.
 `envoy-dispatch backfill-block-ids` runs the same stamp through `applySuppressed` across every document.
 Every write path that changes a document queues that closer once its transaction commits:
 a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation, so ask blocks written by any of them become asks without waiting for a later live change.
@@ -411,7 +412,12 @@ any other error, a panic (`pmdoc.ErrPanic`) among them, is `pmdoc`'s own and ans
 A tree a browser edit makes is not checked, so its rendering can still fail to read back when it is uploaded again.
 
 A document's `doc_updates` rows are its Yjs updates in the order they were stored, and nothing reads one back alone:
-`PgVersioned.Load` and `MaterializeAt` apply them one at a time, oldest first, to one document that collects garbage and return that document's encoding (`stateThrough`), so a deleted item keeps its id and length and none of its content, and a load holds the live document and the one update it is applying, however much the stored updates inserted and later deleted (LEGION-496).
+`PgVersioned.Load` and `MaterializeAt` apply them one at a time, oldest first, to one document that collects garbage and return that document's encoding (`stateThrough`), so a deleted item keeps its id and length and none of its content, and a fold holds the live document and the one update it is applying, however much the stored updates inserted and later deleted (LEGION-496), beside whatever rows its load read into memory.
+A room load or a cold read (`Load`, `LoadDocument`) reads, in one repeatable-read transaction on the rooms pool, the head and the rows at or below it - the compacted row and the rows written since - and when they total at most 32 MiB (`foldBufferBytes`) reads them into memory, ends the transaction and folds them with no connection held;
+a larger log it folds one row at a time as it streams it inside the transaction (`foldRead`).
+At most `bufferedFolds` buffered folds - loads and compactions together, `store.RoomsPoolSize` (four), the pool whose connections bounded folds when they ran inside its transactions - hold their rows at once in a process (`PgVersioned.foldSlots`), so a process holds at most four times 32 MiB of buffered rows;
+a fifth waits within its context.
+Either way it notes the room for compaction once its transaction ends (`noteStoredUpdates`).
 Nothing reads deleted content back from the store:
 every document built from it is a `crdt.New`, which drops an item's content in the transaction that deletes it, the one that applies a load included;
 a version stores its own markdown in `artifact_versions`; and no route reads an update or a state before the head.
@@ -420,10 +426,27 @@ A state is kept only when it reads back as the document that made it: decoded in
 That catches a re-encoding that renumbers or drops a client's clocks, as a decoder that integrated the items after a skipped clock range would;
 ygo parks them (upstream since v1.51.0, reearth/ygo#257).
 It does not catch a re-encoding that keeps every clock and moves text, such as a lost right origin, which `TestACompactedDocumentKeepsItsOrderThroughLaterUpdates` guards on each ygo bump.
-A state that reads back otherwise, or a log the fold's document cannot apply (one parking more than the pending queue below holds), is logged (`dispatch: a document's stored updates do not fold into a state that
-reads back as them`): the load serves the stored updates merged whole, which for a log the fold cannot apply is what `loadDocument` decodes and refuses as `ErrDocumentUnloadable`, offering the rebuild, and compaction leaves them as stored without building that merge.
-Compaction (`Compact`, which ygo runs as a room closes and as the server shuts down, and the outbox runs over every document every 24 hours, `CompactAll`) folds the whole log into one row holding that state (`compactKeep`), whose `content_changed` says whether any row it folded past the latest version's cursor changed content.
-A compacted `doc_updates`, and any backup of it taken later, therefore holds no text a write deleted:
+A state that reads back otherwise, or a log the fold's document cannot apply (one parking more than the pending queue below holds), is logged (`dispatch: a document's stored updates do not fold into a state that reads back as them`):
+the load serves the stored updates merged whole, which for a log the fold cannot apply is what `loadDocument` decodes and refuses as `ErrDocumentUnloadable`, offering the rebuild, and compaction leaves them as stored without building that merge;
+the process's later compactions of the same rows skip them until they change.
+A room's load decodes the stored state once:
+`servicePersistenceAdapter.LoadDoc` hands ygo no bytes and puts the state it read (or the socket's preload) on the load's record (`roomLoad`), and the room's own load hook (`onLoadDocument`, through `bootstrapLoadedState`) decodes it into the room's document under the server's pending cap, `maxUpdateItems`, before anything reads or observes it.
+A single stored row, which `Load` returns as stored, is decoded there alone; a folded log is also decoded by the fold, which applies its rows, and by the fold's read-back.
+A history that does not decode there, a log served merged among them, fails the room (`failRoom`) with that decode's error, which ygo returns to the caller:
+the room is not published, and its next access loads it afresh.
+Compaction (`compactRoom`) folds a document's rows at or below its fold point into that row, which then holds their state, and deletes the rows below it.
+The fold point is the newest row at or below the head older than two minutes on the database's clock (`compactTail`), so a row younger than that is left as written, byte for byte.
+It reads on its own two-connection pool (`store.Pool.Compaction`, `dispatch-compaction`) in one repeatable-read transaction, folds with no document lock held - from memory once that transaction ends when the rows total at most 32 MiB, streaming inside it otherwise - and then takes the document's lock on a connection of the same pool (`lockRoom`) for a short write.
+That write checks the rows at or below the fold point are the ones it folded, version for version and xmin for xmin, and drops the fold when a prune, a rebuild, a delete or another compaction changed them, or when it had to finish a stranded prune first.
+The folded row's `content_changed` says whether any row it folded past the latest version's cursor, read inside that write, changed content.
+Three paths compact, all under that tail rule and none on a request goroutine:
+ygo's room close (`servicePersistenceAdapter.Compact`, on the room's worker as it exits, the server's shutdown included);
+the per-process compaction queue (`compactionQueue`), which every committed append and every load notes and whose one worker compacts a document once it has 16 rows older than two minutes after its first row (`compactMinRows`) or one row after its first older than 15 minutes (`compactMaxTailAge`), retrying a compaction that found the lock busy, was dropped or failed after 1 s, doubling to 1 min;
+and the hourly sweep (`RunCompactionSweep`, lease `document-compaction`, a `duty.RunLeased` ticker of one hour whose first tick is at start), which compacts every document due by the same rule whether or not NATS is configured, and so catches what a restart, `Shutdown` or `Quiesce` dropped from a queue.
+The sweep reads only the documents `doc_compaction_owed` (migration `20261028195714`) names, never a scan of `doc_updates`:
+every append names its document there in the statement that inserts its row once that row is not the document's first, a compaction that leaves no row above its fold point removes it in its write's transaction, as do a rebuild and `Delete`, and the sweep removes an entry whose document holds no row after its first (a prune's or an artifact deletion's), each under the document's lock.
+`PgVersioned.Compact`, ygo's interface, folds under a keep-N rule instead and is scheduled by nothing in Dispatch.
+A compacted `doc_updates`, and any backup of it taken later, therefore holds no text a write deleted once that write is about 75 minutes old - the two-minute tail, the 15-minute age rule and the hourly sweep:
 text deleted before a version captured it is gone (the operator's decision, LEGION-496).
 
 Each `doc_updates` row records `content_changed` - whether the update changed the document's rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and after;
@@ -491,7 +514,7 @@ Inside the transaction the docs layer takes a document's locks in one order, whe
 the owner row (`lockArtifactOwner`), then the writer slot, then the advisory lock; a joined read takes the owner row before it waits for the slot.
 With the gate held, a writer's wait for the slot is only for the previous writer's publish.
 The gate and the slot are in memory, where Postgres cannot see a wait for them, so no transaction may wait for the slot while holding a lock its holder still needs.
-A failed room's eviction flushes and compacts under the advisory lock on a request-pool connection, so nothing holding one of these pools' connections waits for a failed room to recover (`store.ConnectionHeld`):
+A failed room's eviction flushes under the advisory lock on a request-pool connection and always waits for that lock, writing a compaction only when rows stand older than the tail and otherwise letting the lock go, so a repair written into the failed room commits before the room reloads and nothing holding one of these pools' connections waits for a failed room to recover (`store.ConnectionHeld`):
 a document operation inside a transaction (a handler's, or settlement's own) that meets one fails with `ErrServiceUnavailable` (`503 DOC_SERVICE_UNAVAILABLE`, whatever failed the room), the transaction rolls back, and the caller retries once the room has reloaded;
 so does a write whose room fails before its first append, since the reloaded room may lack it; and so does a pinned read (`store.PinConnection`, every ordinary `GET`), which holds the very connection the eviction waits for between its statements.
 A room's own load never waits for that recovery either - the eviction waits in ygo's `CloseRoom` for the load's ready barrier, so the two would hold each other - and refuses instead, which ends the eviction;
@@ -650,9 +673,10 @@ the room has one writer slot (`openLiveWrite`); and a committed write reaches th
 A helper that walks the room inside `Server.Apply` outside a transaction, as an unjoined write once did, races every peer's update; no production path does.
 `TestThreeBrowsersAndTheAPIEditOneRoomAtOnce` has three websocket peers type while the API edits the document, until 50 of its edits have overlapped their typing.
 
-Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment (`internal/dispatch/docs/persistence.go`) states the rule and its reason:
-whether the service builds the decoder (`newDocumentCopy`:
-the copy, a write's fork, every decode of the stored history, including `stateThrough`'s fold and read-back, and the store's decode of an update it appends: a browser's, which no document here encoded (`appendUpdate`), and one whose header names no single client's item count (`refuseUpdateItemCap`)) or ygo builds it for the service (`Server.MaxPendingItems`, set in `New`: the rooms).
+Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment (`internal/dispatch/docs/persistence.go`) states the rule and its reason, and every copy that replays stored or room updates is built by one constructor, `newCappedDocumentCopy`, at the cap of the instance it decodes for, with ygo's format cleanup off (below).
+`newCappedDocumentCopy` takes the cap of the instance the decode runs for - `PgVersioned.maxPendingItems` or `Service.maxPendingItems`, both `maxUpdateItems` in production and lowered only by a test (`shrinkPendingItems`) - while `newDocumentCopy` is that constructor at `maxUpdateItems` itself, for a decode that runs for no instance with a cap below it.
+Which decode uses which is in the code (`internal/dispatch/docs/tree.go`), not listed here.
+ygo builds the decoder for the service's rooms (`Server.MaxPendingItems`, set in `New` from `Service.maxPendingItems`).
 ygo's check of each update the service broadcasts (`Server.BroadcastUpdate`) takes no pending queue, since the room has already applied the update (reearth/ygo#268, in the pinned fork).
 In a room, which keeps what it parks across updates, the queue is also the most the room's peers can park, about ten times ygo's default.
 `TestTheStoreTakesOneBrowserUpdateItsRoomTook` is a browser's update the store decodes itself, which a check at ygo's default queue refuses, failing the room;
@@ -660,10 +684,10 @@ In a room, which keeps what it parks across updates, the queue is also the most 
 `TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`, `TestACopyHoldsEveryItemOneClientWroteAheadOfItsParent` and `TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent` check that a document whose peer deleted a chain of 200,000 nested blocks, or whose lower-numbered client wrote 150,000 items ahead of a block the server wrote, is copied, read, opened and kept from a rebuild whole.
 
 Every copy that replays the room's commits makes no commit of its own:
-ygo follows a remote apply that changes formatted text with a format cleanup committed with a nil origin, as Yjs does, while the room's own repairs and sweeps are local commits, which never clean up, so `newDocumentCopy` builds every copy with `crdt.WithFormatCleanup(false)` (reearth/ygo#369, in the pinned fork), and a room's load applies its stored history itself, with the cleanup off, then turns the cleanup back on for the updates that follow (`applyLoadedState`, from `onLoadDocument`;
+ygo follows a remote apply that changes formatted text with a format cleanup committed with a nil origin, as Yjs does, while the room's own repairs and sweeps are local commits, which never clean up, so every copy is built with `crdt.WithFormatCleanup(false)` (`newCappedDocumentCopy`, which `newDocumentCopy` calls: the replica, a fork, and every fold of the stored history, a compaction's included; reearth/ygo#369, in the pinned fork), and a room's load decodes its stored history itself, under the server's pending cap and with the cleanup off, then turns the cleanup back on for the updates that follow (`bootstrapLoadedState`, from `onLoadDocument`;
 ygo's `LoadDoc` is handed no bytes).
 A browser's update and a write's publish (`publishLiveUpdate`) reach the room as remote applies, and any cleanup either makes is stored with the rest of the room's history, so every copy replays it.
-Without this a replica and a fold of the stored history each ran cleanups the room never ran, and `*x*y` read back as `*xy*` (`TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown`), and a room loaded from a history holding repeated markers at a text's start held a state the room before it never held (`TestARoomLoadsItsStoredHistoryAsItWasStored`).
+Without this a replica and a fold of the stored history each ran cleanups the room never ran, and `*x*y` read back as `*xy*` (`TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown`), a room loaded from a history holding repeated markers at a text's start held a state the room before it never held (`TestARoomLoadsItsStoredHistoryAsItWasStored`), and a compaction stored that formatting in the row every later load reads (`TestACompactionStoresTheRoomsFormattedStateAsTheRoomHoldsIt`).
 
 A room whose last peer leaves, or that only the service's `Server.Apply` touches - an agent's edit, a read outside any transaction - stays resident until it has been idle for a minute (`roomIdleTimeout`), when ygo's idle sweeper evicts it.
 ygo's default, eager eviction, evicts a room the moment its last peer leaves even while a `Server.Apply` is inside its callback on it (sjawhar/ygo v1.51.3-sami.1, `provider/websocket/peer.go` checks only the peers):
@@ -983,7 +1007,8 @@ one that deletes such a row or changes a key column, which is what the weaker le
 Nothing does either today; the check refuses it if something starts to, and that red is the prompt to revisit this rule, not to reach for a weaker level that would not hold.
 **Order:** a transaction that takes both an owner row and the room lock takes the owner row first.
 The durable writers take no owner row at all
-— `appendUpdate`, `CaptureSnapshot`, `PruneAfter`, `Compact` and `Delete` reach the room through `withRoomLock`, which holds a session-level `pg_advisory_lock` on its own connection before it opens a transaction, so no row lock can precede it there
+— `appendUpdate`, `CaptureSnapshot`, `PruneAfter` and `Delete` reach the room through `withRoomLock`, and a compaction's write through `lockRoom` on a connection of the compaction pool;
+each holds a session-level advisory lock on its own connection before it opens a transaction, so no row lock can precede it there
 — which is why order alone could not be the whole rule;
 but a transaction that does take both, such as an upload appending its event after writing the document, deadlocks against a settlement if it takes them the other way round.
 
@@ -1003,7 +1028,7 @@ the queue behind one writer's issue lock is unbounded (a settlement per document
 The rule enforces itself.
 `store.Pool` keeps the pgx pool private and every way it hands out a connection - `Query`, `QueryRow`, `Exec`, `Acquire`, `AcquireFunc`, `AcquireAllIdle`, `CopyFrom`, `SendBatch`, `Begin`, `BeginTx` - refuses one taken while the caller already holds one, with `store.ErrNestedAcquire`, so a second acquisition fails a test instead of wedging production.
 Every entry point that opens one of these pools' transactions marks its context with `store.WithTransactionTracking`:
-`api.Register` marks every route and the document websocket, and settlement, the architecture importer's `Sync`, the outbox publisher's `Run`, `MaterializeAt`, the three CLI backfills (`BackfillBlockIDs`, `BackfillAnchorBlocks`, `CompactAll`), `rebuild-refs`, the startup seeds and each migration mark their own.
+`api.Register` marks every route and the document websocket, and settlement, the architecture importer's `Sync`, the outbox publisher's `Run`, `MaterializeAt`, the two CLI backfills (`BackfillBlockIDs`, `BackfillAnchorBlocks`), `rebuild-refs`, the startup seeds and each migration mark their own.
 There is no exception: `docs.SetIssueClosed` takes its caller's context so the pool sees it even though it runs after that caller has committed.
 A durable append holds its connection directly rather than through a transaction, so `withRoomLock` marks its context with `store.HoldsConnection` for as long as it holds that connection and the room's advisory lock, and `Query` marks the caller for as long as its rows are open, so a cursor counts as the held connection it is.
 A refusal logs its stack once per call site, so a caller that trips it in a loop cannot flood the log; the error itself is returned every time.
@@ -1031,7 +1056,7 @@ with four writers parked on one issue's row lock, a read of an unrelated issue w
 Sixteen ran out too: under heavy agent load the API held all sixteen and every other caller, the events outbox included, waited behind them.
 Sixty-four did not hold either, because the background loops, the live-update readers and the settlements waited for the same connections as the requests, and past capacity each side starved the other.
 
-So a process's connections are one budget, partitioned rather than grown, 92 in all (`store.ConnectionsPerProcess`): the 87 the process opened before the partition, which added none, the event horizon's 2, the background loops' shared wake listener, the outbox's second connection and the outbox's own LISTEN connection, the only connections added since (the comment on `store.SharedPoolSize` is its record).
+So a process's connections are one budget, partitioned rather than grown, 94 in all (`store.ConnectionsPerProcess`): the 87 the process opened before the partition, which added none, the event horizon's 2, the background loops' shared wake listener, the outbox's second connection, the outbox's own LISTEN connection and the compaction pool's 2, the only connections added since (the comment on `store.SharedPoolSize` is its record).
 Each pool below is sized in `store/pools.go`, and every connection carries `dispatch-<pool>` in `application_name`, so `pg_stat_activity` groups a process's connections by pool (`configurePool`; a connection string's own `application_name` is replaced), and the metrics' `pool` label is the part after `dispatch-`.
 
 | Pool | Connections | Acquire bound | What takes them |
@@ -1045,13 +1070,14 @@ Each pool below is sized in `store/pools.go`, and every connection carries `disp
 | `listen` (`Listener`) | the 5 it hands over (its one dial is one of them redialling) | 10 s | the LISTEN connections of the delivery hub, the event stream relay, the stale-room evictor, the background loops' shared wake hub (`pglisten.Hub`, one connection for every channel they wait on) and the events outbox (`dispatch_events` and `dispatch_duty_holds`) |
 | `leases` (`Leases`) | 15 | 2 s | `duty.Exclusive`: one per lease name (13) and 2 spare |
 | `outbox` (`Outbox`) | 2 | none: one connection for each of its two callers | the events outbox: its batches' statements, one at a time, and its publisher hold's renewal beside them |
+| `compaction` (`Compaction`) | 2 | 30 s | a document's compaction: its repeatable-read read of the rows to fold, and its write back under the document's advisory lock (the compaction queue's and the hourly sweep's alike) |
 | `horizon` (`Horizon`) | 2 | 3 s | the event log's safe horizon (`events.Horizon`): its observations, its marks and the reads beside them, its stall diagnosis and its persist write, and the reads `GET /auth/whoami`, `GET /api/v1/references?since=` and the relay's first start make through it |
 | `registry` (`OpenRegistry`) | 1 | none: its one caller | the server process registry's admission, heartbeat and deregistration (`processes.Register` opens it through the store, so `Stats` and `/metrics` report it, and its `Deregister` closes it) |
 
 **Every connection wait is bounded.**
 Each pool's `ConnConfig.Tracer` is `store`'s acquire tracer (`store/acquire.go`, pgx's `AcquireTracer`), which every pool method goes through, wrapped or raw:
 it bounds each acquire at its pool's bound, unless the caller's own deadline is sooner, and records the wait for the metrics.
-An acquire that runs out the bound while the caller is still live is `store.ErrPoolBusy` (`store.IsPoolBusy`; it wraps `context.DeadlineExceeded` too) from every pool, the wrapped ones and the raw ones a caller works through as pgx pools alike (`store.RawPool`: rooms, leases, listen, horizon, registry, health); nothing ran, and a request answers it `503 DATABASE_BUSY` (`admission.WriteUnserved`).
+An acquire that runs out the bound while the caller is still live is `store.ErrPoolBusy` (`store.IsPoolBusy`; it wraps `context.DeadlineExceeded` too) from every pool, the wrapped ones and the raw ones a caller works through as pgx pools alike (`store.RawPool`: rooms, leases, listen, horizon, registry, health, compaction); nothing ran, and a request answers it `503 DATABASE_BUSY` (`admission.WriteUnserved`).
 The bound is per acquire: a write makes an acquire per statement and transaction, one after another, each bounded on its own, and an admitted read of weight one pins one connection for its whole length (above), whose own deadline bounds the sum of its waits.
 A transaction a guarded pool opened commits apart from its caller's cancellation (`store.CommitContext`, bounded at 10 s): a commit a client's leaving cut short has an unknown outcome, and the document service fails every room such a transaction wrote.
 A raw pool's is the pgx transaction itself and commits on its caller's own context (`store.RawPool.Begin`), those being the document loads and the registry's registrations, which belong to no request.
@@ -4949,7 +4975,7 @@ A bad credential is a 401 (`LAUNCHER_INVALID`, `PROOF_INVALID`, or, for `account
 — the credential is good and it is the broker's list that refuses
 — and `ACCOUNT_LACKS_POWER`, for a listed caller reaching a route its name does not carry, naming that caller and that route.
 No refusal repeats the token.
-Each `accountAuth` row declares the power it needs, `readsTokensBack` (`POST /v1/oauth/introspect`) or `relaysDecisions` (the ten routes Dispatch's server relays a person's decisions, ends one of the broker's tokens and reads through, the two decide rows among them), `accountPowers` says which powers each caller name carries, and `authenticate` checks the two before the handler runs, so listing an account for introspection alone never gives it approval or revocation authority (`TestEveryAccountRouteDeclaresItsPower` fails on an `accountAuth` row that declares none).
+Each `accountAuth` row declares the power it needs, `readsTokensBack` (`POST /v1/oauth/introspect`) or `relaysDecisions` (the nine routes Dispatch's server relays a person's decisions, ends one of the broker's tokens and reads through, the two decide rows among them), `accountPowers` says which powers each caller name carries, and `authenticate` checks the two before the handler runs, so listing an account for introspection alone never gives it approval or revocation authority (`TestEveryAccountRouteDeclaresItsPower` fails on an `accountAuth` row that declares none).
 The two `accountAuthAfterRecordKind` rows declare `relaysDecisions` as well, and `decideRecord` checks it against that same table once it has read the record's kind and authenticated its own caller, since `authenticate` reads no credential for them; that test passes over them, being no `accountAuth` rows, and `cmd/broker/account_powers_test.go` is what pins them, driving each as the `listener` caller and reading `403 ACCOUNT_LACKS_POWER`.
 `accountCaller` is the check a daemon's token login makes (`machine.Service.VerifyKubernetesServiceToken`, the Kubernetes half of `VerifyServiceToken`), against the same verifier and with the same taxonomy);
 `serviceAuth` is that same check, taken as the whole of a route's authentication:
@@ -5161,7 +5187,7 @@ a denial releases nothing, so the record's approver may still deny either), re-v
 a non-pending record, and one past its expiry that the sweeper has not yet expired, is `409 RECORD_TERMINAL` for its approver (a duplicate or late decision changes nothing)
 — but a record past its expiry, whether the sweeper has recorded it expired or not, answers with a message saying it expired before its approver acted (`requests.ErrExpired`), never that it was decided.
 An `agent_secret` record is pending while its request is:
-`GET /v1/pending` (`PendingForApprover`, which lists `anyone` records for every approver) lists it only then, and `GET /v1/credential-requests/{id}` (`ReadRecord`) reads it as pending only then;
+`GET /v1/pending` (`PendingForApprover`, which lists `anyone` records for every approver) lists it only then, and `ReadRecord`, which the broker's own approval page and `POST /v1/machine-logins/lookup` read a record through, reads it as pending only then;
 a decided record's terminal event names the decision, and a request cancelled with no cancelled event on its record, the shape an ended enrollment's requests had before `endEnrollment` wrote one, reads as `cancelled` from its request row.
 A machine login is pending while it carries no terminal event, and `PendingForApprover` lists a service's (approver `anyone`) for every approver.
 `Values` releases a live grant's values, each read from the secret its request froze (its source: the ARN, or the Secret Manager resource name).

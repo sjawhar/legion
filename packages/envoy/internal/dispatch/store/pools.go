@@ -127,16 +127,17 @@ func (r *RawPool) Ping(ctx context.Context) error {
 // median. The ceiling is picked here rather than derived from the task's CPU allotment or read
 // out of the DSN another repository's URL builder writes.
 //
-// It is 48 of one connection budget of 92 (ConnectionsPerProcess) that every pool of a process
+// It is 48 of one connection budget of 94 (ConnectionsPerProcess) that every pool of a process
 // shares, partitioned rather than grown: requests 48, background 6 (Background), live 4 (Live),
 // settlements 4 (Settlements), rooms 4, health 1, the five permanent listeners (the listener
-// pool's one dial is one of them redialling), leases leasePoolSize (15), outbox 2, the event
-// horizon 2 (Horizon) and the server process registry's own 1 (registryPoolSize). The partition
+// pool's one dial is one of them redialling), leases leasePoolSize (15), outbox 2, compaction 2
+// (Compaction), the event horizon 2 (Horizon) and the server process registry's own 1
+// (registryPoolSize). The partition
 // itself added nothing: it is the 87 the process opened before, the request pool having given up
 // 16, which background, live, settlements and the leases' two spare connections took; the event
-// horizon's 2, the background loops' shared wake listener, the outbox's second connection and
-// the outbox's own listener are the only connections added since, and the horizon's came with
-// the pool itself. A write
+// horizon's 2, the background loops' shared wake listener, the outbox's second connection, the
+// outbox's own listener and the compaction's 2 are the only connections added since, and the
+// horizon's came with the pool itself. A write
 // takes a connection per statement one after another, and a read pins one for its whole length
 // (PinConnection), so under load the API holds every connection of this pool; the background
 // loops, the live-update readers and the settlements wait on pools of their own, so neither side
@@ -156,11 +157,11 @@ func (r *RawPool) Ping(ctx context.Context) error {
 // ConnectionsPerProcess with it.
 const SharedPoolSize = 48
 
-// roomsPoolSize bounds the connections document loads use. Loading takes no lock and always
+// RoomsPoolSize bounds the connections document loads use. Loading takes no lock and always
 // finishes, so one is enough for the pool to be deadlock-free; a few let cold rooms load
 // concurrently. Measured on the real server, eight cold rooms loading at once are no faster at
 // eight connections than at one, so this is small on purpose.
-const roomsPoolSize = 4
+const RoomsPoolSize = 4
 
 // healthPoolSize bounds the connections the health probe uses. The probe answers one question -
 // is Postgres reachable, and at which schema - and asks it on a connection nothing else can take,
@@ -198,7 +199,7 @@ var ErrPoolClosed = errors.New("connection pool is closed")
 // per caller who wants to read a document. Its acquires are bounded at requestAcquireBound like
 // the request pool's, and a load that waits that bound out is refused with ErrPoolBusy (RawPool).
 func (p *Pool) Rooms() (*RawPool, error) {
-	return p.separate(RoomsPool, roomsPoolSize)
+	return p.separate(RoomsPool, RoomsPoolSize)
 }
 
 // Healthy reports the highest schema migration Postgres has applied, read within
@@ -282,8 +283,9 @@ const leaseNameCount = 13
 // (duty.freeLeaseOn, teardownTimeout). Without them the next pass waits on those (review BG-5);
 // with them a wait at all is a fault, and an acquire that waits leaseAcquireBound makes Exclusive
 // skip the pass rather than queue. They cannot come from the request pool: a lease is held for the
-// whole pass, which is minutes for the compaction, and the request pool's connections are what
-// every request reads through.
+// whole pass, which is minutes for the compaction sweep, and the request pool's connections are
+// what every request reads through. The compaction sweep holds only its lease here: each document
+// it compacts reads and writes on the compaction pool (Pool.Compaction).
 const leasePoolSize = leaseNameCount + 2
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
@@ -318,13 +320,13 @@ const registryPoolSize = 1
 const permanentListeners = 5
 
 // ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres, the
-// budget of 92 SharedPoolSize describes: every pool's size, the registry's own pool
+// budget of 94 SharedPoolSize describes: every pool's size, the registry's own pool
 // (processes.Register) and the event horizon's (Horizon) among them, and one connection per
 // permanent listener, which the listener pool dials and hands off rather than holds (its one dial
 // in flight is a permanent listener redialling, so it is not counted twice).
 const ConnectionsPerProcess = SharedPoolSize + backgroundPoolSize + livePoolSize + settlementsPoolSize +
-	roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + horizonPoolSize + registryPoolSize +
-	permanentListeners
+	RoomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + compactionPoolSize + horizonPoolSize +
+	registryPoolSize + permanentListeners
 
 // Outbox is the pool the events outbox reads and records events through, reads the followers and
 // authors a publish routes to, and holds its publisher hold on. Under load the API's requests
@@ -333,6 +335,27 @@ const ConnectionsPerProcess = SharedPoolSize + backgroundPoolSize + livePoolSize
 // and holds no connection a request could use.
 func (p *Pool) Outbox() (*Pool, error) {
 	return p.wrapped(OutboxPool, outboxPoolSize)
+}
+
+// compactionPoolSize bounds the pool a document's compaction reads and writes through. A
+// compaction holds one connection at a time - its read transaction, then, after a fold that holds
+// none, its write under the document's lock - so one would serve one compaction; two let a second
+// compaction (a room closing while another compacts) read while the first writes.
+const compactionPoolSize = 2
+
+// Compaction is where a document's compaction takes its connections: the repeatable-read
+// transaction it reads the rows to fold in, and the connection it holds the document's advisory
+// lock on while it writes the fold back. Compaction is housekeeping. On the request pool its
+// write would hold a connection every request reads through while it waits for the document's
+// lock, on the background pool it would hold one of the six every background loop shares for the
+// length of a fold, and on the rooms pool its read would queue a room's load behind a log it is
+// folding; on a pool of its own it takes none of them. Like the rooms pool it is handed out raw
+// and its callers stand outside the nested-acquire guard, because a separate pool cannot close
+// the cycle the guard prevents. Its acquires are bounded at backgroundAcquireBound, since nobody
+// waits on a compaction, and one that waits that bound out is refused with ErrPoolBusy (RawPool),
+// which leaves the document to the compaction queue's next try.
+func (p *Pool) Compaction() (*RawPool, error) {
+	return p.separate(CompactionPool, compactionPoolSize)
 }
 
 // horizonPoolSize bounds the pool the event log's safe horizon (events.Horizon) works through. The

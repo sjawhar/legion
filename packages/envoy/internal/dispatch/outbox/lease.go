@@ -143,7 +143,6 @@ func (o *Outbox) Run(ctx context.Context) {
 	defer wg.Wait()
 	// None of these carries the publisher's marker below: a connection one of them holds must
 	// never count as one the publisher holds.
-	wg.Go(func() { compactDaily(ctx, o.deps) })
 	wg.Go(func() { o.listen(ctx) })
 	wg.Go(func() { o.wakeOnCommits(ctx) })
 	wg.Go(func() { o.wakeOnConnectionChange(ctx) })

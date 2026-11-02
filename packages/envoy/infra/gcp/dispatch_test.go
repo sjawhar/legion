@@ -169,7 +169,14 @@ func newTailscaleProvider(ctx *pulumi.Context) (pulumi.ProviderResource, error) 
 func runDispatchWithProviders(t *testing.T, name string, args *gcp.DispatchArgs, providers ...func(*pulumi.Context) (pulumi.ProviderResource, error)) (*pulumitest.Mocks, error) {
 	t.Helper()
 	m := newMocks()
-	err := m.Run(func(ctx *pulumi.Context) error {
+	return m, runDispatchOnMocks(t, m, name, args, providers...)
+}
+
+// runDispatchOnMocks is runDispatchWithProviders on mocks the caller owns, so a test can set
+// Mocks.Preview before the program runs.
+func runDispatchOnMocks(t *testing.T, m *pulumitest.Mocks, name string, args *gcp.DispatchArgs, providers ...func(*pulumi.Context) (pulumi.ProviderResource, error)) error {
+	t.Helper()
+	return m.Run(func(ctx *pulumi.Context) error {
 		var declared []pulumi.ProviderResource
 		for _, newProvider := range providers {
 			provider, err := newProvider(ctx)
@@ -185,7 +192,6 @@ func runDispatchWithProviders(t *testing.T, name string, args *gcp.DispatchArgs,
 		_, err := gcp.NewDispatch(ctx, name, args, opts...)
 		return err
 	})
-	return m, err
 }
 
 func TestDispatchSettingsApplyDefaults(t *testing.T) {
@@ -1392,18 +1398,17 @@ func TestDispatchFrontDoorAloneWritesItsTLSSecret(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
-	const roleType, bindingType = "kubernetes:rbac.authorization.k8s.io/v1:Role", "kubernetes:rbac.authorization.k8s.io/v1:RoleBinding"
 	require.Len(t, registrationsOf(m, roleType), 1, "the component registers one Role")
-	require.Len(t, registrationsOf(m, bindingType), 1, "the component registers one RoleBinding")
+	require.Len(t, registrationsOf(m, roleBindingType), 1, "the component registers one RoleBinding")
 	role := m.Named(t, roleType, "example-dispatch-tailnet-tls").Inputs.Mappable()
 	require.Equal(t, []any{map[string]any{
 		"apiGroups": []any{""}, "resources": []any{"secrets"}, "resourceNames": []any{"example-dispatch-tailnet-tls"},
 		"verbs": []any{"get", "patch"},
 	}}, role["rules"])
-	binding := m.Named(t, bindingType, "example-dispatch-tailnet-tls").Inputs.Mappable()
+	binding := m.Named(t, roleBindingType, "example-dispatch-tailnet-tls").Inputs.Mappable()
 	require.Equal(t, map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "example-dispatch-tailnet-tls"}, binding["roleRef"])
 	require.Equal(t, []any{map[string]any{"kind": "ServiceAccount", "name": "example-dispatch-tailnet", "namespace": "dispatch"}}, binding["subjects"])
-	for _, r := range append(registrationsOf(m, roleType), registrationsOf(m, bindingType)...) {
+	for _, r := range append(registrationsOf(m, roleType), registrationsOf(m, roleBindingType)...) {
 		for _, s := range allStrings(resource.NewProperty(r.Inputs)) {
 			require.NotContains(t, s, "tailscale-state", "%s %s", r.Type, r.Name)
 		}
@@ -1428,6 +1433,46 @@ func TestDispatchFrontDoorAloneWritesItsTLSSecret(t *testing.T) {
 					require.Equal(t, "", entry["value"], "%s names no Kubernetes Secret for tailnet state", workload.deployment)
 				}
 			}
+		}
+	}
+}
+
+// On a preview that creates the front door's TLS Role, its binding's roleRef name is unknown until
+// the Role has an ID, so pulumi-kubernetes sends the API server no dry run of the binding, which an
+// account without the bind verb (a consumer's CI account may be one) would see refused as "not found"
+// while the Role does not exist. On an apply the binding names the Role.
+//
+// Both surfaces are read: the component under the mock engine, and the component as the plugin
+// serves it through Construct, which is the artifact a consumer installs and the path its
+// pulumi preview takes.
+func TestDispatchFrontDoorBindingWaitsForItsRoleOnPreview(t *testing.T) {
+	for _, surface := range []struct {
+		name string
+		run  func(t *testing.T, m *pulumitest.Mocks) error
+	}{
+		{"component", func(t *testing.T, m *pulumitest.Mocks) error {
+			return runDispatchOnMocks(t, m, "example-dispatch", dispatchArgs(), newGCPProvider, newRandomProvider, newTailscaleProvider)
+		}},
+		{"plugin", func(t *testing.T, m *pulumitest.Mocks) error {
+			_, err := constructDispatchOnMocks(t, m, dispatchConstructBaseInputs())
+			return err
+		}},
+	} {
+		for _, preview := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/preview=%v", surface.name, preview), func(t *testing.T) {
+				m := newMocks()
+				m.Preview = preview
+				require.NoError(t, surface.run(t, m))
+				ref := m.Named(t, roleBindingType, "example-dispatch-tailnet-tls").Inputs["roleRef"].ObjectValue()
+				require.Equal(t, "Role", ref["kind"].StringValue())
+				name := ref["name"]
+				if preview {
+					// The mock monitor unmarshals inputs without keeping unknowns, so an unknown arrives as null.
+					require.True(t, name.IsNull() || name.IsComputed(), "roleRef name on a preview = %v, want unknown until the Role exists", name)
+				} else {
+					require.Equal(t, "example-dispatch-tailnet-tls", name.StringValue())
+				}
+			})
 		}
 	}
 }
@@ -1527,8 +1572,10 @@ func TestDispatchTheFrontDoorWaitsForItsTailscaleService(t *testing.T) {
 
 // The Service the component declares is the name every reader reaches Dispatch at: svc: and the
 // hostname, so the Service and the nodes that advertise it can never be named differently; tcp:443
-// alone, the one port the front door terminates TLS on; and the component's own tags, the same
-// grant its front-door nodes join the tailnet under, so a node may host the Service it advertises.
+// alone, the one port the front door terminates TLS on; and no tags. The OAuth client that creates
+// the Service may request no tags — Tailscale refuses the ones it may not set — the hosts' own tag
+// is what auto-approves them as the Service's hosts, and a tailnet policy grants the Service by
+// its name.
 func TestDispatchDeclaresItsTailscaleService(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -1537,14 +1584,8 @@ func TestDispatchDeclaresItsTailscaleService(t *testing.T) {
 	require.Equal(t, "svc:example-dispatch", normalizedProperty(service.Inputs["name"]))
 	require.Equal(t, []any{"tcp:443"}, normalizedProperty(service.Inputs["ports"]),
 		"the front door terminates TLS on 443 and publishes no other port")
-	// The tags input itself, as the engine reads a property list, so the row is the fixture's own
-	// value rather than a second spelling of it and an absent tags fails as an absent list.
-	wantTags := make([]any, 0, len(dispatchArgs().Tags))
-	for _, tag := range dispatchArgs().Tags {
-		wantTags = append(wantTags, tag)
-	}
-	require.Equal(t, wantTags, normalizedProperty(service.Inputs["tags"]),
-		"the Service carries the component's own tags input, the grant its nodes join under")
+	require.NotContains(t, service.Inputs, resource.PropertyKey("tags"),
+		"the Service requests no tags: the client that creates it may not set the component's own")
 }
 
 // The Service's Protect follows deletionProtection, the input that already guards the cluster and
@@ -2714,6 +2755,8 @@ func TestDispatchRefusesEphemeralStorageBeforeRegistering(t *testing.T) {
 const (
 	podDisruptionBudgetType = "kubernetes:policy/v1:PodDisruptionBudget"
 	priorityClassType       = "kubernetes:scheduling.k8s.io/v1:PriorityClass"
+	roleType                = "kubernetes:rbac.authorization.k8s.io/v1:Role"
+	roleBindingType         = "kubernetes:rbac.authorization.k8s.io/v1:RoleBinding"
 )
 
 // safeToEvict reports whether deployment's pod template carries the cluster autoscaler's
