@@ -1817,28 +1817,32 @@ function documentListLines(
     : documents.map((document) => `- ${document.slug} (${document.name}, ${document.kind})`);
 }
 
-/** A reference compared with a document's slug and filename, letter case ignored: the smaller edit
- * distance of the two, and whether the document is close to it - within a third of the reference's
- * length (at least 2 edits), or one holding the other where the one held is at least 4 characters
- * long. Characters are code points, as Go's runes are. */
+/** A reference compared with a document's slug and filename, ASCII letter case ignored: the smaller
+ * edit distance of the two, and whether the document is close to it - within a third of the
+ * reference's length (at least 2 edits), or one holding the other where the one held is at least 4
+ * characters long, whose distance is then exactly their difference in length. Characters are code
+ * points, as Go's runes are, and only ASCII letters are folded, since JavaScript and Go lowercase
+ * other letters differently (`İ`) and Dispatch's `documentCloseness` must rank alike. */
 function documentCloseness(
   reference: string,
   slug: string,
   name: string
 ): { distance: number; near: boolean } {
-  const wanted = [...reference.toLowerCase()];
+  const wanted = [...reference.replace(/[A-Z]/g, (letter) => letter.toLowerCase())];
   const limit = Math.max(2, Math.floor(wanted.length / 3));
-  let distance = limit + 1;
+  let distance = Number.POSITIVE_INFINITY;
   let contained = false;
   for (const candidate of [slug, name]) {
-    const label = [...candidate.toLowerCase()];
-    distance = Math.min(distance, boundedEditDistance(wanted, label, limit));
+    const label = [...candidate.replace(/[A-Z]/g, (letter) => letter.toLowerCase())];
+    let edits = boundedEditDistance(wanted, label, limit);
     if (
       (wanted.length >= 4 && label.join("").includes(wanted.join(""))) ||
       (label.length >= 4 && wanted.join("").includes(label.join("")))
     ) {
       contained = true;
+      edits = Math.abs(label.length - wanted.length);
     }
+    distance = Math.min(distance, edits);
   }
   return { distance, near: contained || distance <= limit };
 }

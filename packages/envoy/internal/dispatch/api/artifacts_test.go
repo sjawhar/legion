@@ -598,6 +598,46 @@ func TestMissingDocumentOnABusyOwnerNamesTheClosestAndCountsTheRest(t *testing.T
 	}
 }
 
+// TestDocumentsNearestRanksByExactDistanceAndFoldsOnlyASCII holds the ranking envoy-client's
+// documentsNearest repeats (its test of the same cases): a name holding the reference ranks by
+// how much longer it is, so an old short match is not lost behind newer long ones, and only ASCII
+// letters fold, so İ is not i in either ranker.
+func TestDocumentsNearestRanksByExactDistanceAndFoldsOnlyASCII(t *testing.T) {
+	documents := func(names ...string) []model.Artifact {
+		var out []model.Artifact
+		for _, name := range names {
+			out = append(out, model.Artifact{Slug: strings.ReplaceAll(name, ".", "-"), Name: name})
+		}
+		return out
+	}
+	for _, test := range []struct {
+		reference string
+		documents []model.Artifact
+		want      []string
+	}{
+		{
+			reference: "Plan",
+			documents: documents("plan.md", "plan-alpha-archive.md", "plan-beta-archive.md", "plan-gamma-archive.md",
+				"plan-delta-archive.md", "plan-omega-archive.md", "plan-kappa-archive.md", "plan-sigma-archive.md", "plan-theta-archive.md"),
+			want: []string{"plan.md", "plan-beta-archive.md", "plan-theta-archive.md", "plan-sigma-archive.md", "plan-kappa-archive.md",
+				"plan-omega-archive.md", "plan-delta-archive.md", "plan-gamma-archive.md", "plan-alpha-archive.md"},
+		},
+		{
+			reference: "İİİİ-md",
+			documents: documents("iiii.md", "notes-0.md", "notes-1.md", "notes-2.md", "notes-3.md", "notes-4.md", "notes-5.md", "notes-6.md", "notes-7.md"),
+			want:      []string{"notes-7.md", "notes-6.md", "notes-5.md", "notes-4.md", "notes-3.md", "notes-2.md", "notes-1.md", "notes-0.md", "iiii.md"},
+		},
+	} {
+		var got []string
+		for _, document := range documentsNearest(test.reference, test.documents) {
+			got = append(got, document.Name)
+		}
+		if strings.Join(got, ",") != strings.Join(test.want, ",") {
+			t.Errorf("documentsNearest(%q) = %v, want %v", test.reference, got, test.want)
+		}
+	}
+}
+
 func TestDocumentRoutesRejectAmbiguousFilenameWithSlugChoices(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createArtifactIssue(t, handler)

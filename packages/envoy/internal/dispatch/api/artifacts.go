@@ -1361,24 +1361,40 @@ func documentsNearest(reference string, documents []model.Artifact) []model.Arti
 	return ordered
 }
 
-// documentCloseness compares a reference with a document's slug and filename, letter case
+// documentCloseness compares a reference with a document's slug and filename, ASCII letter case
 // ignored: the smaller edit distance of the two, and whether the document is close to it - within
 // a third of the reference's length (at least 2 edits), or one holding the other where the one held
-// is at least 4 characters long.
+// is at least 4 characters long, whose distance is then exactly their difference in length. Only
+// ASCII letters are folded because Go and JavaScript lowercase other letters differently, and
+// envoy-client's documentCloseness must rank alike.
 func documentCloseness(reference, slug, name string) (int, bool) {
-	wanted := []rune(strings.ToLower(reference))
+	wanted := []rune(asciiLower(reference))
 	limit := max(2, len(wanted)/3)
-	distance := limit + 1
+	distance := -1
 	contained := false
 	for _, candidate := range []string{slug, name} {
-		label := []rune(strings.ToLower(candidate))
-		distance = min(distance, boundedEditDistance(wanted, label, limit))
+		label := []rune(asciiLower(candidate))
+		edits := boundedEditDistance(wanted, label, limit)
 		if (len(wanted) >= 4 && strings.Contains(string(label), string(wanted))) ||
 			(len(label) >= 4 && strings.Contains(string(wanted), string(label))) {
 			contained = true
+			edits = max(len(label)-len(wanted), len(wanted)-len(label))
+		}
+		if distance < 0 || edits < distance {
+			distance = edits
 		}
 	}
 	return distance, contained || distance <= limit
+}
+
+// asciiLower lowercases the ASCII letters of text and leaves every other character as it is.
+func asciiLower(text string) string {
+	return strings.Map(func(r rune) rune {
+		if 'A' <= r && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, text)
 }
 
 // boundedEditDistance is the Levenshtein distance between a and b in characters, or limit+1 once

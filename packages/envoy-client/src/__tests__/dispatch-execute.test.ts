@@ -8239,6 +8239,68 @@ describe("executeDispatchTool", () => {
     );
   });
 
+  // The cases of Dispatch's TestDocumentsNearestRanksByExactDistanceAndFoldsOnlyASCII: a name
+  // holding the reference ranks by how much longer it is, and only ASCII letters fold.
+  test.each([
+    [
+      "Plan",
+      [
+        "plan.md",
+        ...["alpha", "beta", "gamma", "delta", "omega", "kappa", "sigma", "theta"].map(
+          (n) => `plan-${n}-archive.md`
+        ),
+      ],
+      [
+        "plan.md",
+        "plan-beta-archive.md",
+        "plan-theta-archive.md",
+        "plan-sigma-archive.md",
+        "plan-kappa-archive.md",
+        "plan-omega-archive.md",
+        "plan-delta-archive.md",
+        "plan-gamma-archive.md",
+      ],
+    ],
+    [
+      "İİİİ-md",
+      ["iiii.md", ...[0, 1, 2, 3, 4, 5, 6, 7].map((n) => `notes-${n}.md`)],
+      [7, 6, 5, 4, 3, 2, 1, 0].map((n) => `notes-${n}.md`),
+    ],
+  ])("ranks %s as Dispatch does", async (reference, names, shown) => {
+    const slug = (name: string) => name.replaceAll(".", "-");
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/api/v1/issues/DSP-7") {
+        return response({
+          key: "DSP-7",
+          primary_artifact_id: "none",
+          artifacts: names.map((name) => ({
+            id: name,
+            slug: slug(name),
+            name,
+            kind: "doc",
+            primary: false,
+          })),
+        });
+      }
+      throw new Error(`unexpected request: ${path}`);
+    };
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_doc_read",
+        args: { issue: "DSP-7", artifact: reference },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow(
+      `this issue's 9 documents include: ${shown.map((name) => `${slug(name)} (${name})`).join(", ")}; dispatch read`
+    );
+  });
+
   test("a project read with no document lists the project's documents", async () => {
     const requests: string[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
