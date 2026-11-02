@@ -449,9 +449,13 @@ func requireEnvoyRefilling(t *testing.T, response *httptest.ResponseRecorder, re
 // A listener refilling its list answered the read, and said the list will be back: the Agents
 // read says so with its own code and the listener's Retry-After (5, the listener's own, when it
 // sent none), never an empty list. Any other 503 is still the listener being unavailable.
+//
+// Each case takes a database of its own, because the listener's answer is stored for every
+// server process to read (route_roster) and the two cases run different listeners: sharing one
+// database would serve the second case the first one's stored silence, with its Retry-After.
 func TestAgentsReportsARefillingListenerAsRefilling(t *testing.T) {
-	database := storetest.Open(t)
 	for retryAfter, want := range map[string]string{"7": "7", "": "5"} {
+		database := storetest.Open(t)
 		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			answerListRefilling(w, retryAfter)
 		}))
@@ -465,7 +469,7 @@ func TestAgentsReportsARefillingListenerAsRefilling(t *testing.T) {
 		WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "service starting", "code": "starting"})
 	}))
 	t.Cleanup(plain.Close)
-	response := dispatchRequest(t, agentsHandlerWithStore(t, plain.URL, database), http.MethodGet, "/api/v1/agents", nil, "alice")
+	response := dispatchRequest(t, agentsHandlerWithStore(t, plain.URL, storetest.Open(t)), http.MethodGet, "/api/v1/agents", nil, "alice")
 	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"ENVOY_UNAVAILABLE"`) {
 		t.Fatalf("a 503 without the refilling code: status %d: %s, want ENVOY_UNAVAILABLE", response.Code, response.Body.String())
 	}

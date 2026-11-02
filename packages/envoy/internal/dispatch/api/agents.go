@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/envoy"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 type agentResponse struct {
@@ -113,6 +114,14 @@ func (s *server) listAgents(w http.ResponseWriter, r *http.Request) {
 		roster = s.listRouteRoster(r.Context())
 	}
 	if !roster.answered {
+		// The roster's reason is the one every process reads, stored on the row beside the
+		// answer, so a refill one process met answers ENVOY_REFILLING here too, with the
+		// Retry-After the listener sent, never the unreachable listener dispatch://INFRA-261
+		// forbids (listIssues refuses a judged filter the same way).
+		if roster.reason == model.RouteReasonRefilling {
+			writeEnvoyRefilling(w, roster.retryAfter)
+			return
+		}
 		s.writeEnvoyError(w, roster.err)
 		return
 	}

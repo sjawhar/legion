@@ -49,14 +49,17 @@ import (
 // routeRoster is one listener answer about who is running. answered is false when the listener
 // is unconfigured or gave no list; every route then reads unknown, and reason says why:
 // model.RouteReasonRefilling for the listener's refilling answer, whose Retry-After rides in
-// retryAfter, model.RouteReasonUnreachable for anything else. Its maps and its session slice are
-// read-only once built, since every read in this process served from one stored answer shares
-// them (rosterCache.built): a reader that sorts or edits the sessions copies them first, and
-// never writes a session's Roles or Capabilities, which every copy shares too.
+// retryAfter, model.RouteReasonUnreachable for anything else. Both ride on the stored row with
+// the answer they came with, so a refill one process met is a refill on every process
+// (dispatch://INFRA-261). Its maps and its session slice are read-only once built, since every
+// read in this process served from one stored answer shares them (rosterCache.built): a reader
+// that sorts or edits the sessions copies them first, and never writes a session's Roles or
+// Capabilities, which every copy shares too.
 type routeRoster struct {
 	answered bool
 	// reason is why an unanswered roster gave no list: model.RouteReasonRefilling, with the
-	// listener's Retry-After in retryAfter, or model.RouteReasonUnreachable.
+	// listener's Retry-After in retryAfter, or model.RouteReasonUnreachable. Both are stored on
+	// the route_roster row beside the answer, so every process reads one silence the same way.
 	reason     string
 	retryAfter string
 	// sessions is the listener's answer, in the listener's order. It carries the unresponsive
@@ -74,10 +77,11 @@ type routeRoster struct {
 	// them - and the most recently seen is the live one when a lapsed claim lingers beside it.
 	holders map[string]string
 	// err is why the roster did not answer: the listener client's own error when this process's
-	// fetch got it, errListenerSilence when the silence was read from a row another fetch stored,
-	// or, for a read whose request ended while it waited on the shared fetch, envoy.ErrUnavailable
-	// wrapping the request's context error, so it always matches envoy.ErrUnavailable. It is nil
-	// when the roster answered or the listener is unconfigured.
+	// fetch got it, errListenerSilence or errListenerRefill when the silence was read from a row
+	// another fetch stored, or, for a read whose request ended while it waited on the shared
+	// fetch, envoy.ErrUnavailable wrapping the request's context error. It matches
+	// envoy.ErrRefilling when reason is model.RouteReasonRefilling and envoy.ErrUnavailable
+	// otherwise. It is nil when the roster answered or the listener is unconfigured.
 	err error
 }
 
@@ -97,6 +101,12 @@ func (r routeRoster) state(sessionID string) string {
 // errListenerSilence is the err of a stored silence this process did not fetch itself: the row
 // says only that the listener failed or did not answer, not the error the fetching process saw.
 var errListenerSilence = fmt.Errorf("%w: the listener did not answer Dispatch's last read of its sessions", envoy.ErrUnavailable)
+
+// errListenerRefill is the err of a stored refilling answer this process did not fetch itself:
+// the row says the listener refused its session list while it refills, not the error the
+// fetching process saw. Like the listener's own refusal it matches envoy.ErrRefilling and not
+// envoy.ErrUnavailable, and the Retry-After the listener sent is the roster's retryAfter.
+var errListenerRefill = fmt.Errorf("%w: the listener was refilling its sessions at Dispatch's last read of them", envoy.ErrRefilling)
 
 // routeRosterTimeout bounds the one listener read a roster fetch makes. The listener answers in
 // milliseconds; a listener that has stopped answering would otherwise hold every issue list and
@@ -241,9 +251,15 @@ func (s *server) routeRosterOrUnknown(ctx context.Context) routeRoster {
 
 // routeRosterQuery reads the stored answer and the database's now() in one statement, which
 // answers one row whether route_roster holds one or not; $1 is the sent_at of the roster this
-// process last built, and the sessions are left out when the row still carries it.
+// process last built, and the sessions are left out when the row still carries it. The reason
+// and its Retry-After are read only while they belong to the stored answer, which is what
+// reason_sent_at records: the release before those columns updates the row without naming them,
+// so its silence moves sent_at alone and reads unreachable, as that release answers it, rather
+// than taking the reason of the answer before it.
 const routeRosterQuery = `
 	select now(), coalesce(r.answered, false), r.sent_at, r.expires_at,
+	       coalesce(case when r.reason_sent_at = r.sent_at then r.reason end, ''),
+	       coalesce(case when r.reason_sent_at = r.sent_at then r.retry_after end, ''),
 	       case when r.sent_at is distinct from $1::timestamptz then r.sessions end
 	from (values (true)) as one (present)
 	left join route_roster r on true`
@@ -261,9 +277,11 @@ func (s *server) storedRouteRoster(ctx context.Context) (roster routeRoster, fre
 		known = &builtSent
 	}
 	var answered bool
+	var reason, retryAfter string
 	var sentAt, expiresAt *time.Time
 	var sessions []byte
-	if err := s.deps.Store.Pool.QueryRow(ctx, routeRosterQuery, known).Scan(&now, &answered, &sentAt, &expiresAt, &sessions); err != nil {
+	if err := s.deps.Store.Pool.QueryRow(ctx, routeRosterQuery, known).
+		Scan(&now, &answered, &sentAt, &expiresAt, &reason, &retryAfter, &sessions); err != nil {
 		return routeRoster{}, false, time.Time{}, time.Time{}, err
 	}
 	if sentAt == nil {
@@ -271,7 +289,7 @@ func (s *server) storedRouteRoster(ctx context.Context) (roster routeRoster, fre
 	}
 	roster = built
 	if sessions != nil {
-		if roster, err = cache.remember(*sentAt, answered, sessions); err != nil {
+		if roster, err = cache.remember(*sentAt, answered, reason, retryAfter, sessions); err != nil {
 			return routeRoster{}, false, time.Time{}, time.Time{}, err
 		}
 	}
@@ -279,12 +297,20 @@ func (s *server) storedRouteRoster(ctx context.Context) (roster routeRoster, fre
 }
 
 // remember builds the roster a stored answer holds and keeps it as this process's built roster.
-// The stored sessions are envoy.Session rows; a field a row lacks reads as its zero value. The
-// row records only that the listener answered or did not, so a stored silence reads as
-// model.RouteReasonUnreachable: the reason the fetching process saw, a refilling list among
-// them, is its own and reaches no other process.
-func (c *rosterCache) remember(sent time.Time, answered bool, sessions []byte) (routeRoster, error) {
-	roster := routeRoster{reason: model.RouteReasonUnreachable, err: errListenerSilence}
+// The stored sessions are envoy.Session rows; a field a row lacks reads as its zero value. A
+// stored silence carries the reason the fetching process saw and the Retry-After that came with
+// it, so a refill that process met reads as a refill here too; a row that carries no reason of
+// its own - one the release before the reason was stored wrote - reads
+// model.RouteReasonUnreachable, which is how that release answers it.
+func (c *rosterCache) remember(sent time.Time, answered bool, reason, retryAfter string, sessions []byte) (routeRoster, error) {
+	roster := routeRoster{
+		reason:     cmp.Or(reason, model.RouteReasonUnreachable),
+		retryAfter: retryAfter,
+		err:        errListenerSilence,
+	}
+	if roster.reason == model.RouteReasonRefilling {
+		roster.err = errListenerRefill
+	}
 	if answered {
 		var listed []envoy.Session
 		if err := json.Unmarshal(sessions, &listed); err != nil {
@@ -320,24 +346,30 @@ func (s *server) fetchRouteRoster(ctx context.Context, fetch *rosterFetch, sent 
 }
 
 // storeRouteRosterQuery stores one listener answer unless the stored one was sent later: a call
-// that answers after a later call on another process never replaces that newer answer. It returns
-// a row only when it stored this one. Every parameter is cast, since $1 and $3 each appear twice.
+// that answers after a later call on another process never replaces that newer answer. A
+// silence's reason and the Retry-After that came with it are stored beside it, under the sent_at
+// they belong to (routeRosterQuery). It returns a row only when it stored this one. Every
+// parameter is cast, since $1 appears twice and $3 three times.
 const storeRouteRosterQuery = `
-	insert into route_roster (answered, sessions, sent_at, expires_at)
+	insert into route_roster (answered, sessions, sent_at, expires_at, reason, retry_after, reason_sent_at)
 	values ($1::boolean, $2::jsonb, $3::timestamptz,
 	        case when $1::boolean then $3::timestamptz + make_interval(secs => $4::float8)
-	             else now() + make_interval(secs => $5::float8) end)
+	             else now() + make_interval(secs => $5::float8) end,
+	        $6::text, $7::text, $3::timestamptz)
 	on conflict (id) do update
 	set answered = excluded.answered, sessions = excluded.sessions,
-	    sent_at = excluded.sent_at, expires_at = excluded.expires_at
+	    sent_at = excluded.sent_at, expires_at = excluded.expires_at,
+	    reason = excluded.reason, retry_after = excluded.retry_after,
+	    reason_sent_at = excluded.reason_sent_at
 	where route_roster.sent_at < excluded.sent_at
 	returning true`
 
 // storeRouteRoster stores own, the answer of a call sent at sent, and answers the roster every
 // waiting read is served: own when it was stored, the newer stored one when it was not. A failed
-// call is stored too (answered false, for the silence), so every process reads unknown together
-// rather than each waiting out the listener on its own. Should the database refuse the write, the
-// waiting reads in this process are served own, which no other process sees.
+// call is stored too (answered false, for the silence, with the reason it failed for and the
+// Retry-After a refilling listener sent), so every process reads unknown together, and reads one
+// refill as a refill, rather than each waiting out the listener on its own. Should the database
+// refuse the write, the waiting reads in this process are served own, which no other process sees.
 func (s *server) storeRouteRoster(ctx context.Context, sent time.Time, own routeRoster) routeRoster {
 	sessions := []byte("[]")
 	if len(own.sessions) > 0 {
@@ -349,7 +381,8 @@ func (s *server) storeRouteRoster(ctx context.Context, sent time.Time, own route
 	}
 	var stored bool
 	err := s.deps.Store.Pool.QueryRow(ctx, storeRouteRosterQuery,
-		own.answered, sessions, sent, s.rosters.ttl.Seconds(), s.rosters.silenceTTL.Seconds()).Scan(&stored)
+		own.answered, sessions, sent, s.rosters.ttl.Seconds(), s.rosters.silenceTTL.Seconds(),
+		own.reason, own.retryAfter).Scan(&stored)
 	if err == nil {
 		s.rosters.keep(sent, own)
 		return own
