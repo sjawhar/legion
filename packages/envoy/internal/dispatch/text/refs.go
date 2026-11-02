@@ -548,6 +548,10 @@ func parseServer(raw string, base *url.URL) (Ref, bool) {
 		// for an anchored comment or ask.
 		case len(parts) == 3 && parts[2] == "spec":
 			return documentPage(Ref{Kind: "artifact", IssueKey: key, ID: "spec"}, query, "v", value)
+		// The Decisions tab, a view of the issue's decisions.md: its page names that document,
+		// whatever its fragment, as the dashboard and the agent client read it.
+		case len(parts) == 3 && parts[2] == "decisions":
+			return Ref{Kind: "artifact", IssueKey: key, ID: "decisions-md"}, true
 		case len(parts) == 4 && parts[2] == "artifacts":
 			slug, err := url.PathUnescape(parts[3])
 			if err != nil || !artifactSlugPattern.MatchString(slug) {
