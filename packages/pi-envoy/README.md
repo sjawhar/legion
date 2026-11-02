@@ -537,20 +537,30 @@ that the check still runs on each new ask, to the host's plain log, shows it as 
 session with a UI, and adds it to that call's own result. It is not one of the notices a session
 shows at its start.
 
-**The model.** Both checks ask the session's `askgate` model role (`modelRoles.askgate`). When that
-role is not set, they ask the `default` role. When neither role is set, as in a session started
-without the settings that name them, they ask the session's own model, and the result of every
-such call says so: `AskGate reviewed this call with this session's own model, <provider/id>,
-because neither modelRoles.askgate nor modelRoles.default is set`, or, when that review gave no
-verdict, `AskGate asked this session's own model, <provider/id>, to review this call`. The note
-also says that a model which reviews a write of its own session is a weaker review than a separate
-model, and names `modelRoles.askgate` as the setting that gives the gate a model of its own; the
-entry records that model as `sessionModel`. A model that answers with an error passes the request
-to the next model of the `retry.fallbackChains` chain omp keys by the role in use, or by the
-session's model alone when no role is set, on the same provider. Only a session with no model at
-all, neither role nor a model of its own, is refused, in both modes, with the two roles named. A
-session whose main model is on another provider than the gate's model is not reviewed: its
-transcript stays on that provider.
+**The model.** Both checks ask the first of these that resolves to a model the session can use:
+the session's `askgate` model role (`modelRoles.askgate`), its `default` role, then the session's
+own model. A role set to a model the session cannot use (a typo, a model gone from the catalog, a
+provider the session is not logged in to) is passed over like a role that is not set, but is never
+told as one. One rule governs what the caller is told: unless the review ran on the first role
+that is set, its result carries a note that names the model whose answer the call got, says why
+each role before it was passed over (`modelRoles.askgate is set to <value>, which resolves to no
+model this session can use`, or `is not set`), and says what to change in the Oh My Pi settings.
+The note rides on the result the caller finally receives: a refusal carries it in its reason
+(a revise, a rules refusal, a record or a marker that could not be written), any other result as
+context. So a session started without the settings that name the roles reads `AskGate reviewed
+this call with this session's own model, <provider/id>, because neither modelRoles.askgate nor
+modelRoles.default is set`, and a review that gave no verdict reads `AskGate asked …` instead. A
+model that answers with an error passes the request to the next model of the
+`retry.fallbackChains` chain omp keys by the role in use, or by the session's model alone when the
+gate reviews with it, on the same provider; when such a model answers, the note names it and the
+model that failed first. A note that names the session's own model as the reviewer also says that
+a model which reviews a write of its own session is a weaker review than a separate model. A role
+that is set but unusable is no refusal while the session has a model of its own, for the same
+reason a model error is none: the gate refuses only when no model at all can review, and a session
+whose every Dispatch write is refused cannot even ask a person for the fix. Only a session with no
+model at all, neither role nor a model of its own, is refused, in both modes, and the refusal names
+what each role is set to. A session whose main model is on another provider than the gate's model
+is not reviewed: its transcript stays on that provider.
 
 **When a write posts unreviewed.** Each of these lets the write out, records an `advisor-gate`
 entry with its outcome, and hands the agent a note that says the write went out unreviewed and
@@ -606,9 +616,12 @@ writes from the CLI's own ledger line, carry none: neither has the arguments to 
 third attempt (`outcome: "breaker"`) counts the refusals of
 one thing on one such target, and `revisesForKey` counts every `revise` on it, the `warn` ones
 included, since its counts last started again. An entry whose review ran on the session's own
-model, because neither model role is set, carries `sessionModel`, that model's `provider/id`;
-`model` names the model that answered, another one only when that model's chain was walked. A
-call that opens a new ask adds the fields of the rules check:
+model, because no model role resolved, carries `sessionModel`, that model's `provider/id`;
+`model` names the model that answered, another one only when that model's chain was walked. An
+entry whose review passed over a role set to a model the session cannot use, and the refusal of a
+session with no model at all, carries `unresolvedRoles`: each such role and its value, as
+`[{"role": "askgate", "value": "<provider/id>"}]`. A call that opens a new ask adds the fields of
+the rules check:
 
 - `rule`: `no_change` or `untried_access`, the rule that the first matching ask broke. The gate
   sets it exactly when the rules check refused the call.

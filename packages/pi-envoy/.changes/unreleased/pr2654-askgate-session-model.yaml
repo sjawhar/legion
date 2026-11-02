@@ -2,6 +2,7 @@ kind: Fixed
 body: |-
   AskGate no longer refuses every Dispatch write of a session that has neither the `askgate` nor
   the `default` model role, such as one started without the settings that name them: it reviews
-  with the session's own model, and each such call's result says so, names that model, and names
-  `modelRoles.askgate` as the setting that gives the gate a separate model. Only a session with no
-  model at all is still refused.
+  with the session's own model. A call reviewed by any model but the first role that is set says
+  so: its result names the model whose answer it got, says what each role before it is set to or
+  that it is not set, and keeps that note when a failed record or marker refuses the call. Only a
+  session with no model at all is still refused, and its refusal names what each role is set to.

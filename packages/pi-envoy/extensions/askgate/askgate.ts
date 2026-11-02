@@ -339,6 +339,9 @@ async function loadAskGate(
     appendFile: appendDump,
     complete,
     fallbackModels,
+    // What each role is set to: `ctx.models.resolve` answers alike for a role that is not set and
+    // one set to a model the session cannot use, which the gate must tell apart.
+    configuredRole: (role) => settings.getModelRole(role),
     // The runner's tool_call handler ceiling, normalised as the runner does (runner.ts normalizeHandlerTimeout).
     handlerCeilingMs: () => {
       const configured = cfgExtensionHandlersToolCallTimeoutMs.get(settings);

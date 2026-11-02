@@ -372,6 +372,43 @@ test.skipIf(omp === undefined && !onActions)(
   180_000
 );
 
+// The review of #2654 at 7fe67d3fa1, finding 1: a session whose modelRoles.askgate names a model it
+// cannot use was told that no role is set. The gate reviews it with the session's own model, as a
+// session with no role, and the note and the entry say what the role is set to.
+test.skipIf(omp === undefined && !onActions)(
+  "a session whose askgate role names a model it cannot use is told the role's value, not that no role is set",
+  async () => {
+    const { requests, sessions } = await runSession({
+      cli: "real",
+      modelRoles: false,
+      config: ["modelRoles:", "  askgate: standin/missing-reviewer"],
+      gateAnswer: '{"decision":"allow"}',
+      firstTurn: (dispatch) => ({
+        type: "tool_use",
+        name: "bash",
+        input: { command: ask(dispatch) },
+      }),
+    });
+    expect(await gateEntries(sessions)).toMatchObject([
+      {
+        tool: "dispatch_ask",
+        outcome: "verdict",
+        decision: "allow",
+        model: "standin/standin-model",
+        sessionModel: "standin/standin-model",
+        unresolvedRoles: [{ role: "askgate", value: "standin/missing-reviewer" }],
+      },
+    ]);
+    const turn = lastTurn(requests);
+    expect(turn).toContain(
+      "because modelRoles.askgate is set to standin/missing-reviewer, which resolves to no model this session can use, and modelRoles.default is not set."
+    );
+    expect(turn).not.toContain("neither modelRoles.askgate nor modelRoles.default is set");
+    expect(asksPosted(requests)).toBe(1);
+  },
+  180_000
+);
+
 // The review of the marker design at cf3f1e021, C1: the gate bound an upload's marker to its own
 // review input, so the CLI refused every reviewed markdown upload by `--path`. The fake Dispatch
 // here takes the upload's form and records the file's bytes.

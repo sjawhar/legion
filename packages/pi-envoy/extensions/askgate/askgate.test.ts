@@ -154,6 +154,13 @@ interface BindOptions {
   /** The models `@askgate` and `@default` resolve to: the askgate role's MODEL alone unless a test says otherwise. */
   roles?: { askgate?: GateModel; default?: GateModel };
   /**
+   * What `modelRoles.<role>` is set to in the Oh My Pi settings (`configuredRole`): unless a test
+   * says otherwise, each role `roles` resolves is set to that model's `provider/id`, and every
+   * other role is not set. A role set here that `roles` does not resolve is one set to a model
+   * the session cannot use.
+   */
+  configured?: { askgate?: string; default?: string };
+  /**
    * The session's own model (`ctx.model`), read on each call: MODEL unless a test says otherwise,
    * and undefined for a session with no model at all. A test that keeps its options object can
    * change it between calls.
@@ -308,6 +315,11 @@ function bind(opts: BindOptions = {}): BoundGate {
     fallbackModels: (_ctx, _primary, role) => {
       fallbackRoles.push(role);
       return opts.fallbacks ?? [];
+    },
+    configuredRole: (role) => {
+      if (opts.configured !== undefined) return opts.configured[role];
+      const model = (opts.roles ?? { askgate: MODEL })[role];
+      return model === undefined ? undefined : `${model.provider}/${model.id}`;
     },
     configFile: CONFIG_FILE,
     contextMessages: () => (opts.context ?? (() => [fx.user("Post the comment.")]))(),
@@ -672,6 +684,159 @@ describe("mode and model role (plan tests c-g)", () => {
       // No halt: a halt would let the writes out unreviewed.
       expect(g.notices).toHaveLength(0);
     }
+  });
+  // The rule every review's note obeys: it names the model whose answer the caller finally gets,
+  // it says why each role before that model was passed over (not set, or set to a model this
+  // session cannot use), and it rides on the result the caller finally receives, whatever replaced
+  // the review's own result. A role set to a model the session cannot use is never told as unset.
+  const MISSING = "standin/missing-reviewer";
+  const UNUSABLE = "which resolves to no model this session can use";
+  test("(g) a role set to a model this session cannot use is named as set, and the session's own model reviews", async () => {
+    const g = bind({ roles: {}, configured: { askgate: MISSING } });
+    const result = await g.device("a", "dispatch_comment", COMMENT);
+    expect(result?.block).toBeUndefined();
+    expect(result?.additionalContext).toContain(
+      `AskGate reviewed this call with this session's own model, anthropic/claude-fable-5-1, because modelRoles.askgate is set to ${MISSING}, ${UNUSABLE}, and modelRoles.default is not set.`
+    );
+    expect(result?.additionalContext).toContain(
+      "Make modelRoles.askgate name a model this session can use"
+    );
+    expect(result?.additionalContext).not.toContain("neither modelRoles.askgate nor");
+    expect(g.entries).toMatchObject([
+      {
+        outcome: "verdict",
+        sessionModel: "anthropic/claude-fable-5-1",
+        unresolvedRoles: [{ role: "askgate", value: MISSING }],
+      },
+    ]);
+  });
+  test("(g) an askgate role set to a model this session cannot use passes to the default role, and the note says so", async () => {
+    const DEFAULT_MODEL = { provider: "anthropic", id: "claude-opus-5-5" };
+    const g = bind({
+      roles: { default: DEFAULT_MODEL },
+      configured: { askgate: MISSING, default: "anthropic/claude-opus-5-5" },
+    });
+    const result = await g.device("a", "dispatch_comment", COMMENT);
+    expect(g.calls.map((call) => call.model)).toEqual([DEFAULT_MODEL]);
+    expect(g.fallbackRoles).toEqual(["default"]);
+    expect(result?.additionalContext).toContain(
+      `AskGate reviewed this call with the model of modelRoles.default, anthropic/claude-opus-5-5, because modelRoles.askgate is set to ${MISSING}, ${UNUSABLE}.`
+    );
+    expect(g.entries).toMatchObject([
+      {
+        outcome: "verdict",
+        model: "anthropic/claude-opus-5-5",
+        unresolvedRoles: [{ role: "askgate", value: MISSING }],
+      },
+    ]);
+    expect(g.entries[0].sessionModel).toBeUndefined();
+  });
+  test("(g) with both roles set to models this session cannot use and no model of its own, the refusal names what each is set to", async () => {
+    const g = bind({
+      roles: {},
+      primary: undefined,
+      configured: { askgate: MISSING, default: "standin/gone" },
+    });
+    const result = await g.device("a", "dispatch_comment", COMMENT);
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain(
+      `modelRoles.askgate is set to ${MISSING}, ${UNUSABLE}, and modelRoles.default is set to standin/gone, ${UNUSABLE}.`
+    );
+    expect(result?.reason).not.toContain("Set modelRoles.askgate or modelRoles.default");
+    expect(g.calls).toHaveLength(0);
+    expect(g.entries).toMatchObject([
+      {
+        outcome: "no-model-role",
+        unresolvedRoles: [
+          { role: "askgate", value: MISSING },
+          { role: "default", value: "standin/gone" },
+        ],
+      },
+    ]);
+  });
+  test("(g) a record that fails after the session's own model errors refuses the call, and the refusal still names that model", async () => {
+    const g = bind({
+      roles: {},
+      recordThrows: true,
+      complete: async () => ({ text: "", error: "404 model unavailable" }),
+    });
+    const result = await g.device("r", "dispatch_comment", COMMENT);
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain("AskGate could not record that in the session");
+    expect(result?.reason).toContain(
+      "AskGate asked this session's own model, anthropic/claude-fable-5-1, to review this call, because neither modelRoles.askgate nor modelRoles.default is set."
+    );
+  });
+  test("(g) a marker that cannot be minted after the session's own model allows refuses the call, and the refusal still names that model", async () => {
+    // A store that is a file: every mint into it fails with ENOTDIR.
+    const store = path.join(fs.mkdtempSync(path.join(SUITE_TMP, "file-store-")), "store");
+    fs.writeFileSync(store, "not a directory");
+    const g = bind({
+      roles: {},
+      store,
+      dryRun: async () => ({
+        exitCode: 0,
+        stdout: JSON.stringify(COMMENT),
+        stderr: "",
+        timedOut: false,
+      }),
+    });
+    const result = await g.bash("m", "dispatch comment --issue X-1 --body 'Send this comment.'");
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain("AskGate could not mint one");
+    expect(result?.reason).toContain(
+      "AskGate reviewed this call with this session's own model, anthropic/claude-fable-5-1, because neither modelRoles.askgate nor modelRoles.default is set."
+    );
+    expect(g.entries).toMatchObject([
+      { outcome: "verdict", sessionModel: "anthropic/claude-fable-5-1" },
+    ]);
+  });
+  test("(g) when the session's own model fails and the next model of its chain answers, the note names the model that answered", async () => {
+    const FALLBACK = { provider: "anthropic", id: "fallback-reviewer" };
+    const g = bind({
+      roles: {},
+      fallbacks: [FALLBACK],
+      complete: async (req) =>
+        req.model === FALLBACK ? { text: ALLOW } : { text: "", error: "404 not_found_error" },
+    });
+    const result = await g.device("c", "dispatch_comment", COMMENT);
+    expect(result?.additionalContext).toContain(
+      "AskGate reviewed this call with anthropic/fallback-reviewer, a later model of the retry.fallbackChains chain of this session's own model, anthropic/claude-fable-5-1, which failed first, because neither modelRoles.askgate nor modelRoles.default is set."
+    );
+    expect(result?.additionalContext).not.toContain("reviewed this call with this session's own");
+    // The answer came from another model than the author's own: no weaker-review sentence.
+    expect(result?.additionalContext).not.toContain("weaker review");
+    expect(g.entries).toMatchObject([
+      {
+        outcome: "verdict",
+        model: "anthropic/fallback-reviewer",
+        sessionModel: "anthropic/claude-fable-5-1",
+        failedModels: [{ model: "anthropic/claude-fable-5-1", error: "404 not_found_error" }],
+      },
+    ]);
+  });
+  test("(g) when every model of the session model's chain fails, the note names each model asked and claims no review", async () => {
+    const FALLBACK = { provider: "anthropic", id: "fallback-reviewer" };
+    const g = bind({
+      roles: {},
+      fallbacks: [FALLBACK],
+      complete: async (req) => ({
+        text: "",
+        error: req.model === FALLBACK ? "500 overloaded" : "404 not_found_error",
+      }),
+    });
+    const result = await g.device("e", "dispatch_comment", COMMENT);
+    expect(result?.additionalContext).toContain(
+      "AskGate asked this session's own model, anthropic/claude-fable-5-1, then anthropic/fallback-reviewer of its retry.fallbackChains chain, to review this call, because neither modelRoles.askgate nor modelRoles.default is set."
+    );
+    expect(result?.additionalContext).not.toContain("AskGate reviewed this call");
+    expect(g.entries).toMatchObject([
+      {
+        outcome: "error",
+        model: "anthropic/fallback-reviewer",
+        sessionModel: "anthropic/claude-fable-5-1",
+      },
+    ]);
   });
   test("(g) a call outside the literal grammar is no call the gate refuses, with no role either: the CLI refuses its write", async () => {
     const g = bind({ env: { OMP_ASKGATE: "warn" }, roles: {} });
@@ -5055,7 +5220,13 @@ describe("askgate.ts, the entry", () => {
   const roleHints: Array<string | undefined> = [];
   /** The selector each chain walk started from, beside its role hint. */
   const selectors: string[] = [];
-  const modelRoles: Record<string, string> = { askgate: "anthropic/claude-fable-5-1:high" };
+  /** `modelRoles` as the stubbed settings answer it: the askgate role alone unless a test sets it (`setModelRoles`). */
+  const ASKGATE_ROLE = { askgate: "anthropic/claude-fable-5-1:high" };
+  const modelRoles: Record<string, string> = { ...ASKGATE_ROLE };
+  const setModelRoles = (roles: Record<string, string>) => {
+    for (const key of Object.keys(modelRoles)) delete modelRoles[key];
+    Object.assign(modelRoles, roles);
+  };
   mock.module("@oh-my-pi/pi-coding-agent/session/session-context", () => ({
     buildSessionContext: () => ({ messages: [fx.user("Post it.")] }),
   }));
@@ -5104,6 +5275,7 @@ describe("askgate.ts, the entry", () => {
     throwAfterAttempts = false;
     notFound.clear();
     modelFallback = true;
+    setModelRoles(ASKGATE_ROLE);
     for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
     Object.assign(process.env, saved);
     for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
@@ -5199,14 +5371,19 @@ describe("askgate.ts, the entry", () => {
     ]);
   });
   test("with no askgate role the default role's model is asked, and omp's chain is keyed by the default role", async () => {
-    const { entries } = await gateOnce({}, { roles: { default: MODEL } });
+    setModelRoles({ default: "anthropic/claude-fable-5-1" });
+    const { result, entries } = await gateOnce({}, { roles: { default: MODEL } });
     expect(completions).toHaveLength(1);
     expect(roleHints[0]).toBe("default");
     expect(entries).toMatchObject([{ outcome: "verdict", model: "anthropic/claude-fable-5-1" }]);
+    // The first role set reviewed: no note, and nothing passed over.
+    expect(result?.additionalContext).toBeUndefined();
+    expect(entries[0].unresolvedRoles).toBeUndefined();
   });
   test("with neither role the session's own model is asked, and omp's chain is the session model's own, keyed by no role", async () => {
     // The session model's provider answers its first model with a 404, so the chain is walked.
     notFound.add("claude-fable-5-1");
+    setModelRoles({});
     const { result, entries } = await gateOnce({}, { roles: {} });
     expect(roleHints[0]).toBeUndefined();
     // The walk starts at the session's model, never at a role's configured model.
@@ -5223,11 +5400,27 @@ describe("askgate.ts, the entry", () => {
         sessionModel: "anthropic/claude-fable-5-1",
       },
     ]);
+    // The note names the model that answered, not the session's model that failed first.
     expect(result?.additionalContext).toContain(
-      "AskGate reviewed this call with this session's own model, anthropic/claude-fable-5-1"
+      "AskGate reviewed this call with anthropic/claude-fable-5, a later model of the retry.fallbackChains chain of this session's own model, anthropic/claude-fable-5-1, which failed first, because neither modelRoles.askgate nor modelRoles.default is set."
+    );
+  });
+  test("a role the settings set that resolves to no model of the session is named as set, with its value, in the note", async () => {
+    // modelRoles.askgate is set (ASKGATE_ROLE), and the session's models resolve no role.
+    const { result, entries } = await gateOnce({}, { roles: {} });
+    expect(entries).toMatchObject([
+      {
+        outcome: "verdict",
+        sessionModel: "anthropic/claude-fable-5-1",
+        unresolvedRoles: [{ role: "askgate", value: "anthropic/claude-fable-5-1:high" }],
+      },
+    ]);
+    expect(result?.additionalContext).toContain(
+      "because modelRoles.askgate is set to anthropic/claude-fable-5-1:high, which resolves to no model this session can use, and modelRoles.default is not set."
     );
   });
   test("with neither role and no model of its own the write is refused and no completion runs", async () => {
+    setModelRoles({});
     const { result, entries } = await gateOnce({}, { roles: {}, primary: undefined });
     expect(result?.block).toBe(true);
     expect(completions).toHaveLength(0);
@@ -6074,6 +6267,34 @@ describe("rules check", () => {
     expect(g.calls.filter(isRules)).toHaveLength(8);
     expect(g.notices).toEqual([RULES_NOTICE]);
     expect(g.runtimeWarnings).toEqual([RULES_NOTICE]);
+  });
+  test("a rules refusal on a session with no role names the model whose rules answer refused it, not the one the charter check asked", async () => {
+    const FALLBACK = { provider: "anthropic", id: "fallback-reviewer" };
+    // The session's own model answers the charter check and fails the rules check, whose request
+    // the next model of its chain then answers with a match.
+    const answers = bySystem(ALLOW, NO_CHANGE);
+    const g = bind({
+      roles: {},
+      fallbacks: [FALLBACK],
+      complete: async (req) =>
+        isRules(req) && req.model !== FALLBACK
+          ? { text: "", error: "500 overloaded" }
+          : answers(req),
+    });
+    const result = await g.device("a", "dispatch_ask", KEEP_INPUT);
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain('the rule "no change"');
+    expect(result?.reason).toContain(
+      "AskGate reviewed this call with anthropic/fallback-reviewer, a later model of the retry.fallbackChains chain of this session's own model, anthropic/claude-fable-5-1, which failed first"
+    );
+    expect(g.entries).toMatchObject([
+      {
+        rule: "no_change",
+        model: "anthropic/claude-fable-5-1",
+        ruleModel: "anthropic/fallback-reviewer",
+        sessionModel: "anthropic/claude-fable-5-1",
+      },
+    ]);
   });
   test("the rules notice is written to the log in a session with no UI (E9)", async () => {
     const g = bind({ hasUI: false, complete: bySystem(ALLOW, async () => ({ text: "not json" })) });
