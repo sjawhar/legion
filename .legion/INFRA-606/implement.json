@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-11-01T22:35:00Z",
+  "completed": "2026-11-02T01:45:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -324,6 +324,30 @@
       "observed": "ok: TestTargetedMessagePrefixesUnavailableListenerErrors/timeout passes with the attempt's error carrying the 'envoy listener: ' prefix.",
       "headSha": "15e5795835b269bcefc4073e3a91d2fdfa3b9a16",
       "negativeControl": "With the merge's own value (mentionLookupTimeout on renewMessageDeliveryClaim) the same test fails: the renew's read is cut at 250 ms inside the client's 300 ms window, so the attempt is left unanswered with no resolve error and settles naming nothing."
+    },
+    {
+      "criterion": "Round 26, the tester's failure: a comment mentioning a session whose sends the listener refuses settles that attempt failed, and the claimant's or follower's own copy is published (scripts/e2e/dispatch-claimant-delivery.sh, mention-failed-claimant and mention-failed-follower).",
+      "surface": "The repository's own live proof over the real envoy-dispatch built from this checkout, a NATS of the run's own and the e2e harness's fake Envoy listener, against a superuser Postgres 16 (the load stack's pgserver).",
+      "command": "DATABASE_URL=postgres://postgres@127.0.0.1:16230/claimant_e2e?sslmode=disable bash scripts/e2e/dispatch-claimant-delivery.sh",
+      "observed": "At the head this round pushed: 'summary: 9 ok, 0 FAIL' and 'dispatch claimant delivery e2e: PASS in 94s' (15 checks, 6 setup and 9 cases, as round 24's 'all 15' counted them). The refused case reads 'the fake listener took 9 send(s) for it', 'state=failed error=\"no live session claimant-e2e-c\"', and 'dispatch-20 (comment.created) on agent topics: notifications.agent.claimant-e2e-c'.",
+      "headSha": "0c3829e42130c589b693776ee58932929632bc9c",
+      "negativeControl": "The same script at 2a806f36 reproduced the tester's failure: '7 ok, 2 FAIL (mention-failed-claimant, mention-failed-follower)', each 'mention delivery row was still pending 10s after its 201'. The rows that run left show the cause: the attempt was created at 00:00:39.242 and its last claim written at 00:00:51.072, 11.8 s later, so the send was made and tried again rather than dropped - the listener's 404 'no live session' is a take-over's answer (retryableDeliveryFailure), which the sender retries inside listenerTakeoverWindow, and this branch spends that window on the lane after the 201 where main spends it inside the request. The script's own mentionSettleMs (10 s) was shorter than one window."
+    },
+    {
+      "criterion": "The api package covers that case: a send the listener refuses while its registry still holds the session is tried again inside the take-over window and settles with the listener's answer, under the mention's one key.",
+      "surface": "internal/dispatch/api against a superuser Postgres 16, with the server's take-over window at 2 s",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 ./internal/dispatch/api/ -count=3 -run TestAMentionWhoseSendsTheListenerRefusesSettlesFailedAfterTheTakeOverWindow",
+      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/api 10.131s, 3 of 3: the 201 answers the attempt pending, it settles failed with 'no live session s1', the listener took more than one send and every one under <comment>:session:s1:steer, and the settle waited at least takeoverFirstBackoff.",
+      "headSha": "0c3829e42130c589b693776ee58932929632bc9c",
+      "negativeControl": "With that window at a nanosecond - a sender that settles on the first refusal - the test fails: 'the listener took sends []string{\"b6b67082-...:session:s1:steer\"}, want more than one, every one under the mention's key'."
+    },
+    {
+      "criterion": "Every ci.yaml filter matches every file its job reads, so no change skips a job that tests it.",
+      "surface": "The repository's own gate, .github/scripts/check-ci-filters.sh, over the workflow and the Go dependency closures",
+      "command": "bash .github/scripts/check-ci-filters.sh",
+      "observed": "exit 0, no ::error line: 'every ci.yaml filter matches every file its job reads (28 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)'.",
+      "headSha": "0c3829e42130c589b693776ee58932929632bc9c",
+      "negativeControl": "At 2a806f36 the same command printed 12 ::error lines and '12 CI filter problem(s)', one per file of packages/envoy/internal/contracts, which model.MentionSweepWindow = contracts.DeliveryDuplicateWindow put in pmdoc's closure while envoy_go_race_pmdoc did not match them."
     }
   ],
   "filesChanged": [
@@ -426,7 +450,11 @@
     "round 25: packages/envoy/internal/dispatch/store/migrations/20261101180039_comment_fallback_copies.{up,census}.sql (renamed from 0161_*)",
     "round 25: packages/envoy/AGENTS.md, cmd/dispatch/README.md, loadtest/README.md, loadtest/{run,sample,sessions}.go, loadtest/stack.sh, .changes/unreleased/pr2406-Changed-20261028-113305.yaml (merge resolutions, the migration's new name, the cross-deploy dedupe exception)",
     "round 25: scripts/e2e/dispatch-claimant-delivery.ts, internal/dispatch/api/delivery_sweep_test.go, packages/envoy/AGENTS.md:3284 (the three stale <comment id>:<target> key passages the reviewer named)",
-    "round 25: packages/envoy/internal/dispatch/api/{comment_mention_takeover,listener_takeover,delivery_bound_send,comment_delivery_sender,comment_mentions}_test.go (main's take-over tests read the send after the response; refuseSends answers a host refusal rather than 503)"
+    "round 25: packages/envoy/internal/dispatch/api/{comment_mention_takeover,listener_takeover,delivery_bound_send,comment_delivery_sender,comment_mentions}_test.go (main's take-over tests read the send after the response; refuseSends answers a host refusal rather than 503)",
+    "round 26: .github/workflows/ci.yaml (envoy_go_race_pmdoc covers packages/envoy/internal/contracts/**)",
+    "round 26: scripts/e2e/dispatch-claimant-delivery.ts (mentionSettleMs 10 s -> 20 s and mentionWaitMs 15 s -> 35 s, each covering one listener take-over window, with the reason in its doc comment)",
+    "round 26: packages/envoy/internal/dispatch/api/comment_mention_takeover_test.go (TestAMentionWhoseSendsTheListenerRefusesSettlesFailedAfterTheTakeOverWindow)",
+    "round 26: packages/envoy/internal/dispatch/api/comment_delivery.go (the take-over pacing doc: the comment's own lane carries on in its resolution's window, as the code does and main's text says)"
   ],
   "trickyParts": [
     "Relay and hub generations: start and stop under one mutex; a stopped generation publishes only into its own subscriber-less stream; Add on the WaitGroup only while not closed (event_stream_relay.go, delivery_live_hub.go).",
@@ -488,7 +516,8 @@
     "Round 25: the merge drops this branch's resolveCommentLookups for main's resolveCommentDeliveries, which resolves every target at once through the listener take-over. The branch's bounded fan-out (mentionLookupConcurrency, ceil(k/8) timeouts) went with it: every caller of resolveMentionTargets passed one target afterwards, and bounding the fan-out again would serialise a take-over window per batch. A comment's lookups now all run at once (ten mentions at most), so a listener that answers none costs one 250 ms timeout. AGENTS.md, the release note, the sender test's comment and the PR body say so.",
     "Round 25: the branch's keep-the-mentions-across-resolution-passes optimisation is gone with resolveCommentLookups. A ROUTE_CHANGED retry re-resolves every mention rather than the route alone. TestCommentRouteResolutionIsVerifiedAgainstTheLockedIssue still counts exactly two role lookups, since it counts the route's.",
     "Round 25: refuseSends in the api tests answers 403 with a reason rather than a bodyless 503. Under #2446 a 503 is a listener being replaced, which a sender retries inside the take-over window, so a test counting one comment's sends counted a try the window's timing decided.",
-    "Round 25: commit 45ade47e reflowed cmd/dispatch/README.md with the checker's own --write, because the guides layout test was red on main and on every branch merging it. main's #2640 then landed the same fix with different line breaks, and the third merge takes main's wording, which leaves 45ade47e a no-op in the tree."
+    "Round 25: commit 45ade47e reflowed cmd/dispatch/README.md with the checker's own --write, because the guides layout test was red on main and on every branch merging it. main's #2640 then landed the same fix with different line breaks, and the third merge takes main's wording, which leaves 45ade47e a no-op in the tree.",
+    "Round 26: the tester's and the architect's diagnosis was that the merged path drops a refused send. It does not: the row timings and the passing run's 'took 9 send(s)' show the send is made and retried through #2446's take-over window, and the attempt settles failed with the listener's answer. What was short was this pull request's own wait in the live proof, written before that window existed. No product change was needed, and none was made beyond the doc correction; the api test added covers the case the 422 passing api tests missed and passes at 2a806f36 as well, since the behaviour there is already right."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -497,10 +526,11 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands.",
     "Round 25: main moved three times during the round (f8f0425b, 0642a37a #2633, f0fe8da8 #2640 + #2620), so the branch carries three merges. #2633 closes the numbered migrations at 0161, which is what makes TestMigrationSetTakesNumbersThenTimestamps pass here.",
-    "Round 25: the merge of #2446 put this branch's 250 ms comment-lookup bound on renewMessageDeliveryClaim, which main leaves unbounded. A clean three-way merge changed that call's meaning; only the message path's own test caught it."
+    "Round 25: the merge of #2446 put this branch's 250 ms comment-lookup bound on renewMessageDeliveryClaim, which main leaves unbounded. A clean three-way merge changed that call's meaning; only the message path's own test caught it.",
+    "Round 26: the e2e harness's fake listener (packages/dispatch/e2e/fake-envoy.ts) logs no request at all, for a passing case as much as a failing one. Reading its log as a send record is what made a slow settle look like a dropped send; its /__fixture/sends endpoint, which the script already reads, is the record."
   ],
-  "round": 25,
-  "answersTest": "138b2a202af19ec84f40fb04881f5943d1b5506e",
+  "round": 26,
+  "answersTest": "b4b66af5c22d14fcb6c2b9072c22203c5aa369a6",
   "answersReview": "45530037436dbb21120f3299dedbded3b74b9c1a",
-  "previousHandoff": "d25a64e55373b73179f4cc552ffe8aa1f2b057a6"
+  "previousHandoff": "338ca86c0616e1d899f27c86f645e938055c7b0c"
 }
