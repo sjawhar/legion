@@ -8,6 +8,7 @@ import { useLiveSocketPill } from "./api/live-socket";
 import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
 import type { AuthenticatedUser } from "./api/types";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
+import { credentialCapabilitiesQuery } from "./features/credentials/capabilities";
 import { TextAskBlockCard } from "./features/doc/AskBlockCard";
 import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
@@ -147,6 +148,26 @@ const MachineLoginPage = lazy(() =>
     default: module.MachineLoginPage,
   }))
 );
+
+/**
+ * `/credentials/machine` is served only while this deployment's secrets broker still serves the
+ * device grant, which is the only thing that makes a machine print a code for a person to type
+ * (`credentialCapabilitiesQuery`, Dispatch's relay of the broker's RFC 8414 metadata). A
+ * deployment whose machines sign in with their own cloud identity prints no code, so the page
+ * answers like any other address Dispatch does not have.
+ *
+ * While the answer is still out the route renders nothing rather than "not found": a person who
+ * followed a link to a page that does exist must not read that it does not, and the page's own
+ * lazy chunk is a blank moment anyway.
+ */
+function MachineLoginRoute(): ReactNode {
+  const capabilities = useQuery(credentialCapabilitiesQuery());
+  if (capabilities.isPending) {
+    return null;
+  }
+  return capabilities.data?.machine_code_page === true ? <MachineLoginPage /> : <NotFoundPage />;
+}
+
 const AnswersPage = lazy(() =>
   import("./features/answers/AnswersPage").then((module) => ({ default: module.AnswersPage }))
 );
@@ -812,7 +833,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<ProjectPage />} path="/projects/:key/documents" />
                 <Route element={<DocumentPage />} path="/projects/:key/documents/:slug" />
                 <Route element={<CredentialRecordPage />} path="/credentials/:recordId" />
-                <Route element={<MachineLoginPage />} path="/credentials/machine" />
+                <Route element={<MachineLoginRoute />} path="/credentials/machine" />
                 <Route element={<SettingsPage />} path="/settings" />
                 <Route element={<DeliveryPage />} path="/delivery" />
                 <Route element={<PipelinePage />} path="/pipeline" />

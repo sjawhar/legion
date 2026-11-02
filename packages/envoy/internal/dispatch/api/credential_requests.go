@@ -274,3 +274,69 @@ func (s *server) revokeMachineLogin(w http.ResponseWriter, r *http.Request) {
 	body, err := client.RevokeMachineLogin(r.Context(), r.PathValue("id"), model.CanonicalLogin(actor.ID))
 	relayBrokerResponse(w, body, err)
 }
+
+// --- GET /api/v1/signins, POST .../{id}/revoke ---
+
+// listSignIns answers the sign-ins the caller made on their machines with `agent-secrets login`,
+// one per box key they have not revoked. Dispatch names the person from its own session, never
+// from the request, so nobody lists another person's sign-ins; the broker lists only that
+// person's.
+func (s *server) listSignIns(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	client, ok := s.requireAgentSecrets(w)
+	if !ok {
+		return
+	}
+	body, err := client.SignIns(r.Context(), model.CanonicalLogin(actor.ID))
+	relayBrokerResponse(w, body, err)
+}
+
+// revokeSignIn ends one of the caller's own sign-ins: that machine trades no token for them
+// again and the access tokens already minted under it end with it, while their sign-ins on other
+// machines keep working. Dispatch names the person, so a caller reaches none but their own: the
+// broker answers a sign-in of anyone else as an unknown id. The browser's body carries nothing
+// Dispatch reads.
+func (s *server) revokeSignIn(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	client, ok := s.requireAgentSecrets(w)
+	if !ok {
+		return
+	}
+	body, err := client.RevokeSignIn(r.Context(), r.PathValue("id"), model.CanonicalLogin(actor.ID))
+	relayBrokerResponse(w, body, err)
+}
+
+// --- GET /api/v1/credentials/capabilities ---
+
+// credentialCapabilities is what the credential pages may offer against the broker this Dispatch
+// is configured with. It relays facts Dispatch reads from the broker rather than settings of its
+// own: a browser reaches no broker, and a deployment that turns the device grant off turns it
+// off in one place, the broker.
+type credentialCapabilities struct {
+	// Whether the page where a person types a machine's code is worth serving: whether, that
+	// is, this broker still serves RFC 8628's device grant, read from its RFC 8414 metadata
+	// (agentsecrets.Client.ServesDeviceGrant). False for a Dispatch with no broker at all,
+	// where no code is ever printed for anyone to type.
+	MachineCodePage bool `json:"machine_code_page"`
+}
+
+// getCredentialCapabilities answers that one fact. Unlike every other route here it answers for
+// a Dispatch with no broker rather than 404 FEATURE_OFF, because the question it answers is
+// exactly "what can this deployment do": a 404 would leave the page unable to tell a Dispatch
+// with no broker from a route it failed to reach.
+func (s *server) getCredentialCapabilities(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireHuman(w, r); !ok {
+		return
+	}
+	capabilities := credentialCapabilities{}
+	if s.deps.AgentSecrets != nil {
+		capabilities.MachineCodePage = s.deps.AgentSecrets.ServesDeviceGrant(r.Context())
+	}
+	WriteJSON(w, http.StatusOK, capabilities)
+}

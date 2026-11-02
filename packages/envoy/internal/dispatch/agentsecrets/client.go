@@ -2,11 +2,13 @@
 // API (its account routes: https://sjawhar.github.io/legion/broker/reference/api/). Dispatch lists
 // the credential requests waiting on a person, each secret request linking to the broker's own
 // page, where that person, signed in to the broker, decides it; it relays a machine login's
-// decision with the code the person typed; and it relays a person's revoke of a grant or a
-// machine login. Reads and the machine-login lookup carry and return json.RawMessage, so a broker
-// read-shape change never requires a Dispatch code change. Every decision (a machine login's
-// approve or deny, a revoke) instead carries a Decision Dispatch builds itself: its approver is
-// the login Dispatch's own session resolved, so nothing the browser sends can name who decided.
+// decision with the code the person typed; it relays a person's revoke of a grant, a machine
+// login or one of their own sign-ins; and it reads the broker's public RFC 8414 metadata, so a
+// page can know which grants this broker serves. Reads and the machine-login lookup carry and
+// return json.RawMessage, so a broker read-shape change never requires a Dispatch code change.
+// Every decision (a machine login's approve or deny, a revoke) instead carries a body Dispatch
+// builds itself: the person it names is the login Dispatch's own session resolved, so nothing
+// the browser sends can name who decided.
 //
 // Dispatch authenticates to the broker as itself: every call carries Dispatch's own projected
 // Kubernetes ServiceAccount token, which the broker verifies against its cluster issuer and
@@ -23,9 +25,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/brokertoken"
@@ -47,6 +52,10 @@ type Client struct {
 	// Dispatch cannot read are one reading rather than two.
 	Account *brokertoken.AccountToken
 	HTTP    *http.Client
+	// deviceGrant is the last read of the broker's RFC 8414 metadata, which ServesDeviceGrant
+	// answers from. A Client is built once per process and shared, never copied, which is what
+	// lets it hold a mutex.
+	deviceGrant deviceGrant
 }
 
 // Option configures a Client.
@@ -224,4 +233,114 @@ func (c *Client) RevokeMachineLogin(ctx context.Context, credentialID, approver 
 		return nil, err
 	}
 	return c.do(ctx, http.MethodPost, "/v1/launcher-credentials/"+url.PathEscape(credentialID)+"/revoke-by-approver", body)
+}
+
+// SignIns lists the sign-ins the named person made on their machines with `agent-secrets login`:
+// one row per box key they signed in with and have not revoked. The person is the one Dispatch's
+// own session resolved, so nobody asks for anyone else's.
+func (c *Client) SignIns(ctx context.Context, person string) (json.RawMessage, error) {
+	query := url.Values{"person": {person}}
+	return c.do(ctx, http.MethodGet, "/v1/person-signins?"+query.Encode(), nil)
+}
+
+// RevokeSignIn relays a person's revoke of one of their own sign-ins: that box key trades no
+// token at the broker's exchange again, and every access token already minted under it ends with
+// it. The broker answers a sign-in of anyone else as an unknown id, so nobody reaches another
+// person's by trying ids.
+func (c *Client) RevokeSignIn(ctx context.Context, signInID, person string) (json.RawMessage, error) {
+	body, err := signInRevoke{Person: person}.body()
+	if err != nil {
+		return nil, err
+	}
+	return c.do(ctx, http.MethodPost, "/v1/person-signins/"+url.PathEscape(signInID)+"/revoke", body)
+}
+
+// signInRevoke is the body the broker's sign-in revoke takes. It is not a Decision because a
+// sign-in has no approver: it is the person's own, and what they do to it is end it.
+type signInRevoke struct {
+	Person string `json:"person"`
+}
+
+func (s signInRevoke) body() (json.RawMessage, error) {
+	body, err := json.Marshal(s)
+	if err != nil {
+		return nil, fmt.Errorf("agent-secrets: encode sign-in revoke: %w", err)
+	}
+	return body, nil
+}
+
+// metadataPath is the broker's RFC 8414 authorization server metadata, the one route it serves
+// with no credential at all. The call below presents Dispatch's token anyway, so every call this
+// package makes is built, timed and reported one way.
+const metadataPath = "/.well-known/oauth-authorization-server"
+
+// deviceCodeGrant is RFC 8628's grant type as grant_types_supported spells it. The broker names
+// it only while it serves the device grant, which is only while BROKER_MACHINE_LOGIN_URL is set.
+const deviceCodeGrant = "urn:ietf:params:oauth:grant-type:device_code"
+
+// deviceGrantTTL is how long one read of that document answers for every later ask of it. The
+// fact it carries changes only when the broker is deployed again, so a long window would cost
+// nothing in correctness; it is seconds all the same, for the two reasons the token check's own
+// window is (brokertoken.AffirmativeCacheTTL, the same five seconds against the same broker): it
+// collapses the burst of asks a wave of page loads makes into one read, and it leaves an
+// operator who has just redeployed the broker watching Dispatch follow rather than wondering how
+// long it will take.
+const deviceGrantTTL = 5 * time.Second
+
+// deviceGrant remembers the last answer read out of the broker's metadata. Only a read that
+// succeeded is remembered, and it is remembered with no expiry of its own beyond `until`: a read
+// that fails falls back to it however old it is, since a page that vanishes because one read
+// timed out is worse than one that lingers past a change.
+type deviceGrant struct {
+	// mu is held across the read, so a wave of page loads makes one request rather than one
+	// each, and the answer they all take is the same one.
+	mu     sync.Mutex
+	read   bool
+	served bool
+	until  time.Time
+}
+
+// ServesDeviceGrant answers whether this broker still serves RFC 8628's device grant — whether,
+// that is, there is any machine code for a person to type — from a cached read of its RFC 8414
+// metadata (deviceGrantTTL).
+//
+// It answers true for a broker it could not read and has never read: the fact is unknown, and of
+// the two ways to be wrong, hiding a page that works costs a person their machine login while
+// showing one that does not costs them a clear refusal from the broker when they use it. A
+// broker read before is answered with what it said then.
+func (c *Client) ServesDeviceGrant(ctx context.Context) bool {
+	c.deviceGrant.mu.Lock()
+	defer c.deviceGrant.mu.Unlock()
+	if c.deviceGrant.read && time.Now().Before(c.deviceGrant.until) {
+		return c.deviceGrant.served
+	}
+	served, err := c.readDeviceGrant(ctx)
+	if err != nil {
+		if c.deviceGrant.read {
+			return c.deviceGrant.served
+		}
+		slog.Warn("dispatch: the secrets broker's authorization server metadata could not be read", "error", err)
+		return true
+	}
+	c.deviceGrant.read, c.deviceGrant.served = true, served
+	c.deviceGrant.until = time.Now().Add(deviceGrantTTL)
+	return served
+}
+
+// readDeviceGrant reads the broker's metadata and answers whether grant_types_supported names the
+// device code. A document the broker answered but this cannot read is an error like any other, so
+// the caller falls back the same way for a broker that is unreachable and for one that is not the
+// broker.
+func (c *Client) readDeviceGrant(ctx context.Context) (bool, error) {
+	body, err := c.do(ctx, http.MethodGet, metadataPath, nil)
+	if err != nil {
+		return false, err
+	}
+	var document struct {
+		GrantTypesSupported []string `json:"grant_types_supported"`
+	}
+	if err := json.Unmarshal(body, &document); err != nil {
+		return false, fmt.Errorf("agent-secrets: read %s: %w", metadataPath, err)
+	}
+	return slices.Contains(document.GrantTypesSupported, deviceCodeGrant), nil
 }

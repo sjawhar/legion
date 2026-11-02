@@ -3,20 +3,27 @@ import type {
   CredentialPendingResponse,
   CredentialPendingRow,
   CredentialRecord,
+  SignIn,
+  SignInsResponse,
 } from "../web/src/api/types";
 import { harnessPorts } from "./harness-ports";
 
 // The secrets broker's reads Dispatch relays on every Inbox and Settings load: `GET /v1/pending`
 // (the credential requests waiting on an approver), `GET /v1/credential-requests/{id}` (one
-// record's full detail, for the record page) and `GET /v1/grants` (the live grants of a person's
-// sessions and those the person approved), and the two routes Dispatch's machine-login page
-// drives: `POST /v1/machine-logins/lookup` (the pending login a typed code selects) and
+// record's full detail, for the record page), `GET /v1/grants` (the live grants of a person's
+// sessions and those the person approved) and `GET /v1/person-signins` (the machines one person
+// signed in on); the two routes Dispatch's machine-login page drives:
+// `POST /v1/machine-logins/lookup` (the pending login a typed code selects) and
 // `POST /v1/credential-requests/{id}/approve|deny` (that login's decision, carrying the code
-// again). The server reaches this through
+// again); `POST /v1/person-signins/{id}/revoke`, which the Settings page's Sign-ins section
+// drives; and the public `GET /.well-known/oauth-authorization-server`, the RFC 8414 document
+// Dispatch reads to learn whether this broker still serves the device grant. The server reaches
+// this through
 // DISPATCH_AGENT_SECRETS_URL (run-server.sh) whenever the harness switch is left unset
 // (e2e/harness-broker.ts), and it lists nothing until a test seeds a request through
-// /__fixture/pending, a record through /__fixture/records or a machine login through
-// /__fixture/machine-logins, relaying each row as seeded: a
+// /__fixture/pending, a record through /__fixture/records, a machine login through
+// /__fixture/machine-logins or a sign-in through /__fixture/signins, relaying each row as
+// seeded: a
 // secret request's row carries the `approve_url` of its page on the broker that the Inbox links
 // to (an absolute URL, which e2e/broker-approval.e2e.ts points at a record on the real broker,
 // e2e/run-broker.sh), a machine login's row none. It verifies no caller: the token the server
@@ -35,15 +42,26 @@ export interface FakeMachineLogin {
   record: CredentialRecord;
 }
 
+/** One person's sign-in on one machine, as `GET /v1/person-signins` lists it beside the person it
+ *  belongs to: the row is the SPA's own type, so a change to the contract fails the typecheck
+ *  here too. Revoking it drops it from the list, as the real broker's revoke does. */
+export type FakeSignIn = SignIn & { readonly person: string };
+
 /** Every piece of fixture state this listener holds; `PUT /__fixture/reset` replaces it whole. */
 interface FakeBrokerState {
+  /** Whether this broker serves RFC 8628's device grant, which its RFC 8414 metadata names and
+   *  Dispatch relays to decide whether to serve the machine-code page. A real broker serves it
+   *  while BROKER_MACHINE_LOGIN_URL is set, which the suite's own broker does, so it is the
+   *  default here and a row that drives the other answer sets it back by resetting. */
+  deviceGrant: boolean;
   machineLogins: FakeMachineLogin[];
   pending: FakePendingRequest[];
   records: Record<string, CredentialRecord>;
+  signIns: FakeSignIn[];
 }
 
 function emptyState(): FakeBrokerState {
-  return { machineLogins: [], pending: [], records: {} };
+  return { deviceGrant: true, machineLogins: [], pending: [], records: {}, signIns: [] };
 }
 
 let state = emptyState();
@@ -120,6 +138,62 @@ const server = Bun.serve({
     if (request.method === "GET" && url.pathname === "/v1/grants") {
       return Response.json({ grants: [] });
     }
+    // The RFC 8414 document, public on the real broker too: Dispatch reads
+    // `grant_types_supported` from it and serves the machine-code page only while it names the
+    // device code. The other members are what internal/broker/api/handlers_metadata.go writes,
+    // against this listener's own address, since a client that reads one reads them all.
+    if (request.method === "GET" && url.pathname === "/.well-known/oauth-authorization-server") {
+      const issuer = url.origin;
+      return Response.json({
+        issuer,
+        token_endpoint: `${issuer}/v1/oauth/token`,
+        ...(state.deviceGrant
+          ? { device_authorization_endpoint: `${issuer}/v1/oauth/device_authorization` }
+          : {}),
+        introspection_endpoint: `${issuer}/v1/oauth/introspect`,
+        revocation_endpoint: `${issuer}/v1/oauth/revoke`,
+        grant_types_supported: [
+          "refresh_token",
+          "urn:ietf:params:oauth:grant-type:token-exchange",
+          ...(state.deviceGrant ? ["urn:ietf:params:oauth:grant-type:device_code"] : []),
+        ],
+        response_types_supported: [],
+        token_endpoint_auth_methods_supported: ["none"],
+        dpop_signing_alg_values_supported: ["ES256"],
+        subject_token_types_supported: ["urn:ietf:params:oauth:token-type:access_token"],
+      });
+    }
+    // One person's sign-ins, as internal/broker/api/handlers_ui_personsignin.go lists them: the
+    // person the caller names and nobody else, since that is what keeps one person off another's.
+    if (request.method === "GET" && url.pathname === "/v1/person-signins") {
+      const person = url.searchParams.get("person");
+      if ((person ?? "") === "") {
+        return brokerError(400, "PERSON_REQUIRED", "person is required");
+      }
+      const body: SignInsResponse = {
+        signins: state.signIns
+          .filter((row) => row.person === person)
+          .map(({ person: _, ...row }) => row),
+      };
+      return Response.json(body);
+    }
+    // A sign-in of anyone but the person the body names is an unknown id, the refusal that keeps
+    // one person from reaching another's by trying ids.
+    if (request.method === "POST" && url.pathname.startsWith("/v1/person-signins/")) {
+      const rest = url.pathname.slice("/v1/person-signins/".length);
+      if (rest.endsWith("/revoke")) {
+        const signInID = decodeURIComponent(rest.slice(0, -"/revoke".length));
+        const { person } = (await request.json()) as { person?: string };
+        const found = state.signIns.find(
+          (row) => row.signin_id === signInID && row.person === person
+        );
+        if (found === undefined) {
+          return brokerError(404, "NOT_FOUND", "no sign-in of that person has that id");
+        }
+        state = { ...state, signIns: state.signIns.filter((row) => row !== found) };
+        return Response.json({ state: "revoked", tokens_ended: 1 });
+      }
+    }
     // Only the typed code selects a machine login (ruling 13), so this answers that login's
     // record whole, decided or not, as internal/broker/api/handlers_ui_machinelogin.go does.
     if (request.method === "POST" && url.pathname === "/v1/machine-logins/lookup") {
@@ -156,6 +230,16 @@ const server = Bun.serve({
     if (request.method === "PUT" && url.pathname === "/__fixture/machine-logins") {
       const machineLogins = (await request.json()) as FakeMachineLogin[];
       state = { ...state, machineLogins };
+      return Response.json({ ok: true });
+    }
+    if (request.method === "PUT" && url.pathname === "/__fixture/signins") {
+      const signIns = (await request.json()) as FakeSignIn[];
+      state = { ...state, signIns };
+      return Response.json({ ok: true });
+    }
+    if (request.method === "PUT" && url.pathname === "/__fixture/device-grant") {
+      const { served } = (await request.json()) as { served: boolean };
+      state = { ...state, deviceGrant: served };
       return Response.json({ ok: true });
     }
     if (request.method === "PUT" && url.pathname === "/__fixture/reset") {

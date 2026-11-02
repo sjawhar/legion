@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/brokertoken"
 )
@@ -305,4 +306,120 @@ func TestAMissingOrEmptyTokenFileFailsNamingItAndSendsNothing(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSignInsSendsBearerAndPersonQuery(t *testing.T) {
+	server, captured := serveCapturing(t, http.StatusOK, `{"signins":[]}`)
+	defer server.Close()
+
+	if _, err := New(server.URL, tokenFile(t, "account-token")).SignIns(context.Background(), "sjawhar"); err != nil {
+		t.Fatalf("SignIns: %v", err)
+	}
+	if captured.Method != http.MethodGet || captured.Path != "/v1/person-signins?person=sjawhar" {
+		t.Fatalf("request = %s %s, want GET /v1/person-signins?person=sjawhar", captured.Method, captured.Path)
+	}
+	if captured.Auth != "Bearer account-token" {
+		t.Fatalf("Authorization = %q, want Bearer account-token", captured.Auth)
+	}
+}
+
+func TestRevokeSignInSendsBearerPathAndThePerson(t *testing.T) {
+	server, captured := serveCapturing(t, http.StatusOK, `{"state":"revoked","tokens_ended":2}`)
+	defer server.Close()
+
+	_, err := New(server.URL, tokenFile(t, "account-token")).RevokeSignIn(context.Background(), "signin-1", "sjawhar")
+	if err != nil {
+		t.Fatalf("RevokeSignIn: %v", err)
+	}
+	if captured.Method != http.MethodPost || captured.Path != "/v1/person-signins/signin-1/revoke" {
+		t.Fatalf("request = %s %s, want POST /v1/person-signins/signin-1/revoke", captured.Method, captured.Path)
+	}
+	if string(captured.Body) != `{"person":"sjawhar"}` {
+		t.Fatalf("body = %s, want {\"person\":\"sjawhar\"}", captured.Body)
+	}
+}
+
+// ServesDeviceGrant is read on every page load, so what it costs the broker and what it answers
+// when the broker says nothing are as much its contract as the fact it carries.
+func TestServesDeviceGrantReadsTheMetadataOnceAndKeepsWhatItRead(t *testing.T) {
+	const withDevice = `{"grant_types_supported":["refresh_token","urn:ietf:params:oauth:grant-type:device_code"]}`
+	const withoutDevice = `{"grant_types_supported":["refresh_token","urn:ietf:params:oauth:grant-type:token-exchange"]}`
+
+	t.Run("the document decides, and one read answers every ask until it lapses", func(t *testing.T) {
+		reads := 0
+		body := withDevice
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/.well-known/oauth-authorization-server" {
+				t.Errorf("the client read %s, want the RFC 8414 document", r.URL.Path)
+			}
+			reads++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(body))
+		}))
+		defer server.Close()
+		client := New(server.URL, tokenFile(t, "account-token"))
+
+		if !client.ServesDeviceGrant(context.Background()) {
+			t.Fatalf("the first ask answered false, want true: the document names the device code")
+		}
+		if !client.ServesDeviceGrant(context.Background()) || reads != 1 {
+			t.Fatalf("the broker was read %d times for two asks, want 1", reads)
+		}
+
+		// The window run out, as it does seconds later in a live process.
+		body = withoutDevice
+		client.deviceGrant.until = time.Now().Add(-time.Second)
+		if client.ServesDeviceGrant(context.Background()) {
+			t.Fatalf("a lapsed answer was kept, want the document read again")
+		}
+		if reads != 2 {
+			t.Fatalf("the broker was read %d times, want 2", reads)
+		}
+	})
+
+	t.Run("a broker that cannot be read keeps the answer it last gave", func(t *testing.T) {
+		fail := false
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if fail {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(withoutDevice))
+		}))
+		defer server.Close()
+		client := New(server.URL, tokenFile(t, "account-token"))
+
+		if client.ServesDeviceGrant(context.Background()) {
+			t.Fatalf("the first ask answered true, want false: the document names no device code")
+		}
+		fail = true
+		client.deviceGrant.until = time.Now().Add(-time.Second)
+		if client.ServesDeviceGrant(context.Background()) {
+			t.Fatalf("a failed read replaced the answer the broker gave, want it kept")
+		}
+	})
+
+	t.Run("a broker never read at all keeps the page", func(t *testing.T) {
+		dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		url := dead.URL
+		dead.Close()
+
+		if !New(url, tokenFile(t, "account-token")).ServesDeviceGrant(context.Background()) {
+			t.Fatalf("an unreadable broker answered false; a page that vanishes on one failed read is worse than one that lingers")
+		}
+	})
+
+	t.Run("a document that is not the broker's is a failed read", func(t *testing.T) {
+		server, _ := serveCapturing(t, http.StatusOK, `not json`)
+		defer server.Close()
+		client := New(server.URL, tokenFile(t, "account-token"))
+
+		if !client.ServesDeviceGrant(context.Background()) {
+			t.Fatalf("an unreadable document answered false, want the never-read answer")
+		}
+		if client.deviceGrant.read {
+			t.Fatalf("an unreadable document was remembered as an answer")
+		}
+	})
 }

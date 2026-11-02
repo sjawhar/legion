@@ -18,6 +18,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/brokertoken"
 	"github.com/sjawhar/envoy/internal/brokertoken/brokertokentest"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -30,6 +31,9 @@ const (
 	// bob), so a token this suite presents names someone the server already knows.
 	brokerTestSession = "ses_b1c2d3e4f5a6"
 	brokerTestPerson  = "alice"
+	// brokerTestService is the service a token that names no person names instead: the fleet
+	// the machine presenting it belongs to, as the broker's own configuration names it.
+	brokerTestService = "example-fleet"
 	// brokerTestProject is the one project a named-scope token may write.
 	brokerTestProject = "BRK"
 	// brokerTestAddress is the source address the verifier's per-address bucket is keyed on.
@@ -44,6 +48,23 @@ func liveNamedToken(jkt string) brokertoken.Introspection {
 		Active:       true,
 		Session:      brokerTestSession,
 		Person:       brokerTestPerson,
+		ProjectScope: brokertoken.ProjectScopeNamed,
+		Project:      brokerTestProject,
+		Scope:        "dispatch.write",
+		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
+		ClientID:     brokertoken.ExchangeClientID,
+		Thumbprint:   jkt,
+	}
+}
+
+// serviceOnlyToken is the broker's answer for a machine nobody has signed in on: live, bound to
+// jkt, naming a session and the service its fleet is, and no person. The project is the one its
+// fleet entry names, which is the only project such a token may ever be read as covering.
+func serviceOnlyToken(jkt string) brokertoken.Introspection {
+	return brokertoken.Introspection{
+		Active:       true,
+		Session:      brokerTestSession,
+		Service:      brokerTestService,
 		ProjectScope: brokertoken.ProjectScopeNamed,
 		Project:      brokerTestProject,
 		Scope:        "dispatch.write",
@@ -612,5 +633,134 @@ func TestTheRateRefusalCarriesTheWaitInItsHeader(t *testing.T) {
 	}
 	if rig.broker.Count() != 1 {
 		t.Fatalf("the refused request reached the broker: %d introspections, want 1", rig.broker.Count())
+	}
+}
+
+// TestAServiceOnlyBrokerTokenReadsAndIsNamedByWhoami: a machine nobody has signed in on holds a
+// token the broker says names a session and a service and no person. It is a session's
+// credential like any other — whoami names the session and the service, and a read answers —
+// and only its writes are refused (the test below).
+func TestAServiceOnlyBrokerTokenReadsAndIsNamedByWhoami(t *testing.T) {
+	rig := newBrokerTokenRig(t)
+	caller := newBrokerCaller(t)
+	const token = "a-token-naming-no-person"
+	rig.broker.Says(token, serviceOnlyToken(caller.jkt))
+	own := seedProject(t, rig, brokerTestProject, "Broker")
+
+	who := rig.serve(caller.presenting(t, http.MethodGet, "/api/v1/whoami", token, nil))
+	if who.Code != http.StatusOK {
+		t.Fatalf("whoami under a service-only token: status=%d body=%s", who.Code, who.Body.String())
+	}
+	answer := decodeBody[whoamiAnswer](t, who)
+	if answer.Kind != "agent" || answer.Session == nil || *answer.Session != brokerTestSession {
+		t.Fatalf("whoami = %+v, want the session the token names", answer)
+	}
+	if answer.Service == nil || *answer.Service != brokerTestService {
+		t.Fatalf("whoami service = %v, want %q", answer.Service, brokerTestService)
+	}
+	if answer.Owner != nil {
+		t.Fatalf("whoami owner = %q, want null: the token names no person", *answer.Owner)
+	}
+	if answer.Project == nil || *answer.Project != brokerTestProject {
+		t.Fatalf("whoami project = %v, want the project the token's entry names", answer.Project)
+	}
+
+	read := rig.serve(caller.presenting(t, http.MethodGet, "/api/v1/issues/"+own.issue, token, nil))
+	if read.Code != http.StatusOK {
+		t.Fatalf("read an issue under a service-only token: status=%d body=%s", read.Code, read.Body.String())
+	}
+}
+
+// TestAServiceOnlyBrokerTokenIsRefusedEveryWrite: the refusal is at the one chokepoint register
+// wraps every mutating row in, so it covers every write class — a project's object, the
+// deployment's own rows, a write whose project its body names, and a session's own rows — and
+// the rows below are one of each. Each refusal names the command that makes the write possible,
+// and nothing lands.
+func TestAServiceOnlyBrokerTokenIsRefusedEveryWrite(t *testing.T) {
+	rig := newBrokerTokenRig(t)
+	caller := newBrokerCaller(t)
+	const token = "a-token-that-may-not-write"
+	rig.broker.Says(token, serviceOnlyToken(caller.jkt))
+	own := seedProject(t, rig, brokerTestProject, "Broker")
+
+	writes := map[string]struct {
+		method, pattern, path string
+		body                  any
+		class                 writeScope
+	}{
+		"a comment on its own project's issue": {
+			http.MethodPost, "/api/v1/issues/{key}/comments", "/api/v1/issues/" + own.issue + "/comments",
+			map[string]any{"body": "Written by nobody."}, scopeProject,
+		},
+		"an issue whose body names the project": {
+			http.MethodPost, "/api/v1/issues", "/api/v1/issues",
+			map[string]any{"project": brokerTestProject, "title": "Filed by nobody", "spec": "# Spec"},
+			scopeProjectInBody,
+		},
+		"a project of the deployment's own": {
+			http.MethodPost, "/api/v1/projects", "/api/v1/projects",
+			map[string]any{"key": "NEW", "name": "New"}, scopeDeployment,
+		},
+		"an artifact of its own session": {
+			http.MethodPost, "/api/v1/agents/{session_id}/artifacts", "/api/v1/agents/" + brokerTestSession + "/artifacts",
+			map[string]any{"name": "notes.md", "content": "# Notes"}, scopeSession,
+		},
+	}
+	for name, write := range writes {
+		t.Run(name, func(t *testing.T) {
+			if got := writeClasses[write.method+" "+write.pattern]; got != write.class {
+				t.Fatalf("%s %s is classed %q, want %q", write.method, write.pattern, got, write.class)
+			}
+			response := rig.serve(caller.presenting(t, write.method, write.path, token, write.body))
+			refusal := decodeBody[refusalAnswer](t, response)
+			if response.Code != http.StatusForbidden || refusal.Code != contracts.DispatchSignInRequired {
+				t.Fatalf("status=%d refusal=%+v, want 403 %s", response.Code, refusal, contracts.DispatchSignInRequired)
+			}
+			if !strings.Contains(refusal.Error, "agent-secrets login") {
+				t.Fatalf("the refusal does not name the sign-in command: %q", refusal.Error)
+			}
+			if !strings.Contains(refusal.Error, brokerTestService) {
+				t.Fatalf("the refusal does not name the service: %q", refusal.Error)
+			}
+		})
+	}
+
+	issues := rig.asPerson(t, http.MethodGet, "/api/v1/issues?project="+brokerTestProject, nil)
+	if strings.Contains(issues.Body.String(), "Filed by nobody") {
+		t.Fatalf("a refused write created an issue: %s", issues.Body.String())
+	}
+	projects := rig.asPerson(t, http.MethodGet, "/api/v1/projects", nil)
+	if strings.Contains(projects.Body.String(), `"NEW"`) {
+		t.Fatalf("a refused write created a project: %s", projects.Body.String())
+	}
+}
+
+// TestAServiceOnlyBrokerTokenWithNoProofIsRefused: the new caller kind changes nothing about how
+// a token is presented. A DPoP-bound token sent with no proof at all is refused where it always
+// was — the broker holds it live and the proof check is what turns it down — so no write
+// refusal is ever reached, there being no caller to refuse, and a write under it lands nothing.
+func TestAServiceOnlyBrokerTokenWithNoProofIsRefused(t *testing.T) {
+	rig := newBrokerTokenRig(t)
+	caller := newBrokerCaller(t)
+	const token = "a-token-sent-without-its-proof"
+	rig.broker.Says(token, serviceOnlyToken(caller.jkt))
+	seedProject(t, rig, brokerTestProject, "Broker")
+
+	response := rig.serve(brokerRequest(t, http.MethodGet, "/api/v1/whoami", nil, "DPoP "+token, ""))
+	refusal := decodeBody[refusalAnswer](t, response)
+	if response.Code != http.StatusUnauthorized || refusal.Code != "BROKER_TOKEN_PROOF_INVALID" {
+		t.Fatalf("status=%d refusal=%+v, want 401 BROKER_TOKEN_PROOF_INVALID", response.Code, refusal)
+	}
+
+	written := rig.serve(brokerRequest(t, http.MethodPost, "/api/v1/issues", map[string]any{
+		"project": brokerTestProject, "title": "Filed with no proof", "spec": "# Spec",
+	}, "DPoP "+token, ""))
+	refused := decodeBody[refusalAnswer](t, written)
+	if written.Code != http.StatusUnauthorized || refused.Code != "BROKER_TOKEN_PROOF_INVALID" {
+		t.Fatalf("a write: status=%d refusal=%+v, want 401 BROKER_TOKEN_PROOF_INVALID", written.Code, refused)
+	}
+	issues := rig.asPerson(t, http.MethodGet, "/api/v1/issues?project="+brokerTestProject, nil)
+	if strings.Contains(issues.Body.String(), "Filed with no proof") {
+		t.Fatalf("the unproved write created an issue: %s", issues.Body.String())
 	}
 }

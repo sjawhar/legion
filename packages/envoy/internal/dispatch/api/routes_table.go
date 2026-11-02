@@ -161,6 +161,7 @@ var writeClasses = map[string]writeScope{
 	"POST /api/v1/credential-requests/machine-lookup":      scopeDeployment,
 	"POST /api/v1/credential-grants/{id}/revoke":           scopeDeployment,
 	"POST /api/v1/machine-logins/{id}/revoke":              scopeDeployment,
+	"POST /api/v1/signins/{id}/revoke":                     scopeDeployment,
 	"POST /api/v1/live/_test/disconnect":                   scopeDeployment,
 	"POST /api/v1/live/_test/rotate":                       scopeDeployment,
 	"POST /api/v1/artifacts/_test/quiesce":                 scopeDeployment,
@@ -350,6 +351,9 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/credential-grants/{id}/revoke", authHuman, "Revoke a credential grant as the caller, its approver or its enrollment's operator.", s.revokeCredentialGrant},
 		{http.MethodGet, "/api/v1/machine-logins", authHuman, "List the machine logins the caller may revoke that can still reach a secret: the secrets broker's launcher credentials for every service's login, whoever approved it, and for the caller's own machines, unexpired or expired with a session still running, each naming who approved it.", s.listMachineLogins},
 		{http.MethodPost, "/api/v1/machine-logins/{id}/revoke", authHuman, "Revoke a machine login, expired or not, ending every session it enrolled, a service's pods included: anyone signed in revokes a service's login, and only the person who approved a person's machine login revokes that one.", s.revokeMachineLogin},
+		{http.MethodGet, "/api/v1/signins", authHuman, "List the caller's own sign-ins on their machines (`agent-secrets login`), one per box key they have not revoked, each naming the machine's account, the key's thumbprint, when the person signed in there and when that machine last used it. Nobody lists another person's: Dispatch names the person from its own session.", s.listSignIns},
+		{http.MethodPost, "/api/v1/signins/{id}/revoke", authHuman, "End one of the caller's own sign-ins: that machine trades no token for them again and every access token already minted under it ends, while their sign-ins on other machines keep working. A sign-in of anyone else is an unknown id.", s.revokeSignIn},
+		{http.MethodGet, "/api/v1/credentials/capabilities", authHuman, "What the credential pages may offer against this deployment's secrets broker, relayed from the broker's own RFC 8414 metadata rather than from any Dispatch setting: machine_code_page says whether the broker still serves the device grant, so whether a machine ever prints a code for a person to type.", s.getCredentialCapabilities},
 	}
 	// The live-socket disconnect, live-socket rotate, quiesce and publish hooks (the 1st, 2nd, 3rd
 	// and 5th below) act on every process serving the database, answering once each has

@@ -1536,6 +1536,15 @@ export const DISPATCH_LOGIN_HEADER = "Dispatch-Login";
  *  caller's: nothing ran. The page drops every write that login pressed. */
 export const DISPATCH_LOGIN_CHANGED = "LOGIN_CHANGED";
 
+/**
+ * The code of the `403` for a write by an access token the secrets broker issued that names a
+ * session and a service but no person: the machine holding it has signed nobody in, so Dispatch
+ * has nobody to record the write under. Its reads are unaffected. The message names
+ * `agent-secrets login`, the one command that makes the write possible, because whoever reads
+ * the refusal is whoever must run it.
+ */
+export const DISPATCH_SIGN_IN_REQUIRED = "SIGN_IN_REQUIRED";
+
 /** The codes of a write Dispatch made and has no answer to give for: `409 KEY_COMMITTED`, or a
  *  replayed 2xx reading `ANSWER_NOT_KEPT`. A client treats either as landed. */
 export type IdempotencyLandedCode =

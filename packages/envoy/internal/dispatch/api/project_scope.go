@@ -56,6 +56,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/brokertoken"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -349,6 +350,35 @@ func (s *server) withinSessionScope(route apiRoute, handler http.HandlerFunc) ht
 // message rows are held to the session their delivery attempt names.
 func addressesOneSession(route apiRoute) bool {
 	return route.Scope == scopeSession && strings.Contains(route.Pattern, "{session_id}")
+}
+
+// writeNeedsASignedInPerson refuses every write by a caller whose credential names a service and
+// no person: an access token the secrets broker issued to a machine nobody has signed in on. The
+// refusal is here, in front of every mutating row whatever its class, rather than in each route,
+// for the reason the two checks above are: a route added later is covered by the table it joins
+// and not by a line someone remembered to write.
+//
+// Such a caller may read everything its session may read. What it may not do is write, because
+// Dispatch records a write under the person who made it and this credential names none; a
+// session that accepted a delivery or answered an ask under it would write as nobody. The
+// refusal's message names `agent-secrets login`, the command that signs a person in on that
+// machine, since running it is the whole remedy.
+//
+// Every other credential is unaffected: a cookie, a personal token, a service-account token, the
+// shared token and a broker token that does name a person each reach the handler as before, at
+// the cost of the one header read brokerCredentialActor makes.
+func (s *server) writeNeedsASignedInPerson(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		actor, resolved := s.brokerCredentialActor(r)
+		if !resolved || actor.Owner != nil || actor.Service == nil {
+			handler(w, r)
+			return
+		}
+		writeError(w, contracts.DispatchSignInRequired, http.StatusForbidden, fmt.Sprintf(
+			"this request's credential acts for service %s and no person, so there is nobody to "+
+				"record this write under; run `agent-secrets login` on this machine and try again",
+			*actor.Service))
+	}
 }
 
 // undecidableWrites names every mutating row the project check cannot decide: one writeClasses

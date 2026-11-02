@@ -49,6 +49,7 @@ import type {
   CreateMessageInput,
   CreateProjectInput,
   CreateVersionInput,
+  CredentialCapabilities,
   CredentialDecisionResponse,
   CredentialGrantsResponse,
   CredentialPendingResponse,
@@ -83,6 +84,7 @@ import type {
   ProjectDefaultAssigneeInput,
   RepoProject,
   SearchResponse,
+  SignInsResponse,
   Subscriber,
   Suggestions,
   UpdateDeliverySessionGroupInput,
@@ -1520,6 +1522,27 @@ export class DispatchApiClient {
    *  with it. */
   async revokeMachineLogin(credentialId: string, bounds: WriteBounds): Promise<void> {
     await this.post(`/api/v1/machine-logins/${pathSegment(credentialId)}/revoke`, {}, bounds);
+  }
+
+  /** `GET /api/v1/signins`: the viewer's own sign-ins on their machines (`agent-secrets login`),
+   *  one per box key they have not revoked. Dispatch names the viewer, so nobody reads another
+   *  person's. */
+  getSignIns(): Promise<SignInsResponse> {
+    return this.json<SignInsResponse>("/api/v1/signins");
+  }
+
+  /** End one of the viewer's own sign-ins: that machine trades no token for them again and the
+   *  access tokens already minted under it end with it, while their sign-ins on other machines
+   *  keep working. */
+  async revokeSignIn(signInId: string, bounds: WriteBounds): Promise<void> {
+    await this.post(`/api/v1/signins/${pathSegment(signInId)}/revoke`, {}, bounds);
+  }
+
+  /** `GET /api/v1/credentials/capabilities`: what the credential pages may offer against this
+   *  deployment's secrets broker, which Dispatch relays from the broker's own RFC 8414 metadata
+   *  because a browser reaches no broker. */
+  getCredentialCapabilities(): Promise<CredentialCapabilities> {
+    return this.json<CredentialCapabilities>("/api/v1/credentials/capabilities");
   }
 }
 

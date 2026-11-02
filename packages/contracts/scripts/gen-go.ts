@@ -7,6 +7,7 @@ import {
   DELIVERY_DUPLICATE_WINDOW_MS,
   DISPATCH_LOGIN_CHANGED,
   DISPATCH_LOGIN_HEADER,
+  DISPATCH_SIGN_IN_REQUIRED,
   DOCUMENT_SCHEMA_CLOSE_CODE,
   DOCUMENT_SCHEMA_CLOSE_REASON,
   IDEMPOTENCY_ANSWER_NOT_KEPT,
@@ -251,6 +252,12 @@ const IdempotencyLease = ${IDEMPOTENCY_LEASE_MS} * time.Millisecond
 // packages/contracts so the server's check and the page's header cannot drift apart.
 const DispatchLoginHeader = ${JSON.stringify(DISPATCH_LOGIN_HEADER)}
 const DispatchLoginChanged = ${JSON.stringify(DISPATCH_LOGIN_CHANGED)}
+
+// DispatchSignInRequired is the code of the 403 for a write by a broker-issued access token that
+// names a session and a service but no person: the machine holding it has signed nobody in.
+// Generated from DISPATCH_SIGN_IN_REQUIRED in packages/contracts so the server's refusal and
+// every client's reading of it cannot drift apart.
+const DispatchSignInRequired = ${JSON.stringify(DISPATCH_SIGN_IN_REQUIRED)}
 
 func NowMillis() int64 {
 	return time.Now().UnixMilli()
