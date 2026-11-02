@@ -3,7 +3,7 @@ import { DISPATCH_BLOCK_POINTER_VALUES } from '@legion/contracts';
 import { Schema } from '@milkdown/kit/prose/model';
 import { EditorState } from '@milkdown/kit/prose/state';
 
-import { typedBlockSpec, type BlockTypeSchema } from '../block-schema.js';
+import { typedBlockSpec, type BlockSchema, type BlockTypeSchema } from '../block-schema.js';
 import { createHeadlessProof } from '../lib-headless.js';
 import { createTypedBlockCommands } from '../typed-block-commands.js';
 
@@ -265,6 +265,8 @@ await test('headless Proof rejects a content rule naming an unknown node type', 
   let thrown: unknown;
   try {
     await createHeadlessProof({
+      // A content rule off the wire is not one of the three the shape declares, which is what
+      // this case is: the editor is held to refusing it when it is built.
       blockSchema: {
         version: 1,
         types: [{
@@ -273,7 +275,7 @@ await test('headless Proof rejects a content rule naming an unknown node type', 
           render: 'host',
           attributes: {},
         }],
-      },
+      } as unknown as BlockSchema,
     });
   } catch (error) {
     thrown = error;

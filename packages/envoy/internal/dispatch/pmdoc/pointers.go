@@ -67,7 +67,7 @@ func BlockPointers(tree *Node) []BlockPointer {
 				if !canonical {
 					continue
 				}
-				pointers = append(pointers, BlockPointer{Block: id, BlockType: node.Type, Attribute: name, Ref: ref, Target: target, Targets: typ.Attributes[name].Targets})
+				pointers = append(pointers, BlockPointer{Block: id, BlockType: node.Type, Attribute: name, Ref: ref, Target: target, Targets: typ.Attributes.Get(name).Targets})
 			}
 		}
 		return true

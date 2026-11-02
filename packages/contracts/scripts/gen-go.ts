@@ -63,6 +63,7 @@ type Schema = {
 };
 
 const envelopeFile = resolve(import.meta.dir, "../schemas/envelope.schema.json");
+const blockSchemaFile = resolve(import.meta.dir, "../schemas/block-schema.schema.json");
 
 const map = {
   string: "string",
@@ -533,48 +534,393 @@ const MessageBodyLimit = ${DISPATCH_BODY_MAX}
 `;
 }
 
-const envelope = (await Bun.file(envelopeFile).json()) as Schema;
+// The slice of JSON Schema that schemas/block-schema.schema.json uses, which the block schema
+// renderers below read. `x-ordered` marks an object whose keys carry their declaration order,
+// `x-go-type` names the Go type holding such an object, and `x-go-constants` names the Go
+// constant of each value of a string enum.
+type BlockProp = {
+  description?: string;
+  type?: "object" | "array" | "string" | "integer" | "boolean";
+  $ref?: string;
+  const?: string;
+  enum?: string[];
+  items?: BlockProp;
+  anyOf?: BlockProp[];
+  properties?: Record<string, BlockProp>;
+  required?: string[];
+  additionalProperties?: BlockProp;
+  "x-ordered"?: boolean;
+  "x-go-type"?: string;
+  "x-go-constants"?: Record<string, string>;
+};
 
-// Every generated Go file this script owns. The daemon carries its own copy of the body cap
-// rather than importing the envoy package: its production build imports nothing from
-// github.com/sjawhar/envoy.
+type BlockSchemaDocument = BlockProp & { title: string; $defs: Record<string, BlockProp> };
+
+// The Go the shape alone does not say: the ordered attribute list a typed block's `attributes`
+// object decodes into. encoding/json reads an object into a map, which holds no order, so this
+// reads its keys through json.Decoder tokens and writes them back in the order it read them.
+const blockAttributesKeep = `// BlockAttribute is one attribute of a typed block: the name the schema declares it under, and
+// what it holds.
+type BlockAttribute struct {
+	Name string
+	BlockAttributeSchema
+}
+
+// BlockAttributes is a typed block's attributes in the order its schema declares them, which is
+// the order the renderer writes them in a typed block's markdown.
+type BlockAttributes []BlockAttribute
+
+// Lookup is the attribute named name and whether the type declares it.
+func (a BlockAttributes) Lookup(name string) (BlockAttributeSchema, bool) {
+	for _, attribute := range a {
+		if attribute.Name == name {
+			return attribute.BlockAttributeSchema, true
+		}
+	}
+	return BlockAttributeSchema{}, false
+}
+
+// Get is the attribute named name, or the zero schema when the type declares none, for a caller
+// reading one field of an attribute it has already accepted.
+func (a BlockAttributes) Get(name string) BlockAttributeSchema {
+	attribute, _ := a.Lookup(name)
+	return attribute
+}
+
+// Has reports whether the type declares an attribute named name.
+func (a BlockAttributes) Has(name string) bool {
+	_, ok := a.Lookup(name)
+	return ok
+}
+
+// UnmarshalJSON reads the attributes object key by key, through json.Decoder tokens rather than
+// into a map, so the attributes keep the order the JSON declares them in.
+func (a *BlockAttributes) UnmarshalJSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	opening, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if opening == nil {
+		*a = nil
+		return nil
+	}
+	if delimiter, ok := opening.(json.Delim); !ok || delimiter != '{' {
+		return fmt.Errorf("block attributes must be a JSON object")
+	}
+	attributes := BlockAttributes{}
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		name, ok := key.(string)
+		if !ok {
+			return fmt.Errorf("block attribute names must be strings")
+		}
+		if _, declared := attributes.Lookup(name); declared {
+			return fmt.Errorf("block attribute %q is declared twice", name)
+		}
+		var attribute BlockAttributeSchema
+		if err := decoder.Decode(&attribute); err != nil {
+			return err
+		}
+		attributes = append(attributes, BlockAttribute{Name: name, BlockAttributeSchema: attribute})
+	}
+	if _, err := decoder.Token(); err != nil {
+		return err
+	}
+	*a = attributes
+	return nil
+}
+
+// MarshalJSON writes the attributes as the object they came from, its keys in declaration order,
+// so a schema read and written again is the schema it was read from.
+func (a BlockAttributes) MarshalJSON() ([]byte, error) {
+	var out bytes.Buffer
+	out.WriteByte('{')
+	for index, attribute := range a {
+		if index > 0 {
+			out.WriteByte(',')
+		}
+		name, err := json.Marshal(attribute.Name)
+		if err != nil {
+			return nil, err
+		}
+		out.Write(name)
+		out.WriteByte(':')
+		value, err := json.Marshal(attribute.BlockAttributeSchema)
+		if err != nil {
+			return nil, err
+		}
+		out.Write(value)
+	}
+	out.WriteByte('}')
+	return out.Bytes(), nil
+}`;
+
+function blockRefName(ref: string) {
+  const referenced = ref.split("/").pop();
+  if (!referenced) throw new Error(`unsupported block schema $ref ${ref}`);
+  return referenced;
+}
+
+function blockDescription(prop: BlockProp, what: string) {
+  if (!prop.description) throw new Error(`block schema ${what} has no description`);
+  return prop.description;
+}
+
+// A description as comment lines of at most 100 columns, each behind prefix.
+function blockComment(text: string, prefix: string) {
+  const lines: string[] = [];
+  let line = "";
+  for (const word of text.split(/\s+/)) {
+    const candidate = line === "" ? word : `${line} ${word}`;
+    if (line !== "" && prefix.length + candidate.length > 100) {
+      lines.push(prefix + line);
+      line = word;
+    } else {
+      line = candidate;
+    }
+  }
+  if (line !== "") lines.push(prefix + line);
+  return lines;
+}
+
+function blockDoc(text: string) {
+  return ["/**", ...blockComment(text, " * "), " */"];
+}
+
+function blockGoType(prop: BlockProp): string {
+  if (prop.$ref) return blockRefName(prop.$ref);
+  // A value of several scalar shapes (an attribute's default) is read as it comes off the wire.
+  if (prop.anyOf) return "any";
+  switch (prop.type) {
+    case "string":
+      return "string";
+    case "integer":
+      return "int";
+    case "boolean":
+      return "bool";
+    case "array":
+      if (!prop.items) throw new Error("a block schema array has no items");
+      return `[]${blockGoType(prop.items)}`;
+    case "object": {
+      const goType = prop["x-go-type"];
+      if (!prop["x-ordered"] || !goType) {
+        throw new Error("a block schema object property needs x-ordered and x-go-type");
+      }
+      return goType;
+    }
+    default:
+      throw new Error(`unsupported block schema type ${prop.type}`);
+  }
+}
+
+function blockTypeScriptType(prop: BlockProp): string {
+  if (prop.$ref) return blockRefName(prop.$ref);
+  if (prop.anyOf) return prop.anyOf.map(blockTypeScriptType).join(" | ");
+  switch (prop.type) {
+    case "string":
+      return prop.const === undefined ? "string" : JSON.stringify(prop.const);
+    case "integer":
+      return "number";
+    case "boolean":
+      return "boolean";
+    case "array":
+      if (!prop.items) throw new Error("a block schema array has no items");
+      return `readonly ${blockTypeScriptType(prop.items)}[]`;
+    case "object": {
+      const values = prop.additionalProperties;
+      if (!prop["x-ordered"] || !values) {
+        throw new Error("a block schema object property needs x-ordered and additionalProperties");
+      }
+      // A JavaScript object keeps the insertion order of its string keys, so the object the
+      // server sends carries the declaration order the Go decoder keeps.
+      return `Readonly<Record<string, ${blockTypeScriptType(values)}>>`;
+    }
+    default:
+      throw new Error(`unsupported block schema type ${prop.type}`);
+  }
+}
+
+function blockFields(typeName: string, prop: BlockProp) {
+  if (!prop.properties) throw new Error(`block schema object ${typeName} has no properties`);
+  const req = new Set(prop.required ?? []);
+  return Object.entries(prop.properties).map(([key, field]) => ({
+    key,
+    field,
+    required: req.has(key),
+  }));
+}
+
+function renderBlockGoStruct(typeName: string, prop: BlockProp) {
+  const fields = blockFields(typeName, prop).map(({ key, field, required }) => {
+    const tag = required ? key : `${key},omitempty`;
+    // A $ref carries its description on the definition it names, which is rendered there.
+    const doc = field.$ref
+      ? []
+      : blockComment(blockDescription(field, `${typeName}.${key}`), "\t// ");
+    return [...doc, `\t${name(key)} ${blockGoType(field)} \`json:"${tag}"\``].join("\n");
+  });
+  return [
+    ...blockComment(blockDescription(prop, typeName), "// "),
+    `type ${typeName} struct {`,
+    ...fields,
+    "}",
+  ].join("\n");
+}
+
+function renderBlockGoEnum(typeName: string, prop: BlockProp) {
+  const constants = prop["x-go-constants"];
+  if (!prop.enum?.length || !constants) {
+    throw new Error(`block schema enum ${typeName} needs enum values and x-go-constants`);
+  }
+  const values = prop.enum.map((value) => {
+    const constant = constants[value];
+    if (!constant) throw new Error(`block schema enum ${typeName} value ${value} has no constant`);
+    return `\t${constant} ${typeName} = ${JSON.stringify(value)}`;
+  });
+  return [
+    ...blockComment(blockDescription(prop, typeName), "// "),
+    `type ${typeName} string`,
+    "",
+    "const (",
+    ...values,
+    ")",
+  ].join("\n");
+}
+
+function renderBlockInterface(typeName: string, prop: BlockProp) {
+  const fields = blockFields(typeName, prop).map(({ key, field, required }) => {
+    const doc = field.$ref
+      ? []
+      : blockDoc(blockDescription(field, `${typeName}.${key}`)).map((line) => `  ${line}`);
+    const optional = required ? "" : "?";
+    return [...doc, `  readonly ${key}${optional}: ${blockTypeScriptType(field)};`].join("\n");
+  });
+  return [
+    ...blockDoc(blockDescription(prop, typeName)),
+    `export interface ${typeName} {`,
+    ...fields,
+    "}",
+  ].join("\n");
+}
+
+function renderBlockUnion(typeName: string, prop: BlockProp) {
+  if (!prop.enum?.length) throw new Error(`block schema enum ${typeName} has no values`);
+  const values = prop.enum.map((value) => JSON.stringify(value));
+  const line = `export type ${typeName} = ${values.join(" | ")};`;
+  const body =
+    line.length <= 100
+      ? line
+      : `export type ${typeName} =\n${values.map((value) => `  | ${value}`).join("\n")};`;
+  return [...blockDoc(blockDescription(prop, typeName)), body].join("\n");
+}
+
+// The Go the server reads its own block schema with: the types blocks.json is decoded into, and
+// the attribute order every renderer of a typed block follows.
+function renderBlockSchemaGo(document: BlockSchemaDocument) {
+  const definitions = Object.entries(document.$defs).map(([typeName, definition]) =>
+    definition.enum
+      ? renderBlockGoEnum(typeName, definition)
+      : renderBlockGoStruct(typeName, definition)
+  );
+  return `// Code generated by packages/contracts/scripts/gen-go.ts from
+// packages/contracts/schemas/block-schema.schema.json. DO NOT EDIT.
+
+package pmdoc
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+)
+
+${renderBlockGoStruct(document.title, document)}
+
+${definitions.join("\n\n")}
+
+${blockAttributesKeep}
+`;
+}
+
+// The same shape for every TypeScript client: the browser editor, the SPA and the tools.
+function renderBlockSchemaTypes(document: BlockSchemaDocument) {
+  const definitions = Object.entries(document.$defs).map(([typeName, definition]) =>
+    definition.enum
+      ? renderBlockUnion(typeName, definition)
+      : renderBlockInterface(typeName, definition)
+  );
+  return `// Code generated by scripts/gen-go.ts from schemas/block-schema.schema.json. DO NOT EDIT.
+
+${renderBlockInterface(document.title, document)}
+
+${definitions.join("\n\n")}
+`;
+}
+
+const envelope = (await Bun.file(envelopeFile).json()) as Schema;
+const blockSchema = (await Bun.file(blockSchemaFile).json()) as BlockSchemaDocument;
+
+// Every generated file this script owns, each marked with the language it is written in: Go is
+// gofmt-formatted before it is written and before it is compared. The daemon carries its own copy
+// of the body cap rather than importing the envoy package: its production build imports nothing
+// from github.com/sjawhar/envoy.
 const outputs = [
   {
     path: resolve(import.meta.dir, "../../envoy/internal/contracts/generated.go"),
     rendered: renderContracts(envelope),
+    language: "go",
   },
   {
     path: resolve(import.meta.dir, "../../daemon/internal/dispatch/generated.go"),
     rendered: renderDaemonDispatch(),
+    language: "go",
   },
-];
+  {
+    path: resolve(import.meta.dir, "../../envoy/internal/dispatch/pmdoc/schema_generated.go"),
+    rendered: renderBlockSchemaGo(blockSchema),
+    language: "go",
+  },
+  {
+    path: resolve(import.meta.dir, "../src/block-schema.generated.ts"),
+    rendered: renderBlockSchemaTypes(blockSchema),
+    language: "ts",
+  },
+] satisfies { path: string; rendered: string; language: "go" | "ts" }[];
 const fmt = Bun.which("gofmt");
 
-// `--check` pipes each render through gofmt and compares it with the committed file, writing
-// nothing, so CI fails on a generated.go that no longer matches the TypeScript it comes from.
+// `--check` pipes each Go render through gofmt and compares every render with the committed file,
+// writing nothing, so CI fails on a generated file that no longer matches the TypeScript or the
+// schema it comes from.
 if (process.argv.includes("--check")) {
   if (fmt === null) {
-    throw new Error("gen-go --check needs gofmt: the committed files are gofmt-formatted");
+    throw new Error("gen-go --check needs gofmt: the committed Go files are gofmt-formatted");
   }
   // GEN_GO_CHECK_ROOT points the comparison at copies of the outputs under another root, laid out
   // by their repository-relative paths, so a test can check a copy instead of a tracked file.
   // Unset, `--check` compares the committed files.
   const checkRoot = process.env.GEN_GO_CHECK_ROOT;
   const repoRoot = resolve(import.meta.dir, "../../..");
-  for (const { path: output, rendered } of outputs) {
+  for (const { path: output, rendered, language } of outputs) {
     const path = checkRoot ? resolve(checkRoot, relative(repoRoot, output)) : output;
-    const gofmt = Bun.spawnSync({
-      cmd: [fmt],
-      stdin: new TextEncoder().encode(rendered),
-      stderr: "inherit",
-    });
-    if (gofmt.exitCode !== 0) {
-      throw new Error("gofmt failed");
+    let expected = rendered;
+    if (language === "go") {
+      const gofmt = Bun.spawnSync({
+        cmd: [fmt],
+        stdin: new TextEncoder().encode(rendered),
+        stderr: "inherit",
+      });
+      if (gofmt.exitCode !== 0) {
+        throw new Error("gofmt failed");
+      }
+      expected = gofmt.stdout.toString();
     }
-    if (gofmt.stdout.toString() !== (await Bun.file(path).text())) {
+    if (expected !== (await Bun.file(path).text())) {
       Bun.spawnSync({
         cmd: ["diff", "-u", path, "-"],
-        stdin: gofmt.stdout,
+        stdin: new TextEncoder().encode(expected),
         stderr: "inherit",
         stdout: "inherit",
       });
@@ -592,10 +938,14 @@ for (const { path, rendered } of outputs) {
   await Bun.write(path, rendered);
 }
 
-// One gofmt for every file written, rather than one spawn per output.
+// One gofmt for every Go file written, rather than one spawn per output.
 if (fmt) {
   const gofmt = Bun.spawnSync({
-    cmd: [fmt, "-w", ...outputs.map(({ path }) => path)],
+    cmd: [
+      fmt,
+      "-w",
+      ...outputs.filter(({ language }) => language === "go").map(({ path }) => path),
+    ],
     stderr: "inherit",
     stdout: "inherit",
   });

@@ -65,41 +65,6 @@ export function serviceSubjectLabel(subject: string): string {
   return subject;
 }
 
-export type BlockAttributeKind =
-  | "string"
-  | "bool"
-  | "enum"
-  | "string[]"
-  | "block[]"
-  | "actor"
-  | "timestamp";
-
-export type BlockContentRule = "paragraph+" | "block+" | "paragraph+ bullet_list?";
-
-// A `block[]` attribute points at blocks: canonical block references (parseBlockPointerValue in
-// dispatch-block-ref.ts), each making an edge of the attribute's name (GraphEdgeKind). `targets`,
-// which only a `block[]` attribute carries, limits the types of the blocks it points at; absent
-// or empty, it points at any block.
-export interface BlockAttributeSchema {
-  readonly kind: BlockAttributeKind;
-  readonly choices?: readonly string[];
-  readonly default?: string | boolean | readonly string[];
-  readonly server?: boolean;
-  readonly targets?: readonly string[];
-}
-
-export interface BlockTypeSchema {
-  readonly name: string;
-  readonly content: BlockContentRule;
-  readonly render: "host";
-  readonly attributes: Readonly<Record<string, BlockAttributeSchema>>;
-}
-
-export interface BlockSchema {
-  readonly version: number;
-  readonly types: readonly BlockTypeSchema[];
-}
-
 export interface AgentToken {
   readonly id: string;
   readonly name: string;

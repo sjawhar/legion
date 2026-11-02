@@ -1,3 +1,10 @@
+import type {
+  BlockAttributeKind,
+  BlockAttributeSchema,
+  BlockContentRule,
+  BlockSchema,
+  BlockTypeSchema,
+} from '@legion/contracts';
 import { $nodeSchema } from '@milkdown/kit/utils';
 import type { DOMOutputSpec, Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
 import type { MarkdownNode as ParsedMarkdownNode, NodeSchema } from '@milkdown/kit/transformer';
@@ -8,28 +15,15 @@ import { withDomAttributes } from './editor/schema/dom-attributes.js';
 import { maxDirectiveNesting } from './directive-container.js';
 import { markdownSource } from './typed-block-drawing.js';
 
-export type BlockAttributeKind = 'string' | 'bool' | 'enum' | 'string[]' | 'block[]' | 'actor' | 'timestamp';
-
-export interface BlockAttributeSchema {
-  kind: BlockAttributeKind;
-  choices?: readonly string[];
-  default?: string | boolean | readonly string[];
-  server?: boolean;
-  /** The block types a `block[]` attribute points at (./block-pointers.ts); none, any block. */
-  targets?: readonly string[];
-}
-
-export interface BlockTypeSchema {
-  name: string;
-  content: string;
-  render: 'host';
-  attributes: Readonly<Record<string, BlockAttributeSchema>>;
-}
-
-export interface BlockSchema {
-  version: number;
-  types: readonly BlockTypeSchema[];
-}
+// The schema the server declares (packages/contracts/schemas/block-schema.schema.json) is the one
+// this editor draws: its types are re-exported here so an importer of this module reads one shape.
+export type {
+  BlockAttributeKind,
+  BlockAttributeSchema,
+  BlockContentRule,
+  BlockSchema,
+  BlockTypeSchema,
+};
 
 export type HostBlockRenderer = (node: ProseMirrorNode, type: BlockTypeSchema) => DOMOutputSpec;
 
