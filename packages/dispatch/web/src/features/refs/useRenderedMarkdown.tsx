@@ -10,7 +10,8 @@ import {
 import { createPortal } from "react-dom";
 
 import { type AskBlockHost, applyAskBlockShell, askShellSlots } from "../doc/typed-block-drawing";
-import { collectViewSlots, type ViewBlockSlot, viewPortals } from "../view/ViewBlock";
+import { viewPortals } from "../view/ViewPortals";
+import { collectViewSlots, type ViewBlockSlot } from "../view/view-slots";
 import { collectPictureAnchors, DispatchPicture, type PictureAnchor } from "./DispatchPicture";
 import { TextAskCard } from "./markdown-cards";
 import { parsesInTheWorker, renderWithEngine, type SoftBreaks } from "./markdown-engine";

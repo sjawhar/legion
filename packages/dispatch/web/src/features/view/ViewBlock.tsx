@@ -1,6 +1,5 @@
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 
 import { ApiError, api } from "../../api/client";
 import type {
@@ -9,11 +8,11 @@ import type {
   IssueReferenceSummary,
 } from "../../api/types";
 import { borderDefault, dangerText, linkText, textMutedOnSurface } from "../../theme/classes";
-import { VIEW_FRAME_SLOT } from "../doc/typed-block-drawing";
 import { documentSummaryQuery, issueSummaryQuery } from "../refs/reference-target";
 import { buildReferencePath } from "../refs/routes";
 import { registerViewFrame } from "./frame-budget";
 import { readViewAttributes, type ViewFile } from "./view-attributes";
+import type { ViewBlockSlot } from "./view-slots";
 
 /** The frame's height before the page reports one, and the bounds a reported height is held to
  *  (dispatch://INFRA-682, "The frame"). */
@@ -41,42 +40,6 @@ const PAGE_REFUSALS: Record<number, string> = {
   413: "this page is larger than 5 MiB",
   415: "this file is not a page file",
 };
-
-/** One `view` block's frame slot and what the block says about itself: the `page` and `data`
- *  attributes as the author wrote them, and the caption, which is the frame's title. */
-export interface ViewBlockSlot {
-  readonly caption: string;
-  readonly data: string;
-  readonly host: HTMLElement;
-  readonly key: string;
-  readonly page: string;
-}
-
-/** Every frame slot the engine drew under `root` (`renderViewBlockShell`), with the attributes
- *  and caption its `ViewBlock` renders from. The caption is the block's content hole, the slot's
- *  own previous sibling, so a caption edit reaches the block without touching the frame. */
-export function collectViewSlots(root: HTMLElement): ViewBlockSlot[] {
-  const slots: ViewBlockSlot[] = [];
-  for (const host of root.querySelectorAll<HTMLElement>(VIEW_FRAME_SLOT)) {
-    const page = host.dataset.dispatchViewPage ?? "";
-    const hole = host.previousElementSibling;
-    slots.push({
-      caption:
-        hole?.matches("[data-proof-block-content]") === true ? (hole.textContent ?? "").trim() : "",
-      data: host.dataset.dispatchViewData ?? "",
-      host,
-      key: `view:${page}:${slots.length}`,
-      page,
-    });
-  }
-  return slots;
-}
-
-/** A `ViewBlock` portalled into each of these frame slots, which is how both the body renderer
- *  and the document editors mount one. */
-export function viewPortals(slots: readonly ViewBlockSlot[]): ReactNode[] {
-  return slots.map((slot) => createPortal(<ViewBlock slot={slot} />, slot.host, slot.key));
-}
 
 /** What a summary read of one file has answered so far. */
 interface SummaryResult {
@@ -323,6 +286,11 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
   const overBudget = rows !== undefined && bytes > MAX_DATA_BYTES;
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
+  /** The cap as the frame's own effect reads it: the page's `dispatch-view:ready` schedules the
+   *  first send, and it arrives whenever the page loads, which can be after the grants read
+   *  answered. Without this the cap would hold only for the sends the render schedules. */
+  const overBudgetRef = useRef(overBudget);
+  overBudgetRef.current = overBudget;
 
   const pageVersion = pageState?.version;
   const pageAddress =
@@ -508,7 +476,7 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
     };
 
     const schedule = (): void => {
-      if (!ready || sendTimer !== 0) {
+      if (!ready || sendTimer !== 0 || overBudgetRef.current) {
         return;
       }
       sendTimer = window.setTimeout(

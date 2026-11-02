@@ -3,7 +3,7 @@ import { type EditorState, Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { EditorView, NodeView, ViewMutationRecord } from "@milkdown/kit/prose/view";
 
 import type { BlockSchema, BlockTypeSchema } from "../../api/types";
-import type { ViewBlockSlot } from "../view/ViewBlock";
+import type { ViewBlockSlot } from "../view/view-slots";
 import { pictureNodeView } from "./picture-view";
 import {
   type AskBlockHost,

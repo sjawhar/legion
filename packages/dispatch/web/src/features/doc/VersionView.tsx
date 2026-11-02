@@ -7,7 +7,7 @@ import { whoAmIQuery } from "../../api/queries";
 import type { Ask, BlockSchema } from "../../api/types";
 import { warmMarkdownRenderer } from "../refs/markdown-engine";
 import { Timestamp } from "../refs/Timestamp";
-import { viewPortals } from "../view/ViewBlock";
+import { viewPortals } from "../view/ViewPortals";
 import { AskBlockCard } from "./AskBlockCard";
 import { installTypedBlocks, NO_TYPED_BLOCKS, type TypedBlockHosts } from "./ask-block";
 import { changeMarksAgainst } from "./change-marks";

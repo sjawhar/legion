@@ -2,7 +2,7 @@ import { DOMSerializer, type Node as ProseMirrorNode } from "@milkdown/kit/prose
 import type { NodeView } from "@milkdown/kit/prose/view";
 
 import { releaseViewFrame } from "../view/frame-budget";
-import type { ViewBlockSlot } from "../view/ViewBlock";
+import type { ViewBlockSlot } from "../view/view-slots";
 import { renderViewBlockShell, VIEW_FRAME_SLOT } from "./typed-block-drawing";
 
 let nextViewKey = 0;
