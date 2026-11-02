@@ -3221,7 +3221,9 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
     expect(result?.block).toBeUndefined();
     expect(g.dryRuns.map((run) => run.timeoutMs)).toEqual([core.DRY_RUN_TIMEOUT_MS, 25_000]);
     expect(g.calls).toHaveLength(0);
-    expect(g.entries).toMatchObject([{ tool: "dispatch_ask", outcome: "error" }]);
+    expect(g.entries).toMatchObject([
+      { tool: "dispatch_ask", outcome: "error", deadlineMs: 90_000 },
+    ]);
     expect(g.entries[0].reason).toBe(
       "dispatch ask --dry-run did not finish within 20000 ms, nor within 25000 ms when run again"
     );
@@ -3245,6 +3247,7 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
     });
     expect((await g.bash("b1", ASK))?.block).toBeUndefined();
     expect(g.dryRuns.map((run) => run.timeoutMs)).toEqual([12_500]);
+    expect(g.entries).toMatchObject([{ outcome: "error", deadlineMs: 25_000 }]);
     expect(g.entries[0].reason).toBe(
       "dispatch ask --dry-run did not finish within 12500 ms, and the call's deadline left no time to run it again"
     );

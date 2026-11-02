@@ -468,7 +468,11 @@ export interface GateEntry {
   model?: string;
   /** Each model of the chain that answered with an error before `model` was asked, with that error. */
   failedModels?: Array<{ model: string; error: string }>;
-  /** The deadline this call raced: OMP_ASKGATE_TIMEOUT_MS or 90 s, clamped under the runner's handler ceiling. */
+  /**
+   * The deadline this call raced: OMP_ASKGATE_TIMEOUT_MS or 90 s, clamped under the runner's
+   * handler ceiling. On every entry that reached the model call, and on an `error` entry whose
+   * dry run failed, since the reads raced half of it.
+   */
   deadlineMs?: number;
   /** Every attempt's spend of both calls, the aborted one included. */
   usage?: Usage;
@@ -3509,7 +3513,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
             try {
               // The reads take at most READ_SHARE of the call's deadline, raced from handler
               // entry as the review is, which keeps the rest.
-              const readsEnd = started + Math.floor(callDeadlineMs() * READ_SHARE);
+              const deadlineMs = callDeadlineMs();
+              const readsEnd = started + Math.floor(deadlineMs * READ_SHARE);
               const run = await readArgs(scoped, event.input, ctx, stop, readsEnd);
               // An upload its dry run shows is no markdown document passes as an ungated call
               // does, with no entry and no marker, which the CLI needs for no such upload; an
@@ -3528,11 +3533,12 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                 else decision = unreadableCall(run.unreadable, checks);
               }
               // The CLI refuses arguments it cannot parse before it sends anything, so the
-              // command runs. A dry run the machine was too busy to finish says so.
+              // command runs. A dry run the machine was too busy to finish says so. The entry
+              // names the deadline whose half the reads raced.
               else if ("failure" in run)
                 decision = pass(
                   "error",
-                  { reason: run.failure },
+                  { reason: run.failure, deadlineMs },
                   "none",
                   run.slow ? renderSlowDryRun(run.failure) : undefined
                 );
