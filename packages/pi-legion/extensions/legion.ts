@@ -218,7 +218,9 @@ export default function legionExtension(pi: PiApi): void {
     // reminder of its own; what it reports is its background work.
     const report = sessionActivity(
       asyncJobKinds(context.getAsyncJobSnapshot?.() ?? null),
-      phaseWorkerSession(context) ? phaseReminder.phaseWake() : { open: false, nextReminderAt: null }
+      phaseWorkerSession(context)
+        ? phaseReminder.phaseWake()
+        : { open: false, nextReminderAt: null }
     );
     if (
       options.onlyWhenChanged &&

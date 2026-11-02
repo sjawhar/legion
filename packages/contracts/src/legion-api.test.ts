@@ -26,8 +26,8 @@ import {
   LegionPhaseBackwardRequest,
   LegionPhaseRetryRequest,
   LegionReadyRequest,
-  LegionReleaseRecordsResponse,
   LegionRegisterResponse,
+  LegionReleaseRecordsResponse,
   LegionRootCloseRequest,
   LegionSignOffRequest,
   LegionStateResponse,
@@ -766,7 +766,12 @@ test("the release records carry a release, a resume and a hold", () => {
 // A released claim the state reports as stranded says so: its `suspendedBy` is `released`, which
 // the operator's move reads (`api.StrandedClaim.Move`). A failed one carries none.
 test("a stranded claim may name the suspension that holds it", () => {
-  const stranded = { issue: "LEGION-208", role: "implementer", state: "suspended", suspendedBy: "released" };
+  const stranded = {
+    issue: "LEGION-208",
+    role: "implementer",
+    state: "suspended",
+    suspendedBy: "released",
+  };
   const state = fixture("state.json") as { strandedClaims: unknown[] };
   state.strandedClaims = [stranded];
   expect(LegionStateResponse.safeParse(state).success).toBeTrue();
