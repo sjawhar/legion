@@ -754,6 +754,81 @@ func TestAnUploadNamedAfterAnArtifactsSlugOfAnotherKindIsRefused(t *testing.T) {
 	}
 }
 
+// An upload refused for its name, its kind or its owner writes no object to the file store: the
+// object is written before the upload's transaction opens, and an object no version names is one
+// nothing ever deletes.
+func TestARefusedFileUploadLeavesNoObjectInTheFileStore(t *testing.T) {
+	issueUploads := func(issue model.Issue) string { return "/api/v1/issues/" + issue.Key + "/artifacts" }
+	for _, test := range []struct {
+		name    string
+		before  func(t *testing.T, handler http.Handler, issue model.Issue)
+		path    func(issue model.Issue) string
+		upload  string
+		content []byte
+		mime    string
+		status  int
+		code    string
+		objects int
+	}{
+		{
+			name: "a file under a document's slug",
+			before: func(t *testing.T, handler http.Handler, issue model.Issue) {
+				if response := dispatchRequest(t, handler, http.MethodPost, issueUploads(issue), map[string]string{"name": "report.md", "content": "# Report\n"}, "alice"); response.Code != http.StatusCreated {
+					t.Fatalf("create report.md: status=%d body=%s", response.Code, response.Body.String())
+				}
+			},
+			path:   issueUploads,
+			upload: "report-md", content: []byte("report"), mime: "application/octet-stream",
+			status: http.StatusBadRequest, code: "ARTIFACT_KIND_MISMATCH",
+		},
+		{
+			name: "a file under an image's name",
+			before: func(t *testing.T, handler http.Handler, issue model.Issue) {
+				if response := multipartRequest(t, handler, issueUploads(issue), map[string]string{"name": "shot.png"}, "shot.png", "image/png", pngBytes("first"), "alice"); response.Code != http.StatusCreated {
+					t.Fatalf("upload shot.png: status=%d body=%s", response.Code, response.Body.String())
+				}
+			},
+			path:   issueUploads,
+			upload: "shot.png", content: []byte("not a picture"), mime: "application/octet-stream",
+			status: http.StatusBadRequest, code: "ARTIFACT_KIND_MISMATCH", objects: 1,
+		},
+		{
+			name:   "a new name past its bound",
+			path:   issueUploads,
+			upload: strings.Repeat("n", maxNewArtifactKeyBytes+1), content: pngBytes("long"), mime: "image/png",
+			status: http.StatusBadRequest, code: "INVALID_ARTIFACT",
+		},
+		{
+			name:   "a new reference key past its bound",
+			path:   issueUploads,
+			upload: strings.Repeat("k", maxNewArtifactKeyBytes), content: pngBytes("key"), mime: "image/png",
+			status: http.StatusBadRequest, code: "INVALID_ARTIFACT",
+		},
+		{
+			name:   "a project that does not exist",
+			path:   func(model.Issue) string { return "/api/v1/projects/NOPE/artifacts" },
+			upload: "shot.png", content: pngBytes("nowhere"), mime: "image/png",
+			status: http.StatusNotFound,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			files := filestest.NewMemory()
+			handler, _, _ := newTestServer(t, testServerOptions{files: files})
+			issue := createArtifactIssue(t, handler)
+			if test.before != nil {
+				test.before(t, handler, issue)
+			}
+			response := multipartRequest(t, handler, test.path(issue), map[string]string{"name": test.upload}, "upload", test.mime, test.content, "alice")
+			if response.Code != test.status || !strings.Contains(response.Body.String(), `"code":"`+test.code) {
+				t.Fatalf("refused upload: status=%d body=%s, want %d %s", response.Code, response.Body.String(), test.status, test.code)
+			}
+			if got := files.Len(); got != test.objects {
+				t.Fatalf("the file store holds %d objects after a refused upload, want %d", got, test.objects)
+			}
+		})
+	}
+}
+
 // Uploads at once to one owner that holds no plan yet, some named `plan.md` and the rest `plan-md`,
 // are all stored, and leave no reference, a name or a slug, that names two artifacts. Which name
 // lands first decides whether they make one artifact or two: `plan-md` first holds that name and

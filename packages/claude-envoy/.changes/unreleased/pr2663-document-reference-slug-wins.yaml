@@ -1,0 +1,9 @@
+kind: Fixed
+body: |-
+    The bundled `dispatch` command and tools resolve a bare document reference that is one document's slug and another's filename (a `plan-md-2`
+    named `plan-md` beside `plan.md`) as the slug's document, as Dispatch's own document routes
+    resolve it, instead of refusing it as naming two documents. Only a filename two documents share
+    is still refused.
+time: 2026-11-02T06:00:00.000000000Z
+custom:
+    Issue: pr2663

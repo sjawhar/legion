@@ -1613,8 +1613,8 @@ class DocumentNotFoundError extends Error {}
 
 /** The document `artifactReference` names among `artifacts`. A bare reference is an id, a slug,
  * then a filename; a `canonical` one, the document part of a dispatch:// reference, is a slug by
- * definition (the address the dashboard and Dispatch's own routes use), so its slug match is the
- * document even where another document's filename is the same text. */
+ * definition (the address the dashboard and Dispatch's own routes use), so its slug match comes
+ * before an id. */
 function artifactByReference(
   artifacts: readonly Artifact[],
   artifactReference: string,
@@ -1625,22 +1625,14 @@ function artifactByReference(
   if (canonical && bySlug !== undefined) return bySlug;
   const byId = artifacts.find((candidate) => candidate.id === artifactReference);
   if (byId !== undefined) return byId;
+  // A slug names one document, and wins over another document's filename, as on Dispatch's own
+  // routes (resolveDocumentReference): an older Dispatch could store a document whose filename is
+  // another's slug (`plan-md-2` named `plan-md` beside `plan.md`), and Dispatch reads and edits the
+  // slug's document by that reference. Only a filename two documents share names neither.
+  if (bySlug !== undefined) return bySlug;
   const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
-  // Dispatch suffixes a slug two documents would share, so one document's filename can be
-  // another's slug; a bare reference both answer to names two documents, and only an id tells
-  // them apart. Only a document answers to its filename there, as in Dispatch's own fallback, so
-  // an image or file of that name names no second document.
-  if (bySlug !== undefined) {
-    const named = byName.filter(
-      (candidate) => candidate.id !== bySlug.id && candidate.kind === "doc"
-    );
-    if (named.length > 0) {
-      throw new Error(documentReferenceProblem(artifactReference, [bySlug, ...named], owner, "id"));
-    }
-    return bySlug;
-  }
   if (byName.length > 1) {
-    throw new Error(documentReferenceProblem(artifactReference, byName, owner, "slug"));
+    throw new Error(documentReferenceProblem(artifactReference, byName, owner, true));
   }
   const [artifact] = byName;
   if (artifact === undefined) {
@@ -1670,8 +1662,8 @@ async function resolveArtifact(
     if (canonical && routed !== undefined) return { owner, artifact: routed };
     // A bare reference is matched as an issue's is, over the project's unlinked documents with the
     // route's answer among them: an id outranks another document's slug, and a slug another
-    // document's filename also answers to is refused. The unlinked-only collection keeps an
-    // issue-attached artifact of the same name from becoming the document owner.
+    // document's filename. The unlinked-only collection keeps an issue-attached artifact of the
+    // same name from becoming the document owner.
     const unlinked = await client.listProjectArtifacts(owner.project, true);
     const artifacts =
       routed === undefined
@@ -1760,27 +1752,21 @@ export async function resolveIssueDocumentId(
 
 const documentHintLimit = 8;
 
-/** The refusal of a document reference: none matched, or several did, in which case `use` names
- * what tells them apart (a slug, when several share a filename; the id, when one's slug is
- * another's filename). An owner with more documents than the hint lists is named with its count,
- * the documents nearest the reference first (`documentsNearest`), and the read that lists them all. */
+/** The refusal of a document reference: none matched, or, `ambiguous`, several share it as their
+ * filename, which their slugs tell apart. An owner with more documents than the hint lists is
+ * named with its count, the documents nearest the reference first (`documentsNearest`), and the
+ * read that lists them all. */
 function documentReferenceProblem(
   reference: string,
-  documents: readonly (Pick<Artifact, "id" | "slug" | "name"> & {
-    readonly kind?: Artifact["kind"];
-  })[],
+  documents: readonly (Pick<Artifact, "slug" | "name"> & { readonly kind?: Artifact["kind"] })[],
   owner: Owner,
-  use?: "slug" | "id"
+  ambiguous = false
 ): string {
   const scope = owner.kind;
-  const busy = use === undefined && documents.length > documentHintLimit;
+  const busy = !ambiguous && documents.length > documentHintLimit;
   const hints = (busy ? documentsNearest(reference, documents) : documents)
     .slice(0, documentHintLimit)
-    .map((document) =>
-      use === "id"
-        ? `${document.id} (${document.slug}, ${document.name})`
-        : `${document.slug} (${document.name})`
-    );
+    .map((document) => `${document.slug} (${document.name})`);
   const list = hints.length === 0 ? "none" : hints.join(", ");
   if (busy) {
     const read =
@@ -1794,9 +1780,9 @@ function documentReferenceProblem(
       : "documents and files";
     return `document "${reference}" not found by slug; this ${scope}'s ${documents.length} ${counted} include: ${list}; ${read} lists them all`;
   }
-  return use === undefined
-    ? `document "${reference}" not found by slug; this ${scope}'s documents: ${list}`
-    : `"${reference}" names ${documents.length} documents on this ${scope}; use ${use === "id" ? "the id" : "a slug"}: ${list}`;
+  return ambiguous
+    ? `"${reference}" names ${documents.length} documents on this ${scope}; use a slug: ${list}`
+    : `document "${reference}" not found by slug; this ${scope}'s documents: ${list}`;
 }
 
 /** `documents`, given oldest first as Dispatch lists them, ordered for a hint about `reference`:
