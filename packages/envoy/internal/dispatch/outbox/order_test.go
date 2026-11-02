@@ -8,7 +8,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -135,10 +134,11 @@ func (s sendClockSender) PublishAsync(item contracts.Envelope) <-chan error {
 // the topic family at once, but S only after the first one does, and S takes all three in order.
 // S is reached two ways: as a session route on its own subject, which fails when the stream stops
 // capturing agent subjects, so NATS answers its publish with no responders; and as the holder of
-// the issue's role, to which the first event's forward fails because S withholds its receipt.
+// the issue's role, whose first forward fails because the stream, capturing no agent subject,
+// acknowledges nothing of it.
 func TestABackedOffEventHoldsBackOnlyItsDestination(t *testing.T) {
 	t.Run("a session route the stream does not take", holdsBackASessionRouteTheStreamRefuses)
-	t.Run("a role holder that withholds its receipt", holdsBackARoleHolderThatWithholdsItsReceipt)
+	t.Run("a role holder whose forward the stream does not acknowledge", holdsBackARoleHolderWhoseForwardIsNotAcknowledged)
 }
 
 func holdsBackASessionRouteTheStreamRefuses(t *testing.T) {
@@ -230,32 +230,24 @@ func holdsBackASessionRouteTheStreamRefuses(t *testing.T) {
 	}
 }
 
-func holdsBackARoleHolderThatWithholdsItsReceipt(t *testing.T) {
+func holdsBackARoleHolderWhoseForwardIsNotAcknowledged(t *testing.T) {
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "S"
 	rig.claim(t, role, holder, session.SessionEntry{SelfSubscribed: true})
 	rig.silent(t, contracts.RoleTopicPrefix+role)
-	// S answers no forward of the first event until released, and every other at once. Each
-	// forward it takes is recorded with whether it answered it.
-	type arrival struct {
-		id       int64
-		answered bool
-	}
+	// The stream captures no agent subject until it is let capture them again, so nothing
+	// acknowledges a forward to S and the first event's send runs out of time. S is handed every
+	// forward over core NATS all the same, and answers none of them: nothing but the stream does.
+	capturing := rig.narrowAgentCapture(t)
 	var (
-		withheld atomic.Int64
-		released atomic.Bool
 		mu       sync.Mutex
-		arrivals []arrival
+		arrivals []int64
 	)
 	sub, err := rig.conn.Subscribe(contracts.AgentSubject(holder), func(msg *natsgo.Msg) {
 		id := envelopeEventID(t, msg.Data)
-		answer := id != withheld.Load() || released.Load()
 		mu.Lock()
-		arrivals = append(arrivals, arrival{id: id, answered: answer})
+		arrivals = append(arrivals, id)
 		mu.Unlock()
-		if answer {
-			_ = msg.Respond(nil)
-		}
 	})
 	if err != nil {
 		t.Fatalf("subscribe S: %v", err)
@@ -264,13 +256,12 @@ func holdsBackARoleHolderThatWithholdsItsReceipt(t *testing.T) {
 	if err := rig.conn.Flush(); err != nil {
 		t.Fatalf("flush S's subscription: %v", err)
 	}
-	taken := func() []arrival {
+	taken := func() []int64 {
 		mu.Lock()
 		defer mu.Unlock()
 		return slices.Clone(arrivals)
 	}
 	first := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
-	withheld.Store(first.ID)
 	write := func(body string) model.Event {
 		return appendEvent(t, rig.database, rig.broker, model.Event{
 			IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
@@ -291,17 +282,17 @@ func holdsBackARoleHolderThatWithholdsItsReceipt(t *testing.T) {
 		return slices.Contains(bySubject[topic], second.ID) && slices.Contains(bySubject[topic], third.ID)
 	})
 	for _, got := range taken() {
-		if got.id != first.ID {
-			t.Fatalf("S took event %d while the first event's receipt was withheld: %v", got.id, taken())
+		if got != first.ID {
+			t.Fatalf("S took event %d while the first event's forward was unacknowledged: %v", got, taken())
 		}
 	}
 	for _, event := range []model.Event{first, second, third} {
 		if publishedAt(t, rig.database, event.ID) != nil {
-			t.Fatalf("event %d was published before S answered the first event", event.ID)
+			t.Fatalf("event %d was published before the stream stored its forward to S", event.ID)
 		}
 	}
 
-	released.Store(true)
+	capturing()
 	waitFor(t, 45*time.Second, "all three events published", func() bool {
 		return publishedAt(t, rig.database, first.ID) != nil && publishedAt(t, rig.database, second.ID) != nil &&
 			publishedAt(t, rig.database, third.ID) != nil
@@ -311,17 +302,10 @@ func holdsBackARoleHolderThatWithholdsItsReceipt(t *testing.T) {
 			t.Fatalf("event %d counted %d attempts, want none: it only waited on the first event", event.ID, attempts)
 		}
 	}
-	answeredFirst := slices.IndexFunc(taken(), func(got arrival) bool { return got.id == first.ID && got.answered })
-	if answeredFirst < 0 {
-		t.Fatalf("S never answered the first event: %v", taken())
-	}
 	var order []int64
-	for index, got := range taken() {
-		if got.id != first.ID && index < answeredFirst {
-			t.Fatalf("S took event %d before it answered the first event: %v", got.id, taken())
-		}
-		if !slices.Contains(order, got.id) {
-			order = append(order, got.id)
+	for _, got := range taken() {
+		if !slices.Contains(order, got) {
+			order = append(order, got)
 		}
 	}
 	if want := []int64{first.ID, second.ID, third.ID}; !slices.Equal(order, want) {

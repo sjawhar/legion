@@ -32,25 +32,29 @@ func (r *roleRig) laterEvent(t *testing.T, key string, actor model.Actor) model.
 }
 
 // An owner is given back as its own sends settle, not when its batch ends: an issue read in the
-// same batch as a silent holder's, whose own forward was answered, has its later event - one
-// committed while the silent holder's receipt wait is still running - published at once.
+// same batch as a stalled holder's, whose own forward the stream acknowledged, has its later
+// event - one committed while the stalled holder's forward is still waiting for an
+// acknowledgement that never comes - published at once.
 //
-// TestAHolderThatNeverAnswersDoesNotDelayAnotherIssuesEvents covers two owners in two batches;
-// this covers two owners in one, which only a per-owner release reaches. Both issues' events are
-// committed before the outbox runs, so its first batch reads both owners.
-func TestAnOwnerOfTheSilentHoldersBatchIsReleasedBeforeTheBatchEnds(t *testing.T) {
+// TestAForwardTheStreamDoesNotAcknowledgeDoesNotDelayAnotherIssuesEvents covers two owners in
+// two batches; this covers two owners in one, which only a per-owner release reaches. Both
+// issues' events are committed before the outbox runs, so its first batch reads both owners.
+func TestAnOwnerOfTheStalledHoldersBatchIsReleasedBeforeTheBatchEnds(t *testing.T) {
 	const (
-		silentRole, silentHolder = "silent-reviewer", "ses_never_answers"
-		liveRole, liveHolder     = "live-reviewer", "ses_answers"
-		within                   = time.Second
+		stalledRole, stalledHolder = "stalled-reviewer", "ses_never_acknowledged"
+		liveRole, liveHolder       = "live-reviewer", "ses_acknowledged"
+		within                     = time.Second
 	)
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	rig := newRoleRig(t)
-	rig.claim(t, silentRole, silentHolder, session.SessionEntry{SelfSubscribed: true})
+	rig.claim(t, stalledRole, stalledHolder, session.SessionEntry{SelfSubscribed: true})
 	rig.claim(t, liveRole, liveHolder, session.SessionEntry{SelfSubscribed: true})
-	silent := rig.receiver(t, silentHolder, false)
-	live := rig.receiver(t, liveHolder, true)
-	rig.routedEvent(t, "T-1", silentRole, alice)
+	// The stream stores and acknowledges the live holder's forwards alone, so the stalled
+	// holder's wait out their whole roleForwardAckTimeout.
+	rig.narrowAgentCapture(t, liveHolder)
+	silent := rig.receiver(t, stalledHolder)
+	live := rig.receiver(t, liveHolder)
+	rig.routedEvent(t, "T-1", stalledRole, alice)
 	rig.routedEvent(t, "T-2", liveRole, alice)
 
 	deps := rig.deps()
@@ -61,63 +65,67 @@ func TestAnOwnerOfTheSilentHoldersBatchIsReleasedBeforeTheBatchEnds(t *testing.T
 	select {
 	case <-silent.arrived:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the silent holder never received its forward")
+		t.Fatal("the stalled holder never received its forward")
 	}
 	select {
 	case <-live.arrived:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the answering holder never received its issue's first forward")
+		t.Fatal("the live holder never received its issue's first forward")
 	}
 
-	// The silent holder's receipt wait is running, and every send of the other owner of its batch
-	// has been answered. That owner's next event is committed in it.
+	// The stalled holder's forward is still waiting for an acknowledgement, and every send of the
+	// other owner of its batch has been answered. That owner's next event is committed in it.
 	time.Sleep(200 * time.Millisecond)
 	committed := time.Now()
 	rig.laterEvent(t, "T-2", alice)
 	select {
 	case <-live.arrived:
 		if waited := time.Since(committed); waited > within {
-			t.Fatalf("the answering holder received its issue's later forward %s after its commit, want within %s: "+
+			t.Fatalf("the live holder received its issue's later forward %s after its commit, want within %s: "+
 				"the owner was held in flight until its batch ended", waited.Round(time.Millisecond), within)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("the answering holder never received its issue's later forward")
+		t.Fatal("the live holder never received its issue's later forward")
 	}
 }
 
-// One owner's order holds across the batches running side by side: while its first event waits on
-// a holder that never answers, the batch keeps that owner in flight, so no batch beside it reads
-// the owner's second event and the holder receives the first forward alone.
-func TestAnOwnersSecondEventDoesNotOvertakeItsFirstWhileItsHolderIsSilent(t *testing.T) {
-	const silentRole, silentHolder = "silent-reviewer", "ses_never_answers"
+// One owner's order holds across the batches running side by side: while its first event waits for
+// the stream's acknowledgement of a forward it never gets, the batch keeps that owner in flight,
+// so no batch beside it reads the owner's second event and the holder receives the first forward
+// alone.
+func TestAnOwnersSecondEventDoesNotOvertakeItsFirstWhileItsForwardIsUnacknowledged(t *testing.T) {
+	const stalledRole, stalledHolder = "stalled-reviewer", "ses_never_acknowledged"
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	rig := newRoleRig(t)
-	rig.claim(t, silentRole, silentHolder, session.SessionEntry{SelfSubscribed: true})
-	silent := rig.receiver(t, silentHolder, false)
+	rig.claim(t, stalledRole, stalledHolder, session.SessionEntry{SelfSubscribed: true})
+	// The stream captures no agent subject, so no forward of this holder is ever acknowledged.
+	rig.narrowAgentCapture(t)
+	silent := rig.receiver(t, stalledHolder)
 
 	deps := rig.deps()
 	deps.Listen = rig.database.Pool.Listener
 	stop := runDeps(t, deps, 15*time.Second)
 	defer stop()
 
-	first := rig.routedEvent(t, "T-1", silentRole, alice)
+	first := rig.routedEvent(t, "T-1", stalledRole, alice)
 	var forward contracts.Envelope
 	select {
 	case forward = <-silent.arrived:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the silent holder never received its forward")
+		t.Fatal("the stalled holder never received its forward")
 	}
 	if forward.SourceEventID != fmt.Sprint(first.ID) {
-		t.Fatalf("the silent holder received event %s first, want event %d", forward.SourceEventID, first.ID)
+		t.Fatalf("the stalled holder received event %s first, want event %d", forward.SourceEventID, first.ID)
 	}
 
-	// Committed on the same owner while the first event's receipt wait runs, and well inside
-	// roleReceiptTimeout, so the first event has not been settled when the wait below ends.
+	// Committed on the same owner while the first event's wait for an acknowledgement runs, and
+	// well inside roleForwardAckTimeout, so the first event has not been settled when the wait
+	// below ends.
 	time.Sleep(200 * time.Millisecond)
 	second := rig.laterEvent(t, "T-1", alice)
 	select {
 	case next := <-silent.arrived:
-		t.Fatalf("the silent holder received event %s (its issue's second is %d) while event %d had not reached it",
+		t.Fatalf("the stalled holder received event %s (its issue's second is %d) while event %d had not reached it",
 			next.SourceEventID, second.ID, first.ID)
 	case <-time.After(2 * time.Second):
 	}
@@ -142,12 +150,13 @@ func backOffIn(t *testing.T, database *store.Store, id int64, attempts int, wait
 // The wake the second event gives is spent on a batch that skips the owner in flight and reads
 // another issue, which it sends and marks nothing of, so neither a batch that published nor one
 // that read nothing tells the scan to read once more. What does is that the read left an owner
-// out (batchResult.excluded). Both issues are routed to a holder that never answers, so neither
-// owner is settled before its batch ends and neither release wakes the scan; with the second
-// event unread, the scan's retry timer is armed to the two back-offs alone, minutes out.
+// out (batchResult.excluded). Both issues are routed to a holder whose forwards the stream never
+// acknowledges, so neither owner is settled before its batch ends and neither release wakes the
+// scan; with the second event unread, the scan's retry timer is armed to the two back-offs
+// alone, minutes out.
 func TestAnEventCommittedWhileItsOwnerIsInFlightIsReadWhenThatOwnerIsBack(t *testing.T) {
 	const (
-		silentRole, silentHolder = "silent-reviewer", "ses_never_answers"
+		stalledRole, stalledHolder = "stalled-reviewer", "ses_never_acknowledged"
 		// The attempt count both events carry: their next back-off is retry.Delay(7), 64 s, so a
 		// scan that waits for one misses the bound below by a minute.
 		attempts   = 6
@@ -155,15 +164,17 @@ func TestAnEventCommittedWhileItsOwnerIsInFlightIsReadWhenThatOwnerIsBack(t *tes
 	)
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	rig := newRoleRig(t)
-	rig.claim(t, silentRole, silentHolder, session.SessionEntry{SelfSubscribed: true})
-	silent := rig.receiver(t, silentHolder, false)
+	rig.claim(t, stalledRole, stalledHolder, session.SessionEntry{SelfSubscribed: true})
+	// The stream captures no agent subject, so no forward of this holder is ever acknowledged.
+	rig.narrowAgentCapture(t)
+	silent := rig.receiver(t, stalledHolder)
 	topic := subscribe(t, rig.conn, issueTopic)
 
 	// Neither event is due when the outbox starts, so the batch that reads the first issue is the
 	// one its retry timer starts, with the LISTEN connection's catch-up wake long spent and no
-	// batch beside it. The second issue waits until that batch is on its receipt.
-	first := rig.routedEvent(t, "T-1", silentRole, alice)
-	other := rig.routedEvent(t, "T-2", silentRole, alice)
+	// batch beside it. The second issue waits until that batch is on its forward.
+	first := rig.routedEvent(t, "T-1", stalledRole, alice)
+	other := rig.routedEvent(t, "T-2", stalledRole, alice)
 	backOffIn(t, rig.database, first.ID, attempts, time.Second)
 	backOffIn(t, rig.database, other.ID, attempts, time.Hour)
 
@@ -175,18 +186,19 @@ func TestAnEventCommittedWhileItsOwnerIsInFlightIsReadWhenThatOwnerIsBack(t *tes
 	select {
 	case <-silent.arrived:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the silent holder never received the first issue's forward")
+		t.Fatal("the stalled holder never received the first issue's forward")
 	}
-	// The first issue is in flight on its receipt wait. The second issue falls due, which wakes
-	// nothing - an update notifies no listener - and the first issue's second event commits: its
-	// one wake is spent on the batch that reads the second issue and skips the owner in flight.
+	// The first issue is in flight on its wait for an acknowledgement. The second issue falls
+	// due, which wakes nothing - an update notifies no listener - and the first issue's second
+	// event commits: its one wake is spent on the batch that reads the second issue and skips the
+	// owner in flight.
 	dueNow(t, rig.database, other.ID)
 	committed := time.Now()
 	second := rig.laterEvent(t, "T-1", alice)
 
 	// That batch waits out its own forward, so the second event's copy follows the later of the
-	// two receipt timeouts, both of which began at or before this commit.
-	within := roleReceiptTimeout + 3*time.Second
+	// two waits for an acknowledgement, both of which began at or before this commit.
+	within := roleForwardAckTimeout + 3*time.Second
 	deadline := time.After(within)
 	for {
 		select {

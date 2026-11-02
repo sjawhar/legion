@@ -32,22 +32,20 @@ var ErrUnavailable = errors.New("NATS is unreachable")
 
 // ErrNotAcknowledged is wrapped by the outcome of a window's send that NATS gave no
 // acknowledgement for on a connection that stayed current: no JetStream acknowledgement within
-// publishAcknowledgementTimeout, no responders for the stream's subject, or no answer to a Request
-// within its timeout. The envelope may or may not be stored, so the caller backs it off and counts
-// an attempt, rather than resending it on the next connection as it does an ErrUnavailable.
+// publishAcknowledgementTimeout, no responders for the stream's subject, or a Request the stream
+// did not acknowledge within its timeout. The envelope may or may not be stored, so the caller
+// backs it off and counts an attempt, rather than resending it on the next connection as it does
+// an ErrUnavailable.
+//
+// A Request that ran out of time went unanswered because the stream did not acknowledge the copy
+// it was asked to store, which is the whole of a request's outcome: nobody else answers one,
+// since no session subscribes to its agent subject (INFRA-771). Such a request is known to have
+// left this process when its flush confirmed the publish; a flush that failed or timed out - a
+// reconnecting or stalled connection still buffering the request - adds ErrPublishUnconfirmed
+// with its own reason, since that request is not known to have left. One the server denied is
+// ErrPublishDenied instead, as is one during which the server reported another error or the
+// connection dropped, since either may have hidden its denial.
 var ErrNotAcknowledged = errors.New("NATS did not acknowledge the publish")
-
-// ErrReceiptTimeout is wrapped, with ErrNotAcknowledged, by a window Request whose publish and
-// flush both succeeded, which the server reported nothing against and whose connection stayed up
-// through them, and which no answer reached within its timeout: the request is known to have
-// left this process, and whoever holds the subject did not answer it in time. A flush that fails
-// or times out — a reconnecting or stalled connection still buffering the request — is
-// ErrPublishUnconfirmed instead, since that request is not known to have left; so is one the
-// server denied (ErrPublishDenied), or one during which the server reported another error or the
-// connection dropped, since either may have hidden its denial. No role forward answers it: a
-// forward's whole outcome is the stream's acknowledgement that it stored it (ErrForwardNotStored,
-// StartRequestStoredTo), since no session subscribes to its agent subject (INFRA-771).
-var ErrReceiptTimeout = errors.New("bus: no receipt inside the request window")
 
 // ErrNotCaptured is wrapped by the outcome of a window's PublishAsync of a topic the stream does
 // not capture (StreamCaptures), answered before anything is sent. The window publishes only to the
@@ -87,11 +85,7 @@ type RequestOptions struct {
 	// MsgID, when not empty, is sent as the request's Nats-Msg-Id header (ForwardMsgID), so a
 	// stream that captures the subject stores one copy of the envelope however often it is sent.
 	MsgID string
-	// AcceptStreamAck counts the stream's acknowledgement of its stored copy as the answer, a
-	// duplicate's included: a receiver delivered from the stored copy never answers the request
-	// itself, so for it that acknowledgement is the receipt.
-	AcceptStreamAck bool
-	// Timeout bounds the wait for the answer once the request is sent; zero is
+	// Timeout bounds the wait for the stream's acknowledgement once the request is sent; zero is
 	// publishAcknowledgementTimeout.
 	Timeout time.Duration
 }
@@ -110,11 +104,12 @@ type RequestOptions struct {
 // destination) are ever in flight on a window, and lets everything else proceed side by side.
 //
 // The pin's check comes before the write, and a reconnect can land between the two. That breaks no
-// order: the envelope is then written on the reconnected connection, and its answer - the stream's
-// acknowledgement, or a Request's receipt - comes on that connection and answers for it truly, as
-// for any send made after the reconnect. An earlier send lost with the old connection is answered
-// ErrUnavailable and sent again by its caller; since it is of another (owner, destination), the
-// envelope that landed ahead of it is ahead of nothing it must follow.
+// order: the envelope is then written on the reconnected connection, and its answer - the
+// stream's acknowledgement of the copy it stored, of a publish or of a Request alike - comes on
+// that connection and answers for it truly, as for any send made after the reconnect. An earlier
+// send lost with the old connection is answered ErrUnavailable and sent again by its caller;
+// since it is of another (owner, destination), the envelope that landed ahead of it is ahead of
+// nothing it must follow.
 //
 // PublishAsync sends only to the stream, under the MsgId Publish would use: a topic the stream does
 // not capture answers ErrNotCaptured, and a core forward goes through Request. An outcome decided
@@ -295,9 +290,9 @@ func (w *window) sendJetStream(item contracts.Envelope, data []byte) (func() err
 }
 
 // requestReplies is how many replies to one Request wait to be read: it expects at most two
-// empty receipts and two stream acknowledgements (the first send's, and the send without its id
-// that a duplicate with no sequence calls for), or the server's no-responders answer, and nats.go
-// drops a reply that finds the channel full.
+// stream acknowledgements (the first send's, and the send without its id that a duplicate with
+// no sequence calls for), the server's no-responders answer, and whatever a subscriber of the
+// subject might send it, and nats.go drops a reply that finds the channel full.
 const requestReplies = 4
 
 // Request publishes item's encoding to subject over core NATS on the window's connection, with a
@@ -306,30 +301,30 @@ const requestReplies = 4
 // ErrRefused, and a window whose connection was lost or reconnected answers ErrUnavailable, both in
 // the channel when Request returns, before anything is sent. Otherwise the channel receives:
 //
-//   - nil on the first empty receipt, a reply with no data and no header field, as RequestCoreTo
-//     reads one; or, when opts.AcceptStreamAck, on the stream's acknowledgement of a copy it
-//     holds, at a sequence and without an error, a duplicate's included (answers). Any other
-//     reply is passed over and the wait goes on: a stream's acknowledgement without
-//     AcceptStreamAck or with an error, and the server's no-responders answer;
-//   - under opts.AcceptStreamAck and a MsgID, the outcome of the send the stream's
-//     acknowledgement of a duplicate with no sequence (ErrNotStored) calls for: the request goes
-//     out once more, to the same inbox and without its Nats-Msg-Id, which the record of that id
-//     at sequence 0 does not match, and its reply - an empty receipt, or the acknowledgement of
-//     the copy the stream then stored - answers. A request makes that send at most once, under
-//     the checks sendJetStream's resend makes: a window whose deadline has passed answers an
-//     error wrapping ErrNotStored and ErrWindowDeadline, one whose connection is no longer
-//     current ErrNotStored and ErrUnavailable, and a send nats.go refuses ErrNotStored and its
-//     refusal, the stream holding nothing of the request in each case;
+//   - nil on the stream's acknowledgement of a copy it holds, at a sequence and without an error,
+//     a duplicate's included (answers): the request is stored on a subject the stream captures,
+//     and that acknowledgement is its whole outcome, since no receiver answers a request. Any
+//     other reply is passed over and the wait goes on: an acknowledgement with an error, the
+//     server's no-responders answer, and anything a subscriber of the subject sends;
+//   - under a MsgID, the outcome of the send the stream's acknowledgement of a duplicate with no
+//     sequence (ErrNotStored) calls for: the request goes out once more, to the same inbox and
+//     without its Nats-Msg-Id, which the record of that id at sequence 0 does not match, and the
+//     acknowledgement of the copy the stream then stores answers. A request makes that send at
+//     most once, under the checks sendJetStream's resend makes: a window whose deadline has
+//     passed answers an error wrapping ErrNotStored and ErrWindowDeadline, one whose connection
+//     is no longer current ErrNotStored and ErrUnavailable, and a send nats.go refuses
+//     ErrNotStored and its refusal, the stream holding nothing of the request in each case;
 //   - ErrPublishDenied when the server denied the publish: the request's flush shows it
 //     (confirmFlushed), or, when a violation of another subject hid it there, the violation the
 //     connection recorded under this subject does (deniedPublish). The flush runs beside the wait
-//     for the answer, not ahead of it, so a receipt that lands first answers the request while the
-//     flush is still out; the record is read on the wait's own goroutine, when a flush that could
-//     not confirm the publish comes back and once more before the timeout is answered;
+//     for the answer, not ahead of it, so an acknowledgement that lands first answers the
+//     request while the flush is still out; the record is read on the wait's own goroutine, when
+//     a flush that could not confirm the publish comes back and once more before the timeout is
+//     answered;
 //   - ErrUnavailable once the window's connection is lost or reconnects before an answer, whether
 //     the loss came before the flush, during it, or after it;
-//   - when no answer came within opts.Timeout on a connection that stayed current, an error
-//     wrapping ErrNotAcknowledged and ErrReceiptTimeout, and ErrPublishUnconfirmed with the
+//   - when the stream did not acknowledge the copy within opts.Timeout on a connection that
+//     stayed current, an error wrapping ErrNotAcknowledged, and ErrPublishUnconfirmed with the
 //     flush's own reason when the flush failed or could not confirm the publish.
 //
 // Its inbox is unsubscribed once the outcome is decided.
@@ -357,7 +352,7 @@ func (w *window) request(subject string, item contracts.Envelope, opts RequestOp
 	}
 	inbox := nats.NewInbox()
 	replies := make(chan *nats.Msg, requestReplies)
-	receipt, err := w.conn.ChanSubscribe(inbox, replies)
+	inboxSub, err := w.conn.ChanSubscribe(inbox, replies)
 	if err != nil {
 		return nil, w.unsent(err, len(data))
 	}
@@ -371,11 +366,11 @@ func (w *window) request(subject string, item contracts.Envelope, opts RequestOp
 	// its own message and never one an earlier send of the subject earned (deniedPublish).
 	sentAt := time.Now()
 	if err := w.conn.PublishMsg(msg); err != nil {
-		_ = receipt.Unsubscribe()
+		_ = inboxSub.Unsubscribe()
 		return nil, w.unsent(err, len(data))
 	}
 	return func() error {
-		defer receipt.Unsubscribe()
+		defer inboxSub.Unsubscribe()
 		// The flush runs beside the wait for the answer rather than ahead of it. nats.go clears
 		// the flushes pending on a connection only as that connection turns from connected to
 		// reconnecting (clearPendingFlushCalls), so a flush begun after that moment - a server
@@ -442,14 +437,14 @@ func (w *window) request(subject string, item contracts.Envelope, opts RequestOp
 			}
 			return nil
 		}
-		resendable, resent := opts.AcceptStreamAck && opts.MsgID != "", false
+		resendable, resent := opts.MsgID != "", false
 		// outcome names what reply settles the request as, and reports false for a reply that
 		// settles nothing, so the wait goes on. The stream's acknowledgement of a duplicate with
 		// no sequence has the request sent once more without its id, at most once per request and
 		// only while the request still waits (resending), and settles it only when that send is
-		// fenced or fails, since otherwise the resend's own reply answers.
+		// fenced or fails, since otherwise the resend's own acknowledgement answers.
 		outcome := func(reply *nats.Msg, resending bool) (bool, error) {
-			if answers(reply, opts.AcceptStreamAck) {
+			if answers(reply) {
 				return true, nil
 			}
 			if !resending || !resendable || resent || !notStoredReply(reply) {
@@ -520,9 +515,9 @@ func (w *window) request(subject string, item contracts.Envelope, opts RequestOp
 					return denial
 				}
 				if unconfirmed != nil {
-					return fmt.Errorf("bus: request to %q: %w: %w: %w", subject, ErrNotAcknowledged, ErrReceiptTimeout, unconfirmed)
+					return fmt.Errorf("bus: request to %q: %w: %w", subject, ErrNotAcknowledged, unconfirmed)
 				}
-				return fmt.Errorf("bus: request to %q: %w: %w", subject, ErrNotAcknowledged, ErrReceiptTimeout)
+				return fmt.Errorf("bus: request to %q: %w", subject, ErrNotAcknowledged)
 			}
 		}
 	}, nil
@@ -537,8 +532,8 @@ type replyAck struct {
 }
 
 // acknowledgement reads the stream's acknowledgement from reply, and reports false for a reply
-// that is not one: an empty receipt, a receiver's answer, or the server's refusal, which names no
-// stream.
+// that is not one: anything a subscriber of the subject sent, or the server's refusal, which
+// names no stream.
 func acknowledgement(reply *nats.Msg) (replyAck, bool) {
 	var ack replyAck
 	if json.Unmarshal(reply.Data, &ack) != nil || ack.Stream == "" {
@@ -547,19 +542,13 @@ func acknowledgement(reply *nats.Msg) (replyAck, bool) {
 	return ack, true
 }
 
-// answers reports whether reply answers a Request: an empty receipt, a reply with no data and no
-// header field (a reply to a request that carries headers can come with a header block that holds
-// none), or, when acceptStreamAck, the stream's acknowledgement of a copy it holds, at a sequence
-// and without an error, a duplicate's included. An acknowledgement of a duplicate with no sequence
-// answers nothing: the stream holds no copy of the request, which goes out once more without its
-// id instead (notStoredReply, request).
-func answers(reply *nats.Msg, acceptStreamAck bool) bool {
-	if len(reply.Data) == 0 && len(reply.Header) == 0 {
-		return true
-	}
-	if !acceptStreamAck {
-		return false
-	}
+// answers reports whether reply answers a Request: the stream's acknowledgement of a copy it
+// holds, at a sequence and without an error, a duplicate's included. Nothing else answers one -
+// no session subscribes to its agent subject, and a reply a subscriber of the subject did send
+// is passed over. An acknowledgement of a duplicate with no sequence answers nothing either: the
+// stream holds no copy of the request, which goes out once more without its id instead
+// (notStoredReply, request).
+func answers(reply *nats.Msg) bool {
 	ack, ok := acknowledgement(reply)
 	return ok && ack.Error == nil && ack.Sequence > 0
 }

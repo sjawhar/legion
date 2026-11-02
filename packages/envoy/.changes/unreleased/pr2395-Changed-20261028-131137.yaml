@@ -18,17 +18,17 @@ body: |-
     events of its owner, and nothing else. One owner never waits on another: the holder reads and
     publishes up to four batches side by side, each taking only owners no other batch holds, and
     settles and records an owner as soon as that owner's own sends are answered, so an event
-    waiting out a role holder's five-second receipt delays no other issue's events; the batches
-    run one statement at a time, so the hold's renewal never queues behind them. A role route is
-    no longer published on
+    waiting out the stream's five-second acknowledgement of a role forward delays no other
+    issue's events; the batches run one statement at a time, so the hold's renewal never queues
+    behind them. A role route is no longer published on
     `notifications.role.<role>`: Dispatch resolves the holder as the listener does and forwards the
-    event to the holder's own subject, publishing it only once the holder's receipt arrives (for a
-    holder with a serving port, the stream's acknowledgement of the stored copy). The listener's role
+    event to the holder's own subject, publishing it once the stream has stored that copy, which
+    is a forward's whole answer: no holder answers one. The listener's role
     lane's forward (`bus.Client.RequestCoreTo`) carries a `Nats-Msg-Id` of its dedupe key and subject
     (`bus.ForwardMsgID`) when the original envelope's key names its event
     (`contracts.DedupeKeyNamesTheUpstreamEvent`, asked of the key without
-    `contracts.RoleForwardDedupePrefix`), so a forward sent again until its receipt arrives is stored
-    once per message and recipient; one under a key its caller chose carries its `event_id` and
+    `contracts.RoleForwardDedupePrefix`), so a forward sent again is stored once per message and
+    recipient; one under a key its caller chose carries its `event_id` and
     subject instead, since two distinct envelopes can share that key, and the stream stores each. A
     send NATS does not acknowledge on a live connection is now backed off with its attempt counted
     and the error kept in
@@ -51,7 +51,7 @@ body: |-
     notifications in order across the deploy. The outbox publish-failure counter
     (`envoy_dispatch_outbox_publish_failures_total`) gains two reasons for a role forward:
     `holder`, a forward its holder's resolution held pending with nothing sent, and `unanswered`,
-    a forward NATS took that the role's holder sent no receipt for. A denied role forward is
+    a forward NATS took whose stored copy the stream did not acknowledge. A denied role forward is
     counted `denied` and names its own subject.
 time: 2026-10-28T13:11:37.592238351Z
 custom:

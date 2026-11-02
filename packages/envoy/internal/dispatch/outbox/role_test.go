@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -201,18 +201,17 @@ func (r *roleRig) silent(t *testing.T, subject string) {
 }
 
 // receiver is a role holder's own subscription to its agent subject: it records every forward it
-// receives and answers it with an empty receipt while answering is set.
+// receives and answers nothing, as a session does now that the stream's acknowledgement is a
+// forward's whole answer.
 type receiver struct {
-	answering atomic.Bool
-	mu        sync.Mutex
-	forwards  []contracts.Envelope
-	arrived   chan contracts.Envelope
+	mu       sync.Mutex
+	forwards []contracts.Envelope
+	arrived  chan contracts.Envelope
 }
 
-func (r *roleRig) receiver(t *testing.T, holder string, answering bool) *receiver {
+func (r *roleRig) receiver(t *testing.T, holder string) *receiver {
 	t.Helper()
 	recv := &receiver{arrived: make(chan contracts.Envelope, 64)}
-	recv.answering.Store(answering)
 	sub, err := r.conn.Subscribe(contracts.AgentSubject(holder), func(msg *natsgo.Msg) {
 		var item contracts.Envelope
 		if err := json.Unmarshal(msg.Data, &item); err != nil {
@@ -222,9 +221,6 @@ func (r *roleRig) receiver(t *testing.T, holder string, answering bool) *receive
 		recv.forwards = append(recv.forwards, item)
 		recv.mu.Unlock()
 		recv.arrived <- item
-		if recv.answering.Load() && msg.Reply != "" {
-			_ = msg.Respond(nil)
-		}
 	})
 	if err != nil {
 		t.Fatalf("subscribe to %s: %v", holder, err)
@@ -234,6 +230,40 @@ func (r *roleRig) receiver(t *testing.T, holder string, answering bool) *receive
 		t.Fatalf("flush the subscription: %v", err)
 	}
 	return recv
+}
+
+// narrowAgentCapture has the stream capture the agent subjects of holders alone, in place of every
+// agent subject, and lets it capture them all again when the returned func is called or the test
+// ends. A forward to any other holder is then stored nowhere, so nothing acknowledges it and
+// nothing else answers one: that is the shape a role forward goes unanswered in, and the batch
+// that sent it waits roleForwardAckTimeout. The holder's own subscription is handed the forward
+// all the same, over core NATS.
+func (r *roleRig) narrowAgentCapture(t *testing.T, holders ...string) func() {
+	t.Helper()
+	js, err := r.conn.JetStream()
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	info, err := js.StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read the stream: %v", err)
+	}
+	capturing, narrowed := info.Config, info.Config
+	narrowed.Subjects = slices.DeleteFunc(slices.Clone(capturing.Subjects), func(subject string) bool {
+		return subject == contracts.AgentTopicPrefix+">"
+	})
+	for _, holder := range holders {
+		narrowed.Subjects = append(narrowed.Subjects, contracts.AgentSubject(holder))
+	}
+	update := func(config *natsgo.StreamConfig, what string) {
+		if _, err := js.UpdateStream(config); err != nil {
+			t.Fatalf("%s the stream's agent subjects: %v", what, err)
+		}
+	}
+	update(&narrowed, "narrow")
+	restore := sync.OnceFunc(func() { update(&capturing, "restore") })
+	t.Cleanup(restore)
+	return restore
 }
 
 func (recv *receiver) received() []contracts.Envelope {
@@ -277,72 +307,49 @@ func dueNow(t *testing.T, database *store.Store, id int64) {
 
 // A self-subscribed holder gets the event forwarded to its own agent subject as a listener's role
 // forward carries it - the role's topic, the forward's dedupe key, the event's id - and the event
-// is published only once the holder's receipt is in. A holder that does not answer leaves the
-// event backed off with its attempt and the reason; once it answers, a retry publishes it, and the
-// stream, which captures the holder's subject, holds one copy of the forward however often it was
-// sent. Nothing crosses the role's topic.
-func TestARoleRouteIsForwardedToASelfSubscribedHolderAndPublishedOnItsReceipt(t *testing.T) {
+// is published on the stream's acknowledgement of the copy it stored, which is a forward's whole
+// answer: the holder answers nothing. The stream, which captures the holder's subject, holds that
+// one copy, and nothing crosses the role's topic.
+func TestARoleRouteIsForwardedToASelfSubscribedHolderAndPublishedOnTheStreamsAcknowledgement(t *testing.T) {
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_self_subscribed"
 	rig.claim(t, role, holder, session.SessionEntry{SelfSubscribed: true})
 	rig.silent(t, contracts.RoleTopicPrefix+role)
-	recv := rig.receiver(t, holder, false)
+	recv := rig.receiver(t, holder)
 	event := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
-	outbox := holding(t, rig.deps())
 
-	t.Run("published only after the receipt", func(t *testing.T) {
-		// The holder takes the first forward and does not answer it.
-		recv.answering.Store(false)
-		scanned := make(chan struct{})
-		go func() { outbox.scan(context.Background(), unfenced{}); close(scanned) }()
-		var forward contracts.Envelope
-		select {
-		case forward = <-recv.arrived:
-		case <-time.After(10 * time.Second):
-			t.Fatal("the holder received no forward")
-		}
-		if forward.Topic != contracts.RoleTopicPrefix+role || forward.DedupeKey != contracts.RoleForwardDedupePrefix+fmt.Sprintf("dispatch-%d", event.ID) ||
-			forward.EventID != fmt.Sprintf("dispatch-%d", event.ID) {
-			t.Fatalf("the holder received topic %q dedupe key %q event id %q, want the role forward of event %d",
-				forward.Topic, forward.DedupeKey, forward.EventID, event.ID)
-		}
-		<-scanned
-		if publishedAt(t, rig.database, event.ID) != nil {
-			t.Fatal("the event was published though its holder never answered")
-		}
-		attempts, failure, destinations := eventState(t, rig.database, event.ID)
-		if attempts != 1 || failure == nil || !strings.Contains(*failure, bus.ErrNotAcknowledged.Error()) ||
-			!strings.Contains(*failure, `publish route "role:reviewer"`) {
-			t.Fatalf("attempt_count %d, publish_error %v: want one attempt naming the role route and the missing receipt", attempts, failure)
-		}
-		if strings.Contains(strings.Join(destinations, ","), contracts.RoleTopicPrefix) {
-			t.Fatalf("published_destinations %v records the role route its holder never answered", destinations)
-		}
-	})
+	holding(t, rig.deps()).scan(context.Background(), unfenced{})
 
-	t.Run("published on a retry once the holder answers", func(t *testing.T) {
-		recv.answering.Store(true)
-		dueNow(t, rig.database, event.ID)
-		outbox.scan(context.Background(), unfenced{})
-		if publishedAt(t, rig.database, event.ID) == nil {
-			t.Fatal("the event was not published once its holder answered")
-		}
-		_, failure, destinations := eventState(t, rig.database, event.ID)
-		if failure != nil || !strings.Contains(strings.Join(destinations, ","), contracts.RoleTopicPrefix+role) {
-			t.Fatalf("publish_error %v, published_destinations %v: want no error and the role topic recorded", failure, destinations)
-		}
-		if got := len(recv.received()); got != 2 {
-			t.Fatalf("the holder received %d forwards, want the first and the retry", got)
-		}
-		if copies := storedCopies(t, rig.client, contracts.AgentSubject(holder)); copies != 1 {
-			t.Fatalf("the stream holds %d copies of the forward on %s after a retry, want one", copies, contracts.AgentSubject(holder))
-		}
-	})
+	var forward contracts.Envelope
+	select {
+	case forward = <-recv.arrived:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the holder received no forward")
+	}
+	if forward.Topic != contracts.RoleTopicPrefix+role || forward.DedupeKey != contracts.RoleForwardDedupePrefix+fmt.Sprintf("dispatch-%d", event.ID) ||
+		forward.EventID != fmt.Sprintf("dispatch-%d", event.ID) {
+		t.Fatalf("the holder received topic %q dedupe key %q event id %q, want the role forward of event %d",
+			forward.Topic, forward.DedupeKey, forward.EventID, event.ID)
+	}
+	if publishedAt(t, rig.database, event.ID) == nil {
+		t.Fatal("the event was not published though the stream stored its forward")
+	}
+	attempts, failure, destinations := eventState(t, rig.database, event.ID)
+	if attempts != 0 || failure != nil || !strings.Contains(strings.Join(destinations, ","), contracts.RoleTopicPrefix+role) {
+		t.Fatalf("attempt_count %d, publish_error %v, published_destinations %v: want no attempt, no error and the role route recorded",
+			attempts, failure, destinations)
+	}
+	if got := len(recv.received()); got != 1 {
+		t.Fatalf("the holder received %d forwards, want the one", got)
+	}
+	if copies := storedCopies(t, rig.client, contracts.AgentSubject(holder)); copies != 1 {
+		t.Fatalf("the stream holds %d copies of the forward on %s, want one", copies, contracts.AgentSubject(holder))
+	}
 }
 
-// A holder with a serving port is delivered from the stream's stored copy, which never answers a
-// request, so the stream's acknowledgement of that copy is the receipt: the event is published with
-// nobody subscribed to the holder's subject, and the stream holds the forward once.
+// A holder with a serving port is delivered its stored copy by the listener and never answers a
+// request, so the stream's acknowledgement of that copy is the forward's answer: the event is
+// published with nobody subscribed to the holder's subject, and the stream holds the forward once.
 func TestARoleRouteToAHolderWithAServingPortIsPublishedOnTheStreamsAcknowledgement(t *testing.T) {
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_serving"
@@ -358,6 +365,38 @@ func TestARoleRouteToAHolderWithAServingPortIsPublishedOnTheStreamsAcknowledgeme
 	}
 	if copies := storedCopies(t, rig.client, contracts.AgentSubject(holder)); copies != 1 {
 		t.Fatalf("the stream holds %d copies of the forward, want one", copies)
+	}
+}
+
+// A holder with no serving port is no different: every Oh My Pi and Claude Code session
+// registers without one (session.SessionEntry.Port 0) and answers no forward either, since it is
+// delivered its stored copy from its own consumer by the listener's relay. Its forward counts as
+// reached on the stream's acknowledgement too, so the event is published on its first attempt
+// with the role recorded, and the owner's next event follows in the same batch rather than
+// waiting behind it.
+func TestARoleRouteToAHolderWithNoServingPortIsPublishedOnTheStreamsAcknowledgement(t *testing.T) {
+	rig := newRoleRig(t)
+	const role, holder = "reviewer", "ses_no_port"
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	rig.claim(t, role, holder, session.SessionEntry{SelfSubscribed: true})
+	rig.silent(t, contracts.RoleTopicPrefix+role)
+	first := rig.routedEvent(t, "T-1", role, alice)
+	second := rig.laterEvent(t, "T-1", alice)
+
+	holding(t, rig.deps()).scan(context.Background(), unfenced{})
+
+	for _, event := range []model.Event{first, second} {
+		attempts, failure, destinations := eventState(t, rig.database, event.ID)
+		if publishedAt(t, rig.database, event.ID) == nil {
+			t.Fatalf("event %d was not published: attempt_count %d, publish_error %v", event.ID, attempts, failure)
+		}
+		if attempts != 0 || failure != nil || !strings.Contains(strings.Join(destinations, ","), contracts.RoleTopicPrefix+role) {
+			t.Fatalf("event %d: attempt_count %d, publish_error %v, published_destinations %v: want no attempt, no error and the role route recorded",
+				event.ID, attempts, failure, destinations)
+		}
+	}
+	if copies := storedCopies(t, rig.client, contracts.AgentSubject(holder)); copies != 2 {
+		t.Fatalf("the stream holds %d forwards on %s, want the owner's two", copies, contracts.AgentSubject(holder))
 	}
 }
 
@@ -521,9 +560,7 @@ func TestOneRefusedSubjectFailsOnlyItsOwnEvent(t *testing.T) {
 	t.Cleanup(conn.Close)
 	rig := newRoleRigOn(t, url, client, conn)
 
-	sub, err := conn.Subscribe(contracts.AgentTopicPrefix+">", func(msg *natsgo.Msg) {
-		_ = msg.Respond(nil)
-	})
+	sub, err := conn.Subscribe(contracts.AgentTopicPrefix+">", func(*natsgo.Msg) {})
 	if err != nil {
 		t.Fatalf("subscribe the holders: %v", err)
 	}
@@ -587,26 +624,28 @@ func TestAForwardHeldByItsHoldersResolutionIsCountedUnderTheHolder(t *testing.T)
 	}
 }
 
-// A role forward NATS took whose holder sent no receipt is counted unanswered, not failed: the
-// flush confirmed the publish, so what is missing is the holder's answer and not the bus. The
-// holder here is registered and self-subscribed, as a session plugin registers it, with nothing
-// subscribed to its agent subject, which is the shape a holder that stopped reading has.
-func TestAForwardNoHolderAnsweredIsCountedUnanswered(t *testing.T) {
+// A role forward NATS took whose stored copy the stream did not acknowledge is counted
+// unanswered, not failed: the flush confirmed the publish, so what is missing is the
+// acknowledgement and not the bus. The holder here is registered and live, as a session plugin
+// registers it, and the stream captures no agent subject while the batch runs, so nothing
+// acknowledges the forward - and no session answers one.
+func TestAForwardTheStreamDidNotAcknowledgeIsCountedUnanswered(t *testing.T) {
 	rig := newRoleRig(t)
-	const role, holder = "reviewer", "ses_silent"
+	const role, holder = "reviewer", "ses_unacknowledged"
 	rig.claim(t, role, holder, session.SessionEntry{SelfSubscribed: true})
 	rig.silent(t, contracts.RoleTopicPrefix+role)
+	rig.narrowAgentCapture(t)
 	event := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
 	deps, registry := rig.countingDeps(t)
 
 	holding(t, deps).scan(context.Background(), unfenced{})
 
 	if publishedAt(t, rig.database, event.ID) != nil {
-		t.Fatal("the event whose role holder sent no receipt was published")
+		t.Fatal("the event whose role forward the stream did not acknowledge was published")
 	}
 	body := failureReasons(t, registry)
 	if !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="unanswered"} 1`) {
-		t.Fatalf("/metrics body = %q, want the forward its holder left unanswered counted unanswered", body)
+		t.Fatalf("/metrics body = %q, want the forward the stream did not acknowledge counted unanswered", body)
 	}
 	if strings.Contains(body, `reason="failed"`) {
 		t.Fatalf("/metrics body = %q counts a forward NATS took as a publish failure", body)

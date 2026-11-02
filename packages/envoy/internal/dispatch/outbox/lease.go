@@ -35,11 +35,11 @@ const (
 	// connection went unanswered (answering).
 	holdRetry = time.Second
 	// concurrentBatches is how many batches a holder runs side by side (scan). A batch waits for
-	// every answer of its sends, and a role forward waits roleReceiptTimeout for a holder that may
-	// never answer, so one batch at a time would hold every other owner's events back for that
-	// whole wait. Four lets a wake and a released owner start work while a batch waits, and keeps
-	// the statements of the batches in flight, which run one at a time (lanes), from queueing
-	// deeply on the outbox pool's two connections.
+	// every answer of its sends, and a role forward waits roleForwardAckTimeout for the stream's
+	// acknowledgement, which may never come, so one batch at a time would hold every other
+	// owner's events back for that whole wait. Four lets a wake and a released owner start work
+	// while a batch waits, and keeps the statements of the batches in flight, which run one at a
+	// time (lanes), from queueing deeply on the outbox pool's two connections.
 	concurrentBatches = 4
 )
 
@@ -425,7 +425,7 @@ type scanEnd struct {
 // the batch that returned published anything or was full, and another at every wake that reaches
 // it while batches run - an owner a batch gave back (lanes), an insert of events, a reconnect.
 // Each batch leaves the owners the others hold alone (readBatch), so a batch waiting for a role
-// holder's receipt holds back its own owners' later events and nothing else, while another
+// forward's acknowledgement holds back its own owners' later events and nothing else, while another
 // owner's batch is read, sent and recorded beside it.
 //
 // It starts no batch once hold's deadline has passed, and none after one was fenced, lost NATS,
@@ -535,7 +535,7 @@ type ranBatch struct {
 // scan. Each owner is a lane of its own - a batch takes an owner by reading its events and gives
 // it back once that owner's sends are settled and recorded (publishBatch), and no other batch
 // reads that owner meanwhile - so an owner's events keep their order across the batches running
-// side by side, and an owner waiting on a receipt holds back only itself.
+// side by side, and an owner waiting on an acknowledgement holds back only itself.
 type lanes struct {
 	// mu guards inFlight. A batch's read is made under it, so that the read and the taking of the
 	// owners it read are one act and two batches can never take one owner.
