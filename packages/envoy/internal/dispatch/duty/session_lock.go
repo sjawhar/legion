@@ -8,8 +8,9 @@ import (
 )
 
 // ErrSessionClosed is FreeSessionLock's answer for a connection that was closed before its unlock
-// was sent. The statement that closed it has reported its own failure to its caller, and Postgres
-// drops the session's locks as the session ends, so there is nothing left to unlock.
+// was sent. The statement that closed it has reported its own failure to its caller. A closed
+// connection cannot run an unlock, and Postgres drops the session's locks when the session ends,
+// which can come a moment after the close, once pgx's own cleanup of the connection reaches it.
 var ErrSessionClosed = errors.New("the connection was closed before the unlock; its locks go with its session")
 
 // errLockNotHeld is pg_advisory_unlock answering false: the session did not hold the lock it was
