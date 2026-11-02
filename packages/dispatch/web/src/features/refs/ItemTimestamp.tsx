@@ -10,7 +10,10 @@ import { useMargin } from "../margin/margin-context";
 import { buildReferencePath, type DispatchReferenceRoute } from "./routes";
 import { Timestamp } from "./Timestamp";
 
-const LINK_CLASS = `dispatch-inline-link rounded outline-none hover:underline focus-visible:ring-2 ${focusVisibleRing}`;
+// Below 1280 px `.dispatch-inline-link` (`styles.css`) pads the link 6px above and below, which
+// grows its hit box without moving an inline line. In a flex row, which lays the link out as a
+// block, the padding would make the row taller: the negative margin gives it back.
+const LINK_CLASS = `dispatch-inline-link max-xl:-my-1.5 rounded outline-none hover:underline focus-visible:ring-2 ${focusVisibleRing}`;
 
 /** How long a click waits for the reads that say where an item lands before it goes to the
  *  item's address anyway, where the page shows its own loading. */
@@ -76,11 +79,8 @@ function ItemLink({ at, route }: { at: string; route: DispatchReferenceRoute }):
   const href = buildReferencePath(route);
   // An issue's item is followed once `Landing` has read where its address lands.
   const [following, setFollowing] = useState<{ click: number; route: ItemRoute }>();
-  // The span keeps the link inline wherever the time sits, in a flex row too: an inline link's
-  // touch padding (`.dispatch-inline-link`, `styles.css`) then grows its hit box without moving
-  // the line.
   return (
-    <span>
+    <>
       <Link
         aria-busy={following === undefined ? undefined : true}
         className={following === undefined ? LINK_CLASS : `${LINK_CLASS} cursor-progress`}
@@ -105,7 +105,7 @@ function ItemLink({ at, route }: { at: string; route: DispatchReferenceRoute }):
           route={following.route}
         />
       )}
-    </span>
+    </>
   );
 }
 
