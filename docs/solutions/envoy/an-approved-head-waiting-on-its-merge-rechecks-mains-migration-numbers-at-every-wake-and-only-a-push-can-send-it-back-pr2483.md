@@ -22,9 +22,9 @@ Extends docs/solutions/envoy/a-migration-number-is-checked-against-mains-highest
   keeps it `MERGEABLE`. Whoever watches the merge (the architect, the deployment lane) compares
   main's highest migration with the branch's on every wake while the head waits.
 - A backward move out of `awaiting_merge` is refused, so the remedy is the implementer's push:
-  merge main forward, renumber, push with no `skip-checks` line. That push moves the head past
-  READY, which withdraws READY and starts a full round. Expect it, and say in the round's report
-  that the merge was pushed before the task existed.
+  merge main forward, renumber and push. That push moves the head past READY, which withdraws
+  READY and starts a full round. Expect it, and say in the round's report that the merge was
+  pushed before the task existed.
 - Prove a renumber-only round by diffing the two fingerprinted diffs line by line: every changed
   line must be the old number replaced by the new.
 

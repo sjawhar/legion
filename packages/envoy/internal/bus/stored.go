@@ -103,7 +103,7 @@ func (c *Client) RequestCore(ctx context.Context, subject string, data []byte) (
 	}
 	defer replies.Unsubscribe()
 	err = c.publishConfirmed(ctx, conn, &nats.Msg{Subject: subject, Reply: inbox, Data: data}, conn.PublishMsg)
-	if err != nil && !errors.Is(err, errPublishUnconfirmed) {
+	if err != nil && !errors.Is(err, ErrPublishUnconfirmed) {
 		return nil, err
 	}
 	reply, waitErr := replies.NextMsgWithContext(ctx)

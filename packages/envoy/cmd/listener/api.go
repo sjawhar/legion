@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
@@ -671,7 +672,7 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		// bucket holds no entry for is not gone to this route, though: the known-session store
 		// answers from memory whether Envoy knows it at all, and only a session neither store
 		// holds is the 404.
-		target, err := liveSessionEntry(ctx, d.sessions, targetSession, sendSessionReadTimeout, registered)
+		target, err := liveSessionEntry(ctx, d.sessions, targetSession, sendSessionReadTimeout, roles.Registered)
 		live := err == nil
 		var stopped session.KnownSession
 		switch {
@@ -1178,7 +1179,7 @@ func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
 		withStopped := includeStoppedSessions(r)
-		entry, err := liveSessionEntry(ctx, d.sessions, sessionID, roleHolderReadTimeout, registered)
+		entry, err := liveSessionEntry(ctx, d.sessions, sessionID, roleHolderReadTimeout, roles.Registered)
 		switch {
 		case errors.Is(err, bus.ErrRefused):
 			// Refresh reports a refused key as a missing one too, so this test comes first:
@@ -1491,7 +1492,7 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
-		result, err := resolveRoleHolder(ctx, d.registry, d.sessions, role, registered)
+		result, err := resolveRoleHolder(ctx, d.registry, d.sessions, role, roles.Registered)
 		if errors.Is(err, errRoleHolderChanged) {
 			writeRoleHolderChanged(w, role, "lookup")
 			return

@@ -1,0 +1,8 @@
+kind: Changed
+body: |-
+    Under Claude Code the `dispatch` command acts as `ENVOY_SESSION_ID` (claude-envoy's QA
+    override), else `CLAUDE_CODE_SESSION_ID`: the session claude-envoy registers and claims under, so
+    a handoff it writes is the claim's session's, which the daemon requires.
+time: 2026-10-28T10:39:06.225936796Z
+custom:
+    Issue: pr2354
