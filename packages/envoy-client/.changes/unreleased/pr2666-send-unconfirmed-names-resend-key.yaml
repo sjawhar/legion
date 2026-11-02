@@ -1,0 +1,8 @@
+kind: Fixed
+body: |-
+  A send whose last attempt got no answer (a timeout or a failed connection) or a 5xx throws
+  `EnvoySendUnconfirmedError` instead of the raw error: it says the message is not confirmed
+  delivered and names the `idempotencyKey` under which a resend is stored at most once inside the
+  stream's 72-hour duplicate window. A 4xx stays an `EnvoyApiError`. `SendResult.duplicate` says
+  the listener already held a send under that key, and an answer's body is now read under the
+  attempt's deadline, inside the retry. `envoy_send` takes `idempotency_key` (a lower-case UUID).
