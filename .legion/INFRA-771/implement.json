@@ -2,94 +2,87 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-771",
-  "completed": "2026-11-02T02:25:14Z",
+  "completed": "2026-11-02T05:21:38Z",
   "pullRequest": "sjawhar/legion#2603",
-  "round": 9,
-  "previousHandoff": "8d4f9dac5b878fb4b3ad8a13285cc2fa9581a4a5",
-  "codeHead": "f8905ed38cc0",
-  "answeredReviewRound4": [
-    "Important 1 (a re-plan clears the registration's gap flag): each pass of the loop now carries what an earlier pass learned, sessionDeliveryOutcome.carrying. The gap is true once any pass reported one — only the pass that creates the consumer is told its start fell below the stream's first sequence, and a later pass finds that consumer and reports none — and a serving-port body refused on a later pass keeps the consumer an earlier pass created, since such a refusal leaves register an empty outcome and no refusal.",
-    "Important 2 (the private-subject warning became the uncaptured one): the warning loop asks bus.ReachesPrivateStreamSubject first and reads the uncaptured set only when it has nothing to say. That is the order the hosts' own refusal already used (subscribeRefusesTopic in @legion/envoy-client), so notifications.> and notifications.*.x earn the private sentence again rather than being told to follow a notifications.team.<name> topic instead.",
-    "Minor (no test drove the refused CAS or the exhaustion 503): TestSessionConsumerCarriesTheGapAndTheUnsubscribeAcrossARefusedWrite drives the refused compare-and-swap (an unsubscribe in the window removes a topic the plan merged), and TestSessionConsumerRefusesARegistrationEveryPlanOfWhichIsOutrun drives the exhaustion, asserting three plans were made and that nothing of the refused registration was stored.",
-    "Minor (the inline loop with two identical warn-and-503 exits): the loop is (*listenerDeps).registerSession, which returns the row, the plan and the delivery or an error, and the handler answers a refusal in one place and every error in one other.",
-    "Minor (InterestPlan.Requested and the misplaced bound): the field is deleted with the doc sentence that named it, store.InterestPlanAttempts is gone, and registrationPlanAttempts lives beside the loop in cmd/listener; store.ErrInterestPlanConflict's doc points at it rather than describing the listener's policy.",
-    "Minor (stale names): api.go, packages/contracts/src/subject.ts, packages/envoy/AGENTS.md:3329 and :3333 and packages/envoy-client/README.md name refuseUncapturedTopics and splitUncapturedTopics, and the README and AGENTS.md say which of the two rules speaks first.",
-    "Minor (a test comparing a value with itself): the case asserts the refusal sentence itself, which is what gives packages/contracts' own check:go something to disagree with.",
-    "Minor (the builder's claim was false): packages/pi-shared/test/omp-harness.ts, packages/claude-envoy/tests/envoy-channel-consumer.test.ts and packages/pi-envoy/src/registration-state.test.ts all call consumerDelivery now, omp-harness's own ConsumerDeliveryAnswer is replaced by the client's DeliveryAnswer, and the doc says what holds: every stand-in listener uses it, while the client's own tests of parseSubscribeAnswer build answers by hand because they drive answers this builder never makes.",
-    "The pull request body: the risk list no longer carries the filter/row mismatch round 3 fixed, the presence line says dispatch://INFRA-626 will send the probe and that nothing here sends one, and Proven by names this round's head."
+  "round": 10,
+  "previousHandoff": "abf78572f36568adf4a83d77ac1854c4d6bac20b",
+  "codeHead": "a199decc11e2",
+  "answeredReviewRound5": [
+    "Important (the reviewer's withdrawal of its own round-4 request): sessionDeliveryOutcome.carrying no longer keeps an earlier pass's consumer for a serving-port pass that could be given none. That branch wrote the session entry as consumer delivery while the consumer's filter was an earlier plan's, which the row the registration stored disagrees with, so the relay would have served the session from a filter naming topics the row does not. Only the gap is carried now.",
+    "The tester's TestSessionConsumerKeepsAServingPortsConsumerWhenALaterPassIsRefused is turned around as TestSessionConsumerServingPortAnswersNoConsumerWhenALaterPassIsRefused, and states what the answer is rather than what it is not: no delivery field at all, no consumer delivery on the entry, the stored row the unsubscribe left, and the consumer the first pass created still on the server, for the session's next registration to re-filter — nothing claims it meanwhile, since the entry says the port is the path.",
+    "Minor: the exhaustion case asserts the literal three plans rather than registrationPlanAttempts, so raising the bound is a decision someone takes again.",
+    "Minor: carrying's doc names registerSession, which is the function that re-plans, not subscribeHandler.",
+    "Minor: the gap claim is narrowed to what the code keeps — within one registration's passes, since a later registration finds the consumer and is told no gap."
+  ],
+  "forwardMerge": [
+    "GitHub reported the pull request CONFLICTING against main at 667d0737, which is the trigger. main carries two things through this change's own files: an explicit msgID on every forward (RequestCoreTo, StartRequestCoreTo, StartRequestStoredTo, forwardRole, roleForward.msgID), and a reworked publish window (WindowUntil, Request, ErrPublishUnconfirmed exported, ErrNotCaptured, ConnectionChanged).",
+    "Fourteen files conflicted. The merged forwardRole is func(subject string, item contracts.Envelope, msgID string, timeout time.Duration): main's msgID in, this change's storedOnly out, since every forward is stored-only. StartRequestStoredTo takes msgID and stamps Nats-Msg-Id only when it is not empty; everything this change deletes stays deleted.",
+    "bus.ErrReceiptTimeout is restored, in async.go beside main's new window.Request, which is its only caller now. This change deleted it with the receipt path; main grew a user of it that has nothing to do with role forwards, and its doc says so.",
+    "Two tests main added needed adapting rather than taking: delivery_role_forward_test.go forwarded with RequestCoreTo (now StartRequestStoredTo and its Wait, with everything it pins about roleForward.msgID kept), and connection_changed_test.go published with PublishCore (now PublishCoreContext).",
+    "One test main added is deleted: confirmed_test.go's TestPublishRouteStoresOneCopyOfARoleMessageItForwardsTwice drove a second forward by having the holder's stand-in withhold its first receipt, and after this change no forward waits for a receipt, so that second forward cannot happen. The property it pinned, one stored copy per message and recipient under one Nats-Msg-Id, is pinned by delivery_role_forward_test.go and by internal/bus/stored_forward_test.go.",
+    "main's own deletion of TestAWindowWithSeveralDenialsConfirmsEveryGrantedSend, which went with its window rework, is taken."
   ],
   "proof": [
     {
-      "criterion": "Review round 4's important 1: a registration that plans again still tells the session its messages may be missing, and a serving-port session keeps the consumer an earlier pass created.",
-      "surface": "packages/envoy/cmd/listener against a real nats-server in the test process: the listener's /v1 routes, its session-consumer manager and the stream, with the row rewritten inside the registration's own window through sessionDelivery.beforeRegister.",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=$LEGION_TEST_PG_DSN go test -count=1 -run TestSessionConsumerCarriesTheGapAndTheUnsubscribeAcrossARefusedWrite ./cmd/listener/",
-      "observed": "ok in 0.689 s with the two cases beside it. The case: a seeded row of two topics and no consumer; two stored messages deleted from the stream's head, as aged-out ones are, so the registration's resume point is below the stream's first sequence; an unsubscribe landing between the first pass's plan and its write, which refuses that write at the plan's revision. The answer carries gap true, the stored row has lost the unsubscribed topic, and the consumer's filters equal sessionConsumerFilter of that row.",
-      "headSha": "f8905ed38cc0fb7b869af8aa5507b88fa90b43d4",
-      "negativeControl": "The pre-fix behaviour, restored in place (registered.delivery = pass, the last pass's answer alone): the case fails by name — 'want gap true: the pass that created the consumer found one, and the re-plan must not drop it'. Reverted from a copy, gofmt clean."
+      "criterion": "Review round 5's important finding: a registration that can be given no consumer answers none, so no entry says consumer delivery while the filter of that consumer disagrees with the row the registration stored.",
+      "surface": "packages/envoy/cmd/listener against a real nats-server in the test process, with the row rewritten and the grant withdrawn inside the registration's own window through sessionDelivery.beforeRegister.",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=$LEGION_TEST_PG_DSN go test -count=1 -run TestSessionConsumer ./cmd/listener/",
+      "observed": "ok in 58.709 s over every session-consumer case. The turned-around case: pass one creates the consumer and its write is refused by an unsubscribe in the window; pass two finds the grant gone, and a serving-port body is answered rather than refused. The answer carries no delivery, the entry records no consumer delivery, the stored row has lost the unsubscribed topic, and the consumer the first pass created is still on the server.",
+      "headSha": "a199decc11e2764b340d2beee24db7f6620603df",
+      "negativeControl": "The withdrawn carry, restored in place (if o.answer == nil { return earlier }): the case fails by name — 'want no delivery: the pass that answered could give no consumer, and an earlier pass's one is filtered on a plan this row no longer holds'. Reverted from a copy, gofmt clean."
     },
     {
-      "criterion": "Review round 4's important 2: a dropped topic earns the warning its own rule names, sentence for sentence.",
-      "surface": "packages/envoy/cmd/listener's registration route over the test's own stream.",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=$LEGION_TEST_PG_DSN go test -count=1 -run TestSubscribeHandlerNamesThePrivateRuleBeforeTheUncapturedOne ./cmd/listener/",
-      "observed": "ok in 0.541 s over five topics: notifications.>, notifications.*.x and another session's inbox earn the private sentence in full, and notifications.lxspec.probe.all and notifications.teamx.deploy the uncaptured one, each compared whole rather than by prefix.",
-      "headSha": "f8905ed38cc0fb7b869af8aa5507b88fa90b43d4",
-      "negativeControl": "The case is its own: at the previous head the first three topics earn the uncaptured sentence, which is the finding, and the test is written against the full string rather than the shared prefix that hid it."
+      "criterion": "The merge keeps both sides: main's msgID on every forward and its reworked window, and this change's deletion of the receive and receipt path.",
+      "surface": "The merged tree, read against both parents, and the Go modules' own build and vet.",
+      "command": "cd packages/envoy && gofmt -l ./cmd ./internal && go build ./... && go vet ./...; cd infra && go vet ./...",
+      "observed": "gofmt lists nothing; build and vet clean in both modules. The merged StartRequestStoredTo takes msgID and stamps the header only when it is not empty; forwardRole carries msgID and no storedOnly; ErrReceiptTimeout lives in async.go with main's window.Request as its one caller; request_core_test.go is deleted with the path it tested.",
+      "headSha": "a199decc11e2764b340d2beee24db7f6620603df",
+      "negativeControl": "The build is the control and it ran red three times before it was right: ErrReceiptTimeout undefined for main's window.Request, PublishCore undefined for main's connection test, and RequestCoreTo undefined for main's role-forward test. Each is named above with what it became."
     },
     {
-      "criterion": "The loop's refused compare-and-swap and its exhaustion are both driven, so a change that answers 503 at the first conflict is caught.",
-      "surface": "The same listener rig, with the row rewritten under every plan the registration makes.",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=$LEGION_TEST_PG_DSN go test -count=1 -run 'TestSessionConsumerRefusesARegistrationEveryPlanOfWhichIsOutrun|TestSessionConsumerCarriesTheGapAndTheUnsubscribeAcrossARefusedWrite|TestSessionConsumerFiltersAgainWhenItsWriteLosesTheCompareAndSwap' ./cmd/listener/",
-      "observed": "ok in 0.689 s. The exhaustion case stores another topic between every plan and its write, and asserts the answer is 503, that three plans were made (registrationPlanAttempts) and that none of the refused registration's own topics was stored.",
-      "headSha": "f8905ed38cc0fb7b869af8aa5507b88fa90b43d4",
-      "negativeControl": "The deep review's own mutation, applied in place: returning at the first store.ErrInterestPlanConflict instead of planning again. The exhaustion case then fails 'the registration made 1 plans, want 3' and the gap case fails with it; the round-3 case passes, which is why that one alone was not enough. Reverted from a copy, gofmt clean."
-    },
-    {
-      "criterion": "Nothing of the change regressed under the round's edits: the listener, the stores, the grant and every TypeScript package.",
+      "criterion": "Nothing regressed under the merge: the listener, the bus, the stores and every TypeScript package.",
       "surface": "The repository's own suites in this issue's pod, with its test PostgreSQL and a real nats-server.",
-      "command": "cd packages/envoy && go vet ./... && DISPATCH_TEST_DATABASE_URL=$LEGION_TEST_PG_DSN go test -count=1 -timeout 30m ./cmd/listener/ && go test -count=1 ./internal/store/ ./internal/bus/ ./internal/session/; cd infra && go test -count=1 ./core/; then bun test in contracts, pi-shared, envoy-client, claude-envoy and pi-envoy, bun run typecheck in each, and bunx biome check .",
-      "observed": "vet clean; cmd/listener ok 786.512 s; internal/store ok 32.6 s; internal/bus ok 344.9 s; internal/session ok 11.1 s; infra/core ok 6.8 s; typecheck clean in contracts, pi-shared, envoy-client, claude-envoy, pi-envoy and pi-legion; contracts 406 pass, pi-shared 94 pass, envoy-client 1,304 pass 10 skip, claude-envoy 263 pass 13 skip, pi-envoy 1,750 pass 40 skip; biome 0 errors (2 warnings and 2 infos, all main's, in dist-fresh.test.ts and handoff-commit.ts).",
-      "headSha": "f8905ed38cc0fb7b869af8aa5507b88fa90b43d4",
-      "negativeControl": "The suites caught this round's own mistake before the push: the first draft of the gap case deadlocked on a sync.Once re-entered from inside its own Do — the same trap round 8 recorded — and the store's own race test went red when InterestPlan.Requested was deleted without repointing it."
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=$LEGION_TEST_PG_DSN go test -count=1 -timeout 35m ./cmd/listener/ && go test -count=1 ./internal/bus/ ./internal/store/ ./internal/session/; cd ../.. && bunx biome check . and bun run typecheck in contracts, envoy-client, pi-envoy, claude-envoy and pi-shared",
+      "observed": "cmd/listener ok 796.851 s; internal/bus ok 369.409 s; internal/store ok 34.546 s; internal/session ok 11.567 s; biome 0 errors (2 warnings, main's); typecheck clean in all five packages.",
+      "headSha": "a199decc11e2764b340d2beee24db7f6620603df",
+      "negativeControl": "main's own suites are the control for the merge: internal/bus carries main's new window_request_test.go and connection_changed_test.go, which exercise the Request path and the reconnect wake this change had to keep working, and they pass at the merge head."
     },
     {
-      "criterion": "The change still delivers every event once to a real Oh My Pi session and a real Claude Code session, through every disruption, with the reordered warnings and the carried answer in place.",
+      "criterion": "The change still delivers every event once to a real Oh My Pi session and a real Claude Code session, through every disruption, after the merge.",
       "surface": "scripts/e2e/envoy-session-delivery.sh in this issue's pod: natsd with JetStream, two Envoy listeners, envoy-dispatch on the pod's test PostgreSQL, a real Oh My Pi session on this checkout's packed pi-envoy and a real Claude Code session under legion claude-bridge, each reaching NATS through a cuttable socat proxy.",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && SESSION_DELIVERY_EVIDENCE_DIR=/legion/scratch/tmp/impl-round9/e2e bash scripts/e2e/envoy-session-delivery.sh",
-      "observed": "exit 0 in 455 s, 'ENVOY SESSION DELIVERY: PASS (every event once, the issue in order)'. All six disruption windows, every expected cell 1, both sessions registered delivery consumer, and the closing order assertion naming the twelve comments of LIVE-1 it compared in each transcript. The table is committed at .legion/INFRA-771/evidence/envoy-session-delivery-TABLES.md, refreshed from this run.",
-      "headSha": "f8905ed38cc0fb7b869af8aa5507b88fa90b43d4",
-      "negativeControl": "Round 4's control, unchanged in script and in meaning: the same proof against the build before this change (--build-from f41a4d8c) exits 1 with 'FAIL sessions: session pi does not report consumer delivery, \"delivery\":null'. Within this run the per-marker counts are their own control: a second copy of any marker fails the step."
+      "command": "cd -- \"$LEGION_WORKSPACE\" && SESSION_DELIVERY_EVIDENCE_DIR=/legion/scratch/tmp/impl-round10b/e2e bash scripts/e2e/envoy-session-delivery.sh",
+      "observed": "exit 0 in 294 s, 'ENVOY SESSION DELIVERY: PASS (every event once, the issue in order)'. All six disruption windows, every expected cell 1, both sessions registered delivery consumer, and the closing order assertion naming the twelve comments of LIVE-1 in each transcript. The table is committed at .legion/INFRA-771/evidence/envoy-session-delivery-TABLES.md, refreshed from this run.",
+      "headSha": "a199decc11e2764b340d2beee24db7f6620603df",
+      "negativeControl": "Round 4's control, unchanged in script and in meaning: the same proof against the build before this change (--build-from f41a4d8c) exits 1 with 'FAIL sessions: session pi does not report consumer delivery, \"delivery\":null'. Within this run the per-marker counts are their own control."
     },
     {
-      "criterion": "The pull request's file set against main is unchanged by this round.",
-      "surface": "The diff from the merge base of main and this head.",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && jj diff --from 'fork_point(main@origin | f8905ed38cc0)' --to f8905ed38cc0 --summary",
-      "observed": "185 paths, the same 185 round 8 left: nothing joined the diff and nothing left it. Every file this round touched was already in it.",
-      "headSha": "f8905ed38cc0fb7b869af8aa5507b88fa90b43d4",
-      "negativeControl": "The comparison is against the merge base, not main's tip: a straight diff from main@origin reads more, because main has moved on since this branch merged it, and those extra paths are main's own later work."
+      "criterion": "The pull request's file set against main is this change's alone after the merge, and every path that joined or left it is explained.",
+      "surface": "The diff from the merge base of main and this head, before and after the merge.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && jj diff --from 'fork_point(main@origin | <head>)' --to <head> --summary, at c01d14e9 and at a199decc",
+      "observed": "185 paths before, 186 after. Joined: packages/envoy/cmd/listener/delivery_role_forward_test.go and packages/envoy/internal/bus/connection_changed_test.go, both main's own new tests that this change had to adapt to the deleted core API. Left: bun.lock, which main now carries as this change had synced it. The fingerprint moved from d95a874d to 6385cb47, so the head goes through the tester again.",
+      "headSha": "a199decc11e2764b340d2beee24db7f6620603df",
+      "negativeControl": "The per-file fingerprint alone would have said nothing about the two files that joined: it is the file-set comparison that names them, which is why both are in the forward-merge comment."
     }
   ],
   "filesChanged": [
-    "packages/envoy/cmd/listener/api.go: registerSession with registrationPlanAttempts, one warn-and-503 exit in the handler, and the warning loop asking the private rule first.",
-    "packages/envoy/cmd/listener/session_delivery.go: sessionDeliveryOutcome.carrying.",
-    "packages/envoy/cmd/listener/session_delivery_test.go: the gap-across-a-refused-write case and the exhaustion case.",
-    "packages/envoy/cmd/listener/api_test.go: the warning-order case, which asserts each sentence whole.",
-    "packages/envoy/internal/store/kv.go, interest.go, kv_test.go: InterestPlan.Requested deleted, InterestPlanAttempts moved out of the store, and the race test planning from its own topics.",
-    "packages/envoy/AGENTS.md, packages/contracts/src/subject.ts, packages/envoy-client/README.md: the stale names and the rule order.",
-    "packages/envoy-client/src/__tests__/stream-topics.test.ts: the self-comparison replaced by the sentence.",
-    "packages/envoy-client/test/subscribe-answer.ts: the doc says what holds of it.",
-    "packages/pi-shared/test/omp-harness.ts, packages/claude-envoy/tests/envoy-channel-consumer.test.ts, packages/pi-envoy/src/registration-state.test.ts: the shared builder and the client's DeliveryAnswer."
+    "packages/envoy/cmd/listener/session_delivery.go: carrying keeps the gap alone, with its doc narrowed and naming registerSession.",
+    "packages/envoy/cmd/listener/session_delivery_test.go: the serving-port case turned around, and the exhaustion case's literal three plans.",
+    "The merge's own resolution of fourteen files: internal/bus/{nats,async}.go and four of its tests, cmd/listener/{confirmed,delivery,role_lane}.go with main_test.go and role_lane_test.go, packages/envoy/AGENTS.md and docs/architecture.md, with internal/bus/request_core_test.go deleted.",
+    "packages/envoy/internal/bus/stored_forward_test.go, cmd/listener/delivery_role_forward_test.go, internal/bus/connection_changed_test.go: brought onto the merged API.",
+    "packages/envoy/cmd/listener/confirmed_test.go: the receipt-premised test deleted."
   ],
   "trickyParts": [
-    "Driving the gap needs three things at once in one case: a consumer that does not exist yet, so the registration's first pass creates it and is told the gap; a resume point below the stream's first sequence, which means stored messages deleted from the head as aged-out ones are; and a writer in the window between that pass's plan and its write. The window is beforeRegister, and the writer is a registry Remove rather than a second registration — a second registration would create the consumer itself and there would be no gap left for the pass under test to find.",
-    "That same Remove is what refuses the first pass's compare-and-swap, so one case covers both the carried gap and the refused write the round-3 case could not reach. The exhaustion case needs a writer that changes the row on every pass, which is a fresh topic each time rather than the same unsubscribe."
+    "main's window.Request made this change's deletion of ErrReceiptTimeout wrong: the sentinel had one meaning (a role forward's holder did not answer) and now has another (a window request went unanswered). Restoring it where main's caller lives, rather than where it used to be, is what keeps the two from being read as one thing.",
+    "Two of main's new tests could be adapted and one could not. The one that could not drove a second forward by withholding a receipt, and this change leaves no receipt to withhold; keeping it by some other mechanism would have been a test written to survive rather than to catch something."
   ],
   "deviations": [
-    "The reviewer suggested deleting the self-comparing case outright, since the tool test below it checks the sentence. It is kept and made to assert the sentence itself: what the generated Go copy is checked against (packages/contracts' check:go) is that literal, and the tool test asserts a thrown message rather than the builder's own output."
+    "The merge deletes a test main added (TestPublishRouteStoresOneCopyOfARoleMessageItForwardsTwice) rather than adapting it, for the reason above. Its property is pinned elsewhere, named in the forward-merge comment."
   ],
   "openQuestions": [
-    "CI run 41364405271 at 7b9c47fb was still queued when the reviewer wrote, so ci-ok is unread for that head; this round's push replaces it with f8905ed3, whose run the tester and the reviewer will read."
+    "main now carries sjawhar/legion#2354, which makes phase handoffs records on the Dispatch issue rather than commits. This round still writes and pushes .legion/INFRA-771/implement.json, because the daemon that runs this issue is the release that asks for it; the next round should read its task again before assuming either way.",
+    "No CI run existed for f7fdb91f or 0aa1d047, and run 41377460074 at f8905ed3 was still queued when the review was written. This push is the branch's first run since."
   ],
   "discoveredComplexity": [
-    "A loop that repeats a side-effecting call does not repeat what that call reported: the second pass of a consumer registration is a different question to the server (the consumer exists now), so it answers differently, and only the first pass can know the gap. Any fact a registration answers has to be read as 'what any pass learned', not 'what the last pass returned' — which is why carrying is a method on the outcome rather than a flag beside the loop."
+    "A deletion is only as settled as the branch it was made on: this change deleted a sentinel, a publish helper and a forward API that main then grew new callers of, and each showed up as a build failure rather than as a conflict. The merge's real work was deciding, for each, whether main's new caller is of the thing that was deleted or of something that merely shares its name."
   ]
 }
