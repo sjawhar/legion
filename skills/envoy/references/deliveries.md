@@ -63,6 +63,15 @@ It depends on where a session takes its deliveries, not on whether the topic is 
 - A role is not a subject its holder subscribes to: the listener finds the live holder and forwards the message to it, and drops the message when that holder is the message's source session. The stream keeps the forward on the holder's inbox, so the holder's session gets it once, also after a restart.
 - A session whose plugin, or whose listener, is of an earlier release falls back to the core path while the rollout lasts (dispatch://INFRA-771 removes it): there it receives live on its own NATS subscriptions, and recovers what the stream stored for it itself, marked as published while its connection was down. It does not recover a role message that way.
 
+## What a publish and a send answer
+
+- A publish answers with how many sessions get the message, counted the moment it was published: `published <id> to N other sessions (M running now)`. `N` is every session other than you whose registered topics match the topic, a session Envoy knows and that is not running included, and `M` is how many of those are running now. A stopped session among them reads the message from its own consumer when it runs again, within 72 hours.
+- `published <id>; no other session subscribes to <topic>, so no other session gets it` is the count being zero: nobody follows the topic, so the message reached nobody. Reach whoever you meant another way; a publish does not keep an ad-hoc topic for a session that subscribes later.
+- A role topic's answer names its live `holder` instead of a count, and a listener that counts nothing — one whose NATS user cannot read the known-session records — answers the plain `published <id>`.
+- A send answers what its target was when Envoy stored the message. `sent <id> to <recipient>, which is connected` means a plugin of that session held a NATS connection then. It is not a delivery: whether the session reads the message is its own consumer's business, and a predecessor process of the same session id still holding the connection reads as connected too.
+- `queued <id> for <recipient>: the session is stopped (last seen <time>); if it runs again within 72 hours, it gets the message` means Envoy stored the message for a session it knows and that is not running. Never resend a queued message: a second send stores a second copy for that session to read.
+- A send fails only when Envoy knows no session under that id at all.
+
 ## Listener API errors
 
 When you call the listener's `/v1` API directly, every error response is JSON, and when a field is at fault, `expected` names it: fix that field and retry.

@@ -1,0 +1,5 @@
+kind: Added
+body: '`send` answers `state` (`connected` or `stopped`) and `lastSeen`, and `publish` answers `recipients` and `recipientsConnected`. `sendConfirmationText` reads `queued … the session is stopped` for a target that is not running, the new `publishConfirmationText` renders a publish''s counts, and `presenceSubject` and `presenceReplyBody` are the subject and reply body a plugin answers the listener''s connection check with.'
+time: 2026-11-02T08:27:59.485941911Z
+custom:
+    Issue: pr2643

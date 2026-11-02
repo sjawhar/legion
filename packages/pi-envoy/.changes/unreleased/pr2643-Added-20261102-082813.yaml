@@ -1,0 +1,5 @@
+kind: Added
+body: The extension answers the listener's connection check on its session's presence subject, and declares the check only once a flush shows the server accepted the subscription, so a send to this session reads as connected only while a plugin of it holds a NATS connection. `envoy_send` says whether the target was connected or the message was queued for a stopped session, and `envoy_publish` says how many other sessions get the message.
+time: 2026-11-02T08:28:13.60780061Z
+custom:
+    Issue: pr2643
