@@ -28,8 +28,8 @@ const strandedReportTimeout = 5 * time.Second
 // that releases no pod makes no query for one.
 //
 // It is the resumes table's cheap read: PodReleaseRecords, the other read of that table, carries
-// the project's holds with it, and the idle rule writes one hold row per held pod per tick, so
-// the state route — which judges this rule on every request — must not read it.
+// every release and hold of the project with it, so the state route — which judges this rule on
+// every request — must not read it.
 func strandedReleaseWakes(ctx context.Context, st *store.Store, projectToken string, claims []supervise.Claim, now time.Time) ([]store.PodResume, error) {
 	released := false
 	for _, c := range claims {

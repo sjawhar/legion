@@ -87,7 +87,7 @@ func strandedReleaseWakes(resumes []store.PodResume, now time.Time) map[released
 // left out of both cases while its pod is coming back: the next wake for its role resumes it, and
 // the boot resumes no such claim. It is stranded on one fact alone, whatever its role: a wake for
 // it ran out of StrandedReleaseWake with no turn of the woken role (resumes, the daemon's
-// store.PodReleaseRecords of the project). That is the wake the pod never came back from, and
+// store.UnfinishedPodResumes of the project). That is the wake the pod never came back from, and
 // nothing in the daemon takes it again. A released claim nothing has woken is not stranded: it
 // waits for a delivery, as a released pod is meant to.
 //

@@ -3949,13 +3949,13 @@ The daemon keeps a record of each release, each resume and each pod held past th
 #### Rolling back idle release
 
 Re-pinning the earlier image is not the whole rollback: a released claim and its saved bundle are two things the earlier release cannot act on.
-An earlier daemon (`legion-v18.3.1`, or any release at daemon API contract 44 or below) knows four suspension sources and not `released`, and its `SuspendSource.ByRule` names `daemon` and `exit` alone (`internal/supervise/machine.go` at `legion-v18.3.1`), so:
+An earlier daemon (`legion-v19.0.0`, or any release at daemon API contract 47 or below) knows four suspension sources and not `released`, and its `SuspendSource.ByRule` names `daemon` and `exit` alone (`internal/supervise/machine.go` at `legion-v19.0.0`), so:
 
 - its boot resumes no released claim either (`booted`, `internal/workflow/resume.go` at that tag, which acts on a `ByRule` source), and it has no idle-release loop and no listener report of its own, so nothing of its own ever wakes one: a released claim waits for a phase start or a delivery that may never come;
 
 - its stranded-claim report lists every released phase worker of a running tree, since that report passes over a suspended claim only for a `ByRule` source (`stranded.go` at that tag), so an operator reading it after the rollback meets one line per released claim;
 
-- its launcher knows neither `launcher_bundle` frame (they arrive at daemon API contract 47), so no pod it starts restores a saved bundle, and the work in that bundle reaches no workspace again.
+- its launcher knows neither `launcher_bundle` frame (they arrive at daemon API contract 48), so no pod it starts restores a saved bundle, and the work in that bundle reaches no workspace again.
 
 **Every released pod's unpushed work is lost in the rollback unless this release pushes it first.**
 That work is in the bundle and nowhere else, and no role can push it while its pod is gone, so the push needs a pod, which only this release can bring back.

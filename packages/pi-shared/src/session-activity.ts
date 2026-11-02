@@ -110,8 +110,9 @@ export function sameSessionActivity(
  *
  * The claim token is the role token of the claim's project, issue and role, which is how the
  * daemon minted it (`claim.NewToken`) and how the phase reminder already spells the architect's
- * (`tellArchitect` in `src/phase-reminder.ts`). A claim whose issue is its tree is an architect's,
- * and no architect reports: both hosts gate the report on a phase role.
+ * (`tellArchitect` in `src/phase-reminder.ts`). An architect reports as a phase worker does
+ * (pi-legion), since the daemon releases a pod only when each of its live roles has reported;
+ * claude-envoy runs phase workers alone, so its reports are theirs.
  */
 export function sessionActivityRequest(input: {
   readonly project: string | undefined;
