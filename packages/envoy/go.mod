@@ -154,7 +154,7 @@ require (
 // (#338); Server.OnTokenAuthContext, OnTokenAuth with the connection's request context, which
 // Dispatch does not set (#351); and WithFormatCleanup and Doc.SetFormatCleanup, which turn off the
 // format cleanup a remote apply runs, so a copy that replays the room's commit log
-// (newDocumentCopy) and a room loading its stored history (applyLoadedState) make no commit the
+// (newDocumentCopy) and a room loading its stored history (bootstrapLoadedState) make no commit the
 // room never made (#369). One is fork-only, with no upstream pull request yet: a per-apply scan
 // budget stacked on #333, which Dispatch does not set.
 replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.50.1-0.20261102105534-b3b8308dee0e

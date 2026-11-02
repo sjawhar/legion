@@ -360,17 +360,22 @@ func ParseBlockPointerValue(raw string) ([]string, error) {
 	return values, nil
 }
 
-// validateBlockPointerValues refuses a list of block pointers holding a block of a comment or a
-// message (text.Ref.Item), which a pointer never names: a `block[]` attribute points at blocks of
-// documents, whose types its targets limit, and an item's block has no type. It refuses one that
-// is otherwise not a canonical block reference (text.CanonicalBlockRef), and one named twice. Its
-// twin is blockPointersProblem in @legion/contracts, which follows its wording, quoting a value as
-// JSON.stringify does.
+// validateBlockPointerValues refuses a list of block pointers holding a part of an ask or a block
+// of a comment or a message (text.Ref.Item), which a pointer never names: a `block[]` attribute
+// points at blocks of documents, whose types its targets limit, and an item's block has no type.
+// It refuses one that is otherwise not a canonical block reference (text.CanonicalBlockRef), and
+// one named twice. Its twin is blockPointersProblem in @legion/contracts, which follows its
+// wording, quoting a value as JSON.stringify does.
 func validateBlockPointerValues(values []string) error {
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
 		if ref, ok := text.ParseRef(value, ""); ok && ref.Kind == "block" && ref.Item != "" {
-			return fmt.Errorf("%q is a block of a %s: a block[] attribute points only at a block of a document", value, ref.Item)
+			// The kind takes the article its noun does: an ask, a comment, a message.
+			article := "a"
+			if ref.Item == "ask" {
+				article = "an"
+			}
+			return fmt.Errorf("%q is a block of %s %s: a block[] attribute points only at a block of a document", value, article, ref.Item)
 		}
 		if _, ok := text.CanonicalBlockRef(value); !ok {
 			return fmt.Errorf("%q is not a block reference as Dispatch writes one: dispatch://<ISSUE>/spec#b-<id>, or dispatch://<ISSUE or PROJECT>/artifact/<slug>#b-<id>, the id percent-encoded in upper-case hex except ASCII letters, digits and -, optionally pinned @v<N>", value)
