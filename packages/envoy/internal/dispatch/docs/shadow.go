@@ -277,7 +277,7 @@ func (sh *roomShadow) renderLocked() {
 	if sh.doc == nil {
 		return
 	}
-	markdown, _, _, err := renderDocumentForUpdate(sh.doc.GetXmlFragment(fragmentName))
+	markdown, err := renderFragmentMarkdown(sh.doc.GetXmlFragment(fragmentName))
 	if err != nil {
 		return
 	}

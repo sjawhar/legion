@@ -227,7 +227,7 @@ func formattingRound(t *testing.T, seed uint64, steps int) {
 			if bolded {
 				find, with = "**iota**", "iota"
 			}
-			if strings.Count(renderOfRoom(t, live), find) != 1 {
+			if strings.Count(roomMarkdown(t, service, artifactID), find) != 1 {
 				break
 			}
 			if _, err := joinedApplyOps(service, artifactID,

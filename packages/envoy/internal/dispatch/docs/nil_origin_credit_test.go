@@ -17,20 +17,24 @@ import (
 // INFRA-644. ygo answers a remote update that leaves a text's formatting markers covering no text
 // with a cleanup of its own (reearth/ygo #284): a local transaction on the document that applied
 // the remote update, committed with no origin at all. In a Dispatch room that cleanup is one more
-// logged update, which the room's update observer classifies and, when it counts as a content
-// change, credits to every browser connected at the time (creditContentChange). Nobody typed it,
-// so it must be credited to no one.
+// logged update, which the room's update observer classifies and credits: to every browser
+// connected at the time when it counts as a content change (creditContentChange), and to those
+// browsers for an open write's shadow when it counts as none (unchangedCredit). Nobody typed it,
+// so neither path may credit anyone.
 //
 // The first test here is the scenario itself, on the pinned ygo (v1.54.1-sami.3, which carries
 // reearth/ygo #284): a browser deletes exactly the text another browser's bold run covers, which
 // leaves the markers covering nothing, and the room logs two updates for it - the browser's own
 // and the cleanup, committed with no origin. The cleanup takes no text away, so the room
 // classifies it as no content change and never reaches the credit path for it; the test holds
-// both. The second test is the path on which a room credits such a commit at all, and is
-// deterministic on any ygo: a replica that cannot place an update hands it to recover, which
-// classifies every update it could not place as a content change (renderedReplica.recover), so a
-// nil-origin commit made while a browser is connected is the one that would credit that browser
-// for an edit it never made.
+// both. The second and third tests are the two paths on which a room credits such a commit at
+// all, and both are deterministic on any ygo. A replica that cannot place an update hands it to
+// recover, which classifies every update it could not place as a content change
+// (renderedReplica.recover), so a nil-origin commit made while a browser is connected is the one
+// that would credit that browser for an edit it never made. And a commit classified as no change
+// while a live write is open is measured again by that write's shadow, which stores it as a
+// change with the browsers the room recorded for it wherever the shadow's own render differs
+// (storedClasses).
 
 const (
 	nilOriginParagraph = "Paragraph 0 opens"
@@ -38,18 +42,22 @@ const (
 )
 
 // nilOriginCommit is what the service's own update observer made of one of the room's commits,
-// read while the class it recorded is still there (recordUpdateClass, consumeUpdateClass takes it
-// later), with the room's credit record just after it.
+// read while the class it recorded is still there (queueUpdateClass, consumeUpdateClass takes it
+// later), with the room's credit record just after it. class is the queued class itself, for a
+// test that measures it again as a live write's shadow would (storedClasses).
 type nilOriginCommit struct {
-	origin    string
-	classes   int
-	changed   bool
-	durable   bool
-	credited  bool
-	creditSeq uint64
-	authors   []string
-	lastActor string
-	after     creditState
+	origin       string
+	classes      int
+	changed      bool
+	durable      bool
+	credited     bool
+	creditSeq    uint64
+	authors      []string
+	lastActor    string
+	roomCredited bool
+	roomAuthors  []string
+	class        *queuedClass
+	after        creditState
 }
 
 func (c nilOriginCommit) String() string {
@@ -57,8 +65,12 @@ func (c nilOriginCommit) String() string {
 	if c.credited {
 		credit = fmt.Sprintf("credit=#%d authors=%v lastActor=%s", c.creditSeq, c.authors, c.lastActor)
 	}
-	return fmt.Sprintf("origin=%s classes=%d changed=%t durable=%t %s | room after: %s",
-		c.origin, c.classes, c.changed, c.durable, credit, c.after)
+	roomCredit := "roomCredit=none"
+	if c.roomCredited {
+		roomCredit = fmt.Sprintf("roomCredit=authors=%v", c.roomAuthors)
+	}
+	return fmt.Sprintf("origin=%s classes=%d changed=%t durable=%t %s %s | room after: %s",
+		c.origin, c.classes, c.changed, c.durable, credit, roomCredit, c.after)
 }
 
 // creditState is the room's credit record at one moment: who is connected, F (the in-flight
@@ -179,11 +191,16 @@ func (w *nilOriginWatch) record(update []byte, origin any) {
 			}
 			commit.classes++
 			commit.changed, commit.durable = class.contentChanged, class.durable
+			commit.class = class
 			if class.credit != nil {
 				commit.credited = true
 				commit.creditSeq = class.credit.record.seq
 				commit.authors = sortedActorKeys(class.credit.record.authors)
 				commit.lastActor = describeActor(class.credit.record.lastActor)
+			}
+			if class.roomCredit != nil {
+				commit.roomCredited = true
+				commit.roomAuthors = sortedActorKeys(class.roomCredit.record.authors)
 			}
 		}
 		w.service.unlockState(w.room, state)
@@ -251,6 +268,7 @@ func paragraphLine(t *testing.T, markdown, prefix string) string {
 func TestRenderReuseANilOriginCommitCreditsNoOne(t *testing.T) {
 	t.Run("the browser's delete of a bold run it never saw", testADeleteThatDanglesABoldRun)
 	t.Run("a nil-origin commit a recovered replica counts as changed", testANilOriginCommitAfterARecover)
+	t.Run("a nil-origin commit an open write's shadow counts as changed", testANilOriginCommitAnOpenWritesShadowMeasures)
 }
 
 // testADeleteThatDanglesABoldRun is the scenario: two browsers are connected, a third bolded a
@@ -288,7 +306,7 @@ func testADeleteThatDanglesABoldRun(t *testing.T) {
 		bolded.Format(txn, boldAt, len(nilOriginWord), crdt.Attributes{"strong": map[string]any{}})
 	})
 	waitForLandedAppends(t, service, artifactID)
-	boldLine := paragraphLine(t, renderOfRoom(t, room), nilOriginParagraph)
+	boldLine := paragraphLine(t, roomMarkdown(t, service, artifactID), nilOriginParagraph)
 	if !strings.Contains(boldLine, "**"+nilOriginWord+"**") {
 		t.Fatalf("the room's paragraph reads %q, which holds no bold %q", boldLine, nilOriginWord)
 	}
@@ -374,7 +392,7 @@ func testADeleteThatDanglesABoldRun(t *testing.T) {
 
 	sh.check(t)
 	replicaHoldsTheRoom(t, room, service.replicaOf(room), "the browser's delete and ygo's cleanup of it")
-	line := paragraphLine(t, renderOfRoom(t, room), nilOriginParagraph)
+	line := paragraphLine(t, roomMarkdown(t, service, artifactID), nilOriginParagraph)
 	t.Logf("the room's paragraph after the delete: %q", line)
 	if strings.Contains(line, nilOriginWord) || strings.Contains(line, "**") {
 		t.Errorf("the room's paragraph reads %q: the deleted bold run is still there", line)
@@ -475,4 +493,98 @@ func testANilOriginCommitAfterARecover(t *testing.T) {
 	waitForLandedAppends(t, service, artifactID)
 	sh.check(t)
 	replicaHoldsTheRoom(t, room, service.replicaOf(room), "the nil-origin commit and the keystroke after it")
+}
+
+// testANilOriginCommitAnOpenWritesShadowMeasures is the other path on which a room credits a
+// nil-origin commit, and a live write is what opens it: a commit the room's observer measured as
+// no change carries, while a write is open, the browsers connected as the room took it
+// (unchangedCredit), for the write's shadow to store it with where the shadow measures it a
+// change after all (storedClasses). A shadow holding no document measures every class in its
+// window as a change (roomShadow.measure), so a cleanup of ygo's committed under an open write
+// would be stored as a change by every connected browser - an edit none of them made - unless
+// unchangedCredit refuses a nil origin as creditContentChange does (originCreditsNoOne).
+func testANilOriginCommitAnOpenWritesShadowMeasures(t *testing.T) {
+	service, artifactID, sh := newRenderReuseService(t)
+	watch := watchNilOriginCredits(t, service, artifactID)
+
+	// Bob is connected and types: his keystroke is the room's first commit, which starts the
+	// replica, and he is the browser the shadow credit would name.
+	bob := newRoomPeer(t, service, artifactID, 2, reuseBob, nil)
+	typed := bob.text(nilOriginParagraph)
+	bob.send(func(txn *crdt.Transaction) { typed.Insert(txn, typed.Len(), " and typed.", nil) })
+	waitForLandedAppends(t, service, artifactID)
+	room := service.srv.GetDoc(artifactID)
+	if room == nil {
+		t.Fatal("the browser loaded no room")
+	}
+
+	// A write open on the room. The writer slot is all unchangedCredit reads of it, and a write
+	// that has published nothing leaves the room's state no shadow, so the room's own flush
+	// measures no class and the shadow below is this test's.
+	state := service.lockState(artifactID)
+	state.liveWriter = &liveWrite{}
+	service.unlockState(artifactID, state)
+	defer func() {
+		state := service.lockState(artifactID)
+		state.liveWriter = nil
+		service.unlockState(artifactID, state)
+	}()
+
+	// A commit with no origin that renders exactly as the room did before it, which is what ygo's
+	// cleanup of markers covering no text is: an insert the same transaction deletes changes the
+	// rendering on no pinned ygo, so the room's observer measures this commit as no change and
+	// takes the shadow credit for it.
+	m := sh.measure()
+	mark := watch.mark()
+	const cleaned = " Cleaned up."
+	writeInRoom(t, service, artifactID, "the cleanup ygo commits under an open write", noOrigin, func(fragment *crdt.YXmlFragment) func(*crdt.Transaction) {
+		text := xmlTextWithPrefix(t, fragment, nilOriginParagraph)
+		at := text.Len()
+		return func(txn *crdt.Transaction) {
+			text.Insert(txn, at, cleaned, nil)
+			text.Delete(txn, at, len(cleaned))
+		}
+	})
+	logged, seen := loggedSince(sh, m), watch.since(mark)
+	reportLogged(t, logged, seen)
+	if len(seen) != 1 || len(logged) != 1 {
+		t.Fatalf("the nil-origin transaction left %d logged update(s) and %d observed commit(s), want one of each", len(logged), len(seen))
+	}
+	commit := seen[0]
+	if commit.origin != "nil" || describeOrigin(logged[0].origin) != "nil" {
+		t.Fatalf("the commit's origin is %s (the room logged %s), want nil: the transaction named no origin at all",
+			commit.origin, describeOrigin(logged[0].origin))
+	}
+	if commit.changed {
+		t.Fatal("the room classified the nil-origin commit as a content change, so this test no longer reaches the shadow's credit (unchangedCredit)")
+	}
+	if commit.roomCredited {
+		t.Errorf("the nil-origin commit carries %v for the open write's shadow: ygo's own cleanup transaction is nobody's edit (reearth/ygo #284)",
+			commit.roomAuthors)
+	}
+	waitForLandedAppends(t, service, artifactID)
+
+	// What the write's shadow stores the commit as. A shadow left holding no document - a room
+	// update that did not apply to the fork leaves none (applyLocked) - measures the commit as a
+	// change, so the class is stored as a change with the authors the room recorded for it, and
+	// those must be none.
+	class := commit.class
+	if class == nil {
+		t.Fatal("the room recorded no class for the nil-origin commit, so there is nothing for a shadow to store")
+	}
+	if class.seq == 0 {
+		t.Fatal("the room recorded the nil-origin commit at no commit position, so no shadow window holds it")
+	}
+	window := shadowWindow{shadow: &roomShadow{}, cursor: class.cursor, from: class.seq - 1}
+	stored := storedClasses(artifactID, window, []*queuedClass{class})
+	if !stored[0].changed {
+		t.Fatal("a shadow holding no document measured the nil-origin commit as no change, so this test no longer reaches the author path")
+	}
+	if stored[0].credit != nil {
+		t.Errorf("the write's shadow stores the nil-origin commit as a change by %v: nobody typed it",
+			sortedActorKeys(stored[0].credit.record.authors))
+	}
+
+	sh.check(t)
+	replicaHoldsTheRoom(t, room, service.replicaOf(room), "the nil-origin commit under an open write")
 }

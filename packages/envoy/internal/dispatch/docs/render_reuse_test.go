@@ -1301,7 +1301,7 @@ func TestRenderReuseAReplicaRebuiltFromTheLogHoldsWhatTheRoomParked(t *testing.T
 		t.Fatal("the room parked nothing, so nothing here is tested")
 	}
 	replicaHoldsTheRoom(t, live, replica, "the peer's second transaction")
-	if rendered := renderOfRoom(t, live); strings.Contains(rendered, firstText) || strings.Contains(rendered, secondText) {
+	if rendered := roomMarkdown(t, service, artifactID); strings.Contains(rendered, firstText) || strings.Contains(rendered, secondText) {
 		t.Error("the room renders a paragraph of the peer's while the transaction that holds its place is missing")
 	}
 
@@ -1316,7 +1316,7 @@ func TestRenderReuseAReplicaRebuiltFromTheLogHoldsWhatTheRoomParked(t *testing.T
 	replicaHoldsTheRoom(t, live, replica, "the peer's first transaction")
 	waitForLandedAppends(t, service, artifactID)
 	sh.check(t)
-	rendered := renderOfRoom(t, live)
+	rendered := roomMarkdown(t, service, artifactID)
 	if !strings.Contains(rendered, firstText) || !strings.Contains(rendered, secondText) {
 		t.Error("the room's rendering is missing the text one of the peer's transactions wrote")
 	}
@@ -1447,21 +1447,6 @@ func heldReplicaMarkdown(t *testing.T, replica *renderedReplica) *string {
 	heldReplica(t, replica)
 	defer replica.mu.Unlock()
 	return replicaMarkdown(replica)
-}
-
-// renderOfRoom is a render of the room as of now, taken from a copy of it, as a read of the
-// document renders it.
-func renderOfRoom(t *testing.T, live *crdt.Doc) string {
-	t.Helper()
-	copied, err := snapshotDocument(live)
-	if err != nil {
-		t.Fatalf("copy the room: %v", err)
-	}
-	markdown, _, err := shadowRender(copied)
-	if err != nil || markdown == nil {
-		t.Fatalf("render the room: %v", err)
-	}
-	return *markdown
 }
 
 // storedClassOf is the content_changed the room's persistence stored for update, the very bytes

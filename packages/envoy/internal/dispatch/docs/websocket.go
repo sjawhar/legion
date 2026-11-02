@@ -745,8 +745,9 @@ func soleConnectedActor(connected map[uint64]model.Actor) (sole *model.Actor, am
 // and attributes each one not already recorded (observeAskBlocks), in the same critical section
 // the update observer classifies the update in (renderedReplica.observe): the observer classifies
 // each update in the order the replica took them, so the room's record of its ask blocks moves
-// forward only. The walk that lists those ask blocks (the asks function renderedReplica.observe
-// hands its classify) runs only once the cheap markdown comparison inside observe already showed a
+// forward only. The walk that lists those ask blocks is the asks function the replica's measure
+// of the update answers with (changedBy), which takeLocked hands the replica's drainClassifier,
+// classifyDrained, the caller here: that measure answers one only for an update it found to be a
 // real change, so the no-op path, the common one, pays for neither. A nil askBlocks is that
 // walk's answer when it could not read the document, never a document holding no ask block
 // (askBlockIDs): the room's record is left as it is.
@@ -769,38 +770,52 @@ func (s *Service) observeAskBlocksForUpdate(room string, askBlocks map[string]st
 	state.observeAskBlocks(askBlocks, author)
 }
 
-// creditContentChange credits an observed content change to its authors. A service repair (origin
-// registered by serviceTransact) is credited to no one; a browser that was only connected while it
-// happened is not credited either. A committed transaction's live write, which Ledger.Commit
-// applies, was credited when the transaction committed and is not credited again. An update with
-// no origin at all is credited to no one either: every commit a loaded room makes names an origin
-// - a browser's update names the peer ygo applied it for (its *peer, ygo's provider/websocket
-// peer_update.go), a service mutation names the sentinel ygo's Server.Apply makes for the call
-// (applyOriginSentinel), which serviceTransact registers as a service origin, a repair names its
-// own *identityClosureOrigin (applySuppressed) and a published live write its *liveWriteOrigin.
-// The room's own load decodes the stored history with no origin, before OnLoadDocument opens the
-// update log and registers this observer (ygo's loadRoomDoc), so no observer ever sees it. A nil
-// origin here can therefore only be ygo's own cleanup transaction, which a document commits for
-// itself after a remote delete leaves a text's formatting markers covering no text (reearth/ygo
-// #284): nobody typed it, and on the replica's recover path, where every update it could not
-// place counts as a content change, crediting it would hand every connected browser an edit none
-// of them made (INFRA-644). Any other update is a browser edit by one of the peers, which ygo
-// applies while that peer's connection is registered. ygo does not say which connection
-// sent it, so every connected peer is credited with it: when exactly one is connected it is the
-// latest edit source and replaces `lastActor`, and otherwise the edit cannot be pinned on a single
-// peer and no older actor may stand in for it.
+// originCreditsNoOne is whether a commit's origin names nobody to credit for the update, the one
+// rule both credit paths follow (creditContentChange, unchangedCredit). Three origins credit no
+// one. A service repair's origin, the one serviceTransact registered: the service made that
+// commit, and a browser that was only connected while it happened is not credited for it. A
+// published live write's *liveWriteOrigin: Ledger.Commit credited that write when its transaction
+// committed, and it is not credited again - a case only creditContentChange reaches, since
+// classifyDrained takes no shadow credit for a published update at all (it calls unchangedCredit
+// for an unpublished update alone), so naming it here leaves unchangedCredit's answer on every
+// reachable path the answer it gave before. And no origin at all: every commit a loaded room makes
+// names an origin - a browser's update names the peer ygo applied it for (its *peer, ygo's
+// provider/websocket peer_update.go), a service mutation names the sentinel ygo's Server.Apply
+// makes for the call (applyOriginSentinel), which serviceTransact registers as a service origin, a
+// repair names its own *identityClosureOrigin (applySuppressed) and a published live write its
+// *liveWriteOrigin. The room's own load decodes the stored history with no origin, before
+// OnLoadDocument opens the update log and registers this observer (ygo's loadRoomDoc), so no
+// observer ever sees it. A nil origin here can therefore only be ygo's own cleanup transaction,
+// which a document commits for itself after a remote delete leaves a text's formatting markers
+// covering no text (reearth/ygo #284): nobody typed it, so neither credit path may name anyone for
+// it. On the replica's recover path, where every update it could not place counts as a content
+// change, crediting it would hand every connected browser an edit none of them made (INFRA-644);
+// on the shadow path, a cleanup the room measured as no change is stored as a change wherever an
+// open write's shadow measures one (storedClasses), which would store those browsers as its
+// authors.
+func (s *Service) originCreditsNoOne(origin any) bool {
+	if origin == nil {
+		return true
+	}
+	if _, published := origin.(*liveWriteOrigin); published {
+		return true
+	}
+	_, service := s.serviceOrigins.Load(origin)
+	return service
+}
+
+// creditContentChange credits an observed content change to its authors, or to no one where its
+// origin credits no one (originCreditsNoOne). Any other update is a browser edit by one of the
+// peers, which ygo applies while that peer's connection is registered. ygo does not say which
+// connection sent it, so every connected peer is credited with it: when exactly one is connected
+// it is the latest edit source and replaces `lastActor`, and otherwise the edit cannot be pinned
+// on a single peer and no older actor may stand in for it.
 //
 // The credit goes to F, the room's in-flight credits, until the edit's append lands it
 // (AppendUpdateWithCredit): the returned UpdateCredit is how that append reaches it. This takes
 // no advisory lock and touches no database: nothing reads F without holding state.mu.
 func (s *Service) creditContentChange(room string, origin any, hold *roomHold) *UpdateCredit {
-	if origin == nil {
-		return nil
-	}
-	if _, published := origin.(*liveWriteOrigin); published {
-		return nil
-	}
-	if _, service := s.serviceOrigins.Load(origin); service {
+	if s.originCreditsNoOne(origin) {
 		return nil
 	}
 	state := s.lockState(room)
@@ -815,13 +830,15 @@ func (s *Service) creditContentChange(room string, origin any, hold *roomHold) *
 
 // unchangedCredit is the credit a browser update the room's update observer measured as no change
 // carries for the room's shadow (documentUpdateClass.roomCredit): the peers connected as the room
-// took it, as creditContentChange would credit them, recorded only while a live write is open,
-// whose shadow may measure the update a change once the write is stored before it. It is not in F
-// and takes no credit sequence: no version lists an update recorded as no change, and its append
-// writes these authors only when it stores the update as a change. Nil for a service repair, and
-// while no write is open.
+// took it, the authors creditContentChange would credit the same commit to, recorded only while a
+// live write is open, whose shadow may measure the update a change once the write is stored before
+// it. It is not in F and takes no credit sequence: no version lists an update recorded as no
+// change, and its append writes these authors only when it stores the update as a change. It
+// weighs the origin by the same rule that path does (originCreditsNoOne), so a service repair and
+// a commit with no origin at all - ygo's own cleanup, which nobody typed - carry no authors for a
+// shadow to store them with either. Nil too while no write is open.
 func (s *Service) unchangedCredit(room string, origin any, hold *roomHold) *UpdateCredit {
-	if _, service := s.serviceOrigins.Load(origin); service {
+	if s.originCreditsNoOne(origin) {
 		return nil
 	}
 	state := s.lockState(room)

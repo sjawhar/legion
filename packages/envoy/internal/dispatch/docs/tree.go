@@ -336,6 +336,22 @@ func renderDocumentForUpdate(fragment *crdt.YXmlFragment) (string, *pmdoc.Node, 
 	return markdown, tree, layout, err
 }
 
+// renderFragmentMarkdown is renderDocumentForUpdate's read and render without its layout and
+// without its tree: what fragment renders now, for the measures that compare one rendering with
+// another and keep neither's blocks - a live write's shadow (roomShadow.renderLocked) and the
+// fold of a document's stored updates (renderStoredFold) - which pmdoc.RenderWithLayout would
+// hand a pmdoc.Layout each has nothing to do with.
+func renderFragmentMarkdown(fragment *crdt.YXmlFragment) (string, error) {
+	if fragment == nil {
+		return "", errDocUnloaded
+	}
+	tree, err := pmdoc.ReadForRendering(fragment)
+	if err != nil {
+		return "", documentSchemaError(err)
+	}
+	return documentMarkdown(tree)
+}
+
 // snapshotDocument copies doc's state as of one moment. Encoding it takes the document's lock, which
 // every peer update and service write holds while it applies, so the copy is never a tree half
 // way through a write - which a direct walk of a resident room's live tree can read, since the

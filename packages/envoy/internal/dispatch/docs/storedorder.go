@@ -250,7 +250,7 @@ type storedRender struct {
 }
 
 func renderStoredFold(doc *crdt.Doc) storedRender {
-	markdown, _, _, err := renderDocumentForUpdate(doc.GetXmlFragment(fragmentName))
+	markdown, err := renderFragmentMarkdown(doc.GetXmlFragment(fragmentName))
 	return storedRender{markdown: markdown, renders: err == nil}
 }
 
