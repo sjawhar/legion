@@ -2,40 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-771",
-  "previousHandoff": "e7707a119f1d16f54c8e98ad08c1c6f97c6a7543",
-  "round": 5,
-  "headReviewed": "166921ddbda3161e826d686b51183b29f66a2ecc",
-  "codeHead": "f7fdb91f1d24",
-  "base": "main (merge base 0642a37a)",
+  "previousHandoff": "0aa1d047d9e05d07791c400761d5d1e1edb8eb0b",
+  "round": 6,
+  "headReviewed": "beee61aae4d347cd8dbf8efa34c4dc7ef2ff988f",
+  "codeHead": "a199decc11e2",
+  "base": "main (merged forward at a199decc)",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 1,
-  "minor": 3,
-  "roundFourFindings": "Fixed, each pinned by a test that goes red under its mutation: the gap carried across passes, the private rule asked before the uncaptured one (whole sentences asserted), the refused-CAS and exhaustion tests, the loop moved into registerSession with one error exit, InterestPlan.Requested removed and the bound beside the loop, the stale names, the self-comparing assertion, the three stand-ins on consumerDelivery.",
-  "ownedMistake": "Round 4's review asked that a serving-port body refused on a later pass keep the consumer an earlier pass gave it. That request was wrong: the earlier pass's consumer is filtered on an earlier plan, so keeping it breaks the filter-equals-row rule round 3 fixed. The important finding below asks for that branch to be removed.",
-  "ci": "Required on main: ci-ok, pr-title. The newest pull_request CI run is 41377460074 at f8905ed3, still queued at 03:51Z; GitHub has started no pull_request run for f7fdb91f or 166921dd (pushed about 03:27Z), whose message carries no skip-checks line, so no CI stands for the code head f7fdb91f. ci-ok unread. pr-title success at f8905ed3 (41377619022).",
-  "thermonuclear": "Both run once at f7fdb91f over 7b9c47fb..f7fdb91f, with mutation runs: thermonuclear-deep-review CHANGES (1 medium, 2 minor), thermonuclear-code-quality CHANGES (1 important, 2 minor). Both found the same defect independently, from opposite directions.",
+  "important": 2,
+  "minor": 5,
+  "roundFiveFindings": "Fixed and pinned: the serving-port consumer carry withdrawn (re-adding it reds TestSessionConsumerServingPortAnswersNoConsumerWhenALaterPassIsRefused at :845), the gap carry (dropping it reds :428), the exhaustion test's literal 3 (attempts=2 reds :470). The consumer a refused later pass leaves behind is harmless: no relay pulls it, the server removes it after the 72 h inactive threshold, and the next registration re-filters it.",
+  "ci": "Required on main: ci-ok, pr-title. Run 41393385914 at a199decc still queued at 06:45Z; ci-ok unread. A request for changes does not wait on CI; this push touches only .legion/INFRA-771/ and carries skip-checks: true.",
+  "thermonuclear": "Both run once at a199decc over c01d14e9 and the merge, with mutation runs: thermonuclear-deep-review CHANGES (1 high, 1 medium, 3 minor), thermonuclear-code-quality CHANGES (1 critical, 6 minor). Both found the outbox receipt wait independently; both reproduced it.",
   "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/cmd/listener/session_delivery.go:116-122; session_delivery_test.go (TestSessionConsumerKeepsAServingPortsConsumerWhenALaterPassIsRefused, f7fdb91f)",
-      "description": "carrying returns the earlier pass's consumer when a serving-port pass is refused one. That consumer is filtered on an earlier plan while the loop ends on the later plan's row, so the entry is written as consumer delivery with a filter that disagrees with the row. Probes on scratch copies: row [agent, PRB-1, PRB-2] with filter [agent, PRB-1], so ConsumerHoldsStored makes the durable path and role lane skip PRB-2 while the consumer never holds it; and the tester's own scenario, row [agent, PORT-1] with filter [agent, PORT-1, PORT-2], relaying an unsubscribed topic. Without the branch the entry has no consumer delivery and the durable path pushes to the port, losing nothing. Delete the branch and its doc bullet, carry only the gap, and rewrite f7fdb91f's test to assert the refused serving-port pass answers no delivery and writes no consumer-delivery entry. Its comment that the relay stays is also false (session_relay.go onChange/wanted/apply cancels it)."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/listener/session_delivery_test.go:467",
-      "description": "The exhaustion test compares passes with registrationPlanAttempts, so it passes at 1, 2, 5 and 10 (mutation runs); assert the literal 3."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/listener/session_delivery.go:109",
-      "description": "Names subscribeHandler; the loop is registerSession."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/listener/session_delivery.go:114-115; api.go:1535-1537, :1561",
-      "description": "The doc says the answer must carry the gap, but a registration that creates the consumer with a gap and is then refused (503 on exhaustion, or a portless refusal on a later pass) leaves a consumer the next heartbeat finds with no gap, so the session is never told. Not new in this delta; narrow the claim or keep the gap somewhere a refused answer does not lose."
-    }
-  ],
-  "assignment": "The daemon task for this round (head 166921dd) arrived after the round was reviewed at e7707a11 (review 5731931178, REQUEST_CHANGES); that completion was refused HANDOFF_STALE_ASSIGNMENT, recording nothing. Nothing changed on the branch since; this handoff and the confirming REQUEST_CHANGES at the head it makes carry the same findings for this assignment."
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/outbox/role.go:155, :171-175; internal/bus/async.go:47-49", "description": "The merge brought main's Dispatch outbox role forward, which waits for the holder's empty receipt unless the holder has a serving port (streamAck: entry.Port != 0). This PR removes every receipt the plugins sent and every agent-subject subscription, so for every portless holder (every Oh My Pi and Claude Code session) the wait never ends: the event is recorded failed with ErrReceiptTimeout, counted unanswered, retried on every back-off past the dead-letter count, the owner's later events held behind it (batch.go:589, :594, :598-603), and published_destinations never records the role, while the holder does receive the one stored copy. Both review agents reproduced it on a scratch copy with a real NATS and Postgres. async.go:47-49 already says no role forward answers it. Count a role forward reached on the stream's acknowledgement for every holder (AcceptStreamAck true, streamAck and its Port branch deleted); rewrite the stand-ins that answer receipts (outbox role_test.go:225, :525 and the :590-614 premise, order_test.go:257, throughput_test.go:350, core_denied_test.go:88, cmd/dispatch multiprocess_test.go:490-498, outbox_load_steps_test.go:378-386); correct AGENTS.md:2728, :2742 (which contradicts :2563), :4024, cmd/dispatch/README.md:606 and :2040-2041, cmd/dispatch/main.go:503's metric help, THROUGHPUT.md; then remove the receipt branch of Request, AcceptStreamAck and ErrReceiptTimeout if nothing calls them."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/session_delivery.go:122-131; api.go:1541", "description": "carrying reads the gap only from the previous pass's outcome, so created-with-gap, then a serving-port pass that gets no consumer, then a pass that finds it answers gap:false (both agents reproduced it; f7fdb91f kept it through the carry c01d14e9 removed). Keep a gap flag in registerSession that only turns on and stamp it on the final answer; add the three-pass case. Correct api.go:1501-1502 ('what the first pass learned of the consumer') and session_delivery.go:161 ('subscribeHandler's loop')."},
+    {"severity": "minor", "file": "packages/envoy/docs/architecture.md", "description": "The merge dropped main's paragraph on the outbox forwarding role-routed events itself (roles.ResolveHolder) and the lane's Nats-Msg-Id rule (key vs event_id); restore it, worded for stored-only forwards."},
+    {"severity": "minor", "file": "packages/envoy/AGENTS.md:2544; internal/bus/async.go:309; cmd/listener/delivery_role_stale_holder_test.go:71-83; main's .changes pr2395 fragment", "description": "Name the deleted RequestCoreTo; the stale-holder test's stand-in still answers receipts."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/delivery_role_forward_test.go:53-64, :73-82", "description": "A Respond(nil) subscription nothing reads (Wait skips non-ack replies) and a hand copy of startRoleForward."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/confirmed.go:350; internal/bus/nats.go:1742-1744", "description": "The deleted TestPublishRouteStoresOneCopyOfARoleMessageItForwardsTwice was the only pin of the publish route's MsgId: passing \"\" there still passes the Publish|Role|Forward listener tests. Restore a stored-only case (the first wait fails after the stream stored the copy; assert one copy) and make msgID required."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/session_delivery.go:113-116", "description": "Says the flag survives the re-plan within a registration; true once the important gap finding is fixed."}
+  ]
 }
