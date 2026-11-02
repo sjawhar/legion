@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { machineID } from "../machine";
 import {
   createEnvoyClient,
@@ -6,6 +7,16 @@ import {
   EnvoyApiError,
   newClientInstanceID,
 } from "../transport";
+
+const noInterestsFixture = JSON.parse(
+  readFileSync(
+    new URL("../../../contracts/fixtures/envoy-session-no-interests.json", import.meta.url),
+    "utf8"
+  )
+) as {
+  readonly before_this_change: Record<string, unknown>;
+  readonly after_this_change: Record<string, unknown>;
+};
 
 type RecordedFetch = {
   readonly fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -601,8 +612,93 @@ describe("EnvoyClient", () => {
 
     const sessions = await client.listSessions();
 
-    expect(sessions).toEqual([unversioned, versioned]);
+    expect(sessions).toEqual([
+      { ...unversioned, roles: [], capabilities: [] },
+      { ...versioned, roles: [], capabilities: [] },
+    ]);
     expect(recorded.requests[0]?.url).toBe("http://listener/v1/sessions");
+  });
+
+  test("reads a listener's null topics as an empty list and keeps the row's other values", async () => {
+    const recorded = recordFetch([jsonResponse([noInterestsFixture.before_this_change])]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const sessions = await client.listSessions();
+
+    expect(sessions).toEqual([
+      {
+        session_id: "ses_infra742_no_interests",
+        machine_id: "envoy-fixture",
+        host: "envoy-fixture",
+        dir: "/work/infra-742-fixture",
+        port: 0,
+        title: "INFRA-742 fixture session",
+        topics: [],
+        roles: [],
+        capabilities: [],
+        self_subscribed: true,
+        last_seen: 0,
+      },
+    ]);
+  });
+
+  test("reads the fixed listener's empty lists unchanged", async () => {
+    const recorded = recordFetch([jsonResponse([noInterestsFixture.after_this_change])]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const sessions = await client.listSessions();
+
+    expect(sessions[0]).toMatchObject({ topics: [], roles: [], capabilities: [] });
+  });
+
+  // Inline rather than in the fixture: the fixture states what a listener on main writes, and
+  // these two rows — null roles and capabilities, and both keys absent — are what a tolerant
+  // reader must also accept from a listener it does not deploy with.
+  test("reads null and absent roles and capabilities as empty lists", async () => {
+    const base = {
+      session_id: "ses_null",
+      machine_id: "host-a",
+      dir: "/work",
+      port: 13381,
+      title: "Envoy QA",
+      topics: [],
+      self_subscribed: false,
+    };
+    const recorded = recordFetch([
+      jsonResponse([
+        { ...base, roles: null, capabilities: null },
+        { ...base, session_id: "ses_absent" },
+      ]),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const sessions = await client.listSessions();
+
+    expect(sessions).toEqual([
+      { ...base, topics: [], roles: [], capabilities: [] },
+      { ...base, session_id: "ses_absent", topics: [], roles: [], capabilities: [] },
+    ]);
+  });
+
+  // The tolerance reads a null, nothing more: a wrong element type is still a contract break and
+  // must fail rather than read as empty.
+  test("still rejects a session row whose topics hold a wrong element type", async () => {
+    const recorded = recordFetch([
+      jsonResponse([
+        {
+          session_id: "ses_bad",
+          machine_id: "host-a",
+          dir: "/work",
+          port: 13381,
+          title: "Envoy QA",
+          topics: [1],
+          self_subscribed: false,
+        },
+      ]),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    await expect(client.listSessions()).rejects.toThrow();
   });
 
   test("normalizes non-success responses into a typed API error", async () => {

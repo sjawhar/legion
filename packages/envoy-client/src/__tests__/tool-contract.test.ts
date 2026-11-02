@@ -232,6 +232,8 @@ describe("sessionsOnMachine", () => {
     port: 0,
     title: "",
     topics: [],
+    roles: [],
+    capabilities: [],
     self_subscribed: true,
   });
   const onHub = session("ses_on_hub", "envoy-hub", "gke-node-7");
@@ -258,6 +260,8 @@ describe("sessionsOnMachine", () => {
       port: 0,
       title: "",
       topics: [],
+      roles: [],
+      capabilities: [],
       self_subscribed: true,
     };
 
