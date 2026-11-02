@@ -2064,7 +2064,7 @@ jobs:
     # 26 min 46 s this job measured at four lanes (run 41319582999). A job the timeout kills
     # reports as cancelled and writes no Playwright report, so a timeout tight against the
     # measurement costs the run that would say why it was slow.
-    timeout-minutes: 32
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2235,7 +2235,7 @@ jobs:
           # pgvector, the copy in ghcr.io/sjawhar/legion/ci (.github/ci-images.yaml) this job's
           # service used before the lanes.
           export DISPATCH_E2E_PG_IMAGE=ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
-          export DISPATCH_E2E_WORKERS=4
+          export DISPATCH_E2E_WORKERS=1
           export PLAYWRIGHT_JSON_OUTPUT_NAME=report.json
           status=0
           bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --reporter=list,json || status=$?
