@@ -52,9 +52,9 @@ required check failed, so the merge waits.
    cd -- "$LEGION_WORKSPACE" && gh api --method PATCH repos/<owner>/<repo>/pulls/<n> -F body=@"$dir/body.md"
    ```
 
-   The checks your push starts read the body as it stands then, and READY reads the head your
-   push makes. An edit after the push re-runs only checks triggered by an edited body, and they
-   run at the approved head, without your commits, where they may fail.
+   The checks your push starts read the body as it stands then, and the merger merges the head
+   your push makes. An edit after the push re-runs only checks triggered by an edited body, and
+   they run at the approved head, without your commits, where they may fail.
 
 When the push is refused after step 4 wrote the body, write `$dir/before.md` back with the same
 command before you report the refusal, so the body matches the head GitHub has.

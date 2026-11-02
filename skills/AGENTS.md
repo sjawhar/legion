@@ -17,7 +17,7 @@ They are Markdown instructions loaded by Oh My Pi sessions; the daemon and the t
 | `legion-controller/` | the controller root process | wake routing, admitting the work a person hands over, giving each clear defect a role reports to the tree that owns its code and filing one no tree owns, asking a person about every other finding, the daily report, escalation |
 | `legion-oracle/` | any role doing research | repository-grounded research |
 | `legion-retro/` | the implementer, at retro | the pre-merge retrospective, its Dispatch message, its last commit removing the issue's `.legion/<issue>/` from the head that merges, and the PR body content the pull request's changed paths require at that head |
-| `legion-worker/` | planner, implementer, tester, reviewer, merger | the phase contracts: handoffs, GitHub identity, PR body and READY discipline, the merge-gate order |
+| `legion-worker/` | planner, implementer, tester, reviewer, merger | the phase contracts: handoffs, GitHub identity, PR body and merge discipline, the merge-gate order |
 | `outside-message/` | any session before text reaches a person outside the company | when the operator's approval is needed, the two exclusions, the four steps before the ask, and what the ask carries |
 | `plain-words/` | any session before it sends text a person reads | the empty verb phrases to delete and the literal thing to write instead |
 | `thermonuclear-code-quality/` | the `thermonuclear-code-quality` agent | the maintainability rubric of the reviewer's pair (adapted from the MIT-licensed Thermos plugin in `cursor/plugins`; `LICENSE` beside it) |

@@ -66,7 +66,6 @@ permissions: {}
 concurrency:
   group: changelog-fold-${{ github.ref }}
   cancel-in-progress: false
-
 jobs:
   # Plans the fold and renders the planned fragments with changie into notes, one file per package
   # and label, for fold_publish. It runs changie, a third-party binary, so it holds no write scope

@@ -20,6 +20,8 @@ import {
   LegionSignOffRequest,
   type LegionState,
   LegionStateResponse,
+  LegionTurnOutcomeRequest,
+  LegionTurnOutcomeResponse,
   LegionWaveReleaseRequest,
   LegionWaveReleaseResponse,
 } from "@legion/contracts/legion-api";
@@ -30,11 +32,12 @@ import type { z } from "zod";
  * The plugin's client for the daemon (`packages/daemon`), the one `extensions/legion.ts` boots
  * every Legion session through.
  *
- * Every response is read through the strict schemas of `@legion/contracts/legion-api`, which the
- * daemon's golden tests hold to its own types; the requests are the claim wire of
- * `packages/daemon/internal/claim/wire.go`, which refuses a member it does not read. There is no
- * secret recovery: the daemon persists a registration's capability before it answers, so a
- * restart forgets no secret.
+ * Every response is read through the schemas of `@legion/contracts/legion-api`, which the
+ * daemon's golden tests hold to its own types; a field those schemas do not name is dropped
+ * rather than refused (`parseResponse`), so a session one release behind its daemon keeps
+ * working. The requests are the claim wire of `packages/daemon/internal/claim/wire.go`, which
+ * refuses a member it does not read. There is no secret recovery: the daemon persists a
+ * registration's capability before it answers, so a restart forgets no secret.
  */
 
 /** `claim.RegisterRequest`: the pane's boot token and the session this agent became.
@@ -72,6 +75,12 @@ export interface LegionDaemonClient {
   readonly registerController: (input: RegisterInput) => Promise<LegionControllerRegistration>;
   readonly ready: (input: ReadyInput) => Promise<void>;
   readonly exit: (input: ExitInput) => Promise<void>;
+  /** `claim.TurnOutcomeRequest`: how one of the claim's turns ended, under the sequence the
+   * reporting plugin counted itself (`packages/pi-legion/src/turn-outcome.ts`). The answer is the
+   * trailing run of refused turns the daemon derived and whether this report failed the claim. */
+  readonly turnOutcome: (
+    input: z.input<typeof LegionTurnOutcomeRequest>
+  ) => Promise<z.output<typeof LegionTurnOutcomeResponse>>;
   readonly grant: (
     input: z.input<typeof LegionGrantRequest>
   ) => Promise<z.output<typeof LegionGrantResponse>>;
@@ -239,9 +248,11 @@ export function daemonUnreachable(error: unknown): "refused" | "dropped" | undef
  * applies at most once however often it arrives may run through it: `handoff_complete` (a repeat
  * is answered HANDOFF_ALREADY_RECORDED, or, once the completion moved the issue, refused as no
  * longer the role's phase), `sign_off` (a repeat finds the issue out of accepting and changes
- * nothing) and `register_gate` (its fact is keyed by the gate's issue, generation, document,
+ * nothing), `register_gate` (its fact is keyed by the gate's issue, generation, document,
  * version and Dispatch sequence; a repeat after the sequence moved is a new fact, which the gate
- * takes as a re-registration of the same document and tells no one again). `call` is the whole
+ * takes as a re-registration of the same document and tells no one again) and
+ * `claims/turn-outcome` (one outcome per claim, generation and sequence, so a repeat writes the
+ * cell its first attempt wrote). `call` is the whole
  * operation, grant mint included, since grants live in the daemon's memory and do not survive
  * its restart. `onRetrying` is told once. A daemon refusal after a dropped attempt is told that
  * the dropped one may have been applied.
@@ -310,8 +321,43 @@ export async function retryWhileDaemonRestarts<T>(
   }
 }
 
-/** `body` read through `schema`, or the reason it is not what the schema describes. */
-function parseStrictly<T>(
+/** Deletes from `json` every key the schema did not recognize, at the paths zod reported them at,
+ * and answers whether any key went. What it deletes from is this module's own `JSON.parse` result,
+ * which no caller has seen yet. */
+function dropUnknownFields(json: unknown, issues: readonly z.core.$ZodIssue[]): boolean {
+  let dropped = false;
+  for (const issue of issues) {
+    if (issue.code !== "unrecognized_keys") continue;
+    let node: unknown = json;
+    for (const step of issue.path) {
+      node =
+        typeof node === "object" && node !== null
+          ? (node as Record<PropertyKey, unknown>)[step]
+          : undefined;
+    }
+    if (typeof node !== "object" || node === null) continue;
+    const object = node as Record<string, unknown>;
+    for (const key of issue.keys) {
+      if (key in object) {
+        delete object[key];
+        dropped = true;
+      }
+    }
+  }
+  return dropped;
+}
+
+/**
+ * `body` read through `schema`, or the reason it is not what the schema describes.
+ *
+ * A field the schema does not name is dropped and the parse run again, because a session runs the
+ * release before its daemon's through every roll: on 2026-10-30 a daemon that had begun answering
+ * `GET /legion/v1/state` with two new fields left every session of the release before it with a
+ * dead `legion` tool, each call refused here over a field no agent had asked for. A field the
+ * schema does name, carrying the wrong type, is still refused: tolerating a field this build never
+ * heard of is not tolerating one the daemon got wrong.
+ */
+function parseResponse<T>(
   schema: z.ZodType<T>,
   body: string
 ): { readonly value: T } | { readonly problem: string } {
@@ -321,13 +367,20 @@ function parseStrictly<T>(
   } catch (error) {
     return { problem: `not JSON (${messageFor(error)})` };
   }
-  const parsed = schema.safeParse(json);
-  if (parsed.success) return { value: parsed.data };
-  return {
-    problem: parsed.error.issues
-      .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
-      .join("; "),
-  };
+  // Every pass drops at least one key and a body holds finitely many, so this ends. A pass is run
+  // again rather than once because dropping a key can take the parse further into the body, to a
+  // shape whose own unknown fields the refused pass never reached.
+  for (;;) {
+    const parsed = schema.safeParse(json);
+    if (parsed.success) return { value: parsed.data };
+    if (!dropUnknownFields(json, parsed.error.issues)) {
+      return {
+        problem: parsed.error.issues
+          .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+          .join("; "),
+      };
+    }
+  }
 }
 
 export function createLegionDaemonClient(
@@ -355,7 +408,7 @@ export function createLegionDaemonClient(
     });
     const text = await response.text();
     if (response.ok) return { status: response.status, text };
-    const refusal = parseStrictly(LegionErrorResponse, text);
+    const refusal = parseResponse(LegionErrorResponse, text);
     if ("value" in refusal) {
       const code =
         "code" in refusal.value && typeof refusal.value.code === "string"
@@ -380,14 +433,14 @@ export function createLegionDaemonClient(
     signal?: AbortSignal
   ): Promise<T> => {
     const { status, text } = await call(method, path, body, signal);
-    const parsed = parseStrictly(schema, text);
+    const parsed = parseResponse(schema, text);
     if ("problem" in parsed) {
       throw new LegionDaemonContractError(method, path, status, parsed.problem);
     }
     return parsed.value;
   };
 
-  /** Parses the request before it leaves the pane, then parses the route's strict success body. */
+  /** Parses the request before it leaves the pane, then parses the route's success body. */
   const post = <Input, Output>(
     path: string,
     request: z.ZodType<Input>,
@@ -416,6 +469,13 @@ export function createLegionDaemonClient(
       read("POST", "/legion/v1/claims/register", LegionControllerRegisterResponse, input),
     ready: (input) => acknowledge("/legion/v1/claims/ready", input),
     exit: (input) => acknowledge("/legion/v1/claims/exit", input),
+    turnOutcome: (input) =>
+      post(
+        "/legion/v1/claims/turn-outcome",
+        LegionTurnOutcomeRequest,
+        LegionTurnOutcomeResponse,
+        input
+      ),
     grant: (input) => post("/legion/v1/grants", LegionGrantRequest, LegionGrantResponse, input),
     controllerGrant: (input) =>
       post("/legion/v1/grants", LegionControllerGrantRequest, LegionGrantResponse, input),

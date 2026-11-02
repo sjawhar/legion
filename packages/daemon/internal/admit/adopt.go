@@ -13,10 +13,11 @@ import (
 )
 
 // adoption is a recorded root that joins the live tree of target, that tree's root, recorded under
-// the Dispatch parent parent (workflow's Engine.Adopt).
+// the Dispatch parent and held on the blockers of child, the release's own read of it (workflow's
+// Engine.Adopt).
 type adoption struct {
 	issue, target record.Issue
-	parent        string
+	child         intake.AdoptedChild
 }
 
 // adoptChildren applies an architect's release of children recorded outside its tree: each root
@@ -44,7 +45,7 @@ func (a *Admission) adoptChildren(ctx context.Context, tx pgx.Tx, fact intake.Ch
 			return nil, nil, fmt.Errorf("read released child %s: %w", child.Issue, err)
 		}
 		if stored != nil && stored.Tree != fact.Tree {
-			outside = append(outside, adoption{issue: *stored, parent: child.Parent})
+			outside = append(outside, adoption{issue: *stored, child: child})
 		}
 	}
 	// The tree's root and its liveness are read once for every child the release asks about.
@@ -87,7 +88,7 @@ func (a *Admission) adoptChildren(ctx context.Context, tx pgx.Tx, fact intake.Ch
 		roots = append(roots, child)
 	}
 	for _, child := range roots {
-		if err := a.engine.Adopt(ctx, tx, child.issue, child.target, child.parent); err != nil {
+		if err := a.engine.Adopt(ctx, tx, child.issue, child.target, child.child); err != nil {
 			return nil, nil, fmt.Errorf("adopt %s into the tree of %s: %w", child.issue.Key, fact.Tree, err)
 		}
 	}
@@ -168,7 +169,9 @@ func (a *Admission) adoptQueuedRoots(ctx context.Context, tx pgx.Tx, respectHold
 				return nil, nil, fmt.Errorf("read whether %s joins the tree of %s: %w", issue.Key, target.Key, err)
 			}
 			if refusal == nil {
-				candidates = append(candidates, adoption{issue: issue, target: target, parent: *issue.Parent})
+				// The sweep reads no Dispatch, so a candidate it adopts carries only its
+				// recorded parent: what it waits on is the mirror's, which enterChild reads.
+				candidates = append(candidates, adoption{issue: issue, target: target, child: intake.AdoptedChild{Issue: issue.Key, Parent: *issue.Parent}})
 			}
 		}
 		adopted := false
@@ -176,7 +179,7 @@ func (a *Admission) adoptQueuedRoots(ctx context.Context, tx pgx.Tx, respectHold
 			if slices.ContainsFunc(candidates, func(other adoption) bool { return other.issue.Key == candidate.target.Key }) {
 				continue
 			}
-			if err := a.engine.Adopt(ctx, tx, candidate.issue, candidate.target, candidate.parent); err != nil {
+			if err := a.engine.Adopt(ctx, tx, candidate.issue, candidate.target, candidate.child); err != nil {
 				return nil, nil, fmt.Errorf("adopt %s into the tree of %s: %w", candidate.issue.Key, candidate.target.Key, err)
 			}
 			adopted = true

@@ -19,35 +19,33 @@ import (
 type OutboxKind string
 
 const (
-	OutboxKindDispatchStatus    OutboxKind = "dispatch_status"
-	OutboxKindDispatchMessage   OutboxKind = "dispatch_message"
-	OutboxKindNotice            OutboxKind = "notice"
-	OutboxKindControllerNotice  OutboxKind = "controller_notice"
-	OutboxKindSupervise         OutboxKind = "supervise"
-	OutboxKindGateSeed          OutboxKind = "gate_seed"
-	OutboxKindLingerClose       OutboxKind = "linger_close"
-	OutboxKindIssueSuspend      OutboxKind = "issue_suspend"
-	OutboxKindWorkspaceRemove   OutboxKind = "workspace_remove"
-	OutboxKindMergeQueuePublish OutboxKind = "merge_queue_publish"
-	OutboxKindIssueBranch       OutboxKind = "issue_branch"
-	OutboxKindAutoMergeDisable  OutboxKind = "auto_merge_disable"
-	OutboxKindReadyMerge        OutboxKind = "ready_merge"
-	OutboxKindCheckCompare      OutboxKind = "check_compare"
-	OutboxKindCheckLook         OutboxKind = "check_look"
-	OutboxKindCheckBound        OutboxKind = "check_bound"
-	OutboxKindPhaseEnded        OutboxKind = "phase_ended"
+	OutboxKindDispatchStatus   OutboxKind = "dispatch_status"
+	OutboxKindDispatchMessage  OutboxKind = "dispatch_message"
+	OutboxKindNotice           OutboxKind = "notice"
+	OutboxKindControllerNotice OutboxKind = "controller_notice"
+	OutboxKindSupervise        OutboxKind = "supervise"
+	OutboxKindGateSeed         OutboxKind = "gate_seed"
+	OutboxKindLingerClose      OutboxKind = "linger_close"
+	OutboxKindIssueSuspend     OutboxKind = "issue_suspend"
+	OutboxKindWorkspaceRemove  OutboxKind = "workspace_remove"
+	OutboxKindIssueBranch      OutboxKind = "issue_branch"
+	OutboxKindCheckCompare     OutboxKind = "check_compare"
+	OutboxKindCheckLook        OutboxKind = "check_look"
+	OutboxKindCheckBound       OutboxKind = "check_bound"
+	OutboxKindApprovalCarry    OutboxKind = "approval_carry"
+	OutboxKindRoleMessage      OutboxKind = "role_message"
+	OutboxKindPhaseEnded       OutboxKind = "phase_ended"
 )
 
 // OutboxLane is which executor of an issue runs a kind. An issue's rows run on three lanes side by
 // side. The lifecycle lane runs the rows that start, stop and tidy the issue's roles and their
 // resources, one at a time in the order they were queued: each assumes the state its predecessor
 // leaves (a start after the branch it waits for, a workspace removal after the suspend that
-// stopped the roles). It also carries the issue's pull-request mutations, the disarm
-// (auto_merge_disable) and the READY merge's submission (ready_merge), which must never run beside
-// each other: a disarm and a submit of one pull request at once would race on GitHub, and the lane
-// (with outboxLaneFree across daemons) is what keeps them apart; and the production check's rows
+// stopped the roles). It also carries the production check's rows
 // (check_compare, check_look, check_bound), which start and end the implementer's looks in order
-// with the starts and suspends they queue. The board lane runs the issue's Dispatch writes and
+// with the starts and suspends they queue; and the approval carry (approval_carry), whose fact can
+// move the issue out of reviewing, so it runs before the start that move queues. The board lane
+// runs the issue's Dispatch writes and
 // notice publishes beside them, so a status write or a notice never waits behind a start pulling
 // an image, and a slow publish never holds a stop back. The role-message lane runs the one kind the
 // daemon addresses to a role of the issue that is not its architect (phase_ended), on a lane of its
@@ -65,8 +63,8 @@ const (
 // laneKinds is each lane's kinds in the order LaneKinds lists them. Every OutboxKind is in exactly
 // one lane (TestEveryOutboxKindIsInExactlyOneLane).
 var laneKinds = map[OutboxLane][]OutboxKind{
-	LaneLifecycle:   {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge, OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound},
-	LaneBoard:       {OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindMergeQueuePublish},
+	LaneLifecycle:   {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindApprovalCarry},
+	LaneBoard:       {OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindRoleMessage},
 	LaneRoleMessage: {OutboxKindPhaseEnded},
 }
 
@@ -127,6 +125,14 @@ type StatusWrite struct {
 	// a marked row at delivery when the re-read issue no longer carries the label: a person who took
 	// it off withdrew the handover. A hand-over row (HandOver), also a todo, is not one.
 	PersonHandover bool `json:"personHandover,omitempty"`
+	// Reassert marks the row the daemon queues to set its own status back over one a session
+	// wrote (workflow's sessionStatusWrite): the session's close or park stands in Dispatch and
+	// the record kept the daemon's status, so this row is queued observing a status the issue is
+	// not meant to be at — done, backlog or icebox — exactly as a person's handover is. The
+	// outbox's retry reads the mark to know which rule judges the row (its statusRowKind): asking
+	// the ordinary one, whether the issue is still in the workflow, would drop the row for being
+	// at the status it exists to undo.
+	Reassert bool `json:"reassert,omitempty"`
 }
 
 func (StatusWrite) OutboxKind() OutboxKind { return OutboxKindDispatchStatus }
@@ -353,6 +359,11 @@ type SuperviseRequest struct {
 	// budget, the runner finishes this row rather than retrying it as RequestRetry with fresh
 	// budgets: the failed claim stays failed for the boot report to name.
 	RuleResume bool `json:"ruleResume,omitempty"`
+	// FreshSession marks a start that must not resume the session its claim recorded: the
+	// operator's `legion claims retry --fresh-session` (api's retryClaim). The runner passes it
+	// to the claim's retry, which forgets the session inside that one decision (supervise's
+	// RequestRetry), so a start that never ran leaves the session where it was.
+	FreshSession bool `json:"freshSession,omitempty"`
 	// Linger is the root generation whose linger a tree close expires. A member keeps its
 	// generation across re-admission, so the close acts only while its tree lingers at that root
 	// generation: never in the tree's next run, nor in a later linger of it.
@@ -419,15 +430,20 @@ type WorkspaceRemove struct {
 
 func (WorkspaceRemove) OutboxKind() OutboxKind { return OutboxKindWorkspaceRemove }
 
-// MergeQueuePublish is the merger's READY packet, or the daemon's withdrawal of it, published to
-// the project's merge queue role, `projects.<KEY>.merge_queue_role`: its bare name, which the
-// runner addresses as a role topic.
-type MergeQueuePublish struct {
-	Role   string `json:"role"`
-	Packet string `json:"packet"`
+// RoleMessage is one message the daemon sends a role holder, published to that role's topic: Role
+// is the claim token, which the
+// runner addresses as a role topic, and Body is the whole of what the holder is told. It is how
+// the daemon reaches a worker with something to read rather than a task to do - a settled head's
+// check results, which move nothing (workflow's tellChecks, dispatch://INFRA-714/spec R1). A role
+// with no live holder is told nothing: the row finishes, since the message is of a moment that
+// has passed by the time anyone claims the role, and every recipient can read the pull request's
+// checks on GitHub for itself.
+type RoleMessage struct {
+	Role string `json:"role"`
+	Body string `json:"body"`
 }
 
-func (MergeQueuePublish) OutboxKind() OutboxKind { return OutboxKindMergeQueuePublish }
+func (RoleMessage) OutboxKind() OutboxKind { return OutboxKindRoleMessage }
 
 // IssueBranch creates the row's issue's branch, legion/<KEY>, on GitHub at the repository's default
 // branch, where GitHub does not have it yet, before any role of the issue starts: GitHub can refuse
@@ -440,45 +456,6 @@ type IssueBranch struct {
 }
 
 func (IssueBranch) OutboxKind() OutboxKind { return OutboxKindIssueBranch }
-
-// AutoMergeDisable turns off whatever would merge the pull request without a person: GitHub's
-// auto-merge, then its place in a merge queue. Arming is legitimate only for the READY head of an
-// issue awaiting its merge, so the workflow queues it on every head move but one landing on that
-// head (a push, or a reopen), on every READY withdrawal, on a child's re-entry and on an issue's
-// leaving the workflow. Its executor decides by the record when it runs, keeping the arm only while
-// the issue awaits its merge at the merger's READY commit.
-type AutoMergeDisable struct {
-	Number int `json:"number"`
-}
-
-func (AutoMergeDisable) OutboxKind() OutboxKind { return OutboxKindAutoMergeDisable }
-
-// ReadyMerge submits the merge of pull request Number at Head, the head an accepted READY named.
-// The workflow queues it when an issue reaches awaiting_merge on a READY nobody marked by hand. Its
-// executor decides by GitHub and then the record when it runs, so a READY withdrawn, moved past or
-// left since submits nothing, and it waits while GitHub reports the pull request not yet mergeable
-// in a repository that allows no auto-merge or on a base that requires a merge queue. Armed is the
-// row having seen Head armed for auto-merge or in the merge queue on GitHub, which its executor
-// records on the row (Store.ReplaceOutboxPayload): from then on the arm or entry disappearing
-// without a merge is a removal the row reads from GitHub rather than a cue to submit again
-// (ghautomerge.Submit). Warned is the row having told the issue's architect once that GitHub has
-// not completed the merge it submitted (merge-waiting, the daemon's mergeWaitWarn), which keeps it
-// from telling again however much longer it waits, and Queued is the moment the workflow queued
-// this submission, which that wait is measured from. A queue of the same issue and head starts the
-// row over unarmed, unwarned and at a fresh Queued (readyMergeConflict): the upsert replaces the
-// payload, so a reopen resets the clock and the once-flag together and the two can never disagree,
-// as they would were the wait measured from the row's created_at, which the upsert leaves at the
-// original queueing. A row a daemon before Queued enqueued carries the zero time, and its executor
-// measures that one from created_at, which is what it was measured from then.
-type ReadyMerge struct {
-	Number int       `json:"number"`
-	Head   string    `json:"head"`
-	Armed  bool      `json:"armed,omitempty"`
-	Warned bool      `json:"warned,omitempty"`
-	Queued time.Time `json:"queued,omitzero"`
-}
-
-func (ReadyMerge) OutboxKind() OutboxKind { return OutboxKindReadyMerge }
 
 // CheckCompare wakes a production check from a build or from a deploy run, whichever of Build and
 // Deploy it carries (exactly one). Build is the commit a daemon boot reported itself built from,
@@ -533,16 +510,35 @@ type CheckBound struct{}
 
 func (CheckBound) OutboxKind() OutboxKind { return OutboxKindCheckBound }
 
-// PhaseEnded tells the role whose phase a CI-red transition ended that its phase is over, on that
-// role's own Envoy topic. It is the one message the daemon addresses to a role that is not an
-// architect of its own accord: when CI goes red the implementer starts at once, and without that
-// message nothing tells the tester, the reviewer, the merger or the implementer in retro that the
-// phase it was working is no longer its own, since the daemon's next task for a role waits for that
-// role's turn to end. Role is the recipient, From the phase that ended, To the phase the issue is
-// in now, Reason what the architect's checks-red notice carries, and TaskFollows that the recipient
-// is also the role the new phase starts — the implementer sent back from retro — whose task for
-// that phase follows this message. It stops nothing: the recipient keeps its turn, its jobs, its
-// process and its session.
+// ApprovalCarry is GitHub's compare of the head a reviewer approved with the head the pull
+// request stands at, queued by the push that left the approval set aside below that head
+// (workflow's carryApproval). The executor compares Approved with Head as the implement App and,
+// when every path that changed between them is under the issue's own .legion/<issue>/, applies the
+// intake.Push that says so, which carries the approval up to Head (daemon's approvalCarry). Number
+// is the pull request the two heads belong to, and Repo its repository as the record spells it.
+// Head fences the row: the record's head has moved past the one the row names by the time it runs,
+// so another push's row compares the heads that stand then, and this one compares nothing.
+type ApprovalCarry struct {
+	Repo     string `json:"repo"`
+	Number   int    `json:"number"`
+	Approved string `json:"approved"`
+	Head     string `json:"head"`
+}
+
+func (ApprovalCarry) OutboxKind() OutboxKind { return OutboxKindApprovalCarry }
+
+// PhaseEnded tells the role whose phase a transition the daemon raised on its own ended that its
+// phase is over, on that role's own Envoy topic. It is the one message the daemon addresses to a
+// role that is not an architect of its own accord: when the daemon moves an issue out of a phase
+// on something it read of the pull request — a head that conflicts with its base, the review
+// GitHub delivered, the merge — the next role starts at once, and without that message nothing
+// tells the tester, the reviewer, the merger or the implementer in retro that the phase it was
+// working is no longer its own, since the daemon's next task for a role waits for that role's turn
+// to end. Role is the recipient, From the phase that ended, To the phase the issue is in now,
+// Reason what the architect's notice carries, and TaskFollows that the recipient is also the role
+// the new phase starts — the implementer sent back from retro — whose task for that phase follows
+// this message. It stops nothing: the recipient keeps its turn, its jobs, its process and its
+// session.
 type PhaseEnded struct {
 	Role        claim.Role  `json:"role"`
 	From        phase.Phase `json:"from"`
@@ -556,15 +552,15 @@ func (PhaseEnded) OutboxKind() OutboxKind { return OutboxKindPhaseEnded }
 // Message is what the runner publishes for issue: one sentence that the recipient's phase ended
 // and which phase the issue is in now, the implementer's own sentence where its task follows, the
 // two that keep the role off the working copy the new phase owns without stopping it (the worker
-// prompt says the same, internal/prompts/go/worker-common.md), and the red last, behind the
-// `Reason:` label a started worker's task carries it under (workflow's task), so the GitHub check
-// and workflow names in it are marked off from the daemon's own sentences in both places.
+// prompt says the same, internal/prompts/go/worker-common.md), and the reason last, behind the
+// `Reason:` label a started worker's task carries it under (workflow's task), so the GitHub names
+// in it are marked off from the daemon's own sentences in both places.
 func (p PhaseEnded) Message(issue string) string {
 	follows := ""
 	if p.TaskFollows {
 		follows = fmt.Sprintf(" Your %s task follows.", p.To)
 	}
-	return fmt.Sprintf("%s: CI went red, so your %s phase has ended and the issue is in %s now.%s"+
+	return fmt.Sprintf("%s: the daemon ended your %s phase, and the issue is in %s now.%s"+
 		" Nothing of yours is stopped: your turn, your jobs, your process and your session run on."+
 		" The workspace is the %s phase's now, so stop writing it at once and leave whatever you have uncommitted."+
 		" Reason: %s.",
@@ -657,26 +653,14 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
-	case OutboxKindMergeQueuePublish:
-		value := MergeQueuePublish{}
+	case OutboxKindRoleMessage:
+		value := RoleMessage{}
 		if err := decoder.Decode(&value); err != nil {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
 	case OutboxKindIssueBranch:
 		value := IssueBranch{}
-		if err := decoder.Decode(&value); err != nil {
-			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
-		}
-		payload = value
-	case OutboxKindAutoMergeDisable:
-		value := AutoMergeDisable{}
-		if err := decoder.Decode(&value); err != nil {
-			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
-		}
-		payload = value
-	case OutboxKindReadyMerge:
-		value := ReadyMerge{}
 		if err := decoder.Decode(&value); err != nil {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
@@ -695,6 +679,12 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 		payload = value
 	case OutboxKindCheckBound:
 		value := CheckBound{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
+	case OutboxKindApprovalCarry:
+		value := ApprovalCarry{}
 		if err := decoder.Decode(&value); err != nil {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
@@ -777,20 +767,22 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if value.CheckLook != 0 && (value.CheckLook < 0 || value.Op != "start" || value.Role != claim.RoleImplementer || value.Phase != "") {
 			return fmt.Errorf("a supervise check look names a start of the implementer with no phase, and only a start carries one")
 		}
-	case MergeQueuePublish:
+	case RoleMessage:
 		if value.Role == "" {
-			return fmt.Errorf("merge queue publish requires role")
+			return fmt.Errorf("role message requires role")
 		}
-		if value.Packet == "" {
-			return fmt.Errorf("merge queue publish requires packet")
+		if value.Body == "" {
+			return fmt.Errorf("role message requires body")
 		}
-	case AutoMergeDisable:
-		if value.Number <= 0 {
-			return fmt.Errorf("auto-merge disable requires its pull request number")
+	case ApprovalCarry:
+		if value.Repo == "" || value.Number <= 0 {
+			return fmt.Errorf("an approval carry requires its repository and pull request number")
 		}
-	case ReadyMerge:
-		if value.Number <= 0 || value.Head == "" {
-			return fmt.Errorf("READY merge requires its pull request number and head")
+		if value.Approved == "" || value.Head == "" {
+			return fmt.Errorf("an approval carry requires the approved head and the head it is carried to")
+		}
+		if value.Approved == value.Head {
+			return fmt.Errorf("an approval carry compares %s with itself; an approval of the head needs no carry", value.Head)
 		}
 	case CheckCompare:
 		if value.Look <= 0 {
@@ -828,9 +820,13 @@ func validateOutboxPayload(payload OutboxPayload) error {
 	return nil
 }
 
+// validNoticeKind is every notice kind the daemon publishes, which is also every kind a row may
+// decode as (DecodeOutboxPayload). `ready-refused` is not one of them: READY went with the
+// daemon's merge, so nothing writes the kind, and migration 20261029120800 deletes every row an older
+// daemon left carrying it, in the same migration that drops the four merge kinds from this list.
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "pull-request-missing", "merge-refused", "merge-stalled", "merge-removed", "merge-waiting", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "pull-request-missing", "design-approved", "design-changes-requested", "carried-gate-opened", "child-closed", "child-status", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted", "session-lost", "session-store-fault":
 		return true
 	default:
 		return false

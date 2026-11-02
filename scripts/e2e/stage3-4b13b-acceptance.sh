@@ -10,9 +10,9 @@
 #     tool's handoff_complete closes the phase, with no reminder after it;
 #   - park_child / rerun_child with their refusals, and the Dispatch writes' actor;
 #   - phase-finished carrying the worker's summary and verdict;
-#   - the daemon posting the merger's READY packet (direct, and stored across a refused gate), and
-#     publishing it to merge_queue_role (a live holder, and no holder);
-#   - pr-merged / pr-closed-unmerged, and an issue whose PR merged early skipping READY.
+#   - the merger merging its own pull request, under the squash message it writes itself, and a
+#     design gate re-closed in merging holding nothing;
+#   - pr-merged / pr-closed-unmerged, and a merge the merger did not make closing the issue.
 # Nothing here merges into sjawhar/legion-smoke's main: each proof PR is retargeted to a scratch base
 # branch before any merge, and the scratch base is deleted at the end.
 #
@@ -75,6 +75,7 @@ profile_agent="$omp_home/.omp/profiles/$profile/agent"
 repo="sjawhar/legion-smoke"
 scratch_base="l208-4b13b-accept-$stamp"
 merge_base="$scratch_base-merge"
+gate_base="$scratch_base-gate"
 # The shared Postgres container: this run only creates and reads its own two databases in it and
 # never removes it.
 pg_container=${ACCEPT_PG_CONTAINER:?ACCEPT_PG_CONTAINER names the running Postgres container the run takes its databases in}
@@ -186,8 +187,9 @@ github_cleanup() {
   for b in $(gh api "repos/$repo/git/matching-refs/heads/legion/$project-" --jq '.[].ref' 2>/dev/null); do
     gh api -X DELETE "repos/$repo/git/$b" >/dev/null 2>&1 || true
   done
-  gh api -X DELETE "repos/$repo/git/refs/heads/$scratch_base" >/dev/null 2>&1 || true
-  gh api -X DELETE "repos/$repo/git/refs/heads/$merge_base" >/dev/null 2>&1 || true
+  for b in "$scratch_base" "$merge_base" "$gate_base"; do
+    gh api -X DELETE "repos/$repo/git/refs/heads/$b" >/dev/null 2>&1 || true
+  done
 }
 trap cleanup EXIT
 trap 'printf "FAIL %s: line %s exited %s: %s\n" "$check" "$LINENO" "$?" "$BASH_COMMAND" >&2' ERR
@@ -233,8 +235,7 @@ start_dispatch() {
     curl -fsS "http://127.0.0.1:$port_dispatch/api/v1"
 }
 
-# The one difference from Stage 3's configuration: admission_cap 3 (three roots) and a merge queue
-# role on the project, so the daemon's READY publish is exercised.
+# The one difference from Stage 3's configuration: admission_cap 3, for three roots.
 write_legion_config() {
   cat >"$work/legion.yaml" <<EOF
 project: $project
@@ -249,8 +250,6 @@ nats_urls:
   - nats://127.0.0.1:$port_nats
 dispatch_url: http://127.0.0.1:$port_dispatch
 dispatch_token_file: $work/dispatch-token
-projects:
-  $project: { merge_queue_role: merge-queue }
 gates:
   design: root-issues
 admission_cap: 3
@@ -397,10 +396,6 @@ production_audit() {
 claims() { local sub=$1; shift; "$work/legion" claims "$sub" --config "$work/legion.yaml" --operator-token-file "$work/operator-token" "$@"; }
 claim_json() { claims list --json | jq -ce --arg t "$1" '.claims[] | select(.token == $t)'; }
 claim_is() { claim_json "$1" | jq -e "$2" >/dev/null; }
-token_session_file() { claim_json "$1" | jq -er '.sessionFile // empty | select(. != "")'; }
-envoy_role_holder() { curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/roles/$1" | jq -er .holder; }
-role_unheld() { ! envoy_role_holder "$1" >/dev/null 2>&1; }
-role_held_by() { [ "$(envoy_role_holder "$1" 2>/dev/null)" = "$2" ]; }
 token_session() { claim_json "$1" | jq -er '.session // empty | select(. != "")'; }
 
 # The reminder the phase stall sends (packages/pi-shared/src/phase-stall.ts REMINDER), which now
@@ -467,7 +462,7 @@ reviewer_approved() {
 # later root can reach testing while the script still holds an earlier root's planner), so the
 # routine roles are not instructed in script order but by this watcher, as soon as each one's
 # assignment is in its session: implementers (their pull request opened against the scratch base,
-# never main), testers, reviewers, retro, and a hold for each merger until its READY scenario is set
+# never main), testers, reviewers, retro, and a hold for each merger until its merge scenario is set
 # up. It also retargets any proof pull request whose base is not the scratch base, and logs it.
 # Planners and architects are instructed by the script, where each scenario needs them.
 assigned_in() { jq -e -s --arg a "Issue: $2. Phase: $3." 'any(.[]; .type == "message" and .message.role == "user" and ([.message.content[]? | .text? // empty] | join(" ") | contains($a)))' "$1" >/dev/null; }
@@ -478,7 +473,7 @@ instruction_for() {
     tester:testing) printf '%s' "Acceptance test operation: inspect the implementer's actual one-file change and this issue's pull request, run a focused observable check, record the required test handoff with verdict pass, then call the legion tool's handoff_complete with verdict pass and a summary that begins 'TESTER-SUMMARY $issue:'." ;;
     reviewer:reviewing) printf '%s' "Acceptance final review: use the bash tool to submit APPROVE on this issue's pull request (head legion/$issue) in $repo at its current head as $(role_app reviewer), then complete the reviewer handoff. This exact smoke instruction takes precedence over waiting for another review round." ;;
     implementer:retro) printf '%s' "Acceptance retro: write the required retro handoff for this issue's pull request and complete the phase. Do not change the approved implementation." ;;
-    merger:merging) printf '%s' "Acceptance hold: this is a proof run. Do not verify, build or send READY yet, and do not call handoff_complete. Reply with the single line 'holding' and wait for the next targeted instruction, which says exactly what to do." ;;
+    merger:merging) printf '%s' "Acceptance hold: this is a proof run. Do not read, verify or merge the pull request yet, and do not call handoff_complete. Reply with the single line 'holding' and wait for the next targeted instruction, which says exactly what to do." ;;
   esac
 }
 instructor() {
@@ -511,7 +506,7 @@ instructor() {
     done
     if [ $((tick++ % 4)) = 0 ]; then
       for n in $(gh -R "$repo" pr list --state open --limit 100 --json number,headRefName,baseRefName \
-        --jq ".[] | select((.headRefName | startswith(\"legion/$project-\")) and .baseRefName != \"$scratch_base\" and .baseRefName != \"$merge_base\") | .number" 2>/dev/null); do
+        --jq ".[] | select((.headRefName | startswith(\"legion/$project-\")) and .baseRefName != \"$scratch_base\" and .baseRefName != \"$merge_base\" and .baseRefName != \"$gate_base\") | .number" 2>/dev/null); do
         gh -R "$repo" pr edit "$n" --base "$scratch_base" >/dev/null 2>&1 &&
           printf '%s retargeted %s#%s to %s\n' "$(date -u +%FT%T.%3NZ)" "$repo" "$n" "$scratch_base" >>"$evidence/retargets.log"
       done
@@ -522,43 +517,17 @@ instructor() {
 phase_rank() {
   case "$1" in
     admitted) echo 0 ;; planning) echo 1 ;; implementing) echo 2 ;; testing) echo 3 ;; reviewing) echo 4 ;;
-    accepting) echo 5 ;; retro) echo 6 ;; merging) echo 7 ;; awaiting_merge) echo 8 ;; done) echo 9 ;; *) echo -1 ;;
+    accepting) echo 5 ;; retro) echo 6 ;; merging) echo 7 ;; done) echo 8 ;; *) echo -1 ;;
   esac
 }
 phase_at_least() { local p; p=$(daemon_state | jq -r --arg i "$1" '.issues[$i].phase') || return 1; [ "$(phase_rank "$p")" -ge "$(phase_rank "$2")" ]; }
 wait_for_phase_at_least() { until_true "${3:-$phase_seconds}" "$1 to reach $2 or later" phase_at_least "$1" "$2"; }
 instructed() { compgen -G "$evidence/instructed/$1.$2.$3.*" >/dev/null; }
 dispatch_messages() { dispatch_events "$1" | jq -c '[.[] | select(.type == "message.created") | {seq, actor: .actor.id, body: .payload.body}]'; }
-ready_messages() { dispatch_messages "$1" | jq -c '[.[] | select(.body | startswith("READY"))]'; }
-no_holder_messages() { dispatch_messages "$1" | jq -c '[.[] | select(.body | startswith("merge queue role merge-queue had no live holder"))]'; }
-merger_summary() {
-  local f
-  f=$(claim_session_file "$1" merger) || return 1
-  jq -s -r '[.[] | select(.type == "message" and .message.role == "assistant") | .message.content[]?
-    | select(.type == "toolCall" and .name == "legion" and .arguments.op == "handoff_complete") | .arguments.summary] | last // empty' "$f"
-}
-# merger_self_posted ISSUE: the merger's own tool calls that would post or publish READY itself,
-# made any of the ways lib/omp-tool-calls.jq's calls counts (the tool, a write to its xd:// device,
-# eval code calling tool.<name>(...), or eval code calling the generic tool.write(...) naming that
-# device): any envoy_publish, and a bash call that runs `dispatch message` (runs_dispatch) with a
-# body (--body, or --body-file - with a here-document) opening READY.
-merger_self_posted() {
-  local f
-  f=$(claim_session_file "$1" merger) || return 1
-  jq -s -c -L "$script_lib" 'include "omp-tool-calls";
-    [.[] | select(.type == "message" and .message.role == "assistant") | .message.content[]?
-    | select(calls("envoy_publish") or (runs_dispatch("message") and (bash_command
-        | test("--body(=|\\s+)\\\\?[\u0027\"]?\\s*READY|--body-file(=|\\s+)-[^\\n]*\\n\\s*READY"))))
-    | {name, arguments}]' "$f"
-}
 notices_at_least() { [ "$(notice_deliveries "$1" "$2" "$3")" -ge "$4" ]; }
 # phase_finished_line ISSUE PHASE: the architect's delivered phase-finished notice for PHASE.
 phase_finished_line() { notice_line "$1" architect "$(notice_needle phase-finished "$1")" | grep -F -- "phase: $2" | head -1 || true; }
 phase_finished_seen() { [ -n "$(phase_finished_line "$1" "$2")" ]; }
-ready_count_at_least() { [ "$(ready_messages "$1" | jq length)" -ge "$2" ]; }
-no_holder_count_at_least() { [ "$(no_holder_messages "$1" | jq length)" -ge "$2" ]; }
-# session_holds FILEFN TEXT: the session FILEFN prints holds TEXT.
-session_file_holds() { local f; f=$($1) || return 1; grep -qF -- "$2" "$f"; }
 # until_true_quiet SECONDS COMMAND...: until_true that returns 1 on a timeout instead of failing.
 until_true_quiet() {
   local limit=$1 i
@@ -706,7 +675,7 @@ stat -c '%n %.9Y' "$pdir"/*.md >"$evidence/prompts-mtime-before.txt"
 cp "$evidence/merger.base.md" "$pdir/merger.md"
 # negative control: the stale part is observably different before the restart
 cmp -s "$pdir/merger.md" "$root/packages/daemon/internal/prompts/go/merger.md" && fail "the planted stale merger.md equals the embedded one"
-note "planted the base ($base_rev) merger.md: $(grep -c 'publish READY yourself' "$pdir/merger.md" || true) line(s) telling the merger it publishes nothing and to send ready:true, $(wc -c <"$pdir/merger.md") bytes"
+note "planted the base ($base_rev) merger.md: $(grep -c 'publish READY yourself' "$pdir/merger.md" || true) line(s) of the retired READY vocabulary, $(wc -c <"$pdir/merger.md") bytes"
 sleep 1.1
 stop_daemon
 start_daemon keep
@@ -718,8 +687,8 @@ changed=$(join <(sort "$evidence/prompts-mtime-before.txt") <(sort "$evidence/pr
 note "the restart rewrote merger.md alone back to the embedded text; the $unchanged identical parts kept their mtimes"
 pass
 
-# ---- 2. the merge queue holder and the refused root stops -------------------------------------------
-begin merge-queue-holder
+# ---- 2. a claim no workflow issue backs, and the refused root stops ---------------------------------
+begin claim-with-no-workflow-issue
 holder_tree="${project}-900"
 # The holder is no workflow issue, so no outbox row provisions its workspace. The tmux runtime needs
 # the directory, and a delivery first adopts the working copy for the role's App (jj metaedit), so it
@@ -728,12 +697,11 @@ holder_dir="$state/workspaces/$repo/${holder_tree,,}"
 mkdir -p "$holder_dir" || fail "could not create the holder's jj workspace"
 jj git init "$holder_dir" >/dev/null 2>&1 || fail "could not create the holder's jj workspace"
 holder=$(claims spawn --json --tree "$holder_tree" --issue "$holder_tree" --role architect \
-  --task "Acceptance operation: call your envoy_role_set tool with role merge-queue now, so this session holds the merge-queue role. Then reply with the single line 'holding merge-queue' and wait. Do nothing else." | jq -er .token)
+  --task "Acceptance operation: reply with the single line 'standing by' and wait. Do nothing else." | jq -er .token)
 claim_registered() { claim_is "$1" '(.session // "") != ""'; }
 until_true 600 "holder claim $holder to register" claim_registered "$holder"
 holder_session=$(token_session "$holder")
-until_true 600 "the holder session to claim merge-queue" role_held_by merge-queue "$holder_session"
-note "holder claim $holder (session $holder_session, a tree no workflow issue backs) holds merge-queue"
+note "holder claim $holder (session $holder_session) runs on a tree no workflow issue backs"
 pass
 
 begin root-stop-refusal-names-close-only-without-a-workflow-issue
@@ -747,9 +715,9 @@ claim_is "$holder" '.state == "ready" or .state == "idle" or .state == "working"
 pass
 
 begin admission
-root1=$(new_issue "Primary READY and phase-stall profile")
+root1=$(new_issue "Primary merge and phase-stall profile")
 root2=$(new_issue "Early merge sentinel")
-root3=$(new_issue "Gated READY compass")
+root3=$(new_issue "Gated merge compass")
 set_status "$root1" todo
 set_status "$root2" todo
 set_status "$root3" todo
@@ -1023,60 +991,44 @@ done
 pass
 
 begin retros
-# The instructor holds each merger at its assignment; the READY scenarios below need all three in
-# merging, held.
+# The instructor holds each merger at its assignment, so no merge below is the agent's own: every
+# merge the sections after this one see is the proof human's, made while the merger stands still.
 merging_and_held() { issue_phase "$1" merging && instructed "$1" merger merging; }
 for issue in "$root1" "$root2" "$root3"; do until_true 1800 "$issue in merging with its merger held" merging_and_held "$issue"; done
 note "each merger held at its assignment: $({ grep ' merger merging' "$evidence/instructor.log" || true; } | tr '\n' ';')"
 pass
 
-# ---- 6. an early merge: pr-merged, and no READY for a merged PR ----------------------------------------
-begin early-merge-skips-ready
-# "Early" is $root2's own workflow phase (merging, its merger held since retros above, never
-# released here), not GitHub's own merge computation: $root2's pull request targets
-# $scratch_base, which carries no ruleset, so merge_when_clean's wait here is only for GitHub to
-# finish computing this head's own mergeability (mergeStateStatus settles off its own UNKNOWN
-# moments after a push; nothing here is gated on a required check). CLEAN still means more than
-# "no ruleset is blocking it": GitHub's UNSTABLE is "mergeable despite a non-passing commit
-# status", so waiting for CLEAN rather than settling for UNSTABLE also confirms every check on
-# this head actually passed — which matters here, since $root2's retro push (this check's own
-# last push to it) runs the project's full CI. Nothing but the merger's own handoff_complete moves
-# $root2 toward a READY, which stays impossible for as long as it is held. The merge still lands
-# before any READY exists.
+# ---- 6. a merge the merger did not make still closes the issue --------------------------------------
+begin a-merge-in-merging-closes-the-issue
+# $root2's merger is held at its assignment and never released, so the merge below is the proof
+# human's and the merger completes nothing: what moves $root2 is the daemon's own reading of the
+# merged pull request. $root2's pull request targets $scratch_base, which carries no ruleset, so
+# merge_when_clean's wait here is only for GitHub to finish computing this head's own mergeability
+# (mergeStateStatus settles off its own UNKNOWN moments after a push; nothing here is gated on a
+# required check). CLEAN still means more than "no ruleset is blocking it": GitHub's UNSTABLE is
+# "mergeable despite a non-passing commit status", so waiting for CLEAN rather than settling for
+# UNSTABLE also confirms every check on this head actually passed — which matters here, since
+# $root2's retro push (this check's own last push to it) runs the project's full CI.
 merge_when_clean "$repo" "${pr_of[$root2]}" --squash --delete-branch
-until_true 300 "the pr-merged notice on $root2's architect" notice_delivered "$root2" architect "$(notice_needle pr-merged "$root2")"
-issue_phase "$root2" merging >/dev/null || soft "$root2 left merging on the early merge"
-notice_line "$root2" architect "$(notice_needle pr-merged "$root2")" | head -1 >"$evidence/notice-pr-merged.jsonl"
-send_agent "$root2" merger "Acceptance READY operation: the proof human has already merged pull request #${pr_of[$root2]}. Build your READY packet exactly as your instructions describe anyway and end this phase with the legion tool: op handoff_complete, ready true, and the packet as the summary. Then wait."
-# The merger's READY on an already-merged pull request reaches awaiting_merge with nothing to merge,
-# and the merge closes the issue at once: done, no READY posted.
+# The merge closes the issue where it stands, so its architect is told no pr-merged: that notice is
+# for a merge the close did not follow, and $root2's tree has nothing else in the workflow.
 wait_for_phase "$root2" "done" 600
 sleep 30
-ready_messages "$root2" >"$evidence/ready-messages-$root2.json"
-[ "$(jq length "$evidence/ready-messages-$root2.json")" = 0 ] || soft "a READY was posted for $root2 whose PR had merged: $(cat "$evidence/ready-messages-$root2.json")"
 n=$(notice_deliveries "$root2" architect "$(notice_needle pr-merged "$root2")")
 c=$(notice_deliveries "$root2" architect "$(notice_needle pr-closed-unmerged "$root2")")
-[ "$n" = 1 ] || soft "$root2's architect got $n pr-merged notices, want 1"
+[ "$n" = 0 ] || soft "$root2's architect got $n pr-merged notices for a merge that closed the issue, want 0"
 [ "$c" = 0 ] || soft "$root2's merged PR also produced $c pr-closed-unmerged notices"
-note "merged $repo#${pr_of[$root2]} in merging: pr-merged $n, pr-closed-unmerged $c (control); the merger's READY moved $root2 straight to done, the merge's close, with $(jq length "$evidence/ready-messages-$root2.json") READY messages posted"
+note "merged $repo#${pr_of[$root2]} while its merger was held in merging: $root2 → done on the daemon's read of the merge, with no merger completion; pr-merged $n, pr-closed-unmerged $c (controls)"
 pass
 
 # ---- 7a. the merger's pane: no grant file, and no `legion` run from bash ----------------------------
-# utf16_len: stdin's length in UTF-16 code units, as Dispatch's len16 and MessageBodyLength count it.
-utf16_len() { python3 -c 'import sys; print(len(sys.stdin.read().encode("utf-16-le")) // 2)'; }
-cap_refusals() { tool_outcomes "$1" | jq -c '[.[] | select(.tool == "legion" and (.text | contains("READY_PACKET_TOO_LONG")))]'; }
 begin merger-pane-mints-no-grant
 # This check replaced ready-cap-refused-at-the-boundary, which drove the daemon's completion route
 # from this shell with a grant the merger's bash hook had minted into the pane's LEGION_GRANT_FILE
 # before a `legion state --json` command. Neither exists (LEGION-631): the `legion` tool mints its
 # grants in-process for its own daemon calls, no pane carries a grant file, no agent runs `legion`
-# from bash, and the CLI has no `handoff complete`. The READY cap at its exact boundary
-# (record.MessagePostLimit, one unit over) is the daemon's own test now (internal/api
-# handoff_test.go, the READY one unit over the limit, refused naming <limit+1>/<limit>), on the
-# Dispatch cap internal/daemon/outbox_scratch_dispatch_test.go measures; the merger's own over-cap
-# packet, refused READY_PACKET_TOO_LONG through the tool, is counted in
-# ready-posted-and-published-to-holder below. What stands here is the absence: the merger's pane
-# environment names no grant, its gh reads the role's files under GH_CONFIG_DIR, and no bash
+# from bash, and the CLI has no `handoff complete`. What stands here is the absence: the merger's
+# pane environment names no grant, its gh reads the role's files under GH_CONFIG_DIR, and no bash
 # command the merger has run invokes `legion`.
 merger_omp=$(omp_descendant "$(claim_pane_pid "$root1" merger)") || fail "$root1's merger pane has no OMP process"
 for absent in LEGION_GRANT_FILE LEGION_GRANT; do
@@ -1095,104 +1047,57 @@ jq -R -s -r '[split("\n")[] | fromjson? | select(.type == "message" and .message
 note "$root1's merger pane (OMP $merger_omp) carries no LEGION_GRANT_FILE or LEGION_GRANT, GH_CONFIG_DIR=$merger_gh_dir, and its session holds $(wc -l <"$evidence/merger-legion-commands.txt") bash commands invoking legion"
 pass
 
-# ---- 7. the daemon posts READY (direct) and publishes it to a live holder -----------------------------
-begin ready-posted-and-published-to-holder
-# The holder claimed merge-queue an hour of agent turns ago. Losing it is recorded and repaired
-# rather than ending the run, so the sections after this one are still measured.
-if ! role_held_by merge-queue "$holder_session"; then
-  soft "the holder no longer held merge-queue at the READY section (holder: $(envoy_role_holder merge-queue 2>/dev/null || echo none))"
-  claims deliver --claim "$holder" --task "Acceptance operation: call your envoy_role_set tool with role merge-queue now, then reply 'holding merge-queue' and wait." >/dev/null
-  until_true 300 "the holder session to claim merge-queue again" role_held_by merge-queue "$holder_session"
-fi
-[ "$(ready_messages "$root1" | jq length)" = 0 ] || soft "$root1 already had a READY message before its merger's completion"
-send_agent "$root1" merger "Acceptance READY operation: verify the merge gate as your instructions describe. Then, as a deliberate proof of the READY packet's length limit, first end the phase with the legion tool (op handoff_complete, ready true) using as the summary your READY packet followed by the pull request body quoted in full and then a padding paragraph of at least 2,500 characters; that first call is expected to be refused. Then do exactly what the refusal tells you, and end this phase with the legion tool: op handoff_complete, ready true, and a packet built exactly as your instructions describe as the summary. Then wait."
-wait_for_phase "$root1" awaiting_merge 900
-until_true 180 "the daemon's READY message on $root1" ready_count_at_least "$root1" 1
-sleep 20
-ready_messages "$root1" >"$evidence/ready-messages-$root1.json"
-packet=$(merger_summary "$root1")
-printf '%s\n' "$packet" >"$evidence/merger-summary-$root1.txt"
-[ "$(jq length "$evidence/ready-messages-$root1.json")" = 1 ] || soft "$root1 has $(jq length "$evidence/ready-messages-$root1.json") READY messages, want 1"
-jq -e --arg p "$packet" --arg d "legion-daemon:$project" '(.[0].body | sub("\n\n<!-- legion-outbox:[0-9]+ -->$"; "")) == $p and .[0].actor == $d' "$evidence/ready-messages-$root1.json" >/dev/null ||
-  soft "$root1's READY message is not the merger's packet verbatim by $project's daemon: $(jq -c '.[0] | {actor, body: (.body | .[0:120])}' "$evidence/ready-messages-$root1.json") vs summary '${packet:0:120}'"
-merger_self_posted "$root1" >"$evidence/merger-self-posts-$root1.json"
-[ "$(jq length "$evidence/merger-self-posts-$root1.json")" = 0 ] || soft "$root1's merger posted or published READY itself: $(cat "$evidence/merger-self-posts-$root1.json")"
-holder_file() { token_session_file "$holder"; }
-first_line=$(head -1 <<<"$packet")
-until_true 180 "the merge-queue holder to receive $root1's READY" session_file_holds holder_file "$first_line"
-grep -F '"customType":"envoy-message"' "$(holder_file)" | grep -F -- "$first_line" | head -1 >"$evidence/holder-ready-delivery.jsonl"
-[ -s "$evidence/holder-ready-delivery.jsonl" ] || soft "the holder saw the READY line, but not as an Envoy delivery"
-[ "$(no_holder_messages "$root1" | jq length)" = 0 ] || soft "$root1 was told merge-queue had no holder while one held it"
-note "READY on $root1 by $(jq -r '.[0].actor' "$evidence/ready-messages-$root1.json"): '$first_line' — the merger's summary verbatim; the merger itself posted/published nothing; the holder session received it as an Envoy delivery"
-f=$(claim_session_file "$root1" merger)
-cap_refusals "$f" >"$evidence/ready-cap-merger-refusals-$root1.json"
-posted_len=$(jq -j '.[0].body' "$evidence/ready-messages-$root1.json" | utf16_len)
-note "the merger's own over-cap attempt: $(jq length "$evidence/ready-cap-merger-refusals-$root1.json") READY_PACKET_TOO_LONG refusal(s) ($(jq -r '[.[].text | .[0:150]] | join(" | ")' "$evidence/ready-cap-merger-refusals-$root1.json")); the posted packet is $posted_len UTF-16 units"
-[ "$posted_len" -le 31956 ] || soft "$root1's posted READY is $posted_len units, over record.MessagePostLimit (31956)"
-# The tool's path through the READY cap, as measured: the census's claim that both completion
-# callers met the refusal live rests on this count, so it is a file, not only a log line.
-jq -n --arg issue "$root1" --argjson refusals "$(jq length "$evidence/ready-cap-merger-refusals-$root1.json")" --argjson posted "$posted_len" \
-  '{issue: $issue, tool_refusals: $refusals, posted_utf16: $posted}' >"$evidence/ready-cap-tool-path-$root1.json"
-pass
-
-begin merge-at-awaiting-merge-gives-no-pr-merged
+# ---- 7. the merger merges, with the squash message it writes itself --------------------------------
+begin merger-merges-with-its-own-squash-message
 # The early-merge section merged $root2's pull request into the scratch base, and both proof pull
 # requests branched from the same main commit, so $root1's may no longer merge there cleanly (their
 # retro learnings, for one). It merges into a base of its own, cut from that main commit.
 gh api "repos/$repo/git/refs" -f ref="refs/heads/$merge_base" -f sha="$main_sha" >/dev/null
 gh -R "$repo" pr edit "${pr_of[$root1]}" --base "$merge_base" >/dev/null
 note "$repo#${pr_of[$root1]} retargeted to its own base $merge_base at main $main_sha"
-merge_when_clean "$repo" "${pr_of[$root1]}" --squash --delete-branch
-# A merge at awaiting_merge closes the issue: done, with no pr-merged notice (the close tells a root's
-# architect nothing; it suspends it with the rest of its tree).
+# $root1's merger is released here and merges its own pull request, as its instructions say: a
+# squash at the head it read, under a message of its own. The proof merges nothing and only reads
+# (await_merger_merge).
+pr1_title=$(gh api "repos/$repo/pulls/${pr_of[$root1]}" --jq .title)
+send_agent "$root1" merger "Acceptance merge operation: merge pull request #${pr_of[$root1]} exactly as your instructions describe, then end this phase with the legion tool: op handoff_complete and a summary. Then wait."
+await_merger_merge "$repo" "${pr_of[$root1]}"
+# The message the merger's own --subject and --body wrote: the pull request's title and number
+# alone. GitHub's default squash message joins every commit message of the branch, which would put
+# this tree's Dispatch key, its Omp-Session trailers and its skip-checks lines on the base.
+merge_message=$(gh api "repos/$repo/commits/$merge_when_clean_commit" --jq .commit.message)
+printf '%s\n' "$merge_message" >"$evidence/merge-commit-message-$root1.txt"
+[ "$merge_message" = "$pr1_title (#${pr_of[$root1]})" ] ||
+  soft "$repo#${pr_of[$root1]}'s squash commit message is '$merge_message', want the pull request's title and number alone"
+case "$merge_message" in
+  *"Omp-Session:"* | *"skip-checks: true"* | *"Dispatch: $root1"*)
+    soft "the squash commit message of $repo#${pr_of[$root1]} carries the branch's own commit messages: $merge_message" ;;
+esac
+# The merge closes the issue, and its architect is told no pr-merged: nothing of $root1's tree is
+# left in the workflow, so the close follows the merge at once.
 wait_for_phase "$root1" "done" 600
 sleep 60
 n=$(notice_deliveries "$root1" architect "$(notice_needle pr-merged "$root1")")
-[ "$n" = 0 ] || soft "a merge at awaiting_merge still told $root1's architect pr-merged ($n)"
-note "merged $repo#${pr_of[$root1]} at awaiting_merge: $root1 → done, the merge's close, pr-merged notices $n (negative control)"
+[ "$n" = 0 ] || soft "the merge that closed $root1 still told its architect pr-merged ($n)"
+note "the merger merged $repo#${pr_of[$root1]} at $merge_when_clean_commit under its own message ('$merge_message'); $root1 → done on the daemon's read of that merge, pr-merged notices $n (negative control)"
 pass
 
-# ---- 8. READY stored across a refused gate, posted at the approval, with no merge queue holder ------
-begin gated-ready-posted-with-no-holder
-claims deliver --claim "$holder" --task "Acceptance operation: call your envoy_role_set tool with role mq-released-$ptoken now, then reply 'released' and wait." >/dev/null
-until_true 300 "merge-queue to have no holder" role_unheld merge-queue
-note "the holder released merge-queue (GET /v1/roles/merge-queue: no holder)"
+# ---- 8. a design gate that re-closes in merging holds no merge -------------------------------------
+begin a-reclosed-gate-holds-no-merge
+# The design gate holds a tree's start and nothing after it: a new primary spec version while
+# $root3 is in merging closes the gate, and the merger merges all the same. $root3 merges into a
+# base of its own for the same reason $root1 did.
+gh api "repos/$repo/git/refs" -f ref="refs/heads/$gate_base" -f sha="$main_sha" >/dev/null
+gh -R "$repo" pr edit "${pr_of[$root3]}" --base "$gate_base" >/dev/null
 dispatch_human POST "issues/$root3/artifacts" \
-  "$(jq -cn --arg name spec.md --arg content "# Acceptance smoke\n\nThe human revised this proof specification before READY.\n" '{name:$name,content:$content,summary:"4b.13b gate re-close"}')" >/dev/null
+  "$(jq -cn --arg name spec.md --arg content "# Acceptance smoke\n\nThe human revised this proof specification while the merger stood in merging.\n" '{name:$name,content:$content,summary:"4b.13b gate re-close"}')" >/dev/null
 until_true 180 "the new primary spec version to close $root3's gate" sh -c \
   "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$root3' '.issues[\$issue].designGate.currentVersion > .issues[\$issue].designGate.approvedVersion'"
-send_agent "$root3" merger "Acceptance READY operation: verify the merge gate as your instructions describe, build your READY packet exactly as they describe, and end this phase with the legion tool: op handoff_complete, ready true, and the packet as the summary. If it is refused, record its exact refusal and wait; do not retry it."
-until_true 600 "$root3's merger to observe the READY refusal" session_contains "$root3" merger "READY refused: approve design version"
-sleep 20
-ready_messages "$root3" >"$evidence/ready-messages-$root3-while-refused.json"
-[ "$(jq length "$evidence/ready-messages-$root3-while-refused.json")" = 0 ] || soft "a READY was posted for $root3 while its gate refused it"
-db_value "select summary from phases where issue = '$root3' and role = 'merger'" >"$evidence/merger-stored-summary-$root3.txt"
-[ -s "$evidence/merger-stored-summary-$root3.txt" ] || soft "$root3's refused READY packet is not stored on the merger's phase row"
-issue_phase "$root3" merging >/dev/null || soft "$root3 left merging on a refused READY"
-note "READY refused at the new spec version; no READY message posted (negative control); packet stored on the merger's row ($(wc -c <"$evidence/merger-stored-summary-$root3.txt") bytes)"
-artifact3=${gate_artifacts[$root3]}
-dispatch_human POST "artifacts/$artifact3/reviews" '{"state":"approved"}' >/dev/null
-wait_for_phase "$root3" awaiting_merge 600
-until_true 180 "the daemon's READY message on $root3" ready_count_at_least "$root3" 1
-until_true 180 "the no-holder message on $root3" no_holder_count_at_least "$root3" 1
-sleep 20
-ready_messages "$root3" >"$evidence/ready-messages-$root3.json"
-no_holder_messages "$root3" >"$evidence/no-holder-messages-$root3.json"
-packet3=$(merger_summary "$root3")
-printf '%s\n' "$packet3" >"$evidence/merger-summary-$root3.txt"
-jq -e --arg p "$packet3" --arg d "legion-daemon:$project" 'length == 1 and (.[0].body | sub("\n\n<!-- legion-outbox:[0-9]+ -->$"; "")) == $p and .[0].actor == $d' "$evidence/ready-messages-$root3.json" >/dev/null ||
-  soft "$root3's READY after approval is not exactly one daemon message holding the stored packet: $(jq -c '[.[] | {actor, body: (.body | .[0:100])}]' "$evidence/ready-messages-$root3.json")"
-jq -e --arg d "legion-daemon:$project" 'length == 1 and .[0].actor == $d' "$evidence/no-holder-messages-$root3.json" >/dev/null ||
-  soft "$root3 did not get exactly one daemon no-holder message: $(cat "$evidence/no-holder-messages-$root3.json")"
-merger_self_posted "$root3" >"$evidence/merger-self-posts-$root3.json"
-[ "$(jq length "$evidence/merger-self-posts-$root3.json")" = 0 ] || soft "$root3's merger posted or published READY itself"
-note "approval advanced $root3 to awaiting_merge and the daemon posted the stored packet: '$(head -1 <<<"$packet3")'; then: '$(jq -r '.[0].body' "$evidence/no-holder-messages-$root3.json")'"
-posted_len3=$(jq -j '.[0].body' "$evidence/ready-messages-$root3.json" | utf16_len)
-[ "$posted_len3" -le 31956 ] || soft "$root3's posted READY is $posted_len3 units, over record.MessagePostLimit (31956)"
-cap_refusals "$(claim_session_file "$root3" merger)" >"$evidence/ready-cap-merger-refusals-$root3.json"
-jq -n --arg issue "$root3" --argjson refusals "$(jq length "$evidence/ready-cap-merger-refusals-$root3.json")" --argjson posted "$posted_len3" \
-  '{issue: $issue, tool_refusals: $refusals, posted_utf16: $posted}' >"$evidence/ready-cap-tool-path-$root3.json"
-note "$root3's posted READY is $posted_len3 UTF-16 units; its merger met $(jq length "$evidence/ready-cap-merger-refusals-$root3.json") READY_PACKET_TOO_LONG refusal(s)"
+note "$root3's gate closed on a new spec version while it stood in merging, and $repo#${pr_of[$root3]} is on its own base $gate_base"
+send_agent "$root3" merger "Acceptance merge operation: merge pull request #${pr_of[$root3]} exactly as your instructions describe, then end this phase with the legion tool: op handoff_complete and a summary. Then wait."
+await_merger_merge "$repo" "${pr_of[$root3]}"
+wait_for_phase "$root3" "done" 600
+daemon_state >"$evidence/state-after-gated-merge.json" || true
+note "the closed gate held nothing: the merger merged $repo#${pr_of[$root3]} at $merge_when_clean_commit and $root3 reached done with its gate still closed"
 pass
 
 begin production-untouched
@@ -1205,7 +1110,7 @@ note "$(wc -l <"$evidence/pane-endpoints-checked.txt") launched panes endpoint-c
 cap_exceeded=$(grep -c 'CAP_EXCEEDED' "$evidence/logs/daemon.log" || true)
 printf '%s\n' "$cap_exceeded" >"$evidence/daemon-log-cap-exceeded-count.txt"
 [ "$cap_exceeded" = 0 ] || soft "the daemon log carries $cap_exceeded CAP_EXCEEDED line(s): Dispatch refused a message the daemon sent"
-note "daemon log CAP_EXCEEDED lines: $cap_exceeded (before the READY cap, the daemon logged the READY packet's refusal on every outbox attempt)"
+note "daemon log CAP_EXCEEDED lines: $cap_exceeded (a Dispatch message the daemon could not post would be logged here)"
 production_audit || fail "the rig touched production; see $evidence/production-dispatch-audit.json"
 pass
 

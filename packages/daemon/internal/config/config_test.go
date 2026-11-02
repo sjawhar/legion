@@ -128,7 +128,6 @@ func defaultsFor(port int) Config {
 		Linger:               72 * time.Hour,
 		ProductionCheckBound: 336 * time.Hour,
 		ReviewRoundCap:       3,
-		MaxFixAttempts:       3,
 		ControllerLaunch:     ControllerLaunchOperator,
 	}
 }
@@ -235,7 +234,7 @@ func TestLoadReadsEveryStage3Key(t *testing.T) {
 dispatch_token_file: tokens/DISPATCH_TOKEN
 projects:
   DEMO: {}
-  OTHER: { merge_queue_role: merge-queue }
+  OTHER: {}
   EMPTY: {}
 gates:
   design: off
@@ -250,7 +249,6 @@ github_apps:
 linger_hours: 96
 production_check_hours: 48
 review_round_cap: 5
-max_fix_attempts: 4
 `))
 
 	cfg, err := Load(path, noEnv)
@@ -265,7 +263,7 @@ max_fix_attempts: 4
 	}
 	if !reflect.DeepEqual(cfg.Projects, map[string]Project{
 		"DEMO":  {},
-		"OTHER": {MergeQueueRole: "merge-queue"},
+		"OTHER": {},
 		"EMPTY": {},
 	}) {
 		t.Errorf("Projects = %#v", cfg.Projects)
@@ -279,21 +277,8 @@ max_fix_attempts: 4
 	if cfg.GitHubApps.Review.AppID != "22" || cfg.GitHubApps.Review.PrivateKey != "review-key" {
 		t.Errorf("review app = %#v", cfg.GitHubApps.Review)
 	}
-	if cfg.Linger != 96*time.Hour || cfg.ProductionCheckBound != 48*time.Hour || cfg.ReviewRoundCap != 5 || cfg.MaxFixAttempts != 4 {
-		t.Errorf("Linger=%s ProductionCheckBound=%s ReviewRoundCap=%d MaxFixAttempts=%d, want 96h, 48h, 5, 4", cfg.Linger, cfg.ProductionCheckBound, cfg.ReviewRoundCap, cfg.MaxFixAttempts)
-	}
-}
-
-func TestLoadReadsProjectMergeRules(t *testing.T) {
-	body := strings.Replace(minimalFile, "DEMO: {}",
-		"DEMO: { merge: { by_hand: ['^migrations/versions/'] } }", 1)
-	cfg, err := Load(writeConfigFile(t, body), noEnv)
-	if err != nil {
-		t.Fatalf("Load project merge rules: %v", err)
-	}
-	rules := cfg.Projects["DEMO"].Merge
-	if !rules.MatchByHand([]string{"migrations/versions/0001.py"}) {
-		t.Error("by_hand rule does not match its migration path")
+	if cfg.Linger != 96*time.Hour || cfg.ProductionCheckBound != 48*time.Hour || cfg.ReviewRoundCap != 5 {
+		t.Errorf("Linger=%s ProductionCheckBound=%s ReviewRoundCap=%d, want 96h, 48h and 5", cfg.Linger, cfg.ProductionCheckBound, cfg.ReviewRoundCap)
 	}
 }
 
@@ -1363,7 +1348,6 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "linger_hours", line: "linger_hours: 72", class: modelled},
 		{key: "production_check_hours", line: "production_check_hours: 336", class: modelled},
 		{key: "review_round_cap", line: "review_round_cap: 3", class: modelled},
-		{key: "max_fix_attempts", line: "max_fix_attempts: 3", class: modelled},
 		{key: "capabilities", line: `capabilities: {decided: {secrets: "dispatch://LEGION-205 enrolls pods later"}}`, class: modelled},
 
 		{

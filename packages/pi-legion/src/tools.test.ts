@@ -1,8 +1,15 @@
 import { expect, test } from "bun:test";
 import type { LegionRole } from "@legion/contracts";
-import type { LegionPhase } from "@legion/contracts/legion-api";
+import {
+  LEGION_PHASES,
+  LEGION_WORKFLOW_PHASES,
+  type LegionPhase,
+  type LegionState,
+  LegionStateResponse,
+} from "@legion/contracts/legion-api";
+import type { LegionDaemonClient } from "@legion/pi-shared/daemon-client";
 import { findHandoffCommit, type JjRunner } from "@legion/pi-shared/handoff-commit";
-import type { PiApi, SessionContext } from "@legion/pi-shared/pi-types";
+import type { PiApi, RegisteredTool, SessionContext } from "@legion/pi-shared/pi-types";
 import { z } from "zod";
 import { createLegionTool, type LegionToolSession } from "./tools";
 
@@ -59,6 +66,8 @@ function claimSession(role: LegionRole, issue = "LEGION-208"): LegionToolSession
     tree: "LEGION-208",
     issue,
     secret: "claim-secret",
+    claimToken: `legion-legion-${issue.toLowerCase()}-${role}`,
+    generation: 1,
   };
 }
 
@@ -111,9 +120,9 @@ const OMP_LEGION_TOOL_DESCRIPTION =
   "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " +
   "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " +
   "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " +
-  "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " +
+  "architect), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " +
   "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " +
-  "yet), `ready: true` for the merger's READY. A handoff is a committed " +
+  "yet). A handoff is a committed " +
   "file, `.legion/<issue>/<phase>.json`: the pushed commit carrying it is found here, with the pane's jj, and reported, so write it, commit it and " +
   "push the branch (`jj git push`) before calling; this call refuses, posting nothing, a handoff still in the working copy, missing, not committed " +
   "on this branch, carried by another pane's commit, or not yet on `legion/<issue>@origin`, each naming the remedy. A production check report " +
@@ -124,14 +133,16 @@ const OMP_LEGION_TOOL_DESCRIPTION =
   "the phase hands you now: end the turn without completing; the task of the assignment it hands you now is work of its own, so do that work and " +
   "complete it with a handoff of its own, never this commit or verdict again), the implementer's " +
   "completion of implementing with no open pull request on `legion/<issue>` and none recorded merged (HANDOFF_NO_PULL_REQUEST: open it; one " +
-  "naming a closed pull request is the architect's to decide) and, for READY, each " +
-  "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " +
-  "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. request_backward_move returns an issue to an earlier phase (`to`, `reason`): " +
+  "naming a closed pull request is the architect's to decide); a refused completion changed nothing, so fix what it names and complete again. " +
+  "request_backward_move returns an issue to an earlier phase (`to`, `reason`): " +
   "a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which " +
   "counts a review round. sign_off is the architect's acceptance of an issue in accepting, moving it to retro; the daemon refuses it in every " +
   "other phase (SIGNOFF_OUTSIDE_ACCEPTING), and issues still running beneath it do not hold it: a root's close waits " +
   "for them instead. " +
-  "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. " +
+  "The controller's read_state with no field returns a summary of the daemon's whole state — the project, admission, each " +
+  "capability, one line per recorded issue, and under each issue Legion still runs its slot, hold, gate and each claim's " +
+  "state with its last turn times — and with issue, issues, phase or settings returns the full records it names; " +
+  "set_status moves an issue to todo, backlog or icebox. " +
   "What a later phase needs goes in your handoff; a question for another live role goes to its role topic with envoy_publish.";
 
 /** Every session kind the tool answers for: a root architect, a sub-architect, each phase worker,
@@ -204,7 +215,6 @@ const OMP_LEGION_TOOL_SCHEMA = JSON.stringify({
         "accepting",
         "retro",
         "merging",
-        "awaiting_merge",
         "done",
         "held",
       ],
@@ -213,8 +223,9 @@ const OMP_LEGION_TOOL_SCHEMA = JSON.stringify({
     decision: { type: "string", enum: ["retry", "escalate"] },
     summary: { type: "string" },
     verdict: { type: "string", enum: ["pass", "pending", "fail"] },
-    ready: { type: "boolean" },
     status: { type: "string", enum: ["todo", "backlog", "icebox"] },
+    phase: { type: "string", enum: [...LEGION_PHASES] },
+    settings: { type: "boolean" },
   },
   required: ["op"],
   additionalProperties: false,
@@ -230,11 +241,7 @@ test("the legion tool's parameter schema serializes to the exact schema Oh My Pi
 
 test("a root architect's handoff_complete is refused as unavailable before its arguments are read", async () => {
   const root = toolFor(claimSession("architect"));
-  for (const parameters of [
-    {},
-    { summary: "" },
-    { summary: "x", verdict: "maybe", ready: "yes" },
-  ]) {
+  for (const parameters of [{}, { summary: "" }, { summary: "x", verdict: "maybe" }]) {
     await expect(
       root.execute("", { op: "handoff_complete", ...parameters }, undefined, undefined, context())
     ).resolves.toEqual({
@@ -590,16 +597,9 @@ const stateAt = (phase: LegionPhase) => ({
   },
 });
 
-test("handoff_complete finds the pushed commit carrying the handoff, posts it with a fresh grant, closes the phase on success, and answers the daemon's note", async () => {
+test("handoff_complete finds the pushed commit carrying the handoff, posts it with a fresh grant, and closes the phase on success", async () => {
   const completed: string[] = [];
-  const { calls, daemon } = recordingDaemon({
-    state: stateAt("implementing"),
-    answers: {
-      handoffComplete: {
-        note: "pull request #312 is already merged, so READY was published without reading its head's handoffs",
-      },
-    },
-  });
+  const { calls, daemon } = recordingDaemon({ state: stateAt("implementing") });
   const run = (
     session: LegionToolSession,
     parameters: Record<string, unknown>,
@@ -617,45 +617,32 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
 
   // The implementer at implementing: the issue's phase is read from the daemon's state, the
   // commit carrying .legion/LEGION-208/implement.json is found in the pane, and the request
-  // carries it with the wire's zero values for the verdict and READY.
+  // carries it with the wire's zero value for the verdict.
   await expect(
     run(claimSession("implementer"), { op: "handoff_complete", summary: "Done." })
-  ).resolves.toEqual({
-    content: [
-      {
-        type: "text",
-        text: '{"note":"pull request #312 is already merged, so READY was published without reading its head\'s handoffs"}',
-      },
-    ],
-    details: {
-      note: "pull request #312 is already merged, so READY was published without reading its head's handoffs",
-    },
-  });
+  ).resolves.toEqual({ content: [{ type: "text", text: "{}" }], details: {} });
   expect(calls).toEqual([
     ["state", undefined],
     [
       "grant",
       { sessionId: "ses_208", secret: "claim-secret", tree: "LEGION-208", issue: "LEGION-208" },
     ],
-    [
-      "handoffComplete",
-      { grantId: "grant-208", summary: "Done.", verdict: "", ready: false, commit: CARRYING },
-    ],
+    ["handoffComplete", { grantId: "grant-208", summary: "Done.", verdict: "", commit: CARRYING }],
   ]);
   expect(completed).toEqual(["ses_208"]);
 
   // A role that does not work the issue's phase reports the commit the workspace stands on, and
-  // the daemon refuses it naming whose phase it is: the tester at implementing, the merger's
-  // READY, and a sub-architect, each posting @-. The verdict and READY travel as given.
+  // the daemon refuses it naming whose phase it is: the tester at implementing, the merger, and a
+  // sub-architect, each posting @-. The verdict travels as given.
   await run(claimSession("tester"), { op: "handoff_complete", summary: "Red.", verdict: "fail" });
   expect(calls.at(-1)).toEqual([
     "handoffComplete",
-    { grantId: "grant-208", summary: "Red.", verdict: "fail", ready: false, commit: STANDING },
+    { grantId: "grant-208", summary: "Red.", verdict: "fail", commit: STANDING },
   ]);
-  await run(claimSession("merger"), { op: "handoff_complete", summary: "READY", ready: true });
+  await run(claimSession("merger"), { op: "handoff_complete", summary: "Merged." });
   expect(calls.at(-1)).toEqual([
     "handoffComplete",
-    { grantId: "grant-208", summary: "READY", verdict: "", ready: true, commit: STANDING },
+    { grantId: "grant-208", summary: "Merged.", verdict: "", commit: STANDING },
   ]);
   await run(claimSession("architect", "LEGION-209"), {
     op: "handoff_complete",
@@ -667,14 +654,13 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
       grantId: "grant-208",
       summary: "Children released.",
       verdict: "",
-      ready: false,
       commit: STANDING,
     },
   ]);
   expect(completed).toEqual(["ses_208", "ses_208", "ses_208", "ses_208"]);
 
   // Refused before any daemon call: a root architect, which runs no phase; a missing summary; a
-  // verdict or a ready of the wrong shape; and a phase, which the daemon knows from the grant.
+  // verdict of the wrong shape; and a phase, which the daemon knows from the grant.
   const before = calls.length;
   const refusals = [
     [claimSession("architect"), { summary: "Done." }, "root architect session"],
@@ -684,7 +670,6 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
       { summary: "x", verdict: "maybe" },
       "verdict is pass, pending or fail",
     ],
-    [claimSession("merger"), { summary: "x", ready: "yes" }, "ready is true or false"],
     [claimSession("planner"), { summary: "x", phase: "plan" }, 'does not accept field "phase"'],
   ] as const;
   for (const [session, parameters, message] of refusals) {
@@ -803,35 +788,24 @@ test("the implementer's report on its closed issue's production check carries a 
         "grant",
         { sessionId: "ses_208", secret: "claim-secret", tree: "LEGION-208", issue: "LEGION-208" },
       ],
-      [
-        "handoffComplete",
-        { grantId: "grant-208", summary: `Look 2: ${verdict}.`, verdict, ready: false },
-      ],
+      ["handoffComplete", { grantId: "grant-208", summary: `Look 2: ${verdict}.`, verdict }],
     ]);
   }
   expect(completed).toEqual(["ses_208", "ses_208", "ses_208"]);
 
-  // Refused after the record is read, with nothing minted or posted: a report with no verdict,
-  // and one sent as READY.
-  const refusals = [
-    [
-      { summary: "Looked." },
-      "handoff_complete on a production check names a verdict of pass, pending or fail",
-    ],
-    [
-      { summary: "Looked.", verdict: "pass", ready: true },
-      "handoff_complete on a production check is no READY: leave ready out",
-    ],
-  ] as const;
-  for (const [parameters, message] of refusals) {
-    const result = await run(claimSession("implementer"), {
-      op: "handoff_complete",
-      ...parameters,
-    });
-    expect(result.isError).toBe(true);
-    expect(result.content).toEqual([{ type: "text", text: message }]);
-    expect(calls.at(-1)).toEqual(["state", undefined]);
-  }
+  // Refused after the record is read, with nothing minted or posted: a report with no verdict.
+  const noVerdict = await run(claimSession("implementer"), {
+    op: "handoff_complete",
+    summary: "Looked.",
+  });
+  expect(noVerdict.isError).toBe(true);
+  expect(noVerdict.content).toEqual([
+    {
+      type: "text",
+      text: "handoff_complete on a production check names a verdict of pass, pending or fail",
+    },
+  ]);
+  expect(calls.at(-1)).toEqual(["state", undefined]);
   expect(completed).toHaveLength(3);
 
   // Only the implementer reports on the check: any other role's completion on the closed issue is
@@ -878,7 +852,7 @@ test("the implementer's report on its closed issue's production check carries a 
   expect(implementerAtDone.isError).toBeUndefined();
   expect(closedCalls.at(-1)).toEqual([
     "handoffComplete",
-    { grantId: "grant-208", summary: "Looked.", verdict: "", ready: false },
+    { grantId: "grant-208", summary: "Looked.", verdict: "" },
   ]);
 });
 
@@ -914,16 +888,135 @@ test("a refused completion surfaces the daemon's code and leaves the phase open"
   expect(completed).toEqual([]);
 });
 
-test("the controller reads the whole state without a grant and sets an issue's status with its own", async () => {
-  const state = {
-    daemon: { project: "OMP" },
-    admission: { cap: 2, active: ["LEGION-208"], waiting: [] },
-    issues: { "LEGION-208": { key: "LEGION-208", phase: "held", holdReason: "escalated" } },
+/** A state the contracts schema accepts, with what a test varies laid over it: `read_state`
+ * summarizes the daemon's own answer, so the tests build it as the daemon serves it. */
+function legionState(overrides: Record<string, unknown> = {}): LegionState {
+  return LegionStateResponse.parse({
+    daemon: {
+      project: "INFRA",
+      schemaVersion: 71,
+      boots: 9,
+      firstBootAt: "2026-10-01T00:00:00Z",
+      startedAt: "2026-10-30T01:02:03Z",
+    },
+    admission: { cap: 8, active: [], waiting: [], blocked: [], free: 0 },
+    issues: {},
+    pendingStatusWrites: [],
+    heldOutboxRows: [],
+    strandedClaims: [],
     capabilities: [],
-  };
-  const minted: string[] = [];
-  const { calls, daemon } = recordingDaemon({ state });
-  const tool = createLegionTool({
+    repositories: { owners: ["acme"], mapped: [], refused: [], withoutWebhookApp: [], caches: [] },
+    consumers: [],
+    settings: { review_round_cap: 3, worker_boot_timeout_seconds: 900 },
+    ...overrides,
+  });
+}
+
+/** The phase workers of an issue, in the order the summary lists them under the architect. */
+const WORKER_ROLES = ["planner", "implementer", "tester", "reviewer", "merger"] as const;
+
+/** The state at the size that cut the controller's read (dispatch://INFRA-329): the 92 issues
+ * the INFRA deployment recorded, `running` of them still in the workflow, each carrying a slot, a
+ * design gate, a pull request, an architect and a claim for every role with both turn times. Half
+ * the issues run at once, nearly six times the deployment's admission cap, so the summary is
+ * measured well above the load it meets. */
+function stateOf92Issues(running = 46): LegionState {
+  const at = (minutes: number) =>
+    `2026-10-30T${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}:00Z`;
+  const claimView = (index: number, state: string) => ({
+    session: `ses_${index}`,
+    state,
+    locator: {
+      runtime: "sandbox",
+      claim: `claim-${index}`,
+      incarnation: `uid-${index}/1`,
+      sandbox: {
+        namespace: "legion",
+        name: `infra-${index}`,
+        podUid: `uid-${index}`,
+        container: "roles",
+        generation: 1,
+      },
+    },
+    pluginContract: 42,
+    lastTurnStart: at(index % 1440),
+    lastTurnEnd: at((index + 7) % 1440),
+  });
+  const phases = LEGION_WORKFLOW_PHASES.filter((phase) => phase !== "done");
+  const issues: Record<string, unknown> = {};
+  for (let index = 0; index < 92; index += 1) {
+    const key = `INFRA-${100 + index}`;
+    const phase = phases[index % phases.length];
+    issues[key] =
+      index < running
+        ? {
+            key,
+            generation: 2,
+            phase,
+            status: "in_progress",
+            repo: "acme/widgets",
+            defaultBranch: "main",
+            ...(phase === "held" ? { holdReason: "escalated" } : {}),
+            architect: claimView(index, "idle"),
+            workers: Object.fromEntries(
+              WORKER_ROLES.map((role, offset) => [
+                role,
+                {
+                  claim: claimView(index * 6 + offset, offset === 0 ? "working" : "retired"),
+                  pass: 1,
+                  rounds: 0,
+                },
+              ])
+            ),
+            slot: { index: index % 8, admittedAt: at(index) },
+            designGate: {
+              artifactId: `artifact-${index}`,
+              currentVersion: 3,
+              approvedVersion: index % 2 === 0 ? 2 : null,
+            },
+            pullRequest: {
+              repo: "acme/widgets",
+              number: 1000 + index,
+              head: `${index}`.padStart(40, "0"),
+              state: "open",
+              mergeState: "blocked",
+              reviewDecision: "CHANGES_REQUESTED",
+            },
+          }
+        : {
+            key,
+            generation: 2,
+            phase: "done",
+            status: "done",
+            repo: "acme/widgets",
+            defaultBranch: "main",
+            workers: {},
+          };
+  }
+  return legionState({
+    issues,
+    admission: {
+      cap: 8,
+      free: 0,
+      active: ["INFRA-100", "INFRA-101"],
+      waiting: ["INFRA-102"],
+      blocked: [{ issue: "INFRA-102", blockedBy: ["INFRA-103", "INFRA-104"] }],
+    },
+    capabilities: [
+      { name: "subagents", status: "present", detail: "6 agents discovered" },
+      {
+        name: "model-fallback",
+        status: "open",
+        detail: "no fallback configured",
+        configLine: "capabilities.decided.model-fallback",
+      },
+    ],
+  });
+}
+
+/** The controller's tool over `daemon`, recording each session its grant is minted for. */
+function controllerTool(daemon: () => LegionDaemonClient, minted: string[]): RegisteredTool {
+  return createLegionTool({
     pi,
     daemon,
     controllerGrant: async (sessionId) => {
@@ -937,15 +1030,38 @@ test("the controller reads the whole state without a grant and sets an issue's s
     resolveDocument: noDocumentLookup,
     session: () => ({ kind: "controller", sessionID: "ses_controller" }),
   });
+}
+
+test("the controller reads the state without a grant and sets an issue's status with its own", async () => {
+  const state = legionState({
+    admission: { cap: 2, free: 0, active: ["LEGION-208"], waiting: [], blocked: [] },
+    issues: {
+      "LEGION-208": {
+        key: "LEGION-208",
+        generation: 1,
+        phase: "held",
+        status: "in_progress",
+        holdReason: "escalated",
+        workers: {},
+      },
+    },
+  });
+  const minted: string[] = [];
+  const { calls, daemon } = recordingDaemon({ state });
+  const tool = controllerTool(daemon, minted);
   const run = (parameters: Record<string, unknown>) =>
     tool.execute("", parameters, undefined, undefined, context("ses_controller"));
 
-  // read_state is the state verbatim: the skill reads `issues.<KEY>.phase|holdReason`,
-  // `admission` and `capabilities` from it.
-  await expect(run({ op: "read_state" })).resolves.toEqual({
-    content: [{ type: "text", text: JSON.stringify(state) }],
-    details: state,
-  });
+  // read_state with no field is the summary: the skill reads the issue's phase and hold, the
+  // admission lists and the capability rows from it, and reads a full record with a filter.
+  const summary = await run({ op: "read_state" });
+  expect(summary.details).toEqual({});
+  expect(summary.content).toEqual([
+    {
+      type: "text",
+      text: expect.stringContaining("\nissues 1\nLEGION-208 held in_progress\n  hold escalated"),
+    },
+  ]);
   expect(calls).toEqual([["state", undefined]]);
   expect(minted).toEqual([]);
 
@@ -965,7 +1081,7 @@ test("the controller reads the whole state without a grant and sets an issue's s
   const refusals = [
     [{ op: "set_status", issue: "LEGION-208", status: "done" }, "todo, backlog, icebox"],
     [{ op: "set_status", status: "todo" }, "set_status requires issue"],
-    [{ op: "read_state", issue: "LEGION-208" }, 'read_state does not accept field "issue"'],
+    [{ op: "read_state", to: "planning" }, 'read_state does not accept field "to"'],
     [{ op: "read_record", issue: "LEGION-208" }, "not available to a controller session"],
     [{ op: "handoff_complete", summary: "Done." }, "not available to a controller session"],
     [{ op: "sign_off", issue: "LEGION-208" }, "not available to a controller session"],
@@ -977,4 +1093,117 @@ test("the controller reads the whole state without a grant and sets an issue's s
   }
   expect(calls).toHaveLength(before);
   expect(minted).toEqual(["ses_controller"]);
+});
+
+test("read_state with no field summarizes 92 issues under the tool's limit, naming every one", async () => {
+  const state = stateOf92Issues();
+  const { daemon } = recordingDaemon({ state });
+  const tool = controllerTool(daemon, []);
+  const result = await tool.execute(
+    "",
+    { op: "read_state" },
+    undefined,
+    undefined,
+    context("ses_controller")
+  );
+  const [block] = result.content;
+  const summary = block !== undefined && block.type === "text" ? block.text : "";
+
+  // The INFRA deployment's own state at this size is about 160 KB of JSON, and the tool's output
+  // reaches the controller cut at about 41 KB (dispatch://INFRA-329). This one is of that order,
+  // and the summary of it is a fifth of the cut.
+  expect(Buffer.byteLength(JSON.stringify(state), "utf8")).toBeGreaterThan(100 * 1024);
+  expect(Buffer.byteLength(summary, "utf8")).toBeLessThan(30720);
+  // Every recorded key is named, on its own line with its phase and status: a summary that drops
+  // issues to fit is the bug this replaces.
+  expect(summary).toContain("\nissues 92\n");
+  const lines = summary.split("\n");
+  for (const [key, issue] of Object.entries(state.issues)) {
+    expect(lines).toContain(`${key} ${issue.phase} ${issue.status}`);
+  }
+
+  expect(summary).toContain("project INFRA boots 9 started 2026-10-30T01:02:03Z");
+  expect(summary).toContain(
+    "\nadmission cap 8 free 0\nactive INFRA-100 INFRA-101\nwaiting INFRA-102\nblocked INFRA-102 on INFRA-103 INFRA-104\n"
+  );
+  expect(summary).toContain("\ncapability subagents present\n");
+  expect(summary).toContain(
+    "\ncapability model-fallback open no fallback configured config capabilities.decided.model-fallback\n"
+  );
+  // An issue Legion still runs carries its slot, its gate and every claim's state with that
+  // claim's last turn times; a hold carries its reason.
+  expect(summary).toContain(
+    [
+      "\nINFRA-100 admitted in_progress",
+      "  slot 0 since 2026-10-30T00:00:00Z",
+      "  gate 3 approved 2",
+      "  architect idle 2026-10-30T00:00:00Z 2026-10-30T00:07:00Z",
+      "  planner working 2026-10-30T00:00:00Z 2026-10-30T00:07:00Z",
+      "  implementer retired 2026-10-30T00:01:00Z 2026-10-30T00:08:00Z",
+      "  tester retired 2026-10-30T00:02:00Z 2026-10-30T00:09:00Z",
+      "  reviewer retired 2026-10-30T00:03:00Z 2026-10-30T00:10:00Z",
+      "  merger retired 2026-10-30T00:04:00Z 2026-10-30T00:11:00Z\n",
+    ].join("\n")
+  );
+  expect(summary).toContain("\n  hold escalated\n");
+  expect(summary).toContain("  gate 3 approved none\n");
+  // A done issue's claims are retired, so its line stands alone: that is what pays for naming
+  // every key.
+  expect(summary).toContain("\nINFRA-146 done done\nINFRA-147 done done\n");
+});
+
+test("read_state's filters answer full records, and name what they cannot select", async () => {
+  const state = stateOf92Issues();
+  const { daemon } = recordingDaemon({ state });
+  const tool = controllerTool(daemon, []);
+  const run = (parameters: Record<string, unknown>) =>
+    tool.execute("", parameters, undefined, undefined, context("ses_controller"));
+
+  // The record a filter answers is the state's own, every claim and count in it.
+  await expect(run({ op: "read_state", issue: "INFRA-101" })).resolves.toEqual({
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({ issues: { "INFRA-101": state.issues["INFRA-101"] } }),
+      },
+    ],
+    details: { issues: { "INFRA-101": state.issues["INFRA-101"] } },
+  });
+  await expect(
+    run({ op: "read_state", issues: ["INFRA-101", "INFRA-130"] })
+  ).resolves.toMatchObject({
+    details: {
+      issues: { "INFRA-101": state.issues["INFRA-101"], "INFRA-130": state.issues["INFRA-130"] },
+    },
+  });
+  const reviewing = Object.fromEntries(
+    Object.entries(state.issues).filter(([, issue]) => issue.phase === "reviewing")
+  );
+  expect(Object.keys(reviewing).length).toBeGreaterThan(1);
+  await expect(run({ op: "read_state", phase: "reviewing" })).resolves.toMatchObject({
+    details: { issues: reviewing },
+  });
+  await expect(run({ op: "read_state", settings: true })).resolves.toMatchObject({
+    details: { settings: state.settings },
+  });
+
+  const refusals = [
+    [{ op: "read_state", issue: "INFRA-999" }, "The daemon has no record for INFRA-999"],
+    [
+      { op: "read_state", issues: ["INFRA-998", "INFRA-999"] },
+      "The daemon has no record for INFRA-998, INFRA-999",
+    ],
+    [
+      { op: "read_state", issue: "INFRA-101", settings: true },
+      "read_state takes one of issue, issues, phase, settings, not issue and settings",
+    ],
+    [{ op: "read_state", phase: "nowhere" }, `read_state's phase is one of ${LEGION_PHASES[0]}`],
+    [{ op: "read_state", settings: false }, "read_state's settings is true"],
+    [{ op: "read_state", issues: "INFRA-101" }, "read_state's issues is a list of issue keys"],
+  ] as const;
+  for (const [parameters, message] of refusals) {
+    const result = await run(parameters);
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual([{ type: "text", text: expect.stringContaining(message) }]);
+  }
 });

@@ -51,13 +51,13 @@ func seedApprovalBelowHead(t *testing.T, pool *pgxpool.Pool, approved string) {
 
 // An approval of a head the pull request has since moved past stands when every commit above it
 // changed only the issue's own handoffs, .legion/CAPTURE-1/, even when the push webhook that would
-// say so never arrived: the pass reads GitHub's compare of the approved head with the recorded
+// say so never arrived: the read reads GitHub's compare of the approved head with the recorded
 // one, records the handoff-only push it shows, and the round ends approved. Anything else leaves
 // the approval set aside, as it is today: a path outside .legion/CAPTURE-1/ (code, another issue's
 // handoffs, a rename out of the code), a head the approved one is not an ancestor of, a list GitHub
 // may have cut short or did not give, and a compare GitHub refused or failed. GitHub's answer for
-// two fixed heads never changes, so a second pass asks again only after a failed read.
-func TestThePassCarriesAnApprovalAcrossCommitsThatChangeOnlyTheIssuesHandoffs(t *testing.T) {
+// two fixed heads never changes, so a second read asks again only after a failed read.
+func TestTheReadCarriesAnApprovalAcrossCommitsThatChangeOnlyTheIssuesHandoffs(t *testing.T) {
 	file := func(name string) string { return fmt.Sprintf(`{"filename":%q,"status":"modified"}`, name) }
 	compare := func(status string, files ...string) string {
 		return fmt.Sprintf(`{"status":%q,"ahead_by":1,"behind_by":0,"files":[%s]}`, status, strings.Join(files, ","))
@@ -95,17 +95,17 @@ func TestThePassCarriesAnApprovalAcrossCommitsThatChangeOnlyTheIssuesHandoffs(t 
 			var compares atomic.Int64
 			api := compareStandIn(t, tc.status, tc.answer, &compares).URL
 			w := reviewReadRuntime(pool, api)
-			w.readRequiredChecks(context.Background())
+			readCapture(t, w)
 			if got := compares.Load(); got != 1 {
-				t.Fatalf("the pass compared the approved head with the recorded head %d times, want once", got)
+				t.Fatalf("the read compared the approved head with the recorded head %d times, want once", got)
 			}
-			w.readRequiredChecks(context.Background())
+			readCapture(t, w)
 			again := int64(1)
 			if tc.status == http.StatusInternalServerError {
 				again = 2
 			}
 			if got := compares.Load(); got != again {
-				t.Fatalf("after a second pass the compares number %d, want %d", got, again)
+				t.Fatalf("after a second read the compares number %d, want %d", got, again)
 			}
 			got, pr := capturePhase(t, pool)
 			want, pushes := phase.Reviewing, []record.ClassifiedPush(nil)
@@ -113,47 +113,44 @@ func TestThePassCarriesAnApprovalAcrossCommitsThatChangeOnlyTheIssuesHandoffs(t 
 				want, pushes = phase.Accepting, []record.ClassifiedPush{{SHA: "handoff", Before: "code", HandoffOnly: true}}
 			}
 			if got != want {
-				t.Fatalf("after the pass the issue is in %s, want %s", got, want)
+				t.Fatalf("after the read the issue is in %s, want %s", got, want)
 			}
 			if fmt.Sprint(pr.Pushes) != fmt.Sprint(pushes) {
-				t.Fatalf("after the pass the pushes recorded are %+v, want %+v", pr.Pushes, pushes)
+				t.Fatalf("after the read the pushes recorded are %+v, want %+v", pr.Pushes, pushes)
 			}
 		})
 	}
 }
 
-// The handoff-only push the compare records leaves the approved head, not the head the fix-attempt
-// count moved from, so it takes back no count: here the recorded head was counted as a fix pushed
-// from a red head between the two (middle) before its push arrived, and the head run that count
-// opened replays with the compare's push and still finds no chain from middle. The approval stands
-// and the count stands with it, its run still waiting for the push from middle.
-func TestTheCarryFromAnApprovedHeadTakesBackNoCountFromAnotherHead(t *testing.T) {
+// The handoff-only push the compare records leaves the approved head, not the head the record's
+// run is waiting for a push from: here the head run opened at a head pushed from a commit between
+// the two (middle) before its push arrived, and the run replays with the compare's push and still
+// finds no chain from middle. The approval stands, and the run stays open waiting for that push.
+func TestTheCarryFromAnApprovedHeadLeavesTheRunWaitingForAnotherHeadsPush(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	seedApprovalBelowHead(t, pool, "code")
 	setCapturePullRequest(t, pool, func(pr *record.PullRequest) {
-		pr.FixAttempts, pr.HeadCounted = 3, "handoff"
 		pr.Run = &record.HeadRun{Steps: []record.RunStep{{Head: "handoff"}},
-			Anchor: record.Judgement{HeadSHA: "middle", FixAttempts: 2, CheckedHead: "middle", Failing: []string{"ci"},
-				CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Required: []string{"ci"}, Workflows: []record.RequiredWorkflow{}}}
+			Anchor: record.Judgement{HeadSHA: "middle", CheckedHead: "middle", Failing: []string{"ci"},
+				CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}}}
 	})
 	var compares atomic.Int64
 	review, test := `{"filename":".legion/CAPTURE-1/review.json","status":"modified"}`, `{"filename":".legion/CAPTURE-1/test.json","status":"modified"}`
 	api := compareStandIn(t, http.StatusOK, `{"status":"ahead","ahead_by":2,"behind_by":0,"files":[`+review+`,`+test+`]}`, &compares).URL
-	reviewReadRuntime(pool, api).readRequiredChecks(context.Background())
+	readCapture(t, reviewReadRuntime(pool, api))
 	got, pr := capturePhase(t, pool)
 	if got != phase.Accepting {
-		t.Fatalf("after the pass the issue is in %s, want %s: the approval of code stands", got, phase.Accepting)
+		t.Fatalf("after the read the issue is in %s, want %s: the approval of code stands", got, phase.Accepting)
 	}
-	if pr.FixAttempts != 3 || pr.HeadCounted != "handoff" || pr.Run == nil {
-		t.Fatalf("after the pass fixAttempts=%d headCounted=%q run open %v, want 3, \"handoff\" and open: the carry from code took back the count of the move from middle",
-			pr.FixAttempts, pr.HeadCounted, pr.Run != nil)
+	if pr.Run == nil {
+		t.Fatalf("after the read the head run is closed, want it open: the carry from code is no chain from middle")
 	}
 }
 
-// The pass compares only while an approval is set aside: an approval of the recorded head itself
+// The read compares only while an approval is set aside: an approval of the recorded head itself
 // stands with no read, and so does one a recorded handoff-only push already carries; a round with
 // no approval, or an issue not in reviewing, has no approval for a compare to carry.
-func TestThePassComparesOnlyForAnApprovalSetAside(t *testing.T) {
+func TestTheReadComparesOnlyForAnApprovalSetAside(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		seed func(t *testing.T, pool *pgxpool.Pool)
@@ -183,9 +180,9 @@ func TestThePassComparesOnlyForAnApprovalSetAside(t *testing.T) {
 			tc.seed(t, pool)
 			var compares atomic.Int64
 			api := compareStandIn(t, http.StatusOK, `{"status":"ahead","files":[{"filename":".legion/CAPTURE-1/review.json"}]}`, &compares).URL
-			reviewReadRuntime(pool, api).readRequiredChecks(context.Background())
+			readCapture(t, reviewReadRuntime(pool, api))
 			if got := compares.Load(); got != 0 {
-				t.Fatalf("the pass compared %d times, want none", got)
+				t.Fatalf("the read compared %d times, want none", got)
 			}
 		})
 	}
@@ -194,10 +191,10 @@ func TestThePassComparesOnlyForAnApprovalSetAside(t *testing.T) {
 // The record can lag GitHub by more than one head: the reviewer approved approved, a head the
 // record never reached, and pushed its handoff to handoff, while the record still holds code. The
 // pass follows the head from code to handoff (followHead), which records the push from code, but
-// no recorded push starts at approved, so the approval is still set aside; the pass then compares
+// no recorded push starts at approved, so the approval is still set aside; the read then compares
 // approved with handoff and carries the approval when only the issue's handoffs changed between
 // them, and leaves it set aside when anything else did.
-func TestThePassCarriesAnApprovalOfAHeadBetweenTheRecordedAndGitHubsHead(t *testing.T) {
+func TestTheReadCarriesAnApprovalOfAHeadBetweenTheRecordedAndGitHubsHead(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		above   string
@@ -223,19 +220,19 @@ func TestThePassCarriesAnApprovalOfAHeadBetweenTheRecordedAndGitHubsHead(t *test
 					return
 				}
 				if r.URL.Path == "/repos/acme/widgets/pulls/86" {
-					w.Write([]byte(`{"number":86,"state":"open","base":{"ref":"main"},"head":{"ref":"legion/CAPTURE-1","sha":"handoff"},"updated_at":"2026-10-26T22:42:00Z","mergeable":true}`))
+					w.Write([]byte(`{"number":86,"state":"open","base":{"ref":"main"},"head":{"ref":"legion/CAPTURE-1","sha":"handoff"},"updated_at":"2026-10-26T22:42:00Z","mergeable":true,"mergeable_state":"clean"}`))
 					return
 				}
 				reviews.Config.Handler.ServeHTTP(w, r)
 			}))
 			t.Cleanup(server.Close)
-			reviewReadRuntime(pool, server.URL).readRequiredChecks(context.Background())
+			readCapture(t, reviewReadRuntime(pool, server.URL))
 			got, pr := capturePhase(t, pool)
 			if got != tc.want {
-				t.Fatalf("after the pass the issue is in %s, want %s (pushes %+v)", got, tc.want, pr.Pushes)
+				t.Fatalf("after the read the issue is in %s, want %s (pushes %+v)", got, tc.want, pr.Pushes)
 			}
 			if pr.HeadSHA != "handoff" {
-				t.Fatalf("after the pass the record is at %q, want handoff", pr.HeadSHA)
+				t.Fatalf("after the read the record is at %q, want handoff", pr.HeadSHA)
 			}
 			carried := false
 			for _, push := range pr.Pushes {
@@ -248,9 +245,9 @@ func TestThePassCarriesAnApprovalOfAHeadBetweenTheRecordedAndGitHubsHead(t *test
 	}
 }
 
-// GitHub's rate limit on the compare ends the pass there, as it ends the pass on any of its reads:
-// nothing is read after the refusal, the approval stays set aside, and the next pass asks again.
-func TestARateLimitOnTheCompareEndsThePass(t *testing.T) {
+// GitHub's rate limit on the compare ends the read there, as it ends the read on any of its reads:
+// nothing is read after the refusal, the approval stays set aside, and the next read asks again.
+func TestARateLimitOnTheCompareEndsTheRead(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	seedApprovalBelowHead(t, pool, "code")
 	var paths []string
@@ -266,17 +263,17 @@ func TestARateLimitOnTheCompareEndsThePass(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	w := reviewReadRuntime(pool, server.URL)
-	w.readRequiredChecks(context.Background())
+	readCapture(t, w)
 	want := []string{"/repos/acme/widgets/pulls/86", "/repos/acme/widgets/pulls/86/reviews", "/repos/acme/widgets/compare/code...handoff"}
 	if fmt.Sprint(paths) != fmt.Sprint(want) {
-		t.Fatalf("the pass read %q, want %q and nothing after the rate limit", paths, want)
+		t.Fatalf("the read read %q, want %q and nothing after the rate limit", paths, want)
 	}
 	if got, _ := capturePhase(t, pool); got != phase.Reviewing {
-		t.Fatalf("after the pass the issue is in %s, want reviewing", got)
+		t.Fatalf("after the read the issue is in %s, want reviewing", got)
 	}
-	w.readRequiredChecks(context.Background())
+	readCapture(t, w)
 	if got := strings.Count(fmt.Sprint(paths), "/compare/"); got != 2 {
-		t.Fatalf("after a second pass the compares number %d, want 2", got)
+		t.Fatalf("after a second read the compares number %d, want 2", got)
 	}
 }
 

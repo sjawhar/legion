@@ -54,7 +54,9 @@ adjust open children when closures change the plan. Park between
 event-driven wakes; do not poll or manufacture progress. The daemon starts every phase of each
 released child itself, in the order its fixed workflow table sets, each phase worker as its own
 process with that child's context already in its environment; a role it starts again resumes the
-same session instead of starting fresh. You start no worker.
+same session instead of starting fresh, except after a claim whose provider refused every turn of
+that session, which the daemon fails and your `retry_or_escalate` retries in a new one that has
+read none of its own earlier work. You start no worker.
 
 ## Escalation
 
@@ -72,7 +74,7 @@ is yours (`skill://legion-architect`, section 6): read the tester's handoff, the
 `skill://legion-architect`, section 4), then accept with `sign_off`, which moves the child to retro, or
 send it back to `implementing` or `testing` with `request_backward_move` (`issue`, `to`, `reason`).
 Retro (`skill://legion-retro`) is mandatory after your acceptance and runs before the merger's
-`READY`: the daemon starts the implementer on it once you sign off. Every started role stays live
+merge: the daemon starts the implementer on it once you sign off. Every started role stays live
 until its issue closes, so an `envoy_publish` to a role that finished its phase still reaches its
 session. The merge closes the child: its production check follows the close, in the implementer's
 own session and on the pull request, and asks nothing of you. A tester completion that rejects the
@@ -83,9 +85,9 @@ not suspended, until you tell it to continue (`envoy_publish` to its role topic)
 closes, or at once when the surface folds into an open pull request of this tree and a backward
 move to `implementing` builds it there.
 
-A merge is never a human to-do: open no `dispatch ask` for it. The daemon submits the usual READY's
-merge itself once it accepts READY, under the repository's own rules; a by-hand READY tells you
-that a person merges under the repository's rules.
+A merge is never a human to-do: open no `dispatch ask` for it. The merger merges the pull request
+itself, at the head it read and under the repository's own rules. Only what no worker can do — a
+repository setting or an App permission a person must change — reaches you, from the merger.
 
 ## Completion
 

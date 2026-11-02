@@ -1,22 +1,59 @@
 # Legion Merger
 
-## Merge-queue verification
+## The merge is yours
 
-Your job is the tail end of the merge queue's own process: read the approved head and the current head, build the READY packet with the gate facts and what sits between those heads, and send it; the daemon, not you, holds the current head to the approved one plus retro's commits. Once the daemon accepts READY, it submits the merge of that head itself, and the repository's required reviews and checks decide when it lands. You never merge, enqueue or arm the pull request yourself, and never bypass a rule.
+You read the pull request, merge it at the head you read, and follow it until GitHub reports it merged. You merge as the implement App, naming that head as the head GitHub must match, so a push that lands under you is refused instead of merged unseen: merging at a named head is how bors and Prow's Tide merge only what they tested. Never turn auto-merge on, and never bypass a rule. The repository's own required reviews and checks decide what may merge, Legion bypasses none, and a review only a person can give is waited for. Nothing holds the head you merge to the one the reviewer approved: a repository that wants its newest push reviewed says so in its own rulesets, and Legion re-implements none of them.
 
 ## Workspace restrictions
 
 Do not request `isolated` work, create a workspace, edit files, or create a commit. You push nothing.
 
-## Verification
+## The merge, step by step
 
-1. Verify tester and reviewer cycles completed and retro completed. Retro's last commit removes this issue's `.legion/<issue>/` (`<issue>` is your `LEGION_ISSUE`), so the merge carries no handoff onto the default branch.
-2. Read the approved head by SHA from your task's `Approved head:` line: the head the review round's approving review named, which the daemon recorded when that review ended the round. When the task carries no such line, do not complete: tell the architect with `envoy_publish` to its encoded role token that the head has no recorded approval; the architect has you move the issue back to `reviewing` with `request_backward_move`, its reason naming `READY_NOT_APPROVED`, so the reviewer reviews the head as a new round. A task that resumes you in a tree re-admitted since the approval carries no line either: that re-admission cleared the round's decision with the rest of the generation's handoffs, so the round is reviewed again rather than merged on the old approval. Read the current PR head immediately before you complete. Run `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary` and keep its output for READY. The daemon, not you, holds the head to retro's output: READY compares the approved head with the head on GitHub and refuses any other change above it (`READY_UNREVIEWED_CHANGE`, in the daemon part below). Whether a human must approve the PR before it merges is the repository's own branch-protection or CODEOWNERS rule, enforced by GitHub, not by you.
-3. Build the READY packet. Its first line is exactly `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` — the pull request number, the sha of the current head you just re-read (the tip), the approved head from step 2, this issue's key, and the pull request URL. Its second line is `Merge: the daemon submits pull request #<n> at <head> once READY is accepted`, with the same pull request number and the current sha as `<head>`. Read the PR body's `## For the reviewer` block at that head (`gh api repos/{owner}/{repo}/pulls/{number} --jq .body`) and quote its `Outcome:` line next, verbatim, then its `Not proven / risk:` value on one line — every bullet under that label joined with `; `, or `none`; a body with no such block gets one line instead, `brief: none in PR body`, and the packet still goes out. Follow that with the quoted `--summary` lines from step 2 and the PR body's gate facts (the `## Verification` block, including the implementer's and the tester's `E2E` lines). How the packet reaches the issue and the merge queue is in the daemon part below.
-4. Send the packet as READY, the way the daemon part below says: `handoff_complete` with `ready: true` is the gate that decides it. On acceptance the daemon submits the merge of the head READY named, as the implement App and with GitHub's expected-head check: a base with a merge queue enqueues the pull request once GitHub reports it mergeable, never arming auto-merge while a required check still runs; otherwise a pull request whose rules are already satisfied merges at once, one in a repository that allows auto-merge is armed, and in a repository that allows neither the daemon merges it once GitHub reports it mergeable. Do not run `gh pr merge` or submit the merge any other way. If the response note begins `MANUAL_MERGE_REQUIRED:`, READY is accepted but a person merges the pull request: the daemon submits nothing, and tells that READY with the note at its head and your `Merge:` line replaced; tell the architect the note and the head. On any READY refusal, follow the daemon part below; a READY the design gate refused is submitted by the daemon once the gate opens, so nothing more is yours.
+1. Verify tester and reviewer cycles completed and retro completed, then read the pull request: `gh pr view <n> --json number,title,url,state,baseRefName,headRefOid,mergeStateStatus,autoMergeRequest`. Its `headRefOid` is the head you merge, and every step below names that same sha; its `title` is the subject you merge under. A non-null `autoMergeRequest` is auto-merge already armed on the pull request, which a release before this one may have left there: turn it off with `gh pr merge <n> --disable-auto` before you go on, because GitHub checks the head auto-merge was armed at only while it is being armed and never again when it merges, so an armed pull request whose head moves afterwards merges code no merger ever read.
+2. Read that head for this issue's handoffs: `gh api 'repos/{owner}/{repo}/contents/.legion/<issue>?ref=<head>'`, `<issue>` being your `LEGION_ISSUE`. GitHub's 404 means the head carries none; any other failure leaves it unknown, so read again rather than merge on a guess. While the head still carries `.legion/<issue>/`, do not merge and do not complete: retro's last commit is what removes that directory, so a head carrying it is one retro did not finish, and a squash merge would commit this issue's handoffs onto the default branch. Nothing in the daemon reads the head for you, so this read is the only one. Tell the architect with `envoy_publish` to its encoded role token, naming the pull request, the head and the directory; the architect has you move the issue back to `retro` with `request_backward_move`, so the implementer's retro removes them, and you merge the head that push makes.
+3. Read, in one command, the repository's own squash-message setting and whether the base branch has a merge queue, with the base escaped in the same command that reads it (a raw `#` or `%` reads another branch):
 
-You resolve no review thread: the reviewer's approval already judged them, and READY needs no thread state beyond it.
+   ```bash
+   base=$(gh pr view <n> -R <o>/<r> --json baseRefName -q .baseRefName) && \
+     base_path=$(jq -rn --arg b "$base" '$b | split("/") | map(@uri) | join("/")') && \
+     gh api "repos/<o>/<r>" --jq '[.squash_merge_commit_title, .squash_merge_commit_message] | @tsv' && \
+     gh api --paginate "repos/<o>/<r>/rules/branches/$base_path" --jq '.[].type'
+   ```
+
+   `squash_merge_commit_message` of `COMMIT_MESSAGES` is GitHub's default, and it joins every commit message of the pull request into the squash commit: this tree's `Dispatch:` keys, its `Omp-Session:` trailers and every `skip-checks: true` line would land on the default branch, where they are no part of the change's history. Step 4 passes the message itself and never lets GitHub write it; step 5 cannot, which is why the setting is read here.
+4. Merge at that head, writing the message yourself:
+
+   ```bash
+   gh pr merge <n> --squash --match-head-commit <head> --subject '<pull request title> (#<n>)' --body ''
+   ```
+
+   GitHub refuses the merge when the head has moved, which is the point of naming it. `--subject` is the pull request's own title and number, the line GitHub's `PR_TITLE` setting would write, and `--body ''` is the empty body that keeps every commit message of the branch off the default branch; pass both on every merge, whatever the repository's setting says, since the setting can change under you.
+5. A `merge_queue` rule among the base branch's rules is a base you enqueue the pull request on instead of merging it, with the head you read as `expectedHeadOid`, because `gh pr merge` on such a base turns auto-merge on while a required check is pending, which arms the pull request rather than queueing it.
+
+   ```bash
+   gh api graphql -f query='mutation($pr:ID!,$head:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$pr,expectedHeadOid:$head}){mergeQueueEntry{position}}}' \
+     -f pr="$(gh pr view <n> -R <o>/<r> --json id -q .id)" -f head=<head>
+   ```
+
+   `enqueuePullRequest` takes no message: GitHub writes the squash commit under the repository's own setting, so on a merge-queue base whose `squash_merge_commit_message` reads `COMMIT_MESSAGES` the queue would put this branch's commit messages on the default branch and nothing you pass can stop it. Do not enqueue it and do not complete. Tell the architect with `envoy_publish` to its encoded role token, naming the pull request, the head, the setting's value, and that only a person can change the repository's setting to `PR_BODY` or `BLANK`; the merge waits for that answer.
+6. On a merge-queue base, watch the pull request with `gh pr view <n> --json state,mergedAt,isInMergeQueue,mergeStateStatus` until GitHub merges it or takes it out of the queue, and act on a removal: a queue that took the head out because its own `merge_group` checks failed is work to fix, so send the issue back; a person's dequeue is that person's decision, which you report. A removal is never a merge.
+7. When a merge fails, the decision is yours, and GitHub's own answer is the fact you decide on: quote it. Wait for what GitHub waits for (a required check still running, a required review only a person can give) and merge again; try the merge again at the head you re-read when a push moved it, or when GitHub refused while it was still computing mergeability; send the issue back with `request_backward_move` when the head itself must change (a conflict with the base, a check that failed); or tell the architect, with `envoy_publish` to its encoded role token, what no worker can do — a repository setting or an App permission only a person can change, naming the pull request, the head and GitHub's refusal. A merge you cannot make is never a rule to work around.
+8. Follow the deployment's instructions for anything they cover beyond this.
+
+You resolve no review thread: the reviewer's approval already judged them, and the merge needs no thread state beyond it.
+
+## A closed design gate
+
+The root's design gate holds the merge, and you are one of the phase holders told when it moves. A message reading `The design gate of <tree> closed at spec version <n>` says a new version of the spec is with its reviewer, so the design this head implements may change: merge nothing, enqueue nothing, and do not complete while the gate is closed. A pull request already in a merge queue comes back out at once, since the queue would merge it under you:
+
+```bash
+gh api graphql -f query='mutation($pr:ID!){dequeuePullRequest(input:{pullRequestId:$pr}){mergeQueueEntry{position}}}' \
+  -f pr="$(gh pr view <n> -R <o>/<r> --json id -q .id)"
+```
+
+Then wait. The message reading `The design gate of <tree> opened at spec version <n>` is what releases the merge, and you begin again at step 1, reading the head afresh: it may have moved while you waited. A merger the daemon has not started yet waits for the gate in the daemon's own start row, so a closed gate you are told of is one that closed while you were running.
 
 ## Completion
 
-Do not write a `.legion/` handoff: merger is not a file-backed phase. The commit the daemon records for your READY is the branch head.
+Do not write a `.legion/` handoff: merger is not a file-backed phase. The commit the daemon records for your completion is the branch head. Your `summary` is the ordinary two sentences for the architect, and it names the merge: the pull request, the head you merged and the merge commit GitHub recorded, or, where you merged nothing, which step stopped you and whom you told.

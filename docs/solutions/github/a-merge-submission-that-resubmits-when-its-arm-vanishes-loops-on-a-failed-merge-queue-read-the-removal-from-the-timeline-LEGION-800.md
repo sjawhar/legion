@@ -8,6 +8,7 @@ tags:
   - timeline
   - ready_merge
 date: 2026-10-17
+status: superseded by INFRA-714 — the daemon's merge submission is deleted, so nothing resubmits and nothing reads an arm that vanished; the merger watches its own enqueue and reads a removal from the queue itself
 module: packages/daemon/internal/ghautomerge
 related_issues:
   - "LEGION-800"

@@ -220,7 +220,12 @@ func TestTheKeeperRetriesAControllerWhoseLaunchesRanOut(t *testing.T) {
 	refused := errors.New("the cluster refused the Sandbox")
 	rt.ScriptSpawn(fake.SpawnResult{Err: refused}, fake.SpawnResult{Err: refused}, fake.SpawnResult{Err: refused})
 	o := fakeRuntime(rt, &built{})
-	o.orphanSweep, o.controllerRetry = 50*time.Millisecond, 200*time.Millisecond
+	// The three refused launches run back to back, so the claim's failed state lasts only until
+	// the keeper's retry. A retry as short as the sweep would let the whole sequence fall between
+	// two polls of the wait below, which reads spawns 0 and then 4 and never the failure it is
+	// there to prove; two seconds is long enough that the failed claim is seen and short enough
+	// that the test still runs in seconds.
+	o.orphanSweep, o.controllerRetry = 50*time.Millisecond, 2*time.Second
 	d := startDaemon(t, cfg, o)
 	project, err := claim.ProjectToken(cfg.Project)
 	if err != nil {

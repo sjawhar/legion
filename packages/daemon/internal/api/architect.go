@@ -1054,13 +1054,18 @@ func (s *server) adoptReleasedChildren(w http.ResponseWriter, r *http.Request, t
 }
 
 // recordedOutside returns each released child whose record, as the release read it before its
-// writes (readReleasedBefore), is in a tree other than tree, with the Dispatch parent the release
-// read. Admission reads each record again under the fact lock before it adopts.
+// writes (readReleasedBefore), is in a tree other than tree, with the Dispatch parent and the
+// blocked-by links the release read. Admission reads each record again under the fact lock before
+// it adopts, but it cannot read Dispatch there, and its mirror of those links can be older than
+// this request's own read — a person's re-parent and link are one edit, and the daemon's consumer
+// may not have delivered its event — so the links travel with the fact and hold the adopted child
+// as the mirror's own do (workflow's enterChild, dispatch://INFRA-714/spec R3).
 func recordedOutside(tree string, children []releasedChild) []intake.AdoptedChild {
 	var outside []intake.AdoptedChild
 	for _, child := range children {
 		if child.before != nil && child.before.Tree != tree {
-			outside = append(outside, intake.AdoptedChild{Issue: child.view.Key, Parent: intake.ObservedIssue(child.view).Parent})
+			outside = append(outside, intake.AdoptedChild{Issue: child.view.Key, Parent: intake.ObservedIssue(child.view).Parent,
+				Status: child.view.Status, BlockedBy: child.view.BlockedBy, Seq: child.view.LastSeq})
 		}
 	}
 	return outside

@@ -23,13 +23,13 @@
       "jj": true
     },
     {
-      "script": "ci-red-no-takeover.sh",
+      "script": "conflict-no-takeover.sh",
       "go_version_file": "packages/daemon/go.mod",
       "apt": [],
       "bun": false,
-      "evidence_variable": "CI_RED_NO_TAKEOVER_EVIDENCE_DIR",
+      "evidence_variable": "CONFLICT_NO_TAKEOVER_EVIDENCE_DIR",
       "timeout_minutes": 25,
-      "why_hosted": "Run it from a checkout on a Linux host with go and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/ci-red-no-takeover.sh; CI's service satisfies it, and the script starts no container, installing the nats-server it needs with go install",
+      "why_hosted": "Run it from a checkout on a Linux host with go and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/conflict-no-takeover.sh; CI's service satisfies it, and the script starts no container, installing the nats-server it needs with go install",
       "jj": true
     },
     {
@@ -41,26 +41,6 @@
       "timeout_minutes": 25,
       "why_hosted": "DATABASE_URL is required and must name a loopback host; its prerequisite loop takes go, bun, curl, psql and openssl, and it starts no container",
       "jj": false
-    },
-    {
-      "script": "merged-root-waits.sh",
-      "go_version_file": "packages/daemon/go.mod",
-      "apt": [],
-      "bun": false,
-      "evidence_variable": "MERGED_ROOT_WAITS_EVIDENCE_DIR",
-      "timeout_minutes": 25,
-      "why_hosted": "Run it from a checkout on a Linux host with go and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/merged-root-waits.sh; CI's service satisfies it, and this script starts none",
-      "jj": true
-    },
-    {
-      "script": "no-required-checks.sh",
-      "go_version_file": "packages/daemon/go.mod",
-      "apt": [],
-      "bun": false,
-      "evidence_variable": "NO_REQUIRED_CHECKS_EVIDENCE_DIR",
-      "timeout_minutes": 30,
-      "why_hosted": "Run it from a checkout on a Linux host with go and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/no-required-checks.sh; the proof waits for three reads of what each base requires, so a run takes about seven minutes",
-      "jj": true
     },
     {
       "script": "stage1-skeleton.sh",

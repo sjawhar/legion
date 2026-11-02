@@ -15,8 +15,9 @@ type PushClassification struct {
 // HandoffPath reports whether path is one of issue's own handoff files, under .legion/<issue>/,
 // the directory each phase's role writes its handoff to and retro's last commit removes. Another
 // issue's handoffs are not issue's: its reviewer never read them and its retro does not remove
-// them, so READY refuses them as it refuses code (api's unreviewedChange), and a push changing them
-// is a code push here too. No issue has no handoffs.
+// them, so a push changing them carries no approval across and starts the head's checks afresh -
+// it is a code push here, as a push of anything outside .legion/<issue>/ is. No issue has no
+// handoffs.
 func HandoffPath(issue, path string) bool {
 	prefix := ".legion/" + issue + "/"
 	return issue != "" && len(path) >= len(prefix) && path[:len(prefix)] == prefix

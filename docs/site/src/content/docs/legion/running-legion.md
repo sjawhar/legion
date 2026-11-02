@@ -86,8 +86,8 @@ Beside the two role Apps, every read of the mapping, the boot's included, asks D
 GitHub App, the Envoy App whose webhook carries GitHub's events
 ([The GitHub Apps](#the-github-apps)), is installed on each served repository. A repository it is
 not installed on is served all the same, but GitHub sends Legion none of its events and Dispatch
-has no delivery of it to redeliver, so only the daemon's two-minute pass (below) brings its pull
-requests' changes in. `legion state` names each such repository on a `webhook App missing on
+has no delivery of it to redeliver, so nothing brings its pull requests' changes in and its issues
+stand still. `legion state` names each such repository on a `webhook App missing on
 <repo>: <reason>` line, and `--json` lists it under `repositories.withoutWebhookApp` with its
 `repo` and `reason`, which says whether the App is not installed, `the webhook App check failed:
 <error>` (Dispatch holds no App key, `GITHUB_APP_UNCONFIGURED`, or its read of GitHub failed,
@@ -112,52 +112,49 @@ are exactly what Legion's agents can do on GitHub:
 | **implement** (implementer, merger) | contents, pull requests, issues, actions, statuses, workflows | checks, metadata, packages |
 
 The implement App cannot create a check run, and a review never comes from the App that wrote the
-change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds. The daemon itself reads
-GitHub with the implement App too, in a pass as it starts and every two minutes after: it reads
-each open pull request's base branch and the checks that branch requires (its rulesets and its
-branch protection), since only those decide whether CI is red at a head, and so where Legion sends
-the issue. Whether the merge happens is GitHub's to decide, under those same rules.
+change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds. The daemon reads
+GitHub with the implement App too, but on no timer: no pass comes round over the served
+repositories, and the checks a base branch requires the daemon never reads at all, since whether
+the merge happens is GitHub's to decide under that branch's own rules.
 
-The same pass applies what a GitHub event lost, or still waiting behind the daemon's GitHub
-consumer, would have carried, so such an event leaves the record behind for at most one pass:
+What it reads is one issue's pull request, at two moments and no other: as the workflow runtime
+starts, for every issue in the workflow, which covers the deliveries made while the daemon was
+down; and once an agent's handoff has been recorded, the moment the daemon next decides on that
+pull request. A handoff costs the reads of its own issue's pull request alone. That read is the
+backstop for a webhook GitHub never delivered and Dispatch's redelivery sweep gave up on: it
+applies what the lost event would have carried, as the event would.
 
-- **An opened or reopened pull request, in any phase.** Every pass lists each served repository's
-  open pull requests, a request per hundred of them. One on an issue's branch, `legion/<KEY>`, of
-  the repository itself (not a fork's) that the daemon does not record open is applied as its
-  opened webhook would be, a reopen when the record holds the same pull request: the workflow
-  records it in whatever phase the issue is, and moves an implementing issue whose implementer
-  completed on to testing.
-- **A close or a merge.** A pull request recorded open that GitHub shows closed has its close
-  applied, or its merge with its merge commit: the merge closes an issue waiting on it in
-  `awaiting_merge` and otherwise tells the architect `pr-merged`, and a close without merging tells
-  the architect `pr-closed-unmerged`.
-- **A push.** A head GitHub shows that the record does not hold is applied as its synchronize
-  webhook would be. When no recorded push ends at that head, the pass first rebuilds the pushes
-  that took the branch there from GitHub's repository activity of the branch (its newest hundred
-  entries): one push for each push, force push or branch creation not yet recorded, oldest first,
-  with its pusher and the paths GitHub's compare of its two commits lists. When that activity does
-  not lead back to the recorded head, the pass applies none of them and logs a warning, `workflow:
-  the pass cannot rebuild from GitHub's activity the pushes that moved a pull request's head; …`,
-  with its `reason`. Then, or when a recorded push ends at the head, it applies the one push
-  GitHub's compare shows changed only the issue's own `.legion/<issue>/`, and leaves any other push
-  to its webhook.
+- **An opened or reopened pull request, in any phase.** An issue whose record holds no open pull
+  request has its branch, `legion/<KEY>`, listed. A pull request GitHub holds open on it is
+  applied as its opened webhook would be, a reopen when the record holds that same pull request:
+  the workflow records it in whatever phase the issue is, and moves an implementing issue whose
+  implementer completed on to testing.
+- **A head that moved.** When GitHub shows the pull request open at a head the record does not
+  hold, the read applies the synchronize its webhook would have carried, under GitHub's
+  `updated_at` as its clock, so the same fence decides it: a read older than the record's clock
+  moves nothing. Before that synchronize it applies the push that reached the new head when
+  GitHub's compare of the two shows it changed only the issue's own `.legion/<issue>/`; a push
+  that may change code is left to its own webhook.
+- **A mergeability and a merge state.** GitHub's own answer for the head is recorded. It is what
+  a head conflicting with its base is read from, and what an approval waits on in `reviewing`.
 - **A review.** A deciding review whose webhook never arrived is applied, whatever phase the issue
   is in.
-- **A CI settlement.** For a head no settlement from Envoy's listener stands for, the pass reads
-  the head's check runs; once every check's latest run has completed and the newest completed at
-  least two minutes before, it applies the settlement the listener would have published, and the
-  listener's own settlement of that head arriving later changes nothing the pass learned.
+- **The push that carries an approval set aside.** Where the reviewer approved a head below the
+  recorded one and no recorded push carries the approval up to it, the read asks GitHub to compare
+  the two heads and, when only the issue's own handoffs changed between them, applies the push
+  that says so, so the approval carries to the head and the round ends.
 - **A missing pull request.** An issue in `implementing` whose implementer completed, with no open
   or merged pull request recorded and none GitHub lists on its branch, is told to its architect as
   `pull-request-missing`, once per handoff commit
   ([Troubleshooting](/legion/legion/troubleshooting/#an-architect-is-told-pull-request-missing)).
 
-Each fact the pass applies carries an id built from what GitHub showed, never from the time, so one
-observation is applied once however many passes read it, and the webhook arriving after it changes
-nothing. These reads share the implement App's hourly limit with every pane's `gh`: a rate-limit
-answer ends the pass there, and the next pass starts over. The implementer's completion of
-implementing reads its branch's open pull request with the implement App too, and is refused
-`HANDOFF_NO_PULL_REQUEST` when there is none and the record holds none merged.
+Each fact the read applies carries an id built from what GitHub showed, never from the time, so
+one observation is applied once however many reads see it, and the webhook arriving after it
+changes nothing. These reads share the implement App's hourly limit with every pane's `gh`: a
+rate-limit answer ends the start's reads there, and each issue's next handoff reads it. The
+implementer's completion of implementing reads its branch's open pull request with the implement
+App too, and is refused `HANDOFF_NO_PULL_REQUEST` when there is none and the record holds none
+merged.
 
 `scripts/github-apps/create.ts` registers all three from the manifests beside it:
 `scripts/github-apps/implement.json` and `review.json` hold the permissions above and carry no
@@ -329,14 +326,8 @@ the kubeconfig it names exist and `LEGION_POSTGRES_DSN` (or `postgres_dsn`) name
 What each part is for:
 
 - **`project`** is the Dispatch project key, and it must also be a key of `projects`, which names
-  each Dispatch project the daemon runs (its repositories are [Dispatch's mapping](#the-projects-repositories)). A project may name a
-  `merge_queue_role`, a role that receives a copy of every `READY`, and a notice withdrawing it
-  when the head's own CI turns red before the merge, or the head starts conflicting with its base.
-  Its optional `merge.by_hand` mapping holds regular-expression paths, each matched anywhere in a
-  changed path, so anchor one (`^migrations/versions/`) to mean a directory. A pull request whose
-  change touches one is `READY` with a `MANUAL_MERGE_REQUIRED:` note: the merger does not auto-arm
-  it, the packet the daemon tells starts with the note, and a person merges it under the
-  repository's rules. Its optional `slack_channels` lists Slack channel ids (`C…` or `G…`) whose
+  each Dispatch project the daemon runs (its repositories are [Dispatch's mapping](#the-projects-repositories)). A project's
+  optional `slack_channels` lists Slack channel ids (`C…` or `G…`) whose
   mentions of the Legion Slack app reach the project's controller, which answers in the thread. It
   needs `controller: daemon` and `runtime.kubernetes.agent_secrets`, and the loader refuses it
   otherwise: the controller replies with the Slack bot token the secrets broker grants only to the
@@ -411,7 +402,7 @@ What each part is for:
   ([Start the controller](#start-the-controller)).
 - Workflow limits, all optional: `linger_hours` (72), `production_check_hours` (336: how long a
   closed issue's production check waits for its deploy before its last look, 14 days by default,
-  decimals allowed), `review_round_cap` (3), `max_fix_attempts`
+  decimals allowed), `review_round_cap`
   (3), `controller_wake_interval_seconds` (3600), and the supervision budgets
   `launch_failure_limit` (3), `prompt_failure_limit` (3) and `prompt_retire_limit` (2).
 - **`worker_backends`** (optional) runs a role on Claude Code instead of Oh My Pi:
@@ -712,9 +703,13 @@ Closing the terminal leaves the project without one, and the daemon logs
    ```
 
    An operator's suspension of an agent in a turn waits for that turn to land, at most
-   `worker_stop_timeout_seconds`, and the cut-off task is re-sent on the resume. One that reaches a
-   claim while it is still launching waits until the agent is ready, or until its registration
-   deadline. Until the stop lands the hold lives only in the daemon's memory, so before restarting
+   `worker_stop_timeout_seconds`, and the cut-off task is re-sent on the resume. One that reaches
+   a claim whose start is still running stops that start — which is charged nothing — and suspends
+   the claim at once, rather than waiting out a launch that can take minutes. Every `legion
+   claims` subcommand takes a `--wait`, one minute by default, that bounds the whole call: a call
+   that reaches it is refused with a line naming the bound, and the daemon goes on with what it
+   began under its own deadlines. Until the stop lands the hold lives only in the daemon's memory,
+   so before restarting
    the daemon wait until `legion claims list` shows the claim `suspended`, not merely
    `suspensionHeld`. The resumed agent continues the same conversation in a new pod — and that
    pod brings a disk of its own, so its workspace is provisioned afresh from the issue's branch
@@ -826,8 +821,9 @@ Closing the terminal leaves the project without one, and the daemon logs
 
   `--json` prints everything the daemon records: `admission` (`cap`, `active`, `waiting`), each
   issue under `issues` with its `phase`, `status`, `repo` and `defaultBranch`, `holdReason`,
-  `architect` and `workers` (each claim's `state`), `pullRequest` (`repo`, `head`, `checksVerdict`,
-  `fixAttempts`), `designGate` (`currentVersion`, `approvedVersion`), for a root in `awaiting_person`
+  `architect` and `workers` (each claim's `state`), `pullRequest` (`repo`, `number`, `head`,
+  `state`, `mergeState`, `reviewDecision`),
+  `designGate` (`currentVersion`, `approvedVersion`), for a root in `awaiting_person`
   `waitingOn` (`kind` `ask` with its `ask`, or `gate` with `gateVersion` and `artifactId`; `since`; and
   `answeredAt` with `answeredBy` once it was answered) and, for a closed
   issue whose
@@ -843,7 +839,7 @@ Closing the terminal leaves the project without one, and the daemon logs
   stream time of the oldest waiting message and its age in whole seconds, both null when nothing
   waits or that message could not be read; `lastHandledAt`, null before the first; `stalled`; and
   `unavailable`, present only when a NATS read failed),
-  `settings` (the daemon's resolved `legion.yaml` — `max_fix_attempts`, `worker_boot_timeout_seconds`
+  `settings` (the daemon's resolved `legion.yaml` — `review_round_cap`, `worker_boot_timeout_seconds`
   and the rest as the daemon runs them — with every credential, credential source and credential
   file path left out, and a URL's userinfo masked as `xxxxx@`), and `agentSecretsLogin` when the
   broker is configured:
@@ -854,7 +850,7 @@ Closing the terminal leaves the project without one, and the daemon logs
 
 - **The daemon's log** (standard error) names every launch, death, refusal and relaunch; the lines
   [Troubleshooting](/legion/legion/troubleshooting/) quotes are the ones to search for.
-- **Dispatch** shows each issue's status, the architect's questions and messages, `READY`, and the
+- **Dispatch** shows each issue's status, the architect's questions and messages, and the
   controller's daily report on the project's `Legion daily report` issue.
 - **The controller's terminal** is where the controller says what it did each turn. You can type to
   it at any time; a message from you is always handled first.

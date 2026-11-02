@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-714",
+  "completed": "2026-10-29T19:35:00Z",
+  "plan": "dispatch://INFRA-714/artifact/plan-md (version 1). This issue's one pull request carries R1-R8 and R10-R12 of spec version 8 and owes acceptance A1-A10 and A12-A14; R9 is INFRA-484, the Linux instruction INFRA-488, the Oh My Pi pin INFRA-476.",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker and its references pr-body.md, default-branch-check.md, conflicts-and-rewrites.md, skip-checks-trailer.md and tools.md: the change is ~30 commits on one branch with a proof per acceptance line, and tools.md is how the pod's Postgres and NATS harness is stood up at all (the pod has no Docker).",
+      "skill://legion-worker/references/cleanup-deletion.md: most of R1 and R2 is deletion (the two-minute pass, requiredchecks, ghautomerge, api/ready.go, the awaiting_merge phase, four notice kinds, three outbox kinds), and this reference is the rule for carrying a deletion through every site that spells it.",
+      "skill://ce-simplify-code: the simplify pass over the settled change before review, which a deletion of this size earns.",
+      "skill://dispatch and skill://asd-ste100: the pull-request body, the production-check record and any message a person reads."
+    ],
+    "test": [
+      "skill://legion-worker and skill://legion-worker/references/pr-body.md: every proof entry needs criterion, surface, command, observed, headSha and negativeControl, and the plan's acceptance table is written to be re-run exactly as the tester reads it.",
+      "skill://legion-worker/references/tools.md: the rootless Postgres and the local nats-server are what make internal/daemon, internal/intake and internal/workflow runnable in this pod; the same reference names the nine tests a gVisor pod cannot run, which the handoff must name rather than read as the branch's defects.",
+      "skill://dispatch: the tester drives real Dispatch through the scratch-Dispatch rig and reads issues and messages with the dispatch CLI."
+    ],
+    "review": [
+      "skill://legion-worker and skill://legion-worker/references/review-threads.md: the review rounds of a change this size, and how a prose-only finding is fixed by the reviewer itself.",
+      "skill://legion-worker/references/merge-gate.md: the merge gate is what this change rewrites, so the reviewer must read the gate as it will stand, and judge decision D1 (the merger's own approved-head comparison) against it first.",
+      "skill://ce-simplify-code: judging whether the deletions left the remaining code simpler rather than merely smaller."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1: with api/ready.go deleted nothing refuses an unreviewed head. Measured: sjawhar/legion ruleset 12331919 and theorem-labs/agent-infra ruleset 25817641 both have required_approving_review_count 1 but require_last_push_approval false and dismiss_stale_reviews_on_push false, so an approval survives every later push.",
+        "answer": "Decision D1 and task C4: the merger itself compares the current head with the approved head (gh api .../compare/{approved}...{head}) before merging and refuses anything outside retro's paths or a head still carrying .legion/<issue>/. Agent-side, so R2's non-goal and STRATEGY.md's boundary hold. Recorded as spec departure 1 and raised with the architect; turning require_last_push_approval on is the owner's call and the plan recommends against it, because it would refuse the handoff-only push A3 says keeps the approval and retro's own commits."
+      },
+      {
+        "finding": "F2: 'the merger names the head it read' admits two readings - the head gh pr view shows now, or the approved head the daemon told it. Retro's commits sit above the approved head by design, so matching the approved head would fail on the normal path.",
+        "answer": "Decision D1: --match-head-commit takes the head read now, so GitHub refuses a head that moved under the merger; the approved head (workflow/effects.go:233-236,259-273) is the base of the comparison, not the match."
+      },
+      {
+        "finding": "F3: between the reviewer's approval and the architect's sign-off no agent hands off, so a lost CI settlement would strand an issue that the two-minute pass recovers today; and the spec does not say what follows the fifth UNKNOWN.",
+        "answer": "Decision D2 and task B6: while the record holds 'an approval stands on the current head and GitHub has not reported it mergeable', a durable outbox row re-reads the merge state with backoff, ending at mergeable, a conflict, a push or a bound that posts one pr-blocked notice; the UNKNOWN ladder hands over to that row. Per issue and scoped to one state, so not the periodic pass R1 forbids. Named for the architect to confirm."
+      },
+      {
+        "finding": "F4: with the review event moving the phase, a reviewer that requests changes and then completes is refused HANDOFF_NOT_CURRENT_PHASE (workflow/engine.go:528-530) and its findings are lost; and takenOver (engine.go:948-961) grants quiesce only for the deleted checks_red, so every new daemon-initiated move would start the next role mid-turn.",
+        "answer": "Decision D5 and task B5: a completion from the role that just left its phase is recorded on its own phase row and moves nothing, and takenOver is extended to every daemon-initiated trigger."
+      },
+      {
+        "finding": "F5: awaiting_merge has a second job the deletion list does not replace - a merged root waits there for the rest of its tree (workflow/linger.go:182-206) - and the table has no merging --pull_request_merged--> done row.",
+        "answer": "Decision D4 and task C3: the row is added, awaitsMerge/closeAwaitingRoot become 'phase is merging and the pull request is merged', entry into merging with an already-merged pull request closes at once, and the migration rewrites awaiting_merge inside issues.hold's JSON as well as the phase column."
+      },
+      {
+        "finding": "F6: R2 says the merger sends no completion while R7's design keys the resume on 'no completion recorded', so every restart would re-task the merger for ever, and for a merged root waiting on its tree that task is wrong work.",
+        "answer": "Decision D4 and task D-R7: the resume test is per phase and keyed on the phase's own terminating fact - merging's is pr.State == merged, accepting's is the sign-off - never on a recorded completion."
+      },
+      {
+        "finding": "F7: narrowing a round to a changes-requested review breaks handoff idempotency, because the round is the completion key (api/handoff.go:123,178,363-367) and workflow/engine.go:832-841 documents the dependency.",
+        "answer": "Decision D3 and task A1: a new phases.pass column counts every backward move and replaces round in the completion key; phases.rounds becomes the review-only counter feeding review_round_cap. One migration more than the Rollout lists; recorded as spec departure 3."
+      },
+      {
+        "finding": "F8: Dispatch's last_seq moves on every event, the daemon's own posted messages included (envoy/internal/dispatch/events/broker.go:128, api/messages.go:297), so a status row carrying the sequence read at the phase decision would be refused almost always.",
+        "answer": "Decision D6 and task D-R4: the row carries the sequence of the read it makes at delivery; on ISSUE_CHANGED it re-reads the issue, applies the newer state as a fact, and writes only while that read still shows the issue in the workflow and not closed, with the retry bounded. ISSUE_CHANGED stays non-permanent."
+      },
+      {
+        "finding": "F9: the Rollout ties the DaemonAPIVersion bump to R9 alone, but this pull request changes the state shape the plugin parses strictly (awaiting_merge leaves the phase vocabulary, claims gain causes and turn times).",
+        "answer": "Decision D15 and task E1: the contract bumps here too, taking the number above INFRA-484's, with version.json, both package manifests and the rebuilt claude-envoy dist in the same commit. Recorded as spec departure 4."
+      },
+      {
+        "finding": "F10: the deletion list omits readApprovalCarry while R1 still needs the carry across handoff-only pushes, and a once-per-push compare has no retry, so one failed compare would drop an approval silently.",
+        "answer": "Decision D9 and task B2: the carry is kept, moved into the per-issue read, and for a push made a durable outbox row with retry rather than a synchronous call in the push handler. Recorded as spec departure 2."
+      },
+      {
+        "finding": "F11: R3's design says api.adoptReleasedChildren judges a queued root by the release's own Dispatch read, but the hold is decided from the stale mirror (workflow/engine.go:482,490-497); AdoptedChild (intake/facts.go:157-166) carries no blockers.",
+        "answer": "Decision D13 and task D-R3: AdoptedChild gains the BlockedBy list the release read, and enterChild holds on the union of that list and the mirror's rows; the re-parent message is sent once per parent value, which needs a told-parent marker column."
+      },
+      {
+        "finding": "F12: R12's 'a refused report does not mark its event processed' would, applied to intake.ApplyFact, make every refused handoff retryable (api/handoff.go:118-124 depends on the current behaviour); and R12 names only pass and fail while checkReported has a third verdict, and the implementer may be suspended with its pod deleted.",
+        "answer": "Decision D12 and task D-R12: the un-marking is scoped to the CheckReport handler alone; a late pending is recorded as pass and fail are; A14's test drives the check wake that makes the implementer live again."
+      },
+      {
+        "finding": "F13: base pushes take the global fact lock and would fan out a mergeability read per open pull request (intake/decode.go:681-685 says so), and the gap analyst could not confirm the subject reaches the daemon.",
+        "answer": "Decision D8 and task B1: the subject is confirmed - Envoy publishes notifications.github.<owner>.<repo>.push.branch.<base> (packages/contracts/src/subject.ts:200-209, golden at packages/contracts/src/envelope.test.ts:348) and the consumer's filter is <repo>.> - and the fact is decoded only for a recorded base, acting once per (repo, base) inside one transaction, with pushes inside an outstanding read's window coalesced."
+      },
+      {
+        "finding": "F14: R1 defines mergeable in GraphQL mergeStateStatus spellings while R2 deletes ghautomerge, the only package that reads it.",
+        "answer": "Decision D7 and task A3: the merge state is read with REST GET /pulls/{n} -> mergeable_state, which api/ready.go:78-82 already uses, mapped from its lowercase spellings; no GraphQL client stays in the daemon, and the merger's own enqueue is a gh api graphql call the agent makes."
+      },
+      {
+        "finding": "F15: migrations are forward-only with no down files, so dropping ready_pending_version (in record/store.go:44's issueColumns) would make a daemon rollback impossible; and the Rollout does not list every migration the change needs.",
+        "answer": "Decision D10: ready_pending_version and phases.merge_note are stopped, not dropped, in this release. The migrations are listed per task: A1 (phases.pass), A2 (claim turn times), A3 (pull-request merge state), C3 (the phase cutover and the hold JSON), D-R3 (the told-parent marker), D-R4 (the status row's sequence), D-R6 (the claim's causes and ready time) and E2 (the rollout)."
+      },
+      {
+        "finding": "F16: dropping chargeDeath's Pending test alone would fail a claim for three evictions while it was idle (A8 says 'in turns'), the turn signal is not persisted anywhere, and a death with nothing pending has no next prompt for the cause to ride.",
+        "answer": "Decision D11 and tasks A2 and D-R6: turn start and end are persisted first, then chargeDeath gates on an open turn and a normal turn end clears Deaths; where nothing is pending the cause rides R7's resume task, and where no task is owed it is a message to the worker."
+      },
+      {
+        "finding": "F17: scope the spec implies but does not name - e2e proofs whose subject is deleted, the skills and generated copies that teach the deleted rules, the prompt invariant TestNoPartSaysLegionNeverMerges whose premise inverts, the docs/solutions pages that teach the old rules, read_state's caller set and R10's four subcommands.",
+        "answer": "Decision D14 and tasks C4, E3 and E4 name each file as deleted, rewritten or marked superseded, including the inverted prompt test and the warning that R5's own sentence must not trip its regex. D16 puts read_state's summary and filters in the plugin so no second contract surface is added, and D-R10 bounds every legion claims subcommand."
+      },
+      {
+        "finding": "F18: no acceptance criterion of A1-A10 or A12-A14 is machine-checkable as written; each needs a named surface, command and observation.",
+        "answer": "The plan's acceptance table gives each criterion a surface, a command and a pass condition, and the proof-harness section says how the surface is stood up in a Docker-less pod. A4's merge-queue half and A2 are the two the pod cannot reach, and the table says where each is proven instead."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 2
+  },
+  "specDepartures": [
+    {
+      "spec": "The child issues table maps dispatch://INFRA-471 (unreviewed commits merged) to 'R2: the repository's rules', and the non-goals say rules about which commits may merge are the repository's, set by the operator.",
+      "plan": "The merger agent itself compares the current head with the approved head before merging and refuses anything outside retro's paths, or a head still carrying .legion/<issue>/, as api/ready.go:221-233 does today. The daemon gains no such logic.",
+      "evidence": "gh api repos/sjawhar/legion/rulesets/12331919 and repos/theorem-labs/agent-infra/rulesets/25817641, read 2026-10-29: required_approving_review_count 1, require_last_push_approval false, dismiss_stale_reviews_on_push false. An approval therefore survives every later push, so the repository's rules do not refuse an unreviewed head and the issue title's 'only reviewed commits merged' would not hold.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A4 gains one observation: a head with a non-retro commit above the approved head is refused by the merger, naming the path."
+        ]
+      }
+    },
+    {
+      "spec": "The Design's deletion list moves followHead, readReviews and readUnrecordedPullRequests into the start and handoff reads and does not mention readApprovalCarry, while R1 still needs the approval carried across a handoff-only push and says the file list comes from GitHub's compare, read once per push event.",
+      "plan": "readApprovalCarry is kept: its compare moves into the per-issue read, and for a push it becomes a durable outbox row with retry rather than a synchronous call in the push handler.",
+      "evidence": "daemon/required_checks.go:30-32 records that the pass retries the compare 'until the approval stands or GitHub answers'. A once-per-push compare has no retry, so one rate-limited answer would drop the approval, and with the two-minute pass deleted nothing would bring it back.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "The Rollout lists the migration's three jobs and the removal of three configuration keys, and no other schema change.",
+      "plan": "Two more columns and their migrations: phases.pass, the per-pass counter that keeps handoff idempotency once a round means a changes-requested review only; and a told-parent marker for R3's one message per parent value. issues.ready_pending_version and phases.merge_note are stopped rather than dropped, so a daemon rollback stays possible.",
+      "evidence": "workflow/engine.go:832-841 documents that the round tells one pass through a phase from the last, and api/handoff.go:178 puts it in the completion key. store/migrations holds 61 up files and no down file, and record/store.go:44 selects ready_pending_version on every issue read, so dropping it would break the previous binary.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "The Rollout says R9's ready_for_update changes the plugin contract, so DaemonAPIVersion and packages/contracts move, and the daemon, pi-legion and the worker image ship together - tying the bump to R9's release, which is dispatch://INFRA-484 and not this pull request.",
+      "plan": "This pull request bumps DaemonAPIVersion too, taking the number above INFRA-484's, and ships the daemon, the plugin and the worker image together for the same reason.",
+      "evidence": "api/version.go:3-17 is the bump rule and names the state shape as a covered surface; this change removes awaiting_merge from the phase vocabulary the contract pins (packages/contracts/src/legion-api.ts:39,56) and adds the claim's death cause, start-failure cause and turn times, each parsed by a z.strictObject that refuses an unknown field.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A11's sentence 'The same holds after a release that moves DaemonAPIVersion' applies to this release as well, though A11 itself stays INFRA-484's."
+        ]
+      }
+    }
+  ]
+}

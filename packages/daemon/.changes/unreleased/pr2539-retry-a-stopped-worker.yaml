@@ -1,0 +1,9 @@
+kind: Added
+body: |-
+  `legion claims retry` now reaches a phase worker an operator stopped, not only one that failed,
+  and it retries such a worker through its issue's phase: the phase it is held from comes back, as
+  the architect's retry_or_escalate restores it, and a phase the issue still stands in is started
+  again. The relaunched worker is therefore given that phase's task, where before a worker started
+  outside its phase sat with nothing to do. With `--fresh-session` that start retries the claim in
+  a new session, so the agent it spawns is a new one — what a session the provider refuses needs,
+  and what until now took an edit of the claims store with the daemon stopped.

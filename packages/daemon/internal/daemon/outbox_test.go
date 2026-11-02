@@ -143,6 +143,13 @@ func (d *outboxDispatch) SetStatus(_ context.Context, _ string, status string) (
 	d.statuses = append(d.statuses, status)
 	return dispatch.Issue{}, d.statusErr
 }
+
+// SetStatusAt is the fenced write the outbox's status row makes, which this stand-in takes as any
+// other: a test that drives the sequence fence runs against the real Dispatch
+// (status_scratch_dispatch_test.go).
+func (d *outboxDispatch) SetStatusAt(ctx context.Context, issue dispatch.Issue, status string) (dispatch.Issue, error) {
+	return d.SetStatus(ctx, issue.Key, status)
+}
 func (d *outboxDispatch) HandOver(_ context.Context, issue dispatch.Issue, status string) error {
 	d.handOvers = append(d.handOvers, fmt.Sprintf("%s %s %v", issue.Key, status, issue.Labels))
 	if d.handOverHook != nil {
@@ -713,93 +720,36 @@ func TestOutboxNoticeReturnsPublisherFailure(t *testing.T) {
 	}
 }
 
-// The READY packet reaches the project's merge queue role as the message of one publish to its
-// role topic, keyed by the row so a retried row is one delivery.
-func TestOutboxMergeQueuePublishSendsThePacketToTheRole(t *testing.T) {
-	const packet = "READY #7 at abc (approved at abc) for LEGION-2 (https://example.test/7)"
-	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: packet}, time.Now())
-	row.ID = 57
-	publisher, client := &outboxPublisher{}, &outboxDispatch{}
-
-	if err := (&outbox{notices: publisher, dispatch: client}).execute(context.Background(), row); err != nil {
-		t.Fatalf("execute merge queue publish: %v", err)
-	}
-	if got := publisher.publishes(); len(got) != 1 || got[0] != (outboxPublish{topic: "notifications.role.merge-queue", message: packet, key: "legion-outbox:57", payload: packet}) {
-		t.Fatalf("publishes = %#v, want the packet on the merge queue role's topic once", got)
-	}
-	if len(client.messages) != 0 {
-		t.Fatalf("Dispatch messages = %q, want none when the role took the packet", client.messages)
-	}
-}
-
-// A merge queue role with no live holder cannot take the packet, and waiting would retry forever:
-// the Dispatch message already carries it, so the issue is told the role had no holder, as the
-// shared merger prompt has the merger say, and the row is done.
-func TestOutboxMergeQueueWithNoLiveHolderSaysSoOnTheIssue(t *testing.T) {
-	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
-	row.ID = 58
-	publisher := &outboxPublisher{err: fmt.Errorf("publish notice to notifications.role.merge-queue: %w: no holder for role merge-queue", notify.ErrNoHolder)}
-	client := &outboxDispatch{}
-	runner := &outbox{notices: publisher, dispatch: client, now: func() time.Time { return time.Date(2026, 9, 25, 3, 4, 5, 0, time.UTC) }}
-
-	if err := runner.execute(context.Background(), row); err != nil {
-		t.Fatalf("execute merge queue publish with no holder: %v", err)
-	}
-	if got := client.messages; len(got) != 1 || !strings.HasPrefix(got[0], "merge queue role merge-queue had no live holder at 2026-09-25T03:04:05Z") || !strings.HasSuffix(got[0], "<!-- legion-outbox:58 -->") {
-		t.Fatalf("Dispatch messages = %q, want one naming the role with no live holder", got)
-	}
-
-	publisher.err = errors.New("listener unavailable")
-	if err := runner.execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "listener unavailable") {
-		t.Fatalf("merge queue publish failure = %v, want the listener failure, retried", err)
-	}
-}
-
-// A merge queue holder that does not advertise the packet's delivery mode (403 capability)
-// refuses every attempt until another session holds the role, and the listener's own NATS grant
-// denies every forward (403 with no reason) until an operator changes it, as a role with no holder
-// does: the issue is told the role refused the packet and which holder did, or that the listener
-// was denied the forward and why, and the row is done. A holder that did not confirm the packet in
-// time (504 receipt_timeout or delivery_failed) is retried.
-func TestOutboxMergeQueueAnswersOfTheConfirmedPublishRoute(t *testing.T) {
-	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
+// A role whose holder does not advertise the message's delivery mode (403 capability) refuses
+// every attempt until another session holds the role, and the listener's own NATS grant denies
+// every forward (403 with no reason) until an operator changes it, as a role with no holder does:
+// the row is done either way, since the message reports a moment that has passed by then. A holder
+// that did not confirm the message in time (504 receipt_timeout or delivery_failed) is retried.
+func TestOutboxRoleMessageAnswersOfTheConfirmedPublishRoute(t *testing.T) {
+	row := mustOutboxRow(t, "LEGION-2", record.RoleMessage{Role: "implementer", Body: "CI settled at head"}, time.Now())
 	row.ID = 59
-	publisher := &outboxPublisher{err: fmt.Errorf(`publish notice to notifications.role.merge-queue: listener returned 403 Forbidden: {"reason":"capability","holder":"ses_mq"}: %w`,
-		notify.ErrRefusedByHolder{Holder: "ses_mq"})}
+	publisher := &outboxPublisher{err: fmt.Errorf(`publish notice to notifications.role.implementer: listener returned 403 Forbidden: {"reason":"capability","holder":"ses_impl"}: %w`,
+		notify.ErrRefusedByHolder{Holder: "ses_impl"})}
 	client := &outboxDispatch{}
-	runner := &outbox{notices: publisher, dispatch: client, now: func() time.Time { return time.Date(2026, 9, 25, 3, 4, 5, 0, time.UTC) }}
+	runner := &outbox{log: quietLogger(), notices: publisher, dispatch: client}
 
 	if err := runner.execute(context.Background(), row); err != nil {
-		t.Fatalf("execute merge queue publish its holder refused: %v", err)
+		t.Fatalf("execute a role message its holder refused: %v", err)
 	}
-	if got := client.messages; len(got) != 1 ||
-		!strings.HasPrefix(got[0], "merge queue role merge-queue refused the packet: its holder ses_mq does not advertise the delivery mode, at 2026-09-25T03:04:05Z") ||
-		!strings.HasSuffix(got[0], "<!-- legion-outbox:59 -->") {
-		t.Fatalf("Dispatch messages = %q, want one naming the role and the holder that refused the packet", got)
+	const denial = `envoy: the message bus denied the publish under this listener's own permissions: bus: NATS denied the publish to "notifications.agent.ses_impl"`
+	publisher.err = fmt.Errorf(`publish notice to notifications.role.implementer: listener returned 403 Forbidden: {"error":%q}: %w`, denial, notify.ErrPublishDenied{Message: denial})
+	if err := runner.execute(context.Background(), row); err != nil {
+		t.Fatalf("execute a role message the listener was denied: %v", err)
 	}
-
-	denied := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
-	denied.ID = 60
-	const denial = `envoy: the message bus denied the publish under this listener's own permissions: bus: NATS denied the publish to "notifications.agent.ses_mq"`
-	publisher.err = fmt.Errorf(`publish notice to notifications.role.merge-queue: listener returned 403 Forbidden: {"error":%q}: %w`, denial, notify.ErrPublishDenied{Message: denial})
-	if err := runner.execute(context.Background(), denied); err != nil {
-		t.Fatalf("execute merge queue publish the listener was denied: %v", err)
-	}
-	if got := client.messages; len(got) != 2 ||
-		!strings.HasPrefix(got[1], "merge queue role merge-queue: the listener's NATS grant denied the forward ("+denial+"), at 2026-09-25T03:04:05Z") ||
-		!strings.HasSuffix(got[1], "<!-- legion-outbox:60 -->") {
-		t.Fatalf("Dispatch messages = %q, want a second naming the role and the listener's denial", got)
-	}
-
 	for _, reason := range []string{notify.ReasonReceiptTimeout, notify.ReasonDeliveryFailed} {
-		publisher.err = fmt.Errorf("publish notice to notifications.role.merge-queue: listener returned 504 Gateway Timeout: %w", notify.ErrNotDelivered{Reason: reason, Holder: "ses_mq"})
+		publisher.err = fmt.Errorf("publish notice to notifications.role.implementer: listener returned 504 Gateway Timeout: %w", notify.ErrNotDelivered{Reason: reason, Holder: "ses_impl"})
 		var notDelivered notify.ErrNotDelivered
 		if err := runner.execute(context.Background(), row); !errors.As(err, &notDelivered) || notDelivered.Reason != reason {
-			t.Fatalf("merge queue publish answered %s = %v, want the answer as a failure, retried", reason, err)
+			t.Fatalf("a role message answered %s = %v, want the answer as a failure, retried", reason, err)
 		}
 	}
-	if got := client.messages; len(got) != 2 {
-		t.Fatalf("Dispatch messages = %q, want no message for a packet that is retried", got)
+	if got := client.messages; len(got) != 0 {
+		t.Fatalf("Dispatch messages = %q, want none: a role message posts nothing to the issue", got)
 	}
 }
 
@@ -1697,10 +1647,20 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 			putOutboxIssue(t, pool, records, issue)
 			const head = "16973163"
 			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-				// The base branch requires no check, so the head's settlement gives no verdict, which an approval does not wait on.
-				return records.PutPullRequest(ctx, tx, record.PullRequest{Issue: issue.Key, Repo: "acme/widgets", Number: 118, Branch: "legion/LEGION-208", HeadSHA: head, CheckedHead: head, Failing: []string{}, Required: []string{}, State: record.PullRequestOpen})
+				// The settlement is the head's own, which the approval reads nothing of; GitHub's
+				// merge state for it is clean, which an approval of it advances on.
+				return records.PutPullRequest(ctx, tx, record.PullRequest{Issue: issue.Key, Repo: "acme/widgets", Number: 118, Branch: "legion/LEGION-208", HeadSHA: head, CheckedHead: head, Failing: []string{}, State: record.PullRequestOpen,
+					Mergeability: record.MergeabilityMergeable, MergeState: record.MergeStateClean})
 			}); err != nil {
 				t.Fatalf("put the pull request: %v", err)
+			}
+			// The reviewer's claim, which the daemon started it on: its completion arrives after
+			// its own review has moved the issue, and is recorded on its row (workflow's
+			// leftItsPhase).
+			if _, err := pool.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, session, session_file,
+				state, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
+				values ('reviewer', 'LEGION', 'LEGION-208', 'LEGION-208', 'reviewer', 1, '', '', 'working', 0, 0, 0, 0)`); err != nil {
+				t.Fatalf("seed the reviewer's claim: %v", err)
 			}
 			sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 			sup.deps.PhaseHolds = (&workflowRuntime{pool: pool, records: records}).phaseHolds // exactly what the daemon wires
@@ -1743,7 +1703,8 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 
 			// The reviewer asks for round 2, and the implementer starts on its task.
 			apply("review:round-2", intake.PullRequestReview{Repo: "acme/widgets", Number: 118, State: "CHANGES_REQUESTED", CommitID: head, HeadSHA: head, Author: reviewApp, Body: "scripted changes requested, round 2"})
-			// A review ends when its reviewer completes it: its handoff is part of the phase.
+			// The review itself ended the round; the reviewer's completion follows it, recorded on
+			// the reviewer's own row with the issue already in implementing.
 			apply("handoff:reviewer:reviewing:1", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleReviewer,
 				Claim: "reviewer", Commit: "review-round-1"})
 			due("the round-2 start")

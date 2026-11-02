@@ -100,10 +100,21 @@ func holdSuspension(m *Machine, _ context.Context, ev Event) error {
 // dropping a daemon's linger or leave row. The hold survives launch and is run as soon as the agent
 // says ready (ready), before the claim is published ready or takes a task. It answers
 // ErrSuspendHeld so the operator sees 202 and a daemon row retries across a restart.
-func holdSuspendUntilReady(m *Machine, _ context.Context, ev Event) error {
+//
+// A claim whose launch this very suspension stopped is suspended here and now instead: the
+// suspension cancelled that start before it took the lock (Handle), so nothing of this claim is
+// running and no ready will ever arrive to run a hold. The caller is answered that the claim is
+// suspended, which is what it asked for, rather than a hold nothing would ever end. A launch
+// waiting to be tried again (relaunchLater), which this suspension did not stop, keeps the hold:
+// its retry runs it.
+func holdSuspendUntilReady(m *Machine, ctx context.Context, ev Event) error {
 	request, err := suspendRequest(m, ev)
 	if err != nil {
 		return err
+	}
+	if m.stoppedAStart() && m.launchRecordsNoProcess() {
+		m.log.Info("supervise: the suspension stopped the claim's start, so it suspends the claim now", "reason", request.Reason, "by", request.By)
+		return m.suspendedFor(ctx, request)
 	}
 	m.held = &request
 	m.log.Info("supervise: the suspension waits for the rule-resuming agent to become ready", "reason", request.Reason, "by", request.By)

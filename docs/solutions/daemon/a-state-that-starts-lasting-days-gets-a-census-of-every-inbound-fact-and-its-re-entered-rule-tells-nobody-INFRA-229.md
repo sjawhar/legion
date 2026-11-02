@@ -9,7 +9,7 @@ tags:
   - inbound-facts
   - re-entry
 date: 2026-10-25
-status: active
+status: superseded by INFRA-714 — the long-lasting state it censuses, `awaiting_merge`, is deleted; a merged root that waits for the rest of its tree now waits in `merging`
 module: packages/daemon/internal/workflow
 related_issues:
   - "INFRA-229"

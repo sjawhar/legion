@@ -35,6 +35,15 @@ import { configuredValue } from "./claude-session"
  * appended to that turn as its next step (`deliver`/`step` in
  * `packages/daemon/internal/claudebridge/bridge.go`), which would destroy the turn boundary the
  * whole split exists for.
+ *
+ * A turn Claude Code ended on an API error fires `StopFailure` rather than `Stop`, and that is
+ * the provider refusing the turn: it earns no continuation, since the host would turn one into
+ * another turn at once and the provider would refuse that one the same way. It does arm one
+ * timer, because the task that refused turn carried ended with it and nothing else would wake
+ * this worker, so a single transient refusal would otherwise leave the issue idle. What stops
+ * the reminding for good is the runner's record check, which drops every reminder once the
+ * daemon has failed this role's claim — the refused turns themselves are counted by the bridge,
+ * which reports each turn's outcome to the daemon (INFRA-714).
  */
 
 /** The tool's name: Claude Code shows it as `mcp__legion__legion_phase_hook`, and a hook entry
@@ -455,19 +464,25 @@ export function createPhaseHookEndpoint(deps: PhaseHookDeps): PhaseHookEndpoint 
             stopHookActive: event.stopHookActive ?? "",
             backgroundWork,
           })
-          const reminded = await reminder.settle(event.lastAssistantMessage ?? "", {
+          const reminded = await reminder.settle({
+            kind: "settle",
+            lastAssistantText: event.lastAssistantMessage ?? "",
             backgroundWork,
           })
           return reminded === undefined ? {} : { decision: "block", reason: reminded }
         }
         case "StopFailure": {
-          // The turn ended on an API error. Claude Code ignores whatever this hook returns, so
-          // this event cannot carry a continuation: the machine is told so and arms the reminder
-          // its settle earned itself, under every guard an armed reminder has. This is the one
-          // event of the five the pod measurements did not cover; it records only, so a
-          // `StopFailure` that never fires costs the reminder after an API-error turn and nothing
-          // else.
-          await reminder.settle(event.lastAssistantMessage ?? "", { canContinue: false })
+          // Claude Code runs this instead of `Stop` when the turn ended on an API error, and
+          // `${last_assistant_message}` is then the error text itself rather than anything the
+          // worker said ("Hooks reference", code.claude.com/docs/en/hooks). So this is the
+          // provider refusing the turn, and the machine takes it as one: it earns no
+          // continuation, because the next turn would be refused the same way, and one timer,
+          // because nothing else would wake this worker once the task that turn carried ended
+          // with it. What ends a session the provider keeps refusing is the daemon failing its
+          // claim on the outcomes the bridge reports, which the timer's own record check reads.
+          // Claude Code ignores whatever this hook returns, which costs nothing now that there
+          // is nothing to return.
+          await reminder.settle({ kind: "refused", message: event.lastAssistantMessage ?? "" })
           return {}
         }
         case "PostToolUse":
@@ -485,9 +500,8 @@ export function createPhaseHookEndpoint(deps: PhaseHookDeps): PhaseHookEndpoint 
           // Claude Code's stdin from the bridge and never this process, so what a turn means is
           // read from the prompt itself. The turn is declared first, which makes every armed
           // timer stale, and the pending one is dropped outright: the runner's generation guard
-          // answers the same for the timers it armed, and the one this endpoint arms itself (the
-          // `StopFailure` reminder) obeys the same rule that way rather than through a second
-          // guard of its own.
+          // answers the same for the timers it armed, and dropping the one timer this server
+          // holds is the plainest way to say the same thing.
           reminder.turnStarted()
           dropTimer()
           const prompt = event.prompt ?? ""

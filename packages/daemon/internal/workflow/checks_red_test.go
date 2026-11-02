@@ -1,10 +1,8 @@
 package workflow
 
 import (
-	"bytes"
 	"context"
-	"fmt"
-	"log/slog"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -14,600 +12,580 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// A red CI verdict that stands for the head is a regression the implementer has to fix, whatever
-// phase before READY the issue is in: in testing, reviewing, retro and merging the tester's pass,
-// the reviewer's decision and the merger's READY are all of code CI has now found broken. The issue
-// goes back to implementing, the implementer's task names the failing checks, the architect is
-// told with the same checks in a checks-red notice naming the phase the red stopped, and the round
-// is counted, as every return to implementing counts one: the implementer's completion of this pass
-// is told from its last by it. Its next push is then a counted fix attempt, as a red verdict makes
-// any new head. The implementer's start waits for nobody: the role CI leaves with no phase - the
-// tester, the reviewer whether or not its round is completed, the merger, and the implementer
-// itself in retro - keeps its turn, its jobs, its process and its session, and is told its phase
-// ended by a message on its own topic. Leaving merging also voids a READY the design
-// gate refused there (ReadyPendingVersion).
-//
-// The CI rule reads nothing of the review round: a round whose request for changes is already in
-// is sent back by the red all the same, with the red named rather than the reviewer's body. A head a
-// handoff-only push reached is no exception either: its code is the head it replaced, and a red
-// standing for it - its own second run, or the code head's carried to it (classify.SettlementFor) -
-// is that code's red. A red the review App planned (its failing tests) sends nothing back, and
-// neither does a red in implementing, where the implementer is already at work. Production clears
-// the planned mark at the next code-changing push by anyone but the review App
-// (classify.AdvancePullRequestHead), which retro's own push is, so the planned rows in retro and
-// merging guard the predicate rather than a live path.
-func TestARedVerdictSendsTheTreeBackToImplementing(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		from        phase.Phase
-		status      string
-		planned     bool
-		handoffHead bool
-		// decided seeds the reviewer's row with a request for changes: both halves of the round in.
-		decided bool
-		want    phase.Phase
-		// settles is the commit the red settlement names: the head, or the code head a handoff-only
-		// push replaced.
-		settles string
-		// uncompleted seeds the reviewer's row without its completion: its round still at work.
-		uncompleted bool
-		// readyPending seeds a READY the design gate refused in merging, which leaving merging voids.
-		readyPending bool
-	}{
-		{name: "in testing", from: phase.Testing, status: "testing", want: phase.Implementing},
-		{name: "in reviewing", from: phase.Reviewing, status: "needs_review", want: phase.Implementing},
-		{name: "in reviewing, the reviewer's round not completed", from: phase.Reviewing, status: "needs_review", want: phase.Implementing, uncompleted: true},
-		{name: "a planned red in testing", from: phase.Testing, status: "testing", planned: true, want: phase.Testing},
-		{name: "in implementing", from: phase.Implementing, status: "in_progress", want: phase.Implementing},
-		{name: "on the tester's handoff-only head", from: phase.Testing, status: "testing", handoffHead: true, want: phase.Implementing},
-		{name: "on the reviewer's handoff-only head, its round half in", from: phase.Reviewing, status: "needs_review", handoffHead: true, want: phase.Implementing},
-		{name: "on a code head whose round has a request for changes in", from: phase.Reviewing, status: "needs_review", decided: true, want: phase.Implementing},
-		{name: "on the code head, carried to the tester's handoff-only head", from: phase.Testing, status: "testing", handoffHead: true, want: phase.Implementing, settles: "code"},
-		{name: "on the code head, carried to the reviewer's handoff-only head", from: phase.Reviewing, status: "needs_review", handoffHead: true, want: phase.Implementing, settles: "code"},
-		{name: "in retro", from: phase.Retro, status: "retro", want: phase.Implementing},
-		{name: "a planned red in retro", from: phase.Retro, status: "retro", planned: true, want: phase.Retro},
-		{name: "in merging", from: phase.Merging, status: "retro", want: phase.Implementing, readyPending: true},
-		{name: "a planned red in merging", from: phase.Merging, status: "retro", planned: true, want: phase.Merging, readyPending: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := migratedPool(t)
-			issue := record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"}
-			if tc.readyPending {
-				pending := 4
-				issue.ReadyPendingVersion = &pending
-			}
-			seedIssue(t, pool, issue)
-			pr := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", PlannedRed: tc.planned, Required: []string{"python-cli-tests / test (pytest)"}}
-			if tc.handoffHead {
-				pr.Pushes = []record.ClassifiedPush{{SHA: "head", Before: "code", HandoffOnly: true}}
-			}
-			seedPR(t, pool, pr)
-			// The implementer's row is as it stands in each phase: its handoff cleared when it
-			// entered retro, so no completion is recorded there either.
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			if tc.from == phase.Reviewing {
-				reviewer := record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "head", Summary: "reviewed"}
-				if tc.uncompleted {
-					reviewer.HandoffCommit, reviewer.Summary = "", ""
-				}
-				if tc.decided {
-					reviewer.Decision = &record.ReviewDecision{State: "changes_requested", Body: "rename the widget", Head: "head"}
-				}
-				seedPhase(t, pool, reviewer)
-			}
-			if tc.from == phase.Merging {
-				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
-			}
-			engine := testEngine(config.DesignGateRootIssues, nil)
-			settles := tc.settles
-			if settles == "" {
-				settles = "head"
-			}
-			if result, err := intake.ApplyFact(context.Background(), pool, "github", "red", intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42,
-				HeadSHA: settles, CheckRuns: []record.AttemptRun{{Name: "pytest", ID: 7}}, Generation: 1, Snapshot: "red-head",
-				Failing: []string{"python-cli-tests / test (pytest)"}}, engine); err != nil || result.Refusal != nil {
-				t.Fatalf("apply the red verdict = %+v, %v", result.Refusal, err)
-			}
-			if got := issuePhase(t, pool); got != tc.want {
-				t.Fatalf("after the red verdict the issue is in %s, want %s", got, tc.want)
-			}
-			if tc.settles != "" {
-				var verdict string
-				seedRecord(t, pool, func(tx pgx.Tx) error {
-					pr, err := record.NewStore().PullRequest(t.Context(), tx, "LEGION-208")
-					if err == nil {
-						verdict = classify.HeadVerdict(*pr) + " of " + pr.CheckedHead
-					}
-					return err
-				})
-				if want := "red of " + tc.settles; verdict != want {
-					t.Fatalf("the head's verdict is %q, want the carried %q", verdict, want)
-				}
-			}
-			var pending *int
-			if err := pool.QueryRow(context.Background(), "select ready_pending_version from issues where key = 'LEGION-208'").Scan(&pending); err != nil {
-				t.Fatalf("read the issue's pending READY version: %v", err)
-			}
-			if tc.want == tc.from {
-				if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "checks-red") {
-					t.Fatalf("notices %v, want no checks-red", got)
-				}
-				assertOutboxCount(t, pool, "supervise", 0)
-				if rounds := implementerRounds(t, pool); rounds != 0 {
-					t.Fatalf("rounds = %d, want none counted: nothing went back", rounds)
-				}
-				if (pending != nil) != tc.readyPending {
-					t.Fatalf("the issue's pending READY version is %v, want it kept as seeded: nothing left merging", pending)
-				}
-				return
-			}
-			if pending != nil {
-				t.Fatalf("the issue's pending READY version is %d, want none: a READY the gate refused belongs to the merging phase the red ended", *pending)
-			}
-			task := implementerStart(t, pool)
-			reason, noticePhase := checksRedNotice(t, pool)
-			want := "CI is red at head: python-cli-tests / test (pytest)"
-			rounds := implementerRounds(t, pool)
-			if !strings.Contains(task, want) || strings.Contains(task, "rename the widget") || !strings.Contains(reason, want) || noticePhase != tc.from || rounds != 1 {
-				t.Fatalf("task %q, notice %q in %q and rounds %d; want both to say %q and nothing of the reviewer's body, the notice in %s, and the round counted", task, reason, noticePhase, rounds, want, tc.from)
-			}
-		})
-	}
-}
-
-// A red that sends the work back tells the role whose phase it ended, on that role's own Envoy
-// topic, that the phase is over and which phase the issue is in now (record.PhaseEnded): the tester
-// in testing, the reviewer in reviewing whether or not it completed its round, the merger in
-// merging, and the implementer in retro, which is told besides that its implementing task follows,
-// since the phase the red opens is its own. Nothing else tells any of them: no transition stops a
-// worker, and a task the daemon has for a role is delivered only once that role's turn ends. Two
-// phases tell nobody: accepting, whose role is the tree's architect, which hears the red in its
-// checks-red notice instead, and awaiting_merge, which no role works. The row is the transition's,
-// written beside the architect's notice and the implementer's start, and carries the reason that
-// notice carries.
-func TestARedTellsTheRoleWhosePhaseItEnded(t *testing.T) {
-	const reason = "CI is red at head: python-cli-tests / test (pytest)"
-	for _, tc := range []struct {
-		name   string
-		from   phase.Phase
-		status string
-		// uncompleted seeds the reviewer's row without its completion: its round still at work.
-		uncompleted bool
-		// want is the message queued for the role whose phase ended; the zero value is none.
-		want record.PhaseEnded
-	}{
-		{name: "the tester in testing", from: phase.Testing, status: "testing",
-			want: record.PhaseEnded{Role: claim.RoleTester, From: phase.Testing, To: phase.Implementing, Reason: reason}},
-		{name: "the reviewer in a round it completed", from: phase.Reviewing, status: "needs_review",
-			want: record.PhaseEnded{Role: claim.RoleReviewer, From: phase.Reviewing, To: phase.Implementing, Reason: reason}},
-		{name: "the reviewer in a round it did not complete", from: phase.Reviewing, status: "needs_review", uncompleted: true,
-			want: record.PhaseEnded{Role: claim.RoleReviewer, From: phase.Reviewing, To: phase.Implementing, Reason: reason}},
-		{name: "the merger in merging", from: phase.Merging, status: "retro",
-			want: record.PhaseEnded{Role: claim.RoleMerger, From: phase.Merging, To: phase.Implementing, Reason: reason}},
-		{name: "the implementer in retro", from: phase.Retro, status: "retro",
-			want: record.PhaseEnded{Role: claim.RoleImplementer, From: phase.Retro, To: phase.Implementing, Reason: reason, TaskFollows: true}},
-		{name: "the architect in accepting, which its notice tells", from: phase.Accepting, status: "needs_review"},
-		{name: "nobody in awaiting_merge, a phase no role works", from: phase.AwaitingMerge, status: "retro"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
-			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: []string{"python-cli-tests / test (pytest)"}})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			if tc.from == phase.Reviewing {
-				reviewer := record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "head", Summary: "reviewed"}
-				if tc.uncompleted {
-					reviewer.HandoffCommit, reviewer.Summary = "", ""
-				}
-				seedPhase(t, pool, reviewer)
-			}
-			if tc.from == phase.Merging || tc.from == phase.AwaitingMerge {
-				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", HandoffCommit: "head"})
-			}
-			if result, err := intake.ApplyFact(context.Background(), pool, "github", "red", intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42,
-				HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "pytest", ID: 7}}, Generation: 1, Snapshot: "red-head",
-				Failing: []string{"python-cli-tests / test (pytest)"}}, testEngine(config.DesignGateRootIssues, nil)); err != nil || result.Refusal != nil {
-				t.Fatalf("apply the red verdict = %+v, %v", result.Refusal, err)
-			}
-			if got := issuePhase(t, pool); got != phase.Implementing {
-				t.Fatalf("after the red verdict the issue is in %s, want implementing", got)
-			}
-			// The implementer's start is written whatever the red ended, and waits for nothing.
-			if task := implementerStart(t, pool); !strings.Contains(task, reason) {
-				t.Fatalf("the implementer's task is %q, want the red named in it", task)
-			}
-			got := phaseEndedMessages(t, pool, "LEGION-208")
-			if tc.want == (record.PhaseEnded{}) {
-				if len(got) != 0 {
-					t.Fatalf("the red out of %s told %+v, want nobody: its role is %q", tc.from, got, RoleFor(tc.from))
-				}
-				return
-			}
-			if len(got) != 1 || got[0] != tc.want {
-				t.Fatalf("the red out of %s told %+v, want the one message %+v", tc.from, got, tc.want)
-			}
-		})
-	}
-}
-
-// phaseEndedMessages is every phase-ended message the outbox holds for issue, oldest first, decoded
-// as the runner decodes it.
-func phaseEndedMessages(t *testing.T, pool *pgxpool.Pool, issue string) []record.PhaseEnded {
-	t.Helper()
-	rows, err := pool.Query(context.Background(), "select id, payload from outbox where kind = 'phase_ended' and issue = $1 order by id", issue)
-	if err != nil {
-		t.Fatalf("read the phase-ended messages of %s: %v", issue, err)
-	}
-	defer rows.Close()
-	var messages []record.PhaseEnded
-	for rows.Next() {
-		row := record.OutboxRow{Kind: record.OutboxKindPhaseEnded}
-		if err := rows.Scan(&row.ID, &row.Payload); err != nil {
-			t.Fatalf("read the phase-ended messages of %s: %v", issue, err)
-		}
-		payload, err := record.DecodeOutboxPayload(row)
-		if err != nil {
-			t.Fatalf("decode phase-ended row %d: %v", row.ID, err)
-		}
-		messages = append(messages, payload.(record.PhaseEnded))
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("read the phase-ended messages of %s: %v", issue, err)
-	}
-	return messages
-}
-
-// The CI rule acts on whichever fact makes a red stand for the head (standingRed): a settlement, a
-// read of the required set, or a push classified late that completes the carry of a code head's
-// red to the handoff head that replaced it (classify.SettlementFor, carriedBack). GitHub delivers a
-// push webhook and its synchronize in either order, so the head can move before its push is
-// classified: a red settled at the code head stands for nothing until the push shows the new head
-// changed only .legion/, and the issue may have entered testing meanwhile - the implementer's
-// completion waits on no webhook, only on its push reaching origin - or retro or merging. The push
-// that completes the carry then sends the work back from every phase the rule names, as the
-// settlement would have had it arrived after the push: not from reviewing alone.
-func TestAPushClassifiedLateThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase(t *testing.T) {
+// A CI settlement moves no issue, in any phase (dispatch://INFRA-714/spec R1): a failed check is
+// information the worker holding the phase decides on - re-run, wait, or fix - and not the
+// daemon's to read the semantics of. What the settlement says is told instead, as one message per
+// role to three roles: the worker holding the issue's phase, the implementer, whose code the
+// checks ran on, and the tree's architect, who owns the tree. Each message names every check the
+// settlement reports and the conclusion it reports for it, in name order. A role named twice - the
+// implementer holding the phase, the architect holding accepting - is told once, and a phase no
+// worker holds names none. Nothing else happens: no phase moves, no architect
+// hears checks-red, no worker is started, and no return is counted.
+func TestASettlementMovesNothingAndTellsTheThreeRoles(t *testing.T) {
 	for _, tc := range []struct {
 		from   phase.Phase
 		status string
+		// roles are the roles told, in the order tellChecks addresses them.
+		roles []claim.Role
 	}{
-		{from: phase.Testing, status: "testing"},
-		{from: phase.Reviewing, status: "needs_review"},
-		{from: phase.Accepting, status: "needs_review"},
-		{from: phase.Retro, status: "retro"},
-		{from: phase.Merging, status: "retro"},
+		{phase.Implementing, "in_progress", []claim.Role{claim.RoleArchitect, claim.RoleImplementer}},
+		{phase.Testing, "testing", []claim.Role{claim.RoleArchitect, claim.RoleTester, claim.RoleImplementer}},
+		{phase.Reviewing, "needs_review", []claim.Role{claim.RoleArchitect, claim.RoleReviewer, claim.RoleImplementer}},
+		{phase.Accepting, "needs_review", []claim.Role{claim.RoleArchitect, claim.RoleImplementer}},
+		{phase.Retro, "retro", []claim.Role{claim.RoleArchitect, claim.RoleImplementer}},
+		{phase.Merging, "retro", []claim.Role{claim.RoleArchitect, claim.RoleMerger, claim.RoleImplementer}},
 	} {
 		t.Run(string(tc.from), func(t *testing.T) {
 			pool := migratedPool(t)
 			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
-			// The head has moved to the handoff head, the red settlement stands recorded at the code
-			// head it replaced, and the push between the two is not yet known: no verdict stands.
 			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "code", Required: []string{"ci"},
-				CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Failing: []string{"ci"}})
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			for _, role := range []claim.Role{claim.RoleTester, claim.RoleReviewer, claim.RoleMerger} {
-				if RoleFor(tc.from) == role {
-					seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: role, Claim: claim.Token(string(role) + "-claim")})
-				}
+			if role := RoleFor(tc.from); role != "" && role != claim.RoleImplementer {
+				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: role, Claim: claim.Token(string(role) + "-claim")})
 			}
-			apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
-			if result := apply("late-push", pushedFromTo("code", "head", ".legion/LEGION-208/implement.json", "legion-implementer[bot]")); result.Refusal != nil {
-				t.Fatalf("apply the late push = %+v", result.Refusal)
+			applyRefusingNothing(t, pool, mergingEngine(), settledAt("head", 1, "unit"))
+
+			if got := issuePhase(t, pool); got != tc.from {
+				t.Fatalf("after the settlement the issue is in %s, want it left in %s: a CI result moves nothing", got, tc.from)
 			}
-			var verdict string
-			seedRecord(t, pool, func(tx pgx.Tx) error {
-				pr, err := record.NewStore().PullRequest(t.Context(), tx, "LEGION-208")
-				if err == nil {
-					verdict = classify.HeadVerdict(*pr)
-				}
-				return err
-			})
-			if verdict != "red" {
-				t.Fatalf("after the push the head's verdict is %q, want the code head's red carried to it", verdict)
+			if got := noticeKinds(t, pool, "LEGION-208"); len(got) != 0 {
+				t.Fatalf("the architect was told %v, want nothing but the role message", got)
 			}
-			if got := issuePhase(t, pool); got != phase.Implementing {
-				t.Fatalf("after the late push completed the carry the issue is in %s, want implementing: the red stands for the head as a settlement after the push would have left it", got)
+			assertOutboxCount(t, pool, "supervise", 0)
+			assertOutboxCount(t, pool, "dispatch_status", 0)
+			if pass := implementerPass(t, pool); pass != 0 {
+				t.Fatalf("pass = %d, want none counted: nothing went back", pass)
 			}
-			task := implementerStart(t, pool)
-			reason, noticePhase := checksRedNotice(t, pool)
-			want := "CI is red at head: ci"
-			if !strings.Contains(task, want) || !strings.Contains(reason, want) || noticePhase != tc.from {
-				t.Fatalf("task %q, notice %q in %q; want both to say %q and the notice in %s", task, reason, noticePhase, want, tc.from)
+			want := make([]record.RoleMessage, 0, len(tc.roles))
+			for _, role := range tc.roles {
+				want = append(want, record.RoleMessage{Role: roleToken(t, role), Body: toldBody("CI settled at head: \"build\" succeeded, \"unit\" failed")})
 			}
+			assertRoleMessages(t, pool, "LEGION-208", want)
 		})
 	}
 }
 
-// The head's arrival completes the carry when GitHub delivered the push first: the push, classified
-// handoff-only while the record still said the code head, is kept for the head it made
-// (classify.AdvancePullRequestHead, unspentPushes), and the synchronize that moves the head onto it
-// lets the code head's red stand for the new head (carriedBack) - the same carry the push completes
-// in the other order. So the arrival applies the CI rule in whatever phase the issue is, before
-// reviewing's re-ask: the work goes back from testing, reviewing, accepting, retro and merging, the
-// implementer started at once, and the architect told the phase the red stopped. In awaiting_merge
-// the READY head arriving over its handoff push withdraws nothing, as the late push does not
-// (TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing):
-// that red stood before the READY and says nothing new about the submitted head, so the issue
-// stays, nobody is told and nothing is started.
-func TestAHeadArrivingOverAKnownPushThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase(t *testing.T) {
-	for _, tc := range []struct {
-		from   phase.Phase
-		status string
+// The message is the whole of what the daemon knows of the head's CI, so a settlement that leaves
+// it the same says nothing new and tells nobody again: the listener redelivers a settlement, and a
+// re-run that ends as the run before it did settles the same head with the same conclusions. A
+// settlement that changes a conclusion is told, so a check flapping red, green and red again tells
+// each change - and moves nothing any of the three times, where the rule this replaced sent the
+// work back on the first red and could not take it back.
+func TestASettlementThatSaysNothingNewTellsNobodyAgain(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+		Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
+	engine := mergingEngine()
+	messages := []record.RoleMessage{}
+	for i, step := range []struct {
+		fact intake.Fact
+		// settled is the line the roles are told, "" when the settlement says nothing new.
+		settled string
 	}{
-		{from: phase.Testing, status: "testing"},
-		{from: phase.Reviewing, status: "needs_review"},
-		{from: phase.Accepting, status: "needs_review"},
-		{from: phase.Retro, status: "retro"},
-		{from: phase.Merging, status: "retro"},
-		{from: phase.AwaitingMerge, status: "retro"},
+		{settledAt("head", 1, "unit"), "CI settled at head: \"build\" succeeded, \"unit\" failed"},
+		{settledAt("head", 2, "unit"), ""},
+		{settledAt("head", 3), "CI settled at head: \"build\" succeeded, \"unit\" succeeded"},
+		{settledAt("head", 4, "unit"), "CI settled at head: \"build\" succeeded, \"unit\" failed"},
 	} {
-		t.Run(string(tc.from), func(t *testing.T) {
-			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
-			// The push to the handoff head is known, classified handoff-only, and the head has not
-			// arrived: the record still says the code head, whose red settlement stands for it.
-			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "code", CheckedHead: "code", Required: []string{"ci"},
-				CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Failing: []string{"ci"},
-				Pushes: []record.ClassifiedPush{{SHA: "head", Before: "code", HandoffOnly: true}}})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			for _, role := range []claim.Role{claim.RoleTester, claim.RoleReviewer, claim.RoleMerger} {
-				if RoleFor(tc.from) == role {
-					seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: role, Claim: claim.Token(string(role) + "-claim")})
-				}
-			}
-			if tc.from == phase.AwaitingMerge {
-				// The merger's READY names the arriving head, so the move withdraws no READY of its own
-				// (withdrawMovedReady): only the carried red is in question.
-				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
-			}
-			apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
-			if result := apply("head-arrives", syncedTo("head")); result.Refusal != nil {
-				t.Fatalf("apply the head's arrival = %+v", result.Refusal)
-			}
-			if got := pullRequestAt(t, pool); got.head != "head" || got.verdict != "red" {
-				t.Fatalf("after the arrival the head is %q with verdict %q, want head with the code head's red carried to it", got.head, got.verdict)
-			}
-			if tc.from == phase.AwaitingMerge {
-				if got := issuePhase(t, pool); got != phase.AwaitingMerge {
-					t.Fatalf("after the arrival the issue is in %s, want awaiting_merge: a carried red withdraws no READY", got)
-				}
-				if got := noticeKinds(t, pool, "LEGION-208"); len(got) != 0 {
-					t.Fatalf("notices %v, want none", got)
-				}
-				assertOutboxCount(t, pool, "supervise", 0)
-				return
-			}
-			if got := issuePhase(t, pool); got != phase.Implementing {
-				t.Fatalf("after the arrival completed the carry the issue is in %s, want implementing: the red stands for the head as it does when the push is the fact that completes the carry", got)
-			}
-			task := implementerStart(t, pool)
-			reason, from := checksRedNotice(t, pool)
-			want := "CI is red at head: ci"
-			if !strings.Contains(task, want) || !strings.Contains(reason, want) || from != tc.from {
-				t.Fatalf("task %q, notice %q in %q; want both to say %q and the notice in %s", task, reason, from, want, tc.from)
-			}
-		})
-	}
-}
-
-// An issue in awaiting_merge has no worker with an active phase task and a READY a human was told
-// to merge. A red that then stands for its head by the head's own CI — a required check failing on
-// a rerun, or a newly required one — keeps GitHub from merging it, so the issue goes back to
-// implementing exactly as a red in testing does: the implementer's task and the architect's
-// checks-red notice name the red checks, the project's merge queue role is told the READY is
-// withdrawn, the return is counted as a round, and the round returns through testing, review and
-// READY. A head a push that changed only .legion/ reached is no exception, as it is none before
-// READY either: no worker is at work in awaiting_merge, and only the implementer can change the
-// red. A red carried to the READY head from the code head before it moves nothing: that red stood
-// before the READY and says nothing new about the submitted head. Nor does a red only on a check
-// the base branch does not require.
-func TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing(t *testing.T) {
-	const required = "pr-checks-result"
-	for _, tc := range []struct {
-		name        string
-		handoffHead bool
-		// settles is the commit the red settlement names: the head, or the code head a handoff-only
-		// push replaced.
-		settles string
-		failing string
-		want    phase.Phase
-	}{
-		{"on the READY head", false, "head", required, phase.Implementing},
-		{"on a READY head a handoff-only push reached", true, "head", required, phase.Implementing},
-		{"on the code head, carried to the READY head", true, "code", required, phase.AwaitingMerge},
-		{"only on a check the base branch does not require", false, "head", "review", phase.AwaitingMerge},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-				Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
-			pr := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: []string{required}}
-			if tc.handoffHead {
-				pr.Pushes = []record.ClassifiedPush{{SHA: "head", Before: "code", HandoffOnly: true}}
-			}
-			seedPR(t, pool, pr)
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
-			applyRefusingNothing(t, pool, readyEngine("merge-queue"), intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42,
-				HeadSHA: tc.settles, CheckRuns: []record.AttemptRun{{Name: required, ID: 1}, {Name: "review", ID: 2}}, Generation: 1, Snapshot: "red",
-				Failing: []string{tc.failing}})
-			if got := issuePhase(t, pool); got != tc.want {
-				t.Fatalf("after the red verdict the issue is in %s, want %s", got, tc.want)
-			}
-			published := mergeQueuePublishes(t, pool)
-			if tc.want == phase.AwaitingMerge {
-				if got := noticeKinds(t, pool, "LEGION-208"); len(got) != 0 {
-					t.Fatalf("notices %v, want none", got)
-				}
-				assertOutboxCount(t, pool, "supervise", 0)
-				assertOutboxCount(t, pool, "dispatch_status", 0)
-				if len(published) != 0 {
-					t.Fatalf("merge queue publishes %v, want none: the READY stands", published)
-				}
-				if rounds := implementerRounds(t, pool); rounds != 0 {
-					t.Fatalf("rounds = %d, want none counted: nothing went back", rounds)
-				}
-				return
-			}
-			want := "CI is red at head: " + required
-			reason, from := checksRedNotice(t, pool)
-			var status string
-			if err := pool.QueryRow(context.Background(), "select payload->>'status' from outbox where kind = 'dispatch_status'").Scan(&status); err != nil {
-				t.Fatalf("read the status write: %v", err)
-			}
-			if task := implementerTask(t, pool); !strings.Contains(task, want) || !strings.Contains(reason, want) || from != phase.AwaitingMerge || status != "in_progress" {
-				t.Fatalf("task %q, notice %q from %q, status %q; want both to say %q, from awaiting_merge, and the issue in_progress", task, reason, from, status, want)
-			}
-			if rounds := implementerRounds(t, pool); rounds != 1 {
-				t.Fatalf("rounds = %d, want the return to implementing counted", rounds)
-			}
-			if len(published) != 1 || published[0].Role != "merge-queue" || !strings.Contains(published[0].Packet, "READY withdrawn") || !strings.Contains(published[0].Packet, want) {
-				t.Fatalf("merge queue publishes %v, want one to merge-queue withdrawing the READY and saying %q", published, want)
-			}
-		})
-	}
-}
-
-// In awaiting_merge the READY head's push can arrive after the head and after a red settlement of
-// the code head it replaced, which then stands for it only once the push shows the move changed
-// only handoffs. The push decides the checks again (push), so the READY ends as it does when the
-// push arrives first, whichever the three facts' order: withdrawn or standing, the same merge
-// queue packets and the same phase.
-func TestARedInAwaitingMergeEndsTheSameWhicheverOrderThePushArrivesIn(t *testing.T) {
-	const required = "pr-checks-result"
-	sync := syncedTo("head")
-	push := pushedFromTo("code", "head", ".legion/LEGION-208/merge.json", "legion-merger[bot]")
-	for _, settles := range []string{"code", "head"} {
-		red := intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: settles, CheckRuns: []record.AttemptRun{{Name: required, ID: 1}},
-			Generation: 1, Snapshot: "red", Failing: []string{required}}
-		type outcome struct {
-			phase     phase.Phase
-			published int
-		}
-		var results []outcome
-		for _, order := range [][]intake.Fact{{push, sync, red}, {sync, red, push}, {sync, push, red}} {
-			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-				Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
-			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "code", Required: []string{required}})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
-			engine := readyEngine("merge-queue")
-			for _, fact := range order {
-				applyRefusingNothing(t, pool, engine, fact)
-			}
-			results = append(results, outcome{issuePhase(t, pool), len(mergeQueuePublishes(t, pool))})
-		}
-		for i, got := range results[1:] {
-			if got != results[0] {
-				t.Errorf("red at %s, order %d: phase %s and %d merge queue packets; push first: %s and %d",
-					settles, i+1, got.phase, got.published, results[0].phase, results[0].published)
+		applyRefusingNothing(t, pool, engine, step.fact)
+		if step.settled != "" {
+			for _, role := range []claim.Role{claim.RoleArchitect, claim.RoleTester, claim.RoleImplementer} {
+				messages = append(messages, record.RoleMessage{Role: roleToken(t, role), Body: toldBody(step.settled)})
 			}
 		}
+		if got := issuePhase(t, pool); got != phase.Testing {
+			t.Fatalf("after settlement %d the issue is in %s, want testing", i+1, got)
+		}
+		assertRoleMessages(t, pool, "LEGION-208", messages)
 	}
 }
 
-// A READY is posted on the Dispatch issue whether or not the project names a merge queue role, so
-// its withdrawal is too: with no role, the issue's own record would otherwise keep telling a human
-// to merge a head GitHub will not merge. With a role, the role is told as well.
-func TestAREADYWithdrawalIsPostedOnTheIssueWithOrWithoutAMergeQueueRole(t *testing.T) {
-	const required = "pr-checks-result"
-	for _, role := range []string{"", "merge-queue"} {
-		t.Run("merge queue role "+strconv.Quote(role), func(t *testing.T) {
-			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-				Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
-			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: []string{required}})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			applyRefusingNothing(t, pool, readyEngine(role), intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42,
-				HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Generation: 1, Snapshot: "red", Failing: []string{required}})
-			want := "READY withdrawn for LEGION-208, pull request #42: CI is red at head: " + required
-			if posted := messageBodies(t, pool); len(posted) != 1 || !strings.Contains(posted[0], want) {
-				t.Fatalf("Dispatch messages %q, want one saying %q", posted, want)
-			}
-			if published := mergeQueuePublishes(t, pool); (role == "") != (len(published) == 0) {
-				t.Fatalf("merge queue publishes %v with role %q, want one exactly when a role is named", published, role)
-			}
-		})
-	}
-}
-
-// A settlement reads no workflow run, and the run result it would judge a READY head by is as old
-// as the pass's last read of the runs: a short re-run can turn the run green on GitHub, and READY
-// pass on it, before the next read. So a settlement that finds the READY head red only by a
-// required workflow withdraws nothing, and the pass's next read of the runs decides: a run still
-// red withdraws the READY then, and one that passed leaves it standing.
-func TestASettlementLeavesARedOnlyRequiredWorkflowsMakeToTheNextRead(t *testing.T) {
-	const required, workflow = "pr-checks-result", ".github/workflows/claude-pr-review.yml"
+// A check that failed and was run again settles the same head twice, and what the three roles are
+// told is the latest attempt of each check: GitHub gives a re-run its own check runs, so the
+// second settlement's runs outrank the first's (classify.CompareAttemptSets) and the conclusions
+// it reports replace the ones they outrank (classify.EffectiveOutcome). On sjawhar/legion#2395 the
+// required check failed at the code head in one attempt of a run and passed in the next, and a
+// handoff-only push followed; the three roles are told the red, then the green, and the handoff
+// head carries that green forward, whichever of the re-run and the push arrives first. The rule
+// this replaced carried the first settlement's red to the handoff head and sent the issue back on
+// it, hours after the re-run had passed.
+func TestTheLatestAttemptOfEachCheckIsWhatTheRolesAreTold(t *testing.T) {
+	handoffPush := pushedFromTo("code", "handoff", ".legion/LEGION-208/test.json", "legion-tester[bot]")
 	for _, tc := range []struct {
 		name string
-		read string
-		want phase.Phase
+		// after are the facts that followed the first attempt's red, in the order they arrived:
+		// the re-run's settlement of the same code head, and the handoff-only push that replaced
+		// it with a head GitHub runs nothing on.
+		after []intake.Fact
 	}{
-		{"the next read finds the re-run passed", classify.Success, phase.AwaitingMerge},
-		{"the next read finds the run still red", "failure", phase.Implementing},
+		{"the re-run settles before the handoff push", []intake.Fact{settledAt("code", 2), handoffPush, syncedTo("handoff")}},
+		{"the handoff push lands before the re-run settles", []intake.Fact{handoffPush, syncedTo("handoff"), settledAt("code", 2)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
-			engine := readyEngine("merge-queue")
 			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-				Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
-			// The pass last read the run failed at the READY head; it has been re-run since.
+				Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
 			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: []string{required},
-				Workflows: []record.RequiredWorkflow{{Path: workflow, Result: "failure"}}, WorkflowsHead: "head"})
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "code"})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			applyRefusingNothing(t, pool, engine, intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head",
-				CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Generation: 1, Snapshot: "re-run", Failing: []string{}})
-			if got := issuePhase(t, pool); got != phase.AwaitingMerge {
-				t.Fatalf("after the settlement the issue is in %s, want awaiting_merge", got)
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
+			engine := mergingEngine()
+			applyRefusingNothing(t, pool, engine, settledAt("code", 1, "unit"))
+			applyRefusingNothing(t, pool, engine, tc.after...)
+
+			var want []record.RoleMessage
+			for _, settled := range []string{"CI settled at code: \"build\" succeeded, \"unit\" failed", "CI settled at code: \"build\" succeeded, \"unit\" succeeded"} {
+				for _, role := range []claim.Role{claim.RoleArchitect, claim.RoleTester, claim.RoleImplementer} {
+					want = append(want, record.RoleMessage{Role: roleToken(t, role), Body: toldBody(settled)})
+				}
 			}
-			if published, posted := mergeQueuePublishes(t, pool), messageBodies(t, pool); len(published) != 0 || len(posted) != 0 {
-				t.Fatalf("after the settlement: publishes %v, messages %q; want the READY standing", published, posted)
+			assertRoleMessages(t, pool, "LEGION-208", want)
+			if got := recordedPR(t, pool, "LEGION-208"); got.HeadSHA != "handoff" || got.CheckedHead != "code" || len(got.Failing) != 0 {
+				t.Fatalf("the handoff head %q carries the settlement of %q with %v failing, want it carrying the code head's re-run with nothing failing",
+					got.HeadSHA, got.CheckedHead, got.Failing)
 			}
-			applyRefusingNothing(t, pool, engine, intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{required},
-				Workflows: []record.RequiredWorkflow{{Path: workflow, Result: tc.read}}, WorkflowsHead: "head"})
-			if got := issuePhase(t, pool); got != tc.want {
-				t.Fatalf("after the next read the issue is in %s, want %s", got, tc.want)
+			if got := issuePhase(t, pool); got != phase.Testing {
+				t.Fatalf("the issue is in %s, want it left in testing: no settlement moves it", got)
 			}
-			if published := mergeQueuePublishes(t, pool); (tc.want == phase.Implementing) != (len(published) == 1) {
-				t.Fatalf("merge queue publishes %v, want a withdrawal exactly when the read found the run red", published)
+			assertOutboxCount(t, pool, "supervise", 0)
+			if got := noticeKinds(t, pool, "LEGION-208"); len(got) != 0 {
+				t.Fatalf("the architect was told %v, want nothing but the role messages", got)
 			}
 		})
 	}
 }
 
-// A READY pull request that starts conflicting with its base while awaiting_merge is in the same
-// bind as one whose own CI turned red: GitHub computes no merge ref for a conflicting head, so it
-// runs no checks on it at all, and nothing - not a CI settlement, not a required-checks read -
-// would ever tell the daemon the READY cannot be merged. The daemon's own read of GitHub's
-// mergeability (workflow's mergeability) is the only path to it, and a conflicting read sends the
-// tree back to implementing exactly as RedWithdrawsReady does, naming the base the implementer
-// must merge forward, and counts the return as a round, so the implementer's completion of the
-// merge is told from its completion of the round before. GitHub reports mergeability UNKNOWN until
-// it has computed it - that is "not yet known", never a conflict - so an unknown or a mergeable
-// read moves nothing. Outside awaiting_merge a conflict moves nothing either: a conflict is no red
-// for the CI rule to act on, since GitHub runs no checks on it for a verdict to stand, and the
-// tester or reviewer already at work will see it on GitHub when its pass runs.
-func TestAConflictingMergeabilityInAwaitingMergeSendsTheTreeBackToImplementing(t *testing.T) {
+// A check that runs per pull request - pr-title, and anything on a pull_request edited trigger -
+// runs on whatever head is current, so it never runs on the code head again: once a handoff-only
+// push has landed, its next run is on that handoff head. The two heads hold one tree, since a
+// handoff push changes nothing GitHub checks, so a run on either is a run on the same code and
+// each check name comes to its newest run across them (classify.SettlementFor). On
+// sjawhar/legion#2599 pr-title failed at the code head, the pull request's title was renamed, and
+// the re-run passed on the handoff head that was current by then; the rule this replaced carried
+// the code head's failure over that head and told the roles red for a check that had since
+// passed. The roles are told the red, and then every check green: pr-title by its run on the
+// handoff head, and the checks that ran only on the code head by their runs there.
+func TestACheckRerunOnTheHandoffHeadAboveTheCodeHeadDecidesIt(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+		Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "code"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
+	engine := mergingEngine()
+	applyRefusingNothing(t, pool, engine, settledRunsAt("code", 1, codeHeadRuns(1), "pr-title"))
+	applyRefusingNothing(t, pool, engine,
+		pushedFromTo("code", "handoff", ".legion/LEGION-208/test.json", "legion-tester[bot]"),
+		syncedTo("handoff"),
+		settledRunsAt("handoff", 1, []record.AttemptRun{{Name: "pr-title", ID: 2}}))
+
+	var want []record.RoleMessage
+	for _, settled := range []string{
+		"CI settled at code: \"build\" succeeded, \"pr-title\" failed, \"unit\" succeeded",
+		"CI settled at handoff: \"build\" succeeded, \"pr-title\" succeeded, \"unit\" succeeded",
+	} {
+		for _, role := range []claim.Role{claim.RoleArchitect, claim.RoleTester, claim.RoleImplementer} {
+			want = append(want, record.RoleMessage{Role: roleToken(t, role), Body: toldBody(settled)})
+		}
+	}
+	assertRoleMessages(t, pool, "LEGION-208", want)
+	got := recordedPR(t, pool, "LEGION-208")
+	if got.CheckedHead != "handoff" || len(got.Failing) != 0 {
+		t.Fatalf("the settlement stands at %q with %v failing, want it standing at the handoff head with nothing failing: pr-title passed there",
+			got.CheckedHead, got.Failing)
+	}
+	// Each run carries the head GitHub reported it on and what it concluded, so pr-title's run on
+	// the handoff head decides that name and the code head's runs decide theirs.
+	wantRuns := []record.AttemptRun{{Name: "build", ID: 1, Head: "code", Conclusion: record.RunSucceeded},
+		{Name: "pr-title", ID: 2, Head: "handoff", Conclusion: record.RunSucceeded},
+		{Name: "unit", ID: 1, Head: "code", Conclusion: record.RunSucceeded}}
+	if !reflect.DeepEqual(got.CheckRuns, wantRuns) {
+		t.Fatalf("the runs recorded are %v, want %v: the newest run of each name over the two heads", got.CheckRuns, wantRuns)
+	}
+	if got := issuePhase(t, pool); got != phase.Testing {
+		t.Fatalf("the issue is in %s, want it left in testing: no settlement moves it", got)
+	}
+	assertOutboxCount(t, pool, "supervise", 0)
+	if got := noticeKinds(t, pool, "LEGION-208"); len(got) != 0 {
+		t.Fatalf("the architect was told %v, want nothing but the role messages", got)
+	}
+}
+
+// A check still running has no verdict anywhere: the listener settles a commit only once every
+// check it has seen there is terminal, so a check running at the code head and at the handoff
+// head above it is in no settlement of either, and the roles are told nothing of it. It is never
+// red - the daemon has no conclusion of it to report, and absence from a settlement is not a
+// failure (dispatch://INFRA-714/spec R1) - and the conclusion it finally gets is told when its
+// run ends, beside the checks that concluded at the code head.
+func TestACheckPendingOnEveryHeadIsNoVerdictAndNeverRed(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+		Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "code"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
+	engine := mergingEngine()
+	applyRefusingNothing(t, pool, engine, settledAt("code", 1))
+	applyRefusingNothing(t, pool, engine,
+		pushedFromTo("code", "handoff", ".legion/LEGION-208/test.json", "legion-tester[bot]"),
+		syncedTo("handoff"))
+
+	pending := []record.RoleMessage{}
+	for _, role := range []claim.Role{claim.RoleArchitect, claim.RoleTester, claim.RoleImplementer} {
+		pending = append(pending, record.RoleMessage{Role: roleToken(t, role), Body: toldBody("CI settled at code: \"build\" succeeded, \"unit\" succeeded")})
+	}
+	assertRoleMessages(t, pool, "LEGION-208", pending)
+	if got := recordedPR(t, pool, "LEGION-208"); len(got.Failing) != 0 || len(got.CheckRuns) != 2 {
+		t.Fatalf("the record holds %v failing over the runs %v, want the two checks that concluded and nothing failing: pr-title is still running",
+			got.Failing, got.CheckRuns)
+	}
+
+	applyRefusingNothing(t, pool, engine, settledRunsAt("handoff", 1, []record.AttemptRun{{Name: "pr-title", ID: 7}}, "pr-title"))
+	for _, role := range []claim.Role{claim.RoleArchitect, claim.RoleTester, claim.RoleImplementer} {
+		pending = append(pending, record.RoleMessage{Role: roleToken(t, role),
+			Body: toldBody("CI settled at handoff: \"build\" succeeded, \"pr-title\" failed, \"unit\" succeeded")})
+	}
+	assertRoleMessages(t, pool, "LEGION-208", pending)
+}
+
+// A check that ran only on the code head keeps the conclusion it got there across a handoff-only
+// push, and across a settlement of the handoff head that reports another check: the push's head
+// runs nothing of its own, so the code head's run is the newest run of that name over the two
+// heads. The carry itself still tells nobody, since it says nothing new about the code it names.
+func TestACheckThatRanOnlyOnTheCodeHeadKeepsItsConclusionAboveIt(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+		Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "code"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
+	engine := mergingEngine()
+	applyRefusingNothing(t, pool, engine, settledAt("code", 1, "unit"))
+	var want []record.RoleMessage
+	for _, role := range []claim.Role{claim.RoleArchitect, claim.RoleTester, claim.RoleImplementer} {
+		want = append(want, record.RoleMessage{Role: roleToken(t, role), Body: toldBody("CI settled at code: \"build\" succeeded, \"unit\" failed")})
+	}
+
+	applyRefusingNothing(t, pool, engine,
+		pushedFromTo("code", "handoff", ".legion/LEGION-208/implement.json", "legion-implementer[bot]"),
+		syncedTo("handoff"))
+	assertRoleMessages(t, pool, "LEGION-208", want)
+	if got := recordedPR(t, pool, "LEGION-208"); got.CheckedHead != "code" || len(got.Failing) != 1 {
+		t.Fatalf("after the push the settlement stands at %q with %v failing, want the code head's unchanged", got.CheckedHead, got.Failing)
+	}
+
+	applyRefusingNothing(t, pool, engine, settledRunsAt("handoff", 1, []record.AttemptRun{{Name: "pr-title", ID: 9}}))
+	for _, role := range []claim.Role{claim.RoleArchitect, claim.RoleTester, claim.RoleImplementer} {
+		want = append(want, record.RoleMessage{Role: roleToken(t, role),
+			Body: toldBody("CI settled at handoff: \"build\" succeeded, \"pr-title\" succeeded, \"unit\" failed")})
+	}
+	assertRoleMessages(t, pool, "LEGION-208", want)
+	if got := recordedPR(t, pool, "LEGION-208"); got.CheckedHead != "handoff" || len(got.Failing) != 1 || got.Failing[0] != "unit" {
+		t.Fatalf("the settlement stands at %q with %v failing, want it at the handoff head with unit still failing from the code head",
+			got.CheckedHead, got.Failing)
+	}
+}
+
+// Once a handoff-only push stands above the code head, the two heads hold one tree and the
+// settlements of both merge into one fence - and a settlement of either is newer for some check
+// names and older for others. The handoff head's settlement reports the check that runs per pull
+// request at the run it has there and nothing of the checks that ran only below it; the code
+// head's reports that same check at the older run it had there, beside the ones that are its own.
+// Each name is decided by its own newest run across the two heads (classify.ApplySettlement over
+// classify.mergeAttemptSets), so neither settlement is thrown away for being a mixture. The rule
+// this replaced called such a set a conflict and dropped the whole settlement: a red that arrived
+// from the code head after the handoff head had settled was never recorded and the roles were
+// told green over it, and a check re-run and passed at the code head after it left failing as it
+// was.
+func TestACodeHeadSettlementUnderAHandoffHeadDecidesItsOwnChecks(t *testing.T) {
+	handoffPush := pushedFromTo("code", "handoff", ".legion/LEGION-208/test.json", "legion-tester[bot]")
+	for _, tc := range []struct {
+		name string
+		// facts are the settlements that arrived, in order.
+		facts []intake.Fact
+		// pushAt is the settlement the tester's handoff push and the head it left arrive before.
+		pushAt int
+		// settled is the line the roles are told after each settlement.
+		settled []string
+		// failing is what the record holds failing at the end.
+		failing []string
+	}{
+		{
+			name: "the code head's red arrives after the handoff head has settled",
+			facts: []intake.Fact{
+				settledRunsAt("handoff", 1, []record.AttemptRun{{Name: "pr-title", ID: 5}}),
+				settledRunsAt("code", 1, codeHeadRuns(1), "unit"),
+			},
+			settled: []string{
+				"CI settled at handoff: \"pr-title\" succeeded",
+				"CI settled at handoff: \"build\" succeeded, \"pr-title\" succeeded, \"unit\" failed",
+			},
+			failing: []string{"unit"},
+		},
+		{
+			name:   "the code head's check is re-run and passes after the handoff head has settled",
+			pushAt: 1,
+			facts: []intake.Fact{
+				settledRunsAt("code", 1, codeHeadRuns(1), "unit"),
+				settledRunsAt("handoff", 1, []record.AttemptRun{{Name: "pr-title", ID: 5}}),
+				// The re-run of the code head's own workflow: new runs of the checks that run
+				// there, and the title check still at the run it had on that commit.
+				settledRunsAt("code", 2, []record.AttemptRun{{Name: "build", ID: 7}, {Name: "pr-title", ID: 1}, {Name: "unit", ID: 7}}),
+			},
+			settled: []string{
+				"CI settled at code: \"build\" succeeded, \"pr-title\" succeeded, \"unit\" failed",
+				"CI settled at handoff: \"build\" succeeded, \"pr-title\" succeeded, \"unit\" failed",
+				"CI settled at handoff: \"build\" succeeded, \"pr-title\" succeeded, \"unit\" succeeded",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "code"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
+			engine := mergingEngine()
+			var want []record.RoleMessage
+			for i, fact := range tc.facts {
+				if i == tc.pushAt {
+					applyRefusingNothing(t, pool, engine, handoffPush, syncedTo("handoff"))
+				}
+				applyRefusingNothing(t, pool, engine, fact)
+				for _, role := range []claim.Role{claim.RoleArchitect, claim.RoleTester, claim.RoleImplementer} {
+					want = append(want, record.RoleMessage{Role: roleToken(t, role), Body: toldBody(tc.settled[i])})
+				}
+				assertRoleMessages(t, pool, "LEGION-208", want)
+			}
+			got := recordedPR(t, pool, "LEGION-208")
+			if !reflect.DeepEqual(got.Failing, tc.failing) {
+				t.Fatalf("the record holds %v failing, want %v: each name is decided by its own newest run over the two heads", got.Failing, tc.failing)
+			}
+			if got := issuePhase(t, pool); got != phase.Testing {
+				t.Fatalf("the issue is in %s, want it left in testing: no settlement moves it", got)
+			}
+		})
+	}
+}
+
+// A check GitHub produced no run for - an aggregate job whose needs: never ran, so it never
+// started - reaches the three roles like any other conclusion, and moves nothing, because nothing
+// classifies it (dispatch://INFRA-622). The settlement reports its runs and names that check as
+// failed; the message names it beside the checks that ran, and the worker holding the phase
+// decides what it means.
+func TestACheckGitHubNeverRanIsToldLikeAnyOtherConclusion(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+		Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
+	applyRefusingNothing(t, pool, mergingEngine(), intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head",
+		CheckRuns: []record.AttemptRun{{Name: "unit", ID: 1}}, Generation: 1, Snapshot: "never-ran",
+		Failing: []string{"pr-checks-result"}})
+
+	if got := issuePhase(t, pool); got != phase.Testing {
+		t.Fatalf("after the settlement the issue is in %s, want testing: nothing classifies a conclusion", got)
+	}
+	if got := noticeKinds(t, pool, "LEGION-208"); len(got) != 0 {
+		t.Fatalf("the architect was told %v, want nothing but the role message", got)
+	}
+	assertOutboxCount(t, pool, "supervise", 0)
+	want := []record.RoleMessage{}
+	for _, role := range []claim.Role{claim.RoleArchitect, claim.RoleTester, claim.RoleImplementer} {
+		want = append(want, record.RoleMessage{Role: roleToken(t, role), Body: toldBody("CI settled at head: \"pr-checks-result\" failed, \"unit\" succeeded")})
+	}
+	assertRoleMessages(t, pool, "LEGION-208", want)
+}
+
+// Linger holds a member of a closed tree where it stood (record.TreeLingers): every role of the
+// tree is suspended there, so a settlement that reaches a lingering tree's issue is recorded and
+// nobody is told - a message to a role nobody holds reaches nobody, and the tree is done.
+func TestASettlementOfALingeringTreeTellsNobody(t *testing.T) {
+	pool := migratedPool(t)
+	until := time.Date(2026, 9, 26, 0, 0, 0, 0, time.UTC)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+		Phase: phase.Done, Generation: 1, Status: "done", Rank: "U", LingerUntil: &until})
+	parent := "LEGION-208"
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Parent: &parent,
+		Project: "LEGION", Title: "child", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-209", HeadSHA: "head"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	applyRefusingNothing(t, pool, mergingEngine(), settledAt("head", 1, "unit"))
+
+	assertRoleMessages(t, pool, "LEGION-209", nil)
+	if checked := recordedPR(t, pool, "LEGION-209").CheckedHead; checked != "head" {
+		t.Fatalf("the settlement stands for %q, want it recorded at head while the tree lingers", checked)
+	}
+}
+
+// A settlement of a commit the head's settlement is not - an earlier head no push shows the
+// current one replaced with handoffs alone - stands for no head, so there is nothing to tell: the
+// daemon knows nothing of the head's CI, and a message naming another commit's checks would be
+// read as the head's.
+func TestASettlementThatStandsForNoHeadTellsNobody(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+		Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	applyRefusingNothing(t, pool, mergingEngine(), settledAt("another-commit", 1, "unit"))
+
+	assertRoleMessages(t, pool, "LEGION-208", nil)
+	if got := issuePhase(t, pool); got != phase.Testing {
+		t.Fatalf("the issue is in %s, want testing", got)
+	}
+}
+
+// A push classified after its head arrived completes the carry of a code head's settlement to the
+// handoff head that replaced it (classify.SettlementFor), and so does the head arriving over a
+// push already known. Either way nothing moves and nobody is told again: the roles were told what
+// the settlement said when it arrived, and the carry says nothing new about the code it names. The
+// rule this replaced sent the work back from whatever phase the carry completed in.
+func TestAPushThatCompletesTheCarryMovesNothingAndTellsNobody(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// head is the pull request's recorded head before the fact, and fact the one that
+		// completes the carry.
+		head string
+		fact intake.Fact
+	}{
+		{"the push arrives after its head", "head", pushedFromTo("code", "head", ".legion/LEGION-208/implement.json", "legion-implementer[bot]")},
+		{"the head arrives over a push already known", "code", syncedTo("head")},
+	} {
+		for _, from := range []phase.Phase{phase.Testing, phase.Merging} {
+			t.Run(tc.name+", in "+string(from), func(t *testing.T) {
+				pool := migratedPool(t)
+				status := map[phase.Phase]string{phase.Testing: "testing", phase.Merging: "retro"}[from]
+				seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+					Phase: from, Generation: 1, Status: status, Rank: "U"})
+				pr := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+					Number: 42, Branch: "legion/LEGION-208", HeadSHA: tc.head, CheckedHead: "code",
+					CheckRuns: []record.AttemptRun{{Name: "unit", ID: 1}}, Failing: []string{"unit"}}
+				if tc.head == "code" {
+					pr.Pushes = []record.ClassifiedPush{{SHA: "head", Before: "code", HandoffOnly: true}}
+				}
+				seedPR(t, pool, pr)
+				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+				applyRefusingNothing(t, pool, mergingEngine(), tc.fact)
+
+				if got := recordedPR(t, pool, "LEGION-208"); got.HeadSHA != "head" || got.CheckedHead != "code" {
+					t.Fatalf("after the carry the head is %q and its settlement is of %q, want head carrying the code head's settlement", got.HeadSHA, got.CheckedHead)
+				}
+				if got := issuePhase(t, pool); got != from {
+					t.Fatalf("after the carry the issue is in %s, want it left in %s", got, from)
+				}
+				assertRoleMessages(t, pool, "LEGION-208", nil)
+				if got := noticeKinds(t, pool, "LEGION-208"); len(got) != 0 {
+					t.Fatalf("the architect was told %v, want nothing", got)
+				}
+				assertOutboxCount(t, pool, "supervise", 0)
+			})
+		}
+	}
+}
+
+// A reopen starts the pull request's CI settlement afresh (classify.Reopen): the settlement
+// recorded before the close is of a head GitHub has run nothing on since, so the daemon knows
+// nothing of the reopened head's CI until one arrives. The first settlement after the reopen is
+// therefore told, even when it says what the settlement before the close said.
+func TestAReopenStartsTheCheckSettlementAfreshAndTellsItAgain(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+		Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", HeadUpdatedAt: time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
+	engine := mergingEngine()
+	applyRefusingNothing(t, pool, engine, settledAt("head", 1, "unit"))
+	applyRefusingNothing(t, pool, engine,
+		intake.PullRequestClosed{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", UpdatedAt: time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC)},
+		intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head",
+			UpdatedAt: time.Date(2026, 9, 26, 0, 0, 0, 0, time.UTC), Reopened: true},
+		settledAt("head", 2, "unit"))
+
+	want := []record.RoleMessage{}
+	for range 2 {
+		for _, role := range []claim.Role{claim.RoleArchitect, claim.RoleTester, claim.RoleImplementer} {
+			want = append(want, record.RoleMessage{Role: roleToken(t, role), Body: toldBody("CI settled at head: \"build\" succeeded, \"unit\" failed")})
+		}
+	}
+	assertRoleMessages(t, pool, "LEGION-208", want)
+}
+
+// The implementer pushes and completes without waiting for CI, so a check can settle on its head
+// while the issue is still in implementing. The completion reads none of it: the issue goes on to
+// testing whatever the settlement said, since a CI result moves nothing and the roles were told
+// what it said when it arrived. The rule this replaced read the settlement here and sent the work
+// straight back to implementing rather than through a tester round.
+func TestACompletionHandsOnASettledHeadWithoutReadingIt(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		failing []string
+	}{
+		{"a check failed", []string{"unit"}},
+		{"every check passed", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			engine := testEngine(config.DesignGateRootIssues, nil)
+			applyRefusingNothing(t, pool, engine, settledAt("head", 1, tc.failing...))
+			if got := issuePhase(t, pool); got != phase.Implementing {
+				t.Fatalf("after the settlement the issue is in %s, want implementing", got)
+			}
+			applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-208",
+				Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "head", Summary: "implemented"})
+
+			if got := issuePhase(t, pool); got != phase.Testing {
+				t.Fatalf("after the implementer's completion the issue is in %s, want testing", got)
+			}
+			if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "checks-red") {
+				t.Fatalf("notices %v, want no checks-red", got)
+			}
+			if pass := implementerPass(t, pool); pass != 0 {
+				t.Fatalf("pass = %d, want none: nothing went back", pass)
+			}
+		})
+	}
+}
+
+// A head that conflicts with its base sends its issue back to implementing from whatever later
+// phase it stands in: GitHub computes no merge ref for a conflicting head, so it runs no checks on
+// it at all and no CI result will ever arrive for it, and only the implementer merging the base
+// forward clears it. The daemon's own read of GitHub's mergeability (workflow's mergeability) is
+// the only path to it, since GitHub sends no event when it recomputes one. The move names the
+// base the implementer must merge forward and counts the return as a pass, so the implementer's
+// completion of the merge is told from its completion of the pass before. GitHub reports
+// mergeability UNKNOWN until it has computed it - that
+// is "not yet known", never a conflict - so an unknown or a mergeable read moves nothing, and
+// neither does a conflict read in implementing, where the work it needs already is.
+func TestAConflictingHeadSendsTheIssueBackToImplementingFromEveryLaterPhase(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		from      phase.Phase
@@ -615,11 +593,14 @@ func TestAConflictingMergeabilityInAwaitingMergeSendsTheTreeBackToImplementing(t
 		mergeable record.Mergeability
 		want      phase.Phase
 	}{
-		{"conflicting in awaiting_merge", phase.AwaitingMerge, "retro", record.MergeabilityConflicting, phase.Implementing},
-		{"unknown in awaiting_merge: GitHub has not computed it yet", phase.AwaitingMerge, "retro", record.MergeabilityUnknown, phase.AwaitingMerge},
-		{"mergeable in awaiting_merge", phase.AwaitingMerge, "retro", record.MergeabilityMergeable, phase.AwaitingMerge},
-		{"conflicting in testing: the tester is already at work", phase.Testing, "testing", record.MergeabilityConflicting, phase.Testing},
-		{"conflicting in reviewing: no round is open to decide it", phase.Reviewing, "needs_review", record.MergeabilityConflicting, phase.Reviewing},
+		{"conflicting in testing", phase.Testing, "testing", record.MergeabilityConflicting, phase.Implementing},
+		{"conflicting in reviewing", phase.Reviewing, "needs_review", record.MergeabilityConflicting, phase.Implementing},
+		{"conflicting in accepting", phase.Accepting, "needs_review", record.MergeabilityConflicting, phase.Implementing},
+		{"conflicting in retro", phase.Retro, "retro", record.MergeabilityConflicting, phase.Implementing},
+		{"conflicting in merging", phase.Merging, "retro", record.MergeabilityConflicting, phase.Implementing},
+		{"conflicting in implementing: the work it needs is already there", phase.Implementing, "in_progress", record.MergeabilityConflicting, phase.Implementing},
+		{"unknown in merging: GitHub has not computed it yet", phase.Merging, "retro", record.MergeabilityUnknown, phase.Merging},
+		{"mergeable in merging", phase.Merging, "retro", record.MergeabilityMergeable, phase.Merging},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -628,25 +609,15 @@ func TestAConflictingMergeabilityInAwaitingMergeSendsTheTreeBackToImplementing(t
 			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
 				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			if tc.from == phase.Reviewing {
-				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "head", Summary: "reviewed"})
-			}
-			if tc.from == phase.AwaitingMerge {
-				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
-			}
-			applyRefusingNothing(t, pool, readyEngine("merge-queue"),
-				intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", Mergeable: tc.mergeable})
+			applyRefusingNothing(t, pool, mergingEngine(),
+				intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", HeadSHA: "head", Mergeable: tc.mergeable})
 			if got := issuePhase(t, pool); got != tc.want {
 				t.Fatalf("after the mergeability read the issue is in %s, want %s", got, tc.want)
 			}
-			published := mergeQueuePublishes(t, pool)
-			if tc.want != phase.Implementing {
-				if len(published) != 0 {
-					t.Fatalf("merge queue publishes %v, want none: nothing moved", published)
-				}
+			if tc.from == tc.want {
 				assertOutboxCount(t, pool, "supervise", 0)
-				if rounds := implementerRounds(t, pool); rounds != 0 {
-					t.Fatalf("rounds = %d, want none counted: nothing went back", rounds)
+				if pass := implementerPass(t, pool); pass != 0 {
+					t.Fatalf("pass = %d, want none counted: nothing went back", pass)
 				}
 				return
 			}
@@ -656,32 +627,24 @@ func TestAConflictingMergeabilityInAwaitingMergeSendsTheTreeBackToImplementing(t
 			if err := pool.QueryRow(context.Background(), "select payload->>'status' from outbox where kind = 'dispatch_status'").Scan(&status); err != nil {
 				t.Fatalf("read the status write: %v", err)
 			}
-			if task := implementerTask(t, pool); !strings.Contains(task, want) || !strings.Contains(reason, want) || from != phase.AwaitingMerge || status != "in_progress" {
-				t.Fatalf("task %q, notice %q from %q, status %q; want both to say %q, from awaiting_merge, and the issue in_progress", task, reason, from, status, want)
+			if task := implementerTask(t, pool); !strings.Contains(task, want) || !strings.Contains(reason, want) || from != tc.from || status != "in_progress" {
+				t.Fatalf("task %q, notice %q from %q, status %q; want both to say %q, from %s, and the issue in_progress", task, reason, from, status, want, tc.from)
 			}
-			if rounds := implementerRounds(t, pool); rounds != 1 {
-				t.Fatalf("rounds = %d, want the return to implementing counted", rounds)
-			}
-			if len(published) != 1 || published[0].Role != "merge-queue" || !strings.Contains(published[0].Packet, "READY withdrawn") || !strings.Contains(published[0].Packet, want) {
-				t.Fatalf("merge queue publishes %v, want one to merge-queue withdrawing the READY and saying %q", published, want)
+			if pass := implementerPass(t, pool); pass != 1 {
+				t.Fatalf("pass = %d, want the return to implementing counted", pass)
 			}
 		})
 	}
 }
 
-// A conflict the required-checks poll records before the issue reaches awaiting_merge - in
-// merging, where the merger pushes nothing on its way to READY - is stored but decides nothing
-// there: no worker is suspended yet, and no round is open to act on it. The merger's READY still
-// posts, since GitHub runs no checks at all on a conflicting head for its own required-check read
-// to find red, so the issue enters awaiting_merge with CONFLICTING already on the record. Deciding
-// only on a read that changes the stored value would leave that conflict permanently unacted on -
-// every later read of the same CONFLICTING answer "changes" nothing - so the tree would still wait
-// forever, reached in a different order than a conflict that starts after READY. The handler must
-// decide on every CONFLICTING read, whether or not the record already said so: the first read
-// after the issue reaches awaiting_merge withdraws the READY, and the transition itself, which
-// takes the issue out of awaiting_merge, is what stops a further repeat of the same read from
-// doing it again.
-func TestAConflictRecordedBeforeAwaitingMergeIsWithdrawnOnTheFirstReadAfterReady(t *testing.T) {
+// The handler decides on every CONFLICTING read, whether or not the record already said so: the
+// read that found the conflict first may have run while the issue stood in a phase the trigger has
+// no row for, and deciding only on a read that changes the stored value would leave that conflict
+// unacted on for good - every later read of the same CONFLICTING answer "changes" nothing. What
+// stops the repeat from acting twice is the move itself: implementing, where the conflict sends
+// the issue, has no row for the trigger, so the same read again changes nothing and tells nobody
+// a second time.
+func TestEveryConflictingReadDecidesAndTheMoveItselfStopsTheRepeat(t *testing.T) {
 	pool := migratedPool(t)
 	engine := testEngine(config.DesignGateRootIssues, nil)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
@@ -692,20 +655,15 @@ func TestAConflictRecordedBeforeAwaitingMergeIsWithdrawnOnTheFirstReadAfterReady
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
 
-	conflict := intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", Mergeable: record.MergeabilityConflicting}
+	conflict := intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", HeadSHA: "head", Mergeable: record.MergeabilityConflicting}
 	applyRefusingNothing(t, pool, engine, conflict)
-	if got := issuePhase(t, pool); got != phase.Merging {
-		t.Fatalf("after the first conflicting read the issue is in %s, want merging: nothing decides it before awaiting_merge", got)
-	}
-
-	applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true, Summary: readyPacket, Commit: "head"})
-	if got := issuePhase(t, pool); got != phase.AwaitingMerge {
-		t.Fatalf("after READY the issue is in %s, want awaiting_merge: a conflict already on the record does not refuse it", got)
+	if got := issuePhase(t, pool); got != phase.Implementing {
+		t.Fatalf("after the conflicting read the issue is in %s, want implementing: the merger cannot merge a head GitHub will not", got)
 	}
 
 	applyRefusingNothing(t, pool, engine, conflict)
 	if got := issuePhase(t, pool); got != phase.Implementing {
-		t.Fatalf("after the same conflicting read again the issue is in %s, want implementing: the record did not change, but the decision must still run on this first read in awaiting_merge", got)
+		t.Fatalf("after the same conflicting read again the issue is in %s, want implementing", got)
 	}
 	want := "the head conflicts with main: GitHub runs no checks on it; merge main forward"
 	var notices int
@@ -716,772 +674,30 @@ func TestAConflictRecordedBeforeAwaitingMergeIsWithdrawnOnTheFirstReadAfterReady
 	if notices != 1 || !strings.Contains(reason, want) {
 		t.Fatalf("checks-red notices = %d, reason %q; want exactly one saying %q", notices, reason, want)
 	}
-}
-
-// At max_fix_attempts the daemon stops sending the work back from testing or reviewing on CI red
-// within the attempt the count last counted, and the architect decides what comes next
-// (skill://legion-architect's pr-blocked row): the red verdict that finds the count exhausted is
-// posted on the issue and told to the architect once, and the issue stays in its phase. Every later
-// red at that head stays there too, and tells nothing new: a re-run that fails again, a red that
-// returns after the head read green (a flaky check flapping), and, in reviewing, the reviewer's
-// completion of its round, which asks the round what the red comes to. A cap that held the first
-// red and let the next one through would bound nothing. A fix pushed onto the red raises the count,
-// and its red is told again, and held the same way.
-func TestAnExhaustedFixAttemptCountHoldsEveryRedAtThatCount(t *testing.T) {
-	const required = "pr-checks-result"
-	settlement := func(attempt int, failing ...string) intake.Fact {
-		return intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head",
-			CheckRuns: []record.AttemptRun{{Name: required, ID: int64(attempt)}}, Generation: int64(attempt),
-			Snapshot: "settled-" + strconv.Itoa(attempt), Failing: append([]string{}, failing...)}
-	}
-	completion := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Commit: "review-1", Summary: "reviewed"}
-	for _, tc := range []struct {
-		name   string
-		from   phase.Phase
-		status string
-		// completed seeds the reviewer's row with its completion: its round half in.
-		completed bool
-		// attempts and reported seed the pull request's fix attempts and the count last told.
-		attempts, reported int
-		facts              []intake.Fact
-	}{
-		{"in testing, red twice", phase.Testing, "testing", false, 3, 0, []intake.Fact{settlement(1, required), settlement(2, required)}},
-		{"in testing, red, green, red", phase.Testing, "testing", false, 3, 0, []intake.Fact{settlement(1, required), settlement(2), settlement(3, required)}},
-		{"in testing, red twice at a count past the one told", phase.Testing, "testing", false, 4, 3, []intake.Fact{settlement(1, required), settlement(2, required)}},
-		{"in reviewing, red twice", phase.Reviewing, "needs_review", true, 3, 0, []intake.Fact{settlement(1, required), settlement(2, required)}},
-		{"in reviewing, red, green, red", phase.Reviewing, "needs_review", true, 3, 0, []intake.Fact{settlement(1, required), settlement(2), settlement(3, required)}},
-		{"in reviewing, red, then the reviewer completes", phase.Reviewing, "needs_review", false, 3, 0, []intake.Fact{settlement(1, required), completion}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
-			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: []string{required},
-				FixAttempts: tc.attempts, BlockedAttempts: tc.reported, HeadCounted: "head"})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			if tc.from == phase.Reviewing {
-				reviewer := record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"}
-				if tc.completed {
-					reviewer.HandoffCommit, reviewer.Summary = "head", "reviewed"
-				}
-				seedPhase(t, pool, reviewer)
-			}
-			engine := readyEngine("merge-queue")
-			for i, fact := range tc.facts {
-				applyRefusingNothing(t, pool, engine, fact)
-				if got := issuePhase(t, pool); got != tc.from {
-					t.Fatalf("after fact %d (%T) the issue is in %s, want it held in %s at the exhausted count", i+1, fact, got, tc.from)
-				}
-			}
-			blocked := 0
-			for _, kind := range noticeKinds(t, pool, "LEGION-208") {
-				switch kind {
-				case "pr-blocked":
-					blocked++
-				case "checks-red":
-					t.Fatalf("the architect was told checks-red, want nothing sent back at the exhausted count")
-				}
-			}
-			if blocked != 1 {
-				t.Fatalf("pr-blocked notices = %d, want one for the exhausted count", blocked)
-			}
-			if posted := messageBodies(t, pool); len(posted) != 1 || !strings.Contains(posted[0], "reached max_fix_attempts=3") {
-				t.Fatalf("Dispatch messages %q, want the one max_fix_attempts message", posted)
-			}
-			assertOutboxCount(t, pool, "supervise", 0)
-			if rounds := implementerRounds(t, pool); rounds != 0 {
-				t.Fatalf("rounds = %d, want none: nothing went back", rounds)
-			}
-		})
+	if pass := implementerPass(t, pool); pass != 1 {
+		t.Fatalf("pass = %d, want the one return to implementing counted once", pass)
 	}
 }
 
-// The cap withholds the daemon's own move on a red, not a decision: at an exhausted count a
-// reviewer's request for changes still ends its round and sends the work back to implementing,
-// whichever of its two halves - the review on GitHub and the reviewer's completion - arrives
-// second. The return is the review's, so the implementer is told the reviewer's body and the round
-// is counted against review_round_cap, and the architect hears no checks-red.
-func TestAnExhaustedFixAttemptCountStillTakesTheReviewersRequestForChanges(t *testing.T) {
-	const required = "pr-checks-result"
-	red := intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head",
-		CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Generation: 1, Snapshot: "settled-1", Failing: []string{required}}
-	review := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", HeadSHA: "head",
-		Author: testReviewApp, Body: "rename the widget"}
-	completion := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Commit: "review-1", Summary: "reviewed"}
-	for _, tc := range []struct {
-		name  string
-		facts []intake.Fact
-	}{
-		{"the review, then the completion", []intake.Fact{red, review, completion}},
-		{"the completion, then the review", []intake.Fact{red, completion, review}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-				Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
-			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: []string{required}, FixAttempts: 3, HeadCounted: "head"})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
-			engine := readyEngine("merge-queue")
-			for i, fact := range tc.facts[:2] {
-				applyRefusingNothing(t, pool, engine, fact)
-				if got := issuePhase(t, pool); got != phase.Reviewing {
-					t.Fatalf("after fact %d (%T) the issue is in %s, want reviewing: the round is not decided yet", i+1, fact, got)
-				}
-			}
-			applyRefusingNothing(t, pool, engine, tc.facts[2])
-			if got := issuePhase(t, pool); got != phase.Implementing {
-				t.Fatalf("after the round's second half the issue is in %s, want implementing: a request for changes is a decision the cap does not withhold", got)
-			}
-			if task, rounds := implementerTask(t, pool), implementerRounds(t, pool); !strings.Contains(task, "rename the widget") || rounds != 1 {
-				t.Fatalf("implementer task %q, rounds %d; want the reviewer's body and the round counted", task, rounds)
-			}
-			if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "checks-red") || !containsNotice(got, "pr-blocked") {
-				t.Fatalf("notices %v, want the count's pr-blocked and no checks-red", got)
-			}
-		})
-	}
+// settledAt is a CI settlement of head reporting the two check runs build and unit, generation
+// numbering it and its fence, with the checks named failing.
+func settledAt(head string, generation int64, failing ...string) intake.Fact {
+	return settledRunsAt(head, generation, []record.AttemptRun{{Name: "build", ID: generation}, {Name: "unit", ID: generation}}, failing...)
 }
 
-// The cap bounds the loop it counts: pushes onto a red verdict, and every head pushed on top of the
-// counted one before a push lands on a green verdict. A code head pushed onto a green one - the
-// implementer's answer to a request for changes after a re-run turned the counted head green -
-// raises no count and leaves that attempt, so a red there in testing is new and not the loop's: it
-// sends the work back with a checks-red, as below the cap, whether or not the count was already
-// reported. The next push onto that red raises the count and is reported then. A code head pushed
-// onto a settled head whose base branch has stopped requiring anything leaves the attempt the same
-// way, though that head has no verdict, so a red once the base requires the check again is new.
-// Every other push stays in the attempt: a code head pushed while the counted head had no verdict
-// yet, directly or over a handoff-only head, and an uncounted push onto the held red - the tester's
-// red tests, its handoff-only test.json, the implementer's fix onto the planned red - so the
-// attempt's red is held and reports the count once, and no push sequence slips a round past the
-// cap. A red reaching a handoff-only head from the counted code head it replaced is the loop's too:
-// the cap holds it, and it reports the count once.
-//
-// GitHub delivers a head's push webhook and its synchronize in either order, and a head whose push
-// has not arrived is counted until the push proves handoff-only or the review App's. So every case
-// runs in both orders, and both must leave the same counted attempt, the same hold or send-back,
-// and the same notices.
-func TestAnExhaustedFixAttemptCountHoldsTheCountedAttemptUntilAHeadIsPushedOntoGreen(t *testing.T) {
-	const required, implementer = "pr-checks-result", "legion-implementer[bot]"
-	// step is a settlement or a read of the base branch's required set, delivered as it is, or a
-	// head's arrival: its push webhook and its synchronize, in the order the subtest delivers them.
-	type step struct {
-		fact                    intake.Fact
-		from, to, paths, pusher string
-	}
-	settled := func(head string, attempt int, failing ...string) step {
-		return step{fact: settledAt(head, required, attempt, failing...)}
-	}
-	// reads is the daemon's read of the required set naming exactly names: none is a base that
-	// requires nothing, never a set left unread.
-	reads := func(names ...string) step {
-		return step{fact: intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: append([]string{}, names...)}}
-	}
-	arrives := func(from, to, paths, pusher string) step {
-		return step{from: from, to: to, paths: paths, pusher: pusher}
-	}
-	const code, redTests, handoff = "src/widget.go", "src/widget_test.go", ".legion/LEGION-208/test.json"
-	for _, tc := range []struct {
-		name     string
-		reported int
-		steps    []step
-		// want is the phase the last step leaves the issue in; checksRed and blocked count the
-		// architect's notices of each kind; attempts and mark are the pull request's fix attempts and
-		// the counted head it is left with.
-		want               phase.Phase
-		checksRed, blocked int
-		attempts           int
-		mark               string
-	}{
-		{"a head pushed onto green after the count was reported", 3,
-			[]step{settled("h3", 1, required), settled("h3", 2), arrives("h3", "h4", code, implementer), settled("h4", 1, required)},
-			phase.Implementing, 1, 0, 3, ""},
-		{"a head pushed onto green after the count went green unreported", 0,
-			[]step{settled("h3", 1), arrives("h3", "h4", code, implementer), settled("h4", 1, required)},
-			phase.Implementing, 1, 0, 3, ""},
-		{"a handoff head over the counted head, the counted head's red carried to it", 0,
-			[]step{arrives("h3", "h3t", handoff, testReviewApp), settled("h3", 1, required)},
-			phase.Testing, 0, 1, 3, "h3"},
-		{"a code head pushed before the counted head was judged", 0,
-			[]step{arrives("h3", "h4", code, implementer), settled("h4", 1, required)},
-			phase.Testing, 0, 1, 3, "h3"},
-		{"a code head pushed over a handoff head before the counted head was judged", 0,
-			[]step{arrives("h3", "h3t", ".legion/LEGION-208/implement.json", implementer), arrives("h3t", "h4", code, implementer), settled("h4", 1, required)},
-			phase.Testing, 0, 1, 3, "h3"},
-		{"the tester's red tests pushed onto the held red, then the implementer's fix", 0,
-			[]step{settled("h3", 1, required), arrives("h3", "h4", redTests, testReviewApp), settled("h4", 1, required),
-				arrives("h4", "h5", code, implementer), settled("h5", 1, required)},
-			phase.Testing, 0, 1, 3, "h3"},
-		{"the implementer's fix pushed before CI judged the tester's red tests on the held red", 0,
-			[]step{settled("h3", 1, required), arrives("h3", "h4", redTests, testReviewApp), arrives("h4", "h5", code, implementer), settled("h5", 1, required)},
-			phase.Testing, 0, 1, 3, "h3"},
-		{"the tester's handoff pushed onto the held red, the red carried to it", 0,
-			[]step{settled("h3", 1, required), arrives("h3", "h3t", handoff, testReviewApp), settled("h3", 2, required)},
-			phase.Testing, 0, 1, 3, "h3"},
-		// The base stops requiring anything while the counted head's red is held, so that head has
-		// no verdict and nothing there is red; the implementer's push onto it leaves the attempt as a
-		// push onto green does, and once the base requires the check again the new head's red is new.
-		{"a head pushed onto a base that stopped requiring anything", 0,
-			[]step{settled("h3", 1, required), reads(), arrives("h3", "h4", code, implementer), reads(required), settled("h4", 1, required)},
-			phase.Implementing, 1, 1, 3, ""},
-	} {
-		for _, pushFirst := range []bool{false, true} {
-			order := "synchronize first"
-			if pushFirst {
-				order = "push first"
-			}
-			t.Run(tc.name+", "+order, func(t *testing.T) {
-				var facts []intake.Fact
-				for _, s := range tc.steps {
-					if s.to == "" {
-						facts = append(facts, s.fact)
-						continue
-					}
-					arrival := []intake.Fact{syncedTo(s.to), pushedFromTo(s.from, s.to, s.paths, s.pusher)}
-					if pushFirst {
-						arrival[0], arrival[1] = arrival[1], arrival[0]
-					}
-					facts = append(facts, arrival...)
-				}
-				pool := migratedPool(t)
-				seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-					Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
-				seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-					Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h3", Required: []string{required},
-					FixAttempts: 3, BlockedAttempts: tc.reported, HeadCounted: "h3"})
-				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-				engine := readyEngine("merge-queue")
-				last := len(facts) - 1
-				for i, fact := range facts[:last] {
-					applyRefusingNothing(t, pool, engine, fact)
-					if got := issuePhase(t, pool); got != phase.Testing {
-						t.Fatalf("after fact %d (%T) the issue is in %s, want testing", i+1, fact, got)
-					}
-				}
-				applyRefusingNothing(t, pool, engine, facts[last])
-				if got := issuePhase(t, pool); got != tc.want {
-					t.Fatalf("after the last red the issue is in %s, want %s", got, tc.want)
-				}
-				checksRed, blocked := 0, 0
-				for _, kind := range noticeKinds(t, pool, "LEGION-208") {
-					switch kind {
-					case "checks-red":
-						checksRed++
-					case "pr-blocked":
-						blocked++
-					}
-				}
-				if checksRed != tc.checksRed || blocked != tc.blocked {
-					t.Fatalf("checks-red notices %d and pr-blocked notices %d, want %d and %d", checksRed, blocked, tc.checksRed, tc.blocked)
-				}
-				var attempts int
-				var mark string
-				if err := pool.QueryRow(context.Background(), "select fix_attempts, head_counted from pull_requests where issue = 'LEGION-208'").Scan(&attempts, &mark); err != nil {
-					t.Fatalf("read the fix attempts: %v", err)
-				}
-				if attempts != tc.attempts || mark != tc.mark {
-					t.Fatalf("fix attempts %d and counted head %q, want %d and %q", attempts, mark, tc.attempts, tc.mark)
-				}
-			})
-		}
-	}
+// settledRunsAt is a CI settlement of head reporting runs, generation numbering it among that
+// head's own settlements, with the checks named failing. A check the settlement does not report
+// at all is one it says nothing about: still running, or never seen there.
+func settledRunsAt(head string, generation int64, runs []record.AttemptRun, failing ...string) intake.Fact {
+	return intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: head, CheckRuns: runs,
+		Generation: generation, Snapshot: head + "-" + strconv.FormatInt(generation, 10),
+		Failing: append([]string{}, failing...)}
 }
 
-// A head the daemon reached past one it never recorded - h2 to h4, h3 between - is judged by the
-// chain of pushes h2..h3..h4 whichever of the pushes and the head arrives first. Two handoffs spare
-// the move: pushed first they count nothing, and arriving late they take back the count h4's
-// arrival made, though the push completing the chain names h3, not the head, and that lifts the
-// cap off h4's red, which sends the work back. The review App's red tests then a handoff spare the
-// move too and plan h4's red, so the work stays in testing in both orders.
-func TestASkippedHeadIsJudgedByItsChainOfPushesInEitherOrder(t *testing.T) {
-	const required, implementer = "pr-checks-result", "legion-implementer[bot]"
-	const handoff, redTests = ".legion/LEGION-208/implement.json", "src/widget_test.go"
-	for _, tc := range []struct {
-		name          string
-		first, second intake.Fact
-		want          phase.Phase
-		planned       bool
-	}{
-		{"two handoffs", pushedFromTo("h2", "h3", handoff, implementer), pushedFromTo("h3", "h4", handoff, implementer),
-			phase.Implementing, false},
-		{"the review App's red tests, then a handoff", pushedFromTo("h2", "h3", redTests, testReviewApp), pushedFromTo("h3", "h4", handoff, implementer),
-			phase.Testing, true},
-	} {
-		for _, order := range []struct {
-			name  string
-			facts []intake.Fact
-		}{
-			{"pushes first", []intake.Fact{tc.first, tc.second, syncedTo("h4"), settledAt("h4", required, 2, required)}},
-			{"head first, pushes late in order", []intake.Fact{syncedTo("h4"), settledAt("h4", required, 2, required), tc.first, tc.second}},
-			{"head first, the earlier head's push last", []intake.Fact{syncedTo("h4"), settledAt("h4", required, 2, required), tc.second, tc.first}},
-		} {
-			t.Run(tc.name+", "+order.name, func(t *testing.T) {
-				pool := migratedPool(t)
-				seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-					Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
-				seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-					Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h2", CheckedHead: "h2", Failing: []string{required},
-					CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Required: []string{required}, FixAttempts: 2, HeadCounted: "h2"})
-				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-				engine := readyEngine("merge-queue")
-				for _, fact := range order.facts {
-					applyRefusingNothing(t, pool, engine, fact)
-				}
-				if got := issuePhase(t, pool); got != tc.want {
-					t.Fatalf("after every fact the issue is in %s, want %s", got, tc.want)
-				}
-				var attempts int
-				var mark string
-				var planned bool
-				if err := pool.QueryRow(context.Background(), "select fix_attempts, head_counted, planned_red from pull_requests where issue = 'LEGION-208'").
-					Scan(&attempts, &mark, &planned); err != nil {
-					t.Fatalf("read the pull request: %v", err)
-				}
-				if attempts != 2 || mark != "h2" || planned != tc.planned {
-					t.Fatalf("fix attempts %d, counted head %q, planned red %v; want 2, \"h2\" and %v", attempts, mark, planned, tc.planned)
-				}
-			})
-		}
-	}
-}
-
-// A reopened pull request whose head moved while it was closed - commits pushed then reach no
-// synchronize - is judged as a synchronize to that head would be. Its push never arrives here, so
-// the reopened head's red is held (holdsRed) until the hold lapses and the required-checks pass's
-// next read decides it. At an exhausted count already reported, a reopen past a red counts the push
-// and reports the new count when the reopened head's red is held; a reopen past a green leaves the
-// counted attempt, so the reopened head's red is new and sends the work back. A reopen at the
-// recorded head carries the counted attempt as it stood, and holds nothing.
-func TestAReopenedPullRequestJudgesItsNewHeadAsASynchronizeWould(t *testing.T) {
-	const required = "pr-checks-result"
-	for _, tc := range []struct {
-		name string
-		// failing is the recorded head's settlement, reopened is the head the reopen names.
-		failing  []string
-		reopened string
-		want     phase.Phase
-		// checksRed and blocked count the architect's notices; attempts and mark the pull request's.
-		checksRed, blocked int
-		attempts           int
-		mark               string
-	}{
-		{"past a red", []string{required}, "h4", phase.Testing, 0, 1, 4, "h4"},
-		{"past a green", []string{}, "h4", phase.Implementing, 1, 0, 3, ""},
-		{"at the recorded head", []string{required}, "h3", phase.Testing, 0, 0, 3, "h3"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-				Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
-			seedPR(t, pool, record.PullRequest{State: record.PullRequestClosed, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h3", CheckedHead: "h3", Failing: tc.failing,
-				CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Required: []string{required},
-				FixAttempts: 3, BlockedAttempts: 3, HeadCounted: "h3"})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			engine := readyEngine("merge-queue")
-			applyRefusingNothing(t, pool, engine, intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208",
-				HeadSHA: tc.reopened, Reopened: true})
-			applyRefusingNothing(t, pool, engine, settledAt(tc.reopened, required, 2, required))
-			if tc.reopened != "h3" {
-				if got, kinds := issuePhase(t, pool), noticeKinds(t, pool, "LEGION-208"); got != phase.Testing || len(kinds) != 0 {
-					t.Fatalf("while the reopened head's push is awaited the issue is in %s and the architect was told %v, want testing and nothing", got, kinds)
-				}
-				applyRefusingNothing(t, pool, readyEngineAt("merge-queue", heldRedLapses), intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{required}})
-			}
-			if got := issuePhase(t, pool); got != tc.want {
-				t.Fatalf("after the reopened head's red the issue is in %s, want %s", got, tc.want)
-			}
-			checksRed, blocked := 0, 0
-			for _, kind := range noticeKinds(t, pool, "LEGION-208") {
-				switch kind {
-				case "checks-red":
-					checksRed++
-				case "pr-blocked":
-					blocked++
-				}
-			}
-			var attempts int
-			var mark string
-			if err := pool.QueryRow(context.Background(), "select fix_attempts, head_counted from pull_requests where issue = 'LEGION-208'").Scan(&attempts, &mark); err != nil {
-				t.Fatalf("read the fix attempts: %v", err)
-			}
-			if checksRed != tc.checksRed || blocked != tc.blocked || attempts != tc.attempts || mark != tc.mark {
-				t.Fatalf("checks-red %d, pr-blocked %d, fix attempts %d, counted head %q; want %d, %d, %d and %q",
-					checksRed, blocked, attempts, mark, tc.checksRed, tc.blocked, tc.attempts, tc.mark)
-			}
-		})
-	}
-}
-
-// Each head is held from its own arrival, not from when the head run opened: h3's push is lost for
-// good, so the run h3 opened stays open, and h4 arrives on top of it an hour later. h4's red is held
-// for its own ten minutes, nothing told, and the pass's unchanged read decides it once that lapses.
-func TestAHeadThatJoinsAnOldRunIsHeldFromItsOwnArrival(t *testing.T) {
-	const required = "pr-checks-result"
-	start := time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC)
-	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-		Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
-	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h2", CheckedHead: "h2", Failing: []string{},
-		CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Required: []string{required}, FixAttempts: 1})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-	applyRefusingNothing(t, pool, readyEngineAt("merge-queue", start), syncedTo("h3"))
-	later := readyEngineAt("merge-queue", start.Add(time.Hour))
-	applyRefusingNothing(t, pool, later, syncedTo("h4"))
-	applyRefusingNothing(t, pool, later, pushedFromTo("h3", "h4", "src/widget.go", "legion-implementer[bot]"))
-	applyRefusingNothing(t, pool, later, settledAt("h4", required, 2, required))
-	if got, kinds := issuePhase(t, pool), noticeKinds(t, pool, "LEGION-208"); got != phase.Testing || len(kinds) != 0 {
-		t.Fatalf("an hour after the run opened, h4's red leaves the issue in %s and the architect told %v, want testing and nothing: h4 arrived just now", got, kinds)
-	}
-	applyRefusingNothing(t, pool, readyEngineAt("merge-queue", start.Add(time.Hour+redHold+time.Second)),
-		intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{required}})
-	if got := issuePhase(t, pool); got != phase.Implementing {
-		t.Fatalf("once h4's own hold lapses the issue is in %s, want implementing", got)
-	}
-}
-
-// A branch that returns, inside one open head run, to a head whose lapse was already decided is
-// held from its new arrival, and the pass's unchanged read decides its red once that hold lapses:
-// the arrival clears the mark of the earlier lapse (stampRun). h3's push is lost for good, so the
-// run h3 opened stays open; h3 settles green and its hold lapses, decided green; the branch moves
-// to h4 and back to h3, by a synchronize alone or by a forced push, and h3 settles red.
-func TestAHeadTheBranchReturnsToIsHeldAndDecidedAgain(t *testing.T) {
-	const required = "pr-checks-result"
-	type timed struct {
-		at   time.Duration
-		fact intake.Fact
-	}
-	forcedBack := func(from, to string) intake.Fact {
-		paths, forced, whole := "src/widget.go", "true", "false"
-		return intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: from, After: to,
-			ChangedPaths: &paths, Truncated: &whole, Forced: &forced, Pusher: "legion-implementer[bot]"}
-	}
-	unchanged := intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{required}}
-	for _, tc := range []struct {
-		name string
-		// lapse is when the pass decides h3's first, green, hold; returned is when the branch is
-		// back at h3.
-		lapse, returned time.Duration
-		back            []timed
-	}{
-		{name: "by a synchronize", lapse: 11 * time.Minute, returned: 13 * time.Minute, back: []timed{
-			{12 * time.Minute, syncedTo("h4")},
-			{12 * time.Minute, pushedFromTo("h3", "h4", "src/widget.go", "legion-implementer[bot]")},
-			{13 * time.Minute, syncedTo("h3")},
-			{14 * time.Minute, settledAt("h3", required, 5, required)},
-		}},
-		{name: "by a forced push", lapse: time.Hour, returned: time.Hour + 5*time.Minute, back: []timed{
-			{time.Hour, pushedFromTo("h3", "h4", "src/widget.go", "legion-implementer[bot]")},
-			{time.Hour, syncedTo("h4")},
-			{time.Hour, settledAt("h4", required, 3)},
-			{time.Hour + 5*time.Minute, forcedBack("h4", "h3")},
-			{time.Hour + 5*time.Minute, syncedTo("h3")},
-			{time.Hour + 6*time.Minute, settledAt("h3", required, 4, required)},
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			start := time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC)
-			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-				Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
-			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h2", CheckedHead: "h2", Failing: []string{},
-				CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Required: []string{required}, FixAttempts: 1})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			var logged bytes.Buffer
-			at := func(d time.Duration) *Engine {
-				return New(record.NewStore(), Config{
-					Project: "LEGION", DesignGate: config.DesignGateRootIssues, MergeQueueRole: "merge-queue", Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
-					Clock: func() time.Time { return start.Add(d) },
-				}, slog.New(slog.NewTextHandler(&logged, nil)))
-			}
-			applyRefusingNothing(t, pool, at(0), syncedTo("h3"))
-			applyRefusingNothing(t, pool, at(time.Minute), settledAt("h3", required, 2))
-			applyRefusingNothing(t, pool, at(tc.lapse), unchanged)
-			if pr := runOf(t, pool); pr.Run == nil || pr.Run.Decided != "h3" || !strings.Contains(logged.String(), "lapsed; the green is decided as it stands") {
-				t.Fatalf("h3's green hold lapsed with run %+v and log %q, want the run open, its lapse decided at h3 and logged as a green", pr.Run, logged.String())
-			}
-			for _, step := range tc.back {
-				applyRefusingNothing(t, pool, at(step.at), step.fact)
-			}
-			held := at(tc.returned + redHold - time.Minute)
-			applyRefusingNothing(t, pool, held, unchanged)
-			if got, kinds := issuePhase(t, pool), noticeKinds(t, pool, "LEGION-208"); got != phase.Testing || len(kinds) != 0 {
-				t.Fatalf("h3's red within ten minutes of the return leaves the issue in %s and the architect told %v, want testing and nothing", got, kinds)
-			}
-			lapsed := at(tc.returned + redHold + time.Second)
-			if pr := runOf(t, pool); !lapsed.HoldLapsed(pr) {
-				t.Fatalf("ten minutes after the return the hold on h3's red has not lapsed (run %+v), want it lapsed: the return starts h3's hold afresh", pr.Run)
-			}
-			applyRefusingNothing(t, pool, lapsed, unchanged)
-			if got := issuePhase(t, pool); got != phase.Implementing {
-				t.Fatalf("once the return's hold lapses the issue is in %s, want implementing", got)
-			}
-			if !strings.Contains(logged.String(), "lapsed; the red is decided as it stands") {
-				t.Fatalf("the log %q does not say the red was decided", logged.String())
-			}
-		})
-	}
-}
-
-// runOf is LEGION-208's pull request as recorded.
-func runOf(t *testing.T, pool *pgxpool.Pool) record.PullRequest {
-	t.Helper()
-	var pr *record.PullRequest
-	seedRecord(t, pool, func(tx pgx.Tx) (err error) {
-		pr, err = record.NewStore().PullRequest(t.Context(), tx, "LEGION-208")
-		return err
-	})
-	return *pr
-}
-
-// A red that settles while its head waits for its push is held, and reported once the push closes
-// the head run, as the push arriving first reports it: h3 arrives before its push and counts the
-// third attempt, the cap; its red settles and is held, nothing told; h3's push - the implementer's
-// code - closes the run, the red stays held at the exhausted count, and the architect is told once.
-func TestARedHeldWhileItsHeadWaitsIsReportedWhenThePushArrives(t *testing.T) {
-	const required, implementer = "pr-checks-result", "legion-implementer[bot]"
-	sync, red, push := syncedTo("h3"), settledAt("h3", required, 2, required), pushedFromTo("h2", "h3", "src/widget.go", implementer)
-	type outcome struct {
-		phase    phase.Phase
-		attempts int
-		notices  string
-	}
-	run := func(facts []intake.Fact, held func(pool *pgxpool.Pool)) outcome {
-		pool := migratedPool(t)
-		seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-			Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
-		seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-			Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h2", CheckedHead: "h2", Failing: []string{required},
-			CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Required: []string{required}, FixAttempts: 2, HeadCounted: "h2"})
-		seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-		engine := readyEngine("merge-queue")
-		for i, fact := range facts {
-			applyRefusingNothing(t, pool, engine, fact)
-			if held != nil && i == 1 {
-				held(pool)
-			}
-		}
-		var attempts int
-		if err := pool.QueryRow(context.Background(), "select fix_attempts from pull_requests where issue = 'LEGION-208'").Scan(&attempts); err != nil {
-			t.Fatal(err)
-		}
-		return outcome{issuePhase(t, pool), attempts, fmt.Sprint(noticeKinds(t, pool, "LEGION-208"))}
-	}
-	first := run([]intake.Fact{push, sync, red}, nil)
-	if first != (outcome{phase.Testing, 3, "[pr-blocked]"}) {
-		t.Fatalf("push first: %+v, want testing, 3 attempts and one pr-blocked", first)
-	}
-	late := run([]intake.Fact{sync, red, push}, func(pool *pgxpool.Pool) {
-		if kinds := noticeKinds(t, pool, "LEGION-208"); len(kinds) != 0 || issuePhase(t, pool) != phase.Testing {
-			t.Fatalf("while h3's push is on its way the architect was told %v and the issue is in %s, want nothing told and testing: the red is held",
-				kinds, issuePhase(t, pool))
-		}
-	})
-	if late != first {
-		t.Fatalf("push last: %+v; push first: %+v", late, first)
-	}
-}
-
-// Two heads that each arrive before their pushes - h3, then h4 - are judged as the pushes arriving
-// first judge them, whatever order the pushes arrive in, and the work goes where the pushes first
-// send it: the head run the first opens replays once they do, and h4's red is held while it waits
-// rather than sending the work back on a judgement the pushes can still change. Two handoffs end
-// with the count unchanged and the work sent back; the review App's red tests then a handoff plan
-// h4's red, which keeps the work in testing - also below the cap, where a red sent back before the
-// pushes arrived could not be taken back.
-func TestTwoHeadsAheadOfTheirPushesAreJudgedAsThePushesFirstJudgeThem(t *testing.T) {
-	const required, implementer = "pr-checks-result", "legion-implementer[bot]"
-	const handoff, redTests = ".legion/LEGION-208/implement.json", "src/widget_test.go"
-	for _, tc := range []struct {
-		name          string
-		first, second intake.Fact
-		want          phase.Phase
-		planned       bool
-	}{
-		{"two handoffs", pushedFromTo("h2", "h3", handoff, implementer), pushedFromTo("h3", "h4", handoff, implementer), phase.Implementing, false},
-		{"the review App's red tests, then a handoff", pushedFromTo("h2", "h3", redTests, testReviewApp), pushedFromTo("h3", "h4", handoff, implementer),
-			phase.Testing, true},
-	} {
-		red := settledAt("h4", required, 2, required)
-		for _, start := range []int{1, 2} {
-			for _, order := range []struct {
-				name  string
-				facts []intake.Fact
-			}{
-				{"pushes first", []intake.Fact{tc.first, tc.second, syncedTo("h3"), syncedTo("h4"), red}},
-				{"both heads first, pushes in order", []intake.Fact{syncedTo("h3"), syncedTo("h4"), red, tc.first, tc.second}},
-				{"both heads first, pushes reversed", []intake.Fact{syncedTo("h3"), syncedTo("h4"), red, tc.second, tc.first}},
-				{"each head before its push", []intake.Fact{syncedTo("h3"), tc.first, syncedTo("h4"), red, tc.second}},
-			} {
-				t.Run(fmt.Sprintf("%s, %d attempts, %s", tc.name, start, order.name), func(t *testing.T) {
-					pool := migratedPool(t)
-					seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-						Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
-					seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-						Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h2", CheckedHead: "h2", Failing: []string{required},
-						CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Required: []string{required}, FixAttempts: start, HeadCounted: "h2"})
-					seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-					engine := readyEngine("merge-queue")
-					for _, fact := range order.facts {
-						applyRefusingNothing(t, pool, engine, fact)
-					}
-					if got := issuePhase(t, pool); got != tc.want {
-						t.Fatalf("after every fact the issue is in %s, want %s", got, tc.want)
-					}
-					var attempts int
-					var mark string
-					var planned, open bool
-					if err := pool.QueryRow(context.Background(), "select fix_attempts, head_counted, planned_red, head_run is not null from pull_requests where issue = 'LEGION-208'").
-						Scan(&attempts, &mark, &planned, &open); err != nil {
-						t.Fatalf("read the pull request: %v", err)
-					}
-					if attempts != start || mark != "h2" || planned != tc.planned || open {
-						t.Fatalf("fix attempts %d, counted head %q, planned red %v, head run open %v; want %d, \"h2\", %v and closed", attempts, mark, planned, open, start, tc.planned)
-					}
-				})
-			}
-		}
-	}
-}
-
-// A reopen past a head the daemon never recorded keeps the pushes recorded while the pull request
-// was closed, so a push that arrives after the reopen completes the chain the reopen's move took:
-// the review App's red tests h2..h3, pushed while closed, and the handoff h3..h4 after the reopen
-// at h4 take back the count the reopen made and plan h4's red.
-func TestAReopenKeepsThePushesItsMoveIsJudgedBy(t *testing.T) {
-	const required = "pr-checks-result"
-	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-		Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
-	seedPR(t, pool, record.PullRequest{State: record.PullRequestClosed, Issue: "LEGION-208", Repo: "sjawhar/legion",
-		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h2", CheckedHead: "h2", Failing: []string{required},
-		CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Required: []string{required}, FixAttempts: 2, HeadCounted: "h2"})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-	engine := readyEngine("merge-queue")
-	applyRefusingNothing(t, pool, engine, pushedFromTo("h2", "h3", "src/widget_test.go", testReviewApp))
-	applyRefusingNothing(t, pool, engine, intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208",
-		HeadSHA: "h4", Reopened: true})
-	applyRefusingNothing(t, pool, engine, pushedFromTo("h3", "h4", ".legion/LEGION-208/test.json", "legion-implementer[bot]"))
-	var attempts int
-	var mark string
-	var planned bool
-	if err := pool.QueryRow(context.Background(), "select fix_attempts, head_counted, planned_red from pull_requests where issue = 'LEGION-208'").
-		Scan(&attempts, &mark, &planned); err != nil {
-		t.Fatalf("read the pull request: %v", err)
-	}
-	if attempts != 2 || mark != "h2" || !planned {
-		t.Fatalf("fix attempts %d, counted head %q, planned red %v; want 2, \"h2\" and true", attempts, mark, planned)
-	}
-}
-
-// In awaiting_merge no implementer loops for the fix-attempt cap to bound, and GitHub will not merge
-// a red head, so a red there withdraws the READY and sends the work back whatever the count: never
-// held, never left standing. That holds for a count told in testing before the work went green and
-// moved on through review, acceptance, retro and READY, and for a READY head that is itself the head the count
-// last counted. The withdrawal is told by its checks-red; a count already reported is not reported
-// again.
-func TestAnExhaustedFixAttemptCountNeverHoldsARedInAwaitingMerge(t *testing.T) {
-	const required, implementer = "pr-checks-result", "legion-implementer[bot]"
-	tester := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Commit: "test-1", Summary: "passed", Verdict: "pass"}
-	approval := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "h3", HeadSHA: "h3", Author: testReviewApp, Body: "approved"}
-	reviewer := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Commit: "review-1", Summary: "reviewed"}
-	accepted := intake.SignOff{Issue: "LEGION-208"}
-	retro := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "retro-1", Summary: "retro"}
-	ready := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", Ready: true, Summary: readyPacket, Commit: "h4"}
-	for _, tc := range []struct {
-		name string
-		from phase.Phase
-		// steps carry the issue to awaiting_merge, each leaving it in the phase named beside it.
-		steps []struct {
-			fact  intake.Fact
-			phase phase.Phase
-		}
-		red intake.Fact
-	}{
-		{"a count told in testing, then green, review, acceptance, retro and READY", phase.Testing, []struct {
-			fact  intake.Fact
-			phase phase.Phase
-		}{
-			{settledAt("h3", required, 1, required), phase.Testing},
-			{settledAt("h3", required, 2), phase.Testing},
-			{tester, phase.Reviewing},
-			{approval, phase.Reviewing},
-			{reviewer, phase.Accepting},
-			{accepted, phase.Retro},
-			{syncedTo("h4"), phase.Retro},
-			{pushedFromTo("h3", "h4", "docs/solutions/legion/widget.md", implementer), phase.Retro},
-			{settledAt("h4", required, 1), phase.Retro},
-			{retro, phase.Merging},
-			{ready, phase.AwaitingMerge},
-		}, settledAt("h4", required, 2, required)},
-		{"a READY head the count last counted", phase.AwaitingMerge, nil, settledAt("h3", required, 1, required)},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := migratedPool(t)
-			status := map[phase.Phase]string{phase.Testing: "testing", phase.AwaitingMerge: "retro"}[tc.from]
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-				Phase: tc.from, Generation: 1, Status: status, Rank: "U"})
-			seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 1, ApprovedVersion: new(1)})
-			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h3", Required: []string{required}, FixAttempts: 3, HeadCounted: "h3"})
-			for role, token := range map[claim.Role]claim.Token{claim.RoleImplementer: "implement-claim", claim.RoleTester: "test-claim", claim.RoleReviewer: "review-claim", claim.RoleMerger: "merge-claim"} {
-				row := record.PhaseRow{Issue: "LEGION-208", Role: role, Claim: token}
-				if tc.from == phase.AwaitingMerge && role == claim.RoleMerger {
-					row.HandoffCommit, row.Summary = "h3", "READY #42 at h3"
-				}
-				seedPhase(t, pool, row)
-			}
-			engine := readyEngine("merge-queue")
-			for i, step := range tc.steps {
-				applyRefusingNothing(t, pool, engine, step.fact)
-				if got := issuePhase(t, pool); got != step.phase {
-					t.Fatalf("after step %d (%T) the issue is in %s, want %s", i+1, step.fact, got, step.phase)
-				}
-			}
-			applyRefusingNothing(t, pool, engine, tc.red)
-			if got := issuePhase(t, pool); got != phase.Implementing {
-				t.Fatalf("after the red at the READY head the issue is in %s, want implementing: a READY never stands on red", got)
-			}
-			checksRed, blocked := 0, 0
-			for _, kind := range noticeKinds(t, pool, "LEGION-208") {
-				switch kind {
-				case "checks-red":
-					checksRed++
-				case "pr-blocked":
-					blocked++
-				}
-			}
-			wantBlocked := 0
-			if tc.from == phase.Testing {
-				wantBlocked = 1
-			}
-			if checksRed != 1 || blocked != wantBlocked {
-				t.Fatalf("checks-red notices %d and pr-blocked notices %d, want 1 and %d", checksRed, blocked, wantBlocked)
-			}
-			withdrawn := 0
-			for _, published := range mergeQueuePublishes(t, pool) {
-				if strings.Contains(published.Packet, "READY withdrawn") {
-					withdrawn++
-				}
-			}
-			if withdrawn != 1 {
-				t.Fatalf("READY withdrawals published %d, want 1", withdrawn)
-			}
-		})
-	}
-}
-
-// settledAt is a CI settlement of head on the one check required, attempt numbering its run and its
-// fence, failing the checks named.
-func settledAt(head, required string, attempt int, failing ...string) intake.Fact {
-	return intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: head,
-		CheckRuns: []record.AttemptRun{{Name: required, ID: int64(attempt)}}, Generation: int64(attempt),
-		Snapshot: head + "-" + strconv.Itoa(attempt), Failing: append([]string{}, failing...)}
+// codeHeadRuns is the runs of a code head's own CI at attempt: the two checks of a push, and
+// pr-title, which GitHub runs for the pull request rather than for the code.
+func codeHeadRuns(attempt int64) []record.AttemptRun {
+	return []record.AttemptRun{{Name: "build", ID: attempt}, {Name: "pr-title", ID: attempt}, {Name: "unit", ID: attempt}}
 }
 
 // syncedTo is GitHub's synchronize of the pull request to head.
@@ -1497,6 +713,62 @@ func pushedFromTo(from, to, paths, pusher string) intake.Fact {
 		ChangedPaths: &paths, Truncated: &whole, Forced: &unforced, Pusher: pusher}
 }
 
+// toldBody is the whole message a role is sent for one settlement of pull request 42 (workflow's
+// tellChecks): what the settlement says, and that nothing moved on it.
+func toldBody(settled string) string {
+	return "Pull request #42: " + settled + ". Nothing moved on it: decide whether to re-run the checks, wait for them, or fix the code."
+}
+
+// roleToken is the Envoy role token of LEGION-208's role, the address a role message carries.
+func roleToken(t *testing.T, role claim.Role) string {
+	t.Helper()
+	token, err := claim.NewToken("legion", "LEGION-208", role)
+	if err != nil {
+		t.Fatalf("role token of %s: %v", role, err)
+	}
+	return string(token)
+}
+
+// assertRoleMessages holds the role messages the outbox has queued for issue, in order, to want.
+func assertRoleMessages(t *testing.T, pool *pgxpool.Pool, issue string, want []record.RoleMessage) {
+	t.Helper()
+	rows, err := pool.Query(t.Context(), "select payload->>'role', payload->>'body' from outbox where kind = 'role_message' and issue = $1 order by id", issue)
+	if err != nil {
+		t.Fatalf("read the role messages: %v", err)
+	}
+	defer rows.Close()
+	var got []record.RoleMessage
+	for rows.Next() {
+		var message record.RoleMessage
+		if err := rows.Scan(&message.Role, &message.Body); err != nil {
+			t.Fatalf("scan a role message: %v", err)
+		}
+		got = append(got, message)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate the role messages: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("%d role messages %+v, want %d %+v", len(got), got, len(want), want)
+	}
+	for i, message := range got {
+		if message != want[i] {
+			t.Fatalf("role message %d is %+v, want %+v", i+1, message, want[i])
+		}
+	}
+}
+
+// checksRedNotice is the architect's checks-red notice the outbox holds: its reason, and the phase
+// the conflict or the failed merge stopped.
+func checksRedNotice(t *testing.T, pool *pgxpool.Pool) (reason string, from phase.Phase) {
+	t.Helper()
+	var stopped string
+	if err := pool.QueryRow(context.Background(), "select payload->>'reason', coalesce(payload->>'phase', '') from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'").Scan(&reason, &stopped); err != nil {
+		t.Fatalf("read the architect's checks-red notice: %v", err)
+	}
+	return reason, phase.Phase(stopped)
+}
+
 // phaseStartKeys is every key a phase worker's start payload carries
 // (record.SuperviseRequest): the operation, the issue's tree, the role, its task, the issue
 // generation, the phase the start serves and the assignment it hands that role. The list is
@@ -1506,7 +778,7 @@ const phaseStartKeys = "assignment,generation,op,phase,role,task,tree"
 
 // implementerStart is the task of the implementer's start the outbox holds. The start carries
 // phaseStartKeys and nothing else: it runs at once, as every other start does, whatever phase the
-// red took the issue out of, and waits for no turn to end.
+// daemon's own move took the issue out of, and waits for no turn to end.
 func implementerStart(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
 	var task, keys string
@@ -1521,284 +793,65 @@ func implementerStart(t *testing.T, pool *pgxpool.Pool) string {
 	return task
 }
 
-// checksRedNotice is the architect's checks-red notice the outbox holds: its reason, and the phase
-// the red stopped.
-func checksRedNotice(t *testing.T, pool *pgxpool.Pool) (reason string, from phase.Phase) {
+// applyRefusingNothing applies each fact as its own event, and fails the test on a refusal.
+func applyRefusingNothing(t *testing.T, pool *pgxpool.Pool, engine *Engine, facts ...intake.Fact) {
 	t.Helper()
-	var stopped string
-	if err := pool.QueryRow(context.Background(), "select payload->>'reason', coalesce(payload->>'phase', '') from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'").Scan(&reason, &stopped); err != nil {
-		t.Fatalf("read the architect's checks-red notice: %v", err)
-	}
-	return reason, phase.Phase(stopped)
-}
-
-// The implementer pushes and completes without waiting for CI, so a required check can settle red
-// on its head while the issue is still in implementing, where a red sends nothing back, and the
-// settlement does not come again. The completion is then the fact that lets the red stand outside
-// implementing (implementationReady): the work goes back to implementing at once, the
-// implementer's task and the architect's checks-red naming the red as it would from testing, the
-// return counted as a round, and no tester round runs on code CI already found broken. A head CI
-// found green, or has not judged yet, goes on to testing, where a red that settles later sends the
-// work back as any red in testing does.
-func TestACompletionOnARedThatSettledWhileImplementingSendsTheWorkBack(t *testing.T) {
-	const required = "pr-checks-result"
-	for _, tc := range []struct {
-		name string
-		// seeded is the pull request's head before the facts; before is what reaches the issue
-		// before the implementer's completion at head.
-		seeded string
-		before []intake.Fact
-		want   phase.Phase
-	}{
-		{"red", "head", []intake.Fact{settledAt("head", required, 1, required)}, phase.Implementing},
-		// The usual shape: the code push's CI settles red, then the implementer's handoff-only push
-		// carries that red to the head it completes at.
-		{"red at the code head, carried across the handoff push", "code", []intake.Fact{settledAt("code", required, 1, required),
-			pushedFromTo("code", "head", ".legion/LEGION-208/implement.json", "legion-implementer[bot]"), syncedTo("head")}, phase.Implementing},
-		{"green", "head", []intake.Fact{settledAt("head", required, 1)}, phase.Testing},
-		{"not settled yet", "head", nil, phase.Testing},
-		// The round's fix pushed, the completion arriving before GitHub's synchronize: the record
-		// still holds the red head the round fixed, and that red sends nothing back.
-		{"red at the head the round fixed, the completion before its synchronize", "red-head", []intake.Fact{settledAt("red-head", required, 1, required)}, phase.Testing},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-				Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
-			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: tc.seeded, Required: []string{required}})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			engine := testEngine(config.DesignGateRootIssues, nil)
-			for i, fact := range tc.before {
-				applyRefusingNothing(t, pool, engine, fact)
-				if got := issuePhase(t, pool); got != phase.Implementing {
-					t.Fatalf("after fact %d (%T) the issue is in %s, want implementing: no verdict moves it there", i+1, fact, got)
-				}
-			}
-			assertOutboxCount(t, pool, "supervise", 0)
-			applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "head", Summary: "implemented"})
-			if got := issuePhase(t, pool); got != tc.want {
-				t.Fatalf("after the implementer's completion the issue is in %s, want %s", got, tc.want)
-			}
-			if tc.want == phase.Testing {
-				if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "checks-red") {
-					t.Fatalf("notices %v, want no checks-red", got)
-				}
-				if rounds := implementerRounds(t, pool); rounds != 0 {
-					t.Fatalf("rounds = %d, want none: nothing went back", rounds)
-				}
-				return
-			}
-			task := implementerStart(t, pool)
-			reason, from := checksRedNotice(t, pool)
-			want := "CI is red at head: " + required
-			if !strings.Contains(task, want) || !strings.Contains(task, "Phase: implementing.") || !strings.Contains(reason, want) || from != phase.Testing {
-				t.Fatalf("implementer task %q, notice %q in %q; want both to say %q, the notice in testing", task, reason, from, want)
-			}
-			if rounds := implementerRounds(t, pool); rounds != 1 {
-				t.Fatalf("rounds = %d, want the return counted as one", rounds)
-			}
-		})
+	apply := applyFacts(t, pool, engine)
+	for _, fact := range facts {
+		if result := apply(t.Name()+randomSuffix(t), fact); result.Refusal != nil {
+			t.Fatalf("apply %T = %+v", fact, result.Refusal)
+		}
 	}
 }
 
-// A round that fixed a red at "red" with one code push completes at once, before either webhook of
-// that push reaches the daemon. Whichever order the push and its synchronize then arrive in, the
-// only red is the one the round fixed, and the issue stays in testing: neither the completion nor
-// the push judges the head the push is replacing, and the fixed head's arrival finds no red.
-func TestACompletionBeforeItsPushesWebhooksIsNotSentBackOnTheRedItFixed(t *testing.T) {
-	const required = "pr-checks-result"
-	push := pushedFromTo("red", "fixed", "src/fix.go\n.legion/LEGION-208/implement.json", "legion-implementer[bot]")
-	for _, tc := range []struct {
-		name  string
-		after []intake.Fact
-	}{
-		{"push then synchronize", []intake.Fact{push, syncedTo("fixed")}},
-		{"synchronize then push", []intake.Fact{syncedTo("fixed"), push}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-				Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
-			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "red", Required: []string{required}})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			engine := testEngine(config.DesignGateRootIssues, nil)
-			applyRefusingNothing(t, pool, engine, settledAt("red", required, 1, required),
-				intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "fixed", Summary: "fixed the red"})
-			for i, fact := range tc.after {
-				applyRefusingNothing(t, pool, engine, fact)
-				if got := issuePhase(t, pool); got != phase.Testing {
-					t.Fatalf("after fact %d (%T) the issue is in %s, want testing: the only red is the head the round fixed", i+1, fact, got)
-				}
-			}
-			if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "checks-red") {
-				t.Fatalf("notices %v, want no checks-red", got)
-			}
-			if rounds := implementerRounds(t, pool); rounds != 0 {
-				t.Fatalf("rounds = %d, want none", rounds)
-			}
-		})
-	}
+// implementerTask is the task the implementer was last started with, "" when it was not started.
+func implementerTask(t *testing.T, pool *pgxpool.Pool) string {
+	t.Helper()
+	return startTask(t, pool, claim.RoleImplementer)
 }
 
-// A push webhook naming the head the record already holds can arrive after that head's own red
-// settled while implementing and after the completion handed the head on without judging it. The
-// push is then the first fact outside implementing to see the red, and sends the work back: a code
-// commit pushed above the handoff commit the completion reports, and a handoff push that started CI
-// of its own, whose late arrival takes back the fix attempt its synchronize counted, so the red at
-// the head is below max_fix_attempts again.
-func TestALatePushOfTheRecordedHeadActsOnItsRed(t *testing.T) {
-	const required = "pr-checks-result"
-	for _, tc := range []struct {
-		name     string
-		seeded   record.PullRequest
-		before   []intake.Fact
-		commit   string
-		latePush intake.Fact
-	}{
-		{
-			name: "a code commit above the handoff commit",
-			seeded: record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h0", Required: []string{required}},
-			before: []intake.Fact{pushedFromTo("h0", "handoff", "src/fix.go\n.legion/LEGION-208/implement.json", "legion-implementer[bot]"), syncedTo("handoff"),
-				syncedTo("c2"), settledAt("c2", required, 1, required)},
-			commit:   "handoff",
-			latePush: pushedFromTo("handoff", "c2", "src/lint.go", "legion-implementer[bot]"),
-		},
-		{
-			name: "a handoff push whose late arrival takes back the attempt that reached the cap",
-			seeded: record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "c", Required: []string{required}, FixAttempts: 2},
-			before:   []intake.Fact{settledAt("c", required, 1, required), syncedTo("h"), settledAt("h", required, 2, required)},
-			commit:   "h",
-			latePush: pushedFromTo("c", "h", ".legion/LEGION-208/implement.json", "legion-implementer[bot]"),
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-				Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
-			seedPR(t, pool, tc.seeded)
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			engine := testEngine(config.DesignGateRootIssues, nil)
-			applyRefusingNothing(t, pool, engine, tc.before...)
-			applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: tc.commit, Summary: "implemented"})
-			if got := issuePhase(t, pool); got != phase.Testing {
-				t.Fatalf("after the completion the issue is in %s, want testing: the completion judges no head it did not report, nor a red the cap holds", got)
-			}
-			applyRefusingNothing(t, pool, engine, tc.latePush)
-			if got := issuePhase(t, pool); got != phase.Implementing {
-				t.Fatalf("after the late push the issue is in %s, want implementing: the red stands for the head and nothing else acts on it", got)
-			}
-			if rounds := implementerRounds(t, pool); rounds != 1 {
-				t.Fatalf("rounds = %d, want the return counted as one", rounds)
-			}
-		})
+// startTask is the task role was last started with, "" when it was not started.
+func startTask(t *testing.T, pool *pgxpool.Pool, role claim.Role) string {
+	t.Helper()
+	var task string
+	if err := pool.QueryRow(context.Background(), `select coalesce(max(payload->>'task'), '') from outbox
+		where kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = $1`, string(role)).Scan(&task); err != nil {
+		t.Fatalf("read the %s's start: %v", role, err)
 	}
+	return task
 }
 
-// A red only a required workflow makes, which the completion leaves to the pass's next read of the
-// runs (its result may be two minutes old), still sends the work back: that read, returning the
-// same runs, is a change once the completion cleared the head they were read at, and acts on it.
-func TestAWorkflowOnlyRedTheCompletionDefersIsSentBackByTheNextRead(t *testing.T) {
-	const required, workflow = "pr-checks-result", ".github/workflows/review.yml"
-	redRun := []record.RequiredWorkflow{{Path: workflow, Result: "failure"}}
-	for _, tc := range []struct {
-		name   string
-		seeded record.PullRequest
-		before []intake.Fact
-		commit string
-		// after is applied after the completion; the issue is in testing until then.
-		after []intake.Fact
-	}{
-		{
-			name: "a workflow-only red, the next read unchanged",
-			seeded: record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: []string{required}, Workflows: redRun, WorkflowsHead: "head"},
-			before: []intake.Fact{settledAt("head", required, 1)},
-			commit: "head",
-			after: []intake.Fact{intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{required},
-				Workflows: redRun, WorkflowsHead: "head"}},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-				Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
-			seedPR(t, pool, tc.seeded)
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			engine := testEngine(config.DesignGateRootIssues, nil)
-			applyRefusingNothing(t, pool, engine, tc.before...)
-			applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: tc.commit, Summary: "implemented"})
-			if len(tc.after) > 0 {
-				if got := issuePhase(t, pool); got != phase.Testing {
-					t.Fatalf("after the completion the issue is in %s, want testing: the completion leaves a workflow-only red to the next read", got)
-				}
-				applyRefusingNothing(t, pool, engine, tc.after...)
-			}
-			if got := issuePhase(t, pool); got != phase.Implementing {
-				t.Fatalf("the issue is in %s, want implementing: a red standing for the head handed on was acted on by nothing", got)
-			}
-			if rounds := implementerRounds(t, pool); rounds != 1 {
-				t.Fatalf("rounds = %d, want the return counted as one", rounds)
-			}
-		})
+// implementerPass is the implementer's count of the issue's moves back into an earlier phase.
+func implementerPass(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	var pass int
+	if err := pool.QueryRow(context.Background(), "select pass from phases where issue = 'LEGION-208' and role = 'implementer'").Scan(&pass); err != nil {
+		t.Fatalf("read the implementer's pass: %v", err)
 	}
+	return pass
 }
 
-// Checks can flap: red, then green on a re-run, then red again. Below the cap the first red sends
-// the work back, counting one round and starting the implementer once; the issue is then in
-// implementing, where no CI verdict moves it, so the green and the second red open no second
-// round, deliver no second task and withdraw no READY twice.
-func TestAFlappingVerdictBelowTheCapSendsTheWorkBackOnce(t *testing.T) {
-	const required = "pr-checks-result"
-	for _, tc := range []struct {
-		from   phase.Phase
-		status string
-	}{
-		{phase.Testing, "testing"},
-		{phase.AwaitingMerge, "retro"},
-	} {
-		t.Run("from "+string(tc.from), func(t *testing.T) {
-			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
-			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: []string{required}, FixAttempts: 1, HeadCounted: "head"})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			if tc.from == phase.AwaitingMerge {
-				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
-			}
-			engine := readyEngine("merge-queue")
-			for attempt, failing := range [][]string{{required}, {}, {required}} {
-				applyRefusingNothing(t, pool, engine, intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head",
-					CheckRuns: []record.AttemptRun{{Name: required, ID: int64(attempt + 1)}}, Generation: int64(attempt + 1),
-					Snapshot: "settled-" + strconv.Itoa(attempt+1), Failing: failing})
-				if got := issuePhase(t, pool); got != phase.Implementing {
-					t.Fatalf("after verdict %d the issue is in %s, want implementing", attempt+1, got)
-				}
-			}
-			if rounds := implementerRounds(t, pool); rounds != 1 {
-				t.Fatalf("rounds = %d, want the one return counted", rounds)
-			}
-			assertOutboxCount(t, pool, "supervise", 1)
-			checksRed := 0
-			for _, kind := range noticeKinds(t, pool, "LEGION-208") {
-				if kind == "checks-red" {
-					checksRed++
-				}
-			}
-			if checksRed != 1 {
-				t.Fatalf("checks-red notices = %d, want one", checksRed)
-			}
-			want := 0
-			if tc.from == phase.AwaitingMerge {
-				want = 1
-			}
-			if published := mergeQueuePublishes(t, pool); len(published) != want {
-				t.Fatalf("merge queue publishes %v, want %d withdrawal", published, want)
-			}
-		})
+// implementerRounds is the implementer's count of the review rounds a review ended by requesting
+// changes, which review_round_cap bounds.
+func implementerRounds(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	var rounds int
+	if err := pool.QueryRow(context.Background(), "select rounds from phases where issue = 'LEGION-208' and role = 'implementer'").Scan(&rounds); err != nil {
+		t.Fatalf("read the implementer's rounds: %v", err)
 	}
+	return rounds
+}
+
+// recordedPR is issue's pull request as the store reads it back.
+func recordedPR(t *testing.T, pool *pgxpool.Pool, issue string) record.PullRequest {
+	t.Helper()
+	var pr *record.PullRequest
+	seedRecord(t, pool, func(tx pgx.Tx) (err error) {
+		pr, err = record.NewStore().PullRequest(t.Context(), tx, issue)
+		return err
+	})
+	if pr == nil {
+		t.Fatalf("%s has no pull request recorded", issue)
+	}
+	return *pr
 }

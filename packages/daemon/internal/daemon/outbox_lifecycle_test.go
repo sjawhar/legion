@@ -398,12 +398,13 @@ func TestAnIssuesCloseWaitsForTheWorkersTurnToEnd(t *testing.T) {
 	}
 }
 
-// CI settling red while the tester is in a turn — running a tool, its phase not completed — takes
-// the phase back to implementing with nobody's completion. The implementer's start runs at once, as
-// at every other phase change: it waits for no turn to end, and hands the implementer the CI-red
-// task while the tester is still working. The tester's turn is its own — nothing interrupts it and
-// nothing stops it — and it keeps its launch, its session and its capability.
-func TestACIRedStartsTheImplementerWhileTheTesterIsStillInItsTurn(t *testing.T) {
+// The head starting to conflict with its base while the tester is in a turn — running a tool, its
+// phase not completed — takes the phase back to implementing with nobody's completion. The
+// implementer's start runs at once, as at every other phase change: it waits for no turn to end,
+// and hands the implementer the conflict's task while the tester is still working. The tester's
+// turn is its own — nothing interrupts it and nothing stops it — and it keeps its launch, its
+// session and its capability.
+func TestAConflictStartsTheImplementerWhileTheTesterIsStillInItsTurn(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	ctx := context.Background()
@@ -411,7 +412,7 @@ func TestACIRedStartsTheImplementerWhileTheTesterIsStillInItsTurn(t *testing.T) 
 	putOutboxIssue(t, pool, records, issue)
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		return records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: issue.Key, Repo: "acme/widgets", Number: 86, Branch: "legion/LEGION-208", HeadSHA: "sha-1",
-			HeadUpdatedAt: time.Now(), Failing: []string{}, CheckRuns: []record.AttemptRun{}, Required: []string{"ci"}})
+			HeadUpdatedAt: time.Now(), Failing: []string{}, CheckRuns: []record.AttemptRun{}})
 	}); err != nil {
 		t.Fatalf("seed the pull request: %v", err)
 	}
@@ -473,23 +474,23 @@ func TestACIRedStartsTheImplementerWhileTheTesterIsStillInItsTurn(t *testing.T) 
 		}
 		implementer.Wait()
 	}
-	ciRedTasks := func() int {
+	conflictTasks := func() int {
 		t.Helper()
 		count := 0
 		for _, prompt := range implementerConn.Prompts() {
-			if strings.Contains(prompt.Message, "Phase: implementing.") && strings.Contains(prompt.Message, "CI is red at sha-1: ci") {
+			if strings.Contains(prompt.Message, "Phase: implementing.") && strings.Contains(prompt.Message, "the head conflicts with main") {
 				count++
 			}
 		}
 		return count
 	}
 
-	if result, err := intake.ApplyFact(ctx, pool, "github", "red", intake.PullRequestChecks{Repo: "acme/widgets", Number: 86, HeadSHA: "sha-1",
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "red-1", Failing: []string{"ci"}}, engine); err != nil || result.Refusal != nil {
-		t.Fatalf("apply the red verdict = %+v, %v", result, err)
+	if result, err := intake.ApplyFact(ctx, pool, "github", "conflict", intake.PullRequestMergeability{Repo: "acme/widgets", Number: 86, HeadSHA: "sha-1",
+		Base: "main", Mergeable: record.MergeabilityConflicting}, engine); err != nil || result.Refusal != nil {
+		t.Fatalf("apply the conflicting head = %+v, %v", result, err)
 	}
 	run("the send-back's effects")
-	testwait.Eventually(t, "the implementer to be handed its CI-red task", func() bool { return ciRedTasks() == 1 })
+	testwait.Eventually(t, "the implementer to be handed its conflict task", func() bool { return conflictTasks() == 1 })
 	during := tester.Claim()
 	if during.State != supervise.StateWorking {
 		t.Fatalf("while the implementer started the tester is %s, want working: its turn is its own", during.State)
@@ -502,8 +503,8 @@ func TestACIRedStartsTheImplementerWhileTheTesterIsStillInItsTurn(t *testing.T) 
 		*after.Locator != *before.Locator || !bytes.Equal(after.CapabilityHash, before.CapabilityHash) {
 		t.Fatalf("after the send-back the tester is %+v, want idle on its launch, session and capability", after)
 	}
-	if ciRedTasks() != 1 {
-		t.Fatalf("the implementer was handed %d CI-red tasks, want the one the start delivered", ciRedTasks())
+	if conflictTasks() != 1 {
+		t.Fatalf("the implementer was handed %d conflict tasks, want the one the start delivered", conflictTasks())
 	}
 	for _, method := range []string{"Suspend", "Release"} {
 		for _, call := range rt.CallsOf(method) {
@@ -654,7 +655,7 @@ func TestAReadmittedTreeKeepsItsOpenPullRequest(t *testing.T) {
 			return err
 		}
 		return records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: key, Repo: "acme/widgets", Number: 86, Branch: "legion/" + key, HeadSHA: "sha-1",
-			HeadUpdatedAt: time.Now(), Failing: []string{}, CheckRuns: []record.AttemptRun{}, FixAttempts: 2})
+			HeadUpdatedAt: time.Now(), Failing: []string{}, CheckRuns: []record.AttemptRun{}})
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}

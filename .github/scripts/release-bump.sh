@@ -14,9 +14,9 @@
 # A merge a person makes by hand through GitHub's UI takes the repository's
 # COMMIT_MESSAGES default, so its squash body carries the branch's own commit
 # messages as "* type: summary" bullet lines and a squash-merged PR with a
-# non-conventional title still releases from them. A merge the Legion daemon
-# submits writes the squash message itself (packages/daemon/internal/ghautomerge),
-# the PR title and number as the subject and an empty body, so there the title
+# non-conventional title still releases from them. The Legion merger writes the
+# squash message itself (packages/daemon/internal/prompts/roles/merger.md), the
+# PR title and number as the subject and an empty body, so there the title
 # is the only thing classified: a "type!:" title still bumps the major version,
 # and a "BREAKING CHANGE:" footer written only in a branch commit body does not.
 #

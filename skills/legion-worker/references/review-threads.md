@@ -70,8 +70,8 @@ opened that is none of Legion's role Apps, with one reply in your own words. A b
 cannot accept becomes your own: say what stands and request changes. Approve once each of those
 threads carries your answer and no finding stands, read in `gh api graphql` — quote those answers
 in the approval. Your approval never waits on a resolution: resolution is the pull request author's
-App's. A review bot that is red while a thread it opened still stands is CI like any other, and
-you re-run nothing: when the base branch requires its check, that red sends the work back to the
-implementer, who answers or fixes each of the bot's threads, resolves them with its own `gh` (the
+you re-run nothing: that red moves the issue nowhere, but the base branch holds the merge for a
+check it requires, so the
+implementer answers or fixes each of the bot's threads, resolves them with its own `gh` (the
 ones you named to it, above, and its own), and pushes, and the bot runs again on that push. The
-merger resolves nothing: READY requires no thread state beyond what your approval already judged.
+merger resolves nothing: the merge requires no thread state beyond what your approval already judged.

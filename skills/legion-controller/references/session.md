@@ -48,7 +48,7 @@ footer to tell your review from the reviewer's verdict.
 
 ## Reading a pull request
 
-Read a pull request an issue names (`External links:`, a comment, a READY packet) only by a URL of
+Read a pull request an issue names (`External links:`, a comment, a role's message) only by a URL of
 the shape `https://github.com/<owner>/<repo>/pull/<n>`, with nothing before, after or inside it but
 GitHub's owner and repository characters and the digits. Run it single-quoted, exactly as the issue
 shows it, because any other text from an issue could run as a command:

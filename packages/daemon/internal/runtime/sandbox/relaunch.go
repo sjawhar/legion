@@ -322,13 +322,15 @@ func launcherBackstop(boot, bound time.Duration) time.Duration {
 
 // awaitRoleLauncher waits until loc's role launcher has connected, reporting false, or loc's pod
 // has ended, reporting true, and returns the deadline the wait stood at when it stopped. The
-// launcher starts only once both of the pod's init containers have finished, and workspace-fetch's
-// clone with its retries, then workspace-init's clone of the feed, may take up to ProvisionBound
-// from the fetch's own start. So until the wait first sees the pod provisioning (an init container
-// running, provisioning) it gives the pod the boot timeout, the image pull's; from then on, the boot
-// timeout from the last moment it saw the pod provisioning, never past the boot timeout plus
-// ProvisionBound from the first (launcherDeadline). A pod that never provisions past the boot
-// timeout waits it alone.
+// launcher starts only once both of the pod's init containers have finished, and workspace-fetch
+// — its stream from the repository cache, which no clock ends while it keeps receiving
+// (workspace.CacheStreamLowSpeedBytes), its transfers with their retries, and the restarts the
+// grace covers (fetchRestartGrace) — then workspace-init's clone of the feed, may take up to
+// ProvisionBound from the fetch's own start. So until the wait first sees the pod provisioning (an
+// init container running, or a fetch between those restarts: provisioning) it gives the pod the
+// boot timeout, the image pull's; from then on, the boot timeout from the last moment it saw the
+// pod provisioning, never past the boot timeout plus ProvisionBound from the first
+// (launcherDeadline). A pod that never provisions past the boot timeout waits it alone.
 func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (bool, time.Time, error) {
 	what := "role launcher " + string(loc.Claim)
 	start := time.Now()
@@ -385,26 +387,26 @@ func launcherDeadline(first, last time.Time, boot, bound time.Duration) time.Tim
 	return deadline
 }
 
-// stillFetching is what a launch that gives up on pod says of it while its workspace-fetch still
-// runs: so, with the state of the repository cache that fetch fills a fresh feed from
-// (fetchCacheState), since the fetch's own failure, which names why it ran so long, has not come.
-// Nothing for a pod past its fetch.
+// stillFetching is what a launch that gives up on pod says of it while its workspace-fetch is
+// still running, or coming back from one of the restarts the grace covers (fetchRestartGrace):
+// so, with the state of the repository cache that fetch fills a fresh feed from (fetchCacheState),
+// since the fetch's own failure, which names why it ran so long, has not come. Nothing for a pod
+// past its fetch.
 func (r *Runtime) stillFetching(pod *corev1.Pod) string {
-	if status := initContainerStatus(pod, fetchContainer); status == nil || status.State.Running == nil {
+	status := initContainerStatus(pod, fetchContainer)
+	if status == nil {
 		return ""
 	}
-	return "; its " + fetchContainer + " is still running" + r.fetchCacheState(pod)
-}
-
-// provisioning is whether pod is running one of its init containers, workspace-fetch or
-// workspace-init: the rule the liveness mapping reads such a pod alive by (evaluate).
-func provisioning(pod *corev1.Pod) bool {
-	if phaseOf(pod) != corev1.PodPending {
-		return false
+	doing := ""
+	switch {
+	case status.State.Running != nil:
+		doing = " is still running"
+	case initEnd(*status) != nil && startingAgain(pod, *status):
+		doing = fmt.Sprintf(" is starting again, restarted %d times", status.RestartCount)
+	default:
+		return ""
 	}
-	return slices.ContainsFunc(pod.Status.InitContainerStatuses, func(status corev1.ContainerStatus) bool {
-		return status.State.Running != nil
-	})
+	return "; its " + fetchContainer + doing + r.fetchCacheState(pod)
 }
 
 // suspendFailedLaunch sets the Sandbox of a launch that failed once its Running patch was sent

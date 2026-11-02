@@ -50,6 +50,10 @@ func TestMain(m *testing.M) {
 //   - "wait <name>": an assistant message "done" only once the test releases name;
 //   - "die": exits, never re-emitting it;
 //   - "fail <text>": an assistant message of text, then an error_during_execution result;
+//   - "maxturns <text>": an assistant message of text, then an error_max_turns result, which is
+//     Claude Code's own cap on the steps of one turn rather than the provider refusing it;
+//   - "fail-when <name>": a step the provider refused, held until the test opens the gate <name>,
+//     so a test can decide what has reached the bridge before the refusal does;
 //   - "replay <file>": no init of the fake's own — the lines of testdata/<file>, a recorded Claude
 //     Code stream, written as they were recorded, the last held back until the gate opens;
 //   - anything else: an assistant message "done".
@@ -131,6 +135,23 @@ func fakeClaude() int {
 			emit(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true,
 				"errors": []string{"API Error: 529 overloaded"}})
 			continue
+		case strings.HasPrefix(body, "maxturns "):
+			assistant(text(strings.TrimPrefix(body, "maxturns ")))
+			emit(map[string]any{"type": "result", "subtype": "error_max_turns", "is_error": true,
+				"errors": []string{"reached the maximum number of turns"}})
+			continue
+		case strings.HasPrefix(body, "fail-when "):
+			// The step fails only once the test opens the gate. The fake cannot order a delivery
+			// against its own result: both reach the bridge through two cases of one select, and
+			// a queued delivery emits no frame for this process to see. So the test sends the
+			// delivery, waits for the bridge's own log line saying it is queued, and opens the
+			// gate; the refusal then lands with the delivery already in the queue, which is the
+			// order the case under test is about.
+			released(strings.TrimPrefix(body, "fail-when "))
+			assistant(text("trying"))
+			emit(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true,
+				"errors": []string{"API Error: 529 overloaded"}})
+			continue
 		case strings.HasPrefix(body, "wait "):
 			released(strings.TrimPrefix(body, "wait "))
 			assistant(text("done"))
@@ -189,11 +210,19 @@ type rig struct {
 
 func newRig(t *testing.T, args ...string) *rig {
 	t.Helper()
+	return newRigWithEnv(t, nil, args...)
+}
+
+// newRigWithEnv is newRig with more of the pane's environment than a bare bridge needs: the
+// daemon, boot token file and generation a bridge reports its turns with (turnoutcome.go).
+func newRigWithEnv(t *testing.T, extra []string, args ...string) *rig {
+	t.Helper()
 	dir := t.TempDir()
 	record, gate := filepath.Join(dir, "record"), filepath.Join(dir, "gate")
 	argv := append([]string{os.Args[0]}, args...)
 	env := append(os.Environ(), fakeClaudeEnv+"=1", "FAKE_CLAUDE_RECORD="+record, fakeClaudeGateEnv+"="+gate,
 		"CLAUDE_CONFIG_DIR="+dir, "LEGION_ROLE=implementer", "LEGION_ISSUE=ACME-7")
+	env = append(env, extra...)
 	cfg, err := Configure(argv, env)
 	if err != nil {
 		t.Fatal(err)

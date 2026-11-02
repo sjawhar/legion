@@ -10,7 +10,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -21,14 +20,15 @@ import (
 var lateApplied = time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 
 // pullRequestView is the pull request state and reviewer-round decision a lifecycle event must
-// preserve or update.
+// preserve or update. It carries no CI verdict: a CI result moves nothing and the daemon keeps
+// no verdict of its own (dispatch://INFRA-714/spec R1).
 type pullRequestView struct {
-	head, verdict, decision string
-	state                   record.PullRequestState
+	head, decision string
+	state          record.PullRequestState
 }
 
-// afterEvents seeds a reviewing issue whose pull request is at head-c, green on its one required
-// check, and whose reviewer round is approved, with lateApplied as its clock. It applies facts and
+// afterEvents seeds a reviewing issue whose pull request is at head-c, its checks settled there,
+// and whose reviewer round is approved, with lateApplied as its clock. It applies facts and
 // reads both records back.
 func afterEvents(t *testing.T, state record.PullRequestState, facts ...intake.Fact) pullRequestView {
 	t.Helper()
@@ -43,7 +43,7 @@ func appliedEvents(t *testing.T, state record.PullRequestState, facts ...intake.
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: state, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208",
 		HeadSHA: "head-c", HeadUpdatedAt: lateApplied, CheckedHead: "head-c",
-		Failing: []string{}, CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Required: []string{"ci"}})
+		Failing: []string{}, CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer,
 		Decision: &record.ReviewDecision{State: "approved", Head: "head-c"}})
 	for i, fact := range facts {
@@ -54,8 +54,7 @@ func appliedEvents(t *testing.T, state record.PullRequestState, facts ...intake.
 	return pool
 }
 
-// pullRequestAt reads back the pull request, the verdict that stands for its head, and the reviewer
-// round's decision.
+// pullRequestAt reads back the pull request and the reviewer round's decision.
 func pullRequestAt(t *testing.T, pool *pgxpool.Pool) pullRequestView {
 	t.Helper()
 	var got pullRequestView
@@ -69,7 +68,7 @@ func pullRequestAt(t *testing.T, pool *pgxpool.Pool) pullRequestView {
 		if err != nil || pr == nil {
 			return fmt.Errorf("read pull request: %v", err)
 		}
-		got.head, got.verdict, got.state = pr.HeadSHA, classify.HeadVerdict(*pr), pr.State
+		got.head, got.state = pr.HeadSHA, pr.State
 		return nil
 	})
 	return got
@@ -101,8 +100,8 @@ func lateClosed(head string, at time.Time) intake.Fact {
 // events can share one), and so does one that carries no clock.
 func TestALatePullRequestEventChangesNothing(t *testing.T) {
 	earlier, later := lateApplied.Add(-time.Hour), lateApplied.Add(time.Minute)
-	kept := pullRequestView{head: "head-c", verdict: "green", decision: "approved", state: record.PullRequestOpen}
-	closed := pullRequestView{head: "head-c", verdict: "green", decision: "approved", state: record.PullRequestClosed}
+	kept := pullRequestView{head: "head-c", decision: "approved", state: record.PullRequestOpen}
+	closed := pullRequestView{head: "head-c", decision: "approved", state: record.PullRequestClosed}
 	for _, tc := range []struct {
 		name string
 		seed record.PullRequestState

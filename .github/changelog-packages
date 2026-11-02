@@ -1,3 +1,4 @@
+packages/daemon=legion-v
 packages/pi-legion=pi-legion-v
 packages/pi-envoy=pi-envoy-v
 packages/envoy=legion-envoy-v

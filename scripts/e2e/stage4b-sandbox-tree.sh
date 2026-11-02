@@ -15,7 +15,7 @@
 # on a volume of its own, then closes one as done and parks the other in backlog, sets it todo again
 # so the daemon resumes its parked planner by rule, and parks it once more; two more children are
 # still in the workflow when its pull request merges, so the merge is recorded and the root waits
-# in `awaiting_merge` until the proof human has parked both, the last park closing it. Its
+# in `merging` until the proof human has parked both, the last park closing it. Its
 # architect is suspended from the operator shell while its
 # implementer completes, and stays held until the operator resumes it; in merging, every one of its
 # roles uses Oh My Pi's tools and the image's toolchain as its own App (full-agent-tools). Tree 2
@@ -699,13 +699,13 @@ pod_commands() {
 # could not be read is neither running nor stopped: the read fails, as the caller's wait expects.
 pod_runs() { local out; out=$(pod_commands "$1" "$2") || return 1; grep -qF -- "$3" <<<"$out"; }
 pod_file() { pod_exec "$1" "$2" test -s "$3"; }
-# ci_red_task_taken ISSUE: the daemon's own record that the implementer the CI red started took
-# its task — its claim is working on a delivery of the implementing phase whose turn the daemon
-# has seen start (confirmedAt). It is the start acting, read from the state rather than from the
-# agent's session, and the one fact ci-red-no-takeover times the tester's reads against: a start
-# that waited for the outgoing worker's turn, as the deleted takeover did, would not reach it
-# while the tester's own turn runs.
-ci_red_task_taken() {
+# conflict_task_taken ISSUE: the daemon's own record that the implementer the conflict started
+# took its task — its claim is working on a delivery of the implementing phase whose turn the
+# daemon has seen start (confirmedAt). It is the start acting, read from the state rather than
+# from the agent's session, and the one fact conflict-no-takeover times the tester's reads
+# against: a start that waited for the outgoing worker's turn, as the deleted takeover did, would
+# not reach it while the tester's own turn runs.
+conflict_task_taken() {
   claim_view "$1" implementer |
     jq -e '.state == "working" and .pending != null and .pending.phase == "implementing" and (.pending.confirmedAt // "") != ""' >/dev/null
 }
@@ -2522,7 +2522,7 @@ full_agent_message() {
   printf '(8) task: one subagent named FullAgentGh whose only instruction is to run that same gh api graphql command in bash and reply with the login it printed.'
 }
 # full_agent_merger_message NONCE is the merger's shorter instruction: it is live for the driver's
-# READY (done) and must not merge yet, so it writes, edits and reads a file and prints its App login.
+# merge (done) and must not merge yet, so it writes, edits and reads a file and prints its App login.
 full_agent_merger_message() {
   printf 'Stage 4b proof full-agent-tools operation for the merger: do not merge and call no legion operation yet. (1) write /tmp/full-agent-tools-merger.html containing <title>full-agent-tools %s</title>, edit it so the title reads edited %s, and read it back; ' "$1" "$1"
   printf "(2) bash: gh api graphql -f query='{ viewer { login } }' --jq .data.viewer.login; "
@@ -3433,7 +3433,7 @@ admits next.
 ## A tree's children in this proof
 
 The driver files child issues under a root itself, in `todo`, and later closes one as `done` and
-parks the others in `backlog`, the last of them while its root waits in `awaiting_merge` for the
+parks the others in `backlog`, the last of them while its root waits in `merging` for the
 rest of its tree; each child's planner holds for the driver like every other role. A
 `child-closed` or `child-status` notice of this run needs no action from the root architect: start,
 re-run, park or close nothing for it, write nothing about it, and keep waiting for the next
@@ -4516,19 +4516,20 @@ grep -q GH_TOKEN "$evidence/github-credential-negative.txt" || fail "gh with GH_
 note "in $gh_pod the implementer's gh ($gh_bin, GH_CONFIG_DIR=$gh_config_dir) is $implement_app and the reviewer's $review_app from different hosts.yml files, each role's namespaces seeing its own gh-<role> copy and an empty roles directory, no grant file or App login is in the environment; the implementer's subagent answered $implement_app with no legion command, and its own bash ran jj undo --help; GitHub records the planner's handoff commit $plan_head as $review_app's (skip-checks: true, 0 check runs) and the implementer's head $pr_head as $implement_app's, its code head $code_head with check runs; the daemon recorded both heads as the completions"
 pass
 
-begin ci-red-no-takeover
-# CI settling red while the tester is in its turn takes the phase back without the tester's
-# completion (workflow's TriggerChecksRed) and takes nothing else: the implementer's start acts at
-# once and waits for nobody, and the tester keeps its turn, its background job, its process and
-# its session: the daemon takes no turn over, waits for no outgoing turn, and its RPC carries no
-# abort frame. The tester starts a job that writes a witness file once a ten-minute sleep ends and
-# waits for it; the proof human commits .fail-me to the pull request's branch, and the smoke
-# repository's fail-on-demand check fails on that head. The daemon moves tree 1 back to
+begin conflict-no-takeover
+# A head that starts conflicting with its base while the tester is in its turn takes the phase back
+# without the tester's completion (workflow's TriggerConflict) and takes nothing else: the
+# implementer's start acts at once and waits for nobody, and the tester keeps its turn, its
+# background job, its process and its session: the daemon takes no turn over, waits for no outgoing
+# turn, and its RPC carries no abort frame. The tester starts a job that writes a witness file once
+# a ten-minute sleep ends and waits for it; the proof human commits a different version of the one
+# file the pull request changes to the base branch, so GitHub reports the head CONFLICTING and runs
+# no check on it at all. The daemon moves tree 1 back to
 # implementing and hands the implementer its task while that sleep is still in the tester's
 # process list and the witness file is absent; nothing aborted the tester's turn; the tester is
 # told its phase ended by one message on its own role topic, which is also what ends the `wait` it
 # is in; and its job runs on, so the witness file appears after all. The control: the same chain
-# with a twenty-second sleep, run before the red, which writes its file.
+# with a twenty-second sleep, run before the conflict, which writes its file.
 #
 # The witness is a background job because that is what a long bash call is: with
 # `bash.autoBackground.enabled` the pinned binary's own default (nothing of Legion's turns it
@@ -4536,7 +4537,7 @@ begin ci-red-no-takeover
 # `--mode rpc` and hands the agent a job to `wait` on. A background job outlives the turn that
 # started it, so the witness file is the proof that the role's work was left alone.
 tester_pod=$(claim_sandbox "$tree1" tester) || fail "tree 1's tester has no Sandbox"
-witness=/tmp/stage4b-ci-red-witness control=/tmp/stage4b-ci-red-control
+witness=/tmp/stage4b-conflict-witness control=/tmp/stage4b-conflict-control
 send_agent "$tree1" tester "Stage 4b proof control operation: run exactly this as one bash tool call, with the tool's timeout at least 1800 seconds, and change nothing else: /usr/bin/sleep 20 && date -u +%FT%TZ > $control && echo CONTROL-WRITTEN. Then reply WAITING and wait for the next targeted message."
 on_tree "$tree1" until_true 300 "the tester's control command to write $control" pod_file "$tester_pod" tester "$control"
 on_tree "$tree1" until_true 300 "tree 1's tester to go idle after the control" resident_idle "$tree1" tester
@@ -4544,58 +4545,64 @@ note "the control: the tester's /usr/bin/sleep 20 chain wrote $control in pod $t
 send_agent "$tree1" tester "Stage 4b proof witness operation: run exactly this as one bash tool call, with the tool's timeout at least 1800 seconds, and change nothing else: /usr/bin/sleep 600 && date -u +%FT%TZ > $witness && echo WITNESS-WRITTEN. Oh My Pi will background the call once it outruns its own threshold; wait for that job with the wait tool until it is done, and reply WITNESS-WRITTEN then."
 on_tree "$tree1" until_true 300 "the tester's witness job to run in its pod" pod_runs "$tester_pod" tester "/usr/bin/sleep 600"
 issue_worker_state "$tree1" tester working || fail "the tester runs its witness job while its claim is $(claim_view "$tree1" tester | jq -c .state), not working"
-fail_me=$(jq -cn --arg branch "legion/$tree1" --arg content "$(printf 'Stage 4b CI red\n' | base64 -w0)" \
-  '{message: "Stage 4b proof: fail-on-demand", content: $content, branch: $branch}' |
-  timeout 60 gh api --method PUT "repos/$repo/contents/.fail-me" --input - --jq .commit.sha) ||
-  fail "the proof human could not commit .fail-me to legion/$tree1"
-note "the proof human committed .fail-me to legion/$tree1 as $fail_me while the tester's witness job ran"
+pr_base=$(timeout 60 gh api "repos/$repo/pulls/$pr_number" --jq .base.ref) || fail "read pull request #$pr_number's base"
+conflict_path=$(timeout 60 gh api "repos/$repo/pulls/$pr_number/files" --jq '.[0].filename') ||
+  fail "read the file pull request #$pr_number changes"
+base_blob=$(timeout 60 gh api "repos/$repo/contents/$conflict_path?ref=$pr_base" --jq .sha) ||
+  fail "read $conflict_path on $pr_base"
+conflict_sha=$(jq -cn --arg path "$conflict_path" --arg branch "$pr_base" --arg sha "$base_blob" \
+  --arg content "$(printf 'Stage 4b conflict, no takeover\n' | base64 -w0)" \
+  '{message: "Stage 4b proof: conflict with the issue branch", content: $content, branch: $branch, sha: $sha}' |
+  timeout 60 gh api --method PUT "repos/$repo/contents/$conflict_path" --input - --jq .commit.sha) ||
+  fail "the proof human could not commit the conflicting $conflict_path to $pr_base"
+note "the proof human committed a conflicting $conflict_path to $pr_base as $conflict_sha while the tester's witness job ran"
 on_tree "$tree1" wait_for_phase "$tree1" implementing 900
 # The start acting is read where production reads it: the daemon's own record that the implementer
-# took the red's task — its claim working on a delivery of the implementing phase it has confirmed
-# — and the task in its session. The tester's process list and its witness file are read in the
-# same breath, so what they say is what held while the start acted.
-on_tree "$tree1" until_true 900 "the implementer to be in a turn of the task the red handed it" ci_red_task_taken "$tree1"
-on_tree "$tree1" until_true 300 "the implementer's CI-red task to reach its session" session_contains "$tree1" implementer "Reason: CI is red at"
+# the conflict started took its task — its claim working on a delivery of the implementing phase it
+# has confirmed — and the task in its session. The tester's process list and its witness file are
+# read in the same breath, so what they say is what held while the start acted.
+on_tree "$tree1" until_true 900 "the implementer to be in a turn of the task the conflict handed it" conflict_task_taken "$tree1"
+on_tree "$tree1" until_true 300 "the implementer's conflict task to reach its session" session_contains "$tree1" implementer "Reason: the head conflicts with"
 witness_commands=$(pod_commands "$tester_pod" tester) || fail "the tester's container's process list could not be read while the implementer took its task"
 grep -qF -- "/usr/bin/sleep 600" <<<"$witness_commands" ||
-  fail "the tester's witness job is gone from its pod's process list while the implementer takes its task: the red stopped work it must leave alone"
+  fail "the tester's witness job is gone from its pod's process list while the implementer takes its task: the conflict stopped work it must leave alone"
 ! pod_file "$tester_pod" tester "$witness" ||
-  fail "the tester's witness file $witness was written before the implementer took its task, so its absence proves nothing of the red"
-note "the implementer is in a turn of the red's task ($(claim_view "$tree1" implementer | jq -c '{state, pending: {phase: .pending.phase, confirmedAt: .pending.confirmedAt}}')) while the tester's /usr/bin/sleep 600 still runs in $tester_pod and $witness is absent"
+  fail "the tester's witness file $witness was written before the implementer took its task, so its absence proves nothing of the conflict"
+note "the implementer is in a turn of the conflict's task ($(claim_view "$tree1" implementer | jq -c '{state, pending: {phase: .pending.phase, confirmedAt: .pending.confirmedAt}}')) while the tester's /usr/bin/sleep 600 still runs in $tester_pod and $witness is absent"
 # The tester's turn was not taken over: no turn of its session was aborted, its claim is still the
 # one it registered with in its first pod, and nothing suspended it.
-tester_session=$evidence/ci-red-tester-session.jsonl
+tester_session=$evidence/conflict-tester-session.jsonl
 claim_session_text "$tree1" tester >"$tester_session" || fail "tree 1's tester has no readable session"
 no_aborted_turn "$tester_session" ||
   fail "tree 1's tester holds an aborted turn: $(session_jq "$tester_session" -c "$aborted_turns_jq") ($tester_session)"
-resident_kept "$tree1" tester || fail "tree 1's tester lost its first process or session across the red: $(resident_lost "$tree1" tester)"
+resident_kept "$tree1" tester || fail "tree 1's tester lost its first process or session across the conflict: $(resident_lost "$tree1" tester)"
 note "the tester's session holds no aborted turn and its claim is the one it registered with ($tester_session)"
-# The role the red left with no phase is told so on its own Envoy role topic, which is also what
-# ends the `wait` it is in (record.PhaseEnded, the outbox's role-message lane).
+# The role the conflict left with no phase is told so on its own Envoy role topic, which is also
+# what ends the `wait` it is in (record.PhaseEnded, the outbox's role-message lane).
 on_tree "$tree1" until_true 600 "the phase-ended message to reach tree 1's tester" \
-  session_contains "$tree1" tester "CI went red, so your testing phase has ended"
-note "the tester was told on its own role topic: $(claim_session_text "$tree1" tester | grep -o 'CI went red, so your testing phase has ended[^"]*' | head -n 1)"
+  session_contains "$tree1" tester "the daemon ended your testing phase"
+note "the tester was told on its own role topic: $(claim_session_text "$tree1" tester | grep -o 'the daemon ended your testing phase[^"]*' | head -n 1)"
 # The negative control mutates the evidence alone: the same reader over a copy of the tester's
 # session with one aborted assistant turn appended must refuse it, so the pass above is the
 # session's own and not a reader that never looks.
-cp "$tester_session" "$evidence/ci-red-tester-session-aborted.jsonl"
+cp "$tester_session" "$evidence/conflict-tester-session-aborted.jsonl"
 jq -cn '{type: "message", timestamp: "2026-01-01T00:00:00.000Z", message: {role: "assistant", stopReason: "aborted", errorMessage: "Interrupted by user", content: []}}' \
-  >>"$evidence/ci-red-tester-session-aborted.jsonl"
-expect_failure ci-red-aborted-turn no_aborted_turn "$evidence/ci-red-tester-session-aborted.jsonl"
-# The job the red left alone finishes, so the file its chain writes appears: the whole of what the
-# tester was doing survived the phase it lost.
+  >>"$evidence/conflict-tester-session-aborted.jsonl"
+expect_failure conflict-aborted-turn no_aborted_turn "$evidence/conflict-tester-session-aborted.jsonl"
+# The job the conflict left alone finishes, so the file its chain writes appears: the whole of what
+# the tester was doing survived the phase it lost.
 on_tree "$tree1" until_true 900 "the tester's witness job to write $witness" pod_file "$tester_pod" tester "$witness"
-note "the tester's witness job ran on and wrote $witness: the red took the phase, not the turn, the job, the process or the session"
-send_agent "$tree1" implementer "Stage 4b proof CI-red operation: CI on pull request #$pr_number is red because the proof committed the file .fail-me to legion/$tree1, which the smoke repository's fail-on-demand check fails on. Fetch the branch, start a new change on top of legion/$tree1@origin, delete .fail-me and change nothing else, commit it and push the issue branch (\`jj bookmark set legion/$tree1 -r @- && jj git push --bookmark legion/$tree1\`), record the required implementation handoff, then call the legion tool's handoff_complete. Do not merge."
+note "the tester's witness job ran on and wrote $witness: the conflict took the phase, not the turn, the job, the process or the session"
+send_agent "$tree1" implementer "Stage 4b proof conflict operation: the head of pull request #$pr_number conflicts with $pr_base, because the proof human committed a different $conflict_path there. Merge $pr_base forward into legion/$tree1 as your skill's forward-merge procedure says (\`jj new legion/$tree1 <destination>\`, never a rebase), resolve the conflict in $conflict_path keeping your own change, push the issue branch (\`jj bookmark set legion/$tree1 -r @- && jj git push --bookmark legion/$tree1\`), record the required implementation handoff, then call the legion tool's handoff_complete. Do not merge the pull request."
 on_tree "$tree1" wait_for_phase "$tree1" testing 1800
 on_tree "$tree1" until_true 300 "tree 1's tester to be handed testing again in its first pod and session" resident_kept "$tree1" tester
-note "the implementer removed .fail-me and $tree1 is back in testing; the tester is in its first pod and session, the one it held through the red"
+note "the implementer merged $pr_base forward and $tree1 is back in testing; the tester is in its first pod and session, the one it held through the conflict"
 pass
 
 begin tree-reviewed
 send_agent "$tree1" tester "Stage 4b proof test operation: inspect the implementer's actual one-file change and pull request #$pr_number, run a focused observable check, record the required test handoff with verdict pass, then call the legion tool's handoff_complete with verdict pass."
 on_tree "$tree1" wait_for_phase "$tree1" reviewing 1200
-# The daemon's checks-red move back (ci-red-no-takeover, Testing → Implementing) counted the
+# The daemon's conflict move back (conflict-no-takeover, Testing → Implementing) counted the
 # implementer a round, as every move back does since #1850 (workflow/engine.go movesBack →
 # recordRound), so tree 1 stands at round 1 here and at round 2 once the review below requests
 # changes; `round_line 1` and `round_correction_pushed 1` below label the proof's correction, not
@@ -4838,7 +4845,7 @@ begin full-agent-tools
 # refused) and 5 (plain gh as the role's App, in subagents too). The five instructions are sent
 # first and waited for after, so the roles run at once; the browser is asserted in every role, since
 # the criterion is every role, not one per pod.
-# The merger does less, and is left waiting for the READY instruction done sends.
+# The merger does less, and is left waiting for the merge instruction done sends.
 issue_phase "$tree1" merging >/dev/null || fail "$tree1 left merging before the full-agent-tools operation: $(daemon_state | jq -c --arg i "$tree1" '.issues[$i].phase')"
 on_tree "$tree1" wait_for_worker "$tree1" merger
 mkdir -p "$evidence/full-agent-tools"
@@ -6141,7 +6148,7 @@ pass
 begin "done"
 on_tree "$tree1" wait_for_worker "$tree1" merger
 # The merge does not close tree 1: children 3 and 4 are still in the workflow, so the daemon
-# records the merge and leaves the root in awaiting_merge — nothing suspended, no linger, no
+# records the merge and leaves the root in merging — nothing suspended, no linger, no
 # Dispatch done, its admission slot and all six roles kept — and tells its architect once, naming
 # the pull request and the issues the close waits for (closeMerged and waitingForTree,
 # internal/workflow/pullrequest.go). The proof human then parks the children one at a time, and the
@@ -6152,46 +6159,36 @@ on_tree "$tree1" wait_for_worker "$tree1" merger
 # alone comes back, resumed on its kept session, while the other five stay suspended, and the
 # root's Sandbox stays Running for the look (the look's start supersedes the linger's suspension of
 # the issue).
-# The daemon submits the READY head's merge itself the moment it accepts READY, so what must be in
-# place at the merge is in place before the merger's READY. The smoke main is held from here until
+# The merger merges the pull request itself, at the head it read, so what must be in place at the
+# merge is in place before the merger is released. The smoke main is held from here until
 # the cleanup below has emptied it (hold_smoke_main), on an open descriptor: start no background
 # child before release_smoke_main, or it inherits the descriptor and holds the smoke main past this
 # run's window; `9>&- 7>&-` does not close it: its number is allocated at runtime, not fixed.
 hold_smoke_main
-send_agent "$tree1" merger "Stage 4b proof READY operation: verify pull request #$pr_number is ready to merge and call the legion tool's handoff_complete with ready true."
-on_tree "$tree1" wait_for_phase "$tree1" awaiting_merge 900
-# READY is posted with every review thread on the pull request resolved: the implementer resolved
-# the reviewer's thread in its correction round and the bot's once the reviewer named it as
-# accepted (review-thread). The merger resolves nothing and the daemon's READY reads no thread
-# state, so this is the end state the roles left, read here as the merger found it.
-ready_packet() {
-  dispatch_events "$tree1" | jq -er --arg ready "READY #$pr_number at " \
-    '[.[] | select(.type == "message.created" and (.payload.body | startswith($ready))) | .payload.body] | last | select(. != null)'
-}
-on_tree "$tree1" until_true 300 "the daemon's READY packet for pull request #$pr_number on $tree1" ready_packet
-ready_packet >"$evidence/ready-packet.txt"
-ready_head=$(timeout 60 gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || fail "read pull request #$pr_number's head"
-ready_sha=$(sed -n '1s/^READY #[0-9]* at \([0-9a-f]\{7,40\}\) .*/\1/p' "$evidence/ready-packet.txt")
-[ -n "$ready_sha" ] && [ "${ready_head#"$ready_sha"}" != "$ready_head" ] ||
-  fail "the READY packet's first line names '${ready_sha:-no sha}', not pull request #$pr_number's head $ready_head: $(head -1 "$evidence/ready-packet.txt")"
-review_threads >"$evidence/review-threads-at-ready.json" || fail "read pull request #$pr_number's review threads at READY"
+# Every review thread on the pull request is resolved before the merger acts: the implementer
+# resolved the reviewer's thread in its correction round and the bot's once the reviewer named it
+# as accepted (review-thread). The merger resolves nothing and reads no thread state, so this is
+# the end state the roles left, read here as the merger finds it.
+merge_head=$(timeout 60 gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || fail "read pull request #$pr_number's head"
+review_threads >"$evidence/review-threads-at-merge.json" || fail "read pull request #$pr_number's review threads before the merge"
 for id in "$thread_id" "$bot_thread_id"; do
-  threads_all_resolved "$evidence/review-threads-at-ready.json" "$id" ||
-    fail "READY was posted at $ready_head with review threads unresolved: $(jq -c '[.[] | select(.isResolved | not) | {id, newest: ([.comments[] | select(.state == "SUBMITTED")] | last | .author)}]' "$evidence/review-threads-at-ready.json"), or without the thread $id"
+  threads_all_resolved "$evidence/review-threads-at-merge.json" "$id" ||
+    fail "the merger reached $merge_head with review threads unresolved: $(jq -c '[.[] | select(.isResolved | not) | {id, newest: ([.comments[] | select(.state == "SUBMITTED")] | last | .author)}]' "$evidence/review-threads-at-merge.json"), or without the thread $id"
 done
 # Control: the same record with the reviewer's thread unresolved fails.
 jq --arg id "$thread_id" 'map(if .id == $id then .isResolved = false else . end)' \
-  "$evidence/review-threads-at-ready.json" >"$evidence/review-threads-unresolved-negative.json"
-expect_failure unresolved-thread-at-ready threads_all_resolved "$evidence/review-threads-unresolved-negative.json" "$thread_id"
-note "READY #$pr_number was posted at $ready_head with $(jq length "$evidence/review-threads-at-ready.json") review threads, 0 unresolved, the reviewer's $thread_id and the bot's $bot_thread_id among them"
-# The daemon submits the READY head's merge itself; await_ready_merge reads the pull request until
-# it merges and never merges it by hand.
-await_ready_merge "$repo" "$pr_number" --delete-branch
+  "$evidence/review-threads-at-merge.json" >"$evidence/review-threads-unresolved-negative.json"
+expect_failure unresolved-thread-at-merge threads_all_resolved "$evidence/review-threads-unresolved-negative.json" "$thread_id"
+note "pull request #$pr_number stands at $merge_head with $(jq length "$evidence/review-threads-at-merge.json") review threads, 0 unresolved, the reviewer's $thread_id and the bot's $bot_thread_id among them"
+# The merger merges it; await_merger_merge reads the pull request until it merges and never merges
+# it by hand.
+send_agent "$tree1" merger "Stage 4b proof merge operation: merge pull request #$pr_number exactly as your instructions describe, then end this phase with the legion tool: op handoff_complete and a summary."
+await_merger_merge "$repo" "$pr_number" --delete-branch
 # The merge is recorded and the root waits for the rest of its tree (INFRA-229).
 merge_recorded() {
-  daemon_state | jq -e --arg issue "$tree1" '.issues[$issue] | .phase == "awaiting_merge" and .pullRequest.state == "merged"' >/dev/null
+  daemon_state | jq -e --arg issue "$tree1" '.issues[$issue] | .phase == "merging" and .pullRequest.state == "merged"' >/dev/null
 }
-on_tree "$tree1" until_true 600 "the daemon to record pull request #$pr_number merged on $tree1, which stays in awaiting_merge" merge_recorded
+on_tree "$tree1" until_true 600 "the daemon to record pull request #$pr_number merged on $tree1, which stays in merging" merge_recorded
 waiting_for=$(log_lines "workflow: a merged root's close waits for the rest of its tree" |
   jq -r -s --arg issue "$tree1" '[.[] | select(.issue == $issue)] | last | .waitingFor // empty')
 [ "$waiting_for" = "$child3, $child4" ] ||
@@ -6212,7 +6209,7 @@ lingered=$(log_lines "workflow: tree lingers" | jq -c --arg tree "$tree1" 'selec
   fail "the daemon lingered tree $tree1 at its merge ($lingered times) while $child3 and $child4 were still in the workflow"
 merge_claims=$(issue_claim_states "$tree1" | paste -sd ',' -)
 case $merge_claims in *suspended*) fail "the merge suspended a claim of $tree1 while its tree still ran: $merge_claims" ;; esac
-note "$repo#$pr_number merged by $merge_when_clean_by at $merge_when_clean_commit: the daemon recorded the merge and left $tree1 in awaiting_merge (claims $merge_claims, its slot kept, Dispatch retro, no linger, no production check), telling its architect once that the close waits for $waiting_for"
+note "$repo#$pr_number merged by $merge_when_clean_by at $merge_when_clean_commit: the daemon recorded the merge and left $tree1 in merging (claims $merge_claims, its slot kept, Dispatch retro, no linger, no production check), telling its architect once that the close waits for $waiting_for"
 # The children leave one at a time, and only the last park closes the root. A parked child leaves
 # the workflow (phase done) with its claims suspended, and the park deletes its Sandbox with the six
 # role Secrets it owned once its pod is gone, the disk going with that pod: the path child-release
@@ -6231,18 +6228,18 @@ for child in "$child3" "$child4"; do
   until_true "$phase_seconds" "$child's park to suspend its planner" issue_worker_state "$child" planner suspended
   until_true 600 "$child's Sandbox, pod and disk to be gone after its backlog" child_parked "$child" "$child_pod"
   note "the proof human parked $child (backlog): it left the workflow, its planner is suspended, and it has no Sandbox, no pod and no disk (its pod $child_pod took the disk $child_pod-issue with it)"
-  [ "$child" = "$child4" ] || issue_phase "$tree1" awaiting_merge >/dev/null ||
-    fail "$tree1 left awaiting_merge on $child3's park, with $child4 still in the workflow"
+  [ "$child" = "$child4" ] || issue_phase "$tree1" merging >/dev/null ||
+    fail "$tree1 left merging on $child3's park, with $child4 still in the workflow"
 done
 # The last park closes the root, as the merge of a finished tree's root does.
 on_tree "$tree1" wait_for_phase "$tree1" "done" 900
-phase_change_logged "$tree1" awaiting_merge "done" pull_request_merged ||
-  fail "the daemon log has no \"workflow: phase changed\" line moving $tree1 from awaiting_merge to done on pull_request_merged"
+phase_change_logged "$tree1" merging "done" pull_request_merged ||
+  fail "the daemon log has no \"workflow: phase changed\" line moving $tree1 from merging to done on pull_request_merged"
 closed_last=$(log_lines "workflow: a merged root closes once its last child left the workflow" | jq -c --arg issue "$tree1" 'select(.issue == $issue)' | grep -c . || true)
 [ "$closed_last" = 1 ] ||
   fail "the daemon logged \"a merged root closes once its last child left the workflow\" for $tree1 $closed_last times, want once, at $child4's park"
 until_true 120 "the daemon's done status on the Dispatch board" dispatch_status_is "$tree1" "done"
-note "$child4's park, the last of tree 1 to leave the workflow, closed $tree1: phase changed awaiting_merge → done on pull_request_merged, and the board reads done"
+note "$child4's park, the last of tree 1 to leave the workflow, closed $tree1: phase changed merging → done on pull_request_merged, and the board reads done"
 check_opened_on "$tree1" "$merge_when_clean_commit" ||
   fail "$tree1's production check reads $(daemon_state | jq -c --arg issue "$tree1" '.issues[$issue].check'), want it open on merge commit $merge_when_clean_commit at its first look, woken by the merge"
 state_file check-opened

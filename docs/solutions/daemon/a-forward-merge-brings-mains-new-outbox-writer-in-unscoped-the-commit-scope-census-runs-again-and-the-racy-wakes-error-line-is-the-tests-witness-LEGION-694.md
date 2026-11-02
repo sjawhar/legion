@@ -11,7 +11,7 @@ tags:
   - race-witness
   - review-round
 date: 2026-10-17
-status: active
+status: superseded in part by INFRA-714 — the `ready_merge` and `merge-refused` outbox kinds this note's census runs over are deleted with the daemon's merge submission; the census habit and the racy-wakes witness stand
 module: packages/daemon/internal/daemon
 related_issues:
   - "LEGION-694"

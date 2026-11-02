@@ -9,7 +9,7 @@ import (
 func TestPhaseValuesMatchWorkflowWireContract(t *testing.T) {
 	want := []string{
 		"admitted", "awaiting_person", "planning", "implementing", "testing", "reviewing", "accepting", "retro",
-		"merging", "awaiting_merge", "done", "held",
+		"merging", "done", "held",
 	}
 	got := make([]string, len(All))
 	for index, value := range All {

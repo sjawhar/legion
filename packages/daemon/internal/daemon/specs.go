@@ -39,8 +39,6 @@ type specs struct {
 	// slackChannels is the project's slack_channels, which the controller is told after the design
 	// gate policy (SlackChannelsFragment); its LEGION_SLACK_CHANNELS is the runtime's to set.
 	slackChannels []string
-	// mergeRules is the project's merge policy, which a merger is told after its addressing.
-	mergeRules config.MergeRules
 	// identity is the role's App bot identity every pane commits as, minted for the owner of the
 	// repository the launch works; nil for a daemon with no GitHub Apps.
 	identity func(ctx context.Context, role claim.Role, owner string) (runtime.GitIdentity, error)
@@ -159,9 +157,6 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 	}
 	if claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) {
 		addressing += " " + DesignGateFragment(s.designGate)
-	}
-	if c.Role == claim.RoleMerger {
-		addressing += " " + MergeRulesFragment(s.mergeRules)
 	}
 	spec.Prompt = runtime.PromptParts{
 		RolePromptPaths:            promptPaths,
@@ -285,8 +280,7 @@ func (s specs) rolePromptPaths(c supervise.Claim) ([]string, error) {
 // repository and default branch and the project's repositories (RepositoriesClause) — left off
 // entirely for a daemon that runs no workflow, whose claims name no repository. The clause names
 // the project's mapping as it is now, which may hold none: a recorded issue keeps its repository
-// after a refresh unmaps or refuses it. The daemon posts every READY packet and publishes it to
-// `projects.<KEY>.merge_queue_role` itself (workflow.Engine.ready). It is exported for the rigs
+// after a refresh unmaps or refuses it. It is exported for the rigs
 // under packages/pi-legion/scripts, which tell a worker what a pane is told.
 func AddressingFragment(project string, c supervise.Claim, repo ghrepo.Repository, defaultBranch string, repositories api.RepositoriesView) (string, error) {
 	architect, err := claim.NewToken(project, c.Tree, claim.RoleArchitect)
@@ -296,6 +290,14 @@ func AddressingFragment(project string, c supervise.Claim, repo ghrepo.Repositor
 	fragment := fmt.Sprintf("Legion addressing: your role topic is `%s%s`; the architect that owns your issue is `%s%s`; "+
 		"the project's controller is `%s%s`; a sibling role on your issue is your topic with the trailing `-<role>` replaced.",
 		notify.RoleTopicPrefix, c.Token, notify.RoleTopicPrefix, architect, notify.RoleTopicPrefix, claim.ControllerToken(project))
+	if c.SessionLost {
+		// The agent this launch starts is a fresh session on a claim that had one: nothing in it
+		// says an earlier session existed, so it would read an empty transcript as a fresh start
+		// and redo work that is already pushed (dispatch://INFRA-714 R8).
+		fragment += " The session this claim recorded was found in no session store, so this is a new session: " +
+			"the turns, tool calls and subagents of your earlier work are gone, and only what you pushed and committed survives. " +
+			"Read your issue and the committed handoffs in your workspace before you continue, and tell your architect what you found."
+	}
 	if repo.IsZero() {
 		return fragment, nil
 	}
@@ -355,19 +357,4 @@ func SlackChannelsFragment(channels []string) string {
 	return "Slack channels: " + strings.Join(named, ", ") +
 		": your session hears each one's app mentions while it holds the controller role; answer each in its thread, " +
 		"and nothing from any other channel (skill://legion-controller/references/slack-mentions.md)."
-}
-
-// MergeRulesFragment is the merger's project policy. The daemon checks these rules again at READY.
-func MergeRulesFragment(rules config.MergeRules) string {
-	render := func(patterns []config.PathPattern) string {
-		expressions := make([]string, 0, len(patterns))
-		for _, pattern := range patterns {
-			expressions = append(expressions, "`"+pattern.Expression+"`")
-		}
-		if len(expressions) == 0 {
-			return "none"
-		}
-		return strings.Join(expressions, ", ")
-	}
-	return "Merge policy: by_hand " + render(rules.ByHand) + "."
 }

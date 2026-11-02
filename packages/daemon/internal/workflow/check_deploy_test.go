@@ -35,7 +35,7 @@ func withDeploys(t *testing.T, rig checkRig, deploys ...config.Deploy) checkRig 
 // request number merged, so its production check is open at look 1.
 func openRootCheck(t *testing.T, rig checkRig, key, repo, branch string, number int) {
 	t.Helper()
-	seedIssue(t, rig.pool, record.Issue{Key: key, Repo: repo, DefaultBranch: branch, GitHubRepo: repo, Tree: key, Project: "LEGION", Title: key, Phase: phase.AwaitingMerge, Generation: 2, Status: "retro", Rank: "W"})
+	seedIssue(t, rig.pool, record.Issue{Key: key, Repo: repo, DefaultBranch: branch, GitHubRepo: repo, Tree: key, Project: "LEGION", Title: key, Phase: phase.Merging, Generation: 2, Status: "retro", Rank: "W"})
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestOpen, Issue: key, Repo: repo, Number: number, Branch: "legion/" + key, HeadSHA: "head-" + key, Failing: []string{}})
 	rig.apply(key+"-merged", intake.PullRequestMerged{Repo: repo, Number: number, MergeSHA: "merge-" + key})
 	if check := productionCheck(t, rig.pool, key); check == nil || !check.Open() {

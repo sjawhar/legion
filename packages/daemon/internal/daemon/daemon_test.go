@@ -491,7 +491,7 @@ func TestRunServesTheStateOfItsOwnBoot(t *testing.T) {
 func TestTheStateCarriesTheDaemonsSettingsAndNoSecret(t *testing.T) {
 	const privateKey = "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----"
 	cfg := testConfig(t)
-	cfg.MaxFixAttempts = 5
+	cfg.ReviewRoundCap = 5
 	cfg.GitHubApps = config.GitHubApps{
 		Implement: config.GitHubApp{AppID: "1001", PrivateKey: privateKey, Installations: map[string]string{"sjawhar": "2001"}},
 		Review:    config.GitHubApp{AppID: "1002", PrivateKey: privateKey, Installations: map[string]string{"sjawhar": "2002"}},
@@ -507,9 +507,9 @@ func TestTheStateCarriesTheDaemonsSettingsAndNoSecret(t *testing.T) {
 		t.Fatalf("decode the state %s: %v", body, err)
 	}
 	settings := state.Settings
-	if settings.MaxFixAttempts != 5 || settings.WorkerBootTimeoutSeconds != 120 || settings.Runtime.Name != "tmux" {
-		t.Errorf("settings max_fix_attempts %d, worker_boot_timeout_seconds %d, runtime.name %q; want the configured 5, 120, tmux",
-			settings.MaxFixAttempts, settings.WorkerBootTimeoutSeconds, settings.Runtime.Name)
+	if settings.ReviewRoundCap != 5 || settings.WorkerBootTimeoutSeconds != 120 || settings.Runtime.Name != "tmux" {
+		t.Errorf("settings review_round_cap %d, worker_boot_timeout_seconds %d, runtime.name %q; want the configured 5, 120, tmux",
+			settings.ReviewRoundCap, settings.WorkerBootTimeoutSeconds, settings.Runtime.Name)
 	}
 	if settings.GitHubApps == nil || settings.GitHubApps.Implement.AppID != "1001" || settings.GitHubApps.Review.AppID != "1002" {
 		t.Errorf("settings.github_apps = %+v, want both configured Apps by id", settings.GitHubApps)

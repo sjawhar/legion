@@ -29,7 +29,6 @@ func TestAGitHubFactFromAnotherRepositoryChangesNothing(t *testing.T) {
 			intake.Push{Repo: "acme/other", Branch: "legion/LEGION-209", Before: "head", After: "other-head"},
 			intake.PullRequestReview{Repo: "acme/other", Number: 42, ID: 7, State: "approved", CommitID: "head", HeadSHA: "head", Author: testReviewApp, SubmittedAt: updated},
 			intake.PullRequestChecks{Repo: "acme/other", Number: 42, HeadSHA: "head", Failing: []string{"unit"}, Cancelled: []string{}, Snapshot: "red", Generation: 9},
-			intake.RequiredChecks{Repo: "acme/other", Number: 42, Names: []string{"unit"}, Workflows: []record.RequiredWorkflow{}},
 			intake.PullRequestMergeability{Repo: "acme/other", Number: 42, Base: "main", Mergeable: record.MergeabilityConflicting},
 			intake.PullRequestMerged{Repo: "acme/other", Number: 42, MergeSHA: "merge"},
 			intake.PullRequestClosed{Repo: "acme/other", Number: 42, HeadSHA: "head", UpdatedAt: updated},

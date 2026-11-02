@@ -1,0 +1,7 @@
+kind: Changed
+body: |-
+  The daemon moves an issue's phase from the events it observes, and reads GitHub only in reply to
+  one and once per issue at its own start. The two-minute pass that re-read every open pull request
+  is gone, and with it the daemon's read of a base branch's required checks from the repository's
+  rulesets: GitHub applies those rules itself. A push to a pull request's base is now an event the
+  daemon acts on, since GitHub sends nothing for the pull request when its base moves under it.

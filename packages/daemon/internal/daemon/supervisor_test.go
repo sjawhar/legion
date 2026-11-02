@@ -16,6 +16,8 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/stream"
@@ -522,4 +524,218 @@ func (e *recordingEnroller) revocations() []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return slices.Clone(e.revoked)
+}
+
+// issueRig is a supervisor holding the claims of one issue, with the daemon's own answer to which
+// of them is in a turn (claimInTurn) wired in and an App identity per role: what a phase task's
+// adoption of the working copy those roles share needs.
+type issueRig struct {
+	t       *testing.T
+	ctx     context.Context
+	sup     *supervisor
+	rt      *fake.Runtime
+	conns   *fake.Conns
+	project string
+}
+
+func newIssueRig(t *testing.T) *issueRig {
+	t.Helper()
+	project, err := claim.ProjectToken("legion")
+	if err != nil {
+		t.Fatalf("the project token: %v", err)
+	}
+	ctx := context.Background()
+	rt, conns := fake.NewRuntime(), fake.NewConns()
+	sup := newSupervisor(ctx, nil, "legion", t.TempDir(), quietLogger())
+	sup.deps = supervise.Deps{
+		Runtime: rt, Conns: conns, Store: &outboxClaimStore{}, Specs: outboxSpecs{}, Clock: stillClock{}, Log: quietLogger(),
+		Limits:         supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
+		Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
+		PluginContract: api.DaemonAPIVersion,
+		Identity: func(_ context.Context, role claim.Role, _ string) (runtime.GitIdentity, error) {
+			return runtime.GitIdentity{Name: "legion-" + string(role) + "[bot]", Email: string(role) + "@example.invalid"}, nil
+		},
+		IssueInTurn: sup.claimInTurn,
+	}
+	t.Cleanup(sup.stop)
+	return &issueRig{t: t, ctx: ctx, sup: sup, rt: rt, conns: conns, project: project}
+}
+
+// ready creates role's claim on the rig's one issue, puts conn in the directory for it, and walks
+// it to ready, which is where a task is sent from.
+func (r *issueRig) ready(role claim.Role, conn runtime.Conn) (claim.Token, *supervise.Machine) {
+	r.t.Helper()
+	token, err := claim.NewToken(r.project, "LEGION-209", role)
+	if err != nil {
+		r.t.Fatalf("the token of %s: %v", role, err)
+	}
+	machine, _, err := r.sup.Create(r.ctx, supervise.Claim{Token: token, Project: r.project, Tree: "LEGION-208",
+		Issue: "LEGION-209", Role: role, State: supervise.StateQueued}, "")
+	if err != nil {
+		r.t.Fatalf("create %s: %v", token, err)
+	}
+	r.conns.Register(token, conn)
+	if err := machine.Handle(r.ctx, supervise.RequestSpawn{Claim: token}); err != nil {
+		r.t.Fatalf("spawn %s: %v", token, err)
+	}
+	generation := machine.Claim().Generation
+	for _, ev := range []supervise.Event{
+		supervise.RequestRegister{Claim: token, Generation: generation, Session: "ses-" + string(role),
+			SessionFile: "/sessions/" + string(role) + ".jsonl", PluginContract: api.DaemonAPIVersion},
+		supervise.RequestReady{Claim: token, Generation: generation, Session: "ses-" + string(role)},
+	} {
+		if err := machine.Handle(r.ctx, ev); err != nil {
+			r.t.Fatalf("handle %T for %s: %v", ev, token, err)
+		}
+	}
+	return token, machine
+}
+
+// adoptions is how many working copies the runtime has been asked to adopt so far.
+func (r *issueRig) adoptions() int { return len(r.rt.CallsOf("AdoptWorkingCopy")) }
+
+// gatedPrompt holds every prompt at the door until the test lets it through, so a test can ask
+// what the issue's other claims read while a send is in flight and no turn has started.
+type gatedPrompt struct {
+	*fake.Conn
+	entered chan string
+	release chan struct{}
+}
+
+func newGatedPrompt() *gatedPrompt {
+	return &gatedPrompt{Conn: fake.NewConn(), entered: make(chan string, 4), release: make(chan struct{})}
+}
+
+func (g *gatedPrompt) Prompt(ctx context.Context, deliveryID, message string) error {
+	g.entered <- deliveryID
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return g.Conn.Prompt(ctx, deliveryID, message)
+}
+
+// The roles of an issue work one jj workspace, so a phase task's adoption of it is nobody's
+// private act: the daemon answers supervise's Deps.IssueInTurn from the claims its machines
+// publish (claimInTurn), and the tester's task waits while the implementer is in a turn. The end
+// of that turn is posted to the issue's other claims once the implementer's own machine has
+// recorded it (wakeIssue), and the waiting task is adopted and sent then.
+func TestAPhaseTaskWaitsForTheTurnOfAnotherClaimOfItsIssue(t *testing.T) {
+	rig := newIssueRig(t)
+	implementer, writing := rig.ready(claim.RoleImplementer, fake.NewConn())
+	testerConn := fake.NewConn()
+	tester, waiting := rig.ready(claim.RoleTester, testerConn)
+
+	// The implementer is in the turn of its own phase task, as it is while it writes the work it
+	// has just reported complete.
+	for _, ev := range []supervise.Event{
+		supervise.RequestDeliver{Claim: implementer, Task: "implement the plan", ID: "outbox:1", Phase: phase.Implementing, Generation: 1},
+		supervise.StreamTurnStart{Claim: implementer},
+	} {
+		if err := writing.Handle(rig.ctx, ev); err != nil {
+			t.Fatalf("handle %T for the implementer: %v", ev, err)
+		}
+	}
+	// Its own task's send runs on a goroutine of its own, so the adoption it makes is counted
+	// only once that send is over.
+	writing.Wait()
+	adoptions := rig.adoptions()
+
+	if err := waiting.Handle(rig.ctx, supervise.RequestDeliver{Claim: tester, Task: "test the branch", ID: "outbox:2",
+		Phase: phase.Testing, Generation: 1}); err != nil {
+		t.Fatalf("deliver the tester's task: %v", err)
+	}
+	waiting.Wait()
+
+	if prompts := testerConn.Prompts(); len(prompts) != 0 {
+		t.Fatalf("the tester was prompted %+v while the implementer's turn was open; want its task held", prompts)
+	}
+	if got := rig.adoptions(); got != adoptions {
+		t.Fatalf("adoptions = %d while the implementer's turn was open, want the %d made before it", got, adoptions)
+	}
+
+	// The turn ends through the inbox, as the worker stream's event reaches a machine, so the wake
+	// the pump posts to the issue's other claims is the one under test.
+	rig.sup.post(implementer, supervise.StreamTurnEnd{Claim: implementer})
+
+	testwait.Eventually(t, "the tester's task to be sent once the implementer's turn ended", func() bool {
+		return len(testerConn.Prompts()) == 1
+	})
+	sent := testerConn.Prompts()[0]
+	if sent.Message != "test the branch" {
+		t.Fatalf("the tester was sent %+v, want its own task", sent)
+	}
+	made := rig.rt.CallsOf("AdoptWorkingCopy")
+	if len(made) != adoptions+1 || made[adoptions].Identity.Name != "legion-tester[bot]" {
+		t.Fatalf("adoptions = %+v, want one more, for the tester's App", made)
+	}
+}
+
+// A claim whose prompt is in flight counts as being in a turn for the same working copy: its
+// adoption of the shared workspace has already run, and the turn that prompt asks for has not
+// started only because the agent has not answered yet. Counting StateWorking alone read such a
+// claim as idle for the whole length of its send — an adoption and a prompt round trip — so two
+// phase tasks to two roles of one issue could each read the other as idle and adopt the working
+// copy they share at the same time (dispatch://INFRA-314). The held task goes at the end of the
+// turn that send started, as it does for a turn already running.
+func TestAPhaseTaskWaitsForASendInFlightOnAnotherClaimOfItsIssue(t *testing.T) {
+	rig := newIssueRig(t)
+	gated := newGatedPrompt()
+	implementer, writing := rig.ready(claim.RoleImplementer, gated)
+	testerConn := fake.NewConn()
+	tester, waiting := rig.ready(claim.RoleTester, testerConn)
+
+	if err := writing.Handle(rig.ctx, supervise.RequestDeliver{Claim: implementer, Task: "implement the plan", ID: "outbox:1",
+		Phase: phase.Implementing, Generation: 1}); err != nil {
+		t.Fatalf("deliver the implementer's task: %v", err)
+	}
+	// The implementer's send is held inside its prompt: its adoption has run and its turn has not
+	// started, which is exactly the claim the old answer read as idle.
+	select {
+	case <-gated.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the implementer's send never reached its prompt")
+	}
+	adoptions := rig.adoptions()
+	if view := writing.View(); view.State != supervise.StateReady || !view.SendInFlight {
+		t.Fatalf("the implementer is %s with its send in flight = %v, want it ready with a send in flight", view.State, view.SendInFlight)
+	}
+
+	if err := waiting.Handle(rig.ctx, supervise.RequestDeliver{Claim: tester, Task: "test the branch", ID: "outbox:2",
+		Phase: phase.Testing, Generation: 1}); err != nil {
+		t.Fatalf("deliver the tester's task: %v", err)
+	}
+	waiting.Wait()
+
+	if prompts := testerConn.Prompts(); len(prompts) != 0 {
+		t.Fatalf("the tester was prompted %+v while the implementer's send was in flight; want its task held", prompts)
+	}
+	if got := rig.adoptions(); got != adoptions {
+		t.Fatalf("adoptions = %d while the implementer's send was in flight, want the %d made before it", got, adoptions)
+	}
+
+	// The implementer's agent takes the prompt and the turn it asked for starts: the tester's task
+	// is still held, now by the turn itself.
+	close(gated.release)
+	writing.Wait()
+	if err := writing.Handle(rig.ctx, supervise.StreamTurnStart{Claim: implementer}); err != nil {
+		t.Fatalf("the implementer's turn start: %v", err)
+	}
+	if prompts := testerConn.Prompts(); len(prompts) != 0 {
+		t.Fatalf("the tester was prompted %+v while the implementer's turn was open; want its task still held", prompts)
+	}
+
+	rig.sup.post(implementer, supervise.StreamTurnEnd{Claim: implementer})
+
+	testwait.Eventually(t, "the tester's task to be sent once the implementer's turn ended", func() bool {
+		return len(testerConn.Prompts()) == 1
+	})
+	if sent := testerConn.Prompts()[0]; sent.Message != "test the branch" {
+		t.Fatalf("the tester was sent %+v, want its own task", sent)
+	}
+	made := rig.rt.CallsOf("AdoptWorkingCopy")
+	if len(made) != adoptions+1 || made[adoptions].Identity.Name != "legion-tester[bot]" {
+		t.Fatalf("adoptions = %+v, want one more, for the tester's App", made)
+	}
 }

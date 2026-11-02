@@ -158,6 +158,10 @@ export interface AgentEndMessage {
   /** How an assistant reply ended: `stop` settled normally, `aborted` was an interrupt, `error` a
    * provider failure, `length` a truncation. */
   readonly stopReason?: string;
+  /** The provider's own words for an `error` stop, which the host carries beside the reason
+   * (`AssistantMessage` in `src/omp-host.d.ts`): the sentence a refused turn is reported and
+   * logged with. Absent on every other stop, and on an error the host could not word. */
+  readonly errorMessage?: string;
 }
 
 export interface AgentEndEvent {

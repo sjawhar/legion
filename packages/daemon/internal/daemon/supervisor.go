@@ -77,6 +77,60 @@ func (s *supervisor) Machine(token claim.Token) (*supervise.Machine, bool) {
 	return m.machine, true
 }
 
+// claimInTurn names a claim of issue other than except whose agent is in a turn now, or is about
+// to be, for the adoption a phase task makes of the working copy an issue's roles share
+// (supervise's Deps.IssueInTurn). A claim counts when its published state is StateWorking, a turn
+// in flight, and when its machine has a send in flight (supervise.ClaimView.SendInFlight): the
+// prompt that starts that turn is on its way and the adoption it goes behind may be rewriting the
+// shared working copy at this moment, which is the very thing this answer guards. Without it two
+// phase tasks to two roles of one issue each read the other as idle and adopt together
+// (dispatch://INFRA-314), and a turn's end wakes a held claim whose own next send has already
+// started.
+//
+// It reads each machine's published claim rather than any record of turns kept beside them, and
+// it iterates the lock-free snapshot of the machines (supervised) rather than taking s.mu:
+// publishing takes a machine's own lock, OnTerminal takes s.mu and then every machine's, and a
+// reader here holding s.mu while a machine decides would be those two locks taken in both orders.
+// View never waits on the decision a machine is making either, so answering this can never be
+// held up by another claim's launch or stop.
+func (s *supervisor) claimInTurn(issue string, except claim.Token) (claim.Token, bool) {
+	if issue == "" {
+		return "", false
+	}
+	for _, machine := range s.supervised() {
+		view := machine.View()
+		if view.Token == except || view.Issue != issue {
+			continue
+		}
+		if view.State == supervise.StateWorking || view.SendInFlight {
+			return view.Token, true
+		}
+	}
+	return "", false
+}
+
+// wakeIssue tells the issue's other claims that token's turn has ended, once token's own machine
+// has recorded that end: a claim holding a task it would not adopt the shared working copy for
+// can send it now (supervise's IssueTurnEnded). It is posted after the machine's decision rather
+// than beside it, because a claim woken before that decision published its end would read the
+// turn as still running and hold the task until the next sweep.
+func (s *supervisor) wakeIssue(token claim.Token) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.stopped {
+		return
+	}
+	ended, ok := s.machines[token]
+	if !ok || ended.issue == "" {
+		return
+	}
+	for other, m := range s.machines {
+		if other != token && m.issue == ended.issue {
+			m.inbox.put(supervise.IssueTurnEnded{Claim: other})
+		}
+	}
+}
+
 // OnTerminal applies one durable-state callback to every current and future machine.
 func (s *supervisor) OnTerminal(callback func(supervise.Claim, supervise.ClaimState)) {
 	s.mu.Lock()
@@ -195,6 +249,11 @@ func (s *supervisor) add(token claim.Token, m *supervise.Machine) {
 			}
 			if err := m.Handle(s.ctx, ev); err != nil {
 				s.decisionFailed(token, fmt.Sprintf("%T", ev), err, "supervise: an event failed")
+			}
+			// The turn is over and this machine has recorded that, so a claim of the same issue
+			// holding a task it would not adopt their shared working copy for may send it now.
+			if _, ended := ev.(supervise.StreamTurnEnd); ended {
+				s.wakeIssue(token)
 			}
 		}
 	}()

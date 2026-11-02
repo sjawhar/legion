@@ -77,6 +77,88 @@ type ExitRequest struct {
 	Reason     string `json:"reason"`
 }
 
+// Turn outcomes are what a producer reports a turn ended as: the provider took the turn, or
+// refused it. They are the two values of TurnOutcomeRequest.Outcome, and nothing else is accepted.
+const (
+	TurnClean   = "clean"
+	TurnRefused = "refused"
+)
+
+// TurnOutcomeCaller is one of the two identities a turn outcome is reported under, and the type
+// of whichever one its body named (TurnOutcomeRequest.Caller). They are two types rather than
+// five fields of one, so the route reads the identity the caller gave rather than guessing from
+// which fields are filled in which combination.
+type TurnOutcomeCaller interface{ isTurnOutcomeCaller() }
+
+// AgentCaller is the producer inside the agent's own session, which holds the secret its
+// registration was issued and names the claim with it, as the ready and the exit do: pi-legion's
+// agent_end hook for an Oh My Pi session.
+type AgentCaller struct {
+	ClaimToken Token  `json:"claimToken,omitempty"`
+	SessionID  string `json:"sessionId,omitempty"`
+	Secret     string `json:"secret,omitempty"`
+}
+
+// BootCaller is the producer beside the agent rather than inside it, which holds no secret — the
+// Claude bridge, whose pane's registration is claude-envoy's, inside Claude Code, and the secret
+// never leaves that process. It presents the launch's own boot token, the 0600 file its pane is
+// told, which names the same claim (api's turnOutcome).
+type BootCaller struct {
+	BootToken string `json:"bootToken,omitempty"`
+}
+
+func (AgentCaller) isTurnOutcomeCaller() {}
+func (BootCaller) isTurnOutcomeCaller()  {}
+
+// named is whether a body named this identity at all. Any one of the agent's three fields counts:
+// a body that named two of them meant this identity and gave it incompletely, which the route
+// answers by naming the field it left out rather than by reading it as the other caller.
+func (c AgentCaller) named() bool {
+	return c.ClaimToken != "" || c.SessionID != "" || c.Secret != ""
+}
+
+func (c BootCaller) named() bool { return c.BootToken != "" }
+
+// TurnOutcomeRequest is the outcome of one turn, reported by the producer that ended it.
+// Sequence is that producer's own count of the turns it has ended at Generation, from 1, and the
+// daemon keeps the report under the pair: a report that arrives late or out of order lands in its
+// own place, and the run of refused turns the daemon derives is the same either way. Message is
+// what the provider said about a refusal, and is left out of a clean turn.
+//
+// The caller is exactly one of AgentCaller and BootCaller, embedded so that each is a shape of
+// its own on the wire as well as in Go (@legion/contracts' LegionTurnOutcomeRequest is the same
+// union).
+type TurnOutcomeRequest struct {
+	AgentCaller
+	BootCaller
+	Generation uint64 `json:"generation"`
+	Sequence   uint64 `json:"sequence"`
+	Outcome    string `json:"outcome"`
+	Message    string `json:"message,omitempty"`
+}
+
+// Caller is the identity the body named, and false when it named both or neither: each says who
+// is calling, and a caller that cannot say is not answered.
+func (r TurnOutcomeRequest) Caller() (TurnOutcomeCaller, bool) {
+	if r.AgentCaller.named() == r.BootCaller.named() {
+		return nil, false
+	}
+	if r.BootCaller.named() {
+		return r.BootCaller, true
+	}
+	return r.AgentCaller, true
+}
+
+// TurnOutcomeResponse is what the daemon made of the report: the run of refused turns the claim's
+// reports now end with (RefusedRun), and whether this report took that run to the launch failure
+// limit and failed the claim. A producer acts on neither — its turn is over — but a pane's log
+// saying the daemon has counted three refusals in a row is the one place an operator sees the
+// count that failed the claim being made.
+type TurnOutcomeResponse struct {
+	RefusedRun int  `json:"refusedRun"`
+	Failed     bool `json:"failed"`
+}
+
 // Refusal is one of the ways a claim route says no: the status it answers with and the sentence
 // it puts in the body. Both halves are a contract with the plugins, whose shared claim boot stops
 // the agent on any 4xx from the registration (`bootLegionClaim` in

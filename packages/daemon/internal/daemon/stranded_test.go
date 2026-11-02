@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
 // strandedLine is the error the daemon logs once a boot has re-adopted its claims, naming every
@@ -112,9 +113,11 @@ func operatorHeld(c supervise.Claim) supervise.Claim {
 	return c
 }
 
-// runningRoot is a root admitted at generation 1 and working phase p.
+// runningRoot is a root admitted at generation 1 and working phase p, showing the status that
+// phase shows (workflow.PhaseStatus): what the daemon that ran it recorded, and what the boot's
+// correction of a status that is not its phase's leaves alone.
 func runningRoot(key string, p phase.Phase) record.Issue {
-	return record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: key, Project: projectOf(key), Title: key, Phase: p, Generation: 1, Status: "in_progress", Rank: "m", HandedOver: true}
+	return record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: key, Project: projectOf(key), Title: key, Phase: p, Generation: 1, Status: workflow.PhaseStatus(p), Rank: "m", HandedOver: true}
 }
 
 // projectOf is the Dispatch project key an issue key names.

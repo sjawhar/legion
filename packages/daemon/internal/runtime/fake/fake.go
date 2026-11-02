@@ -66,6 +66,11 @@ type Runtime struct {
 	// Now stamps the observations the fake mints. NewRuntime sets it to time.Now; a test with a
 	// clock of its own replaces it before use.
 	Now func() time.Time
+	// OnResume, when set, runs at the start of every Resume, after the call is recorded, with that
+	// call's own context: a test that must act while a launch is still in the runtime blocks here
+	// and watches that context for the caller's cancellation. A non-nil answer is the Resume's,
+	// and nothing is started.
+	OnResume func(ctx context.Context) error
 
 	mu       sync.Mutex
 	pending  *sync.Cond
@@ -196,17 +201,25 @@ func (r *Runtime) Spawn(_ context.Context, spec runtime.SpawnSpec) (runtime.Loca
 	return r.mint(spec.Claim), nil
 }
 
-// Resume records its call, then refuses a previous incarnation of another claim, as every runtime
-// does.
-func (r *Runtime) Resume(_ context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
+// Resume records its call, then runs OnResume when a test set one, then refuses a previous
+// incarnation of another claim, as every runtime does.
+func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	call := Call{Method: "Resume", Spec: spec}
 	if prev != nil {
 		recorded := *prev
 		call.Previous = &recorded
 	}
 	r.calls = append(r.calls, call)
+	hook := r.OnResume
+	r.mu.Unlock()
+	if hook != nil {
+		if err := hook(ctx); err != nil {
+			return runtime.Locator{}, err
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if err := (runtime.Known{Claim: spec.Claim, Locator: prev}).Validate(); err != nil {
 		return runtime.Locator{}, err
 	}

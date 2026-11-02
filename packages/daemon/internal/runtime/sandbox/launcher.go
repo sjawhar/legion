@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
@@ -243,15 +244,30 @@ func (d *launchers) request(ctx context.Context, token claim.Token, podUID strin
 }
 
 // startRefusal is a Start the launcher answered OK: false, without starting the generation: the one
-// start error after which no child of that generation can be running (stopIssuedChild).
+// start error after which no child of that generation can be running (stopIssuedChild). A refusal
+// over the session it was asked to resume carries the launcher's own verdict as its kind
+// (shimwire.SessionRefusal); this is the one place that kind becomes the sentinel the supervisor
+// acts on, so a lost session and a store that could not be asked reach it as they do from the tmux
+// runtime (runtime.ErrSessionFileMissing, runtime.ErrSessionStore).
 type startRefusal struct {
 	token      claim.Token
 	generation uint64
 	reason     string
+	session    shimwire.SessionRefusal
 }
 
 func (e startRefusal) Error() string {
 	return fmt.Sprintf("launcher %s start generation %d: %s", e.token, e.generation, e.reason)
+}
+
+func (e startRefusal) Unwrap() error {
+	switch e.session {
+	case shimwire.SessionGone:
+		return runtime.ErrSessionFileMissing
+	case shimwire.SessionStoreUnreachable:
+		return runtime.ErrSessionStore
+	}
+	return nil
 }
 
 func (d *launchers) start(ctx context.Context, token claim.Token, podUID string, command shimwire.LauncherStart) error {
@@ -264,7 +280,7 @@ func (d *launchers) start(ctx context.Context, token claim.Token, podUID string,
 		return fmt.Errorf("launcher %s start: got %T", token, answer)
 	}
 	if !result.OK {
-		return startRefusal{token: token, generation: command.Generation, reason: result.Error}
+		return startRefusal{token: token, generation: command.Generation, reason: result.Error, session: result.Session}
 	}
 	// An OK answer naming another generation says the launcher started something, and not what it
 	// was asked: the Start's outcome is unknown, never a refusal, so the issued generation is stopped.

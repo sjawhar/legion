@@ -74,12 +74,12 @@ func TestAFinishedRolesFailedClaimIsNoticedAndHoldsNothing(t *testing.T) {
 				Reason: "the planner does not work LEGION-209's phase implementing; nothing is held"}},
 		},
 		{
-			name:  "the merger while the issue awaits its merge",
+			name:  "the tester while the issue is merging",
 			root:  record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"},
-			child: record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Parent: &root, Project: "LEGION", Title: "child", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "V"},
-			role:  claim.RoleMerger, wantPhase: phase.AwaitingMerge,
-			want: []record.OutboxPayload{record.Notice{Kind: "worker-died", Role: claim.RoleMerger, Phase: phase.AwaitingMerge,
-				Reason: "the merger does not work LEGION-209's phase awaiting_merge; nothing is held"}},
+			child: record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Parent: &root, Project: "LEGION", Title: "child", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "V"},
+			role:  claim.RoleTester, wantPhase: phase.Merging,
+			want: []record.OutboxPayload{record.Notice{Kind: "worker-died", Role: claim.RoleTester, Phase: phase.Merging,
+				Reason: "the tester does not work LEGION-209's phase merging; nothing is held"}},
 		},
 		{
 			name: "the tester while the implementer's phase is held",

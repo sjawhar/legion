@@ -95,18 +95,3 @@ func searchedIn(searched []string) string {
 	}
 	return strings.Join(searched, ", ")
 }
-
-// takingOverSession is whether a session found nowhere on this host is one this runtime takes
-// over, which starts a fresh agent rather than refuse the launch (Resume): every one is, while the
-// operator has asked for the takeover (runtime.tmux.take_over). Neither the recorded path nor the
-// previous incarnation tells the other runtime's sessions from this host's own. A daemon that runs
-// as the other runtime's image does — the same home and Oh My Pi profile, which is how a host
-// built from that image runs — records the very paths a pod recorded; and a claim the other
-// runtime left suspended, or one whose takeover launch failed before this daemon restarted, has no
-// incarnation left to say where it ran. The key is set for the move alone, so what this costs is
-// bounded and is the operator's choice: in that window a session of this host's own that has gone
-// missing starts fresh, uncharged, where it would otherwise fail its launches. With the key off,
-// every missing session is the refusal again, and the claim keeps it.
-func (r *Runtime) takingOverSession() bool {
-	return r.takeOver != ""
-}

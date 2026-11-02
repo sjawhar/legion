@@ -16,16 +16,18 @@ import (
 // Every start that hands a role a task mints that role an assignment, writes it on the role's
 // phases row and carries it on the start's payload, both in the transition's own transaction. The
 // issue's run cannot do this work: one run holds every phase entry, so the testing phase the
-// tester is given after a red and an implementing round has to be told from the testing phase
-// before it by something the run does not carry (api/handoff.go, HANDOFF_STALE_ASSIGNMENT).
+// tester is given after a failed round and an implementing pass has to be told from the testing
+// phase before it by something the run does not carry (api/handoff.go,
+// HANDOFF_STALE_ASSIGNMENT).
 func TestEveryPhaseStartMintsTheRoleAnAssignmentOnItsRowAndItsPayload(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208",
 		Project: "LEGION", Title: "root", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42,
-		Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{}, Required: []string{"pytest"}})
+		Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
 	engine := testEngine(config.DesignGateRootIssues, nil)
 	apply := func(eventID string, fact intake.Fact) {
 		t.Helper()
@@ -37,14 +39,9 @@ func TestEveryPhaseStartMintsTheRoleAnAssignmentOnItsRowAndItsPayload(t *testing
 			t.Fatalf("ApplyFact %s refused: %+v", eventID, *result.Refusal)
 		}
 	}
-	red := func(eventID, head string) {
-		t.Helper()
-		apply(eventID, intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: head,
-			CheckRuns: []record.AttemptRun{{Name: "pytest", ID: 7}}, Generation: 1, Snapshot: eventID, Failing: []string{"pytest"}})
-	}
 
-	// The red ends testing and starts the implementer, which is the first start of this test.
-	red("red-1", "head")
+	// The tester's failed verdict ends testing and starts the implementer, the first start here.
+	apply("test-1", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Verdict: "fail", Commit: "test-1"})
 	assertPhase(t, pool, phase.Implementing)
 	firstImplementing := assignmentOfStart(t, pool, claim.RoleImplementer, 1)
 
@@ -61,9 +58,10 @@ func TestEveryPhaseStartMintsTheRoleAnAssignmentOnItsRowAndItsPayload(t *testing
 		t.Fatalf("after its completion the implementer's row carries %q, want the %q its start wrote", got, firstImplementing)
 	}
 
-	// The tester fails this round and the issue goes back to implementing, where the implementer's
-	// second start mints an assignment of its own; its completion gives the tester a second one.
-	apply("test-1", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Verdict: "fail", Commit: "test-1"})
+	// The tester fails this round too and the issue goes back to implementing, where the
+	// implementer's second start mints an assignment of its own; its completion gives the tester a
+	// second one.
+	apply("test-2", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Verdict: "fail", Commit: "test-2"})
 	assertPhase(t, pool, phase.Implementing)
 	secondImplementing := assignmentOfStart(t, pool, claim.RoleImplementer, 2)
 	if secondImplementing == firstImplementing {

@@ -27,7 +27,7 @@
 // 200, not 403 ISSUE_OUTSIDE_TREE, as the route-visible proof that an issue is the architect's
 // tree's; what the daemon wrote to the Dispatch stand-in; and, for tree membership, which no route
 // shows, the daemon's own record of the issue in its PostgreSQL (record.Store), as
-// merged_root_waits_live_test.go reads and writes it. Step 4 reads the outbox table for the rows
+// the daemon's own tests read and write it. Step 4 reads the outbox table for the rows
 // the old linger queued, which no route shows either.
 //
 // What the proof stands in for lies outside the change. The broker is a native nats-server the

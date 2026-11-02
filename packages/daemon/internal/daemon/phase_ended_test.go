@@ -21,22 +21,23 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
-// When CI settles red the daemon starts the implementer at once — it waits for no turn to end and
-// stops nobody — so the role whose phase that red ended would otherwise learn of it from nothing:
+// When the head starts conflicting with its base the daemon starts the implementer at once — it
+// waits for no turn to end and stops nobody — so the role whose phase that move ended would
+// otherwise learn of it from nothing:
 // the task the daemon next has for a role is delivered only when that role's turn is over. The
 // phase-ended row (record.PhaseEnded) is what tells it, published to that role's own Envoy topic in
 // the same drain as the start: the tester in testing, the reviewer in reviewing whether or not it
 // completed its round, the merger in merging, and the implementer in retro, which is told besides
 // that its implementing task follows. The message is the daemon's own sentence, pinned here for
-// each of the five, and it ends with the reason the architect's checks-red notice carries, behind
-// the `Reason:` label a started worker's task carries it under, so the check and workflow names
-// GitHub supplies stand apart from the daemon's own words. It is no
+// each of the five, and it ends with the reason the architect's notice carries, behind
+// the `Reason:` label a started worker's task carries it under, so the branch names GitHub
+// supplies stand apart from the daemon's own words. It is no
 // architect notice: the architect's own notice goes out beside it, to the architect's topic.
-func TestACIRedTellsTheRoleWhosePhaseEndedOnItsOwnTopic(t *testing.T) {
-	const red = "CI is red at sha-1: ci"
+func TestAConflictTellsTheRoleWhosePhaseEndedOnItsOwnTopic(t *testing.T) {
+	const why = "the head conflicts with main: GitHub runs no checks on it; merge main forward"
 	tail := " Nothing of yours is stopped: your turn, your jobs, your process and your session run on." +
 		" The workspace is the implementing phase's now, so stop writing it at once and leave whatever you have uncommitted." +
-		" Reason: " + red + "."
+		" Reason: " + why + "."
 	for _, tc := range []struct {
 		name   string
 		from   phase.Phase
@@ -47,33 +48,33 @@ func TestACIRedTellsTheRoleWhosePhaseEndedOnItsOwnTopic(t *testing.T) {
 		message     string
 	}{
 		{name: "the tester in testing", from: phase.Testing, status: "testing", role: claim.RoleTester,
-			message: "LEGION-208: CI went red, so your testing phase has ended and the issue is in implementing now." + tail},
+			message: "LEGION-208: the daemon ended your testing phase, and the issue is in implementing now." + tail},
 		{name: "the reviewer in a round it completed", from: phase.Reviewing, status: "needs_review", role: claim.RoleReviewer,
-			message: "LEGION-208: CI went red, so your reviewing phase has ended and the issue is in implementing now." + tail},
+			message: "LEGION-208: the daemon ended your reviewing phase, and the issue is in implementing now." + tail},
 		{name: "the reviewer in a round it did not complete", from: phase.Reviewing, status: "needs_review", role: claim.RoleReviewer, uncompleted: true,
-			message: "LEGION-208: CI went red, so your reviewing phase has ended and the issue is in implementing now." + tail},
+			message: "LEGION-208: the daemon ended your reviewing phase, and the issue is in implementing now." + tail},
 		{name: "the merger in merging", from: phase.Merging, status: "retro", role: claim.RoleMerger,
-			message: "LEGION-208: CI went red, so your merging phase has ended and the issue is in implementing now." + tail},
+			message: "LEGION-208: the daemon ended your merging phase, and the issue is in implementing now." + tail},
 		{name: "the implementer in retro", from: phase.Retro, status: "retro", role: claim.RoleImplementer,
-			message: "LEGION-208: CI went red, so your retro phase has ended and the issue is in implementing now." +
+			message: "LEGION-208: the daemon ended your retro phase, and the issue is in implementing now." +
 				" Your implementing task follows." + tail},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			publisher := &outboxPublisher{}
-			runner, sup, pool := redRunner(t, tc.from, tc.status, tc.uncompleted, publisher)
+			runner, sup, pool := conflictRunner(t, tc.from, tc.status, tc.uncompleted, publisher)
 			implementer := startedClaim(t, sup, claim.RoleImplementer)
 
-			applyTheRed(t, ctx, pool, runner)
+			applyTheConflict(t, ctx, pool, runner)
 			if err := runner.RunOnce(ctx); err != nil {
-				t.Fatalf("run the red's effects: %v", err)
+				t.Fatalf("run the conflict's effects: %v", err)
 			}
 
-			// The start ran in the same drain, and the implementer holds the CI-red task.
+			// The start ran in the same drain, and the implementer holds the conflict task.
 			implementer.Wait()
 			held := implementer.Claim()
-			if held.Pending == nil || !strings.Contains(held.Pending.Task, "Phase: implementing.") || !strings.Contains(held.Pending.Task, red) {
-				t.Fatalf("the implementer is %s holding %+v, want the implementing task naming the red: its start waits for nothing", held.State, held.Pending)
+			if held.Pending == nil || !strings.Contains(held.Pending.Task, "Phase: implementing.") || !strings.Contains(held.Pending.Task, why) {
+				t.Fatalf("the implementer is %s holding %+v, want the implementing task naming the conflict: its start waits for nothing", held.State, held.Pending)
 			}
 			topic := notify.RoleTopicPrefix + string(mustClaimToken(t, "LEGION-208", tc.role))
 			var told []outboxPublish
@@ -104,7 +105,7 @@ func TestACIRedTellsTheRoleWhosePhaseEndedOnItsOwnTopic(t *testing.T) {
 				t.Fatalf("the architect was told checks-red %d times, want once beside the phase-ended message", notices)
 			}
 			if left := outboxRows(t, pool); left != 0 {
-				t.Fatalf("outbox rows left = %d, want every row of the red run", left)
+				t.Fatalf("outbox rows left = %d, want every row of the conflict run", left)
 			}
 		})
 	}
@@ -116,14 +117,14 @@ func TestACIRedTellsTheRoleWhosePhaseEndedOnItsOwnTopic(t *testing.T) {
 func TestAPhaseEndedMessageNobodyHoldsEndsAndTheStartGoesOn(t *testing.T) {
 	ctx := context.Background()
 	publisher := &holderPublisher{}
-	runner, sup, pool := redRunner(t, phase.Testing, "testing", false, publisher)
+	runner, sup, pool := conflictRunner(t, phase.Testing, "testing", false, publisher)
 	implementer := startedClaim(t, sup, claim.RoleImplementer)
 	topic := notify.RoleTopicPrefix + string(mustClaimToken(t, "LEGION-208", claim.RoleTester))
 	publisher.setAbsent(topic)
 
-	applyTheRed(t, ctx, pool, runner)
+	applyTheConflict(t, ctx, pool, runner)
 	if err := runner.RunOnce(ctx); err != nil {
-		t.Fatalf("run the red's effects: %v", err)
+		t.Fatalf("run the conflict's effects: %v", err)
 	}
 
 	implementer.Wait()
@@ -152,7 +153,7 @@ func TestAPhaseEndedMessageNobodyHoldsEndsAndTheStartGoesOn(t *testing.T) {
 func TestAPhaseEndedMessageRetriesEveryFailureButNoHolder(t *testing.T) {
 	ctx := context.Background()
 	row := mustOutboxRow(t, "LEGION-208", record.PhaseEnded{Role: claim.RoleTester, From: phase.Testing,
-		To: phase.Implementing, Reason: "CI is red at sha-1: ci"}, time.Now())
+		To: phase.Implementing, Reason: "the head conflicts with main"}, time.Now())
 	row.ID = 61
 	publisher := &outboxPublisher{}
 	runner := &outbox{project: "legion", notices: publisher, log: quietLogger()}
@@ -180,11 +181,11 @@ func TestAPhaseEndedMessageRetriesEveryFailureButNoHolder(t *testing.T) {
 	}
 }
 
-// redRunner is an outbox runner over an isolated database holding LEGION-208 in from, with the
-// pull request a red is about to settle on and the phase rows of the roles that worked it, wired to
+// conflictRunner is an outbox runner over an isolated database holding LEGION-208 in from, with the
+// pull request about to be read as conflicting and the phase rows of the roles that worked it, wired to
 // the workflow engine as production wires it: a fact applied against the pool queues its rows, and
 // one drain runs them.
-func redRunner(t *testing.T, from phase.Phase, status string, uncompleted bool, publisher notify.Publisher) (*outbox, *supervisor, *pgxpool.Pool) {
+func conflictRunner(t *testing.T, from phase.Phase, status string, uncompleted bool, publisher notify.Publisher) (*outbox, *supervisor, *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
 	pool := isolatedOutboxPool(t)
@@ -195,7 +196,7 @@ func redRunner(t *testing.T, from phase.Phase, status string, uncompleted bool, 
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: issue.Key, Repo: "acme/widgets",
 			Number: 86, Branch: "legion/LEGION-208", HeadSHA: "sha-1", HeadUpdatedAt: time.Now(), Failing: []string{},
-			CheckRuns: []record.AttemptRun{}, Required: []string{"ci"}}); err != nil {
+			CheckRuns: []record.AttemptRun{}, Base: "main"}); err != nil {
 			return err
 		}
 		if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "implement-claim"}); err != nil {
@@ -229,7 +230,7 @@ func redRunner(t *testing.T, from phase.Phase, status string, uncompleted bool, 
 }
 
 // startedClaim creates role's claim on LEGION-208 as a launch that has not registered yet, so the
-// start the red queues finds it and hands it its task: what the claim then holds is what the start
+// start the conflict queues finds it and hands it its task: what the claim then holds is what the start
 // delivered.
 func startedClaim(t *testing.T, sup *supervisor, role claim.Role) *supervise.Machine {
 	t.Helper()
@@ -241,13 +242,13 @@ func startedClaim(t *testing.T, sup *supervisor, role claim.Role) *supervise.Mac
 	return machine
 }
 
-// applyTheRed settles the required check red on the pull request's head, the fact that sends the
-// work back to implementing.
-func applyTheRed(t *testing.T, ctx context.Context, pool *pgxpool.Pool, runner *outbox) {
+// applyTheConflict records GitHub's read of the head as conflicting with its base, the fact that
+// sends the work back to implementing.
+func applyTheConflict(t *testing.T, ctx context.Context, pool *pgxpool.Pool, runner *outbox) {
 	t.Helper()
-	result, err := intake.ApplyFact(ctx, pool, "github", "red", intake.PullRequestChecks{Repo: "acme/widgets", Number: 86, HeadSHA: "sha-1",
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "red-1", Failing: []string{"ci"}}, runner.handlers...)
+	result, err := intake.ApplyFact(ctx, pool, "github", "conflict", intake.PullRequestMergeability{Repo: "acme/widgets", Number: 86,
+		HeadSHA: "sha-1", Base: "main", Mergeable: record.MergeabilityConflicting}, runner.handlers...)
 	if err != nil || result.Refusal != nil {
-		t.Fatalf("apply the red verdict = %+v, %v", result, err)
+		t.Fatalf("apply the conflicting head = %+v, %v", result, err)
 	}
 }

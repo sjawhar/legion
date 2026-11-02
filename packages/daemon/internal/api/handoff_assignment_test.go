@@ -38,7 +38,7 @@ func TestAStaleAssignmentsCompletionDoesNotTakeTheNextTestingPhases(t *testing.T
 		Project: testProject, Title: "LEGION-208", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
 	if err := h.store.Tx(ctx, func(tx pgx.Tx) error {
 		return record.NewStore().PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "acme/widgets",
-			Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{}, Required: []string{"pytest"}})
+			Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{}})
 	}); err != nil {
 		t.Fatalf("record the pull request: %v", err)
 	}
@@ -50,13 +50,12 @@ func TestAStaleAssignmentsCompletionDoesNotTakeTheNextTestingPhases(t *testing.T
 	tester := newLiveClaim(t, h, "LEGION-208", claim.RoleTester)
 	firstTesting := takeStart(t, h, tester.token, "LEGION-208", claim.RoleTester)
 
-	// CI goes red at the head while the tester works. The issue goes back to implementing, the
-	// implementer starts at once, and the tester's turn, its process and its claim are untouched:
-	// its delivery is still pending and confirmed.
-	if result, err := intake.ApplyFact(ctx, h.store.Pool(), "github", "red", intake.PullRequestChecks{Repo: "acme/widgets", Number: 42,
-		HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "pytest", ID: 7}}, Generation: 1, Snapshot: "red-head",
-		Failing: []string{"pytest"}}, engine); err != nil || result.Refusal != nil {
-		t.Fatalf("apply the red settlement = %+v, %v", result.Refusal, err)
+	// The head starts conflicting with its base while the tester works. The issue goes back to
+	// implementing, the implementer starts at once, and the tester's turn, its process and its
+	// claim are untouched: its delivery is still pending and confirmed.
+	if result, err := intake.ApplyFact(ctx, h.store.Pool(), "github", "conflict", intake.PullRequestMergeability{Repo: "acme/widgets", Number: 42,
+		HeadSHA: "head", Base: "main", Mergeable: record.MergeabilityConflicting}, engine); err != nil || result.Refusal != nil {
+		t.Fatalf("apply the conflicting head = %+v, %v", result.Refusal, err)
 	}
 	assertIssuePhase(t, h, phase.Implementing)
 	testerMachine, ok := h.supervisor.Machine(tester.token)
@@ -64,13 +63,13 @@ func TestAStaleAssignmentsCompletionDoesNotTakeTheNextTestingPhases(t *testing.T
 		t.Fatal("no machine for the tester")
 	}
 	if p := testerMachine.Claim().Pending; p == nil || p.ConfirmedAt.IsZero() || p.Assignment != firstTesting {
-		t.Fatalf("the tester's delivery after the red is %+v, want its first assignment still confirmed and pending", p)
+		t.Fatalf("the tester's delivery after the conflict is %+v, want its first assignment still confirmed and pending", p)
 	}
 
-	// The implementer's second round ends and the issue is in testing again: the tester's second
+	// The implementer's second pass ends and the issue is in testing again: the tester's second
 	// assignment, which its first task's turn knows nothing of.
 	takeStart(t, h, implementer.token, "LEGION-208", claim.RoleImplementer)
-	completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "fixed the red", Commit: "handoff-2"}))
+	completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "merged the base forward", Commit: "handoff-2"}))
 	assertIssuePhase(t, h, phase.Testing)
 	_, secondStart := queuedStart(t, h, "LEGION-208", claim.RoleTester)
 	if secondStart.Assignment == "" || secondStart.Assignment == firstTesting {
@@ -193,7 +192,7 @@ func TestAHeldPhasesRetryKeepsTheAssignmentItsWorkerStillServes(t *testing.T) {
 		Project: testProject, Title: "LEGION-208", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
 	if err := h.store.Tx(ctx, func(tx pgx.Tx) error {
 		return record.NewStore().PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "acme/widgets",
-			Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{}, Required: []string{"pytest"}})
+			Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{}})
 	}); err != nil {
 		t.Fatalf("record the pull request: %v", err)
 	}
@@ -239,14 +238,14 @@ func TestAHeldPhasesRetryKeepsTheAssignmentItsWorkerStillServes(t *testing.T) {
 
 // newAssignmentHarness serves the daemon's routes with the workflow deciding every fact they
 // apply, over a real Postgres and the GitHub stand-in a completing implementer reads. It answers
-// the engine the test applies its own facts with — a settlement, a failed claim, an architect's
-// retry — and the recorder of every fact the routes applied.
+// the engine the test applies its own facts with — a conflicting head, a failed claim, an
+// architect's retry — and the recorder of every fact the routes applied.
 func newAssignmentHarness(t *testing.T) (*harness, *workflow.Engine, *factRecorder) {
 	t.Helper()
 	h := newHarness(t)
 	github := newHandoffGitHub(t)
 	facts := &factRecorder{}
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3, MaxFixAttempts: 3},
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,

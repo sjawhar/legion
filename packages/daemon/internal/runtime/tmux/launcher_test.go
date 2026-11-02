@@ -185,10 +185,10 @@ func TestLaunchRefusesWhatItsLaunchersCannotRun(t *testing.T) {
 
 	resumed := spec
 	resumed.ResumeSessionFile = filepath.Join(stateDir, "sessions", "--work--", "2026-10-26T00-00-00-000Z_ses-gone.jsonl")
-	want = "Refusing to start LEGION-43 fresh while respawning: recorded OMP session file is missing: " + resumed.ResumeSessionFile +
+	want = "resume " + string(resumed.Claim) + ": the recorded session file is missing: no OMP session at " + resumed.ResumeSessionFile +
 		", and no other folder of " + filepath.Join(stateDir, "sessions") + " or of the pane's sessions directory " +
 		filepath.Join(stateDir, "home", ".omp", "agent", "sessions") + " holds that session"
-	if _, err := rt.Resume(context.Background(), nil, resumed); err == nil || errors.Is(err, runtime.ErrSessionFileMissing) || err.Error() != want {
+	if _, err := rt.Resume(context.Background(), nil, resumed); !errors.Is(err, runtime.ErrSessionFileMissing) || err.Error() != want {
 		t.Errorf("Resume from a missing session = %v, want %q", err, want)
 	}
 	if entries, _ := os.ReadDir(filepath.Join(stateDir, "secrets")); len(entries) != 0 {

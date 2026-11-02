@@ -1,0 +1,16 @@
+-- 20261029120400_pull_request_base_moved.up.sql — the commit a push left the pull request's base branch at
+-- (record.PullRequest.BaseMoved), recorded for every open pull request on that base by the base
+-- push's handler (workflow's basePush).
+--
+-- GitHub recomputes whether a head still merges into its base when the base moves, and sends no
+-- event for the pull request while it does, so a head the record holds as clean can already be
+-- behind or dirty with nothing in the record saying so. The push onto the base is the only notice,
+-- and the commit it left the base at is what says which base the recorded mergeability was read
+-- against: while it is set, the next read of the pull request is known to be needed rather than
+-- waited for.
+--
+-- Every existing row takes '', which reads as "no push onto the base recorded", so no read is
+-- owed for a base push the daemon never saw. A base that moved before this release is read again
+-- at the issue's next event or handoff, and at the daemon's next start, so there is nothing for
+-- the migration to derive.
+alter table pull_requests add column base_moved text not null default '';

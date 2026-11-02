@@ -129,7 +129,7 @@ const STALL_STATE = {
     withoutWebhookApp: [],
     caches: [],
   },
-  settings: { max_fix_attempts: 3, worker_boot_timeout_seconds: 120 },
+  settings: { review_round_cap: 3, worker_boot_timeout_seconds: 120 },
   consumers: [],
 };
 
@@ -319,16 +319,20 @@ test.skipIf(omp === undefined && !onActions)(
     // issue's record before it was sent, and the handoff_complete read it again, found the pushed
     // commit carrying .legion/STALL-2/implement.json in its workspace with the pane's jj, minted
     // a grant in-process and posted the completion with both: no grant file, no `legion` command,
-    // and no handoff read by the daemon.
+    // and no handoff read by the daemon. Each of the two runs the host settled also reported the
+    // turn it ended to the daemon (`src/turn-outcome.ts`); the turn that ended on the tool call
+    // ends no run of its own, so it earns no report.
     expect(
       pane.requests.map((request) => request.path).filter((p) => p.startsWith("/legion/"))
     ).toEqual([
       "/legion/v1/claims/register",
       "/legion/v1/claims/ready",
       "/legion/v1/state",
+      "/legion/v1/claims/turn-outcome",
       "/legion/v1/state",
       "/legion/v1/grants",
       "/legion/v1/handoff/complete",
+      "/legion/v1/claims/turn-outcome",
     ]);
     expect(pane.handoffCommit).toMatch(/^[0-9a-f]{40}$/);
     expect(pane.completions()).toEqual([
@@ -336,7 +340,6 @@ test.skipIf(omp === undefined && !onActions)(
         grantId: "stall-grant-1",
         summary: "Stall proof done.",
         verdict: "",
-        ready: false,
         commit: pane.handoffCommit,
       },
     ]);
@@ -451,12 +454,18 @@ test.skipIf(omp === undefined && !onActions)(
     // only once it was over.
     expect(reminderTurn - waitingTurn).toBeGreaterThanOrEqual(1_400);
     // Nothing arrived from outside in between: in that gap the pane spoke only to the daemon,
-    // for the reminder's own record check, and to the listener for its session registration.
+    // for the reminder's own record check and the outcome of the turn that bought the wait, and
+    // to the listener for its session registration.
     const between = seen
       .filter((request) => request.at > waitingTurn && request.at < reminderTurn)
       .map((request) => request.path);
     expect(
-      between.filter((path) => path !== "/legion/v1/state" && path !== "/v1/interests/subscribe")
+      between.filter(
+        (path) =>
+          path !== "/legion/v1/state" &&
+          path !== "/legion/v1/claims/turn-outcome" &&
+          path !== "/v1/interests/subscribe"
+      )
     ).toEqual([]);
     // What the worker is told once its wait is over: the reminding repeats, rather than this
     // being the last it hears until something arrives.

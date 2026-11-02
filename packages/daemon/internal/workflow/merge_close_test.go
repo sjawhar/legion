@@ -118,7 +118,7 @@ func TestAChildsMergeClosesItAndHandsItsImplementerTheFirstLook(t *testing.T) {
 func TestARootsCloseLingersItsTreeAndOpensItsCheckBehindTheLingersRows(t *testing.T) {
 	rig := seedMergedRoot(t, record.Issue{Key: "LEGION-209", Phase: phase.Implementing, Status: "in_progress"})
 	pool := rig.pool
-	assertPhase(t, pool, phase.AwaitingMerge)
+	assertPhase(t, pool, phase.Merging)
 
 	rig.apply("child-done", intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.closed", Status: "done", Title: "LEGION-209", Parent: "LEGION-208", Rank: "V1"})
 	assertPhase(t, pool, phase.Done)
@@ -245,12 +245,12 @@ func TestAChildClosedAsDoneWithNoPullRequestOpensNoCheck(t *testing.T) {
 	}
 }
 
-// A root's merge while a child runs records the merge and waits: the root stays in awaiting_merge
+// A root's merge while a child runs records the merge and waits: the root stays in merging
 // with nothing written to Dispatch, no linger deadline, no member suspended and its slot still
 // held, and its architect is told once, by name, which issue the close waits for.
 func TestAMergedRootWaitsWhileItsChildRuns(t *testing.T) {
 	rig := seedMergedRoot(t, record.Issue{Key: "LEGION-209", Phase: phase.Implementing, Status: "in_progress"})
-	assertPhase(t, rig.pool, phase.AwaitingMerge)
+	assertPhase(t, rig.pool, phase.Merging)
 	var lingering bool
 	if err := rig.pool.QueryRow(context.Background(), "select linger_until is not null from issues where key = 'LEGION-208'").Scan(&lingering); err != nil || lingering {
 		t.Fatalf("the waiting root lingers = %t, %v; want no linger deadline", lingering, err)
@@ -297,7 +297,7 @@ func TestAWaitingRootsChildCompletesItsPhase(t *testing.T) {
 	if got := issueAt(t, rig.pool, "LEGION-209"); got != phase.Testing {
 		t.Fatalf("the child after its completion = %s, want testing", got)
 	}
-	assertPhase(t, rig.pool, phase.AwaitingMerge)
+	assertPhase(t, rig.pool, phase.Merging)
 }
 
 // The architect is told once, when the wait begins. A second child leaving while a third still
@@ -311,11 +311,11 @@ func TestAWaitingRootTellsItsArchitectOnlyWhenTheWaitBegins(t *testing.T) {
 	assertWaitNotice(t, rig.pool, "LEGION-209, LEGION-210, LEGION-211")
 
 	rig.apply("child-parked", intake.DispatchIssue{Key: "LEGION-210", Seq: 2, Type: "issue.updated", Status: "backlog", Title: "LEGION-210", Parent: "LEGION-208", Rank: "V2"})
-	assertPhase(t, rig.pool, phase.AwaitingMerge)
+	assertPhase(t, rig.pool, phase.Merging)
 	assertWaitNotice(t, rig.pool, "LEGION-209, LEGION-210, LEGION-211")
 
 	rig.apply("boot", intake.DaemonBooted{Boot: 1})
-	assertPhase(t, rig.pool, phase.AwaitingMerge)
+	assertPhase(t, rig.pool, phase.Merging)
 	assertWaitNotice(t, rig.pool, "LEGION-209, LEGION-210, LEGION-211")
 }
 
@@ -329,7 +329,7 @@ func TestAMergedRootClosesWhenItsLastOpenChildLeaves(t *testing.T) {
 		child record.Issue
 		leave func(t *testing.T, rig mergedRootRig)
 	}{
-		{name: "the child's own merge", child: record.Issue{Key: "LEGION-209", Phase: phase.AwaitingMerge, Status: "retro"}, leave: func(t *testing.T, rig mergedRootRig) {
+		{name: "the child's own merge", child: record.Issue{Key: "LEGION-209", Phase: phase.Merging, Status: "retro"}, leave: func(t *testing.T, rig mergedRootRig) {
 			seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 43, Branch: "legion/LEGION-209", HeadSHA: "head-43", Failing: []string{}})
 			rig.apply("child-merged", intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 43, MergeSHA: "merge-43"})
 		}},
@@ -370,24 +370,24 @@ func TestAMergedRootClosesWhenItsLastOpenChildLeaves(t *testing.T) {
 	}
 }
 
-// An issue that reaches awaiting_merge on an already-merged pull request waits the same way while
+// An issue that reaches merging on an already-merged pull request waits the same way while
 // a child runs, and its architect is told there: the notice it got when the pull request merged
-// could not say which issues the close waits for, since the issue was not awaiting the merge then.
-func TestAnIssueReachingAwaitingMergeOnAMergedPullRequestWaitsForItsTree(t *testing.T) {
+// could not say which issues the close waits for, since the issue had not reached merging then.
+func TestAnIssueReachingMergingOnAMergedPullRequestWaitsForItsTree(t *testing.T) {
 	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Retro, Generation: 1, Status: "retro", Rank: "U"})
 	parent := "LEGION-208"
 	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "V"})
 	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4, ApprovedVersion: new(4)})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implementer-claim"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestMerged, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head",
 		MergeSHA: "merge", Failing: []string{}, CheckRuns: []record.AttemptRun{}})
 
-	result := applyFacts(t, pool, readyEngine(""))("ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true, Summary: readyPacket, Commit: "head"})
+	result := applyFacts(t, pool, mergingEngine())("retro", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implementer-claim", Generation: 1, Summary: "retro done", Commit: "head"})
 	if result.Refusal != nil {
-		t.Fatalf("the merger's READY = %+v, want it accepted", result.Refusal)
+		t.Fatalf("the implementer's retro completion = %+v, want it accepted", result.Refusal)
 	}
-	assertPhase(t, pool, phase.AwaitingMerge)
+	assertPhase(t, pool, phase.Merging)
 	assertOutboxCount(t, pool, "linger_close", 0)
 	if got := superviseRequests(t, pool, "suspend"); len(got) != 0 {
 		t.Fatalf("suspend rows = %v, want none while the close waits", got)
@@ -415,7 +415,7 @@ func TestWhichChildrenHoldAMergedRootsCloseUp(t *testing.T) {
 			want := phase.Done
 			notices := 0
 			if tc.waits {
-				want, notices = phase.AwaitingMerge, 1
+				want, notices = phase.Merging, 1
 			}
 			assertPhase(t, rig.pool, want)
 			if got := architectNotices(t, rig.pool); len(got) != notices {
@@ -439,13 +439,12 @@ func TestARootWithNoOpenTreeClosesAtItsMerge(t *testing.T) {
 	}
 }
 
-// A merged root stands in awaiting_merge for as long as its tree runs, so the two facts that would
-// take an awaiting pull request back to implementing can land on a merge GitHub already made. A
-// synchronize past the head READY named is older than the merge, since GitHub synchronizes only an
-// open pull request, and changes nothing (pullRequestSynchronized), and a red required check
-// withdraws nothing there, as it never has (classify.RedWithdrawsReady): there is nothing left to
-// merge or to re-implement.
-func TestNothingWithdrawsTheREADYOfAWaitingMergedRoot(t *testing.T) {
+// A merged root stands in merging for as long as its tree runs, so the facts that would take an
+// open pull request back to implementing can land on a merge GitHub already made: a synchronize
+// past the head the merger merged is older than the merge, since GitHub synchronizes only an open
+// pull request, and moves nothing there (pullRequestSynchronized), and a red check moves nothing
+// anywhere. There is nothing left to merge or to re-implement.
+func TestNothingMovesAWaitingMergedRoot(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		fact intake.Fact
@@ -456,14 +455,13 @@ func TestNothingWithdrawsTheREADYOfAWaitingMergedRoot(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rig := seedMergedRoot(t, record.Issue{Key: "LEGION-209", Phase: phase.Implementing, Status: "in_progress"})
-			seedPhase(t, rig.pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: readyPacket})
 			rig.apply("moved", tc.fact)
-			assertPhase(t, rig.pool, phase.AwaitingMerge)
+			assertPhase(t, rig.pool, phase.Merging)
 			if got := superviseRequests(t, rig.pool, "start"); len(got) != 0 {
-				t.Fatalf("start rows = %v, want none: no READY was withdrawn", got)
+				t.Fatalf("start rows = %v, want none: nothing moved", got)
 			}
 			if got := messageBodies(t, rig.pool); len(got) != 0 {
-				t.Fatalf("Dispatch messages = %q, want none: no READY was withdrawn", got)
+				t.Fatalf("Dispatch messages = %q, want none: nothing moved", got)
 			}
 			for _, notice := range architectNotices(t, rig.pool) {
 				if notice.Kind != "pr-merged" {
@@ -474,7 +472,7 @@ func TestNothingWithdrawsTheREADYOfAWaitingMergedRoot(t *testing.T) {
 	}
 }
 
-// A merged root can stand in awaiting_merge for days, and a pull request opened from its branch in
+// A merged root can stand in merging for days, and a pull request opened from its branch in
 // that time is new work, not the change the root waits to close on: GitHub has already merged that
 // one and never sends the merge again. The root still closes on that merge when its last child
 // leaves, its production check reading pull request #42 at merge. The tree's slot is admission's,
@@ -484,7 +482,7 @@ func TestANewPullRequestFromAWaitingRootsBranchLeavesItsMergeStanding(t *testing
 	rig := seedMergedRoot(t, record.Issue{Key: "LEGION-209", Phase: phase.Implementing, Status: "in_progress"})
 	rig.apply("follow-up-opened", intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 99, Branch: "legion/LEGION-208", HeadSHA: "follow-up",
 		UpdatedAt: time.Date(2026, 10, 20, 4, 0, 0, 0, time.UTC)})
-	assertPhase(t, rig.pool, phase.AwaitingMerge)
+	assertPhase(t, rig.pool, phase.Merging)
 
 	rig.apply("child-parked", intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "backlog", Title: "LEGION-209", Parent: "LEGION-208", Rank: "V1"})
 	assertPhase(t, rig.pool, phase.Done)
@@ -510,7 +508,7 @@ func seedMergedRoot(t *testing.T, children ...record.Issue) mergedRootRig {
 	now := time.Date(2026, 10, 19, 4, 0, 0, 0, time.UTC)
 	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: 48 * time.Hour, Clock: func() time.Time { return now }}, nil)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-		Phase: phase.AwaitingMerge, Generation: 7, Status: "retro", Rank: "U", LastDispatchSeq: 1})
+		Phase: phase.Merging, Generation: 7, Status: "retro", Rank: "U", LastDispatchSeq: 1})
 	seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0})
 	parent := "LEGION-208"
 	for i, child := range children {
@@ -572,7 +570,7 @@ func seedMergingChild(t *testing.T, pool *pgxpool.Pool, root record.Issue) {
 	t.Helper()
 	seedIssue(t, pool, root)
 	parent := root.Key
-	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: root.Key, Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.AwaitingMerge, Generation: 7, Status: "retro", Rank: "V", LastDispatchSeq: 1})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: root.Key, Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Merging, Generation: 7, Status: "retro", Rank: "V", LastDispatchSeq: 1})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleMerger, Claim: "child-merger", HandoffCommit: "head-43"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 43, Branch: "legion/LEGION-209", HeadSHA: "head-43", Failing: []string{}})
 }

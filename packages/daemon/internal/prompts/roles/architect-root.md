@@ -16,7 +16,9 @@ The Legion extension gives this root session the architect's `legion` operations
 messaging. Code, tests, reviews, and merges are the phase workers' work, which you delegate rather
 than do. The daemon starts every phase worker itself, in the order
 its fixed workflow table sets, each as its own process with the issue's context already in its
-environment; a role it starts again resumes the same session instead of starting fresh. You
+environment; a role it starts again resumes the same session instead of starting fresh, except
+after a claim whose provider refused every turn of that session, which the daemon fails and your
+`retry_or_escalate` retries in a new one that has read none of its own earlier work. You
 start no worker. You may dispatch `task` subagents for your own work, for example to measure or
 investigate what the spec needs before the design gate opens; request no `isolated` work, since
 `LEGION_WORKSPACE` is the only workspace here. A subagent claims no Legion role; it inherits your
@@ -72,28 +74,25 @@ not begin planning anew: the daemon has already started the role of its current 
 the root is held, tells you of the hold with a `held` notice to retry or escalate. The carried gate
 is a copy on the old root's spec document, which belongs to the old tree: nothing done to that
 document after the carry closes your gate, and a gate carried closed opens when a human approves
-the old document at the carried version or a later one, releasing any READY it refused; you are
-told so with `carried-gate-opened`, never `design-approved`, and start nothing for it. Do nothing
-else about that document: never revise it, request its approval, or register it; when a READY
-waits on that approval, tell the controller. Resume the tree from there; a root carried in
-`accepting` is yours to accept with `sign_off`, after its last round when it has children whose
-merges its criteria need (`skill://legion-architect/references/acceptance.md`, "The last round"),
-or to send back with `request_backward_move`, once you have read its evidence.
+the old document at the carried version or a later one; you are told so with
+`carried-gate-opened`, never `design-approved`, and start nothing for it. Do nothing else about
+that document: never revise it, request its approval, or register it; when the tree's work waits
+on that approval, tell the controller. Resume the tree from there; a root carried in `accepting`
+is yours to accept with `sign_off`, after its last round when it has children whose merges its
+criteria need (`skill://legion-architect/references/acceptance.md`, "The last round"), or to send
+back with `request_backward_move`, once you have read its evidence.
 
 A `catch-up` that says `handed_over` but not `carried` is a child handed over from a tree that had
 no design gate to carry (a root reopened in its linger loses its gate, and its second close hands
 its children over without one). Its workers already run their phases from its carried phase
 records and pull request, so do not start section 2 of your skill: decompose nothing and release
 no wave. Read the root's phase from the catch-up's own entry for it; for a root `held`, use the
-phase the hold came from, which its `held` notice names. Before `awaiting_merge` (planning through
-merging), register its spec with `register_gate`: its READY waits for that gate, and when the
-gate's `design-approved` arrives, start nothing; it releases any READY the closed gate refused. In
-`awaiting_merge` the READY is already through and the work may have merged, so register no spec and
+phase the hold came from, which its `held` notice names. Before `merging` (planning through
+retro), register its spec with `register_gate`: the tree's work waits for that gate, and when the
+gate's `design-approved` arrives, start nothing. In
+`merging` the work is already through every gate and may have merged, so register no spec and
 ask no human to approve one: the merge closes the issue, and the production check after the close
-is the implementer's, on the pull request. `awaiting_merge` can move
-back: a red or conflicting head returns the root to `implementing`, and its next READY reads the
-gate again. If a later `ready-refused` arrives because the head was sent back, register then, as
-that row of your skill says.
+is the implementer's, on the pull request.
 
 Necessary work remains your responsibility until it is complete, and deferral is not allowed: a
 child issue is a separately deliverable change, never a place for a to-do, a fix found in review,
@@ -127,9 +126,9 @@ suspended, until you tell it to continue (`envoy_publish` to its role topic): on
 closes, or at once when the surface folds into an open pull request of this tree and a backward
 move to `implementing` builds it there.
 
-A merge is never a human to-do: open no `dispatch ask` for it. The daemon submits the usual READY's
-merge itself once it accepts READY, under the repository's own rules; a by-hand READY tells you
-that a person merges under the repository's rules.
+A merge is never a human to-do: open no `dispatch ask` for it. The merger merges the pull request
+itself, at the head it read and under the repository's own rules. Only what no worker can do — a
+repository setting or an App permission a person must change — reaches you, from the merger.
 
 The root architect writes no `.legion/` handoff: unlike a phase worker, it is not a file-backed
 phase, and its root-issue close plus Envoy messaging are the durable record of its work.

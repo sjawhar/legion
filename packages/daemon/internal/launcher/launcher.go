@@ -426,9 +426,17 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 	}
 	body, _ := json.Marshal(command)
 	// refuse is how a start that cannot run answers: the refusal is remembered under the command's
-	// id, so a retry of that id is answered with it rather than tried again.
-	refuse := func(message string) shimwire.LauncherStartResult {
-		result := shimwire.LauncherStartResult{ID: command.ID, Error: message}
+	// id, so a retry of that id is answered with it rather than tried again. A refusal over the
+	// session to resume names its kind in the answer's own field, and the remembered answer carries
+	// it too, so the retry says the same thing (shimwire.SessionRefusal).
+	refuse := func(cause error) shimwire.LauncherStartResult {
+		result := shimwire.LauncherStartResult{ID: command.ID, Error: cause.Error()}
+		for _, kind := range []shimwire.SessionRefusal{shimwire.SessionGone, shimwire.SessionStoreUnreachable} {
+			if errors.Is(cause, kind) {
+				result.Session = kind
+				break
+			}
+		}
 		m.remember(command.ID, body, result)
 		return result
 	}
@@ -456,39 +464,39 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 	// lookup reaches the table through and which the child must find already bound.
 	dir, err := m.writeFiles(command)
 	if err != nil {
-		return refuse(err.Error())
+		return refuse(err)
 	}
 	proxy, clientURL, err := m.startSession(ctx, command.Generation, dir)
 	var keeper *claudeKeeper
 	// abandon refuses a start that made the generation's directory, undoing what it made first.
-	abandon := func(message string) shimwire.LauncherStartResult {
+	abandon := func(cause error) shimwire.LauncherStartResult {
 		keeper.close()
 		endSession(proxy, dir)
-		return refuse(message)
+		return refuse(cause)
 	}
 	if err != nil {
-		return abandon(err.Error())
+		return abandon(err)
 	}
 	// A Claude Code child's session is kept in the session table (claudeKeeper): the order is
 	// the resume's lookup, which decides the recreated-workspace notice from the row's last save,
 	// then the restore of the session's files from their rows, then the child, then the saves.
 	if keeper, err = newClaudeKeeper(env, command.ResumeFile, clientURL, m.stderr); err != nil {
-		return abandon(err.Error())
+		return abandon(err)
 	}
 	recreated := false
 	var sessions *pgx.Conn
 	if command.ResumeFile != "" {
 		if recreated, sessions, err = resumable(ctx, env, command.ResumeFile, clientURL, m.stderr); err != nil {
-			return abandon(err.Error())
+			return abandon(err)
 		}
 	}
 	if err := keeper.open(ctx, sessions); err != nil {
-		return abandon(err.Error())
+		return abandon(err)
 	}
 	env = mergeEnv(env, []string{WorkspaceRecreatedVariable + "=" + strconv.FormatBool(recreated)})
 	process, err := m.command(command, env)
 	if err != nil {
-		return abandon(err.Error())
+		return abandon(err)
 	}
 	// The orphan reaper must see this PID as the direct child before it can observe its exit, and
 	// stopActive, which takes the lock, either sees this generation or finds the container
@@ -500,11 +508,11 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 			_ = process.status.Close()
 			_ = process.write.Close()
 		}
-		return abandon("the launcher's container is stopping; no generation starts")
+		return abandon(errors.New("the launcher's container is stopping; no generation starts"))
 	}
 	if err := process.start(); err != nil {
 		m.mu.Unlock()
-		return abandon(fmt.Sprintf("start child: %v", err))
+		return abandon(fmt.Errorf("start child: %w", err))
 	}
 	active := &child{generation: command.Generation, pid: process.cmd.Process.Pid, process: process.cmd.Process, dir: dir, status: process.status, output: process.output, proxy: proxy, keeper: keeper, done: make(chan struct{})}
 	m.child = active
@@ -887,10 +895,11 @@ func endSession(proxy *sessionproxy.Proxy, dir string) {
 	_ = os.RemoveAll(dir)
 }
 
-// resumable refuses a resume of a session nothing holds, so it is a launch failure and never a fresh
-// agent: Oh My Pi starts a new session at a --resume path it finds empty. It looks where the child's
-// Oh My Pi will, in the session table (the runtime's runtime.kubernetes.session_store, which must
-// keep sessions in a database: no issue disk holds one), reached as sessionDial reaches it. A
+// resumable refuses a resume of a session nothing holds, so the launcher never starts a fresh
+// agent behind the daemon's back: Oh My Pi starts a new session at a --resume path it finds empty.
+// It looks where the child's Oh My Pi will, in the session table (the runtime's
+// runtime.kubernetes.session_store, which must keep sessions in a database: no issue disk holds
+// one), reached as sessionDial reaches it. A
 // Claude Code resume's file is its transcript's path, `<CLAUDE_CONFIG_DIR>/projects/<dir>/<id>.jsonl`
 // (the session a claude-envoy claim records), which is the very key its launcher kept the
 // transcript's row under (claudeKeeper): the row's mtime_ms is that file's mtime at its last save.
@@ -906,7 +915,7 @@ func endSession(proxy *sessionproxy.Proxy, dir string) {
 func resumable(ctx context.Context, env []string, file, clientURL string, log io.Writer) (recreated bool, conn *pgx.Conn, err error) {
 	sessions, err := newSessionDial(env, clientURL)
 	if err != nil {
-		return false, nil, fmt.Errorf("resume session %s: %v", file, err)
+		return false, nil, fmt.Errorf("resume session %s: %w: %v", file, shimwire.SessionStoreUnreachable, err)
 	}
 	written, conn, err := sessionWritten(ctx, sessions, file)
 	if err != nil {
@@ -928,7 +937,8 @@ func resumable(ctx context.Context, env []string, file, clientURL string, log io
 
 // sessionWritten is when the session a resume names was last written, read from the session table
 // the child's Oh My Pi keeps it in (resumable) through a connection sessions dials, which it returns
-// open. A session the table answers it does not hold is refused at once.
+// open. A table that could not be asked at all is shimwire.SessionStoreUnreachable; a session the
+// table answers it does not hold is shimwire.SessionGone, refused at once.
 func sessionWritten(parent context.Context, sessions sessionDial, file string) (time.Time, *pgx.Conn, error) {
 	var written time.Time
 	var found bool
@@ -937,11 +947,11 @@ func sessionWritten(parent context.Context, sessions sessionDial, file string) (
 		return err
 	})
 	if err != nil {
-		return time.Time{}, nil, fmt.Errorf("resume session %s: %v", file, err)
+		return time.Time{}, nil, fmt.Errorf("resume session %s: %w: %v", file, shimwire.SessionStoreUnreachable, err)
 	}
 	if !found {
 		closeSessions(conn)
-		return time.Time{}, nil, fmt.Errorf("resume session %s: the session table holds no such session", file)
+		return time.Time{}, nil, fmt.Errorf("resume session %s: %w", file, shimwire.SessionGone)
 	}
 	return written, conn, nil
 }

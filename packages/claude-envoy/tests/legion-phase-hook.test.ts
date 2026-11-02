@@ -27,6 +27,8 @@ const implementer: ClaimCapability = {
   issue: "LEGION-208",
   role: "implementer",
   secret: "U2VjcmV0",
+  claimToken: "legion-legion-legion-208-implementer",
+  generation: 1,
 }
 
 /**
@@ -73,6 +75,8 @@ async function harness(
   options: {
     readonly record?: string
     readonly claim?: ClaimCapability
+    /** The state the daemon's record gives the implementer's claim; `working` in the fixture. */
+    readonly claimState?: string
     /** Added to (and overriding) `QUICK_LIMITS` and `LEGION_PROJECT`. */
     readonly env?: Record<string, string | undefined>
     /** False for a session outside a Legion pane, which has no inbox at all. */
@@ -91,7 +95,11 @@ async function harness(
       resolve(import.meta.dir, "../../contracts/fixtures/daemon-api/state.json"),
       "utf8",
     ),
-  )
+  ) as { issues: Record<string, { workers: Record<string, { claim: { state: string } }> }> }
+  const implementerClaim = state.issues["LEGION-208"]?.workers["implementer"]?.claim
+  if (options.claimState !== undefined && implementerClaim !== undefined) {
+    implementerClaim.state = options.claimState
+  }
   const record = async (): Promise<unknown> => {
     const raw = await readFile(file, "utf8").catch(() => undefined)
     return raw === undefined ? undefined : JSON.parse(raw)
@@ -220,23 +228,80 @@ test("a settle that says what it waits on buys the quiet wait, and is reminded o
   }
 })
 
-test("a turn that ended on an API error is settled, answered {} and reminded from the timer", async () => {
+// `StopFailure` runs instead of `Stop` when the turn ended on an API error, and its
+// `${last_assistant_message}` is the error text rather than anything the worker said ("Hooks
+// reference", code.claude.com/docs/en/hooks). That is the provider refusing the turn, so the
+// answer carries no continuation: the host would turn one into another turn at once and the
+// provider would refuse that one the same way, as it did for dispatch://INFRA-264's implementer.
+// One timer is armed all the same, because the task that refused turn carried ended with it and
+// nothing else would wake this worker: a single transient refusal would otherwise leave the issue
+// idle. What stops the reminding of a session the provider refuses for ever is the daemon failing
+// the claim at `launch_failure_limit`, which the test below this one holds.
+test("a turn that ended on an API error carries no continuation, and is woken once by its timer", async () => {
   const { endpoint, record, inbox, close } = await harness({
-    record: recorded("open", 0),
+    record: recorded("open", 0, { lastMessage: "I pushed the branch." }),
     claim: implementer,
   })
   try {
-    // Claude Code ignores what a StopFailure hook returns, so the machine is told this settle can
-    // carry no continuation: it arms the reminder itself, under the guards every armed reminder
-    // has, and the count moves when that reminder is written into the session.
     expect(
-      await endpoint.handle({ event: "StopFailure", lastAssistantMessage: "I pushed the branch." }),
+      await endpoint.handle({
+        event: "StopFailure",
+        lastAssistantMessage: "API Error: Rate limit reached",
+      }),
     ).toEqual({})
-    const said = { reported: false, lastMessage: "I pushed the branch." }
-    expect(await record()).toEqual({ state: "open", count: 0, ...said })
-    await waitFor(async () => inbox.length > 0, "the reminder the failed turn earned")
+    // The words the worker last said stand: the provider's error text is not one of them, and a
+    // turn the worker never read moves nothing.
+    expect(await record()).toEqual({
+      state: "open",
+      count: 0,
+      reported: false,
+      lastMessage: "I pushed the branch.",
+    })
+    // Nothing is sent as the turn ends; the reminder comes from the timer instead.
+    expect(inbox).toEqual([])
+    await waitFor(async () => inbox.length > 0, "the reminder the refused turn's timer carries")
     expect(inbox).toEqual([REMINDER])
-    expect(await record()).toEqual({ state: "open", count: 1, ...said })
+    // One wake, not a run of them: the next refusal arms the next one. An assertion that nothing
+    // more arrives has no signal to await, so this is one of the file's fixed waits, three times
+    // the reminder interval the harness sets above.
+    await Bun.sleep(60)
+    expect(inbox).toEqual([REMINDER])
+    expect(await record()).toEqual({
+      state: "open",
+      count: 1,
+      reported: false,
+      lastMessage: "I pushed the branch.",
+    })
+  } finally {
+    await close()
+  }
+})
+
+// The daemon failing this role's claim is its word that this session is finished: the retry it
+// starts runs in a session of its own. It is what ends the reminding here, since this host sees
+// a refused turn only as the `StopFailure` of the turn it refused.
+test("no reminder is sent once the daemon has failed this role's claim", async () => {
+  const { endpoint, record, inbox, lines, close } = await harness({
+    record: recorded("open", 1),
+    claim: implementer,
+    claimState: "failed",
+  })
+  try {
+    expect(await endpoint.handle({ event: "Stop", lastAssistantMessage: "Still here." })).toEqual(
+      {},
+    )
+    // A case asserting that nothing happens has no condition to wait for, so this is one of the
+    // file's fixed waits (its header says why a fake clock settles nothing here), three times
+    // the reminder interval above.
+    await Bun.sleep(60)
+    expect(inbox).toEqual([])
+    expect(await record()).toEqual({
+      state: "open",
+      count: 1,
+      reported: false,
+      lastMessage: "Still here.",
+    })
+    expect(lines.some((line) => line.includes("the daemon has failed this claim"))).toBe(true)
   } finally {
     await close()
   }

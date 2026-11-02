@@ -301,9 +301,10 @@ package api
 // 36: INFRA-229 (sjawhar/legion) -- `api.PullRequestView` gains `state`, the pull request's
 // `open`, `merged` or `closed`, always emitted: an architect's acceptance is now refused while an
 // issue beneath it is still in the workflow and a merged root's close waits for the rest of its
-// tree, so a root stands in `awaiting_merge` for days and an operator must see that its pull
-// request merged rather than guess at it. A 35 plugin's strict reader refuses a state whose pull
-// request views carry the field, so the boot gate and `legion probe-image` refuse the mixed pair.
+// tree, so a root stands in the phase that waits for its merge for days and an operator must see
+// that its pull request merged rather than guess at it. A 35 plugin's strict reader refuses a
+// state whose pull request views carry the field, so the boot gate and `legion probe-image`
+// refuse the mixed pair.
 //
 // 37: sjawhar/legion INFRA-80 -- an issue's disk dies with its pod: the pod's one volume is a
 // generic ephemeral volume the pod itself owns (issuePod.disk), which the kubelet creates
@@ -443,4 +444,44 @@ package api
 // holds this daemon and the image that runs its roles together. This change adds no store
 // migration. (This branch took 43; main then landed the consumer lag at 43, so this branch takes
 // the number above it, as the collision note says.)
-const DaemonAPIVersion = 44
+//
+// 45: dispatch://INFRA-714 -- the daemon is an event-driven state machine, and its strictly parsed
+// shapes change with it. The phase enum loses `awaiting_merge` (both places it is spelled: the
+// issue's phase and a backward move's target), since the merger merges in `merging` and the daemon
+// closes the issue when it reads that merge. `api.PullRequestView` loses `checksVerdict` and
+// `fixAttempts` — a CI settlement moves no issue, so the daemon counts no fix attempt and keeps no
+// verdict of its own — and gains `mergeState`, GitHub's own merge state for the head in GitHub's
+// lowercase spelling (`clean`, `unstable`, `has_hooks`, `blocked`, `dirty`, `behind`, `draft`,
+// `unknown`), absent until the daemon's read of the pull request has run. `api.PhaseView` gains
+// `pass`, the passes the phase has made through its stretch of the workflow, beside the `rounds`
+// only a review requesting changes counts. Every claim view, a phase worker's and the operator's,
+// gains `lastTurnStart` and `lastTurnEnd`, each absent until the claim's agent has begun or ended
+// a turn. `settings` drops `max_fix_attempts` for `review_round_cap`. `HandoffCompleteRequest`
+// drops `ready` and `HandoffCompleteResponse` is an empty object: the flag and the `note` went
+// with READY and the daemon's merge, since the merger merges and the daemon submits none. Every
+// contract response is a `z.strictObject`, so a 44 plugin refuses a state carrying `mergeState`,
+// `pass`, `lastTurnStart` or `lastTurnEnd`, and a plugin from this contract refuses an older
+// daemon's `checksVerdict` and `fixAttempts`; the boot gate and `legion probe-image` refuse the
+// mixed pair. (This branch took 42, then 43 when main landed the consumer-lag state at 43;
+// main landed the background-task contract at 44, so this branch takes the number above it, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
+// says.)
+//
+// 46: dispatch://INFRA-714 -- every turn a session ends is reported to the daemon by the producer
+// that ended it, over `POST /legion/v1/claims/turn-outcome`: `{claimToken, sessionId, secret,
+// generation, sequence, outcome, message}`, authenticated by the registration's secret as the
+// ready and the exit are, answering `{refusedRun, failed}`. `sequence` is the producer's own count
+// of the turns it has ended at that generation, from 1, and `outcome` is `clean` or `refused`,
+// `message` the provider's words for a refusal. The daemon keeps the newest reports per claim,
+// keyed by (generation, sequence), derives the trailing run of refused turns from them on every
+// report, and fails the claim once that run reaches `launch_failure_limit` — the fault that left an
+// implementer's every turn refused by its provider with its claim never failing. A plugin built
+// before 46 reports no turn, so its session's refusals are counted by nobody, and a plugin from
+// this contract posting to a daemon before 46 is answered "no route" for every turn it ends; the
+// boot gate and `legion probe-image` refuse the mixed pair. `legion claims retry` gains the
+// optional body `{freshSession}` (`--fresh-session`), which starts the claim in a new session
+// rather than resuming the recorded one; a claim the provider refused out of its budget takes one
+// whoever retries it. That retry also reaches a phase worker an operator stopped, which is
+// retired: the route starts the worker's phase again — restoring a held one, as the architect's
+// retry_or_escalate does — so the session it starts, new or kept, is given that phase's task.
+const DaemonAPIVersion = 46

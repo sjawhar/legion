@@ -1,7 +1,6 @@
 package prompts
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
-	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
 // A broken role sequence drops the shared core, uses a root prompt for a child, or makes the Go
@@ -45,17 +43,32 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 		// The implementer is told the completion of implementing the handoff route refuses with no
 		// open pull request, and what to do about it.
 		{"implementer", claim.RoleImplementer, false, []string{"core/common.md", "core/implementer.md", "mechanics/headless.md", "implementer.md"}, []string{"implementer.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
-			"refuses READY while the head still carries it", "(`HANDOFF_NO_PULL_REQUEST`), recording nothing: open the pull request and complete again at the same commit"}},
+			"the merger reads the head for that directory itself and merges nothing while it is there", "(`HANDOFF_NO_PULL_REQUEST`), recording nothing: open the pull request and complete again at the same commit"}},
 		// The tester runs the application, not CI again (dispatch://LEGION-631).
 		{"tester", claim.RoleTester, false, []string{"core/common.md", "core/tester.md", "mechanics/headless.md", "tester.md"}, []string{"tester.md", "worker-common.md"}, []string{`op: "handoff_complete"`, `verdict: "pass"`, `verdict: "fail"`,
 			"read CI for everything static", "try to break it"}},
+		// The reviewer's own handoff push carries no `skip-checks: true` trailer, and its prompt
+		// says so in the one sentence every text states it in: the daemon moves the issue to
+		// accepting only once GitHub reports the approved head mergeable, and a head GitHub was
+		// told to skip runs no workflow, so it has no check for GitHub to report on. A prompt that
+		// told the reviewer to trailer its push would leave every approved head blocked on a base
+		// that requires a check, and every issue would sit in reviewing after its approval
+		// (dispatch://INFRA-714).
 		{"reviewer", claim.RoleReviewer, false, []string{"core/common.md", "core/reviewer.md", "mechanics/headless.md", "reviewer.md"}, []string{"reviewer.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
-			"Retro's last commit removes that directory above your approved head", "`pullRequest.head` is the commit you pushed"}},
-		// The packet limit the merger is told is the one the handoff route enforces.
-		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, []string{"merger.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "`ready: true`", "`READY_HEAD_CONFLICTS`: the pull request conflicts with its base",
-			"`READY_HEAD_CARRIES_HANDOFFS`", "`READY_DISARM_PENDING`", fmt.Sprintf("at most %d characters", record.MessagePostLimit),
-			"`READY_HEAD_MOVED`", "`READY_FILES_TRUNCATED`", "`READY_PULL_REQUEST_CLOSED`",
-			"`GITHUB_READ_FAILED`", "`DESIGN_GATE_CLOSED`", "`NO_PULL_REQUEST`", "`READY_REQUIRED`"}},
+			"Retro's last commit removes that directory above your approved head", "`pullRequest.head` is the commit you pushed",
+			"The reviewer's push never carries the `skip-checks: true` line, whatever paths it touches, because the daemon moves the issue to `accepting` only once GitHub reports the approved head mergeable, and a base that requires a check answers `blocked` for a head GitHub was told to skip."}},
+		// The merge the merger is told to run names the head GitHub must match, on a queue base and
+		// off it, and carries the message it writes itself; its completion is an ordinary phase
+		// completion, refused only on the grounds every phase worker's is (dispatch://INFRA-714, R2).
+		// It also disarms an auto-merge an older release armed, since GitHub holds an armed pull
+		// request to no head, and it merges nothing while the design gate is closed (R5).
+		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, []string{"merger.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
+			"gh pr merge <n> --squash --match-head-commit <head> --subject '<pull request title> (#<n>)' --body ''",
+			"enqueuePullRequest", "squash_merge_commit_message",
+			"gh pr merge <n> --disable-auto", "autoMergeRequest", "dequeuePullRequest",
+			"The design gate of <tree> closed at spec version <n>",
+			"`HANDOFF_NOT_CURRENT_PHASE`", "`HANDOFF_STALE_GENERATION`", "`HANDOFF_NO_RUN`",
+			"`HANDOFF_ALREADY_RECORDED`", "`TREE_LINGERING`"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			parts, err := composer.Compose(tc.role, tc.isRoot)
@@ -185,9 +198,9 @@ func composedText(t *testing.T, composer *Composer, role claim.Role, isRoot bool
 // No role's handoffs reach the default branch: retro's last commit removes the issue's own
 // .legion/<issue>/ from the head that merges (dispatch://LEGION-605). No phase worker's composed
 // prompt still carries the rule this replaced: that the approved and the merged head keep .legion/,
-// and that the daemon strips the leftovers from the next issue's branch. READY, not the merger,
-// holds the commits above the approved head to retro's removal and its docs/solutions/ ones, so no
-// prompt carries the merger's own fileset check any more, and the merger's names READY's refusals.
+// and that the daemon strips the leftovers from the next issue's branch. The merger reads the head
+// for the directory itself before it merges (dispatch://INFRA-714, R2), and no prompt holds the
+// head that merges to the head a review approved: the repository's own rulesets decide that.
 func TestNoComposedPromptKeepsTheIssuesHandoffsOnTheMergedHead(t *testing.T) {
 	stateDir := t.TempDir()
 	composer, err := New(stateDir)
@@ -196,7 +209,7 @@ func TestNoComposedPromptKeepsTheIssuesHandoffsOnTheMergedHead(t *testing.T) {
 	}
 	retired := []string{"No role pushes a `.legion/` deletion", "No role removes `.legion/`", "nobody removes it before the merge", "strips whatever `.legion/`", "still carries `.legion/`",
 		"Retro then commits only `docs/solutions/`", "no file changes above the approved head", "the same sha when retro added nothing", "Retro's `docs/solutions/` commit is never",
-		"'~(docs/solutions | .legion/<issue>)'"}
+		"'~(docs/solutions | .legion/<issue>)'", "`READY_UNREVIEWED_CHANGE`", "`READY_NOT_APPROVED`", "Approved head:"}
 	for _, role := range []claim.Role{claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer, claim.RoleMerger} {
 		text := composedText(t, composer, role, false)
 		for _, phrase := range retired {
@@ -204,20 +217,18 @@ func TestNoComposedPromptKeepsTheIssuesHandoffsOnTheMergedHead(t *testing.T) {
 				t.Errorf("the composed %s prompt still says %q", role, phrase)
 			}
 		}
-		for _, want := range []string{"`READY_UNREVIEWED_CHANGE`", "`READY_NOT_APPROVED`"} {
-			if role == claim.RoleMerger && !strings.Contains(text, want) {
-				t.Errorf("the merger's prompt does not name %s, READY's refusal of a change above the approved head no review approved", want)
-			}
+		if want := "repos/{owner}/{repo}/contents/.legion/<issue>?ref=<head>"; role == claim.RoleMerger && !strings.Contains(text, want) {
+			t.Errorf("the merger's prompt does not name %s, its own read of the head for the issue's handoffs", want)
 		}
 	}
 }
 
 // GitHub, under each repository's base-branch rules, decides whether a merge happens, and no
-// prompt may tell an agent that Legion refuses one over a check (dispatch://INFRA-83). READY reads
-// none of the head's checks and judges none, so no composed prompt — any phase worker's, and the
-// architect's in both its shapes — still names the refusal that read them, the packet note that
-// said which checks went unread, or a trailer the daemon turns away for the CI it leaves the head
-// without.
+// prompt may tell an agent that Legion refuses one over a check (dispatch://INFRA-83). The daemon
+// reads none of the head's checks and judges none, so no composed prompt — any phase worker's,
+// and the architect's in both its shapes — still names the refusal that read them, the packet
+// note that said which checks went unread, or a trailer the daemon turns away for the CI it
+// leaves the head without.
 func TestNoComposedPromptSaysLegionRefusesAMergeOverACheck(t *testing.T) {
 	composer, err := New(t.TempDir())
 	if err != nil {
@@ -244,7 +255,7 @@ func TestNoComposedPromptSaysLegionRefusesAMergeOverACheck(t *testing.T) {
 // A state directory outlives the daemon binary that wrote its prompt snapshot, so a boot of a newer
 // daemon finds the older daemon's words there. A part whose content is not the running binary's is
 // rewritten, shared or the daemon's own: a prompt that contradicts the daemon's own behaviour (who
-// posts READY) is the defect, and nothing treats these files as the operator's to edit (the
+// posts the merge) is the defect, and nothing treats these files as the operator's to edit (the
 // operator's text is `instructions`). A part already holding the running binary's content is left
 // as it is, so an ordinary restart writes nothing.
 func TestNewRewritesAPartTheRunningDaemonDidNotWrite(t *testing.T) {

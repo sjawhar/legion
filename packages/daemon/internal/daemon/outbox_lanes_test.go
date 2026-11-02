@@ -155,6 +155,9 @@ func (d *postingDispatch) GetIssue(_ context.Context, key string) (dispatch.Issu
 func (d *postingDispatch) SetStatus(context.Context, string, string) (dispatch.Issue, error) {
 	return dispatch.Issue{}, errors.New("postingDispatch takes no status")
 }
+func (d *postingDispatch) SetStatusAt(ctx context.Context, issue dispatch.Issue, status string) (dispatch.Issue, error) {
+	return d.SetStatus(ctx, issue.Key, status)
+}
 func (d *postingDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("postingDispatch takes no hand-over")
 }
@@ -219,6 +222,9 @@ func (d *laneBoard) SetStatus(_ context.Context, _ string, status string) (dispa
 	d.status = status
 	d.landed = append(d.landed, status)
 	return dispatch.Issue{}, nil
+}
+func (d *laneBoard) SetStatusAt(ctx context.Context, issue dispatch.Issue, status string) (dispatch.Issue, error) {
+	return d.SetStatus(ctx, issue.Key, status)
 }
 func (d *laneBoard) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("laneBoard takes no hand-over")
@@ -519,48 +525,6 @@ func TestAReleasedNoticeRunsOnItsLaneWhenTheReleaseCommits(t *testing.T) {
 	_, sweeps := clock.armed(outboxLease)
 	if hours != 1 || sweeps != 1 {
 		t.Fatalf("hour timers armed = %d and sweep timers armed = %d, want one each and neither fired", hours, sweeps)
-	}
-}
-
-// A READY merge GitHub refuses for good tells the architect as the refusal commits: the
-// ready_merge row's finish and its merge-refused notice are one transaction through the workflow's
-// store (projectRecords), whose commit wakes the notice's board lane, so the notice is published
-// with no sweep fired and no row written outside a commit scope. Written unscoped, the wake comes
-// before the commit and the lane finds nothing unless the commit wins the race, so the write's
-// ERROR line (wakeOnCommit) is the witness the test holds, beside the publish and the quiet sweep.
-func TestAREADYMergeRefusalsNoticeRunsOnTheBoardLaneAsTheRefusalCommits(t *testing.T) {
-	github := newMergeGitHub(t, func(int) string { return pullJSON("OPEN", "ready-head", "CLEAN") },
-		refusedAnswer("Squash merges are not allowed on this repository."))
-	pool := isolatedOutboxPool(t)
-	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
-	architectClaim(t, sup, "LEGION-208", supervise.StateWorking)
-	clock := microClock()
-	publisher := &holderPublisher{}
-	var logged syncBuffer
-	log := slog.New(slog.NewTextHandler(&logged, nil))
-	runner := mergeRunner(pool, nil, github.url, log, clock.Now)
-	runner.supervisor, runner.notices = sup, publisher
-	runner.records = projectRecords{Store: record.NewStore(), project: "LEGION", wake: runner.wake, log: log}
-	seedReadyMerge(t, pool, runner.records, "LEGION-208", awaitingREADY)
-	runLanes(t, runner, clock)
-
-	commitRows(t, pool, runner.records, "ready", mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, clock.Now()))
-	testwait.Eventually(t, "the merge-refused notice was published and both rows finished", func() bool {
-		_, delivered := publisher.snapshot()
-		return len(delivered) == 1 && outboxRows(t, pool) == 0
-	})
-	_, delivered := publisher.snapshot()
-	if kind := delivered[0].payload.(record.Notice).Kind; kind != "merge-refused" || delivered[0].topic != architectTopic(t, "LEGION-208") {
-		t.Fatalf("delivered %s to %s, want merge-refused to LEGION-208's architect", kind, delivered[0].topic)
-	}
-	if merges, _ := github.merged(); merges != 1 {
-		t.Fatalf("merge submissions = %d, want the one GitHub refused", merges)
-	}
-	if _, sweeps := clock.armed(outboxLease); sweeps != 1 {
-		t.Fatalf("sweep timers armed = %d, want the one Run armed and never fired", sweeps)
-	}
-	if strings.Contains(logged.String(), "written outside a commit scope") {
-		t.Fatalf("the refusal's notice was written outside a commit scope:\n%s", logged.String())
 	}
 }
 

@@ -1,0 +1,10 @@
+kind: Changed
+body: |-
+  A turn the provider refused earns no `session_stop` continuation: `session_stop` classifies the
+  settling message, and a reply Oh My Pi stopped at `error` is an input of the phase-stall machine
+  of its own rather than a check on the reminder's answer. One implementer had every turn refused
+  by its provider, and every reminder bought it another refused turn, for ever. The refused turn
+  arms one timer instead, so the worker is reminded once five minutes later rather than left idle
+  by a single transient refusal: by then the daemon has had every refusal of the run reported, and
+  a reminder is dropped once the daemon's record says it has failed this role's claim, which is
+  the daemon's own word that the session is finished and that the retry runs in a new one.

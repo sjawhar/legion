@@ -41,9 +41,20 @@ func (s *Postgres) MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID
 	return tag.RowsAffected() == 1, nil
 }
 
+// ForgetProcessed removes the processed-events row of one fact, so the same fact id applies again
+// when it is sent anew. ApplyFact uses it for a refused production check report alone: the report
+// of a look is one fact id, and a refusal of it must not stand as the answer to the implementer's
+// next report of that same look (dispatch://INFRA-714/spec R12).
+func (s *Postgres) ForgetProcessed(ctx context.Context, tx pgx.Tx, source, eventID string) error {
+	if _, err := tx.Exec(ctx, "delete from processed_events where source = $1 and event_id = $2", source, eventID); err != nil {
+		return fmt.Errorf("forget processed event %s/%s: %w", source, eventID, err)
+	}
+	return nil
+}
+
 // issueColumns reads an empty ancestry as NULL, so a record with none scans as a nil Ancestry, as
 // it was written.
-const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, taken_back, linger_until, held_from, last_dispatch_seq, ready_pending_version, coalesce(hold_reason, ''), dispatch_status, repo, default_branch, github_repo, awaiting_ask, awaiting_gate_version, coalesce(awaiting_artifact, ''), awaiting_answered_at, coalesce(awaiting_answered_by, ''), coalesce(awaiting_answered_detail, ''), awaiting_since_seq, awaiting_since, handout_seq, coalesce(declared_seq, 0), declared_at, nullif(ancestry, '{}'), handed_over_from`
+const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, taken_back, linger_until, held_from, last_dispatch_seq, coalesce(hold_reason, ''), dispatch_status, repo, default_branch, github_repo, awaiting_ask, awaiting_gate_version, coalesce(awaiting_artifact, ''), awaiting_answered_at, coalesce(awaiting_answered_by, ''), coalesce(awaiting_answered_detail, ''), awaiting_since_seq, awaiting_since, handout_seq, coalesce(declared_seq, 0), declared_at, nullif(ancestry, '{}'), handed_over_from, coalesce(told_parent, '')`
 
 func (s *Postgres) Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error) {
 	issue, err := scanIssue(tx.QueryRow(ctx, "select "+issueColumns+" from issues where key = $1", key))
@@ -193,28 +204,30 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 	// spelling it was recorded with: a write naming others changes no row, and is refused below.
 	// handout_seq, declared_seq and declared_at are StartHandout's, TakeInThrough's, Declare's and
 	// ClearDeclared's alone, so a copy of the issue read before any of them never writes them back.
-	tag, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, parent, phase, generation, status, rank, handed_over, taken_back, linger_until, held_from, last_dispatch_seq, ready_pending_version, hold_reason, dispatch_status, repo, default_branch, github_repo,
+	// ready_pending_version is neither written nor read: READY is gone, and the column is left as
+	// the rows hold it so a rollback to a daemon that still reads it finds its data.
+	tag, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, parent, phase, generation, status, rank, handed_over, taken_back, linger_until, held_from, last_dispatch_seq, hold_reason, dispatch_status, repo, default_branch, github_repo,
 		awaiting_ask, awaiting_gate_version, awaiting_artifact, awaiting_answered_at, awaiting_answered_by, awaiting_answered_detail, awaiting_since_seq, awaiting_since,
-		ancestry, handed_over_from)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, nullif($16::text, ''), $17, $18, $19, $20, $21, $22, $23, $24, nullif($25::text, ''), nullif($26::text, ''), $27, $28,
-		coalesce($29::text[], '{}'), $30)
+		ancestry, handed_over_from, told_parent)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, nullif($15::text, ''), $16, $17, $18, $19, $20, $21, $22, $23, nullif($24::text, ''), nullif($25::text, ''), $26, $27,
+		coalesce($28::text[], '{}'), $29, nullif($30::text, ''))
 		on conflict (key) do update set tree = excluded.tree, project = excluded.project, title = excluded.title,
 		parent = excluded.parent, phase = excluded.phase, generation = excluded.generation,
 		status = excluded.status, rank = excluded.rank, handed_over = excluded.handed_over, taken_back = excluded.taken_back,
 		linger_until = excluded.linger_until,
 		held_from = excluded.held_from, last_dispatch_seq = excluded.last_dispatch_seq,
-		ready_pending_version = excluded.ready_pending_version, hold_reason = excluded.hold_reason, dispatch_status = excluded.dispatch_status,
+		hold_reason = excluded.hold_reason, dispatch_status = excluded.dispatch_status,
 		awaiting_ask = excluded.awaiting_ask, awaiting_gate_version = excluded.awaiting_gate_version,
 		awaiting_artifact = excluded.awaiting_artifact,
 		awaiting_answered_at = excluded.awaiting_answered_at, awaiting_answered_by = excluded.awaiting_answered_by,
 		awaiting_answered_detail = excluded.awaiting_answered_detail,
 		awaiting_since_seq = excluded.awaiting_since_seq, awaiting_since = excluded.awaiting_since,
-		ancestry = excluded.ancestry, handed_over_from = excluded.handed_over_from
+		ancestry = excluded.ancestry, handed_over_from = excluded.handed_over_from, told_parent = excluded.told_parent
 		where issues.repo = excluded.repo and issues.default_branch = excluded.default_branch and issues.github_repo = excluded.github_repo`,
 		issue.Key, issue.Tree, issue.Project, issue.Title, issue.Parent, string(issue.Phase), int64(issue.Generation), issue.Status,
-		issue.Rank, issue.HandedOver, issue.TakenBack, issue.LingerUntil, heldFrom, issue.LastDispatchSeq, issue.ReadyPendingVersion, string(holdReason), issue.DispatchStatus,
+		issue.Rank, issue.HandedOver, issue.TakenBack, issue.LingerUntil, heldFrom, issue.LastDispatchSeq, string(holdReason), issue.DispatchStatus,
 		issue.Repo, issue.DefaultBranch, issue.GitHubRepo, awaitingAsk, awaitingGate, awaitingArtifact, answeredAt, string(answeredBy), answeredDetail,
-		sinceSeq, since, issue.Ancestry, issue.HandedOverFrom,
+		sinceSeq, since, issue.Ancestry, issue.HandedOverFrom, issue.ToldParent,
 	)
 	if err != nil {
 		return fmt.Errorf("put issue %s: %w", issue.Key, err)
@@ -375,9 +388,9 @@ func scanIssue(row scanner) (*Issue, error) {
 	var sinceSeq *int64
 	var since, declaredAt *time.Time
 	if err := row.Scan(&issue.Key, &issue.Tree, &issue.Project, &issue.Title, &issue.Parent, &phaseValue, &generation, &issue.Status,
-		&issue.Rank, &issue.HandedOver, &issue.TakenBack, &issue.LingerUntil, &heldFrom, &issue.LastDispatchSeq, &issue.ReadyPendingVersion, &holdReason, &issue.DispatchStatus,
+		&issue.Rank, &issue.HandedOver, &issue.TakenBack, &issue.LingerUntil, &heldFrom, &issue.LastDispatchSeq, &holdReason, &issue.DispatchStatus,
 		&issue.Repo, &issue.DefaultBranch, &issue.GitHubRepo, &awaitingAsk, &awaitingGate, &awaitingArtifact, &answeredAt, &answeredBy, &answeredDetail,
-		&sinceSeq, &since, &issue.HandoutSeq, &issue.DeclaredSeq, &declaredAt, &issue.Ancestry, &issue.HandedOverFrom); err != nil {
+		&sinceSeq, &since, &issue.HandoutSeq, &issue.DeclaredSeq, &declaredAt, &issue.Ancestry, &issue.HandedOverFrom, &issue.ToldParent); err != nil {
 		return nil, err
 	}
 	if declaredAt != nil {
@@ -409,7 +422,7 @@ func scanIssue(row scanner) (*Issue, error) {
 }
 
 func (s *Postgres) Phases(ctx context.Context, tx pgx.Tx, issue string) ([]PhaseRow, error) {
-	rows, err := tx.Query(ctx, `select issue, role, claim, handoff_commit, rounds, verdict, summary, last_handoff, decision, completed_at, merge_note, assignment from phases
+	rows, err := tx.Query(ctx, `select issue, role, claim, handoff_commit, pass, rounds, verdict, summary, last_handoff, decision, completed_at, assignment from phases
 		where issue = $1 order by role`, issue)
 	if err != nil {
 		return nil, fmt.Errorf("list phases for %s: %w", issue, err)
@@ -437,15 +450,15 @@ func (s *Postgres) PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) erro
 			return fmt.Errorf("put %s phase on %s: encode the review decision: %w", phase.Role, phase.Issue, err)
 		}
 	}
-	_, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, rounds, verdict, summary, last_handoff,
-		decision, completed_at, merge_note, assignment)
+	_, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, pass, rounds, verdict, summary, last_handoff,
+		decision, completed_at, assignment)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		on conflict (issue, role) do update set claim = excluded.claim,
-		handoff_commit = excluded.handoff_commit, rounds = excluded.rounds, verdict = excluded.verdict,
+		handoff_commit = excluded.handoff_commit, pass = excluded.pass, rounds = excluded.rounds, verdict = excluded.verdict,
 		summary = excluded.summary, last_handoff = excluded.last_handoff, decision = excluded.decision,
-		completed_at = excluded.completed_at, merge_note = excluded.merge_note, assignment = excluded.assignment`,
-		phase.Issue, string(phase.Role), string(phase.Claim), phase.HandoffCommit, phase.Rounds, phase.Verdict, phase.Summary, phase.LastHandoff,
-		decision, phase.CompletedAt, phase.MergeNote, phase.Assignment,
+		completed_at = excluded.completed_at, assignment = excluded.assignment`,
+		phase.Issue, string(phase.Role), string(phase.Claim), phase.HandoffCommit, phase.Pass, phase.Rounds, phase.Verdict, phase.Summary, phase.LastHandoff,
+		decision, phase.CompletedAt, phase.Assignment,
 	)
 	if err != nil {
 		return fmt.Errorf("put %s phase on %s: %w", phase.Role, phase.Issue, err)
@@ -457,8 +470,8 @@ func scanPhase(row scanner) (PhaseRow, error) {
 	var phase PhaseRow
 	var role, token string
 	var decision []byte
-	if err := row.Scan(&phase.Issue, &role, &token, &phase.HandoffCommit, &phase.Rounds, &phase.Verdict, &phase.Summary, &phase.LastHandoff,
-		&decision, &phase.CompletedAt, &phase.MergeNote, &phase.Assignment); err != nil {
+	if err := row.Scan(&phase.Issue, &role, &token, &phase.HandoffCommit, &phase.Pass, &phase.Rounds, &phase.Verdict, &phase.Summary, &phase.LastHandoff,
+		&decision, &phase.CompletedAt, &phase.Assignment); err != nil {
 		return PhaseRow{}, err
 	}
 	phase.CompletedAt = phase.CompletedAt.UTC()
@@ -472,10 +485,10 @@ func scanPhase(row scanner) (PhaseRow, error) {
 	return phase, nil
 }
 
-const pullRequestColumns = `issue, repo, number, branch, head_sha, head_updated_at,
-	failing, cancelled, fix_attempts, blocked_attempts, check_runs,
-	generation, snapshot, pushes, head_moves, head_counted, head_run, planned_red, review_seen, review_seen_at, state,
-	checked_head, required, required_workflows, required_workflows_head, mergeability, merge_sha`
+const pullRequestColumns = `issue, repo, number, branch, base, base_moved, head_sha, head_updated_at,
+	failing, cancelled, check_runs,
+	generation, snapshot, pushes, head_moves, head_run, review_seen, review_seen_at, state,
+	checked_head, mergeability, merge_state, merge_sha`
 
 func (s *Postgres) PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error) {
 	pr, err := scanPullRequest(tx.QueryRow(ctx, "select "+pullRequestColumns+" from pull_requests where issue = $1", issue))
@@ -531,22 +544,48 @@ func PullRequestRecorded(ctx context.Context, q RowQuerier, repo string, number 
 
 // OpenPullRequests is every open pull request of the Dispatch project's issues, by issue key.
 func (s *Postgres) OpenPullRequests(ctx context.Context, tx pgx.Tx, project string) ([]PullRequest, error) {
+	describe := fmt.Sprintf("list the open pull requests of %s", project)
 	rows, err := tx.Query(ctx, "select "+pullRequestColumns+" from pull_requests where state = $1 and issue in (select key from issues where project = $2) order by issue",
 		PullRequestOpen, project)
 	if err != nil {
-		return nil, fmt.Errorf("list the open pull requests of %s: %w", project, err)
+		return nil, fmt.Errorf("%s: %w", describe, err)
 	}
+	return collectPullRequests(rows, describe)
+}
+
+// OpenPullRequestsOnBase is every open pull request of repo whose recorded base branch is base, by
+// issue key. It is one indexed lookup (pull_requests_open_on_base, a partial index of the open rows
+// by repository and base), so a push onto a branch no open pull request sits on - the common case
+// for a repository other automation pushes to many times a minute - reads one index and no row. A
+// base recorded as "" is every pull request written before the daemon kept the base at all, so it
+// matches none: the caller never asks for one, and the next GitHub read fills those rows.
+func (s *Postgres) OpenPullRequestsOnBase(ctx context.Context, tx pgx.Tx, repo, base string) ([]PullRequest, error) {
+	if base == "" {
+		return nil, nil
+	}
+	describe := fmt.Sprintf("list the open pull requests of %s on %s", repo, base)
+	rows, err := tx.Query(ctx, "select "+pullRequestColumns+" from pull_requests where repo = $1 and base = $2 and state = $3 order by issue",
+		repo, base, PullRequestOpen)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", describe, err)
+	}
+	return collectPullRequests(rows, describe)
+}
+
+// collectPullRequests reads every row of a pull request listing, naming the listing in any failure
+// as describe.
+func collectPullRequests(rows pgx.Rows, describe string) ([]PullRequest, error) {
 	defer rows.Close()
 	open := []PullRequest{}
 	for rows.Next() {
 		pr, err := scanPullRequest(rows)
 		if err != nil {
-			return nil, fmt.Errorf("list the open pull requests of %s: %w", project, err)
+			return nil, fmt.Errorf("%s: %w", describe, err)
 		}
 		open = append(open, *pr)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list the open pull requests of %s: %w", project, err)
+		return nil, fmt.Errorf("%s: %w", describe, err)
 	}
 	return open, nil
 }
@@ -572,17 +611,6 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 	if err != nil {
 		return fmt.Errorf("put pull request for %s: encode moves: %w", pr.Issue, err)
 	}
-	// A set never read is null, never an empty list, which is a base that requires no check.
-	var required []byte
-	if pr.Required != nil {
-		if required, err = json.Marshal(pr.Required); err != nil {
-			return fmt.Errorf("put pull request for %s: encode required checks: %w", pr.Issue, err)
-		}
-	}
-	workflows, err := json.Marshal(append([]RequiredWorkflow{}, pr.Workflows...))
-	if err != nil {
-		return fmt.Errorf("put pull request for %s: encode required workflows: %w", pr.Issue, err)
-	}
 	// No head run is null.
 	var run []byte
 	if pr.Run != nil {
@@ -590,27 +618,32 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 			return fmt.Errorf("put pull request for %s: encode the head run: %w", pr.Issue, err)
 		}
 	}
-	_, err = tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at,
-		failing, cancelled, fix_attempts, blocked_attempts, check_runs, generation, snapshot, pushes, head_moves,
-		head_counted, head_run, planned_red, review_seen, review_seen_at, state, checked_head, required,
-		required_workflows, required_workflows_head, mergeability, merge_sha)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
+	// fix_attempts, blocked_attempts and head_counted are stopped columns: nothing reads them since
+	// a CI result stopped moving an issue (dispatch://INFRA-714/spec R1), and they are kept rather
+	// than dropped so a rollback to the daemon before it still runs. Each is `not null` with no
+	// default (migration 0004), so a new row is given its zero here and no write ever touches it
+	// again; planned_red, required, required_workflows and required_workflows_head are stopped too
+	// and need not be named at all, being nullable or defaulted (migrations 0013, 0028, 0029).
+	_, err = tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, base, base_moved, head_sha, head_updated_at,
+		failing, cancelled, check_runs, generation, snapshot, pushes, head_moves,
+		head_run, review_seen, review_seen_at, state, checked_head, mergeability, merge_state, merge_sha,
+		fix_attempts, blocked_attempts, head_counted)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, 0, 0, '')
 		on conflict (issue) do update set repo = excluded.repo, number = excluded.number, branch = excluded.branch,
+		base = excluded.base, base_moved = excluded.base_moved,
 		head_sha = excluded.head_sha, head_updated_at = excluded.head_updated_at,
-		failing = excluded.failing, cancelled = excluded.cancelled, fix_attempts = excluded.fix_attempts,
-		blocked_attempts = excluded.blocked_attempts, check_runs = excluded.check_runs,
+		failing = excluded.failing, cancelled = excluded.cancelled, check_runs = excluded.check_runs,
 		generation = excluded.generation, snapshot = excluded.snapshot,
-		pushes = excluded.pushes, head_moves = excluded.head_moves, head_counted = excluded.head_counted, head_run = excluded.head_run,
-		planned_red = excluded.planned_red, review_seen = excluded.review_seen,
+		pushes = excluded.pushes, head_moves = excluded.head_moves, head_run = excluded.head_run,
+		review_seen = excluded.review_seen,
 		review_seen_at = excluded.review_seen_at, state = excluded.state, checked_head = excluded.checked_head,
-		required = excluded.required, required_workflows = excluded.required_workflows,
-		required_workflows_head = excluded.required_workflows_head, mergeability = excluded.mergeability,
-		merge_sha = excluded.merge_sha`,
-		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA, pr.HeadUpdatedAt,
-		failing, cancelled, pr.FixAttempts, pr.BlockedAttempts, checkRuns,
-		pr.Generation, pr.Snapshot, pushes, moves, pr.HeadCounted, run, pr.PlannedRed,
-		pr.ReviewSeen.ID, pr.ReviewSeen.SubmittedAt, pr.State, pr.CheckedHead, required,
-		workflows, pr.WorkflowsHead, pr.Mergeability, pr.MergeSHA,
+		mergeability = excluded.mergeability,
+		merge_state = excluded.merge_state, merge_sha = excluded.merge_sha`,
+		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.Base, pr.BaseMoved, pr.HeadSHA, pr.HeadUpdatedAt,
+		failing, cancelled, checkRuns,
+		pr.Generation, pr.Snapshot, pushes, moves, run,
+		pr.ReviewSeen.ID, pr.ReviewSeen.SubmittedAt, pr.State, pr.CheckedHead,
+		pr.Mergeability, pr.MergeState, pr.MergeSHA,
 	)
 	if err != nil {
 		return fmt.Errorf("put pull request for %s: %w", pr.Issue, err)
@@ -638,16 +671,14 @@ func (s *Postgres) ClaimSession(ctx context.Context, tx pgx.Tx, token claim.Toke
 }
 
 // ClearGeneration empties one issue's generation-scoped facts: a merged or closed pull request,
-// the counters of one still open, its design gate, its recorded handoffs and a READY the gate
-// refused.
+// the counters of one still open, its design gate and its recorded handoffs.
 func (s *Postgres) ClearGeneration(ctx context.Context, tx pgx.Tx, issue string) error {
 	return clearGeneration(ctx, tx, "issue = $1", "key = $1", issue, fmt.Sprintf("clear the generation of %s", issue))
 }
 
 // ClearTreeGeneration empties them for every issue of the tree. A root set back to todo starts a
 // new generation of the whole tree, and its children carried the old one's pull request, gate and
-// handoffs into it — a child re-entered at the new generation read a handoff of the last — and a
-// child's READY the old gate refused would wait on a packet cleared with those handoffs.
+// handoffs into it — a child re-entered at the new generation read a handoff of the last.
 func (s *Postgres) ClearTreeGeneration(ctx context.Context, tx pgx.Tx, tree string) error {
 	return clearGeneration(ctx, tx, "issue in (select key from issues where tree = $1)", "tree = $1", tree,
 		fmt.Sprintf("clear the generation of tree %s", tree))
@@ -659,22 +690,24 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where, issues, key, describ
 	for _, statement := range []string{
 		"delete from pull_requests where " + where + " and state <> 'open'",
 		// An open pull request is kept across a new generation, but the last one's reading of it is
-		// not: its counters and its checks settlement are of a head nobody has judged since, and the
-		// review round's decision goes with the phases below, and so does its head run, whose
-		// replay would put the old generation's judgement back. Its pushes stay, each a fact about
-		// two commits, and so does its newest review, which orders every review it will have, and
-		// the checks its base branch requires, which belong to the base, not the generation.
-		"update pull_requests set fix_attempts = 0, blocked_attempts = 0, head_counted = '', " +
-			"head_run = null, planned_red = false, checked_head = '', failing = '[]'::jsonb, cancelled = '[]'::jsonb, " +
-			"check_runs = '[]'::jsonb where " + where,
+		// not: its checks settlement is of a head nobody has judged since, and the review round's
+		// decision goes with the phases below, and so does its head run, whose replay would put the
+		// old generation's judgement back. Its pushes stay, each a fact about two commits, and so
+		// does its newest review, which orders every review it will have.
+		"update pull_requests set head_run = null, checked_head = '', failing = '[]'::jsonb, " +
+			"cancelled = '[]'::jsonb, check_runs = '[]'::jsonb where " + where,
 		"delete from design_gates where " + where,
+		// The review rounds go with the generation that ran them, since review_round_cap bounds the
+		// rounds of one run. The pass does not: it is what tells one pass through a phase from the
+		// last in the handoff completion key, and a new generation's completion at a commit the last
+		// one already reported has to be a fact of its own, which a pass put back to zero would not
+		// make it.
+		//
 		// The assignment goes with the run too: the start that re-enters the phase mints the next
 		// one, and until it does the cleared row names none, which the completion route reads as
 		// nothing to compare rather than as a mismatch to refuse.
-		"update phases set handoff_commit = '', rounds = 0, verdict = '', summary = '', decision = null, merge_note = '', " +
+		"update phases set handoff_commit = '', rounds = 0, verdict = '', summary = '', decision = null, " +
 			"assignment = '' where " + where,
-		// A READY the gate refused waits on the merger's packet, which the statement above clears.
-		"update issues set ready_pending_version = null where " + issues,
 	} {
 		if _, err := tx.Exec(ctx, statement, key); err != nil {
 			return fmt.Errorf("%s: %w", describe, err)
@@ -685,11 +718,11 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where, issues, key, describ
 
 func scanPullRequest(row scanner) (*PullRequest, error) {
 	var pr PullRequest
-	var failing, cancelled, checkRuns, pushes, moves, required, workflows, run []byte
-	if err := row.Scan(&pr.Issue, &pr.Repo, &pr.Number, &pr.Branch, &pr.HeadSHA, &pr.HeadUpdatedAt,
-		&failing, &cancelled, &pr.FixAttempts, &pr.BlockedAttempts, &checkRuns, &pr.Generation, &pr.Snapshot,
-		&pushes, &moves, &pr.HeadCounted, &run, &pr.PlannedRed, &pr.ReviewSeen.ID, &pr.ReviewSeen.SubmittedAt, &pr.State,
-		&pr.CheckedHead, &required, &workflows, &pr.WorkflowsHead, &pr.Mergeability, &pr.MergeSHA); err != nil {
+	var failing, cancelled, checkRuns, pushes, moves, run []byte
+	if err := row.Scan(&pr.Issue, &pr.Repo, &pr.Number, &pr.Branch, &pr.Base, &pr.BaseMoved, &pr.HeadSHA, &pr.HeadUpdatedAt,
+		&failing, &cancelled, &checkRuns, &pr.Generation, &pr.Snapshot,
+		&pushes, &moves, &run, &pr.ReviewSeen.ID, &pr.ReviewSeen.SubmittedAt, &pr.State,
+		&pr.CheckedHead, &pr.Mergeability, &pr.MergeState, &pr.MergeSHA); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(failing, &pr.Failing); err != nil {
@@ -706,14 +739,6 @@ func scanPullRequest(row scanner) (*PullRequest, error) {
 	}
 	if err := json.Unmarshal(moves, &pr.Moves); err != nil {
 		return nil, fmt.Errorf("decode moves: %w", err)
-	}
-	if required != nil {
-		if err := json.Unmarshal(required, &pr.Required); err != nil {
-			return nil, fmt.Errorf("decode required checks: %w", err)
-		}
-	}
-	if err := json.Unmarshal(workflows, &pr.Workflows); err != nil {
-		return nil, fmt.Errorf("decode required workflows: %w", err)
 	}
 	if run != nil {
 		if err := json.Unmarshal(run, &pr.Run); err != nil {
@@ -1146,15 +1171,6 @@ func (s *Postgres) ControllerNoticePending(ctx context.Context, tx pgx.Tx, proje
 	return pending, nil
 }
 
-func (s *Postgres) DisarmPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error) {
-	var pending bool
-	if err := tx.QueryRow(ctx, "select exists (select 1 from outbox where kind = $1 and issue = $2)",
-		string(OutboxKindAutoMergeDisable), issue).Scan(&pending); err != nil {
-		return false, fmt.Errorf("read whether %s has a disarm pending: %w", issue, err)
-	}
-	return pending, nil
-}
-
 func (s *Postgres) PersonHandoverPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error) {
 	var pending bool
 	if err := tx.QueryRow(ctx, "select exists (select 1 from outbox where kind = $1 and issue = $2 and payload->>'personHandover' = 'true')",
@@ -1166,20 +1182,6 @@ func (s *Postgres) PersonHandoverPending(ctx context.Context, tx pgx.Tx, issue s
 
 const outboxColumns = `id, kind, issue, payload, attempts, next_at, last_error, created_at, lease_token, lease_until`
 
-// readyMergeConflict makes a ready_merge enqueue one durable submission per issue and READY head:
-// the unique partial index 0044 turns the race between a reopen and a retry into one row. A
-// duplicate enqueue keeps the existing row's next_at, a GitHub rate-limit deadline included,
-// restarts its attempts, takes the payload it brings, and takes the row from any worker holding it:
-// that worker read the record before the reopen, so its finish, retry and payload replacement, each
-// matched on its lease token, must touch nothing, and the row decides again on the new record once
-// the lease expires. The new payload starts the row over unarmed (ReadyMerge.Armed): a reopen's
-// queue submits READY's merge again, since the close took away whatever was armed. Its target is
-// that partial index, which holds ready_merge rows alone, so no other kind's insert conflicts on
-// it.
-const readyMergeConflict = `
-	on conflict (issue, (payload ->> 'head')) where kind = 'ready_merge' do update set attempts = 0, payload = excluded.payload,
-		lease_token = case when outbox.lease_token = '' then '' else gen_random_uuid()::text end`
-
 func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error {
 	if !json.Valid(row.Payload) {
 		return fmt.Errorf("enqueue %s for %s: payload is not JSON", row.Kind, row.Issue)
@@ -1187,11 +1189,11 @@ func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error 
 	var err error
 	if row.CreatedAt.IsZero() {
 		_, err = tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token, lease_until)
-			values ($1, $2, $3, $4, $5, $6, $7, $8)`+readyMergeConflict,
+			values ($1, $2, $3, $4, $5, $6, $7, $8)`,
 			string(row.Kind), row.Issue, string(row.Payload), row.Attempts, row.NextAt, row.LastError, row.LeaseToken, row.LeaseUntil)
 	} else {
 		_, err = tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, created_at, lease_token, lease_until)
-			values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`+readyMergeConflict,
+			values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 			string(row.Kind), row.Issue, string(row.Payload), row.Attempts, row.NextAt, row.LastError, row.CreatedAt, row.LeaseToken, row.LeaseUntil)
 	}
 	if err != nil {
@@ -1561,31 +1563,6 @@ func (s *Postgres) RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseTo
 		return fmt.Errorf("retry outbox row %d: %w", id, err)
 	}
 	return nil
-}
-
-func (s *Postgres) ReplaceOutboxPayload(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, payload OutboxPayload) (bool, error) {
-	if err := validateOutboxPayload(payload); err != nil {
-		return false, fmt.Errorf("replace the payload of outbox row %d: %w", id, err)
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return false, fmt.Errorf("replace the payload of outbox row %d: %w", id, err)
-	}
-	var kind string
-	err = tx.QueryRow(ctx, "select kind from outbox where id = $1 and lease_token = $2 for update", id, leaseToken).Scan(&kind)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("replace the payload of outbox row %d: %w", id, err)
-	}
-	if kind != string(payload.OutboxKind()) {
-		return false, fmt.Errorf("replace the payload of outbox row %d: the row is %s, and the payload %s", id, kind, payload.OutboxKind())
-	}
-	if _, err := tx.Exec(ctx, "update outbox set payload = $2 where id = $1", id, string(encoded)); err != nil {
-		return false, fmt.Errorf("replace the payload of outbox row %d: %w", id, err)
-	}
-	return true, nil
 }
 
 // RoleRun reads one role's run of an issue generation as the store holds it. RoleRuns owns the

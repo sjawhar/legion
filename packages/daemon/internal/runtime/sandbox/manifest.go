@@ -991,16 +991,21 @@ func (r *Runtime) initEnvironment(launch) []corev1.EnvVar {
 }
 
 // ProvisionBound satisfies runtime.Runtime: workspace.FetchBudget plus workspace.CloneTimeout, the
-// real bounds of the pod's two provisioning phases, one after the other: workspace-fetch's whole
-// budget (its wait for the repository cache, then one FetchTimeout for the cache's stream and its
-// verification, then one of its own for the delta from GitHub) and workspace-init's shared clone
-// of the feed, whose size-following steps
+// bounds of the pod's two provisioning phases, one after the other: workspace-fetch's whole
+// clocked budget (its wait for the repository cache, then one FetchTimeout for the verification of
+// what the cache streamed, then one of its own for the delta from GitHub) and workspace-init's
+// shared clone of the feed, whose size-following steps
 // share one CloneTimeout. It is how much longer than the boot timeout a launch may wait for
-// its pod's launcher, counted from when it first sees one of the pod's init containers running
-// (awaitRoleLauncher). The fetch started no later than that and the shared clone after the fetch
-// ended, so both end inside the bound, each failing on its own, naming why, when it runs out;
-// workspace-init's other commands, local work that waits on no other pod, then have at least the
-// boot timeout. A test shortens it (provisionBound).
+// its pod's launcher, counted from when it first sees the pod provisioning (awaitRoleLauncher).
+// The stream from the repository cache is the one part of the fetch outside those bounds: it ends
+// when it falls below the low-speed bound rather than on any clock
+// (workspace.CacheStreamLowSpeedBytes), so a stream that keeps receiving runs on into the slack
+// this bound holds over what its fetch actually waited and checked — the whole CacheWaitTimeout,
+// more than two hours, for a pod whose repository cache is ready at once. A pod still provisioning
+// when even that runs out is given up on and replaced, as one whose workspace-fetch keeps
+// restarting past its grace is (fetchRestartGrace); a phase that runs out of a bound of its own
+// fails before that, naming why. workspace-init's other commands, local work that waits on no
+// other pod, then have at least the boot timeout. A test shortens it (provisionBound).
 func (r *Runtime) ProvisionBound() time.Duration {
 	return r.provisionBound
 }

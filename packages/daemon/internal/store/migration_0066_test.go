@@ -11,8 +11,15 @@ import (
 // the row the workflow now writes could not be queued before 0066, and the transaction that wrote
 // it — the one that sends the work back to implementing — would fail with it: the negative control
 // is that refusal, read before the migration. After it the row is queued, and so is every kind the
-// constraint already named, since the migration rewrites the list whole and a kind left out would
+// constraint still names, since the migration rewrites the list whole and a kind left out would
 // stop its own effect. A kind that is none is still refused.
+//
+// The reading after the migration is of the schema whole, because store.Migrate applies every
+// migration there is rather than this one: the three kinds the daemon's own merge wrote
+// (`ready_merge`, `auto_merge_disable`, `merge_queue_publish`) are gone by 20261029120800, which deletes
+// their rows and rewrites the check without them, and `approval_carry` and `role_message` arrive
+// at 20261029120500 and 20261029120600. So the list below is the end of the schema's own, not 0066's, and what holds
+// 0066 itself is the refusal above and `phase_ended` being taken here.
 func TestTheOutboxTakesThePhaseEndedKindWith0066(t *testing.T) {
 	ctx := context.Background()
 	store := emptyStore(t)
@@ -32,14 +39,14 @@ func TestTheOutboxTakesThePhaseEndedKindWith0066(t *testing.T) {
 	}
 	for _, kind := range []string{
 		"dispatch_status", "dispatch_message", "notice", "controller_notice", "supervise", "gate_seed",
-		"linger_close", "workspace_remove", "merge_queue_publish", "issue_branch", "issue_suspend",
-		"auto_merge_disable", "ready_merge", "check_compare", "check_look", "check_bound", "phase_ended",
+		"linger_close", "workspace_remove", "issue_branch", "issue_suspend", "check_compare",
+		"check_look", "check_bound", "approval_carry", "role_message", "phase_ended",
 	} {
 		if err := queue(kind); err != nil {
 			t.Fatalf("queue a %s row after 0066: %v", kind, err)
 		}
 	}
-	t.Logf("after the migration the outbox takes all seventeen kinds, phase_ended among them")
+	t.Logf("after the migrations the outbox takes all sixteen kinds the schema ends with, phase_ended among them")
 	if err := queue("quiesce"); err == nil || !strings.Contains(err.Error(), "outbox_kind_check") {
 		t.Fatalf("queueing a row of a kind that is none = %v, want the constraint to refuse it", err)
 	}
