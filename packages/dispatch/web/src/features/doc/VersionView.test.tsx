@@ -5,7 +5,7 @@ import { render, waitFor, within } from "@testing-library/react";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
-import { renderWithEngine, warmMarkdownRenderer } from "../refs/markdown-engine";
+import { loadedEngine, warmMarkdownRenderer } from "../refs/markdown-engine";
 import { changeMarksAgainst } from "./change-marks";
 import type { CreateEditor, EditorHandle } from "./editor";
 import { DocumentRuntime } from "./runtime";
@@ -186,10 +186,7 @@ test("VersionView shows the parser's error instead of an empty document when a v
 /** The document the editor builds for `markdown`, which the component marks against its
  *  baseline: the fake editor holds no ProseMirror document of its own. */
 function renderedDocument(markdown: string): ProseMirrorNode {
-  let doc: ProseMirrorNode | undefined;
-  renderWithEngine((engine) => {
-    doc = engine?.parse(markdown);
-  });
+  const doc = loadedEngine()?.parse(markdown);
   if (doc === undefined) throw new Error(`the engine rendered nothing for "${markdown}"`);
   return doc;
 }

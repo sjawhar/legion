@@ -51,6 +51,13 @@ import type {
   Token,
   TokenizeContext,
 } from "micromark-util-types";
+import {
+  blocksAround,
+  directivesAround,
+  maxBlockNesting,
+  recordContinued,
+  recordDirectivesAround,
+} from "./block-nesting.js";
 import { factoryAttributes, factoryLabel, factoryName } from "./directive-factories.js";
 
 declare module "micromark-util-types" {
@@ -96,6 +103,12 @@ interface DirectiveBlock {
   indent: number;
   /** How many directive containers stand around it, itself included. */
   depth: number;
+  /**
+   * How many blocks the document service counts around its content, itself included: quotes,
+   * lists, list items, typed blocks and footnote definitions (`maxBlockNesting`,
+   * ./block-nesting.ts).
+   */
+  blocks: number;
   /** The line its opening fence is on. */
   line: number;
   /** Whether a closing fence has closed it. */
@@ -109,55 +122,40 @@ interface DirectiveBlock {
 }
 
 /**
+ * Per parse, what this module follows across the lines of one document. Only this module reads or
+ * writes it: the depths the lines of a parse stand inside, which the two modules count
+ * differently over the same lines, are ./block-nesting.ts's record, written once per line through
+ * `recordDirectivesAround` and `recordContinued` and read through `directivesAround` and
+ * `blocksAround` (sjawhar/legion#2519).
+ */
+interface DirectiveParse {
+  /** The depth of the innermost directive container that is open and not closed. */
+  openDirectives: number;
+  /**
+   * The line on which the continuation of a closed directive container, still on the container
+   * stack, last ran: every container around it went on there. It is 0 once that block exits.
+   */
+  reachedClosedDirective: number;
+}
+
+const parses = new WeakMap<ParseContext, DirectiveParse>();
+
+/** The record of `context`'s parse, made on the first call. */
+function directiveParse(context: TokenizeContext): DirectiveParse {
+  let parse = parses.get(context.parser);
+  if (parse === undefined) {
+    parse = { openDirectives: 0, reachedClosedDirective: 0 };
+    parses.set(context.parser, parse);
+  }
+  return parse;
+}
+
+/**
  * How many directive containers may stand inside one another. An opener standing inside this many
  * open directive containers does not open; the document service refuses a typed block nested that
  * deep.
  */
 export const maxDirectiveNesting = 32;
-
-/** Per parse, what its document tokenizer has found of the directive containers around its lines. */
-interface ParseRecord {
-  /** The line `depth` was last recorded on. */
-  line: number;
-  /**
-   * How many directive containers are open around `line`: the depth of the innermost block whose
-   * continuation the line passed. The document tokenizer runs continuations outermost first and
-   * stops at the first that fails, so the last one run on a line is the innermost directive
-   * container still open around it. A start only reads this, so a start that micromark runs inside
-   * `effects.check` and throws away cannot change it.
-   */
-  depth: number;
-  /** The depth of the innermost directive container that is open and not closed. */
-  open: number;
-  /**
-   * The line on which the continuation of a closed directive container, still on the container
-   * stack, last ran: every container around it went on there. It is 0 once that block exits.
-   */
-  reachedClosed: number;
-}
-
-const parses = new WeakMap<ParseContext, ParseRecord>();
-
-function parseRecord(context: TokenizeContext): ParseRecord {
-  let record = parses.get(context.parser);
-  if (record === undefined) {
-    record = { line: 0, depth: 0, open: 0, reachedClosed: 0 };
-    parses.set(context.parser, record);
-  }
-  return record;
-}
-
-function recordOpenAround(context: TokenizeContext, depth: number): void {
-  const record = parseRecord(context);
-  record.line = context.now().line;
-  record.depth = depth;
-}
-
-/** How many directive containers are open around the current line; it never creates a record. */
-function openAround(context: TokenizeContext): number {
-  const record = parses.get(context.parser);
-  return record !== undefined && record.line === context.now().line ? record.depth : 0;
-}
 
 const directiveContainer: Construct = {
   name: "directiveContainer",
@@ -210,10 +208,10 @@ function tokenizeLazyContentEnd(
   return start;
 
   function start(code: Code): State | undefined {
-    const record = parses.get(self.parser);
-    if (record === undefined || markdownLineEnding(code)) return nok(code);
-    if (record.reachedClosed === self.now().line) return ok(code);
-    if (record.open <= openAround(self)) return nok(code);
+    if (markdownLineEnding(code)) return nok(code);
+    const record = directiveParse(self);
+    if (record.reachedClosedDirective === self.now().line) return ok(code);
+    if (record.openDirectives <= directivesAround(self)) return nok(code);
     self.parser.lazy[self.now().line] = true;
     return ok(code);
   }
@@ -273,25 +271,11 @@ function resolveFenceLineEndings(events: Event[]): void {
  * flow construct's content was a document of its own, made of the rest of each line after the
  * prefixes of the containers around the block and its own indentation, and `subtokenize` put what
  * that document emitted between one line's content and the next after the next line's prefixes.
- * Here every container is on one stack, so:
- *
- * - A container inside a directive container that goes on, ended by a line (lazily, or by a
- *   `_closeFlow` such as a new list item's), ends where the directive's content starts on that
- *   line, after the prefixes of the containers around the directive; micromark puts it before
- *   them, right after the line before.
- * - An unclosed directive container ends, with the containers inside it, right after its last
- *   content, before any prefixes of the containers around it that follow: its content document
- *   ended there. When the line after was lazy for it (no container of the line reached it), the
- *   flow construct left that last line ending out of its content, so a last line that held nothing
- *   else was no line of it at all, and its own exit goes before that last line ending.
- * - A closed directive container ends right after its closing fence, where micromark only exits it
- *   on the next line.
- * - The directive container's own exit is the flow construct's, which `subtokenize` never moved,
- *   so it is no longer marked `_container` once placed, except where it goes before a last line
- *   ending: `subtokenize` puts it there.
- * - A line that opens a directive container first, where some container did not go on, was lazy
- *   for the flow construct, which opened no container there, and micromark puts a lazy line's
- *   exits right after the line before; so do the lines `lazyContentEnd` ends a block at.
+ * Here every container is on one stack, so this walks the events once, and at each run of exits
+ * one rule below says where each of them goes: `exitsOfAClosedDirectiveContainer`,
+ * `exitsOfAnUnclosedDirectiveContainer`, `exitsOfAContainerEndedByALine` or `exitsOfALazyLine`,
+ * each carrying the end it reads as its own doc comment. `placeExits` then moves them, and leaves
+ * a directive container's own exit where it is put.
  *
  * An exit moves over prefixes and content only, within a line or two, and never past another
  * container's event, so this stays linear in the events.
@@ -329,22 +313,24 @@ function resolveContentExits(events: Event[], context: TokenizeContext): void {
     // The line after the last content, when that content ends in a line ending.
     const nextLine =
       chunk !== undefined && chunk.end.line !== chunk.start.line ? chunk.end.line : -1;
-    // Whether that line was lazy: micromark found no container there, or it opens a directive
-    // container first, which the flow construct, opening no container, read as a lazy line.
-    let after = end;
-    while (after < events.length && events[after][1].type === "linePrefix") after++;
-    const lazyLine =
-      nextLine !== -1 &&
-      (context.parser.lazy[nextLine] === true ||
-        (after < events.length &&
-          events[after][0] === "enter" &&
-          events[after][1]._directive !== undefined &&
-          events[after][1].start.line === nextLine));
-    // Whether the last content is only a line ending.
-    const bareChunk =
-      chunk !== undefined &&
-      chunk.end.offset - chunk.start.offset <= 2 &&
-      context.sliceStream(chunk).length === 1;
+    const run: ExitRun = {
+      events,
+      context,
+      index,
+      end,
+      lastChunk,
+      chunk,
+      // Whether the last content is only a line ending. The stream is read here, once for the
+      // run: the rule that reads it runs once per exit of the run, and a run ending several
+      // nested containers would otherwise slice the same chunk again for each of them.
+      bareChunk:
+        chunk !== undefined &&
+        chunk.end.offset - chunk.start.offset <= 2 &&
+        context.sliceStream(chunk).length === 1,
+      nextLine,
+      // Whether that line was lazy for the flow construct: the rules below all read it.
+      lazyLine: aLazyLine(events, context, end, nextLine),
+    };
     const gaps: number[] = new Array(end - index);
     // The directive containers whose exit goes exactly where it is put: `subtokenize` must not move
     // it back over line endings, as nothing moved the flow construct's own exit.
@@ -359,100 +345,211 @@ function resolveContentExits(events: Event[], context: TokenizeContext): void {
       // Whether the exit is a directive container's own, or one inside a directive container that
       // exits in this run too.
       const blockEnds = block !== undefined && (own !== undefined || owner >= remaining);
-      let gap = end;
+      let placement: ExitPlacement = { gap: end, settled: false };
       if (blockEnds && block.closed) {
-        // A closed directive container ends right after its closing fence, a line or less back.
-        gap = index - 1;
-        while (
-          gap > 0 &&
-          !(events[gap][0] === "exit" && events[gap][1].type === "directiveContainerFence")
-        ) {
-          gap--;
-        }
-        gap++;
-        settled.push(exiting);
+        placement = exitsOfAClosedDirectiveContainer(run);
       } else if (blockEnds) {
-        // An unclosed one ends with the containers inside it right after its last content. When the
-        // line after was lazy for it, the flow construct left the last line ending out of its
-        // content, so a last line that held nothing else (past the prefixes of the containers
-        // around it) was no line of it at all; else its own exit goes before that line ending, where
-        // `subtokenize` moves it. That line was no line of it either when a flow token, such as a
-        // fenced code block that took the line ending before it, ends in it, but an exit before it
-        // would fall inside that token, so the exits go where they go after a line of content.
-        gap = contentEnd(events, block, index);
-        const lazy = lazyLine && block.contentStarts[nextLine - block.line] === undefined;
-        const bare =
-          lazy &&
-          bareChunk &&
-          gap === lastChunk + 1 &&
-          block.contentStarts[chunk.start.line - block.line] === chunk.start.offset &&
-          !flowTokenEndsIn(chunk);
-        if (bare)
-          gap = own !== undefined ? lastChunk - 1 : contentEnd(events, block, lastChunk - 1);
-        if (own !== undefined && (bare || !lazy)) settled.push(exiting);
-      } else if (block !== undefined && nextLine !== -1 && (lastChunk === index - 1 || lazyLine)) {
-        // A container inside a directive container that goes on ends where the directive's content
-        // starts on the next line. micromark puts a lazy line's exits right after the line before.
-        const start = block.contentStarts[nextLine - block.line];
-        if (start !== undefined) {
-          gap = lastChunk + 1;
-          while (gap < events.length) {
-            if (gap === index) gap = end;
-            if (gap === events.length) break;
-            const token = events[gap][1];
-            if (
-              token.start.offset >= start ||
-              token._container === true ||
-              token._directive !== undefined
-            )
-              break;
-            gap++;
-          }
-        }
-      } else if (block === undefined && lazyLine) {
-        // A container in no directive container that a lazy line ends ends right after the line
-        // before, where micromark puts a lazy line's exits.
-        gap = lastChunk + 1;
+        placement = exitsOfAnUnclosedDirectiveContainer(run, block, own);
+      } else if (
+        block !== undefined &&
+        run.nextLine !== -1 &&
+        (lastChunk === index - 1 || run.lazyLine)
+      ) {
+        placement = exitsOfAContainerEndedByALine(run, block);
+      } else if (block === undefined && run.lazyLine) {
+        placement = exitsOfALazyLine(run);
       }
+      if (placement.settled) settled.push(exiting);
+      let gap = placement.gap;
       if (gap >= index && gap <= end) gap = end;
       if (at < end - 1) gap = Math.min(gap, gaps[at + 1 - index]);
       gaps[at - index] = gap;
     }
 
-    // An exit moves back over prefixes and content only, never over another container's event.
-    let valid = true;
-    for (let at = Math.min(gaps[0], index); at < index && valid; at++) {
-      valid = events[at][1]._container !== true && events[at][1]._directive === undefined;
-    }
-    let windowEnd = end;
-    if (valid) {
-      for (const token of settled) token._container = false;
-    }
-    if (valid && (gaps[0] !== end || gaps[gaps.length - 1] !== end)) {
-      const windowStart = Math.min(index, gaps[0]);
-      windowEnd = Math.max(end, gaps[gaps.length - 1]);
-      const placed: Event[] = [];
-      let next = 0;
-      for (let at = windowStart; at <= windowEnd; at++) {
-        while (next < gaps.length && gaps[next] === at) {
-          const exit = events[index + next];
-          if (at < index) exit[1].end = { ...events[at - 1][1].end };
-          placed.push(exit);
-          next++;
-        }
-        if (at < windowEnd && (at < index || at >= end)) placed.push(events[at]);
-      }
-      for (let at = 0; at < placed.length; at++) events[windowStart + at] = placed[at];
-      if (lastChunk >= windowStart) {
-        lastChunk = windowEnd - 1;
-        while (!(events[lastChunk][0] === "exit" && events[lastChunk][1].type === "chunkFlow"))
-          lastChunk--;
-      }
-    }
+    const moved = placeExits(run, gaps, settled);
+    lastChunk = moved.lastChunk;
     open.length = remaining;
     owners.length = remaining;
-    index = windowEnd;
+    index = moved.windowEnd;
   }
+}
+
+/** One run of container exits, innermost first, and the line after the content before it. */
+interface ExitRun {
+  events: Event[];
+  context: TokenizeContext;
+  /** The first exit of the run. */
+  index: number;
+  /** The gap after its last exit. */
+  end: number;
+  /** The index of the last `chunkFlow` exit: the end of the last line's content. */
+  lastChunk: number;
+  /** That content, or undefined where no line has ended yet. */
+  chunk: Token | undefined;
+  /** Whether that content is only a line ending. */
+  bareChunk: boolean;
+  /** The line after it, when it ends in a line ending, or -1. */
+  nextLine: number;
+  /** Whether that line was lazy for the flow construct (`aLazyLine`). */
+  lazyLine: boolean;
+}
+
+/** Where one exit of a run goes. */
+interface ExitPlacement {
+  /** The gap it goes in: before the event at this index. */
+  gap: number;
+  /** Whether it settles where it is put (`placeExits`). */
+  settled: boolean;
+}
+
+/**
+ * - A closed directive container ends right after its closing fence, where micromark only exits it
+ *   on the next line.
+ */
+function exitsOfAClosedDirectiveContainer({ events, index }: ExitRun): ExitPlacement {
+  // The fence is a line or less back.
+  let gap = index - 1;
+  while (
+    gap > 0 &&
+    !(events[gap][0] === "exit" && events[gap][1].type === "directiveContainerFence")
+  ) {
+    gap--;
+  }
+  return { gap: gap + 1, settled: true };
+}
+
+/**
+ * - An unclosed directive container ends, with the containers inside it, right after its last
+ *   content, before any prefixes of the containers around it that follow: its content document
+ *   ended there. When the line after was lazy for it (no container of the line reached it), the
+ *   flow construct left that last line ending out of its content, so a last line that held nothing
+ *   else was no line of it at all, and its own exit goes before that last line ending.
+ *
+ * A last line held nothing else when it held nothing past the prefixes of the containers around
+ * the block. It was no line of the block either when a flow token, such as a fenced code block
+ * that took the line ending before it, ends in it, but an exit before it would fall inside that
+ * token, so the exits go where they go after a line of content.
+ */
+function exitsOfAnUnclosedDirectiveContainer(
+  run: ExitRun,
+  block: DirectiveBlock,
+  own: DirectiveBlock | undefined
+): ExitPlacement {
+  const { events, index, lastChunk, chunk, nextLine } = run;
+  let gap = contentEnd(events, block, index);
+  const lazy = run.lazyLine && block.contentStarts[nextLine - block.line] === undefined;
+  const bare =
+    lazy &&
+    chunk !== undefined &&
+    run.bareChunk &&
+    gap === lastChunk + 1 &&
+    block.contentStarts[chunk.start.line - block.line] === chunk.start.offset &&
+    !flowTokenEndsIn(chunk);
+  if (bare) gap = own !== undefined ? lastChunk - 1 : contentEnd(events, block, lastChunk - 1);
+  return { gap, settled: own !== undefined && (bare || !lazy) };
+}
+
+/**
+ * - A container inside a directive container that goes on, ended by a line (lazily, or by a
+ *   `_closeFlow` such as a new list item's), ends where the directive's content starts on that
+ *   line, after the prefixes of the containers around the directive; micromark puts it before
+ *   them, right after the line before.
+ */
+function exitsOfAContainerEndedByALine(
+  { events, index, end, lastChunk, nextLine }: ExitRun,
+  block: DirectiveBlock
+): ExitPlacement {
+  const start = block.contentStarts[nextLine - block.line];
+  if (start === undefined) return { gap: end, settled: false };
+  let gap = lastChunk + 1;
+  while (gap < events.length) {
+    if (gap === index) gap = end;
+    if (gap === events.length) break;
+    const token = events[gap][1];
+    if (token.start.offset >= start || token._container === true || token._directive !== undefined)
+      break;
+    gap++;
+  }
+  return { gap, settled: false };
+}
+
+/**
+ * - A line that opens a directive container first, where some container did not go on, was lazy
+ *   for the flow construct, which opened no container there, and micromark puts a lazy line's
+ *   exits right after the line before; so do the lines `lazyContentEnd` ends a block at. That is
+ *   where the exits of a container in no directive container go.
+ */
+function exitsOfALazyLine({ lastChunk }: ExitRun): ExitPlacement {
+  return { gap: lastChunk + 1, settled: false };
+}
+
+/**
+ * Whether the line after a run's last content is such a line: `run.lazyLine`, which every rule
+ * above reads as well, so it is read once for the run.
+ */
+function aLazyLine(
+  events: Event[],
+  context: TokenizeContext,
+  end: number,
+  nextLine: number
+): boolean {
+  if (nextLine === -1) return false;
+  if (context.parser.lazy[nextLine] === true) return true;
+  let after = end;
+  while (after < events.length && events[after][1].type === "linePrefix") after++;
+  return (
+    after < events.length &&
+    events[after][0] === "enter" &&
+    events[after][1]._directive !== undefined &&
+    events[after][1].start.line === nextLine
+  );
+}
+
+/**
+ * Moves each exit of the run to the gap its rule chose, and settles the exits that go exactly
+ * where they are put, unless an exit would move over another container's event.
+ * It answers where the driver goes on: the last `chunkFlow` exit, which a move can have shifted,
+ * and the end of the window it rebuilt.
+ */
+function placeExits(
+  run: ExitRun,
+  gaps: number[],
+  settled: Token[]
+): { lastChunk: number; windowEnd: number } {
+  const { events, index, end } = run;
+  let lastChunk = run.lastChunk;
+  // An exit moves back over prefixes and content only, never over another container's event.
+  let valid = true;
+  for (let at = Math.min(gaps[0], index); at < index && valid; at++) {
+    valid = events[at][1]._container !== true && events[at][1]._directive === undefined;
+  }
+  let windowEnd = end;
+  // A directive container's own exit is the flow construct's, which `subtokenize` never moved, so
+  // it is no longer marked `_container` once placed, except where it goes before a last line
+  // ending: `subtokenize` puts it there.
+  if (valid) for (const token of settled) token._container = false;
+  if (valid && (gaps[0] !== end || gaps[gaps.length - 1] !== end)) {
+    const windowStart = Math.min(index, gaps[0]);
+    windowEnd = Math.max(end, gaps[gaps.length - 1]);
+    const placed: Event[] = [];
+    let next = 0;
+    for (let at = windowStart; at <= windowEnd; at++) {
+      while (next < gaps.length && gaps[next] === at) {
+        const exit = events[index + next];
+        if (at < index) exit[1].end = { ...events[at - 1][1].end };
+        placed.push(exit);
+        next++;
+      }
+      if (at < windowEnd && (at < index || at >= end)) placed.push(events[at]);
+    }
+    for (let at = 0; at < placed.length; at++) events[windowStart + at] = placed[at];
+    if (lastChunk >= windowStart) {
+      lastChunk = windowEnd - 1;
+      while (!(events[lastChunk][0] === "exit" && events[lastChunk][1].type === "chunkFlow"))
+        lastChunk--;
+    }
+  }
+  return { lastChunk, windowEnd };
 }
 
 /**
@@ -515,12 +612,15 @@ function tokenizeDirectiveContainerStart(
       : 0;
   let sizeOpen = 0;
   let depth = 0;
+  let blocks = 0;
   let opener: Token;
   return start;
 
   function start(code: Code): State | undefined {
-    depth = openAround(self) + 1;
+    depth = directivesAround(self) + 1;
     if (depth > maxDirectiveNesting) return nok(code);
+    blocks = blocksAround(self) + 1;
+    if (blocks > maxBlockNesting) return nok(code);
     opener = effects.enter("directiveContainer", { _container: true });
     effects.enter("directiveContainerFence");
     effects.enter("directiveContainerSequence");
@@ -559,6 +659,7 @@ function tokenizeDirectiveContainerStart(
       fenceSize: sizeOpen,
       indent: initialSize,
       depth,
+      blocks,
       line: self.now().line,
       closed: false,
       contentStarts: [],
@@ -569,9 +670,10 @@ function tokenizeDirectiveContainerStart(
     }
     state.directive = block;
     opener._directive = block;
+    opener._nestDepth = blocks;
     if (someContainerEnded(self, opener)) self.parser.lazy[block.line] = true;
     // A start that micromark ran inside `effects.check` runs again at once, after any exits.
-    parseRecord(self).open = depth;
+    directiveParse(self).openDirectives = depth;
     return ok(code);
   }
 }
@@ -614,10 +716,11 @@ function tokenizeDirectiveContainerContinuation(
 
   function start(code: Code): State | undefined {
     if (block.closed) {
-      parseRecord(self).reachedClosed = self.now().line;
+      directiveParse(self).reachedClosedDirective = self.now().line;
       return nok(code);
     }
-    recordOpenAround(self, block.depth);
+    recordDirectivesAround(self, block.depth);
+    recordContinued(self, block.blocks);
     // Only a line that opens with a colon or a blank can hold a closing fence, and an attempt on
     // every line at every level is what nesting costs.
     if (code !== 58 && !markdownSpace(code)) return content(code);
@@ -629,8 +732,9 @@ function tokenizeDirectiveContainerContinuation(
   // inside ends before the last line ending rather than taking it as a line of code.
   function closed(code: Code): State | undefined {
     block.closed = true;
-    recordOpenAround(self, block.depth - 1);
-    parseRecord(self).open = block.depth - 1;
+    recordDirectivesAround(self, block.depth - 1);
+    recordContinued(self, block.blocks - 1);
+    directiveParse(self).openDirectives = block.depth - 1;
     if (blockQuoteOpenInside(self.events, block)) self.parser.lazy[self.now().line] = true;
     state._closeFlow = true;
     return ok(code);
@@ -696,9 +800,9 @@ function tokenizeClosingFence(
 
 function exitDirectiveContainer(this: TokenizeContext, effects: Effects): undefined {
   const block = directiveState(this).directive;
-  const record = parseRecord(this);
-  record.open = Math.min(record.open, block.depth - 1);
-  if (block.closed) record.reachedClosed = 0;
+  const record = directiveParse(this);
+  record.openDirectives = Math.min(record.openDirectives, block.depth - 1);
+  if (block.closed) record.reachedClosedDirective = 0;
   effects.exit("directiveContainer");
 }
 

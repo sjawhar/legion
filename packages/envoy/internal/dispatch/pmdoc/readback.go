@@ -27,20 +27,43 @@ func (s skip) has(name string) bool { return s.all || s.names[name] }
 // attributes and anchor marks are not written, so they are not compared, and neither is an empty
 // paragraph the renderer does not write (writtenChildren).
 
+// WrittenReadBack is a document a write makes rendered - the markdown the write stores it as -
+// and that markdown read back (ParseRendering). Every whole document a write makes is read back
+// already, to refuse one that reads back otherwise (RefuseMisreadDocument), so ParseWritten hands
+// that reading to the write: a step of the same write that would read the same rendering again -
+// the task items its issue records, the blocks its advice counts - reads this tree instead of
+// making a second one of the same markdown. Markdown is the rendering this tree was read from,
+// which a caller compares with the markdown it stored before it shares the tree: a write that
+// renders the tree it stores otherwise - an upload whose server-owned attributes are taken off
+// before it is rendered (docs' asUploaded) - stored another rendering, which this is not.
+type WrittenReadBack struct {
+	Markdown string
+	Tree     *Node
+}
+
 // ReadBack is what doc's markdown reads back as.
 func ReadBack(doc *Node) (*Node, error) {
-	return readBack(doc, maxSpanCells)
+	written, err := readBackWritten(doc, maxSpanCells)
+	return written.Tree, err
 }
 
 // readBack is what doc's markdown, its tables' spans adding at most spanCells cells (render),
 // reads back as (ParseRendering).
 func readBack(doc *Node, spanCells int) (*Node, error) {
+	written, err := readBackWritten(doc, spanCells)
+	return written.Tree, err
+}
+
+// readBackWritten is readBack with the markdown it read back, so a caller that stores that
+// markdown shares this reading of it.
+func readBackWritten(doc *Node, spanCells int) (WrittenReadBack, error) {
 	r, err := render(doc, spanCells)
 	if err != nil {
-		return nil, err
+		return WrittenReadBack{}, err
 	}
-	back, err := ParseRendering(r.b.String())
-	return back, renderedNesting(doc, err)
+	markdown := r.b.String()
+	back, err := ParseRendering(markdown)
+	return WrittenReadBack{Markdown: markdown, Tree: back}, renderedNesting(doc, err)
 }
 
 // NewMisread names how after, which a write made from before, reads back otherwise where before
@@ -103,24 +126,26 @@ func newMisread(before, after *Node, spanCells int) (string, error) {
 // documentMisread names how doc, a whole document a write makes, reads back otherwise, or is ""
 // when it does not: every block that reads back otherwise is the write's, the first named as far
 // down as its markdown still pairs (misreads), and a doc whose markdown the parser refuses is named
-// by that refusal. Only a refusal (ErrSchema) is a verdict; any other error is the error.
-func documentMisread(doc *Node) (string, error) {
-	back, err := ReadBack(doc)
+// by that refusal. Only a refusal (ErrSchema) is a verdict; any other error is the error. It
+// answers the read-back it judged as well, which is the zero value where it made none, so a write
+// that stores that rendering shares the one parse of it (WrittenReadBack).
+func documentMisread(doc *Node) (WrittenReadBack, string, error) {
+	read, err := readBackWritten(doc, maxSpanCells)
 	if err != nil {
 		if errors.Is(err, ErrSchema) {
-			return err.Error(), nil
+			return WrittenReadBack{}, err.Error(), nil
 		}
-		return "", err
+		return WrittenReadBack{}, "", err
 	}
 	written := asWritten(doc)
-	difference := readDifference(written, back, skip{})
+	difference := readDifference(written, read.Tree, skip{})
 	if difference == "" {
-		return "", nil
+		return read, "", nil
 	}
-	if found := misreads(written, back, skip{}); len(found) > 0 {
-		return found[0].reason, nil
+	if found := misreads(written, read.Tree, skip{}); len(found) > 0 {
+		return read, found[0].reason, nil
 	}
-	return difference, nil
+	return read, difference, nil
 }
 
 // RefuseMisreadDocument refuses (ErrSchema) a whole document a write makes, a spec, an upload or a
@@ -131,7 +156,8 @@ func documentMisread(doc *Node) (string, error) {
 // them reads, and is logged. Any other error reading it back, a panic (ErrPanic) among them, is
 // the error.
 func RefuseMisreadDocument(doc *Node) error {
-	return refuseMisread(documentMisread(doc))
+	_, misread, err := documentMisread(doc)
+	return refuseMisread(misread, err)
 }
 
 // RefuseMisreadWrite refuses a write into a document; see RefuseMisreadDocument. It reads both

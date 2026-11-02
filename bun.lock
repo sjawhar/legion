@@ -152,7 +152,7 @@
     },
     "packages/pi-envoy": {
       "name": "@sjawhar/pi-envoy",
-      "version": "13.11.1",
+      "version": "14.2.0",
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@legion/contracts": "workspace:*",
@@ -169,7 +169,7 @@
     },
     "packages/pi-legion": {
       "name": "@sjawhar/pi-legion",
-      "version": "15.7.1",
+      "version": "16.3.0",
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@legion/contracts": "workspace:*",
@@ -215,6 +215,7 @@
         "@milkdown/theme-nord": "^7.5.0",
         "@milkdown/transformer": "^7.5.0",
         "mdast-util-directive": "^3.1.0",
+        "micromark-core-commonmark": "^2.0.3",
         "micromark-factory-space": "^2.0.1",
         "micromark-factory-whitespace": "^2.0.1",
         "micromark-util-character": "^2.1.1",
@@ -239,9 +240,13 @@
     },
   },
   "patchedDependencies": {
+    "micromark-core-commonmark@2.0.3": "patches/micromark-core-commonmark@2.0.3.patch",
+    "mdast-util-from-markdown@2.0.3": "patches/mdast-util-from-markdown@2.0.3.patch",
+    "micromark-extension-gfm-footnote@2.1.0": "patches/micromark-extension-gfm-footnote@2.1.0.patch",
+    "micromark@4.0.2": "patches/micromark@4.0.2.patch",
+    "prosemirror-tables@1.8.5": "patches/prosemirror-tables@1.8.5.patch",
     "@milkdown/plugin-clipboard@7.22.1": "patches/@milkdown%2Fplugin-clipboard@7.22.1.patch",
     "@milkdown/preset-gfm@7.22.1": "patches/@milkdown%2Fpreset-gfm@7.22.1.patch",
-    "prosemirror-tables@1.8.5": "patches/prosemirror-tables@1.8.5.patch",
     "nats@2.29.3": "patches/nats@2.29.3.patch",
   },
   "packages": {

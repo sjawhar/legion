@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'A write of a document of more than 2,000 blocks no longer indexes those blocks in its own request: an upload of an 8,000-item list spends about 350 ms less there, and the write answers as it did, with the same version and the same stored markdown. The index catches up afterwards - the block-index reconciliation indexes such a document within about 30 seconds, or the next settlement that writes a version of its own does, and the excerpt reconciliation stores its mentions'' excerpts within five minutes. Until it does, a reference into such a document resolves to no block: the mention is listed from the document rather than from the block holding it, shown with the document''s name in place of the text around it, and a backlink names the document rather than that block. A document of 2,000 blocks or fewer is indexed by its own write, as every document was.'
+time: 2026-10-30T12:00:00.000000000Z
+custom:
+    Issue: INFRA-625

@@ -391,6 +391,17 @@ func writeDocumentVersion(ctx context.Context, tx pgx.Tx, artifactID string, num
 	return version, nil
 }
 
+// recordDocumentTaskProgress records the task count of the document a write just stored.
+// readBack is the rendering that write stored, read back by its own parse (docs'
+// Ledger.ReadBackOf): the count reads that tree rather than parsing the same markdown again, and
+// parses markdown itself when the write left none.
+func recordDocumentTaskProgress(ctx context.Context, tx pgx.Tx, artifactID string, readBack *pmdoc.Node, markdown string) error {
+	if readBack != nil {
+		return docs.RecordTaskProgress(ctx, tx, artifactID, readBack)
+	}
+	return docs.RecordTaskProgressMarkdown(ctx, tx, artifactID, markdown)
+}
+
 // uploadDocuments is the document an upload of name to target writes live: the existing document
 // of that name, whose text the upload replaces. None for a file, or a name no document has yet,
 // which the upload creates and seeds.
@@ -574,6 +585,10 @@ func (s *server) storeArtifact(
 	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
 	defer ledger.Discard()
 	var documentMarkdown string
+	// documentReadBack is the rendering this write stored, read back by its own parse (docs'
+	// Ledger.ReadBackOf), which the task count and the advice's blocks read in place of parsing
+	// the same markdown again (recordDocumentTaskProgress, documentBlocksFor).
+	var documentReadBack *pmdoc.Node
 	var documentChanges model.ReferenceChanges
 	var movedEvents []model.Event
 	if kind == "doc" {
@@ -594,8 +609,10 @@ func (s *server) storeArtifact(
 		// The version credits the uploader alone, and holds the upload's write to the document,
 		// which clears the credit of every edit that write read when it changed the document.
 		ledger.WroteVersion(artifact.ID, version)
+		documentReadBack = ledger.ReadBackOf(artifact.ID, documentMarkdown)
 		// The version row exists now, so the count names it (LEGION-542).
-		if err := docs.RecordTaskProgressMarkdown(r.Context(), tx, artifact.ID, documentMarkdown); err != nil {
+		err = recordDocumentTaskProgress(r.Context(), tx, artifact.ID, documentReadBack, documentMarkdown)
+		if err != nil {
 			s.writeHandlerError(w, r, err)
 			return
 		}
@@ -703,7 +720,7 @@ func (s *server) storeArtifact(
 	release()
 	var blocks *documentBlocks
 	if kind == "doc" {
-		blocks = readDocumentBlocks(documentMarkdown)
+		blocks = documentBlocksFor(documentReadBack, documentMarkdown)
 	}
 	if advice != nil {
 		advice.documentBlocks = blocks

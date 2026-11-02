@@ -157,18 +157,21 @@ export default defineConfig({
           // rule and the header session pickers' (the live view's model and thinking pickers) rest on
           // each engine dispatching a closed select's `change` in the key's own task, deep links meet
           // each engine's chunk cancellation and the margin hold's frame and scroll order,
-          // IndexedDB-backed document recovery must run in the engines people use, and a body's Mermaid
-          // diagram draws through each engine's SVG parser, shadow DOM and the ELK layout running in it.
-          // So those specs also run in WebKit. So does the one-socket invariant (`live-socket`): a tab
-          // holds one live socket in every engine, and WebKit is the one iOS Safari uses for every
-          // subscription its row opens. The keyed write path (`keyed-writes`, `keyed-send`) runs here and
-          // in Firefox too: each engine has its own way of failing a request, aborting one, keeping a
-          // tab's storage across a reload and asking before it unloads, and a write must land once
-          // through all of them.
+          // IndexedDB-backed document recovery must run in the engines people use, a body's Mermaid
+          // diagram draws through each engine's SVG parser, shadow DOM and the ELK layout running in
+          // it, and a long body's formatting arrives from a Web Worker whose chunk, deadline and late
+          // paint each engine schedules its own way, both in a body a reader opens (`heavy-bodies`)
+          // and in one that grows under its own paint as a turn streams (`heavy-streamed-turn`). So
+          // those specs also run in WebKit. So does the
+          // one-socket invariant (`live-socket`): a tab holds one live socket in every engine, and
+          // WebKit is the one iOS Safari uses for every subscription its row opens. The keyed write
+          // path (`keyed-writes`, `keyed-send`) runs here and in Firefox too: each engine has its own
+          // way of failing a request, aborting one, keeping a tab's storage across a reload and
+          // asking before it unloads, and a write must land once through all of them.
           {
             name: "webkit",
             testMatch:
-              /(collab-cursor|deep-links|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits)\.e2e\.ts/,
+              /(collab-cursor|deep-links|heavy-bodies|heavy-streamed-turn|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits)\.e2e\.ts/,
             use: { ...devices["Desktop Safari"] },
           },
           // The live view's phone layout (its keyboard cap, gutter and scroll locks), its model
@@ -187,14 +190,15 @@ export default defineConfig({
           // the issue picker's and the header session pickers' keyboard-step rule rests on the engine's
           // select dispatch, offline document recovery owns browser storage, a click on a link
           // inside the editor meets the engine's focus rule (Firefox focuses the editing host, not the
-          // link), and a body's Mermaid diagram draws through the engine's SVG parser, shadow DOM and
-          // the ELK layout running in it. Those specs, the whole deep-links spec, the one-socket
-          // invariant (`live-socket`, which holds in every engine) and the keyed write path run in
-          // Firefox too.
+          // link), a body's Mermaid diagram draws through the engine's SVG parser, shadow DOM and
+          // the ELK layout running in it, and a long body's formatting arrives from a Web Worker whose
+          // chunk, deadline and late paint the engine schedules its own way. Those specs, the whole
+          // deep-links spec, the one-socket invariant (`live-socket`, which holds in every engine) and
+          // the keyed write path run in Firefox too.
           {
             name: "firefox",
             testMatch:
-              /(code-line-replace|deep-links|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits|picture-link-click)\.e2e\.ts/,
+              /(code-line-replace|deep-links|heavy-bodies|heavy-streamed-turn|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits|picture-link-click)\.e2e\.ts/,
             use: { ...devices["Desktop Firefox"] },
           },
 
