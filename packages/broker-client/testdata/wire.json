@@ -1,0 +1,127 @@
+{
+  "contract": "secrets-broker-token-exchange",
+  "version": 1,
+  "token_endpoint_path": "/v1/oauth/token",
+  "placeholders": {
+    "${broker}": "the broker's base URL, with no trailing slash",
+    "${token_endpoint}": "${broker} with token_endpoint_path appended: the htu every proof names",
+    "${subject_token}": "the subject token the client's source answered for this exchange",
+    "${actor_token}": "the machine's own Google identity token, for the one exchange that carries an actor",
+    "${session}": "the session name the caller asks to write under"
+  },
+  "never_sent": {
+    "audience": "RFC 8693's audience names the service a token is asked for. This exchange mints the broker's own access token and nothing else, so the broker reads no audience, and a client that sends one sends a field the other client does not.",
+    "requested_token_type": "The exchange mints an access token and only an access token, so the default is the only answer and naming it adds a field the two clients could disagree on.",
+    "scope": "The broker grants the scope the entry decides; a scope in the form is neither read nor honoured.",
+    "client_secret": "The exchange client is registered confidential but presents no credential of its own: the subject token and the proof of the caller's key are what the broker judges the request on."
+  },
+  "dpop": {
+    "header": "DPoP",
+    "typ": "dpop+jwt",
+    "alg": "ES256",
+    "embeds_public_key": true,
+    "private_members_forbidden": ["d", "p", "q", "dp", "dq", "qi", "k"],
+    "claims": ["jti", "htm", "htu", "iat"],
+    "htm": "POST",
+    "htu": "${token_endpoint}",
+    "nonce": "A proof carries a nonce claim only after the broker has answered 400 use_dpop_nonce with a DPoP-Nonce header, and then that nonce and no other; the first proof of a request carries none.",
+    "ath": "A token endpoint request presents no access token, so its proof carries no ath."
+  },
+  "accept": {
+    "status": 200,
+    "fields": {
+      "access_token": "the broker's opaque access token, bound to the key the proof presented",
+      "token_type": "DPoP",
+      "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+      "expires_in": "seconds the access token lives, an hour or less"
+    },
+    "optional_fields": {
+      "credential_id": "the launcher credential the trade minted or re-used, which a caller that enrols sessions needs and a caller that only writes to Dispatch ignores",
+      "credential_expires_at": "that credential's expiry, RFC 3339"
+    },
+    "forbidden_fields": {
+      "refresh_token": "This grant issues none: a renewal is a fresh subject token traded again. A client that kept one would keep a credential the broker never minted, so an answer carrying one is refused."
+    }
+  },
+  "refuse": [
+    {
+      "name": "the broker refuses the subject token",
+      "status": 400,
+      "body": {
+        "error": "invalid_grant",
+        "error_description": "the machine example-machine@example.iam.gserviceaccount.example is in no fleet this broker lists"
+      },
+      "client": "stops with a plain error carrying the broker's error and error_description, holds no token, and writes nothing"
+    },
+    {
+      "name": "the answer carries a refresh token",
+      "status": 200,
+      "body": {
+        "access_token": "example-access-token",
+        "token_type": "DPoP",
+        "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+        "expires_in": 3600,
+        "refresh_token": "example-refresh-token"
+      },
+      "client": "refuses the answer naming refresh_token: this grant issues none, and no client of it ever keeps one"
+    },
+    {
+      "name": "the answer names no access token",
+      "status": 200,
+      "body": {
+        "token_type": "DPoP",
+        "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+        "expires_in": 3600
+      },
+      "client": "refuses the answer naming access_token"
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "kubernetes-projected",
+      "what": "A pod trades the projected service-account token its runtime mounts, read again from its file before every trade.",
+      "form": {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "client_id": "dispatch-token-exchange",
+        "subject_token": "${subject_token}",
+        "subject_token_type": "urn:envoy:params:oauth:token-type:kubernetes-service-account",
+        "session": "${session}"
+      }
+    },
+    {
+      "name": "google-machine",
+      "what": "A machine trades its own Google identity token: the one its Compute Engine metadata server mints, or one minted for it through a workload identity pool.",
+      "form": {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "client_id": "dispatch-token-exchange",
+        "subject_token": "${subject_token}",
+        "subject_token_type": "urn:envoy:params:oauth:token-type:google-identity",
+        "session": "${session}"
+      }
+    },
+    {
+      "name": "person-sign-in",
+      "what": "A person who signed in on a machine trades their own Google identity token with that machine's as the actor token (RFC 8693 section 2.1), proving the box key the sign-in is bound to.",
+      "form": {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "client_id": "dispatch-token-exchange",
+        "subject_token": "${subject_token}",
+        "subject_token_type": "urn:envoy:params:oauth:token-type:person-google-identity",
+        "actor_token": "${actor_token}",
+        "actor_token_type": "urn:envoy:params:oauth:token-type:machine-google-identity",
+        "session": "${session}"
+      }
+    },
+    {
+      "name": "access-token",
+      "what": "A session on a dev box trades the access token its machine login holds for one of its own.",
+      "form": {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "client_id": "dispatch-token-exchange",
+        "subject_token": "${subject_token}",
+        "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
+        "session": "${session}"
+      }
+    }
+  ]
+}

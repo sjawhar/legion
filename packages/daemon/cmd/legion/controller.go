@@ -223,6 +223,14 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	if defaultOwner != "" {
 		env["GH_CONFIG_DIR"] = ghconfig.OwnerDir(controllerGHDir(stateDir), defaultOwner)
 	}
+	stopDispatchToken, dispatchTokenFile, err := controllerStartDispatchToken(cfg, stateDir, stderr)
+	if err != nil {
+		return 0, err
+	}
+	defer stopDispatchToken()
+	if dispatchTokenFile != "" {
+		env["DISPATCH_TOKEN_FILE"] = dispatchTokenFile
+	}
 	composer, err := prompts.New(stateDir)
 	if err != nil {
 		return 0, fmt.Errorf("snapshot controller role prompts: %w", err)
@@ -481,4 +489,88 @@ func fetchControllerSecret(ctx context.Context, daemonURL, operatorToken string,
 		return "", "", fmt.Errorf("%s%s answered design gate policy %q, not 'root-issues' or 'off'; upgrade the daemon to this legion's release", daemonURL, route, answer.DesignGate)
 	}
 	return answer.Secret, answer.DesignGate, nil
+}
+
+// controllerDispatchTokenLog is where the renewal loop writes once Oh My Pi owns the terminal.
+const controllerDispatchTokenLog = "dispatch-token.log"
+
+// controllerStartDispatchToken gets the controller its own Dispatch token from the secrets
+// broker, so no person's token is copied onto a machine: on a box with an identity of its own
+// (AGENT_SECRETS_URL and AGENT_SECRETS_MACHINE_IDENTITY), the Go token client trades that
+// identity for a broker access token, this writes it under the state directory as every other
+// credential of the controller's is written — a file the session reads through a `<NAME>_FILE`
+// pointer, never a value in its environment — and a loop renews it there while Oh My Pi runs.
+// It answers that file, which replaces the configured dispatch_token_file in the controller's
+// environment, and a function that stops the loop.
+//
+// With no broker or no machine identity it answers "" and changes nothing: the controller
+// carries the operator's configured dispatch_token_file, as it always has. A machine that names
+// an identity it cannot present refuses the start, naming it, rather than running a controller
+// whose Dispatch token nobody renews.
+//
+// The loop's lifetime is Oh My Pi's, not this command's signal context, for the reason
+// startControllerGitHubRefresh's is: a Ctrl-C in the terminal is Oh My Pi's to handle, and a
+// loop bound to the signal would leave the controller on a token no one renews. When the client
+// can no longer renew — the broker refuses this machine, or it has been unreachable past the
+// token's life — it stops with a plain error, which the loop logs: the file then holds the last
+// token the broker did mint, and nothing writes an empty one in its place, since a session with
+// no token must be refused by Dispatch rather than told it is somebody.
+func controllerStartDispatchToken(cfg config.ControllerConfig, stateDir string, stderr io.Writer) (stop func(), file string, err error) {
+	noop := func() {}
+	brokerURL := strings.TrimSuffix(os.Getenv("AGENT_SECRETS_URL"), "/")
+	source, err := brokerclient.MachineSource(os.Getenv)
+	switch {
+	case err != nil:
+		return noop, "", err
+	case cfg.DispatchURL == "" || source == nil || brokerURL == "":
+		return noop, "", nil
+	}
+	key, err := brokerclient.NewKey()
+	if err != nil {
+		return noop, "", err
+	}
+	session, err := brokerclient.SessionName(os.Getenv, "controller")
+	if err != nil {
+		return noop, "", err
+	}
+	logFile, err := os.OpenFile(filepath.Join(stateDir, controllerDispatchTokenLog), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	if err != nil {
+		return noop, "", fmt.Errorf("open %s: %w", filepath.Join(stateDir, controllerDispatchTokenLog), err)
+	}
+	log := slog.New(slog.NewTextHandler(logFile, nil))
+	client := &brokerclient.Client{BrokerURL: brokerURL, Key: key, Subject: source, Session: session,
+		HTTP: &http.Client{Timeout: 30 * time.Second}, Log: log}
+	loopCtx, cancel := context.WithCancel(context.Background())
+	done, first := make(chan struct{}), make(chan error, 1)
+	var once sync.Once
+	go func() {
+		defer close(done)
+		defer logFile.Close()
+		err := client.Run(loopCtx, func(token *brokerclient.Token) error {
+			path, err := runtime.WriteDispatchTokenFile(stateDir, token.AccessToken)
+			if err == nil {
+				file = path
+				log.Info("the controller holds a Dispatch token of this machine's own",
+					"file", path, "expires_at", token.Expiry.UTC().Format(time.RFC3339))
+			}
+			once.Do(func() { first <- err })
+			return err
+		})
+		if err != nil && loopCtx.Err() == nil {
+			log.Error("the controller's Dispatch token is no longer renewed; it works until it expires and then Dispatch refuses this session", "error", err.Error())
+		}
+		once.Do(func() { first <- err })
+	}()
+	// The first trade is made before Oh My Pi starts, and its failure refuses the start: a
+	// controller whose Dispatch token never arrived would read every issue as nobody.
+	if err := <-first; err != nil {
+		cancel()
+		<-done
+		return noop, "", fmt.Errorf("the controller's own Dispatch token, traded from this machine's identity (%s) at %s: %w", source.Name(), brokerURL, err)
+	}
+	fmt.Fprintf(stderr, "[legion] the controller's Dispatch token is this machine's own (%s), kept in %s; this process renews it while Oh My Pi runs\n", source.Name(), file)
+	return func() {
+		cancel()
+		<-done
+	}, file, nil
 }

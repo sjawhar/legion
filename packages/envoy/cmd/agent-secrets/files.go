@@ -2,10 +2,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sjawhar/envoy/internal/brokerclient"
 )
 
 // readTrimmed reads the file at path whole and answers its text with surrounding white space
@@ -18,18 +21,13 @@ func readTrimmed(path string) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-// readPodToken reads a projected pod token through readTrimmed and refuses an empty trimmed value.
-// The caller never converts a blank file into a bodyless renewal: a pod given --pod-token-file
-// either sends a token or makes no request.
+// readPodToken reads a pod's projected service-account token through the token client's own
+// file source (internal/brokerclient), the one reader of a projected token in this repository:
+// the renewer and the token exchange must never disagree about what a token file holds. It
+// refuses an empty file, as that source does, because the caller never turns a blank file into
+// a bodyless renewal: a pod given --pod-token-file either sends a token or makes no request.
 func readPodToken(path string) (string, error) {
-	token, err := readTrimmed(path)
-	if err != nil {
-		return "", err
-	}
-	if token == "" {
-		return "", fmt.Errorf("pod token file %s is empty", path)
-	}
-	return token, nil
+	return (&brokerclient.FileSource{Path: path}).Token(context.Background())
 }
 
 // writeFileAtomic writes data to path by renaming a finished temporary file into place, so no

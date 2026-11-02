@@ -110,6 +110,8 @@ type command struct {
 
 // commands is every form, in the order usage lists them.
 var commands = []command{
+	{"login", "agent-secrets login",
+		"Sign in on this machine: print the code to type at the sign-in page, wait for it, and keep\nthis machine's box key beside the sign-in, readable by you alone. Every form afterwards acts\nfor you and reads your secrets. A second person signs in beside you; AGENT_SECRETS_PERSON\nthen names whose session a form is."},
 	{"keygen", "agent-secrets keygen --out <dir>",
 		"Write a new signing key to <dir>/key.pem and print its thumbprint. A box's launcher runs it\ninside the box before enrolling it."},
 	{"enroll", "agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]",
@@ -167,6 +169,31 @@ environment:
                              operator types the code, and a waiting request names the page where
                              its approver decides it, unless the broker's answer names one of its
                              own on the broker
+  AGENT_SECRETS_PERSON       whose sign-in on this box a form acts for, where more than one
+                             person has signed in here; with one sign-in it is used, and with
+                             several every form refuses until this names one of them
+  AGENT_SECRETS_SIGNIN_ISSUER
+                             the identity provider login signs a person in at, through its
+                             device grant (default https://accounts.google.com)
+  AGENT_SECRETS_SIGNIN_CLIENT_ID
+                             the OAuth client login runs that device grant as, the one whose
+                             audience the broker's own sign-in setting names; login needs it
+  AGENT_SECRETS_SIGNIN_CLIENT_SECRET_FILE
+                             a file holding that client's secret, where the provider wants one
+  AGENT_SECRETS_MACHINE_IDENTITY
+                             how this machine proves who it is to the broker's token exchange:
+                             metadata (the Compute Engine metadata server), file:<path> (a
+                             projected service-account token) or pool (a workload identity
+                             pool); a person's sign-in presents it as their actor token
+  AGENT_SECRETS_GOOGLE_AUDIENCE
+                             the audience this machine's Google identity token is minted for,
+                             which the broker checks against its own setting
+  AGENT_SECRETS_POOL_AUDIENCE, AGENT_SECRETS_POOL_IDENTITY, AGENT_SECRETS_POOL_SUBJECT_TOKEN_FILE
+                             the workload identity pool provider, the managed identity its
+                             client id names, and the credential file the pool trusts
+                             (AGENT_SECRETS_MACHINE_IDENTITY=pool)
+  AGENT_SECRETS_SESSION_NAME the session name a trade asks to write under (default this
+                             machine's hostname; a person's sign-in prefixes their own name)
   OMP_SESSION_ID             the agent session the broker names and notifies if a pending request
                              expires; falls back to ENVOY_SESSION_ID, then CLAUDE_CODE_SESSION_ID,
                              so a harness that sets one of those instead still names its session
@@ -197,6 +224,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "--version":
 		fmt.Fprintf(stdout, "agent-secrets %s\n", buildversion.String())
 		return 0
+	case "login":
+		return cmdLogin(args[1:], stdout, stderr)
 	case "keygen":
 		return cmdKeygen(args[1:], stdout, stderr)
 	case "enroll":
@@ -434,17 +463,27 @@ func loadKey(path string) (*ecdsa.PrivateKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	block, _ := pem.Decode(data)
-	if block == nil {
-		return nil, fmt.Errorf("%s: not a PEM file", path)
-	}
-	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	key, err := parseKeyPEM(data)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	return key, nil
+}
+
+// parseKeyPEM reads the PKCS8 PEM encodeKeyPEM writes, whether it came from a file (loadKey) or
+// from a sign-in record (login.go), so one decoder reads every key this binary wrote.
+func parseKeyPEM(data []byte) (*ecdsa.PrivateKey, error) {
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, errors.New("not a PEM file")
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
 	key, ok := parsed.(*ecdsa.PrivateKey)
 	if !ok {
-		return nil, fmt.Errorf("%s: not an ECDSA private key", path)
+		return nil, errors.New("not an ECDSA private key")
 	}
 	return key, nil
 }
@@ -501,10 +540,29 @@ func selectSigner(dir string) (string, Signer, error) {
 // sessionContext resolves the broker URL and this process's Signer every session-authenticated
 // subcommand (renew, request, status, cancel, revoke, self, and the exec form) needs, plus the
 // enrollment id buildSigner read from file mode (empty in helper mode).
+//
+// A machine somebody has signed in on (`agent-secrets login`, one record per person under the
+// key directory) acts for that person first of all: it trades their identity for an access
+// token with this machine's own as the actor and enrols their box key under the credential that
+// trade minted (signInSigner), which is what makes the session theirs rather than the fleet's.
+// With no sign-in on the box, it is the box's or pod's own key, then the helper, as before.
 func sessionContext() (base, enrollmentID string, signer Signer, err error) {
 	base = brokerBaseURL()
 	if base == "" {
 		return "", "", nil, fmt.Errorf("%s is required: it names the secrets broker this command reads every secret from, and this command reads no local secrets file", brokerURLVar)
+	}
+	signedIn, err := currentSignIn()
+	if err != nil {
+		return "", "", nil, err
+	}
+	if signedIn != nil {
+		ctx, stop := context.WithTimeout(context.Background(), tradeDeadline)
+		defer stop()
+		enrollmentID, signer, err = signInSigner(ctx, base, signedIn)
+		if err != nil {
+			return "", "", nil, err
+		}
+		return base, enrollmentID, signer, nil
 	}
 	enrollmentID, signer, err = buildSigner()
 	if err != nil {

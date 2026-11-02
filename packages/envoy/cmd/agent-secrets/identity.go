@@ -188,6 +188,12 @@ func cmdIdentity(args []string, stdout, stderr io.Writer) int {
 	if exists(filepath.Join(dir, keyFile)) || freshMarker(dir) {
 		return 0
 	}
+	// A person signed in on this machine is an identity of its own: their box key is here, and
+	// every form trades it for a session of theirs (login.go). It is a local read, as every
+	// other check here is: whether the broker still takes that sign-in is the next call's.
+	if records, err := loadSignIns(); err == nil && len(records) > 0 {
+		return 0
+	}
 	sock, named := helperSocket()
 	if !exists(sock) {
 		if named || helperInstalled() {
