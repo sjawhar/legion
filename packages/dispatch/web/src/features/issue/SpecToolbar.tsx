@@ -10,6 +10,7 @@ import {
   successText,
 } from "../../theme/classes";
 import { ConnectionDot } from "../doc/ConnectionDot";
+import { CopyMarkdownButton } from "../doc/CopyMarkdownButton";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import type { DispatchReferenceRoute } from "../refs/routes";
@@ -69,6 +70,7 @@ export function SpecToolbar({
       </button>
       <ConnectionDot connection={toolbar.connection} pending={toolbar.pending} />
       <CopyRefButton route={reference} />
+      <CopyMarkdownButton read={toolbar.readMarkdown} />
       {version === undefined ? (
         <>
           <button

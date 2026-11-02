@@ -12,18 +12,22 @@ import { dangerText, linkHoverText, linkText, successText } from "../theme/class
  *
  *  `value` may be a function of the click, for a button whose modifier keys choose what it
  *  copies; such a button names itself through `label`, since the default `Copy <what> <value>`
- *  needs one value to print. */
+ *  needs one value to print. Such a function may answer a promise, for a value it reads only
+ *  once clicked (a document's current text); a value too long to print in the failure hint (that
+ *  document) says what to do in `failure` instead. */
 export function CopyButton({
   children,
   className,
+  failure,
   label,
   value,
   what,
 }: {
   children?: ReactNode;
   className?: string;
+  failure?: string;
   label?: string;
-  value: string | ((event: MouseEvent<HTMLButtonElement>) => string);
+  value: string | ((event: MouseEvent<HTMLButtonElement>) => string | Promise<string>);
   what: string;
 }): ReactNode {
   const { copy, status } = useCopyFeedback();
@@ -64,6 +68,8 @@ export function CopyButton({
         >
           {status === "copied" ? (
             "Copied"
+          ) : failure !== undefined ? (
+            `Copy failed - ${failure}`
           ) : children === status.failed ? (
             "Copy failed - select the text"
           ) : (

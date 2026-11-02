@@ -10,6 +10,7 @@ import {
 } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
+import { isText } from "../../api/artifact-version";
 import {
   api,
   isArtifactNotFound,
@@ -111,6 +112,11 @@ function admissionBlock(error: unknown): AdmissionBlock {
  * refusal is normally followed by the repair message, never by an endless reconnect. */
 const SCHEMA_REFUSAL_DELAYS_MS = [0, 1_000, 2_000, 4_000, 8_000] as const;
 
+/** How long Copy Markdown waits for this browser's unsent edits of the current version to reach
+ * the server before it reads the text the server holds anyway: a document that cannot send them
+ * (offline, or a socket in backoff) still copies. */
+const COPY_SEND_WAIT_MS = 3_000;
+
 /** The document chrome reports its state upward so an issue can place its controls in the active
  * Spec tab row. Project document pages retain their artifact-header toolbar. */
 export interface DocumentToolbar {
@@ -119,6 +125,8 @@ export interface DocumentToolbar {
   isNamingVersion: boolean;
   requestNamedVersion(): void;
   copyBlockLink(): Promise<boolean>;
+  /** Reads the version on screen as Markdown, as Dispatch stores it, for Copy Markdown. */
+  readMarkdown(): Promise<string>;
   versions: Version[];
 }
 
@@ -393,6 +401,36 @@ export function ProofDocument({
       `${window.location.origin}${window.location.pathname}${blockFragment(blockId)}`
     );
   }, []);
+  const pendingRef = useRef(pending);
+  pendingRef.current = pending;
+  // Copy Markdown's read, made when the copy is asked for, so the copy is the text on screen then:
+  // an older version's stored text, or the current text read again from the server once this
+  // browser's own edits of it have reached the server (`COPY_SEND_WAIT_MS`). A cached read would
+  // miss every edit since the last version settled. The server renders both as canonical
+  // Markdown, which writes no comment's, suggestion's or ask's mark; the editor's own
+  // `getMarkdown()` writes those, so it is never the source.
+  const readMarkdown = useCallback(async (): Promise<string> => {
+    if (version !== undefined) {
+      const read = await queryClient.fetchQuery({
+        queryKey: ["artifact", artifact.id, "version", version],
+        queryFn: () => api.getArtifactVersion(artifact.id, version),
+        staleTime: Number.POSITIVE_INFINITY,
+      });
+      if (!isText(read)) {
+        throw new Error(`Version ${version} of ${artifact.name} is not a document's text.`);
+      }
+      return read.markdown;
+    }
+    const held = pendingRef.current;
+    if (held !== undefined && held.count > 0 && !held.readOnly) {
+      await pendingWaiter.whenSent(artifact.id, COPY_SEND_WAIT_MS);
+    }
+    const text = await queryClient.fetchQuery({
+      ...liveTextQueryOptions(artifact.id),
+      staleTime: 0,
+    });
+    return text.markdown;
+  }, [artifact.id, artifact.name, pendingWaiter, queryClient, version]);
   // Whether this browser holds no edit of this document the server has still to take: the margin
   // waits on it after it has marked the words a comment is to anchor to again, so the mark it
   // sends is one the server can already see. That mark is an edit of its own, so the wait is for
@@ -456,6 +494,7 @@ export function ProofDocument({
       pending,
       copyBlockLink,
       isNamingVersion: nameVersion.isPending,
+      readMarkdown,
       requestNamedVersion,
       versions,
     });
@@ -466,6 +505,7 @@ export function ProofDocument({
     nameVersion.isPending,
     onToolbarChange,
     page,
+    readMarkdown,
     requestNamedVersion,
     versions,
   ]);

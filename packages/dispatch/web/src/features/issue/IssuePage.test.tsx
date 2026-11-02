@@ -19,6 +19,7 @@ import type {
 import { DocumentRuntime } from "../doc/runtime";
 import { MarginProvider } from "../margin/margin-context";
 import { KeymapProvider } from "../shell/KeymapProvider";
+import { appKeymap } from "../shell/keymap";
 import { IssuePage } from "./IssuePage";
 
 const issue: IssueDetails = {
@@ -1625,6 +1626,146 @@ test("IssuePage copies the issue key on click, its reference on a modifier click
     getArtifact.mockRestore();
     getArtifactText.mockRestore();
     getArtifactVersion.mockRestore();
+    restore();
+  }
+});
+
+/** The palette's Copy Markdown row, which is never offered twice. */
+function copyMarkdownRow() {
+  const rows = appKeymap.actions().filter((action) => action.label === "Copy Markdown");
+  expect(rows.length).toBeLessThanOrEqual(1);
+  return rows[0];
+}
+
+test("IssuePage's Spec copies its Markdown beside its link, at the version shown, from the button and the palette", async () => {
+  const originalClipboard = navigator.clipboard;
+  const writeText = spyOn({ writeText: async (_text: string) => undefined }, "writeText");
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  const restore = stubIssuePage(issue);
+  const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
+    ...issue.artifacts[0],
+  });
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "# Primary\n\nShip **it**.\n",
+    version: 2,
+    token: "sha256:primary",
+  });
+  const getArtifactVersion = spyOn(api, "getArtifactVersion").mockResolvedValue({
+    authors: [{ id: "alice", kind: "user" }],
+    created_at: "2026-09-09T00:00:00Z",
+    markdown: "# Primary v1\n",
+    named: false,
+    number: 1,
+    summary: null,
+  });
+  const view = renderIssuePage("/issues/CORE-1/spec", "/issues/CORE-1/artifacts/spec?v=1");
+
+  try {
+    const tabs = await screen.findByTestId("issue-tabs");
+    const current = await within(tabs).findByRole("button", { name: "Copy Markdown" });
+    expect(
+      current.closest("[data-copy-markdown]")?.previousElementSibling?.matches("[data-copy-ref]")
+    ).toBe(true);
+    // The copy reads the text again when pressed, so an edit since the page opened is in it.
+    getArtifactText.mockResolvedValue({
+      markdown: "# Primary\n\nShip **it** today.\n",
+      version: 2,
+      token: "sha256:primary-edited",
+    });
+    fireEvent.click(current);
+    await waitFor(() =>
+      expect(writeText).toHaveBeenLastCalledWith("# Primary\n\nShip **it** today.\n")
+    );
+    expect(await within(tabs).findByText("Copied", { exact: true })).toBeTruthy();
+    expect(copyMarkdownRow()?.scope).toBe("document");
+
+    fireEvent.click(screen.getByRole("link", { name: "Navigate to test route" }));
+    await waitFor(() => expect(getArtifactVersion).toHaveBeenCalledWith("artifact-1", 1));
+    const past = await within(tabs).findByRole("button", { name: "Copy Markdown" });
+    fireEvent.click(past);
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith("# Primary v1\n"));
+    writeText.mockClear();
+    const row = copyMarkdownRow();
+    if (row === undefined) throw new Error("no Copy Markdown row in the palette");
+    act(() => row.run());
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("# Primary v1\n"));
+
+    fireEvent.click(screen.getByRole("tab", { name: "Conversation" }));
+    await screen.findByRole("tab", { name: "Conversation", selected: true });
+    expect(screen.queryByRole("button", { name: "Copy Markdown" })).toBeNull();
+    expect(copyMarkdownRow()).toBeUndefined();
+  } finally {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+    view.unmount();
+    getArtifact.mockRestore();
+    getArtifactText.mockRestore();
+    getArtifactVersion.mockRestore();
+    restore();
+  }
+});
+
+test("IssuePage offers Copy Markdown on its Markdown documents and not on an uploaded picture", async () => {
+  const originalClipboard = navigator.clipboard;
+  const writeText = spyOn({ writeText: async (_text: string) => undefined }, "writeText");
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  const version = {
+    authors: [{ id: "alice", kind: "user" as const }],
+    created_at: "2026-09-09T01:00:00Z",
+    named: false,
+    number: 1,
+    summary: null,
+  };
+  const notes = {
+    ...issue.artifacts[0],
+    id: "artifact-notes",
+    name: "notes.md",
+    primary: false,
+    slug: "notes-md",
+    versions: [version],
+  };
+  const picture = {
+    ...notes,
+    id: "artifact-image",
+    kind: "image" as const,
+    name: "diagram.png",
+    slug: "diagram-png",
+    versions: [{ ...version, mime: "image/png", sha256: "image-sha", size: 10 }],
+  };
+  const restore = stubIssuePage({ ...issue, artifacts: [...issue.artifacts, notes, picture] });
+  const getArtifact = spyOn(api, "getArtifact").mockImplementation(async (id) =>
+    id === notes.id ? notes : issue.artifacts[0]
+  );
+  const getArtifactText = spyOn(api, "getArtifactText").mockImplementation(async (id) => ({
+    markdown: id === notes.id ? "- an uploaded note\n" : "# Primary\n",
+    version: 1,
+  }));
+  const view = renderIssuePage(
+    "/issues/CORE-1/artifacts/notes-md",
+    "/issues/CORE-1/artifacts/diagram-png"
+  );
+
+  try {
+    const header = await screen.findByTestId("artifact-header");
+    const copy = await within(header).findByRole("button", { name: "Copy Markdown" });
+    expect(
+      copy.closest("[data-copy-markdown]")?.previousElementSibling?.matches("[data-copy-ref]")
+    ).toBe(true);
+    fireEvent.click(copy);
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith("- an uploaded note\n"));
+    expect(await within(header).findByText("Copied", { exact: true })).toBeTruthy();
+    expect(copyMarkdownRow()?.scope).toBe("document");
+
+    fireEvent.click(screen.getByRole("link", { name: "Navigate to test route" }));
+    await screen.findByRole("img", { name: "diagram.png version 1" });
+    const pictureHeader = screen.getByTestId("artifact-header");
+    expect(within(pictureHeader).getByRole("button", { name: /^Copy reference / })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Copy Markdown" })).toBeNull();
+    expect(copyMarkdownRow()).toBeUndefined();
+  } finally {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+    view.unmount();
+    getArtifact.mockRestore();
+    getArtifactText.mockRestore();
     restore();
   }
 });

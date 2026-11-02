@@ -7,7 +7,9 @@ declare global {
 }
 
 /** Replaces the page's async clipboard with a recorder (before any navigation) so a test can
- *  assert what a copy button actually wrote, not just that it reported "Copied". */
+ *  assert what a copy button actually wrote, not just that it reported "Copied". It records a
+ *  `write` of clipboard items (each one's plain text, once its read has finished) as it records
+ *  `writeText`. */
 export async function recordClipboard(page: Page): Promise<() => Promise<string[]>> {
   await page.addInitScript(() => {
     const copied: string[] = [];
@@ -15,6 +17,11 @@ export async function recordClipboard(page: Page): Promise<() => Promise<string[
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: {
+        write: async (items: ClipboardItem[]) => {
+          for (const item of items) {
+            copied.push(await (await item.getType("text/plain")).text());
+          }
+        },
         writeText: async (text: string) => {
           copied.push(text);
         },

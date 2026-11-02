@@ -21,6 +21,7 @@ import {
 } from "../../theme/classes";
 import { ApprovalChip } from "../doc/ApprovalChip";
 import { ConnectionDot } from "../doc/ConnectionDot";
+import { CopyMarkdownButton } from "../doc/CopyMarkdownButton";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 import { AgentName } from "../refs/AgentName";
 import { CopyRefButton } from "../refs/CopyRefButton";
@@ -135,6 +136,10 @@ export function ArtifactHeader({
               {artifact.name}
             </h2>
             <CopyRefButton className="-my-2 md:-my-0.5" route={documentRoute(artifact, version)} />
+            {/* A Markdown document's page reports a toolbar; a file or a picture has none. */}
+            {toolbar === undefined ? null : (
+              <CopyMarkdownButton className="-my-2 md:-my-0.5" read={toolbar.readMarkdown} />
+            )}
           </div>
           {artifact.approval === undefined ? null : (
             <div className="mt-1">

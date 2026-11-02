@@ -144,6 +144,10 @@ it opens a comment on the text you selected and puts the cursor in it. It works 
 in the document and text is selected. With nothing selected, in a comment you are writing, or on a
 document you cannot edit, it does nothing.
 
+The palette also offers **Copy Markdown** on a document's page. It copies the version on screen as
+Markdown, as the **Copy Markdown** button next to the document's link button does
+([Copying a document as Markdown](/legion/dispatch/documents/#copying-a-document-as-markdown)).
+
 ## Agents
 
 | Keys | Action |

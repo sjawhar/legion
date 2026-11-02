@@ -9,6 +9,7 @@ import { ApiError, api } from "../../api/client";
 import type { Artifact, Subscriber } from "../../api/types";
 import { DocumentRuntime } from "../doc/runtime";
 import { MarginProvider } from "../margin/margin-context";
+import { appKeymap } from "../shell/keymap";
 import { DocumentPage } from "./DocumentPage";
 
 const getReferences = spyOn(api, "getReferences").mockResolvedValue({
@@ -41,14 +42,14 @@ const artifact: Artifact = {
   ],
 };
 
-function renderDocumentPage() {
+function renderDocumentPage(path = "/projects/CORE/documents/design-notes") {
   const runtime = fakeDocumentRuntime({ text: "# Design notes" });
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
   queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
   const view = render(
-    <MemoryRouter initialEntries={["/projects/CORE/documents/design-notes"]}>
+    <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
         <DocumentRuntime.Provider value={runtime.runtime}>
           <MarginProvider>
@@ -225,6 +226,116 @@ test("shows Subscribed agents and unsubscribes after confirming the dialog", asy
     getArtifactSubscribers.mockRestore();
     getArtifactText.mockRestore();
     getArtifact.mockRestore();
+    getProjectArtifact.mockRestore();
+  }
+});
+
+/** The palette's Copy Markdown row, which is never offered twice. */
+function copyMarkdownRow() {
+  const rows = appKeymap.actions().filter((action) => action.label === "Copy Markdown");
+  expect(rows.length).toBeLessThanOrEqual(1);
+  return rows[0];
+}
+
+test("a project document copies its Markdown beside its link, the current text or the picked version's", async () => {
+  const originalClipboard = navigator.clipboard;
+  const writeText = spyOn({ writeText: async (_text: string) => undefined }, "writeText");
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  const getProjectArtifact = spyOn(api, "getProjectArtifact").mockResolvedValue(artifact);
+  const getArtifact = spyOn(api, "getArtifact").mockResolvedValue(artifact);
+  const getArtifactSubscribers = spyOn(api, "getArtifactSubscribers").mockResolvedValue([]);
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "# Design notes\n\nUse Postgres.\n",
+    version: 1,
+    token: "sha256:design-notes",
+  });
+  const getArtifactVersion = spyOn(api, "getArtifactVersion").mockResolvedValue({
+    authors: [{ id: "alice", kind: "user" }],
+    created_at: "2026-09-10T00:00:00Z",
+    markdown: "# Design notes\n\nUse SQLite.\n",
+    named: false,
+    number: 1,
+    summary: null,
+  });
+
+  try {
+    const current = renderDocumentPage();
+    try {
+      const header = await screen.findByTestId("artifact-header");
+      const copy = await within(header).findByRole("button", { name: "Copy Markdown" });
+      expect(
+        copy.closest("[data-copy-markdown]")?.previousElementSibling?.matches("[data-copy-ref]")
+      ).toBe(true);
+      // The copy reads the text again when pressed, so an edit since the page opened is in it.
+      getArtifactText.mockResolvedValue({
+        markdown: "# Design notes\n\nUse Postgres 18.\n",
+        version: 1,
+        token: "sha256:design-notes-edited",
+      });
+      fireEvent.click(copy);
+      await waitFor(() =>
+        expect(writeText).toHaveBeenLastCalledWith("# Design notes\n\nUse Postgres 18.\n")
+      );
+      expect(await within(header).findByText("Copied", { exact: true })).toBeTruthy();
+      expect(copyMarkdownRow()?.scope).toBe("document");
+    } finally {
+      current.view.unmount();
+    }
+
+    const past = renderDocumentPage("/projects/CORE/documents/design-notes?version=1");
+    try {
+      const header = await screen.findByTestId("artifact-header");
+      const copy = await within(header).findByRole("button", { name: "Copy Markdown" });
+      fireEvent.click(copy);
+      await waitFor(() =>
+        expect(writeText).toHaveBeenLastCalledWith("# Design notes\n\nUse SQLite.\n")
+      );
+      expect(getArtifactVersion).toHaveBeenCalledWith("artifact-1", 1);
+    } finally {
+      past.view.unmount();
+    }
+  } finally {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+    getArtifactVersion.mockRestore();
+    getArtifactText.mockRestore();
+    getArtifactSubscribers.mockRestore();
+    getArtifact.mockRestore();
+    getProjectArtifact.mockRestore();
+  }
+});
+
+test("a project's uploaded file that is not Markdown has its link button and no Copy Markdown", async () => {
+  const file: Artifact = {
+    ...artifact,
+    kind: "file",
+    name: "trace.json",
+    slug: "trace-json",
+    versions: [
+      {
+        authors: [{ id: "alice", kind: "user" }],
+        created_at: "2026-09-10T00:00:00Z",
+        mime: "application/json",
+        named: false,
+        number: 1,
+        sha256: "trace-sha",
+        size: 12,
+        summary: null,
+      },
+    ],
+  };
+  const getProjectArtifact = spyOn(api, "getProjectArtifact").mockResolvedValue(file);
+  const getArtifactSubscribers = spyOn(api, "getArtifactSubscribers").mockResolvedValue([]);
+  const { view } = renderDocumentPage("/projects/CORE/documents/trace-json");
+
+  try {
+    const header = await screen.findByTestId("artifact-header");
+    await screen.findByRole("link", { name: "Download version 1" });
+    expect(within(header).getByRole("button", { name: /^Copy reference / })).toBeTruthy();
+    expect(within(header).queryByRole("button", { name: "Copy Markdown" })).toBeNull();
+    expect(copyMarkdownRow()).toBeUndefined();
+  } finally {
+    view.unmount();
+    getArtifactSubscribers.mockRestore();
     getProjectArtifact.mockRestore();
   }
 });
