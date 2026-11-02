@@ -10,7 +10,7 @@ import {
   textMutedOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { blockFragment } from "./block-reference";
+import { blockFragment, isBlockItemKind } from "./block-reference";
 import { referenceTriggerProps } from "./RefPreview";
 import { referencesQuery } from "./reference-target";
 import type { DispatchReferenceRoute } from "./routes";
@@ -21,7 +21,8 @@ const NODE_LABELS: Record<GraphEdge["node"]["kind"], string> = {
   artifact: "Artifact",
   ask: "Ask",
   // A block of a document that cites a node shows as the document holding it, linked to the
-  // block; a block of a comment or message shows as its item (`blockItem`).
+  // block; a part of an ask, or a block of a comment or message, shows as its item
+  // (`blockItem`).
   block: "Artifact",
   comment: "Comment",
   component: "Component",
@@ -45,12 +46,12 @@ const STRUCTURAL_LABELS: Partial<Record<GraphEdge["kind"], string>> = {
 const CLAMP_LINES = 3;
 const CLAMP_CHARACTERS = 240;
 
-/** The comment or message a graph node is a block of: its parent, for a block node naming no
- *  document (`comment/<uuid>#b2`, `message/<uuid>#b1`); undefined for any other node. */
+/** The ask, comment or message a graph node is a block of: its parent, for a block node naming
+ *  no document (`ask/<uuid>#b2`, `comment/<uuid>#b2`, `message/<uuid>#b1`); undefined for any
+ *  other node. A part of an ask reads as its ask, as a block of a comment reads as its comment:
+ *  one set of item kinds says which (`isBlockItemKind`). */
 function blockItem(node: GraphEdge["node"]): GraphEdge["node"]["parent"] {
-  return node.kind === "block" &&
-    node.document === undefined &&
-    (node.parent?.kind === "comment" || node.parent?.kind === "message")
+  return node.kind === "block" && node.document === undefined && isBlockItemKind(node.parent?.kind)
     ? node.parent
     : undefined;
 }
@@ -99,9 +100,10 @@ interface SourceGroup {
 
 /** One entry per citing source, in the server's newest-first order: a document that both holds
  *  an ask's anchor and mentions it is one source with two rows, not two cards, and the blocks of
- *  one document, or of one comment or message, that cite the node are that document's or item's
- *  rows. A source of one node links to that node (a block at the block); a document or item whose
- *  blocks are its rows links to itself, and each row to its own block. */
+ *  one document, or the parts or blocks of one ask, comment or message, that cite the node are
+ *  that document's or item's rows. A source of one node links to that node (a block at the
+ *  block); a document or item whose blocks are its rows links to itself, and each row to its own
+ *  block. */
 function groupBySource(edges: readonly GraphEdge[]): SourceGroup[] {
   const groups = new Map<string, { edges: GraphEdge[]; nodes: Set<string> }>();
   for (const edge of edges) {

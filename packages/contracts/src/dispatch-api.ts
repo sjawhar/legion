@@ -871,6 +871,11 @@ export interface Ask extends AnchorPosition {
   readonly created_at: string;
   /** Batches the current inbound graph-edge count for ask-list surfaces. */
   readonly referenced_by_count?: number;
+  /** The current revision of the ask's parts: the number a reference to one of them pins
+   *  (`dispatch://<key>/ask/<id>#b-<part>@v<N>`). Batched beside the part ids of the options and
+   *  the answer, so it is absent on a write's own answer and while the ask's parts are not indexed
+   *  yet, where no revision can be pinned. */
+  readonly revision?: number;
   readonly issue?: Pick<Issue, "key" | "title" | "assignee">;
   readonly document?: InboxDocument;
   /** Inbox rows, the issue detail's `open_asks` and the issue ask list: the newest reply in the
@@ -1163,11 +1168,19 @@ export interface SessionAnswersResponse {
 }
 
 export interface AskOption {
+  /** The part this option is stored as: the block `dispatch://<key>/ask/<ask id>#b-<id>` names,
+   *  pinned to the ask's `revision` with `@v<N>`. Read-only, and carried by every read that shows
+   *  an ask's options; absent on a write's own answer, and while the ask's parts are not indexed
+   *  yet. A write that sends it back has it ignored: no caller mints or moves a part id. */
+  readonly id?: string;
   readonly label: string;
   readonly description?: string;
 }
 
 export interface AskAnswer {
+  /** The part the ask's current answer is stored as, read as an option's `id` is and never
+   *  written by a caller; a superseded answer, which no part of the ask holds, carries none. */
+  readonly id?: string;
   readonly user: string;
   readonly selected: string[];
   readonly text: string | null;
@@ -1344,14 +1357,16 @@ export interface Comment extends AnchorPosition {
   readonly created_at: string;
   readonly mentions: CommentMention[];
   readonly deliveries: CommentDelivery[];
-  /** The block of the comment this reply answers (`reply_to_block`); null on every other
-   *  comment, and absent from a Dispatch older than the field. */
+  /** The block this reply answers (`reply_to_block`): a block of the comment `reply_to` names,
+   *  or, with `ask_id`, a part of that ask; null on every other comment, and absent from a
+   *  Dispatch older than the field. */
   readonly reply_block?: ReplyBlock | null;
 }
 
-/** The block a reply answers: its node id (`comment/<uuid>#b2`), its reference (absent for a
- *  block of a direct message, which has no address), its id, its text cut to 480 characters (the
- *  last text it held once removed), and whether its item's current revision no longer holds it. */
+/** The block a reply answers: its node id (`comment/<uuid>#b2`, or `ask/<uuid>#b2` for a part of
+ *  the ask the reply names), its reference (absent for a block of a direct message, which has no
+ *  address), its id, its text cut to 480 characters (the last text it held once removed), and
+ *  whether its item's current revision no longer holds it. */
 export interface ReplyBlock {
   readonly node: string;
   readonly ref?: string;
@@ -2166,12 +2181,14 @@ export type GraphEdgeKind =
 //
 // A block node (`kind: "block"`, id `<document ref_key>#<block id>`) also carries `block_id`,
 // its document's reference as `document`, and `changed_version`, the document version in which
-// its text last changed (its `changed_at` is that version's time). A block of a comment or an
-// issue message (id `comment/<uuid>#<block id>` or `message/<uuid>#<block id>`) carries no
-// `document`: its `parent` is the comment or message, and a comment block's `changed_version` is
-// the comment revision in which its text last changed (a message block has none). `text` and
-// `pin` are set only on the node a reference read names: `text` is the block's whole current
-// text, and `pin` answers a reference pinned to a version (or a comment's revision).
+// its text last changed (its `changed_at` is that version's time). A block of a comment, an issue
+// message or an ask (id `comment/<uuid>#<block id>`, `message/<uuid>#<block id>` or
+// `ask/<ask id>#<part id>`, a part being the ask's question, one of its options or its answer)
+// carries no `document`: its `parent` is the comment, message or ask, and a comment block's or an
+// ask part's `changed_version` is the comment revision or the ask's part revision in which its
+// text last changed (a message block has none). `text` and `pin` are set only on the node a
+// reference read names: `text` is the block's whole current text, and `pin` answers a reference
+// pinned to a version (or a comment's or an ask's revision).
 export interface GraphNode {
   readonly kind:
     | "issue"
@@ -2903,9 +2920,11 @@ export interface CreateCommentInput {
   readonly body: string;
   readonly anchor?: AnchorInput;
   readonly reply_to?: string;
-  /** The id of the block of the comment `reply_to` names that the reply answers (`b2`), checked
-   *  against that comment before `reply_to` climbs to its thread's head. `400 INVALID_COMMENT`
-   *  without `reply_to`, for a block that comment does not hold now, and in an ask's thread. */
+  /** The id of the block the reply answers (`b2`): a block of the comment `reply_to` names,
+   *  checked against that comment before `reply_to` climbs to its thread's head, in an ask's
+   *  thread as anywhere else, or, with `ask_id`, a part of that ask. `400 INVALID_COMMENT`
+   *  without `reply_to` or `ask_id`, and for a block the item it is checked against does not
+   *  hold now. */
   readonly reply_to_block?: string;
   readonly ask_id?: string;
   readonly mentions?: Array<{ readonly target: string }>;
@@ -3280,9 +3299,19 @@ const askEventPayloadFields = {
   // kind the server no longer writes (the removed `action`). The outbound `AskKind` stays narrow.
   kind: z.string().optional(),
   question: z.string().optional(),
-  options: z.array(z.object({ label: z.string().optional() })).optional(),
+  // An option and the answer carry the part id of the block each is stored as, and the payload the
+  // ask's part revision, as every other read of the ask carries them; a payload the ask has moved
+  // past carries no id, and one of an ask whose parts are not indexed yet no revision either.
+  options: z
+    .array(z.object({ id: z.string().optional(), label: z.string().optional() }))
+    .optional(),
+  revision: z.number().int().positive().optional(),
   answer: z
-    .object({ selected: z.array(z.string()).nullish(), text: z.string().nullish() })
+    .object({
+      id: z.string().optional(),
+      selected: z.array(z.string()).nullish(),
+      text: z.string().nullish(),
+    })
     .nullish(),
   previous_answer: z
     .object({

@@ -110,9 +110,12 @@ func TestGraphEdgesUnionsMentionsWithEveryStructuralRelation(t *testing.T) {
 		"from message block":     `select * from graph_edges where from_kind = 'message_block' and from_id = 'message/` + ids.Message + `#b1'`,
 		"to a comment's blocks":  `select * from graph_edges where to_kind = 'comment_block' and to_id in (select node_id from comment_blocks where comment_id = '` + ids.AnchoredComment + `')`,
 		"to a message's blocks":  `select * from graph_edges where to_kind = 'message_block' and to_id in (select node_id from message_blocks where message_id = '` + ids.Message + `')`,
+		"to ask block":           `select * from graph_edges where to_kind = 'ask_block' and to_id = 'ask/` + ids.PlainAsk + `#b1'`,
+		"from ask block":         `select * from graph_edges where from_kind = 'ask_block' and from_id = 'ask/` + ids.PlainAsk + `#b1'`,
+		"to an ask's blocks":     `select * from graph_edges where to_kind = 'ask_block' and to_id in (select node_id from ask_blocks where ask_id = '` + ids.PlainAsk + `')`,
 	} {
 		plan := explainWithoutSeqScan(t, store, query)
-		for _, table := range []string{"refs", "artifacts", "asks", "comments", "messages", "issues", "issue_links", "ask_followers", "issue_component_members", "issue_components", "document_blocks", "block_refs", "document_block_versions", "comment_blocks", "message_blocks", "comment_block_refs", "message_block_refs"} {
+		for _, table := range []string{"refs", "artifacts", "asks", "comments", "messages", "issues", "issue_links", "ask_followers", "issue_component_members", "issue_components", "document_blocks", "block_refs", "document_block_versions", "comment_blocks", "message_blocks", "comment_block_refs", "message_block_refs", "ask_blocks", "ask_block_refs"} {
 			if strings.Contains(plan, "Seq Scan on "+table) {
 				t.Errorf("%s: plan scans %s sequentially:\n%s", name, table, plan)
 			}
@@ -173,17 +176,20 @@ func TestGraphEdgesCarryBlockMentionsAndPartOf(t *testing.T) {
 	}
 }
 
-// A current block of a comment or message is a node of the graph under its storage kind
-// (comment_block, message_block): it is part_of its item, each link it holds is an edge out of it,
-// and a reply that names it is a replies_to edge to it. A removed block is neither part_of its
-// item nor the source of the links it held.
+// A current block of a comment, a message or an ask is a node of the graph under its storage kind
+// (comment_block, message_block, ask_block): it is part_of its item, each link it holds is an edge
+// out of it, and a reply that names it is a replies_to edge to it. A removed block is neither
+// part_of its item nor the source of the links it held. A reply whose request names an ask names
+// a part of that ask in the same comments.replies_to_block column a reply to a comment names a
+// comment block in, so the two kinds are told apart by the node id's prefix: the ask part's
+// reply reaches ask_block and the comment block's reply comment_block.
 func TestItemBlockArmsAreGraphEdges(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	var comment, reply, message, messageReply string
+	var comment, reply, message, messageReply, ask, askReply string
 	if err := store.Pool.QueryRow(ctx, `
 		with p as (insert into projects (key, name) values ('CORE', 'Core') returning key),
 		issue as (insert into issues (key, project_key, number, title, created_by, rank) select 'CORE-1', key, 1, 'One', '{"kind":"user","id":"alice"}', 'A' from p returning key),
@@ -203,16 +209,25 @@ func TestItemBlockArmsAreGraphEdges(t *testing.T) {
 		message_refs as (insert into message_block_refs (message_id, block_id, from_node, to_kind, to_id, source_seq)
 			select id, 'b1', 'message/' || id || '#b1', 'issue', 'CORE-2', 8 from message, target returning message_id),
 		message_reply as (insert into messages (issue_key, author, body, in_reply_to, replies_to_block)
-			select 'CORE-1', '{"kind":"user","id":"alice"}', 'Noted', id, 'message/' || id || '#b1' from message returning id)
-		select comment.id::text, reply.id::text, message.id::text, message_reply.id::text
-		from comment, reply, message, message_reply, comment_block, comment_removed, message_block
-	`).Scan(&comment, &reply, &message, &messageReply); err != nil {
+			select 'CORE-1', '{"kind":"user","id":"alice"}', 'Noted', id, 'message/' || id || '#b1' from message returning id),
+		ask as (insert into asks (issue_key, author, question) select key, '{"kind":"user","id":"alice"}', 'Which CORE-2?' from issue returning id),
+		ask_block as (insert into ask_blocks (ask_id, block_id, node_id, position, type, text_sha256, excerpt, made_at, changed_revision, changed_at)
+			select id, 'b1', 'ask/' || id || '#b1', 0, 'question', 'q', 'Which CORE-2?', now(), 1, now() from ask returning ask_id),
+		ask_removed as (insert into ask_blocks (ask_id, block_id, node_id, position, type, text_sha256, excerpt, made_at, changed_revision, changed_at, removed_at)
+			select id, 'b2', 'ask/' || id || '#b2', null, 'option', 'o', 'Dropped CORE-2', now(), 1, now(), now() from ask returning ask_id),
+		ask_refs as (insert into ask_block_refs (ask_id, block_id, from_node, to_kind, to_id, source_seq)
+			select id, b.block_id, 'ask/' || id || '#' || b.block_id, 'issue', 'CORE-2', 9 from ask, target, (values ('b1'), ('b2')) as b (block_id) returning ask_id),
+		ask_reply as (insert into comments (issue_key, author, body, ask_id, replies_to_block)
+			select 'CORE-1', '{"kind":"session","id":"s1"}', 'The first one', id, 'ask/' || id || '#b1' from ask returning id)
+		select comment.id::text, reply.id::text, message.id::text, message_reply.id::text, ask.id::text, ask_reply.id::text
+		from comment, reply, message, message_reply, ask, ask_reply, comment_block, comment_removed, message_block, ask_block, ask_removed
+	`).Scan(&comment, &reply, &message, &messageReply, &ask, &askReply); err != nil {
 		t.Fatalf("seed item blocks: %v", err)
 	}
 
 	rows, err := store.Pool.Query(ctx, `
 		select from_kind, from_id, kind, to_kind, to_id, source_seq is not null from graph_edges
-		where from_kind in ('comment_block', 'message_block') or to_kind in ('comment_block', 'message_block')`)
+		where from_kind in ('comment_block', 'message_block', 'ask_block') or to_kind in ('comment_block', 'message_block', 'ask_block')`)
 	if err != nil {
 		t.Fatalf("read graph_edges: %v", err)
 	}
@@ -229,6 +244,7 @@ func TestItemBlockArmsAreGraphEdges(t *testing.T) {
 		t.Fatalf("iterate graph_edges: %v", err)
 	}
 	commentBlock, messageBlock := "comment/"+comment+"#b1", "message/"+message+"#b1"
+	askBlock := "ask/" + ask + "#b1"
 	want := []graphEdgeRow{
 		{"comment_block", commentBlock, "part_of", "comment", comment, false},
 		{"comment_block", commentBlock, "mentions", "issue", "CORE-2", true},
@@ -236,6 +252,9 @@ func TestItemBlockArmsAreGraphEdges(t *testing.T) {
 		{"message_block", messageBlock, "part_of", "message", message, false},
 		{"message_block", messageBlock, "mentions", "issue", "CORE-2", true},
 		{"message", messageReply, "replies_to", "message_block", messageBlock, false},
+		{"ask_block", askBlock, "part_of", "ask", ask, false},
+		{"ask_block", askBlock, "mentions", "issue", "CORE-2", true},
+		{"comment", askReply, "replies_to", "ask_block", askBlock, false},
 	}
 	sortGraphEdges(got)
 	sortGraphEdges(want)

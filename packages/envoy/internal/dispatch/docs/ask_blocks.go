@@ -323,6 +323,11 @@ func (s *Service) reconcileAskBlocks(
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index new ask block: %w", err)
 			}
+			// The new ask's parts, beside its own references: both named by the ask.opened.
+			changes, err = refs.IndexAskPartsCounted(ctx, tx, ask, s.serverURL, ask.CreatedAt, changes)
+			if err != nil {
+				return settlementReconciliation{}, fmt.Errorf("index the parts of new ask block %s: %w", ask.ID, err)
+			}
 			payload, err := events.AskEventPayload(ctx, tx, ask, changes)
 			if err != nil {
 				return settlementReconciliation{}, err
@@ -343,7 +348,14 @@ func (s *Service) reconcileAskBlocks(
 			if ask.State == "answered" {
 				eventType = "ask.answered"
 			}
-			payload, err := events.AskEventPayload(ctx, tx, ask, model.ReferenceChanges{})
+			// The restoration writes state, answer and resolution back: the answer it brings
+			// back is a part again, and the event names what that moved.
+			restoredAt := refs.AskPartsAt(ask)
+			changes, err := refs.IndexAskPartsCounted(ctx, tx, ask, s.serverURL, restoredAt, model.ReferenceChanges{})
+			if err != nil {
+				return settlementReconciliation{}, fmt.Errorf("index the parts of restored ask %s: %w", ask.ID, err)
+			}
+			payload, err := events.AskEventPayload(ctx, tx, ask, changes)
 			if err != nil {
 				return settlementReconciliation{}, err
 			}
@@ -390,6 +402,12 @@ func (s *Service) reconcileAskBlocks(
 			changes, err := refs.ReplaceCountedEdit(ctx, tx, "ask", ask.ID, previous.Question, ask.Question, s.serverURL)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index reconciled ask: %w", err)
+			}
+			// The block's wording is now the row's: its parts are that wording too, and the
+			// ask.edited names what they moved beside the ask's own references.
+			changes, err = refs.IndexAskPartsCounted(ctx, tx, ask, s.serverURL, editedAt, changes)
+			if err != nil {
+				return settlementReconciliation{}, fmt.Errorf("index the parts of reconciled ask %s: %w", ask.ID, err)
 			}
 			reconciled.events = append(reconciled.events, documentAskEvent(
 				owner,

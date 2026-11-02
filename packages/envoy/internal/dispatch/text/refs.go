@@ -66,8 +66,8 @@ func IsSessionID(value string) bool {
 // both for an artifact an agent's conversation owns (`agent/<session id>/artifact/<slug>`).
 // A block (Kind "block") carries the block's id as written in Block, and in Pin the version or
 // revision a pinned reference (`@v<N>` after the fragment) names, or 0. A block of a document
-// carries its document's fields; a block of a comment or a message carries the item's kind in
-// Item and the item's fields, its id in ID.
+// carries its document's fields; a block of an ask, a comment or a message carries the item's
+// kind in Item and the item's fields, its id in ID.
 type Ref struct {
 	Kind     string
 	Item     string
@@ -201,9 +201,9 @@ func trimReference(raw string) string {
 
 // parseDispatch reads a `dispatch://` reference, without its scheme, by the grammar the dashboard's
 // `parseDispatchReference` reads: a slug as written, an `@v` version, an agent's session id as
-// written, an item id decoded as `itemSegment` decodes it, and a `#b-` block of a document, a
-// comment or a message as parseBlock reads it. A reference holding a control character names
-// nothing.
+// written, an item id decoded as `itemSegment` decodes it, and a `#b-` block of a document, an
+// ask, a comment or a message as parseBlock reads it. A reference holding a control character
+// names nothing.
 func parseDispatch(value string) (Ref, bool) {
 	if hasControl(value) {
 		return Ref{}, false
@@ -322,8 +322,8 @@ const MaxTargetBytes = 2048
 // TargetID is the durable id the reference graph stores an edge to ref under, refs.to_id and
 // block_refs.to_id: an issue's key; a document's ref_key, `<issue key or project>/<slug>` (`spec`
 // for an issue's spec) or `agent/<session id>/<slug>`; a document block's `<document's
-// ref_key>#<block id>`; a comment's or message's block's `<item kind>/<item id>#<block id>`
-// (`comment/<uuid>#b2`, a lowercase kind no issue key, project or `agent/` can be); a
+// ref_key>#<block id>`; an ask's, a comment's or a message's block's `<item kind>/<item id>#<block
+// id>` (`comment/<uuid>#b2`, a lowercase kind no issue key, project or `agent/` can be); a
 // component's `<project>/<id>` node address; and an ask's, a comment's or a message's id. A
 // document's version and a block's pin are not part of it: a pinned and an unpinned reference to
 // one block are one target.
@@ -433,13 +433,15 @@ func CanonicalBlockRef(value string) (Ref, bool) {
 
 // parseBlock reads `<document or item reference>#b-<block id>[@v<N>]`: a block of an issue's
 // spec, an issue's document or a project's document, optionally pinned to version N of that
-// document, or a block of a comment (`KEY/comment/<id>`, or a project document's
+// document, or a part of an ask (`KEY/ask/<id>`, or a project document's
+// `PROJECT/artifact/<slug>/ask/<id>`), optionally pinned to revision N of the ask's parts, or a
+// block of a comment (`KEY/comment/<id>`, or a project document's
 // `PROJECT/artifact/<slug>/comment/<id>`), optionally pinned to revision N of that comment, or of
 // an issue's message (`KEY/message/<id>`). A message never changes, so a pinned message block is
 // no reference. The id is read with any valid percent-encoding (EncodeBlockID writes one), so
 // `%40` is an `@` in the id and a raw `@` is only ever the pin. Any other fragment, a raw `@` that
-// does not start a well-formed pin, a versioned document, an agent conversation's document, an
-// ask, or an id that is empty or does not decode names nothing. (Extract holds the block's id to
+// does not start a well-formed pin, a versioned document, an agent conversation's document, or an
+// id that is empty or does not decode names nothing. (Extract holds the block's id to
 // MaxBlockIDBytes and its whole target id to MaxTargetBytes in text, inBound.) A document version
 // shows only as an `@` in the document part: no key or slug holds one.
 func parseBlock(document, fragment string) (Ref, bool) {
@@ -468,7 +470,7 @@ func parseBlock(document, fragment string) (Ref, bool) {
 	case !ok:
 		return Ref{}, false
 	case ref.Kind == "artifact" && ref.Session == "":
-	case ref.Kind == "comment", ref.Kind == "message" && pin == 0:
+	case ref.Kind == "ask", ref.Kind == "comment", ref.Kind == "message" && pin == 0:
 		ref.Item = ref.Kind
 	default:
 		return Ref{}, false
@@ -512,9 +514,8 @@ func decodeItemID(value string) (string, bool) {
 // parseServer reads a dashboard URL against its parsed server URL as the dashboard's
 // `referenceRouteFromHref` reads it: the key and the path's item id as written, the query as
 // `searchParams` reads it, a version a positive decimal, and a `#b-` fragment on a document page
-// as documentPage reads it and on an issue comment's or message's page as pageBlock reads it (an
-// ask's page names the ask whatever its fragment). A URL holding a control character names
-// nothing; net/url refuses only the ASCII ones.
+// as documentPage reads it and on an issue ask's, comment's or message's page as pageBlock reads
+// it. A URL holding a control character names nothing; net/url refuses only the ASCII ones.
 func parseServer(raw string, base *url.URL) (Ref, bool) {
 	if base == nil || base.Scheme == "" || base.Host == "" {
 		return Ref{}, false
@@ -559,11 +560,7 @@ func parseServer(raw string, base *url.URL) (Ref, bool) {
 			return documentPage(Ref{Kind: "artifact", IssueKey: key, ID: slug}, query, "v", value)
 		case len(parts) == 4 && (parts[2] == "asks" || parts[2] == "comments" || parts[2] == "messages"):
 			if id, ok := itemSegment(parts[3]); ok {
-				item := Ref{Kind: strings.TrimSuffix(parts[2], "s"), IssueKey: key, ID: id}
-				if item.Kind == "ask" {
-					return item, true
-				}
-				return pageBlock(item, value), true
+				return pageBlock(Ref{Kind: strings.TrimSuffix(parts[2], "s"), IssueKey: key, ID: id}, value), true
 			}
 		}
 		return Ref{}, false
@@ -587,12 +584,12 @@ func parseServer(raw string, base *url.URL) (Ref, bool) {
 
 // documentPage reads a document page of an issue or a project: the item its query names, as
 // documentItem reads it, else the block of the document its `#b-<block id>` fragment names
-// (pageBlock), else the document. A `?comment=` names the comment whatever the fragment: the
-// dashboard writes a document block's fragment beside it, so the fragment there is never a block
-// of the comment. A version page (`versionParam` set) is the document whatever its fragment: a
-// version's stored markdown carries no block ids to land on. Extract holds what this names to
-// the bounds in text (pageInBound): a block past them is the document, a document or item past
-// them nothing.
+// (pageBlock), else the document. A `?comment=` or an `?ask=` names that item whatever the
+// fragment: the dashboard writes a document block's fragment beside it, so the fragment there is
+// never a block of the item. A version page (`versionParam` set) is the document whatever its
+// fragment: a version's stored markdown carries no block ids to land on. Extract holds what this
+// names to the bounds in text (pageInBound): a block past them is the document, a document or
+// item past them nothing.
 func documentPage(document Ref, query url.Values, versionParam string, page *url.URL) (Ref, bool) {
 	ref, ok := documentItem(document, query)
 	if !ok || ref.Kind != "artifact" || query.Get(versionParam) != "" {
@@ -601,9 +598,9 @@ func documentPage(document Ref, query url.Values, versionParam string, page *url
 	return pageBlock(ref, page), true
 }
 
-// pageBlock is what a dashboard page showing ref - a document, or a comment or a message - names:
-// the block its `#b-<block id>` fragment names (blockID; a raw `@` is no pin here, since pins are
-// written only as `dispatch://` references), else ref itself.
+// pageBlock is what a dashboard page showing ref - a document, or an ask, a comment or a message
+// - names: the block its `#b-<block id>` fragment names (blockID; a raw `@` is no pin here, since
+// pins are written only as `dispatch://` references), else ref itself.
 func pageBlock(ref Ref, page *url.URL) Ref {
 	encoded, found := strings.CutPrefix(page.EscapedFragment(), "b-")
 	if !found {

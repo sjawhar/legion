@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-369",
+  "completed": "2026-11-01T23:21:05Z",
+  "round": "the red CI check at 3e4f9289 (the three Dispatch skills at exactly 2000 words), and the live-room gap the tester found: nothing drove Docs.SetBlockAttributes into the block-pointer validator, for any kind",
+  "previousHandoff": "3e4f92898bd32fa5dca556ae4586e8a2e6fcea57",
+  "proof": [
+    {
+      "criterion": "The word guard the push went red on is green with margin, and nothing of the branch's reference form is given up to get there.",
+      "surface": "The guard itself, run in this pod against the staged skills partition it builds (packages/pi-envoy/src/skills-guard.test.ts, which counts every file of skills/dispatch, skills/dispatch-first and skills/dispatch-writing-specs as wc -w does, frontmatter included).",
+      "command": "find skills/dispatch skills/dispatch-first skills/dispatch-writing-specs -type f | xargs cat | wc -w; then cd packages/pi-envoy && bun test src/skills-guard.test.ts",
+      "observed": "1997 words, and the suite passes: 11 tests, 0 fail, 1 skip. Three words were cut from skills/dispatch/SKILL.md, each a redundancy and no instruction: 'local path' -> 'path', 'Do not repeat' -> 'never repeat', and 'from Dispatch **Settings -> Agent tokens**' -> 'from **Settings -> Agent tokens**' inside this skill's own setup section. The added reference line, dispatch://KEY/ask/<id>#b-<part>[@vN], stands: it is the address this issue exists to give.",
+      "headSha": "8105eb4fe5ddfbb4e25da8c3fa5a37ee1b7de30f",
+      "negativeControl": "The job log of CI run 41349059082, job pi-envoy 124976536702, at the previous head: 'Expected: < 2000, Received: 2000' at skills-guard.test.ts:98. main alone counts 1999, so the branch's one line is what crossed it."
+    },
+    {
+      "criterion": "The live room's own write meets both block-pointer refusals: a pointer at a block of a type the attribute's targets do not allow, and one naming a part of an ask.",
+      "surface": "The Go server's document service against PostgreSQL 17: Docs.SetBlockAttributes inside a Docs.Join transaction, which is the call the live room and the answer route make, with pmdoctest.BlockPointerSchema installed and a real indexed spec behind it.",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch?sslmode=disable' go test ./internal/dispatch/api/ -run 'TestSetBlockAttributesRefusesABlockPointerInTheLiveRoom' -count=1 -timeout 20m -v",
+      "observed": "PASS, four subtests: a pointer at a paragraph and at a callout are refused pmdoc.ErrBlockPointer naming the attribute, the target's type and the allowed type; a part of an ask, plain and pinned @v1, is refused as the value (pmdoc.ErrSchema, never docs.ErrDocSchema) with the message ending 'is a block of an ask: a block[] attribute points only at a block of a document'; after each refusal the room's markdown and checks.md's artifact, version count and block_refs are unchanged; and a pointer at an allowed requirement is accepted and reads back on the block as ':::claim{#c1 serves=\"dispatch://CORE-1/artifact/checks-md#b-r2\"}'.",
+      "headSha": "8105eb4fe5ddfbb4e25da8c3fa5a37ee1b7de30f",
+      "negativeControl": "Red-before, run by me after the worker reported it: with the ask arm of validateBlockPointerValues removed (pmdoc/schema.go:372) and everything else intact, both ask rows fail, reporting the generic 'is not a block reference as Dispatch writes one' in place of the sentence; restored byte for byte, and the diff then held the test file alone. Removing refuseBlockPointers (docs/mutation.go:377) turns the two type rows red."
+    }
+  ],
+  "filesChanged": [
+    "skills/dispatch/SKILL.md - three redundant words cut, so the three Dispatch skills total 1997 of the guard's 2000",
+    "packages/envoy/internal/dispatch/api/block_pointers_test.go - TestSetBlockAttributesRefusesABlockPointerInTheLiveRoom, with setBlockAttributes (a Docs.Join transaction, as answerAsk's WriteBlock makes one) and artifactMarkdown (the room's current rendering)"
+  ],
+  "trickyParts": [
+    "The live write validates the same tree twice: pmdoc.SetBlockAttributes' own out.Validate() (retype.go:127) and pmdoc.Update's want.Validate() (update.go:22). Removing either alone leaves the test green, and removing both makes the room record the value and refuse its own document afterwards, which is a different behaviour. The test therefore asserts the refusal is the value's (pmdoc.ErrSchema and not docs.ErrDocSchema), and the red-before that isolates it removes the ask arm of validateBlockPointerValues rather than a validator call.",
+    "The test needs newTestServer rather than blockIndexHandler: refuseBlockPointers reads each target's type from the block index in the write's own transaction, so the document service under test must be the one the handlers write through (deps.Docs)."
+  ],
+  "deviations": [
+    "The architect's acceptance asked for red-before by removing out.Validate() at pmdoc/retype.go:127. That cannot hold on this path, for the double validation above; the green result is recorded and the refusal is isolated two other ways instead, both red."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "internal/dispatch/pmdoc needs more than a 10-minute deadline on this pod: it runs about 934 s and passes at 35m, and its differential tests shell out to Bun, so they fail with 'Cannot find module @legion/contracts' until bun install has linked the workspace."
+  ]
+}

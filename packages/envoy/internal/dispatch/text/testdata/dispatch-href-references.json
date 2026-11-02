@@ -72,8 +72,16 @@
     "ref": "dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2"
   },
   {
+    "href": "/issues/CORE-1/asks/22222222-2222-4222-8222-222222222222#b-b3",
+    "ref": "dispatch://CORE-1/ask/22222222-2222-4222-8222-222222222222#b-b3"
+  },
+  {
     "href": "/projects/CORE/documents/handbook-md?comment=88888888-8888-4888-8888-888888888888#b-b2",
     "ref": "dispatch://CORE/artifact/handbook-md/comment/88888888-8888-4888-8888-888888888888"
+  },
+  {
+    "href": "/projects/CORE/documents/handbook-md?ask=99999999-9999-4999-8999-999999999999#b-b2",
+    "ref": "dispatch://CORE/artifact/handbook-md/ask/99999999-9999-4999-8999-999999999999"
   },
   {
     "href": "/issues/CORE-1/spec#b-d%C3%A9cision%3A1",

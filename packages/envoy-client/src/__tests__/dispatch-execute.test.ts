@@ -5848,6 +5848,238 @@ describe("executeDispatchTool", () => {
         ]);
       });
     });
+
+    // A part of an ask reads as one line naming what the part is - the question, an option or the
+    // answer - the part's id, its ask and the revision of the ask's parts its text last changed
+    // in, then its text. No node carries a part's type, so the read asks the ask itself which
+    // part the id names.
+    describe("of an ask", () => {
+      const ask = "22222222-2222-4222-8222-222222222222";
+      const askRef = `dispatch://CORE-1/ask/${ask}`;
+      const part = (id: string, extra: Record<string, unknown> = {}) => ({
+        kind: "block",
+        id: `ask/${ask}#${id}`,
+        block_id: id,
+        issue_key: "CORE-1",
+        project: "CORE",
+        ref: `${askRef}#b-${id}`,
+        parent: { kind: "ask", id: ask, ref: askRef },
+        changed_version: 2,
+        parent_version: 2,
+        ...extra,
+      });
+      /** The ask its own read answers: its options and its answer carry the part ids the index
+       *  minted for them, so b1, which is neither, is its question. */
+      const askBody = {
+        id: ask,
+        issue_key: "CORE-1",
+        author: { kind: "session", id: "author-1" },
+        question: "Ship on Friday?",
+        options: [
+          { id: "b2", label: "Yes" },
+          { id: "b3", label: "No" },
+        ],
+        multiple: false,
+        urgency: "med",
+        anchor: null,
+        state: "answered",
+        answer: {
+          id: "b4",
+          user: "sami",
+          selected: ["Yes"],
+          text: null,
+          at: "2026-10-21T00:00:00Z",
+        },
+        revision: 2,
+        created_at: "2026-10-20T00:00:00Z",
+      };
+      /** A read of part `ref`, whose node the references route answers, against a server whose
+       *  ask read answers `askBody` with `ask` written over it. */
+      const readPart = (ref: string, node: unknown, overrides: Record<string, unknown> = {}) => {
+        const requests: string[] = [];
+        const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+          const target = new URL(String(url));
+          requests.push(target.pathname + target.search);
+          if (target.pathname === `/api/v1/asks/${ask}`) {
+            return response({ ask: { ...askBody, ...overrides }, replies: [], answers: [] });
+          }
+          if (target.pathname === "/api/v1/references") return response({ node, edges: [] });
+          throw new Error(`unexpected request: ${target.pathname}`);
+        };
+        const result = executeDispatchTool({
+          tool: "dispatch_read",
+          args: { ref },
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: fetchImpl as typeof fetch,
+        });
+        return { result, requests };
+      };
+      const sections = ["Referenced by:", "- none", "Links:", "- none"];
+
+      test.each([
+        ["b1", "Question", "Ship on Friday?"],
+        ["b2", "Option", "Yes"],
+        ["b4", "Answer", "Yes"],
+      ])("read prints part %s of an ask as its %s", async (id, noun, text) => {
+        const { result, requests } = readPart(`${askRef}#b-${id}`, part(id, { text }));
+        expect((await result).text).toBe(
+          [`${noun} ${id} of ask ${ask} (changed in revision 2):`, text, ...sections].join("\n")
+        );
+        expect(requests).toContain(`/api/v1/asks/${ask}`);
+      });
+
+      // An ask's parts are numbered by revision, so the `Node:` line of a part says which revision
+      // of the ask's parts it belongs to, as a comment block's says its comment's revision.
+      test("read prints an ask part's facts, its parent version a revision", async () => {
+        const { result } = readPart(
+          `${askRef}#b-b2`,
+          part("b2", {
+            text: "Yes",
+            made_by: [{ kind: "session", id: "author-1" }],
+            made_at: "2026-10-20T00:00:00Z",
+            changed_by: [{ kind: "session", id: "author-1" }],
+            changed_at: "2026-10-21T00:00:00Z",
+          })
+        );
+        expect((await result).text).toBe(
+          [
+            `Option b2 of ask ${ask} (changed in revision 2):`,
+            "Yes",
+            `Node: block ${askRef}#b-b2 · made by session author-1 at 2026-10-20T00:00:00Z · changed by session author-1 at 2026-10-21T00:00:00Z · part of ${askRef} (revision 2)`,
+            ...sections,
+          ].join("\n")
+        );
+      });
+
+      test("a pinned reference to a part the ask has moved past names it a part", async () => {
+        const pinned = `${askRef}#b-b5@v1`;
+        const { result } = readPart(pinned, {
+          ...part("b5"),
+          changed_version: undefined,
+          pin: { version: 1, ref: pinned, text: "Maybe", state: "removed", removed_version: 2 },
+        });
+        expect((await result).text).toBe(
+          [
+            `Part b5 of ask ${ask}:`,
+            "Pinned to revision: 1",
+            "Removed in revision 2.",
+            "Text at revision 1:",
+            "Maybe",
+            ...sections,
+          ].join("\n")
+        );
+      });
+
+      // An ask whose parts the index has not placed - revision 0 and no part id - says only that
+      // the block is a part of the ask.
+      test("a part of an ask whose parts carry no id is named a part", async () => {
+        const { result } = readPart(`${askRef}#b-b2`, part("b2", { text: "Yes" }), {
+          options: [{ label: "Yes" }, { label: "No" }],
+          answer: { user: "sami", selected: ["Yes"], text: null, at: "2026-10-21T00:00:00Z" },
+          revision: undefined,
+        });
+        expect((await result).text).toBe(
+          [`Part b2 of ask ${ask} (changed in revision 2):`, "Yes", ...sections].join("\n")
+        );
+      });
+
+      // The ask's read only chooses the heading's word, so a server that cannot answer it leaves
+      // the part under the general heading rather than failing the read of the part.
+      test("a part whose ask the server cannot read is named a part, with the rest of the read unchanged", async () => {
+        const node = part("b2", {
+          text: "Yes",
+          made_by: [{ kind: "session", id: "author-1" }],
+          changed_by: [{ kind: "session", id: "author-1" }],
+        });
+        const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+          const target = new URL(String(url));
+          if (target.pathname === `/api/v1/asks/${ask}`) {
+            return response({ error: "internal server error", code: "INTERNAL" }, 500);
+          }
+          if (target.pathname === "/api/v1/references") return response({ node, edges: [] });
+          throw new Error(`unexpected request: ${target.pathname}`);
+        };
+        const result = await executeDispatchTool({
+          tool: "dispatch_read",
+          args: { ref: `${askRef}#b-b2` },
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: fetchImpl as typeof fetch,
+        });
+
+        expect(result.text).toBe(
+          [
+            `Part b2 of ask ${ask} (changed in revision 2):`,
+            "Yes",
+            `Node: block ${askRef}#b-b2 · made by session author-1 · changed by session author-1 · part of ${askRef} (revision 2)`,
+            ...sections,
+          ].join("\n")
+        );
+        expect(result.details).toEqual({ issue: "CORE-1", block: "b2" });
+      });
+
+      // A part that cites a node shows in that node's read as its ask, then the part, as a block
+      // of a comment shows as its comment: `blockItem`'s rule, one set of item kinds.
+      test("a part of an ask citing a block shows as its ask, then the part", async () => {
+        const { result } = readBlock(blockRef, () =>
+          response({
+            node: blockNode,
+            edges: [
+              {
+                kind: "mentions",
+                direction: "in",
+                node: part("b1"),
+                excerpt: { text: "Ship on Friday?" },
+                created_at: "2026-10-21T00:00:00Z",
+                source_seq: 9,
+              },
+            ],
+          })
+        );
+        expect((await result).text).toContain(
+          `Referenced by:\n- mentions ask ${askRef} block b1 (Ship on Friday? · 2026-10-21T00:00:00Z)\nLinks:`
+        );
+      });
+
+      // `reply_to_ask` answers a part, so the refusal hands it the whole reference rather than
+      // the ask's id, which would drop the part. A pin goes: `reply_to_ask` refuses a part
+      // pinned to a revision.
+      test("a tool that would act on the part's owner refuses it, naming the part reply_to_ask answers", async () => {
+        const refused = async (ref: string) =>
+          await executeDispatchTool({
+            tool: "dispatch_comment",
+            args: { ref, body: "Yes, Friday." },
+            cwd: "/workspace",
+            host: "omp",
+            config,
+            env: {},
+            exec: repoExec("owner/repo"),
+            fetchImpl: (() => {
+              throw new Error("network must not be called");
+            }) as unknown as typeof fetch,
+          }).then(
+            () => [],
+            (error: unknown) => {
+              if (!(error instanceof ToolInputError)) throw error;
+              return error.problems;
+            }
+          );
+
+        expect(await refused(`${askRef}#b-b2`)).toEqual([
+          `ref ${askRef}#b-b2 names block b2 of an ask on CORE-1; dispatch comment would act on CORE-1 and drop the block: reply under it with reply_to_ask ${askRef}#b-b2 and issue CORE-1`,
+        ]);
+        expect(await refused(`${askRef}#b-b2@v2`)).toEqual([
+          `ref ${askRef}#b-b2@v2 names block b2 of an ask on CORE-1; dispatch comment would act on CORE-1 and drop the block: reply under it with reply_to_ask ${askRef}#b-b2 and issue CORE-1`,
+        ]);
+      });
+    });
   });
 
   test("reads a named artifact version from a singular dispatch URI", async () => {
@@ -6440,7 +6672,10 @@ describe("executeDispatchTool", () => {
         "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " +
         "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " +
         "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " +
-        "dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " +
+        "dispatch read), dispatch://KEY-1/ask/<uuid>#b-<part id> or " +
+        "dispatch://PROJECT/artifact/<slug>/ask/<uuid>#b-<part id> (one part of an ask: its question, " +
+        "one of its options or its answer, optionally pinned to a revision of the ask's parts with " +
+        "@v<N> after it; for dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " +
         "dispatch://PROJECT/artifact/<slug>/comment/<uuid>#b-<block id> or " +
         "dispatch://KEY-1/message/<uuid>#b-<block id> (one block of a comment or message, a " +
         "comment's optionally pinned to a revision of the comment with @v<N> after it; for dispatch " +
@@ -8788,6 +9023,158 @@ describe("executeDispatchTool", () => {
     ]);
   });
 
+  // Each option of an ask and its answer is a part of its own in the reference graph, so the read
+  // names the reference of each and lists the edges on that option under it. Every other edge
+  // stays under the ask, the ones at its question among them: no read carries the question's part
+  // id, so nothing places them on it.
+  describe("an ask's parts", () => {
+    const ask = "aaaaaaaa-0000-4000-8000-000000000042";
+    const askRef = `dispatch://DSP-42/ask/${ask}`;
+    const part = (id: string) => ({
+      kind: "block",
+      id: `ask/${ask}#${id}`,
+      block_id: id,
+      issue_key: "DSP-42",
+      project: "DSP",
+      ref: `${askRef}#b-${id}`,
+      parent: { kind: "ask", id: ask, ref: askRef },
+    });
+    const citer = (kind: string, id: string, ref: string) => ({ kind, id, ref });
+    const edge = (blockId: string, node: unknown, text: string) => ({
+      kind: "mentions",
+      direction: "in",
+      node,
+      block: part(blockId),
+      excerpt: { text },
+      created_at: "2026-09-10T08:00:00Z",
+      source_seq: 918,
+    });
+    /** A read of the ask against a server answering `GET /api/v1/asks/{id}` with `ask`, whose
+     *  inbound graph carries one edge at an option, one at the answer and one at the question. */
+    const readAsk = async (askBody: Record<string, unknown>) => {
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === `/api/v1/asks/${ask}`) {
+          return response({ ask: askBody, replies: [], answers: [] });
+        }
+        if (target.pathname === "/api/v1/references" && target.searchParams.has("to")) {
+          return response({
+            node: { kind: "ask", id: ask },
+            edges: [
+              edge(
+                "b2",
+                citer("comment", "comment-9", "dispatch://DSP-42/comment/comment-9"),
+                "I'd take JSON."
+              ),
+              edge("b4", citer("issue", "OPS-1", "dispatch://OPS-1"), "The answer decides it."),
+              edge(
+                "b1",
+                citer("message", "message-7", "dispatch://ACME-3/message/message-7"),
+                "Which API?"
+              ),
+            ],
+          });
+        }
+        if (target.pathname === "/api/v1/references" && target.searchParams.has("from")) {
+          return response({ node: { kind: "ask", id: ask }, edges: [] });
+        }
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+      const result = await executeDispatchTool({
+        tool: "dispatch_read",
+        args: { ref: askRef },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+      return result.text.split("\n");
+    };
+    const askBody = {
+      id: ask,
+      issue_key: "DSP-42",
+      author: { kind: "session", id: "author-1" },
+      question: "The service needs a public API. Which approach should we use?",
+      options: [
+        { id: "b2", label: "JSON API", description: "Use the HTTP API." },
+        { id: "b3", label: "MCP API" },
+      ],
+      multiple: false,
+      urgency: "high",
+      anchor: null,
+      state: "answered",
+      answer: {
+        id: "b4",
+        user: "sami",
+        selected: ["JSON"],
+        text: "Ship JSON.",
+        at: "2026-09-09T00:00:00Z",
+      },
+      revision: 2,
+      created_at: "2026-09-09T00:00:00Z",
+    };
+
+    test("the read names each option and its answer, and lists the edges on that option under it", async () => {
+      expect(await readAsk(askBody)).toEqual([
+        "Question: The service needs a public API. Which approach should we use?",
+        "Options:",
+        `- JSON API — Use the HTTP API. (${askRef}#b-b2)`,
+        "  Referenced by:",
+        "  - mentions comment dispatch://DSP-42/comment/comment-9 (I'd take JSON. · 2026-09-10T08:00:00Z)",
+        `- MCP API (${askRef}#b-b3)`,
+        "State: answered",
+        `Ask id: ${ask}`,
+        "Answer:",
+        "- By: sami",
+        "- Selected: JSON",
+        "- Text: Ship JSON.",
+        `- Reference: ${askRef}#b-b4`,
+        "  Referenced by:",
+        "  - mentions issue dispatch://OPS-1 (The answer decides it. · 2026-09-10T08:00:00Z)",
+        "Replies:",
+        "- none",
+        "Referenced by:",
+        `- mentions message dispatch://ACME-3/message/message-7 (Which API? · 2026-09-10T08:00:00Z) (block ${askRef}#b-b1)`,
+        "Links:",
+        "- none",
+      ]);
+    });
+
+    // Until the index has run, `revision` is 0 and no part carries an id: the options read as
+    // they did before an ask had parts, and every edge is listed under the ask.
+    test("an ask whose parts are not indexed yet prints its options as before", async () => {
+      expect(
+        await readAsk({
+          ...askBody,
+          options: [{ label: "JSON API", description: "Use the HTTP API." }, { label: "MCP API" }],
+          answer: { ...askBody.answer, id: undefined },
+          revision: undefined,
+        })
+      ).toEqual([
+        "Question: The service needs a public API. Which approach should we use?",
+        "Options:",
+        "- JSON API — Use the HTTP API.",
+        "- MCP API",
+        "State: answered",
+        `Ask id: ${ask}`,
+        "Answer:",
+        "- By: sami",
+        "- Selected: JSON",
+        "- Text: Ship JSON.",
+        "Replies:",
+        "- none",
+        "Referenced by:",
+        `- mentions comment dispatch://DSP-42/comment/comment-9 (I'd take JSON. · 2026-09-10T08:00:00Z) (block ${askRef}#b-b2)`,
+        `- mentions issue dispatch://OPS-1 (The answer decides it. · 2026-09-10T08:00:00Z) (block ${askRef}#b-b4)`,
+        `- mentions message dispatch://ACME-3/message/message-7 (Which API? · 2026-09-10T08:00:00Z) (block ${askRef}#b-b1)`,
+        "Links:",
+        "- none",
+      ]);
+    });
+  });
+
   test("posts a comment reply to an ask using reply_to_ask", async () => {
     const requests: Array<{ pathname: string; body: unknown }> = [];
     const askID = "01234567-0000-4000-8000-000000000042";
@@ -9201,6 +9588,40 @@ describe("executeDispatchTool", () => {
     expect(toBlock.text).toBe("Posted comment comment-2");
   });
 
+  test("a comment reply to an ask's part names the part", async () => {
+    const askID = "01234567-0000-4000-8000-000000000042";
+    const bodies: unknown[] = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname !== "/api/v1/issues/DSP-1/comments") {
+        throw new Error(`unexpected request: ${target.pathname}`);
+      }
+      bodies.push(JSON.parse(init?.body as string));
+      return response({ id: "comment-2", issue_key: "DSP-1", ask_id: askID, reply_to: null });
+    };
+    const reply = (replyToAsk: string) =>
+      executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { issue: "DSP-1", body: "Monday works", reply_to_ask: replyToAsk },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    const toPart = await reply(`dispatch://DSP-1/ask/${askID}#b-b2`);
+    // A reply to the ask itself names no part.
+    await reply(askID);
+
+    expect(bodies).toEqual([
+      { body: "Monday works", ask_id: askID, reply_to_block: "b2", actor: expect.anything() },
+      { body: "Monday works", ask_id: askID, actor: expect.anything() },
+    ]);
+    expect(toPart.details).toMatchObject({ issue: "DSP-1", comment: "comment-2", ask: askID });
+  });
+
   test("a comment reply refuses a block reference that names no block of a comment", async () => {
     const parent = "11111111-1111-4111-8111-111111111111";
     const fetchImpl = (() => {
@@ -9234,8 +9655,44 @@ describe("executeDispatchTool", () => {
     expect(await problems(`dispatch://DSP-1/comment/${parent}#b-b2@v1`)).toEqual([
       `reply_to dispatch://DSP-1/comment/${parent}#b-b2@v1 names revision 1 of the block, but a reply answers the block whatever its text becomes: drop @v1`,
     ]);
-    expect(await problems(`dispatch://DSP-1/ask/${parent}#b-b2`)).toEqual([
-      `reply_to dispatch://DSP-1/ask/${parent}#b-b2 names no block; a block of a comment reads dispatch://KEY/comment/<id>#b-<block id>`,
+    // An ask's parts are blocks of their own, so a part names a block - of the wrong item, and
+    // the refusal names the field that answers a part.
+    const part = `dispatch://DSP-1/ask/${parent}#b-b3`;
+    expect(await problems(part)).toEqual([
+      `reply_to ${part} names a block of an ask, but a comment reply answers a block of a comment (dispatch://KEY/comment/<id>#b-<block id>); answer it with dispatch comment --reply-to-ask '${part}'`,
+    ]);
+  });
+
+  test("a comment reply refuses a reply_to_ask that names no part of an ask", async () => {
+    const parent = "11111111-1111-4111-8111-111111111111";
+    const problems = async (replyToAsk: string) => {
+      const error = await executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { issue: "DSP-1", body: "Yes", reply_to_ask: replyToAsk },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: (() => {
+          throw new Error("network must not be called");
+        }) as unknown as typeof fetch,
+      }).then(
+        () => undefined,
+        (thrown: unknown) => thrown
+      );
+      if (!(error instanceof ToolInputError)) throw new Error("expected ToolInputError");
+      return error.problems;
+    };
+    const block = `dispatch://DSP-1/comment/${parent}#b-b2`;
+
+    // A block of another item is no part of an ask: what `reply_to_ask` answers is a part of the
+    // ask it names, so the refusal hands the block to the field that answers it.
+    expect(await problems(block)).toEqual([
+      `reply_to_ask ${block} names a block of a comment, but reply_to_ask answers a part of the ask it names (dispatch://KEY/ask/<id>#b-<block id>); answer it with dispatch comment --reply-to '${block}'`,
+    ]);
+    expect(await problems(`dispatch://DSP-1/ask/${parent}#b-b2@v2`)).toEqual([
+      `reply_to_ask dispatch://DSP-1/ask/${parent}#b-b2@v2 names revision 2 of the block, but a reply answers the block whatever its text becomes: drop @v2`,
     ]);
   });
 

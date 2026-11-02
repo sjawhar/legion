@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-369",
+  "completed": "2026-11-01T23:53:00Z",
+  "round": "the re-check after the skills word trim and the live-room test, at code head 8105eb4fe5dd",
+  "forwardMerge": {
+    "from": "3e4f92898bd32fa5dca556ae4586e8a2e6fcea57",
+    "to": "c27127df39e176e8f6a8b488d82e2d9b833594f6",
+    "fingerprintBefore": "ac27c9e6",
+    "fingerprintAfter": "113d3fb4",
+    "verdict": "changed",
+    "filesWhoseDiffMoved": [
+      "packages/envoy/internal/dispatch/api/block_pointers_test.go",
+      "skills/dispatch/SKILL.md"
+    ],
+    "judgement": "I computed both fingerprints and split each side's diff per file: 81 file sections before, 82 now, and only those two differ. No production code moved, and no migration file moved, so the migration's two orders I proved at 3e4f9289 still describe this head; the rest of that round's results needed only the re-run below, as the tree's architect scoped."
+  },
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Its two claims are the word trim and the new live-room test, and I checked both rather than reading them. The three Dispatch skills count 1997 words as the guard counts them (dispatch 725, dispatch-first 528, dispatch-writing-specs 744), three below the 2000 bound, with the ask-part reference line still at skills/dispatch/SKILL.md:72; the trim is three prose edits that lose no rule. TestSetBlockAttributesRefusesABlockPointerInTheLiveRoom passes, and I proved it red under both controls below rather than taking the handoff's word for the red-before."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "The live room's own write meets the block pointer refusal, and the test that says so fails when the behaviour is taken away.",
+      "surface": "Go against a real PostgreSQL, through Docs.SetBlockAttributes inside a Docs.Join transaction, with pmdoctest.BlockPointerSchema installed (no stock type declares a block[] attribute, INFRA-173: the running server's schema knows only ask and callout).",
+      "command": "go test ./internal/dispatch/api/ -run TestSetBlockAttributesRefusesABlockPointerInTheLiveRoom -count=1; then the same with the ask arm of validateBlockPointerValues removed; then the same with BOTH validations of the live path bypassed (pmdoc/retype.go:127 out.Validate in SetBlockAttributes, and pmdoc/update.go:22 want.Validate in Update)",
+      "observed": "Green as it stands. Control A, the ask arm removed (ref.Item != \"ask\" added to the guard): FAILS on both ask cases - and the value is still refused, by CanonicalBlockRef, with the generic 'is not a block reference as Dispatch writes one', so the ask arm supplies the sentence rather than the refusal, which is the failure mode the architect named. Control B, both live-path validations bypassed: FAILS on both ask cases, and the write is then refused downstream as 'document is outside the Proof schema: the write left it outside: ...', which the test distinguishes from refusing the value. So the architect's correction is confirmed and extended: not only can out.Validate alone not make it red, bypassing both still leaves a third guard, and the test is written to tell the three apart.",
+      "headSha": "c27127df39e176e8f6a8b488d82e2d9b833594f6",
+      "negativeControl": "My first attempt at control B patched the wrong out.Validate (retype.go:58, RetypeBlock's) and the test stayed green. That is the control on the control: the test is aimed at the call site the live room uses, not at any Validate in the file."
+    },
+    {
+      "criterion": "The pi-envoy skills word guard, the red that sent the issue back, is green with margin.",
+      "surface": "The guard itself and the files it counts.",
+      "command": "bun test src/skills-guard.test.ts in packages/pi-envoy; and a count of every file of the three skills as wc -w counts",
+      "observed": "10 pass, 0 fail, 1 skip - the skip is the unrelated row at line 138 (test.skipIf on omp), not the word test. The count is 1997: dispatch 725, dispatch-first 528, dispatch-writing-specs 744. CI's reading at 156cbec9 was 2000, exactly the bound; there are now three words of margin, and the trim cut no rule, only three redundant phrasings.",
+      "headSha": "c27127df39e176e8f6a8b488d82e2d9b833594f6",
+      "negativeControl": "The red at 156cbec9 is the control: the same test, same files, Received 2000 and failing. It passes here for the three words cut and nothing else."
+    },
+    {
+      "criterion": "Everything proven at 3e4f9289 still holds at this head: T7 on all three write paths, the contracts refusal the editor runs, the migration set, and the reference graph.",
+      "surface": "The repository's block-pointer and ask-block suites against a real PostgreSQL, the contracts module run directly, and a real Dispatch stack in the issue's pod (database dispatch_tester9, port 21150).",
+      "command": "go test ./internal/dispatch/api/ -run 'BlockPointer|APointerAndAProseCitation'; go test ./internal/dispatch/store/ -run 'AskBlock|TestTheAskBlockMigrationsOweEveryStoredAsk|TestAnOlderBuildsWriteLeavesTheAskBlocksOwed'; bun against contracts' blockPointersProblem; the acceptance driver; a read of graph_edges",
+      "observed": "Both Go sets ok. Contracts refuses an ask part, the pinned form and a project document's ask part with 'is a block of an ask: ...', refuses a comment's block with 'of a comment', and still accepts a document's block. The driver answered exit=0 PASS=171 FAIL=0 SKIP=0. The fresh database holds 165 migrations and graph_edges serves part_of x20, mentions from a part x3, mentions to a part from a comment and a comment block, and replies_to a part x1. No migration file differs from 3e4f9289 (jj diff over the migrations directory: 0 files changed), so the two application orders I proved there describe this head unchanged.",
+      "headSha": "c27127df39e176e8f6a8b488d82e2d9b833594f6",
+      "negativeControl": "The driver's own R10 case: ?to=<ask>%23b-b9 answers 404 naming the part and the ask while #b-b2 answers 200 with that option's text."
+    },
+    {
+      "criterion": "The reader-facing change and the repository's own gates.",
+      "surface": "The production SPA bundle in a real Chromium, and the gate CI runs.",
+      "command": "bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/ask-part-references.e2e.ts; bash .github/scripts/check-ci-filters.sh; go test ./internal/dispatch/pmdoc/... -timeout 40m",
+      "observed": "2 passed; check-ci-filters.sh exit 0 with 28 gates and 0 uncovered files; pmdoc ok at 973.690 s under the 40-minute deadline the architect set.",
+      "headSha": "c27127df39e176e8f6a8b488d82e2d9b833594f6",
+      "negativeControl": "pmdoc at -timeout 10m reads as a failure and is not one, which is why the deadline matters: it ran 934 s last round and 974 s here."
+    }
+  ],
+  "ci": "Read on GitHub at 23:52Z: the pull request is MERGEABLE / BLOCKED, and at code head 8105eb4fe5dd run 41361623017 was still going - 25 lanes queued, 2 success, 4 skipped, 1 cancelled, and no failure. Read as running; I did not wait for it, and no CI result is carried into this handoff. The red that sent the issue back, pi-envoy's word guard at 156cbec9, I checked myself above rather than waiting for CI's own reading of it.",
+  "observations": [
+    "internal/dispatch/pmdoc needs a deadline above 10 minutes on this pod: 934 s last round, 973.690 s here. A shorter one reads as a failure. The implementer also records that its differential rows shell out to Bun and need the workspace linked.",
+    "Control A's finding is worth keeping: without the ask arm an ask-part pointer is still refused, but by CanonicalBlockRef and with the generic 'is not a block reference as Dispatch writes one'. The ask arm is what makes the message name an ask, so the sentence is the thing the test must keep pinning."
+  ],
+  "findings": []
+}

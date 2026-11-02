@@ -8,6 +8,15 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
+// itemBlockNodeID is the node id of block blockID of the item of kind whose uuid is itemID, the
+// one shape every block table's node_id column holds: `comment/<uuid>#b2`,
+// `message/<uuid>#b1`, `ask/<uuid>#b3` for a part of an ask. Production writes that shape in
+// text.TargetID and in the SQL that inserts a block row; a test writes it here rather than
+// spelling it out at each assertion.
+func itemBlockNodeID(kind ItemKind, itemID, blockID string) string {
+	return string(kind) + "/" + itemID + "#" + blockID
+}
+
 // A mention in a comment or message starts at the block holding it: one pair per (block, target),
 // so a target cited twice in one block is one pair and cited from two blocks is two, and an
 // external link writes none.

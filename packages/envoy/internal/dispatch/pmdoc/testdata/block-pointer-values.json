@@ -188,25 +188,49 @@
     "value": "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2",
     "ok": false,
     "why": "a block of an issue's comment",
-    "problem": "a block[] attribute points only at a block of a document"
+    "problem": "is a block of a comment: a block[] attribute points only at a block of a document"
   },
   {
     "value": "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2@v1",
     "ok": false,
     "why": "a block of a revision of an issue's comment",
-    "problem": "a block[] attribute points only at a block of a document"
+    "problem": "is a block of a comment: a block[] attribute points only at a block of a document"
   },
   {
     "value": "dispatch://CORE/artifact/handbook-md/comment/88888888-8888-4888-8888-888888888888#b-b2",
     "ok": false,
     "why": "a block of a project document's comment",
-    "problem": "a block[] attribute points only at a block of a document"
+    "problem": "is a block of a comment: a block[] attribute points only at a block of a document"
   },
   {
     "value": "dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2",
     "ok": false,
     "why": "a block of an issue message",
-    "problem": "a block[] attribute points only at a block of a document"
+    "problem": "is a block of a message: a block[] attribute points only at a block of a document"
+  },
+  {
+    "value": "dispatch://CORE-1/ask/22222222-2222-4222-8222-222222222222#b-b2",
+    "ok": false,
+    "why": "a part of an issue's ask",
+    "problem": "is a block of an ask: a block[] attribute points only at a block of a document"
+  },
+  {
+    "value": "dispatch://CORE-1/ask/22222222-2222-4222-8222-222222222222#b-b2@v1",
+    "ok": false,
+    "why": "a part of a revision of an issue's ask",
+    "problem": "is a block of an ask: a block[] attribute points only at a block of a document"
+  },
+  {
+    "value": "dispatch://CORE/artifact/handbook-md/ask/99999999-9999-4999-8999-999999999999#b-b2",
+    "ok": false,
+    "why": "a part of a project document's ask",
+    "problem": "is a block of an ask: a block[] attribute points only at a block of a document"
+  },
+  {
+    "value": "dispatch://CORE-1/artifact/notes-md/ask/a1#b-b2",
+    "ok": false,
+    "why": "an issue document's ask, a shape no reference has",
+    "problem": "is not a block reference as Dispatch writes one"
   },
   {
     "value": "dispatch://CORE-1/artifact/notes-md/comment/c1#b-x",
@@ -224,6 +248,6 @@
     "value": "dispatch://CORE-1/spec#b-x dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2",
     "ok": false,
     "why": "a document's block, then an issue message's",
-    "problem": "a block[] attribute points only at a block of a document"
+    "problem": "is a block of a message: a block[] attribute points only at a block of a document"
   }
 ]
