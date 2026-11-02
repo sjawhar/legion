@@ -722,6 +722,7 @@ function decisionOf(
     ref: `dispatch://CORE-1/artifact/decisions-md#b-${blockId}`,
     replaced,
     text: "We decided.",
+    text_sha256: `sum-${blockId}`,
     unsure,
     waiting_review: true,
   };

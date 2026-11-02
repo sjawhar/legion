@@ -63,6 +63,7 @@ const decisions: IssueDecisions = {
       ref: "dispatch://CORE-1/artifact/decisions-md#b-d-1",
       replaced: false,
       text: "Ship it in two steps.",
+      text_sha256: "sum-d-1",
       unsure: false,
       waiting_review: true,
     },

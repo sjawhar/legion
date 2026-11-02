@@ -254,7 +254,10 @@ function WaitingDecision({
   const keep = useKeyedWrite({
     inline: true,
     label: () => `Keep ${decision.heading}`,
-    write: (id: string, bounds) => api.keepDecision(id, decision.block_id, bounds),
+    // The sum of the text this card showed: a decision the agent changed since is refused
+    // (`409 DECISION_CHANGED`), so a Keep never stands over words the reader did not see.
+    write: (id: string, bounds) =>
+      api.keepDecision(id, decision.block_id, decision.text_sha256, bounds),
     onSuccess: (kept) => {
       if (kept === null) {
         void queryClient.invalidateQueries({ exact: true, queryKey: ["decisions", issueKey] });

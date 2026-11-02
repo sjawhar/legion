@@ -41,6 +41,7 @@ function decision(fields: Partial<Decision> & Pick<Decision, "block_id" | "headi
     links: [],
     ref: `dispatch://CORE-1/artifact/decisions-md#b-${fields.block_id}`,
     replaced: false,
+    text_sha256: `sum-${fields.block_id}`,
     unsure: false,
     waiting_review: false,
     ...fields,
@@ -176,7 +177,7 @@ test("Keep records the decision and moves it from Waiting for your review to You
     fireEvent.click(within(waiting).getByRole("button", { name: "Keep" }));
 
     await waitFor(() => expect(keep).toHaveBeenCalled());
-    expect(keep.mock.calls[0]?.slice(0, 2)).toEqual([documentId, "store"]);
+    expect(keep.mock.calls[0]?.slice(0, 3)).toEqual([documentId, "store", "sum-store"]);
     await waitFor(() =>
       expect(
         within(list("Waiting for your review")).queryByText("Store notices in a table")
