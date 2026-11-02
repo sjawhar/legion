@@ -1267,7 +1267,7 @@ function consumeMarker(stores, argv, args, files, now) {
   if (changed !== undefined)
     return {
       ok: false,
-      why: `a file this write posts changed after AskGate reviewed it (\`${changed.flag} ${changed.operand}\`)`,
+      why: `a file this write posts changed after AskGate read it (\`${changed.flag} ${changed.operand}\`)`,
       changed
     };
   return {
@@ -22950,7 +22950,7 @@ var REFUSED = 1;
 var USAGE = 2;
 var HOSTS = ["omp", "claude"];
 var CLAUDE_OUTPUT_MAX = 25000;
-var SAME_MESSAGE = "AskGate reviews the calls of a message before any of them runs, so it did not review that change.";
+var SAME_MESSAGE = "AskGate reads the files of a message's calls before any of them runs, so it did not see that change.";
 var STATE_WRITE_FAILED = "dispatch: Dispatch took the call, but this session's state";
 function stateWriteFailed(problem) {
   return `${STATE_WRITE_FAILED} could not be written: ${problem}`;
@@ -23097,7 +23097,7 @@ async function runDispatchCli(argv, rawEnv, io) {
         const spent = consumeMarker(gate.stores, argv, parsed.args, files, Date.now());
         const asksCarried = spent.ok ? 0 : newAsks(parsed.tool, uploadBytes === undefined ? parsed.args : { ...parsed.args, content: new TextDecoder().decode(uploadBytes) }).length;
         if (!spent.ok && gate.mode === "block") {
-          return refuse(spent.changed === undefined ? `${notCalled} AskGate is on for this session, and ${spent.why}. ${LITERAL_FORM} Send the write again in that form, as a bash call of its own.` : `${notCalled} AskGate is on for this session, and ${spent.why}. ${SAME_MESSAGE} Send the call again in a later message.`, REFUSED, parsed.tool, { mode: "block", why: spent.why, asksCarried });
+          return refuse(spent.changed === undefined ? `${notCalled} AskGate is on for this session, and ${spent.why}. ${LITERAL_FORM} Send the write again in that form, as a bash call of its own.` : `${notCalled} AskGate is on for this session, and ${spent.why}. ${SAME_MESSAGE} Send the call again in a later message than the one that changes the file.`, REFUSED, parsed.tool, { mode: "block", why: spent.why, asksCarried });
         }
         if (!spent.ok) {
           try {

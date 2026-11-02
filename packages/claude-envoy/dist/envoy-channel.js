@@ -43193,7 +43193,7 @@ function consumeMarker(stores, argv, args, files, now) {
   if (changed !== undefined)
     return {
       ok: false,
-      why: `a file this write posts changed after AskGate reviewed it (\`${changed.flag} ${changed.operand}\`)`,
+      why: `a file this write posts changed after AskGate read it (\`${changed.flag} ${changed.operand}\`)`,
       changed
     };
   return {
