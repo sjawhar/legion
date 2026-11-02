@@ -19518,16 +19518,11 @@ function artifactByReference(artifacts, artifactReference, owner, canonical) {
   const byId = artifacts.find((candidate) => candidate.id === artifactReference);
   if (byId !== undefined)
     return byId;
-  const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
-  if (bySlug !== undefined) {
-    const named = byName.filter((candidate) => candidate.id !== bySlug.id && candidate.kind === "doc");
-    if (named.length > 0) {
-      throw new Error(documentReferenceProblem(artifactReference, [bySlug, ...named], owner, "id"));
-    }
+  if (bySlug !== undefined)
     return bySlug;
-  }
+  const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
   if (byName.length > 1) {
-    throw new Error(documentReferenceProblem(artifactReference, byName, owner, "slug"));
+    throw new Error(documentReferenceProblem(artifactReference, byName, owner, true));
   }
   const [artifact] = byName;
   if (artifact === undefined) {
@@ -19582,10 +19577,10 @@ async function documentTargets(client, resolution) {
   };
 }
 var documentHintLimit = 8;
-function documentReferenceProblem(reference, documents, owner, use) {
-  const hints = documents.slice(0, documentHintLimit).map((document) => use === "id" ? `${document.id} (${document.slug}, ${document.name})` : `${document.slug} (${document.name})`);
+function documentReferenceProblem(reference, documents, owner, ambiguous = false) {
+  const hints = documents.slice(0, documentHintLimit).map((document) => `${document.slug} (${document.name})`);
   const list = hints.length === 0 ? "none" : hints.join(", ");
-  return use === undefined ? `document "${reference}" not found by slug; this ${owner}'s documents: ${list}` : `"${reference}" names ${documents.length} documents on this ${owner}; use ${use === "id" ? "the id" : "a slug"}: ${list}`;
+  return ambiguous ? `"${reference}" names ${documents.length} documents on this ${owner}; use a slug: ${list}` : `document "${reference}" not found by slug; this ${owner}'s documents: ${list}`;
 }
 var askHintLimit = 8;
 function askIDInputProblem(asks, scope) {
@@ -22486,7 +22481,8 @@ var ErrorWireSchema = object({
 });
 var EnvelopeResponseSchema = EnvelopeSchema.extend({
   recipient: string2().optional(),
-  holder: string2().optional()
+  holder: string2().optional(),
+  duplicate: boolean2().optional()
 });
 var ReplayWireSchema = object({
   stream: object({
@@ -22572,44 +22568,84 @@ class EnvoyApiError extends Error {
     this.code = parsed?.code;
   }
 }
+var mintedDedupeKey2 = new RegExp(MINTED_DEDUPE_KEY_PATTERN);
+
+class EnvoySendUnconfirmedError extends Error {
+  targetSessionID;
+  idempotencyKey;
+  attempts;
+  last;
+  name = "EnvoySendUnconfirmedError";
+  resendSafe;
+  constructor(targetSessionID, idempotencyKey, attempts, last) {
+    const got = last instanceof EnvoyApiError ? `the listener answered ${last.details.status} (${last.message})` : `the listener did not answer (${last instanceof Error ? last.message : String(last)})`;
+    const tried = attempts === 1 ? "on its only attempt" : `on the last of ${attempts} attempts`;
+    const resendSafe = mintedDedupeKey2.test(`agent.${targetSessionID.trim()}.${idempotencyKey}`);
+    const resend = resendSafe ? `Sending it again with idempotency_key ${idempotencyKey} within ` + `${DELIVERY_DUPLICATE_WINDOW_MS / 3600000} hours is the safe resend: Envoy drops it as ` + "a repeat if the first copy arrived (a recipient that restarted in between can rarely " + "see it twice)." : `Envoy cannot recognise a resend under idempotency_key ${idempotencyKey} as a repeat ` + "(the key is not a lower-case UUID, or the session id holds a dot): ask the recipient " + "whether it arrived before sending it again.";
+    super(`The send to ${targetSessionID} is not confirmed delivered: ${got} ${tried}. It may or may ` + `not have arrived. ${resend}`, { cause: last });
+    this.targetSessionID = targetSessionID;
+    this.idempotencyKey = idempotencyKey;
+    this.attempts = attempts;
+    this.last = last;
+    this.resendSafe = resendSafe;
+  }
+}
 function createEnvoyClient(config) {
   const baseUrl = normalizeEnvoyUrl(config.baseUrl);
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const apiToken = config.token;
+  const attempts = config.retry === false ? 1 : 2;
+  const attemptOnce = async (url, init, deadlineMs) => {
+    const headers = new Headers(init.headers);
+    if (apiToken)
+      headers.set("Authorization", `Bearer ${apiToken}`);
+    let response;
+    try {
+      response = await config.fetch(url, {
+        ...init,
+        headers,
+        signal: AbortSignal.timeout(deadlineMs)
+      });
+    } catch (error) {
+      return { unanswered: error };
+    }
+    try {
+      return { response, body: await response.text() };
+    } catch (error) {
+      if (response.status >= 400 && response.status < 500) {
+        return { response, body: `(its body did not arrive: ${String(error)})` };
+      }
+      return { unanswered: error };
+    }
+  };
   const request = async (path, init, options = {}) => {
     const url = `${baseUrl}${path}`;
-    const attempts = config.retry === false ? 1 : 2;
     const tries = options.retry === false ? 1 : attempts;
     for (let attempt = 0;attempt < tries; attempt += 1) {
-      let response;
-      try {
-        const headers = new Headers(init.headers);
-        if (apiToken)
-          headers.set("Authorization", `Bearer ${apiToken}`);
-        response = await config.fetch(url, {
-          ...init,
-          headers,
-          signal: AbortSignal.timeout(options.timeoutMs ?? timeoutMs)
-        });
-      } catch (error) {
+      const outcome = await attemptOnce(url, init, options.timeoutMs ?? timeoutMs);
+      if ("unanswered" in outcome) {
+        options.onUnanswered?.();
         if (attempt + 1 < tries) {
           await waitForRetry();
           continue;
         }
-        throw error;
+        throw outcome.unanswered;
       }
-      const responseBody = await response.text();
+      const { response, body } = outcome;
       if (response.ok)
-        return responseBody;
+        return body;
       const error = new EnvoyApiError({
         method: init.method ?? "GET",
         url,
         status: response.status,
-        responseBody
+        responseBody: body
       });
-      if (response.status >= 500 && attempt + 1 < tries) {
-        await waitForRetry();
-        continue;
+      if (response.status >= 500) {
+        options.onUnanswered?.();
+        if (attempt + 1 < tries) {
+          await waitForRetry();
+          continue;
+        }
       }
       throw error;
     }
@@ -22645,18 +22681,33 @@ function createEnvoyClient(config) {
     getInterest: async (sessionID) => InterestWireSchema.parse(JSON.parse(await request(`/v1/interests/${sessionID}`, {}))),
     send: async (input) => {
       const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
-      const response = EnvelopeResponseSchema.parse(JSON.parse(await post("/v1/messages/send", {
-        source: input.source ?? "agent",
-        ...sourceSession(input.sourceSessionID),
-        target_session: input.targetSessionID,
-        message: input.message,
-        idempotency_key: idempotencyKey,
-        ...messageMetadata(input)
-      })));
+      let unanswered = false;
+      let response;
+      try {
+        const answer = await post("/v1/messages/send", {
+          source: input.source ?? "agent",
+          ...sourceSession(input.sourceSessionID),
+          target_session: input.targetSessionID,
+          message: input.message,
+          idempotency_key: idempotencyKey,
+          ...messageMetadata(input)
+        }, {
+          onUnanswered: () => {
+            unanswered = true;
+          }
+        });
+        response = EnvelopeResponseSchema.parse(JSON.parse(answer));
+      } catch (error) {
+        if (error instanceof EnvoyApiError && error.details.status < 500 && !unanswered) {
+          throw error;
+        }
+        throw new EnvoySendUnconfirmedError(input.targetSessionID, idempotencyKey, attempts, error);
+      }
       return {
         envelope: response,
         recipient: response.recipient ?? input.targetSessionID,
-        confirmed: response.recipient !== undefined
+        confirmed: response.recipient !== undefined,
+        duplicate: response.duplicate === true
       };
     },
     publish: async (input) => {
@@ -22695,7 +22746,13 @@ function createEnvoyClient(config) {
         raw = await post("/v1/roles/set", body);
       } catch (error) {
         if (error instanceof EnvoyApiError && error.details.status === 409) {
-          const held = RoleHeldWireSchema.safeParse(JSON.parse(error.details.responseBody));
+          let answer;
+          try {
+            answer = JSON.parse(error.details.responseBody);
+          } catch {
+            throw error;
+          }
+          const held = RoleHeldWireSchema.safeParse(answer);
           if (held.success)
             return { claimed: false, holder: held.data.holder };
         }

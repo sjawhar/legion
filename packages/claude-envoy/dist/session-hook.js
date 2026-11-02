@@ -18572,16 +18572,11 @@ function artifactByReference(artifacts, artifactReference, owner, canonical) {
   const byId = artifacts.find((candidate) => candidate.id === artifactReference);
   if (byId !== undefined)
     return byId;
-  const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
-  if (bySlug !== undefined) {
-    const named = byName.filter((candidate) => candidate.id !== bySlug.id && candidate.kind === "doc");
-    if (named.length > 0) {
-      throw new Error(documentReferenceProblem(artifactReference, [bySlug, ...named], owner, "id"));
-    }
+  if (bySlug !== undefined)
     return bySlug;
-  }
+  const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
   if (byName.length > 1) {
-    throw new Error(documentReferenceProblem(artifactReference, byName, owner, "slug"));
+    throw new Error(documentReferenceProblem(artifactReference, byName, owner, true));
   }
   const [artifact] = byName;
   if (artifact === undefined) {
@@ -18636,10 +18631,10 @@ async function documentTargets(client, resolution) {
   };
 }
 var documentHintLimit = 8;
-function documentReferenceProblem(reference, documents, owner, use) {
-  const hints = documents.slice(0, documentHintLimit).map((document) => use === "id" ? `${document.id} (${document.slug}, ${document.name})` : `${document.slug} (${document.name})`);
+function documentReferenceProblem(reference, documents, owner, ambiguous = false) {
+  const hints = documents.slice(0, documentHintLimit).map((document) => `${document.slug} (${document.name})`);
   const list = hints.length === 0 ? "none" : hints.join(", ");
-  return use === undefined ? `document "${reference}" not found by slug; this ${owner}'s documents: ${list}` : `"${reference}" names ${documents.length} documents on this ${owner}; use ${use === "id" ? "the id" : "a slug"}: ${list}`;
+  return ambiguous ? `"${reference}" names ${documents.length} documents on this ${owner}; use a slug: ${list}` : `document "${reference}" not found by slug; this ${owner}'s documents: ${list}`;
 }
 var askHintLimit = 8;
 function askIDInputProblem(asks, scope) {
