@@ -35,6 +35,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/oauth2"
+
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 )
 
@@ -88,6 +90,21 @@ type RefusedError struct {
 	Status int
 	// Code and Description are the OAuth error the broker answered.
 	Code, Description string
+	// answer is this same refusal as x/oauth2's own token-endpoint error, which Unwrap says
+	// why it is kept.
+	answer oauth2.RetrieveError
+}
+
+// newRefusedError is the refusal a broker answered with an OAuth error body.
+func newRefusedError(status int, code, description string) *RefusedError {
+	return &RefusedError{
+		Status: status, Code: code, Description: description,
+		answer: oauth2.RetrieveError{
+			Response:         &http.Response{StatusCode: status, Status: fmt.Sprintf("%d %s", status, http.StatusText(status))},
+			ErrorCode:        code,
+			ErrorDescription: description,
+		},
+	}
 }
 
 func (e *RefusedError) Error() string {
@@ -96,6 +113,17 @@ func (e *RefusedError) Error() string {
 	}
 	return fmt.Sprintf("the secrets broker refused this machine's identity: HTTP %d %s: %s", e.Status, e.Code, e.Description)
 }
+
+// Unwrap is this refusal as the answered OAuth token-endpoint error it is, which is how every
+// caller of this package reads it. A broker failure is printed through internal/redact, whose
+// allow-list prints an error's own text only where it can prove that text carries nothing of
+// the URL the deployment configured, and an answered HTTP refusal is one of the kinds it
+// passes. Without this a refusal read as an unplaceable failure and printed as "the request
+// failed", losing the broker's reason — that the request names no session, that no entry lists
+// this account — which is the only part a person can act on; beside a broker URL that carries
+// a credential, whose text redact prints no part of, the status on this answer is what names
+// the refusal rather than that same "the request failed".
+func (e *RefusedError) Unwrap() error { return &e.answer }
 
 // Permanent reports whether this refusal is one no retry can cure, which every refusal is but
 // the broker's 429: its token endpoint spends a bucket per source address, and a bucket
@@ -385,7 +413,7 @@ func (c *Client) post(ctx context.Context, form url.Values) (*Token, error) {
 	}
 	if resp.StatusCode/100 != 2 {
 		if resp.StatusCode/100 == 4 && answer.Error != "" {
-			return nil, &RefusedError{Status: resp.StatusCode, Code: answer.Error, Description: answer.ErrorDescription}
+			return nil, newRefusedError(resp.StatusCode, answer.Error, answer.ErrorDescription)
 		}
 		return nil, fmt.Errorf("the broker at %s answered HTTP %d %s", endpoint, resp.StatusCode, answer.Error)
 	}

@@ -7,119 +7,74 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/sjawhar/envoy/brokerclient"
-
-	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
-// controllerDispatchTokenWait bounds how long the start waits for the first Dispatch token the
-// broker mints. A controller with no Dispatch token cannot do its work, so a broker that is down
-// refuses the start rather than letting Oh My Pi come up with no credential.
-const controllerDispatchTokenWait = 60 * time.Second
+// controllerDispatchTradeWait bounds the one trade this start makes to prove the controller can
+// hold a Dispatch credential at all. A controller that cannot write to Dispatch cannot do its
+// work, so a broker that is down refuses the start rather than letting Oh My Pi come up with no
+// credential.
+const controllerDispatchTradeWait = 60 * time.Second
 
-// controllerStartDispatchToken mints the controller's own Dispatch token, where this machine
-// proves an identity of its own, and keeps it fresh while Oh My Pi runs.
+// controllerDispatchBroker says whether the controller's Dispatch credential is the secrets
+// broker's — this machine's own identity traded for one of the broker's access tokens — rather
+// than a bearer the configuration points at, and refuses the start where that trade does not
+// work.
 //
-// With AGENT_SECRETS_MACHINE_IDENTITY unset this does nothing and answers an empty path: the
-// controller reads the `dispatch_token_file` its configuration names, as it always has. With it
-// set, the machine's identity is traded at the secrets broker (AGENT_SECRETS_URL) for one of the
-// broker's access tokens, written 0600 under the state directory as every other credential of
-// the controller's is, and the environment's DISPATCH_TOKEN_FILE points at that file instead —
-// so nobody copies a person's Dispatch token onto a machine, which is the whole of why this
-// grant exists. The token is bound to a key this process makes, whose public half alone reaches
-// the broker and which lives as long as this process does.
+// With AGENT_SECRETS_MACHINE_IDENTITY unset it answers false and does nothing: the controller
+// reads the `dispatch_token_file` its configuration names, as it always has. With it set, the
+// controller's own session holds the credential and this process holds none: the Envoy client
+// makes a key of its own, trades this machine's identity at AGENT_SECRETS_URL inside the running
+// session and presents the minted token as `Authorization: DPoP <token>` with a proof signed per
+// request (`brokerCredential`, packages/envoy-client/src/broker-credential.ts), renewing it
+// there. Nobody copies a person's Dispatch token onto a machine, which is the whole of why this
+// grant exists.
 //
-// The trade issues no refresh token, so the renewal is a fresh identity token traded again,
-// which internal/brokerclient's own loop does before each token expires; every renewal rewrites
-// the same file, and nothing of the controller restarts. The loop writes nothing to the terminal
-// Oh My Pi owns: it appends one line per renewal and per failure to
-// `<state_dir>/dispatch-token.log`, opened append-only 0600 before Oh My Pi starts, and never
-// logs a token. Its lifetime is Oh My Pi's, as the GitHub refresh loop's is, and the stop it
-// answers waits for it, so the process never exits while a write is in flight.
-func controllerStartDispatchToken(ctx context.Context, stateDir string, stderr io.Writer) (stop func(), tokenFile string, err error) {
-	noop := func() {}
+// Nothing of that credential is written to a file and no DISPATCH_TOKEN_FILE points at one.
+// Such a token is bound to the key its holder proves: Dispatch refuses it presented as a bearer
+// (RFC 9449 Section 7.2, `brokertoken.Presented`), and the client resolves every bearer —
+// DISPATCH_TOKEN_FILE, then DISPATCH_TOKEN, then the token an envoy.json holds — before it
+// consults the broker at all. A pointer to such a token is therefore a pointer the session
+// cannot spend, and handing it one shuts the broker route off; controllerEnvironment hands it
+// none, and controllerStart drops an inherited one.
+//
+// What this start does do is trade once itself, before the daemon mints a capability: a broker
+// that refuses this machine's identity — no entry listing it, an entry that fixes no session
+// while nothing names one — refuses the start, in the broker's own words, rather than leaving a
+// controller to find at its first write that it can write nothing. That trade's token is read by
+// nobody, is never written down, and the key it is bound to lives and dies with this call; the
+// session's own credential is its own trade.
+func controllerDispatchBroker(ctx context.Context, stderr io.Writer) (bool, error) {
 	identity, err := brokerclient.MachineIdentity(os.Getenv)
-	if err != nil {
-		return noop, "", err
-	}
-	if identity == nil {
-		return noop, "", nil
+	if err != nil || identity == nil {
+		return false, err
 	}
 	broker := os.Getenv(brokerclient.BrokerURLVar)
 	if broker == "" {
-		return noop, "", fmt.Errorf("%s names the identity this machine proves, so %s must name the secrets broker it proves it to",
+		return false, fmt.Errorf("%s names the identity this machine proves, so %s must name the secrets broker it proves it to",
 			brokerclient.IdentityVar, brokerclient.BrokerURLVar)
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return noop, "", fmt.Errorf("make the key the controller's Dispatch token is bound to: %w", err)
+		return false, fmt.Errorf("make the key the controller's trade is proved with: %w", err)
 	}
-	logPath := filepath.Join(stateDir, "dispatch-token.log")
-	logFile, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
-	if err != nil {
-		return noop, "", fmt.Errorf("open %s: %w", logPath, err)
-	}
-	log := slog.New(slog.NewTextHandler(logFile, nil))
 	client, err := brokerclient.New(brokerclient.Config{
 		BrokerURL: broker, Key: key, Subject: identity, Session: os.Getenv(brokerclient.SessionVar),
-		HTTP: brokerclient.HTTPClient(), Log: log,
+		HTTP: brokerclient.HTTPClient(),
 	})
 	if err != nil {
-		logFile.Close()
-		return noop, "", err
+		return false, err
 	}
-
-	loopCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	done := make(chan struct{})
-	first := make(chan error, 1)
-	var path string
-	go func() {
-		defer close(done)
-		defer logFile.Close()
-		err := client.Run(loopCtx, func(_ context.Context, token *brokerclient.Token) error {
-			written, err := runtime.WriteDispatchTokenFile(stateDir, token.AccessToken)
-			if err != nil {
-				return fmt.Errorf("write the controller's Dispatch token: %w", err)
-			}
-			path = written
-			log.Info("controller: dispatch token minted", "file", written, "expires", token.Expiry.UTC().Format(time.RFC3339))
-			select {
-			case first <- nil:
-			default:
-			}
-			return nil
-		})
-		if err != nil {
-			log.Error("controller: the Dispatch token can no longer be minted", "error", err.Error())
-		}
-		select {
-		case first <- err:
-		default:
-		}
-	}()
-	stop = func() {
-		cancel()
-		<-done
+	timed, cancel := context.WithTimeout(ctx, controllerDispatchTradeWait)
+	defer cancel()
+	token, err := client.Token(timed)
+	if err != nil {
+		return false, fmt.Errorf("the controller's Dispatch credential cannot be minted at %s: %w", broker, err)
 	}
-	select {
-	case err := <-first:
-		if err != nil {
-			stop()
-			return noop, "", err
-		}
-	case <-time.After(controllerDispatchTokenWait):
-		stop()
-		return noop, "", fmt.Errorf("the secrets broker at %s did not mint the controller's Dispatch token within %s", broker, controllerDispatchTokenWait)
-	case <-ctx.Done():
-		stop()
-		return noop, "", ctx.Err()
-	}
-	fmt.Fprintf(stderr, "[legion] the controller holds a Dispatch token of this machine's own from %s, written to %s; this process renews it before it expires (log: %s)\n",
-		broker, path, logPath)
-	return stop, path, nil
+	fmt.Fprintf(stderr, "[legion] the controller's Dispatch credential is this machine's own: %s trades %s for a token bound to the session's key, which the session mints and renews itself (this check's own trade expires %s); no token is written down and no bearer is handed to Oh My Pi\n",
+		broker, identity.Describe(), token.Expiry.UTC().Format(time.RFC3339))
+	return true, nil
 }

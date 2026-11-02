@@ -12,6 +12,11 @@ body: |
   (`AGENT_SECRETS_POOL_AUDIENCE` and `AGENT_SECRETS_POOL_ACCOUNT`, a token minted through a
   workload identity pool with `generateIdToken` and `includeEmail`) — and `AGENT_SECRETS_SESSION`
   the session name a trade writes under. With it unset every program works exactly as before.
+  A refusal the broker answers carries what it said: it reads as the OAuth refusal it is, so the
+  redaction that keeps a configured URL's credential out of every message prints the broker's
+  own reason — an entry that fixes no session while the request names none, an identity no entry
+  lists — instead of `the request failed`, and prints the status alone where that URL carries a
+  credential.
   The wire contract both this client and the TypeScript one are held to is the corpus at
   `packages/envoy/internal/brokerclient/testdata/wire.json`, which each suite replays: a field one
   client sends or reads without an entry there fails that client's own test.
@@ -29,10 +34,14 @@ body: |
   credential its trade mints, so a pod needs nobody to enrol it, and `agent-secrets-helper` gets
   its launcher credential the same way with no person approving the machine at all.
 
-  `legion controller start` mints the controller's own Dispatch token through that client where
-  this machine proves an identity, writes it under the state directory and points
-  `DISPATCH_TOKEN_FILE` at it, renewing it while Oh My Pi runs, so nobody copies a person's
-  Dispatch token onto a machine.
+  `legion controller start` gives the controller's session that same route where this machine
+  proves an identity: the session trades for a Dispatch credential of its own and renews it, so
+  nobody copies a person's Dispatch token onto a machine. It hands Oh My Pi no
+  `DISPATCH_TOKEN_FILE` and no `DISPATCH_TOKEN`, and drops an inherited one, since such a token
+  is bound to the key its holder proves and Dispatch refuses it presented as a bearer; it
+  trades once itself before the daemon mints the controller's capability, so a broker that
+  refuses this machine refuses the start, in the broker's own words, rather than leaving a
+  controller to find at its first write that it can write nothing.
 time: 2026-11-02T09:30:00.000000000Z
 custom:
   Issue: pr2636
