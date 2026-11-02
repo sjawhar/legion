@@ -763,3 +763,24 @@ export const canvasText = "bg-slate-50 dark:bg-slate-950 text-slate-900 dark:tex
  */
 export const scrollFadeTrailing =
   "[mask-image:linear-gradient(to_right,#000_calc(100%-32px),#0000)]";
+
+// ---------------------------------------------------------------------------------------------
+// Spec block marks: editor decorations (`ProofEditorHandle.setBlockMarks`), never classes written
+// into the editor's DOM
+// ---------------------------------------------------------------------------------------------
+
+/** A spec block a decision shaped that the decision has changed since: a dashed amber rule down
+ *  its leading edge. The rule identifies the state, so it is registered as a UI boundary against
+ *  the document's surface and canvas; the block's `title` says what it means. */
+export const STALE_BLOCK_BORDER = pair(P.AMBER_700, P.AMBER_400);
+export const staleBlockMark =
+  "border-l-2 border-dashed border-l-amber-700 dark:border-l-amber-400 pl-2";
+registerText("stale block rule on surface", STALE_BLOCK_BORDER, SURFACE, 3);
+registerText("stale block rule on canvas", STALE_BLOCK_BORDER, CANVAS, 3);
+
+/** A spec block that changed since the version the person last read: a faint accent fill behind
+ *  the document's own text. */
+export const CHANGED_SINCE_READ_BG = pair(P.SKY_50, P.SKY_950);
+export const changedSinceReadMark = "bg-sky-50 dark:bg-sky-950";
+registerText("primary text on a changed-since-read block", TEXT_PRIMARY, CHANGED_SINCE_READ_BG);
+registerText("secondary text on a changed-since-read block", TEXT_SECONDARY, CHANGED_SINCE_READ_BG);

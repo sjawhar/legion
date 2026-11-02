@@ -28,9 +28,9 @@ import {
   type MarginItem,
   type MarginItemAction,
   type MarginTab,
+  marginItemBlockId,
   marginItemId,
   marginItemMarkId,
-  marginItemRecord,
   threadMarkId,
   useMarginItems,
   useMarginOwner,
@@ -172,6 +172,7 @@ export function useMarginSheet(): MarginSheetModel {
     asksPending,
     commentsError,
     commentsPending,
+    decisions,
     editComment,
     items,
     marginItems,
@@ -455,11 +456,10 @@ export function useMarginSheet(): MarginSheetModel {
     const markIds = selectedItems
       .map((item) => marginItemMarkId(item))
       .filter((markId): markId is string => markId !== undefined);
-    const blockIds = selectedItems
-      .map((item) => marginItemRecord(item).anchor)
-      .flatMap((anchor) =>
-        anchor?.orphaned && typeof anchor.block_id === "string" ? [anchor.block_id] : []
-      );
+    const blockIds = selectedItems.flatMap((item) => {
+      const blockId = marginItemBlockId(item);
+      return blockId === undefined ? [] : [blockId];
+    });
     documentBridge?.setActiveMarks([...new Set(markIds)]);
     documentBridge?.setActiveBlocks(blockIds);
   }, [documentBridge, hoveredItemId, marginItems, selectedItemId]);
@@ -472,16 +472,16 @@ export function useMarginSheet(): MarginSheetModel {
   );
   useEffect(() => {
     const item = marginItems.find((candidate) => marginItemId(candidate) === selectedItemId);
-    const anchor = item === undefined ? undefined : marginItemRecord(item).anchor;
-    if (!anchor?.orphaned || typeof anchor.block_id !== "string") {
+    const blockId = item === undefined ? undefined : marginItemBlockId(item);
+    if (blockId === undefined) {
       selectedBlockFocus.current = undefined;
       return;
     }
-    if (selectedBlockFocus.current === anchor.block_id) {
+    if (selectedBlockFocus.current === blockId) {
       return;
     }
-    selectedBlockFocus.current = anchor.block_id;
-    focusBlock(anchor.block_id);
+    selectedBlockFocus.current = blockId;
+    focusBlock(blockId);
   }, [focusBlock, marginItems, selectedItemId]);
   const onSelectCard = useCallback(
     (id: string) => {
@@ -583,6 +583,7 @@ export function useMarginSheet(): MarginSheetModel {
       asksPending,
       commentsError,
       commentsPending,
+      decisions,
       historicalAsks,
       marginRef,
       isClosed,

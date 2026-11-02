@@ -617,6 +617,21 @@ from the issue's own ask, comment and message lists) above each event pinned fro
 tab, which retains its original event body; both have an `Unpin` action, so a pin made before the
 Conversation became a list of conversations stays its event's line here and remains removable.
 
+An issue's Spec tab also shows its decisions (`GET /api/v1/issues/{key}/decisions`, under
+`["decisions", <key>]`): `useMarginItems` makes one `decision` item of each decision that is not
+replaced at each spec block it links, placed at that block (`DecisionList` in
+`features/margin/DecisionCard.tsx`), an unsure one in the unsure colour; selecting it lights up
+and focuses the block. The same page marks blocks through `ProofEditorHandle.setBlockMarks`,
+never a class in editor DOM, for the reason above (`features/doc/spec-marks.ts`'s `useSpecMarks`):
+each block a `stale` link of the view names gets `staleBlockMark` and the title `A decision that
+shaped this block changed after it.`, and, when the person has read a version of the spec
+(`GET /api/v1/me/documents/{id}/read`), each block whose `changed_version` in the spec's
+`part_of` read (`GET /api/v1/references?to=dispatch://KEY/spec&kind=part_of`) is above it gets
+`changedSinceReadMark`, with one `role="status"` line above the document naming the heading of
+each such block's section. The page then records the version it shows as read, a quiet write
+(`documentReadRequest`); the read version is the one the visit opened on, so the marks stay for
+the visit.
+
 A margin thread's own reply holds its draft and refusal while its send is out, as every composer
 does, whatever unmounts its card: the card mounts its reply composer whenever it expands, under
 the thread's reply send name (`marginReplySendKey`), and the held-send store keeps a reply that
