@@ -941,7 +941,9 @@ export const dispatchToolSpecs = [
         .describe(
           "Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " +
             "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " +
-            "you need the human to act - the ask returns to 'Waiting on you'."
+            "you need the human to act - the ask returns to 'Waiting on you'. human does not " +
+            "apply to an approval request a newer version moved: it stays with you until dispatch " +
+            "request-approval hands it back at the current version."
         )
         .optional(),
       images: imagesArgument(
