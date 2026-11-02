@@ -43,11 +43,24 @@ type config struct {
 	OperatorFile string
 	MachineFile  string
 	StatePath    string
+	// KeyDir is where this user's session identity lives (AGENT_SECRETS_KEY_DIR), the
+	// directory `agent-secrets login` keeps this user's sign-ins under. The helper reads that
+	// one and no other user's: it runs as its own user, and the records are that user's own,
+	// 0600 in a 0700 directory.
+	KeyDir string
 	// Identity is this machine's own identity at the broker's token exchange
 	// (AGENT_SECRETS_MACHINE_IDENTITY and the variables it needs), or nil where this machine
 	// proves none and is logged in by a person as before. With one, the helper's launcher
 	// credential is the one that exchange mints, and nobody approves this machine at all.
 	Identity brokerclient.Source
+	// SignIn is the device-flow client a person signed in with (AGENT_SECRETS_SIGNIN_*), which
+	// mints their next identity token from the refresh token their record holds, or nil where
+	// the deployment names none. Without it, and without Identity, no sign-in on this box can
+	// be traded and every session enrols under this machine's own credential.
+	SignIn *brokerclient.DeviceFlow
+	// Person is AGENT_SECRETS_PERSON in the helper's own environment, which picks one of
+	// several sign-ins of this user; empty where it says nothing.
+	Person string
 	// Session is the session name a trade writes under (AGENT_SECRETS_SESSION), empty where
 	// the deployment's entry fixes one.
 	Session string
@@ -60,6 +73,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 		Socket:       getenv("AGENT_SECRETS_HELPER_SOCK"),
 		OperatorFile: getenv("AGENT_SECRETS_OPERATOR_FILE"),
 		MachineFile:  getenv("AGENT_SECRETS_MACHINE_FILE"),
+		KeyDir:       getenv("AGENT_SECRETS_KEY_DIR"),
+		Person:       strings.TrimSpace(getenv(brokerclient.PersonVar)),
 		Session:      strings.TrimSpace(getenv(brokerclient.SessionVar)),
 	}
 	identity, err := brokerclient.MachineIdentity(getenv)
@@ -67,6 +82,11 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 	cfg.Identity = identity
+	signIn, err := brokerclient.SignInFlow(getenv)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.SignIn = signIn
 	// AGENT_SECRETS_URL is checked by serve, not here: `sessions` needs only the socket, and
 	// the installer's restart guard runs it without the unit's environment.
 	if cfg.Socket == "" {
@@ -77,6 +97,11 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	if cfg.MachineFile == "" {
 		cfg.MachineFile = filepath.Join(home, ".config", "agent-secrets", "machine.json")
+	}
+	if cfg.KeyDir == "" {
+		// The default `agent-secrets` itself reads (its keyDir()): the directory the helper's
+		// own socket lives in, so both find one place with neither variable set.
+		cfg.KeyDir = filepath.Dir(helper.DefaultSocket(getenv))
 	}
 	cfg.StatePath = filepath.Join(filepath.Dir(cfg.Socket), "sessions.json")
 	return cfg, nil
@@ -111,6 +136,17 @@ environment:
                                With it the helper's launcher credential is the one that exchange
                                mints, traded again before it lapses, and no person approves this
                                machine; unset, a person logs it in as before
+  AGENT_SECRETS_KEY_DIR        where this user's session identity lives; the helper reads the
+                               sign-ins agent-secrets login keeps there (<key dir>/signins) to
+                               decide whose authority each session enrols under, and reads no
+                               other user's; install writes it into the unit when set
+                               (default $XDG_RUNTIME_DIR/agent-secrets)
+  AGENT_SECRETS_SIGNIN_CLIENT_ID, AGENT_SECRETS_SIGNIN_CLIENT_SECRET_FILE, AGENT_SECRETS_SIGNIN_ISSUER
+                               the device-flow client a person signed in with, which mints their
+                               next identity token; without it a sign-in on this box cannot be
+                               traded and every session enrols under this machine's credential
+  AGENT_SECRETS_PERSON         which of this user's sign-ins a session enrols under, where more
+                               than one person has signed in here
   AGENT_SECRETS_SESSION        the session name a trade writes under, where the deployment's
                                entry fixes none
 
@@ -175,7 +211,8 @@ func serve(cfg config) error {
 	srv := &helper.Server{
 		Registry: helper.NewRegistry(cfg.StatePath),
 		Broker: &helper.Broker{URL: cfg.URL, OperatorFile: cfg.OperatorFile, MachineFile: cfg.MachineFile,
-			Identity: identity, HTTP: &http.Client{Timeout: 30 * time.Second}, Log: log},
+			Identity: identity, SignIns: signInAuthority(cfg, log),
+			HTTP: &http.Client{Timeout: 30 * time.Second}, Log: log},
 		Hostname: hostname,
 		PeerOf:   helper.PeerOf,
 		Log:      log,
@@ -245,6 +282,28 @@ func identityClient(cfg config, log *slog.Logger) (*brokerclient.Client, error) 
 		BrokerURL: cfg.URL, Key: key, Subject: cfg.Identity, Session: cfg.Session,
 		HTTP: brokerclient.HTTPClient(), Log: log,
 	})
+}
+
+// signInAuthority is the people signed in on this box as this helper's own user, which the
+// helper asks before every enrolment, or nil where no sign-in here could be traded: a machine
+// that proves no identity of its own has no actor token to present beside a person's, and a
+// deployment that names no sign-in client has nothing to mint a person's next identity token
+// with. Those are the two halves `agent-secrets login` itself requires, so where either is
+// missing there is no sign-in on this box to read and every session enrols under this machine's
+// own credential.
+//
+// The store is this user's own key directory and never another's: a second user on this machine
+// runs a helper of their own, as their own user, reading their own 0700 directory, and nothing
+// here takes a directory or a person from a session.
+func signInAuthority(cfg config, log *slog.Logger) helper.SignIns {
+	if cfg.Identity == nil || cfg.SignIn == nil {
+		return nil
+	}
+	return &brokerclient.SignInAuthority{
+		Store: brokerclient.SignInsIn(cfg.KeyDir), Person: cfg.Person,
+		Machine: cfg.Identity, Flow: cfg.SignIn,
+		BrokerURL: cfg.URL, HTTP: brokerclient.HTTPClient(), Log: log,
+	}
 }
 
 // claimSocket takes the helper's claim on sock: an exclusive flock on sock+".lock" (0600, beside

@@ -3235,13 +3235,22 @@ export async function executeDispatchTool(
     const session = proved ?? sessionId;
     const unowned =
       "no owner, so an issue you create without an assignee takes its parent's assignee, else the project's default assignee, else nobody.";
+    // A broker token is the one credential that proves a session of its own, so a caller that
+    // names a service and proves a session is the kind Dispatch refuses every write with
+    // SIGN_IN_REQUIRED. whoami is where a person asks what their credential may do, so it says
+    // that here rather than describing the issue creation the server would refuse, and it names
+    // the command that gets them a write. A verified service-account token names a service and
+    // proves no session; it writes as before, and keeps the sentence it had.
+    const signInNeeded = owner === null && service !== null && proved !== null;
     const acting =
       owner !== null
         ? `Session ${session} acts for ${owner}: issues you create without an assignee are assigned to ${owner}.`
         : service !== null
           ? // The text names the identity the way every other surface does; details
             // keeps the subject whole, because that is the persisted value.
-            `Session ${session} runs as service ${serviceSubjectLabel(service)}: ${unowned}`
+            signInNeeded
+            ? `Session ${session} runs as service ${serviceSubjectLabel(service)} and no person, so it may read but Dispatch refuses every write it makes: run \`agent-secrets login\` on this machine to write as yourself.`
+            : `Session ${session} runs as service ${serviceSubjectLabel(service)}: ${unowned}`
           : `Session ${session} runs under the shared token: ${unowned}`;
     const elsewhere =
       proved !== null && proved !== sessionId

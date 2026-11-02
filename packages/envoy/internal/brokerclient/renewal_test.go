@@ -12,7 +12,9 @@ import (
 	"context"
 	"errors"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -82,6 +84,86 @@ func TestABrokerThatIsDownIsWaitedOut(t *testing.T) {
 	after, err := client.Token(ctx)
 	if err != nil || after.AccessToken != "dispatch-token" {
 		t.Fatalf("Token once the broker is up again = %v, %v; want a fresh trade, with no step by a person", after, err)
+	}
+}
+
+// TestABusyBrokerIsAskedAgainRatherThanEndingTheLoop: the broker's token endpoint spends a
+// bucket per source address, so a 429 is the one refusal a retry cures. A loop that stopped on
+// it would enrol nothing from the moment the credential in hand lapsed, with only a restart to
+// cure it — the failure a dev stack reproduces in seconds and a deployment meets behind one
+// address.
+func TestABusyBrokerIsAskedAgainRatherThanEndingTheLoop(t *testing.T) {
+	// The first trade lands; the three after it find the bucket empty; then it has refilled.
+	const refusals = 3
+	broker := newStubBroker(t, func(n int, _ url.Values) (int, map[string]any) {
+		if n > 0 && n <= refusals {
+			return 429, map[string]any{"error": "invalid_request", "error_description": "too many token requests; try again later"}
+		}
+		return 200, map[string]any{"access_token": "token-" + strconv.Itoa(n), "token_type": "DPoP", "expires_in": 3600}
+	})
+	client, err := New(Config{BrokerURL: broker.URL(), Key: testKey(t), Subject: projectedStub(), RenewBefore: time.Second})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	first, err := client.Token(ctx)
+	if err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+
+	// A 429 while the token in hand is live is no reason to stop writing with it.
+	client.held.Expiry = time.Now().Add(30 * time.Second)
+	held, err := client.Token(ctx)
+	if err != nil || held.AccessToken != first.AccessToken {
+		t.Fatalf("Token while the broker is busy = %v, %v; want the token in hand, which is still live", held, err)
+	}
+
+	// And the renewal loop waits the bucket out rather than ending: every wait fires at once,
+	// so the three refusals and the trade that follows them run at the test's speed.
+	client.after = func(time.Duration) <-chan time.Time {
+		fired := make(chan time.Time, 1)
+		fired <- time.Now()
+		return fired
+	}
+	loop, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var landed atomic.Int64
+	err = client.Run(loop, func(context.Context, *Token) error {
+		landed.Add(1)
+		cancel()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run = %v; want the 429s waited out, not the end of the loop", err)
+	}
+	if landed.Load() != 1 {
+		t.Fatalf("the loop handed its caller %d tokens; want the one after the 429s", landed.Load())
+	}
+	if trades := len(broker.Requests()); trades != refusals+2 {
+		t.Fatalf("the broker saw %d trades, want %d: Token's first, the loop's %d refused, and the one that landed",
+			trades, refusals+2, refusals)
+	}
+}
+
+// TestATokenShorterThanRenewBeforeIsNotRenewedInALoop: a token that lives less than
+// RenewBefore is renewed at half of what is left, so a deployment minting short tokens — or a
+// dev stack proving a renewal in seconds — renews steadily rather than trading again the
+// instant each token lands, which empties the broker's bucket.
+func TestATokenShorterThanRenewBeforeIsNotRenewedInALoop(t *testing.T) {
+	now := time.Now()
+	client, err := New(Config{BrokerURL: "https://secrets.example", Key: testKey(t), Subject: projectedStub(),
+		Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if wait := client.untilRenewal(&Token{Expiry: now.Add(time.Hour)}); wait != time.Hour-DefaultRenewBefore {
+		t.Errorf("a token of an hour is renewed in %s, want %s ahead of its expiry", wait, DefaultRenewBefore)
+	}
+	if wait := client.untilRenewal(&Token{Expiry: now.Add(2 * time.Second)}); wait != time.Second {
+		t.Errorf("a token of two seconds is renewed in %s, want half of what is left", wait)
+	}
+	if wait := client.untilRenewal(&Token{Expiry: now.Add(-time.Second)}); wait != 0 {
+		t.Errorf("a token already past its expiry is renewed in %s, want at once", wait)
 	}
 }
 

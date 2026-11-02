@@ -165,8 +165,9 @@ func TestInstallResolvesSymlinksAndTakesTheURLFromTheEnvironment(t *testing.T) {
 }
 
 // TestInstallWritesTheHelpersEnvironmentIntoTheUnit: each helper setting set in install's
-// environment (the socket, the operator file and the machine file, beside the broker URL) becomes
-// an Environment= line, so the unit's helper reads the machine file and listens on the socket
+// environment (the socket, the operator file, the machine file and the key directory whose
+// sign-ins say whose authority a session enrols under, beside the broker URL) becomes an
+// Environment= line, so the unit's helper reads the machine file and listens on the socket
 // install probed; one that is unset is left out, and a value a unit line would need escaped is
 // refused, writing nothing.
 func TestInstallWritesTheHelpersEnvironmentIntoTheUnit(t *testing.T) {
@@ -174,6 +175,7 @@ func TestInstallWritesTheHelpersEnvironmentIntoTheUnit(t *testing.T) {
 	dir := filepath.Dir(r.sock)
 	r.env["AGENT_SECRETS_OPERATOR_FILE"] = filepath.Join(dir, "operator")
 	r.env["AGENT_SECRETS_MACHINE_FILE"] = filepath.Join(dir, "machine.json")
+	r.env["AGENT_SECRETS_KEY_DIR"] = filepath.Join(dir, "keys")
 	if err := r.run("--url", "https://secrets.example"); err != nil {
 		t.Fatal(err)
 	}
@@ -186,6 +188,7 @@ func TestInstallWritesTheHelpersEnvironmentIntoTheUnit(t *testing.T) {
 		"\nEnvironment=AGENT_SECRETS_HELPER_SOCK=" + r.sock + "\n",
 		"\nEnvironment=AGENT_SECRETS_OPERATOR_FILE=" + filepath.Join(dir, "operator") + "\n",
 		"\nEnvironment=AGENT_SECRETS_MACHINE_FILE=" + filepath.Join(dir, "machine.json") + "\n",
+		"\nEnvironment=AGENT_SECRETS_KEY_DIR=" + filepath.Join(dir, "keys") + "\n",
 	} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("unit lacks %q:\n%s", want, data)

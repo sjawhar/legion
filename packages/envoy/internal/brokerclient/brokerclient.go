@@ -79,9 +79,10 @@ type Token struct {
 	CredentialExpiresAt time.Time
 }
 
-// RefusedError is a trade the broker refused: a plain error naming what it said, which no retry
-// can cure — an identity no entry lists, a sign-in a person revoked, a token of the wrong
-// audience. The renewal loop stops on it rather than asking again every quarter minute.
+// RefusedError is a trade the broker refused: a plain error naming what it said. Almost every
+// one is a refusal no retry can cure — an identity no entry lists, a sign-in a person revoked,
+// a token of the wrong audience — and the renewal loop stops on those rather than asking again
+// every quarter minute. The one exception is the broker's 429 (Permanent).
 type RefusedError struct {
 	// Status is the HTTP status of the refusal.
 	Status int
@@ -95,6 +96,13 @@ func (e *RefusedError) Error() string {
 	}
 	return fmt.Sprintf("the secrets broker refused this machine's identity: HTTP %d %s: %s", e.Status, e.Code, e.Description)
 }
+
+// Permanent reports whether this refusal is one no retry can cure, which every refusal is but
+// the broker's 429: its token endpoint spends a bucket per source address, and a bucket
+// refills. A client that stopped trading on a 429 would stop for good over a burst — its own,
+// or that of another process behind the same address — and enrol nothing once the credential
+// it holds lapsed, with nothing but a restart to cure it.
+func (e *RefusedError) Permanent() bool { return e.Status != http.StatusTooManyRequests }
 
 // Config is one client: the broker it trades at, the identity it trades, and the key it proves.
 type Config struct {
@@ -186,9 +194,10 @@ func New(cfg Config) (*Client, error) {
 func (c *Client) Key() *ecdsa.PrivateKey { return c.key }
 
 // Token is a live access token: the held one while it is good for longer than RenewBefore, and
-// otherwise a fresh trade. A trade the broker did not answer while the held token is still live
-// answers that token, since a client that already holds an identity need not stop for a broker
-// that is merely down; a refusal, and a failure with nothing live left, answer the error, so no
+// otherwise a fresh trade. A trade the broker did not answer, or answered 429, while the held
+// token is still live answers that token, since a client that already holds an identity need
+// not stop for a broker that is merely down or busy; a refusal no retry can cure
+// (RefusedError.Permanent), and a failure with nothing live left, answer the error, so no
 // caller writes with no identity.
 func (c *Client) Token(ctx context.Context) (*Token, error) {
 	c.mu.Lock()
@@ -202,7 +211,7 @@ func (c *Client) Token(ctx context.Context) (*Token, error) {
 		return token, nil
 	}
 	var refused *RefusedError
-	if !errors.As(err, &refused) && c.held != nil && c.now().Before(c.held.Expiry) {
+	if !(errors.As(err, &refused) && refused.Permanent()) && c.held != nil && c.now().Before(c.held.Expiry) {
 		c.logf(ctx, "the secrets broker did not answer a renewal; the token in hand is still live", "error", err.Error())
 		return c.held, nil
 	}
@@ -215,11 +224,11 @@ func (c *Client) Token(ctx context.Context) (*Token, error) {
 // something to keep fresh takes — a credential to install, a token file to rewrite — and
 // nothing of that caller restarts across a renewal.
 //
-// It stops with a plain error when the broker refuses the identity, which no retry can cure, and
-// when onToken fails. A broker that does not answer is retried, from defaultRetryWait doubling
-// to maxRetryWait, for as long as ctx lives: an outage past the token's own life is the same
-// event as a short one, since this grant has no rotation window to miss. A cancelled ctx is no
-// error.
+// It stops with a plain error when the broker refuses the identity in a way no retry can cure
+// (RefusedError.Permanent), and when onToken fails. A broker that does not answer, or answers
+// 429, is retried, from defaultRetryWait doubling to maxRetryWait, for as long as ctx lives: an
+// outage past the token's own life is the same event as a short one, since this grant has no
+// rotation window to miss. A cancelled ctx is no error.
 func (c *Client) Run(ctx context.Context, onToken func(context.Context, *Token) error) error {
 	wait := defaultRetryWait
 	for {
@@ -243,7 +252,7 @@ func (c *Client) Run(ctx context.Context, onToken func(context.Context, *Token) 
 			return nil
 		}
 		var refused *RefusedError
-		if errors.As(err, &refused) {
+		if errors.As(err, &refused) && refused.Permanent() {
 			return err
 		}
 		c.logf(ctx, "the secrets broker did not answer a trade; asking again", "error", err.Error(), "in", wait.String())
@@ -256,14 +265,20 @@ func (c *Client) Run(ctx context.Context, onToken func(context.Context, *Token) 
 	}
 }
 
-// untilRenewal is how long to wait before trading again for the token in hand: RenewBefore ahead
-// of its expiry, and at once for one that is already inside that window.
+// untilRenewal is how long to wait before trading again for the token in hand: RenewBefore
+// ahead of its expiry, and half of what is left for a token that lives less than RenewBefore —
+// a deployment that mints short tokens, or a dev stack proving a renewal in seconds. That half
+// is never later than the token's own expiry, and it is what keeps such a client from trading
+// again the instant each token lands, which would spend the broker's per-address token bucket
+// in a loop and end in a 429.
 func (c *Client) untilRenewal(token *Token) time.Duration {
-	wait := token.Expiry.Add(-c.renewBefore).Sub(c.now())
-	if wait < 0 {
-		return 0
+	if wait := token.Expiry.Add(-c.renewBefore).Sub(c.now()); wait > 0 {
+		return wait
 	}
-	return wait
+	if left := token.Expiry.Sub(c.now()); left > 0 {
+		return left / 2
+	}
+	return 0
 }
 
 // sleep waits d, reporting false when ctx ended first.

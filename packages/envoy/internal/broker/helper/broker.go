@@ -103,14 +103,22 @@ type loginState struct {
 }
 
 // Broker is the helper's view of the secrets broker: the launcher routes (Enroll, Revoke)
-// authenticate with a machineCredential, and Renew authenticates with the session's own proof,
-// exactly as before. That credential comes one of two ways. Where this machine proves an
+// authenticate with a launcher credential, and Renew authenticates with the session's own
+// proof, exactly as before.
+//
+// Two credentials can be that launcher credential, and enrollAs chooses between them at every
+// enrolment (enrolAuthority). The first is this machine's own. Where this machine proves an
 // identity of its own (Identity: a Google identity token, a projected Kubernetes token, a token
-// minted through a workload identity pool), the credential is the one the broker's RFC 8693
+// minted through a workload identity pool), that credential is the one the broker's RFC 8693
 // exchange mints for it, traded at Start and traded again before it lapses, with no person in
-// it at all. Where it proves none, the credential is the one a human-approved machine login
-// mints (Login, an OAuth device grant on the broker's own token endpoint), kept at MachineFile
-// and refreshed daily (Start).
+// it at all. Where it proves none, it is the one a human-approved machine login mints (Login,
+// an OAuth device grant on the broker's own token endpoint), kept at MachineFile and refreshed
+// daily (Start), carrying the person who approved it.
+//
+// The second is the credential of the person signed in on this box (SignIns), which outranks
+// the machine's: the helper runs as that person's own user, so a sign-in it can read is a
+// sign-in of its own user, and the rule a session acts under is the spec's — a session acts for
+// a person only after that person's own sign-in on the box.
 type Broker struct {
 	URL          string
 	OperatorFile string // login_hint source; read per login, as before
@@ -122,7 +130,16 @@ type Broker struct {
 	// again), and the renewal is a fresh identity token traded again, this grant issuing no
 	// refresh token. Nil is a machine that proves nothing of its own and logs in as before.
 	Identity *brokerclient.Client
-	HTTP     *http.Client
+	// SignIns, when set, is the people signed in on this box as this helper's own user
+	// (`agent-secrets login`), asked before every enrolment: a session registered while one of
+	// them is signed in enrols under that person's launcher credential and acts for them, and
+	// one registered with none signed in enrols under this machine's own. It reads the store of
+	// this helper's own key directory and no other user's, and nothing of it reaches a session:
+	// a session never says whose authority it enrols under. Nil where no sign-in can apply —
+	// this machine proves no identity of its own, so there is no actor token for a person's
+	// trade, or the deployment names no sign-in client to renew a person's identity token with.
+	SignIns SignIns
+	HTTP    *http.Client
 	// Log records every change of the launcher credential: a machine login or a trade installing
 	// one, a restart resuming one, a refresh moving its expiry, the warning a day before it
 	// lapses, and the helper dropping it, when the broker refuses it or its refresh or it
@@ -191,6 +208,19 @@ type Broker struct {
 	installed   chan struct{} // closed, then replaced, each time a credential is installed
 }
 
+// SignIns is the people signed in on this box, as the Broker asks about them:
+// brokerclient.SignInAuthority in the helper itself, and a stand-in in a test, since this
+// package's own rig needs a unix socket whose peer the kernel can pin and the rule these two
+// calls carry must be testable without one.
+type SignIns interface {
+	// Current is the launcher credential a session enrolling now acts under, nil where this
+	// box offers none and the machine's own is what it enrols under.
+	Current(ctx context.Context) (*brokerclient.Authority, error)
+	// Refused tells it the broker rejected a launcher proof signed with that credential, so
+	// the next Current trades afresh rather than presenting it again.
+	Refused(credentialID string)
+}
+
 // BrokerError is a non-success answer, with the contract's code.
 type BrokerError struct {
 	Status  int
@@ -203,7 +233,9 @@ func (e *BrokerError) Error() string {
 }
 
 // readOperator reads OperatorFile, trimmed, per call: it names the login_hint for a machine
-// login and the "operator" field of every enrollment.
+// login, and the "operator" of an enrolment signed with the credential such a login minted,
+// which is the one launcher credential of the three the helper can hold whose operator it
+// learns from this file (enrolAuthority).
 func (b *Broker) readOperator() (string, error) {
 	data, err := os.ReadFile(b.OperatorFile)
 	if err != nil {
@@ -1080,10 +1112,14 @@ const expiresSoonMsg = "the launcher credential lapses soon: no refresh has move
 
 // enrollBody is POST /v1/enrollments's shape in the shared broker contract (the v8 "approver"
 // field is gone: the broker's policy picks a request's approver, never the enrollment).
+// Operator is a pointer because the field is optional and "" is not an absent operator: the
+// broker reads a stated empty operator as an operator that matches no credential and refuses
+// the enrolment (enroll.Service.Create, ErrOperatorMismatch), so a credential that carries
+// none sends no field at all.
 type enrollBody struct {
 	Kind       string  `json:"kind"`
 	RuntimeID  string  `json:"runtime_id"`
-	Operator   string  `json:"operator"`
+	Operator   *string `json:"operator,omitempty"`
 	Thumbprint string  `json:"thumbprint"`
 	SessionID  *string `json:"session_id"`
 	PodToken   *string `json:"pod_token"`
@@ -1106,6 +1142,15 @@ func (b *Broker) launcherProof(method, url string) (string, *machineCredential, 
 	return compact, cred, err
 }
 
+// isLauncherInvalid reports whether err is the broker's 401 LAUNCHER_INVALID, its answer to any
+// launcher proof it rejects: a credential that has expired or been revoked (a person's sign-in
+// revoked with it), and also a proof it cannot verify, such as one signed outside its
+// clock-skew window or for a URL other than its own.
+func isLauncherInvalid(err error) bool {
+	var be *BrokerError
+	return errors.As(err, &be) && be.Status == http.StatusUnauthorized && be.Code == "LAUNCHER_INVALID"
+}
+
 // clearOnInvalid drops the machine credential (dropRefused) and reports it missing whenever err
 // is the broker's 401 LAUNCHER_INVALID. The broker answers that for any launcher proof it
 // rejects: an expired or revoked credential, and also a proof it cannot verify, such as one
@@ -1117,10 +1162,11 @@ func (b *Broker) launcherProof(method, url string) (string, *machineCredential, 
 // uses it. A credential it drops is handed to the refresh loop, which refreshes it at once so
 // its machine file is deleted if the broker has ended the login (settleRefused).
 func (b *Broker) clearOnInvalid(cred *machineCredential, err error) error {
-	var be *BrokerError
-	if !errors.As(err, &be) || be.Status != http.StatusUnauthorized || be.Code != "LAUNCHER_INVALID" {
+	if !isLauncherInvalid(err) {
 		return err
 	}
+	var be *BrokerError
+	errors.As(err, &be)
 	dropped, held := b.dropOutsideRefresh(cred, dropRefused, "code", be.Code)
 	if dropped {
 		b.wakeRefused(cred)
@@ -1198,18 +1244,99 @@ func (b *Broker) enroll(ctx context.Context, runtimeID, thumbprint string, sessi
 	return id, lease, err
 }
 
-// enrollAs is one POST /v1/enrollments naming kind, signed with the current machine credential;
-// it reads the operator with readOperator, which propagates its error, never the cosmetic
-// Operator().
-func (b *Broker) enrollAs(ctx context.Context, kind, runtimeID, thumbprint string, sessionID *string) (string, time.Time, error) {
-	url := b.URL + "/v1/enrollments"
-	compact, cred, err := b.launcherProof(http.MethodPost, url)
-	if err != nil {
-		return "", time.Time{}, err
+// signingAuthority is the launcher credential the helper signs a call about a session with, by
+// the rule Broker's own comment gives: the person signed in on this box as this helper's user,
+// where there is one, and this machine's own credential otherwise.
+//
+// It asks SignIns at every call rather than once at start, so a session registered after
+// `agent-secrets login` acts for that person and one registered after the sign-in is revoked
+// falls back to this machine, with no restart either way (brokerclient.SignInAuthority.Current
+// says what that costs). A sign-in the broker has refused is no sign-in; every other failure to
+// read one is returned, since a box that cannot tell whose sessions these are must not guess.
+//
+// machine is the held machine credential when that is what it chose, for the caller to drop if
+// the broker refuses it (clearOnInvalid), and nil under a person's, which no drop of this
+// machine's credential has anything to do with. It names no operator: only an enrolment states
+// one (enrolAuthority).
+func (b *Broker) signingAuthority(ctx context.Context) (*brokerclient.Authority, *machineCredential, error) {
+	if b.SignIns != nil {
+		authority, err := b.SignIns.Current(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		if authority != nil {
+			return authority, nil, nil
+		}
+	}
+	cred := b.cred.Load()
+	if cred == nil {
+		return nil, nil, errNoCredential
+	}
+	return &brokerclient.Authority{Key: cred.key, CredentialID: cred.id}, cred, nil
+}
+
+// enrolAuthority is signingAuthority with the operator the credential it chose carries, which
+// is the only operator an enrolment may state: the person for a sign-in's credential; the
+// OperatorFile's login for a machine login's, the login_hint that login was approved under; and
+// none at all for the credential this machine's identity traded for, which names its fleet's
+// service and no person. Stating an operator a credential does not carry is refused outright
+// (enroll.Service.Create, ErrOperatorMismatch), which is why the machine-identity branch reads
+// no operator file at all — and why a revoke, which states none, reads it on no branch.
+func (b *Broker) enrolAuthority(ctx context.Context) (*brokerclient.Authority, *machineCredential, error) {
+	authority, cred, err := b.signingAuthority(ctx)
+	if err != nil || cred == nil || b.Identity != nil {
+		return authority, cred, err
 	}
 	operator, err := b.readOperator()
 	if err != nil {
+		return nil, nil, err
+	}
+	authority.Operator = operator
+	return authority, cred, nil
+}
+
+// enrollAs is one POST /v1/enrollments naming kind, signed with the credential enrolAuthority
+// chose.
+//
+// A person's credential the broker rejects (401 LAUNCHER_INVALID: their sign-in was revoked, or
+// the credential lapsed) is asked about once more rather than failing: the authority is told
+// (SignInAuthority.Refused) and chosen again, which trades afresh and settles on this machine's
+// own credential once the broker refuses the sign-in itself. So one enrolment is one answer,
+// and the session a launcher is waiting on enrols under the authority the box has now.
+func (b *Broker) enrollAs(ctx context.Context, kind, runtimeID, thumbprint string, sessionID *string) (string, time.Time, error) {
+	authority, cred, err := b.enrolAuthority(ctx)
+	if err != nil {
 		return "", time.Time{}, err
+	}
+	id, lease, err := b.enrollUnder(ctx, authority, cred, kind, runtimeID, thumbprint, sessionID)
+	if cred != nil || !isLauncherInvalid(err) {
+		return id, lease, err
+	}
+	b.logger().Warn("the broker refused the sign-in's launcher credential; enrolling under whatever authority this box has now",
+		"operator", authority.Operator, "credential_id", authority.CredentialID)
+	b.SignIns.Refused(authority.CredentialID)
+	if authority, cred, err = b.enrolAuthority(ctx); err != nil {
+		return "", time.Time{}, err
+	}
+	return b.enrollUnder(ctx, authority, cred, kind, runtimeID, thumbprint, sessionID)
+}
+
+// enrollUnder is that one request, signed with authority. An operator is stated only where the
+// credential carries one, since the broker refuses an enrolment that states an operator its
+// credential does not have. cred is non-nil only where authority is this machine's own held
+// credential, and a 401 LAUNCHER_INVALID drops exactly that one (clearOnInvalid); a person's
+// credential is the caller's to settle.
+func (b *Broker) enrollUnder(ctx context.Context, authority *brokerclient.Authority, cred *machineCredential,
+	kind, runtimeID, thumbprint string, sessionID *string,
+) (string, time.Time, error) {
+	url := b.URL + "/v1/enrollments"
+	compact, err := proof.SignLauncher(authority.Key, authority.CredentialID, http.MethodPost, url, time.Now())
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	var operator *string
+	if authority.Operator != "" {
+		operator = &authority.Operator
 	}
 	body, err := json.Marshal(enrollBody{Kind: kind, RuntimeID: runtimeID, Operator: operator, Thumbprint: thumbprint, SessionID: sessionID})
 	if err != nil {
@@ -1223,6 +1350,9 @@ func (b *Broker) enrollAs(ctx context.Context, kind, runtimeID, thumbprint strin
 	req.Header.Set("Content-Type", "application/json")
 	var out leaseReply
 	if err := b.do(req, []int{http.StatusOK, http.StatusCreated}, &out); err != nil {
+		if cred == nil {
+			return "", time.Time{}, err
+		}
 		return "", time.Time{}, b.clearOnInvalid(cred, err)
 	}
 	if out.EnrollmentID == "" {
@@ -1253,9 +1383,36 @@ func (b *Broker) Renew(ctx context.Context, s *Session) (time.Time, error) {
 }
 
 // Revoke deletes the enrollment and every grant under it. 204 and 404 both mean done.
+//
+// It signs with the credential enrolAuthority would choose now and, where the broker answers
+// that this is not that enrolment's credential (403), with this machine's own. The broker lets
+// a credential end only the enrolments of its own operator, and a machine's only those it made
+// itself (enroll.authorized, ErrNotEnrollingCredential), while the helper keeps no note of
+// which of the two enrolled a given session: a key it enrolled for a launcher leaves it none at
+// all, and a restart leaves it the enrollment id alone. Two attempts settle every case, and
+// only a 403 — the broker's "not this credential's" — costs the second.
 func (b *Broker) Revoke(ctx context.Context, enrollmentID string) error {
+	authority, cred, err := b.signingAuthority(ctx)
+	if err != nil {
+		return err
+	}
+	err = b.revokeUnder(ctx, authority, cred, enrollmentID)
+	var be *BrokerError
+	if cred != nil || !errors.As(err, &be) || be.Status != http.StatusForbidden {
+		return err
+	}
+	machine := b.cred.Load()
+	if machine == nil {
+		return err
+	}
+	return b.revokeUnder(ctx, &brokerclient.Authority{Key: machine.key, CredentialID: machine.id}, machine, enrollmentID)
+}
+
+// revokeUnder is one DELETE /v1/enrollments/{id} signed with authority; cred is this machine's
+// held credential where that is what signed, which a 401 LAUNCHER_INVALID drops.
+func (b *Broker) revokeUnder(ctx context.Context, authority *brokerclient.Authority, cred *machineCredential, enrollmentID string) error {
 	url := b.URL + "/v1/enrollments/" + enrollmentID
-	compact, cred, err := b.launcherProof(http.MethodDelete, url)
+	compact, err := proof.SignLauncher(authority.Key, authority.CredentialID, http.MethodDelete, url, time.Now())
 	if err != nil {
 		return err
 	}
@@ -1265,6 +1422,9 @@ func (b *Broker) Revoke(ctx context.Context, enrollmentID string) error {
 	}
 	req.Header.Set("Proof", compact)
 	if err := b.do(req, []int{http.StatusNoContent, http.StatusNotFound}, nil); err != nil {
+		if cred == nil {
+			return err
+		}
 		return b.clearOnInvalid(cred, err)
 	}
 	return nil

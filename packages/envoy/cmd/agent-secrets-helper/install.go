@@ -20,8 +20,10 @@ import (
 
 // install writes the helper's systemd user unit for the binary at exe (symlinks resolved), the
 // broker URL from --url or AGENT_SECRETS_URL and each of AGENT_SECRETS_HELPER_SOCK,
-// AGENT_SECRETS_OPERATOR_FILE and AGENT_SECRETS_MACHINE_FILE set in its environment, so the unit's
-// helper uses the socket install probes and the machine file the caller named, in three steps. First the preflight: a helper
+// AGENT_SECRETS_OPERATOR_FILE, AGENT_SECRETS_MACHINE_FILE and AGENT_SECRETS_KEY_DIR set in its
+// environment, so the unit's helper uses the socket install probes, the machine file the caller
+// named, and the key directory whose sign-ins say whose authority a session enrols under, in
+// three steps. First the preflight: a helper
 // answering on its socket while the unit is not active was not started by it, and starting the
 // unit would put a second helper on that socket, so install refuses, listing that helper's
 // sessions, and writes and starts nothing, whether or not the unit file already matches. Then
@@ -54,7 +56,7 @@ func install(args []string, getenv func(string) string, exe string, stdout io.Wr
 		return fmt.Errorf("broker URL %q holds characters a unit's Environment= line would need escaped", redact.URL(*url))
 	}
 	environment := "Environment=AGENT_SECRETS_URL=" + *url + "\n"
-	for _, name := range []string{"AGENT_SECRETS_HELPER_SOCK", "AGENT_SECRETS_OPERATOR_FILE", "AGENT_SECRETS_MACHINE_FILE"} {
+	for _, name := range []string{"AGENT_SECRETS_HELPER_SOCK", "AGENT_SECRETS_OPERATOR_FILE", "AGENT_SECRETS_MACHINE_FILE", "AGENT_SECRETS_KEY_DIR"} {
 		value := getenv(name)
 		if value == "" {
 			continue

@@ -7,15 +7,9 @@
 // this package's rig needs — while that package's run anywhere.
 package main
 
-import (
-	"path/filepath"
-
-	"github.com/sjawhar/envoy/internal/brokerclient"
-)
+import "github.com/sjawhar/envoy/internal/brokerclient"
 
 const (
-	// signInsDir is the directory under the key dir that holds one record per person.
-	signInsDir = "signins"
 	// personVar names which person a session acts for where the box has more than one sign-in.
 	personVar = brokerclient.PersonVar
 	// signInCommand is the command every refusal a sign-in would cure names.
@@ -27,6 +21,8 @@ type signIn = brokerclient.SignInRecord
 
 // signInStore is where this machine keeps them: under the key dir, so a box, a pod and a
 // person's machine each keep their own where everything else of that session's identity is.
+// The directory inside it is brokerclient's own (SignInsIn), the one place that names it, since
+// agent-secrets-helper reads the same records to decide whose authority a session enrols under.
 func signInStore() brokerclient.SignInStore {
-	return brokerclient.SignInStore{Dir: filepath.Join(keyDir(), signInsDir)}
+	return brokerclient.SignInsIn(keyDir())
 }

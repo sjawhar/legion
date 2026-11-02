@@ -51,30 +51,38 @@ func (s *Server) Serve(ctx context.Context, ln *net.UnixListener) error {
 	}
 }
 
+// peerOps are the ops judged on who the caller is: each resolves the peer's session from its
+// pid, through an ancestry walk the pinned pidfd holds still. Every other op is a pass-through
+// broker call or a question about the helper itself (see the switch below), and the socket's
+// own mode — 0600, this user's — is the whole of what guards it, which is why the peer is
+// pinned for these and for nothing else: a kernel that cannot pin one (SO_PEERPIDFD is Linux
+// 6.5) still enrols a box's key and still logs this machine in.
+var peerOps = map[string]bool{"register": true, "sign": true, "sign-request": true, "sign-launcher": true, "unregister": true}
+
 func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	peer, err := s.PeerOf(conn)
-	if err != nil {
-		s.reply(conn, Response{Code: CodeUnidentified, Error: "the kernel did not identify the peer: " + err.Error()})
-		return
-	}
 	line, err := bufio.NewReaderSize(conn, maxLine).ReadBytes('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
-		peer.Close()
 		return
 	}
 	var req Request
 	if err := json.Unmarshal(line, &req); err != nil {
-		peer.Close()
 		s.reply(conn, Response{Code: CodeBadRequest, Error: "one JSON object per line"})
 		return
 	}
-	pid := peer.PID()
-	if pid == 0 {
-		peer.Close()
-		s.reply(conn, Response{Code: CodeUnidentified, Error: "the peer exited before it was identified"})
-		return
+	var peer *Peer
+	var pid int
+	if peerOps[req.Op] {
+		if peer, err = s.PeerOf(conn); err != nil {
+			s.reply(conn, Response{Code: CodeUnidentified, Error: "the kernel did not identify the peer: " + err.Error()})
+			return
+		}
+		if pid = peer.PID(); pid == 0 {
+			peer.Close()
+			s.reply(conn, Response{Code: CodeUnidentified, Error: "the peer exited before it was identified"})
+			return
+		}
 	}
 	var resp Response
 	switch req.Op {
@@ -101,17 +109,14 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 	case "unregister":
 		resp = s.unregister(ctx, peer, pid)
 	case "sessions":
-		peer.Close()
 		resp = s.sessions()
 	case "drain":
 		// drain is `agent-secrets-helper install`'s restart guard: the sessions, and with none,
 		// a helper that refuses every later register until it exits.
-		peer.Close()
 		resp = s.drain()
 	case "undrain":
 		// undrain is install's undo of a drain whose restart then failed: the helper takes
 		// registrations again.
-		peer.Close()
 		s.Registry.Undrain()
 		s.Log.Info("undrained: taking new sessions again")
 		resp = Response{OK: true}
@@ -119,23 +124,18 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 		// login, login-status, enroll-session-key and unenroll-session-key are pass-through broker
 		// calls, not registry-session ops: a key the helper does not hold is not a registry session
 		// (see Broker.EnrollSessionKey), so none of these needs peer's pid at all.
-		peer.Close()
 		resp = s.login(ctx)
 	case "login-status":
-		peer.Close()
 		resp = s.loginStatus()
 	case "enroll-session-key":
-		peer.Close()
 		if s.Registry.Draining() {
 			resp = drainingResponse
 			break
 		}
 		resp = s.enrollSessionKey(ctx, req.RuntimeID, req.Thumbprint, req.SessionID)
 	case "unenroll-session-key":
-		peer.Close()
 		resp = s.unenrollSessionKey(ctx, req.EnrollmentID)
 	default:
-		peer.Close()
 		resp = Response{Code: CodeBadRequest, Error: "unknown op " + req.Op}
 	}
 	s.reply(conn, resp)
