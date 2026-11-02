@@ -16,17 +16,22 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// idleRigNamespace is the namespace every object of the rig's cluster lives in, the one
-// runtime.kubernetes.namespace the rig configures.
-const idleRigNamespace = "legion"
+// sandboxNamespace is the namespace every object of these tests' cluster lives in, the one
+// runtime.kubernetes.namespace they configure.
+const sandboxNamespace = "legion"
 
-// idleRigKube is the Kubernetes API the rig's real Sandbox runtime talks to, and the stand-in for
-// the Agent Sandbox controller behind it. It is the fake of
-// packages/daemon/internal/runtime/sandbox/rig_test.go (its `rig` type, its `control` loop and its
-// `createPod`) rebuilt over HTTP rather than over client-go's object trackers, because a runtime
-// built by the daemon's own boot takes a *rest.Config and nothing else: the daemon package reaches
-// the runtime only through that seam, as outbox_issue_suspend_test.go's issueSandboxAPI does, and
-// this is that stand-in grown a pod informer, a watch of every resource, and a controller.
+// issueSandboxAPI is the Kubernetes API this package's tests talk to: the one stand-in the
+// daemon's issue closes, its carried-child cleanup, its kind-of-pod tests and the idle release
+// and wake rig all reach the runtime through, because a runtime built by the daemon's own boot
+// takes a *rest.Config and nothing else. It is the fake of
+// packages/daemon/internal/runtime/sandbox/rig_test.go (its `rig` type, its `control` loop and
+// its `createPod`) rebuilt over HTTP rather than over client-go's object trackers.
+//
+// The controller stand-in is opt-in: a test that calls run gets pods, and one that does not —
+// every close test — sees a Sandbox's operatingMode as the daemon's request to the real
+// controller and no pod at all. Each Sandbox stands for the disk of the pod it would have, since
+// an issue pod's disk is its own generic ephemeral volume whose claim the pod owns: only a
+// foreground delete, which garbage collection carries through the pod to the claim, takes it.
 //
 // What it serves is the subset the runtime uses: the Sandboxes, pods, Services and Secrets of one
 // namespace, each resource listable, watchable (with client-go's watch-list semantics: the initial
@@ -38,8 +43,8 @@ const idleRigNamespace = "legion"
 // reference and labels the controller gives it; a Suspended Sandbox's pod is deleted; a Sandbox's
 // Service is made when it asks for one and removed with it. Each pod it reports Ready starts the
 // pod's processes through onPodReady — in this rig, a real `legion launcher` per role.
-type idleRigKube struct {
-	t       *testing.T
+type issueSandboxAPI struct {
+	// url is the server a test served the API on (serve), empty until one did.
 	url     string
 	mu      sync.Mutex
 	rv      int64
@@ -50,6 +55,14 @@ type idleRigKube struct {
 	unexpected  []string
 	pvcRequests int
 	uids        int
+	// disks are the disks of the Sandboxes' pods, by Sandbox name, while they exist: an issue
+	// pod's disk is its own generic ephemeral volume, whose claim `<pod>-issue` the pod owns, so
+	// a Sandbox's arrival stands for its pod's disk and only the Sandbox's foreground delete,
+	// which garbage collection carries through the pod to the claim, takes it. deletes are the
+	// options each Sandbox delete was asked with, and created every Sandbox a test's daemon made.
+	disks   map[string]bool
+	deletes map[string]metav1.DeleteOptions
+	created []string
 	// onPodReady runs, off the API's lock, for every pod the controller created and reported
 	// Ready, with the pod's own uid and each of its roles' launcher tokens; onPodGone for every
 	// pod it deleted. Both are the rig's.
@@ -83,20 +96,43 @@ func kubeResourceOf(name string) (kubeResource, bool) {
 	return kubeResource{}, false
 }
 
-func newIdleRigKube(t *testing.T) *idleRigKube {
-	t.Helper()
-	a := &idleRigKube{t: t, objects: map[string]map[string]map[string]any{}, watches: map[string][]chan kubeEvent{}}
+// newIssueSandboxAPI is the API holding sandboxes, each with the disk of the pod it stands for.
+// It serves nothing of itself: a caller mounts it on a server of its own, or calls serve.
+func newIssueSandboxAPI(sandboxes ...map[string]any) *issueSandboxAPI {
+	a := &issueSandboxAPI{objects: map[string]map[string]map[string]any{},
+		watches: map[string][]chan kubeEvent{}, disks: map[string]bool{}, deletes: map[string]metav1.DeleteOptions{}}
 	for _, r := range kubeResources {
 		a.objects[r.resource] = map[string]map[string]any{}
 	}
-	server := httptest.NewServer(a)
-	t.Cleanup(server.Close)
-	a.url = server.URL
+	for _, object := range sandboxes {
+		name := object["metadata"].(map[string]any)["name"].(string)
+		a.objects["sandboxes"][name], a.disks[name] = object, true
+	}
 	return a
 }
 
+// serve puts the API on a server of its own, closed with the test, and answers its URL.
+func (a *issueSandboxAPI) serve(t *testing.T) string {
+	t.Helper()
+	server := httptest.NewServer(a)
+	t.Cleanup(server.Close)
+	a.url = server.URL
+	return a.url
+}
+
+// issueSandbox is a Running issue Sandbox of tree and issue as the API holds it, owning no volume
+// claim template: its pod's disk is the pod's own.
+func issueSandbox(name, uid, tree, issue string) map[string]any {
+	return map[string]any{
+		"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
+		"metadata": map[string]any{"name": name, "namespace": sandboxNamespace, "uid": uid, "resourceVersion": "1", "generation": float64(1),
+			"labels": map[string]any{"legion.dev/project": "legion", "legion.dev/tree": tree, "legion.dev/issue": issue}},
+		"spec": map[string]any{"operatingMode": "Running"},
+	}
+}
+
 // run reconciles every Sandbox until t ends: the controller stand-in.
-func (a *idleRigKube) run(t *testing.T) {
+func (a *issueSandboxAPI) run(t *testing.T) {
 	t.Helper()
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -120,7 +156,7 @@ func (a *idleRigKube) run(t *testing.T) {
 }
 
 // reconcile is one pass of the controller stand-in.
-func (a *idleRigKube) reconcile() {
+func (a *issueSandboxAPI) reconcile() {
 	type work struct {
 		pod   string
 		uid   string
@@ -147,7 +183,7 @@ func (a *idleRigKube) reconcile() {
 		if service, _ := spec["service"].(bool); service {
 			if _, made := a.objects["services"][name]; !made {
 				uid, _ := object["metadata"].(map[string]any)["uid"].(string)
-				a.putLocked("services", name, idleRigService(name, uid))
+				a.putLocked("services", name, controllerService(name, uid))
 			}
 		}
 	}
@@ -177,7 +213,7 @@ func (a *idleRigKube) reconcile() {
 
 // launcherTokensLocked is every role of the pod with the launcher token the daemon wrote into its
 // role Secret: the pod's own view of <roles-dir>/<role>/launcher/LAUNCHER_TOKEN.
-func (a *idleRigKube) launcherTokensLocked(pod string) map[string]string {
+func (a *issueSandboxAPI) launcherTokensLocked(pod string) map[string]string {
 	roles := map[string]string{}
 	for name, object := range a.objects["secrets"] {
 		role, ok := strings.CutPrefix(name, pod+"-")
@@ -206,7 +242,7 @@ func (a *idleRigKube) launcherTokensLocked(pod string) map[string]string {
 // createPodLocked makes the pod the Sandbox's podTemplate describes, Ready: the controller's own
 // pod, owned by the Sandbox, carrying its labels, with every init container completed and every
 // container running, as sandbox/rig_test.go's createPod and runningStatusOf build it.
-func (a *idleRigKube) createPodLocked(name string, sandbox map[string]any) string {
+func (a *issueSandboxAPI) createPodLocked(name string, sandbox map[string]any) string {
 	spec, _ := sandbox["spec"].(map[string]any)
 	template, _ := kubeClone(spec)["podTemplate"].(map[string]any)
 	if template == nil {
@@ -230,22 +266,22 @@ func (a *idleRigKube) createPodLocked(name string, sandbox map[string]any) strin
 	pod := map[string]any{
 		"apiVersion": "v1", "kind": "Pod",
 		"metadata": map[string]any{
-			"name": name, "namespace": idleRigNamespace, "labels": labels,
+			"name": name, "namespace": sandboxNamespace, "labels": labels,
 			"uid": podUID,
 			"ownerReferences": []any{map[string]any{
 				"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox", "name": name, "uid": uid, "controller": true,
 			}},
 		},
 		"spec":   podSpec,
-		"status": idleRigPodStatus(podSpec),
+		"status": sandboxPodStatus(podSpec),
 	}
 	a.putLocked("pods", name, pod)
 	return podUID
 }
 
-// idleRigPodStatus is a Running pod's status for spec: every init container completed and every
+// sandboxPodStatus is a Running pod's status for spec: every init container completed and every
 // container running (sandbox/rig_test.go's runningStatusOf).
-func idleRigPodStatus(podSpec map[string]any) map[string]any {
+func sandboxPodStatus(podSpec map[string]any) map[string]any {
 	status := map[string]any{"phase": "Running"}
 	var inits []any
 	if containers, _ := podSpec["initContainers"].([]any); containers != nil {
@@ -278,15 +314,15 @@ func idleRigPodStatus(podSpec map[string]any) map[string]any {
 	return status
 }
 
-// idleRigService is the headless Service the Agent Sandbox controller makes for a Sandbox that
+// controllerService is the headless Service the Agent Sandbox controller makes for a Sandbox that
 // asks for one, as outbox_issue_suspend_test.go's controllerService builds it.
-func idleRigService(name, uid string) map[string]any {
+func controllerService(name, uid string) map[string]any {
 	hash := fnv.New32a()
 	_, _ = hash.Write([]byte(name))
 	label := map[string]any{"agents.x-k8s.io/sandbox-name-hash": fmt.Sprintf("%08x", hash.Sum32())}
 	return map[string]any{
 		"apiVersion": "v1", "kind": "Service",
-		"metadata": map[string]any{"name": name, "namespace": idleRigNamespace, "labels": label,
+		"metadata": map[string]any{"name": name, "namespace": sandboxNamespace, "labels": label,
 			"ownerReferences": []any{map[string]any{"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox", "name": name, "uid": uid, "controller": true}}},
 		"spec": map[string]any{"clusterIP": "None", "selector": label},
 	}
@@ -295,7 +331,7 @@ func idleRigService(name, uid string) map[string]any {
 // putLocked writes a copy of object as resource's name at a fresh resourceVersion and tells every
 // watcher. The copy is what is stored and what the watchers carry, and nothing writes it again, so
 // a watcher encoding an event never reads a map another request is editing.
-func (a *idleRigKube) putLocked(resource, name string, object map[string]any) map[string]any {
+func (a *issueSandboxAPI) putLocked(resource, name string, object map[string]any) map[string]any {
 	a.rv++
 	stored := kubeClone(object)
 	meta, _ := stored["metadata"].(map[string]any)
@@ -331,7 +367,7 @@ func kubeClone(object map[string]any) map[string]any {
 }
 
 // deleteLocked removes resource's name and tells every watcher.
-func (a *idleRigKube) deleteLocked(resource, name string) {
+func (a *issueSandboxAPI) deleteLocked(resource, name string) {
 	object, ok := a.objects[resource][name]
 	if !ok {
 		return
@@ -341,7 +377,7 @@ func (a *idleRigKube) deleteLocked(resource, name string) {
 	a.notifyLocked(resource, kubeEvent{Type: "DELETED", Object: object})
 }
 
-func (a *idleRigKube) notifyLocked(resource string, event kubeEvent) {
+func (a *issueSandboxAPI) notifyLocked(resource string, event kubeEvent) {
 	for _, watch := range a.watches[resource] {
 		select {
 		case watch <- event:
@@ -351,14 +387,14 @@ func (a *idleRigKube) notifyLocked(resource string, event kubeEvent) {
 }
 
 // sandbox is the Sandbox named name as the API holds it, or nil.
-func (a *idleRigKube) sandbox(name string) map[string]any {
+func (a *issueSandboxAPI) sandbox(name string) map[string]any {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.objects["sandboxes"][name]
 }
 
 // pod is whether a pod of name exists.
-func (a *idleRigKube) pod(name string) bool {
+func (a *issueSandboxAPI) pod(name string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	_, ok := a.objects["pods"][name]
@@ -366,7 +402,7 @@ func (a *idleRigKube) pod(name string) bool {
 }
 
 // mode is the Sandbox's operatingMode, "deleted" once the API no longer holds it.
-func (a *idleRigKube) mode(name string) string {
+func (a *issueSandboxAPI) mode(name string) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	object, ok := a.objects["sandboxes"][name]
@@ -381,8 +417,78 @@ func (a *idleRigKube) mode(name string) string {
 	return mode
 }
 
+// label is the Sandbox's label key, "" once the API no longer has it.
+func (a *issueSandboxAPI) label(name, key string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	object, ok := a.objects["sandboxes"][name]
+	if !ok {
+		return ""
+	}
+	labels, _ := object["metadata"].(map[string]any)["labels"].(map[string]any)
+	value, _ := labels[key].(string)
+	return value
+}
+
+// uid is the Sandbox's uid, "" once the API no longer has it.
+func (a *issueSandboxAPI) uid(name string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	object, ok := a.objects["sandboxes"][name]
+	if !ok {
+		return ""
+	}
+	uid, _ := object["metadata"].(map[string]any)["uid"].(string)
+	return uid
+}
+
+// disk is whether the disk of the Sandbox's pod, the claim that pod owns, still exists.
+func (a *issueSandboxAPI) disk(name string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.disks[name]
+}
+
+// deleted is the options of the Sandbox's delete, and whether one was requested.
+func (a *issueSandboxAPI) deleted(name string) (metav1.DeleteOptions, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	options, ok := a.deletes[name]
+	return options, ok
+}
+
+// initEnv is the environment variable names of the Sandbox's workspace-init container, from the
+// pod template the daemon's Running patch wrote; nil when the Sandbox has no template.
+func (a *issueSandboxAPI) initEnv(name string) []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	object, ok := a.objects["sandboxes"][name]
+	if !ok {
+		return nil
+	}
+	template, _ := object["spec"].(map[string]any)["podTemplate"].(map[string]any)
+	if template == nil {
+		return nil
+	}
+	containers, _ := template["spec"].(map[string]any)["initContainers"].([]any)
+	var names []string
+	for _, c := range containers {
+		container := c.(map[string]any)
+		if container["name"] != "workspace-init" {
+			continue
+		}
+		env, _ := container["env"].([]any)
+		for _, e := range env {
+			variable, _ := e.(map[string]any)
+			name, _ := variable["name"].(string)
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // requireServed fails the test naming every request the API did not know.
-func (a *idleRigKube) requireServed(t *testing.T) {
+func (a *issueSandboxAPI) requireServed(t *testing.T) {
 	t.Helper()
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -391,7 +497,7 @@ func (a *idleRigKube) requireServed(t *testing.T) {
 	}
 }
 
-func (a *idleRigKube) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (a *issueSandboxAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	resource, name, ok := kubePath(r.URL.Path)
 	if !ok {
 		a.unserved(w, r)
@@ -431,7 +537,7 @@ func (a *idleRigKube) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *idleRigKube) unserved(w http.ResponseWriter, r *http.Request) {
+func (a *issueSandboxAPI) unserved(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	a.unexpected = append(a.unexpected, r.Method+" "+r.URL.Path)
 	a.mu.Unlock()
@@ -466,7 +572,7 @@ func kubeStatus(w http.ResponseWriter, code int, reason metav1.StatusReason) {
 		Status: "Failure", Reason: reason, Code: int32(code)})
 }
 
-func (a *idleRigKube) list(w http.ResponseWriter, r *http.Request, kind kubeResource) {
+func (a *issueSandboxAPI) list(w http.ResponseWriter, r *http.Request, kind kubeResource) {
 	a.mu.Lock()
 	items := []any{}
 	for _, object := range a.objects[kind.resource] {
@@ -483,7 +589,7 @@ func (a *idleRigKube) list(w http.ResponseWriter, r *http.Request, kind kubeReso
 	})
 }
 
-func (a *idleRigKube) get(w http.ResponseWriter, kind kubeResource, name string) {
+func (a *issueSandboxAPI) get(w http.ResponseWriter, kind kubeResource, name string) {
 	a.mu.Lock()
 	object, ok := a.objects[kind.resource][name]
 	a.mu.Unlock()
@@ -495,7 +601,7 @@ func (a *idleRigKube) get(w http.ResponseWriter, kind kubeResource, name string)
 	_ = json.NewEncoder(w).Encode(object)
 }
 
-func (a *idleRigKube) create(w http.ResponseWriter, r *http.Request, kind kubeResource) {
+func (a *issueSandboxAPI) create(w http.ResponseWriter, r *http.Request, kind kubeResource) {
 	var object map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&object); err != nil {
 		a.mu.Lock()
@@ -517,13 +623,24 @@ func (a *idleRigKube) create(w http.ResponseWriter, r *http.Request, kind kubeRe
 	meta["creationTimestamp"] = time.Now().UTC().Format(time.RFC3339)
 	object["apiVersion"], object["kind"] = kind.apiVersion, kind.kind
 	stored := a.putLocked(kind.resource, name, object)
+	if kind.resource == "sandboxes" {
+		a.disks[name], a.created = true, append(a.created, name)
+		// The controller makes the headless Service of a Sandbox that asks for one as soon as the
+		// Sandbox arrives, so a test that runs no controller loop still sees it.
+		if spec, _ := stored["spec"].(map[string]any); spec["service"] == true {
+			if _, made := a.objects["services"][name]; !made {
+				uid, _ := stored["metadata"].(map[string]any)["uid"].(string)
+				a.putLocked("services", name, controllerService(name, uid))
+			}
+		}
+	}
 	a.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(stored)
 }
 
-func (a *idleRigKube) replace(w http.ResponseWriter, r *http.Request, kind kubeResource, name string) {
+func (a *issueSandboxAPI) replace(w http.ResponseWriter, r *http.Request, kind kubeResource, name string) {
 	var object map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&object); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -550,7 +667,7 @@ func (a *idleRigKube) replace(w http.ResponseWriter, r *http.Request, kind kubeR
 // patch applies the runtime's JSON patch (a Sandbox's operatingMode and labels, each with its
 // `test` preconditions) or a JSON merge patch (a role's address record, a suspension naming a
 // displaced pod), as outbox_issue_suspend_test.go's stand-in does.
-func (a *idleRigKube) patch(w http.ResponseWriter, r *http.Request, kind kubeResource, name string) {
+func (a *issueSandboxAPI) patch(w http.ResponseWriter, r *http.Request, kind kubeResource, name string) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -640,7 +757,7 @@ func kubeMerge(object, patch map[string]any) {
 	}
 }
 
-func (a *idleRigKube) remove(w http.ResponseWriter, r *http.Request, kind kubeResource, name string) {
+func (a *issueSandboxAPI) remove(w http.ResponseWriter, r *http.Request, kind kubeResource, name string) {
 	var options metav1.DeleteOptions
 	if err := json.NewDecoder(r.Body).Decode(&options); err != nil && err != io.EOF {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -661,6 +778,12 @@ func (a *idleRigKube) remove(w http.ResponseWriter, r *http.Request, kind kubeRe
 		return
 	}
 	a.deleteLocked(kind.resource, name)
+	if kind.resource == "sandboxes" {
+		a.deletes[name] = options
+		if options.PropagationPolicy != nil && *options.PropagationPolicy == metav1.DeletePropagationForeground {
+			delete(a.disks, name)
+		}
+	}
 	a.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(metav1.Status{TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"}, Status: "Success"})
@@ -669,7 +792,7 @@ func (a *idleRigKube) remove(w http.ResponseWriter, r *http.Request, kind kubeRe
 // watch streams resource's events until the request's context ends. A watch that asks for the
 // initial events (client-go's watch-list) gets an ADDED for every object it selects and then the
 // `k8s.io/initial-events-end` bookmark, which is what tells the informer its store is complete.
-func (a *idleRigKube) watch(w http.ResponseWriter, r *http.Request, kind kubeResource) {
+func (a *issueSandboxAPI) watch(w http.ResponseWriter, r *http.Request, kind kubeResource) {
 	selector := r.URL.Query().Get("labelSelector")
 	events := make(chan kubeEvent, 256)
 	a.mu.Lock()

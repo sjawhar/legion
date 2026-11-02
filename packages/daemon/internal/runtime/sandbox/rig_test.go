@@ -372,7 +372,10 @@ type rig struct {
 	wanted     map[claim.Token]bool
 	// refuseBundle, when set, is the error every fake launcher of this rig answers each
 	// launcher_bundle slice with, as a launcher refuses one that did not arrive as it was sent.
+	// failRestore, when set, is the error its report of the restore carries instead, which is a
+	// launcher that held the whole bundle and could not put it back.
 	refuseBundle string
+	failRestore  string
 }
 
 type rigOption func(*rig, *Options)
@@ -385,6 +388,13 @@ func withoutController() rigOption { return func(g *rig, _ *Options) { g.noContr
 // withRefusedBundle has every fake launcher refuse each slice of a workspace bundle with reason.
 func withRefusedBundle(reason string) rigOption {
 	return func(g *rig, _ *Options) { g.refuseBundle = reason }
+}
+
+// withFailedRestore has every fake launcher of this rig hold the whole bundle and then report
+// that its restore failed with reason, as a launcher whose `git bundle unbundle` found no
+// prerequisite commit does.
+func withFailedRestore(reason string) rigOption {
+	return func(g *rig, _ *Options) { g.failRestore = reason }
 }
 
 // testLaunchers is a launchers of its own, outside any rig, with no saved workspace bundles to
@@ -888,8 +898,11 @@ func (g *rig) connectRunning(token claim.Token, running uint64) {
 		}
 		_ = writer.WriteFrame(first)
 		// held is the slices of each bundle sequence that arrived, as the real launcher holds
-		// them: the whole of one is answered Held (internal/launcher's bundleRestore).
+		// them: the whole of one is answered Held (internal/launcher's bundleRestore), and the
+		// start that follows applies the bundle and reports what the restore did, which is what
+		// the daemon drops its saved copy on. whole names the sequence awaiting that start.
 		held := map[string]map[int]bool{}
+		whole := ""
 		reader := bufio.NewReader(client)
 		for {
 			line, err := reader.ReadBytes('\n')
@@ -911,6 +924,12 @@ func (g *rig) connectRunning(token claim.Token, running uint64) {
 				if running != 0 {
 					_ = writer.WriteFrame(shimwire.LauncherStartResult{ID: command.ID, Error: fmt.Sprintf("generation %d is still running", running)})
 					continue
+				}
+				// The real launcher restores the bundle inside the start, before it answers it
+				// (internal/launcher's manager.start), so the report crosses first.
+				if whole != "" {
+					_ = writer.WriteFrame(shimwire.LauncherRestored{ID: whole, OK: g.failRestore == "", Error: g.failRestore})
+					whole = ""
 				}
 				running = command.Generation
 				_ = writer.WriteFrame(shimwire.LauncherStartResult{ID: command.ID, OK: true, RunningGeneration: command.Generation})
@@ -937,8 +956,12 @@ func (g *rig) connectRunning(token claim.Token, running uint64) {
 					held[command.ID] = map[int]bool{}
 				}
 				held[command.ID][command.Index] = true
+				all := len(held[command.ID]) == command.Count
+				if all {
+					whole = command.ID
+				}
 				_ = writer.WriteFrame(shimwire.LauncherBundleResult{
-					ID: command.ID, Index: command.Index, OK: true, Held: len(held[command.ID]) == command.Count,
+					ID: command.ID, Index: command.Index, OK: true, Held: all,
 				})
 			}
 		}

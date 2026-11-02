@@ -355,8 +355,15 @@ func populatedState(t *testing.T) State {
 		// two and a half minutes ago and waits behind it (record.Store.HeldRows).
 		HeldOutboxRows: []HeldOutboxRow{{ID: 802, Kind: "supervise", Issue: "LEGION-208", WaitedSeconds: 150, WaitsOn: 801}},
 		// LEGION-210's implementer failed while implementing: its issue is held from that phase,
-		// and nothing retries the claim until its architect retries the phase.
-		StrandedClaims: []StrandedClaim{{Issue: "LEGION-210", Role: claim.RoleImplementer, State: "failed"}},
+		// and nothing retries the claim until its architect retries the phase. LEGION-211's
+		// implementer is the other kind, a released pod whose wake never brought it back: its
+		// suspendedBy is read on the operator claim routes, and the entry here carries the same
+		// three keys as every other, which is what a session on the contract before this one
+		// parses.
+		StrandedClaims: []StrandedClaim{
+			{Issue: "LEGION-210", Role: claim.RoleImplementer, State: "failed"},
+			{Issue: "LEGION-211", Role: claim.RoleImplementer, State: "suspended", SuspendedBy: "released"},
+		},
 		ControllerLocator: &ControllerLocator{
 			Runtime:      "kubernetes",
 			External:     true,
@@ -415,6 +422,30 @@ func populatedState(t *testing.T) State {
 
 func TestStateGolden(t *testing.T) {
 	golden(t, "state.json", populatedState(t))
+}
+
+// Every plugin parses the state with one strict schema of its own contract, and a Kubernetes
+// deployment relaunches no stale session (INFRA-945 spec R10), so a session on the contract
+// before this one reads this daemon's state for as long as its pod lives: a key added to a
+// session-facing body refuses the whole of it. `suspendedBy` is the key this change was tempted
+// to add, and it belongs to the operator claim routes alone; the guard beside
+// `legion-api.test.ts`'s schema tests holds the same property on the schema side.
+func TestNoSessionFacingBodyCarriesSuspendedBy(t *testing.T) {
+	state := populatedState(t)
+	suspended := false
+	for _, stranded := range state.StrandedClaims {
+		suspended = suspended || stranded.SuspendedBy != ""
+	}
+	if !suspended {
+		t.Fatal("no stranded claim of the fixture names a suspender: the guard would pass over nothing")
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal the state: %v", err)
+	}
+	if bytes.Contains(encoded, []byte("suspendedBy")) {
+		t.Fatalf("the state body carries suspendedBy: %s", encoded)
+	}
 }
 
 func TestStateStage3Golden(t *testing.T) {

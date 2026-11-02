@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
 // releaseRuntime is the fake runtime with the two things an idle release asks of a Kubernetes
@@ -276,19 +277,19 @@ func TestAnIdleIssuesPodIsReleasedWithItsClaimsKeepingTheirPhaseAndTask(t *testi
 	}
 }
 
-// R4's two halves. The boundary is the stop of the first role process of the pod. A delivery
-// queued below it was queued while every role still ran, so it cancels the release: the roles go
-// on in the same pod, nothing is suspended, and the bundle, had one been stored, goes with it.
-// One queued above it waits behind the release on the issue's lifecycle lane, so the release
-// finishes and the pod comes back for it.
-func TestADeliveryBeforeTheBoundaryCancelsTheReleaseAndOneAfterItWaits(t *testing.T) {
+// R4's boundary, through the whole daemon path. The boundary is the stop of the first role
+// process of the pod, and until it has run a delivery for a role of the pod cancels the
+// release: one queued below the release's own rows was in flight when the mark was written,
+// one above them arrived while every role still ran. Either way the roles go on in the same
+// pod, nothing is suspended, no Sandbox is torn down and the bundle the save stored goes with
+// the release, since the pod keeps that work in its own workspace.
+func TestADeliveryThePodIsGivenAroundTheMarkCancelsTheRelease(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		before   bool
-		released bool
+		name   string
+		before bool
 	}{
-		{name: "queued before the boundary", before: true},
-		{name: "queued after the boundary", released: true},
+		{name: "queued below the release's rows", before: true},
+		{name: "queued above them", before: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rig := newIdleRig(t)
@@ -296,11 +297,11 @@ func TestADeliveryBeforeTheBoundaryCancelsTheReleaseAndOneAfterItWaits(t *testin
 			rig.w.releaseIdlePods(ctx)
 			boundary := rig.boundary(t)
 
-			// The delivery's transaction took its id before the release's and committed after.
 			// Below the boundary means below the release's own first row, the save, which sits
-			// one id under the boundary; above it, anywhere after. It is not due yet, so the
-			// drain below runs the release's own rows and this row stays queued, which is what
-			// the boundary reads.
+			// one id under the boundary: the delivery's transaction took its id before the
+			// release's and committed after. Above it, anywhere after its last row. It is not
+			// due yet, so the drain below runs the release's own rows and this row stays
+			// queued, which is what the boundary reads.
 			id := boundary - 2
 			if !tc.before {
 				id = boundary + 10
@@ -314,29 +315,25 @@ func TestADeliveryBeforeTheBoundaryCancelsTheReleaseAndOneAfterItWaits(t *testin
 			rig.drain(t)
 
 			got := rig.machine.Claim()
-			_, suspended := rig.rt.reads()
-			if tc.released {
-				if got.State != supervise.StateSuspended || got.SuspendedBy != supervise.SuspendedByReleased {
-					t.Fatalf("the claim = %s by %s, want the release to have finished", got.State, got.SuspendedBy)
-				}
-				if suspended != 1 || !rig.bundled(t) {
-					t.Fatalf("teardowns = %d, bundle saved = %t; want the release complete", suspended, rig.bundled(t))
-				}
-			} else {
-				if got.State == supervise.StateSuspended {
-					t.Fatalf("the claim = %s by %s, want the cancelled release to have left it running", got.State, got.SuspendedBy)
-				}
-				if suspended != 0 {
-					t.Fatalf("Sandbox teardowns = %d, want none: the pod goes on", suspended)
-				}
-				if rig.bundled(t) {
-					t.Fatal("the cancelled release left its bundle behind")
-				}
+			if got.State == supervise.StateSuspended {
+				t.Fatalf("the claim = %s by %s, want the cancelled release to have left it running", got.State, got.SuspendedBy)
+			}
+			if _, suspended := rig.rt.reads(); suspended != 0 {
+				t.Fatalf("Sandbox teardowns = %d, want none: the pod goes on", suspended)
+			}
+			if rig.bundled(t) {
+				t.Fatal("the cancelled release left its bundle behind")
 			}
 			if rig.marked(t) {
 				t.Fatal("the release's mark outlived it")
 			}
-			// The delivery itself is untouched either way: it is still queued for its role.
+			// The pod it kept is recorded under the hold's own word, so a deployment reading
+			// the records sees a release that stopped short and why.
+			holds := rig.records(t).Holds
+			if len(holds) != 1 || holds[0].Reason != workflow.IdleHoldOvertaken.String() {
+				t.Fatalf("the holds are %+v, want one %s", holds, workflow.IdleHoldOvertaken)
+			}
+			// The delivery itself is untouched: it is still queued for its role.
 			var left int
 			if err := rig.pool.QueryRow(ctx, `select count(*) from outbox where issue = $1
 				and payload->>'op' = 'start' and payload->>'role' = 'tester'`, rig.issue.Key).Scan(&left); err != nil {
@@ -346,6 +343,34 @@ func TestADeliveryBeforeTheBoundaryCancelsTheReleaseAndOneAfterItWaits(t *testin
 				t.Fatalf("the queued start = %d rows, want it left for its own turn", left)
 			}
 		})
+	}
+}
+
+// A turn that began after the release was marked — a direct message, a notice or a person's
+// answer reaching a live session — leaves no outbox row at all: what says it happened is the
+// claim, working rather than idle. The save stored the workspace from before that turn's edits,
+// so the boundary cancels the release and the pod keeps the work in its own workspace.
+func TestATurnStartedAfterTheMarkCancelsTheRelease(t *testing.T) {
+	rig := newIdleRig(t)
+	ctx := context.Background()
+	rig.w.releaseIdlePods(ctx)
+	if _, err := rig.pool.Exec(ctx, `update claims set state = 'working' where issue = $1`, rig.issue.Key); err != nil {
+		t.Fatal(err)
+	}
+
+	rig.drain(t)
+
+	if got := rig.machine.Claim(); got.State == supervise.StateSuspended {
+		t.Fatalf("the claim = %s by %s, want the cancelled release to have left it in its turn", got.State, got.SuspendedBy)
+	}
+	if _, suspended := rig.rt.reads(); suspended != 0 {
+		t.Fatalf("Sandbox teardowns = %d, want none: the pod is in a turn", suspended)
+	}
+	if rig.bundled(t) {
+		t.Fatal("the cancelled release left behind a bundle taken before the turn's edits")
+	}
+	if rig.marked(t) {
+		t.Fatal("the release's mark outlived it")
 	}
 }
 

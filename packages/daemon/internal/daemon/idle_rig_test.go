@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -39,9 +38,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
-// idleRigRepo is the repository every issue of the rig is on, which its Dispatch mapping names.
-const idleRigRepo = "acme/widgets"
-
 // idleRigImage is the worker image the rig's configuration names, pinned by digest as the runtime
 // requires. Every pod the rig's controller makes runs it, so no pod is ever held back for an old
 // image.
@@ -59,6 +55,13 @@ const (
 	idleRigIdleMinutes     = 5
 	idleRigBackstopMinutes = 10
 )
+
+// idleRigTick is how often the rig's daemon decides every pod and fires the backstops that came
+// due (overrides.idleTick, the daemon's own minute in production). Every moment the rig drives is
+// a row it back-dates — the quiet period, a backstop's due time, a wake's age — so the tick's
+// period buys nothing but the wait for it, and a quarter of a second takes minutes off the run
+// while leaving each pass as far apart as the work it does.
+const idleRigTick = 250 * time.Millisecond
 
 // idleWakeRig is the acceptance rig of INFRA-945's A3: the Go daemon on a real Postgres, a real
 // nats-server, a real Envoy listener and the Sandbox runtime over a fake Kubernetes API whose
@@ -89,8 +92,8 @@ type idleWakeRig struct {
 	pool     *pgxpool.Pool
 	natsURL  string
 	js       jetstream.JetStream
-	board    *idleRigDispatch
-	kube     *idleRigKube
+	board    *liveDispatch
+	kube     *issueSandboxAPI
 	pods     *idleRigPods
 	agents   *idleRigAgents
 	listener *idleRigListener
@@ -146,7 +149,7 @@ func newIdleWakeRig(t *testing.T, issues ...string) *idleWakeRig {
 	// daemon has not admitted is one its boot lingers closed.
 	cfg.AdmissionCap = len(issues) + 4
 	cfg.Runtime = config.Runtime{Name: "kubernetes", Kubernetes: &config.Kubernetes{
-		Namespace: idleRigNamespace, Image: idleRigImage, StorageClass: "standard", IssueVolume: "1Gi",
+		Namespace: sandboxNamespace, Image: idleRigImage, StorageClass: "standard", IssueVolume: "1Gi",
 		Resources: config.DefaultResources(), RepositoryCache: config.DefaultRepositoryCache(),
 		SessionStore: ompsessions.Store{Kind: ompsessions.StoreCloudSQLIAM,
 			Database: ompsessions.Database{Instance: "legion-test:us-central1:sessions", Name: idleRigDatabase(t, pool), User: idleRigUser(t, pool)}},
@@ -156,15 +159,19 @@ func newIdleWakeRig(t *testing.T, issues ...string) *idleWakeRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	board := newIdleRigDispatch(t, cfg.Project)
+	// The rig's board lists the issues it holds: the daemon's boot lingers closed every recorded
+	// issue Dispatch's listing does not name.
+	board := newLiveDispatch(t, cfg.Project)
+	board.lists = true
 	cfg.DispatchURL = board.url
 	rig := &idleWakeRig{t: t, cfg: cfg, board: board, pool: pool, natsURL: natsURL, js: workflowJetStream(t, natsURL),
-		kube: newIdleRigKube(t), agents: newIdleRigAgents(t, pool), listener: listener,
+		kube: newIssueSandboxAPI(), agents: newIdleRigAgents(t, pool), listener: listener,
 		records: record.NewStore(), project: project, logs: &syncBuffer{}, built: &built{}}
 	rig.pods = newIdleRigPods(t, rig.address, cfg.Runtime.Kubernetes.SessionStore.Database,
 		func(context.Context) (sessionproxy.Dialer, error) {
 			return idleRigDialer{address: idleRigHostPort(t, pool)}, nil
 		})
+	rig.kube.serve(t)
 	rig.kube.onPodReady = rig.podReady
 	rig.kube.onPodGone = rig.pods.podGone
 	rig.kube.run(t)
@@ -321,7 +328,7 @@ func (r *idleWakeRig) seed(name, key string, index int) idleRigIssue {
 	defer st.Close()
 	if err := pgx.BeginFunc(ctx, st.Pool(), func(tx pgx.Tx) error {
 		if err := r.records.PutIssue(ctx, tx, record.Issue{
-			Key: key, Repo: idleRigRepo, DefaultBranch: "main", GitHubRepo: idleRigRepo, Project: r.cfg.Project,
+			Key: key, Repo: liveRepo, DefaultBranch: "main", GitHubRepo: liveRepo, Project: r.cfg.Project,
 			Tree: key, Title: "An idle pod", Phase: phase.Implementing, Generation: 1, Status: "in_progress",
 			HandedOver: true, Rank: "U",
 		}); err != nil {
@@ -334,7 +341,7 @@ func (r *idleWakeRig) seed(name, key string, index int) idleRigIssue {
 			return nil
 		}
 		return r.records.PutPullRequest(ctx, tx, record.PullRequest{
-			Issue: key, Repo: idleRigRepo, Number: idleRigPullNumber(key), Branch: "legion/" + key,
+			Issue: key, Repo: liveRepo, Number: idleRigPullNumber(key), Branch: "legion/" + key,
 			HeadSHA: idleRigHead(key), HeadUpdatedAt: time.Now().Add(-time.Hour).UTC(), State: record.PullRequestOpen,
 		})
 	}); err != nil {
@@ -380,7 +387,7 @@ func (r *idleWakeRig) boot() {
 	done := make(chan error, 1)
 	go func() {
 		done <- run(ctx, r.cfg, Build{}, slog.New(slog.NewJSONHandler(io.MultiWriter(r.logs, r.logFile()), &slog.HandlerOptions{Level: slog.LevelDebug})), overrides{
-			listen: heldListen, runtime: r.newRuntime, clock: stillClock{},
+			listen: heldListen, runtime: r.newRuntime, clock: stillClock{}, idleTick: idleRigTick,
 			workflowTokens: idleRigAppTokens{workflowTokenRecorder: &workflowTokenRecorder{}}, githubAPI: repositoriesGitHub(r.t),
 		})
 	}()
@@ -602,7 +609,7 @@ func (r *idleWakeRig) newPrompts(issue idleRigIssue) []idleRigMessage {
 // daemon's idle tick reads a pod that has done nothing for longer than the idle period. The
 // session's own report is left as the session wrote it, because the rule reads it against that
 // session's last turn and not against the clock. The rule reads the claim rows and nothing else
-// (store.IdleView), so the rows are the clock it is measured against.
+// (pods.IdleView), so the rows are the clock it is measured against.
 func (r *idleWakeRig) quiet() {
 	r.t.Helper()
 	if _, err := r.pool.Exec(context.Background(),
@@ -625,7 +632,7 @@ func (r *idleWakeRig) awaitReleased(issues ...idleRigIssue) {
 	var quieted time.Time
 	idleRigEventually(r.t, 240*time.Second, "every pod of the rig released", func() bool {
 		// The pods are back-dated rather than waited out: the idle rule reads the claim rows and
-		// nothing else (store.IdleView), so those rows are the clock it is measured against.
+		// nothing else (pods.IdleView), so those rows are the clock it is measured against.
 		if time.Since(quieted) > 2*time.Second {
 			quieted = time.Now()
 			r.quiet()
@@ -675,7 +682,7 @@ func (r *idleWakeRig) publishSettlement(issue idleRigIssue) {
 	r.t.Helper()
 	group := func() map[string]any { return map[string]any{"names": []string{}, "truncated": false} }
 	payload, err := json.Marshal(map[string]any{
-		"kind": "checks", "repo": idleRigRepo, "number": strconv.Itoa(idleRigPullNumber(issue.key)), "sha": idleRigHead(issue.key),
+		"kind": "checks", "repo": liveRepo, "number": strconv.Itoa(idleRigPullNumber(issue.key)), "sha": idleRigHead(issue.key),
 		"check_runs": []map[string]any{{"name": "build", "id": 1}}, "generation": 1,
 		"snapshot": issue.key + "-settled", "settled_at": time.Now().UnixMilli(),
 		"failed": group(), "passed": group(), "running": group(), "queued": group(), "cancelled": group(), "skipped": group(),
@@ -684,18 +691,18 @@ func (r *idleWakeRig) publishSettlement(issue idleRigIssue) {
 		r.t.Fatalf("encode the settlement payload: %v", err)
 	}
 	subject := fmt.Sprintf("notifications.github.%s.pr.%d.checks",
-		strings.ReplaceAll(idleRigRepo, "/", "."), idleRigPullNumber(issue.key))
+		strings.ReplaceAll(liveRepo, "/", "."), idleRigPullNumber(issue.key))
 	r.publish(subject, "github", "checks-"+issue.key, string(payload))
 }
 
 // releaseRecords is the deployment's record of every release, resume and hold, read through the
-// route a claim of the pod reads them on (GET /legion/v1/claims/release-records).
+// route a claim of the pod reads them on (POST /legion/v1/claims/release-records).
 func (r *idleWakeRig) releaseRecords(issue idleRigIssue) api.ReleaseRecordsResponse {
 	r.t.Helper()
 	seen := r.agents.role(issue.key, string(issue.role))
-	query := url.Values{"claimToken": {seen.Claim}, "secret": {seen.Secret},
-		"since": {time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)}}
-	status, body := r.api.request(http.MethodGet, "/legion/v1/claims/release-records?"+query.Encode(), nil, false)
+	status, body := r.api.request(http.MethodPost, "/legion/v1/claims/release-records",
+		api.ReleaseRecordsRequest{ClaimToken: claim.Token(seen.Claim), Secret: seen.Secret,
+			Since: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)}, false)
 	if status != http.StatusOK {
 		r.t.Fatalf("read the release records = %d %s", status, body)
 	}

@@ -599,7 +599,7 @@ func (p *idleRigRoleProcess) prompted(prompt shimwire.Prompt) error {
 	}
 	// The report that follows every turn, and every task acknowledged without one: the idle rule
 	// releases no pod whose session has said nothing since its last turn, and a task
-	// acknowledged is a turn as far as that rule reads it (store.IdleClaim.Reported).
+	// acknowledged is a turn as far as that rule reads it (pods.IdleClaim.Reported).
 	return p.reportActivity()
 }
 

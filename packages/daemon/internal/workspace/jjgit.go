@@ -1,11 +1,18 @@
 package workspace
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // The plumbing a release's two halves share: the shim's save of an issue workspace's unpushed work
@@ -74,4 +81,93 @@ func OutputLines(out string) []string {
 		}
 	}
 	return kept
+}
+
+// commandWaitDelay bounds the wait for a jj or git child's output once it has been killed at its
+// budget: a child that holds the pipe open past it is left behind rather than kept waited on.
+const commandWaitDelay = time.Second
+
+// RunCommand runs one jj or git command of the workspace within the caller's budget and returns
+// its trimmed standard output. dir is the directory the command runs in, which is the workspace
+// its -R or --git-dir names: jj searches upward from the directory it runs in for the closest
+// .jj and reads that repository's configuration before it applies -R, so a command left standing
+// wherever the caller's process stands would read a repository nobody named (docs/testing.md).
+// stdin is fed to the command, and nil is an empty standard input. started is when the caller's
+// budget began, which a timeout's report names. A failure's report ends with a note on each
+// stale git lock it names (staleGitLockNote).
+//
+// The save (internal/shim) and the restore (internal/launcher) both run here: they run the same
+// two tools over the same workspace, and a restore wedged on a stale index.lock or on a git
+// child that holds the pipe past the budget needs the same note and the same WaitDelay the save
+// has.
+func RunCommand(ctx context.Context, budget time.Duration, started time.Time, env []string, dir string, stdin []byte, args []string) (string, error) {
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Env = env
+	cmd.Dir = dir
+	if len(stdin) > 0 {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	cmd.WaitDelay = commandWaitDelay
+	err := cmd.Run()
+	if err == nil {
+		return strings.TrimSpace(stdout.String()), nil
+	}
+	command := strings.Join(args, " ")
+	report := strings.TrimSpace(stderr.String())
+	if note := staleGitLockNote(report, time.Now()); note != "" {
+		report += "\n" + note
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		message := fmt.Sprintf("Command timed out after %s s (ran %.1f s): %s",
+			strconv.FormatFloat(budget.Seconds(), 'f', -1, 64), time.Since(started).Seconds(), command)
+		if report != "" {
+			message += "\n" + report
+		}
+		return "", errors.New(message)
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return "", fmt.Errorf("Command failed (exit %d): %s\n%s", exit.ExitCode(), command, report)
+	}
+	return "", fmt.Errorf("run %s: %w", command, err)
+}
+
+// gitLockReports are the ways a git or jj failure names the lock file it could not take: jj's git
+// backend (gitoxide), and git's own lockfile API, which every git jj runs reports through.
+var gitLockReports = []*regexp.Regexp{
+	regexp.MustCompile(`The lockfile at '([^']+)' might need manual deletion`),
+	regexp.MustCompile(`Unable to create '([^']+)': File exists`),
+}
+
+// staleGitLockNote is one line for each git lock file output names that is still on disk: its
+// path, how long ago it was last written, and what becomes of it. A git or jj interrupted
+// mid-write leaves its lock, and every later write of what it locks fails on it. In a pod no
+// process removes it while the pod runs, since another role's git, in a container whose
+// processes this one cannot see, may hold it; replacing the issue's pod does (`workspace-init
+// provision`, cmd/legion/workspace_init.go). Under tmux nothing removes it. The Legion tools'
+// staleGitLockNote (packages/pi-shared/src/git-lock.ts) words the same note for its own jj
+// calls. Empty when output names no lock, or each one it names is already gone.
+func staleGitLockNote(output string, now time.Time) string {
+	var locks, notes []string
+	for _, report := range gitLockReports {
+		for _, match := range report.FindAllStringSubmatch(output, -1) {
+			if !slices.Contains(locks, match[1]) {
+				locks = append(locks, match[1])
+			}
+		}
+	}
+	for _, lock := range locks {
+		info, err := os.Lstat(lock)
+		if err != nil {
+			continue
+		}
+		notes = append(notes, fmt.Sprintf("git lock %s was last written %s ago and blocks this command. "+
+			"Do not remove it while the issue's pod runs: another role's git, which this container cannot see, may hold it. "+
+			"Replacing the issue's pod removes it. "+
+			"Under the tmux runtime nothing removes it: remove it by hand only once no git or jj process on the host is using the repository.",
+			lock, now.Sub(info.ModTime()).Round(time.Second)))
+	}
+	return strings.Join(notes, "\n")
 }

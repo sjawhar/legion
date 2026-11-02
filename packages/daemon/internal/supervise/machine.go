@@ -179,24 +179,21 @@ type Claim struct {
 	// records the daemon's own contract, so a registration that still differs while it equals the
 	// daemon's contract is the one that is charged rather than relaunched again uncharged.
 	PluginRelaunchFor int
-	// ActivityAt is when the claim's session last read what it was doing and reported it
-	// (api's claims/activity route, INFRA-945), zero for a claim that has reported nothing.
-	// ActivityBackground is whether that reading found background work of the session's own
-	// running and ActivityKinds what kinds it named, sorted and de-duplicated by the session;
-	// ActivityNextReminderAt is when the phase reminder armed in that session is due, zero when
-	// no armed reminder was live. The four are written only by that route, never by a machine's
-	// own claim write: a report that arrived since the machine read its claim must not be erased
-	// by the next state it persists.
-	ActivityAt             time.Time
-	ActivityBackground     bool
-	ActivityKinds          []string
-	ActivityNextReminderAt time.Time
 }
 
 // RuleMayResume says whether the rule may resume this suspended claim: every suspension but the
 // operator's, which holds until an operator resumes the claim.
 func (c Claim) RuleMayResume() bool {
 	return c.State == StateSuspended && c.SuspendedBy != SuspendedByOperator
+}
+
+// Released is whether the claim is the one suspension a wake brings back: the daemon released its
+// idle issue pod, so the claim keeps its session, its phase and its pending task, and the next
+// wake for its role resumes it (SuspendedByReleased). Every rule that acts on a released claim —
+// the wakes, the notice routing, the stranded report, a release the store cancelled — reads it
+// here rather than spelling the pair out again.
+func (c Claim) Released() bool {
+	return c.State == StateSuspended && c.SuspendedBy == SuspendedByReleased
 }
 
 // RuleHolds is whether an operator's suspension blocks a daemon rule: the claim is suspended by the
@@ -785,8 +782,9 @@ func (m *Machine) unlock() {
 	m.mu.Unlock()
 }
 
-// OnTerminal installs the daemon callback for durable ready and failed transitions.
-// The callback runs after the transition's claim write has succeeded.
+// OnTerminal installs the daemon callback for the durable transitions it acts on: ready, working
+// and failed. The callback runs after the transition's claim write has succeeded, and a machine
+// keeps one, so a daemon that observes more than one of them observes them in that one callback.
 func (m *Machine) OnTerminal(callback func(Claim, ClaimState)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

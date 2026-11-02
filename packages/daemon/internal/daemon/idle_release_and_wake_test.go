@@ -10,7 +10,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/notify"
-	"github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/pods"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
@@ -229,6 +229,12 @@ func TestIdleReleaseAndWake(t *testing.T) {
 		// consumer once it is back, and the first of them resumes the claim: a wake acts only on
 		// a claim that is still released (workflow's wakeReleased), so the pod comes back once
 		// and its role is given exactly one task, naming the wake that woke it.
+		// The resume is the claim's; the task reaches its agent once the replacement pod is up and
+		// the delivery's own retry has found it, which is a few seconds later. Either wake may be
+		// the one that took it, so this waits for the task rather than for one wake's wording.
+		idleRigEventually(t, 60*time.Second, "the task the wake gave "+issue.key+"'s woken role", func() bool {
+			return len(rig.newPrompts(issue)) > 0
+		})
 		prompts := rig.newPrompts(issue)
 		if len(prompts) != 1 {
 			t.Fatalf("the woken role of %s was given %d tasks after the restart, want exactly one: %v",
@@ -307,10 +313,10 @@ func idleRigWakeAll(t *testing.T, rig *idleWakeRig) {
 	// Each wake is recorded against the release it ended, with the kind that woke it.
 	kinds := map[string]string{
 		delivery.key: "",
-		checks.key:   store.WakeChecks,
-		role.key:     store.WakeRoleMessage,
-		agent.key:    store.WakeAgentMessage,
-		backstop.key: store.WakeBackstop,
+		checks.key:   pods.WakeChecks,
+		role.key:     pods.WakeRoleMessage,
+		agent.key:    pods.WakeAgentMessage,
+		backstop.key: pods.WakeBackstop,
 	}
 	recorded := map[string]string{}
 	for _, resume := range rig.releaseRecords(delivery).Resumes {

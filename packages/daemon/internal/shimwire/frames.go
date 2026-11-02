@@ -56,10 +56,13 @@ const (
 	// The workspace bundle's two directions: the daemon asking one role's shim for the unpushed
 	// work of the workspace every role of its issue shares, and the daemon handing that bundle to
 	// the launcher of the pod that replaces the released one, in slices under the frame limit.
+	// The launcher reports what became of it once it has run the restore (launcher_restored),
+	// which is the confirmation the daemon drops its saved copy on.
 	TypeBundleWorkspace       = "bundle-workspace"
 	TypeBundleWorkspaceResult = "bundle-workspace-result"
 	TypeLauncherBundle        = "launcher_bundle"
 	TypeLauncherBundleResult  = "launcher_bundle_result"
+	TypeLauncherRestored      = "launcher_restored"
 )
 
 // The protocol's sizes, verified against the shipped files: the largest plain line including its
@@ -391,14 +394,27 @@ type LauncherBundle struct {
 }
 
 // LauncherBundleResult answers one LauncherBundle. Held is the launcher holding the whole,
-// digest-checked body: the confirmation the daemon deletes the saved bundle on, which it answers
-// the last slice of the sequence with. The restore itself runs in the roles container before the
-// first role of the pod starts.
+// digest-checked body, which it answers the last slice of the sequence with: the sequence is
+// over and the daemon sends no more of it. It is not the restore — that runs in the roles
+// container before the first role of the pod starts, and the launcher reports its outcome in a
+// launcher_restored of its own, which is what the daemon drops its saved copy on.
 type LauncherBundleResult struct {
 	ID    string `json:"id"`
 	Index int    `json:"index"`
 	OK    bool   `json:"ok"`
 	Held  bool   `json:"held,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// LauncherRestored is the launcher's own report of what became of the bundle it held: the
+// launcher sends it, unasked, as soon as the start that applied the bundle has run the restore,
+// and again on each later connection until one carries it, since a restore the daemon never
+// heard of leaves the saved work in its database for the issue's next pod. ID is the slice
+// sequence the bundle arrived under. OK is the restore that put the work back; a restore that
+// failed carries the reason the launcher wrote the agent, and the daemon keeps its copy.
+type LauncherRestored struct {
+	ID    string `json:"id"`
+	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
 }
 
@@ -461,6 +477,7 @@ func (BundleWorkspace) FrameType() string              { return TypeBundleWorksp
 func (BundleWorkspaceResult) FrameType() string        { return TypeBundleWorkspaceResult }
 func (LauncherBundle) FrameType() string               { return TypeLauncherBundle }
 func (LauncherBundleResult) FrameType() string         { return TypeLauncherBundleResult }
+func (LauncherRestored) FrameType() string             { return TypeLauncherRestored }
 
 func (f Hello) MarshalJSON() ([]byte, error) {
 	type plain Hello
@@ -599,6 +616,11 @@ func (f LauncherBundleResult) MarshalJSON() ([]byte, error) {
 	return marshalFrame(TypeLauncherBundleResult, plain(f))
 }
 
+func (f LauncherRestored) MarshalJSON() ([]byte, error) {
+	type plain LauncherRestored
+	return marshalFrame(TypeLauncherRestored, plain(f))
+}
+
 // Validate refuses a hello the listener would refuse (worker-stream-listener.ts:140-148).
 func (f Hello) Validate() error {
 	if f.BootToken == "" {
@@ -687,17 +709,22 @@ var digestShape = regexp.MustCompile(`^[0-9a-f]{64}$`)
 const LauncherBundlePayloadBytes = 256 << 10
 
 // SplitWorkspaceBundle slices b into the launcher_bundle sequence that carries it, every slice
-// declaring the digest of the whole body so the launcher can refuse one that did not arrive as it
-// was sent. id names the sequence.
-func SplitWorkspaceBundle(id string, b WorkspaceBundle) ([]LauncherBundle, error) {
-	if id == "" {
-		return nil, fmt.Errorf("%w: a launcher_bundle sequence needs an id", ErrMalformedFrame)
+// declaring the digest of the whole body so the launcher can refuse one that did not arrive as
+// it was sent. The sequence's id is name and that digest, so the same bundle sent again is the
+// same sequence and another bundle under the same name is another one: a launcher whose
+// connection was replaced mid-sequence answers a slice it already took with the answer it gave,
+// and refuses only a payload that differs from the one that id carried (internal/launcher's
+// bundleRestore.receive).
+func SplitWorkspaceBundle(name string, b WorkspaceBundle) ([]LauncherBundle, error) {
+	if name == "" {
+		return nil, fmt.Errorf("%w: a launcher_bundle sequence needs a name", ErrMalformedFrame)
 	}
 	body, err := marshalWorkspaceBundle(b)
 	if err != nil {
 		return nil, err
 	}
 	digest := BundleDigest(body)
+	id := name + "-" + digest
 	count := (len(body) + LauncherBundlePayloadBytes - 1) / LauncherBundlePayloadBytes
 	frames := make([]LauncherBundle, 0, count)
 	for index := range count {
@@ -920,6 +947,8 @@ func Decode(line []byte) (Frame, error) {
 		return decodeInto[LauncherBundle](trimmed)
 	case TypeLauncherBundleResult:
 		return decodeInto[LauncherBundleResult](trimmed)
+	case TypeLauncherRestored:
+		return decodeInto[LauncherRestored](trimmed)
 	default:
 		return Raw{Type: head.Type, JSON: bytes.Clone(trimmed)}, nil
 	}

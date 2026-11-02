@@ -61,6 +61,12 @@ type PodResume struct {
 // background work is working as designed, and one held by an old image or an unsent report is
 // not. A streak is one row because a pod can be held for days and the tick runs every minute,
 // which would otherwise be 1,440 rows a day saying the same thing.
+//
+// A streak ends when the pod is released (RecordPodRelease), when the rule reads another reason
+// for that pod, and when a pass of the rule holds it for no reason worth a row
+// (EndPodHoldStreaks): the next pass of that reason then opens a streak of its own, with its own
+// FirstAt and Passes. That is what makes the rows of a window the holds of that window, rather
+// than one row per pod and reason carrying every hold there has ever been.
 type PodHold struct {
 	ID      int64
 	Project string
@@ -90,33 +96,26 @@ type PodReleaseRecords struct {
 
 // RecordPodRelease writes one release and answers the row's id, which every resume of that pod
 // names. A release records what it did even when nothing ever wakes the pod, so a window's count
-// of releases is complete without reading any resume.
+// of releases is complete without reading any resume. It ends every hold streak of that pod: the
+// pod is gone, so whatever was keeping it is over, and a pod held again after it comes back is
+// a streak of its own.
 func (s *Store) RecordPodRelease(ctx context.Context, rel PodRelease) (int64, error) {
 	if rel.Project == "" || rel.Issue == "" {
 		return 0, errors.New("a pod release record needs its project and issue")
 	}
 	var id int64
-	err := s.pool.QueryRow(ctx, `insert into pod_releases (project, issue, generation, roles, at, bundle_bytes)
-		values ($1, $2, $3, $4, $5, $6) returning id`,
-		rel.Project, rel.Issue, int64(rel.Generation), strings.Join(rel.Roles, ","), rel.At, rel.BundleBytes).Scan(&id)
+	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `insert into pod_releases (project, issue, generation, roles, at, bundle_bytes)
+			values ($1, $2, $3, $4, $5, $6) returning id`,
+			rel.Project, rel.Issue, int64(rel.Generation), strings.Join(rel.Roles, ","), rel.At, rel.BundleBytes).Scan(&id); err != nil {
+			return err
+		}
+		return endPodHoldStreaks(ctx, tx, rel.Project, rel.Issue, "")
+	})
 	if err != nil {
 		return 0, fmt.Errorf("record the release of %s: %w", rel.Issue, err)
 	}
 	return id, nil
-}
-
-// RecordPodWake is RecordPodWakeTx in a transaction of its own, for a caller outside one. It
-// answers the row's id, which the pod-ready and first-turn observations name. The row is written
-// when the wake is taken, not when the pod comes back, so a resume that never reaches a first
-// turn is in the records as a stuck one rather than missing.
-func (s *Store) RecordPodWake(ctx context.Context, res PodResume) (int64, error) {
-	var id int64
-	err := s.Tx(ctx, func(tx pgx.Tx) error {
-		var err error
-		id, err = RecordPodWakeTx(ctx, tx, res)
-		return err
-	})
-	return id, err
 }
 
 // MarkPodResumeReady stamps when the replacement pod was Ready. It is written once, by the first
@@ -156,19 +155,28 @@ func (s *Store) StuckPodResumes(ctx context.Context, project string, before time
 	return s.podResumesWithoutAFirstTurn(ctx, project, before, true)
 }
 
-// UnfinishedPodResumes are every resume of project whose wake is at or before the bound and whose
-// woken role has not taken its first turn, the ones a stuck pass has already marked included.
-// The stranded report reads this one: a resume marked stuck is exactly a pod a wake never brought
-// back, so dropping it would take the claim out of the report the moment the warning was written.
+// UnfinishedPodResumes are the resumes of project the stranded report judges R6 on: those of
+// each pod's newest release whose wake is at or before the bound and whose woken role has not
+// taken its first turn, the ones a stuck pass has already marked included — a resume marked
+// stuck is exactly a pod a wake never brought back, so dropping it would take the claim out of
+// the report the moment the warning was written.
+//
+// A resume of an older release is left out, whatever became of it: the claim it was for has
+// been released again since, which is a pod the daemon has just let go rather than one a wake
+// never brought back. Reading those too would list a role as stranded the moment its next
+// release was recorded.
 func (s *Store) UnfinishedPodResumes(ctx context.Context, project string, before time.Time) ([]PodResume, error) {
 	return s.podResumesWithoutAFirstTurn(ctx, project, before, false)
 }
 
 func (s *Store) podResumesWithoutAFirstTurn(ctx context.Context, project string, before time.Time, unmarked bool) ([]PodResume, error) {
 	query := `select id, release_id, project, issue, role, kind, at, stuck
-		from pod_resumes where project = $1 and first_turn_at is null and at <= $2`
+		from pod_resumes r where project = $1 and first_turn_at is null and at <= $2`
 	if unmarked {
 		query += ` and not stuck`
+	} else {
+		query += ` and release_id = (select max(id) from pod_releases
+			where project = r.project and issue = r.issue)`
 	}
 	rows, err := s.pool.Query(ctx, query+` order by id`, project, before)
 	if err != nil {
@@ -191,19 +199,54 @@ func (s *Store) podResumesWithoutAFirstTurn(ctx context.Context, project string,
 // pod and the rule's reason, so a reason read again only moves the streak's end on and counts
 // the pass. greatest keeps At the newest pass read, so a pass recorded out of order never moves
 // the streak's end backwards.
+//
+// Every streak of that pod under another reason ends in the same transaction: the rule reads one
+// reason per pass — the first condition that held the pod — so a pass that reads a new reason is
+// a pass that no longer reads the old one.
 func (s *Store) RecordPodHold(ctx context.Context, hold PodHold) error {
 	if hold.Project == "" || hold.Issue == "" || hold.Reason == "" {
 		return errors.New("a pod hold record needs its project, issue and reason")
 	}
-	_, err := s.pool.Exec(ctx, `insert into pod_holds (project, issue, reason, detail, first_at, at, passes)
-		values ($1, $2, $3, $4, $5, $5, 1)
-		on conflict (project, issue, reason) do update
-		set detail = excluded.detail, at = greatest(pod_holds.at, excluded.at), passes = pod_holds.passes + 1`,
-		hold.Project, hold.Issue, hold.Reason, hold.Detail, hold.At)
+	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		if err := endPodHoldStreaks(ctx, tx, hold.Project, hold.Issue, hold.Reason); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `insert into pod_holds (project, issue, reason, detail, first_at, at, passes)
+			values ($1, $2, $3, $4, $5, $5, 1)
+			on conflict (project, issue, reason) where not ended do update
+			set detail = excluded.detail, at = greatest(pod_holds.at, excluded.at), passes = pod_holds.passes + 1`,
+			hold.Project, hold.Issue, hold.Reason, hold.Detail, hold.At)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("record the hold of %s: %w", hold.Issue, err)
 	}
 	return nil
+}
+
+// EndPodHoldStreaks ends every hold streak of a pod but the one for except, "" ending them all:
+// the daemon's own call for a pass of the idle rule that held the pod for no reason worth a row
+// — it was released, it is not idle yet, or it has no pod at all — after which the next pass
+// that does read a reason opens a streak of its own.
+func (s *Store) EndPodHoldStreaks(ctx context.Context, project, issue, except string) error {
+	if project == "" || issue == "" {
+		return errors.New("ending a pod's hold streaks needs its project and issue")
+	}
+	if err := s.Tx(ctx, func(tx pgx.Tx) error {
+		return endPodHoldStreaks(ctx, tx, project, issue, except)
+	}); err != nil {
+		return fmt.Errorf("end the hold streaks of %s: %w", issue, err)
+	}
+	return nil
+}
+
+// endPodHoldStreaks marks the running streaks of the pod ended through the caller's transaction.
+// A streak already ended is left as it is, so its first_at, at and passes stay what the passes
+// of that streak made them.
+func endPodHoldStreaks(ctx context.Context, tx pgx.Tx, project, issue, except string) error {
+	_, err := tx.Exec(ctx, `update pod_holds set ended = true
+		where project = $1 and issue = $2 and reason <> $3 and not ended`, project, issue, except)
+	return err
 }
 
 // PodReleaseRecords are every release, resume and hold of project recorded at or after since,

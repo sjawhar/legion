@@ -278,15 +278,18 @@ const legionPendingStatusWrite = z.strictObject({
 
 /** `api.StrandedClaim` — one claim nothing will wake (`workflow.Stranded`): a worker of its issue's
  * phase, or its tree's architect, in a tree that runs, named by its issue, its role and its state;
- * the issue's entry under `issues` carries the rest. `suspendedBy` is who suspended a suspended
- * one, absent on a failed one; `released` is the pod the daemon released whose wake never brought
- * it back. Its state, role and suspension say the move that brings it back
- * (`api.StrandedClaim.Move`). */
+ * the issue's entry under `issues` carries the rest. Its state, role and suspension say the move
+ * that brings it back (`api.StrandedClaim.Move`).
+ *
+ * Who suspended a suspended one is not here and must never be added: a session parses this body
+ * with the schema of the contract its plugin was built at, and a Kubernetes deployment relaunches
+ * no stale session, so a key added here refuses the whole state in every pod still on the
+ * previous image. The operator claim routes serve it, and no plugin calls them
+ * ("no session-facing response carries suspendedBy" in legion-api.test.ts). */
 const legionStrandedClaim = z.strictObject({
   issue: issueKey,
   role: z.enum(LEGION_ROLES),
   state: z.enum(["suspended", "failed"]),
-  suspendedBy: nonEmptyString.optional(),
 });
 
 /** `api.HeldOutboxRow` — one due lifecycle outbox row its issue's lifecycle lane cannot run yet,
@@ -605,9 +608,13 @@ const legionResumeRecord = z.strictObject({
 /** `api.HoldRecord` — one streak of the idle rule keeping a pod past the idle period, with the
  * rule's own name for what held it (`workflow.IdleHold`) and the detail that word leaves out —
  * the kinds a background-work hold's session reported — left out where there is none. A reason
- * the rule read again on a later pass is the same record: `firstAt` is the streak's first pass,
+ * the rule read again on the next pass is the same record: `firstAt` is the streak's first pass,
  * `at` its newest and `passes` how many it has made, so a pod held for days is one row rather
- * than one a minute. The daemon records no row for a pod that is simply not idle yet. */
+ * than one a minute. The streak ends when the pod is released, when the rule reads another
+ * reason for it, or when a pass holds it for no reason worth a row, and a hold after that is a
+ * record of its own: the records of a window are the streaks of that window, not one row per
+ * pod and reason for all time. The daemon records no row for a pod that is simply not idle
+ * yet. */
 const legionHoldRecord = z.strictObject({
   id: z.number().int().positive(),
   issue: issueKey,
@@ -618,12 +625,24 @@ const legionHoldRecord = z.strictObject({
   passes: z.number().int().positive(),
 });
 
-/** `api.ReleaseRecordsResponse`, the body of `GET /legion/v1/claims/release-records`: every
+/** `api.ReleaseRecordsRequest`, the body of `POST /legion/v1/claims/release-records`: the claim
+ * the reading pod holds, that claim's secret, and the start of the window it reads. The caller is
+ * an issue pod, which holds its claim credential and no operator token, so the claim secret
+ * authenticates it as `claims/ready` is authenticated — and it is a POST rather than a GET with a
+ * query because that secret is a credential, which a URL carries into every proxy and access log
+ * between the pod and the daemon. */
+export const LegionReleaseRecordsRequest = z.strictObject({
+  claimToken: nonEmptyString,
+  secret: nonEmptyString,
+  since: timestamp,
+});
+
+export type LegionReleaseRecordsRequestBody = z.output<typeof LegionReleaseRecordsRequest>;
+
+/** `api.ReleaseRecordsResponse`, the body `POST /legion/v1/claims/release-records` answers: every
  * release, resume and hold of the project recorded at or after the `since` the caller names,
- * oldest first. The caller is an issue pod, which holds its claim credential and no operator
- * token, so `claimToken`, `secret` and `since` ride in the query string — the route is a GET with
- * no body — and the claim secret authenticates it as `claims/ready` is authenticated. Every list
- * is present: a window with nothing in it is three empty lists, never three absent ones. */
+ * oldest first. Every list is present: a window with nothing in it is three empty lists, never
+ * three absent ones. */
 export const LegionReleaseRecordsResponse = z.strictObject({
   releases: z.array(legionReleaseRecord),
   resumes: z.array(legionResumeRecord),

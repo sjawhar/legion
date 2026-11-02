@@ -600,3 +600,86 @@ func TestClaimUnretiredIsEveryStoredStateButRetired(t *testing.T) {
 		}
 	}
 }
+
+// storedActivity is the four activity columns of token's claim row, which no claim read carries:
+// the report lives on the row alone, and only the idle view reads it back.
+func storedActivity(t *testing.T, store *Store, token claim.Token) (at time.Time, background bool, kinds string, reminder time.Time) {
+	t.Helper()
+	var read, due *time.Time
+	if err := store.Pool().QueryRow(context.Background(),
+		`select activity_at, activity_background, activity_kinds, activity_next_reminder_at from claims where token = $1`,
+		string(token)).Scan(&read, &background, &kinds, &due); err != nil {
+		t.Fatalf("read the activity of %s: %v", token, err)
+	}
+	return orZero(read), background, kinds, orZero(due)
+}
+
+// A session fires its reports without an in-flight guard — pi-legion's five-second timer and its
+// session_stop report race — so an earlier reading can reach the daemon after a later one. The
+// earlier one must not win: a reading taken mid-turn before a background job started would then
+// stand as the newest, and the idle rule would release a pod whose job is still running.
+func TestAnActivityReportNeverOverwritesANewerOne(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	c := tmuxClaim("legion-LEGION-209-implementer")
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+
+	// The end-of-turn report: a background job of the session's own is running.
+	due := at(20)
+	newest := claim.SessionActivity{
+		At:             at(10),
+		BackgroundWork: claim.BackgroundWork{Running: true, Kinds: []string{"async-job"}},
+		Phase:          claim.PhaseActivity{NextReminderAt: &due},
+	}
+	if known, err := store.PutClaimActivity(ctx, c.Token, newest); err != nil || !known {
+		t.Fatalf("PutClaimActivity of the newest report = %t, %v", known, err)
+	}
+
+	// The reading taken before the job started, which the five-second timer sent first and which
+	// arrives second.
+	stale := claim.SessionActivity{At: at(9)}
+	if known, err := store.PutClaimActivity(ctx, c.Token, stale); err != nil || !known {
+		t.Fatalf("PutClaimActivity of the stale report = %t, %v", known, err)
+	}
+	gotAt, background, kinds, reminder := storedActivity(t, store, c.Token)
+	if !gotAt.Equal(newest.At) || !background || kinds != "async-job" || !reminder.Equal(due) {
+		t.Fatalf("after the stale report the row reads %s, background %t, kinds %q, reminder %s; want the newest report kept",
+			gotAt, background, kinds, reminder)
+	}
+
+	// A report of the same instant is the same reading sent twice, and is written: a retry must
+	// not be refused.
+	same := claim.SessionActivity{At: at(10)}
+	if known, err := store.PutClaimActivity(ctx, c.Token, same); err != nil || !known {
+		t.Fatalf("PutClaimActivity of the repeated report = %t, %v", known, err)
+	}
+	if _, background, kinds, reminder = storedActivity(t, store, c.Token); background || kinds != "" || !reminder.IsZero() {
+		t.Fatalf("the repeated report left background %t, kinds %q, reminder %s; want the quiet reading written",
+			background, kinds, reminder)
+	}
+
+	// A newer one is written whole, the armed reminder cleared with the rest.
+	newer := claim.SessionActivity{At: at(11)}
+	if known, err := store.PutClaimActivity(ctx, c.Token, newer); err != nil || !known {
+		t.Fatalf("PutClaimActivity of the newer report = %t, %v", known, err)
+	}
+	if gotAt, _, _, _ = storedActivity(t, store, c.Token); !gotAt.Equal(newer.At) {
+		t.Fatalf("activity_at = %s after the newer report, want %s", gotAt, newer.At)
+	}
+}
+
+// A report for a claim the daemon has forgotten is nothing to record, and says so: the route
+// answers it as it answers a wrong secret. A report the ordering guard drops is not that.
+func TestAnActivityReportOfAnUnknownClaimIsNotRecorded(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	known, err := store.PutClaimActivity(ctx, "legion-LEGION-999-implementer", claim.SessionActivity{At: at(1)})
+	if err != nil {
+		t.Fatalf("PutClaimActivity: %v", err)
+	}
+	if known {
+		t.Fatal("a report for a claim the store does not hold was recorded")
+	}
+}

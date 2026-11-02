@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,7 +15,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/pods"
 	"github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
 // wakeRuntime is the smallest workflowRuntime the wake pass and the release gate read: the
@@ -27,6 +31,23 @@ func wakeRuntime(t *testing.T) (*workflowRuntime, *pgxpool.Pool, *bytes.Buffer) 
 	w := &workflowRuntime{pool: pool, projectID: "legion", idleStore: st, idlePeriod: 10 * time.Minute,
 		log: slog.New(slog.NewTextHandler(logged, &slog.HandlerOptions{Level: slog.LevelDebug}))}
 	return w, pool, logged
+}
+
+// recordPodWake writes one resume row as a wake's own transaction does (store.RecordPodWakeTx),
+// which is what these tests seed: the whole wake (store.TakePodWake) also marks the wake and
+// cancels a backstop, and neither is what the pass under test reads.
+func recordPodWake(t *testing.T, st *store.Store, res store.PodResume) int64 {
+	t.Helper()
+	ctx := context.Background()
+	var id int64
+	if err := st.Tx(ctx, func(tx pgx.Tx) error {
+		var err error
+		id, err = store.RecordPodWakeTx(ctx, tx, res)
+		return err
+	}); err != nil {
+		t.Fatalf("record the wake of %s: %v", res.Issue, err)
+	}
+	return id
 }
 
 // recordListenerReady stamps the listener's liveness report at at, as the wake fact does.
@@ -76,14 +97,11 @@ func TestAStuckResumeIsWarnedAboutOnceAtTenMinutes(t *testing.T) {
 	w, pool, logged := wakeRuntime(t)
 	ctx := context.Background()
 	woke := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
-	id, err := w.idleStore.RecordPodWake(ctx, store.PodResume{Project: "legion", Issue: "LEGION-208",
-		Role: string(claim.RoleImplementer), Kind: store.WakeBackstop, At: woke})
-	if err != nil {
-		t.Fatalf("record the wake: %v", err)
-	}
+	id := recordPodWake(t, w.idleStore, store.PodResume{Project: "legion", Issue: "LEGION-208",
+		Role: string(claim.RoleImplementer), Kind: pods.WakeBackstop, At: woke})
 
 	// Nine minutes after the wake nothing is stuck yet.
-	w.warnStuckResumes(ctx, woke.Add(stuckResumeAfter-time.Minute))
+	w.warnStuckResumes(ctx, woke.Add(workflow.StrandedReleaseWake-time.Minute))
 	if strings.Contains(logged.String(), "has had no first turn") {
 		t.Fatalf("the daemon's log = %q, want no warning before ten minutes", logged)
 	}
@@ -92,7 +110,7 @@ func TestAStuckResumeIsWarnedAboutOnceAtTenMinutes(t *testing.T) {
 	}
 
 	// Ten minutes after it, one warning naming the issue, the role and the step.
-	w.warnStuckResumes(ctx, woke.Add(stuckResumeAfter))
+	w.warnStuckResumes(ctx, woke.Add(workflow.StrandedReleaseWake))
 	line := logged.String()
 	for _, want := range []string{"has had no first turn", "LEGION-208", string(claim.RoleImplementer), "the replacement pod to be ready"} {
 		if !strings.Contains(line, want) {
@@ -111,16 +129,13 @@ func TestAStuckResumeIsWarnedAboutOnceAtTenMinutes(t *testing.T) {
 	}
 
 	// A resume whose pod came up but whose role has taken no turn waits on the first turn.
-	later, err := w.idleStore.RecordPodWake(ctx, store.PodResume{Project: "legion", Issue: "LEGION-208",
-		Role: string(claim.RoleTester), Kind: store.WakeChecks, At: woke})
-	if err != nil {
-		t.Fatalf("record the second wake: %v", err)
-	}
+	later := recordPodWake(t, w.idleStore, store.PodResume{Project: "legion", Issue: "LEGION-208",
+		Role: string(claim.RoleTester), Kind: pods.WakeChecks, At: woke})
 	if err := w.idleStore.MarkPodResumeReady(ctx, later, woke.Add(time.Minute)); err != nil {
 		t.Fatalf("stamp the pod ready: %v", err)
 	}
 	logged.Reset()
-	w.warnStuckResumes(ctx, woke.Add(stuckResumeAfter))
+	w.warnStuckResumes(ctx, woke.Add(workflow.StrandedReleaseWake))
 	if !strings.Contains(logged.String(), "the woken role's first turn") {
 		t.Fatalf("the warning = %q, want it to say the pod is up and the first turn is what waits", logged)
 	}
@@ -179,4 +194,82 @@ func (h *backstopHandler) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact
 	}
 	h.facts++
 	return intake.Result{}, nil
+}
+
+// terminalHandler counts the workflow facts a claim's durable states applied, by their kind.
+type terminalHandler struct {
+	mu    sync.Mutex
+	facts []string
+}
+
+func (h *terminalHandler) Apply(_ context.Context, _ pgx.Tx, fact intake.Fact) (intake.Result, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	switch fact.(type) {
+	case intake.ClaimReady:
+		h.facts = append(h.facts, "ready")
+	case intake.ClaimFailed:
+		h.facts = append(h.facts, "failed")
+	}
+	return intake.Result{}, nil
+}
+
+func (h *terminalHandler) applied() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.facts...)
+}
+
+// A supervisor keeps one durable-state callback (supervisor.OnTerminal assigns it), so the
+// daemon's two readers of those states are one callback: the workflow facts a claim's ready and
+// failure are, and the stamps a released pod's resume is measured by. Registering them as two
+// callbacks left only the second, which dropped every ClaimReady and ClaimFailed the workflow
+// runs on.
+//
+// R5: the first turn is stamped from the woken claim reaching working, not from a delivery's
+// confirmation, because a wake for a notice or a phase-ended message carries no delivery.
+func TestTheDaemonsOneTerminalCallbackCarriesTheFactsAndTheResumeStamps(t *testing.T) {
+	w, pool, _ := wakeRuntime(t)
+	facts := &terminalHandler{}
+	w.handlers = []intake.Handler{facts}
+	woke := time.Now().UTC().Add(-time.Minute).Truncate(time.Millisecond)
+	id := recordPodWake(t, w.idleStore, store.PodResume{Project: "legion", Issue: "LEGION-208",
+		Role: string(claim.RoleImplementer), Kind: pods.WakeRoleMessage, At: woke})
+	held := supervise.Claim{Token: "legion-legion-208-implementer", Project: "legion", Tree: "LEGION-208",
+		Issue: "LEGION-208", Role: claim.RoleImplementer, Generation: 1}
+
+	w.claimTerminal(held, supervise.StateReady)
+	awaitResume(t, pool, id, "pod_ready_at")
+	w.claimTerminal(held, supervise.StateWorking)
+	awaitResume(t, pool, id, "first_turn_at")
+	w.claimTerminal(held, supervise.StateFailed)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for len(facts.applied()) < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := facts.applied(); len(got) != 2 || got[0] != "ready" || got[1] != "failed" {
+		t.Fatalf("workflow facts = %v, want the claim's ready and its failure", got)
+	}
+}
+
+// awaitResume waits for the resume's column to be stamped: the stamps are written off the
+// machine's goroutine, so the callback returns before the write lands.
+func awaitResume(t *testing.T, pool *pgxpool.Pool, id int64, column string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var stamped bool
+		if err := pool.QueryRow(context.Background(),
+			`select `+column+` is not null from pod_resumes where id = $1`, id).Scan(&stamped); err != nil {
+			t.Fatalf("read the resume's %s: %v", column, err)
+		}
+		if stamped {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the resume's %s was never stamped", column)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

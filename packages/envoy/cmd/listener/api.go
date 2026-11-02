@@ -751,6 +751,18 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to agent topics; use /v1/messages/send for direct agent messages")
 			return
 		}
+		// The wake subject is this listener's own report of a released Legion pod, and a Legion
+		// daemon acts on what it reads there: it wakes the pod a role token or a session names,
+		// and it holds its whole release gate open on a `listener_ready` report's clock. A caller
+		// of this route chooses every field of the envelope and the payload, source "envoy"
+		// included, so a session that could publish here — a prompt-injected one among them —
+		// could wake pods at will and keep that gate open with a report dated in the future. Only
+		// the listener publishes it, and it does so directly (wake.go).
+		if strings.TrimSpace(request.Topic) == bus.LegionWakeTopic {
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest,
+				"cannot publish to "+bus.LegionWakeTopic+"; the listener alone reports a Legion pod wake", "topic")
+			return
+		}
 		if message, field := validateMessageBody(request.messageBody); message != "" {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, message, field)
 			return

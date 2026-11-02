@@ -546,6 +546,7 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintln(stdout, checksSummary(openChecks(state.Issues)))
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
+	nameStrandedSuspensions(ctx, state.StrandedClaims, *configPath, *port, address)
 	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims))
 	for _, line := range webhookAppLines(state.Repositories.WithoutWebhookApp) {
 		fmt.Fprintln(stdout, line)
@@ -723,6 +724,67 @@ func strandedSummary(stranded []api.StrandedClaim) string {
 		}
 	}
 	return fmt.Sprintf("claims nothing will wake: %d — %s", len(stranded), strings.Join(groups, "; "))
+}
+
+// nameStrandedSuspensions fills in who suspended each stranded claim, which the state body does
+// not carry: every plugin parses that body with the strict schema of its own contract, so a key
+// added to it refuses the whole state in a session the daemon has not relaunched
+// (api.StrandedClaim). The operator claim routes serve it, and this reads them with the bearer
+// legion.yaml's operator_token_file names — the file a Kubernetes deployment, the only runtime
+// that releases an idle pod, must name. Read as a pane reads (LEGION_DAEMON_URL), or with
+// --port, there is no configuration to take a bearer from, and a daemon that refuses the one
+// there is answers nothing: each leaves every stranded claim reading as the plain suspension it
+// is, which `legion claims list --json` tells apart. The state is the operator's one unguarded
+// read, so nothing here fails the command.
+func nameStrandedSuspensions(ctx context.Context, stranded []api.StrandedClaim, configPath string, port int, address string) {
+	if len(stranded) == 0 {
+		return
+	}
+	bearer := configuredOperatorToken(configPath, port)
+	if bearer == "" {
+		return
+	}
+	timed, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	status, answer, err := operator{base: address, bearer: bearer}.do(timed, http.MethodGet, claimsRoute, nil)
+	if err != nil || status/100 != 2 {
+		return
+	}
+	var list api.OperatorClaims
+	if json.Unmarshal(answer, &list) != nil {
+		return
+	}
+	suspenders := make(map[string]string, len(list.Claims))
+	for _, c := range list.Claims {
+		suspenders[c.Issue+" "+string(c.Role)] = c.SuspendedBy
+	}
+	for i, c := range stranded {
+		stranded[i].SuspendedBy = suspenders[c.Issue+" "+string(c.Role)]
+	}
+}
+
+// configuredOperatorToken is the operator bearer legion.yaml names, and "" when this command
+// reads a daemon it has no configuration for — a pane's LEGION_DAEMON_URL or a --port, the two
+// addresses daemonAddress takes without one — or when the file names none or cannot be read.
+func configuredOperatorToken(configPath string, port int) string {
+	if configPath == "" && port != 0 {
+		return ""
+	}
+	if _, pane := os.LookupEnv("LEGION_DAEMON_URL"); pane && configPath == "" && port == 0 {
+		return ""
+	}
+	if configPath == "" {
+		configPath = defaultConfigPath
+	}
+	cfg, err := config.LoadForValidation(configPath, nil)
+	if err != nil || cfg.OperatorTokenFile == "" {
+		return ""
+	}
+	bearer, err := config.ReadPrivateSecretPointer("operator_token_file", cfg.OperatorTokenFile)
+	if err != nil {
+		return ""
+	}
+	return bearer
 }
 
 // webhookAppLines are the lines an operator reads for the served repositories Dispatch's GitHub App

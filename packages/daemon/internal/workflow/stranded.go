@@ -11,36 +11,49 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
-	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 const strandedRoleRunBatchSize = 200
 
 // StrandedReleaseWake is how long a wake of a released pod may go without the woken role taking a
-// turn before the claim it was for is stranded. It is the same ten minutes the daemon marks a
-// resume stuck at (store.PodResume.Stuck): a resume that has run out of it is one the replacement
-// pod never came back from, and the operator is the only thing left that will act on it.
+// turn before the claim it was for is stranded: a wake that has run out of it is one the
+// replacement pod never came back from, and the operator is the only thing left that will act on
+// it. It is the one bound of that rule — the daemon's own stuck-resume warning is the same wake
+// running out, and reads it here rather than keeping a second ten minutes of its own.
 const StrandedReleaseWake = 10 * time.Minute
 
+// ReleasedWake is one recorded wake of a released pod as the stranded rule reads it: the pod and
+// the role the wake was for, when the wake reached the daemon, whether the woken role has taken
+// its first turn since, and whether a stuck pass has already said so. The daemon reads them from
+// its own records (store.Store.UnfinishedPodResumes) and hands them in, so this rule stays what
+// every other rule here is: a judgement over values.
+type ReleasedWake struct {
+	Issue     string
+	Role      string
+	At        time.Time
+	FirstTurn bool
+	Stuck     bool
+}
+
 // releasedRole keys a released claim's recorded wakes by the pod and the role they were for,
-// which is all a resume record names of the claim (store.PodResume has no claim token).
+// which is all a wake record names of the claim (it carries no claim token).
 type releasedRole struct{ issue, role string }
 
 // strandedReleaseWakes is each released claim whose wake ran out of StrandedReleaseWake with no
-// first turn: the resumes with no first turn at all, taken more than that ago, or already marked
+// first turn: the wakes with no first turn at all, taken more than that ago, or already marked
 // stuck, which is the same fact recorded. A claim with no wake is not here, and neither is one
 // whose wake is younger than the bound: the pod it is coming back as is still being built.
-func strandedReleaseWakes(resumes []store.PodResume, now time.Time) map[releasedRole]bool {
-	woken := make(map[releasedRole]bool, len(resumes))
-	for _, resume := range resumes {
-		if !resume.FirstTurnAt.IsZero() {
+func strandedReleaseWakes(wakes []ReleasedWake, now time.Time) map[releasedRole]bool {
+	woken := make(map[releasedRole]bool, len(wakes))
+	for _, wake := range wakes {
+		if wake.FirstTurn {
 			continue
 		}
-		if !resume.Stuck && now.Sub(resume.At) <= StrandedReleaseWake {
+		if !wake.Stuck && now.Sub(wake.At) <= StrandedReleaseWake {
 			continue
 		}
-		woken[releasedRole{issue: resume.Issue, role: resume.Role}] = true
+		woken[releasedRole{issue: wake.Issue, role: wake.Role}] = true
 	}
 	return woken
 }
@@ -83,18 +96,18 @@ func strandedReleaseWakes(resumes []store.PodResume, now time.Time) map[released
 // are the caller's transaction snapshot, as are the slots read here; the daemon's boot logs what
 // this returns, and the state route serves it as strandedClaims.
 //
-// A released claim — one whose idle pod the daemon released (supervise.SuspendedByReleased) — is
+// A released claim — one whose idle pod the daemon released (supervise.Claim.Released) — is
 // left out of both cases while its pod is coming back: the next wake for its role resumes it, and
 // the boot resumes no such claim. It is stranded on one fact alone, whatever its role: a wake for
-// it ran out of StrandedReleaseWake with no turn of the woken role (resumes, the daemon's
-// store.UnfinishedPodResumes of the project). That is the wake the pod never came back from, and
-// nothing in the daemon takes it again. A released claim nothing has woken is not stranded: it
-// waits for a delivery, as a released pod is meant to.
+// it ran out of StrandedReleaseWake with no turn of the woken role (wakes, which the daemon reads
+// of its own records). That is the wake the pod never came back from, and nothing in the daemon
+// takes it again. A released claim nothing has woken is not stranded: it waits for a delivery, as
+// a released pod is meant to.
 //
 // Candidates' queued starts and their claims are read through RoleRuns in bounded batches: a fleet
 // of hundreds of suspended claims makes a few snapshot queries, never one pair per claim.
-func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, claims []supervise.Claim, resumes []store.PodResume, now time.Time) ([]supervise.Claim, error) {
-	woken := strandedReleaseWakes(resumes, now)
+func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, claims []supervise.Claim, wakes []ReleasedWake, now time.Time) ([]supervise.Claim, error) {
+	woken := strandedReleaseWakes(wakes, now)
 	issues, err := s.Issues(ctx, tx)
 	if err != nil {
 		return nil, err
@@ -136,8 +149,7 @@ func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, claims []supervise
 		// A released claim is held to R6's one fact and nothing else: it is stranded only once a
 		// wake for it has run out of StrandedReleaseWake with no turn, and then whatever its role,
 		// since the pod the wake was taken for never came back.
-		if c.State == supervise.StateSuspended && c.SuspendedBy == supervise.SuspendedByReleased &&
-			!woken[releasedRole{issue: c.Issue, role: string(c.Role)}] {
+		if c.Released() && !woken[releasedRole{issue: c.Issue, role: string(c.Role)}] {
 			continue
 		}
 		// current is the phase the start that would wake the claim names; the architect's names none.

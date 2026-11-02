@@ -32,7 +32,6 @@ const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.gener
 	c.serving_assignment,
 	c.agent_secrets_enrollment, c.agent_secrets_enrollment_incarnation, c.suspended_by,
 	c.plugin_contract, c.plugin_relaunch_for,
-	c.activity_at, c.activity_background, c.activity_kinds, c.activity_next_reminder_at,
 	d.delivery_id, d.task, d.phase, d.generation, d.assignment, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
@@ -43,26 +42,37 @@ func (s *Store) PutClaim(ctx context.Context, c supervise.Claim) error {
 	return putClaim(ctx, s.pool, c)
 }
 
-// Execer is the part of a pool or a transaction a caller outside this package writes through:
-// the API's activity route holds the daemon's pool (api.Options.Pool) and no store of its own.
-type Execer = execer
-
-// PutClaimActivity writes the four activity columns of c.Token's claim row and nothing else: what
-// c's session last reported of what it is doing (INFRA-945). It is its own statement rather than
-// part of putClaim because the report arrives between a machine's writes and the machine's
-// in-memory claim does not carry it, so one write of the whole row would erase every report sent
-// since that machine read its claim. It reports false for a token no claim holds, which is a
-// report for a claim the daemon has forgotten and nothing to record.
-func PutClaimActivity(ctx context.Context, db Execer, c supervise.Claim) (bool, error) {
-	tag, err := db.Exec(ctx, `update claims set activity_at = $2, activity_background = $3,
-		activity_kinds = $4, activity_next_reminder_at = $5, updated_at = now() where token = $1`,
-		string(c.Token), instant(c.ActivityAt), c.ActivityBackground,
-		strings.Join(c.ActivityKinds, ","), instant(c.ActivityNextReminderAt),
-	)
-	if err != nil {
-		return false, fmt.Errorf("put the activity of claim %s: %w", c.Token, err)
+// PutClaimActivity writes the four activity columns of token's claim row and nothing else: what
+// that claim's session last reported of what it is doing (INFRA-945). The report is no part of
+// the claim's machine state — it arrives between a machine's writes, and the machine's in-memory
+// claim does not carry it — so one write of the whole row would erase every report sent since
+// that machine read its claim; the claim's own writes leave these columns alone, and the idle
+// rule reads them through its own view (IdleClaim).
+//
+// A report older than the one recorded is dropped rather than written: a session fires its
+// reports without an in-flight guard, so an earlier reading can land after a later one, and the
+// pod would then be released on a reading the session has already replaced. It answers whether
+// the store holds the claim at all, which a later report of a claim the daemon has forgotten
+// does not.
+func (s *Store) PutClaimActivity(ctx context.Context, token claim.Token, a claim.SessionActivity) (bool, error) {
+	var reminder *time.Time
+	if a.Phase.NextReminderAt != nil && !a.Phase.NextReminderAt.IsZero() {
+		at := a.Phase.NextReminderAt.UTC()
+		reminder = &at
 	}
-	return tag.RowsAffected() > 0, nil
+	var known bool
+	err := s.pool.QueryRow(ctx, `with reported as (
+		update claims set activity_at = $2, activity_background = $3, activity_kinds = $4,
+			activity_next_reminder_at = $5, updated_at = now()
+		where token = $1 and (activity_at is null or activity_at <= $2) returning token)
+		select exists (select 1 from claims where token = $1)`,
+		string(token), a.At.UTC(), a.BackgroundWork.Running,
+		strings.Join(a.BackgroundWork.Kinds, ","), reminder,
+	).Scan(&known)
+	if err != nil {
+		return false, fmt.Errorf("put the activity of claim %s: %w", token, err)
+	}
+	return known, nil
 }
 
 // putClaim writes a claim through whichever executor the caller has: the pool, or a transaction
@@ -90,9 +100,8 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		session, session_file, locator, state, failure, launch_failures, deaths, prompt_failures, prompt_retires,
 		boot_token_hash, capability_hash, uncertain_streak, last_start_row,
 		serving_generation, serving_assignment, agent_secrets_enrollment, agent_secrets_enrollment_incarnation, suspended_by,
-		plugin_contract, plugin_relaunch_for,
-		activity_at, activity_background, activity_kinds, activity_next_reminder_at)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)
+		plugin_contract, plugin_relaunch_for)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
 		on conflict (token) do update set project = excluded.project, tree = excluded.tree,
 		issue = excluded.issue, role = excluded.role, generation = excluded.generation, tree_epoch = excluded.tree_epoch,
 		session = excluded.session, session_file = excluded.session_file,
@@ -109,10 +118,9 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		suspended_by = excluded.suspended_by,
 		plugin_contract = excluded.plugin_contract,
 		plugin_relaunch_for = excluded.plugin_relaunch_for,
-		-- The four activity columns are deliberately left out of this update: PutClaimActivity
-		-- owns them, and a machine's claim write carries whatever its in-memory claim last read,
-		-- so a report the session sent since would be erased by the next state it persists. The
-		-- insert above carries them, so a claim admitted with a report keeps it.
+		-- The four activity columns are no part of a claim's write: PutClaimActivity owns them,
+		-- and a machine's write carries whatever its in-memory claim last read, so a report the
+		-- session sent since would be erased by the next state it persists.
 		updated_at = now()`,
 		string(c.Token), c.Project, c.Tree, c.Issue, string(c.Role), int64(c.Generation), int64(c.TreeEpoch),
 		c.Session, c.SessionFile, locator, string(c.State), c.Failure,
@@ -120,7 +128,6 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		c.BootTokenHash, c.CapabilityHash, c.UncertainStreak, c.LastStartRow, int64(c.ServingGeneration), c.ServingAssignmentID,
 		enrollmentID, enrollmentIncarnation, string(c.SuspendedBy),
 		c.PluginContract, c.PluginRelaunchFor,
-		instant(c.ActivityAt), c.ActivityBackground, strings.Join(c.ActivityKinds, ","), instant(c.ActivityNextReminderAt),
 	)
 	if err != nil {
 		return fmt.Errorf("put claim %s: %w", c.Token, err)
@@ -360,15 +367,12 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		queuedAt, delivered        *time.Time
 		confirmed                  *time.Time
 		interrupted                *bool
-		activityAt, nextReminder   *time.Time
-		activityKinds              string
 	)
 	err := row.Scan(&token, &c.Project, &c.Tree, &c.Issue, &role, &generation, &treeEpoch, &c.Session,
 		&c.SessionFile, &locator, &state, &c.Failure, &c.Budgets.LaunchFailures, &c.Budgets.Deaths, &c.Budgets.PromptFailures,
 		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak,
 		&c.LastStartRow, &servingGeneration, &c.ServingAssignmentID, &enrollmentID, &enrollmentIC, &by,
 		&c.PluginContract, &c.PluginRelaunchFor,
-		&activityAt, &c.ActivityBackground, &activityKinds, &nextReminder,
 		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &deliveryAssignment, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return supervise.Claim{}, err
@@ -378,10 +382,6 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 	}
 	c.Token, c.Role, c.State, c.SuspendedBy = claim.Token(token), claim.Role(role), supervise.ClaimState(state), supervise.SuspendSource(by)
 	c.Generation, c.TreeEpoch, c.ServingGeneration = uint64(generation), uint64(treeEpoch), uint64(servingGeneration)
-	c.ActivityAt, c.ActivityNextReminderAt = orZero(activityAt), orZero(nextReminder)
-	if activityKinds != "" {
-		c.ActivityKinds = strings.Split(activityKinds, ",")
-	}
 	if locator != nil {
 		var loc runtime.Locator
 		if err := json.Unmarshal(locator, &loc); err != nil {

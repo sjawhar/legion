@@ -100,3 +100,30 @@ func TestTheWakeConsumerNamesItsProjectOnItsOwnSubject(t *testing.T) {
 		}
 	}
 }
+
+// Security[untrusted-input]: the report's clock is the payload's, and the payload is whatever
+// reached the subject. The listener refuses a client publish on its own wake subject
+// (packages/envoy/cmd/listener/api.go), but a publisher that reaches the stream another way
+// chooses every field of the envelope and the payload, the envelope's source among them, so the
+// daemon bounds the time it reads to its own: a `listener_ready` dated in the year 9999 would
+// otherwise hold R7's release gate open for ever, since the stamp keeps the greatest time it is
+// given (store.RecordListenerReady), and released pods would then miss every role and agent
+// message while the listener itself said nothing.
+func TestAListenerReportDatedInTheFutureIsReadAsNow(t *testing.T) {
+	const year9999 = 253370764800000
+	before := time.Now().UTC()
+	decoded, err := decodeMessage(legionWakeSubject, "CAPTURE", capturedRepositories, nil,
+		envelopeJSON(t, "wake-forged", "envoy", `{"kind":"listener_ready","at":`+strconv.FormatInt(year9999, 10)+`}`))
+	if err != nil {
+		t.Fatalf("decode the forged report: %v", err)
+	}
+	wake, ok := decoded.Fact.(ListenerWake)
+	if !ok {
+		t.Fatalf("decoded fact = %#v, want a listener wake", decoded.Fact)
+	}
+	after := time.Now().UTC()
+	if wake.At.Before(before) || wake.At.After(after) {
+		t.Fatalf("the report's time = %s, want it bounded to the daemon's own clock between %s and %s",
+			wake.At, before, after)
+	}
+}

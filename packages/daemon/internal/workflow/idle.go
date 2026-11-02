@@ -4,9 +4,8 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/pods"
 	"github.com/sjawhar/legion/daemon/internal/record"
-	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -47,13 +46,25 @@ const (
 	IdleHoldNotIdle
 	// IdleHoldNoPod: the record holds no such issue, or the issue has no live claim to release.
 	IdleHoldNoPod
-	// IdleHoldReleasing: a release of this pod is already in progress.
+	// IdleHoldReleasing: a release of this pod is already in progress. It is the idle tick's own
+	// word for "my release is already running", never a release that stopped short: a release
+	// cancelled at one of its own rows records IdleHoldOvertaken or IdleHoldUnauthorized.
 	IdleHoldReleasing
 	// IdleHoldBundleTooLarge: the workspace's unpushed work does not fit the bundle a release
 	// carries (runtime.MaxWorkspaceBundleBytes), so the pod is kept and the work with it.
 	IdleHoldBundleTooLarge
 	// IdleHoldBundleSave: the bundle could not be built or could not be saved, so the pod is kept.
 	IdleHoldBundleSave
+	// IdleHoldOvertaken: the pod was given work after its release was marked and before the
+	// first role process of the pod was stopped — a turn started, a claim was resumed, or a
+	// task, notice, message or start reached a role of the pod — so one of the release's own
+	// role stops cancelled it and the roles go on in the same pod.
+	IdleHoldOvertaken
+	// IdleHoldUnauthorized: the store no longer authorized the teardown when it asked — the run
+	// the release was taken against has moved on, the issue has left the workflow, its tree
+	// lingers or its cleanup is reserved, or a role of the pod was started again — so the
+	// teardown cancelled the release instead of deleting the pod.
+	IdleHoldUnauthorized
 )
 
 var idleHoldNames = map[IdleHold]string{
@@ -72,6 +83,8 @@ var idleHoldNames = map[IdleHold]string{
 	IdleHoldReleasing:      "releasing",
 	IdleHoldBundleTooLarge: "bundle_too_large",
 	IdleHoldBundleSave:     "bundle_save_failed",
+	IdleHoldOvertaken:      "overtaken",
+	IdleHoldUnauthorized:   "unauthorized",
 }
 
 // String is the hold's recorded name, which a reader of the daemon's release records reads.
@@ -97,7 +110,7 @@ type IdleDecision struct {
 }
 
 // IdleRelease decides whether an issue's pod may be released now. It is the whole rule and it is
-// pure: the view the store read (store.IdleView), the clock, the idle period, whether the pod
+// pure: the view the store read (pods.IdleView), the clock, the idle period, whether the pod
 // runs the image the configuration names, and the plugin contract this daemon serves
 // (api.DaemonAPIVersion) are all it reads, so every condition below is one row of a table test.
 //
@@ -105,7 +118,7 @@ type IdleDecision struct {
 // decision reports:
 //
 //   - the issue is in the workflow and its tree is live: neither the issue nor its root has left
-//     the workflow, and the root does not linger. A pod in that state is a close's to stop;
+//     the workflow, and neither lingers (TreeLive). A pod in that state is a close's to stop;
 //
 //   - the pod is not a root's that waits on an answer a person has not given. A root whose answer
 //     has come waits only for its slot and qualifies, and the children of a root that waits on a
@@ -134,7 +147,7 @@ type IdleDecision struct {
 // supervise.Claim.UpdateRound through InPodRound(). That field does not exist on this branch; it
 // arrives with sjawhar/legion#2538, and the forward merge that brings it in adds its row here and
 // one row to the table test.
-func IdleRelease(view store.IdleView, now time.Time, idle time.Duration, onConfiguredImage bool, contract int) IdleDecision {
+func IdleRelease(view pods.IdleView, now time.Time, idle time.Duration, onConfiguredImage bool, contract int) IdleDecision {
 	if !view.Found {
 		return IdleDecision{Hold: IdleHoldNoPod}
 	}
@@ -170,7 +183,7 @@ func IdleRelease(view store.IdleView, now time.Time, idle time.Duration, onConfi
 			return IdleDecision{Hold: IdleHoldInTurn}
 		}
 	}
-	if len(view.Waiting) > 0 {
+	if view.Waiting {
 		return IdleDecision{Hold: IdleHoldDelivery}
 	}
 	for _, c := range view.Claims {
@@ -199,20 +212,18 @@ func IdleRelease(view store.IdleView, now time.Time, idle time.Duration, onConfi
 	return IdleDecision{Release: true, Roles: roles}
 }
 
-// idleTreeLive is whether the issue and its tree are still the workflow's to run: neither the
-// issue nor its root carries a status or a phase that takes it out (InWorkflow), and the root
-// does not linger. An issue of its own that lingers is a member of a lingering tree, which the
-// root's own linger already says.
-func idleTreeLive(view store.IdleView) bool {
-	issue := record.Issue{Status: view.Status, Phase: view.Phase}
-	root := record.Issue{Status: view.Root.Status, Phase: view.Root.Phase}
-	return InWorkflow(issue) && InWorkflow(root) && !view.Root.Lingering && !view.Lingering
+// idleTreeLive is the live-tree gate over the view the store read: the view carries each
+// issue's status, its phase and its linger, which is all TreeLive reads of either.
+func idleTreeLive(view pods.IdleView) bool {
+	return TreeLive(
+		record.Issue{Key: view.Issue, Status: view.Status, Phase: view.Phase, LingerUntil: view.LingerUntil},
+		record.Issue{Key: view.Tree, Status: view.Root.Status, Phase: view.Root.Phase, LingerUntil: view.Root.LingerUntil})
 }
 
 // idleStateReleasable is whether a live claim's state is one a release may suspend: an agent that
 // finished booting and is waiting for work (ready), or one that finished a turn (idle). Every
 // other live state is a process in a turn, one starting, or one whose launch is not yet known.
-func idleStateReleasable(c store.IdleClaim) bool {
+func idleStateReleasable(c pods.IdleClaim) bool {
 	switch c.State {
 	case supervise.StateReady, supervise.StateIdle:
 		return true
@@ -220,11 +231,8 @@ func idleStateReleasable(c store.IdleClaim) bool {
 	return false
 }
 
-// idlePhaseOpen is whether the claim is the phase worker of the issue's current phase, serving
-// the current generation: the one shape of claim a phase reminder is armed in.
-func idlePhaseOpen(view store.IdleView, c store.IdleClaim) bool {
-	if view.Phase == phase.Done || c.Role == claim.RoleArchitect {
-		return false
-	}
-	return RoleFor(view.Phase) == c.Role && c.ServingGeneration == view.Generation
+// idlePhaseOpen is whether the claim is the worker of the issue's open phase (OpenPhaseRole),
+// serving the current generation: the one shape of claim a phase reminder is armed in.
+func idlePhaseOpen(view pods.IdleView, c pods.IdleClaim) bool {
+	return OpenPhaseRole(view.Phase) == c.Role && c.ServingGeneration == view.Generation
 }

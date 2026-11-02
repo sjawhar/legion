@@ -36,9 +36,9 @@ func frameTypes(frames []shimwire.Frame) []string {
 
 // A released issue's pod comes back with the work the release took off its disk: the daemon reads
 // the bundle its store kept, sends it to the new pod's launcher in launcher_bundle slices, and
-// drops its own copy on the Held that says the launcher holds the whole of it — all of it before
-// the launcher is told to start any role, since the launcher restores the bundle into the
-// workspace ahead of the role's command (internal/launcher).
+// drops its own copy when that launcher reports the restore it ran — all of the hop before the
+// launcher is told to start any role, since the launcher restores the bundle into the workspace
+// ahead of the role's command (internal/launcher).
 func TestASavedWorkspaceBundleReachesThePodsLauncherBeforeItStartsAnyRole(t *testing.T) {
 	st := migratedStore(t)
 	saved := savedWorkspaceBundle()
@@ -91,9 +91,45 @@ func TestASavedWorkspaceBundleReachesThePodsLauncherBeforeItStartsAnyRole(t *tes
 	if !read.At.Equal(saved.At) {
 		t.Fatalf("the bundle crossed as taken at %s, want %s", read.At, saved.At)
 	}
-	// The launcher held the whole of it, so the daemon's copy has done its work.
+	// The launcher restored it and said so, so the daemon's copy has done its work.
 	if _, held, err := st.WorkspaceBundle(g.ctx, testTree); err != nil || held {
-		t.Fatalf("after the launcher held the bundle the store holds it = %t (%v), want it deleted", held, err)
+		t.Fatalf("after the launcher reported its restore the store holds the bundle = %t (%v), want it deleted", held, err)
+	}
+}
+
+// Held says the launcher holds the body, not that the restore ran: the restore runs later, at the
+// first role start, and it can fail — a prerequisite commit the bundle needs that the new pod's
+// clone does not have, a jj step that will not run, the restore's own budget. The daemon keeps
+// the saved work until the launcher reports that the restore put it back, so a restore that
+// failed leaves it where the launcher's notice says it is: in the daemon's database, for the
+// issue's next pod.
+func TestAFailedRestoreKeepsTheSavedWorkForTheIssuesNextPod(t *testing.T) {
+	st := migratedStore(t)
+	saved := savedWorkspaceBundle()
+	if err := st.PutWorkspaceBundle(context.Background(), testTree, saved); err != nil {
+		t.Fatalf("save the released workspace's bundle: %v", err)
+	}
+	const refusal = "git bundle unbundle: object not found"
+	g := newRig(t, nil, withFailedRestore(refusal), withOptions(func(o *Options) {
+		o.SavedWorkspaceBundle, o.WorkspaceBundleRestored = st.WorkspaceBundle, st.DeleteWorkspaceBundle
+	}))
+	spec := workerSpec(t)
+	loc := g.spawn(spec)
+	if loc.Sandbox.Generation != spec.Generation {
+		t.Fatalf("the failed restore left the launch at %+v, want generation %d", loc, spec.Generation)
+	}
+
+	frames := g.sent(spec.Claim)
+	if start := slices.IndexFunc(frames, func(f shimwire.Frame) bool { _, ok := f.(shimwire.LauncherStart); return ok }); start < 1 {
+		t.Fatalf("the launcher was sent %v, want the bundle's slices and then the role's start", frameTypes(frames))
+	}
+	kept, held, err := st.WorkspaceBundle(g.ctx, testTree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !held || !bytes.Equal(kept.Bundle, saved.Bundle) {
+		t.Fatalf("after a restore the launcher could not run the store holds %d bytes (held=%t), want the %d saved kept for the next pod",
+			len(kept.Bundle), held, len(saved.Bundle))
 	}
 }
 

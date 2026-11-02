@@ -38,11 +38,25 @@ const (
 // daemon's window is three times this, so one report lost to a reconnect costs nothing.
 const listenerReadyInterval = 5 * time.Minute
 
-// wakeReportBound is how long a wake report's publish may take. A report that does not go out in
-// it costs only this wake: the daemon's backstop still brings the pod back. No caller waits it
-// out — the two reports a 404 raises are published off that 404's path (reportRoleWake,
-// reportAgentWake) — so it bounds the report's own goroutine and nothing else.
-const wakeReportBound = 2 * time.Second
+// A wake report is retried until the bus acknowledges it. Losing one is not "one wake late": a
+// released architect gets no backstop at all (the daemon arms one for a phase worker only), a
+// phase worker whose phase is closed gets none either, and the daemon's stranded report passes
+// over a released claim no wake ever touched — so a report dropped during a NATS reconnect
+// leaves a tree stalled with nothing saying so. R3 asks for the report to reach the daemon
+// across a daemon restart too, which the stream's own retention gives once the publish is
+// stored, and a publish that never happened defeats in the same way.
+//
+// wakeReportAttempt bounds one publish, wakeReportRetry is the first wait between two of them,
+// doubling to wakeReportRetryCap, and wakeReportBudget bounds the whole report: past it the
+// listener has been unable to reach the stream for minutes, which its own liveness report then
+// says, and holding the goroutine longer buys nothing. No caller waits any of it out — the two
+// reports a 404 raises are published off that 404's path (reportRoleWake, reportAgentWake).
+const (
+	wakeReportAttempt  = 2 * time.Second
+	wakeReportRetry    = 250 * time.Millisecond
+	wakeReportRetryCap = 15 * time.Second
+	wakeReportBudget   = 5 * time.Minute
+)
 
 // wakeReport is the wire shape of a report on bus.LegionWakeTopic. At is this listener's own
 // clock in epoch milliseconds, matching contracts.Envelope's KeptAt, because the stream's store
@@ -54,10 +68,17 @@ type wakeReport struct {
 	At      int64  `json:"at"`
 }
 
-// publishWakeReport publishes one report on bus.LegionWakeTopic. It never fails anything: a
-// report the bus does not take is logged and nothing else, since the 404 it was raised beside is
-// answered whatever the bus does, and is answered without waiting for it (reportRoleWake).
-func publishWakeReport(client *bus.Client, logger *logging.Logger, report wakeReport) {
+// publishWakeReport publishes one report on bus.LegionWakeTopic, retrying until the stream
+// acknowledges it, the whole report's budget runs out, or ctx ends with the listener. Nothing
+// waits for it: the 404 it was raised beside is answered whatever the bus does, and is answered
+// without waiting for it (reportRoleWake).
+//
+// Each attempt is published under a dedupe key of its own, as the stream keeps no duplicate
+// window for these: an attempt the stream stored and failed to acknowledge is reported twice,
+// and a wake the daemon has taken already is taken no second time (its mark's key is the
+// report's event id, and the role and agent reports of one message carry the same name
+// whichever attempt the daemon reads).
+func publishWakeReport(lifetime context.Context, client *bus.Client, logger *logging.Logger, report wakeReport) {
 	if client == nil {
 		return
 	}
@@ -93,15 +114,40 @@ func publishWakeReport(client *bus.Client, logger *logging.Logger, report wakeRe
 		logger.Warn("legion wake report not valid", slog.String("kind", report.Kind), slog.String("error", err.Error()))
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), wakeReportBound)
+	ctx, cancel := context.WithTimeout(lifetime, wakeReportBudget)
 	defer cancel()
-	if err := client.PublishWithin(ctx, item); err != nil {
-		logger.Warn("legion wake report not published", slog.String("kind", report.Kind),
-			slog.String("role", report.Role), slog.String("session", report.Session), slog.String("error", err.Error()))
-		return
+	for attempt, wait := 1, wakeReportRetry; ; attempt++ {
+		if err := publishWithinBudget(ctx, client, item); err == nil {
+			logger.Info("legion wake report published", slog.String("kind", report.Kind),
+				slog.String("role", report.Role), slog.String("session", report.Session), slog.Int("attempts", attempt))
+			return
+		} else if ctx.Err() != nil {
+			logger.Warn("legion wake report not published", slog.String("kind", report.Kind),
+				slog.String("role", report.Role), slog.String("session", report.Session),
+				slog.Int("attempts", attempt), slog.String("error", err.Error()))
+			return
+		} else {
+			logger.Warn("legion wake report not published; retrying until the bus takes it",
+				slog.String("kind", report.Kind), slog.String("role", report.Role),
+				slog.String("session", report.Session), slog.Int("attempts", attempt), slog.String("error", err.Error()))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		if wait *= 2; wait > wakeReportRetryCap {
+			wait = wakeReportRetryCap
+		}
 	}
-	logger.Info("legion wake report published", slog.String("kind", report.Kind),
-		slog.String("role", report.Role), slog.String("session", report.Session))
+}
+
+// publishWithinBudget makes one publish attempt, bounded by wakeReportAttempt and by what is
+// left of the report's whole budget.
+func publishWithinBudget(budget context.Context, client *bus.Client, item contracts.Envelope) error {
+	ctx, cancel := context.WithTimeout(budget, wakeReportAttempt)
+	defer cancel()
+	return client.PublishWithin(ctx, item)
 }
 
 // reportRoleWake reports that a message was published to role and no live session held it. The
@@ -110,13 +156,15 @@ func publishWakeReport(client *bus.Client, logger *logging.Logger, report wakeRe
 //
 // The report is published off the caller's path. The caller is writing a 404 the report owes
 // nothing, and every role send with no holder raises one — including the common case where no
-// daemon holds a released claim of that role at all — so publishing it inline would put
-// wakeReportBound in front of each of those 404s.
+// daemon holds a released claim of that role at all — so publishing it inline would put the
+// report's retries in front of each of those 404s. Its own context is the process's: a report
+// raised by a request outlives that request, because the pod it wakes is owed the report
+// however the caller's connection ends.
 func reportRoleWake(d *listenerDeps, logger *logging.Logger, role string) {
 	if d == nil || role == "" {
 		return
 	}
-	go publishWakeReport(d.client, logger, wakeReport{Kind: wakeKindRole, Role: role})
+	go publishWakeReport(context.Background(), d.client, logger, wakeReport{Kind: wakeKindRole, Role: role})
 }
 
 // reportAgentWake reports that a message was sent to the agent subject of sessionID and nothing
@@ -125,7 +173,7 @@ func reportAgentWake(client *bus.Client, logger *logging.Logger, sessionID strin
 	if sessionID == "" {
 		return
 	}
-	go publishWakeReport(client, logger, wakeReport{Kind: wakeKindAgent, Session: sessionID})
+	go publishWakeReport(context.Background(), client, logger, wakeReport{Kind: wakeKindAgent, Session: sessionID})
 }
 
 // startListenerReadyReports publishes this listener's liveness report at once and every
@@ -138,7 +186,7 @@ func startListenerReadyReports(ctx context.Context, client *bus.Client, logger *
 		interval = listenerReadyInterval
 	}
 	go func() {
-		publishWakeReport(client, logger, wakeReport{Kind: wakeKindReady})
+		publishWakeReport(ctx, client, logger, wakeReport{Kind: wakeKindReady})
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -146,7 +194,7 @@ func startListenerReadyReports(ctx context.Context, client *bus.Client, logger *
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				publishWakeReport(client, logger, wakeReport{Kind: wakeKindReady})
+				publishWakeReport(ctx, client, logger, wakeReport{Kind: wakeKindReady})
 			}
 		}
 	}()

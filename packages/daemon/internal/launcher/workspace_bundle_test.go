@@ -42,11 +42,11 @@ func TestTheLauncherReassemblesABundleAndRefusesOneThatDidNotArriveAsItWasSent(t
 		r := &bundleRestore{results: map[string]shimwire.LauncherBundleResult{}}
 		for index, frame := range frames {
 			got := r.receive(frame)
-			if !got.OK || got.ID != "restore-1" || got.Index != index {
+			if !got.OK || got.ID != frames[0].ID || got.Index != index {
 				t.Fatalf("slice %d answered %#v", index, got)
 			}
 			if want := index == len(frames)-1; got.Held != want {
-				t.Fatalf("slice %d of %d answered held=%v, want %v: the daemon deletes its saved copy on the last slice's confirmation",
+				t.Fatalf("slice %d of %d answered held=%v, want %v: the sequence is over at its last slice",
 					index, len(frames), got.Held, want)
 			}
 		}
@@ -92,8 +92,8 @@ func TestTheLauncherReassemblesABundleAndRefusesOneThatDidNotArriveAsItWasSent(t
 		if r.body != nil {
 			t.Fatalf("a refused sequence left %d bytes to restore", len(r.body))
 		}
-		if restored, notice := r.apply(context.Background(), []string{"LEGION_WORKSPACE=/nowhere"}); restored || notice != "" {
-			t.Fatalf("a refused sequence restored something: restored=%v notice=%q", restored, notice)
+		if got := r.apply(context.Background(), []string{"LEGION_WORKSPACE=/nowhere"}); got.Restored || got.Notice != "" || got.Ran {
+			t.Fatalf("a refused sequence restored something: %+v", got)
 		}
 	})
 
@@ -218,6 +218,39 @@ func TestARestoreWhoseBaseCommitIsGoneStartsTheRolesWithANotice(t *testing.T) {
 	}
 	if log := f.run(workspace, "jj", "log", "-R", workspace, "--ignore-working-copy", "-r", "all()", "--no-graph", "-T", "commit_id ++ \"\\n\""); strings.Contains(log, saved.Head) {
 		t.Fatalf("a restore that failed left the saved working copy in the workspace:\n%s", log)
+	}
+}
+
+// A bookmark's name is written by the agent that worked in the released workspace, so it reaches
+// jj as an argument nobody chose. One jj reads as an option of its own must cost that bookmark
+// and nothing else: the heads, the working copy and every other bookmark are restored, and the
+// notice names the one that was not set.
+func TestARestoreSkipsABookmarkNameJJWillNotTakeAndRestoresTheRest(t *testing.T) {
+	testbin.RequireJJFilters(t)
+	f := newBundleFixture(t)
+	f.workOne()
+	saved := f.bundleWorkspaceOne()
+	// jj reads this one as an option: `jj bookmark set --oops` is an unknown flag, and before
+	// the restore passed its names after `--` it ended the whole restore with the workspace
+	// half put back.
+	const awkward = "--oops"
+	saved.Bookmarks[awkward] = saved.Bookmarks["side"]
+
+	workspace := f.secondPod("ws4")
+	notice := f.restoreInto(workspace, saved, 1)
+	if !strings.Contains(notice, "is restored") || !strings.Contains(notice, awkward) {
+		t.Fatalf("the notice is %q, want the restore done and the bookmark it could not set named", notice)
+	}
+	if head := f.run(workspace, "jj", "log", "-R", workspace, "--ignore-working-copy", "-r", "@", "--no-graph", "-T", "commit_id"); head != saved.Head {
+		t.Fatalf("the restored working copy is on %s, want the saved %s: one bad bookmark name took the rest of the restore with it", head, saved.Head)
+	}
+	listed := f.run(workspace, "jj", "bookmark", "list", "-R", workspace, "--ignore-working-copy",
+		"-T", `if(remote, "", name ++ " " ++ normal_target.commit_id() ++ "\n")`)
+	if !strings.Contains(listed, "side "+f.commits["second head"]) {
+		t.Fatalf("the restored workspace has no side bookmark:\n%s", listed)
+	}
+	if strings.Contains(listed, awkward) {
+		t.Fatalf("the restore set the bookmark jj refused:\n%s", listed)
 	}
 }
 
@@ -423,7 +456,8 @@ func (f *bundleFixture) bundleWorkspaceOne() shimwire.WorkspaceBundle {
 
 // restoreInto drives one replacement pod's launcher: the bundle in launcher_bundle slices, then
 // the generation's start, which applies the restore before its child runs. It returns the notice
-// the launcher wrote for the restore and stops the generation.
+// the launcher wrote for the restore, having held it to the report the launcher sent the daemon,
+// and stops the generation.
 func (f *bundleFixture) restoreInto(workspace string, saved shimwire.WorkspaceBundle, generation uint64) string {
 	f.t.Helper()
 	g := newRig(f.t)
@@ -448,8 +482,20 @@ func (f *bundleFixture) restoreInto(workspace string, saved shimwire.WorkspaceBu
 	}
 	published(f.t, marker)
 	g.stop(generation)
+	// The daemon deletes its saved copy on this report and on nothing else, so the start that
+	// ran the restore sends it before it answers.
+	report := g.restored
+	if report == nil {
+		f.t.Fatalf("the launcher reported nothing of the restore it ran:\n%s", g.stderr.String())
+	}
+	if report.ID != frames[0].ID {
+		f.t.Fatalf("the launcher reported the restore of sequence %q, want %q", report.ID, frames[0].ID)
+	}
 	for _, line := range strings.Split(g.stderr.String(), "\n") {
 		if strings.Contains(line, "released workspace's saved work") {
+			if report.OK != strings.Contains(line, "is restored") {
+				f.t.Fatalf("the launcher reported ok=%v and wrote %q", report.OK, line)
+			}
 			return line
 		}
 	}

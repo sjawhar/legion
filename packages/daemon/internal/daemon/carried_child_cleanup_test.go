@@ -259,5 +259,6 @@ func (f *carriedCleanup) launchedChildSandbox(uid string) {
 	s := issueSandbox(f.childSandbox, uid, f.childKey, f.childKey)
 	f.api.mu.Lock()
 	defer f.api.mu.Unlock()
-	f.api.objects[f.childSandbox] = s
+	f.api.objects["sandboxes"][f.childSandbox] = s
+	f.api.disks[f.childSandbox] = true
 }

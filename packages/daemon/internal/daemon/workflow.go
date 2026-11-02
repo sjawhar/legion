@@ -307,9 +307,12 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// through the runtime, since the outbox itself is built later (attach).
 	w.records = projectRecords{Store: record.NewStore(), project: cfg.Project, wake: w.wakeOutbox, log: log}
 	engineCfg := engineConfig(cfg, reviewAppLogin, build)
-	// The engine reads and writes the pod tables of the idle release under the claim token's
-	// spelling of the project, which is what those tables hold (workflow.Config.ProjectToken).
-	engineCfg.ProjectToken = projectID
+	// The engine reads and writes the pod tables of the idle release through the store's own
+	// view of this project (store.Store.PodRecordsOf), which derives the claim token's spelling
+	// of the project the tables are keyed by.
+	if engineCfg.Pods, err = st.PodRecordsOf(cfg.Project); err != nil {
+		return nil, err
+	}
 	engineCfg.Repositories, engineCfg.NoteUnread = w, w.noteUnread
 	w.engine = workflow.New(w.records, engineCfg, log)
 	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
@@ -605,10 +608,7 @@ func (w *workflowRuntime) attach(supervision *supervision) {
 		supervision.supervisor.store, w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
 		supervision.plan.tools, w.log)
 	w.outboxWake.Store(w.outbox)
-	supervision.supervisor.OnTerminal(w.terminal)
-	// A released pod's replacement is up once its agent registers and says ready, which is the
-	// first observation the daemon has of it (R5's pod-ready time).
-	supervision.supervisor.OnTerminal(w.podResumeReady)
+	supervision.supervisor.OnTerminal(w.claimTerminal)
 	w.attachIdleRelease(supervision)
 }
 
@@ -752,6 +752,17 @@ func (w *workflowRuntime) terminal(c supervise.Claim, state supervise.ClaimState
 		case w.failed <- err:
 		default:
 		}
+	}
+}
+
+// claimTerminal is the daemon's one durable-state callback, because a supervisor keeps one
+// (supervisor.OnTerminal): a claim's ready and its failure are workflow facts (terminal), and the
+// same transitions measure a released pod's resume — its replacement pod is up at the first
+// ready, and the woken role took its work at the first turn (podResume).
+func (w *workflowRuntime) claimTerminal(c supervise.Claim, state supervise.ClaimState) {
+	w.podResume(c, state)
+	if state == supervise.StateReady || state == supervise.StateFailed {
+		w.terminal(c, state)
 	}
 }
 
@@ -1128,8 +1139,6 @@ func (w *workflowRuntime) taskConfirmed(c supervise.Claim) {
 	if c.Issue == "" || c.Role == claim.RoleController {
 		return
 	}
-	// The confirmation is also the woken role's first turn, which ends the resume R5 measures.
-	w.podResumeFirstTurn(c)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), readyReleaseTimeout)
 		defer cancel()

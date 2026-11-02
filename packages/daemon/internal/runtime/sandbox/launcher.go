@@ -121,6 +121,8 @@ func (s *launcherSession) ServeLauncher(conn net.Conn, reader *bufio.Reader, wri
 			s.deliver(value.ID, value)
 		case shimwire.LauncherBundleResult:
 			s.deliver(bundleWaiter(value.ID, value.Index), value)
+		case shimwire.LauncherRestored:
+			s.owner.restoreReported(s, value)
 		default:
 			return
 		}
@@ -306,16 +308,17 @@ func (d *launchers) start(ctx context.Context, token claim.Token, podUID string,
 const bundleRestoreBound = 2 * time.Minute
 
 // restoreWorkspace carries the bundle the last release of this pod's issue saved to the pod's
-// launcher, and drops the saved copy once the launcher answers that it holds the whole of it.
-// The launcher applies it to the workspace before the first role of the pod runs, so every call
-// is from a start that has not been issued yet (start).
+// launcher. The launcher applies it to the workspace before the first role of the pod runs, so
+// every call is from a start that has not been issued yet (start), and it reports what the
+// restore did in a frame of its own, which is what the saved copy is dropped on
+// (restoreReported).
 //
 // Nothing here stops a role. A slice the launcher refuses, a body that did not arrive as it was
 // sent, a store that cannot be read and a connection that fails are each logged and left: a pod
 // that never starts is worse than one whose workspace holds only what was pushed, and the
 // launcher writes the agent its own notice of what was lost (internal/launcher's restoreWorkspace).
-// The bundle stays in the database until a launcher has held it, so the issue's next pod is sent
-// it again.
+// The bundle stays in the database until a launcher has restored it, so the issue's next pod is
+// sent it again.
 func (d *launchers) restoreWorkspace(ctx context.Context, token claim.Token, podUID string) {
 	if d.saved == nil || d.restored == nil {
 		return
@@ -368,13 +371,10 @@ func (d *launchers) restoreWorkspace(ctx context.Context, token claim.Token, pod
 		if !result.Held {
 			continue
 		}
-		// Held is the launcher holding the whole, digest-checked body and promising the restore
-		// before its first role runs. The daemon's copy has done its work.
-		if err := d.restored(restoring, issue); err != nil {
-			d.log.Warn("launcher bundle: the restored workspace bundle could not be dropped from the store",
-				"issue", issue, "launcher", token, "error", err)
-			return
-		}
+		// Held ends the sequence: the launcher has the whole, digest-checked body and applies it
+		// before its first role runs. The daemon's copy stays until the launcher reports what
+		// the restore itself did (restoreReported) — a restore can still fail, and the work is
+		// then in the daemon's database alone, which is where the launcher's notice says it is.
 		d.log.Info("launcher bundle: the released workspace's saved work reached the pod that replaces it",
 			"issue", issue, "launcher", token, "bytes", len(bundle.Bundle), "slices", len(frames))
 		return
@@ -383,25 +383,47 @@ func (d *launchers) restoreWorkspace(ctx context.Context, token claim.Token, pod
 		"issue", issue, "launcher", token, "slices", len(frames))
 }
 
-// bundleFrames are the slices that carry issue's saved bundle, under a sequence id made of the
-// issue and the digest of the body. The id is the same every time the same bundle is sent, which
-// is what a pod whose launcher reconnects needs: the launcher answers a slice it has already
-// taken under an id it knows with the answer it gave, Held included, and refuses only a payload
-// that differs from the one that id carried — which another bundle of the same issue never is,
-// since another body is another digest and so another sequence (internal/launcher's
-// bundleRestore.receive).
+// restoreReported drops the saved bundle of the issue a launcher's pod is of, once that launcher
+// reports that its restore put the work back. It is the one confirmation the bundle is deleted
+// on: a restore that failed, and a pod no role ever started in, leave the work in the daemon's
+// database for the issue's next pod, which is sent it again. Nothing else ever deletes it, so
+// the issue's close and its tree's close are what end a bundle no pod restores (outbox's
+// dropReleasedWork).
+//
+// It runs on the launcher's own frame loop rather than in a goroutine of its own, so a pod whose
+// restore is confirmed has its bundle gone before any later frame of that launcher is read; the
+// delete is one indexed row.
+func (d *launchers) restoreReported(s *launcherSession, report shimwire.LauncherRestored) {
+	if d.restored == nil || s.issue == "" {
+		return
+	}
+	if !report.OK {
+		d.log.Warn("launcher bundle: the pod's launcher could not restore the released workspace's saved work, which stays in the database for the issue's next pod",
+			"issue", s.issue, "launcher", s.token, "sequence", report.ID, "error", report.Error)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
+	defer cancel()
+	if err := d.restored(ctx, s.issue); err != nil {
+		d.log.Warn("launcher bundle: the restored workspace bundle could not be dropped from the store",
+			"issue", s.issue, "launcher", s.token, "error", err)
+		return
+	}
+	d.log.Info("launcher bundle: the pod's launcher restored the released workspace's saved work, which is dropped from the database",
+		"issue", s.issue, "launcher", s.token, "sequence", report.ID)
+}
+
+// bundleFrames are the slices that carry issue's saved bundle. The sequence's id is the issue and
+// the digest of the body (shimwire.SplitWorkspaceBundle), so it is the same every time the same
+// bundle is sent, which is what a pod whose launcher reconnects needs: the launcher answers a
+// slice it has already taken under an id it knows with the answer it gave, Held included, and
+// refuses only a payload that differs from the one that id carried — which another bundle of the
+// same issue never is, since another body is another digest and so another sequence
+// (internal/launcher's bundleRestore.receive).
 func bundleFrames(issue string, b runtime.WorkspaceBundle) ([]shimwire.LauncherBundle, error) {
-	frames, err := shimwire.SplitWorkspaceBundle("restore-"+issue, shimwire.WorkspaceBundle{
+	return shimwire.SplitWorkspaceBundle("restore-"+issue, shimwire.WorkspaceBundle{
 		Bundle: b.Bundle, Head: b.Head, Tips: b.Tips, Bookmarks: b.Bookmarks, At: b.At,
 	})
-	if err != nil {
-		return nil, err
-	}
-	id := "restore-" + issue + "-" + frames[0].SHA256
-	for i := range frames {
-		frames[i].ID = id
-	}
-	return frames, nil
 }
 
 // bundleWaiter names the request one slice's answer belongs to. A sequence is answered slice by

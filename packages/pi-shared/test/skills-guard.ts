@@ -6,7 +6,6 @@
 // limit, no line-length cap), so the file's own byte count is the measure. Reads by filesystem path
 // stop at 300 lines, which is why every reference is linked as `skill://<name>/<path>`, and why each
 // such link must resolve (the daemon's boot gate checks only the name before the first `/`).
-import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -318,10 +317,3 @@ export function retiredWorkerLifecycleClaims(markdown: string): string[] {
   }
   return faults;
 }
-
-// This rule is declared here rather than in a plugin's skills-guard.test.ts because it is written
-// over the repository's own skills/, not over a staged partition, and so holds whichever plugin
-// ships the worker skill: every skills-guard.test.ts that imports this module runs it.
-test("the worker skill says a released pod is not a stop, and never that a role stays live", () => {
-  expect(retiredWorkerLifecycleClaims(readFileSync(WORKER_SKILL, "utf8"))).toEqual([]);
-});

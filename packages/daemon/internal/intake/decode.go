@@ -172,6 +172,15 @@ const legionWakeSubject = "notifications.legion.wake"
 // this daemon does not know, and a role or agent report naming neither a role nor a session, is
 // no fact rather than poison: a listener of a later release can report a kind this build has no
 // wake for, and nothing is lost by acknowledging it.
+//
+// The report's clock is bounded to the daemon's own: a payload naming a time in the future is
+// read as now. The subject is a stream subject, and a publisher that reaches it chooses every
+// field of the envelope and the payload, this `at` and the envelope's source among them; a
+// `listener_ready` dated in the year 9999 would otherwise hold R7's gate open for good
+// (store.RecordListenerReady keeps the greatest it is given), so a session that can publish
+// could have pods released into a silence nothing wakes them out of. The listener refuses a
+// client publish on its own subject as well (packages/envoy/cmd/listener/api.go), so a forged
+// report has to reach the bus directly; this is the half that holds whatever does.
 func decodeListenerWake(eventID, payload string) (Fact, error) {
 	var report struct {
 		Kind    string `json:"kind"`
@@ -195,9 +204,12 @@ func decodeListenerWake(eventID, payload string) (Fact, error) {
 	default:
 		return nil, nil
 	}
-	at := time.UnixMilli(report.At).UTC()
 	if report.At <= 0 {
 		return nil, nil
+	}
+	at := time.UnixMilli(report.At).UTC()
+	if now := time.Now().UTC(); at.After(now) {
+		at = now
 	}
 	return ListenerWake{Kind: report.Kind, Role: report.Role, Session: report.Session, At: at, Report: eventID}, nil
 }

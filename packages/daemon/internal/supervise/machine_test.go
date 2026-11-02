@@ -910,3 +910,27 @@ func TestTerminalCallbackRunsOnlyAfterReadyAndFailurePersist(t *testing.T) {
 		t.Fatalf("terminal callbacks = %v, want ready then failed", observed)
 	}
 }
+
+// A turn's start is reported to the daemon as a durable state of its own. It is the one
+// observation that a woken pod's role came back and took work: a wake for a notice or a
+// phase-ended message gives the role no delivery to confirm, so without this its resume would
+// never reach a first turn and the daemon would call the pod stuck and then strand its claim
+// (INFRA-945 R5). The state is reported after the claim's write, as ready and failed are.
+func TestATurnStartReportsTheWorkingClaim(t *testing.T) {
+	h := newHarness(t)
+	var observed []ClaimState
+	h.m.OnTerminal(func(c Claim, state ClaimState) {
+		if persisted := h.store.load(c.Token); persisted.State != state {
+			t.Errorf("callback state %s ran before persisted claim state %s", state, persisted.State)
+		}
+		observed = append(observed, state)
+	})
+
+	h.reach(StateReady)
+	h.must(StreamTurnStart{Claim: testToken})
+	h.m.Wait()
+
+	if !slices.Equal(observed, []ClaimState{StateReady, StateWorking}) {
+		t.Fatalf("reported states = %v, want ready then working", observed)
+	}
+}

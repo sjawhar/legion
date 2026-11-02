@@ -3943,8 +3943,9 @@ Those are the defaults, and release is on under `runtime: kubernetes` wherever t
 The loader refuses a `backstop_minutes` below `idle_minutes`, which would wake a pod the daemon has only just released.
 Whatever the setting says, the daemon releases nothing while the Envoy listener it uses does not report the role messages and direct messages of released sessions, since those two wakes would otherwise be lost.
 
-`legion state` shows a released claim apart from a suspended or a failed one, and the stranded-claim report counts one only when its wake is more than 10 minutes old with no resume.
-The daemon keeps a record of each release, each resume and each pod held past the idle period, and a claim reads the deployment's records on `GET /legion/v1/claims/release-records`.
+`legion state` shows a released claim apart from a suspended or a failed one, reading which it is from the operator claim routes with the bearer `operator_token_file` names, since the state body itself carries no suspender; without that bearer every stranded claim reads as the plain suspension it is, which `legion claims list --json` tells apart.
+The stranded-claim report counts a released claim only when its wake is more than 10 minutes old with no resume.
+The daemon keeps a record of each release, each resume and each pod held past the idle period, and a claim reads the deployment's records on `POST /legion/v1/claims/release-records`, naming its claim token and that claim's secret in the body: the secret is the credential, and a query string would put it in every proxy and access log between the pod and the daemon.
 
 #### Rolling back idle release
 

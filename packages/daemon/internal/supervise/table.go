@@ -992,16 +992,26 @@ func agentBusy(reason string) bool {
 // it is that delivery's turn: a replay naming it, or — B1 — Oh My Pi's own agent_start while the
 // delivery is in flight (sent and not yet answered, acknowledged and waiting, or possibly sent by
 // an earlier daemon). Any other turn is a foreign one, and confirms nothing.
+//
+// The persisted working state is reported to the daemon (Machine.OnTerminal), because a turn is
+// the one observation that a woken pod's role came back and took work, whether or not the wake
+// carried a delivery for it to confirm: a wake for a notice or a phase-ended message carries
+// none, and its resume would otherwise never be measured (R5).
 func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	start := ev.(StreamTurnStart)
 	m.claim.State = StateWorking
 	p := m.claim.Pending
 	_, awaiting := m.timers[TimerTurn]
 	inFlight := m.send != nil || awaiting || m.askFirst
+	persist := m.persist
 	if p != nil && p.ConfirmedAt.IsZero() && (start.DeliveryID == p.ID || (start.DeliveryID == "" && inFlight)) {
-		return m.confirm(ctx)
+		persist = m.confirm
 	}
-	return m.persist(ctx)
+	if err := persist(ctx); err != nil {
+		return err
+	}
+	m.terminal(StateWorking)
+	return nil
 }
 
 // turnEnded is the turn over: the delivery whose turn it was retires (settle), and one queued

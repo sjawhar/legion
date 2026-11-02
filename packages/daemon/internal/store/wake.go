@@ -12,50 +12,22 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// Wake kinds, the vocabulary of pod_resumes.kind and of a wake mark's kind: the five ways a
-// released pod comes back. WakeDelivery is a delivery the daemon already had for a role of the
-// pod — a phase start, a task, a backward move, a notice, a phase-ended message, a production
-// check's look, a slot resume; WakeChecks is a CI settlement on the head of the issue's pull
-// request; WakeRoleMessage and WakeAgentMessage are what only the Envoy listener sees, a message
-// published to a role topic of the pod and one sent to the agent subject of a released session;
-// WakeBackstop is the stored backstop a release armed.
-const (
-	WakeDelivery     = "delivery"
-	WakeChecks       = "checks"
-	WakeRoleMessage  = "role_message"
-	WakeAgentMessage = "agent_message"
-	WakeBackstop     = "backstop"
-)
-
-// ReleasedClaim is one claim of a released pod as a wake reads it: a claim this daemon's project
-// holds, suspended with the source `released`, which is the one state a wake acts on. Every other
-// suspended claim is somebody else's to resume — an operator's, a close's — and a path that takes
-// a released claim over (an operator's suspend, a linger) re-stamps its source, which takes it out
-// of every read here.
-type ReleasedClaim struct {
-	Token   claim.Token
-	Project string
-	Tree    string
-	Issue   string
-	Role    claim.Role
-	// Session is the agent session the claim kept through the release, the one a message
-	// addressed to that session names.
-	Session string
-	// ServingGeneration is the run the claim was serving when it was released.
-	ServingGeneration uint64
-}
-
-// releasedClaimSelect reads the columns a wake needs of a released claim. It is deliberately not
-// claimSelect: a wake reads no delivery and no launch state, only who the claim is and what it
-// was serving.
+// releasedClaimSelect reads the columns a wake needs of a released claim: a claim this daemon's
+// project holds, suspended with the source `released` (supervise.Claim.Released), which is the
+// one state a wake acts on. Every other suspended claim is somebody else's to resume — an
+// operator's, a close's — and a path that takes a released claim over (an operator's suspend, a
+// linger) re-stamps its source, which takes it out of every read here.
+//
+// It is deliberately not claimSelect: a wake reads no delivery and no launch state, only who the
+// claim is, the session it kept and the run it was serving.
 const releasedClaimSelect = `select token, project, tree, issue, role, session, serving_generation
 	from claims where project = $1 and state = $2 and suspended_by = $3`
 
-func scanReleasedClaims(rows pgx.Rows) ([]ReleasedClaim, error) {
+func scanReleasedClaims(rows pgx.Rows) ([]supervise.Claim, error) {
 	defer rows.Close()
-	var out []ReleasedClaim
+	var out []supervise.Claim
 	for rows.Next() {
-		var c ReleasedClaim
+		c := supervise.Claim{State: supervise.StateSuspended, SuspendedBy: supervise.SuspendedByReleased}
 		var generation int64
 		if err := rows.Scan(&c.Token, &c.Project, &c.Tree, &c.Issue, &c.Role, &c.Session, &generation); err != nil {
 			return nil, err
@@ -70,7 +42,7 @@ func scanReleasedClaims(rows pgx.Rows) ([]ReleasedClaim, error) {
 
 // ReleasedClaimsOf is every released claim of issue, in token order, which is the set a wake of
 // the whole pod resumes.
-func ReleasedClaimsOf(ctx context.Context, tx pgx.Tx, project, issue string) ([]ReleasedClaim, error) {
+func ReleasedClaimsOf(ctx context.Context, tx pgx.Tx, project, issue string) ([]supervise.Claim, error) {
 	rows, err := tx.Query(ctx, releasedClaimSelect+` and issue = $4 order by token`,
 		project, string(supervise.StateSuspended), string(supervise.SuspendedByReleased), issue)
 	if err != nil {
@@ -84,49 +56,49 @@ func ReleasedClaimsOf(ctx context.Context, tx pgx.Tx, project, issue string) ([]
 }
 
 // ReleasedClaimOfRole is the released claim of issue's role, and whether there is one.
-func ReleasedClaimOfRole(ctx context.Context, tx pgx.Tx, project, issue string, role claim.Role) (ReleasedClaim, bool, error) {
+func ReleasedClaimOfRole(ctx context.Context, tx pgx.Tx, project, issue string, role claim.Role) (supervise.Claim, bool, error) {
 	claims, err := ReleasedClaimsOf(ctx, tx, project, issue)
 	if err != nil {
-		return ReleasedClaim{}, false, err
+		return supervise.Claim{}, false, err
 	}
 	for _, c := range claims {
 		if c.Role == role {
 			return c, true, nil
 		}
 	}
-	return ReleasedClaim{}, false, nil
+	return supervise.Claim{}, false, nil
 }
 
 // ReleasedClaimByToken is the released claim whose token is token, and whether this daemon's
 // project holds one. The listener reports a role token it saw a message published to and knows
 // nothing of which daemon owns it, so every daemon reads its own claims and the one that holds a
 // released claim of that token is the one that acts.
-func ReleasedClaimByToken(ctx context.Context, tx pgx.Tx, project, token string) (ReleasedClaim, bool, error) {
+func ReleasedClaimByToken(ctx context.Context, tx pgx.Tx, project, token string) (supervise.Claim, bool, error) {
 	return oneReleasedClaim(ctx, tx, `and token = $4`, project, token, "role token")
 }
 
 // ReleasedClaimBySession is the released claim that kept session, and whether this daemon's
 // project holds one. A released claim keeps its session id, which is what lets a message
 // addressed to that session find the pod that must come back for it.
-func ReleasedClaimBySession(ctx context.Context, tx pgx.Tx, project, session string) (ReleasedClaim, bool, error) {
+func ReleasedClaimBySession(ctx context.Context, tx pgx.Tx, project, session string) (supervise.Claim, bool, error) {
 	return oneReleasedClaim(ctx, tx, `and session = $4`, project, session, "session")
 }
 
-func oneReleasedClaim(ctx context.Context, tx pgx.Tx, where, project, value, what string) (ReleasedClaim, bool, error) {
+func oneReleasedClaim(ctx context.Context, tx pgx.Tx, where, project, value, what string) (supervise.Claim, bool, error) {
 	if value == "" {
-		return ReleasedClaim{}, false, nil
+		return supervise.Claim{}, false, nil
 	}
 	rows, err := tx.Query(ctx, releasedClaimSelect+" "+where+` order by token limit 1`,
 		project, string(supervise.StateSuspended), string(supervise.SuspendedByReleased), value)
 	if err != nil {
-		return ReleasedClaim{}, false, fmt.Errorf("read the released claim of %s %s: %w", what, value, err)
+		return supervise.Claim{}, false, fmt.Errorf("read the released claim of %s %s: %w", what, value, err)
 	}
 	claims, err := scanReleasedClaims(rows)
 	if err != nil {
-		return ReleasedClaim{}, false, fmt.Errorf("read the released claim of %s %s: %w", what, value, err)
+		return supervise.Claim{}, false, fmt.Errorf("read the released claim of %s %s: %w", what, value, err)
 	}
 	if len(claims) == 0 {
-		return ReleasedClaim{}, false, nil
+		return supervise.Claim{}, false, nil
 	}
 	return claims[0], true, nil
 }
@@ -148,12 +120,17 @@ func MarkPodWake(ctx context.Context, tx pgx.Tx, project, issue, kind, key strin
 	return tag.RowsAffected() > 0, nil
 }
 
-// CancelPodBackstops drops every open backstop of issue: a wake that is bringing the pod back
-// leaves nothing for one to do, and a path that takes a released claim over leaves nothing for
-// one to act on.
-func CancelPodBackstops(ctx context.Context, tx pgx.Tx, project, issue string) error {
-	if _, err := tx.Exec(ctx, `delete from pod_wake_backstops where project = $1 and issue = $2 and not fired`,
-		project, issue); err != nil {
+// CancelPodBackstops drops the open backstops of issue that role armed, and every open backstop
+// of the issue when role is empty. A wake resumes one role, and it is that role's backstop alone
+// that has nothing left to do: another role of the same pod may be waiting on a deploy run with
+// nothing but its own backstop to bring it back, and a pod woken for one role may be held again
+// before it ever reaches that other role's work. A path that takes the whole released pod over
+// (ForgetPodWakes) names no role, because no backstop of it is left to act on.
+func CancelPodBackstops(ctx context.Context, tx pgx.Tx, project, issue string, role claim.Role) error {
+	_, err := tx.Exec(ctx, `delete from pod_wake_backstops
+		where project = $1 and issue = $2 and not fired and ($3 = '' or role = $3)`,
+		project, issue, string(role))
+	if err != nil {
 		return fmt.Errorf("cancel the backstops of %s: %w", issue, err)
 	}
 	return nil
@@ -166,7 +143,7 @@ func ForgetPodWakes(ctx context.Context, tx pgx.Tx, project, issue string) error
 	if _, err := tx.Exec(ctx, `delete from pod_wake_marks where project = $1 and issue = $2`, project, issue); err != nil {
 		return fmt.Errorf("forget the wake marks of %s: %w", issue, err)
 	}
-	return CancelPodBackstops(ctx, tx, project, issue)
+	return CancelPodBackstops(ctx, tx, project, issue, "")
 }
 
 // ForgetPodWakesOf is ForgetPodWakes in a transaction of its own, for a caller outside one: the
@@ -175,43 +152,47 @@ func (s *Store) ForgetPodWakesOf(ctx context.Context, project, issue string) err
 	return s.Tx(ctx, func(tx pgx.Tx) error { return ForgetPodWakes(ctx, tx, project, issue) })
 }
 
-// TakePodWake takes one wake outside any fact transaction, for the wakes the outbox takes: a
-// notice or a phase-ended message that found the role it is for released. It marks the wake
-// under its key and, when the mark is the first, records it against the newest release of the
-// pod and answers that resume row's id. taken is false for a wake another pass already took,
-// and then the caller resumes nothing: the first wake is already bringing the pod back.
-func (s *Store) TakePodWake(ctx context.Context, project, issue, role, kind, key string, at time.Time) (int64, bool, error) {
-	var id int64
-	var taken bool
-	err := s.Tx(ctx, func(tx pgx.Tx) error {
-		first, err := MarkPodWake(ctx, tx, project, issue, kind, key, at)
-		if err != nil || !first {
-			return err
-		}
-		release, err := LatestPodRelease(ctx, tx, project, issue)
-		if err != nil {
-			return err
-		}
-		id, err = RecordPodWakeTx(ctx, tx, PodResume{Release: release, Project: project, Issue: issue,
-			Role: role, Kind: kind, At: at})
-		if err != nil {
-			return err
-		}
-		taken = true
-		return CancelPodBackstops(ctx, tx, project, issue)
-	})
-	return id, taken, err
+// TakePodWake takes one wake of issue's role inside the caller's transaction, and is the whole of
+// what taking a wake is: the mark under the wake's own key, the resume recorded against the
+// release that wake ends, and the role's own backstop cancelled. It answers whether this call
+// took the wake; false is a wake another pass already took, and then the caller resumes nothing,
+// because the first wake is already bringing the pod back.
+//
+// Every wake runs through here — the four the workflow applies inside a fact's transaction and
+// the delivery wake the outbox takes in one of its own (Store.TakePodWake) — so there is one
+// account of what a wake writes and one order it writes it in.
+func TakePodWake(ctx context.Context, tx pgx.Tx, project, issue string, role claim.Role, kind, key string, at time.Time) (bool, error) {
+	first, err := MarkPodWake(ctx, tx, project, issue, kind, key, at)
+	if err != nil || !first {
+		return false, err
+	}
+	release, err := LatestPodRelease(ctx, tx, project, issue)
+	if err != nil {
+		return false, err
+	}
+	if _, err := RecordPodWakeTx(ctx, tx, PodResume{Release: release, Project: project, Issue: issue,
+		Role: string(role), Kind: kind, At: at}); err != nil {
+		return false, err
+	}
+	return true, CancelPodBackstops(ctx, tx, project, issue, role)
 }
 
-// CancelPodBackstopsOf is CancelPodBackstops in a transaction of its own, for the same callers.
-func (s *Store) CancelPodBackstopsOf(ctx context.Context, project, issue string) error {
-	return s.Tx(ctx, func(tx pgx.Tx) error { return CancelPodBackstops(ctx, tx, project, issue) })
+// TakePodWake takes one wake outside any fact transaction, for the wakes the outbox takes: a
+// notice or a phase-ended message that found the role it is for released.
+func (s *Store) TakePodWake(ctx context.Context, project, issue string, role claim.Role, kind, key string, at time.Time) (bool, error) {
+	var taken bool
+	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		var err error
+		taken, err = TakePodWake(ctx, tx, project, issue, role, kind, key, at)
+		return err
+	})
+	return taken, err
 }
 
 // ReleasedClaimsIn is every released claim of issue, in a transaction of its own: what the
 // release's own arming of backstops reads, and what a caller outside a fact transaction asks.
-func (s *Store) ReleasedClaimsIn(ctx context.Context, project, issue string) ([]ReleasedClaim, error) {
-	var claims []ReleasedClaim
+func (s *Store) ReleasedClaimsIn(ctx context.Context, project, issue string) ([]supervise.Claim, error) {
+	var claims []supervise.Claim
 	err := s.Tx(ctx, func(tx pgx.Tx) error {
 		var err error
 		claims, err = ReleasedClaimsOf(ctx, tx, project, issue)
@@ -392,4 +373,60 @@ func (s *Store) PodResumeReadyAt(ctx context.Context, id int64) (time.Time, erro
 		return time.Time{}, nil
 	}
 	return at.UTC(), nil
+}
+
+// PodRecords is the pod tables of one project as a caller outside the store reads and writes
+// them: the listener's liveness report, the claims a release left released, the wake that brings
+// one back and the backstop a wake fires. It derives the project token the claim-keyed tables
+// hold (claim.ProjectToken) once, from the project key its caller already has, so no caller
+// carries a second spelling of the project — which is what the workflow engine's own copy of it
+// was for, and what filed the listener's report under a project the daemon never read.
+//
+// The workflow takes it as an interface (workflow.Pods), so nothing of the engine reaches
+// Postgres directly.
+type PodRecords struct {
+	store   *Store
+	project string
+}
+
+// PodRecordsOf is project's pod tables, refusing a project key that is no project
+// (claim.ProjectToken).
+func (s *Store) PodRecordsOf(project string) (*PodRecords, error) {
+	token, err := claim.ProjectToken(project)
+	if err != nil {
+		return nil, fmt.Errorf("read the pod records of %s: %w", project, err)
+	}
+	return &PodRecords{store: s, project: token}, nil
+}
+
+// RecordListenerReady stamps the Envoy listener's report for this project.
+func (p *PodRecords) RecordListenerReady(ctx context.Context, tx pgx.Tx, at time.Time) error {
+	return RecordListenerReady(ctx, tx, p.project, at)
+}
+
+// ReleasedClaimOfRole is the released claim of issue's role, and whether there is one.
+func (p *PodRecords) ReleasedClaimOfRole(ctx context.Context, tx pgx.Tx, issue string, role claim.Role) (supervise.Claim, bool, error) {
+	return ReleasedClaimOfRole(ctx, tx, p.project, issue, role)
+}
+
+// ReleasedClaimByToken is the released claim whose token is token, and whether this project
+// holds one.
+func (p *PodRecords) ReleasedClaimByToken(ctx context.Context, tx pgx.Tx, token string) (supervise.Claim, bool, error) {
+	return ReleasedClaimByToken(ctx, tx, p.project, token)
+}
+
+// ReleasedClaimBySession is the released claim that kept session, and whether this project holds
+// one.
+func (p *PodRecords) ReleasedClaimBySession(ctx context.Context, tx pgx.Tx, session string) (supervise.Claim, bool, error) {
+	return ReleasedClaimBySession(ctx, tx, p.project, session)
+}
+
+// TakePodWake takes one wake of issue's role, as the package function does.
+func (p *PodRecords) TakePodWake(ctx context.Context, tx pgx.Tx, issue string, role claim.Role, kind, key string, at time.Time) (bool, error) {
+	return TakePodWake(ctx, tx, p.project, issue, role, kind, key, at)
+}
+
+// FirePodBackstop marks backstop id fired, as the package function does.
+func (p *PodRecords) FirePodBackstop(ctx context.Context, tx pgx.Tx, id int64) (bool, error) {
+	return FirePodBackstop(ctx, tx, id)
 }

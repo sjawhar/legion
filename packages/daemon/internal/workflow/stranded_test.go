@@ -12,7 +12,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
-	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -118,17 +117,16 @@ func TestStrandedNamesAReleasedClaimOnlyWhenItsWakeNeverBroughtThePodBack(t *tes
 	s := &strandedStore{issues: issues, claims: stored,
 		slots: slotsOf("LEGION-1", "LEGION-2", "LEGION-3", "LEGION-4", "LEGION-5")}
 
-	resumes := []store.PodResume{
+	resumes := []ReleasedWake{
 		// Woken a minute ago: the replacement pod is still being built.
-		{Issue: "LEGION-2", Role: string(claim.RoleTester), Kind: "delivery", At: strandedNow.Add(-time.Minute)},
+		{Issue: "LEGION-2", Role: string(claim.RoleTester), At: strandedNow.Add(-time.Minute)},
 		// Woken well past the bound with no turn, for both roles of LEGION-3's pod.
-		{Issue: "LEGION-3", Role: string(claim.RoleReviewer), Kind: "delivery", At: strandedNow.Add(-30 * time.Minute)},
-		{Issue: "LEGION-3", Role: string(claim.RoleArchitect), Kind: "message", At: strandedNow.Add(-30 * time.Minute)},
+		{Issue: "LEGION-3", Role: string(claim.RoleReviewer), At: strandedNow.Add(-30 * time.Minute)},
+		{Issue: "LEGION-3", Role: string(claim.RoleArchitect), At: strandedNow.Add(-30 * time.Minute)},
 		// The same fact already recorded by the stuck pass, whatever the wake's age reads as now.
-		{Issue: "LEGION-4", Role: string(claim.RolePlanner), Kind: "backstop", At: strandedNow, Stuck: true},
+		{Issue: "LEGION-4", Role: string(claim.RolePlanner), At: strandedNow, Stuck: true},
 		// Woken long ago and back: the role took its turn, so nothing is stranded.
-		{Issue: "LEGION-5", Role: string(claim.RoleMerger), Kind: "delivery", At: strandedNow.Add(-time.Hour),
-			FirstTurnAt: strandedNow.Add(-50 * time.Minute)},
+		{Issue: "LEGION-5", Role: string(claim.RoleMerger), At: strandedNow.Add(-time.Hour), FirstTurn: true},
 	}
 
 	got, err := Stranded(context.Background(), nil, s, claims, resumes, strandedNow)
@@ -141,7 +139,7 @@ func TestStrandedNamesAReleasedClaimOnlyWhenItsWakeNeverBroughtThePodBack(t *tes
 	}
 
 	// A wake exactly at the bound has not run out of it.
-	atTheBound := []store.PodResume{{Issue: "LEGION-1", Role: string(claim.RoleImplementer), Kind: "delivery",
+	atTheBound := []ReleasedWake{{Issue: "LEGION-1", Role: string(claim.RoleImplementer),
 		At: strandedNow.Add(-StrandedReleaseWake)}}
 	got, err = Stranded(context.Background(), nil, s, []supervise.Claim{never}, atTheBound, strandedNow)
 	if err != nil {

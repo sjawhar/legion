@@ -156,8 +156,8 @@ func TestABundleResultRefusalNamesTheSizeAndCarriesNoBundle(t *testing.T) {
 
 // The launcher reads one frame per line and reassembles nothing of its own, so a bundle on its way
 // to a pod is sliced here: every slice inside the frame limit, every slice declaring the digest of
-// the body they rebuild, and the body itself holding the bundle raw so a 40 MiB save is base64'd
-// once rather than twice.
+// the body they rebuild, the sequence named by its caller's name and that digest, and the body
+// itself holding the bundle raw so a 40 MiB save is base64'd once rather than twice.
 func TestAWorkspaceBundleSlicesIntoFramesUnderTheLineLimit(t *testing.T) {
 	saved := WorkspaceBundle{
 		Bundle:    bytes.Repeat([]byte("PACKjj\x00\x02"), (3<<20)/8),
@@ -178,7 +178,7 @@ func TestAWorkspaceBundleSlicesIntoFramesUnderTheLineLimit(t *testing.T) {
 		if err := frame.Validate(); err != nil {
 			t.Fatalf("slice %d: %v", index, err)
 		}
-		if frame.Index != index || frame.Count != len(frames) || frame.ID != "restore-1" {
+		if frame.Index != index || frame.Count != len(frames) || frame.ID != "restore-1-"+frames[0].SHA256 {
 			t.Fatalf("slice %d is %d of %d under %q", index, frame.Index, frame.Count, frame.ID)
 		}
 		line, err := json.Marshal(frame)
@@ -212,6 +212,23 @@ func TestAWorkspaceBundleSlicesIntoFramesUnderTheLineLimit(t *testing.T) {
 		t.Fatal("a body with no bundle behind its header was accepted")
 	}
 	if _, err := SplitWorkspaceBundle("", saved); err == nil {
-		t.Fatal("a sequence with no id was accepted")
+		t.Fatal("a sequence with no name was accepted")
+	}
+	// The id is the name and the digest, so the same bundle sent again is the same sequence and
+	// another bundle under the same name is another one: the launcher tells a repeated slice
+	// from a slice of a bundle it has not seen by that id alone.
+	again, err := SplitWorkspaceBundle("restore-1", saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := saved
+	other.Head = "da4f9f492e9f8349389c243743e0a000cd1c676f"
+	changed, err := SplitWorkspaceBundle("restore-1", other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again[0].ID != frames[0].ID || changed[0].ID == frames[0].ID {
+		t.Fatalf("the same bundle sliced to %q and another to %q, want the first to repeat %q and the second not to",
+			again[0].ID, changed[0].ID, frames[0].ID)
 	}
 }

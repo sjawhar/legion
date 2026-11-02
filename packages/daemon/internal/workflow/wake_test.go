@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/pods"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store"
 )
@@ -39,7 +40,7 @@ func newWakeRig(t *testing.T) wakeRig {
 	pool := migratedPool(t)
 	logged := &bytes.Buffer{}
 	clock := &checkClock{now: wakeAt}
-	engine := New(record.NewStore(), Config{Project: "LEGION", ProjectToken: wakeProjectToken(t), Linger: time.Hour, Clock: clock.Now},
+	engine := New(record.NewStore(), Config{Project: "LEGION", Pods: wakePods(t, pool), Linger: time.Hour, Clock: clock.Now},
 		slog.New(slog.NewTextHandler(logged, nil)))
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
 		Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: wakeIssueGeneration,
@@ -49,6 +50,23 @@ func newWakeRig(t *testing.T) wakeRig {
 	seedReleasedClaim(t, pool, claim.RoleImplementer, "session-implementer")
 	seedReleasedClaim(t, pool, claim.RoleArchitect, "session-architect")
 	return wakeRig{pool: pool, engine: engine, logged: logged, apply: applyFacts(t, pool, engine)}
+}
+
+// wakePods is the project's pod records as the daemon hands them to the engine
+// (store.Store.PodRecordsOf, over the project key alone): the engine carries no spelling of the
+// project of its own, and the store derives the one its claim-keyed tables hold.
+func wakePods(t *testing.T, pool *pgxpool.Pool) Pods {
+	t.Helper()
+	st, err := store.Open(context.Background(), pool.Config().ConnString())
+	if err != nil {
+		t.Fatalf("open the store over the test pool: %v", err)
+	}
+	t.Cleanup(st.Close)
+	records, err := st.PodRecordsOf("LEGION")
+	if err != nil {
+		t.Fatalf("read the project's pod records: %v", err)
+	}
+	return records
 }
 
 // wakeProjectToken is the project as a claim token spells it, which is what `claims.project` and
@@ -186,7 +204,7 @@ func settlement(head string, failing ...string) intake.PullRequestChecks {
 func TestACISettlementWakesTheReleasedPhaseWorker(t *testing.T) {
 	rig := newWakeRig(t)
 	rig.apply("settled", settlement("head1", "build"))
-	oneWake(t, rig.pool, claim.RoleImplementer, store.WakeChecks, "head1", "build")
+	oneWake(t, rig.pool, claim.RoleImplementer, pods.WakeChecks, "head1", "build")
 }
 
 // R2: one head settles again as each of its checks finishes, and each settlement of that head
@@ -195,7 +213,7 @@ func TestASecondSettlementOfTheSameHeadWakesThePodNoSecondTime(t *testing.T) {
 	rig := newWakeRig(t)
 	rig.apply("settled", settlement("head1", "build"))
 	rig.apply("settled-again", settlement("head1"))
-	oneWake(t, rig.pool, claim.RoleImplementer, store.WakeChecks, "head1")
+	oneWake(t, rig.pool, claim.RoleImplementer, pods.WakeChecks, "head1")
 	if resumes := wakeResumes(t, rig.pool); len(resumes) != 1 {
 		t.Fatalf("pod resumes after a second settlement of the same head = %v, want the one", resumes)
 	}
@@ -207,7 +225,7 @@ func TestARoleMessageWakesTheReleasedRole(t *testing.T) {
 	rig := newWakeRig(t)
 	token := wakeToken(t, claim.RoleImplementer)
 	rig.apply("role-message", intake.ListenerWake{Kind: intake.ListenerWakeRole, Role: string(token), At: wakeAt, Report: "report-1"})
-	oneWake(t, rig.pool, claim.RoleImplementer, store.WakeRoleMessage, string(token), "role topic")
+	oneWake(t, rig.pool, claim.RoleImplementer, pods.WakeRoleMessage, string(token), "role topic")
 }
 
 // R3: the same report delivered twice wakes the pod once; the mark is keyed on the listener's own
@@ -218,7 +236,7 @@ func TestARoleMessageReportedTwiceWakesThePodOnce(t *testing.T) {
 	fact := intake.ListenerWake{Kind: intake.ListenerWakeRole, Role: string(token), At: wakeAt, Report: "report-1"}
 	rig.apply("role-message", fact)
 	rig.apply("role-message-redelivered", fact)
-	oneWake(t, rig.pool, claim.RoleImplementer, store.WakeRoleMessage, string(token))
+	oneWake(t, rig.pool, claim.RoleImplementer, pods.WakeRoleMessage, string(token))
 }
 
 // R3: a role message for a released sub-architect wakes the architect, which stays the message's
@@ -227,7 +245,7 @@ func TestARoleMessageWakesAReleasedArchitect(t *testing.T) {
 	rig := newWakeRig(t)
 	token := wakeToken(t, claim.RoleArchitect)
 	rig.apply("role-message", intake.ListenerWake{Kind: intake.ListenerWakeRole, Role: string(token), At: wakeAt, Report: "report-1"})
-	oneWake(t, rig.pool, claim.RoleArchitect, store.WakeRoleMessage, string(token))
+	oneWake(t, rig.pool, claim.RoleArchitect, pods.WakeRoleMessage, string(token))
 }
 
 // R4: a message sent to the agent subject of a released session wakes the role that kept that
@@ -235,7 +253,7 @@ func TestARoleMessageWakesAReleasedArchitect(t *testing.T) {
 func TestAnAgentMessageWakesTheReleasedSession(t *testing.T) {
 	rig := newWakeRig(t)
 	rig.apply("agent-message", intake.ListenerWake{Kind: intake.ListenerWakeAgent, Session: "session-implementer", At: wakeAt, Report: "report-2"})
-	oneWake(t, rig.pool, claim.RoleImplementer, store.WakeAgentMessage, "session-implementer", "sent to your session")
+	oneWake(t, rig.pool, claim.RoleImplementer, pods.WakeAgentMessage, "session-implementer", "sent to your session")
 }
 
 // R4: a report naming a session no released claim of this daemon's project kept wakes nothing.
@@ -281,7 +299,7 @@ func TestTheBackstopWakesThePhaseWorker(t *testing.T) {
 	rig := newWakeRig(t)
 	id := armBackstop(t, rig.pool, claim.RoleImplementer, wakeAt.Add(-time.Minute))
 	rig.apply("backstop", intake.PodBackstopDue{ID: id, Issue: "LEGION-208", Role: claim.RoleImplementer})
-	oneWake(t, rig.pool, claim.RoleImplementer, store.WakeBackstop, "backstop")
+	oneWake(t, rig.pool, claim.RoleImplementer, pods.WakeBackstop, "backstop")
 }
 
 // R5: a backstop two passes read fires once. The row's conditional fire is what decides it, so
@@ -292,7 +310,7 @@ func TestABackstopReadTwiceFiresOnce(t *testing.T) {
 	fact := intake.PodBackstopDue{ID: id, Issue: "LEGION-208", Role: claim.RoleImplementer}
 	rig.apply("backstop", fact)
 	rig.apply("backstop-again", fact)
-	oneWake(t, rig.pool, claim.RoleImplementer, store.WakeBackstop, "backstop")
+	oneWake(t, rig.pool, claim.RoleImplementer, pods.WakeBackstop, "backstop")
 	var fired bool
 	if err := rig.pool.QueryRow(context.Background(), `select fired from pod_wake_backstops where id = $1`, id).Scan(&fired); err != nil {
 		t.Fatalf("read the backstop: %v", err)
@@ -302,23 +320,25 @@ func TestABackstopReadTwiceFiresOnce(t *testing.T) {
 	}
 }
 
-// R5: an architect gets no backstop. BackstopRole is the one statement of which role a release
-// arms one for, and it answers none for a phase the architect works and none for a done issue.
+// R5: an architect gets no backstop. OpenPhaseRole is the one statement of "the worker of the
+// open phase" — which role a release arms a backstop for, which role a CI settlement wakes, and
+// which live claim has a phase reminder armed in it — and it answers none for a phase the
+// architect works and none for a phase no role works.
 func TestAnArchitectGetsNoBackstop(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		issue record.Issue
-		want  claim.Role
+		name string
+		p    phase.Phase
+		want claim.Role
 	}{
-		{name: "implementing", issue: record.Issue{Phase: phase.Implementing}, want: claim.RoleImplementer},
-		{name: "testing", issue: record.Issue{Phase: phase.Testing}, want: claim.RoleTester},
-		{name: "accepting is the architect's", issue: record.Issue{Phase: phase.Accepting}},
-		{name: "awaiting a person", issue: record.Issue{Phase: phase.AwaitingPerson}},
-		{name: "done", issue: record.Issue{Phase: phase.Done}},
+		{name: "implementing", p: phase.Implementing, want: claim.RoleImplementer},
+		{name: "testing", p: phase.Testing, want: claim.RoleTester},
+		{name: "accepting is the architect's", p: phase.Accepting},
+		{name: "awaiting a person", p: phase.AwaitingPerson},
+		{name: "done", p: phase.Done},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := BackstopRole(tc.issue); got != tc.want {
-				t.Fatalf("BackstopRole(%s) = %q, want %q", tc.issue.Phase, got, tc.want)
+			if got := OpenPhaseRole(tc.p); got != tc.want {
+				t.Fatalf("OpenPhaseRole(%s) = %q, want %q", tc.p, got, tc.want)
 			}
 		})
 	}
@@ -388,10 +408,10 @@ func TestWakeTaskNamesItsWake(t *testing.T) {
 	for _, tc := range []struct {
 		kind, detail, want string
 	}{
-		{kind: store.WakeChecks, detail: "head1 failed build", want: "head1 failed build"},
-		{kind: store.WakeRoleMessage, detail: "legion-LEGION-208-implementer", want: "role topic"},
-		{kind: store.WakeAgentMessage, detail: "session-1", want: "sent to your session"},
-		{kind: store.WakeBackstop, detail: "the backstop came due", want: "backstop"},
+		{kind: pods.WakeChecks, detail: "head1 failed build", want: "head1 failed build"},
+		{kind: pods.WakeRoleMessage, detail: "legion-LEGION-208-implementer", want: "role topic"},
+		{kind: pods.WakeAgentMessage, detail: "session-1", want: "sent to your session"},
+		{kind: pods.WakeBackstop, detail: "the backstop came due", want: "backstop"},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
 			task := WakeTask(tc.kind, tc.detail)

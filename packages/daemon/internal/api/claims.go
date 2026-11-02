@@ -226,7 +226,9 @@ func (s *server) exit(w http.ResponseWriter, r *http.Request) {
 // whenever the report's content changes (INFRA-945), so the idle rule can decide whether the
 // session's pod may be released. It decides nothing about the claim, so it posts no request to
 // the claim's machine: the report is written onto the claim's row alone
-// (store.PutClaimActivity), where a machine's own write neither carries it nor erases it.
+// (store.Store.PutClaimActivity, reached through Options.ClaimActivity), where a machine's own
+// write neither carries it nor erases it, and where a report older than the one recorded is
+// dropped rather than written.
 //
 // It refuses exactly as its siblings do — a blank field with the field's name, a claim this
 // daemon does not hold or a wrong secret with claim.InvalidSecret, a stale plugin with the
@@ -252,27 +254,18 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 	if s.refuseIfStaleClaim(w, r, m.Claim()) {
 		return
 	}
-	if s.pool == nil {
+	if s.claimActivity == nil {
 		writeJSON(w, http.StatusInternalServerError, errorBody("the daemon has no store to record session activity in"))
 		return
 	}
-	c := m.Claim()
-	c.ActivityAt = req.Activity.At.UTC()
-	c.ActivityBackground = req.Activity.BackgroundWork.Running
-	c.ActivityKinds = req.Activity.BackgroundWork.Kinds
-	if next := req.Activity.Phase.NextReminderAt; next != nil {
-		c.ActivityNextReminderAt = next.UTC()
-	} else {
-		c.ActivityNextReminderAt = time.Time{}
-	}
-	stored, err := store.PutClaimActivity(r.Context(), s.pool, c)
+	known, err := s.claimActivity.PutClaimActivity(r.Context(), req.ClaimToken, req.Activity)
 	if err != nil {
 		s.log.Error("api: a session's activity report was not recorded", "claim", req.ClaimToken,
 			"session", req.SessionID, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody("record session activity: "+err.Error()))
 		return
 	}
-	if !stored {
+	if !known {
 		writeJSON(w, claim.InvalidSecret.Status, claim.InvalidSecret)
 		return
 	}
@@ -322,10 +315,19 @@ type HoldRecord struct {
 	Passes  int64  `json:"passes"`
 }
 
-// ReleaseRecordsResponse is the body of GET /legion/v1/claims/release-records: every release,
-// resume and hold of the project recorded at or after the `since` the caller named, oldest
-// first. Each list is never null, so a window with nothing in it reads as three empty lists
-// rather than three absent ones.
+// ReleaseRecordsRequest is the body of POST /legion/v1/claims/release-records: the claim the
+// reading pod holds, that claim's secret, and the start of the window it reads as an RFC 3339
+// instant.
+type ReleaseRecordsRequest struct {
+	ClaimToken claim.Token `json:"claimToken"`
+	Secret     string      `json:"secret"`
+	Since      string      `json:"since"`
+}
+
+// ReleaseRecordsResponse is the body POST /legion/v1/claims/release-records answers: every
+// release, resume and hold of the project recorded at or after the `since` the caller named,
+// oldest first. Each list is never null, so a window with nothing in it reads as three empty
+// lists rather than three absent ones.
 type ReleaseRecordsResponse struct {
 	Releases []ReleaseRecord `json:"releases"`
 	Resumes  []ResumeRecord  `json:"resumes"`
@@ -335,25 +337,28 @@ type ReleaseRecordsResponse struct {
 // releaseRecords is a pod reading its deployment's idle-release records: what has been released,
 // what came back and how long it took, and every pod the rule kept with the reason it read. A pod
 // holds its claim credential and LEGION_DAEMON_URL and no operator token, so the route
-// authenticates by the claim exactly as ready, exit and activity do — but it is a GET with no
-// body, so the three fields ride in the query string rather than in JSON.
+// authenticates by the claim exactly as ready, exit and activity do. It is a POST because the
+// claim's secret is the credential: in a query string it would reach every proxy and access log
+// between the pod and the daemon, so it rides in the body as its siblings' does.
 //
 // It refuses a blank field by its name with 400, a claim this daemon does not hold and a wrong
 // secret with claim.InvalidSecret, and a stale plugin with the stale-contract 409, as its
 // siblings do. `since` is required and must be an RFC 3339 instant: a window nobody named is not
 // a window, and the whole table is not an answer.
 func (s *server) releaseRecords(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query()
-	token, secret, since := claim.Token(query.Get("claimToken")), query.Get("secret"), query.Get("since")
-	if !requireFields(w, field{"claimToken", string(token)}, field{"secret", secret}, field{"since", since}) {
+	var req ReleaseRecordsRequest
+	if !s.readBody(w, r, &req, s.claimSecretCheck) || !requireFields(w,
+		field{"claimToken", string(req.ClaimToken)}, field{"secret", req.Secret}, field{"since", req.Since},
+	) {
 		return
 	}
-	from, err := time.Parse(time.RFC3339, since)
+	token := req.ClaimToken
+	from, err := time.Parse(time.RFC3339, req.Since)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorBody("since must be an RFC 3339 time: "+err.Error()))
 		return
 	}
-	m, ok := s.authenticated(token, secret)
+	m, ok := s.authenticated(token, req.Secret)
 	if !ok {
 		writeJSON(w, claim.InvalidSecret.Status, claim.InvalidSecret)
 		return

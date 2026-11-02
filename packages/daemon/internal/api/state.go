@@ -542,14 +542,20 @@ type HeldOutboxRow struct {
 
 // StrandedClaim is one claim nothing will wake — a worker of its issue's phase, or its tree's
 // architect, in a tree that runs — named by its issue, its role and its state; the issue's own
-// entry under `issues` carries the rest. SuspendedBy is who suspended a suspended one and is
-// absent on a failed one. Its state, role and suspension say the move that brings it back
-// (Move).
+// entry under `issues` carries the rest. Its state, role and suspension say the move that brings
+// it back (Move).
+//
+// SuspendedBy, who suspended a suspended one, is never served here: every plugin parses this
+// body with one strict schema, and a session on the contract before this one refuses the whole
+// state over a key it does not know — a daemon that relaunches no stale session (spec R10)
+// would break every such pod the moment a claim is stranded. It is served on the operator
+// claim routes, which no plugin calls (OperatorClaim.SuspendedBy), and `legion state` reads it
+// from there to tell a released claim from a suspended one.
 type StrandedClaim struct {
 	Issue       string     `json:"issue"`
 	Role        claim.Role `json:"role"`
 	State       string     `json:"state"`
-	SuspendedBy string     `json:"suspendedBy,omitempty"`
+	SuspendedBy string     `json:"-"`
 }
 
 // StrandedMove is the move that brings a stranded claim back (StrandedClaim.Move). Its value is the
@@ -605,7 +611,9 @@ func (c StrandedClaim) Move() StrandedMove {
 }
 
 // StrandedClaimsOf is stranded as the state shows it, claim for claim. A failed claim carries no
-// suspension, so only a suspended one names who suspended it.
+// suspension, so only a suspended one names who suspended it, and never on the wire
+// (StrandedClaim.SuspendedBy): the daemon's own boot log reads it from here, and `legion state`
+// reads each from the operator claim routes.
 func StrandedClaimsOf(stranded []supervise.Claim) []StrandedClaim {
 	claims := make([]StrandedClaim, len(stranded))
 	for i, c := range stranded {

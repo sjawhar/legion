@@ -30,14 +30,12 @@ type Config struct {
 	// Project is the project key, which is what the record's own tables hold: an issue's
 	// `project`, a production check's, the Dispatch mirror's.
 	Project string
-	// ProjectToken is the same project as a claim token spells it (claim.ProjectToken), which is
-	// what every table keyed on a claim holds: `claims.project`, and with it the pod tables the
-	// idle release writes and reads — `listener_reports`, `pod_wake_marks`, `pod_releases`,
-	// `pod_resumes`, `pod_wake_backstops`. The daemon's own side of the release reads those under
-	// this spelling (workflowRuntime.projectID), so every read and write of them here uses it
-	// too; a site that used Project would file a row the daemon never finds, which is what held
-	// the release's listener gate shut (wake.go).
-	ProjectToken   string
+	// Pods is the daemon's record of the project's released pods, which the wakes read and write
+	// (Pods, wake.go). It holds the project as the claim-keyed tables spell it, derived from
+	// Project once where it is built (store.Store.PodRecordsOf), so this configuration carries
+	// one spelling of the project and a wake can file no row under another. Nil, as in every
+	// engine built without the pod tables, wakes nothing and records no listener report.
+	Pods           Pods
 	DesignGate     config.DesignGate
 	ReviewRoundCap int
 	MaxFixAttempts int

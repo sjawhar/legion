@@ -155,11 +155,11 @@ type WorkspaceBundler interface {
 // before any role of that pod starts.
 type SavedWorkspaceBundle func(ctx context.Context, issue string) (WorkspaceBundle, bool, error)
 
-// WorkspaceBundleRestored is the runtime's confirmation that the issue's saved work has reached
-// the pod that replaces the released one: the launcher holds the whole, digest-checked bundle and
-// will restore it before its first role runs. It drops the saved copy
-// (store.Store.DeleteWorkspaceBundle), so it is called only on that confirmation — a bundle no
-// launcher has taken stays in the daemon's database for the issue's next pod.
+// WorkspaceBundleRestored is the runtime's confirmation that the pod replacing the released one
+// has put the issue's saved work back: its launcher ran the restore and reported that it
+// succeeded. It drops the saved copy (store.Store.DeleteWorkspaceBundle), so it is called only
+// on that report — a bundle no launcher has restored, because none took it or because the
+// restore failed, stays in the daemon's database for the issue's next pod.
 type WorkspaceBundleRestored func(ctx context.Context, issue string) error
 
 // RegistrationDeadline is the registration deadline's base Boot×RegistrationIntervals bound plus

@@ -6,24 +6,34 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// storedClaim is the claim of token as the store holds it, which is what the idle rule reads: a
-// route that wrote onto a machine and nothing else would pass against the machine and fail here.
-func storedClaim(t *testing.T, h *harness, token claim.Token) supervise.Claim {
+// storedActivity is the four activity columns of a claim's row, which is where the report lives
+// and what the idle rule reads: a route that wrote onto the claim's machine and nothing else
+// would pass against the machine and fail here. No claim read carries them.
+type storedActivity struct {
+	at         time.Time
+	background bool
+	kinds      string
+	reminder   time.Time
+}
+
+func readActivity(t *testing.T, h *harness, token claim.Token) storedActivity {
 	t.Helper()
-	claims, err := h.supervisor.Claims(h.ctx)
-	if err != nil {
-		t.Fatalf("read the claims: %v", err)
+	var read storedActivity
+	var at, reminder *time.Time
+	if err := h.store.Pool().QueryRow(h.ctx,
+		`select activity_at, activity_background, activity_kinds, activity_next_reminder_at from claims where token = $1`,
+		string(token)).Scan(&at, &read.background, &read.kinds, &reminder); err != nil {
+		t.Fatalf("read the activity of %s: %v", token, err)
 	}
-	for _, c := range claims {
-		if c.Token == token {
-			return c
-		}
+	if at != nil {
+		read.at = *at
 	}
-	t.Fatalf("no stored claim for %s", token)
-	return supervise.Claim{}
+	if reminder != nil {
+		read.reminder = *reminder
+	}
+	return read
 }
 
 // INFRA-945: the four values the idle rule reads of a live session reach the claim's row and come
@@ -47,18 +57,18 @@ func TestClaimActivityIsWrittenOntoTheClaimAndReadBack(t *testing.T) {
 		t.Fatalf("activity = %d with body %s, want 204 and nothing", recorder.Code, recorder.Body)
 	}
 
-	stored := storedClaim(t, h, token)
-	if !stored.ActivityAt.Equal(read) {
-		t.Errorf("activity_at = %s, want %s", stored.ActivityAt, read)
+	stored := readActivity(t, h, token)
+	if !stored.at.Equal(read) {
+		t.Errorf("activity_at = %s, want %s", stored.at, read)
 	}
-	if !stored.ActivityBackground {
+	if !stored.background {
 		t.Error("activity_background = false, want true")
 	}
-	if got := stored.ActivityKinds; len(got) != 2 || got[0] != "async-job" || got[1] != "subagent" {
-		t.Errorf("activity_kinds = %v, want [async-job subagent]", got)
+	if stored.kinds != "async-job,subagent" {
+		t.Errorf("activity_kinds = %q, want \"async-job,subagent\"", stored.kinds)
 	}
-	if !stored.ActivityNextReminderAt.Equal(wake) {
-		t.Errorf("activity_next_reminder_at = %s, want %s", stored.ActivityNextReminderAt, wake)
+	if !stored.reminder.Equal(wake) {
+		t.Errorf("activity_next_reminder_at = %s, want %s", stored.reminder, wake)
 	}
 
 	// The work ended and no reminder is armed any more: an empty kind list and no wake are
@@ -73,9 +83,8 @@ func TestClaimActivityIsWrittenOntoTheClaimAndReadBack(t *testing.T) {
 	}, nil); recorder.Code != http.StatusNoContent {
 		t.Fatalf("the second activity = %d; body %s", recorder.Code, recorder.Body)
 	}
-	quiet := storedClaim(t, h, token)
-	if !quiet.ActivityAt.Equal(later) || quiet.ActivityBackground || len(quiet.ActivityKinds) != 0 ||
-		!quiet.ActivityNextReminderAt.IsZero() {
+	quiet := readActivity(t, h, token)
+	if !quiet.at.Equal(later) || quiet.background || quiet.kinds != "" || !quiet.reminder.IsZero() {
 		t.Errorf("the quiet report read back as %+v", quiet)
 	}
 }
@@ -118,7 +127,7 @@ func TestClaimActivityRefusesACallerThatCannotProveItsClaim(t *testing.T) {
 		t.Errorf("a report with no reading time = %d, want 400; body %s", undated.Code, undated.Body)
 	}
 
-	if stored := storedClaim(t, h, token); !stored.ActivityAt.IsZero() {
-		t.Errorf("a refused report left activity_at at %s", stored.ActivityAt)
+	if stored := readActivity(t, h, token); !stored.at.IsZero() {
+		t.Errorf("a refused report left activity_at at %s", stored.at)
 	}
 }

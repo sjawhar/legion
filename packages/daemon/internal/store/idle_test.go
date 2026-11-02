@@ -5,8 +5,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/pods"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -35,12 +38,13 @@ func TestTheIdleViewReadsTheStoredActivityReportAndTheQueuedRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The report arrives the way the route sends it, after the machine's own last write.
-	reported := c
-	reported.ActivityAt = now.Add(-40 * time.Minute)
-	reported.ActivityBackground = true
-	reported.ActivityKinds = []string{"async-job", "subagent"}
-	reported.ActivityNextReminderAt = now.Add(-5 * time.Minute)
-	if wrote, err := PutClaimActivity(ctx, st.Pool(), reported); err != nil || !wrote {
+	reminder := now.Add(-5 * time.Minute)
+	reported := claim.SessionActivity{
+		At:             now.Add(-40 * time.Minute),
+		BackgroundWork: claim.BackgroundWork{Running: true, Kinds: []string{"async-job", "subagent"}},
+		Phase:          claim.PhaseActivity{NextReminderAt: &reminder},
+	}
+	if wrote, err := st.PutClaimActivity(ctx, token, reported); err != nil || !wrote {
 		t.Fatalf("PutClaimActivity = %t, %v", wrote, err)
 	}
 	if _, err := st.Pool().Exec(ctx, `insert into outbox (id, kind, issue, payload, attempts, next_at, last_error) values
@@ -49,29 +53,26 @@ func TestTheIdleViewReadsTheStoredActivityReportAndTheQueuedRows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	view, err := st.IdleView(ctx, "legion", rootIssue)
-	if err != nil {
-		t.Fatalf("IdleView: %v", err)
-	}
+	view := idleViewOf(t, st, rootIssue)
 	if !view.Found || view.Tree != rootIssue || view.Phase != phase.Implementing || view.Generation != 1 || view.Status != "in_progress" {
 		t.Fatalf("view = %+v, want the running issue", view)
 	}
-	if !view.IsRoot() || view.Root.Key != rootIssue || view.Root.AwaitingPerson || view.Root.Lingering {
+	if !view.IsRoot() || view.Root.AwaitingPerson || view.Root.LingerUntil != nil {
 		t.Fatalf("root = %+v, want the running root", view.Root)
 	}
 	if len(view.Claims) != 1 {
 		t.Fatalf("claims = %+v, want the one claim", view.Claims)
 	}
 	got := view.Claims[0]
-	if got.Token != token || got.Role != claim.RoleImplementer || got.State != supervise.StateIdle || got.PluginContract != 47 || got.ServingGeneration != 1 {
+	if got.Role != claim.RoleImplementer || got.State != supervise.StateIdle || got.PluginContract != 47 || got.ServingGeneration != 1 {
 		t.Fatalf("claim = %+v, want the stored implementer", got)
 	}
 	if !got.Live() {
 		t.Fatalf("claim %+v reads as not live", got)
 	}
-	if !got.ActivityAt.Equal(reported.ActivityAt) || !got.ActivityBackground ||
+	if !got.ActivityAt.Equal(reported.At) || !got.ActivityBackground ||
 		len(got.ActivityKinds) != 2 || got.ActivityKinds[0] != "async-job" || got.ActivityKinds[1] != "subagent" ||
-		!got.ActivityNextReminderAt.Equal(reported.ActivityNextReminderAt) {
+		!got.ActivityNextReminderAt.Equal(reminder) {
 		t.Fatalf("activity = %+v, want the session's own report", got)
 	}
 	if !got.LastTurnAt.Equal(now.Add(-45 * time.Minute)) {
@@ -83,19 +84,36 @@ func TestTheIdleViewReadsTheStoredActivityReportAndTheQueuedRows(t *testing.T) {
 	if since, ok := got.ActivityAt, got.UpdatedAt.IsZero(); ok || got.UpdatedAt.Before(since) {
 		t.Fatalf("updated_at = %s, want it at or after the report at %s", got.UpdatedAt, since)
 	}
-	// The start waits for a role of the pod; the Dispatch status write reaches no session.
-	if len(view.Waiting) != 1 || view.Waiting[0].ID != 31 || view.Waiting[0].Kind != "supervise" || view.Waiting[0].Role != claim.RoleTester {
-		t.Fatalf("waiting = %+v, want the queued start alone", view.Waiting)
+	// The start waits for a role of the pod; the Dispatch status write reaches no session, so
+	// the view would read nothing waiting without it.
+	if !view.Waiting {
+		t.Fatal("the view reads nothing waiting, though a start of the pod's tester is queued")
 	}
 	if view.Releasing {
 		t.Fatal("the view reports a release in progress with no mark written")
 	}
 
-	markRelease(t, st, 31, 0)
-	marked, err := st.IdleView(ctx, "legion", rootIssue)
-	if err != nil || !marked.Releasing {
-		t.Fatalf("view after the mark = %+v, %v; want it releasing", marked.Releasing, err)
+	markRelease(t, st, 30, 31, 32, 0)
+	if marked := idleViewOf(t, st, rootIssue); !marked.Releasing {
+		t.Fatalf("view after the mark = %+v, want it releasing", marked.Releasing)
 	}
+}
+
+// idleViewOf is the pod's view as the release's own transaction reads it (readIdleView, which
+// ReleaseIdleIssue hands to the rule): the store serves no view of its own, because nothing but
+// that decision reads one.
+func idleViewOf(t *testing.T, st *Store, issue string) pods.IdleView {
+	t.Helper()
+	ctx := context.Background()
+	var view pods.IdleView
+	if err := st.Tx(ctx, func(tx pgx.Tx) error {
+		var err error
+		view, err = readIdleView(ctx, tx, "legion", issue)
+		return err
+	}); err != nil {
+		t.Fatalf("read the idle view of %s: %v", issue, err)
+	}
+	return view
 }
 
 // A machine's own claim write never carries the activity report, which is why an idle decision
@@ -111,9 +129,8 @@ func TestAClaimWriteAfterAReportLeavesTheReportStanding(t *testing.T) {
 	if err := st.PutClaim(ctx, c); err != nil {
 		t.Fatal(err)
 	}
-	reported := c
-	reported.ActivityAt = time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
-	if _, err := PutClaimActivity(ctx, st.Pool(), reported); err != nil {
+	reported := claim.SessionActivity{At: time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)}
+	if _, err := st.PutClaimActivity(ctx, token, reported); err != nil {
 		t.Fatal(err)
 	}
 	// The machine, which never read the report, persists its next state.
@@ -121,12 +138,9 @@ func TestAClaimWriteAfterAReportLeavesTheReportStanding(t *testing.T) {
 	if err := st.PutClaim(ctx, c); err != nil {
 		t.Fatal(err)
 	}
-	view, err := st.IdleView(ctx, "legion", rootIssue)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := view.Claims[0]; !got.ActivityAt.Equal(reported.ActivityAt) {
-		t.Fatalf("activity_at = %s after the machine's write, want the report's %s", got.ActivityAt, reported.ActivityAt)
+	view := idleViewOf(t, st, rootIssue)
+	if got := view.Claims[0]; !got.ActivityAt.Equal(reported.At) {
+		t.Fatalf("activity_at = %s after the machine's write, want the report's %s", got.ActivityAt, reported.At)
 	}
 }
 
@@ -143,7 +157,7 @@ func TestReleaseIdleIssueWritesItsRowsAndItsMarkTogether(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	kept, err := st.ReleaseIdleIssue(ctx, "legion", rootIssue, func(IdleView) (IdleReleaseMark, error) {
+	kept, err := st.ReleaseIdleIssue(ctx, "legion", rootIssue, func(pods.IdleView) (IdleReleaseMark, error) {
 		return IdleReleaseMark{}, nil
 	})
 	if err != nil || kept {
@@ -157,8 +171,8 @@ func TestReleaseIdleIssueWritesItsRowsAndItsMarkTogether(t *testing.T) {
 		t.Fatalf("outbox rows = %d, want none written by a decision that released nothing", rows)
 	}
 
-	var seen IdleView
-	marked, err := st.ReleaseIdleIssue(ctx, "legion", rootIssue, func(view IdleView) (IdleReleaseMark, error) {
+	var seen pods.IdleView
+	marked, err := st.ReleaseIdleIssue(ctx, "legion", rootIssue, func(view pods.IdleView) (IdleReleaseMark, error) {
 		seen = view
 		return IdleReleaseMark{Generation: view.Generation, Role: claim.RoleImplementer, Rows: []IdleReleaseRow{
 			{Kind: "issue_bundle", Payload: []byte(`{"tree":"LEGION-208","generation":1,"treeGeneration":1,"role":"implementer"}`)},
@@ -169,7 +183,7 @@ func TestReleaseIdleIssueWritesItsRowsAndItsMarkTogether(t *testing.T) {
 	if err != nil || !marked {
 		t.Fatalf("ReleaseIdleIssue = %t, %v; want the release marked", marked, err)
 	}
-	if len(seen.Claims) != 1 || seen.Claims[0].Token != token {
+	if len(seen.Claims) != 1 || seen.Claims[0].Role != claim.RoleImplementer {
 		t.Fatalf("the decision saw %+v, want the issue's one claim", seen.Claims)
 	}
 
@@ -192,20 +206,21 @@ func TestReleaseIdleIssueWritesItsRowsAndItsMarkTogether(t *testing.T) {
 		ids[1] <= ids[0] || ids[2] <= ids[1] {
 		t.Fatalf("queued rows = %v (%v), want the save, then the role stop, then the teardown", kinds, ids)
 	}
-	first := ids[1]
-	var boundary, generation int64
+	var first, boundary, last, generation int64
 	var role string
-	if err := st.Pool().QueryRow(ctx, `select boundary_row, generation, role from issue_releases where project='legion' and issue=$1`,
-		rootIssue).Scan(&boundary, &generation, &role); err != nil {
+	if err := st.Pool().QueryRow(ctx, `select first_row, boundary_row, last_row, generation, role from issue_releases
+		where project='legion' and issue=$1`, rootIssue).Scan(&first, &boundary, &last, &generation, &role); err != nil {
 		t.Fatal(err)
 	}
-	if boundary != first || generation != 1 || role != "implementer" {
-		t.Fatalf("mark = row %d, generation %d, role %s; want the first row %d", boundary, generation, role, first)
+	// The mark names its own rows: the save, the role stop that is its boundary, and the
+	// teardown, which is how a row of this release is told from a row of one that is over.
+	if first != ids[0] || boundary != ids[1] || last != ids[2] || generation != 1 || role != "implementer" {
+		t.Fatalf("mark = rows %d..%d boundary %d, generation %d, role %s; want the rows %v", first, last, boundary, generation, role, ids)
 	}
 
 	// A second release never starts behind the first: the decision is asked, sees the mark, and
 	// nothing more is written.
-	again, err := st.ReleaseIdleIssue(ctx, "legion", rootIssue, func(view IdleView) (IdleReleaseMark, error) {
+	again, err := st.ReleaseIdleIssue(ctx, "legion", rootIssue, func(view pods.IdleView) (IdleReleaseMark, error) {
 		if !view.Releasing {
 			t.Error("the second decision was handed a view that does not report the release in progress")
 		}
@@ -226,9 +241,8 @@ func TestReleaseIdleIssueWritesItsRowsAndItsMarkTogether(t *testing.T) {
 	if err := st.ClearIssueRelease(ctx, "legion", rootIssue); err != nil {
 		t.Fatal(err)
 	}
-	cleared, err := st.IdleView(ctx, "legion", rootIssue)
-	if err != nil || cleared.Releasing {
-		t.Fatalf("view after the mark was cleared = %t, %v; want no release in progress", cleared.Releasing, err)
+	if cleared := idleViewOf(t, st, rootIssue); cleared.Releasing {
+		t.Fatalf("view after the mark was cleared = %t, want no release in progress", cleared.Releasing)
 	}
 }
 

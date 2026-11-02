@@ -23,17 +23,17 @@ const strandedReportTimeout = 5 * time.Second
 // strandedReleaseWakes is the wakes of released pods that workflow.Stranded judges R6 on: the
 // recorded resumes of project that have not reached the woken role's first turn
 // (store.UnfinishedPodResumes, read up to now so the ten-minute bound stays workflow's alone,
-// and the rows a stuck pass has already marked included, since those are exactly the pods a wake
-// never brought back). It is read only when the project holds a released claim, so a deployment
-// that releases no pod makes no query for one.
+// of each pod's newest release alone, and the rows a stuck pass has already marked included,
+// since those are exactly the pods a wake never brought back). It is read only when the project
+// holds a released claim, so a deployment that releases no pod makes no query for one.
 //
 // It is the resumes table's cheap read: PodReleaseRecords, the other read of that table, carries
 // every release and hold of the project with it, so the state route — which judges this rule on
 // every request — must not read it.
-func strandedReleaseWakes(ctx context.Context, st *store.Store, projectToken string, claims []supervise.Claim, now time.Time) ([]store.PodResume, error) {
+func strandedReleaseWakes(ctx context.Context, st *store.Store, projectToken string, claims []supervise.Claim, now time.Time) ([]workflow.ReleasedWake, error) {
 	released := false
 	for _, c := range claims {
-		if c.State == supervise.StateSuspended && c.SuspendedBy == supervise.SuspendedByReleased {
+		if c.Released() {
 			released = true
 			break
 		}
@@ -41,7 +41,16 @@ func strandedReleaseWakes(ctx context.Context, st *store.Store, projectToken str
 	if !released {
 		return nil, nil
 	}
-	return st.UnfinishedPodResumes(ctx, projectToken, now)
+	resumes, err := st.UnfinishedPodResumes(ctx, projectToken, now)
+	if err != nil {
+		return nil, err
+	}
+	wakes := make([]workflow.ReleasedWake, 0, len(resumes))
+	for _, resume := range resumes {
+		wakes = append(wakes, workflow.ReleasedWake{Issue: resume.Issue, Role: resume.Role, At: resume.At,
+			FirstTurn: !resume.FirstTurnAt.IsZero(), Stuck: resume.Stuck})
+	}
+	return wakes, nil
 }
 
 // reportStranded logs, once the boot has re-adopted every claim and replayed the failed ones to

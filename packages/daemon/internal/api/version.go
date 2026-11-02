@@ -485,10 +485,12 @@ package api
 // restores from the chunked `launcher_bundle` frames before any role starts; a launcher before 48
 // knows neither frame, and a shim before 48 answers none, so the image probe holds this daemon
 // and the image that runs its roles together. A claim may read the deployment's release, resume
-// and hold records on GET /legion/v1/claims/release-records, authenticated by the claim and
-// naming the window in its query, and each entry of the state's `strandedClaims` now carries the
-// `suspendedBy` of a suspended claim, so a released one whose wake never brought its pod back
-// reads apart from one an operator suspended. This change adds six store
-// migrations. (This branch took 47; main then landed 45, which put #2538 on 46 and #2539 on 47,
-// so this branch takes the number above them, as the collision note says.)
+// and hold records on POST /legion/v1/claims/release-records, which names its claim, that
+// claim's secret and the window's start in its body, as the other claim routes do: the secret is
+// a credential, and a query string reaches every proxy and access log between the pod and the
+// daemon. No session-facing body carries the new `suspendedBy` value: the state's
+// `strandedClaims` keeps the three keys it has had since 23, and an operator reads a released
+// claim apart from a suspended one on the operator claim routes, which no plugin calls. This
+// change adds six store migrations. (This branch took 47; main then landed 45, which put #2538
+// on 46 and #2539 on 47, so this branch takes the number above them, as the collision note says.)
 const DaemonAPIVersion = 48

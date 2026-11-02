@@ -149,9 +149,13 @@ type Options struct {
 	// once it has returned.
 	CapabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
 	// ReleaseRecords is the store's record of what the idle release has done (store.Store), which
-	// the claim route `GET /legion/v1/claims/release-records` serves a pod. Nil answers that route
+	// the claim route `POST /legion/v1/claims/release-records` serves a pod. Nil answers that route
 	// 500 and changes nothing else.
 	ReleaseRecords ReleaseRecordStore
+	// ClaimActivity records what a claim's session reports it is doing (store.Store), which the
+	// claim route `POST /legion/v1/claims/activity` writes. Nil answers that route 500 and
+	// changes nothing else.
+	ClaimActivity ClaimActivityStore
 }
 
 // TreeLifecycles is the store's durable tree barrier (store.Store) as the operator routes use it:
@@ -167,6 +171,15 @@ type TreeLifecycles interface {
 // them: every release, resume and hold of the project recorded at or after a time.
 type ReleaseRecordStore interface {
 	PodReleaseRecords(ctx context.Context, project string, since time.Time) (store.PodReleaseRecords, error)
+}
+
+// ClaimActivityStore is the store's write of a session's activity report (store.Store) as the
+// claim route makes it: the report lives on the claim's row and nowhere in the claim's machine,
+// so the route reaches it here rather than through the daemon's pool. It answers whether the
+// store holds the claim at all; a report older than the one recorded is dropped and still
+// answers true.
+type ClaimActivityStore interface {
+	PutClaimActivity(ctx context.Context, token claim.Token, activity claim.SessionActivity) (bool, error)
 }
 
 type server struct {
@@ -206,10 +219,11 @@ type server struct {
 	dispatch     dispatch.Client
 	claimReady   func(c supervise.Claim)
 	// promptAgents and capabilityReported are Options.PromptAgents and Options.CapabilityReported,
-	// releaseRecordStore Options.ReleaseRecords.
+	// releaseRecordStore Options.ReleaseRecords and claimActivity Options.ClaimActivity.
 	promptAgents       []string
 	capabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
 	releaseRecordStore ReleaseRecordStore
+	claimActivity      ClaimActivityStore
 	// stopping and drained are Options.Stopping and Options.Drained, decisions Options.Decisions.
 	stopping  context.Context
 	drained   context.Context
@@ -259,6 +273,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		promptAgents:       opts.PromptAgents,
 		capabilityReported: opts.CapabilityReported,
 		releaseRecordStore: opts.ReleaseRecords,
+		claimActivity:      opts.ClaimActivity,
 		log:                opts.Log,
 		stopping:           opts.Stopping,
 		drained:            opts.Drained,
@@ -293,7 +308,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	mux.HandleFunc("POST /legion/v1/claims/ready", s.ready)
 	mux.HandleFunc("POST /legion/v1/claims/exit", s.exit)
 	mux.HandleFunc("POST /legion/v1/claims/activity", s.activity)
-	mux.HandleFunc("GET /legion/v1/claims/release-records", s.releaseRecords)
+	mux.HandleFunc("POST /legion/v1/claims/release-records", s.releaseRecords)
 	mux.HandleFunc("POST /legion/v1/grants", s.grant)
 	mux.HandleFunc("POST /legion/v1/controller/secret", s.controllerSecret)
 	mux.HandleFunc("POST /legion/v1/controller/github-credential", s.controllerGitHubCredential)

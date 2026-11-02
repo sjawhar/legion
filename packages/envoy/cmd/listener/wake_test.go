@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -62,7 +66,7 @@ func TestTheWakeReportsWireShape(t *testing.T) {
 // A report with no bus to publish on is dropped, never a panic: a listener built without a
 // client in a test answers its 404s as it always did.
 func TestAWakeReportWithNoBusIsDropped(t *testing.T) {
-	publishWakeReport(nil, logging.New("test"), wakeReport{Kind: wakeKindReady})
+	publishWakeReport(context.Background(), nil, logging.New("test"), wakeReport{Kind: wakeKindReady})
 	reportAgentWake(nil, logging.New("test"), "")
 	if !bus.StreamCaptures(bus.LegionWakeTopic) {
 		t.Fatalf("the stream does not capture the wake topic")
@@ -98,7 +102,7 @@ func TestEveryWakeReportCrossesTheBusAsAValidEnvelope(t *testing.T) {
 		{Kind: wakeKindAgent, Session: "session-1"},
 		{Kind: wakeKindReady},
 	} {
-		publishWakeReport(client, logging.New("test"), report)
+		publishWakeReport(context.Background(), client, logging.New("test"), report)
 		message, err := subscription.NextMsg(10 * time.Second)
 		if err != nil {
 			t.Fatalf("the %s report never reached %s: %v", report.Kind, bus.LegionWakeTopic, err)
@@ -138,5 +142,80 @@ func TestEveryWakeReportCrossesTheBusAsAValidEnvelope(t *testing.T) {
 		if payload["kind"] != report.Kind {
 			t.Errorf("the %s report's payload says kind %v", report.Kind, payload["kind"])
 		}
+	}
+}
+
+// R3: a wake report is retried until the bus takes it. Losing one is not "one wake late": the
+// daemon arms a backstop for a phase worker of an open phase alone, so a released architect, and
+// a worker whose phase is closed, have nothing else that brings their pod back, and the daemon's
+// stranded report passes over a released claim no wake ever touched. A report dropped while the
+// stream is out of reach — a reconnect, a stream not yet reconciled — would leave such a tree
+// stalled with nothing saying so.
+//
+// The bus here is out of reach exactly that way: a client of an account whose stream does not
+// exist yet cannot publish to it at all, and the stream arrives while the report is retrying.
+func TestAWakeReportIsRetriedUntilTheBusTakesIt(t *testing.T) {
+	url := testnats.URL(t)
+	client, err := bus.Connect([]string{url})
+	if err != nil {
+		t.Fatalf("connect the bus: %v", err)
+	}
+	t.Cleanup(client.Close)
+	reported := make(chan struct{})
+	go func() {
+		defer close(reported)
+		publishWakeReport(context.Background(), client, logging.New("test"),
+			wakeReport{Kind: wakeKindAgent, Session: "session-released"})
+	}()
+
+	// The stream arrives only once one whole attempt has run out, as a reconnect or a
+	// deployment's first reconcile brings it back: a report published once, however long its own
+	// bound, is gone by then, and only a retry still has it to send.
+	time.Sleep(wakeReportAttempt + 500*time.Millisecond)
+	owner, err := bus.ConnectOwningStream([]string{url}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("create the stream: %v", err)
+	}
+	t.Cleanup(owner.Close)
+
+	// What the report is read from is the stream, not the subject: a publish the stream never
+	// acknowledged still reaches a core subscriber of that subject, and a wake the stream does
+	// not hold reaches no daemon's durable and survives no daemon restart (R3).
+	subscription, err := owner.JS().SubscribeSync(bus.LegionWakeTopic, nats.DeliverAll(), nats.OrderedConsumer())
+	if err != nil {
+		t.Fatalf("read %s from the stream: %v", bus.LegionWakeTopic, err)
+	}
+	t.Cleanup(func() { _ = subscription.Unsubscribe() })
+	message, err := subscription.NextMsg(60 * time.Second)
+	if err != nil {
+		t.Fatalf("the stream never stored the agent_message report: %v", err)
+	}
+	var item contracts.Envelope
+	if err := json.Unmarshal(message.Data, &item); err != nil {
+		t.Fatalf("decode the report's envelope: %v", err)
+	}
+	if err := item.Validate(); err != nil {
+		t.Fatalf("the retried report's envelope is not valid: %v", err)
+	}
+	select {
+	case <-reported:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the report's goroutine is still retrying after the stream took it")
+	}
+}
+
+// Security[untrusted-input]: the listener's own wake subject is refused to every caller of the
+// publish route. A Legion daemon acts on what it reads there — it wakes the pod a role token or
+// a session names, and holds its whole release gate open on a `listener_ready` report — and a
+// caller of this route chooses every field of the envelope and the payload, source "envoy"
+// included, so a session that could publish here could wake pods at will and keep that gate open
+// with a report dated in the future.
+func TestThePublishRouteRefusesTheLegionWakeTopic(t *testing.T) {
+	recorder, _ := publishThrough(&listenerDeps{}, `{"topic":"`+bus.LegionWakeTopic+`","message":"listener_ready","source":"envoy"}`)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("publishing %s answered %d; want it refused with 400, body %s", bus.LegionWakeTopic, recorder.Code, recorder.Body)
+	}
+	if !strings.Contains(recorder.Body.String(), "the listener alone reports a Legion pod wake") {
+		t.Fatalf("the refusal = %s, want it to say the listener alone reports a wake", recorder.Body)
 	}
 }

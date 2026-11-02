@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/pods"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store"
-	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
@@ -86,7 +86,7 @@ func (w *workflowRuntime) releaseIdlePod(ctx context.Context, issue string) {
 	onConfiguredImage := w.idleImages.IssuePodRunsConfiguredImage(issue)
 	var decision workflow.IdleDecision
 	var quiet bool
-	marked, err := w.idleStore.ReleaseIdleIssue(ctx, w.projectID, issue, func(view store.IdleView) (store.IdleReleaseMark, error) {
+	marked, err := w.idleStore.ReleaseIdleIssue(ctx, w.projectID, issue, func(view pods.IdleView) (store.IdleReleaseMark, error) {
 		decision = workflow.IdleRelease(view, now, w.idlePeriod, onConfiguredImage, api.DaemonAPIVersion)
 		since, found := view.QuietSince()
 		quiet = found && now.Sub(since) >= w.idlePeriod
@@ -102,9 +102,13 @@ func (w *workflowRuntime) releaseIdlePod(ctx context.Context, issue string) {
 	if !marked {
 		detail := strings.Join(decision.HoldKinds, ",")
 		w.log.Debug("idle release: the pod is kept", "issue", issue, "hold", decision.Hold.String(), "detail", detail)
-		if quiet {
-			recordIdleHold(ctx, w.idleStore, w.projectID, issue, decision.Hold, detail, now, w.log)
+		if !quiet {
+			// The pod did something inside the idle period, so no hold of it is running: every
+			// streak it has ends here and a later pass that holds it starts a new one.
+			endIdleHolds(ctx, w.idleStore, w.projectID, issue, "", w.log)
+			return
 		}
+		recordIdleHold(ctx, w.idleStore, w.projectID, issue, decision.Hold, detail, now, w.log)
 		return
 	}
 	w.log.Info("idle release: releasing an issue's pod, which has had no turn in progress and no turn due for the idle period",
@@ -125,12 +129,13 @@ func (w *workflowRuntime) releaseIdlePod(ctx context.Context, issue string) {
 //     would count every release again, once per tick of its teardown.
 //
 // Every other value is a reason worth a row, the ones that are working as designed
-// (background_work, in_turn, delivery_waiting, reminder_due, awaiting_person) as much as the ones
-// that are not (image, plugin_contract, unreported, bundle_too_large, bundle_save_failed): a
-// deployment reads release's health from which of them it sees, so leaving the healthy ones out
-// would leave it unable to tell a pod kept for good reason from one never decided at all.
-// IdleHoldTreeNotLive is recorded too: a pod of an issue the workflow has taken out is one the
-// close is stopping, and a deployment that sees it every tick is seeing a close that is stuck.
+// (background_work, in_turn, delivery_waiting, reminder_due, awaiting_person) as much as the
+// ones that are not (image, plugin_contract, unreported, bundle_too_large, bundle_save_failed,
+// overtaken, unauthorized): a deployment reads release's health from which of them it sees, so
+// leaving the healthy ones out would leave it unable to tell a pod kept for good reason from one
+// never decided at all. IdleHoldTreeNotLive is recorded too: a pod of an issue the workflow has
+// taken out is one the close is stopping, and a deployment that sees it every tick is seeing a
+// close that is stuck.
 func recordableHold(hold workflow.IdleHold) bool {
 	switch hold {
 	case workflow.IdleHoldNone, workflow.IdleHoldNotIdle, workflow.IdleHoldNoPod, workflow.IdleHoldReleasing:
@@ -141,14 +146,31 @@ func recordableHold(hold workflow.IdleHold) bool {
 
 // recordIdleHold records one pass of the idle rule that kept a pod past the idle period, under
 // the rule's own word for the reason and the detail that word leaves out ("" where there is
-// none). A hold that cannot be written is logged and nothing else: the records are a
-// deployment's measurement, and a release is a saving, so nothing waits on either.
+// none), and ends every streak of that pod under another reason (store.RecordPodHold). A hold no
+// deployment reads as a hold ends every streak of the pod instead: nothing is keeping it now. A
+// record that cannot be written is logged and nothing else: the records are a deployment's
+// measurement, and a release is a saving, so nothing waits on either.
 func recordIdleHold(ctx context.Context, st *store.Store, project, issue string, hold workflow.IdleHold, detail string, at time.Time, log *slog.Logger) {
-	if st == nil || !recordableHold(hold) {
+	if st == nil {
+		return
+	}
+	if !recordableHold(hold) {
+		endIdleHolds(ctx, st, project, issue, "", log)
 		return
 	}
 	if err := st.RecordPodHold(ctx, store.PodHold{Project: project, Issue: issue, Reason: hold.String(), Detail: detail, At: at}); err != nil {
 		log.Warn("idle release: could not record a pod's hold", "issue", issue, "hold", hold.String(), "error", err)
+	}
+}
+
+// endIdleHolds ends every hold streak of a pod but except's ("" ending them all), which is what
+// a pass that reads no hold worth a row leaves behind.
+func endIdleHolds(ctx context.Context, st *store.Store, project, issue, except string, log *slog.Logger) {
+	if st == nil {
+		return
+	}
+	if err := st.EndPodHoldStreaks(ctx, project, issue, except); err != nil {
+		log.Warn("idle release: could not end a pod's hold streaks", "issue", issue, "error", err)
 	}
 }
 
@@ -165,7 +187,7 @@ func (r *outbox) recordPodRelease(ctx context.Context, issue string, generation 
 	var roles []string
 	for _, machine := range r.supervisor.supervised() {
 		c := machine.Claim()
-		if c.Issue == issue && c.State == supervise.StateSuspended && c.SuspendedBy == supervise.SuspendedByReleased {
+		if c.Issue == issue && c.Released() {
 			roles = append(roles, string(c.Role))
 		}
 	}
@@ -201,7 +223,7 @@ func (r *outbox) recordPodHold(ctx context.Context, issue string, hold workflow.
 //     delivery queued while the save ran is still below it and cancels the whole release;
 //  3. the teardown (record.IssueRelease): it deletes the pod, its disk and its Sandbox, and
 //     records the release with the size the save stored.
-func idleReleaseRows(view store.IdleView, decision workflow.IdleDecision, now time.Time) (store.IdleReleaseMark, error) {
+func idleReleaseRows(view pods.IdleView, decision workflow.IdleDecision, now time.Time) (store.IdleReleaseMark, error) {
 	mark := store.IdleReleaseMark{Generation: view.Generation, Role: decision.Roles[0]}
 	rows := make([]store.IdleReleaseRow, 0, len(decision.Roles)+2)
 	add := func(payload record.OutboxPayload, boundary bool) error {

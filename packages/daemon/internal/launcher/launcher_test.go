@@ -73,14 +73,16 @@ type rig struct {
 }
 
 // roleConn is the daemon end of one role's launcher connection: the frames it reads, the hello
-// that opened it and the last state the role reported on it.
+// that opened it, the last state the role reported on it and the last report it made of the
+// pod's workspace restore.
 type roleConn struct {
-	t      *testing.T
-	conn   net.Conn
-	reader *bufio.Reader
-	writer *shimwire.Writer
-	hello  shimwire.LauncherHello
-	latest shimwire.LauncherState
+	t        *testing.T
+	conn     net.Conn
+	reader   *bufio.Reader
+	writer   *shimwire.Writer
+	hello    shimwire.LauncherHello
+	latest   shimwire.LauncherState
+	restored *shimwire.LauncherRestored
 }
 
 // lockedBuffer is a bytes.Buffer the launcher and its children can write while a test reads it.
@@ -220,6 +222,9 @@ func (g *roleConn) next() shimwire.Frame {
 	if state, ok := frame.(shimwire.LauncherState); ok {
 		g.latest = state
 	}
+	if report, ok := frame.(shimwire.LauncherRestored); ok {
+		g.restored = &report
+	}
 	return frame
 }
 
@@ -230,19 +235,21 @@ func (g *roleConn) send(frame shimwire.Frame) {
 	}
 }
 
-// answer sends command and returns its answer, skipping state frames.
+// answer sends command and returns its answer, skipping the frames the launcher reports of its
+// own accord: its state, and what became of the pod's workspace restore.
 func (g *roleConn) answer(command shimwire.Frame) shimwire.Frame {
 	g.t.Helper()
 	g.send(command)
 	return g.reply()
 }
 
-// reply is the next answer the launcher sends, skipping state frames.
+// reply is the next answer the launcher sends, skipping the frames it reports of its own accord.
 func (g *roleConn) reply() shimwire.Frame {
 	g.t.Helper()
 	for {
-		frame := g.next()
-		if _, state := frame.(shimwire.LauncherState); !state {
+		switch frame := g.next(); frame.(type) {
+		case shimwire.LauncherState, shimwire.LauncherRestored:
+		default:
 			return frame
 		}
 	}

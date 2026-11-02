@@ -218,7 +218,7 @@ func claimRuns(state supervise.ClaimState) bool {
 // it to lose its role here, a notice for a released sub-architect would walk up to the architect
 // above it, which owns neither the issue nor the answer.
 func holdsRole(held supervise.ClaimView) bool {
-	if held.State == supervise.StateSuspended && held.SuspendedBy == supervise.SuspendedByReleased {
+	if held.Released() {
 		return !held.Stopping
 	}
 	return claimRuns(held.State) && !held.Stopping

@@ -2,19 +2,24 @@ package api
 
 import (
 	"net/http"
-	"net/url"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/store"
 )
 
-// releaseRecordsURL is the route as a pod calls it: the claim it holds, that claim's secret, and
-// the start of the window it reads, all in the query string, since the route is a GET.
-func releaseRecordsURL(token claim.Token, secret string, since string) string {
-	query := url.Values{"claimToken": {string(token)}, "secret": {secret}, "since": {since}}
-	return "/legion/v1/claims/release-records?" + query.Encode()
+// releaseRecordsRoute is the route as a pod calls it: a POST, because the claim secret it is
+// authenticated by must not ride in a URL that a proxy or an access log between the pod and the
+// daemon records.
+const releaseRecordsRoute = "/legion/v1/claims/release-records"
+
+// readRecords is the request a pod sends: the claim it holds, that claim's secret, and the start
+// of the window it reads.
+func readRecords(token claim.Token, secret, since string) ReleaseRecordsRequest {
+	return ReleaseRecordsRequest{ClaimToken: token, Secret: secret, Since: since}
 }
 
 // INFRA-945 R6: a pod reads its project's idle-release records with the one credential it holds —
@@ -33,11 +38,15 @@ func TestClaimReleaseRecordsServeAPodTheProjectsWindow(t *testing.T) {
 		t.Fatalf("record the release: %v", err)
 	}
 	woke := released.Add(30 * time.Minute)
-	resumeID, err := h.store.RecordPodWake(h.ctx, store.PodResume{
-		Release: releaseID, Project: testProject, Issue: "LEGION-208", Role: "implementer",
-		Kind: "delivery", At: woke,
-	})
-	if err != nil {
+	var resumeID int64
+	if err := h.store.Tx(h.ctx, func(tx pgx.Tx) error {
+		var err error
+		resumeID, err = store.RecordPodWakeTx(h.ctx, tx, store.PodResume{
+			Release: releaseID, Project: testProject, Issue: "LEGION-208", Role: "implementer",
+			Kind: "delivery", At: woke,
+		})
+		return err
+	}); err != nil {
 		t.Fatalf("record the wake: %v", err)
 	}
 	if err := h.store.MarkPodResumeReady(h.ctx, resumeID, woke.Add(time.Minute)); err != nil {
@@ -59,7 +68,7 @@ func TestClaimReleaseRecordsServeAPodTheProjectsWindow(t *testing.T) {
 	}
 
 	since := released.Add(-time.Minute).Format(time.RFC3339)
-	recorder := h.request(http.MethodGet, releaseRecordsURL(token, registered.Secret, since), nil, nil)
+	recorder := h.request(http.MethodPost, releaseRecordsRoute, readRecords(token, registered.Secret, since), nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("release-records = %d, want 200; body %s", recorder.Code, recorder.Body)
 	}
@@ -117,17 +126,17 @@ func TestClaimReleaseRecordsRefuseACallerThatCannotProveItsClaim(t *testing.T) {
 	registered := h.registered(bootToken, "ses_implementer")
 	since := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC).Format(time.RFC3339)
 
-	bare := h.request(http.MethodGet, "/legion/v1/claims/release-records", nil, nil)
+	bare := h.request(http.MethodPost, releaseRecordsRoute, ReleaseRecordsRequest{}, nil)
 	wantRefusal(t, bare, http.StatusBadRequest, "claimToken is required")
 
-	noSecret := h.request(http.MethodGet, releaseRecordsURL(token, "", since), nil, nil)
+	noSecret := h.request(http.MethodPost, releaseRecordsRoute, readRecords(token, "", since), nil)
 	wantRefusal(t, noSecret, http.StatusBadRequest, "secret is required")
 
-	wrongSecret := h.request(http.MethodGet, releaseRecordsURL(token, "not-the-secret", since), nil, nil)
+	wrongSecret := h.request(http.MethodPost, releaseRecordsRoute, readRecords(token, "not-the-secret", since), nil)
 	wantRefusal(t, wrongSecret, claim.InvalidSecret.Status, claim.InvalidSecret.Message)
 
-	unknown := h.request(http.MethodGet,
-		releaseRecordsURL("legion-legion-legion-999-implementer", registered.Secret, since), nil, nil)
+	unknown := h.request(http.MethodPost, releaseRecordsRoute,
+		readRecords("legion-legion-legion-999-implementer", registered.Secret, since), nil)
 	wantRefusal(t, unknown, claim.InvalidSecret.Status, claim.InvalidSecret.Message)
 }
 
@@ -138,10 +147,10 @@ func TestClaimReleaseRecordsRefuseAnUnreadableSince(t *testing.T) {
 	token, bootToken := h.launch("LEGION-208", claim.RoleImplementer)
 	registered := h.registered(bootToken, "ses_implementer")
 
-	missing := h.request(http.MethodGet, releaseRecordsURL(token, registered.Secret, ""), nil, nil)
+	missing := h.request(http.MethodPost, releaseRecordsRoute, readRecords(token, registered.Secret, ""), nil)
 	wantRefusal(t, missing, http.StatusBadRequest, "since is required")
 
-	unreadable := h.request(http.MethodGet, releaseRecordsURL(token, registered.Secret, "yesterday"), nil, nil)
+	unreadable := h.request(http.MethodPost, releaseRecordsRoute, readRecords(token, registered.Secret, "yesterday"), nil)
 	if unreadable.Code != http.StatusBadRequest {
 		t.Fatalf("an unreadable since = %d, want 400; body %s", unreadable.Code, unreadable.Body)
 	}
