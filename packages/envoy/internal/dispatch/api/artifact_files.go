@@ -182,13 +182,17 @@ func (s *server) serveFileVersion(w http.ResponseWriter, r *http.Request, artifa
 	}
 }
 
-// cutDownload is the line a download whose write failed on the answer's transfer bound writes:
-// its reader stopped reading, or fell below the floor, and the bytes it was sent are short of the
-// Content-Length it was promised. INFO, since it is the reader's doing and no fault of the
-// server's, and once per download, the write that failed being the last one made.
+// cutDownload ends a download whose write failed on the answer's transfer bound: its reader stopped
+// reading, or fell below the floor, and the bytes it was sent are short of the Content-Length it
+// was promised. It logs one line - INFO, since it is the reader's doing and no fault of the
+// server's, and once per download, the write that failed being the last one made - and aborts
+// the connection (http.ErrAbortHandler), so the client sees a cut rather than an answer that
+// merely stops, and the access log marks the request aborted. Both of serveFileVersion's
+// branches end a cut download here, the row-held one and the store-backed one alike.
 func cutDownload(artifactID string, number int, sha *string, written, size int64) {
 	slog.Info("dispatch: a file version's download was cut: its reader stopped or fell below the floor",
 		"artifact", artifactID, "version", number, "sha256", deref(sha), "written", written, "size", size)
+	panic(http.ErrAbortHandler)
 }
 
 // downloadWriter is the answer a store-backed version is copied into: it counts what reached the
