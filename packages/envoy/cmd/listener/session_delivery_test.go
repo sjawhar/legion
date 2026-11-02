@@ -796,3 +796,54 @@ func awaitSkipped(t *testing.T, harness listenerDeliveryHarness, want int) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// A serving-port registration keeps the consumer an earlier pass gave it when a later pass can
+// give none. Only a portless body is refused for want of a consumer; a serving-port one is
+// answered with no delivery at all, since its port is pushed to instead
+// (sessionDelivery.register). So without sessionDeliveryOutcome.carrying the re-plan would drop
+// the consumer the first pass created from the answer, and the session would read its
+// registration as one that got none -- while the consumer, and the relay that serves it, stay.
+// The later pass here is refused for want of the grant, the one refusal a listener meets without
+// its NATS user changing under it.
+func TestSessionConsumerKeepsAServingPortsConsumerWhenALaterPassIsRefused(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+	const (
+		sessionID = "ses_port_carry"
+		kept      = "notifications.dispatch.issue.PORT-1.>"
+		dropped   = "notifications.dispatch.issue.PORT-2.>"
+	)
+	if _, err := rig.harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{kept, dropped}); err != nil {
+		t.Fatalf("seed the session's interest row: %v", err)
+	}
+	registration := `{"session_id":"` + sessionID + `","port":8099,"host":"127.0.0.1","topics":["` + kept + `"],
+		"delivery":{"consumer":true,"epoch":"e"}}`
+
+	// Pass one creates the consumer; the unsubscribe in its window refuses its write. Pass two
+	// finds the grant gone, so it can give no consumer, and a serving-port body is answered
+	// rather than refused.
+	fired := false
+	rig.deps.consumers.beforeRegister = func() {
+		if fired {
+			rig.deps.consumers.grantMu.Lock()
+			rig.deps.consumers.noGrantUntil = rig.deps.consumers.now().Add(time.Minute)
+			rig.deps.consumers.grantMu.Unlock()
+			return
+		}
+		fired = true
+		if err := rig.harness.registry.Remove(context.Background(), sessionID, []string{dropped}); err != nil {
+			t.Errorf("unsubscribe from %s: %v", dropped, err)
+		}
+	}
+	answer := rig.subscribe(t, registration)
+	rig.deps.consumers.beforeRegister = nil
+
+	if answer.Delivery == nil || answer.Delivery.Mode != deliveryModeConsumer {
+		t.Fatalf("answer %s, want the consumer the first pass created: a later pass that can give none must not drop it", answer.raw)
+	}
+	if answer.Delivery.Subject != bus.DeliverSubject(sessionID) {
+		t.Fatalf("relay subject %q, want %q", answer.Delivery.Subject, bus.DeliverSubject(sessionID))
+	}
+	if _, err := rig.deps.consumers.consumers.Info(context.Background(), sessionID); err != nil {
+		t.Fatalf("the consumer the answer names: %v", err)
+	}
+}
