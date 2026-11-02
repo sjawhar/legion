@@ -33,8 +33,6 @@ interface FrameSlot {
   /** Within three screen heights of the screen. */
   kept: boolean;
   running: boolean;
-  /** Pixels from the screen, written by the ranking pass that reads it. */
-  distance: number;
 }
 
 const slots = new Map<Element, FrameSlot>();
@@ -62,15 +60,14 @@ function distanceFromScreen(element: Element): number {
  * told once.
  */
 function rankFrames(): void {
-  const eligible: FrameSlot[] = [];
+  const eligible: { distance: number; slot: FrameSlot }[] = [];
   for (const slot of slots.values()) {
     if (slot.kept && (slot.near || slot.running)) {
-      slot.distance = distanceFromScreen(slot.element);
-      eligible.push(slot);
+      eligible.push({ distance: distanceFromScreen(slot.element), slot });
     }
   }
   eligible.sort((left, right) => left.distance - right.distance);
-  const running = new Set(eligible.slice(0, MAX_RUNNING_FRAMES));
+  const running = new Set(eligible.slice(0, MAX_RUNNING_FRAMES).map((entry) => entry.slot));
   for (const slot of [...slots.values()]) {
     const next = running.has(slot);
     if (next !== slot.running) {
@@ -132,7 +129,6 @@ export function registerViewFrame(
   onRunningChange: (running: boolean) => void
 ): () => void {
   slots.set(element, {
-    distance: 0,
     element,
     kept: false,
     near: false,

@@ -7,9 +7,9 @@ import { whoAmIQuery } from "../../api/queries";
 import type { Ask, BlockSchema } from "../../api/types";
 import { warmMarkdownRenderer } from "../refs/markdown-engine";
 import { Timestamp } from "../refs/Timestamp";
-import { EditorViewBlocks } from "../view/ViewBlock";
+import { viewPortals } from "../view/ViewBlock";
 import { AskBlockCard } from "./AskBlockCard";
-import { installTypedBlocks } from "./ask-block";
+import { installTypedBlocks, NO_TYPED_BLOCKS, type TypedBlockHosts } from "./ask-block";
 import { changeMarksAgainst } from "./change-marks";
 import { colorForLogin } from "./connection";
 import { createDoc, type EditorHandle } from "./editor";
@@ -17,7 +17,6 @@ import type { Highlight } from "./highlight";
 import { embedHighlight } from "./highlight";
 import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 import { DocumentRuntime } from "./runtime";
-import type { AskBlockHost } from "./typed-block-drawing";
 
 export interface VersionViewProps {
   artifactId: string;
@@ -46,7 +45,7 @@ export function VersionView({
   version,
 }: VersionViewProps): ReactNode {
   const root = useRef<HTMLDivElement>(null);
-  const [askBlockHosts, setAskBlockHosts] = useState<readonly AskBlockHost[]>([]);
+  const [typedBlocks, setTypedBlocks] = useState<TypedBlockHosts>(NO_TYPED_BLOCKS);
   const [highlightMissing, setHighlightMissing] = useState(false);
   const [renderError, setRenderError] = useState<string | undefined>(undefined);
   const { createEditor } = useContext(DocumentRuntime);
@@ -114,7 +113,7 @@ export function VersionView({
         editor.destroy();
         return;
       }
-      installTypedBlocks(editor.view, blockSchema, setAskBlockHosts);
+      installTypedBlocks(editor.view, blockSchema, setTypedBlocks);
       const embedded =
         highlighted === undefined ? undefined : embedHighlight(markdown, highlighted);
       editor.setMarkdown(embedded ?? markdown);
@@ -177,7 +176,7 @@ export function VersionView({
       )}
       <article aria-label="Document" className="dispatch-doc" data-read-only="true">
         <div ref={root} />
-        {askBlockHosts.map((host) => {
+        {typedBlocks.asks.map((host) => {
           const blockId = String(host.node.attrs.blockId);
           return (
             <AskBlockCard
@@ -190,7 +189,7 @@ export function VersionView({
             />
           );
         })}
-        <EditorViewBlocks />
+        {viewPortals(typedBlocks.views)}
       </article>
     </section>
   );

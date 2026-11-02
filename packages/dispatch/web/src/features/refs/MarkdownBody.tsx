@@ -97,9 +97,9 @@ function slotKey(element: Element): string {
   return key;
 }
 
-/** Writes the fresh element's attributes onto the live one it replaces. A frame slot keeps every
- *  attribute it already has, because the mounted block stamps its own; every other element is
- *  made to carry exactly what the fresh paint says. */
+/** Writes the fresh element's attributes onto the live one it replaces. A frame slot keeps the
+ *  attributes the fresh paint does not name, because the mounted block stamps its own; every
+ *  other element is made to carry exactly what the fresh paint says. */
 function copyAttributes(live: Element, fresh: Element): void {
   for (const { name, value } of fresh.attributes) {
     if (live.getAttribute(name) !== value) {

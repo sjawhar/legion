@@ -1,5 +1,5 @@
 import { useQueries, useQuery } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { ApiError, api } from "../../api/client";
@@ -78,49 +78,6 @@ export function viewPortals(slots: readonly ViewBlockSlot[]): ReactNode[] {
   return slots.map((slot) => createPortal(<ViewBlock slot={slot} />, slot.host, slot.key));
 }
 
-/**
- * The frame slots of the document editors (`features/doc/view-block.ts`). A node view is not
- * React, so it registers its slot here and `EditorViewBlocks`, which the live editor and the
- * version view render, portals a `ViewBlock` into each. A body's slots are collected from its
- * own element instead (`collectViewSlots`), since a body is painted whole on each repaint.
- */
-const editorSlots = new Map<string, ViewBlockSlot>();
-let editorSnapshot: readonly ViewBlockSlot[] = [];
-const editorListeners = new Set<() => void>();
-
-function publishEditorSlots(): void {
-  editorSnapshot = [...editorSlots.values()];
-  for (const listener of [...editorListeners]) {
-    listener();
-  }
-}
-
-/** Adds the node view's slot, or writes the one already under its key: a caption edit or a new
- *  `data` attribute reaches the mounted `ViewBlock` without a new frame. */
-export function setEditorViewSlot(slot: ViewBlockSlot): void {
-  editorSlots.set(slot.key, slot);
-  publishEditorSlots();
-}
-
-export function removeEditorViewSlot(key: string): void {
-  if (editorSlots.delete(key)) {
-    publishEditorSlots();
-  }
-}
-
-function subscribeEditorSlots(listener: () => void): () => void {
-  editorListeners.add(listener);
-  return () => {
-    editorListeners.delete(listener);
-  };
-}
-
-/** A `ViewBlock` in every frame slot a document editor's node views have registered. The live
- *  editor (`ProofDocument`) and the version view render it once each. */
-export function EditorViewBlocks(): ReactNode {
-  return viewPortals(useSyncExternalStore(subscribeEditorSlots, () => editorSnapshot));
-}
-
 /** What a summary read of one file has answered so far. */
 interface SummaryResult {
   readonly data: DocumentReferenceSummary | IssueReferenceSummary | undefined;
@@ -153,7 +110,10 @@ interface DataEntry {
 }
 
 /** The same-origin address of one version's bytes, which the block reads with the reader's own
- *  session, as every artifact read is made. */
+ *  session, as every artifact read is made. `artifactVersionUrl`
+ *  (`features/artifacts/ArtifactHeader.tsx`) writes the same string, and importing it here
+ *  would close the cycle `ViewBlock → ArtifactHeader → ApprovalChip → MarkdownBody →
+ *  useRenderedMarkdown → ViewBlock` that `lint/suspicious/noImportCycles` refuses. */
 function versionAddress(id: string, version: number): string {
   return `/api/v1/artifacts/${encodeURIComponent(id)}/versions/${version}`;
 }
@@ -377,7 +337,7 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
   for (const cause of [
     refusal,
     movedAway ? "the page moved away from its address" : undefined,
-    silent ? "this page sent no ready message in 10 seconds" : undefined,
+    silent ? `this page sent no ready message in ${READY_DEADLINE_MS / 1_000} seconds` : undefined,
   ]) {
     if (cause !== undefined) {
       lines.push({ cause, ref: page });
@@ -385,7 +345,7 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
   }
   if (overBudget) {
     lines.push({
-      cause: "the data files together are larger than 16 MiB, so Dispatch sends no data",
+      cause: `the data files together are larger than ${MAX_DATA_BYTES / 1024 ** 2} MiB, so Dispatch sends no data`,
       ref: "data",
     });
   }
@@ -393,7 +353,9 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
   // One HEAD before the frame, so a refusal of the page route is a line rather than an empty
   // frame. A page over 5 MiB, a file that is no page and a version that is not there answer it.
   useEffect(() => {
-    if (!running || pageAddress === undefined) {
+    // The answer cannot have changed: `pageAddress` carries the version number, and a version's
+    // size and type are fixed, so a block that scrolls back into the budget sends no second HEAD.
+    if (!running || pageAddress === undefined || head?.address === pageAddress) {
       return;
     }
     let cancelled = false;
@@ -413,7 +375,7 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
     return () => {
       cancelled = true;
     };
-  }, [pageAddress, running]);
+  }, [head, pageAddress, running]);
 
   // A change of which grants cover the named files is a new frame, so a page that lost a grant
   // loses the data it holds; a new version of a granted file changes no grant and no frame.
@@ -482,35 +444,53 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
     };
 
     /** Sends the newest version of every file the grants cover. The bytes are read as the
-     *  message goes out, so ten uploads inside one wait cost one read of the newest version. */
+     *  message goes out, so ten uploads inside one wait cost one read of the newest version.
+     *  The reads one message needs are started together, since they are independent reads of
+     *  this same origin: the page waits for the longest of them rather than for their sum. One
+     *  version is read once however many entries name it, as a `data` attribute may name one
+     *  file twice. */
     const send = async (): Promise<void> => {
       const held = texts.current;
-      const files: DataEntry[] = [];
+      // The entries as they stand now, walked twice: the reads are started over the first walk,
+      // and the second walk, over the answers the message carries in that same order, tells the
+      // reader what did not arrive and holds what did.
+      const current = entriesRef.current;
+      const started = new Map<string, Promise<DataEntry>>();
+      const files = await Promise.all(
+        current.map((entry) => {
+          const { id, version } = entry;
+          if (id === undefined || version === undefined) {
+            // An entry no grant covers, or one no read could name, goes as it stands.
+            return entry;
+          }
+          const read = held.get(id);
+          if (read?.version === version) {
+            return read;
+          }
+          const key = `${id}@${version}`;
+          const reading = started.get(key) ?? readVersion(entry, id, version);
+          started.set(key, reading);
+          return reading;
+        })
+      );
       const failures = new Map<string, string>();
-      for (const entry of entriesRef.current) {
-        const { id, version } = entry;
+      for (const [index, read] of files.entries()) {
+        const { id, version } = current[index];
         if (id === undefined || version === undefined) {
-          files.push(entry);
           continue;
         }
-        let read = held.get(id);
-        if (read?.version !== version) {
-          read = await readVersion(entry, id, version);
-          if (read.text === undefined) {
-            // The reader gets a line for this file, and the page gets the entry beside the
-            // files that did answer their text.
-            failures.set(
-              read.ref,
-              read.error === "not-text"
-                ? "this file is not UTF-8 text"
-                : answerCause(read.status, "file")
-            );
-            files.push(read);
-            continue;
-          }
-          held.set(id, read);
+        if (read.text === undefined) {
+          // The reader gets a line for this file, and the page gets the entry beside the
+          // files that did answer their text.
+          failures.set(
+            read.ref,
+            read.error === "not-text"
+              ? "this file is not UTF-8 text"
+              : answerCause(read.status, "file")
+          );
+          continue;
         }
-        files.push(read);
+        held.set(id, read);
       }
       if (stopped || loads > 1) {
         return;

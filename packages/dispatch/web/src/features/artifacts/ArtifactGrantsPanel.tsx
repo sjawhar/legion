@@ -21,6 +21,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { isAgentArtifact } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
@@ -38,7 +39,7 @@ import { versionsNewestFirst } from "./ArtifactHeader";
  * so the panel asks for no list it could not get.
  */
 function isPageFile(artifact: Artifact, version: number | undefined): boolean {
-  if (artifact.kind === "doc" || (artifact.issue_key === null && artifact.project === "")) {
+  if (artifact.kind === "doc" || isAgentArtifact(artifact)) {
     return false;
   }
   const versions = versionsNewestFirst(artifact.versions);

@@ -3,6 +3,7 @@ import { type EditorState, Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { EditorView, NodeView, ViewMutationRecord } from "@milkdown/kit/prose/view";
 
 import type { BlockSchema, BlockTypeSchema } from "../../api/types";
+import type { ViewBlockSlot } from "../view/ViewBlock";
 import { pictureNodeView } from "./picture-view";
 import {
   type AskBlockHost,
@@ -157,27 +158,40 @@ export const askBlockEditingPlugin = new Plugin({
   },
 });
 
+/** The blocks of one editor that React draws into: the decision cards, in document order, and
+ * the frame slots a `ViewBlock` is portalled into. They are one editor's own, never another's:
+ * a document page holds the live editor and a version view at once, and each draws its own. */
+export interface TypedBlockHosts {
+  readonly asks: readonly AskBlockHost[];
+  readonly views: readonly ViewBlockSlot[];
+}
+
+/** The blocks of an editor that has reported none yet. */
+export const NO_TYPED_BLOCKS: TypedBlockHosts = { asks: [], views: [] };
+
 /** Installs the document's typed blocks in the editor: `AskBlockView` for every `ask` node,
- * reporting the live set of hosts (in document order) whenever it changes, `viewBlockView` for
- * every `view` node (the sandboxed frame its page runs in, beside the editable caption),
- * `renderTypedBlock`'s node view for every other type in the block schema, `pictureNodeView` for
- * every `image` node (a picture whose source is a Dispatch reference draws from its version's
- * bytes route), while keeping the library's other node views, and `askBlockEditingPlugin`. Call
- * once per editor, right after it is created. */
+ * `viewBlockView` for every `view` node (the sandboxed frame its page runs in, beside the
+ * editable caption), reporting both live sets whenever either changes, the decision hosts in
+ * document order; `renderTypedBlock`'s node view for every other type in the block schema,
+ * `pictureNodeView` for every `image` node (a picture whose source is a Dispatch reference draws
+ * from its version's bytes route), while keeping the library's other node views, and
+ * `askBlockEditingPlugin`. Call once per editor, right after it is created. */
 export function installTypedBlocks(
   view: EditorView,
   blockSchema: BlockSchema,
-  onHostsChange: (hosts: readonly AskBlockHost[]) => void
+  onHostsChange: (hosts: TypedBlockHosts) => void
 ): void {
-  const registry = new Map<number, AskBlockHost>();
+  const asks = new Map<number, AskBlockHost>();
+  const views = new Map<string, ViewBlockSlot>();
   const publish = () => {
-    onHostsChange(
-      [...registry.values()].sort((left, right) =>
+    onHostsChange({
+      asks: [...asks.values()].sort((left, right) =>
         left.header.compareDocumentPosition(right.header) & Node.DOCUMENT_POSITION_FOLLOWING
           ? -1
           : 1
-      )
-    );
+      ),
+      views: [...views.values()],
+    });
   };
   view.setProps({
     nodeViews: {
@@ -190,8 +204,8 @@ export function installTypedBlocks(
             (node: ProseMirrorNode) => typedBlockView(node, view.dom.ownerDocument, type),
           ])
       ),
-      ask: (node) => new AskBlockView(node, view.dom.ownerDocument, registry, publish),
-      view: (node) => viewBlockView(node, view.dom.ownerDocument),
+      ask: (node) => new AskBlockView(node, view.dom.ownerDocument, asks, publish),
+      view: (node) => viewBlockView(node, view.dom.ownerDocument, views, publish),
       image: pictureNodeView(view),
     },
     plugins: [...(view.props.plugins ?? []), askBlockEditingPlugin],

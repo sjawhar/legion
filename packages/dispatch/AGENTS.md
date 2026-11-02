@@ -556,7 +556,7 @@ A typed block in a body is drawn as a document draws it (INFRA-526). `markdown-e
 The third typed block kind is `view` (`features/view/`, dispatch://INFRA-682): `:::view{page="dispatch://KEY/artifact/chart-html" data="dispatch://KEY/artifact/data-json …"}` with the caption as its body.
 It draws the page file in a sandboxed frame and gives it the newest version of each granted data file, so an agent's own HTML draws data Dispatch holds, in a document, a comment, a reply, an ask and a message alike.
 `view-attributes.ts` is the one reading of the two attributes, used by the editor's node view and the body renderer alike: one `page` reference, one to eight `data` references separated by whitespace, each an issue file or a project file with an optional `@vN`, and anything else is the one line a reader sees in place of the frame.
-`renderViewBlockShell` (`features/doc/typed-block-drawing.ts`) writes the frame slot, `collectViewSlots` finds every slot a body painted and `viewPortals` mounts a `ViewBlock` into each, while the document editors register their node views' slots through `setEditorViewSlot` and `EditorViewBlocks` renders those.
+`renderViewBlockShell` (`features/doc/typed-block-drawing.ts`) writes the frame slot, `collectViewSlots` finds every slot a body painted and `viewPortals` mounts a `ViewBlock` into each, while a document editor's node views register their slots with the editor that installed them: `installTypedBlocks` (`features/doc/ask-block.ts`) owns one registry per editor, as it does for `ask`, and reports both kinds to the component holding that editor (`TypedBlockHosts`), which portals a `ViewBlock` into each of its own slots. One registry per editor, never one for the page: `ProofDocument` only hides its editor while a version view is open, so a shared registry drew every block of both twice.
 `paintBlock` (`features/refs/MarkdownBody.tsx`) splices rather than replaces, so a repaint of a streaming body never takes a running frame out of the document, which the browser would read as the page moving itself away.
 `ViewBlock.tsx` owns the frame (`sandbox="allow-scripts"`, no `allow`, 400 px until the page reports a height, then that height held between 100 and 2,000) and the three messages: the page posts `dispatch-view:ready` and `dispatch-view:height`, Dispatch posts `dispatch-view:data` with one entry per data file, in the order of the `data` attribute, a granted file as `{ref, name, version, contentType, text}` and every other as `{ref, error}` (`not-granted`, `unreadable`, `not-text`, `read-failed` with its `status`).
 Dispatch reads a message only from the block's own frame, before that frame's second `load`, and sends one frame at most one data message in 2 seconds, with the newest version of each file.
@@ -1728,17 +1728,17 @@ and holds the body it applies to `after.json`. It also checks that the probe reo
 after a 4001, its second subscribe arriving within 500 ms of the close, and within the first
 attempt's spread after a 1012 (`RECONNECT_SPREAD_MS`, two seconds).
 
-The `view` block's rows run in the default `chromium` project alone: `e2e/view-read-failures.e2e.ts`
-is in no other project's `testMatch` and in no `plainHttpSpecs`.
-A browser sends `Sec-Fetch-Dest` only to a potentially trustworthy URL,
-so on `chromium-plain-http`'s plain-HTTP host name the page route answers `attachment`,
-no frame draws, and a view row there would fail for its origin rather than for the behaviour under test.
-A view spec reaches another engine only by its stem joining that project's `testMatch` - and, for `webkit-iphone`, its title joining that project's `grep` too,
-since a file matched there with no title in the grep runs zero tests and looks green.
+The `view` block has four spec files.
+`e2e/view-block.e2e.ts` (the block, the frame, the data messages and the minimal page of `skill://dispatch-view`), `e2e/view-sandbox.e2e.ts` (the page route's headers and what the sandbox stops) and `e2e/view-grants.e2e.ts` (the grants panel) are in the `testMatch` of `webkit` and `firefox` as well as the default `chromium`, because a frame's load counting, its sandbox and its `postMessage` are each engine's own.
+They are also in `webkit-iphone`'s `testMatch` and in its title `grep`, which they join through the phrase `a view block` that every one of their titles holds: a file matched there with no title in the `grep` runs zero tests and looks green.
+`e2e/view-block.e2e.ts`'s rows carry `@phone`, so `iphone` runs them too.
+`e2e/view-budget.e2e.ts` is Chromium's alone, and says in its header why.
+None of the four is in `plainHttpSpecs`.
+A browser sends `Sec-Fetch-Dest` only to a potentially trustworthy URL, so on `chromium-plain-http`'s plain-HTTP host name the page route answers `attachment`, no frame draws, and a view row there would fail for its origin rather than for the behaviour under test.
 
 The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,
 `e2e/keyboard-agents-picker.e2e.ts`, `e2e/keyboard-session-pickers.e2e.ts`, `e2e/keyed-send.e2e.ts`,
-`e2e/keyed-writes.e2e.ts`, `e2e/live-socket.e2e.ts`, and `e2e/offline-edits.e2e.ts`. Every row of
+`e2e/keyed-writes.e2e.ts`, `e2e/live-socket.e2e.ts`, `e2e/offline-edits.e2e.ts`, and the `view` block's `e2e/view-block.e2e.ts`, `e2e/view-sandbox.e2e.ts` and `e2e/view-grants.e2e.ts`. Every row of
 the live-socket spec runs in every project that lists
 the spec - `chromium`, `iphone`, `firefox` and, in CI, `webkit`: the APIs its rows need
 (`routeWebSocket`, the request events it counts navigations with, `page.clock`) exist in all three
@@ -1792,14 +1792,15 @@ reader's by counting rendering frames, not milliseconds, since a busy page can d
 task (CI's WebKit did), and a text change in the margin opens that window too: a `dispatch://` reference resolving to
 its title can resize an ask card and make Firefox or WebKit anchor the margin's scroll.
 
-The `webkit-iphone` project runs, in WebKit with the iPhone 13 profile, four rows of `e2e/agent-view.e2e.ts` (the live view's phone layout, its Jump to latest, a capped model name, and a document-scrolling route the keyboard cap leaves alone), `e2e/agent-view-settings.e2e.ts`'s `the header shows the session's reported model` row, the rows of `e2e/phone-conversation.e2e.ts` titled `covers none of`, which check what the Conversation's floating pills cover on a phone (the stuck live-updates pill's Reload among them), `e2e/delivery-live.e2e.ts`'s `on a phone the delivery page` row, and `e2e/live-socket.e2e.ts`'s one-socket row: iOS Safari is the engine the keyboard cap and those layouts exist for, and the `iphone` project is Chromium. Its project `grep` selects those rows by title, so renaming any of them silently drops its WebKit run with no failure; rename the `grep` with it. WebKit delivers a scroll container's `scroll` event a frame later than Chromium, and the thread follows its bottom only once that event has arrived, so the live view's rows scroll the thread through `scrollThreadTo`, which waits for the event, before they raise a keyboard.
+The `webkit-iphone` project runs, in WebKit with the iPhone 13 profile, four rows of `e2e/agent-view.e2e.ts` (the live view's phone layout, its Jump to latest, a capped model name, and a document-scrolling route the keyboard cap leaves alone), `e2e/agent-view-settings.e2e.ts`'s `the header shows the session's reported model` row, the rows of `e2e/phone-conversation.e2e.ts` titled `covers none of`, which check what the Conversation's floating pills cover on a phone (the stuck live-updates pill's Reload among them), `e2e/delivery-live.e2e.ts`'s `on a phone the delivery page` row, `e2e/live-socket.e2e.ts`'s one-socket row, and the `view` block's rows of `e2e/view-block.e2e.ts`, `e2e/view-sandbox.e2e.ts` and `e2e/view-grants.e2e.ts`, which the `grep` takes by the phrase `a view block` that every one of their titles holds: iOS Safari is the engine the keyboard cap and those layouts exist for, the `iphone` project is Chromium, and a frame's sandbox and `postMessage` are WebKit's own. Its project `grep` selects those rows by title, so renaming any of them silently drops its WebKit run with no failure; rename the `grep` with it. WebKit delivers a scroll container's `scroll` event a frame later than Chromium, and the thread follows its bottom only once that event has arrived, so the live view's rows scroll the thread through `scrollThreadTo`, which waits for the event, before they raise a keyboard.
 
 No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (the count falls by one, with no error), then restore it. Repeat it whenever the `grep` or the titles change.
 
 The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts`, `e2e/deep-links.e2e.ts`,
 `e2e/keyboard-agents-picker.e2e.ts`, `e2e/keyboard-session-pickers.e2e.ts`, `e2e/keyed-send.e2e.ts`,
-`e2e/keyed-writes.e2e.ts`, `e2e/live-socket.e2e.ts`, `e2e/offline-edits.e2e.ts`, and
-`e2e/picture-link-click.e2e.ts`: Firefox's native editing puts text
+`e2e/keyed-writes.e2e.ts`, `e2e/live-socket.e2e.ts`, `e2e/offline-edits.e2e.ts`,
+`e2e/picture-link-click.e2e.ts`, and the `view` block's `e2e/view-block.e2e.ts`,
+`e2e/view-sandbox.e2e.ts` and `e2e/view-grants.e2e.ts`: Firefox's native editing puts text
 typed over a code block's last line before that line's newline, and deletes a paragraph's hard break
 along with the text after it, which Chromium and WebKit never do, so that spec is the one that needs
 a second engine; the two picker specs, the deep-links spec, the two keyed specs and the live-socket
@@ -1852,8 +1853,9 @@ The `iphone` Playwright project uses Chromium with the iPhone 13 viewport,
 touch input, and user agent, and runs only the tests tagged `@phone`
 (`grep: phoneTagged` in `e2e/playwright.config.ts`). Those tests cover the
 navigation drawer, the margin's bottom sheet and the phone Thread dialog,
-touch gestures and touch-sized controls, the compact Inbox and top bar, and
-the live view's phone layout. It does not replace the manual phone check: run
+touch gestures and touch-sized controls, the compact Inbox and top bar,
+the live view's phone layout, and a `view` block's frame on a phone
+(`e2e/view-block.e2e.ts`'s rows carry the tag). It does not replace the manual phone check: run
 the server on a tailnet-reachable address, open it from a phone, open the
 review panel, and answer an open ask in Waiting on you.
 

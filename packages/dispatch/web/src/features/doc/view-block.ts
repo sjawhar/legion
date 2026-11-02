@@ -2,7 +2,7 @@ import { DOMSerializer, type Node as ProseMirrorNode } from "@milkdown/kit/prose
 import type { NodeView } from "@milkdown/kit/prose/view";
 
 import { releaseViewFrame } from "../view/frame-budget";
-import { removeEditorViewSlot, setEditorViewSlot } from "../view/ViewBlock";
+import type { ViewBlockSlot } from "../view/ViewBlock";
 import { renderViewBlockShell, VIEW_FRAME_SLOT } from "./typed-block-drawing";
 
 let nextViewKey = 0;
@@ -11,8 +11,11 @@ let nextViewKey = 0;
  * The `view` block's ProseMirror node view, in the live editor and in a version view. It owns
  * only the shell (`renderViewBlockShell`, the one spec a comment's body draws too): the header,
  * the caption hole, which is the node's editable content, and the frame slot beside it. The slot
- * is registered with `features/view/ViewBlock.tsx`, which portals a `ViewBlock` into it, because
- * a node view is not React and the frame reads the same queries a body's block reads.
+ * is registered with the editor that installed this view (`installTypedBlocks`), which reports
+ * its slots to the component holding the editor; that component portals a `ViewBlock` into each,
+ * because a node view is not React and the frame reads the same queries a body's block reads.
+ * One registry per editor, as the decision block's is: the live editor and a version view are
+ * both on the page, and a slot of one is no slot of the other.
  *
  * Two things make a plain `toDOM` spec unusable here. ProseMirror reads a DOM change inside a
  * spec-rendered node as a suspect edit and draws the node again from its state, which would
@@ -23,7 +26,12 @@ let nextViewKey = 0;
  * whose `page` is unchanged: a decoration, a caption edit and a new `data` attribute all leave
  * the frame running. A new `page` is a new view and a new frame.
  */
-export function viewBlockView(node: ProseMirrorNode, document: Document): NodeView {
+export function viewBlockView(
+  node: ProseMirrorNode,
+  document: Document,
+  registry: Map<string, ViewBlockSlot>,
+  publish: () => void
+): NodeView {
   const key = `view-editor:${nextViewKey++}`;
   const rendered = DOMSerializer.renderSpec(document, renderViewBlockShell(node));
   const dom = rendered.dom as HTMLElement;
@@ -38,20 +46,24 @@ export function viewBlockView(node: ProseMirrorNode, document: Document): NodeVi
     dom.dataset.blockId = blockId;
   }
   let current = node;
-  const publish = (): void => {
-    setEditorViewSlot({
+  /** Adds this node view's slot, or writes the one already under its key: a caption edit or a
+   *  new `data` attribute reaches the mounted `ViewBlock` without a new frame. */
+  const register = (): void => {
+    registry.set(key, {
       caption: current.textContent.trim(),
       data: String(current.attrs.data ?? ""),
       host: slot,
       key,
       page: String(current.attrs.page ?? ""),
     });
+    publish();
   };
-  publish();
+  register();
   return {
     contentDOM,
     destroy: () => {
-      removeEditorViewSlot(key);
+      registry.delete(key);
+      publish();
       releaseViewFrame(slot);
     },
     dom,
@@ -63,7 +75,7 @@ export function viewBlockView(node: ProseMirrorNode, document: Document): NodeVi
       }
       current = next;
       slot.dataset.dispatchViewData = String(next.attrs.data ?? "");
-      publish();
+      register();
       return true;
     },
   };

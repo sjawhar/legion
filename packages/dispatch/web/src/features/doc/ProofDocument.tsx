@@ -49,11 +49,11 @@ import {
 } from "../refs/routes";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
-import { EditorViewBlocks } from "../view/ViewBlock";
+import { viewPortals } from "../view/ViewBlock";
 import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AskBlockCard } from "./AskBlockCard";
-import { installTypedBlocks } from "./ask-block";
+import { installTypedBlocks, NO_TYPED_BLOCKS, type TypedBlockHosts } from "./ask-block";
 import { ChangeView } from "./ChangeView";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
@@ -74,7 +74,6 @@ import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 import { FRAGMENT_NAME } from "./roots";
 import { DocumentRuntime } from "./runtime";
 import { loadBlockSchema } from "./schema";
-import type { AskBlockHost } from "./typed-block-drawing";
 import { VersionView } from "./VersionView";
 
 const CONTROL_CHARACTERS = /\p{Cc}/gu;
@@ -316,7 +315,7 @@ export function ProofDocument({
     [asksQuery.data, artifact.id]
   );
   const blocksReadOnly = isClosed || schemaReadOnly;
-  const [askBlockHosts, setAskBlockHosts] = useState<readonly AskBlockHost[]>([]);
+  const [typedBlocks, setTypedBlocks] = useState<TypedBlockHosts>(NO_TYPED_BLOCKS);
   const [isNameDialogOpen, setIsNameDialogOpen] = useState(false);
   // Naming a version is the name dialog's form, which shows a refusal itself; a rebuild shows
   // its own beside its button.
@@ -532,7 +531,7 @@ export function ProofDocument({
     // The editor's place in the page - its typed blocks, the margin, search highlights, a block
     // link - for as long as it is this effect's editor. It returns what undoes it.
     const bindEditor = (handle: EditorHandle, connection: DocumentConnection) => {
-      installTypedBlocks(handle.view, blockSchema, setAskBlockHosts);
+      installTypedBlocks(handle.view, blockSchema, setTypedBlocks);
       // False once this editor unbinds, so a focus a frame late never reaches a destroyed editor
       // or leaves a re-run behind for it.
       let bound = true;
@@ -971,7 +970,7 @@ export function ProofDocument({
         }}
       >
         <div ref={root} />
-        {askBlockHosts.map((host) => {
+        {typedBlocks.asks.map((host) => {
           const blockId = String(host.node.attrs.blockId);
           return (
             <AskBlockCard
@@ -985,7 +984,7 @@ export function ProofDocument({
             />
           );
         })}
-        <EditorViewBlocks />
+        {viewPortals(typedBlocks.views)}
         {blockReferencesQuery.data?.some(
           (block) => block.references.comments + block.references.asks > 0
         ) ? (
