@@ -134,8 +134,13 @@ func TestStatementTimings(t *testing.T) {
 		// would be of a statement production never runs (relatedEFSearch).
 		Setup: []string{relatedEFSearch},
 	})
-	runner.Head(t, "relatedProbeSQL"+label,
-		benchtime.Statement{SQL: side.relatedProbeSQL, Args: []any{subjects.Project, lexemes, "", (*string)(nil)}})
+	// The after text binds the lexemes ORed as $5; the before text builds that tsquery in a CTE
+	// of its own and takes four arguments.
+	probeArguments := []any{subjects.Project, lexemes, "", (*string)(nil)}
+	if side.relatedProbeSQL == relatedProbeSQL {
+		probeArguments = append(probeArguments, relatedProbeTSQuery(lexemes))
+	}
+	runner.Head(t, "relatedProbeSQL"+label, benchtime.Statement{SQL: side.relatedProbeSQL, Args: probeArguments})
 }
 
 // documentArmStatements are the five statements whose document arm this change moved onto
