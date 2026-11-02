@@ -2579,7 +2579,7 @@ func TestARowQuoteReadsEmptyAndFormattedCells(t *testing.T) {
 		t.Fatal(err)
 	}
 	for find, cells := range map[string]string{
-		"A | | B":                        `the cells are "A", "", "B"`,
+		"A | | B":                          `the cells are "A", "", "B"`,
 		"*Item* | [Owner](https://x.test)": `the cells are "Item", "Owner"`,
 	} {
 		_, err := applyAlone(tree, model.EditOp{Op: "replace", Find: find, With: "x"})
