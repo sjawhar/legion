@@ -180,10 +180,8 @@ func accountAuthAfterRecordKind(needs power, h func(*server, http.ResponseWriter
 // serviceAuth is a route for a service calling the broker with its own Kubernetes ServiceAccount
 // token, the account BROKER_SERVICE_LOGINS lets log in as that service — a deployment's Legion
 // daemon, which registers the pods it starts. The token is verified and mapped to its service by
-// the Kubernetes half of the check a token login makes (machine.Service.VerifyKubernetesServiceToken):
-// a Google VM's identity token logs a VM in as its fleet's service, but a VM is no daemon and
-// registers no pod, so it authenticates no route of this class. The handler is given the service's
-// name.
+// the check a token login makes (machine.Service.VerifyServiceToken). The handler is given the
+// service's name.
 //
 // It is a class of its own rather than a power of accountAuth's because the two lists are two
 // authorities: BROKER_API_ACCOUNTS names the callers that relay a person's decisions and read
@@ -227,8 +225,8 @@ func routes() []apiRoute {
 		// Revoke an enrollment made under the caller's machine credential's operator, or a pod
 		// enrollment the caller's own machine credential made.
 		{http.MethodDelete, "/v1/enrollments/{id}", launcherAuth((*server).deleteEnrollment)},
-		// Log a service in with its own token, a Kubernetes ServiceAccount's or a Google VM's
-		// identity token, which no person approves: answers its launcher credential's id and expiry.
+		// Log a service in with its own projected Kubernetes ServiceAccount token, which no person
+		// approves: answers its launcher credential's id and expiry.
 		{http.MethodPost, "/v1/launcher-credentials/token", public((*server).tokenLogin)},
 		// Start a person's machine login as an OAuth device authorization (RFC 8628): answers the
 		// device code the machine polls with and the code the person types. Rate-limited per source
@@ -311,6 +309,19 @@ func routes() []apiRoute {
 		// asks before it gets them again. The revoking person is the login the request names, which
 		// the broker still takes on the caller's word: a revoke only takes power away.
 		{http.MethodPost, "/v1/grants/{id}/revoke-by-approver", accountAuth(relaysDecisions, (*server).revokeByApprover)},
+		// List the sign-ins the named person made on their machines with `agent-secrets login`,
+		// by machine: one row per box key they signed in with and have not revoked, each naming
+		// the machine's Google account, the box key's thumbprint, and when the sign-in was made
+		// and last used. The person is the one the caller names, as it is for every list
+		// Dispatch's server relays.
+		{http.MethodGet, "/v1/person-signins", accountAuth(relaysDecisions, (*server).listPersonSignIns)},
+		// End one of the named person's sign-ins: that box key trades no token at the exchange
+		// again, and every access token already minted on that box under that sign-in ends in
+		// the revoke's own transaction, so none of them outlives it. The person's sign-ins on
+		// their other boxes keep working, and the box signs in again with a key of its own. The
+		// revoking person is the one the request names, which the broker takes on the caller's
+		// word: a revoke only takes power away.
+		{http.MethodPost, "/v1/person-signins/{id}/revoke", accountAuth(relaysDecisions, (*server).revokePersonSignIn)},
 		// List the logins of the calling credential's operator's own machines, as Dispatch's
 		// machine-logins page lists them, without the service logins that page also lists.
 		{http.MethodGet, "/v1/operator/machines", launcherAuth((*server).listOperatorMachines)},

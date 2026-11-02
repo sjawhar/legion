@@ -81,6 +81,17 @@ type Provider struct {
 // is a 500 server_error, which a client retries.
 var ErrLoginEnded = errors.New("the machine login has ended")
 
+// ErrMachineKeyTaken is the ExchangeConfig.MachineCredentials error (wrapped or not) that
+// refuses a machine's exchange invalid_grant: another live machine login already holds the key
+// the request's DPoP proof presented, and a launcher credential's key is one credential's.
+// Any other error from it is a 500 server_error.
+var ErrMachineKeyTaken = errors.New("another live machine login holds this key")
+
+// ErrSignInRevoked is the ExchangeConfig.PersonSignIns error (wrapped or not) that refuses a
+// person's trade invalid_grant: that person has revoked the sign-in this box key belongs to, so
+// the box signs in again with a key of its own. Any other error from it is a 500 server_error.
+var ErrSignInRevoked = errors.New("the person has revoked this machine's sign-in")
+
 // TokenHooks are the broker's own steps around a token request the library has validated.
 type TokenHooks struct {
 	// Before runs before either grant issues anything, with the grant type and the login's session
@@ -127,9 +138,10 @@ func New(c Config, store *oauthstore.Store) (*Provider, error) {
 	}
 	// A deployment that has listed no identity gets the empty set rather than a nil one, so the
 	// exchange composes and refuses every caller by name instead of faulting on a map nobody
-	// built.
+	// built. Its sign-in domain is empty, which admits no person at all: a set nobody built
+	// lists no machine either, so there is no box a person could have signed in on.
 	if c.Exchange.Policy == nil {
-		policy, err := exchange.NewSet(nil, nil)
+		policy, err := exchange.NewSet(nil, nil, nil, "")
 		if err != nil {
 			return nil, fmt.Errorf("oauth: the empty exchange policy: %w", err)
 		}

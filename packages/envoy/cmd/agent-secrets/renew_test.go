@@ -210,8 +210,6 @@ func TestRenewStopsOnlyForTerminalBrokerCodes(t *testing.T) {
 		status        int
 	}{
 		{"POD_TOKEN_REQUIRED", "a pod enrollment's renewal must carry its projected token", http.StatusForbidden},
-		{"VM_TOKEN_REQUIRED", "a VM enrollment's renewal must carry its VM identity token", http.StatusForbidden},
-		{"VM_NOT_LISTED", "this VM is not one its fleet's settings allow: instance example-vm-1 does not match", http.StatusForbidden},
 		{"ENROLLMENT_NOT_LIVE", "enrollment is not live", http.StatusUnauthorized},
 		{"PROOF_INVALID", "enrollment is not live", http.StatusUnauthorized},
 		{"PROOF_INVALID", "proof invalid: not live", http.StatusUnauthorized},

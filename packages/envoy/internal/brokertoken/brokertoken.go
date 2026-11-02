@@ -57,12 +57,12 @@ var (
 	// (DefaultAddressLimit). Nothing was asked of the broker.
 	ErrRateLimited = errors.New("brokertoken: too many introspections from this source address")
 	// ErrNotASession is a live token that is not a session's credential: the broker's answer
-	// names no session, or no person, or the token was issued to a client other than the
-	// exchange every Dispatch access token comes from (ExchangeClientID), or its project scope
-	// is a word this package does not know. A machine login's own access token is exactly that —
-	// the credential a dev box holds to ask the broker for other credentials, DPoP-bound and
-	// perfectly live, for which no exchange ever decided a session, a person or a project scope —
-	// and so is any other token the broker issued for something
+	// names no session, or names neither a person nor a service, or the token was issued to a
+	// client other than the exchange every Dispatch access token comes from (ExchangeClientID),
+	// or its project scope is a word this package does not know. A machine login's own access
+	// token is exactly that — the credential a dev box holds to ask the broker for other
+	// credentials, DPoP-bound and perfectly live, for which no exchange ever decided a session,
+	// a person or a project scope — and so is any other token the broker issued for something
 	// other than acting as a session. Whoever mounts this check acts as the session a token
 	// names, so a token that names none is refused here rather than admitted for a request body
 	// to name one in its place.
@@ -157,8 +157,14 @@ type Caller struct {
 	// Session is the session the writes are recorded as, which a Caller always names: an answer
 	// naming none is ErrNotASession and never reaches one.
 	Session string
-	// Person is the person that session acts for, which a Caller always names too.
+	// Person is the person that session acts for. A Caller names a person or a service, never
+	// both and never neither: an answer that names no person names the service its machine is.
 	Person string
+	// Service is the service a caller that names no person is: the fleet the machine presenting
+	// the token belongs to, as the broker's own configuration names it. Whoever mounts this
+	// check decides what such a caller may do; what this package promises is that one of the two
+	// is set.
+	Service string
 	// Project is the one project key this caller may write, and is empty for a caller that is
 	// held to no single project. callerOf applies the broker's named-scope rule, so a reader
 	// takes this field as it stands rather than reading the scope beside it.
@@ -351,11 +357,15 @@ func (v *Verifier) live(ctx context.Context, r *http.Request) (string, Introspec
 	if answer.Thumbprint == "" {
 		return "", Introspection{}, ErrKeyMismatch
 	}
-	// The fourth clause is the scope the Project beside it is read under: a word this package
+	// A token names a person or a service: an exchange decided one of the two for every token
+	// issued for acting as a session, and one that names neither is no session's credential
+	// whatever else it carries.
+	//
+	// The last two clauses are the scope the Project beside it is read under: a word this package
 	// does not know is a token it cannot read, and is refused here rather than taken as a token
 	// that names no project at all (ErrNotASession). A named scope with no project beside it is
 	// the same case: it is refused rather than read as a caller no project check covers.
-	if answer.Session == "" || answer.Person == "" || answer.ClientID != ExchangeClientID ||
+	if answer.Session == "" || (answer.Person == "" && answer.Service == "") || answer.ClientID != ExchangeClientID ||
 		(answer.ProjectScope != ProjectScopeNamed && answer.ProjectScope != ProjectScopePerson) ||
 		(answer.ProjectScope == ProjectScopeNamed && answer.Project == "") {
 		return "", Introspection{}, ErrNotASession

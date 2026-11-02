@@ -9,7 +9,9 @@
 // place once four fifths of that has passed.
 //
 //	dev-oidc-issuer [--token <audience>=<service account>=<file> ...]
-//	                [--code-flow <client id>=<client secret file> ... [--sign-in-as <email> [--sign-in-group <group>]]]
+//	                [--code-flow <client id>=<client secret file> ...]
+//	                [--device-flow <client id>=<client secret file> ...]
+//	                [--sign-in-as <email> [--sign-in-group <group>]]
 //
 // Each service account's tokens are bound to one pod of its own (kubernetes.io → pod → uid), kept
 // across rewrites as a pod keeps its uid, so a file serves a pod's enrolment and its token
@@ -32,6 +34,20 @@
 // pool user federated from the provider DevIdP, a member of --sign-in-group's group when it is
 // given (identity.GroupRule). Dispatch takes a domain only from Google's own issuer, so a Dispatch
 // signing people in here runs under DISPATCH_SIGNIN_GROUP set to --sign-in-group's group.
+//
+// --device-flow serves the OAuth 2.0 device authorization grant (RFC 8628) for one confidential
+// client, in the shape of --code-flow and from a secret file read the same way, so a client with
+// no browser of its own can be driven through a person's device sign-in with no Google. It is
+// repeatable, and names clients of its own: a client id --code-flow serves is refused, since one
+// client serves the device grant or the code flow, not both, as a Google client registered for
+// limited-input devices is not the one a browser signs in at. A device authorization (POST
+// <issuer URL>/device_authorization) answers a device code and a user code; the person who would
+// type that user code in at Google is the loopback-only control route POST <issuer
+// URL>/_dev/approve-device-code, whose body is {"user_code": "…"}; and the poll (POST <issuer
+// URL>/token, grant_type urn:ietf:params:oauth:grant-type:device_code, the client authenticating
+// with its secret) answers authorization_pending until that approval and the client's tokens
+// once it has one. An approval signs in the person queued at /_dev/sign-in-as, or --sign-in-as's
+// with none queued, exactly as an authorization does.
 //
 // A caller that needs a token for an account no --token names, or for a pod of its own choosing,
 // asks the loopback-only control route POST <issuer URL>/_dev/mint, whose body names the subject,
@@ -84,9 +100,10 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	var tokens tokenFlags
 	fs.Var(&tokens, "token", "keep `<audience>=<service account>=<file>`'s token in file (repeatable)")
-	var flow codeFlow
-	fs.Var(&flow.clients, "code-flow", "serve the sign-in code flow for `<client id>=<client secret file>` (repeatable)")
-	fs.StringVar(&flow.signInAs, "sign-in-as", "", "sign each authorization in as `<email>` when none is queued (needs --code-flow)")
+	flow := codeFlow{codeClients: clientFlags{flagName: "--code-flow"}, deviceClients: clientFlags{flagName: "--device-flow"}}
+	fs.Var(&flow.codeClients, "code-flow", "serve the sign-in code flow for `<client id>=<client secret file>` (repeatable)")
+	fs.Var(&flow.deviceClients, "device-flow", "serve the device authorization grant for `<client id>=<client secret file>` (repeatable)")
+	fs.StringVar(&flow.signInAs, "sign-in-as", "", "sign each authorization or device approval in as `<email>` when none is queued (needs --code-flow or --device-flow)")
 	fs.StringVar(&flow.signInGroup, "sign-in-group", "", "make --sign-in-as's person a member of the sign-in pool group `<group>` (needs --sign-in-as)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -101,8 +118,8 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 	if flow.signInAs != "" {
 		local, domain, _ := strings.Cut(flow.signInAs, "@")
 		switch {
-		case len(flow.clients) == 0:
-			fmt.Fprintln(stderr, "dev-oidc-issuer: --sign-in-as needs --code-flow")
+		case !flow.serves():
+			fmt.Fprintln(stderr, "dev-oidc-issuer: --sign-in-as needs --code-flow or --device-flow")
 			return exitUsageError
 		case local == "" || domain == "" || strings.Contains(domain, "@"):
 			fmt.Fprintf(stderr, "dev-oidc-issuer: --sign-in-as %q is not an email address\n", flow.signInAs)
@@ -113,20 +130,48 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "dev-oidc-issuer: --sign-in-group needs --sign-in-as")
 		return exitUsageError
 	}
+	for _, device := range flow.deviceClients.clients {
+		for _, code := range flow.codeClients.clients {
+			if device.clientID == code.clientID {
+				fmt.Fprintf(stderr, "dev-oidc-issuer: --device-flow names client %s, which --code-flow serves\n", device.clientID)
+				return exitUsageError
+			}
+		}
+	}
 	return serve(ctx, tokens, flow, tokenLifetime, stderr)
 }
 
-// codeFlow is --code-flow, --sign-in-as and --sign-in-group: the clients the code flow serves,
-// the email of the person an authorization signs in as when none is queued, empty for none, and
-// the sign-in pool group that person is a member of, empty for none. With no client it serves no
-// sign-in at all.
+// codeFlow is --code-flow, --device-flow, --sign-in-as and --sign-in-group: the clients each
+// grant serves, the email of the person an authorization or a device approval signs in as when
+// none is queued, empty for none, and the sign-in pool group that person is a member of, empty
+// for none. With no client it serves no sign-in at all.
 type codeFlow struct {
-	clients               codeFlowFlags
-	signInAs, signInGroup string
+	codeClients, deviceClients clientFlags
+	signInAs, signInGroup      string
 }
 
-// clientIDs names every client the code flow serves, in the order --code-flow gave them.
-func (f codeFlow) clientIDs() []string {
+// serves says whether any client signs a person in here, through either grant.
+func (f codeFlow) serves() bool {
+	return len(f.codeClients.clients)+len(f.deviceClients.clients) > 0
+}
+
+// clientSpec is one --code-flow or --device-flow: a confidential client the issuer serves, and
+// its secret.
+type clientSpec struct {
+	clientID, clientSecret string
+}
+
+// clientFlags is one repeated client flag, --code-flow or --device-flow: the clients it names,
+// and its own name, which its refusals carry.
+type clientFlags struct {
+	flagName string
+	clients  []clientSpec
+}
+
+func (f *clientFlags) String() string { return "" }
+
+// ids names every client the flag serves, in the order it gave them.
+func (f clientFlags) ids() []string {
 	ids := make([]string, len(f.clients))
 	for i, client := range f.clients {
 		ids[i] = client.clientID
@@ -134,29 +179,19 @@ func (f codeFlow) clientIDs() []string {
 	return ids
 }
 
-// codeFlowSpec is one --code-flow: a confidential client the code flow serves, and its secret.
-type codeFlowSpec struct {
-	clientID, clientSecret string
-}
-
-// codeFlowFlags is the repeated --code-flow flag.
-type codeFlowFlags []codeFlowSpec
-
-func (f *codeFlowFlags) String() string { return "" }
-
 // Set parses <client id>=<client secret file> and reads the secret from the file now, so a file
 // that cannot be read, or holds nothing but whitespace, is refused before any issuer runs rather
 // than serving a client no caller can authenticate as. A client id given twice is refused: the
 // second secret would replace the first, and the client the caller meant would authenticate with
 // neither.
-func (f *codeFlowFlags) Set(value string) error {
+func (f *clientFlags) Set(value string) error {
 	clientID, file, _ := strings.Cut(value, "=")
 	if clientID == "" || file == "" {
 		return errors.New("want <client id>=<client secret file>")
 	}
-	for _, served := range *f {
+	for _, served := range f.clients {
 		if served.clientID == clientID {
-			return fmt.Errorf("--code-flow names client %s twice", clientID)
+			return fmt.Errorf("%s names client %s twice", f.flagName, clientID)
 		}
 	}
 	raw, err := os.ReadFile(file)
@@ -167,7 +202,7 @@ func (f *codeFlowFlags) Set(value string) error {
 	if secret == "" {
 		return fmt.Errorf("the client secret file %s is empty", file)
 	}
-	*f = append(*f, codeFlowSpec{clientID: clientID, clientSecret: secret})
+	f.clients = append(f.clients, clientSpec{clientID: clientID, clientSecret: secret})
 	return nil
 }
 
@@ -213,6 +248,34 @@ func signInAsHandler(issuer *oidctest.Issuer) http.Handler {
 			return
 		}
 		issuer.SignInAs(claims)
+		w.WriteHeader(http.StatusNoContent)
+	})
+}
+
+// approveDeviceCodeHandler is POST /_dev/approve-device-code: it approves the pending device
+// authorization whose user code its JSON body names, as the person who typed that code in at
+// Google does, signing in whoever is queued at /_dev/sign-in-as or, with none queued,
+// --sign-in-as's person. A user code nothing is waiting on is refused, naming it. It answers
+// loopback callers only, for the reason the sign-in control does: whoever can reach it approves
+// a sign-in nobody asked for.
+func approveDeviceCodeHandler(issuer *oidctest.Issuer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsLoopback() {
+			http.Error(w, "the device approval control answers loopback callers only", http.StatusForbidden)
+			return
+		}
+		var want struct {
+			UserCode string `json:"user_code"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&want); err != nil || want.UserCode == "" {
+			http.Error(w, `want {"user_code": "…"}, the code the device told the person to type in`, http.StatusBadRequest)
+			return
+		}
+		if err := issuer.ApproveDeviceCode(want.UserCode); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 }
@@ -276,20 +339,27 @@ func (f *tokenFlags) Set(value string) error {
 
 // serve runs the issuer until ctx ends, writing every spec's token before it reports its URL and
 // again each time four fifths of lifetime has passed, and serving the code flow for every client
-// flow names. A token it cannot write ends it, 1.
+// flow names it for and the device grant for every client it names for that. A token it cannot
+// write ends it, 1.
 func serve(ctx context.Context, specs []tokenSpec, flow codeFlow, lifetime time.Duration, stderr io.Writer) int {
 	p := &process{stderr: stderr}
 	defer p.stop()
 	issuer := oidctest.New(p)
 	key := issuer.PublishKey(p, "dev-signing-key")
-	for _, client := range flow.clients {
+	for _, client := range flow.codeClients.clients {
 		issuer.EnableCodeFlow(key, client.clientID, client.clientSecret)
 	}
-	if len(flow.clients) > 0 {
+	for _, client := range flow.deviceClients.clients {
+		issuer.EnableDeviceFlow(key, client.clientID, client.clientSecret)
+	}
+	if flow.serves() {
 		if flow.signInAs != "" {
 			issuer.SignInByDefault(person(flow.signInAs, flow.signInGroup))
 		}
 		issuer.Handle("POST /_dev/sign-in-as", signInAsHandler(issuer))
+	}
+	if len(flow.deviceClients.clients) > 0 {
+		issuer.Handle("POST /_dev/approve-device-code", approveDeviceCodeHandler(issuer))
 	}
 	issuer.Handle("POST /_dev/mint", mintHandler(issuer, key, p, lifetime))
 	// Each account's pod, a random UUID as the API server assigns a pod's uid, shared by every
@@ -316,12 +386,15 @@ func serve(ctx context.Context, specs []tokenSpec, flow codeFlow, lifetime time.
 	for _, spec := range specs {
 		fmt.Fprintf(stderr, "dev-oidc-issuer: %s holds %s's token for audience %s (pod %s)\n", spec.file, spec.account, spec.audience, spec.podUID)
 	}
-	if len(flow.clients) > 0 {
-		signsIn := "nobody until one is queued"
-		if flow.signInAs != "" {
-			signsIn = strings.ToLower(flow.signInAs)
-		}
-		fmt.Fprintf(stderr, "dev-oidc-issuer: code flow serves client %s; an authorization with none queued at /_dev/sign-in-as signs in %s\n", strings.Join(flow.clientIDs(), ", "), signsIn)
+	signsIn := "nobody until one is queued"
+	if flow.signInAs != "" {
+		signsIn = strings.ToLower(flow.signInAs)
+	}
+	if len(flow.codeClients.clients) > 0 {
+		fmt.Fprintf(stderr, "dev-oidc-issuer: code flow serves client %s; an authorization with none queued at /_dev/sign-in-as signs in %s\n", strings.Join(flow.codeClients.ids(), ", "), signsIn)
+	}
+	if len(flow.deviceClients.clients) > 0 {
+		fmt.Fprintf(stderr, "dev-oidc-issuer: device flow serves client %s; an approval at /_dev/approve-device-code with none queued at /_dev/sign-in-as signs in %s\n", strings.Join(flow.deviceClients.ids(), ", "), signsIn)
 	}
 	fmt.Fprintf(stderr, "dev-oidc-issuer: issuer listening url=%s\n", issuer.URL())
 	ticker := time.NewTicker(lifetime * 4 / 5)

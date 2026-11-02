@@ -48,21 +48,19 @@ type client struct {
 // terminalRenewal is the closed set of renewal refusals `agent-secrets renew` stops on, exiting
 // exitRenewRefused (76) so the worker shim does not restart it; every other refusal keeps the retry
 // backoff. Each member is an answer no retry can change: POD_TOKEN_REQUIRED is a pod enrollment's
-// renewal that carried no token and VM_TOKEN_REQUIRED a vm enrollment's, VM_NOT_LISTED a VM its
-// fleet's broker settings no longer allow (only an operator's change of them can), and
+// renewal that carried no token, and
 // ENROLLMENT_NOT_LIVE an enrollment that has ended, lapsed or never existed. A broker that predates
 // ENROLLMENT_NOT_LIVE answers an ended enrollment
 // PROOF_INVALID with a message saying "not live" (its renew handler's "enrollment is not live" and
 // its proof check's "proof invalid: not live"), which no recoverable proof failure says.
 // POD_IDENTITY_MISMATCH is not a member: the broker also answers it for a token it could not
 // verify while its issuer or key set was unreachable, and a real mismatch ends with the lease,
-// after which the next renewal is ENROLLMENT_NOT_LIVE. VM_IDENTITY_MISMATCH and VM_TOKEN_EXPIRED
-// are not members for the same reason as their pod counterparts.
+// after which the next renewal is ENROLLMENT_NOT_LIVE.
 var terminalRenewal = struct {
 	Codes                     []string
 	LegacyCode, LegacyMessage string
 }{
-	Codes:         []string{"POD_TOKEN_REQUIRED", "VM_TOKEN_REQUIRED", "VM_NOT_LISTED", "ENROLLMENT_NOT_LIVE"},
+	Codes:         []string{"POD_TOKEN_REQUIRED", "ENROLLMENT_NOT_LIVE"},
 	LegacyCode:    "PROOF_INVALID",
 	LegacyMessage: "not live",
 }
@@ -451,9 +449,8 @@ func (c *client) Self(ctx context.Context, signer Signer) (SelfResult, []byte, e
 
 // RenewEnrollment is the one Signer-taking method that still needs enrollmentID explicitly: the
 // broker route is /v1/enrollments/{id}/renew, so the id is in the URL path, not just the signed
-// payload. A pod's renewal carries its current projected token as pod_token and a VM's its
-// current metadata token as vm_token; an empty field or token sends no body at all, a box's
-// renewal.
+// payload. A pod's renewal carries its current projected token as pod_token; an empty field or
+// token sends no body at all, a box's renewal.
 func (c *client) RenewEnrollment(ctx context.Context, signer Signer, enrollmentID, tokenField, token string) (time.Time, error) {
 	if err := pathID("an enrollment id", enrollmentID); err != nil {
 		return time.Time{}, err
