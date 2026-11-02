@@ -247,16 +247,18 @@ func TestDecisionLinksGoStaleWithTheDecisionAndClearWithTheirBlock(t *testing.T)
 	}
 }
 
-// Keep records a person's agreement at the decision's current version, which stops it waiting for
-// review; a later change of the decision asks for review again. A bearer may not keep, and a block
-// that is no decision heading is not a target.
+// Keep records a person's agreement with the text they read, which stops the decision waiting for
+// review; a later change of the decision asks for review again, and a Keep that carries the text
+// before that change is refused. A bearer may not keep, and a block that is no decision heading
+// is not a target.
 func TestKeepRecordsAgreementUntilTheDecisionChanges(t *testing.T) {
 	fixture := newDecisionsFixture(t)
 	handler, key := fixture.handler, fixture.issue.Key
 	table := decisionNamed(t, readIssueDecisions(t, handler, key), tableDecision)
 
 	keepPath := "/api/v1/artifacts/" + fixture.decisions.ID + "/blocks/" + table.BlockID + "/keep"
-	kept := dispatchRequest(t, handler, http.MethodPost, keepPath, map[string]any{}, "alice")
+	kept := dispatchRequest(t, handler, http.MethodPost, keepPath,
+		map[string]any{"text_sha256": table.TextSHA256}, "alice")
 	if kept.Code != http.StatusOK {
 		t.Fatalf("keep: status=%d body=%s", kept.Code, kept.Body.String())
 	}
@@ -277,6 +279,22 @@ func TestKeepRecordsAgreementUntilTheDecisionChanges(t *testing.T) {
 		t.Fatalf("after the decision changed it = %#v, want it kept at the older version and waiting for review", changed)
 	}
 
+	// The Keep of the text the person read before that change is refused, and writes nothing: a
+	// Keep that stood would record an agreement with words nobody read.
+	stale := dispatchRequest(t, handler, http.MethodPost, keepPath,
+		map[string]any{"text_sha256": table.TextSHA256}, "alice")
+	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), "DECISION_CHANGED") {
+		t.Fatalf("a Keep of the text before the change: status=%d body=%s, want 409 DECISION_CHANGED",
+			stale.Code, stale.Body.String())
+	}
+	if again := decisionNamed(t, readIssueDecisions(t, handler, key), tableDecision); !again.WaitingReview {
+		t.Fatalf("the refused Keep was recorded: %#v", again)
+	}
+	keepBlock(t, handler, fixture.decisions.ID, changed.BlockID, changed.TextSHA256)
+	if now := decisionNamed(t, readIssueDecisions(t, handler, key), tableDecision); now.WaitingReview {
+		t.Fatalf("after a Keep of the text as it stands the decision = %#v, want it kept", now)
+	}
+
 	bearer := sessionRequest(t, handler, http.MethodPost, keepPath, map[string]any{"actor": sessionActor()})
 	if bearer.Code != http.StatusForbidden || !strings.Contains(bearer.Body.String(), "HUMAN_ONLY") {
 		t.Fatalf("a bearer's keep: status=%d body=%s, want 403 HUMAN_ONLY", bearer.Code, bearer.Body.String())
@@ -288,39 +306,55 @@ func TestKeepRecordsAgreementUntilTheDecisionChanges(t *testing.T) {
 		t.Fatalf("the decision's paragraph has no block id; blocks = %v", blocks)
 	}
 	notHeading := dispatchRequest(t, handler, http.MethodPost,
-		"/api/v1/artifacts/"+fixture.decisions.ID+"/blocks/"+paragraph+"/keep", map[string]any{}, "alice")
+		"/api/v1/artifacts/"+fixture.decisions.ID+"/blocks/"+paragraph+"/keep",
+		map[string]any{"text_sha256": table.TextSHA256}, "alice")
 	if notHeading.Code != http.StatusNotFound || !strings.Contains(notHeading.Body.String(), "TARGET_NOT_FOUND") {
 		t.Fatalf("keep on a block that is no decision heading: status=%d body=%s, want 404 TARGET_NOT_FOUND",
 			notHeading.Code, notHeading.Body.String())
 	}
 }
 
-// keepBlock is a person's Keep of the decision that heading block opens.
-func keepBlock(t *testing.T, handler http.Handler, artifactID, blockID string) model.DecisionKeep {
+// keepBlock is a person's Keep of the decision that heading block opens, at the text sum the
+// view served them.
+func keepBlock(t *testing.T, handler http.Handler, artifactID, blockID, sum string) model.DecisionKeep {
 	t.Helper()
 	response := dispatchRequest(t, handler, http.MethodPost,
-		"/api/v1/artifacts/"+artifactID+"/blocks/"+blockID+"/keep", map[string]any{}, "alice")
+		"/api/v1/artifacts/"+artifactID+"/blocks/"+blockID+"/keep",
+		map[string]any{"text_sha256": sum}, "alice")
 	if response.Code != http.StatusOK {
 		t.Fatalf("keep %s: status=%d body=%s", blockID, response.Code, response.Body.String())
 	}
 	return decodeBody[model.DecisionKeep](t, response)
 }
 
-// A kept decision whose text changes without its changed version moving waits for review again.
-// The version is the greatest of the blocks the decision holds now, so a block taken out of it,
-// and one moved from it into another decision, leave both decisions' versions where they were
-// while their text changed: the sum of the text, not the version, is what Keep records.
+// A kept decision whose text changes without its changed version moving waits for review again,
+// and the spec blocks it linked are out of date. The version is the greatest of the blocks the
+// decision holds now, so a block taken out of it, and one moved from it into another decision,
+// leave both decisions' versions where they were while their text changed: the text, not the
+// version, is what Keep records and what the out-of-date rule reads.
 func TestAKeptDecisionWaitsForReviewAgainWhenABlockLeavesOrJoinsIt(t *testing.T) {
 	fixture := newDecisionsFixture(t)
 	handler, key, id := fixture.handler, fixture.issue.Key, fixture.decisions.ID
 
-	// A paragraph written into the agent decision, kept with it, then taken out again.
+	// A paragraph written into the agent decision: its text changed after it linked both spec
+	// blocks, so both are out of date, and a Keep agrees with the text as it now stands.
 	const measured = "Measured against the file store."
 	editIssueDocument(t, handler, key, fixture.decisions.Slug, []map[string]any{
 		{"op": "insert", "markdown": measured, "before": "## " + nameDecision},
 	})
 	table := decisionNamed(t, readIssueDecisions(t, handler, key), tableDecision)
-	keepBlock(t, handler, id, table.BlockID)
+	if got := fmt.Sprint(staleTargets(table)); got != "[hold-it ship_it]" && got != "[ship_it hold-it]" {
+		t.Fatalf("after a block joined it the decision marks %v out of date, want both spec blocks",
+			staleTargets(table))
+	}
+	keepBlock(t, handler, id, table.BlockID, table.TextSHA256)
+	if kept := decisionNamed(t, readIssueDecisions(t, handler, key), tableDecision); kept.WaitingReview {
+		t.Fatalf("after the Keep the decision = %#v, want it waiting for no review", kept)
+	}
+
+	// The paragraph taken out again: the decision's text is the text it linked those blocks
+	// with, so neither is out of date any more, while the Keep, which agreed with the
+	// paragraph, no longer holds - and the decision's changed version moved for neither.
 	editIssueDocument(t, handler, key, fixture.decisions.Slug, []map[string]any{
 		{"op": "delete", "find": measured},
 	})
@@ -335,14 +369,17 @@ func TestAKeptDecisionWaitsForReviewAgainWhenABlockLeavesOrJoinsIt(t *testing.T)
 	if !removed.WaitingReview {
 		t.Fatalf("after a block left it the decision = %#v, want it waiting for review", removed)
 	}
+	if stale := staleTargets(removed); len(stale) != 0 {
+		t.Fatalf("the decision's text is what it linked those blocks with, and it marks %v", stale)
+	}
 
 	// Both decisions kept as they now stand, then the agent decision's paragraph moved into the
 	// unsure one: no block of either changed, so neither changed version moves.
 	view := readIssueDecisions(t, handler, key)
 	table = decisionNamed(t, view, tableDecision)
 	cache := decisionNamed(t, view, cacheDecision)
-	keepBlock(t, handler, id, table.BlockID)
-	keepBlock(t, handler, id, cache.BlockID)
+	keepBlock(t, handler, id, table.BlockID, table.TextSHA256)
+	keepBlock(t, handler, id, cache.BlockID, cache.TextSHA256)
 	blocks := blockIDsByText(t, handler, id)
 	paragraph := blocks[tableParagraph+" Shapes dispatch://"+key+"/spec#b-ship%5Fit and dispatch://"+key+"/spec#b-hold-it."]
 	if paragraph == "" {
@@ -365,6 +402,15 @@ func TestAKeptDecisionWaitsForReviewAgainWhenABlockLeavesOrJoinsIt(t *testing.T)
 		if !decision.WaitingReview {
 			t.Fatalf("after the move %q = %#v, want it waiting for review", decision.Heading, decision)
 		}
+	}
+	// The links moved with the paragraph, and both spec blocks are out of date under the
+	// decision that holds them now: the decision they joined changed when they arrived.
+	if got := fmt.Sprint(staleTargets(joined)); got != "[hold-it ship_it]" && got != "[ship_it hold-it]" {
+		t.Fatalf("the decision the paragraph joined marks %v out of date, want both spec blocks",
+			staleTargets(joined))
+	}
+	if len(left.Links) != 0 {
+		t.Fatalf("the decision the paragraph left still holds %v", linkTargets(left))
 	}
 }
 

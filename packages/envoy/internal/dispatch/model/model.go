@@ -1840,13 +1840,15 @@ type DecisionLink struct {
 // it up to the next heading of its level or higher. Kind is "person" when its blocks mention an
 // ask (a person's decision links the answered ask) and "agent" otherwise; Unsure is set by a
 // paragraph that starts "Unsure:"; Replaced is set by sitting under the section headed exactly
-// "## Replaced". ChangedVersion and ChangedAt are the greatest of its blocks'. WaitingReview is
-// an agent's decision, not replaced, whose text nobody has kept as it stands.
+// "## Replaced". ChangedVersion and ChangedAt are the greatest of its blocks'. TextSHA256 is the
+// sum of Text, which a Keep carries back to say which text it agreed with. WaitingReview is an
+// agent's decision, not replaced, whose text nobody has kept as it stands.
 type Decision struct {
 	BlockID        string         `json:"block_id"`
 	Heading        string         `json:"heading"`
 	Ref            string         `json:"ref"`
 	Text           string         `json:"text"`
+	TextSHA256     string         `json:"text_sha256"`
 	Kind           string         `json:"kind"`
 	Unsure         bool           `json:"unsure"`
 	Replaced       bool           `json:"replaced"`

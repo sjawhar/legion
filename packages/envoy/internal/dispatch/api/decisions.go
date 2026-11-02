@@ -263,7 +263,6 @@ func (s *server) readDecisions(ctx context.Context, document model.Artifact, ref
 				To:             link.To,
 				CreatedVersion: link.CreatedVersion,
 				CreatedAt:      link.CreatedAt,
-				Stale:          staleLink(decision, link),
 			})
 		}
 		if len(decision.Asks) > 0 {
@@ -272,21 +271,280 @@ func (s *server) readDecisions(ctx context.Context, document model.Artifact, ref
 		if keep, ok := keeps[section.headingBlock]; ok {
 			decision.Kept = &keep
 		}
+		decision.TextSHA256 = decisionTextSum(decision.Text)
 		decision.WaitingReview = decision.Kind == "agent" && !decision.Replaced &&
-			(decision.Kept == nil || decision.Kept.TextSHA256 != decisionTextSum(decision.Text))
+			(decision.Kept == nil || decision.Kept.TextSHA256 != decision.TextSHA256)
 		decisions = append(decisions, decision)
+	}
+	if err := s.markStaleLinks(ctx, document.ID, markdown, decisions); err != nil {
+		return nil, err
 	}
 	return decisions, nil
 }
 
-// staleLink is the out-of-date rule: the decision changed after it first linked the spec block,
-// and that spec block has not changed since the decision did. A decision the block index has not
-// reached has no changed version and marks nothing.
-func staleLink(decision model.Decision, link model.BlockLink) bool {
-	if decision.ChangedAt == nil || decision.ChangedVersion <= link.CreatedVersion {
+// markStaleLinks decides each link's `stale`: the decision's own text changed after it first
+// linked the spec block, and that spec block has not changed since the decision did.
+//
+// Both halves are answered by the decision's text at a version, never by its changed version:
+// that version is the greatest of the blocks the decision holds now, so a block removed from the
+// decision, or moved into or out of it, changes the text and leaves the version where it was
+// (the reviewer's measurement on #2626). The text at the version that created the link says
+// whether the decision changed since; the text at the version current when the spec block last
+// changed says whether it changed since that, which is what clears a link the spec answered.
+//
+// A version this document does not hold, a heading the version did not carry, and a spec block
+// Dispatch records no change for each leave the link as it is: the view marks nothing it cannot
+// read, as the block index's first pass over a document marks nothing.
+func (s *server) markStaleLinks(
+	ctx context.Context, artifactID, markdown string, decisions []model.Decision,
+) error {
+	times := map[int64]time.Time{}
+	numbers := map[int]bool{}
+	for _, decision := range decisions {
+		for _, link := range decision.Links {
+			numbers[link.CreatedVersion] = true
+			if link.To.ChangedAt != nil {
+				times[link.To.ChangedAt.UnixNano()] = *link.To.ChangedAt
+			}
+		}
+	}
+	if len(numbers) == 0 {
+		return nil
+	}
+	atTime, err := s.versionsAtTimes(ctx, artifactID, sortedTimes(times))
+	if err != nil {
+		return err
+	}
+	for _, number := range atTime {
+		numbers[number] = true
+	}
+	sums, err := s.decisionSumsAt(ctx, artifactID, sortedNumbers(numbers))
+	if err != nil {
+		return err
+	}
+	current := decisionSums(markdown)
+	for i := range decisions {
+		decision := &decisions[i]
+		now, ok := current[decision.Heading]
+		if !ok {
+			continue
+		}
+		for j := range decision.Links {
+			decision.Links[j].Stale = staleLink(now, decision.Heading, decision.Links[j], sums, atTime)
+		}
+	}
+	return nil
+}
+
+// staleLink is that rule for one link, over the sums markStaleLinks read. A time keys those
+// reads by its own instant (UnixNano), since a time read back from Postgres is the same instant
+// in another `time.Time` value, which no map matches.
+func staleLink(
+	now, heading string,
+	link model.DecisionLink,
+	sums map[int]map[string]string,
+	atTime map[int64]int,
+) bool {
+	atCreated, ok := sums[link.CreatedVersion][heading]
+	if !ok || atCreated == now {
 		return false
 	}
-	return link.To.ChangedAt != nil && link.To.ChangedAt.Before(*decision.ChangedAt)
+	if link.To.ChangedAt == nil {
+		return false
+	}
+	number, ok := atTime[link.To.ChangedAt.UnixNano()]
+	if !ok {
+		return false
+	}
+	if number == 0 {
+		// The spec block last changed before this document held a version of its own, so every
+		// change of the decision came after it.
+		return true
+	}
+	atChange, ok := sums[number][heading]
+	return ok && atChange != now
+}
+
+// versionsAtTimes is, for each time, the document's greatest version written at or before it:
+// the version of decisions.md that stood when a spec block changed, keyed by the time's own
+// instant. A time before the document's first version answers 0.
+func (s *server) versionsAtTimes(
+	ctx context.Context, artifactID string, times []time.Time,
+) (map[int64]int, error) {
+	at := map[int64]int{}
+	if len(times) == 0 {
+		return at, nil
+	}
+	rows, err := s.deps.Store.Pool.Query(ctx, `
+		select asked.ord, version.number
+		from unnest($2::timestamptz[]) with ordinality as asked(at, ord)
+		left join lateral (
+			select v.number from artifact_versions v
+			where v.artifact_id = $1::uuid and v.created_at <= asked.at
+			order by v.number desc limit 1
+		) version on true
+	`, artifactID, times)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ordinal int
+		var number *int
+		if err := rows.Scan(&ordinal, &number); err != nil {
+			return nil, err
+		}
+		if ordinal < 1 || ordinal > len(times) {
+			continue
+		}
+		at[times[ordinal-1].UnixNano()] = 0
+		if number != nil {
+			at[times[ordinal-1].UnixNano()] = *number
+		}
+	}
+	return at, rows.Err()
+}
+
+// decisionSumsAt is each named version's decisions by heading, with the sum of each one's text:
+// the version's own stored markdown, cut by the same rule as the document as it stands.
+func (s *server) decisionSumsAt(
+	ctx context.Context, artifactID string, numbers []int,
+) (map[int]map[string]string, error) {
+	sums := map[int]map[string]string{}
+	if len(numbers) == 0 {
+		return sums, nil
+	}
+	rows, err := s.deps.Store.Pool.Query(ctx, `
+		select number, coalesce(markdown, '') from artifact_versions
+		where artifact_id = $1::uuid and number = any($2::int[])
+	`, artifactID, numbers)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var number int
+		var markdown string
+		if err := rows.Scan(&number, &markdown); err != nil {
+			return nil, err
+		}
+		sums[number] = decisionSums(markdown)
+	}
+	return sums, rows.Err()
+}
+
+// decisionSums cuts a document's markdown into its decisions by heading, and sums each one's
+// text. A version holds no block id, so a decision is found here by its heading, as a reader
+// reads it; a heading the document carries twice is left out rather than guessed at, and a
+// renamed heading reads as a decision whose text changed, which it is.
+//
+// A section runs from its heading line to the line before the next heading of its own level or
+// higher, as the block walk cuts the document that stands (decisionSections), and its sum is
+// taken over that text with the blank lines at its end removed, so the same section of two
+// versions sums alike whatever follows it.
+func decisionSums(markdown string) map[string]string {
+	sums := map[string]string{}
+	repeated := map[string]bool{}
+	type section struct {
+		heading string
+		level   int
+		start   int
+	}
+	var open []section
+	fenced := ""
+	offset := 0
+	closeTo := func(level, end int) {
+		for len(open) > 0 && open[len(open)-1].level >= level {
+			last := open[len(open)-1]
+			open = open[:len(open)-1]
+			text := strings.TrimRight(markdown[last.start:end], "\n")
+			if repeated[last.heading] {
+				continue
+			}
+			if _, held := sums[last.heading]; held {
+				delete(sums, last.heading)
+				repeated[last.heading] = true
+				continue
+			}
+			sums[last.heading] = decisionTextSum(text)
+		}
+	}
+	for _, line := range strings.SplitAfter(markdown, "\n") {
+		if line == "" {
+			break
+		}
+		trimmed := strings.TrimRight(line, "\n")
+		if fence := codeFence(trimmed); fence != "" {
+			if fenced == "" {
+				fenced = fence
+			} else if strings.HasPrefix(fence, fenced[:1]) && len(fence) >= len(fenced) {
+				fenced = ""
+			}
+			offset += len(line)
+			continue
+		}
+		if fenced == "" {
+			if level, heading := markdownHeading(trimmed); level > 1 {
+				closeTo(level, offset)
+				open = append(open, section{heading: heading, level: level, start: offset})
+			}
+		}
+		offset += len(line)
+	}
+	closeTo(2, len(markdown))
+	return sums
+}
+
+// codeFence is the fence a line opens or closes a fenced code block with (three or more
+// backticks or tildes, at most three spaces in), else "". A heading inside such a block is the
+// code's own text.
+func codeFence(line string) string {
+	trimmed := strings.TrimLeft(line, " ")
+	if len(line)-len(trimmed) > 3 {
+		return ""
+	}
+	for _, marker := range []string{"```", "~~~"} {
+		if strings.HasPrefix(trimmed, marker) {
+			run := 0
+			for run < len(trimmed) && trimmed[run] == marker[0] {
+				run++
+			}
+			return trimmed[:run]
+		}
+	}
+	return ""
+}
+
+// markdownHeading is a line's ATX heading level and title, or level 0 for a line that is no
+// heading. It reads what `headingOf` reads off a heading block's own markdown.
+func markdownHeading(line string) (int, string) {
+	level := 0
+	for level < len(line) && line[level] == '#' {
+		level++
+	}
+	if level == 0 || level > 6 || level >= len(line) || line[level] != ' ' {
+		return 0, ""
+	}
+	return level, strings.TrimSpace(strings.TrimRight(line[level+1:], "#"))
+}
+
+// sortedNumbers and sortedTimes are the keys of a set, in order, so one read asks for each once.
+func sortedNumbers(set map[int]bool) []int {
+	numbers := make([]int, 0, len(set))
+	for number := range set {
+		numbers = append(numbers, number)
+	}
+	sort.Ints(numbers)
+	return numbers
+}
+
+func sortedTimes(set map[int64]time.Time) []time.Time {
+	times := make([]time.Time, 0, len(set))
+	for _, at := range set {
+		times = append(times, at)
+	}
+	sort.Slice(times, func(i, j int) bool { return times[i].Before(times[j]) })
+	return times
 }
 
 // decisionTextSum is the sum a Keep records and the view compares: the decision's whole text, so
@@ -435,13 +693,28 @@ func decisionKeeps(ctx context.Context, q queryer, artifactID string) (map[strin
 	return keeps, rows.Err()
 }
 
-// keepDecision is POST /api/v1/artifacts/{id}/blocks/{block_id}/keep: the caller agrees with the
-// decision that heading block opens, as its text stands now. Any other block - one that is no
-// decision heading, or a decision under `## Replaced`, which is no longer the design - is 404
-// TARGET_NOT_FOUND.
+// keepDecision is POST /api/v1/artifacts/{id}/blocks/{block_id}/keep {"text_sha256": "<sum>"}:
+// the caller agrees with the decision that heading block opens, as the text they read it at.
+// The sum is the `text_sha256` the view served them, and a decision whose text has changed
+// since is 409 DECISION_CHANGED with nothing written: a Keep over text nobody read is the one
+// thing Keep exists to prevent, as `409 ASK_EDITED` holds an answer to the wording it was given
+// on. Any other block - one that is no decision heading, or a decision under `## Replaced`,
+// which is no longer the design - is 404 TARGET_NOT_FOUND.
 func (s *server) keepDecision(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
+		return
+	}
+	var input struct {
+		TextSHA256 string `json:"text_sha256"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if input.TextSHA256 == "" {
+		writeError(w, "INVALID_KEEP", http.StatusBadRequest,
+			"text_sha256 is the text_sha256 the decision was read at")
 		return
 	}
 	document, err := s.loadArtifact(r.Context(), s.deps.Store.Pool, r.PathValue("id"))
@@ -453,6 +726,11 @@ func (s *server) keepDecision(w http.ResponseWriter, r *http.Request) {
 	decision, err := s.keptDecision(r.Context(), document, blockID)
 	if err != nil {
 		s.writeHandlerError(w, err)
+		return
+	}
+	if decision.TextSHA256 != input.TextSHA256 {
+		writeError(w, "DECISION_CHANGED", http.StatusConflict,
+			"the decision changed since it was read; read it again and keep what it says now")
 		return
 	}
 	tx, err := s.begin(r.Context())
