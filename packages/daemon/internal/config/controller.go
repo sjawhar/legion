@@ -20,8 +20,8 @@ const ControllerConfigExample = "deploy/kubernetes/daemon/controller.yaml.exampl
 // the ones the controller needs.
 var controllerKeys = []string{
 	"project", "daemon_url", "operator_token_file", "envoy_url", "envoy_token_file", "nats_urls",
-	"nats_nkey_seed_file", "dispatch_url", "dispatch_token_file", "instructions", "omp_invocation",
-	"omp_launch_prefix", "state_dir",
+	"nats_nkey_seed_file", "dispatch_url", "dispatch_token_file", "dispatch_token_broker",
+	"instructions", "omp_invocation", "omp_launch_prefix", "state_dir",
 }
 
 // ControllerConfig is `legion controller start`'s operator-side file, settled. Every path is
@@ -41,7 +41,13 @@ type ControllerConfig struct {
 	NatsNkeySeedFile  string
 	DispatchURL       string
 	DispatchTokenFile string
-	InstructionsPath  string
+	// DispatchTokenBroker is `dispatch_token_broker`: the controller's Dispatch credential is
+	// this machine's own identity, traded at the secrets broker its environment names, rather
+	// than a bearer in a file (`dispatch_token_file`), the one alternative to it. The loader
+	// reads no environment, so it decides nothing about that trade; `legion controller start`
+	// makes it (controllerDispatchBroker).
+	DispatchTokenBroker bool
+	InstructionsPath    string
 	// OmpInvocation is the invocation as configured, "" when the file sets none; the command
 	// resolves it as the daemon resolves its own (omplaunch.ResolveInvocation), with no pinned
 	// default in Go.
@@ -57,7 +63,9 @@ type ControllerConfig struct {
 // It is never the daemon's loader, which runs both GitHub Apps' private_key_command and demands
 // keys the controller never uses. Relative paths resolve against the file's directory; `~` is not
 // expanded. daemonURL, when not "", is `--daemon-url`, which replaces the file's daemon_url and is
-// validated the same way.
+// validated the same way. A Dispatch credential is `dispatch_token_file` or `dispatch_token_broker`
+// and never both, and either needs `dispatch_url`; that a configured `dispatch_url` names one at
+// all is the start's rule, since only the start can prove the broker route.
 func LoadController(path, daemonURL string) (ControllerConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -144,11 +152,24 @@ func LoadController(path, daemonURL string) (ControllerConfig, error) {
 	if cfg.DispatchTokenFile, err = optionalPath("dispatch_token_file"); err != nil {
 		return ControllerConfig{}, err
 	}
+	if node, set := values["dispatch_token_broker"]; set {
+		if node.Tag != "!!bool" || node.Decode(&cfg.DispatchTokenBroker) != nil {
+			return ControllerConfig{}, errors.New("dispatch_token_broker must be true or false")
+		}
+	}
+	// Which credential a configured Dispatch is written with is a file-shape question only so
+	// far: the two sources exclude each other, and either names a Dispatch to spend it on. That
+	// a configured dispatch_url has one of them at all is `legion controller start`'s rule, not
+	// this loader's (controllerStart): a machine's broker route is proved by trading at the
+	// broker, and this loader reads no environment, so a file naming neither is a configuration
+	// it takes and the start decides on.
 	switch {
-	case dispatchURL != "" && cfg.DispatchTokenFile == "":
-		return ControllerConfig{}, errors.New(missingDispatchTokenFile)
+	case cfg.DispatchTokenFile != "" && cfg.DispatchTokenBroker:
+		return ControllerConfig{}, errors.New("dispatch_token_file and dispatch_token_broker are both set: the controller's Dispatch credential is the bearer a file holds or this machine's own identity traded at the secrets broker, never both")
 	case dispatchURL == "" && cfg.DispatchTokenFile != "":
 		return ControllerConfig{}, errors.New("dispatch_token_file is set but dispatch_url is not")
+	case dispatchURL == "" && cfg.DispatchTokenBroker:
+		return ControllerConfig{}, errors.New("dispatch_token_broker is set but dispatch_url is not")
 	case dispatchURL != "":
 		if cfg.DispatchURL, err = dispatchBase(dispatchURL, "dispatch_url"); err != nil {
 			return ControllerConfig{}, err

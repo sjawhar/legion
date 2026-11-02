@@ -1,5 +1,5 @@
 # legion controller start --config controller.yaml [--daemon-url http://127.0.0.1:13370]
-# The operator-side file: the same key names as legion.yaml, only the thirteen keys the controller
+# The operator-side file: the same key names as legion.yaml, only the fourteen keys the controller
 # needs; any other key is refused naming it. Relative paths resolve against this file's directory
 # (no ~ expansion). The command also writes the controller's gh files (the review App's read-only
 # token for every owner of the project, one directory per owner) under <state_dir>/gh and keeps
@@ -28,9 +28,18 @@ nats_urls:
 # refuses a blank or unreadable file, one its group or others can read, or one holding no nkey user
 # seed, before it asks the daemon for anything.
 # nats_nkey_seed_file: ./nats-seed
-# Dispatch, for the controller's native tools (both keys or neither).
+# Dispatch, for the controller's native tools: the service, and the one credential the controller
+# writes it with, which is one of the two keys below and never both. `legion controller start`
+# refuses a dispatch_url that names neither, and either key with no dispatch_url.
 dispatch_url: https://dispatch.example
+# The bearer a file holds: a token of your own, or one of the deployment's shared agent tokens.
 dispatch_token_file: ./dispatch-token
+# Or, in its place, this machine's own identity: the controller's session trades it at the secrets
+# broker its environment names (AGENT_SECRETS_URL, AGENT_SECRETS_MACHINE_IDENTITY and the rest) for
+# a DPoP-bound Dispatch token it mints and renews itself, so no person's token is copied onto a
+# machine and nothing is written to disk. `legion controller start` makes one trade of its own
+# before the daemon mints a capability, so a broker that refuses this machine refuses the start.
+# dispatch_token_broker: true
 # The deployment's standing rules, appended to the controller's system prompt like every pane's.
 instructions: ./instructions.md
 # How Oh My Pi is launched on this machine (defaults: no prefix and no pinned invocation — set

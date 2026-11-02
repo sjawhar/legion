@@ -46,7 +46,8 @@ func newStubBroker(t *testing.T, refusal string) *stubBroker {
 }
 
 // provesAnIdentity has the operator's machine prove a Kubernetes identity of its own at broker,
-// as a pod running `legion controller start` does.
+// as a pod running `legion controller start` does. What the controller does with that identity
+// is its configuration's word: `dispatch_token_broker` (controllerOptions.dispatchBroker).
 func (c *operatorMachine) provesAnIdentity(broker *stubBroker) {
 	c.t.Helper()
 	projected := filepath.Join(c.dir, "projected-token")
@@ -59,15 +60,16 @@ func (c *operatorMachine) provesAnIdentity(broker *stubBroker) {
 	c.t.Setenv("AGENT_SECRETS_SESSION", "legion-demo-controller")
 }
 
-// TestAControllerWithAMachineIdentityIsHandedNoBearerPointer: the broker's access token is
+// TestAControllerOnTheBrokerRouteIsHandedNoBearerPointer: the broker's access token is
 // DPoP-bound — Dispatch refuses it presented as a bearer (RFC 9449 Section 7.2) — and the Envoy
 // client takes the broker route only where no bearer resolves at all. So a controller whose
-// machine proves an identity is handed DISPATCH_URL and the broker's own variables, and neither
-// DISPATCH_TOKEN_FILE nor DISPATCH_TOKEN: a pointer to such a token is one the session presents
-// as a bearer and Dispatch refuses, which is the whole of the session's Dispatch writing.
-func TestAControllerWithAMachineIdentityIsHandedNoBearerPointer(t *testing.T) {
+// configuration names `dispatch_token_broker` is handed DISPATCH_URL and the broker's own
+// variables, and neither DISPATCH_TOKEN_FILE nor DISPATCH_TOKEN: a pointer to such a token is
+// one the session presents as a bearer and Dispatch refuses, which is the whole of the session's
+// Dispatch writing.
+func TestAControllerOnTheBrokerRouteIsHandedNoBearerPointer(t *testing.T) {
 	d := newControllerDaemon(t)
-	c := newControllerStart(t, d, controllerOptions{})
+	c := newControllerStart(t, d, controllerOptions{dispatchBroker: true})
 	broker := newStubBroker(t, "")
 	c.provesAnIdentity(broker)
 	// The operator's own shell carries a Dispatch bearer and a pointer of its own; both would
@@ -140,7 +142,7 @@ func TestAControllerWithAMachineIdentityIsHandedNoBearerPointer(t *testing.T) {
 // the daemon mints a capability, which would have revoked the running controller's.
 func TestABrokerThatRefusesThisMachineRefusesTheStartBeforeTheMint(t *testing.T) {
 	d := newControllerDaemon(t)
-	c := newControllerStart(t, d, controllerOptions{})
+	c := newControllerStart(t, d, controllerOptions{dispatchBroker: true})
 	c.provesAnIdentity(newStubBroker(t, "the fleet is listed with no session of its own, so the request names one"))
 
 	c.refused("is listed with no session of its own")
@@ -150,14 +152,41 @@ func TestABrokerThatRefusesThisMachineRefusesTheStartBeforeTheMint(t *testing.T)
 	}
 }
 
-// TestAMachineIdentityWithNoBrokerRefusesTheStart: a deployment that named an identity and no
-// broker has a mistake in it, and nothing of the controller is started on it.
-func TestAMachineIdentityWithNoBrokerRefusesTheStart(t *testing.T) {
+// TestABrokerRouteWithNoBrokerRefusesTheStart: a deployment that put the controller on the broker
+// route and named no broker has a mistake in it, and nothing of the controller is started on it.
+func TestABrokerRouteWithNoBrokerRefusesTheStart(t *testing.T) {
 	d := newControllerDaemon(t)
-	c := newControllerStart(t, d, controllerOptions{})
+	c := newControllerStart(t, d, controllerOptions{dispatchBroker: true})
 	c.provesAnIdentity(newStubBroker(t, ""))
 	t.Setenv("AGENT_SECRETS_URL", "")
 
 	c.refused("must name the secrets broker it proves it to")
+	c.wantNoSecretRequest()
+}
+
+// TestABrokerRouteOnAMachineThatProvesNothingRefusesTheStart: `dispatch_token_broker` says the
+// controller's Dispatch credential is this machine's own identity, so a machine that proves none
+// is a controller that could write nothing. The refusal names the variable that would carry it.
+func TestABrokerRouteOnAMachineThatProvesNothingRefusesTheStart(t *testing.T) {
+	d := newControllerDaemon(t)
+	c := newControllerStart(t, d, controllerOptions{dispatchBroker: true})
+	t.Setenv("AGENT_SECRETS_MACHINE_IDENTITY", "")
+
+	c.refused("dispatch_token_broker is set, so the controller's Dispatch credential is this machine's own identity, and AGENT_SECRETS_MACHINE_IDENTITY names none")
+	c.wantNoSecretRequest()
+}
+
+// TestADispatchURLWithNoCredentialRefusesTheStart: the loader takes a `dispatch_url` with neither
+// credential, since it reads no environment and only a trade proves the broker route; the start
+// is where that file is refused, naming both of the keys that would settle it.
+func TestADispatchURLWithNoCredentialRefusesTheStart(t *testing.T) {
+	d := newControllerDaemon(t)
+	c := newControllerStart(t, d, controllerOptions{lines: []string{
+		"project: " + controllerProject, "daemon_url: " + d.url, "operator_token_file: ./operator-token",
+		"envoy_url: http://envoy.test:9020", "nats_urls: [nats://a:4222]",
+		"dispatch_url: https://dispatch.test",
+	}})
+
+	c.refused("dispatch_url is configured with no Dispatch credential: set dispatch_token_file to the bearer's file, or dispatch_token_broker: true where this machine proves an identity of its own and the controller's session trades it at the secrets broker")
 	c.wantNoSecretRequest()
 }

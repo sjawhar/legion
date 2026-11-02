@@ -34,9 +34,11 @@ body: |
   credential its trade mints, so a pod needs nobody to enrol it, and `agent-secrets-helper` gets
   its launcher credential the same way with no person approving the machine at all.
 
-  `legion controller start` gives the controller's session that same route where this machine
-  proves an identity: the session trades for a Dispatch credential of its own and renews it, so
-  nobody copies a person's Dispatch token onto a machine. It hands Oh My Pi no
+  `legion controller start` gives the controller's session that same route where the controller's
+  own file asks for it: `dispatch_token_broker: true`, the alternative to `dispatch_token_file`
+  and never set beside it, has the session trade this machine's identity for a Dispatch
+  credential of its own and renew it, so nobody copies a person's Dispatch token onto a machine.
+  It hands Oh My Pi no
   `DISPATCH_TOKEN_FILE` and no `DISPATCH_TOKEN`, and drops an inherited one, since such a token
   is bound to the key its holder proves and Dispatch refuses it presented as a bearer; it
   trades once itself before the daemon mints the controller's capability, so a broker that

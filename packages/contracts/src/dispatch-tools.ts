@@ -235,11 +235,12 @@ const messageValidation: NonNullable<DispatchToolSpec["validation"]> = {
 };
 
 /**
- * dispatch_read: an issue, a project document, or a ref, exactly as every owned read - or a
- * `message` alone, which addresses a conversation by any message in it. A human's direct message
- * to this session and the replies to it belong to no issue or document, so the id is all there is.
+ * dispatch_read: an issue, a project (alone, its documents; with artifact, one of them), or a ref,
+ * exactly as every owned read - or a `message` alone, which addresses a conversation by any
+ * message in it. A human's direct message to this session and the replies to it belong to no
+ * issue or document, so the id is all there is.
  */
-const readOwner = documentOwnerValidation(true);
+const readOwner = documentOwnerValidation(false);
 const readValidation: NonNullable<DispatchToolSpec["validation"]> = {
   check: (value) => {
     const input = value as {
@@ -257,7 +258,9 @@ const readValidation: NonNullable<DispatchToolSpec["validation"]> = {
       input.ref === undefined
     );
   },
-  message: `${readOwner.message} message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.`,
+  message:
+    "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one. " +
+    "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.",
 };
 
 /** Component attachment modes an issue write accepts. */
@@ -938,7 +941,9 @@ export const dispatchToolSpecs = [
         .describe(
           "Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " +
             "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " +
-            "you need the human to act - the ask returns to 'Waiting on you'."
+            "you need the human to act - the ask returns to 'Waiting on you'. human does not " +
+            "apply to an approval request a newer version moved: it stays with you until dispatch " +
+            "request-approval hands it back at the current version."
         )
         .optional(),
       images: imagesArgument(
@@ -1283,8 +1288,9 @@ export const dispatchToolSpecs = [
     description:
       "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " +
       "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " +
-      "issue plus artifact (one of its documents), or project plus artifact; or message alone, which reads a human's direct message to this session and every " +
+      "issue plus artifact (one of its documents), project plus artifact, or project alone, which lists the project's documents on no issue and nothing more; or message alone, which reads a human's direct message to this session and every " +
       "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " +
+      "An issue read lists every document, picture and file the issue holds under `Documents:`, each by slug, filename and kind. " +
       "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " +
       "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " +
       "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " +

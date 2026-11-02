@@ -75,12 +75,11 @@ func runControllerStart(ctx context.Context, args []string, stdout, stderr io.Wr
 // refuse an operator token file others can read, then a stdin that is no terminal (stdinIsTerminal:
 // given a positional word there, Oh My Pi runs headless print mode, which would run the start
 // command after the mint revoked the running controller), a blank or unreadable Envoy token file,
-// a NATS nkey seed file that is blank, unreadable, or holds no nkey user seed, a secrets broker
-// that refuses this machine's identity where it proves one (controllerDispatchBroker, which also
-// decides that the session's Dispatch credential is the broker's and the configured
-// `dispatch_token_file` is read by nobody), a blank or unreadable Dispatch token file where it
-// proves none, an instructions file that is missing or blank, and an Oh My Pi invocation that
-// does not resolve;
+// a NATS nkey seed file that is blank, unreadable, or holds no nkey user seed, a configured
+// `dispatch_url` whose file names neither of the two Dispatch credentials, a secrets broker that
+// refuses this machine's identity under `dispatch_token_broker` (controllerDispatchBroker) and a
+// blank or unreadable Dispatch token file under `dispatch_token_file`, an instructions file that
+// is missing or blank, and an Oh My Pi invocation that does not resolve;
 // then probe that Oh My Pi as the controller will run it — the launch prefix, the invocation, the
 // controller's whole environment, in
 // `<state_dir>/controller`, created for it, at the operator's terminal — and refuse a
@@ -144,18 +143,25 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 			return 0, err
 		}
 	}
-	// Where this machine proves an identity of its own, the controller's session holds a
-	// Dispatch credential of the secrets broker's (controllerDispatchBroker), which this start
-	// proves it can trade for but never holds: the configured pointer is read by nobody, so a
-	// file that is there only for the loader's sake is not checked here either.
-	brokered, err := controllerDispatchBroker(ctx, stderr)
-	if err != nil {
-		return 0, err
-	}
-	if cfg.DispatchTokenFile != "" && !brokered {
+	// Exactly one credential writes the configured Dispatch, and the file says which: the bearer
+	// `dispatch_token_file` points at, read here as every other pointer is, or this machine's own
+	// identity (`dispatch_token_broker`), traded at the secrets broker once here to prove the
+	// controller can hold a credential at all (controllerDispatchBroker). The loader takes a
+	// `dispatch_url` with neither, since it reads no environment and the broker route is proved
+	// only by trading; naming neither here is a controller that could write nothing, so the start
+	// refuses it by name.
+	switch {
+	case cfg.DispatchURL == "":
+	case cfg.DispatchTokenBroker:
+		if err := controllerDispatchBroker(ctx, stderr); err != nil {
+			return 0, err
+		}
+	case cfg.DispatchTokenFile != "":
 		if _, err := config.ReadSecretPointer("dispatch_token_file", cfg.DispatchTokenFile); err != nil {
 			return 0, err
 		}
+	default:
+		return 0, errors.New("dispatch_url is configured with no Dispatch credential: set dispatch_token_file to the bearer's file, or dispatch_token_broker: true where this machine proves an identity of its own and the controller's session trades it at the secrets broker")
 	}
 	if cfg.InstructionsPath != "" {
 		if _, err := config.ReadDeploymentInstructions(cfg.InstructionsPath); err != nil {
@@ -201,11 +207,11 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	delete(env, "LEGION_BOOT_TOKEN")
 	delete(env, "LEGION_BOOT_TOKEN_FILE")
 	delete(env, "LEGION_SLACK_CHANNELS")
-	if brokered {
+	if cfg.DispatchTokenBroker {
 		delete(env, "DISPATCH_TOKEN")
 		delete(env, "DISPATCH_TOKEN_FILE")
 	}
-	for _, pair := range controllerEnvironment(cfg, stateDir, runtime.SecretFilePath(stateDir, token), gh, brokered) {
+	for _, pair := range controllerEnvironment(cfg, stateDir, runtime.SecretFilePath(stateDir, token), gh) {
 		env[pair[0]] = pair[1]
 	}
 	created, err := makeDirs(controllerDir)
@@ -310,12 +316,12 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 // empty directory when the daemon has no GitHub App, and controllerStart points it at the default
 // owner's directory once the fetch names one; GH_TOKEN, GITHUB_TOKEN and GH_HOST are blanked so gh
 // and git read the bundle's hosts.yml rather than an inherited pointer of the operator's own.
-// Secrets travel as `<NAME>_FILE` pointers only, and with brokered — this machine holding its
-// Dispatch credential at the secrets broker (controllerDispatchBroker) — DISPATCH_URL travels
-// with no bearer beside it at all, since the client trades for a DPoP-bound token of its own and
-// consults that route only where no bearer resolves. Later pairs replace any inherited value of
-// the same name.
-func controllerEnvironment(cfg config.ControllerConfig, stateDir, secretFile, gh string, brokered bool) [][2]string {
+// Secrets travel as `<NAME>_FILE` pointers only, and under `dispatch_token_broker` — this machine
+// holding its Dispatch credential at the secrets broker (controllerDispatchBroker) — DISPATCH_URL
+// travels with no bearer beside it at all, since the client trades for a DPoP-bound token of its
+// own and consults that route only where no bearer resolves. Later pairs replace any inherited
+// value of the same name.
+func controllerEnvironment(cfg config.ControllerConfig, stateDir, secretFile, gh string) [][2]string {
 	bin := workerbin.LauncherDir(stateDir)
 	env := [][2]string{
 		{"LEGION_CONTROLLER", "1"},
@@ -339,7 +345,7 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, secretFile, gh
 	}
 	if cfg.DispatchURL != "" {
 		env = append(env, [2]string{"DISPATCH_URL", cfg.DispatchURL})
-		if !brokered {
+		if !cfg.DispatchTokenBroker {
 			env = append(env, [2]string{"DISPATCH_TOKEN_FILE", cfg.DispatchTokenFile})
 		}
 	}

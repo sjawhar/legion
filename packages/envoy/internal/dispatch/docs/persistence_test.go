@@ -24,7 +24,7 @@ func createDocument(t *testing.T, database *store.Store, markdown string) string
 }
 
 // createIssueDocument creates a document on issue DOC-<number>, creating the issue if need be.
-func createIssueDocument(t *testing.T, database *store.Store, number int, markdown string) string {
+func createIssueDocument(t testing.TB, database *store.Store, number int, markdown string) string {
 	t.Helper()
 	tree, err := pmdoc.Parse(markdown)
 	if err != nil {
@@ -116,7 +116,7 @@ func createProjectDocument(t *testing.T, database *store.Store, markdown string)
 	return artifactID
 }
 
-func genRandomSuffix(t *testing.T) string {
+func genRandomSuffix(t testing.TB) string {
 	t.Helper()
 	var value [4]byte
 	if _, err := rand.Read(value[:]); err != nil {

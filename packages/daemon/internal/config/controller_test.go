@@ -123,7 +123,7 @@ func TestLoadControllerRefuses(t *testing.T) {
 	}{
 		{"a file that is not a mapping", "- a\n- b\n", "controller.yaml must be a mapping"},
 		{"an unknown key", requiredControllerKeys + "runtime: kubernetes\n",
-			`unknown key "runtime" in the controller configuration; legion controller start reads only project, daemon_url, operator_token_file, envoy_url, envoy_token_file, nats_urls, nats_nkey_seed_file, dispatch_url, dispatch_token_file, instructions, omp_invocation, omp_launch_prefix, state_dir — see deploy/kubernetes/daemon/controller.yaml.example`},
+			`unknown key "runtime" in the controller configuration; legion controller start reads only project, daemon_url, operator_token_file, envoy_url, envoy_token_file, nats_urls, nats_nkey_seed_file, dispatch_url, dispatch_token_file, dispatch_token_broker, instructions, omp_invocation, omp_launch_prefix, state_dir — see deploy/kubernetes/daemon/controller.yaml.example`},
 		{"no project", without("project"), "project is required in the controller configuration"},
 		{"no daemon_url", without("daemon_url"), "daemon_url is required in the controller configuration"},
 		{"no operator_token_file", without("operator_token_file"), "operator_token_file is required in the controller configuration"},
@@ -136,6 +136,11 @@ func TestLoadControllerRefuses(t *testing.T) {
 		{"a broken daemon_url", strings.Replace(requiredControllerKeys, "http://daemon.test:13370", "daemon", 1), "daemon_url must be a valid URL"},
 		{"a broken envoy_url", strings.Replace(requiredControllerKeys, "http://envoy.test:9020", "envoy", 1), "envoy_url must be a valid URL"},
 		{"dispatch_token_file alone", requiredControllerKeys + "dispatch_token_file: ./t\n", "dispatch_token_file is set but dispatch_url is not"},
+		{"dispatch_token_broker alone", requiredControllerKeys + "dispatch_token_broker: true\n", "dispatch_token_broker is set but dispatch_url is not"},
+		{"both Dispatch credentials", requiredControllerKeys + "dispatch_url: https://d.test\ndispatch_token_file: ./t\ndispatch_token_broker: true\n",
+			"dispatch_token_file and dispatch_token_broker are both set: the controller's Dispatch credential is the bearer a file holds or this machine's own identity traded at the secrets broker, never both"},
+		{"a dispatch_token_broker that is no boolean", requiredControllerKeys + "dispatch_url: https://d.test\ndispatch_token_broker: the broker\n",
+			"dispatch_token_broker must be true or false"},
 		{"a daemon_url with a query string", strings.Replace(requiredControllerKeys, "http://daemon.test:13370", "http://daemon.test:13370?token=token", 1),
 			"daemon_url must not include a query string or fragment"},
 		{"a daemon_url with a fragment", strings.Replace(requiredControllerKeys, "http://daemon.test:13370", "http://daemon.test:13370#fragment", 1),
@@ -176,6 +181,21 @@ func TestLoadControllerTakesADispatchURLWithNoTokenFile(t *testing.T) {
 	}
 	if got.DispatchURL != "https://d.test" || got.DispatchTokenFile != "" {
 		t.Fatalf("DispatchURL = %q, DispatchTokenFile = %q, want the URL and no token file", got.DispatchURL, got.DispatchTokenFile)
+	}
+}
+
+// The file's own way of saying that the controller's Dispatch credential is this machine's
+// identity, traded at the secrets broker: `dispatch_token_broker`, the alternative to
+// `dispatch_token_file`. The loader reads no environment, so it takes the key and nothing more;
+// `legion controller start` makes the trade it names.
+func TestLoadControllerTakesTheBrokerAsTheDispatchCredential(t *testing.T) {
+	got, err := LoadController(controllerFile(t, requiredControllerKeys+"dispatch_url: https://d.test\ndispatch_token_broker: true\n"), "")
+	if err != nil {
+		t.Fatalf("LoadController: %v", err)
+	}
+	if got.DispatchURL != "https://d.test" || got.DispatchTokenFile != "" || !got.DispatchTokenBroker {
+		t.Fatalf("DispatchURL = %q, DispatchTokenFile = %q, DispatchTokenBroker = %v, want the URL, no token file and the broker route",
+			got.DispatchURL, got.DispatchTokenFile, got.DispatchTokenBroker)
 	}
 }
 

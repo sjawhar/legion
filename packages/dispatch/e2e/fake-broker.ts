@@ -9,10 +9,9 @@ import type {
 import { harnessPorts } from "./harness-ports";
 
 // The secrets broker's reads Dispatch relays on every Inbox and Settings load: `GET /v1/pending`
-// (the credential requests waiting on an approver), `GET /v1/credential-requests/{id}` (one
-// record's full detail, for the record page), `GET /v1/grants` (the live grants of a person's
-// sessions and those the person approved) and `GET /v1/person-signins` (the machines one person
-// signed in on); the two routes Dispatch's machine-login page drives:
+// (the credential requests waiting on an approver), `GET /v1/grants` (the live grants of a
+// person's sessions and those the person approved) and `GET /v1/person-signins` (the machines one
+// person signed in on); the two routes Dispatch's machine-login page drives:
 // `POST /v1/machine-logins/lookup` (the pending login a typed code selects) and
 // `POST /v1/credential-requests/{id}/approve|deny` (that login's decision, carrying the code
 // again); `POST /v1/person-signins/{id}/revoke`, which the Settings page's Sign-ins section
@@ -21,9 +20,8 @@ import { harnessPorts } from "./harness-ports";
 // this through
 // DISPATCH_AGENT_SECRETS_URL (run-server.sh) whenever the harness switch is left unset
 // (e2e/harness-broker.ts), and it lists nothing until a test seeds a request through
-// /__fixture/pending, a record through /__fixture/records, a machine login through
-// /__fixture/machine-logins or a sign-in through /__fixture/signins, relaying each row as
-// seeded: a
+// /__fixture/pending, a machine login through /__fixture/machine-logins or a sign-in through
+// /__fixture/signins, relaying each row as seeded: a
 // secret request's row carries the `approve_url` of its page on the broker that the Inbox links
 // to (an absolute URL, which e2e/broker-approval.e2e.ts points at a record on the real broker,
 // e2e/run-broker.sh), a machine login's row none. It verifies no caller: the token the server
@@ -56,12 +54,11 @@ interface FakeBrokerState {
   deviceGrant: boolean;
   machineLogins: FakeMachineLogin[];
   pending: FakePendingRequest[];
-  records: Record<string, CredentialRecord>;
   signIns: FakeSignIn[];
 }
 
 function emptyState(): FakeBrokerState {
-  return { deviceGrant: true, machineLogins: [], pending: [], records: {}, signIns: [] };
+  return { deviceGrant: true, machineLogins: [], pending: [], signIns: [] };
 }
 
 let state = emptyState();
@@ -126,14 +123,6 @@ const server = Bun.serve({
           .map(({ approver: _, ...row }) => row),
       };
       return Response.json(body);
-    }
-    if (request.method === "GET" && url.pathname.startsWith("/v1/credential-requests/")) {
-      const recordID = decodeURIComponent(url.pathname.slice("/v1/credential-requests/".length));
-      const record = state.records[recordID];
-      if (record === undefined) {
-        return brokerError(404, "NOT_FOUND", "no such credential request");
-      }
-      return Response.json(record);
     }
     if (request.method === "GET" && url.pathname === "/v1/grants") {
       return Response.json({ grants: [] });
@@ -220,11 +209,6 @@ const server = Bun.serve({
     if (request.method === "PUT" && url.pathname === "/__fixture/pending") {
       const pending = (await request.json()) as FakePendingRequest[];
       state = { ...state, pending };
-      return Response.json({ ok: true });
-    }
-    if (request.method === "PUT" && url.pathname === "/__fixture/records") {
-      const records = (await request.json()) as CredentialRecord[];
-      state = { ...state, records: Object.fromEntries(records.map((r) => [r.record_id, r])) };
       return Response.json({ ok: true });
     }
     if (request.method === "PUT" && url.pathname === "/__fixture/machine-logins") {
