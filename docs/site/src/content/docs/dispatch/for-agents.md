@@ -326,7 +326,10 @@ carries an `Idempotency-Key` header of its own, and the command asks again under
 attempt fails on the way, gets no answer for 20 seconds while none of its body is going out,
 Dispatch answers 5xx, 408 or 429, or Dispatch is still running an earlier attempt
 (`409 KEY_IN_FLIGHT`): at most five attempts, the last starting within 30 seconds of the first, and
-the whole command within 60. It asks again only of a Dispatch that judges the key: one whose answer
+the whole command within 60. Once an attempt got no answer for 20 seconds or was told
+`409 KEY_IN_FLIGHT`, Dispatch may still be running the write, and it finishes it whatever the
+command does, so the command keeps asking every 3 seconds or less until 55 seconds, to collect the
+answer. It asks again only of a Dispatch that judges the key: one whose answer
 carried the key back, or whose `/healthz` said `idempotency_keys: true` in the last five minutes,
 whatever its status; any other would make a repeated write twice. Dispatch makes the write once per
 key and answers a repeat with the first answer, so the command never makes a write twice. When the

@@ -109,6 +109,7 @@ function pacing(policy: Omit<DispatchWriteRetry, "pause" | "now"> = DISPATCH_WRI
     advance: (ms: number) => {
       clock += ms;
     },
+    clock: () => clock,
   };
 }
 
@@ -255,7 +256,8 @@ describe("DispatchClient's writes", () => {
       expect(request.headers["Idempotency-Key"]).toBe(key as string);
       expect(request.body).toBe(JSON.stringify(comment));
     }
-    expect(pauses).toEqual([1_000, 2_000, 4_000, 8_000]);
+    // After KEY_IN_FLIGHT the write is asked at most 3 s later, not on the schedule's 8 s.
+    expect(pauses).toEqual([1_000, 2_000, 4_000, 3_000]);
   });
 
   // An answer that echoed the key is itself the proof that this Dispatch runs the keyed layer, so
@@ -620,27 +622,34 @@ describe("DispatchClient's writes", () => {
     expect(landed).not.toBeInstanceOf(DispatchServiceError);
     expect((landed as DispatchWriteUnsettledError).attempts).toBe(5);
     expect((landed as DispatchWriteUnsettledError).last).toBeInstanceOf(DispatchGatewayError);
+    // /healthz said this Dispatch runs the keyed layer, so the message says it finishes the write.
     expect(landed.message).toBe(
       "POST http://dispatch.test/api/v1/issues/DSP-1/comments answered 429 Too Many Requests " +
         `with a body that is not Dispatch's error JSON ("429 Too Many Requests"), which looks like ` +
         "a proxy or gateway page rather than Dispatch's own answer (the last of 5 attempts), and an " +
         "earlier attempt of the write may have reached Dispatch, so it may or may not have taken " +
-        "effect: check whether it did before retrying it."
+        "effect. Dispatch finishes an attempt it received whatever this command does, so read the " +
+        "write back before you send it again: a new command sends it under a new key."
     );
 
+    // KEY_IN_FLIGHT says Dispatch may still be running the write, so it is asked every 3 s at most
+    // until 55 s: first at 0 s, then at 1 and 3 s on the schedule, then every 3 s from 6 to 54 s.
     const running = scripted([
       new TypeError("fetch failed"),
-      ...Array.from({ length: 4 }, () => inFlight()),
+      ...Array.from({ length: 30 }, () => inFlight()),
     ]);
     const stillRunning = await failure(
       client(running.fetchImpl, pacing().retry).comment("DSP-1", comment)
     );
 
+    expect(running.sent).toHaveLength(20);
     expect(stillRunning).toBeInstanceOf(DispatchWriteUnsettledError);
     expect(stillRunning.message).toBe(
-      "KEY_IN_FLIGHT: an earlier request with this key is still running (the last of 5 " +
+      "KEY_IN_FLIGHT: an earlier request with this key is still running (the last of 20 " +
         "attempts), and Dispatch was still running an earlier attempt of the write, so it may or " +
-        "may not have taken effect: check whether it did before retrying it."
+        "may not have taken effect. Dispatch finishes an attempt it received whatever this " +
+        "command does, so read the write back before you send it again: a new command sends it " +
+        "under a new key."
     );
   });
 
@@ -750,22 +759,97 @@ describe("DispatchClient's writes", () => {
     expect(probes).toHaveLength(1);
   });
 
+  /**
+   * The production pacing for a write whose attempts stall. The silence cut is a real timer, so it
+   * fires here after 20 ms, and the client's clock moves by the production `silenceMs` when it
+   * does, as 20 s of real silence would move it; every window and pause is production's.
+   */
+  function stalling() {
+    const paced = pacing({ ...DISPATCH_WRITE_RETRY, silenceMs: 20 });
+    const stall = (signal: AbortSignal | null | undefined): Promise<Response> => {
+      signal?.addEventListener("abort", () => paced.advance(DISPATCH_WRITE_RETRY.silenceMs), {
+        once: true,
+      });
+      return hang(signal);
+    };
+    return { ...paced, stall };
+  }
+
+  const replayed = () => json(posted, 201, { "Idempotency-Replayed": "?1" });
+
+  // Measured on 2026-11-02 from the transcript store: one write cut off for silence took 52 s
+  // when it was sent again, and succeeded. Dispatch finishes a keyed write whatever its client
+  // does, so the call keeps asking under its key, each repeat answered 409 KEY_IN_FLIGHT, until
+  // the first run's stored answer comes back. Before, it stopped asking 30 s after it began.
+  test("collect under its key a write Dispatch finishes 52 s after it began, past a silence cut", async () => {
+    const { retry, pauses, clock, stall } = stalling();
+    const finished = () => (clock() < 52_000 ? inFlight() : replayed());
+    const { fetchImpl, sent } = scripted([stall, ...Array.from({ length: 20 }, () => finished)]);
+
+    await expect(client(fetchImpl, retry).comment("DSP-1", comment)).resolves.toEqual(posted);
+
+    expect(new Set(sent.map((request) => request.headers["Idempotency-Key"])).size).toBe(1);
+    // Cut at 20 s, then asked 1 s later and at most every 3 s while the run lives: the replay is
+    // collected at 53 s, inside the 55 s the call keeps for a write Dispatch may still be running.
+    expect(pauses).toEqual([1_000, 2_000, ...Array.from({ length: 10 }, () => 3_000)]);
+    expect(clock()).toBe(53_000);
+  });
+
+  test("ask again under its key after one silent attempt", async () => {
+    const { retry, pauses, clock, stall } = stalling();
+    const { fetchImpl, sent } = scripted([stall, replayed()]);
+
+    await expect(client(fetchImpl, retry).comment("DSP-1", comment)).resolves.toEqual(posted);
+
+    expect(sent).toHaveLength(2);
+    expect(pauses).toEqual([1_000]);
+    expect(clock()).toBe(21_000);
+  });
+
+  test("ask again under its key after two silent attempts in a row", async () => {
+    const { retry, pauses, clock, stall } = stalling();
+    const { fetchImpl, sent } = scripted([stall, stall, replayed()]);
+
+    await expect(client(fetchImpl, retry).comment("DSP-1", comment)).resolves.toEqual(posted);
+
+    expect(sent).toHaveLength(3);
+    expect(pauses).toEqual([1_000, 2_000]);
+    expect(clock()).toBe(43_000);
+  });
+
   test("a write whose every attempt is silent may or may not have taken effect", async () => {
-    const { fetchImpl, sent } = scripted(Array.from({ length: 5 }, () => hang));
+    const { retry, stall } = stalling();
+    const { fetchImpl, sent } = scripted(Array.from({ length: 5 }, () => stall));
 
-    const error = await failure(
-      client(fetchImpl, pacing({ ...DISPATCH_WRITE_RETRY, silenceMs: 20 }).retry).comment(
-        "DSP-1",
-        comment
-      )
-    );
+    const error = await failure(client(fetchImpl, retry).comment("DSP-1", comment));
 
-    expect(sent).toHaveLength(5);
+    // Cut at 20, 41 and 63 s; no ask starts past 55 s.
+    expect(sent).toHaveLength(3);
     expect(error).toBeInstanceOf(DispatchWriteUnsettledError);
     expect(error.message).toBe(
       "POST http://dispatch.test/api/v1/issues/DSP-1/comments made no progress for 0.02 s, so it " +
-        "was cut off (the last of 5 attempts), and an attempt of the write may have reached " +
-        "Dispatch, so it may or may not have taken effect: check whether it did before retrying it."
+        "was cut off (the last of 3 attempts), and an attempt of the write may have reached " +
+        "Dispatch, so it may or may not have taken effect. Dispatch finishes an attempt it " +
+        "received whatever this command does, so read the write back before you send it again: " +
+        "a new command sends it under a new key."
+    );
+  });
+
+  // A Dispatch not known to run the keyed layer is never asked twice, however long the call has.
+  test("a silent attempt against a Dispatch not known to run the keyed layer is its only one", async () => {
+    const { retry, stall } = stalling();
+    const { fetchImpl, sent, probes } = scripted([stall, replayed()], {
+      health: { status: "ok" },
+    });
+
+    const error = await failure(client(fetchImpl, retry).comment("DSP-1", comment));
+
+    expect(sent).toHaveLength(1);
+    expect(probes).toHaveLength(1);
+    expect(error.message).toBe(
+      "POST http://dispatch.test/api/v1/issues/DSP-1/comments made no progress for 0.02 s, so it " +
+        "was cut off (its only attempt), and an attempt of the write may have reached Dispatch, " +
+        "so it may or may not have taken effect: check whether it did before retrying it."
     );
   });
 
@@ -841,11 +925,13 @@ describe("DispatchClient's writes", () => {
     }
   });
 
-  test("the production pacing is five attempts within 30 s, each cut off after 20 s of silence", () => {
+  test("the production pacing is five attempts within 30 s, each cut off after 20 s of silence, and asks every 3 s until 55 s while Dispatch may be running the write", () => {
     expect(DISPATCH_WRITE_RETRY).toEqual({
       pausesMs: [1_000, 2_000, 4_000, 8_000],
       withinMs: 30_000,
       silenceMs: 20_000,
+      inFlightPauseMs: 3_000,
+      inFlightWithinMs: 55_000,
     });
   });
 });
