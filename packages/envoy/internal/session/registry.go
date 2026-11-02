@@ -17,6 +17,11 @@ import (
 )
 
 type SessionEntry struct {
+	// Port is always 0 for an entry this build writes: a registration naming a serving port is
+	// refused (cmd/listener's subscribeHandler), and no delivery opens a connection to a
+	// session. The field is kept because every released client parses it in the listener's
+	// answers, and because an entry an older listener stored can still carry a port until it
+	// lapses (the session bucket's TTL, 5 minutes by default).
 	Port         int      `json:"port"`
 	MachineID    string   `json:"machine_id"`
 	Dir          string   `json:"dir"`
@@ -25,19 +30,22 @@ type SessionEntry struct {
 	UpdatedAt    int64    `json:"updated_at"`
 	// Driving reports whether the claiming process is the one actually driving
 	// this session (its explicit -s target or a session it owns), as opposed to a
-	// process that merely has the session loaded from shared on-disk state.
+	// process that merely has the session loaded from shared on-disk state. Nothing in the
+	// listener reads it: the rule that weighed it against an incumbent claim turned on the two
+	// claims naming different serving ports, which no registration carries any more
+	// (mergeForClaim). It is still stored, as the registering process's own report of itself.
 	Driving        bool `json:"driving,omitempty"`
 	SelfSubscribed bool `json:"self_subscribed,omitempty"`
 	// Host is the machine the client-reported `machineID()` (envoy-client's
 	// os.hostname()/ENVOY_MACHINE_ID) names as where the session process actually runs, as
 	// opposed to MachineID, which is the registering listener's own ENVOY_MACHINE_ID, whether
 	// every session registers through one shared listener or each machine runs its own; a
-	// re-registration through another listener moves it, while the stored subscription keeps its
-	// first listener's. No delivery reads Host: a message reaches the session from its own
-	// consumer, relayed by the listener the entry names, or on the session's own subscription,
-	// wherever its process runs. Host is empty for a session whose plugin predates this field
-	// (subscribeBody had no "host"), and HostOrMachine falls back to MachineID so every display
-	// caller sees a populated value.
+	// re-registration through another listener moves both, this entry's and the one the stored
+	// subscription carries (store's mergeForUpsert). No delivery reads Host: a message reaches
+	// the session from its own consumer, relayed by the listener the entry names, or on the
+	// session's own subscription, wherever its process runs. Host is empty for a session whose
+	// plugin predates this field (subscribeBody had no "host"), and HostOrMachine falls back to
+	// MachineID so every display caller sees a populated value.
 	Host string `json:"host,omitempty"`
 	// Delivery is DeliveryConsumer when the session registered for consumer delivery and the
 	// listener it registered through holds its session consumer (bus.SessionConsumers): the

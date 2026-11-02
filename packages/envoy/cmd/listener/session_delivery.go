@@ -179,15 +179,16 @@ func (m *sessionDelivery) drain(ctx context.Context) {
 }
 
 // register gives a registration the delivery it asks for, once its topics are stored: topics are
-// the session's stored interest topics. A registration that carried delivery with consumer set, or
-// registered a serving port, gets the session's consumer, created when the stream holds none (at
-// the sequence after its resume point when that names the stream's current identity, else at the
-// stream's end) and otherwise updated to the current filter, before the registration answers.
+// the session's stored interest topics. A registration that carried delivery with consumer set
+// gets the session's consumer, created when the stream holds none (at the sequence after its
+// resume point when that names the stream's current identity, else at the stream's end) and
+// otherwise updated to the current filter, before the registration answers. A registration that
+// asks for nothing stays on the core path: it takes its messages off its own NATS subscription.
 func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, topics []string) sessionDeliveryOutcome {
-	if body.Delivery == nil && body.Port <= 0 {
+	if body.Delivery == nil {
 		return sessionDeliveryOutcome{}
 	}
-	if body.Port <= 0 && !body.Delivery.Consumer {
+	if !body.Delivery.Consumer {
 		return coreDeliveryOutcome(deliveryReasonNotRequested)
 	}
 	if _, ok := bus.SessionConsumerName(body.SessionID); !ok {

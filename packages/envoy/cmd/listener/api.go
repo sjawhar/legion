@@ -802,17 +802,21 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	}
 }
 
-// sessionInfo is the joined view of an Interest (topics, dir, machine) and a
-// SessionEntry (port). Returned by GET /v1/sessions. Its host is where the session runs, its
-// recorded host or else MachineID (HostOrMachine); no delivery reads it. An inbox message is the
-// session's owner's to deliver (session.HandleAgentMessage): the listener its stored subscription
-// names, the one store.Registry.Match delivers on, else the one MachineID names. Any other
-// listener leaves inbox messages to the owner silently.
+// sessionInfo is the joined view of an Interest (topics, dir, machine) and a SessionEntry (its
+// title, its capabilities and how it receives). Returned by GET /v1/sessions. Its host is where
+// the session runs, its recorded host or else MachineID (HostOrMachine); no delivery reads it. An
+// inbox message is the session's owner's to deliver (session.HandleAgentMessage): the listener
+// its stored subscription names, the one store.Registry.Match delivers on, else the one MachineID
+// names. Any other listener leaves inbox messages to the owner silently.
 type sessionInfo struct {
-	SessionID      string   `json:"session_id"`
-	MachineID      string   `json:"machine_id"`
-	Host           string   `json:"host"`
-	Dir            string   `json:"dir"`
+	SessionID string `json:"session_id"`
+	MachineID string `json:"machine_id"`
+	Host      string `json:"host"`
+	Dir       string `json:"dir"`
+	// Port is always 0: this listener refuses a registration that names a serving port
+	// (subscribeHandler) and delivers to no port. It is still answered because every released
+	// client parses it (packages/envoy-client/src/transport.ts), and a missing field would
+	// break one that does not tolerate its absence.
 	Port           int      `json:"port"`
 	Title          string   `json:"title"`
 	Capabilities   []string `json:"capabilities"`
@@ -1455,6 +1459,15 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			return
 		}
 		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir), slog.String("plugin", body.Plugin), slog.String("plugin_version", body.PluginVersion))
+		// A registration naming a serving port is refused before anything is stored. The
+		// listener pushed a message to that port until dispatch://INFRA-889 and no longer
+		// opens a connection to a session at all, so a stored registration carrying one would
+		// leave its session waiting for deliveries that never come. The refusal names the
+		// field, as every other refusal of this route does, and says what to send instead.
+		if body.Port > 0 {
+			writeJSONError(w, http.StatusBadRequest, "port is no longer supported: this listener does not deliver to a session's port. Register with no port (port 0) and receive the session's messages from its own consumer (delivery.consumer).", "port")
+			return
+		}
 		// A topic reaching a private stream subject (another session's inbox, a failed-delivery
 		// lane, the Legion controller lane; bus.ReachesPrivateStreamSubject) is left out and named in
 		// a warning, the rest of the registration stored: the topics stored here drive the
@@ -1498,7 +1511,7 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		// set to the topics just stored before the registration answers, so a message published on
 		// a newly followed stored topic after the answer is the consumer's to deliver.
 		delivery := d.consumers.register(r.Context(), body, item.Topics)
-		if body.Port > 0 || body.SelfSubscribed || delivery.relayed() {
+		if body.SelfSubscribed || delivery.relayed() {
 			epochChanged := false
 			if delivery.relayed() {
 				previous, err := d.sessions.Get(body.SessionID)

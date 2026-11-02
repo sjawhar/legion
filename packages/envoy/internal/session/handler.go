@@ -117,10 +117,11 @@ func handleAgentMessage(
 		}
 		return delivered(delivery)
 	}
-	// A stored subscription naming another listener makes the session that listener's, whatever
-	// listener the session last registered through: the stored MachineID is the one its topics
-	// are fanned out on (store.Registry.Match), and that listener reads this message from its own
-	// durable too.
+	// A stored subscription naming another listener makes the session that listener's: the
+	// stored MachineID is the one its topics are fanned out on (store.Registry.Match), and that
+	// listener reads this message from its own durable too. The row names the listener the
+	// session registered through most recently (store's mergeForUpsert), so this is also the
+	// listener it is registered through, give or take a registration still in flight.
 	if interest != nil && interest.MachineID != "" {
 		return HandleAgentResult{OwnedElsewhere: true}
 	}

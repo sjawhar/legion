@@ -132,6 +132,24 @@ func envDuration(logger *logging.Logger, name string, fallback time.Duration) ti
 	return d
 }
 
+// warnIgnoredEnv writes one WARN naming an environment variable this listener no longer reads,
+// and is called for each such variable that is present in the environment at all - an empty value
+// is a variable an operator still sets, so it is still reported. reason says what the listener
+// stopped doing, so the line tells the operator why the setting configures nothing now; every line
+// ends by asking for the variable's removal from the deployment. The listener starts either way:
+// a deployment that still carries the setting must keep running until its operator catches up
+// (envDuration takes the same warn-and-continue line for a value it cannot use). The message and
+// its fields are what an operator's log filter matches, so they name the variable exactly as it is
+// written in the environment.
+func warnIgnoredEnv(logger *logging.Logger, name string, reason string) {
+	value, set := os.LookupEnv(name)
+	if !set {
+		return
+	}
+	logger.Warn(name+" is set and ignored: "+reason+"; remove it from the deployment",
+		slog.String("value", value))
+}
+
 // rewatchListenerKVWatchers recreates cache watchers that are not represented
 // by bus.Client subscriptions. It attempts every one so a failed rebuild of one
 // cannot leave the other caches permanently stale too.
@@ -694,6 +712,11 @@ func main() {
 		log.Fatal(err)
 	}
 	logger := logging.New(cfg.MachineID)
+	// The first lines of the log belong to the settings a deployment still carries and this
+	// listener no longer reads, before it does any work, so an operator reading from the top
+	// sees them (dispatch://INFRA-889 deleted both).
+	warnIgnoredEnv(logger, "ENVOY_HOST_BRIDGE", "the listener no longer pushes a message to a session's serve port, so it opens no connection this would address")
+	warnIgnoredEnv(logger, "ENVOY_SUBSCRIBE_ALL_TOPICS", "the listener no longer holds a live topics subscription, so there is no such subscription to turn on")
 	apiToken := os.Getenv("ENVOY_API_TOKEN")
 	oidcIssuer, oidcAudience, err := resolveListenerOIDCConfig(os.Getenv)
 	if err != nil {
