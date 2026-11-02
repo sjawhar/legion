@@ -558,7 +558,7 @@ those is, the sandbox in the paragraph under it.
 | Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. | Built |
 | Cloud SQL instance, database, user and generated password | PostgreSQL 18 by default (`databaseVersion`), private IP only, automated backups and point-in-time recovery. | Not built |
 | Kubernetes namespace (not with `existingNamespace`), ServiceAccount `<hostname>`, Secrets, ConfigMap and SecretProviderClass | The app's and the listener's account, which Workload Identity lets mount the NATS seed; the generated application secrets (`<hostname>-dispatch`), the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the front door's auth key (`<hostname>-tailnet-auth-key`, one key `TS_AUTHKEY`), the Serve configuration (ConfigMap `<hostname>-serve`, rendered from the component's own names and registered after the Tailscale Service), and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key). | Not built |
-| Tailscale Service `svc:<hostname>` | The name every reader reaches Dispatch at, which the component declares itself through the `tailscale` provider it is given: one port, `tcp:443`, no tags, and a comment naming `<hostname>.<tailnetDnsName>`, the tailnet name it serves. It requests no tags because the OAuth client that creates it may not be allowed to set any, and Tailscale refuses a Service whose requested tags that client may not set; the hosts' own `tags` are what auto-approve them as the Service's hosts, and a tailnet policy grants the Service by its name. It is a tailnet resource and no child of the cluster, so it is parented on the component alone, its `protect` follows `deletionProtection` rather than being fixed (a child's explicit `Protect` overrides what it would inherit, so a fixed one could be changed only by a resource transform on the component or a state edit), and it is registered after the Cloud SQL instance. The provider's create is an upsert that writes the whole Service, so one that already exists under that name is adopted, its comment and ports overwritten and its tags cleared ([Moving a stack that declares the Service itself](#moving-a-stack-that-declares-the-service-itself)). | Not built |
+| Tailscale Service `svc:<hostname>` | The name every reader reaches Dispatch at, which the component declares itself through the `tailscale` provider it is given: one port, `tcp:443`, no tags, and a comment naming `<hostname>.<tailnetDnsName>`, the tailnet name it serves. It requests no tags because the OAuth client that creates it may not be allowed to set any, and Tailscale refuses a Service whose requested tags that client may not set; the hosts' own `tags` are what auto-approve them as the Service's hosts, and a tailnet policy grants the Service by its name. It is a tailnet resource and no child of the cluster, so it is parented on the component alone, its `protect` follows `deletionProtection` rather than being fixed (a child's explicit `Protect` overrides what it would inherit, so a fixed one could be changed only by a resource transform on the component or a state edit), and it is registered after the Cloud SQL instance. The provider's create is an upsert, so one that already exists under that name is adopted, its comment and ports overwritten; the request carries no tags, and Tailscale's API reference does not say whether the live Service keeps its own ([Moving a stack that declares the Service itself](#moving-a-stack-that-declares-the-service-itself)). | Not built |
 | ServiceAccount `<hostname>-tailnet`, Role and RoleBinding `<hostname>-tailnet-tls` | The front door's pods run as an account of their own, which the Role lets `get` and `patch` the one Secret `<hostname>-tailnet-tls` and nothing else (no `create`, since the component creates it, and no `update`, since the pods send merge patches), so neither the app nor the listener, nor the account `serviceAccountSubject` names, can write the certificate. The pod does not automount the account's token: only `cert-publish`, which calls the API server, mounts it, so the tailnet-facing `tailscale` and `advertiser` containers hold no credential for the Secret. The RoleBinding names the Role by an output that waits on the Role's ID, so a preview that creates the Role leaves the name unknown and pulumi-kubernetes sends no server-side dry run of the binding, which an account without the `bind` verb would see refused as "not found" while the Role does not exist. | Not built |
 | Secret `<hostname>-tailnet-tls` | The Tailscale Service's certificate, its key and the ACME account key (keys `tls.crt`, `tls.key` and `acme-account.key.pem`), which the front door's pods publish and seed from ([The front door](#the-front-door)). The component declares it with no data and ignores its contents, so a later preview never plans to undo what the pods wrote, and no pod template carries its checksum, so a renewed certificate rolls no pod. | Not built |
 | Three ClusterIP Services and three NetworkPolicies (two Services with `natsInCluster`) | Dispatch's API on port 8766, to the `allowedNamespaces` and the front door; the front door's SOCKS5 proxy on port 1055, to the app and the listener, neither the Service nor that rule rendered with `natsInCluster`, which leaves the front door's policy admitting nothing; the listener's API on port 9020, to the app. Each policy admits those sources alone among pods (Kubernetes still admits each pod's own node). | Not built |
@@ -694,23 +694,24 @@ it, so on a fresh stack no pod advertises the Service before it exists: a node t
 Service before it exists is not approved when the Service appears.
 
 **The component adopts a Service that already exists under that name.** The Tailscale provider's
-create is an upsert (`VIPServices().CreateOrUpdate`), which writes the whole Service, so a first
-apply does not fail on a live `svc:<hostname>`: it takes the Service over, overwrites its comment
-and its ports with the component's, and clears its tags, since the component declares none and
-the provider's `tags` defaults to the empty set. A stack that declared that Service itself must
-therefore hand it over before the apply that moves the pin, with `retainOnDelete: true` on its
-own declaration rather than a state edit
+create is an upsert (`VIPServices().CreateOrUpdate`, a `PUT` of the Service), so a first apply
+does not fail on a live `svc:<hostname>`: it takes the Service over and overwrites its comment
+and its ports with the component's. It sends no tags: the provider's `tags` defaults to the
+empty set, and its client leaves an empty list out of the request (`tags,omitempty` in
+tailscale-client-go-v2 v2.9.0). Tailscale's API reference does not say whether a `PUT` without
+`tags` keeps the tags a live Service already carries; the component's state records none either
+way. A stack that declared that Service itself must therefore hand it over before the apply that
+moves the pin, with `retainOnDelete: true` on its own declaration rather than a state edit
 ([Moving a stack that declares the Service itself](#moving-a-stack-that-declares-the-service-itself)
 below); removing the declaration without that, while the component's own Service is in the same
 apply, deletes the Service the component has just adopted, and readers lose
 `<hostname>.<tailnetDnsName>`.
 
-**The Service requests no tags.** A Tailscale Service takes the tags of the OAuth client that
-creates it, and Tailscale refuses one whose requested tags that client may not set
-(`requested tags ... are invalid or not permitted`), so a consumer whose `services` client
-carries no tags could not create the Service at all. The component's `tags` input is unchanged
-and still reaches the front door's nodes, which is where it is needed: the nodes' own tag is
-what the tailnet policy's auto-approval names.
+**The Service requests no tags.** Tailscale refuses a Service whose requested tags the OAuth
+client creating it may not set (`requested tags ... are invalid or not permitted`), so a
+consumer whose `services` client may set no tags could not create a Service that requested any.
+The component's `tags` input is unchanged and still reaches the front door's nodes, which is
+where it is needed: the nodes' own tag is what the tailnet policy's auto-approval names.
 
 The tailnet policy is still the operator's. The Service's hosts are approved there, so give
 `tags` an auto-approval for `svc:<hostname>` before an apply creates the front door's pods; that
@@ -719,7 +720,8 @@ Service is a grant destination of its own
 ([Tailscale Services](https://tailscale.com/kb/1552/tailscale-services),
 "Configure Service access"), so the tailnet policy also needs a grant that reaches it for every
 client of Dispatch: one with `dst: ["svc:<hostname>"]` and `ip: ["443"]`. A grant whose `dst`
-names `tags` does not reach the Service, which carries none.
+names `tags` does not reach a Service the component creates, which carries none, so name the
+Service in the grant for an adopted Service too.
 
 `frontDoorToolsImage`, one of the tailnet group and pinned by digest like the other three
 images, is the image the front door's `cert-publish` container runs on. Its scripts call
@@ -1457,8 +1459,8 @@ in one apply:
 2. In the next apply, remove that resource and the `tailnetService` argument from the program and
    pass the component a `tailscale` provider. The component registers the Service without the
    consumer's dependency, its create is an upsert, so it adopts the live `svc:<hostname>` and
-   writes the component's comment, port `tcp:443` and `tags` over it; the consumer's retained
-   delete then removes its own state entry and leaves the Service where it is.
+   writes the component's comment and port `tcp:443` over it, sending no tags; the consumer's
+   retained delete then removes its own state entry and leaves the Service where it is.
 
 Do not reach for `pulumi state delete` on the consumer's Service instead. A stack that passed
 that Service's `Name` as `tailnetService` has the component depending on it — the SDK puts the

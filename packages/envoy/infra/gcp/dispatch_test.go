@@ -1439,7 +1439,7 @@ func TestDispatchFrontDoorAloneWritesItsTLSSecret(t *testing.T) {
 
 // On a preview that creates the front door's TLS Role, its binding's roleRef name is unknown until
 // the Role has an ID, so pulumi-kubernetes sends the API server no dry run of the binding, which an
-// account without the bind verb (the deployment's CI account) would see refused as "not found"
+// account without the bind verb (a consumer's CI account may be one) would see refused as "not found"
 // while the Role does not exist. On an apply the binding names the Role.
 //
 // Both surfaces are read: the component under the mock engine, and the component as the plugin

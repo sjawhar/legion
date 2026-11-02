@@ -551,7 +551,7 @@ func newDispatchFrontDoor(ctx *pulumi.Context, s dispatchSettings, service *tail
 	}
 	// The binding names the Role by an output that waits on the Role's ID. On a preview that creates
 	// the Role the name is unknown, so pulumi-kubernetes sends no server-side dry run of the binding:
-	// from an account without the bind verb (the deployment's CI account) the API server checks
+	// from an account without the bind verb (a consumer's CI account may be one) the API server checks
 	// escalation by reading the Role, which does not exist yet, and refuses the dry run as "not found".
 	roleName := pulumi.All(role.ID(), role.Metadata.Name().Elem()).ApplyT(func(v []any) string { return v[1].(string) }).(pulumi.StringOutput)
 	if _, err := rbacv1.NewRoleBinding(ctx, tlsName, &rbacv1.RoleBindingArgs{
