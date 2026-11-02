@@ -119,6 +119,13 @@ func WithSessionReplicas(n int) SessionRegistryOption {
 	return func(o *sessionRegistryOpts) { o.replicas = n }
 }
 
+// BucketMaxAge is the maximum age OpenSessionRegistry creates the envoy_sessions bucket with, and
+// so the age a registration record lives for in a deployment that sets no ENVOY_SESSION_MAX_AGE
+// (WithSessionMaxAge). A record the bucket expires reads gone, whatever its own age says, so a
+// reader that acts on a gone session - the role claim reaper's period, say
+// (cmd/listener's defaultRoleClaimReapInterval) - reads this rather than a copy of it.
+const BucketMaxAge = 5 * time.Minute
+
 func WithSessionTTL(d time.Duration) SessionRegistryOption {
 	return func(o *sessionRegistryOpts) { o.ttl = d }
 }
@@ -360,7 +367,7 @@ func (r *SessionRegistry) unlockAndNotify() {
 }
 
 func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*SessionRegistry, error) {
-	opts := sessionRegistryOpts{replicas: 1, ttl: 5 * time.Minute, liveWindow: LiveWindow, goneHorizon: GoneHorizon, lastSeenRetention: LastSeenMemory, now: time.Now}
+	opts := sessionRegistryOpts{replicas: 1, ttl: BucketMaxAge, liveWindow: LiveWindow, goneHorizon: GoneHorizon, lastSeenRetention: LastSeenMemory, now: time.Now}
 	for _, o := range options {
 		o(&opts)
 	}

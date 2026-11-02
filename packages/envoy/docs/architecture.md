@@ -101,9 +101,12 @@ it is always `false`, because no answer releases one.
 No lookup, publish, role-lane delivery attempt, Dispatch outbox forward or daemon probe releases a
 role claim, whatever the holder's state. Only the role claim reaper does, and only once the
 holder's own record reads `gone`. It runs on a period of its own,
-`ENVOY_ROLE_CLAIM_REAP_INTERVAL` (a Go duration, default 5m), and not on the session reaper's: a
-record the session bucket expires reads `gone` too, so a shorter period takes a merely stalled
-holder's role that much sooner. A Legion role whose agent process exits is `gone` at once rather
+`ENVOY_ROLE_CLAIM_REAP_INTERVAL` (a Go duration, default 5m), and not on the session reaper's:
+while the session bucket's maximum age is below the gone horizon, as the 5m it ships with is, a
+record the bucket expires reads `gone` too, so a period shorter than that age takes a merely
+stalled holder's role that much sooner. Once the maximum age covers the horizon no record goes
+early, and the period decides only how long past the horizon a gone holder keeps its role, so it
+belongs well inside the horizon. A Legion role whose agent process exits is `gone` at once rather
 than at the end of the live window, so its successor's soft claim takes the role without waiting
 the window out; a soft claim replaces the holder, it does not release the claim.
 

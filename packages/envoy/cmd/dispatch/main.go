@@ -51,7 +51,6 @@ import (
 	"github.com/sjawhar/envoy/internal/pglisten"
 	"github.com/sjawhar/envoy/internal/redact"
 	"github.com/sjawhar/envoy/internal/roles"
-	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/listenfd"
 )
 
@@ -1577,10 +1576,12 @@ func testHookDuration(env settingValues, name string, testHooksEnabled bool, tar
 	return nil
 }
 
-// roleHolderWindows are the session windows Dispatch judges a role route's holder by, read as
-// the listener reads its own (envconf.PositiveDuration): the listener's two settings, their
-// compiled defaults, a warning and the default for a value no duration can be read from, and a
-// refusal to start for one that is not positive.
+// roleHolderWindows are the session windows Dispatch judges a role route's holder by, read
+// through the helper the listener reads its own with (envconf.SessionWindows): the listener's
+// two settings, their compiled defaults, a warning and the default for a value no duration can
+// be read from, and a refusal to start for one that is not positive. It hands the helper the
+// settings table's own lookup, so Dispatch still reads its environment in one place
+// (settings.go, TestNoReaderBypassesTheSettingsTable).
 //
 // Both processes judge the same holder, so both carry the same values. Dispatch left to the
 // compiled windows calls a holder gone whose horizon the deployment raised, counts its role
@@ -1588,11 +1589,7 @@ func testHookDuration(env settingValues, name string, testHooksEnabled bool, tar
 // listener, carrying the raise, still calls that holder unresponsive and keeps its claim: the
 // event reaches it never (dispatch://INFRA-392).
 func roleHolderWindows(env settingValues) (roles.Windows, error) {
-	live, err := envconf.PositiveDuration(slog.Default(), env.lookup, "ENVOY_SESSION_LIVE_WINDOW", session.LiveWindow)
-	if err != nil {
-		return roles.Windows{}, err
-	}
-	horizon, err := envconf.PositiveDuration(slog.Default(), env.lookup, "ENVOY_SESSION_GONE_HORIZON", session.GoneHorizon)
+	live, horizon, err := envconf.SessionWindows(slog.Default(), env.lookup)
 	if err != nil {
 		return roles.Windows{}, err
 	}

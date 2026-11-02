@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/session"
 )
 
 // Duration reads the duration name holds in environment: an unset or empty value leaves fallback
@@ -53,4 +55,29 @@ func PositiveDuration(logger *slog.Logger, environment func(string) (string, boo
 		return 0, fmt.Errorf("invalid %s %q: want a positive Go duration such as 1m", name, value)
 	}
 	return d, nil
+}
+
+// SessionWindows reads the two session windows both programs carry: ENVOY_SESSION_LIVE_WINDOW,
+// how long after its last registration a session reads live, and ENVOY_SESSION_GONE_HORIZON,
+// how long it then reads unresponsive before it reads gone. Each is read as PositiveDuration
+// reads a window - the package's own compiled default for an unset variable, a WARN and that
+// default for one no Go duration can be read from, and a refusal naming the variable for one
+// that is not positive - and each defaults to session.LiveWindow or session.GoneHorizon, the
+// declarations every reader of a session record judges its age against.
+//
+// The listener and Dispatch both judge the same holder, so both read these two the same way
+// (dispatch://INFRA-392). They are read here, once, rather than spelled out in each program, so
+// a change to either variable's name, default or rules reaches both. environment is the caller's
+// own one reader of its environment, as everything in this package takes: the listener's
+// os.LookupEnv, and Dispatch's settings table.
+func SessionWindows(logger *slog.Logger, environment func(string) (string, bool)) (live, horizon time.Duration, err error) {
+	live, err = PositiveDuration(logger, environment, "ENVOY_SESSION_LIVE_WINDOW", session.LiveWindow)
+	if err != nil {
+		return 0, 0, err
+	}
+	horizon, err = PositiveDuration(logger, environment, "ENVOY_SESSION_GONE_HORIZON", session.GoneHorizon)
+	if err != nil {
+		return 0, 0, err
+	}
+	return live, horizon, nil
 }

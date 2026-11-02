@@ -155,14 +155,15 @@ const defaultSessionReapInterval = time.Minute
 //
 // It is not the session reaper's period, short though that is. A session's record reads gone
 // when the session bucket expires its key as well as when its last registration passes the gone
-// horizon, and the bucket ships with a five-minute maximum age, so a stalled session's key is
-// gone five minutes after its last heartbeat and the reaper then finds its holder gone. Judged
-// every minute, a stalled holder would lose its role up to five times sooner than the fixed pass
-// this change replaces, which is the opposite of what this change is for; the raise of that
-// maximum age past the gone horizon is dispatch://INFRA-887's, and it cannot land first. The
-// grace a restored claim gets is measured from the listener's own start against the live window
-// (store.Registry.ReleaseExpiredRoleClaim), not counted in passes, so the period does not move
-// it; what the period decides is how long after a holder is gone its role is free.
+// horizon, and the bucket ships with a five-minute maximum age (session.BucketMaxAge), so a
+// stalled session's key is gone five minutes after its last heartbeat and the reaper then finds
+// its holder gone. Judged every minute, a stalled holder would lose its role up to five times
+// sooner than the fixed pass this change replaces, which is the opposite of what this change is
+// for; the raise of that maximum age past the gone horizon is dispatch://INFRA-887's, and it
+// cannot land first. The grace a restored claim gets is measured from the listener's own start
+// against the live window (store.Registry.ReleaseExpiredRoleClaim), not counted in passes, so
+// the period does not move it; what the period decides is how long after a holder is gone its
+// role is free.
 const defaultRoleClaimReapInterval = 5 * time.Minute
 
 // rewatchListenerKVWatchers recreates cache watchers that are not represented
@@ -1007,14 +1008,10 @@ func main() {
 	// the compiled constant, which .github/scripts/check-heartbeat-margin.sh reads to prove that
 	// three registration refreshes fit inside the live window; a deployment that moves one moves
 	// what this listener runs with and nothing else. A value that is not a positive duration is
-	// refused by name here rather than taken (envconf.PositiveDuration). Dispatch reads the same
-	// two windows with the same rules and judges a role route's holder by them, so a deployment
-	// gives both processes the same values (cmd/dispatch's roleHolderWindows).
-	sessionLiveWindow, err := envconf.PositiveDuration(logger.Slog(), os.LookupEnv, "ENVOY_SESSION_LIVE_WINDOW", session.LiveWindow)
-	if err != nil {
-		log.Fatal(err)
-	}
-	sessionGoneHorizon, err := envconf.PositiveDuration(logger.Slog(), os.LookupEnv, "ENVOY_SESSION_GONE_HORIZON", session.GoneHorizon)
+	// refused by name here rather than taken. Dispatch reads the same two windows through the
+	// same helper and judges a role route's holder by them, so a deployment gives both processes
+	// the same values (envconf.SessionWindows, cmd/dispatch's roleHolderWindows).
+	sessionLiveWindow, sessionGoneHorizon, err := envconf.SessionWindows(logger.Slog(), os.LookupEnv)
 	if err != nil {
 		log.Fatal(err)
 	}
