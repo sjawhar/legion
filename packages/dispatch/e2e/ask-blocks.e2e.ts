@@ -887,7 +887,7 @@ for (const [target, spec, quote, pasted, stored] of [
     "- Listed.\n- Second.\n",
     "Listed.",
     loneAsk,
-    "- Listed.\n  :::ask{#d2}\n  Which one?\n\n  - A\n  - B\n  :::\n- Second.\n",
+    "- Listed.\n  :::ask{#d2}\n  Which one?\n  - A\n  - B\n  :::\n- Second.\n",
   ],
   [
     "a list item",
