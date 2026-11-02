@@ -461,6 +461,16 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		ArtifactID string                 `json:"artifact_id"`
 		Version    int                    `json:"version"`
 		Approval   model.ArtifactApproval `json:"approval"`
+		// Coverage is one line per requirement of the spec with no check, as the approver reads
+		// them (coverage.go); never a missing plan task, since the plan comes after the
+		// approval, and empty for any document that is not an issue's spec. A gap refuses
+		// nothing: the request is recorded as it always was.
+		Coverage []string `json:"coverage"`
+	}
+	coverage, err := s.coverageOfSpec(r.Context(), tx, artifact)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
 	}
 	if err := s.attachApproval(r.Context(), tx, &artifact); err != nil {
 		s.writeHandlerError(w, err)
@@ -474,7 +484,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if settled {
-		WriteJSON(w, http.StatusOK, response{Ask: nil, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
+		WriteJSON(w, http.StatusOK, response{Ask: nil, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval, Coverage: coverage})
 		return
 	}
 	open, err := docs.OpenApprovalAsk(r.Context(), tx, artifact.ID)
@@ -513,7 +523,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	if len(events) > 0 {
 		status = http.StatusCreated
 	}
-	WriteJSON(w, status, response{Ask: ask, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
+	WriteJSON(w, status, response{Ask: ask, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval, Coverage: coverage})
 }
 
 // openApprovalAsk inserts the approval request naming documents, asking question, and appends

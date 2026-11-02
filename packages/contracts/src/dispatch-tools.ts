@@ -1072,7 +1072,7 @@ export const dispatchToolSpecs = [
       "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " +
       "Do not use it for issue status, asks, or events; " +
       "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " +
-      "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " +
+      "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, a typed block's serves and needs under it, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " +
       "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, time, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " +
       "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " +
       "any other file that is not UTF-8 text is described, with the route that serves its bytes. " +
@@ -1090,7 +1090,7 @@ export const dispatchToolSpecs = [
       blocks: z
         .boolean()
         .describe(
-          "List the live document's blocks, with each table's rows and cells, instead of its markdown; refused with a version, or for an uploaded file."
+          "List the live document's blocks, with a typed block's serves and needs and each table's rows and cells, instead of its markdown; refused with a version, or for an uploaded file."
         )
         .optional(),
       ref: z
@@ -1134,6 +1134,10 @@ export const dispatchToolSpecs = [
       "it first. " +
       "Refused 409 PLAN_APPROVED_BY_REVIEW on an issue's plan, which its plan review approves " +
       "(dispatch plan-approve), never a person. " +
+      "On an issue's spec the answer ends with a `Coverage of <name>:` line naming each requirement " +
+      "the spec marks that no check serves, in any document of the issue or of its descendants, or saying " +
+      "the spec marks no requirements; a spec every requirement of which has a check gets no such line. It never " +
+      "names a missing plan task, and a gap refuses nothing. " +
       OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -1316,11 +1320,17 @@ export const dispatchToolSpecs = [
       "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " +
       "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " +
       "when it has any (`Progress: none` otherwise). " +
+      "An issue whose spec marks requirements carries one `Coverage:` line per gap, `Coverage: R3 has no check` or " +
+      "`Coverage: R3 has no plan task` (the second only once the issue has a plan document), counting the `check` and " +
+      "`plan_task` blocks of every document of the issue and of its descendants; a spec that marks none reads " +
+      "`Coverage: the spec marks no requirements`. Nothing is refused for a gap. " +
       `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` +
       "--events N lists the last N, and --all-events every one. " +
       "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " +
       "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
-      "A block read prints `Block:`, `Document:`, `Changed in version:` and `Text:`, then those two sections; a pinned one adds " +
+      "A block read prints `Block:`, `Type:` for a block of a document, `Document:`, every attribute a typed block carries " +
+      "(a `check`'s serves, surface, run, when and negative_control; a `plan_task`'s serves and needs), `Changed in version:` " +
+      "and `Text:`, then those two sections; a pinned one adds " +
       "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " +
       "reads `No block <id> in <document>.` " +
       "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " +

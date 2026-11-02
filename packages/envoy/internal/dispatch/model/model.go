@@ -795,6 +795,30 @@ type CheckBlock struct {
 	Results         []CheckResult `json:"results"`
 }
 
+// IssueCoverage is what each requirement of an issue's spec lacks: the requirements the spec
+// marks, in document order, and one Gaps line per gap, which `dispatch read --issue` prints
+// after `Coverage: `. HasPlan says whether the issue has a plan document; before it has one, a
+// requirement with no plan task is no gap, since the plan comes after the spec's approval.
+// Nothing is ever refused for a gap.
+type IssueCoverage struct {
+	Issue          string                `json:"issue"`
+	SpecArtifactID string                `json:"spec_artifact_id"`
+	HasPlan        bool                  `json:"has_plan"`
+	Requirements   []RequirementCoverage `json:"requirements"`
+	Gaps           []string              `json:"gaps"`
+}
+
+// RequirementCoverage is one `requirement` block of an issue's spec and what serves it: the
+// `check` and `plan_task` blocks of any document of that issue or of any descendant issue, at
+// any status, that name it in `serves`.
+type RequirementCoverage struct {
+	BlockID   string `json:"block_id"`
+	Ref       string `json:"ref"`
+	Text      string `json:"text"`
+	Checks    int    `json:"checks"`
+	PlanTasks int    `json:"plan_tasks"`
+}
+
 // CheckResultEventPayload is the payload of result.recorded, appended on the check's issue: the
 // result, the issue it was recorded on (Issue, which is the check's issue only when the result
 // was recorded there) and the check it proves.
@@ -828,16 +852,27 @@ type ArtifactHumanEditedEventPayload struct {
 }
 
 // ArtifactBlock is an addressable document block and its byte range in canonical markdown. Table
-// lists a table block's rows and cells; nil for every other block.
+// lists a table block's rows and cells; nil for every other block. Attributes is a typed block's
+// attributes in the order its type declares them, which is the order its opening line writes
+// them; a block of no declared type carries none.
 type ArtifactBlock struct {
-	ID            string          `json:"id"`
-	Type          string          `json:"type"`
-	From          int             `json:"from"`
-	To            int             `json:"to"`
-	Token         string          `json:"token"`
-	References    BlockReferences `json:"references"`
-	Table         *BlockTable     `json:"table,omitempty"`
-	DescendantIDs []string        `json:"-"`
+	ID            string                `json:"id"`
+	Type          string                `json:"type"`
+	From          int                   `json:"from"`
+	To            int                   `json:"to"`
+	Token         string                `json:"token"`
+	References    BlockReferences       `json:"references"`
+	Attributes    []BlockAttributeValue `json:"attributes,omitempty"`
+	Table         *BlockTable           `json:"table,omitempty"`
+	DescendantIDs []string              `json:"-"`
+}
+
+// BlockAttributeValue is one attribute a typed block carries: the name its type declares it
+// under, and the value the block holds, as its opening line writes it with no escape and no
+// quotes (pmdoc.TypedBlockAttributes).
+type BlockAttributeValue struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // BlockTable is a table block's rows in child order, the header row first, as GET

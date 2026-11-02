@@ -64,6 +64,7 @@ const CALLS: Record<ClientMethod, (client: DispatchClient) => Promise<unknown>> 
       commit: "1111111111111111111111111111111111111111",
     }),
   issueResults: (client) => client.issueResults("DSP-1"),
+  issueCoverage: (client) => client.issueCoverage("DSP-1"),
   editAsk: (client) => client.editAsk("ask-1", { question: "Which one?", actor } as never),
   comment: (client) => client.comment("DSP-1", { body: "Shipped.", actor }),
   listIssueAsks: (client) => client.listIssueAsks("DSP-1"),
@@ -86,6 +87,8 @@ const CALLS: Record<ClientMethod, (client: DispatchClient) => Promise<unknown>> 
   docRead: (client) => client.docRead("artifact-1"),
   fileVersion: (client) => client.fileVersion("artifact-1", 1),
   artifactBlocks: (client) => client.artifactBlocks("artifact-1"),
+  issueArtifactBlocks: (client) => client.issueArtifactBlocks("DSP-1", "spec"),
+  projectArtifactBlocks: (client) => client.projectArtifactBlocks("DSP", "notes-md"),
   docEdit: (client) =>
     client.docEdit("artifact-1", { ops: [{ op: "delete", find: "old" }], actor } as never),
   nameArtifactVersion: (client) =>

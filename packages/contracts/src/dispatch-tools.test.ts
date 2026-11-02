@@ -1157,7 +1157,7 @@ describe("dispatchToolSpecs", () => {
     ],
     [
       "dispatch_read",
-      "A block read prints `Block:`, `Document:`, `Changed in version:` and `Text:`, then those two sections; a pinned one adds the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, reads `No block <id> in <document>.`",
+      "A block read prints `Block:`, `Type:` for a block of a document, `Document:`, every attribute a typed block carries (a `check`'s serves, surface, run, when and negative_control; a `plan_task`'s serves and needs), `Changed in version:` and `Text:`, then those two sections; a pinned one adds the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, reads `No block <id> in <document>.`",
     ],
   ])("%s's description, which --help prints, holds the rule moved from the skill", (name, rule) => {
     expect(specFor(name).description).toContain(rule);

@@ -1068,6 +1068,7 @@ func renderedBlocks(tree pmdoc.ValidDocument, rows map[string][]pmdoc.TableRow) 
 	if err != nil {
 		return renderedDocument{}, documentSchemaError(err)
 	}
+	attributes := typedBlockAttributes(tree.Node())
 	tables := make(map[string]*model.BlockTable, len(rows))
 	blocks := make([]model.ArtifactBlock, len(offsets))
 	for index, offset := range offsets {
@@ -1077,6 +1078,7 @@ func renderedBlocks(tree pmdoc.ValidDocument, rows map[string][]pmdoc.TableRow) 
 			From:          offset.From,
 			To:            offset.To,
 			Token:         tokens.blocks[offset.ID],
+			Attributes:    attributes[offset.ID],
 			DescendantIDs: tableDescendants[offset.ID],
 		}
 		if offset.Type != "table" {
@@ -1090,6 +1092,40 @@ func renderedBlocks(tree pmdoc.ValidDocument, rows map[string][]pmdoc.TableRow) 
 		blocks[index].Table = table
 	}
 	return renderedDocument{markdown: markdown, blocks: blocks, token: tokens.document, tokenErr: tokens.documentErr}, nil
+}
+
+// typedBlockAttributes is each typed block's attributes by block id, as its opening line writes
+// them (pmdoc.TypedBlockAttributes): the first holder of a repeated id, the block GET
+// /api/v1/artifacts/{id}/blocks addresses by that id. A document holding no typed block
+// allocates nothing.
+func typedBlockAttributes(tree *pmdoc.Node) map[string][]model.BlockAttributeValue {
+	var attributes map[string][]model.BlockAttributeValue
+	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+		if !pmdoc.IsTypedBlock(node.Type) {
+			return true
+		}
+		id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+		if id == "" {
+			return true
+		}
+		if _, held := attributes[id]; held {
+			return true
+		}
+		values := pmdoc.TypedBlockAttributes(node)
+		if len(values) == 0 {
+			return true
+		}
+		if attributes == nil {
+			attributes = map[string][]model.BlockAttributeValue{}
+		}
+		held := make([]model.BlockAttributeValue, len(values))
+		for index, value := range values {
+			held[index] = model.BlockAttributeValue{Name: value.Name, Value: value.Value}
+		}
+		attributes[id] = held
+		return true
+	})
+	return attributes
 }
 
 // blockTable is a table's rows as the API carries them.

@@ -29,6 +29,7 @@ import type {
   IssueComponents,
   IssueComponentsInput,
   IssueComponentsMode,
+  IssueCoverage,
   IssueDetails,
   IssuePriority,
   IssueProgress,
@@ -2021,6 +2022,7 @@ function issueSummary(
   references: IssueReferences | string,
   graph: readonly string[],
   linkBase: string,
+  coverage: IssueCoverage | undefined,
   titles?: ReadonlyMap<string, string>
 ): string {
   const asks = issue.open_asks;
@@ -2051,6 +2053,9 @@ function issueSummary(
     ...(specApproval === undefined
       ? []
       : [`Spec ${specApproval.replace(/^Approval/, "approval")}`]),
+    // What the spec's requirements lack: one line per gap, or the one line that says the spec
+    // marks none. A gap refuses nothing; it is what the reader fixes before the work starts.
+    ...(coverage?.gaps ?? []).map((gap) => `Coverage: ${gap}`),
     // The links a person or an agent put on the issue — the pull request that delivers it among
     // them — which the issue page renders with their state; the reference graph below carries
     // only links between Dispatch nodes.
@@ -2138,6 +2143,22 @@ async function issueReferencesOrUnavailable(
 }
 
 /**
+ * What the issue's requirements lack, or nothing at all: a Dispatch that does not serve the
+ * coverage read yet, or one that cannot answer it, leaves the read without `Coverage:` lines
+ * rather than failing it, as the closure section does.
+ */
+async function issueCoverageOrNone(
+  client: DispatchClient,
+  key: string
+): Promise<IssueCoverage | undefined> {
+  try {
+    return await client.issueCoverage(key);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * The sections every read ends with: the `Node:` line (the read node's maker, last change and
  * parent), `Referenced by:` (edges pointing at the node, mentions and structure alike) and
  * `Links:` (edges it writes), read from the reference graph in both directions. A graph the
@@ -2189,22 +2210,35 @@ function nodeLine(node: GraphNode): string[] {
 }
 
 /**
- * A block read's head, from the node its reference names. A document's block: the block, the
- * document it is in (`ref.document`, the reference before the `#b-`), the version its text last
- * changed in and that text. A comment's or message's block: one line naming the block, its item
- * and the comment revision its text last changed in (`Block b2 of comment <id> (changed in
- * revision 1):`), then its text. A block no current version or revision holds has neither a
- * changed version nor text. Then for a pinned ref how the block stands against the version or
- * revision it pins and its text there.
+ * A block read's head, from the node its reference names and, for a block of a document, the
+ * live block `GET /api/v1/artifacts/{id}/blocks` lists under its id (`typedBlockOf`). A
+ * document's block: the block, its type, the document it is in (`ref.document`, the reference
+ * before the `#b-`), every attribute it carries — a `check`'s `serves`, `surface`, `run`, `when`
+ * and `negative_control`, a `plan_task`'s `serves` and `needs` — the version its text last
+ * changed in and that text, the claim a `check` makes among it. A comment's or message's block:
+ * one line naming the block, its item and the comment revision its text last changed in (`Block
+ * b2 of comment <id> (changed in revision 1):`), then its text; neither has a type or attributes.
+ * A block no current version or revision holds has no changed version, text, type or attribute.
+ * Then for a pinned ref how the block stands against the version or revision it pins and its
+ * text there.
  */
-function blockLines(node: GraphNode, ref: ParsedDispatchRef): string[] {
+function blockLines(
+  node: GraphNode,
+  ref: ParsedDispatchRef,
+  typed?: ArtifactBlock | undefined
+): string[] {
   const unit = ref.item === undefined ? "version" : "revision";
   const blockID = node.block_id ?? ref.block;
   const head =
     ref.item === undefined
       ? [
           `Block: ${blockID}`,
+          ...(typed === undefined ? [] : [`Type: ${typed.type}`]),
           `Document: ${node.document ?? ref.document}`,
+          ...(typed?.attributes ?? []).map(
+            (attribute) =>
+              `${attribute.name}: ${attribute.value === "" ? "(empty)" : attribute.value}`
+          ),
           ...(node.changed_version === undefined
             ? []
             : [`Changed in version: ${node.changed_version}`]),
@@ -2229,6 +2263,31 @@ function blockLines(node: GraphNode, ref: ParsedDispatchRef): string[] {
     `Text at ${unit} ${pin.version}:`,
     pin.text,
   ];
+}
+
+/**
+ * The live block of the document a block reference names, under the id the reference carries:
+ * its type and the attributes a typed block holds. The reference names its document's owner and
+ * slug (`spec` for an issue's spec), so one read serves it and the document is never resolved.
+ * A block of a comment or a message has neither type nor attributes, and so has a block the
+ * live document no longer holds — a pinned reference's, say — so both answer nothing. A listing
+ * the caller cannot read leaves the block's head as it read before the listing, rather than
+ * failing the read.
+ */
+async function typedBlockOf(
+  client: DispatchClient,
+  ref: ParsedDispatchRef
+): Promise<ArtifactBlock | undefined> {
+  if (ref.item !== undefined || ref.block === undefined) return undefined;
+  try {
+    const blocks =
+      ref.owner.kind === "project"
+        ? await client.projectArtifactBlocks(ref.owner.project, ref.id)
+        : await client.issueArtifactBlocks(ref.owner.issue, ref.id);
+    return blocks.find((block) => block.id === ref.block);
+  } catch {
+    return undefined;
+  }
 }
 
 function logSummary(issue: IssueDetails, events: readonly Event[]): string {
@@ -2696,7 +2755,7 @@ async function listDocumentBlocks(
   const { bytes, blocks } = live;
   const decoder = new TextDecoder();
   const lines = [
-    `Blocks of ${artifact.name}, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.`,
+    `Blocks of ${artifact.name}, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words, then a typed block's serves and needs. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.`,
   ];
   const holders: ArtifactBlock[] = [];
   for (const block of blocks) {
@@ -2713,6 +2772,14 @@ async function listDocumentBlocks(
     lines.push(
       `${indent}${block.id} ${block.type} (${block.token ?? "no token"}; ${comments} comment${comments === 1 ? "" : "s"}, ${asks} ask${asks === 1 ? "" : "s"}): ${opening}`
     );
+    // A plan task's and a check's pointers, the two attributes a reader follows between
+    // documents; every attribute of a block is in `dispatch read` of its reference.
+    for (const name of ["serves", "needs"]) {
+      const attribute = block.attributes?.find((held) => held.name === name);
+      if (attribute !== undefined && attribute.value !== "") {
+        lines.push(`${indent}  ${name}: ${attribute.value}`);
+      }
+    }
     if (block.type === "table") {
       if (block.table === undefined) {
         lines.push(
@@ -4377,9 +4444,23 @@ export async function executeDispatchTool(
         summary: stringArg(args, "summary"),
         ...(includeVerification ? { include_verification: true } : {}),
       });
+      // One line per requirement of the spec with no check, or the one line saying the spec
+      // marks none, as Dispatch names them; never a missing plan task, since the plan comes
+      // after the approval. A gap refuses nothing: the request is recorded, and a spec every
+      // requirement of which has a check carries no line at all.
+      const gaps = result.coverage ?? [];
+      const coverageLines =
+        gaps.length === 0
+          ? []
+          : [
+              `Coverage of ${resolved.artifact.name}: ${gaps.map((gap) => `${gap}.`).join(" ")} Mark each requirement the spec states with a requirement block and write a check that serves it, in the issue's Verification document, before the work starts.`,
+            ];
       if (result.ask === null) {
         return {
-          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. A change outside the decision blocks after approval makes it stale, so request again only for such a version, once the human has agreed to every point in it, with a --summary naming what changed since version ${result.version}; the human's own answer to a decision block carries the approval when that answer is the whole change.`,
+          text: [
+            `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. A change outside the decision blocks after approval makes it stale, so request again only for such a version, once the human has agreed to every point in it, with a --summary naming what changed since version ${result.version}; the human's own answer to a decision block carries the approval when that answer is the whole change.`,
+            ...coverageLines,
+          ].join("\n"),
           details: {
             ...(resolved.owner.kind === "project"
               ? documentResultDetails(resolved.artifact)
@@ -4396,7 +4477,10 @@ export async function executeDispatchTool(
         ? `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}).`
         : `The approval request for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}) already waits on the human, so this call changed nothing: nothing since it last reached the human (a newer version, a human's reply in its thread, or your progress note) left it waiting on you.`;
       return {
-        text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and a change outside the decision blocks after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one, with a --summary naming what changed since the earlier approval. The human's own answer to a decision block carries the approval when that answer is the whole change since the approved version, and answers an open request Approve in their name: request nothing then.`,
+        text: [
+          `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and a change outside the decision blocks after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one, with a --summary naming what changed since the earlier approval. The human's own answer to a decision block carries the approval when that answer is the whole change since the approved version, and answers an open request Approve in their name: request nothing then.`,
+          ...coverageLines,
+        ].join("\n"),
         details: { ...details, artifact: resolved.artifact.id, version: result.version },
       };
     }
@@ -4668,7 +4752,7 @@ export async function executeDispatchTool(
         // The read names the block's node, so a 404 is the block's own answer: an unpinned ref
         // names a block no current version holds, and a pinned one's answer says which of its
         // version, that version's record or the block the server could not find.
-        const [incoming, outgoing] = await Promise.all([
+        const [incoming, outgoing, typed] = await Promise.all([
           client.getReferences({ to: blockRef }).catch((error: unknown) => {
             if (ref.pin === undefined && dispatchAnswered(error, 404)) {
               throw new Error(`No block ${ref.block} in ${holder}.`);
@@ -4676,11 +4760,15 @@ export async function executeDispatchTool(
             throw error;
           }),
           graphReferences(client, { from: blockRef }),
+          // The live block of its document, for its type and the attributes it carries: a block
+          // of a comment or a message has neither, and so has one no live version holds.
+          typedBlockOf(client, ref),
         ]);
         return {
-          text: [...blockLines(incoming.node, ref), ...graphSectionLines(incoming, outgoing)].join(
-            "\n"
-          ),
+          text: [
+            ...blockLines(incoming.node, ref, typed),
+            ...graphSectionLines(incoming, outgoing),
+          ].join("\n"),
           details: {
             ...(ref.owner.kind === "project"
               ? { project: ref.owner.project }
@@ -4751,7 +4839,7 @@ export async function executeDispatchTool(
       const read = await readPromise;
       // The claim's holder must read the same here as on the issue page, so the label comes
       // from the live registry — asked for only when a session holds this issue.
-      const [references, graph, titles, pictures] = await Promise.all([
+      const [references, graph, titles, pictures, coverage] = await Promise.all([
         referencesPromise,
         graphSections(client, dispatchIssueRef(read.issue.key)),
         liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
@@ -4759,6 +4847,7 @@ export async function executeDispatchTool(
           ...read.issue.open_asks.map((ask) => ({ text: ask.question, at: ask.created_at })),
           ...read.events.flatMap(eventTexts),
         ]),
+        issueCoverageOrNone(client, read.issue.key),
       ]);
       return {
         text: issueSummary(
@@ -4767,6 +4856,7 @@ export async function executeDispatchTool(
           references,
           [...pictures.lines, ...graph],
           linkBase,
+          coverage,
           titles
         ),
         details: { issue: read.issue.key },

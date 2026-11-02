@@ -685,6 +685,40 @@ export interface ApprovalRequestResponse {
   readonly artifact_id: string;
   readonly version: number;
   readonly approval: ArtifactApproval;
+  /** One line per requirement of the issue's spec with no check, or the single line `the spec
+   *  marks no requirements` for a spec that marks none, as `IssueCoverage.gaps` writes them; no
+   *  line at all for a spec every requirement of which has a check, empty for a document that is
+   *  not a spec, and never a missing plan task, since the plan comes after the approval. Absent
+   *  from a Dispatch older than requirement coverage. */
+  readonly coverage?: readonly string[];
+}
+
+/** What each requirement of an issue's spec lacks, from `GET /api/v1/issues/{key}/coverage`. A
+ *  requirement is a `requirement` block of the spec; it has a check when a `check` block of any
+ *  document of that issue or of any descendant issue, at any status, names it in `serves`, and a
+ *  plan task when a `plan_task` block of that set does. Nothing is ever refused for a gap. */
+export interface IssueCoverage {
+  readonly issue: string;
+  /** The issue's spec document, `""` for an issue that has none. */
+  readonly spec_artifact_id: string;
+  /** Whether the issue has a plan document. Before it has one, a requirement with no plan task
+   *  is no gap. */
+  readonly has_plan: boolean;
+  readonly requirements: readonly RequirementCoverage[];
+  /** One line per gap, `<block id> has no check` and `<block id> has no plan task`, or the
+   *  single line `the spec marks no requirements` for a spec that marks none. */
+  readonly gaps: readonly string[];
+}
+
+/** One `requirement` block of an issue's spec and what serves it. */
+export interface RequirementCoverage {
+  readonly block_id: string;
+  /** The block's reference, `dispatch://<KEY>/spec#b-<id>`. */
+  readonly ref: string;
+  /** The requirement's words, with every link and `dispatch://` reference dropped. */
+  readonly text: string;
+  readonly checks: number;
+  readonly plan_tasks: number;
 }
 
 export interface ArtifactBlock {
@@ -698,9 +732,21 @@ export interface ArtifactBlock {
     readonly comments: number;
     readonly asks: number;
   };
+  /** A typed block's attributes in the order its type declares them, which is the order its
+   *  opening line writes them, each value unescaped and unquoted; absent on a block of no
+   *  declared type, on a typed block that carries none, and on every block from a Dispatch
+   *  server older than the listing. */
+  readonly attributes?: readonly BlockAttributeValue[];
   /** A table block's rows and cells; absent on every other block, and on a table from a Dispatch
    *  server older than the listing. */
   readonly table?: BlockTable;
+}
+
+/** One attribute a typed block carries: the name its type declares it under and the value the
+ *  block holds. */
+export interface BlockAttributeValue {
+  readonly name: string;
+  readonly value: string;
 }
 
 /** A table block's rows in child order, the header row first, each row and cell placed as

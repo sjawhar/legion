@@ -404,14 +404,34 @@ func defaultAttributes(typ BlockTypeSchema) Attrs {
 	return attrs
 }
 
-// renderTypedAttributes writes a typed block's directive attributes in the order its type
-// declares them (schema/blocks.json), which is the order every reader of the markdown sees.
-func renderTypedAttributes(n *Node, typ BlockTypeSchema) (string, error) {
-	id, ok := n.Attrs[BlockIDAttr].(string)
-	if !ok || id == "" {
-		return "", fmt.Errorf("%w: typed block %q is missing blockId", ErrSchema, n.Type)
+// BlockAttributeValue is one attribute a typed block carries: the name its type declares it
+// under, and the value the block holds, as the opening line writes it before escaping and
+// quoting (TypedBlockAttributes).
+type BlockAttributeValue struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// TypedBlockAttributes is each attribute node carries, in the order its type declares them
+// (schema/blocks.json), which is the order its opening line writes them: the values a reader of
+// that line reads back, with no escape and no quotes. A block of no type the schema declares
+// carries none, and so does one whose attributes the renderer would refuse.
+func TypedBlockAttributes(node *Node) []BlockAttributeValue {
+	typ, ok := typedBlock(node.Type)
+	if !ok {
+		return nil
 	}
-	parts := []string{TypedBlockIDAttribute(id)}
+	values, err := typedAttributeValues(node, typ)
+	if err != nil {
+		return nil
+	}
+	return values
+}
+
+// typedAttributeValues is a typed block's declared attributes and their written values, in
+// declaration order, leaving out one the block does not hold and one the markdown never carries.
+func typedAttributeValues(n *Node, typ BlockTypeSchema) ([]BlockAttributeValue, error) {
+	var values []BlockAttributeValue
 	for _, attribute := range typ.Attributes {
 		name, definition := attribute.Name, attribute.BlockAttributeSchema
 		if name == "invalid" && definition.Server {
@@ -422,47 +442,74 @@ func renderTypedAttributes(n *Node, typ BlockTypeSchema) (string, error) {
 			if definition.Default == nil {
 				continue
 			}
-			return "", fmt.Errorf("%w: typed block %q is missing attribute %q", ErrSchema, n.Type, name)
+			return nil, fmt.Errorf("%w: typed block %q is missing attribute %q", ErrSchema, n.Type, name)
 		}
-		var encoded string
-		switch definition.Kind {
-		case BlockAttributeString, BlockAttributeEnum, BlockAttributeActor, BlockAttributeTimestamp:
-			text, ok := value.(string)
-			if !ok {
-				return "", fmt.Errorf("%w: typed block %q attribute %q must be a string", ErrSchema, n.Type, name)
-			}
-			encoded = text
-		case BlockAttributeBool:
-			flag, ok := value.(bool)
-			if !ok {
-				return "", fmt.Errorf("%w: typed block %q attribute %q must be a bool", ErrSchema, n.Type, name)
-			}
-			encoded = strconv.FormatBool(flag)
-		case BlockAttributeStringList:
-			items, ok := stringSlice(value)
-			if !ok {
-				return "", fmt.Errorf("%w: typed block %q attribute %q must be a string array", ErrSchema, n.Type, name)
-			}
-			jsonValue, err := json.Marshal(items)
-			if err != nil {
-				return "", fmt.Errorf("%w: encode typed block %q attribute %q: %v", ErrSchema, n.Type, name, err)
-			}
-			encoded = string(jsonValue)
-		case BlockAttributeBlockList:
-			// Joined by one space, as ParseBlockPointerValue reads them. The joined value still
-			// passes through escapeDirectiveAttribute and strconv.Quote below, which leave a
-			// canonical reference unchanged: it holds none of the characters they escape.
-			items, ok := stringSlice(value)
-			if !ok {
-				return "", fmt.Errorf("%w: typed block %q attribute %q must be an array of block references", ErrSchema, n.Type, name)
-			}
-			encoded = strings.Join(items, " ")
-		default:
-			return "", fmt.Errorf("%w: typed block %q attribute %q has unknown kind %q", ErrSchema, n.Type, name, definition.Kind)
+		encoded, err := encodeTypedAttribute(n.Type, name, definition, value)
+		if err != nil {
+			return nil, err
 		}
-		parts = append(parts, name+"="+strconv.Quote(escapeDirectiveAttribute(encoded)))
+		values = append(values, BlockAttributeValue{Name: name, Value: encoded})
+	}
+	return values, nil
+}
+
+// renderTypedAttributes writes a typed block's directive attributes in the order its type
+// declares them (schema/blocks.json), which is the order every reader of the markdown sees.
+func renderTypedAttributes(n *Node, typ BlockTypeSchema) (string, error) {
+	id, ok := n.Attrs[BlockIDAttr].(string)
+	if !ok || id == "" {
+		return "", fmt.Errorf("%w: typed block %q is missing blockId", ErrSchema, n.Type)
+	}
+	values, err := typedAttributeValues(n, typ)
+	if err != nil {
+		return "", err
+	}
+	parts := make([]string, 0, len(values)+1)
+	parts = append(parts, TypedBlockIDAttribute(id))
+	for _, value := range values {
+		parts = append(parts, value.Name+"="+strconv.Quote(escapeDirectiveAttribute(value.Value)))
 	}
 	return strings.Join(parts, " "), nil
+}
+
+// encodeTypedAttribute is the text one attribute value is written as, before escaping and
+// quoting; it refuses a value whose kind is not the one the type declares.
+func encodeTypedAttribute(blockType, name string, definition BlockAttributeSchema, value any) (string, error) {
+	switch definition.Kind {
+	case BlockAttributeString, BlockAttributeEnum, BlockAttributeActor, BlockAttributeTimestamp:
+		text, ok := value.(string)
+		if !ok {
+			return "", fmt.Errorf("%w: typed block %q attribute %q must be a string", ErrSchema, blockType, name)
+		}
+		return text, nil
+	case BlockAttributeBool:
+		flag, ok := value.(bool)
+		if !ok {
+			return "", fmt.Errorf("%w: typed block %q attribute %q must be a bool", ErrSchema, blockType, name)
+		}
+		return strconv.FormatBool(flag), nil
+	case BlockAttributeStringList:
+		items, ok := stringSlice(value)
+		if !ok {
+			return "", fmt.Errorf("%w: typed block %q attribute %q must be a string array", ErrSchema, blockType, name)
+		}
+		jsonValue, err := json.Marshal(items)
+		if err != nil {
+			return "", fmt.Errorf("%w: encode typed block %q attribute %q: %v", ErrSchema, blockType, name, err)
+		}
+		return string(jsonValue), nil
+	case BlockAttributeBlockList:
+		// Joined by one space, as ParseBlockPointerValue reads them. The joined value still
+		// passes through escapeDirectiveAttribute and strconv.Quote in the renderer, which leave
+		// a canonical reference unchanged: it holds none of the characters they escape.
+		items, ok := stringSlice(value)
+		if !ok {
+			return "", fmt.Errorf("%w: typed block %q attribute %q must be an array of block references", ErrSchema, blockType, name)
+		}
+		return strings.Join(items, " "), nil
+	default:
+		return "", fmt.Errorf("%w: typed block %q attribute %q has unknown kind %q", ErrSchema, blockType, name, definition.Kind)
+	}
 }
 
 func escapeDirectiveAttribute(value string) string {

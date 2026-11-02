@@ -40,3 +40,30 @@ func IssueAncestors(ctx context.Context, q Queryer, key string) ([]string, error
 	}
 	return ancestors, nil
 }
+
+// IssueDescendants is every issue below the issue key on `child_of`, at any status, read through
+// q: its children, their children, and so on, bounded by IssueDepthCap like the ancestor walk
+// above, so the query terminates even if a raced reparent ever commits a cycle. The key itself is
+// not in the answer. An issue with no child, an issue no row has, and the empty key answer [].
+// This is the server's one recursive descendant walk over whole subtrees: api's coverage read is
+// this query. api's loadChildren is a different read — one row per direct child, with a rollup
+// over that child's own subtree — and stays its own.
+func IssueDescendants(ctx context.Context, q Queryer, key string) ([]string, error) {
+	descendants := []string{}
+	if key == "" {
+		return descendants, nil
+	}
+	if err := q.QueryRow(ctx, `
+		with recursive descendants as (
+			select c.key, 1 as depth from issues c where c.parent_key = $1
+			union
+			select c.key, d.depth + 1
+			from issues c join descendants d on c.parent_key = d.key
+			where d.depth < $2
+		)
+		select coalesce(array_agg(key order by key), '{}') from descendants
+	`, key, IssueDepthCap).Scan(&descendants); err != nil {
+		return nil, fmt.Errorf("read the descendants of %s: %w", key, err)
+	}
+	return descendants, nil
+}

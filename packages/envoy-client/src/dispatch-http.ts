@@ -35,6 +35,7 @@ import type {
   GraphReferences,
   Issue,
   IssueCheckResults,
+  IssueCoverage,
   IssueDetails,
   IssuePriority,
   IssueRead,
@@ -1295,6 +1296,23 @@ export class DispatchClient {
 
   async artifactBlocks(id: string): Promise<ArtifactBlock[]> {
     return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
+  }
+
+  /** `GET /api/v1/issues/{key}/artifacts/{slug}/blocks`: the blocks of one issue document named
+   *  by its slug (`spec` for the issue's spec), with no read of the issue to resolve its id. */
+  async issueArtifactBlocks(issue: string, slug: string): Promise<ArtifactBlock[]> {
+    return this.#json("GET", ["api", "v1", "issues", issue, "artifacts", slug, "blocks"]);
+  }
+
+  /** `GET /api/v1/projects/{key}/artifacts/{slug}/blocks`: the same for a project document. */
+  async projectArtifactBlocks(project: string, slug: string): Promise<ArtifactBlock[]> {
+    return this.#json("GET", ["api", "v1", "projects", project, "artifacts", slug, "blocks"]);
+  }
+
+  /** `GET /api/v1/issues/{key}/coverage`: what each requirement of the issue's spec lacks, with
+   *  one `gaps` line per gap. Nothing is ever refused for a gap. */
+  async issueCoverage(key: string): Promise<IssueCoverage> {
+    return this.#json("GET", ["api", "v1", "issues", key, "coverage"]);
   }
 
   /** `GET /api/v1/comments/{id}/blocks`: the comment's current blocks with their ids, text,
