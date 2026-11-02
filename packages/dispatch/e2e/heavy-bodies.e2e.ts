@@ -4,7 +4,9 @@
 // two measure the very same bytes. The one surface where a body grows under a paint - the live
 // view, where a streaming turn arrives whole with every frame - is `heavy-streamed-turn.e2e.ts`,
 // which reads a drawn body through the same `heavy-bodies-page.ts` as the rows here
-// (sjawhar/legion#2519).
+// (sjawhar/legion#2519). What a row here holds the main thread for is measured by
+// `main-thread-hold.ts`, which `nested-directive.e2e.ts` measures its own two rows with, so one
+// instrument and one bound answer for both (sjawhar/legion#2612).
 import { type BrowserContext, expect, type Locator, type Page, test } from "@playwright/test";
 
 // `markdownWorkerThreshold` comes from the module that carries it and imports nothing: the
@@ -24,17 +26,12 @@ import {
   plainList,
 } from "./heavy-bodies";
 import { expectSettled, markdownBody } from "./heavy-bodies-page";
+import { expectUnderTheBound, measureDraw, record } from "./main-thread-hold";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 declare global {
   interface Window {
-    /** The largest gap, in milliseconds, between two ticks of the page's main-thread heartbeat. */
-    __heavyBodiesLongestGap?: number;
-    /** `performance.now()` when the record last started, so a row can time the draw from it. */
-    __heavyBodiesResetAt?: number;
-    /** Starts the heartbeat's record again: no gap so far, and the last tick now. */
-    __heavyBodiesResetGap?: () => void;
     /** How far the reader's own scroll moved the page, once `scrollOnTheFirstBatch` has run it;
      *  0 until then. */
     __heavyBodiesReaderScrolled?: number;
@@ -45,9 +42,6 @@ const agent = {
   actor: { id: "e2e-heavy-bodies-agent", kind: "session" as const },
   as: "agent" as const,
 };
-
-/** The longest the main thread may go without running a task while the card draws. */
-const longestGapMs = 1_000;
 
 /**
  * The parse worker's own chunk, as Vite names a module worker's bundle - the diagram renderer
@@ -94,98 +88,6 @@ function deepestNesting(element: Locator, selector: string): Promise<number> {
  *  without shipping 30,000 characters into an assertion message. */
 function textLength(element: Locator): Promise<number> {
   return element.evaluate((node) => node.textContent?.length ?? 0);
-}
-
-interface Measured {
-  /** Milliseconds from the record's start until this row saw the formatted body; the row's own
-   *  polling rounds it up. */
-  readonly drawn: number;
-  /** The largest gap, in milliseconds, between two ticks of the main-thread heartbeat since the
-   *  record started. */
-  readonly gap: number;
-}
-
-/**
- * Installs a heartbeat before the page's own scripts: a `setTimeout(0)` loop that records the
- * largest gap between its ticks, which a parse holding the main thread widens to the parse's
- * length. The record starts again when the page first asks for the data the body comes in,
- * before that request goes out: the bundle has been evaluated and the tab drawn by then, and the
- * body cannot draw before the answer.
- */
-async function measureDraw(
-  page: Page,
-  {
-    drawn,
-    open,
-    reset,
-  }: {
-    /** Resolves once the formatted body is in the page. */
-    readonly drawn: () => Promise<void>;
-    /** What the reader does: open the page, and whatever else reaches the body. */
-    readonly open: () => Promise<void>;
-    /** The first GET of this request starts the record. */
-    readonly reset: RegExp;
-  }
-): Promise<Measured> {
-  await page.addInitScript(() => {
-    let last = performance.now();
-    window.__heavyBodiesLongestGap = 0;
-    window.__heavyBodiesResetAt = last;
-    window.__heavyBodiesResetGap = () => {
-      last = performance.now();
-      window.__heavyBodiesLongestGap = 0;
-      window.__heavyBodiesResetAt = last;
-    };
-    const tick = () => {
-      const now = performance.now();
-      window.__heavyBodiesLongestGap = Math.max(window.__heavyBodiesLongestGap ?? 0, now - last);
-      last = now;
-      setTimeout(tick, 0);
-    };
-    setTimeout(tick, 0);
-  });
-  // Only the first request resets: a later one could wait out the draw, then erase its gap.
-  let started = false;
-  await page.route(reset, async (route) => {
-    if (!started && route.request().method() === "GET") {
-      started = true;
-      await page.evaluate(() => window.__heavyBodiesResetGap?.());
-    }
-    await route.continue();
-  });
-
-  await open();
-  await drawn();
-  if (!started) {
-    throw new Error(`the page never asked for ${reset.source}`);
-  }
-  const measured = await page.evaluate(() => ({
-    drawn: performance.now() - (window.__heavyBodiesResetAt ?? Number.NaN),
-    gap: window.__heavyBodiesLongestGap,
-  }));
-  if (measured.gap === undefined) {
-    throw new Error("the main-thread heartbeat never started");
-  }
-  return { drawn: measured.drawn, gap: measured.gap };
-}
-
-/** Both measurements are the run's evidence, so they are kept on the result even when it passes.
- *  Only the gap is asserted; the time to the formatted body is recorded, never a limit. */
-function record({ drawn, gap }: Measured): void {
-  test.info().annotations.push(
-    { description: `${Math.round(gap)} ms`, type: "longest main-thread gap" },
-    {
-      description: `${Math.round(drawn)} ms, as this row polled for it`,
-      type: "time to the formatted body",
-    }
-  );
-}
-
-function expectUnderTheBound({ gap }: Measured): void {
-  expect(
-    gap,
-    `the main thread ran no task for ${Math.round(gap)} ms while the card drew`
-  ).toBeLessThan(longestGapMs);
 }
 
 interface HeldWorker {
