@@ -1355,10 +1355,15 @@ func TestPodUpdateAnUnansweredClaimRelaunchedIntoAnotherPodIsAskedNothingMore(t 
 	if !errors.Is(err, ErrLeftPodRound) {
 		t.Fatalf("the answer from the new pod returned %v, want the refusal of a process in another pod", err)
 	}
-	for _, name := range []string{testRound, PodRound(testOtherPod)} {
-		if !strings.Contains(err.Error(), name) {
-			t.Errorf("refusal = %q, want it to name %q", err, name)
-		}
+	// The refusal names one round, the round the claim left, which is the round the answer
+	// carried. It names no round of the pod the claim came up in: no round is open over that
+	// pod, and a worker that answered the id of one would be refused again, as answering a
+	// round that is not its claim's (foreignRoundRefusal).
+	if !strings.Contains(err.Error(), testRound) {
+		t.Errorf("refusal = %q, want it to name the round the claim left, %q", err, testRound)
+	}
+	if of := PodRound(testOtherPod); strings.Contains(err.Error(), of) {
+		t.Errorf("refusal = %q, want it to name no round of the pod the claim came up in, %q", err, of)
 	}
 	if c := h.claim(); c.UpdateSignalledAt != nil || c.UpdateHead != "" {
 		t.Errorf("claim after the refused answer = %+v, want nothing of it recorded", c)

@@ -233,6 +233,16 @@ func (s *supervision) completePodUpdate(ctx context.Context, issue string, snaps
 		}
 		return false
 	}
+	// Gone first: whether this round's pod is still there is asked before any wait, because
+	// every wait below is a wait on that pod. A round whose pod no live claim records has
+	// nothing in that pod to cut and nothing there to replace, so waiting for a turn — which by
+	// then is a turn in the pod that replaced this one — would hold every answered worker's next
+	// task, and the notice would name a pod that is gone. What is left to decide is read from
+	// the round's own record of its members (roundWithNoProcessInItsPod, lostClaims).
+	k, running := podProcess(live, round)
+	if !running {
+		return s.roundWithNoProcessInItsPod(ctx, issue, snapshot, round, pod)
+	}
 	if working := workingClaims(live); len(working) > 0 {
 		s.log.Info("supervise: every worker of this update round has answered; the replacement waits for the turns still running",
 			"issue", issue, "round", round, "working", working)
@@ -245,10 +255,6 @@ func (s *supervision) completePodUpdate(ctx context.Context, issue string, snaps
 		s.log.Info("supervise: the claims of this issue run in two pods now; this round's replacement waits for the one in flight",
 			"issue", issue, "round", round, "pod", pod)
 		return true
-	}
-	k, running := podProcess(live, round)
-	if !running {
-		return s.roundWithNoProcessInItsPod(ctx, issue, snapshot, round, pod)
 	}
 	bounded, done := context.WithTimeout(ctx, s.plan.orphanSweep)
 	defer done()

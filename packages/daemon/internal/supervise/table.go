@@ -2150,26 +2150,22 @@ func foreignRoundRefusal(c Claim, answered string) error {
 		"%w. It answers %q, and this claim is in %s. %s", ErrForeignUpdateRound, answered, in, next)}
 }
 
-// leftPodRoundRefusal is what a worker reads when it answers its claim's round from a process
-// the daemon started in another pod (podUpdateSignalled). Another agent reads it, so it
-// follows ASD-STE100 as the task it answers does: one instruction per sentence, active voice,
-// and no word that has a second reading. It names the round the answer carried and, where the
-// claim records a process, the round of the pod that process runs in, as the wrong-round
-// refusal names its two rounds, and then what the worker does next.
+// leftPodRoundRefusal is what a worker reads when it answers a round its claim has left
+// (podUpdateSignalled). Another agent reads it, so it follows ASD-STE100 as the task it answers
+// does: one instruction per sentence, active voice, and no word that has a second reading.
 //
-// A claim that records no process names one round only: a suspension let that process go
-// (letGo), and the claim has left the round all the same.
+// It names one round, the round the claim left, which is the round the answer carries. It names
+// no round of the pod the claim's process runs in now, because there is none: no round is open
+// over that pod, and a worker that answered the id of one would be refused again, as answering
+// a round that is not its claim's (foreignRoundRefusal). Where the process runs is nothing the
+// worker can act on either, so the refusal does not say it.
 //
-// What it does next is nothing of that round. The round asks about work on a disk that is gone,
-// which no turn of this process can push, and the daemon ends the round itself.
+// What the worker does next is nothing of that round. The round asks about work on a disk that
+// is gone, which no turn of this process can push, and the daemon ends the round itself.
 func leftPodRoundRefusal(c Claim) error {
-	now := ""
-	if c.Locator != nil && c.Locator.Sandbox != nil {
-		now = fmt.Sprintf("The round of that pod is %q. ", PodRound(c.Locator.Sandbox.PodUID))
-	}
 	return &RefusedError{State: c.State, Request: "ready_for_update", Err: fmt.Errorf(
-		"%w. It answers %q. The daemon started this claim in another pod than that round's own. %sDo not answer %q again. The daemon asks this claim for no answer now",
-		ErrLeftPodRound, c.UpdateRound, now, c.UpdateRound)}
+		"%w. It answers %q. The daemon started this claim in another pod than that round's own. Do not answer %q again. The daemon asks this claim for no answer now",
+		ErrLeftPodRound, c.UpdateLeftRound, c.UpdateLeftRound)}
 }
 
 func nothingToDo(*Machine, context.Context, Event) error { return nil }

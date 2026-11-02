@@ -2408,3 +2408,249 @@ func TestPodUpdateRefusesALateAnswerFromAClaimSuspendedAfterItLeftTheRound(t *te
 			c.UpdateSignalledAt, c.UpdateHead)
 	}
 }
+
+// envoyTurn is a turn the daemon sent nothing for, started in the pod that replaced the round's
+// own: an Envoy notice delivered into the relaunched session, or a person's steer. A claim that
+// has left its round keeps its answer through such a turn (takeBackSignal), because the answer
+// was given in the pod the round is about and no turn of the pod that replaced it can move the
+// branch that pod held.
+func (r *podUpdateRig) envoyTurn(role claim.Role) {
+	r.t.Helper()
+	r.handle(role, supervise.StreamTurnStart{Claim: r.tokens[role]})
+	if c := r.claimOf(role); c.State != supervise.StateWorking {
+		r.t.Fatalf("the %s after a turn of its own is %s, want it %s", role, c.State, supervise.StateWorking)
+	}
+}
+
+// Whether this round's pod is still there is asked before any wait, because every wait in the
+// round's completion is a wait on that pod. A round whose pod no live claim records has nothing
+// in that pod to cut and nothing there to replace: the turn the sweep would wait for runs in the
+// pod that replaced this one, waiting for it would hold every answered worker's next task behind
+// a round that can never end, and the stalled-round notice would name a pod that is gone.
+//
+// So the round is decided here rather than held: it ends by the one path every reading of a gone
+// pod ends a round by (endRoundOverAGonePod), the turn in the new pod is left running, and the
+// operator's side is told nothing, however long past the notice bound the sweep runs.
+func TestPodUpdateDecidesAGonePodsRoundRatherThanWaitForATurnInThePodThatReplacedIt(t *testing.T) {
+	const held = "supervise: every worker of this update round has answered; the replacement waits for the turns still running"
+	const overAGonePod = "supervise: the pod of this issue's update round is not there, and every claim of the round had answered; nothing was lost and the round is over"
+	rig := newPodUpdateRig(t, readyWorker(claim.RoleImplementer), readyWorker(claim.RoleTester))
+	rig.drifts(podUpdateDrift)
+
+	rig.tick()
+	roles := []claim.Role{claim.RoleImplementer, claim.RoleTester}
+	for _, role := range roles {
+		rig.awaitRound(role, podUpdateRound)
+		rig.signal(role, "a1b2c3d")
+	}
+	rig.settleAll()
+
+	// The pod goes, and the displaced path brings both workers back in the pod that replaced
+	// it; one of them is in a turn of its own there when the sweep runs.
+	for _, role := range roles {
+		rig.displacedInto(role, podUpdateReplacementPod)
+	}
+	rig.envoyTurn(claim.RoleImplementer)
+	rig.settleAll()
+	// Long past the bound the round's own stall is told at, so a sweep that waited for that
+	// turn would tell the operator's side of a pod that is gone.
+	rig.clock.advance(podUpdateNotice + time.Hour)
+
+	rig.tick()
+
+	// What the sweep itself did, read before the round's end is waited for: a sweep that waited
+	// on the turn instead says so in these three, and leaves the round open behind them.
+	if lines := loggedLines(t, rig.logs.String(), held); len(lines) != 0 {
+		t.Errorf("the sweep waited for the turns still running %d times, and that turn is in the pod that replaced this round's own: %+v",
+			len(lines), lines)
+	}
+	if lines := loggedLines(t, rig.logs.String(), overAGonePod); len(lines) != 1 {
+		t.Errorf("the sweep ended the round over a gone pod %d times, want once: %+v", len(lines), lines)
+	}
+	if notices := rig.notices(); len(notices) != 0 {
+		t.Errorf("the controller was told %q, over %+v: the round it names is of a pod that is gone, and nothing of that round waits on a turn",
+			notices[0].Reason, notices[0].Update)
+	}
+	if messages := rig.messages(); len(messages) != 0 {
+		t.Errorf("the issue was written %q; every worker of the round had answered before its pod went", messages)
+	}
+	if calls := rig.replacements(); len(calls) != 0 {
+		t.Errorf("ReplacePod called %d times for a pod that is already gone", len(calls))
+	}
+	if c := rig.claimOf(claim.RoleImplementer); c.State != supervise.StateWorking {
+		t.Errorf("the worker whose turn runs in the pod that replaced the round's own is %s, want it still %s: that turn was never this round's to wait for",
+			c.State, supervise.StateWorking)
+	}
+	for _, role := range roles {
+		rig.awaitClaim(role, "its round to end over the pod that is gone",
+			func(c supervise.Claim) bool { return c.UpdateRound == "" })
+	}
+}
+
+// Every worker answered, the pod went, and one of them takes a turn of its own in the pod that
+// replaced it. The issue is told nothing: what the round's pod took with it is read from the
+// round's own record of each member (UpdateLeftRound, UpdateLeftAnswered), and that member had
+// answered when it left. Read from "has not answered now", the turn would have taken the answer
+// back (takeBackSignal) and the issue would be told a worker lost work that worker had pushed.
+func TestPodUpdateTellsTheIssueNothingWhenAnAnsweredWorkerTakesATurnInTheNewPod(t *testing.T) {
+	rig := newPodUpdateRig(t, readyWorker(claim.RoleImplementer), readyWorker(claim.RoleTester))
+	rig.drifts(podUpdateDrift)
+
+	rig.tick()
+	roles := []claim.Role{claim.RoleImplementer, claim.RoleTester}
+	for _, role := range roles {
+		rig.awaitRound(role, podUpdateRound)
+		rig.signal(role, "a1b2c3d")
+	}
+	rig.settleAll()
+
+	for _, role := range roles {
+		rig.displacedInto(role, podUpdateReplacementPod)
+	}
+	// An Envoy notice starts a turn of the implementer's own in the new pod, and that turn ends.
+	token := rig.tokens[claim.RoleImplementer]
+	rig.envoyTurn(claim.RoleImplementer)
+	rig.handle(claim.RoleImplementer, supervise.StreamTurnEnd{Claim: token})
+	rig.settleAll()
+	if c := rig.claimOf(claim.RoleImplementer); c.UpdateSignalledAt == nil || !c.UpdateLeftAnswered {
+		t.Fatalf("the relaunched worker after a turn of its own = answered=%t, left answered=%t; want its answer to the dead pod's round standing",
+			c.UpdateSignalledAt != nil, c.UpdateLeftAnswered)
+	}
+
+	rig.tick()
+
+	if messages := rig.messages(); len(messages) != 0 {
+		t.Fatalf("the issue was written %q; every worker of the round had answered before its pod went", messages)
+	}
+	if notices := rig.notices(); len(notices) != 0 {
+		t.Errorf("the controller was told %+v of a round that ended with nothing lost", notices)
+	}
+	if calls := rig.replacements(); len(calls) != 0 {
+		t.Errorf("ReplacePod called %d times for a pod that is already gone", len(calls))
+	}
+	for _, role := range roles {
+		rig.awaitClaim(role, "its round to end over the pod that is gone",
+			func(c supervise.Claim) bool { return c.UpdateRound == "" })
+	}
+}
+
+// The same report, where the pod went by this round's own replacement rather than by a failure
+// of its own: ReplacePod suspended the Sandbox, which displaces the pod, and then ran out of the
+// time the sweep bounds it to while it waited for that pod to go. The daemon is told a failure,
+// the round stays open, and the pod goes all the same — the suspension had landed — which brings
+// every worker back in the pod built in its place.
+//
+// The round ends at the sweep that reads them there, the pod it could replace is gone, and the
+// issue is told nothing: each worker had answered when it left the round.
+func TestPodUpdateTellsTheIssueNothingWhenTheReplacementTimesOutAfterItsSuspensionLanded(t *testing.T) {
+	rig := newPodUpdateRig(t, readyWorker(claim.RoleImplementer), readyWorker(claim.RoleTester))
+	rig.drifts(podUpdateDrift)
+
+	rig.tick()
+	roles := []claim.Role{claim.RoleImplementer, claim.RoleTester}
+	for _, role := range roles {
+		rig.awaitRound(role, podUpdateRound)
+		rig.signal(role, "a1b2c3d")
+	}
+	rig.rt.FailReplacePod(fmt.Errorf("wait for the pod of the suspended sandbox to go: %w", context.DeadlineExceeded))
+
+	rig.awaitReplacement(1, "once every worker answered")
+
+	for _, role := range roles {
+		if c := rig.claimOf(role); c.UpdateRound != podUpdateRound || c.UpdateSignalledAt == nil {
+			t.Fatalf("the %s after the replacement failed = round %q answered=%t, want the round open with its answer standing",
+				role, c.UpdateRound, c.UpdateSignalledAt != nil)
+		}
+		rig.displacedInto(role, podUpdateReplacementPod)
+	}
+	token := rig.tokens[claim.RoleTester]
+	rig.envoyTurn(claim.RoleTester)
+	rig.handle(claim.RoleTester, supervise.StreamTurnEnd{Claim: token})
+	rig.settleAll()
+
+	rig.tick()
+
+	if messages := rig.messages(); len(messages) != 0 {
+		t.Fatalf("the issue was written %q; every worker of the round had answered before the replacement took its pod", messages)
+	}
+	if notices := rig.notices(); len(notices) != 0 {
+		t.Errorf("the controller was told %+v of a round whose pod the replacement took", notices)
+	}
+	if calls := rig.replacements(); len(calls) != 1 {
+		t.Errorf("the pod was replaced %d times, want the one call that timed out: the pod it names is gone", len(calls))
+	}
+	for _, role := range roles {
+		rig.awaitClaim(role, "its round to end over the pod the replacement took",
+			func(c supervise.Claim) bool { return c.UpdateRound == "" })
+	}
+}
+
+// One worker had not answered when the pod went, and it answers from the process the daemon
+// started in the pod that replaced it. The issue is told once that this worker lost work: the
+// report is the round's own record of what each member left with, and this member left having
+// answered nothing.
+//
+// The late answer changes none of it. It names work the dead pod's disk held, which no process
+// of this claim has seen, so it is refused (ErrLeftPodRound) and nothing of it is recorded; and
+// the round ends with the report, so no later sweep writes the message again.
+func TestPodUpdateTellsTheIssueOnceOfAWorkerThatAnswersOnlyInTheNewPod(t *testing.T) {
+	rig := newPodUpdateRig(t, readyWorker(claim.RoleImplementer), readyWorker(claim.RoleTester))
+	rig.drifts(podUpdateDrift)
+
+	rig.tick()
+	roles := []claim.Role{claim.RoleImplementer, claim.RoleTester}
+	for _, role := range roles {
+		rig.awaitRound(role, podUpdateRound)
+	}
+	// The tester pushes its work and answers; the implementer never does.
+	rig.signal(claim.RoleTester, "a1b2c3d")
+	rig.settleAll()
+
+	for _, role := range roles {
+		rig.displacedInto(role, podUpdateReplacementPod)
+	}
+	back := rig.claimOf(claim.RoleImplementer)
+	m, ok := rig.sup.Machine(back.Token)
+	if !ok {
+		t.Fatal("the implementer is not supervised")
+	}
+	err := m.Handle(rig.ctx, supervise.PodUpdateSignalled{
+		Claim: back.Token, Generation: back.Generation, Session: back.Session, Round: podUpdateRound, Head: "e4f5a6b",
+	})
+	if !errors.Is(err, supervise.ErrLeftPodRound) {
+		t.Fatalf("the answer from the pod that replaced the round's own returned %v, want the refusal of a claim that left the round", err)
+	}
+	if c := rig.claimOf(claim.RoleImplementer); c.UpdateSignalledAt != nil || c.UpdateHead != "" {
+		t.Fatalf("the claim after the refused answer = answered %v head %q, want nothing of that answer recorded",
+			c.UpdateSignalledAt, c.UpdateHead)
+	}
+	rig.settleAll()
+
+	rig.tick()
+
+	messages := rig.messages()
+	if len(messages) != 1 {
+		t.Fatalf("the issue was written on %d times, want once for the pod that went: %q", len(messages), messages)
+	}
+	if !strings.Contains(messages[0], string(claim.RoleImplementer)) {
+		t.Errorf("the message does not name the implementer, which had answered nothing when the pod went: %s", messages[0])
+	}
+	if strings.Contains(messages[0], string(claim.RoleTester)) {
+		t.Errorf("the message names the tester, which answered before the pod went: %s", messages[0])
+	}
+	if calls := rig.replacements(); len(calls) != 0 {
+		t.Errorf("ReplacePod called %d times for a pod that is already gone", len(calls))
+	}
+	for _, role := range roles {
+		rig.awaitClaim(role, "its round to end with the report",
+			func(c supervise.Claim) bool { return c.UpdateRound == "" })
+	}
+
+	// The sweep that follows the round's end finds no round of this pod at all, and writes
+	// nothing more: the issue is told once.
+	rig.tick()
+
+	if after := rig.messages(); len(after) != 1 {
+		t.Fatalf("the issue was written on %d times over two sweeps, want the one report the round's end decided: %q", len(after), after)
+	}
+}
