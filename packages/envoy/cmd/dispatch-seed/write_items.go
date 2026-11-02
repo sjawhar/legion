@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -17,10 +18,23 @@ import (
 // read of an item is its tsvector and its first block, both of which this size exercises.
 const itemBodyBytes = 600
 
-// writeAsks writes the asks with their followers, their mentions and the `ask.opened` event each
-// one is read through. An ask has no blocks, so its mentions are rows of `refs` alone: that is
-// what makes the 100,000 rows of `refs` twice the 50,000 block mentions spread over the three
-// block tables.
+// askQuestionBlock is the part id of an ask's question, the part a reply under an ask names. The
+// question is the first part of every ask (refs.AskParts), and a part the index has not seen
+// before takes the next id of the ask's state row, counted from one (itemblocks.Align), so b1 is
+// the question of every ask the seed writes, as it is the first block of every comment and
+// message it writes.
+const askQuestionBlock = "b1"
+
+// writeAsks writes the asks with their options, their followers, their mentions, the parts the
+// ask is indexed into and the `ask.opened` event each one is read through.
+//
+// The parts - the question, each option and the answer the ask holds - are recorded with the
+// server's own indexer (refs.IndexAskParts), in the ask's own transaction, as every route that
+// writes an ask records them (api/references.go's indexAskParts). The insert owes that index
+// (migration 20261101143212's asks_item_blocks_owed trigger), so an ask the seed left unindexed
+// is work a started server would do for itself, rewriting rows a measurement is being read from.
+// A mention the question carries is then a row of `refs`, the ask's own, and a row of
+// `ask_block_refs`, held by the part the text is in.
 //
 // The opening event is written in the ask's own transaction, as the create route writes it
 // (api/asks.go), because its payload carries the question the row was written with. Every read
@@ -29,7 +43,9 @@ const itemBodyBytes = 600
 // every route that lists or reads it.
 func (r *seedRun) writeAsks(ctx context.Context) error {
 	seqs := r.askEventSeqs()
-	return r.inBatches(ctx, "asks", len(r.plan.asks), batchRows, func(ctx context.Context, tx pgx.Tx, from, to int) error {
+	// An ask costs a part index as a comment costs a block index, so the asks go in the smaller
+	// batches the indexed items are written in.
+	return r.inBatches(ctx, "asks", len(r.plan.asks), batchItems, func(ctx context.Context, tx pgx.Tx, from, to int) error {
 		mentions := newMentionRows("ask")
 		followers := make([][]any, 0, to-from)
 		opened := make([][]any, 0, to-from)
@@ -40,6 +56,7 @@ func (r *seedRun) writeAsks(ctx context.Context) error {
 				mention = r.plan.mentionText(index%len(mentionKinds), index)
 			}
 			question := r.plan.askQuestion(r.random, mention, itemBodyBytes)
+			options := r.plan.askOptions(r.random, ask.Options)
 			var issueKey, anchor, blockID *string
 			var artifactID, blockArtifact *string
 			if ask.Issue >= 0 {
@@ -68,26 +85,40 @@ func (r *seedRun) writeAsks(ctx context.Context) error {
 				blockArtifact = &r.plan.documents[ask.BlockDoc].ID
 				blockID = &r.plan.asks[index].BlockID
 			}
-			var answer, resolution any
+			var answer *model.AskAnswer
+			var resolution any
 			switch ask.State {
 			case "answered":
-				answer = fmt.Sprintf(`{"text":%q,"by":%s}`, r.plan.vocabulary.phrase(r.random, 6), seedActor)
+				given := r.askAnswer(ask, options)
+				answer = &given
 			case "resolved":
 				resolution = fmt.Sprintf(`{"reason":%q,"by":%s}`, r.plan.vocabulary.phrase(r.random, 4), seedActor)
+			}
+			optionsJSON, err := json.Marshal(options)
+			if err != nil {
+				return fmt.Errorf("ask %s: encode its options: %w", ask.ID, err)
+			}
+			var answerJSON any
+			if answer != nil {
+				encoded, err := json.Marshal(answer)
+				if err != nil {
+					return fmt.Errorf("ask %s: encode its answer: %w", ask.ID, err)
+				}
+				answerJSON = string(encoded)
 			}
 			if _, err := tx.Exec(ctx, `
 				insert into asks (id, issue_key, artifact_id, author, question, options, multiple, urgency,
 				                  anchor, state, answer, resolution, created_at, kind, block_id, block_artifact_id)
-				values ($1, $2, $3, $4::jsonb, $5, '[]'::jsonb, false, 'med', $6::jsonb, $7, $8::jsonb, $9::jsonb, $10, 'question', $11, $12)
-			`, ask.ID, issueKey, artifactID, seedActor, question, anchor, ask.State, answer, resolution,
-				ask.CreatedAt, blockID, blockArtifact); err != nil {
+				values ($1, $2, $3, $4::jsonb, $5, $6::jsonb, false, 'med', $7::jsonb, $8, $9::jsonb, $10::jsonb, $11, 'question', $12, $13)
+			`, ask.ID, issueKey, artifactID, seedActor, question, string(optionsJSON), anchor, ask.State,
+				answerJSON, resolution, ask.CreatedAt, blockID, blockArtifact); err != nil {
 				return fmt.Errorf("ask %s: %w", ask.ID, err)
 			}
 			mentions.add(ask.ID, text.Refs(text.ExtractAt(question, serverURL)), ask.CreatedAt)
 			if index < r.sizes.AskFollowers {
 				followers = append(followers, []any{ask.ID, ask.Follower, ask.CreatedAt})
 			}
-			payload, err := askOpenedPayload(model.Ask{
+			opening := model.Ask{
 				ID:              ask.ID,
 				IssueKey:        issueKey,
 				ArtifactID:      artifactID,
@@ -96,14 +127,24 @@ func (r *seedRun) writeAsks(ctx context.Context) error {
 				Author:          seedAuthor,
 				Kind:            "question",
 				Question:        question,
-				Options:         []model.AskOption{},
+				Options:         options,
 				Urgency:         "med",
 				Anchor:          anchorValue,
 				State:           "open",
 				CreatedAt:       ask.CreatedAt,
-			})
+			}
+			payload, err := askOpenedPayload(opening)
 			if err != nil {
 				return err
+			}
+			// The parts are read from the ask as its row stands, answer and all, not from the ask
+			// as it opened: the index records what a reader of the row finds now. The time is the
+			// ask's own, which is the time its row was last written (coalesce(edited_at,
+			// created_at)), so a re-index of it would date its parts as this one did.
+			stored := opening
+			stored.State, stored.Answer = ask.State, answer
+			if _, err := refs.IndexAskParts(ctx, tx, stored, serverURL, ask.CreatedAt); err != nil {
+				return fmt.Errorf("index the parts of ask %s: %w", ask.ID, err)
 			}
 			// The event is owned by the ask's own owner and dated at the ask, as one appended
 			// with the ask is, and it is published (`notify` false, `published_at` set) like
@@ -124,10 +165,30 @@ func (r *seedRun) writeAsks(ctx context.Context) error {
 	})
 }
 
+// askAnswer is the answer an answered ask holds, in the shape the answer route writes
+// (api/ask_transitions.go): the answerer, the option it chose when the ask offers any, the text
+// it was given and its time. The part index reads the stored answer as a model.AskAnswer, takes
+// it as a part of its own and records its answerer as that part's maker (refs.askPartMakers), so
+// an answer of another shape would index as a part no answer of the server's ever is. Its time is
+// the ask's own, the one time every row and event of a seeded ask carries.
+func (r *seedRun) askAnswer(ask askPlan, options []model.AskOption) model.AskAnswer {
+	selected := []string{}
+	if len(options) > 0 {
+		selected = []string{options[0].Label}
+	}
+	given := r.plan.vocabulary.phrase(r.random, 6)
+	return model.AskAnswer{User: seedAuthor.ID, Selected: selected, Text: &given, At: ask.CreatedAt}
+}
+
 // writeComments writes the comments, indexes each one's blocks with the server's own indexer
 // (refs.IndexItem) and writes the comment's own mentions. An edited comment is indexed twice, as
 // its write and its edit indexed it: the blocks the edit dropped keep their rows with a null
 // position.
+//
+// A reply names the block it answers in replies_to_block, as the create route writes it
+// (api/reply_blocks.go): a block of the comment it replies to, or the part of the ask it answers,
+// whose node id starts `ask/`. The view reads the two as edges to a comment_block and to an
+// ask_block, telling them apart by that prefix.
 func (r *seedRun) writeComments(ctx context.Context) error {
 	return r.inBatches(ctx, "comments", len(r.plan.comments), batchItems, func(ctx context.Context, tx pgx.Tx, from, to int) error {
 		mentions := newMentionRows("comment")
@@ -161,6 +222,10 @@ func (r *seedRun) writeComments(ctx context.Context) error {
 			}
 			if comment.Ask >= 0 {
 				askID = &r.plan.asks[comment.Ask].ID
+			}
+			if comment.AskPart {
+				node := "ask/" + r.plan.asks[comment.Ask].ID + "#" + askQuestionBlock
+				repliesTo = &node
 			}
 			var replyTo *string
 			if comment.ReplyTo >= 0 {

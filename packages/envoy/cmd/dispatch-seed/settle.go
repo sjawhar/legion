@@ -33,14 +33,18 @@ func (r *seedRun) settleOwedWork(ctx context.Context) error {
 // owedWorkCounts is the five counts that must all be zero for the data set to be settled: the
 // documents owed a block index, the bodies owed a grammar pass, the items owed a block index,
 // the mentions owed an excerpt, and the mentions holding an excerpt older than their document's
-// latest version. The fifth is the one a seed has to be told about: a mention whose
-// excerpt_version is below its document's highest version number is one refs.MarkStaleExcerpts
-// re-owes, and the documents with 28 versions make that the common case for a seed that wrote 1.
+// latest version. The third reads the three state tables the block index reconciliation reads
+// (docs/block_index.go), an ask's parts among them, since every ask is written owed its parts
+// and the seed's own index of them is what clears the mark. The fifth is the one a seed has to
+// be told about: a mention whose excerpt_version is below its document's highest version number
+// is one refs.MarkStaleExcerpts re-owes, and the documents with 28 versions make that the common
+// case for a seed that wrote 1.
 const owedWorkCounts = `
 	select (select count(*) from document_block_versions where version is null),
 	       (select count(*) from block_grammar_owed),
 	       (select count(*) from comment_block_state where owed_at is not null)
-	         + (select count(*) from message_block_state where owed_at is not null),
+	         + (select count(*) from message_block_state where owed_at is not null)
+	         + (select count(*) from ask_block_state where owed_at is not null),
 	       (select count(*) from refs where from_kind = 'artifact' and excerpt_version is null),
 	       (select count(*) from refs r
 	         where r.from_kind = 'artifact'

@@ -47,8 +47,9 @@ type sizes struct {
 	// Mentions is the 100,000 rows of `refs`, and BlockMentions the 50,000 rows spread over
 	// `block_refs`, `comment_block_refs` and `message_block_refs`. Every mention a document, a
 	// comment or a message writes lies inside one of its blocks, so it writes a row of both
-	// tables; an ask has no blocks, so its mentions are the rows of `refs` alone that make the
-	// first figure twice the second.
+	// tables, and that is what makes the first figure twice the second. An ask's question is a
+	// part of it, so an ask's mentions write a row of `ask_block_refs` too, a fourth table the
+	// spec's second figure does not count.
 	DocumentMentions int
 	CommentMentions  int
 	MessageMentions  int

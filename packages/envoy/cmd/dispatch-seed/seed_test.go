@@ -331,9 +331,15 @@ var checksums = []struct {
 	{"document_block_texts", `artifact_id::text, block_id, version, md5(text)`},
 	{"document_block_versions", `artifact_id::text, version`},
 	{"document_indexed_versions", `artifact_id::text, version`},
-	{"asks", `id::text, issue_key, artifact_id::text, md5(question), state, answer::text, resolution::text,
-		anchor::text, created_at, block_id, block_artifact_id::text, written_version, md5(search::text)`},
+	{"asks", `id::text, issue_key, artifact_id::text, md5(question), options::text, state, answer::text,
+		resolution::text, anchor::text, created_at, block_id, block_artifact_id::text, written_version,
+		md5(search::text)`},
 	{"ask_followers", `ask_id::text, session_id, since`},
+	{"ask_blocks", `ask_id::text, block_id, node_id, position, type, text_sha256, md5(excerpt),
+		made_at, made_by::text, changed_revision, changed_at, removed_at`},
+	{"ask_block_texts", `ask_id::text, block_id, revision, md5(text)`},
+	{"ask_block_state", `ask_id::text, revision, next_block, body_sha256, owed_at`},
+	{"ask_block_refs", `ask_id::text, block_id, from_node, to_kind, to_id, kind, created_at`},
 	{"comments", `id::text, issue_key, artifact_id::text, md5(body), anchor::text, reply_to::text, resolved,
 		created_at, ask_id::text, replies_to_block, edited_at, written_version, md5(search::text)`},
 	{"comment_blocks", `comment_id::text, block_id, node_id, position, type, text_sha256, md5(excerpt),
@@ -486,10 +492,12 @@ func assertEveryAskHasItsOpeningEvent(t *testing.T, database *store.Store) {
 	}
 }
 
-// graphArmCount is how many arms the graph_edges view of migration 0142 unions. The test reads
-// the arms from the view's own text, so it follows a migration that restates the view; this
-// number is the guard that it still read a whole view.
-const graphArmCount = 23
+// graphArmCount is how many arms graph_edges unions: the 23 of migration 0142, plus the three
+// 20261101183525 restated it with - an ask's current parts, the links those parts hold, and the
+// split of the comment reply arm into a reply to a comment's block and a reply to an ask's part.
+// The test reads the arms from the view's own text, so it follows a migration that restates the
+// view; this number is the guard that it still read a whole view.
+const graphArmCount = 26
 
 var (
 	armKindLiteral   = regexp.MustCompile(`'([a-z_]+)'::text AS kind`)
@@ -510,7 +518,7 @@ func assertEveryGraphArmHoldsRows(t *testing.T, database *store.Store) {
 	}
 	arms := strings.Split(definition, "UNION ALL")
 	if len(arms) != graphArmCount {
-		t.Fatalf("graph_edges has %d arms, not the %d migration 0142 defines; read the view and update the test",
+		t.Fatalf("graph_edges has %d arms, not the %d migration 20261101183525 restates it with; read the view and update the test",
 			len(arms), graphArmCount)
 	}
 	pairs := map[[2]string]bool{}
@@ -558,7 +566,7 @@ func assertEveryGraphArmHoldsRows(t *testing.T, database *store.Store) {
 	// Every node kind the backlink count resolves must be the target of a mention as well, which
 	// the pairs above do not cover: the mention arms take their kind from a column.
 	for _, kind := range []string{"issue", "artifact", "ask", "comment", "message", "component",
-		"session", "block", "comment_block", "message_block"} {
+		"session", "block", "ask_block", "comment_block", "message_block"} {
 		if counted[[2]string{"mentions", kind}] == 0 {
 			t.Errorf("no mention names a %s, so the backlink count of that kind reads nothing", kind)
 		}

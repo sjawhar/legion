@@ -5,15 +5,17 @@ import (
 	"math/rand/v2"
 	"strings"
 
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // mentionKinds is every node kind refs/graph.go's nodeLoaders resolves that text can name, in the
-// order the seed cycles them, so `refs` holds mentions to each. The tenth kind, `session`, has no
-// grammar in text/refs.go - no `dispatch://` reference names a session - so the one mention to a
-// session is written into `refs` directly (writeSessionMention).
+// order the seed cycles them, so `refs` holds mentions to each. The one kind left out, `session`,
+// has no grammar in text/refs.go - no `dispatch://` reference names a session - so the one
+// mention to a session is written into `refs` directly (writeSessionMention).
 var mentionKinds = []string{
-	"issue", "artifact", "ask", "comment", "message", "component", "block", "comment_block", "message_block",
+	"issue", "artifact", "ask", "comment", "message", "component", "block", "ask_block",
+	"comment_block", "message_block",
 }
 
 // buildMentionTargets lists the asks and comments a reference can name. A reference to an ask or
@@ -68,6 +70,9 @@ func (p *seedPlan) mentionText(kindIndex, nth int) string {
 		return "dispatch://" + p.projects[component.Project].Key + "/component/" + component.ID
 	case "block":
 		return p.documentReference(nth%len(p.documents)) + "#b-" + text.EncodeBlockID(firstParagraphBlock)
+	case "ask_block":
+		ask := p.asks[p.issueAsks[nth%len(p.issueAsks)]]
+		return "dispatch://" + p.issues[ask.Issue].Key + "/ask/" + ask.ID + "#b-" + askQuestionBlock
 	case "comment_block":
 		comment := p.comments[p.issueComments[nth%len(p.issueComments)]]
 		return "dispatch://" + p.issues[comment.Issue].Key + "/comment/" + comment.ID + "#b-b1"
@@ -172,9 +177,11 @@ func (p *seedPlan) itemBody(random *rand.Rand, blocks int, mention string, bytes
 	return builder.String()
 }
 
-// askQuestion is an ask's question, with its mention when it writes one. An ask has no blocks, so
-// its mentions are rows of `refs` with no row in any block mention table: that is what makes the
-// 100,000 mentions of `refs` twice the 50,000 block mentions.
+// askQuestion is an ask's question, with its mention when it writes one. The question is a part
+// of the ask (refs.AskParts), so a mention it carries is a row of `refs` and a row of
+// `ask_block_refs`: the 100,000 mentions of `refs` are twice the 50,000 rows the three block
+// mention tables of the documents, the comments and the messages hold, and the parts of the asks
+// hold their own beside them.
 func (p *seedPlan) askQuestion(random *rand.Rand, mention string, bytes int) string {
 	var builder strings.Builder
 	if mention != "" {
@@ -183,6 +190,21 @@ func (p *seedPlan) askQuestion(random *rand.Rand, mention string, bytes int) str
 	}
 	p.vocabulary.paragraph(&builder, random, bytes)
 	return builder.String()
+}
+
+// askOptions is the options an ask offers. A label is four words, long enough that two options of
+// one ask do not draw the same text, which the API refuses (validateAskOptions). Every other
+// option carries a description, so the data set holds both readings of an option's part text:
+// "<label> — <description>" and the label alone (refs.AskParts).
+func (p *seedPlan) askOptions(random *rand.Rand, count int) []model.AskOption {
+	options := make([]model.AskOption, count)
+	for index := range options {
+		options[index].Label = p.vocabulary.phrase(random, 4)
+		if index%2 == 0 {
+			options[index].Description = p.vocabulary.phrase(random, 8)
+		}
+	}
+	return options
 }
 
 // anchorJSON is the stored anchor of an anchored ask or comment: the document it is in, the block

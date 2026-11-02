@@ -88,7 +88,8 @@ type documentPlan struct {
 
 // askPlan is one ask. Exactly one of Issue and Document owns it (asks_one_owner); an anchored ask
 // is owned by the document it is anchored in, and a block ask names a document and a block of it
-// through block_artifact_id.
+// through block_artifact_id. Options is how many options it offers, each of them a part of the
+// ask beside its question (refs.AskParts); an ask with none takes a free-text answer alone.
 type askPlan struct {
 	ID        string
 	Issue     int
@@ -97,6 +98,7 @@ type askPlan struct {
 	BlockID   string
 	Anchored  bool
 	TableRow  bool
+	Options   int
 	State     string
 	CreatedAt time.Time
 	Follower  string
@@ -104,14 +106,18 @@ type askPlan struct {
 
 // commentPlan is one comment. Exactly one of Issue and Document owns it; the rest of the fields
 // are the arms of graph_edges a comment can carry: a reply to another comment, an answer to an
-// ask, a reply naming a block of another comment, and an anchor into a document.
+// ask, a reply naming a block of another comment or a part of the ask it answers, and an anchor
+// into a document.
 type commentPlan struct {
-	ID         string
-	Issue      int
-	Document   int
-	ReplyTo    int
-	Ask        int
-	RepliesTo  int // index of the comment whose first block this one replies to, or -1
+	ID        string
+	Issue     int
+	Document  int
+	ReplyTo   int
+	Ask       int
+	RepliesTo int // index of the comment whose first block this one replies to, or -1
+	// AskPart is whether this comment replies to the question part of the ask it answers, which
+	// only a comment under an ask (Ask >= 0) can do.
+	AskPart    bool
 	Anchored   bool
 	TableRow   bool
 	Edited     bool
@@ -345,6 +351,9 @@ func (p *seedPlan) planComponents() {
 
 // planAsks spreads the asks over the issues and the documents. Every tenth is anchored in a
 // document, every third of those on a table row, which is the subject the anchor reads measure.
+// The options cycle none, one, two and three, so the parts of the asks (refs.AskParts) hold every
+// shape a reader of them meets: an ask that is its question alone, one that offers options, and,
+// where the cycle of the states falls on answered, one whose answer is a part of its own.
 func (p *seedPlan) planAsks() {
 	s := p.sizes
 	p.asks = make([]askPlan, s.Asks)
@@ -355,6 +364,7 @@ func (p *seedPlan) planAsks() {
 			Issue:     -1,
 			Document:  -1,
 			BlockDoc:  -1,
+			Options:   index % 4,
 			State:     states[index%len(states)],
 			CreatedAt: timeAt(index, s.Asks),
 			Follower:  p.sessions[index%len(p.sessions)],
@@ -391,7 +401,9 @@ func (p *seedPlan) documentForAnchor(index int) int {
 
 // planComments spreads the comments over the issues and the documents, and gives each tenth of
 // them one of the arms graph_edges reads a comment through: a reply, an answer to an ask, a reply
-// naming a block, and an anchor.
+// naming a block of another comment, and an anchor. Every other reply under an ask also names
+// the part of that ask it answers, which is the arm the view tells from a reply to a comment's
+// block by the `ask/` its node id starts with.
 func (p *seedPlan) planComments() {
 	s := p.sizes
 	p.comments = make([]commentPlan, s.Comments)
@@ -426,6 +438,7 @@ func (p *seedPlan) planComments() {
 		case 4:
 			comment.Issue = index % len(p.issues)
 			comment.Ask = index % len(p.asks)
+			comment.AskPart = index%20 == 4
 		case 5:
 			comment.Issue = index % len(p.issues)
 			comment.RepliesTo = index - 1
