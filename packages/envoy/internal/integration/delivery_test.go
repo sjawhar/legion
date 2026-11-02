@@ -5,34 +5,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// testEnv holds a complete test environment: NATS, the listener's delivery logic, and the count
-// of deliveries made to each session.
+// testEnv is what a listener and the sessions registered through it share, over the test's own
+// NATS server: the client a producer publishes through, the interest registry a fan-out reads, and
+// the session registry a delivery resolves its target in.
 type testEnv struct {
 	t        *testing.T
-	ctx      context.Context
+	url      string
 	client   *bus.Client
 	registry *store.Registry
 	sessions *session.SessionRegistry
-	dedupe   *dedupe.Cache
-
-	// mu guards delivered, one count per session the consumer below delivered to, and recorders,
-	// the envelopes a test asked to be given as they are delivered.
-	mu        sync.Mutex
-	delivered map[string]*atomic.Int32
-	recorders map[string]chan deliveryEvent
 }
 
 type testEnvOption func(*testEnvOpts)
@@ -49,7 +41,6 @@ func setupTestEnv(t *testing.T, options ...testEnvOption) *testEnv {
 	for _, o := range options {
 		o(&opts)
 	}
-	ctx := context.Background()
 
 	// Start real NATS with JetStream
 	uri := testnats.URL(t)
@@ -72,83 +63,106 @@ func setupTestEnv(t *testing.T, options ...testEnvOption) *testEnv {
 		t.Fatalf("failed to create session registry: %v", err)
 	}
 
-	dc := dedupe.New(5 * time.Minute)
-
 	return &testEnv{
-		t:         t,
-		ctx:       ctx,
-		client:    client,
-		registry:  registry,
-		sessions:  sessions,
-		dedupe:    dc,
-		delivered: map[string]*atomic.Int32{},
-		recorders: map[string]chan deliveryEvent{},
+		t:        t,
+		url:      uri,
+		client:   client,
+		registry: registry,
+		sessions: sessions,
 	}
 }
 
-// deliveriesTo is the count of deliveries the consumer below made to sessionID, created on the
-// first call. A session takes its messages off its own NATS subscription, so the listener hands
-// it nothing: a delivery is counted where the consumer resolves the session and records it,
-// which is where a push to the session's serve port was made until dispatch://INFRA-889.
-func (env *testEnv) deliveriesTo(sessionID string) *atomic.Int32 {
-	env.mu.Lock()
-	defer env.mu.Unlock()
-	count, held := env.delivered[sessionID]
-	if !held {
-		count = &atomic.Int32{}
-		env.delivered[sessionID] = count
-	}
-	return count
+// sessionStandIn is a session's own end of a delivery: a registered session that takes its messages
+// off NATS subscriptions it holds itself, as every session on the core path does (cmd/listener's
+// sessionDelivery.register: a registration that asks for no consumer "takes its messages off its
+// own NATS subscription"). Its entry records SelfSubscribed, so a listener hands such a session
+// nothing of its own - session.Resolve answers skipped - and every message counted here is one that
+// arrived on a subject the session subscribed to, as it arrives in production.
+type sessionStandIn struct {
+	sessionID string
+	received  chan contracts.Envelope
 }
 
-// recordDelivery counts a delivery of item to sessionID and gives it to that session's recorder,
-// when one is watching (watchDeliveries).
-func (env *testEnv) recordDelivery(sessionID string, item contracts.Envelope) {
-	env.deliveriesTo(sessionID).Add(1)
-	env.mu.Lock()
-	events := env.recorders[sessionID]
-	env.mu.Unlock()
-	if events == nil {
-		return
+// registerSession registers sessionID as a live self-subscribed session of this machine following
+// topics - the session entry and the interest row a registration writes - and subscribes it, on a
+// NATS connection of its own, to each subject such a session reads its messages from.
+func (env *testEnv) registerSession(sessionID string, topics []string) *sessionStandIn {
+	env.t.Helper()
+	standIn := &sessionStandIn{sessionID: sessionID, received: make(chan contracts.Envelope, 64)}
+	conn := testnats.Connect(env.t, env.url)
+	env.t.Cleanup(conn.Close)
+	for _, subject := range standInSubjects(sessionID, topics) {
+		if _, err := conn.Subscribe(subject, standIn.take(env.t)); err != nil {
+			env.t.Fatalf("subscribe the session %s to %s: %v", sessionID, subject, err)
+		}
 	}
+	if err := conn.Flush(); err != nil {
+		env.t.Fatalf("flush the subscriptions of the session %s: %v", sessionID, err)
+	}
+	env.registerKVSession(sessionID)
+	env.registerInterest(sessionID, topics)
+	return standIn
+}
+
+// standInSubjects is what a self-subscribed session following topics holds a subscription on: its
+// own agent subject and each of those topics.
+func standInSubjects(sessionID string, topics []string) []string {
+	return append([]string{contracts.AgentSubject(sessionID)}, topics...)
+}
+
+// take hands the test every envelope the session's subscriptions receive.
+func (s *sessionStandIn) take(t *testing.T) natsgo.MsgHandler {
+	return func(msg *natsgo.Msg) {
+		var item contracts.Envelope
+		if err := json.Unmarshal(msg.Data, &item); err != nil {
+			t.Errorf("the session %s cannot decode what arrived on %s: %v", s.sessionID, msg.Subject, err)
+			return
+		}
+		select {
+		case s.received <- item:
+		default:
+			t.Errorf("the session %s received more messages than its test read", s.sessionID)
+		}
+	}
+}
+
+// receives returns the next envelope the session received, failing the test when none arrives
+// within the bound.
+func (s *sessionStandIn) receives(t *testing.T, within time.Duration) contracts.Envelope {
+	t.Helper()
 	select {
-	case events <- deliveryEvent{sessionID: sessionID, item: item}:
-	default:
-		env.t.Errorf("the recorder of %s is full: a test read fewer deliveries than it was given", sessionID)
+	case item := <-s.received:
+		return item
+	case <-time.After(within):
+		t.Fatalf("no message reached the session %s within %s", s.sessionID, within)
+		return contracts.Envelope{}
 	}
 }
 
-// watchDeliveries gives sessionID a recorder of the envelopes delivered to it from now on.
-func (env *testEnv) watchDeliveries(sessionID string) chan deliveryEvent {
-	events := make(chan deliveryEvent, 32)
-	env.mu.Lock()
-	defer env.mu.Unlock()
-	env.recorders[sessionID] = events
-	return events
+// receivesNothing fails the test when a message reaches the session within the window.
+func (s *sessionStandIn) receivesNothing(t *testing.T, window time.Duration) {
+	t.Helper()
+	select {
+	case item := <-s.received:
+		t.Fatalf("the session %s received %s on %s within %s, want nothing", s.sessionID, item.EventID, item.Topic, window)
+	case <-time.After(window):
+	}
 }
 
 // registerInterest subscribes interest in the KV store (envoy_interests bucket).
 func (env *testEnv) registerInterest(sessionID string, topics []string) {
 	env.t.Helper()
-	allTopics := append([]string{contracts.AgentSubject(sessionID)}, topics...)
-	env.registry.Upsert(store.Interest{
+	if _, err := env.registry.Upsert(store.Interest{
 		SessionID: sessionID,
 		MachineID: "test-machine",
 		Dir:       "/test",
-	}, allTopics)
-}
-
-// registerSession records sessionID as a live session of this machine that takes its messages
-// off its own subscription, following topics, and returns its delivery count.
-func (env *testEnv) registerSession(sessionID string, topics []string) *atomic.Int32 {
-	env.t.Helper()
-	env.registerKVSession(sessionID)
-	env.registerInterest(sessionID, topics)
-	return env.deliveriesTo(sessionID)
+	}, standInSubjects(sessionID, topics)); err != nil {
+		env.t.Fatalf("register the interest of the session %s: %v", sessionID, err)
+	}
 }
 
 // registerKVSession writes a session-liveness entry to the envoy_sessions KV bucket.
-func (env *testEnv) registerKVSession(sessionID string) *atomic.Int32 {
+func (env *testEnv) registerKVSession(sessionID string) {
 	env.t.Helper()
 	if err := env.sessions.Put(sessionID, session.SessionEntry{
 		SelfSubscribed: true,
@@ -157,7 +171,6 @@ func (env *testEnv) registerKVSession(sessionID string) *atomic.Int32 {
 	}); err != nil {
 		env.t.Fatal(err)
 	}
-	return env.deliveriesTo(sessionID)
 }
 
 func publishEnvelope(env *testEnv, item contracts.Envelope) {
@@ -181,232 +194,105 @@ func newEnvelope(source, topic, summary, dedupeKey string) contracts.Envelope {
 	}
 }
 
-// startConsumer subscribes to NATS and processes messages using the same logic as the listener.
-func (env *testEnv) startConsumer(machineID string) {
-	env.t.Helper()
-	_, err := env.client.JS().Subscribe("", func(msg *natsgo.Msg) {
-		var item contracts.Envelope
-		if err := json.Unmarshal(msg.Data, &item); err != nil {
-			msg.Ack()
-			return
-		}
-		if item.Validate() != nil {
-			msg.Ack()
-			return
-		}
-
-		// Agent path
-		if item.Source == "agent" {
-			sessionID := item.Topic[len("notifications.agent."):]
-			if env.dedupe.Seen(item.DedupeKey, sessionID) {
-				msg.Ack()
-				return
-			}
-			interest, err := env.registry.Get(context.Background(), sessionID)
-			var interestPtr *store.Interest
-			if err == nil {
-				interestPtr = &interest
-			}
-			entry, entryErr := env.sessions.Get(sessionID)
-			var entryPtr *session.SessionEntry
-			if entryErr == nil {
-				entryPtr = &entry
-			}
-			result := session.HandleAgentMessage(item, sessionID, machineID, interestPtr, entryPtr, 0)
-			if result.Delivered {
-				env.dedupe.Record(item.DedupeKey, sessionID)
-				env.recordDelivery(sessionID, item)
-			}
-			if result.ShouldNAK {
-				msg.NakWithDelay(1 * time.Second)
-			} else {
-				msg.Ack()
-			}
-			return
-		}
-
-		// Broadcast path
-		items := env.registry.Match(machineID, item.Topic)
-		if len(items) == 0 {
-			msg.Ack()
-			return
-		}
-		var failed bool
-		for _, interest := range items {
-			if env.dedupe.Seen(item.DedupeKey, interest.SessionID) {
-				continue
-			}
-			if item.SourceSession != "" && item.SourceSession == interest.SessionID {
-				continue
-			}
-			// The listener resolves the subscriber's record and delivers through it
-			// (fanoutDelivery, cmd/listener/delivery.go); session.Resolve reads no registry.
-			targetEntry, targetErr := env.sessions.Get(interest.SessionID)
-			var target *session.SessionEntry
-			if targetErr == nil {
-				target = &targetEntry
-			}
-			if _, err := session.Resolve(item, interest.SessionID, target, 0); err != nil {
-				failed = true
-			} else {
-				env.dedupe.Record(item.DedupeKey, interest.SessionID)
-				env.recordDelivery(interest.SessionID, item)
-			}
-		}
-		if failed {
-			msg.NakWithDelay(1 * time.Second)
-		} else {
-			msg.Ack()
-		}
-	},
-		natsgo.BindStream(bus.Stream),
-		natsgo.ConsumerFilterSubjects(bus.StreamSubjects()...),
-		natsgo.DeliverNew(),
-		natsgo.AckExplicit(),
-		natsgo.ManualAck(),
-		natsgo.AckWait(10*time.Second),
-	)
-	if err != nil {
-		env.t.Fatalf("failed to subscribe: %v", err)
-	}
-}
-
 // --- TESTS ---
 
-func TestDelivery_AgentMessageDeliveredExactlyOnce(t *testing.T) {
+// A message published to a session's own agent subject reaches that session, whole, and reaches it
+// once.
+func TestAMessageToASessionsAgentSubjectReachesItOnce(t *testing.T) {
 	env := setupTestEnv(t)
-	deliveries := env.registerSession("ses_target", nil)
-	env.startConsumer("test-machine")
+	target := env.registerSession("ses_target", nil)
 
-	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_target", "hello", "dedupe-1"))
-
-	// Wait for delivery
-	time.Sleep(2 * time.Second)
-	if count := deliveries.Load(); count != 1 {
-		t.Fatalf("expected exactly 1 delivery, got %d", count)
-	}
-}
-
-func TestDelivery_DuplicateEnvelopeDeduped(t *testing.T) {
-	env := setupTestEnv(t)
-	deliveries := env.registerSession("ses_target", nil)
-	env.startConsumer("test-machine")
-
-	item := newEnvelope("agent", "notifications.agent.ses_target", "hello", "dedupe-same")
-	publishEnvelope(env, item)
-	time.Sleep(1 * time.Second)
-	// Publish again with same dedupe key
-	publishEnvelope(env, item)
-	time.Sleep(2 * time.Second)
-
-	if count := deliveries.Load(); count != 1 {
-		t.Fatalf("expected 1 delivery (second deduped), got %d", count)
-	}
-}
-
-func TestDelivery_BroadcastDeliveredToAllSubscribers(t *testing.T) {
-	env := setupTestEnv(t)
-
-	deliveries1 := env.registerSession("ses_one", []string{"notifications.slack.*.*.mention"})
-	deliveries2 := env.registerSession("ses_two", []string{"notifications.slack.*.*.mention"})
-	env.startConsumer("test-machine")
-
-	publishEnvelope(env, newEnvelope("slack", "notifications.slack.T123.C456.mention", "hey", "dedupe-broadcast"))
-
-	time.Sleep(2 * time.Second)
-	if c1 := deliveries1.Load(); c1 != 1 {
-		t.Fatalf("session 1: expected 1 delivery, got %d", c1)
-	}
-	if c2 := deliveries2.Load(); c2 != 1 {
-		t.Fatalf("session 2: expected 1 delivery, got %d", c2)
-	}
-}
-
-func TestDelivery_BroadcastSkipsSender(t *testing.T) {
-	env := setupTestEnv(t)
-
-	deliveriesSender := env.registerSession("ses_sender", []string{"notifications.slack.*.*.mention"})
-	deliveriesOther := env.registerSession("ses_other", []string{"notifications.slack.*.*.mention"})
-	env.startConsumer("test-machine")
-
-	// Publish with SourceSession matching one of the subscribers
-	item := newEnvelope("slack", "notifications.slack.T123.C456.mention", "team broadcast", "dedupe-echo")
-	item.SourceSession = "ses_sender"
+	item := newEnvelope("agent", contracts.AgentSubject("ses_target"), "hello", "dedupe-agent-subject")
 	publishEnvelope(env, item)
 
-	time.Sleep(2 * time.Second)
-	if c := deliveriesSender.Load(); c != 0 {
-		t.Fatalf("sender should NOT receive its own broadcast, got %d deliveries", c)
+	got := target.receives(t, 5*time.Second)
+	if got.EventID != item.EventID || got.Topic != item.Topic || got.PayloadSummary != "hello" {
+		t.Fatalf("the session received %+v, want the published envelope", got)
 	}
-	if c := deliveriesOther.Load(); c != 1 {
-		t.Fatalf("other subscriber expected 1 delivery, got %d", c)
+	if got.SourceSession != item.SourceSession || got.TraceID != item.TraceID {
+		t.Fatalf("the session received sender %q and trace %q, want %q and %q", got.SourceSession, got.TraceID, item.SourceSession, item.TraceID)
 	}
+	target.receivesNothing(t, 300*time.Millisecond)
 }
 
-func TestDelivery_BroadcastEmptySourceSessionDeliveredToAll(t *testing.T) {
+// A message on a topic a session follows reaches every session that follows it, once each, and no
+// session that follows another topic. The interest rows the fan-out reads name those sessions and
+// no other.
+func TestAMessageOnAFollowedTopicReachesEverySessionFollowingItAndNoOther(t *testing.T) {
 	env := setupTestEnv(t)
+	const mention = "notifications.slack.*.*.mention"
+	followers := []*sessionStandIn{
+		env.registerSession("ses_one", []string{mention}),
+		env.registerSession("ses_two", []string{mention}),
+	}
+	elsewhere := env.registerSession("ses_three", []string{"notifications.slack.*.*.reaction"})
 
-	deliveries1 := env.registerSession("ses_a", []string{"notifications.slack.*.*.mention"})
-	deliveries2 := env.registerSession("ses_b", []string{"notifications.slack.*.*.mention"})
-	env.startConsumer("test-machine")
-
-	// Publish with empty SourceSession — no echo skip should happen
-	item := newEnvelope("slack", "notifications.slack.T123.C456.mention", "no sender", "dedupe-nosource")
-	item.SourceSession = ""
+	topic := "notifications.slack.T123.C456.mention"
+	waitForMatchCount(t, env, "test-machine", topic, len(followers))
+	item := newEnvelope("slack", topic, "hey", "dedupe-followed-topic")
 	publishEnvelope(env, item)
 
-	time.Sleep(2 * time.Second)
-	if c := deliveries1.Load(); c != 1 {
-		t.Fatalf("session A expected 1 delivery, got %d", c)
+	for _, follower := range followers {
+		got := follower.receives(t, 5*time.Second)
+		if got.EventID != item.EventID || got.PayloadSummary != "hey" {
+			t.Fatalf("the session %s received %+v, want the published envelope", follower.sessionID, got)
+		}
+		follower.receivesNothing(t, 300*time.Millisecond)
 	}
-	if c := deliveries2.Load(); c != 1 {
-		t.Fatalf("session B expected 1 delivery, got %d", c)
+	elsewhere.receivesNothing(t, 300*time.Millisecond)
+}
+
+// Every message of a burst published at once reaches the session following their topic: none is
+// lost between the producers and the subscription the session reads.
+func TestEveryMessageOfAConcurrentBurstReachesTheSessionFollowingItsTopic(t *testing.T) {
+	env := setupTestEnv(t)
+	const burst = 10
+	target := env.registerSession("ses_concurrent", []string{"notifications.slack.*.*.concurrent"})
+
+	var wg sync.WaitGroup
+	for i := range burst {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			publishEnvelope(env, newEnvelope("slack", "notifications.slack.T1.C1.concurrent", fmt.Sprintf("msg-%d", idx), fmt.Sprintf("dedupe-concurrent-%d", idx)))
+		}(i)
+	}
+	wg.Wait()
+
+	received := map[string]bool{}
+	for len(received) < burst {
+		received[target.receives(t, 10*time.Second).PayloadSummary] = true
+	}
+	for i := range burst {
+		if summary := fmt.Sprintf("msg-%d", i); !received[summary] {
+			t.Fatalf("the session never received %s; it received %v", summary, received)
+		}
 	}
 }
 
-func TestDelivery_DeliveryFailureRetries(t *testing.T) {
+// A WhatsApp message carries the phone it is for in its subject (contracts.WhatsappSubject), so it
+// reaches every session following that phone and no session following another.
+func TestAWhatsappMessageReachesEverySessionFollowingThatPhoneAndNoOther(t *testing.T) {
 	env := setupTestEnv(t)
-
-	// A session whose entry records no way of receiving: its resolution fails, so the message is
-	// NAKed and redelivered.
-	env.registerSession("ses_dead", []string{"notifications.slack.*.*.mention"})
-	if err := env.sessions.Put("ses_dead", session.SessionEntry{MachineID: "test-machine", Dir: "/test"}); err != nil {
-		t.Fatal(err)
+	followers := []*sessionStandIn{
+		env.registerSession("ses_wa_a", []string{"notifications.whatsapp.15551234567.>"}),
+		env.registerSession("ses_wa_b", []string{"notifications.whatsapp.15551234567.>"}),
 	}
+	otherPhone := env.registerSession("ses_wa_other", []string{"notifications.whatsapp.15559876543.>"})
 
-	// Also register a live session
-	deliveries := env.registerSession("ses_live", []string{"notifications.slack.*.*.mention"})
+	item := newEnvelope("whatsapp", contracts.WhatsappSubject("15551234567", "5551234567@s.whatsapp.net", "message"), "Hello from WhatsApp", "dedupe-whatsapp")
+	item.SourceSession = "" // the bridge holds no session
+	item.PayloadRef = "whatsapp://messages/15551234567/5551234567@s.whatsapp.net"
+	publishEnvelope(env, item)
 
-	env.startConsumer("test-machine")
-
-	publishEnvelope(env, newEnvelope("slack", "notifications.slack.T123.C456.mention", "test", "dedupe-retry"))
-
-	// The dead session fails, causing NAK. The live session gets delivered on retry.
-	// With dedupe, the live session should still only get 1 delivery.
-	time.Sleep(5 * time.Second)
-	if count := deliveries.Load(); count != 1 {
-		t.Fatalf("live session: expected exactly 1 delivery (dedupe protects from retry duplication), got %d", count)
+	for _, follower := range followers {
+		got := follower.receives(t, 5*time.Second)
+		if got.EventID != item.EventID || got.PayloadRef != item.PayloadRef {
+			t.Fatalf("the session %s received %+v, want the bridge's envelope", follower.sessionID, got)
+		}
+		follower.receivesNothing(t, 300*time.Millisecond)
 	}
-}
-
-func TestDelivery_NoRegistryEntryNoDelivery(t *testing.T) {
-	env := setupTestEnv(t)
-
-	env.registry.Upsert(store.Interest{
-		SessionID: "ses_ghost",
-		MachineID: "test-machine",
-		Dir:       "/test",
-	}, []string{"notifications.agent.ses_ghost"})
-
-	deliveries := env.deliveriesTo("ses_ghost")
-
-	env.startConsumer("test-machine")
-	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_ghost", "hello", "dedupe-ghost"))
-
-	time.Sleep(2 * time.Second)
-	if count := deliveries.Load(); count != 0 {
-		t.Fatalf("expected 0 deliveries (no registry entry), got %d", count)
-	}
+	otherPhone.receivesNothing(t, 500*time.Millisecond)
 }
 
 func containsTopic(topics []string, want string) bool {
@@ -417,8 +303,6 @@ func containsTopic(topics []string, want string) bool {
 	}
 	return false
 }
-
-// --- NEW TESTS ---
 
 func TestRoleTransfer_ExactlyOneHolder(t *testing.T) {
 	env := setupTestEnv(t)
@@ -455,274 +339,6 @@ func TestRoleTransfer_ExactlyOneHolder(t *testing.T) {
 	t.Fatalf("timed out waiting for role transfer: A=%v B=%v matches=%v", a.Topics, b.Topics, matches)
 }
 
-func TestDelivery_WildcardTopicMatching(t *testing.T) {
-	env := setupTestEnv(t)
-	deliveries := env.registerSession("ses_wildcard", []string{"notifications.slack.*.*.mention"})
-	env.startConsumer("test-machine")
-
-	publishEnvelope(env, newEnvelope("slack", "notifications.slack.T123.C456.mention", "wildcard test", "dedupe-wildcard"))
-
-	time.Sleep(2 * time.Second)
-	if count := deliveries.Load(); count != 1 {
-		t.Fatalf("expected 1 delivery via wildcard match, got %d", count)
-	}
-}
-
-func TestDelivery_UnsubscribeStopsDelivery(t *testing.T) {
-	env := setupTestEnv(t)
-	broadcastTopic := "notifications.slack.T999.C999.mention"
-	deliveries := env.registerSession("ses_unsub", []string{broadcastTopic})
-	env.startConsumer("test-machine")
-
-	// First publish — should be delivered
-	publishEnvelope(env, newEnvelope("slack", broadcastTopic, "before unsub", "dedupe-unsub-1"))
-	time.Sleep(2 * time.Second)
-	if count := deliveries.Load(); count != 1 {
-		t.Fatalf("expected 1 delivery before unsubscribe, got %d", count)
-	}
-
-	// Unsubscribe from the broadcast topic
-	if err := env.registry.Remove(context.Background(), "ses_unsub", []string{broadcastTopic}); err != nil {
-		t.Fatalf("failed to remove interest: %v", err)
-	}
-	time.Sleep(500 * time.Millisecond) // allow KV watch to propagate
-
-	// Second publish — should NOT be delivered (topic removed)
-	publishEnvelope(env, newEnvelope("slack", broadcastTopic, "after unsub", "dedupe-unsub-2"))
-	time.Sleep(2 * time.Second)
-	if count := deliveries.Load(); count != 1 {
-		t.Fatalf("expected still 1 delivery after unsubscribe, got %d", count)
-	}
-}
-
-func TestDelivery_DedupeWindowExpiry(t *testing.T) {
-	env := setupTestEnv(t)
-	env.dedupe = dedupe.New(500 * time.Millisecond)
-
-	deliveries := env.registerSession("ses_expiry", nil)
-	env.startConsumer("test-machine")
-
-	item := newEnvelope("agent", "notifications.agent.ses_expiry", "expiry test", "dedupe-expiry")
-	publishEnvelope(env, item)
-	time.Sleep(700 * time.Millisecond) // > 500ms dedupe window
-
-	// Same dedupe key again — should be delivered because window expired
-	publishEnvelope(env, item)
-	time.Sleep(2 * time.Second)
-	if count := deliveries.Load(); count != 2 {
-		t.Fatalf("expected 2 deliveries after dedupe window expiry, got %d", count)
-	}
-}
-
-func TestDelivery_MalformedEnvelope(t *testing.T) {
-	env := setupTestEnv(t)
-	deliveries := env.registerSession("ses_healthy", []string{"notifications.github.acme.widgets.*"})
-	env.startConsumer("test-machine")
-
-	// Publish raw invalid JSON
-	_, err := env.client.JS().Publish("notifications.github.acme.widgets.bad", []byte("not json {{{"))
-	if err != nil {
-		t.Fatalf("failed to publish invalid JSON: %v", err)
-	}
-
-	// Publish valid JSON with empty required fields
-	emptyEnv := contracts.Envelope{Topic: "notifications.github.acme.widgets.bad"}
-	emptyData, _ := json.Marshal(emptyEnv)
-	_, err = env.client.JS().Publish("notifications.github.acme.widgets.bad", emptyData)
-	if err != nil {
-		t.Fatalf("failed to publish empty envelope: %v", err)
-	}
-
-	time.Sleep(2 * time.Second)
-
-	// Verify consumer is still alive by delivering a valid message
-	publishEnvelope(env, newEnvelope("github", "notifications.github.acme.widgets.valid", "still alive", "dedupe-alive"))
-	time.Sleep(2 * time.Second)
-	if count := deliveries.Load(); count != 1 {
-		t.Fatalf("expected 1 delivery (only valid message), consumer should survive malformed input, got %d", count)
-	}
-}
-
-func TestDelivery_ConcurrentPublish(t *testing.T) {
-	env := setupTestEnv(t)
-	deliveries := env.registerSession("ses_concurrent", []string{"notifications.slack.*.*.concurrent"})
-	env.startConsumer("test-machine")
-
-	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			publishEnvelope(env, newEnvelope("slack", "notifications.slack.T1.C1.concurrent", fmt.Sprintf("msg-%d", idx), fmt.Sprintf("dedupe-concurrent-%d", idx)))
-		}(i)
-	}
-	wg.Wait()
-
-	time.Sleep(5 * time.Second)
-	if count := deliveries.Load(); count != 10 {
-		t.Fatalf("expected 10 deliveries, got %d", count)
-	}
-}
-
-func TestDelivery_MaxDeliverExhaustion(t *testing.T) {
-	env := setupTestEnv(t)
-
-	env.registry.Upsert(store.Interest{
-		SessionID: "ses_exhaust",
-		MachineID: "test-machine",
-		Dir:       "/test",
-	}, []string{contracts.AgentSubject("ses_exhaust")})
-
-	// Custom consumer: short AckWait, MaxDeliver(3), always NAK (no dedupe)
-	attempts := &atomic.Int32{}
-	_, err := env.client.JS().Subscribe("", func(msg *natsgo.Msg) {
-		var item contracts.Envelope
-		if err := json.Unmarshal(msg.Data, &item); err != nil {
-			msg.Ack()
-			return
-		}
-		if item.Validate() != nil {
-			msg.Ack()
-			return
-		}
-
-		attempts.Add(1)
-		msg.NakWithDelay(500 * time.Millisecond)
-	},
-		natsgo.BindStream(bus.Stream),
-		natsgo.ConsumerFilterSubjects(bus.StreamSubjects()...),
-		natsgo.DeliverNew(),
-		natsgo.AckExplicit(),
-		natsgo.ManualAck(),
-		natsgo.AckWait(2*time.Second),
-		natsgo.MaxDeliver(3),
-	)
-	if err != nil {
-		t.Fatalf("failed to subscribe: %v", err)
-	}
-
-	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_exhaust", "exhaust test", "dedupe-exhaust"))
-
-	// Wait for retries to exhaust: 3 deliveries × ~500ms NAK delay + margin
-	time.Sleep(8 * time.Second)
-
-	count := attempts.Load()
-	if count != 3 {
-		t.Fatalf("expected exactly 3 delivery attempts (MaxDeliver=3), got %d", count)
-	}
-
-	// Verify retries have stopped
-	time.Sleep(3 * time.Second)
-	if final := attempts.Load(); final != count {
-		t.Fatalf("retries should have stopped at %d, but count changed to %d", count, final)
-	}
-}
-
-func TestDelivery_SessionWithKVAndInterestDeliveredOnce(t *testing.T) {
-	env := setupTestEnv(t)
-	deliveries := env.registerSession("ses_both", nil)
-	env.startConsumer("test-machine")
-
-	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_both", "double check", "dedupe-both"))
-
-	// Wait long enough that a second (buggy) delivery would have arrived
-	time.Sleep(3 * time.Second)
-	if count := deliveries.Load(); count != 1 {
-		t.Fatalf("expected exactly 1 delivery, got %d", count)
-	}
-}
-
-func TestDelivery_UnsubscribeEmptyTopicsDeletesAll(t *testing.T) {
-	env := setupTestEnv(t)
-	broadcastTopic := "notifications.slack.T888.C888.mention"
-	deliveries := env.registerSession("ses_emptyunsub", []string{broadcastTopic})
-	env.startConsumer("test-machine")
-
-	// Verify delivery works before unsubscribe
-	publishEnvelope(env, newEnvelope("slack", broadcastTopic, "before unsub", "dedupe-emptyunsub-1"))
-	time.Sleep(2 * time.Second)
-	if count := deliveries.Load(); count != 1 {
-		t.Fatalf("expected 1 delivery before unsubscribe, got %d", count)
-	}
-
-	// Remove with empty topics = delete the entire KV entry
-	if err := env.registry.Remove(context.Background(), "ses_emptyunsub", []string{}); err != nil {
-		t.Fatalf("failed to remove all interests: %v", err)
-	}
-	time.Sleep(500 * time.Millisecond) // allow KV watch to propagate
-
-	// Verify the interest entry is completely gone
-	_, err := env.registry.Get(context.Background(), "ses_emptyunsub")
-	if err == nil {
-		t.Fatal("expected error from Get after Remove(empty), but entry still exists")
-	}
-
-	// Publish again with different dedupe key — should NOT be delivered
-	publishEnvelope(env, newEnvelope("slack", broadcastTopic, "after unsub", "dedupe-emptyunsub-2"))
-	time.Sleep(2 * time.Second)
-	if count := deliveries.Load(); count != 1 {
-		t.Fatalf("expected still 1 delivery after Remove(empty), got %d", count)
-	}
-}
-
-func TestDelivery_StaleSubDedupeProtectsLiveSession(t *testing.T) {
-	env := setupTestEnv(t)
-	broadcastTopic := "notifications.slack.*.*.mention"
-	concreteTopic := "notifications.slack.T777.C777.mention"
-
-	// Session A: an entry that records no way of receiving at all, so its resolution fails and
-	// the message is NAKed for a redelivery.
-	env.registerSession("ses_stale", []string{broadcastTopic})
-	if err := env.sessions.Put("ses_stale", session.SessionEntry{MachineID: "test-machine", Dir: "/test"}); err != nil {
-		t.Fatal(err)
-	}
-
-	// Session B: a live session
-	deliveriesB := env.registerSession("ses_live_b", []string{broadcastTopic})
-
-	env.startConsumer("test-machine")
-
-	publishEnvelope(env, newEnvelope("slack", concreteTopic, "dedupe guard", "dedupe-stale"))
-
-	// Wait for at least 1 NAK retry cycle (1s NAK delay in startConsumer) + processing margin
-	time.Sleep(5 * time.Second)
-
-	// Session B must receive exactly 1 delivery — dedupe prevents the retry duplicate
-	if count := deliveriesB.Load(); count != 1 {
-		t.Fatalf("expected exactly 1 delivery to live session (dedupe protects from NAK retry), got %d", count)
-	}
-}
-
-func TestDelivery_KVFirstDeliverySkipsFile(t *testing.T) {
-	env := setupTestEnv(t)
-
-	deliveries := env.registerKVSession("ses_kv")
-	env.registerInterest("ses_kv", nil)
-
-	env.startConsumer("test-machine")
-	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_kv", "kv test", "dedupe-kv-first"))
-
-	time.Sleep(2 * time.Second)
-	if c := deliveries.Load(); c != 1 {
-		t.Fatalf("expected 1 delivery via KV, got %d", c)
-	}
-}
-
-func TestDelivery_BroadcastUsesKVPort(t *testing.T) {
-	env := setupTestEnv(t)
-
-	deliveries := env.registerKVSession("ses_bcast_kv")
-	env.registerInterest("ses_bcast_kv", []string{"notifications.slack.*.*.mention"})
-
-	env.startConsumer("test-machine")
-	publishEnvelope(env, newEnvelope("slack", "notifications.slack.T1.C1.mention", "broadcast kv", "dedupe-bcast-kv"))
-
-	time.Sleep(2 * time.Second)
-	if c := deliveries.Load(); c != 1 {
-		t.Fatalf("expected 1 broadcast delivery via KV, got %d", c)
-	}
-}
-
 func TestDelivery_KVEntryExpiresButInterestPersists(t *testing.T) {
 	env := setupTestEnv(t, withSessionTTL(2*time.Second))
 
@@ -750,127 +366,6 @@ func TestDelivery_KVEntryExpiresButInterestPersists(t *testing.T) {
 	t.Fatal("KV entry did not expire within 5s (TTL was 2s)")
 }
 
-func TestDelivery_ResumeDeliveryAfterReRegistration(t *testing.T) {
-	env := setupTestEnv(t, withSessionTTL(2*time.Second))
-
-	deliveries := env.registerKVSession("ses_resume")
-	env.registerInterest("ses_resume", nil)
-	env.startConsumer("test-machine")
-
-	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_resume", "msg1", "dedupe-resume-1"))
-	time.Sleep(2 * time.Second)
-	if c := deliveries.Load(); c != 1 {
-		t.Fatalf("expected 1 delivery before the entry lapsed, got %d", c)
-	}
-
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(500 * time.Millisecond)
-		if _, err := env.sessions.Get("ses_resume"); err != nil {
-			break
-		}
-	}
-
-	// The session registers again, and its messages reach it as before.
-	env.registerKVSession("ses_resume")
-
-	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_resume", "msg2", "dedupe-resume-2"))
-	time.Sleep(2 * time.Second)
-	if c := deliveries.Load(); c != 2 {
-		t.Fatalf("expected the message after the re-registration to be delivered too, got %d deliveries", c)
-	}
-}
-
-// TestE2E_CrossMachineAgentMessageACKsWithoutDelivery verifies that when an agent
-// message targets a session on machine-B, machine-A's listener ACKs (does not deliver
-// or NAK). This prevents wasting MaxDeliver budget on wrong-machine retries.
-func TestDelivery_CrossMachineAgentMessageACKsWithoutDelivery(t *testing.T) {
-	env := setupTestEnv(t)
-	deliveries := env.deliveriesTo("ses_on_b")
-
-	// Register the session in KV as belonging to machine-B
-	if err := env.sessions.Put("ses_on_b", session.SessionEntry{
-		SelfSubscribed: true,
-		MachineID:      "machine-B",
-		Dir:            "/test",
-	}); err != nil {
-		t.Fatalf("failed to put session entry: %v", err)
-	}
-
-	// Register interest (any machine can see interests)
-	env.registry.Upsert(store.Interest{
-		SessionID: "ses_on_b",
-		MachineID: "machine-B",
-		Dir:       "/test",
-	}, []string{contracts.AgentSubject("ses_on_b")})
-
-	// Start consumer as machine-A (not the session's machine)
-	env.startConsumer("machine-A")
-
-	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_on_b", "cross-machine test", "dedupe-cross-1"))
-
-	// Wait long enough for delivery + potential retries
-	time.Sleep(3 * time.Second)
-
-	// Machine-A should NOT have delivered (session belongs to machine-B)
-	if count := deliveries.Load(); count != 0 {
-		t.Fatalf("machine-A should not deliver to machine-B's session, got %d deliveries", count)
-	}
-}
-
-// TestE2E_CrossMachineBroadcastFilteredByMatch verifies that broadcast messages
-// are only delivered to sessions on the local machine (registry.Match filters by machine_id).
-func TestDelivery_CrossMachineBroadcastFilteredByMatch(t *testing.T) {
-	env := setupTestEnv(t)
-	// The consumer below runs as machine-A.
-	//
-	// Register local session (machine-A)
-	env.registry.Upsert(store.Interest{
-		SessionID: "ses_local",
-		MachineID: "machine-A",
-		Dir:       "/test",
-	}, []string{"notifications.slack.*.*.mention"})
-	if err := env.sessions.Put("ses_local", session.SessionEntry{
-		SelfSubscribed: true,
-		MachineID:      "machine-A",
-		Dir:            "/test",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	deliveriesLocal := env.deliveriesTo("ses_local")
-
-	// Register remote session (machine-B)
-	env.registry.Upsert(store.Interest{
-		SessionID: "ses_remote",
-		MachineID: "machine-B",
-		Dir:       "/test",
-	}, []string{"notifications.slack.*.*.mention"})
-	if err := env.sessions.Put("ses_remote", session.SessionEntry{
-		SelfSubscribed: true,
-		MachineID:      "machine-B",
-		Dir:            "/test",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	deliveriesRemote := env.deliveriesTo("ses_remote")
-
-	// Consumer is machine-A
-	env.startConsumer("machine-A")
-
-	publishEnvelope(env, newEnvelope("slack", "notifications.slack.T1.C1.mention", "broadcast", "dedupe-cross-bcast"))
-
-	time.Sleep(3 * time.Second)
-
-	// Local session should receive the broadcast
-	if c := deliveriesLocal.Load(); c != 1 {
-		t.Fatalf("local session expected 1 delivery, got %d", c)
-	}
-	// Remote session should NOT receive (Match filters by machine_id)
-	if c := deliveriesRemote.Load(); c != 0 {
-		t.Fatalf("remote session should not receive broadcast on machine-A, got %d", c)
-	}
-}
-
 func TestDelivery_RegistryListReturnsSortedInterests(t *testing.T) {
 	env := setupTestEnv(t)
 
@@ -893,65 +388,5 @@ func TestDelivery_RegistryListReturnsSortedInterests(t *testing.T) {
 	}
 	if items[2].SessionID != "ses_charlie" {
 		t.Fatalf("expected third item to be ses_charlie, got %s", items[2].SessionID)
-	}
-}
-
-// --- WHATSAPP MCP BRIDGE INTEGRATION ---
-
-func TestDelivery_WhatsappTopicRouting(t *testing.T) {
-	env := setupTestEnv(t)
-	// Subscribe to all WhatsApp messages for phone 15551234567
-	whatsappPattern := "notifications.whatsapp.15551234567.>"
-	deliveries := env.registerSession("ses_whatsapp", []string{whatsappPattern})
-	env.startConsumer("test-machine")
-
-	// Publish a WhatsApp envelope (simulating what the MCP bridge would publish)
-	waTopic := contracts.WhatsappSubject("15551234567", "5551234567@s.whatsapp.net", "message")
-	waEnv := newEnvelope("whatsapp", waTopic, "Hello from WhatsApp", "dedupe-wa-1")
-	waEnv.SourceSession = "" // Bridge has no session
-	waEnv.PayloadRef = "whatsapp://messages/15551234567/5551234567@s.whatsapp.net"
-	publishEnvelope(env, waEnv)
-
-	time.Sleep(2 * time.Second)
-	if count := deliveries.Load(); count != 1 {
-		t.Fatalf("expected 1 delivery for WhatsApp message, got %d", count)
-	}
-}
-
-func TestDelivery_WhatsappDifferentPhoneNotDelivered(t *testing.T) {
-	env := setupTestEnv(t)
-	// Subscribe to messages for phone 15551234567 only
-	deliveries := env.registerSession("ses_wa_filtered", []string{"notifications.whatsapp.15551234567.>"})
-	env.startConsumer("test-machine")
-
-	// Publish message for a DIFFERENT phone number
-	waTopicOther := contracts.WhatsappSubject("15559876543", "5551234567@s.whatsapp.net", "message")
-	publishEnvelope(env, newEnvelope("whatsapp", waTopicOther, "Wrong phone", "dedupe-wa-wrong"))
-
-	time.Sleep(2 * time.Second)
-	if count := deliveries.Load(); count != 0 {
-		t.Fatalf("expected 0 deliveries for wrong phone, got %d", count)
-	}
-}
-
-func TestDelivery_WhatsappMultipleSubscribers(t *testing.T) {
-	env := setupTestEnv(t)
-
-	// Both sessions subscribe to WhatsApp messages
-	deliveries1 := env.registerSession("ses_wa_a", []string{"notifications.whatsapp.15551234567.>"})
-	deliveries2 := env.registerSession("ses_wa_b", []string{"notifications.whatsapp.15551234567.>"})
-	env.startConsumer("test-machine")
-
-	waTopic := contracts.WhatsappSubject("15551234567", "5551234567@s.whatsapp.net", "message")
-	item := newEnvelope("whatsapp", waTopic, "Broadcast WhatsApp", "dedupe-wa-broadcast")
-	item.SourceSession = ""
-	publishEnvelope(env, item)
-
-	time.Sleep(2 * time.Second)
-	if c1 := deliveries1.Load(); c1 != 1 {
-		t.Fatalf("session A expected 1 delivery, got %d", c1)
-	}
-	if c2 := deliveries2.Load(); c2 != 1 {
-		t.Fatalf("session B expected 1 delivery, got %d", c2)
 	}
 }
