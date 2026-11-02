@@ -1,9 +1,11 @@
 package refs
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -17,7 +19,7 @@ import (
 )
 
 // ItemKind is the kind of item whose blocks a call of this file writes: a comment, a message or
-// an ask, whose blocks are the parts of its question, options and answer (IndexAskParts). It
+// an ask, whose blocks are the parts of its question, options and answer (PlanAskParts). It
 // names the tables a call writes and is never caller input.
 type ItemKind string
 
@@ -121,10 +123,10 @@ func ReplaceCountedItem(
 
 // IndexItem records body, written at `at` (the created_at of an insert, the edited_at of an
 // edit), as the current revision of the blocks of comment or message itemID, in the caller's
-// transaction. It is ReadItemIndex, PlanItemIndex and Queue back to back, the queued statements
-// run at once as a batch of their own (indexItemBlocks); a transaction that decides everything
+// transaction. It is ReadItemIndex, planItemBlocks and Queue back to back, the queued statements
+// run at once as a batch of their own (store.RunWrite); a transaction that decides everything
 // before it writes calls the three apart and queues the writes in its write phase. An ask indexes
-// its parts through the same core (IndexAskParts).
+// its parts through the same core (PlanAskParts, ItemIndexing.Queue).
 //
 // The caller holds the item's owner - its advisory lock (store.LockOwner), which the
 // reconciliation takes too (IndexOwedItemBlocks) - and the index's first queued statement takes
@@ -171,7 +173,21 @@ func IndexItem(
 	located []text.Located,
 	carried *CarriedEdit,
 ) ([]Target, error) {
-	return indexItemBlocks(ctx, tx, kind, itemID, at, itemBodySource(kind, body, located, carried))
+	index, err := ReadItemIndex(ctx, tx, kind, itemID)
+	if err != nil {
+		return nil, err
+	}
+	indexing, err := planItemBlocks(index, kind, itemID, at, itemBodySource(kind, body, located, carried))
+	if err != nil {
+		return nil, err
+	}
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		indexing.Queue(b)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return indexing.Moved(), nil
 }
 
 // itemBlockSource is one reading of an item's blocks, which the index writes: the blocks in
@@ -211,64 +227,6 @@ func itemBodySource(kind ItemKind, body string, located []text.Located, carried 
 			return itemBlockPairs(next, ids, located)
 		},
 	}
-}
-
-// indexItemBlocks records source as the current revision of the blocks of item itemID, written at
-// `at`, in the caller's transaction. It is ReadItemIndex, planItemBlocks and Queue back to back,
-// the queued statements run at once as a batch of their own (store.RunWrite), which is where the
-// index runs for a caller holding no write phase to queue it on; a transaction that decides
-// everything before it writes plans the index and queues it itself.
-//
-// The caller holds the item's owner - its advisory lock (store.LockOwner), which the
-// reconciliation takes too - and the index's first queued statement takes the item's state row
-// (inserting it when missing, then `for no key update`), so the index of one item is written by
-// one transaction at a time.
-//
-// A new block takes made_at = at, except at the first indexing of a comment or an ask already
-// edited, whose blocks' making time was never recorded (null); a new, changed (identity hash) or
-// restored block takes the new revision as changed_revision and `at` as changed_at; an unchanged
-// one moves only its position, type and excerpt; a current block the source no longer holds is
-// removed (position null, removed_at = at). A kind with revisions records the text of each new,
-// changed or restored block, and null for each removed one, in its block texts table at the new
-// revision.
-//
-// Revisions: a comment's and an ask's revision counts its indexed revisions, 1 the first
-// indexing. A call bumps it by one when it is the first indexing, when the source's sum differs
-// from the one last indexed (body_sha256), or when the blocks changed (a parser that reads the
-// same body otherwise); a call that finds none of those writes no block and no text row and keeps
-// the revision. A message has no revisions.
-//
-// Every call reconciles the item's block mentions from the source's pairs, one row per (block,
-// target), so a reindex with a new grammar re-reads them even when the text is unchanged. A new
-// row takes `at`, or at the item's first indexing its own refs row's created_at and source_seq
-// for that target; Stamp gives the others their event. A direct message holds no mention. It
-// stores the revision, the next block number and the source's sum and clears owed_at.
-//
-// It returns the targets of the block mentions it inserted or deleted, and of the links a block
-// holds whose excerpt it rewrote.
-func indexItemBlocks(
-	ctx context.Context,
-	tx pgx.Tx,
-	kind ItemKind,
-	itemID string,
-	at time.Time,
-	source itemBlockSource,
-) ([]Target, error) {
-	index, err := ReadItemIndex(ctx, tx, kind, itemID)
-	if err != nil {
-		return nil, err
-	}
-	indexing, err := planItemBlocks(index, kind, itemID, at, source)
-	if err != nil {
-		return nil, err
-	}
-	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
-		indexing.Queue(b)
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	return indexing.Moved(), nil
 }
 
 // ItemIndex is what a comment's, a message's or an ask's block index holds: its state row, every
@@ -351,6 +309,9 @@ type ItemIndexing struct {
 	// current is the excerpt of each block the body holds, by block id: what a reply naming one
 	// of them reads of the index before it is written (Block).
 	current map[string]string
+	// index is what the item's block index held when this one was planned against it, which Held
+	// carries forward into what it leaves.
+	index ItemIndex
 }
 
 // PlanItemIndex plans the index of body, written at `at`, of comment or message itemID against
@@ -387,7 +348,7 @@ func planItemBlocks(
 	state, stored := index.state, index.stored
 	indexing := ItemIndexing{
 		kind: kind, tables: tables, itemID: itemID, at: at,
-		bodySHA256: source.bodySum, firstIndexing: !state.indexed,
+		bodySHA256: source.bodySum, firstIndexing: !state.indexed, index: index,
 	}
 	counter := state.nextBlock
 	for _, block := range stored {
@@ -488,6 +449,59 @@ func planItemBlocks(
 // in a block whose excerpt it changes.
 func (i ItemIndexing) Moved() []Target {
 	return i.moved
+}
+
+// Held is what the item's block index holds once this index is written, which a second index of
+// the same item in one transaction plans against, so it sees the rows the first one queued
+// (PlanAskParts). It reads the plan alone: the state this index records, the blocks the source
+// holds in its order followed by the removed ones, the ones this index removes first, as a read
+// after the write orders them (storedItemBlocks), the excerpt of each block the source holds,
+// and the links its blocks hold once the reconciliation has run.
+func (i ItemIndexing) Held() ItemIndex {
+	held := ItemIndex{
+		state: itemState{
+			indexed: true, revision: i.revision, nextBlock: i.nextBlock,
+			bodySHA256: i.bodySHA256, edited: i.index.state.edited,
+		},
+		stored:   make([]itemblocks.Stored, 0, len(i.index.stored)+len(i.written)),
+		excerpts: i.current,
+		held:     make([]itemBlockLink, 0, len(i.pairs)),
+	}
+	for _, rows := range [][]itemBlockRow{i.written, i.kept} {
+		for _, row := range rows {
+			held.stored = append(held.stored, itemblocks.Stored{
+				ID: row.id, Type: row.nodeType, Hash: row.sum, Position: row.position,
+			})
+		}
+	}
+	slices.SortFunc(held.stored, func(first, second itemblocks.Stored) int {
+		return first.Position - second.Position
+	})
+	// A block this index removes loses its position at a removed_at later than every earlier
+	// removal's, so a read after the write puts it before them, and among themselves by id, the
+	// order storedItemBlocks takes. Each keeps the type and the text it was written with.
+	var earlier []itemblocks.Stored
+	removing := len(held.stored)
+	for _, block := range i.index.stored {
+		if _, holds := i.current[block.ID]; holds {
+			continue
+		}
+		removed := block.Position < 0
+		block.Position = -1
+		if removed {
+			earlier = append(earlier, block)
+			continue
+		}
+		held.stored = append(held.stored, block)
+	}
+	slices.SortFunc(held.stored[removing:], func(first, second itemblocks.Stored) int {
+		return cmp.Or(cmp.Compare(len(first.ID), len(second.ID)), cmp.Compare(first.ID, second.ID))
+	})
+	held.stored = append(held.stored, earlier...)
+	for _, pair := range i.pairs {
+		held.held = append(held.held, itemBlockLink{blockID: pair.blockID, kind: pair.kind, target: pair.target})
+	}
+	return held
 }
 
 // Block is the node id and excerpt of block blockID as the index leaves it, the row its insert

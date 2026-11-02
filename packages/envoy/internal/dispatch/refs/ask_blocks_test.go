@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -85,16 +86,23 @@ func writeAskAnswer(t *testing.T, tx pgx.Tx, ask *model.Ask, user string, select
 	ask.Answer, ask.State = &answer, "answered"
 }
 
-// indexAskPartsAt indexes the ask's parts at the index-th second of a fixed clock, so each indexing
-// of one test has a time of its own.
+// indexAskPartsAt plans the ask's parts at the index-th second of a fixed clock, so each indexing
+// of one test has a time of its own, and writes them as a batch of their own.
 func indexAskPartsAt(t *testing.T, tx pgx.Tx, ask model.Ask, index int) []Target {
 	t.Helper()
+	ctx := context.Background()
 	at := time.Date(2026, 10, 30, 12, 0, index, 0, time.UTC)
-	moved, err := IndexAskParts(context.Background(), tx, ask, askPartServer, at)
+	indexing, err := PlanAskParts(ctx, tx, nil, ask, askPartServer, at, false)
 	if err != nil {
 		t.Fatalf("index the parts of ask %s: %v", ask.ID, err)
 	}
-	return moved
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		indexing.Queue(b)
+		return nil
+	}); err != nil {
+		t.Fatalf("write the parts of ask %s: %v", ask.ID, err)
+	}
+	return indexing.Moved()
 }
 
 // askPartRow is one row of ask_blocks: a removed part's position is -1 and a part the ask's

@@ -1054,6 +1054,41 @@ func TestAnOpenApprovalRequestIsAnsweredByTheCarry(t *testing.T) {
 	}
 }
 
+// The version write that carries an approval writes one ask's parts twice: it moves the open
+// request to the new version, which rewords its question, and the carry then answers it. The
+// second plan reads the rows the first queued, so each write is a revision of its own: the
+// question moves to revision 2 and the answer arrives at revision 3, and the question's part
+// records the time of the rewording that moved it, not the time of the answer.
+func TestTheCarrysAnswerAndTheRequestsMoveTakeARevisionEach(t *testing.T) {
+	handler, database, _ := settlingCarryDocuments(t, 20*time.Millisecond)
+	issue := createInteractionIssue(t, handler, "TEST", "Request moved and answered at once", "Context\n")
+	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
+	asks := insertDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, waveAsk, 2, map[string]string{"wave": "How many regions take the first wave?"})
+	request := requestApproval(t, handler, issue.PrimaryArtifactID)
+	if request.Approval.Version != 2 {
+		t.Fatalf("request = %#v, want one at version 2", request.Approval)
+	}
+	requireAskParts(t, database, request.ID, "the request", "b1@1 b2@1 b3@1", 1)
+
+	answerDecisionBlock(t, handler, asks["wave"], "alice", []string{"Two"}, "", nil)
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 3)
+	answered := readBlockAsk(t, handler, request.ID)
+	if answered.State != "answered" || answered.Approval == nil || answered.Approval.Version != 3 {
+		t.Fatalf("request after the carry = state %q approval %#v, want it answered at version 3", answered.State, answered.Approval)
+	}
+	requireAskParts(t, database, request.ID, "the carry", "b1@2 b2@1 b3@1 b4@3", 3)
+	if answered.EditedAt == nil {
+		t.Fatal("the request carries no edited_at after the move")
+	}
+	edited, err := time.Parse(time.RFC3339Nano, *answered.EditedAt)
+	if err != nil {
+		t.Fatalf("read the request's edited_at %q: %v", *answered.EditedAt, err)
+	}
+	if changed := askPartChangedAt(t, database, request.ID, "b1"); !changed.Equal(edited) {
+		t.Fatalf("the question part changed at %v, want the rewording's own time %v", changed, edited)
+	}
+}
+
 // A document approved at version 1, whose very first edit is the agent's block insert: the version
 // before the answer's is the insert's, holding the block open, and the approved version holds no
 // block at all. The answer carries.

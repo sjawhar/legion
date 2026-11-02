@@ -298,8 +298,9 @@ func (s *server) normalizeCommentThreadTarget(
 // ask_id names. It is never read from the thread's head: a reply to a comment in an ask's thread
 // names a block of that comment, as the client and the tool that write it mean, where only a
 // reply naming the ask names one of the ask's parts. The ask is ordered against a write of its
-// own by the owner's lock, which this transaction took before it read either (lockCommentOwner,
-// asks.go's readAskForTransition). The index the item owes is queued on ledger, which is nil on
+// own by the owner's lock, which this transaction took before it read either (lockCommentOwner;
+// every writer of an ask takes the same lock through requireOpenOwner, and asks.go's
+// readAskForTransition reads the row under it). The index the item owes is queued on ledger, which is nil on
 // a route that holds no write phase (the delivery replies), where it is written at once.
 func (s *server) namedReplyBlock(
 	ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, kind refs.ItemKind, itemID, blockID string,

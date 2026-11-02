@@ -1657,7 +1657,7 @@ class DocumentNotFoundError extends Error {}
 function artifactByReference(
   artifacts: readonly Artifact[],
   artifactReference: string,
-  owner: "issue" | "project",
+  owner: Owner,
   canonical: boolean
 ): Artifact {
   const bySlug = artifacts.find((candidate) => candidate.slug === artifactReference);
@@ -1710,7 +1710,7 @@ async function resolveArtifact(
         : [routed, ...unlinked.filter((candidate) => candidate.id !== routed.id)];
     return {
       owner,
-      artifact: artifactByReference(artifacts, artifactReference, "project", canonical),
+      artifact: artifactByReference(artifacts, artifactReference, owner, canonical),
     };
   }
   const issue = await client.getIssue(owner.issue);
@@ -1720,11 +1720,19 @@ async function resolveArtifact(
       (candidate) => candidate.primary || candidate.id === issue.primary_artifact_id
     );
   } else {
-    artifact = artifactByReference(issue.artifacts, artifactReference, "issue", canonical);
+    artifact = artifactByReference(
+      issue.artifacts,
+      artifactReference,
+      { kind: "issue", issue: issue.key },
+      canonical
+    );
   }
   if (!artifact) {
     throw new DocumentNotFoundError(
-      documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, "issue")
+      documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, {
+        kind: "issue",
+        issue: issue.key,
+      })
     );
   }
   return { owner, issue, artifact };
@@ -1784,20 +1792,125 @@ export async function resolveIssueDocumentId(
 const documentHintLimit = 8;
 
 /** The refusal of a document reference: none matched, or, `ambiguous`, several share it as their
- * filename, which their slugs tell apart. */
+ * filename, which their slugs tell apart. An owner with more documents than the hint lists is
+ * named with its count, the documents nearest the reference first (`documentsNearest`), and the
+ * read that lists them all. */
 function documentReferenceProblem(
   reference: string,
-  documents: readonly Pick<Artifact, "slug" | "name">[],
-  owner: "issue" | "project",
+  documents: readonly (Pick<Artifact, "slug" | "name"> & { readonly kind?: Artifact["kind"] })[],
+  owner: Owner,
   ambiguous = false
 ): string {
-  const hints = documents
+  const scope = owner.kind;
+  const busy = !ambiguous && documents.length > documentHintLimit;
+  const hints = (busy ? documentsNearest(reference, documents) : documents)
     .slice(0, documentHintLimit)
     .map((document) => `${document.slug} (${document.name})`);
   const list = hints.length === 0 ? "none" : hints.join(", ");
+  if (busy) {
+    const read =
+      owner.kind === "issue"
+        ? `dispatch read --issue ${owner.issue}`
+        : `dispatch read --project ${owner.project}`;
+    // `--artifact` names an uploaded picture or file as well as a document, so the hint counts
+    // and ranks them too, and says so: Dispatch's own refusal counts documents alone.
+    const counted = documents.every((document) => (document.kind ?? "doc") === "doc")
+      ? "documents"
+      : "documents and files";
+    return `document "${reference}" not found by slug; this ${scope}'s ${documents.length} ${counted} include: ${list}; ${read} lists them all`;
+  }
   return ambiguous
-    ? `"${reference}" names ${documents.length} documents on this ${owner}; use a slug: ${list}`
-    : `document "${reference}" not found by slug; this ${owner}'s documents: ${list}`;
+    ? `"${reference}" names ${documents.length} documents on this ${scope}; use a slug: ${list}`
+    : `document "${reference}" not found by slug; this ${scope}'s documents: ${list}`;
+}
+
+/** `documents`, given oldest first as Dispatch lists them, ordered for a hint about `reference`:
+ * those whose slug or filename is close to it (`documentCloseness`) first, nearest first, then
+ * every other one, each group newest first. Dispatch's `documentsNearest`
+ * (packages/envoy/internal/dispatch/api/artifacts.go) orders its own hint by the same rule. */
+function documentsNearest<T extends Pick<Artifact, "slug" | "name">>(
+  reference: string,
+  documents: readonly T[]
+): T[] {
+  return documents
+    .map((document, index) => ({
+      document,
+      index,
+      ...documentCloseness(reference, document.slug, document.name),
+    }))
+    .sort((a, b) => {
+      if (a.near !== b.near) return a.near ? -1 : 1;
+      if (a.near && a.distance !== b.distance) return a.distance - b.distance;
+      return b.index - a.index;
+    })
+    .map(({ document }) => document);
+}
+
+/** An owner's documents as a read lists them, one line each in the order Dispatch gives: slug,
+ *  then filename and kind, the address `artifact` takes and the name a person sees. */
+function documentListLines(
+  documents: readonly Pick<Artifact, "slug" | "name" | "kind">[]
+): string[] {
+  return documents.length === 0
+    ? ["- none"]
+    : documents.map((document) => `- ${document.slug} (${document.name}, ${document.kind})`);
+}
+
+/** A reference compared with a document's slug and filename, ASCII letter case ignored: the smaller
+ * edit distance of the two, and whether the document is close to it - within a third of the
+ * reference's length (at least 2 edits), or one holding the other where the one held is at least 4
+ * characters long, whose distance is then exactly their difference in length. A spelling more than
+ * `limit` edits away gives no distance (`boundedEditDistance` knows only that it is past `limit`),
+ * so it never ties a document close through its other spelling. Characters are code points, as
+ * Go's runes are, and only ASCII letters are folded, since JavaScript and Go lowercase other
+ * letters differently (`İ`) and Dispatch's `documentCloseness` must rank alike. */
+function documentCloseness(
+  reference: string,
+  slug: string,
+  name: string
+): { distance: number; near: boolean } {
+  const wanted = [...reference.replace(/[A-Z]/g, (letter) => letter.toLowerCase())];
+  const limit = Math.max(2, Math.floor(wanted.length / 3));
+  let distance = Number.POSITIVE_INFINITY;
+  for (const candidate of [slug, name]) {
+    const label = [...candidate.replace(/[A-Z]/g, (letter) => letter.toLowerCase())];
+    let edits = boundedEditDistance(wanted, label, limit);
+    if (
+      (wanted.length >= 4 && label.join("").includes(wanted.join(""))) ||
+      (label.length >= 4 && wanted.join("").includes(label.join("")))
+    ) {
+      edits = Math.abs(label.length - wanted.length);
+    } else if (edits > limit) {
+      continue;
+    }
+    distance = Math.min(distance, edits);
+  }
+  return distance === Number.POSITIVE_INFINITY
+    ? { distance: limit + 1, near: false }
+    : { distance, near: true };
+}
+
+/** The Levenshtein distance between `a` and `b`, or `limit + 1` once it is known to be more. */
+function boundedEditDistance(a: readonly string[], b: readonly string[], limit: number): number {
+  if (Math.abs(a.length - b.length) > limit) return limit + 1;
+  let previous = Array.from({ length: b.length + 1 }, (_, j) => j);
+  let current = new Array<number>(b.length + 1).fill(0);
+  for (let i = 1; i <= a.length; i++) {
+    current[0] = i;
+    let smallest = i;
+    for (let j = 1; j <= b.length; j++) {
+      const substitution = (previous[j - 1] as number) + (a[i - 1] === b[j - 1] ? 0 : 1);
+      current[j] = Math.min(
+        (previous[j] as number) + 1,
+        (current[j - 1] as number) + 1,
+        substitution
+      );
+      smallest = Math.min(smallest, current[j] as number);
+    }
+    if (smallest > limit) return limit + 1;
+    [previous, current] = [current, previous];
+  }
+  return Math.min(previous[b.length] as number, limit + 1);
 }
 
 const askHintLimit = 8;
@@ -2066,6 +2179,10 @@ function issueSummary(
       : issue.external_links.map(
           (link) => `- ${link.url}${link.kind === undefined ? "" : ` (${link.kind})`}`
         )),
+    // Every document, picture and file the issue holds, oldest first, which a document
+    // reference's not-found hint points to once the issue holds more than the hint lists.
+    "Documents:",
+    ...documentListLines(issue.artifacts ?? []),
     "Open asks:",
     ...(asks.length === 0 ? ["- none"] : asks.map((ask) => `- ${ask.id}: ${ask.question}`)),
     "References:",
@@ -4823,6 +4940,21 @@ export async function executeDispatchTool(
               : { issue: ref.owner.issue }),
             block: incoming.node.block_id ?? ref.block,
           },
+        };
+      }
+      // A project named with no document reads as the list of its documents (those on no issue,
+      // the ones a project document reference names), which a project document reference's
+      // not-found hint points to.
+      const projectOwner = documentOwner();
+      if (projectOwner.kind === "project" && optionalString(args, "artifact") === undefined) {
+        const documents = await client.listProjectArtifacts(projectOwner.project, true);
+        return {
+          text: [
+            `Project: ${projectOwner.project}`,
+            "Documents:",
+            ...documentListLines(documents),
+          ].join("\n"),
+          details: { project: projectOwner.project },
         };
       }
       // A document's summary. An issue's document reads as a project's does, with the issue it

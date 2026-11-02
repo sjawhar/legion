@@ -301,7 +301,8 @@ func OwedItems(ctx context.Context, q Queryer, limit int) ([]OwedItem, error) {
 // transaction id to hold through everything it reads and plans, and under the owner lock it
 // excludes nothing the owner lock does not. Everything it writes is read and planned first, under
 // that lock and with no transaction id held - a comment's or a message's block index
-// (ReadItemIndex, PlanItemIndex) and the references the text cites (PlanReplace) - and its writes
+// (ReadItemIndex, PlanItemIndex), an ask's part index (PlanAskParts) and the references the text
+// cites (PlanReplace) - and its writes
 // then go as one batch, in that order with the owed row's delete last (store.RunWrite).
 //
 // Dropping that row lock leaves no deadlock with the trigger that writes the owed row: the
@@ -360,7 +361,7 @@ func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL st
 				return err
 			}
 			if held {
-				if indexing, err = PlanAskParts(ctx, tx, ask, serverURL, writtenAt); err != nil {
+				if indexing, err = PlanAskParts(ctx, tx, nil, ask, serverURL, writtenAt, false); err != nil {
 					return err
 				}
 				indexed = true

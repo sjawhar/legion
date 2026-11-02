@@ -804,16 +804,13 @@ func TestCompactionDoesNotCarryCoveredContentClassificationPastCursor(t *testing
 		t.Fatalf("seed legacy canonical markdown: %v", err)
 	}
 	alignLatestVersionWithUpdates(t, service, artifactID)
-	for index := range compactKeep + 1 {
+	for index := range 2 {
 		browserMarkWithAttrs(t, service, artifactID, "proofAuthored", "one|two", pmdoc.Attrs{
 			"id": fmt.Sprintf("covered-mark-%d", index), "by": "user:alice",
 		})
 	}
-	waitForPersistedUpdates(t, service, artifactID, compactKeep+2)
-	persist := service.persistence.(*PgVersioned)
-	if _, err := persist.Compact(context.Background(), artifactID, compactKeep); err != nil {
-		t.Fatalf("compact updates: %v", err)
-	}
+	waitForPersistedUpdates(t, service, artifactID, 3)
+	compactAged(t, service.persistence.(*PgVersioned), service.store, artifactID)
 	if err := service.Evict(context.Background(), artifactID); err != nil {
 		t.Fatalf("evict compacted document: %v", err)
 	}
@@ -847,12 +844,9 @@ func TestCompactionRetainsUncoveredContentBeyondVersionCursor(t *testing.T) {
 		})
 	}
 	waitForPersistedUpdates(t, service, artifactID, 6)
-	persist := service.persistence.(*PgVersioned)
-	if _, err := persist.Compact(context.Background(), artifactID, compactKeep); err != nil {
-		t.Fatalf("compact updates: %v", err)
-	}
-	if stored := storedUpdateCount(t, service.store, artifactID); stored != compactKeep {
-		t.Fatalf("compaction left %d stored updates, want %d", stored, compactKeep)
+	compactAged(t, service.persistence.(*PgVersioned), service.store, artifactID)
+	if stored := storedUpdateCount(t, service.store, artifactID); stored != 1 {
+		t.Fatalf("compaction left %d stored updates, want 1", stored)
 	}
 	if err := service.Evict(context.Background(), artifactID); err != nil {
 		t.Fatalf("evict compacted document: %v", err)

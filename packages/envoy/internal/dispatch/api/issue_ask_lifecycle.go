@@ -176,7 +176,7 @@ func (s *server) recordRestoredAsksTx(ctx context.Context, tx pgx.Tx, ledger *do
 		// queued after the row write that took it off (prepareRestoration), and the ask.opened
 		// names what that moved and stamps the part rows the index leaves with its own id, so a
 		// ?since= read lists them.
-		changes, err := s.queueAskParts(ctx, tx, ledger, ask, restoredAt, model.ReferenceChanges{})
+		changes, err := s.queueAskParts(ctx, tx, ledger, ask, restoredAt, false, model.ReferenceChanges{})
 		if err != nil {
 			return nil, err
 		}

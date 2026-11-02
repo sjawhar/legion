@@ -43,8 +43,18 @@ function response(body: unknown, status = 200): Response {
   });
 }
 
-/** The production attempts at each write, without waiting out the pauses between them. */
-const writeRetry: DispatchWriteRetry = { ...DISPATCH_WRITE_RETRY, pause: async () => undefined };
+/**
+ * The production attempts at each write, without waiting out the pauses between them: the write
+ * clock moves only by the pauses, so a write's windows bound its attempts as they would in time.
+ */
+let writeClock = 0;
+const writeRetry: DispatchWriteRetry = {
+  ...DISPATCH_WRITE_RETRY,
+  pause: async (ms) => {
+    writeClock += ms;
+  },
+  now: () => writeClock,
+};
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -4708,9 +4718,15 @@ describe("executeDispatchTool", () => {
       "and the close may or may not have taken effect. Read the issue's status before retrying: " +
       "done means it closed; otherwise retry with a reason that points at message message-7, " +
       "since retrying this call posts its reason again";
+    // This Dispatch runs the keyed layer, so each message also says that it finishes the close.
+    const keyedTail =
+      ". Dispatch finishes an attempt it received whatever this command does, so read the write " +
+      "back before you send it again: a new command sends it under a new key.";
     const inFlight = () =>
       refusal(409, "KEY_IN_FLIGHT", "an earlier request with this key is still running");
-    for (const [first, then, expected] of [
+    // A KEY_IN_FLIGHT says Dispatch may still be running the close, so it is asked every 3 s at
+    // most until 55 s rather than five times: 20 attempts.
+    for (const [first, then, expected, attempts] of [
       [
         () => gatewayPage(502, "Bad Gateway"),
         () => gatewayPage(429, "Too Many Requests"),
@@ -4718,16 +4734,18 @@ describe("executeDispatchTool", () => {
           'a body that is not Dispatch\'s error JSON ("429 Too Many Requests"), which looks like ' +
           "a proxy or gateway page rather than Dispatch's own answer (the last of 5 attempts), " +
           "and an earlier attempt of the write may have reached Dispatch, so it may or may not " +
-          `have taken effect: check whether it did before retrying it.${unknownSentence}`,
+          `have taken effect${keyedTail}${unknownSentence}`,
+        5,
       ],
       [
         (): Response => {
           throw new TypeError("fetch failed");
         },
         inFlight,
-        "KEY_IN_FLIGHT: an earlier request with this key is still running (the last of 5 " +
+        "KEY_IN_FLIGHT (the last of 20 " +
           "attempts), and Dispatch was still running an earlier attempt of the write, so it may " +
-          `or may not have taken effect: check whether it did before retrying it.${unknownSentence}`,
+          `or may not have taken effect${keyedTail}${unknownSentence}`,
+        20,
       ],
     ] as const) {
       let patches = 0;
@@ -4743,7 +4761,7 @@ describe("executeDispatchTool", () => {
 
       expect(failure).toBe(expected);
       expect(failure).not.toContain("did not close");
-      expect(patches).toBe(5);
+      expect(patches).toBe(attempts);
     }
   });
 
@@ -8428,6 +8446,161 @@ describe("executeDispatchTool", () => {
     );
   });
 
+  test("on a busy issue names the closest documents first, counts the rest and names the read that lists them", async () => {
+    // 12 artifacts, oldest first as Dispatch lists them: the spec, the uploaded prediction, then
+    // ten notes. The reference differs from the prediction's slug in letter case alone.
+    const artifacts = [
+      { id: "artifact-42", slug: "spec", name: "spec.md", kind: "doc", primary: true },
+      {
+        id: "a-p",
+        slug: "prediction-p1-md",
+        name: "prediction-P1.md",
+        kind: "file",
+        primary: false,
+      },
+      ...Array.from({ length: 10 }, (_, index) => ({
+        id: `a-${index}`,
+        slug: `notes-${index}-md`,
+        name: `notes-${index}.md`,
+        kind: "doc",
+        primary: false,
+      })),
+    ];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/api/v1/issues/DSP-1234") {
+        return response({ key: "DSP-1234", primary_artifact_id: "artifact-42", artifacts });
+      }
+      throw new Error(`unexpected request: ${path}`);
+    };
+    const notes = [9, 8, 7, 6, 5, 4, 3].map((n) => `notes-${n}-md (notes-${n}.md)`).join(", ");
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_doc_read",
+        args: { issue: "DSP-1234", artifact: "prediction-P1-md" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow(
+      `document "prediction-P1-md" not found by slug; this issue's 12 documents and files include: ` +
+        `prediction-p1-md (prediction-P1.md), ${notes}; dispatch read --issue DSP-1234 lists them all`
+    );
+  });
+
+  // The cases of Dispatch's TestDocumentsNearestRanksByExactDistanceAndFoldsOnlyASCII: a name
+  // holding the reference ranks by how much longer it is, and only ASCII letters fold.
+  test.each([
+    [
+      "Plan",
+      [
+        "plan.md",
+        ...["alpha", "beta", "gamma", "delta", "omega", "kappa", "sigma", "theta"].map(
+          (n) => `plan-${n}-archive.md`
+        ),
+      ],
+      [
+        "plan.md",
+        "plan-beta-archive.md",
+        "plan-theta-archive.md",
+        "plan-sigma-archive.md",
+        "plan-kappa-archive.md",
+        "plan-omega-archive.md",
+        "plan-delta-archive.md",
+        "plan-gamma-archive.md",
+      ],
+    ],
+    [
+      "Plan.",
+      [
+        "plan.v1.md",
+        ...["alpha", "beta", "gamma", "delta", "omega", "kappa", "sigma", "theta"].map(
+          (n) => `plan.${n}-archive.md`
+        ),
+      ],
+      [
+        "plan.v1.md",
+        ...["beta", "theta", "sigma", "kappa", "omega", "delta", "gamma"].map(
+          (n) => `plan.${n}-archive.md`
+        ),
+      ],
+    ],
+    [
+      "İİİİ-md",
+      ["iiii.md", ...[0, 1, 2, 3, 4, 5, 6, 7].map((n) => `notes-${n}.md`)],
+      [7, 6, 5, 4, 3, 2, 1, 0].map((n) => `notes-${n}.md`),
+    ],
+  ])("ranks %s as Dispatch does", async (reference, names, shown) => {
+    const slug = (name: string) => name.replaceAll(".", "-");
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/api/v1/issues/DSP-7") {
+        return response({
+          key: "DSP-7",
+          primary_artifact_id: "none",
+          artifacts: names.map((name) => ({
+            id: name,
+            slug: slug(name),
+            name,
+            kind: "doc",
+            primary: false,
+          })),
+        });
+      }
+      throw new Error(`unexpected request: ${path}`);
+    };
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_doc_read",
+        args: { issue: "DSP-7", artifact: reference },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow(
+      `this issue's 9 documents include: ${shown.map((name) => `${slug(name)} (${name})`).join(", ")}; dispatch read`
+    );
+  });
+
+  test("a project read with no document lists the project's documents", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(`${target.pathname}${target.search}`);
+      if (target.pathname === "/api/v1/projects/CORE/artifacts") {
+        return response([
+          { id: "r-1", slug: "runbook-md", name: "runbook.md", kind: "doc", primary: false },
+          { id: "r-2", slug: "chart-png", name: "chart.png", kind: "image", primary: false },
+        ]);
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { project: "CORE" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe(
+      "Project: CORE\nDocuments:\n- runbook-md (runbook.md, doc)\n- chart-png (chart.png, image)"
+    );
+    expect(result.details).toEqual({ project: "CORE" });
+    expect(requests).toEqual(["/api/v1/projects/CORE/artifacts?unlinked=true"]);
+  });
+
   test.each([
     [
       "dispatch_artifact",
@@ -8885,6 +9058,73 @@ describe("executeDispatchTool", () => {
         fetchImpl: (async () => response({})) as unknown as typeof fetch,
       })
     ).rejects.toThrow("Exactly one of path or content is required.");
+  });
+
+  test.each([
+    "rows.jsonl",
+    "size-table-rows.tsv",
+    "mustfail.json",
+    "notes.TXT",
+    "rows.jsonl_",
+    "rows.jsonl ",
+    "отчёт.данные",
+    "rows.jsonl.1",
+    "tool.1",
+    "row data.jsonl.1",
+    "plan v1.2",
+  ])("refuses inline content named %j before it sends anything, naming --path", async (name) => {
+    const requests: string[] = [];
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_artifact",
+        args: { issue: "DSP-42", name, content: '{"row_id": 1}\n{"row_id": 2}\n' },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: (async (url: RequestInfo | URL) => {
+          requests.push(String(url));
+          return response({});
+        }) as unknown as typeof fetch,
+      })
+    ).rejects.toThrow(
+      `${JSON.stringify(name)} is not a Markdown name. Upload the file under the same name with path (--path <file>), which stores a file whose path does not end in .md or .markdown as its bytes, unchanged`
+    );
+    expect(requests).toEqual([]);
+  });
+
+  test.each([
+    "spec.md",
+    "Plan.MD",
+    "notes.markdown",
+    "Design notes",
+    "plan v1.2.md",
+    "notes v2. draft",
+    "Dr. Smith's notes",
+  ])("sends inline content named %j as a Markdown document", async (name) => {
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      requests.push({ url: String(url), init: init ?? {} });
+      return response({
+        artifact: { id: "artifact-42", issue_key: "DSP-42", name, slug: "slug" },
+        version: { number: 1 },
+      });
+    };
+
+    await executeDispatchTool({
+      tool: "dispatch_artifact",
+      args: { issue: "DSP-42", name, content: "# Notes\n" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(JSON.parse(requests[0]?.init.body as string)).toMatchObject({ name });
   });
 
   for (const input of [
@@ -10627,6 +10867,16 @@ describe("executeDispatchTool", () => {
             { url: "https://github.com/owner/repo/pull/7", kind: "github_pr" },
             { url: "https://example.com/runs/3" },
           ],
+          artifacts: [
+            { id: "artifact-42", slug: "spec", name: "spec.md", kind: "doc", primary: true },
+            {
+              id: "artifact-43",
+              slug: "chart-png",
+              name: "chart.png",
+              kind: "image",
+              primary: false,
+            },
+          ],
           open_asks: [],
           progress: { tasks: { done: 1, total: 4 }, children: null },
           last_seq: 0,
@@ -10732,7 +10982,12 @@ describe("executeDispatchTool", () => {
     // The pull request a person linked is on the read, as on the issue page; the reference graph
     // at the end carries none of it.
     expect(result.text).toContain(
-      "Progress: tasks 1/4\nExternal links:\n- https://github.com/owner/repo/pull/7 (github_pr)\n- https://example.com/runs/3\nOpen asks:"
+      "Progress: tasks 1/4\nExternal links:\n- https://github.com/owner/repo/pull/7 (github_pr)\n- https://example.com/runs/3\nDocuments:"
+    );
+    // Every artifact the issue holds, by slug, filename and kind, which a missing document's hint
+    // names this read for.
+    expect(result.text).toContain(
+      "Documents:\n- spec (spec.md, doc)\n- chart-png (chart.png, image)\nOpen asks:"
     );
     expect(
       result.text.endsWith(

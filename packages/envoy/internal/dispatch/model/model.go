@@ -1103,7 +1103,7 @@ type BlockInvalidEventPayload struct {
 }
 
 // AskOption is an answer choice. ID is the id of the block this option is stored as - the part
-// `dispatch://<key>/ask/<ask id>#b-<id>` names (refs.IndexAskParts) - which every read that shows
+// `dispatch://<key>/ask/<ask id>#b-<id>` names (refs.PlanAskParts) - which every read that shows
 // an ask's options carries (api.attachAskPartIDs) and no write accepts: a caller that sends an
 // option back as it read it has its id emptied (api.validateAskOptions). Absent on a write's own
 // response and while the ask's parts are not indexed yet.

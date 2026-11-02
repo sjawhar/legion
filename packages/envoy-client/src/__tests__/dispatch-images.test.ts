@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { ASK_QUESTION_MAX, overCapMessage } from "@legion/contracts";
 import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { type DispatchToolResult, executeDispatchTool } from "../dispatch-execute";
-import { DispatchClient } from "../dispatch-http";
+import { DISPATCH_WRITE_RETRY, DispatchClient, forgetKeyedLayerMemory } from "../dispatch-http";
 import {
   forgetShownPictures,
   readPictures,
@@ -410,6 +410,73 @@ describe("sending pictures", () => {
     expect(failure.message).toBe(
       `images: ${shot} was not uploaded: upload too large. Nothing was posted.`
     );
+    expect(server.posted).toEqual([]);
+  });
+
+  // An upload that ends with no definitive answer may still land, so it is not said to have
+  // failed, and the write's own message, which ends its sentence, is not given a second period.
+  test("an upload that may have reached Dispatch is not said to have failed", async () => {
+    let uploads = 0;
+    const server = dispatch((pathname, init) => {
+      if (pathname === "/healthz") return json({ idempotency_keys: true });
+      if (pathname !== "/api/v1/issues/DSP-41/artifacts" || init.method !== "POST") return;
+      uploads += 1;
+      const status = uploads === 1 ? 502 : 429;
+      return new Response(`<html>${status}</html>`, {
+        status,
+        headers: { "Content-Type": "text/html" },
+      });
+    });
+    const shot = file("unsettled.png", PNG);
+
+    const failure = await refusal(
+      executeDispatchTool({
+        tool: "dispatch_message",
+        args: { issue: "DSP-41", body: "Look.", images: [shot] },
+        cwd: directory,
+        host: "omp",
+        sessionId: session,
+        config,
+        env: {},
+        exec: async () => {
+          throw new Error("no repository");
+        },
+        fetchImpl: server.fetchImpl,
+        writeRetry: { ...DISPATCH_WRITE_RETRY, pausesMs: [0], pause: async () => undefined },
+      })
+    );
+    // The /healthz answer above is remembered per process and origin; later files' tests drive
+    // the same origin as a Dispatch of their own.
+    forgetKeyedLayerMemory();
+
+    expect(uploads).toBe(2);
+    expect(failure.message).toStartWith(`images: ${shot} may or may not have been uploaded: `);
+    expect(failure.message).toEndWith(
+      "a new command sends it under a new key. Nothing was posted."
+    );
+    expect(server.posted).toEqual([]);
+  });
+
+  // A gateway's 502 can come after Dispatch stored the upload, so it is no refusal either, even
+  // where the write is not asked again (no keyed layer is known here).
+  test("an upload a gateway answered 502 is not said to have failed", async () => {
+    const server = dispatch((pathname, init) =>
+      pathname === "/api/v1/issues/DSP-41/artifacts" && init.method === "POST"
+        ? new Response("<html>502 Bad Gateway</html>", {
+            status: 502,
+            headers: { "Content-Type": "text/html" },
+          })
+        : undefined
+    );
+    const shot = file("gateway.png", PNG);
+
+    const failure = await refusal(
+      run("dispatch_message", { issue: "DSP-41", body: "Look.", images: [shot] }, server.fetchImpl)
+    );
+
+    expect(failure.message).toStartWith(`images: ${shot} may or may not have been uploaded: `);
+    expect(failure.message).toEndWith(". Nothing was posted.");
+    expect(failure.message).not.toContain("..");
     expect(server.posted).toEqual([]);
   });
 

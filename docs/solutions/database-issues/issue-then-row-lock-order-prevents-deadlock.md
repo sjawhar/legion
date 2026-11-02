@@ -8,7 +8,7 @@ tags:
   - concurrency
   - go
 date: 2026-09-09
-status: active
+status: superseded by sjawhar/legion#2468 — a Dispatch write no longer takes the issue row or any child row in its read phase: writers of one issue or document take turns on an advisory owner lock instead (`store.LockOwner`, `store.LockOwnerShared`, `store.OwnerOf`, namespace `OWNR`, `packages/envoy/internal/dispatch/store/ownerlock.go`), which assigns the transaction no transaction id, and the owner's row is taken only in the write phase, after every read. The ordering lesson stands and is now the owner lock's: one rule says which owner a row has, every reader and writer of that row takes that owner's lock, and a transaction that takes both takes the owner lock before the room lock
 module: envoy
 problem_type: database_issue
 component: database

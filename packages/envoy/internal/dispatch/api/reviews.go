@@ -547,7 +547,7 @@ func (s *server) openApprovalAsk(
 	// both named by the ask.opened below. The parts are planned against the ask this route
 	// writes, since the row holding it is queued above, and their statements are queued after
 	// that insert, which the rows of a part reference.
-	askChanges, err = s.queueAskParts(ctx, tx, ledger, ask, ask.CreatedAt, askChanges)
+	askChanges, err = s.queueAskParts(ctx, tx, ledger, ask, ask.CreatedAt, false, askChanges)
 	if err != nil {
 		return nil, nil, err
 	}

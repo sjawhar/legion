@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -26,7 +25,7 @@ import (
 // fan-out also delivers, under a different key the listener cannot recognise as a repeat.
 func TestACommentDuringAListenerTakeOverReachesTheRouteHolderOnce(t *testing.T) {
 	listener := startTakeOverListener(t)
-	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
+	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
 	issue := createInteractionIssue(t, handler, "TEST", "Routed take-over", "before")
 	if patched := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key,
 		map[string]any{"route": "session:s1"}, "alice"); patched.Code != http.StatusOK {
@@ -52,7 +51,7 @@ func TestACommentDuringAListenerTakeOverReachesTheRouteHolderOnce(t *testing.T) 
 			mentionSends++
 		}
 	}
-	deliveries := eventDeliveries(t, database, deps.Docs, "comment.created", created.ID)
+	deliveries := eventDeliveries(t, database, "comment.created", created.ID)
 	if len(deliveries) != 1 {
 		t.Fatalf("comment.created events for %s = %#v, want one", created.ID, deliveries)
 	}
@@ -183,7 +182,7 @@ func TestAResumedMentionOfARoutedCommentReachesTheRouteHolderOnce(t *testing.T) 
 				mentionSends++
 			}
 		}
-		deliveries := eventDeliveries(t, database, deps.Docs, "comment.created", comment.ID)
+		deliveries := eventDeliveries(t, database, "comment.created", comment.ID)
 		if len(deliveries) != 1 {
 			t.Fatalf("comment.created events for %s = %#v, want one", comment.ID, deliveries)
 		}
@@ -248,7 +247,7 @@ func TestAResumedMentionOfARoutedCommentReachesTheRouteHolderOnce(t *testing.T) 
 // steers the listener published to s1, and the comment.created event's fan-outs to s1's own topic.
 // attempts describes the mention's delivery attempts, for a failure.
 func receivedDuringTakeOver(
-	t *testing.T, listener *takeOverListener, handler http.Handler, database *store.Store, documentService docs.API,
+	t *testing.T, listener *takeOverListener, handler http.Handler, database *store.Store,
 	issueKey string, input map[string]any,
 ) (mentionSends, fanOuts int, attempts string) {
 	t.Helper()
@@ -264,7 +263,7 @@ func receivedDuringTakeOver(
 			mentionSends++
 		}
 	}
-	deliveries := eventDeliveries(t, database, documentService, "comment.created", created.ID)
+	deliveries := eventDeliveries(t, database, "comment.created", created.ID)
 	if len(deliveries) != 1 {
 		t.Fatalf("comment.created events for %s = %#v, want one", created.ID, deliveries)
 	}
@@ -291,7 +290,7 @@ func receivedDuringTakeOver(
 // resolve its mentions through the take-over before it commits, as a routed issue's comment does.
 func TestACommentDuringAListenerTakeOverReachesTheClaimantOnce(t *testing.T) {
 	listener := startTakeOverListener(t)
-	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
+	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
 	issue := createInteractionIssue(t, handler, "TEST", "Claimed take-over", "before")
 	if _, err := database.Pool.Exec(context.Background(), `
 		update issues set claimed_by = '{"kind":"session","id":"s1"}'::jsonb, claimed_at = now() where key = $1
@@ -299,7 +298,7 @@ func TestACommentDuringAListenerTakeOverReachesTheClaimantOnce(t *testing.T) {
 		t.Fatalf("claim the issue for s1: %v", err)
 	}
 
-	mentionSends, fanOuts, attempts := receivedDuringTakeOver(t, listener, handler, database, deps.Docs, issue.Key, nil)
+	mentionSends, fanOuts, attempts := receivedDuringTakeOver(t, listener, handler, database, issue.Key, nil)
 	if heard := mentionSends + fanOuts; heard != 1 {
 		t.Fatalf("session s1 received the comment %d times, want once: %d mention steer(s) and %d claimant fan-out(s) "+
 			"while the mention's delivery is [%s] - the mention committed unresolved and retried through the listener "+
@@ -315,7 +314,7 @@ func TestACommentDuringAListenerTakeOverReachesTheClaimantOnce(t *testing.T) {
 // through the take-over before it commits too.
 func TestAnAskReplyDuringAListenerTakeOverReachesTheFollowerOnce(t *testing.T) {
 	listener := startTakeOverListener(t)
-	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
+	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
 	issue := createInteractionIssue(t, handler, "TEST", "Ask thread take-over", "before")
 	askResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 		"question": "Which approach?", "actor": map[string]any{"kind": "session", "id": "s1"},
@@ -325,7 +324,7 @@ func TestAnAskReplyDuringAListenerTakeOverReachesTheFollowerOnce(t *testing.T) {
 	}
 	ask := decodeBody[model.Ask](t, askResponse)
 
-	mentionSends, fanOuts, attempts := receivedDuringTakeOver(t, listener, handler, database, deps.Docs, issue.Key,
+	mentionSends, fanOuts, attempts := receivedDuringTakeOver(t, listener, handler, database, issue.Key,
 		map[string]any{"ask_id": ask.ID})
 	if heard := mentionSends + fanOuts; heard != 1 {
 		t.Fatalf("session s1 received the reply %d times, want once: %d mention steer(s) and %d follower fan-out(s) "+
@@ -342,7 +341,7 @@ func TestAnAskReplyDuringAListenerTakeOverReachesTheFollowerOnce(t *testing.T) {
 // through the take-over before it commits once the issue's primary document credits a session.
 func TestACommentDuringAListenerTakeOverReachesThePrimaryDocumentAuthorOnce(t *testing.T) {
 	listener := startTakeOverListener(t)
-	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
+	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
 	issue := createInteractionIssue(t, handler, "TEST", "Spec author take-over", "before")
 	if _, err := database.Pool.Exec(context.Background(), `
 		update artifacts set created_by = '{"kind":"session","id":"s1"}'::jsonb where id = $1
@@ -350,7 +349,7 @@ func TestACommentDuringAListenerTakeOverReachesThePrimaryDocumentAuthorOnce(t *t
 		t.Fatalf("credit s1 with the issue's primary document: %v", err)
 	}
 
-	mentionSends, fanOuts, attempts := receivedDuringTakeOver(t, listener, handler, database, deps.Docs, issue.Key, nil)
+	mentionSends, fanOuts, attempts := receivedDuringTakeOver(t, listener, handler, database, issue.Key, nil)
 	if heard := mentionSends + fanOuts; heard != 1 {
 		t.Fatalf("session s1 received the comment %d times, want once: %d mention steer(s) and %d primary document "+
 			"author fan-out(s) while the mention's delivery is [%s] - the mention committed unresolved and retried "+

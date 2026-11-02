@@ -55,9 +55,11 @@ func TestCopiedAskQueriesAvoidSequentialScans(t *testing.T) {
 		{"the asks of an issue's copies", copiesOnIssue, "asks", "asks_block_id_unique", []any{blocks, document, issueKey, patterns}},
 		{"the asks of a project's copies", copiesOnProject, "asks", "asks_block_id_unique", []any{blocks, document, projectKey, patterns}},
 		{"what a copied ask asked and decided", copiedAskHistoryQuery, "events", "events_ask_payload_id", []any{[]string{"ask-id"}}},
-		{"a settlement's decided asks", decidedWordingRestore, "asks", "asks_pkey", []any{[]string{document}}},
-		{"a settlement's decided asks' events", decidedWordingRestore, "events", "events_ask_payload_id", []any{[]string{document}}},
-		{"the boot's decided asks' events", decidedWordingRestore, "events", "events_ask_payload_id", []any{[]string(nil)}},
+		// The restoration guards each ask on the answer its plan read, which it is given beside
+		// the ids (decidedWordingRestore).
+		{"a settlement's decided asks", decidedWordingRestore, "asks", "asks_pkey", []any{[]string{document}, []*string{nil}}},
+		{"a settlement's decided asks' events", decidedWordingRestore, "events", "events_ask_payload_id", []any{[]string{document}, []*string{nil}}},
+		{"the boot's decided asks' events", decidedWordingRestore, "events", "events_ask_payload_id", []any{[]string(nil), []*string(nil)}},
 	} {
 		t.Run(query.name, func(t *testing.T) {
 			var planJSON []byte

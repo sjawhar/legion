@@ -222,7 +222,7 @@ func itemBlockParent(issueKey *string, project, slug, nodeID string) *model.Node
 
 // ItemBlockRevision is what the index recorded of one block of an item at one revision: a
 // comment's block (IndexItem writes comment_block_state and comment_block_texts) or a part of an
-// ask (IndexAskParts writes ask_block_state and ask_block_texts).
+// ask (PlanAskParts and ItemIndexing.Queue write ask_block_state and ask_block_texts).
 type ItemBlockRevision struct {
 	// Current is the item's current revision, 0 while no block-aware build indexed it.
 	Current int

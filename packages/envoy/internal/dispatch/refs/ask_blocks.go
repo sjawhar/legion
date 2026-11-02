@@ -12,7 +12,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -158,32 +157,102 @@ func askPartPairs(parts []itemblocks.Block, ids []string, serverURL string) []bl
 	return pairs
 }
 
-// PlanAskParts reads the ask's stored part index and plans the parts the ask holds, written at
-// `at` (the created_at of the insert, the edited_at of an edit, the time of the answer),
-// against what that index holds (ReadItemIndex): each part's id (itemblocks.Align, where an
-// answer is replaced rather than reworded), the part rows and their texts at the new revision,
-// the links the parts hold and the targets they move. It writes nothing, so a transaction that
-// decides before it writes plans here in its read phase and queues the index in its write phase
-// (ItemIndexing.Queue), after the insert of the ask row its part rows reference. It bumps the
-// revision only when the parts changed.
-func PlanAskParts(ctx context.Context, q Queryer, ask model.Ask, serverURL string, at time.Time) (ItemIndexing, error) {
-	parts := AskParts(ask)
-	return planAskParts(ctx, q, ask, parts, askPartsSum(parts), serverURL, at)
+// PendingAskParts is where a transaction holds the part index its own queued writes of an ask
+// leave, so a second plan of one ask's parts in it runs against the rows the first queued rather
+// than against the stored ones: a version write that moves an open approval request and then
+// answers it writes the same ask's parts twice (docs.Ledger). A plan given no holder runs
+// against the stored index, which is every plan outside a transaction that queues its writes.
+type PendingAskParts interface {
+	// AskPartIndex is ask askID's part index as this transaction's queued writes leave it, held
+	// false when the transaction has queued none of them.
+	AskPartIndex(askID string) (ItemIndex, bool)
+	// RecordAskPartIndex records what the plan just made leaves, which the next plan of the same
+	// ask in this transaction runs against.
+	RecordAskPartIndex(askID string, index ItemIndex)
 }
 
-// planAskParts is PlanAskParts over parts the caller has already read and summed.
-func planAskParts(
+// PlanAskParts plans the parts the ask holds, written at `at` (the created_at of the insert, the
+// edited_at of an edit, the time of the answer), against what the ask's part index holds: each
+// part's id (itemblocks.Align, where an answer is replaced rather than reworded), the part rows
+// and their texts at the new revision, the links the parts hold and the targets they move. It
+// writes nothing, so a transaction that decides before it writes plans here in its read phase and
+// queues the index in its write phase (ItemIndexing.Queue), after the insert of the ask row its
+// part rows reference. It bumps the revision only when the parts changed.
+//
+// The index it plans against is pending's, what this transaction's own queued writes of the ask
+// leave, where it holds one, and the stored index otherwise (ReadItemIndex); it records what
+// this plan leaves on pending in turn. edited marks the ask edited where the update that sets
+// edited_at is queued and has not run, which that read does not show: at a first indexing it is
+// the difference between parts made at the time of the edit and parts that record no making
+// time, which is what an ask edited before the index first reached it has (ItemIndex.Edited).
+func PlanAskParts(
 	ctx context.Context,
 	q Queryer,
+	pending PendingAskParts,
+	ask model.Ask,
+	serverURL string,
+	at time.Time,
+	edited bool,
+) (ItemIndexing, error) {
+	index, held := ItemIndex{}, false
+	if pending != nil {
+		index, held = pending.AskPartIndex(ask.ID)
+	}
+	if !held {
+		var err error
+		if index, err = ReadItemIndex(ctx, q, ItemAsk, ask.ID); err != nil {
+			return ItemIndexing{}, fmt.Errorf("index the parts of ask %s: %w", ask.ID, err)
+		}
+	}
+	if edited {
+		index = index.Edited()
+	}
+	parts := AskParts(ask)
+	indexing, err := planAskParts(index, ask, parts, askPartsSum(parts), serverURL, at)
+	if err != nil {
+		return ItemIndexing{}, err
+	}
+	if pending != nil {
+		pending.RecordAskPartIndex(ask.ID, indexing.Held())
+	}
+	return indexing, nil
+}
+
+// PlanAskPartsCounted is PlanAskParts with the counts the event of the write carries: it resolves
+// the counted targets the plan moves and merges them into beside, what the same write moved
+// elsewhere - the ask's own references, or model.ReferenceChanges{} for a write that reconciles
+// none. It writes nothing either: the caller queues the plan where it makes its write, after the
+// statements that leave the ask's row as the plan reads it.
+func PlanAskPartsCounted(
+	ctx context.Context,
+	q Queryer,
+	pending PendingAskParts,
+	ask model.Ask,
+	serverURL string,
+	at time.Time,
+	edited bool,
+	beside model.ReferenceChanges,
+) (ItemIndexing, model.ReferenceChanges, error) {
+	indexing, err := PlanAskParts(ctx, q, pending, ask, serverURL, at, edited)
+	if err != nil {
+		return ItemIndexing{}, model.ReferenceChanges{}, err
+	}
+	counted, err := CountedChanges(ctx, q, indexing.Moved())
+	if err != nil {
+		return ItemIndexing{}, model.ReferenceChanges{}, err
+	}
+	return indexing, MergeChanges(beside, counted), nil
+}
+
+// planAskParts is PlanAskParts against index, what the ask's part index holds, over parts the
+// caller has already read and summed.
+func planAskParts(
+	index ItemIndex,
 	ask model.Ask,
 	parts []itemblocks.Block,
 	sum, serverURL string,
 	at time.Time,
 ) (ItemIndexing, error) {
-	index, err := ReadItemIndex(ctx, q, ItemAsk, ask.ID)
-	if err != nil {
-		return ItemIndexing{}, fmt.Errorf("index the parts of ask %s: %w", ask.ID, err)
-	}
 	source, err := askPartsSource(ask, parts, sum, serverURL)
 	if err != nil {
 		return ItemIndexing{}, err
@@ -198,8 +267,8 @@ func planAskParts(
 // askPartsSource is the ask's parts as the core every item kind's blocks go through reads them
 // (planItemBlocks): the parts in order, the sum its state row records for them, the maker each
 // part records, the alignment that replaces an answer rather than rewording it, and the links
-// each part's own text holds. It is the one reading of an ask's blocks, which the plan and the
-// index that writes at once both take.
+// each part's own text holds. It is the one reading of an ask's blocks: every plan of them takes
+// it, the owed repair's (planAskIfOwed) and a write's own (PlanAskParts) alike.
 func askPartsSource(ask model.Ask, parts []itemblocks.Block, sum, serverURL string) (itemBlockSource, error) {
 	makers, err := askPartMakers(ask, parts)
 	if err != nil {
@@ -217,27 +286,6 @@ func askPartsSource(ask model.Ask, parts []itemblocks.Block, sum, serverURL stri
 			return askPartPairs(next, ids, serverURL)
 		},
 	}, nil
-}
-
-// IndexAskParts plans the ask's parts and writes them at once, as a batch of their own
-// (PlanAskParts, store.RunWrite), for a caller whose transaction holds the ask row already and
-// queues no write phase to put the index on: a background pass of its own and the tests of the
-// part index. A caller that decides before it writes plans with PlanAskParts instead and queues
-// what it leaves.
-//
-// It returns the targets of the part mentions it moved, which the caller's event counts.
-func IndexAskParts(ctx context.Context, tx pgx.Tx, ask model.Ask, serverURL string, at time.Time) ([]Target, error) {
-	indexing, err := PlanAskParts(ctx, tx, ask, serverURL, at)
-	if err != nil {
-		return nil, err
-	}
-	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
-		indexing.Queue(b)
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("index the parts of ask %s: %w", ask.ID, err)
-	}
-	return indexing.Moved(), nil
 }
 
 // askPartColumns selects the three columns an ask's parts are read from, aliased a, in the order
@@ -307,7 +355,11 @@ func planAskIfOwed(ctx context.Context, q Queryer, askID, serverURL string) (Ite
 		return ItemRepair{kind: ItemAsk, itemID: askID}, nil
 	}
 	repair := ItemRepair{kind: ItemAsk, itemID: askID, owed: true}
-	if repair.indexing, err = planAskParts(ctx, q, ask, parts, partsSum, serverURL, writtenAt); err != nil {
+	index, err := ReadItemIndex(ctx, q, ItemAsk, askID)
+	if err != nil {
+		return ItemRepair{}, fmt.Errorf("index the parts of ask %s: %w", askID, err)
+	}
+	if repair.indexing, err = planAskParts(index, ask, parts, partsSum, serverURL, writtenAt); err != nil {
 		return ItemRepair{}, err
 	}
 	return repair, nil
@@ -353,10 +405,10 @@ type AskIDs struct {
 }
 
 // AskPartIDs is the part ids of each of asks, in the order they were given, read in one
-// statement over the part rows IndexAskParts writes. A reader shows them beside each option and
-// the answer, so a reference to either can be written: `dispatch://<key>/ask/<id>#b-<part id>`,
-// pinned to the ask's revision with `@v<N>`. The same ask may be given twice - two event
-// payloads of one ask - and each is matched on its own.
+// statement over the part rows PlanAskParts plans and ItemIndexing.Queue writes. A reader shows
+// them beside each option and the answer, so a reference to either can be written:
+// `dispatch://<key>/ask/<id>#b-<part id>`, pinned to the ask's revision with `@v<N>`. The same
+// ask may be given twice - two event payloads of one ask - and each is matched on its own.
 //
 // A part is matched to the option or the answer it stands for by what identifies it: its type
 // and the identity hash of its own text (AskParts, which salts an answer's with its answerer),

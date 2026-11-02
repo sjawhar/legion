@@ -300,6 +300,44 @@ func planReplaceCounted(
 	}, nil
 }
 
+// planAskPartsCounted is the counted index of an ask's parts as this package makes its writes: it
+// plans the parts the ask's row holds at `at` - its question, its options and the answer it
+// carries - against the index this transaction's own queued writes of the same ask leave, else
+// the stored one, resolves the counted targets they move and merges them into beside, what the
+// same write moved elsewhere (refs.PlanAskPartsCounted), and returns those with the step that
+// writes the parts. edited marks the ask edited for a write whose update of edited_at is queued
+// and has not run. The step is queued after the statements that leave the row as the plan reads
+// it, since a part row names its ask; the plan itself runs in the read phase, where the counts
+// the event carries are worked out.
+func planAskPartsCounted(
+	ctx context.Context,
+	tx pgx.Tx,
+	ask model.Ask,
+	serverURL string,
+	at time.Time,
+	edited bool,
+	beside model.ReferenceChanges,
+) (model.ReferenceChanges, WriteStep, error) {
+	indexing, changes, err := refs.PlanAskPartsCounted(ctx, tx, pendingAskParts(ctx, tx), ask, serverURL, at, edited, beside)
+	if err != nil {
+		return model.ReferenceChanges{}, nil, err
+	}
+	return changes, func(b *store.WriteBatch) error {
+		indexing.Queue(b)
+		return nil
+	}, nil
+}
+
+// pendingAskParts is where a plan of an ask's parts in tx records what it leaves and reads what
+// an earlier plan of the same ask in this transaction left: ctx's ledger, when it queues tx's
+// writes, and nothing where the plan's writes run at once and no plan before it queued any.
+func pendingAskParts(ctx context.Context, tx pgx.Tx) refs.PendingAskParts {
+	if ledger := queueFor(ctx, tx); ledger != nil {
+		return ledger
+	}
+	return nil
+}
+
 // planAskReferences is planReplaceCounted for ask askID, whose references are the ones its
 // question cites.
 func planAskReferences(ctx context.Context, tx pgx.Tx, askID, question, serverURL string) (model.ReferenceChanges, WriteStep, error) {

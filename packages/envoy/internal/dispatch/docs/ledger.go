@@ -117,6 +117,10 @@ type Ledger struct {
 	// transaction plans against (planReplaceCounted, planBlockIndex).
 	referenced   map[refs.Target][]refs.Target
 	blockIndexes map[string]refs.BlockIndex
+	// askParts holds, per ask this transaction has planned the parts of, what its part index
+	// holds once that plan is written: what a later plan of the same ask's parts in this
+	// transaction runs against (refs.PendingAskParts, planAskPartsCounted).
+	askParts map[string]refs.ItemIndex
 	// askBlocks holds, per document, the block asks whose rows this transaction has queued writes
 	// of, by block id, as they will stand (recordAskBlock, loadAskBlocks).
 	askBlocks map[string]map[string]model.Ask
@@ -490,6 +494,26 @@ func (l *Ledger) RegisterPendingArtifact(artifactID, refKey string) {
 	l.artifacts[artifactID] = refKey
 }
 
+// AskPartIndex is ask askID's part index as this transaction's queued writes of it leave it, held
+// false when the transaction has planned none of its parts yet: what a second plan of the same
+// ask's parts runs against, so it sees the rows the first plan queued rather than the stored ones
+// (refs.PendingAskParts). A version write that moves an open approval request and then answers it
+// with the carry plans one ask's parts twice, and without this the answer would land in the
+// revision the move took.
+func (l *Ledger) AskPartIndex(askID string) (refs.ItemIndex, bool) {
+	index, held := l.askParts[askID]
+	return index, held
+}
+
+// RecordAskPartIndex records what the plan just made of ask askID's parts leaves, which the next
+// plan of the same ask's parts in this transaction runs against (AskPartIndex).
+func (l *Ledger) RecordAskPartIndex(askID string, index refs.ItemIndex) {
+	if l.askParts == nil {
+		l.askParts = make(map[string]refs.ItemIndex)
+	}
+	l.askParts[askID] = index
+}
+
 // pendingRefKey is the reference key registered for artifactID on ctx's ledger
 // (RegisterPendingArtifact), false when none is and the artifacts row is the only place to read it.
 func pendingRefKey(ctx context.Context, artifactID string) (string, bool) {
@@ -691,9 +715,28 @@ func (l *Ledger) commit(ctx context.Context) error {
 			l.service.scheduleSettleAfterAppend(flush.room)
 		}
 	}
+	l.noteAppended()
 	l.flushes = nil
 	l.creditRooms()
 	return nil
+}
+
+// noteAppended notes to the compaction queue (noteStoredUpdates) the last version each append of
+// the committed transaction made durable: each live write's own appends, and the room updates it
+// flushed ahead of them. A document the transaction both wrote and flushed is noted once for
+// each, which asks the queue for the one check a single note would (compactionQueue.note). A
+// seed's row is its document's first, which leaves nothing to fold.
+func (l *Ledger) noteAppended() {
+	for _, artifactID := range l.order {
+		if versions := l.live[artifactID].versions; len(versions) > 0 {
+			l.service.noteStoredUpdates(artifactID, int64(versions[len(versions)-1]))
+		}
+	}
+	for _, flush := range l.flushes {
+		if appended := flush.appended(nil); len(appended) > 0 {
+			l.service.noteStoredUpdates(flush.room, int64(appended[len(appended)-1]))
+		}
+	}
 }
 
 // takeRoomCursors records on each room instance a write was made on, and on the room instance its

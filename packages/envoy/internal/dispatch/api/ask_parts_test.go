@@ -271,6 +271,63 @@ func TestAnAsksPartsAreIndexedOnEveryWrite(t *testing.T) {
 	}
 }
 
+// An ask the part index has never reached - every ask stored before migration 20261101143212,
+// which seeds each of them owed at revision 0 - takes its first index from whichever write lands
+// first. When that write is an edit, its parts were made at a time the ask never recorded, so
+// each records none, as a comment's blocks do at the first indexing of a comment already edited.
+// The edit's own update of edited_at is queued and has not run when the plan reads the row, so
+// the plan has to be told the ask is edited.
+func TestAnEditThatFirstIndexesAnAsksPartsRecordsNoMakingTime(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "First indexed by an edit", "A spec")
+	ask := createPartAsk(t, handler, issue.Key, "Which day do we ship?",
+		map[string]string{"label": "Monday", "description": "Ship at the start of the week."},
+		map[string]string{"label": "Tuesday", "description": "Ship once the review lands."})
+	seedAskPartIndex(t, database, ask.ID)
+
+	editPartAskOptions(t, handler, ask.ID, "reword an option",
+		map[string]string{"label": "Monday", "description": "Ship at the start of the week."},
+		map[string]string{"label": "Tuesday", "description": "Ship once the review lands and the queue is green."})
+
+	requireAskParts(t, database, ask.ID, "the edit that first indexes the ask", "b1@1 b2@1 b3@1", 1)
+	for _, part := range []string{"b1", "b2", "b3"} {
+		if made := askPartMadeAt(t, database, ask.ID, part); made != nil {
+			t.Fatalf("part %s of the ask the edit first indexed was made at %v, want no making time", part, *made)
+		}
+	}
+}
+
+// seedAskPartIndex puts the ask's part index back to what migration 20261101143212 seeded for
+// every ask stored before it: a state row owed at revision 0, with no part row and no part text,
+// which the next write of the ask indexes for the first time.
+func seedAskPartIndex(t *testing.T, database *store.Store, askID string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, statement := range []string{
+		`delete from ask_block_refs where ask_id = $1::uuid`,
+		`delete from ask_block_texts where ask_id = $1::uuid`,
+		`delete from ask_blocks where ask_id = $1::uuid`,
+		`update ask_block_state set revision = 0, next_block = 1, body_sha256 = null, owed_at = now() where ask_id = $1::uuid`,
+	} {
+		if _, err := database.Pool.Exec(ctx, statement, askID); err != nil {
+			t.Fatalf("seed the part index of ask %s: %v", askID, err)
+		}
+	}
+}
+
+// askPartMadeAt is the time the part was made (made_at), null for a part found at the first
+// indexing of an ask already edited.
+func askPartMadeAt(t *testing.T, database *store.Store, askID, blockID string) *time.Time {
+	t.Helper()
+	var made *time.Time
+	if err := database.Pool.QueryRow(context.Background(), `
+		select made_at from ask_blocks where ask_id = $1::uuid and block_id = $2
+	`, askID, blockID).Scan(&made); err != nil {
+		t.Fatalf("read the making time of %s of ask %s: %v", blockID, askID, err)
+	}
+	return made
+}
+
 // A decided ask an earlier release reworded gets its decided wording back with no event of any
 // kind (restoreWordings), and its parts move with its row: the restoration is a write of the
 // ask's question and options, so it indexes them, and leaves nothing owed.

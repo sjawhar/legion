@@ -146,8 +146,9 @@ func RewriteApprovalAsk(
 	row := *ask
 	// The rewording is a revision of the request's question part, which its ask.edited names
 	// beside the request's own references. The parts are planned from the row the update below
-	// writes, which the read of the index does not show yet, and written in that same step.
-	changes, parts, err := planAskParts(ctx, tx, row, serverURL, editedAt, changes)
+	// writes, which the read of the index does not show yet, and written in that same step; that
+	// update sets edited_at too, which the plan is told rather than reading.
+	changes, parts, err := planAskPartsCounted(ctx, tx, row, serverURL, editedAt, true, changes)
 	if err != nil {
 		return fmt.Errorf("index the parts of approval ask %s: %w", ask.ID, err)
 	}
