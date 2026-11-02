@@ -306,8 +306,9 @@ const SPEC_FLAGS = ["--spec", "--spec-file"];
 /**
  * `dispatch artifact` is reviewed only as an upload of a markdown document. Dispatch stores an
  * upload as one when the CLI sends it as text/markdown: inline text (`--content`, `--content-file`),
- * whatever its name, or a `--path` file whose own name ends in `.md` or `.markdown`, since Bun takes
- * a file's type from its path. The gate also reviews an upload whose `--name` ends in `.md`.
+ * which the CLI takes only under a name ending in `.md` or `.markdown` or with no extension, or a
+ * `--path` file whose own name ends in `.md` or `.markdown`, since Bun takes a file's type from its
+ * path. The gate also reviews an upload whose `--name` ends in `.md`.
  */
 const UPLOAD_COMMAND = "artifact";
 /** The upload flags whose text is the document itself. */
