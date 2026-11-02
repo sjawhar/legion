@@ -27,8 +27,8 @@ type BlockPointer struct {
 }
 
 // BlockPointers lists, in document order, each reference each typed block's `block[]` attributes
-// hold, a block's attributes by name. A schema declaring no `block[]` attribute (every shipped
-// schema) lists none without walking tree. A tree inside the schema holds only canonical
+// hold, a block's attributes by name. A schema declaring no `block[]` attribute lists none
+// without walking tree. A tree inside the schema holds only canonical
 // references (ParseBlockPointerValue); any other value is skipped.
 //
 // A typed block repeating the id of a typed block before it in document order lists none: the
@@ -75,26 +75,56 @@ func BlockPointers(tree *Node) []BlockPointer {
 	return pointers
 }
 
+// BlockTarget is a block a pointer names, as the write naming it would leave it: the types the
+// block index holds under its node id, the document holding it (an artifact's reference key),
+// and that document's issue, "" for a document a project holds.
+type BlockTarget struct {
+	Types    []string
+	Document string
+	Issue    string
+}
+
+// BlockWriting is where the write holding the pointers lands: the document it writes (an
+// artifact's reference key), that document's issue, "" for a document a project holds, and the
+// issues above it, `child_of` upward (refs.IssueAncestors).
+type BlockWriting struct {
+	Document  string
+	Issue     string
+	Ancestors []string
+}
+
+// sameDocumentPointers are the `block[]` attributes whose target is a block of the writing
+// document itself. A plan task's `needs` orders the tasks of one plan, so it names a task of its
+// own document and never another plan's; every other attribute may name a block of the writing
+// document's own issue or of an issue above it.
+var sameDocumentPointers = map[string]bool{"needs": true}
+
 // CheckBlockPointers refuses tree, the tree a write leaves, when a pointer it introduces names a
-// block of a type its attribute's targets do not allow, naming the first such pointer in document
-// order. A pointer is introduced when prior, the tree before the write, holds no pointer with the
-// same typed block id, typed block type, attribute and reference: a new pointer, a changed value,
-// or a block retyped into a type declaring the attribute, whatever the type before declared under
-// that name. A nil prior (a new document, or one outside the schema) holds none. A pointer the
-// write leaves unchanged is never refused, so a target retyped elsewhere blocks no unrelated edit.
-// Its pointers are BlockPointers', so a typed block repeating the id of a typed block before it is
-// never checked. The block index writes no edge for it while it repeats the id, but settlement's
+// block the attribute may not name, naming the first such pointer in document order. A pointer is
+// introduced when prior, the tree before the write, holds no pointer with the same typed block id,
+// typed block type, attribute and reference: a new pointer, a changed value, or a block retyped
+// into a type declaring the attribute, whatever the type before declared under that name. A nil
+// prior (a new document, or one outside the schema) holds none. A pointer the write leaves
+// unchanged is never refused, so a target retyped elsewhere blocks no unrelated edit. Its pointers
+// are BlockPointers', so a typed block repeating the id of a typed block before it is never
+// checked. The block index writes no edge for it while it repeats the id, but settlement's
 // EnsureBlockIDs then gives it a fresh id, and its unchecked pointer becomes an edge, which the
 // readers hide while its target has a type the attribute does not allow (block_ref_listed). A
 // typed block repeating the id of an earlier paragraph is checked, though the index writes no edge
 // for it either.
 //
+// A pointer is refused when it names a block no document holds, a block of a type the attribute's
+// targets do not allow (more than one type is refused when any is outside them), a block of an
+// issue that is neither the writing document's own issue nor one above it, a block of another
+// document when the writing document is a project's and so has no issue, or a block of another
+// document under an attribute that points only inside its own document (sameDocumentPointers).
+// Only a write that comes this way is held to this: a browser's edit never does, and its pointer
+// at a block no document holds stays as the unresolved reference it is.
+//
 // resolve is called at most once, with the target of each introduced pointer whose attribute has
-// targets, and returns the current types of the blocks they name by node id (text.TargetID); none
-// for an id no block has: such a pointer is accepted, as an ordinary reference to an absent node
-// is. More than one type is refused when any is outside the targets. Its error is returned as it
-// is.
-func CheckBlockPointers(tree, prior *Node, resolve func(targets []text.Ref) (map[string][]string, error)) error {
+// targets, and answers where the write lands and the block each target names by node id
+// (text.TargetID), with none for an id no block has. Its error is returned as it is.
+func CheckBlockPointers(tree, prior *Node, resolve func(targets []text.Ref) (BlockWriting, map[string]BlockTarget, error)) error {
 	pointers := BlockPointers(tree)
 	if len(pointers) == 0 {
 		return nil
@@ -118,17 +148,48 @@ func CheckBlockPointers(tree, prior *Node, resolve func(targets []text.Ref) (map
 	if len(introduced) == 0 {
 		return nil
 	}
-	types, err := resolve(targets)
+	writing, found, err := resolve(targets)
 	if err != nil {
 		return err
 	}
 	for _, pointer := range introduced {
-		for _, typ := range types[text.TargetID(pointer.Target)] {
+		// at names the pointer every refusal below is about: the block holding it, the
+		// attribute, and the reference as written.
+		at := fmt.Sprintf("typed block %q %s attribute %q points at %s",
+			pointer.BlockType, TypedBlockIDAttribute(pointer.Block), pointer.Attribute, pointer.Ref)
+		target, holds := found[text.TargetID(pointer.Target)]
+		if !holds {
+			return fmt.Errorf("%w: %s, which no document holds", ErrBlockPointer, at)
+		}
+		for _, typ := range target.Types {
 			if !slices.Contains(pointer.Targets, typ) {
-				return fmt.Errorf("%w: typed block %q %s attribute %q points at %s, a %q block; it points only at %s",
-					ErrBlockPointer, pointer.BlockType, TypedBlockIDAttribute(pointer.Block), pointer.Attribute, pointer.Ref, typ, strings.Join(pointer.Targets, ", "))
+				return fmt.Errorf("%w: %s, a %q block; it points only at %s",
+					ErrBlockPointer, at, typ, strings.Join(pointer.Targets, ", "))
 			}
+		}
+		switch {
+		case writing.Issue == "":
+			if target.Document != writing.Document {
+				return fmt.Errorf("%w: %s, a block of %s; a document a project holds, which no issue does, points only at a block of itself",
+					ErrBlockPointer, at, target.Document)
+			}
+		case target.Issue != writing.Issue && !slices.Contains(writing.Ancestors, target.Issue):
+			return fmt.Errorf("%w: %s, a block of %s; it points only at a block of %s or of an issue above it",
+				ErrBlockPointer, at, issueOf(target), writing.Issue)
+		}
+		if sameDocumentPointers[pointer.Attribute] && target.Document != writing.Document {
+			return fmt.Errorf("%w: %s, a block of %s; it points only at a block of its own document, %s",
+				ErrBlockPointer, at, target.Document, writing.Document)
 		}
 	}
 	return nil
+}
+
+// issueOf names where a target's document sits, for a refusal: its issue, or the document itself
+// when a project holds it and no issue does.
+func issueOf(target BlockTarget) string {
+	if target.Issue == "" {
+		return target.Document + ", which a project holds and no issue does"
+	}
+	return target.Issue
 }

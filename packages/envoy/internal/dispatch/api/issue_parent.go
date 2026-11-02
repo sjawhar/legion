@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 // parseIssueParent decodes the tri-state `parent` field of an issue PATCH. Absent →
@@ -37,12 +38,14 @@ func parseIssueParent(raw json.RawMessage) (parent *string, provided bool, err e
 
 // parentDepthCap is the most links an issue may sit below its root: a create or reparent that
 // would put an issue deeper is refused (refuseParentTooDeep), so it bounds every recursive issue
-// walk — the ancestor walk, the children subtree walk, the components and repository laterals'
-// owner searches, the architecture tree's containment walks, and the legion-label walk below
-// (legionManagedStatusSQL) — like refs.Closure's depth cap: the queries terminate even if a
-// raced reparent ever commits a cycle. parentDepthCapSQL is the same number spliced into the
-// walks built as SQL text.
-const parentDepthCap = 32
+// walk — the ancestor walk (refs.IssueAncestors, the one issueAncestors reads), the children
+// subtree walk, the components and repository laterals' owner searches, the architecture tree's
+// containment walks, and the legion-label walk below (legionManagedStatusSQL) — like
+// refs.Closure's depth cap: the queries terminate even if a raced reparent ever commits a cycle.
+// It is refs.IssueDepthCap, where the ancestor walk lives so that docs and refs can read it too:
+// one bound for every issue walk in the server. parentDepthCapSQL is the same number spliced
+// into the walks built as SQL text.
+const parentDepthCap = refs.IssueDepthCap
 
 var parentDepthCapSQL = strconv.Itoa(parentDepthCap)
 
