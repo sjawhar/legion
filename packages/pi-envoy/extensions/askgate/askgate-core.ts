@@ -758,6 +758,66 @@ type ShellToken =
   | { kind: "redirect"; fd: string; op: string; target?: string; start: number; end: number }
   | { kind: "comment"; start: number; end: number };
 
+/**
+ * The literal text of a `$(cat <<'EOF' … EOF)` at `from`, or undefined. A command substitution
+ * is an expansion the gate cannot read, but this one is already written out: `cat` with no
+ * operand and one here-document whose delimiter is quoted takes no input of its own and expands
+ * nothing, so its output is the body as it stands in the command. Reading it keeps a write whose
+ * body is a here-document inside the literal grammar, where it is reviewed, rather than posting
+ * it unreviewed with a warning the writer can miss.
+ *
+ * Only where bash gives the same bytes, which is **inside double quotes alone**: unquoted, bash
+ * splits the output into words and expands each as a glob, so a body of `ok --issue Y-9` becomes
+ * three arguments and one holding `/etc/host*` becomes file names. The caller passes only the
+ * double-quoted site.
+ *
+ * The shape: `cat`, an optional `-`, `<<` or `<<-` (whose body and delimiter line have leading
+ * tabs stripped), a delimiter in quotes, and nothing after the body's closing delimiter but
+ * blanks and the closing parenthesis. Three narrowings each answer a way bash reads it otherwise:
+ * a double-quoted delimiter takes no backslash, since bash removes the quoting and `"#\$"` ends
+ * the body at `#$`; no blank of the opener may be a newline, since `cat` on its own line reads
+ * the shell's own input and not the here-document; and the end is found from the delimiter line
+ * rather than by scanning for the parenthesis, since a body holding `It's`, a lone `"` or `1)`
+ * sends such a scan past the command.
+ */
+function heredocSubstitution(
+  text: string,
+  from: number
+): { end: number; value: string } | undefined {
+  if (!text.startsWith("$(", from)) return undefined;
+  const opener =
+    /^[^\S\n]*cat[^\S\n]+(?:-[^\S\n]+)?<<(-?)[^\S\n]*(?:'([^']*)'|"([^"\\`]*)")[^\S\n]*\n/.exec(
+      text.slice(from + 2)
+    );
+  if (opener === null) return undefined;
+  const delimiter = opener[2] ?? opener[3] ?? "";
+  if (delimiter === "") return undefined;
+  const strip = opener[1] === "-";
+  const body: string[] = [];
+  let index = from + 2 + opener[0].length;
+  while (index <= text.length) {
+    const stop = text.indexOf("\n", index);
+    const line = text.slice(index, stop === -1 ? text.length : stop);
+    if ((strip ? line.replace(/^\t+/, "") : line) === delimiter) {
+      // Past the body only blanks and the closing parenthesis may stand: anything else is another
+      // command (`… EOF; id)`) or an unclosed substitution, and neither is this literal.
+      const rest = text.slice(stop === -1 ? text.length : stop + 1);
+      const close = /^\s*\)/.exec(rest);
+      if (close === null) return undefined;
+      return {
+        end: (stop === -1 ? text.length : stop + 1) + close[0].length,
+        // Command substitution strips the trailing newlines of what it captures.
+        value: body.join("\n").replace(/\n+$/, ""),
+      };
+    }
+    if (stop === -1) break;
+    body.push(strip ? line.replace(/^\t+/, "") : line);
+    index = stop + 1;
+  }
+  // No closing delimiter: bash would read on past the command, so this is no literal.
+  return undefined;
+}
+
 /** Where a `$(…)`, `${…}` or backtick expansion that starts at `from` ends, quotes and nesting
  * followed roughly: a mistake here can only move a cause, since any `$` or backtick is unread. */
 function expansionEnd(text: string, from: number): number {
@@ -832,6 +892,13 @@ function readWord(text: string, from: number): WordToken {
       while (index < text.length && text[index] !== '"') {
         const inner = text[index];
         if (REFUSED_DOUBLE_QUOTED.includes(inner)) {
+          // A `$(cat <<'EOF' … EOF)` is written out in the command: take its text as literal.
+          const here = inner === "$" ? heredocSubstitution(text, index) : undefined;
+          if (here !== undefined) {
+            value += here.value;
+            index = here.end;
+            continue;
+          }
           unread.push(inner);
           refused = true;
           if (inner === "\\") {
@@ -851,6 +918,8 @@ function readWord(text: string, from: number): WordToken {
       if (refused && part.includes("\n")) linesExpansion ??= part.split("\n")[0];
       index++;
     } else if (char === "$" || char === "`") {
+      // No here-document is read here: unquoted, bash splits a substitution's output into words
+      // and expands each as a glob, so its text is not what the CLI gets (heredocSubstitution).
       unread.push(char);
       const end = Math.max(expansionEnd(text, index), index + 1);
       expand(index, end);
