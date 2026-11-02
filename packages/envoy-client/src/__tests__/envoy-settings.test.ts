@@ -4,7 +4,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { dispatchSettings } from "../dispatch-config";
 import { type EnvoyConfig, readEnvoyConfig } from "../envoy-config";
-import { type EnvoyEnvironment, envoySettings } from "../envoy-settings";
+import {
+  type EnvoyEnvironment,
+  envoySettings,
+  HEARTBEAT_RETRY_MAX_MS,
+  HEARTBEAT_RETRY_MIN_MS,
+  heartbeatRetryDelayMs,
+} from "../envoy-settings";
 
 /** The error a read failed with, or a test failure naming what it read instead. */
 function errorOf(config: EnvoyConfig): string {
@@ -592,5 +598,27 @@ describe("the NATS seed in envoy.json", () => {
       url: "https://dispatch.example",
       token: "user-token",
     });
+  });
+});
+
+// Both plugins' heartbeats arm their one extra registration from this draw, so the window it
+// stays inside is what keeps a listener that failed many sessions at once from being met by all
+// of them on the same tick.
+describe("heartbeatRetryDelayMs", () => {
+  test("spans the retry window and never leaves it", () => {
+    expect(heartbeatRetryDelayMs(() => 0)).toBe(HEARTBEAT_RETRY_MIN_MS);
+    expect(heartbeatRetryDelayMs(() => 1)).toBe(HEARTBEAT_RETRY_MAX_MS);
+    expect(heartbeatRetryDelayMs(() => 0.5)).toBe(
+      (HEARTBEAT_RETRY_MIN_MS + HEARTBEAT_RETRY_MAX_MS) / 2
+    );
+  });
+
+  test("draws afresh each call, so failing sessions come back spread out", () => {
+    const drawn = new Set(Array.from({ length: 50 }, () => heartbeatRetryDelayMs()));
+    for (const delay of drawn) {
+      expect(delay).toBeGreaterThanOrEqual(HEARTBEAT_RETRY_MIN_MS);
+      expect(delay).toBeLessThanOrEqual(HEARTBEAT_RETRY_MAX_MS);
+    }
+    expect(drawn.size).toBeGreaterThan(1);
   });
 });

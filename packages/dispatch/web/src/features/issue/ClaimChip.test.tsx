@@ -382,11 +382,21 @@ test("claimIsTakeable follows the server's refusal: held inside the grace, takea
   const past = now - (ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS + 60_000);
   expect(claimIsTakeable(claim, stalledRegistry("session-one", inside), now)).toBe(false);
   expect(claimIsTakeable(claim, stalledRegistry("session-one", past), now)).toBe(true);
-  // The exact moment is still the holder's: the server grants the take after it, not at it.
+  // The exact moment is still the holder's: the server grants the take after it, not at it
+  // (`judgeClaim`'s `now.After(takeableAt)`), so a chip that read it free here would paint
+  // "takeable now" and list the issue as unclaimed for a take the server answers 409.
   expect(
     claimIsTakeable(
       claim,
       stalledRegistry("session-one", now - ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS),
+      now
+    )
+  ).toBe(false);
+  // One millisecond past it the server grants the take, and so does this.
+  expect(
+    claimIsTakeable(
+      claim,
+      stalledRegistry("session-one", now - ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS - 1),
       now
     )
   ).toBe(true);

@@ -138,6 +138,47 @@ func TestTheCleanStopRunsOffTheMachinesDecision(t *testing.T) {
 	}
 }
 
+// The daemon's clock and the listener's are not one, and the stop is dated so that the skew
+// between them can only refuse a delete, never make one. The moment the stop carries is read on
+// this daemon's clock and compared with an UpdatedAt the registering process stamped on its own,
+// so a daemon running ahead would otherwise call the relaunch's registration older than the stop
+// and delete it — the very loss the condition exists to stop. So the stop is dated
+// cleanSessionStopSkewAllowance before the moment it was asked at, and no further: a stop dated
+// before the relaunch's own backoff and boot could begin refusing deletes that are owed.
+//
+// Before the allowance the stop carried time.Now() itself, and the first check below failed with
+// a gap of about zero.
+func TestCleanSessionStopDatesItselfBeforeTheMomentItWasAskedAt(t *testing.T) {
+	arrived := make(chan struct{})
+	listener := &deleteRecorder{arrived: arrived}
+	server := listener.server(t)
+	stop := cleanSessionStop(context.Background(), server.URL, "envoy-token", bufferedLogger(&bytes.Buffer{}))
+
+	// The moment is read inside the call, so it lies between these two, less the allowance.
+	before := time.Now()
+	stop("ses_skewed")
+	after := time.Now()
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the clean stop never reached the listener")
+	}
+
+	var millis int64
+	if _, err := fmt.Sscanf(listener.query, "if_not_registered_after=%d", &millis); err != nil {
+		t.Fatalf("the listener was asked %q, want a stop naming the moment it belongs to: %v", listener.query, err)
+	}
+	carried := time.UnixMilli(millis)
+	if behind := after.Sub(carried); behind < cleanSessionStopSkewAllowance {
+		t.Fatalf("the stop was dated %s before it was asked for, want at least the %s allowance: a daemon clock that far ahead of the listener's would delete the relaunch's registration",
+			behind, cleanSessionStopSkewAllowance)
+	}
+	if behind := before.Sub(carried); behind > launchBackoffFirst {
+		t.Fatalf("the stop was dated %s before it was asked for, past the %s a relaunch's own backoff takes: stops that are owed would start being refused",
+			behind, launchBackoffFirst)
+	}
+}
+
 // A listener that never answers does not leave the stop in flight for as long as it likes: the
 // request is bounded, by cleanSessionStopBudget and by supervision's own end, and what it then
 // costs the session is only the wait it already had, so it is reported as the refusal it is.

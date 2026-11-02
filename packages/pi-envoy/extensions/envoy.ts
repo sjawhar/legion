@@ -68,7 +68,12 @@ import {
 } from "@legion/envoy-client/dispatch-session-state";
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe";
 import { askgateSetting, readEnvoyConfig } from "@legion/envoy-client/envoy-config";
-import { MIN_PASS_DEADLINE_MS } from "@legion/envoy-client/envoy-settings";
+import {
+  heartbeatRetryDelayMs,
+  MIN_PASS_DEADLINE_MS,
+  REGISTRATION_SETTLE_MS,
+  SHUTDOWN_SETTLE_MS,
+} from "@legion/envoy-client/envoy-settings";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
 import { natsConnectionOptions } from "@legion/envoy-client/nats-connection";
@@ -265,20 +270,6 @@ function liveSessionSettings(live: LiveAgentSession | undefined): AgentStreamSet
 
 const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
-/**
- * The window the one extra registration a failed heartbeat makes waits out, before the heartbeat
- * returns to its plain interval. A registration that times out under listener load costs the
- * session a third of its live window (`.github/scripts/check-heartbeat-margin.sh`), and three
- * missed refreshes drop a running pane out of every live listing (dispatch://INFRA-392), so one
- * failure buys one extra call rather than a whole interval's wait. The delay is drawn fresh per
- * call, so the panes a slow listener failed together come back spread over twenty seconds
- * instead of in one burst: the listener sees one extra call per failing session per interval,
- * never a herd on the same tick. claude-envoy's channel server retries on the same rule
- * (packages/claude-envoy/src/envoy-channel-server.ts); the per-call budget is untouched by it,
- * since the extra call is one more call and not a longer one.
- */
-const HEARTBEAT_RETRY_MIN_MS = 20_000;
-const HEARTBEAT_RETRY_MAX_MS = 40_000;
 /** How long a delivery waits for the pictures it embeds before it goes out as text alone. */
 const DELIVERY_PICTURES_TIMEOUT_MS = 20_000;
 /** The most BTW event ids an instance remembers, so a failure notice naming one stays inert. */
@@ -2448,25 +2439,16 @@ export default function envoyExtension(pi: PiApi): void {
     return registering;
   };
 
-  /** How long a deregistration waits for a registration already on the wire. A client call can
-   *  take a timeout and a retry (5.25 s) to fail, so this is the whole of one attempt; past it
-   *  the DELETE goes out anyway, since one never sent always leaves the record behind where one
-   *  that races a slow registration only may. */
-  const REGISTRATION_SETTLE_MS = 5_000;
-
   /** The whole of what the `session_shutdown` handler gives its deregistration and its drain. Oh
    *  My Pi abandons a shutdown handler after 2 s (`SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS`), and the
-   *  second this leaves is for the synchronous work ahead of the race and for the host. */
-  const SHUTDOWN_DEADLINE_MS = 1_000;
-
-  /** What the shutdown path's deregistration spends on a registration still on the wire.
-   *  `REGISTRATION_SETTLE_MS` is five times the whole handler deadline, so a registration slower
-   *  than a second meant no DELETE was sent at all and the record outlived this process by the
-   *  gone horizon — the failure this change exists to prevent, where a DELETE that races a slow
-   *  registration only may lose. A quarter of a second covers a listener round trip many times
-   *  over and leaves 750 ms of `SHUTDOWN_DEADLINE_MS` (1.75 s of the host's 2 s) for the DELETE
+   *  second this leaves is for the synchronous work ahead of the race and for the host. The
+   *  shared `SHUTDOWN_SETTLE_MS` is what that path spends waiting on a registration still on the
+   *  wire: `REGISTRATION_SETTLE_MS` is five times this whole deadline, so a registration slower
+   *  than a second would mean no DELETE was sent at all and the record outlived this process by
+   *  the gone horizon, where a DELETE that races a slow registration only may lose. The quarter
+   *  of a second it spends instead leaves 750 ms here (1.75 s of the host's 2 s) for the DELETE
    *  to reach the wire. */
-  const SHUTDOWN_REGISTRATION_SETTLE_MS = 250;
+  const SHUTDOWN_DEADLINE_MS = 1_000;
 
   /** Deregisters a session this process has stopped heartbeating — its own at shutdown, the one
    *  it left at a `/new`, a fork or a branch — once that session's registration has settled or
@@ -2671,14 +2653,15 @@ export default function envoyExtension(pi: PiApi): void {
           healing = false;
         });
     };
-    /** Schedules the extra call and answers how far out it is, or nothing when one is already
-     *  owed. The timer is the host's, so it is cleared with the session. */
+    /** Schedules the extra call a failed heartbeat buys and answers how far out it is, or
+     *  nothing when one is already owed. The delay is the shared draw
+     *  (`heartbeatRetryDelayMs`), the one claude-envoy's channel server retries on too, so the
+     *  panes a slow listener failed together come back spread rather than in one burst. The
+     *  timer is the host's, so it is cleared with the session. */
     const armRetry = (): number | undefined => {
       if (retryArmed) return undefined;
       retryArmed = true;
-      const delayMs = Math.round(
-        HEARTBEAT_RETRY_MIN_MS + Math.random() * (HEARTBEAT_RETRY_MAX_MS - HEARTBEAT_RETRY_MIN_MS)
-      );
+      const delayMs = heartbeatRetryDelayMs();
       context.setTimeout(() => {
         // A pass settled while the delay ran: the registration is fresh and the call is dropped.
         if (!retryArmed) return;
@@ -3360,13 +3343,13 @@ export default function envoyExtension(pi: PiApi): void {
     try {
       // The heartbeat has stopped (`shuttingDown`), so no new registration starts; one already on
       // the wire is waited out before the DELETE, or it would land behind it and leave the session
-      // registered with nobody heartbeating it. That wait takes `SHUTDOWN_REGISTRATION_SETTLE_MS`
-      // here rather than the whole of `REGISTRATION_SETTLE_MS`, which is longer than the deadline
+      // registered with nobody heartbeating it. That wait takes `SHUTDOWN_SETTLE_MS` here rather
+      // than the whole of `REGISTRATION_SETTLE_MS`, which is longer than the deadline
       // below: the DELETE has to be on the wire before the host abandons this handler, since a
       // record left behind outlives the process by the gone horizon. The drain runs beside the
       // wait: it needs no listener call, and both share that deadline, which is what the host's
       // own limit on a shutdown handler leaves them.
-      const deregistration = deregisterSession(sessionID, SHUTDOWN_REGISTRATION_SETTLE_MS).catch(
+      const deregistration = deregisterSession(sessionID, SHUTDOWN_SETTLE_MS).catch(
         () => undefined
       );
       const draining = connection?.drain().catch(() => undefined) ?? Promise.resolve();

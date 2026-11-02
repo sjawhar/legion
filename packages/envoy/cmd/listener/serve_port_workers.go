@@ -351,9 +351,16 @@ const (
 // stored message is relayed from there, one that subscribes on NATS itself with no port has it,
 // and a message stored below a consumer's start is in no consumer, so this push is how the session
 // gets it.
+//
+// Only a live session is pushed to, which is why the state is read here (Lookup) rather than the
+// record alone (Get): Get answers a record for as long as the bucket holds it, two hours, so a
+// session that stopped answering an hour ago still reads as a serving port and is pushed to, and
+// each push fails at its dead port and is retried with a WARN until the horizon. Anything but
+// live is handed back to the durable, exactly as a session with no record is, and the durable
+// delivers the message again under whatever state the session is in then.
 func (w *servePortWorkers) target(push servePortPush) (session.SessionEntry, servePortVerdict) {
-	entry, err := w.cfg.sessions.Get(push.sessionID)
-	if err != nil {
+	entry, state := w.cfg.sessions.Lookup(push.sessionID)
+	if state != session.Live {
 		return session.SessionEntry{}, servePortGone
 	}
 	interest, err := w.cfg.registry.Get(context.Background(), push.sessionID)

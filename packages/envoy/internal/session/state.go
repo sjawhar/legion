@@ -33,9 +33,10 @@ const (
 // role lookup's resolution of the holder, and a soft claim taking a role from the session
 // holding it (cmd/listener's sessionIsLive). Topic fan-out keeps an Unresponsive recipient and
 // skips its push with a status of its own rather than a failure, while the role reaper and the
-// session reaper act only on Gone. A push to a session's own serving port reads no state at
-// all: it asks Get for the port and host the record carries, and Get's one measure is the
-// bucket's maximum age.
+// session reaper act only on Gone. A push to a session's own serving port is made only to a
+// Live one: the record Get answers can be as old as the bucket's maximum age, so the two push
+// paths read Lookup and hand anything else back (cmd/listener's servePortWorkers.target and
+// sessionRelays.push).
 type State string
 
 const (

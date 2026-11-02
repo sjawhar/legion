@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -903,10 +904,18 @@ func (m *sessionRelays) pushUntilAccepted(ctx context.Context, sessionID string,
 
 // push makes one prompt_async push of item to the session's port at the address its current entry
 // gives, keeping msg in progress first.
+//
+// Only a live session is pushed to, which is why the state is read here (Lookup) rather than the
+// record alone (Get): Get answers a record for as long as the bucket holds it, two hours, so a
+// session that stopped answering an hour ago still reads as a serving port and is pushed to, and
+// each push fails at its dead port and is retried with a WARN until the gone horizon. Anything
+// but live refuses the push exactly as a missing record does — the message stays unacked in the
+// session's own consumer, and the backoff asks again — so it is pushed as soon as the session
+// answers again and is lost nowhere in between.
 func (m *sessionRelays) push(ctx context.Context, sessionID string, item contracts.Envelope, msg bus.SessionMessage) error {
-	entry, err := m.rules.sessions.Get(sessionID)
-	if err != nil {
-		return err
+	entry, state := m.rules.sessions.Lookup(sessionID)
+	if state != session.Live {
+		return fmt.Errorf("session %s is %s, not live", sessionID, state)
 	}
 	_ = msg.InProgress()
 	return m.deliverer.Push(ctx, item, sessionID, entry)

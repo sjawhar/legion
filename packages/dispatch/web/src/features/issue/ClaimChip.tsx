@@ -3,6 +3,7 @@ import {
   type ClaimHolding,
   claimHolds,
   claimTakeableAt,
+  claimTakeableNow,
 } from "@legion/contracts";
 import type { ReactNode } from "react";
 
@@ -60,8 +61,9 @@ function holderLastSeen(
  * `internal/dispatch/api/issue_claim.go`): a holder the latest successful read does not list has
  * gone, so the claim is free; one that has only missed its heartbeats keeps the issue until
  * `claimTakeableAt` - its last registration plus the shared grace - which the server refuses a
- * take until, and grants one after. An unresponsive holder whose last registration nothing
- * dates keeps the claim, because the server refuses that take too.
+ * take until, and grants one after, the strict comparison `claimTakeableNow` makes for both
+ * callers of this rule. An unresponsive holder whose last registration nothing dates keeps the
+ * claim, because the server refuses that take too.
  *
  * Takeable is not gone. Such a holder still reads "unresponsive" on the chip, still holds its
  * roles, and is still delivered to; this says only that a second agent asking for the issue now
@@ -76,11 +78,7 @@ export function claimIsTakeable(
   if (holding !== "unresponsive") {
     return holding === "lapsed";
   }
-  const takeableAt = claimTakeableAt(
-    { holder_state: "unresponsive" },
-    registry.lastSeen(claim.actor.id)
-  );
-  return takeableAt !== null && Date.parse(takeableAt) <= now;
+  return claimTakeableNow({ holder_state: "unresponsive" }, registry.lastSeen(claim.actor.id), now);
 }
 
 /**
@@ -141,9 +139,9 @@ export function ClaimChip({
   const heard: ClaimHolderLiveness = judged ? { holder_state: "unresponsive" } : read;
   const heardAt = !unresponsive ? null : holderLastSeen(heard, lastSeen);
   const takeableAt = !unresponsive ? null : claimTakeableAt(heard, lastSeen);
-  // One moment decides the tone and the wording, and it is the server's: before it the take is
-  // refused, after it granted.
-  const takeable = lapsed || (takeableAt !== null && Date.parse(takeableAt) <= Date.now());
+  // One moment decides the tone and the wording, and it is the server's: at it the take is still
+  // refused, after it granted, which is why `claimTakeableNow` compares strictly.
+  const takeable = lapsed || (unresponsive && claimTakeableNow(heard, lastSeen));
   const since = `Claimed by ${text.label(claim.actor)} · since ${new Date(claim.at).toLocaleString()}.`;
   const explains =
     "A claim marks who is implementing this issue, so two agents never take the same work.";

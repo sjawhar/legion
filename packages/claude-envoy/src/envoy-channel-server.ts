@@ -24,6 +24,11 @@ import {
 import { sessionDirectory as dispatchSessionDirectory } from "@legion/envoy-client/dispatch-session-directory"
 import { writeSessionTitle } from "@legion/envoy-client/dispatch-session-state"
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe"
+import {
+  heartbeatRetryDelayMs,
+  REGISTRATION_SETTLE_MS,
+  SHUTDOWN_SETTLE_MS,
+} from "@legion/envoy-client/envoy-settings"
 import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
 import { natsConnectionOptions } from "@legion/envoy-client/nats-connection"
@@ -149,40 +154,6 @@ const ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/
 const HANDOFF_POLL_MS = 250
 /** How long a handoff waits for NATS to confirm the new direct subject before retrying. */
 const HANDOFF_FLUSH_TIMEOUT_MS = 10_000
-
-/**
- * How long a deregistration waits for a registration already on the wire. One that lands after
- * the DELETE writes the record back, and the session stays registered with nothing heartbeating
- * it (dispatch://INFRA-392); a listener call can take a timeout and a retry to fail, so this is
- * the whole of one attempt.
- */
-const REGISTRATION_SETTLE_MS = 5_000
-
-/**
- * The whole of what the shutdown path spends settling, over both the writes the chain holds and
- * the registration on the wire. `REGISTRATION_SETTLE_MS` on each of them is 10 s before the
- * DELETE is even sent, and nothing gives this process that long: in a Legion pane the process
- * group has 5 s between SIGTERM and SIGKILL (`DefaultGrace`, `packages/daemon/internal/shim`),
- * shared with `claude` itself. A DELETE never sent leaves the record behind for the whole gone
- * horizon, where one that overtakes a slow registration only may, so the shutdown path waits a
- * quarter of a second — a listener round trip many times over — and sends it.
- */
-const SHUTDOWN_SETTLE_MS = 250
-
-/**
- * The window the one extra registration a failed heartbeat makes waits out, before the heartbeat
- * returns to its plain interval. A registration that times out under listener load costs the
- * session a third of its live window (`.github/scripts/check-heartbeat-margin.sh`), and three
- * missed refreshes drop a running session out of every live listing (dispatch://INFRA-392), so
- * one failure buys one extra call rather than a whole interval's wait. The delay is drawn fresh
- * per call, so the sessions a slow listener failed together come back spread over twenty seconds
- * instead of in one burst: the listener sees one extra call per failing session per interval,
- * never a herd on the same tick. pi-envoy's pane plugin retries on the same rule
- * (packages/pi-envoy/extensions/envoy.ts); the per-call budget is untouched by it, since the
- * extra call is one more call and not a longer one.
- */
-const HEARTBEAT_RETRY_MIN_MS = 20_000
-const HEARTBEAT_RETRY_MAX_MS = 40_000
 
 /** `promise`, or a rejection naming `what` once `ms` pass. */
 async function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
@@ -330,9 +301,9 @@ export interface ChannelSessionOptions {
   readonly registrationSettleMs?: number
   /**
    * Schedules the one extra registration a failed heartbeat makes, at the delay it is handed
-   * (drawn between `HEARTBEAT_RETRY_MIN_MS` and `HEARTBEAT_RETRY_MAX_MS`), and answers how to
-   * drop it; `setTimeout` on this process's clock unless a test passes its own, so a test reads
-   * the delay the session drew and runs the call without waiting it out.
+   * (the shared draw, `heartbeatRetryDelayMs`), and answers how to drop it; `setTimeout` on this
+   * process's clock unless a test passes its own, so a test reads the delay the session drew and
+   * runs the call without waiting it out.
    */
   readonly scheduleRetry?: (run: () => void, delayMs: number) => () => void
   /**
@@ -1489,14 +1460,14 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       }
     }
   }
-  /** Schedules the extra call and answers how far out it is, or nothing when one is already
-   *  owed. */
+  /** Schedules the extra call a failed heartbeat buys and answers how far out it is, or nothing
+   *  when one is already owed. The delay is the shared draw (`heartbeatRetryDelayMs`), the one
+   *  pi-envoy's pane plugin retries on too, so the sessions a slow listener failed together come
+   *  back spread rather than in one burst. */
   const armRetry = (): number | undefined => {
     if (retryArmed || shuttingDown) return undefined
     retryArmed = true
-    const delayMs = Math.round(
-      HEARTBEAT_RETRY_MIN_MS + Math.random() * (HEARTBEAT_RETRY_MAX_MS - HEARTBEAT_RETRY_MIN_MS),
-    )
+    const delayMs = heartbeatRetryDelayMs()
     dropRetry = scheduleRetry(() => {
       // A tick settled while the delay ran: the registration is fresh and the call is dropped.
       if (!retryArmed) return

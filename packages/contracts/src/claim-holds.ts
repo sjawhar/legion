@@ -91,3 +91,22 @@ export function claimTakeableAt(
   }
   return new Date(seen + ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS).toISOString();
 }
+
+/**
+ * Whether another agent may take an unresponsive holder's claim at `now`, the one question the
+ * dashboard's chip tone and its Unclaimed filter ask of the moment `claimTakeableAt` names.
+ *
+ * The comparison is strict, because the server's is: `judgeClaim` frees the claim only once
+ * `now.After(takeableAt)` (`packages/envoy/internal/dispatch/api/issue_claim.go`), so a holder
+ * exactly `takeableAt` old still has the issue. A surface that called that instant free would
+ * paint "takeable now", list the issue as unclaimed, and get a 409 for the take it invited.
+ * Nothing to wait for - no moment known, or a holder no waiting frees - is not takeable.
+ */
+export function claimTakeableNow(
+  liveness: ClaimHolderLiveness,
+  lastSeen: number | undefined = undefined,
+  now: number = Date.now()
+): boolean {
+  const takeableAt = claimTakeableAt(liveness, lastSeen);
+  return takeableAt !== null && Date.parse(takeableAt) < now;
+}

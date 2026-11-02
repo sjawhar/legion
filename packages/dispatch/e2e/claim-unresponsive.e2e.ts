@@ -91,7 +91,12 @@ test("an unresponsive holder keeps its claim: the issue page says unresponsive s
     );
 
     // The issue is nobody's to pick up while the claim holds, so the Unclaimed filter hides it.
+    // A second issue nobody has claimed is what says the list arrived: a count of zero passes
+    // against a page that has rendered no row at all, so a regression that listed the held
+    // issue would pass this too if nothing positive were waited for first.
+    const pickable = await createIssue({ project: "CORE", title: "Nobody's to pick up" });
     await page.goto("/projects/CORE/issues?unclaimed=1");
+    await expect(page.locator("[data-issue-row]").filter({ hasText: pickable.key })).toHaveCount(1);
     await expect(page.getByTestId("unclaimed-unchecked")).toHaveCount(0);
     await expect(page.locator("[data-issue-row]").filter({ hasText: issueKey })).toHaveCount(0);
 

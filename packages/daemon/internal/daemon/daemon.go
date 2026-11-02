@@ -113,6 +113,17 @@ const (
 	// keeps a stop that does land late off the relaunch's registration is the condition the stop
 	// carries (cleanSessionStop), not this bound.
 	cleanSessionStopBudget = 5 * time.Second
+	// cleanSessionStopSkewAllowance is how far before the moment its probe judged a dead role's
+	// process gone the clean stop dates itself (cleanSessionStop). The listener compares that
+	// moment with the registration's UpdatedAt, which the registering process stamped on its own
+	// clock, so a daemon clock ahead of the listener's by δ would otherwise delete a relaunch's
+	// registration written up to δ after the stop. Dating the stop earlier moves every skew
+	// toward the safe answer, which is the refusal: a stop that is kept costs the session only
+	// the wait it already had, where one that deletes the live registration of the process that
+	// replaced the dead one is the loss this whole path exists to stop. Half the first launch
+	// backoff is the size of it, because the relaunch's registration cannot land sooner than
+	// that backoff plus a process boot, so no stop that is owed is refused by it.
+	cleanSessionStopSkewAllowance = launchBackoffFirst / 2
 )
 
 // overrides are the parts of a daemon a test replaces, and the listener `legion start` inherited;
@@ -1142,6 +1153,13 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 // it. So every stop is sent, and the one that would have done the damage is the one the listener
 // keeps.
 //
+// The two clocks are not one. goneAt is read on this daemon's clock and compared with an
+// UpdatedAt the registering process stamped on its own, so a daemon ahead of the listener by δ
+// would call a registration written up to δ after the stop older than it, and delete exactly the
+// relaunch registration the condition is for. The stop therefore carries goneAt less
+// cleanSessionStopSkewAllowance, which moves every skew toward the refusal: the direction that
+// costs a session only the wait it already had.
+//
 // The request is bounded by cleanSessionStopBudget, so a listener that never answers does not
 // leave it in flight for as long as it likes.
 //
@@ -1154,22 +1172,22 @@ func cleanSessionStop(supervising context.Context, envoyURL, token string, log *
 	}
 	stop := sessionStop{sessions: notify.New(envoyURL, token), log: log}
 	return func(session string) {
-		go stop.send(supervising, session, time.Now())
+		goneAt := time.Now().Add(-cleanSessionStopSkewAllowance)
+		go stop.send(supervising, session, goneAt)
 	}
 }
 
 // sessionStop is one role's clean stop in flight: the listener client it goes to, and the log
 // that says what became of it.
 type sessionStop struct {
-	sessions interface {
-		DeleteSession(ctx context.Context, session string, goneAt time.Time) (notify.SessionDeleted, error)
-	}
-	log *slog.Logger
+	sessions *notify.HTTPPublisher
+	log      *slog.Logger
 }
 
-// send is the goroutine cleanSessionStop starts, with goneAt the moment the probe judged the
-// process gone, which the listener judges the stored registration against. It reports the stop
-// refused, kept or done, one line either way, since nothing waits on its answer.
+// send is the goroutine cleanSessionStop starts, with goneAt the moment the stop belongs to -
+// the moment the probe judged the process gone, less cleanSessionStopSkewAllowance - which the
+// listener judges the stored registration against. It reports the stop refused, kept or done,
+// one line either way, since nothing waits on its answer.
 func (s sessionStop) send(supervising context.Context, session string, goneAt time.Time) {
 	ctx, cancel := context.WithTimeout(supervising, cleanSessionStopBudget)
 	defer cancel()
