@@ -120,9 +120,12 @@ reason. A missing signal degrades to the prior behaviour, never to silence (`pr-
 not quietly stop firing) and never to the new behaviour (a handoff push could not be un-counted
 on a guess).
 
-Taking the fields out obeyed the same order from the other end: sjawhar/legion#2354 deleted the
-last reader first, and dispatch://INFRA-609 stopped the listener sending them only afterwards, so
-no skew window ever had a daemon reading a field the listener had already dropped.
+Taking the fields out runs the same order from the other end: sjawhar/legion#2354 deleted the last
+reader first, and dispatch://INFRA-609 stopped the listener sending them only afterwards. The merge
+order alone does not close the skew window, since the listener and the daemon still deploy
+separately: a daemon from before sjawhar/legion#2354 reads a push with no `changed_paths_truncated`
+as unclassified and one with no `forced` as forced. So the listener image carrying INFRA-609 is
+deployed only once every daemon reports `daemon.schemaVersion` 20261101144900 or later.
 
 The `log` effect itself was the cheapest way to get a reducer — pure, no logger — to say why:
 `events.ts`'s exhaustive `dispatch` switch executes it as `console.warn("[legion] …")`, it cannot
