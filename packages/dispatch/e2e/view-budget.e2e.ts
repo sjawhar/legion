@@ -28,11 +28,11 @@ import { asUser } from "./users";
  * can store no such block - fetched to open this row's document with the block written as a
  * plain paragraph.
  *
- * Measured at `99565624`, `main` at the merge's second parent, on 2026-11-02: 1,778,541 bytes.
- * To measure it again, in a checkout of that commit with this file and `e2e/recording-origin.ts`
- * copied in, `e2e/api.ts`'s `uploadIssueFile`, `uploadProjectFile` and `createArtifactGrant`
- * added there (the base answers the grants route `404`, which that copy swallows) and the byte
- * row opening `BASE_DOCUMENT` in place of the directive, run:
+ * Measured at `a8f4f74c`, `main` at the merge's second parent, on 2026-11-02: 1,780,380 bytes.
+ * To measure it again, in a checkout of that commit with this file copied in and cut to the byte
+ * row alone, `e2e/api.ts`'s `uploadIssueFile`, `uploadProjectFile` and `createArtifactGrant`
+ * added there (the base answers the grants route `404`, which that copy swallows) and that row
+ * opening `BASE_DOCUMENT` in place of the directive, run:
  *
  *   cd packages/dispatch && bun run build:web && DATABASE_URL='postgres://…' bun e2e/run.ts -- \
  *     bunx playwright test --config e2e/playwright.config.ts --project=chromium \
@@ -41,7 +41,7 @@ import { asUser } from "./users";
  * The row prints `view budget: … bytes of JavaScript` for the document it opened, at the base
  * commit and at this one alike, so the two runs the pull request quotes are those two lines.
  */
-const BASE_JS_BYTES: number | undefined = 1_778_541;
+const BASE_JS_BYTES: number | undefined = 1_780_380;
 
 /** What R6 allows the change to add to that number. */
 const BUDGET_BYTES = 10_000;
