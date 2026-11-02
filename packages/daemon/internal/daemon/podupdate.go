@@ -240,12 +240,16 @@ func (s *supervision) completePodUpdate(ctx context.Context, issue string, snaps
 		}
 		return false
 	}
-	// Gone first: whether this round's pod is still there is asked before any wait, because
-	// every wait below is a wait on that pod. A round whose pod no live claim records has
-	// nothing in that pod to cut and nothing there to replace, so waiting for a turn — which by
-	// then is a turn in the pod that replaced this one — would hold every answered worker's next
-	// task, and the notice would name a pod that is gone. What is left to decide is read from
-	// the round's own record of its members (roundWithNoProcessInItsPod, lostClaims).
+	// Gone first: whether this round's pod is still there is asked before the round waits on a
+	// turn or on a replacement in flight, because each of those is a wait on that pod. The one
+	// wait above it is for a worker that has not answered, which belongs to no pod: a round
+	// nobody has answered has lost nothing to tell anyone of, whether its pod is there or not.
+	//
+	// A round whose pod no live claim records has nothing in that pod to cut and nothing there
+	// to replace, so waiting for a turn — which by then is a turn in the pod that replaced this
+	// one — would hold every answered worker's next task, and the notice would name a pod that
+	// is gone. What is left to decide is read from the round's own record of its members
+	// (roundWithNoProcessInItsPod, lostClaims).
 	k, running := podProcess(live, round)
 	if !running {
 		return s.roundWithNoProcessInItsPod(ctx, issue, snapshot, round, pod)
@@ -965,23 +969,24 @@ func blockingClaims(group []supervise.Claim) []supervise.Claim {
 // it holds the pod until it does: the round asks it at the next tick, and a replacement made
 // before that would end a turn of a worker the round asked nothing of.
 //
-// A claim that has left the round waits for nothing (supervise's Claim.leftPodRound). The pod it
-// was in is gone, the round asks it nothing more, and a replacement held for its answer would be
-// held for an answer no process will give. What that claim lost is the other question
-// (lostClaims), and the two are never the same set.
+// A claim that has left the round waits for nothing (supervise's Claim.LeftPodRound, which is
+// the one statement of that rule and is asked here rather than restated). The pod it was in is
+// gone, the round asks it nothing more, and a replacement held for its answer would be held for
+// an answer no process will give. What that claim lost is the other question (lostClaims), and
+// the two are never the same set.
 func waitingClaims(group []supervise.Claim, round string) []supervise.Claim {
 	var waiting []supervise.Claim
 	for _, c := range blockingClaims(group) {
-		if !answered(c, round) && c.UpdateLeftRound != round {
+		if !answered(c, round) && !c.LeftPodRound() {
 			waiting = append(waiting, c)
 		}
 	}
 	return waiting
 }
 
-// memberOf is whether c is one of round's claims: the round it records is this one, or this one
-// is the round it left. Membership survives the leaving, because a claim that leaves keeps the
-// round it records (supervise's leftPodRoundAt), and it is what the report below is read from.
+// memberOf is whether c is one of round's claims: the round it records is this one. A claim that
+// leaves a round keeps the round it records (supervise's leftPodRoundAt), so membership survives
+// the leaving and this one reading is the whole of it.
 //
 // A claim in no round and a claim in another round are members of this one in neither sense.
 // Each of the two is why the report may not be read from "has not answered": a claim an earlier
@@ -989,7 +994,7 @@ func waitingClaims(group []supervise.Claim, round string) []supervise.Claim {
 // in the pod that replaced the round's own have both answered nothing, and neither of them was
 // ever in the pod whose disk went.
 func memberOf(c supervise.Claim, round string) bool {
-	return c.UpdateRound == round || c.UpdateLeftRound == round
+	return c.UpdateRound == round
 }
 
 // lostClaims is what the round's pod took with it: every member of the round with a worker that
@@ -999,22 +1004,15 @@ func memberOf(c supervise.Claim, round string) bool {
 // read from the round's own record of each member rather than from where any claim's process is
 // now.
 //
-// A member that left the round having answered pushed its work before the pod went and lost
-// nothing; one that left without answering lost whatever it had not pushed. No turn and no
-// answer of the process that replaced it changes either reading.
+// A member that answered pushed its work before the pod went and lost nothing, whether it
+// answered in the round's own pod or had already answered when it left: leaving records no
+// answer and withdraws none (supervise's LeftPodRound holds takeBackSignal off). One that never
+// answered lost whatever it had not pushed. No turn and no answer of the process that replaced
+// it changes either reading.
 func lostClaims(group []supervise.Claim, round string) []supervise.Claim {
 	var lost []supervise.Claim
 	for _, c := range blockingClaims(group) {
-		if !memberOf(c, round) {
-			continue
-		}
-		if c.UpdateLeftRound == round {
-			if !c.UpdateLeftAnswered {
-				lost = append(lost, c)
-			}
-			continue
-		}
-		if !answered(c, round) {
+		if memberOf(c, round) && !answered(c, round) {
 			lost = append(lost, c)
 		}
 	}

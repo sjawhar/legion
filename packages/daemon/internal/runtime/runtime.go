@@ -174,7 +174,7 @@ var ErrSessionFileMissing = errors.New("the recorded session file is missing")
 // work it lost, and replaces a pod that is already gone.
 //
 // The round open over such a place ends at the sweep that reads this, and every sweep asks this
-// before it waits on anything of that round, since each of those waits is a wait on the pod.
+// before the round waits on a turn of its own, since each such wait is a wait on the pod.
 // What was lost is read from the round's own record of the claims it asked and what each had
 // done when it left, never from where a claim's process is now (internal/daemon's
 // endRoundOverAGonePod, supervise's Claim.UpdateLeftRound), so the sweep that reads this need

@@ -245,7 +245,11 @@ func IsPluginRound(round string) bool { return strings.HasPrefix(round, PluginRo
 // locator, it would be a fact about where the claim's process is now rather than about the
 // round: a suspension clears the locator (letGo), the claim would read as one that had never
 // left, and the answer its new pod's process gives late would be taken for the round.
-func (c Claim) leftPodRound() bool {
+//
+// It is exported because internal/daemon's sweep asks the same question of the same record when
+// it decides whom a replacement still waits for, and one predicate is what keeps the two from
+// drifting apart.
+func (c Claim) LeftPodRound() bool {
 	return c.InPodRound() && c.UpdateLeftRound == c.UpdateRound
 }
 
@@ -1203,7 +1207,7 @@ func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 // A process in no pod leaves no pod round: a tmux pane runs outside one, and a claim in a plugin
 // round or in no round at all has no pod round to leave.
 func (m *Machine) leftPodRoundAt(loc runtime.Locator) {
-	if !m.claim.InPodRound() || m.claim.leftPodRound() {
+	if !m.claim.InPodRound() || m.claim.LeftPodRound() {
 		return
 	}
 	if loc.Sandbox == nil || PodRound(loc.Sandbox.PodUID) == m.claim.UpdateRound {

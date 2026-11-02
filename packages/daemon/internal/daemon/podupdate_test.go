@@ -287,6 +287,13 @@ func (r *podUpdateRig) awaitRound(role claim.Role, round string) supervise.Claim
 // again, or ask every worker of the round again over the claims the end has already reached
 // (openPodUpdate posts to every blocking claim). A wait for what a sweep has already decided is
 // awaitClaim's, as is one for what a posted event or a direct call brings about.
+//
+// A settleAll before each tick was tried here in place of that skipped poll, as the more
+// deterministic shape, and it is not: it makes this rig's own
+// TestPodUpdateTellsItsWorkerNothingHoweverTheRoundEnds time out in every subtest, where the
+// skipped poll passes it 100 times out of 100. settleAll nests its own bounded wait per machine
+// inside this one, and a sweep that reads only fully settled machines does not reach the
+// decision these waits are for.
 func (r *podUpdateRig) awaitSwept(role claim.Role, what string, want func(supervise.Claim) bool) supervise.Claim {
 	r.t.Helper()
 	// landing is the first poll, which leaves a decision the last sweep posted the time to land.
@@ -2463,9 +2470,10 @@ func (r *podUpdateRig) envoyTurn(role claim.Role) {
 	}
 }
 
-// Whether this round's pod is still there is asked before any wait, because every wait in the
-// round's completion is a wait on that pod. A round whose pod no live claim records has nothing
-// in that pod to cut and nothing there to replace: the turn the sweep would wait for runs in the
+// Whether this round's pod is still there is asked before the round waits on a turn, because
+// every such wait in the round's completion is a wait on that pod. A round whose pod no live
+// claim records has nothing in that pod to cut and nothing there to replace: the turn the sweep
+// would wait for runs in the
 // pod that replaced this one, waiting for it would hold every answered worker's next task behind
 // a round that can never end, and the stalled-round notice would name a pod that is gone.
 //

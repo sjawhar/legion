@@ -1189,7 +1189,7 @@ func (m *Machine) takeBackSignal(ownTask bool) {
 	if m.claim.UpdateRound == "" || m.claim.UpdateSignalledAt == nil {
 		return
 	}
-	if m.claim.leftPodRound() {
+	if m.claim.LeftPodRound() {
 		return
 	}
 	if ownTask && updatesRound(m.claim.Pending, m.claim.UpdateRound) {
@@ -1313,7 +1313,7 @@ func (m *Machine) answerByTurnEnd() {
 	if !updatesRound(p, m.claim.UpdateRound) || p.ConfirmedAt.IsZero() {
 		return
 	}
-	if m.claim.leftPodRound() {
+	if m.claim.LeftPodRound() {
 		return
 	}
 	if m.askFirst || m.unseenTurn {
@@ -1917,7 +1917,7 @@ func (m *Machine) dropUpdateTask(ctx context.Context) error {
 // so the ask would cost one turn and teach the round nothing. It is asked nothing however often
 // it is started again, and a suspension does not bring it back into the round.
 func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time.Time) error {
-	if m.claim.UpdateSignalledAt != nil || m.claim.leftPodRound() {
+	if m.claim.UpdateSignalledAt != nil || m.claim.LeftPodRound() {
 		return nil
 	}
 	if !HoldsCapability(m.claim.State) && m.claim.State != StateSuspended {
@@ -2130,7 +2130,7 @@ func podUpdateSignalled(m *Machine, ctx context.Context, ev Event) error {
 			"answered", signal.Round, "round", m.claim.UpdateRound, "head", signal.Head)
 		return foreignRoundRefusal(m.claim, signal.Round)
 	}
-	if m.claim.leftPodRound() {
+	if m.claim.LeftPodRound() {
 		m.log.Warn("supervise: this claim left its update round when the daemon started it again in another pod; the answer is refused",
 			"round", m.claim.UpdateRound, "answeredWhenItLeft", m.claim.UpdateLeftAnswered, "head", signal.Head)
 		return leftPodRoundRefusal(m.claim)

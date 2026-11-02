@@ -3934,7 +3934,7 @@ What such a round waits on that only a person can clear is a claim no task reach
 A pod that goes before its round is over, replaced where it stood for a failure of its own, has the daemon write on the issue which roles had not answered and that the work they did not push went with the disk.
 Two readings say the pod went:
 the runtime answering that the pod the claims record is not there, and the claims recording another pod in its place.
-Whichever of them a sweep reaches first ends the round, and every sweep asks it before the round waits on anything, because each of those waits is a wait on the pod.
+Whichever of them a sweep reaches first ends the round, and every sweep asks it before the round waits on a turn, because each such wait is a wait on the pod.
 The message is decided from the round's own record and not from where any claim's process is now (`endRoundOverAGonePod`):
 the round records, on each claim it asked, the round that claim left and whether it had answered when it left, and only the round's end clears either.
 So a worker relaunched into the pod that replaced this one is still a member of the round, with the part the dead pod left it; a role first started in that new pod is no member and is named nothing; and an earlier sweep's end landing on some claims before others takes those claims out of the round rather than into the message.

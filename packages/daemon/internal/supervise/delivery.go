@@ -196,7 +196,7 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	//
 	// holds is whether the delivery is still the claim's to send; the ask of a left round never
 	// is, and its issue's phase is not asked about, since the round's words are what it is.
-	left := m.claim.leftPodRound() && updatesRound(p, m.claim.UpdateRound)
+	left := m.claim.LeftPodRound() && updatesRound(p, m.claim.UpdateRound)
 	holds := !left
 	if holds {
 		var err error
