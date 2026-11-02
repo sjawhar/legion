@@ -30,7 +30,7 @@ func TestTheLauncherReassemblesABundleAndRefusesOneThatDidNotArriveAsItWasSent(t
 		Bookmarks: map[string]string{"legion/INFRA-945": "dffe88ae2f793e13436cef3921adc988433fbd4e"},
 		At:        time.Date(2026, 11, 1, 9, 30, 0, 0, time.UTC),
 	}
-	frames, err := shimwire.SplitWorkspaceBundle("restore-1", saved)
+	frames, err := shimwire.SplitWorkspaceBundle("restore-1", 11, saved)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestTheLauncherReassemblesABundleAndRefusesOneThatDidNotArriveAsItWasSent(t
 		if r.body != nil {
 			t.Fatalf("a refused sequence left %d bytes to restore", len(r.body))
 		}
-		if got := r.apply(context.Background(), []string{"LEGION_WORKSPACE=/nowhere"}); got.Restored || got.Notice != "" || got.Ran {
+		if got := r.apply(context.Background(), []string{"LEGION_WORKSPACE=/nowhere"}); got.Restored || got.Notice != "" {
 			t.Fatalf("a refused sequence restored something: %+v", got)
 		}
 	})
@@ -107,6 +107,35 @@ func TestTheLauncherReassemblesABundleAndRefusesOneThatDidNotArriveAsItWasSent(t
 		if got := r.receive(odd); got.OK || !strings.Contains(got.Error, "does not match its sequence") {
 			t.Fatalf("a slice of another digest answered %#v", got)
 		}
+		// The release is as much of the sequence as the digest: the report the daemon acts on
+		// names it, and it deletes the bundle of that release alone.
+		other := frames[1]
+		other.Release = 12
+		if got := r.receive(other); got.OK || !strings.Contains(got.Error, "does not match its sequence") {
+			t.Fatalf("a slice of another release answered %#v", got)
+		}
+	})
+
+	t.Run("the report names the release whose work it restored", func(t *testing.T) {
+		r := &bundleRestore{results: map[string]shimwire.LauncherBundleResult{}}
+		for _, frame := range frames {
+			if got := r.receive(frame); !got.OK {
+				t.Fatalf("slice %d answered %#v", frame.Index, got)
+			}
+		}
+		// The workspace is a path no restore can read, so this is the report of a restore that
+		// failed: it still names its release, which is what keeps the daemon's copy where a
+		// report of no release at all would have it guess.
+		if got := r.apply(context.Background(), []string{"LEGION_WORKSPACE=/nowhere"}); got.Restored {
+			t.Fatalf("the restore answered %+v, want no work restored", got)
+		}
+		report := r.owed()
+		if report == nil {
+			t.Fatal("the launcher owes the daemon no report of the restore it ran")
+		}
+		if report.Release != 11 || report.ID != frames[0].ID || report.OK {
+			t.Fatalf("the report is %#v, want release 11 of sequence %q and the restore failed", report, frames[0].ID)
+		}
 	})
 }
 
@@ -116,7 +145,7 @@ func TestTheLauncherReassemblesABundleAndRefusesOneThatDidNotArriveAsItWasSent(t
 func TestTheLauncherAnswersABundleFrameOnItsConnection(t *testing.T) {
 	g := newRig(t)
 	saved := shimwire.WorkspaceBundle{Bundle: []byte("PACK not a real bundle"), Head: "f2f13454", At: time.Now().UTC()}
-	frames, err := shimwire.SplitWorkspaceBundle("restore-2", saved)
+	frames, err := shimwire.SplitWorkspaceBundle("restore-2", 12, saved)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,6 +250,34 @@ func TestARestoreWhoseBaseCommitIsGoneStartsTheRolesWithANotice(t *testing.T) {
 	}
 }
 
+// A bundle is restored into a workspace provisioned after it was saved, and into no other. The
+// workspace a save was taken from is on the released pod's disk, and a roles container that
+// restarts on a disk of its own comes back to it with a launcher process that holds no record of
+// the restore it ran: it is sent the bundle again, at the start of every role, and applying it
+// there would `jj edit` back to the saved head and move each bookmark `--allow-backwards` over
+// what the roles have done since. The creation record provisioning leaves is what tells that
+// workspace from the one the issue's next pod made (workspace.Created).
+func TestARestoreRefusesAWorkspaceOlderThanTheWorkItHolds(t *testing.T) {
+	testbin.RequireJJFilters(t)
+	f := newBundleFixture(t)
+	f.workOne()
+	saved := f.bundleWorkspaceOne()
+	// The roles go on working in the workspace the save came out of, as they do while the pod
+	// lives on: its working copy is another commit now.
+	f.run(f.ws, "jj", "new", "-R", f.ws, "-m", "work after the save")
+	f.write(filepath.Join(f.ws, "after.txt"), "after\n")
+	after := f.at()
+
+	notice := f.restoreInto(f.ws, saved, 1)
+	if !strings.Contains(notice, "not restored") || !strings.Contains(notice, "before the work was saved") {
+		t.Fatalf("the notice is %q, want the restore refused for a workspace created before the work was saved", notice)
+	}
+	if head := f.run(f.ws, "jj", "log", "-R", f.ws, "--ignore-working-copy", "-r", "@", "--no-graph", "-T", "commit_id"); head != after {
+		t.Fatalf("the working copy is on %s, want the %s the roles worked on: the restore edited the workspace back to the saved head %s",
+			head, after, saved.Head)
+	}
+}
+
 // A bookmark's name is written by the agent that worked in the released workspace, so it reaches
 // jj as an argument nobody chose. One jj reads as an option of its own must cost that bookmark
 // and nothing else: the heads, the working copy and every other bookmark are restored, and the
@@ -316,15 +373,20 @@ func newBundleFixture(t *testing.T) *bundleFixture {
 }
 
 // pod is a pod's shared clone and the issue workspace in it, as provisioning makes them: a
-// colocated clone of the remote with every remote branch tracked, and one `jj workspace add`.
-func (f *bundleFixture) pod(clone, workspace string) {
+// colocated clone of the remote with every remote branch tracked, one `jj workspace add`, and the
+// record of when the workspace was created, which a restore reads to tell a workspace provisioned
+// since the save from the one the save came out of (workspace.RecordCreated, restoreWorkspace).
+func (f *bundleFixture) pod(clone, ws string) {
 	f.t.Helper()
 	// --no-local: a local clone hardlinks the whole object store, unreachable objects included,
 	// where a pod clones over the network and gets only what the remote's refs reach.
 	f.run(f.root, "git", "clone", "--quiet", "--no-local", f.remote, clone)
 	f.run(clone, "jj", "git", "init", "--colocate", clone)
 	f.run(clone, "jj", "bookmark", "track", "main@origin", "legion/"+bundleIssue+"@origin")
-	f.run(clone, "jj", "workspace", "add", "--name", filepath.Base(workspace), workspace)
+	f.run(clone, "jj", "workspace", "add", "--name", filepath.Base(ws), ws)
+	if err := workspace.RecordCreated(ws, time.Now()); err != nil {
+		f.t.Fatal(err)
+	}
 }
 
 // secondPod is the pod that replaces the released one: its own clone of the remote as it stands
@@ -454,6 +516,11 @@ func (f *bundleFixture) bundleWorkspaceOne() shimwire.WorkspaceBundle {
 	}
 }
 
+// bundleRelease is the id of the idle release whose save every fixture bundle carries: the daemon
+// deletes the bundle of the release a restore report names, so each sequence and each report names
+// one.
+const bundleRelease int64 = 9
+
 // restoreInto drives one replacement pod's launcher: the bundle in launcher_bundle slices, then
 // the generation's start, which applies the restore before its child runs. It returns the notice
 // the launcher wrote for the restore, having held it to the report the launcher sent the daemon,
@@ -461,7 +528,7 @@ func (f *bundleFixture) bundleWorkspaceOne() shimwire.WorkspaceBundle {
 func (f *bundleFixture) restoreInto(workspace string, saved shimwire.WorkspaceBundle, generation uint64) string {
 	f.t.Helper()
 	g := newRig(f.t)
-	frames, err := shimwire.SplitWorkspaceBundle("restore-"+workspace, saved)
+	frames, err := shimwire.SplitWorkspaceBundle("restore-"+workspace, bundleRelease, saved)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -488,8 +555,9 @@ func (f *bundleFixture) restoreInto(workspace string, saved shimwire.WorkspaceBu
 	if report == nil {
 		f.t.Fatalf("the launcher reported nothing of the restore it ran:\n%s", g.stderr.String())
 	}
-	if report.ID != frames[0].ID {
-		f.t.Fatalf("the launcher reported the restore of sequence %q, want %q", report.ID, frames[0].ID)
+	if report.ID != frames[0].ID || report.Release != bundleRelease {
+		f.t.Fatalf("the launcher reported the restore of sequence %q of release %d, want %q of release %d",
+			report.ID, report.Release, frames[0].ID, bundleRelease)
 	}
 	for _, line := range strings.Split(g.stderr.String(), "\n") {
 		if strings.Contains(line, "released workspace's saved work") {

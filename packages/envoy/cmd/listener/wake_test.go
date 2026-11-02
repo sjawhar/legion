@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -201,6 +203,46 @@ func TestAWakeReportIsRetriedUntilTheBusTakesIt(t *testing.T) {
 	case <-reported:
 	case <-time.After(30 * time.Second):
 		t.Fatal("the report's goroutine is still retrying after the stream took it")
+	}
+}
+
+// One report retries for up to wakeReportBudget, and during a bus outage one is raised per role
+// send with no holder and per message nothing can place. So the reports run under the
+// listener's own lifetime, which the shutdown ends, and no more than wakeReportsInFlight run at
+// once: without both, an outage piles up a goroutine and a report per such request for minutes,
+// and the shutdown leaves every one of them running.
+func TestWakeReportsEndWithTheListenerAndAreCappedInFlight(t *testing.T) {
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect the bus: %v", err)
+	}
+	// A closed connection is the outage: every publish from here fails and every report retries.
+	client.Close()
+	lifetime, stopListener := context.WithCancel(context.Background())
+	t.Cleanup(stopListener)
+	reporter := newWakeReporter(lifetime, client)
+	logger := logging.NewWithWriter("test", io.Discard)
+
+	for i := range wakeReportsInFlight {
+		reportAgentWake(reporter, logger, fmt.Sprintf("session-%d", i))
+	}
+	if got := len(reporter.slots); got != wakeReportsInFlight {
+		t.Fatalf("%d reports are in flight after %d were raised, want every slot taken", got, wakeReportsInFlight)
+	}
+	reportAgentWake(reporter, logger, "one-too-many")
+	if got := len(reporter.slots); got != wakeReportsInFlight {
+		t.Fatalf("a report past the cap left %d in flight, want it dropped at %d", got, wakeReportsInFlight)
+	}
+
+	// The listener stops: every report still retrying ends with it, rather than holding its
+	// goroutine for the rest of its budget.
+	stopListener()
+	deadline := time.Now().Add(30 * time.Second)
+	for len(reporter.slots) > 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d reports are still retrying after the listener stopped", len(reporter.slots))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

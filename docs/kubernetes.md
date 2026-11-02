@@ -3875,8 +3875,9 @@ A phase worker whose phase is open is reminded five minutes after a turn that di
 Each live claim of the pod must also have reported to the daemon, after its last turn, that it runs no background work, and the pod must run the image the daemon's configuration names with every live claim on the daemon's current contract.
 The pod of a root that waits on a person's answer in `awaiting_person` is kept until that answer comes; its children are not.
 A pod held past the idle period is held for one of those reasons, and the daemon records which one.
+One more reason holds a pod that is otherwise idle: a saved bundle of its unpushed work that no pod has restored yet (`bundle_unrestored`, below).
 
-A release is three acts, in this order:
+A release is three acts, in this order, and the daemon gives it an id (`issue_releases.id`) that its mark, its bundle and the restore report of the pod that puts that bundle back all carry:
 
 - the workspace's unpushed work is saved as a git bundle in the daemon's own database (below);
 
@@ -3909,6 +3910,7 @@ A wake acts only on a claim that is still `released`, of an issue still in the w
 Every other path that suspends, resumes, stops or closes a claim takes a released claim over, after which no wake acts on it: a linger, a park, a close, a hand-over, the production check, and the operator's `legion claims` commands.
 A daemon restart resumes no released claim, and a wake or a backstop that came due while the daemon was down acts once it has started.
 A wake that arrives while the release runs cancels it, up to the moment the first role process of the pod is stopped, and the roles go on in the same pod; after that moment the wake waits for the release to finish and then resumes the pod.
+A cancel is one act: in one transaction the daemon queues the resume of each claim that release had suspended — the roles its own mark recorded, never a claim an earlier release left `released` — and deletes the mark.
 Each woken role is given one task or message that names the wake, so an agent reads why its pod came back.
 From the wake to the woken role's first turn is 5 minutes or less for 90% of wakes and 10 minutes or less for each one; a resume with no first turn 10 minutes after its wake writes a warning naming the issue, the role and the step it waits on.
 
@@ -3920,6 +3922,7 @@ sjawhar/legion is public and a working copy holds every file that is not ignored
 A bundle above 40 MiB, or a save that fails, stops the release, and the daemon records that reason.
 Only the pod's own launcher receives the bundle, over the launcher's authenticated connection, in `launcher_bundle` frames each under the 1 MiB frame limit (`shimwire.MaxFrameBytes`), and the launcher restores it in the roles container before any role starts, never in the token-holding `workspace-fetch` container.
 The daemon deletes the bundle once the launcher confirms the restore, and deletes it too when a wake cancels the release.
+A restore that fails keeps it: the work is still in the database and no pod has it, so the daemon holds the issue's next pod open rather than release it again over a workspace that never had that work, which is the `bundle_unrestored` hold above, and the next pod of the issue is sent the same bundle.
 A bundle stays through a linger and a park, and goes when its issue is done or its tree closes.
 Nothing else of the disk is kept: `$TMPDIR` and its contents, every ignored file, every file jj does not snapshot (above its `snapshot.max-new-file-size`), each role's home with the Oh My Pi state and `local://` files under it, a test Postgres with its databases, and the workspace's CodeGraph index all go with the pod.
 A restore whose base commit is gone writes a notice that names what it could not bring back.
@@ -3943,12 +3946,12 @@ Those are the defaults, and release is on under `runtime: kubernetes` wherever t
 The loader refuses a `backstop_minutes` below `idle_minutes`, which would wake a pod the daemon has only just released.
 Whatever the setting says, the daemon releases nothing while the Envoy listener it uses does not report the role messages and direct messages of released sessions, since those two wakes would otherwise be lost.
 
-`legion state` shows a released claim apart from a suspended or a failed one, reading which it is from the operator claim routes with the bearer `operator_token_file` names, since the state body itself carries no suspender; without that bearer every stranded claim reads as the plain suspension it is, which `legion claims list --json` tells apart.
+`legion state` shows a released claim apart from a suspended or a failed one, reading which it is from the operator claim routes with the bearer `--operator-token-file` names, since the state body itself carries no suspender; without that flag every stranded claim reads as the plain suspension it is, which `legion claims list --json` tells apart.
 The stranded-claim report counts a released claim only when its wake is more than 10 minutes old with no resume.
 The daemon keeps a record of each release, each resume and each pod held past the idle period.
 A role of an issue pod reads the deployment's records with the `legion` tool's `read_release_records`, whose one argument `since` is the RFC 3339 instant its window starts at.
 The plugin posts them on `POST /legion/v1/claims/release-records` with the claim token and secret its registration left in the session's own process, so no role handles that credential and nothing writes it to disk; the route takes it in the body because a query string would put the secret in every proxy and access log between the pod and the daemon.
-The op answers every release, resume and hold of the window, oldest first, and over them the counts a report is written from: releases, resumes by wake kind, holds by reason, the pod-hours released, the share of releases a wake followed within ten minutes, and the median, 90th percentile and maximum seconds from a wake to the woken role's first turn.
+The op answers every release, resume and hold of the window, oldest first, and the counts a report is written from over them; what those are is in the tool's own description, which is where they are written out.
 
 #### Rolling back idle release
 

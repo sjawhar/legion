@@ -157,10 +157,13 @@ type SavedWorkspaceBundle func(ctx context.Context, issue string) (WorkspaceBund
 
 // WorkspaceBundleRestored is the runtime's confirmation that the pod replacing the released one
 // has put the issue's saved work back: its launcher ran the restore and reported that it
-// succeeded. It drops the saved copy (store.Store.DeleteWorkspaceBundle), so it is called only
-// on that report — a bundle no launcher has restored, because none took it or because the
-// restore failed, stays in the daemon's database for the issue's next pod.
-type WorkspaceBundleRestored func(ctx context.Context, issue string) error
+// succeeded, naming the release whose save it restored. It drops that release's saved copy and no
+// other (store.Store.DeleteRestoredWorkspaceBundle), so it is called only on that report, and a
+// report that arrives after a later release has saved again finds nothing of its own to delete —
+// a bundle no launcher has restored, because none took it, because the restore failed, or because
+// its confirmation named a release the store no longer holds, stays in the daemon's database for
+// the issue's next pod.
+type WorkspaceBundleRestored func(ctx context.Context, issue string, release int64) error
 
 // RegistrationDeadline is the registration deadline's base Boot×RegistrationIntervals bound plus
 // grace: the supervisor's armRegistration calls it with ProvisionBound before a claim's hello and

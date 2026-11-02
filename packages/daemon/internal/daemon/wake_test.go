@@ -166,7 +166,11 @@ func TestABackstopThatCameDueWhileTheDaemonWasDownFiresAfterItStarts(t *testing.
 	// of the first one. The armed backstop is still due.
 	restarted := &workflowRuntime{pool: pool, projectID: "legion", idleStore: outboxTreeStore(t, pool),
 		idlePeriod: 10 * time.Minute, log: quietLogger()}
-	applied := &backstopHandler{}
+	records, err := restarted.idleStore.PodRecordsOf("legion")
+	if err != nil {
+		t.Fatalf("read the pod records: %v", err)
+	}
+	applied := &backstopHandler{records: records}
 	restarted.handlers = []intake.Handler{applied}
 	restarted.fireDueBackstops(ctx, time.Now().UTC())
 	if applied.facts != 1 {
@@ -181,14 +185,17 @@ func TestABackstopThatCameDueWhileTheDaemonWasDownFiresAfterItStarts(t *testing.
 // backstopHandler is the workflow engine's backstop arm as this test needs it: it counts the
 // facts it is handed and fires the row conditionally, as the engine does, so a backstop two
 // passes read is seen to fire once.
-type backstopHandler struct{ facts int }
+type backstopHandler struct {
+	records *store.PodRecords
+	facts   int
+}
 
 func (h *backstopHandler) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
 	due, ok := fact.(intake.PodBackstopDue)
 	if !ok {
 		return intake.Result{}, nil
 	}
-	fired, err := store.FirePodBackstop(ctx, tx, due.ID)
+	fired, err := h.records.FirePodBackstop(ctx, tx, due.ID)
 	if err != nil || !fired {
 		return intake.Result{}, err
 	}
@@ -220,15 +227,19 @@ func (h *terminalHandler) applied() []string {
 	return append([]string(nil), h.facts...)
 }
 
-// A supervisor keeps one durable-state callback (supervisor.OnTerminal assigns it), so the
+// A supervisor keeps one durable-state callback (supervisor.OnDurableState assigns it), so the
 // daemon's two readers of those states are one callback: the workflow facts a claim's ready and
 // failure are, and the stamps a released pod's resume is measured by. Registering them as two
 // callbacks left only the second, which dropped every ClaimReady and ClaimFailed the workflow
 // runs on.
 //
+// The callback is taken from the supervisor the boot's attach installed it on, never called as a
+// method: a second registration in attach would be the same defect again, and only the hook the
+// supervisor ends up holding shows it.
+//
 // R5: the first turn is stamped from the woken claim reaching working, not from a delivery's
 // confirmation, because a wake for a notice or a phase-ended message carries no delivery.
-func TestTheDaemonsOneTerminalCallbackCarriesTheFactsAndTheResumeStamps(t *testing.T) {
+func TestTheDaemonsOneDurableStateCallbackCarriesTheFactsAndTheResumeStamps(t *testing.T) {
 	w, pool, _ := wakeRuntime(t)
 	facts := &terminalHandler{}
 	w.handlers = []intake.Handler{facts}
@@ -238,11 +249,20 @@ func TestTheDaemonsOneTerminalCallbackCarriesTheFactsAndTheResumeStamps(t *testi
 	held := supervise.Claim{Token: "legion-legion-208-implementer", Project: "legion", Tree: "LEGION-208",
 		Issue: "LEGION-208", Role: claim.RoleImplementer, Generation: 1}
 
-	w.claimTerminal(held, supervise.StateReady)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sup := newSupervisor(ctx, w.idleStore, "legion", t.TempDir(), quietLogger())
+	w.attach(&supervision{supervisor: sup, log: quietLogger()})
+	hook := sup.durableState
+	if hook == nil {
+		t.Fatal("attach left the supervisor no durable-state callback")
+	}
+
+	hook(held, supervise.StateReady)
 	awaitResume(t, pool, id, "pod_ready_at")
-	w.claimTerminal(held, supervise.StateWorking)
+	hook(held, supervise.StateWorking)
 	awaitResume(t, pool, id, "first_turn_at")
-	w.claimTerminal(held, supervise.StateFailed)
+	hook(held, supervise.StateFailed)
 
 	deadline := time.Now().Add(10 * time.Second)
 	for len(facts.applied()) < 2 && time.Now().Before(deadline) {

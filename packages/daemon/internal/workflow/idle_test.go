@@ -105,6 +105,11 @@ func TestTheIdleRuleNamesTheOneConditionThatHeldEachPod(t *testing.T) {
 			image: true, want: IdleHoldTreeNotLive,
 		},
 		{
+			name:  "a bundle of the pod's work is still waiting to be restored",
+			view:  func() pods.IdleView { v := idleChild(); v.BundleUnrestored = true; return v }(),
+			image: true, want: IdleHoldBundleUnrestored,
+		},
+		{
 			name: "the root waits on a person who has not answered",
 			view: func() pods.IdleView {
 				v := idleRoot()

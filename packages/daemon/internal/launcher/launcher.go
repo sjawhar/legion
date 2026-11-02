@@ -536,9 +536,7 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 	if outcome.Notice != "" {
 		m.logf("launcher: %s", outcome.Notice)
 	}
-	if outcome.Ran {
-		m.reportRestore()
-	}
+	m.reportRestore()
 	env = mergeEnv(env, []string{
 		WorkspaceRecreatedVariable + "=" + strconv.FormatBool(recreated),
 		WorkspaceRestoredVariable + "=" + strconv.FormatBool(outcome.Restored),

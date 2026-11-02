@@ -356,13 +356,13 @@ func populatedState(t *testing.T) State {
 		HeldOutboxRows: []HeldOutboxRow{{ID: 802, Kind: "supervise", Issue: "LEGION-208", WaitedSeconds: 150, WaitsOn: 801}},
 		// LEGION-210's implementer failed while implementing: its issue is held from that phase,
 		// and nothing retries the claim until its architect retries the phase. LEGION-211's
-		// implementer is the other kind, a released pod whose wake never brought it back: its
-		// suspendedBy is read on the operator claim routes, and the entry here carries the same
+		// implementer is the other kind, a released pod whose wake never brought it back: who
+		// suspended it is read on the operator claim routes, and the entry here carries the same
 		// three keys as every other, which is what a session on the contract before this one
 		// parses.
 		StrandedClaims: []StrandedClaim{
 			{Issue: "LEGION-210", Role: claim.RoleImplementer, State: "failed"},
-			{Issue: "LEGION-211", Role: claim.RoleImplementer, State: "suspended", SuspendedBy: "released"},
+			{Issue: "LEGION-211", Role: claim.RoleImplementer, State: "suspended"},
 		},
 		ControllerLocator: &ControllerLocator{
 			Runtime:      "kubernetes",
@@ -431,15 +431,17 @@ func TestStateGolden(t *testing.T) {
 // to add, and it belongs to the operator claim routes alone; the guard beside
 // `legion-api.test.ts`'s schema tests holds the same property on the schema side.
 func TestNoSessionFacingBodyCarriesSuspendedBy(t *testing.T) {
-	state := populatedState(t)
-	suspended := false
-	for _, stranded := range state.StrandedClaims {
-		suspended = suspended || stranded.SuspendedBy != ""
+	// The body where the key does live, so a guard over nothing cannot pass for a clean one.
+	operator, err := json.Marshal(OperatorClaims{Claims: []OperatorClaim{
+		{Issue: "LEGION-211", Role: claim.RoleImplementer, State: "suspended", SuspendedBy: "released"},
+	}})
+	if err != nil {
+		t.Fatalf("marshal the operator claim list: %v", err)
 	}
-	if !suspended {
-		t.Fatal("no stranded claim of the fixture names a suspender: the guard would pass over nothing")
+	if !bytes.Contains(operator, []byte("suspendedBy")) {
+		t.Fatalf("the operator claim list does not carry suspendedBy either: %s", operator)
 	}
-	encoded, err := json.Marshal(state)
+	encoded, err := json.Marshal(populatedState(t))
 	if err != nil {
 		t.Fatalf("marshal the state: %v", err)
 	}

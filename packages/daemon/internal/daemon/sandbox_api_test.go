@@ -14,6 +14,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/rest"
 )
 
 // sandboxNamespace is the namespace every object of these tests' cluster lives in, the one
@@ -118,6 +119,17 @@ func (a *issueSandboxAPI) serve(t *testing.T) string {
 	t.Cleanup(server.Close)
 	a.url = server.URL
 	return a.url
+}
+
+// sandboxRESTConfig is how a test's runtime reaches the API served at host. The stand-in decodes
+// and encodes JSON alone, and client-go's typed clients prefer protobuf for the built-in group
+// unless the configuration names a content type (rest.Request.UseProtobufAsDefaultIfPreferred),
+// so it names JSON for both directions: without it a Secret write arrives as protobuf and the
+// stand-in answers 400.
+func sandboxRESTConfig(host string) *rest.Config {
+	return &rest.Config{Host: host, ContentConfig: rest.ContentConfig{
+		ContentType: "application/json", AcceptContentTypes: "application/json",
+	}}
 }
 
 // issueSandbox is a Running issue Sandbox of tree and issue as the API holds it, owning no volume

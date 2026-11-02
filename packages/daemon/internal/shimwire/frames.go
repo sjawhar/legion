@@ -385,10 +385,17 @@ type BundleWorkspaceResult struct {
 // (SplitWorkspaceBundle), Count how many slices there are, and SHA256 the digest of the body the
 // slices rebuild, which the launcher checks before it writes anything. ID names the sequence, so a
 // repeated slice is recognised as a repeated launcher_start id is.
+//
+// Release is the id of the release that saved the body, which the launcher echoes in its
+// launcher_restored: the daemon deletes the bundle that report names and no other, so a report
+// that reaches it after a later release has saved again deletes nothing (internal/runtime/sandbox's
+// restoreReported). It travels beside the body rather than in it so that a report still names its
+// release when the body could not be read.
 type LauncherBundle struct {
 	ID      string `json:"id"`
 	Index   int    `json:"index"`
 	Count   int    `json:"count"`
+	Release int64  `json:"release"`
 	Payload []byte `json:"payload"`
 	SHA256  string `json:"sha256"`
 }
@@ -410,12 +417,14 @@ type LauncherBundleResult struct {
 // launcher sends it, unasked, as soon as the start that applied the bundle has run the restore,
 // and again on each later connection until one carries it, since a restore the daemon never
 // heard of leaves the saved work in its database for the issue's next pod. ID is the slice
-// sequence the bundle arrived under. OK is the restore that put the work back; a restore that
-// failed carries the reason the launcher wrote the agent, and the daemon keeps its copy.
+// sequence the bundle arrived under and Release the release whose save that sequence carried.
+// OK is the restore that put the work back; a restore that failed carries the reason the launcher
+// wrote the agent, and the daemon keeps its copy.
 type LauncherRestored struct {
-	ID    string `json:"id"`
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
+	ID      string `json:"id"`
+	Release int64  `json:"release,omitempty"`
+	OK      bool   `json:"ok"`
+	Error   string `json:"error,omitempty"`
 }
 
 // WorkspaceBundle is the saved work the LauncherBundle slices carry: the git bundle's own bytes,
@@ -689,6 +698,8 @@ func (f LauncherBundle) Validate() error {
 		return fmt.Errorf("%w: launcher_bundle count is %d", ErrMalformedFrame, f.Count)
 	case f.Index < 0 || f.Index >= f.Count:
 		return fmt.Errorf("%w: launcher_bundle index %d of %d", ErrMalformedFrame, f.Index, f.Count)
+	case f.Release <= 0:
+		return fmt.Errorf("%w: launcher_bundle %d names no release", ErrMalformedFrame, f.Index)
 	case len(f.Payload) == 0:
 		return fmt.Errorf("%w: launcher_bundle %d carries no payload", ErrMalformedFrame, f.Index)
 	case len(f.Payload) > LauncherBundlePayloadBytes:
@@ -708,29 +719,33 @@ var digestShape = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // rpc_chunk on its side.
 const LauncherBundlePayloadBytes = 256 << 10
 
-// SplitWorkspaceBundle slices b into the launcher_bundle sequence that carries it, every slice
-// declaring the digest of the whole body so the launcher can refuse one that did not arrive as
-// it was sent. The sequence's id is name and that digest, so the same bundle sent again is the
-// same sequence and another bundle under the same name is another one: a launcher whose
-// connection was replaced mid-sequence answers a slice it already took with the answer it gave,
-// and refuses only a payload that differs from the one that id carried (internal/launcher's
-// bundleRestore.receive).
-func SplitWorkspaceBundle(name string, b WorkspaceBundle) ([]LauncherBundle, error) {
+// SplitWorkspaceBundle slices b, the work release saved, into the launcher_bundle sequence that
+// carries it, every slice declaring the release and the digest of the whole body so the launcher
+// can refuse one that did not arrive as it was sent. The sequence's id is name, the release and
+// that digest, so the same bundle sent again is the same sequence and another bundle, or the same
+// work saved by another release, is another one: a launcher whose connection was replaced
+// mid-sequence answers a slice it already took with the answer it gave, and refuses only a payload
+// that differs from the one that id carried (internal/launcher's bundleRestore.receive).
+func SplitWorkspaceBundle(name string, release int64, b WorkspaceBundle) ([]LauncherBundle, error) {
 	if name == "" {
 		return nil, fmt.Errorf("%w: a launcher_bundle sequence needs a name", ErrMalformedFrame)
+	}
+	if release <= 0 {
+		return nil, fmt.Errorf("%w: a launcher_bundle sequence needs the release that saved it", ErrMalformedFrame)
 	}
 	body, err := marshalWorkspaceBundle(b)
 	if err != nil {
 		return nil, err
 	}
 	digest := BundleDigest(body)
-	id := name + "-" + digest
+	id := name + "-" + strconv.FormatInt(release, 10) + "-" + digest
 	count := (len(body) + LauncherBundlePayloadBytes - 1) / LauncherBundlePayloadBytes
 	frames := make([]LauncherBundle, 0, count)
 	for index := range count {
 		end := min((index+1)*LauncherBundlePayloadBytes, len(body))
 		frames = append(frames, LauncherBundle{
-			ID: id, Index: index, Count: count, Payload: body[index*LauncherBundlePayloadBytes : end], SHA256: digest,
+			ID: id, Index: index, Count: count, Release: release,
+			Payload: body[index*LauncherBundlePayloadBytes : end], SHA256: digest,
 		})
 	}
 	return frames, nil

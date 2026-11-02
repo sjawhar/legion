@@ -36,6 +36,16 @@ func inTx(t *testing.T, store *Store, read func(pgx.Tx) error) {
 	}
 }
 
+// podRecords is project legion's pod tables as a caller outside the store reads and writes them.
+func podRecords(t *testing.T, store *Store) *PodRecords {
+	t.Helper()
+	records, err := store.PodRecordsOf("legion")
+	if err != nil {
+		t.Fatalf("read the pod records: %v", err)
+	}
+	return records
+}
+
 // reopenStore is a daemon restart: a fresh pool and a fresh store over the same database, with
 // nothing of the first one carried in memory. Only what was written survives it.
 func reopenStore(t *testing.T, store *Store) *Store {
@@ -56,19 +66,20 @@ func TestAReleasedClaimIsReadByItsTokenAndItsSessionUntilAnotherPathTakesItOver(
 	ctx := context.Background()
 	seedReleasedPod(t, store, "session-1")
 
+	records := podRecords(t, store)
 	inTx(t, store, func(tx pgx.Tx) error {
-		byToken, found, err := ReleasedClaimByToken(ctx, tx, "legion", string(releasedToken))
+		byToken, found, err := records.ReleasedClaimByToken(ctx, tx, string(releasedToken))
 		if err != nil || !found {
 			t.Fatalf("ReleasedClaimByToken = %+v, %t, %v; want the released claim", byToken, found, err)
 		}
 		if byToken.Issue != rootIssue || byToken.Role != claim.RoleImplementer || byToken.ServingGeneration != 1 {
 			t.Fatalf("the claim read by token = %+v, want the implementer of %s at generation 1", byToken, rootIssue)
 		}
-		bySession, found, err := ReleasedClaimBySession(ctx, tx, "legion", "session-1")
+		bySession, found, err := records.ReleasedClaimBySession(ctx, tx, "session-1")
 		if err != nil || !found || bySession.Token != releasedToken {
 			t.Fatalf("ReleasedClaimBySession = %+v, %t, %v; want the same claim", bySession, found, err)
 		}
-		if _, found, err := ReleasedClaimBySession(ctx, tx, "legion", "another-daemons-session"); err != nil || found {
+		if _, found, err := records.ReleasedClaimBySession(ctx, tx, "another-daemons-session"); err != nil || found {
 			t.Fatalf("a session of no claim of this project = %t, %v; want not found", found, err)
 		}
 		return nil
@@ -80,10 +91,10 @@ func TestAReleasedClaimIsReadByItsTokenAndItsSessionUntilAnotherPathTakesItOver(
 			t.Fatalf("take the claim over: %v", err)
 		}
 		inTx(t, store, func(tx pgx.Tx) error {
-			if _, found, err := ReleasedClaimByToken(ctx, tx, "legion", string(releasedToken)); err != nil || found {
+			if _, found, err := records.ReleasedClaimByToken(ctx, tx, string(releasedToken)); err != nil || found {
 				t.Fatalf("a claim suspended by %s reads released = %t, %v; want not found", source, found, err)
 			}
-			if _, found, err := ReleasedClaimBySession(ctx, tx, "legion", "session-1"); err != nil || found {
+			if _, found, err := records.ReleasedClaimBySession(ctx, tx, "session-1"); err != nil || found {
 				t.Fatalf("a claim suspended by %s reads released by session = %t, %v; want not found", source, found, err)
 			}
 			return nil
@@ -148,12 +159,13 @@ func TestABackstopSurvivesTheDaemonAndFiresOnce(t *testing.T) {
 		t.Fatalf("the backstop is due at %s, want the time the first arming set, %s", due2[0].DueAt.UTC(), due)
 	}
 
+	records := podRecords(t, restarted)
 	inTx(t, restarted, func(tx pgx.Tx) error {
-		fired, err := FirePodBackstop(ctx, tx, due2[0].ID)
+		fired, err := records.FirePodBackstop(ctx, tx, due2[0].ID)
 		if err != nil || !fired {
 			t.Fatalf("the first fire = %t, %v; want it fired", fired, err)
 		}
-		again, err := FirePodBackstop(ctx, tx, due2[0].ID)
+		again, err := records.FirePodBackstop(ctx, tx, due2[0].ID)
 		if err != nil || again {
 			t.Fatalf("the second fire = %t, %v; want it already fired", again, err)
 		}
@@ -200,13 +212,14 @@ func TestTheListenerIsLiveOnlyWithAReportInsideTheWindow(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	const window = 15 * time.Minute
+	records := podRecords(t, store)
 
 	live, _, found, err := store.ListenerLive(ctx, "legion", now, window)
 	if err != nil || live || found {
 		t.Fatalf("with no report at all: live = %t, found = %t, %v; want neither", live, found, err)
 	}
 	inTx(t, store, func(tx pgx.Tx) error {
-		return RecordListenerReady(ctx, tx, "legion", now.Add(-16*time.Minute))
+		return records.RecordListenerReady(ctx, tx, now.Add(-16*time.Minute))
 	})
 	live, at, found, err := store.ListenerLive(ctx, "legion", now, window)
 	if err != nil || live || !found {
@@ -216,7 +229,7 @@ func TestTheListenerIsLiveOnlyWithAReportInsideTheWindow(t *testing.T) {
 		t.Fatalf("the report is stamped %s, want %s", at, now.Add(-16*time.Minute))
 	}
 	inTx(t, store, func(tx pgx.Tx) error {
-		return RecordListenerReady(ctx, tx, "legion", now.Add(-5*time.Minute))
+		return records.RecordListenerReady(ctx, tx, now.Add(-5*time.Minute))
 	})
 	live, _, _, err = store.ListenerLive(ctx, "legion", now, window)
 	if err != nil || !live {
@@ -225,7 +238,7 @@ func TestTheListenerIsLiveOnlyWithAReportInsideTheWindow(t *testing.T) {
 	// A report that arrives out of order never moves the stamp backwards: the reports are the
 	// listener's own clock, and one delivered late must not make a live listener look dead.
 	inTx(t, store, func(tx pgx.Tx) error {
-		return RecordListenerReady(ctx, tx, "legion", now.Add(-20*time.Minute))
+		return records.RecordListenerReady(ctx, tx, now.Add(-20*time.Minute))
 	})
 	live, _, _, err = store.ListenerLive(ctx, "legion", now, window)
 	if err != nil || !live {

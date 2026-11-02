@@ -481,8 +481,10 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []strin
 		opts.Conns, opts.StreamURL, opts.Store, opts.Mapped = listener, address, st, mapped
 		// The two halves of the release's saved work: an idle release puts the issue's unpushed
 		// work here (outbox's release), and the runtime hands it to the launcher of the pod that
-		// replaces the released one before any role of that pod starts.
-		opts.SavedWorkspaceBundle, opts.WorkspaceBundleRestored = st.WorkspaceBundle, st.DeleteWorkspaceBundle
+		// replaces the released one before any role of that pod starts. The confirmation deletes
+		// the bundle of the release the launcher's report names and no other, so a report that
+		// arrives late takes no newer release's work with it.
+		opts.SavedWorkspaceBundle, opts.WorkspaceBundleRestored = st.WorkspaceBundle, st.DeleteRestoredWorkspaceBundle
 		if apps != nil {
 			opts.Tokens = implementTokens{apps}
 			opts.GitHubCredential = appauth.GitHubCredential(apps, owners)

@@ -10,6 +10,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/pods"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -96,6 +97,43 @@ func TestTheIdleViewReadsTheStoredActivityReportAndTheQueuedRows(t *testing.T) {
 	markRelease(t, st, 30, 31, 32, 0)
 	if marked := idleViewOf(t, st, rootIssue); !marked.Releasing {
 		t.Fatalf("view after the mark = %+v, want it releasing", marked.Releasing)
+	}
+}
+
+// The view carries two facts beside the rule's own conditions: whether the issue holds a bundle
+// no pod has restored, which keeps the pod from being released over work that never came back,
+// and whether a hold streak of the pod is running, which is what the daemon's pass reads before
+// it ends one. The second is in the view because the pass already takes this read, and ending
+// streaks a pod does not have would cost a write transaction per pod per tick.
+func TestTheIdleViewReadsTheUnrestoredBundleAndTheRunningHoldStreak(t *testing.T) {
+	st := migratedStore(t)
+	ctx := context.Background()
+	openRunningTree(t, st)
+	now := time.Now().UTC()
+
+	if view := idleViewOf(t, st, rootIssue); view.BundleUnrestored || view.Holding {
+		t.Fatalf("view = %+v, want no stored bundle and no running streak", view)
+	}
+
+	if err := st.PutWorkspaceBundle(ctx, rootIssue, 7,
+		runtime.WorkspaceBundle{Bundle: []byte("PACK"), Head: "abc", At: now}); err != nil {
+		t.Fatalf("save a bundle for %s: %v", rootIssue, err)
+	}
+	if err := st.RecordPodHold(ctx, PodHold{Project: "legion", Issue: rootIssue, Reason: "image", At: now}); err != nil {
+		t.Fatalf("record a hold of %s: %v", rootIssue, err)
+	}
+	if view := idleViewOf(t, st, rootIssue); !view.BundleUnrestored || !view.Holding {
+		t.Fatalf("view = %+v, want the unrestored bundle and the running streak", view)
+	}
+
+	if err := st.EndPodHoldStreaks(ctx, "legion", rootIssue); err != nil {
+		t.Fatalf("end the hold streaks of %s: %v", rootIssue, err)
+	}
+	if err := st.DeleteWorkspaceBundle(ctx, rootIssue); err != nil {
+		t.Fatalf("delete the bundle of %s: %v", rootIssue, err)
+	}
+	if view := idleViewOf(t, st, rootIssue); view.BundleUnrestored || view.Holding {
+		t.Fatalf("view = %+v, want the restored bundle and the ended streak gone from it", view)
 	}
 }
 

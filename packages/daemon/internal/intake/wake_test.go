@@ -107,8 +107,8 @@ func TestTheWakeConsumerNamesItsProjectOnItsOwnSubject(t *testing.T) {
 // chooses every field of the envelope and the payload, the envelope's source among them, so the
 // daemon bounds the time it reads to its own: a `listener_ready` dated in the year 9999 would
 // otherwise hold R7's release gate open for ever, since the stamp keeps the greatest time it is
-// given (store.RecordListenerReady), and released pods would then miss every role and agent
-// message while the listener itself said nothing.
+// given (store.PodRecords.RecordListenerReady), and released pods would then miss every role
+// and agent message while the listener itself said nothing.
 func TestAListenerReportDatedInTheFutureIsReadAsNow(t *testing.T) {
 	const year9999 = 253370764800000
 	before := time.Now().UTC()

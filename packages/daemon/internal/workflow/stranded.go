@@ -24,32 +24,28 @@ const strandedRoleRunBatchSize = 200
 const StrandedReleaseWake = 10 * time.Minute
 
 // ReleasedWake is one recorded wake of a released pod as the stranded rule reads it: the pod and
-// the role the wake was for, when the wake reached the daemon, whether the woken role has taken
-// its first turn since, and whether a stuck pass has already said so. The daemon reads them from
-// its own records (store.Store.UnfinishedPodResumes) and hands them in, so this rule stays what
-// every other rule here is: a judgement over values.
+// the role the wake was for, when the wake reached the daemon, and whether a stuck pass has
+// already said so. The daemon reads them from its own records (store.Store.UnfinishedPodResumes,
+// which selects the resumes whose woken role has taken no first turn) and hands them in, so this
+// rule stays what every other rule here is: a judgement over values.
 type ReleasedWake struct {
-	Issue     string
-	Role      string
-	At        time.Time
-	FirstTurn bool
-	Stuck     bool
+	Issue string
+	Role  string
+	At    time.Time
+	Stuck bool
 }
 
 // releasedRole keys a released claim's recorded wakes by the pod and the role they were for,
 // which is all a wake record names of the claim (it carries no claim token).
 type releasedRole struct{ issue, role string }
 
-// strandedReleaseWakes is each released claim whose wake ran out of StrandedReleaseWake with no
-// first turn: the wakes with no first turn at all, taken more than that ago, or already marked
-// stuck, which is the same fact recorded. A claim with no wake is not here, and neither is one
-// whose wake is younger than the bound: the pod it is coming back as is still being built.
+// strandedReleaseWakes is each released claim whose wake ran out of StrandedReleaseWake: the
+// wakes taken more than that ago, and the ones already marked stuck, which is the same fact
+// recorded. A claim with no wake is not here, and neither is one whose wake is younger than the
+// bound: the pod it is coming back as is still being built.
 func strandedReleaseWakes(wakes []ReleasedWake, now time.Time) map[releasedRole]bool {
 	woken := make(map[releasedRole]bool, len(wakes))
 	for _, wake := range wakes {
-		if wake.FirstTurn {
-			continue
-		}
 		if !wake.Stuck && now.Sub(wake.At) <= StrandedReleaseWake {
 			continue
 		}

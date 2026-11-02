@@ -894,7 +894,7 @@ func TestAstraAFailedClaimStaysFailedAcrossARestart(t *testing.T) {
 func TestTerminalCallbackRunsOnlyAfterReadyAndFailurePersist(t *testing.T) {
 	h := newHarness(t)
 	var observed []ClaimState
-	h.m.OnTerminal(func(c Claim, state ClaimState) {
+	h.m.OnDurableState(func(c Claim, state ClaimState) {
 		if persisted := h.store.load(c.Token); persisted.State != state {
 			t.Fatalf("callback state %s ran before persisted claim state %s", state, persisted.State)
 		}
@@ -919,7 +919,7 @@ func TestTerminalCallbackRunsOnlyAfterReadyAndFailurePersist(t *testing.T) {
 func TestATurnStartReportsTheWorkingClaim(t *testing.T) {
 	h := newHarness(t)
 	var observed []ClaimState
-	h.m.OnTerminal(func(c Claim, state ClaimState) {
+	h.m.OnDurableState(func(c Claim, state ClaimState) {
 		if persisted := h.store.load(c.Token); persisted.State != state {
 			t.Errorf("callback state %s ran before persisted claim state %s", state, persisted.State)
 		}

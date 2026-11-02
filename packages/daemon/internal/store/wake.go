@@ -55,35 +55,8 @@ func ReleasedClaimsOf(ctx context.Context, tx pgx.Tx, project, issue string) ([]
 	return claims, nil
 }
 
-// ReleasedClaimOfRole is the released claim of issue's role, and whether there is one.
-func ReleasedClaimOfRole(ctx context.Context, tx pgx.Tx, project, issue string, role claim.Role) (supervise.Claim, bool, error) {
-	claims, err := ReleasedClaimsOf(ctx, tx, project, issue)
-	if err != nil {
-		return supervise.Claim{}, false, err
-	}
-	for _, c := range claims {
-		if c.Role == role {
-			return c, true, nil
-		}
-	}
-	return supervise.Claim{}, false, nil
-}
-
-// ReleasedClaimByToken is the released claim whose token is token, and whether this daemon's
-// project holds one. The listener reports a role token it saw a message published to and knows
-// nothing of which daemon owns it, so every daemon reads its own claims and the one that holds a
-// released claim of that token is the one that acts.
-func ReleasedClaimByToken(ctx context.Context, tx pgx.Tx, project, token string) (supervise.Claim, bool, error) {
-	return oneReleasedClaim(ctx, tx, `and token = $4`, project, token, "role token")
-}
-
-// ReleasedClaimBySession is the released claim that kept session, and whether this daemon's
-// project holds one. A released claim keeps its session id, which is what lets a message
-// addressed to that session find the pod that must come back for it.
-func ReleasedClaimBySession(ctx context.Context, tx pgx.Tx, project, session string) (supervise.Claim, bool, error) {
-	return oneReleasedClaim(ctx, tx, `and session = $4`, project, session, "session")
-}
-
+// oneReleasedClaim is the one released claim of project that where selects, and whether there is
+// one.
 func oneReleasedClaim(ctx context.Context, tx pgx.Tx, where, project, value, what string) (supervise.Claim, bool, error) {
 	if value == "" {
 		return supervise.Claim{}, false, nil
@@ -152,38 +125,20 @@ func (s *Store) ForgetPodWakesOf(ctx context.Context, project, issue string) err
 	return s.Tx(ctx, func(tx pgx.Tx) error { return ForgetPodWakes(ctx, tx, project, issue) })
 }
 
-// TakePodWake takes one wake of issue's role inside the caller's transaction, and is the whole of
-// what taking a wake is: the mark under the wake's own key, the resume recorded against the
-// release that wake ends, and the role's own backstop cancelled. It answers whether this call
-// took the wake; false is a wake another pass already took, and then the caller resumes nothing,
-// because the first wake is already bringing the pod back.
-//
-// Every wake runs through here — the four the workflow applies inside a fact's transaction and
-// the delivery wake the outbox takes in one of its own (Store.TakePodWake) — so there is one
-// account of what a wake writes and one order it writes it in.
-func TakePodWake(ctx context.Context, tx pgx.Tx, project, issue string, role claim.Role, kind, key string, at time.Time) (bool, error) {
-	first, err := MarkPodWake(ctx, tx, project, issue, kind, key, at)
-	if err != nil || !first {
-		return false, err
-	}
-	release, err := LatestPodRelease(ctx, tx, project, issue)
-	if err != nil {
-		return false, err
-	}
-	if _, err := RecordPodWakeTx(ctx, tx, PodResume{Release: release, Project: project, Issue: issue,
-		Role: string(role), Kind: kind, At: at}); err != nil {
-		return false, err
-	}
-	return true, CancelPodBackstops(ctx, tx, project, issue, role)
-}
-
 // TakePodWake takes one wake outside any fact transaction, for the wakes the outbox takes: a
-// notice or a phase-ended message that found the role it is for released.
+// notice or a phase-ended message that found the role it is for released. Inside a fact's
+// transaction the workflow takes its four through PodRecords.TakePodWake, which is where taking
+// a wake is written out.
+//
+// project is the project token the claim-keyed tables hold, as it is for every other
+// project-keyed method of this file: the daemon derives it once at boot (claim.ProjectToken,
+// internal/daemon/bootreads.go) and its outbox carries that, so nothing is derived again here.
 func (s *Store) TakePodWake(ctx context.Context, project, issue string, role claim.Role, kind, key string, at time.Time) (bool, error) {
+	records := &PodRecords{store: s, project: project}
 	var taken bool
 	err := s.Tx(ctx, func(tx pgx.Tx) error {
 		var err error
-		taken, err = TakePodWake(ctx, tx, project, issue, role, kind, key, at)
+		taken, err = records.TakePodWake(ctx, tx, issue, role, kind, key, at)
 		return err
 	})
 	return taken, err
@@ -251,16 +206,6 @@ func (s *Store) DuePodBackstops(ctx context.Context, project string, now time.Ti
 	return out, rows.Err()
 }
 
-// FirePodBackstop marks backstop id fired and answers whether this call was the one that fired
-// it, so a backstop read by two passes wakes its pod once.
-func FirePodBackstop(ctx context.Context, tx pgx.Tx, id int64) (bool, error) {
-	tag, err := tx.Exec(ctx, `update pod_wake_backstops set fired = true where id = $1 and not fired`, id)
-	if err != nil {
-		return false, fmt.Errorf("fire backstop %d: %w", id, err)
-	}
-	return tag.RowsAffected() > 0, nil
-}
-
 // RecordPodWakeTx is RecordPodWake inside a caller's transaction: a wake decided by an intake
 // fact records itself with the outbox row that brings the pod back, so a committed wake is a
 // recorded wake and a rolled-back one is neither. It writes the same pod_resumes row.
@@ -308,22 +253,6 @@ func (s *Store) OpenPodResume(ctx context.Context, project, issue string, role c
 		return 0, false, fmt.Errorf("read the open resume of %s's %s: %w", issue, role, err)
 	}
 	return id, true, nil
-}
-
-// RecordListenerReady stamps when the Envoy listener last said it is alive and reporting, which
-// is the whole of R7's gate: the daemon releases no pod while that stamp is older than the
-// freshness window.
-func RecordListenerReady(ctx context.Context, tx pgx.Tx, project string, at time.Time) error {
-	if project == "" {
-		return errors.New("a listener-ready report needs its project")
-	}
-	_, err := tx.Exec(ctx, `insert into listener_reports (project, ready_at) values ($1, $2)
-		on conflict (project) do update set ready_at = greatest(listener_reports.ready_at, excluded.ready_at)`,
-		project, at)
-	if err != nil {
-		return fmt.Errorf("record the listener's report for %s: %w", project, err)
-	}
-	return nil
 }
 
 // ListenerReadyAt is when the Envoy listener last reported itself ready for project, and whether
@@ -399,34 +328,79 @@ func (s *Store) PodRecordsOf(project string) (*PodRecords, error) {
 	return &PodRecords{store: s, project: token}, nil
 }
 
-// RecordListenerReady stamps the Envoy listener's report for this project.
+// RecordListenerReady stamps when the Envoy listener last said it is alive and reporting, which
+// is the whole of R7's gate: the daemon releases no pod while that stamp is older than the
+// freshness window.
 func (p *PodRecords) RecordListenerReady(ctx context.Context, tx pgx.Tx, at time.Time) error {
-	return RecordListenerReady(ctx, tx, p.project, at)
+	_, err := tx.Exec(ctx, `insert into listener_reports (project, ready_at) values ($1, $2)
+		on conflict (project) do update set ready_at = greatest(listener_reports.ready_at, excluded.ready_at)`,
+		p.project, at)
+	if err != nil {
+		return fmt.Errorf("record the listener's report for %s: %w", p.project, err)
+	}
+	return nil
 }
 
 // ReleasedClaimOfRole is the released claim of issue's role, and whether there is one.
 func (p *PodRecords) ReleasedClaimOfRole(ctx context.Context, tx pgx.Tx, issue string, role claim.Role) (supervise.Claim, bool, error) {
-	return ReleasedClaimOfRole(ctx, tx, p.project, issue, role)
+	claims, err := ReleasedClaimsOf(ctx, tx, p.project, issue)
+	if err != nil {
+		return supervise.Claim{}, false, err
+	}
+	for _, c := range claims {
+		if c.Role == role {
+			return c, true, nil
+		}
+	}
+	return supervise.Claim{}, false, nil
 }
 
-// ReleasedClaimByToken is the released claim whose token is token, and whether this project
-// holds one.
+// ReleasedClaimByToken is the released claim whose token is token, and whether this daemon's
+// project holds one. The listener reports a role token it saw a message published to and knows
+// nothing of which daemon owns it, so every daemon reads its own claims and the one that holds a
+// released claim of that token is the one that acts.
 func (p *PodRecords) ReleasedClaimByToken(ctx context.Context, tx pgx.Tx, token string) (supervise.Claim, bool, error) {
-	return ReleasedClaimByToken(ctx, tx, p.project, token)
+	return oneReleasedClaim(ctx, tx, `and token = $4`, p.project, token, "role token")
 }
 
-// ReleasedClaimBySession is the released claim that kept session, and whether this project holds
-// one.
+// ReleasedClaimBySession is the released claim that kept session, and whether this daemon's
+// project holds one. A released claim keeps its session id, which is what lets a message
+// addressed to that session find the pod that must come back for it.
 func (p *PodRecords) ReleasedClaimBySession(ctx context.Context, tx pgx.Tx, session string) (supervise.Claim, bool, error) {
-	return ReleasedClaimBySession(ctx, tx, p.project, session)
+	return oneReleasedClaim(ctx, tx, `and session = $4`, p.project, session, "session")
 }
 
-// TakePodWake takes one wake of issue's role, as the package function does.
+// TakePodWake takes one wake of issue's role inside the caller's transaction, and is the whole
+// of what taking a wake is: the mark under the wake's own key, the resume recorded against the
+// release that wake ends, and the role's own backstop cancelled. It answers whether this call
+// took the wake; false is a wake another pass already took, and then the caller resumes nothing,
+// because the first wake is already bringing the pod back.
+//
+// Every wake runs through here — the four the workflow applies inside a fact's transaction and
+// the delivery wake the outbox takes in one of its own (Store.TakePodWake) — so there is one
+// account of what a wake writes and one order it writes it in.
 func (p *PodRecords) TakePodWake(ctx context.Context, tx pgx.Tx, issue string, role claim.Role, kind, key string, at time.Time) (bool, error) {
-	return TakePodWake(ctx, tx, p.project, issue, role, kind, key, at)
+	first, err := MarkPodWake(ctx, tx, p.project, issue, kind, key, at)
+	if err != nil || !first {
+		return false, err
+	}
+	release, err := LatestPodRelease(ctx, tx, p.project, issue)
+	if err != nil {
+		return false, err
+	}
+	if _, err := RecordPodWakeTx(ctx, tx, PodResume{Release: release, Project: p.project, Issue: issue,
+		Role: string(role), Kind: kind, At: at}); err != nil {
+		return false, err
+	}
+	return true, CancelPodBackstops(ctx, tx, p.project, issue, role)
 }
 
-// FirePodBackstop marks backstop id fired, as the package function does.
+// FirePodBackstop marks backstop id fired and answers whether this call was the one that fired
+// it, so a backstop read by two passes wakes its pod once.
 func (p *PodRecords) FirePodBackstop(ctx context.Context, tx pgx.Tx, id int64) (bool, error) {
-	return FirePodBackstop(ctx, tx, id)
+	tag, err := tx.Exec(ctx, `update pod_wake_backstops set fired = true where id = $1 and not fired`, id)
+	if err != nil {
+		return false, fmt.Errorf("fire backstop %d: %w", id, err)
+	}
+	return tag.RowsAffected() > 0, nil
 }

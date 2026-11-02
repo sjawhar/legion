@@ -604,7 +604,7 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			// A session of a released Legion issue pod is gone from the bucket with its pod, and
 			// this 404 is the only sight of the message meant for it: the wake is reported so the
 			// pod comes back and the sender's next attempt reaches it.
-			reportAgentWake(d.client, logger, targetSession)
+			reportAgentWake(d.wakes, logger, targetSession)
 			record.refuse(w, http.StatusNotFound, outcomeNoLiveSession, fmt.Sprintf("no live session %s", targetSession))
 			return
 		}

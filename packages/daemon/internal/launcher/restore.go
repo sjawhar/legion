@@ -36,11 +36,13 @@ const restoreRefPrefix = "legion-restore-"
 // runs. A pod the daemon sends no bundle to restores nothing and waits for nothing.
 type bundleRestore struct {
 	mu sync.Mutex
-	// sequence is the id of the slice sequence being assembled, with the count and digest its
-	// slices agree on, and slices what has arrived of it.
+	// sequence is the id of the slice sequence being assembled, with the count, the digest and
+	// the release its slices agree on, and slices what has arrived of it. release is the id of
+	// the release that saved the body, which the report the daemon acts on carries back (apply).
 	sequence string
 	count    int
 	digest   string
+	release  int64
 	slices   [][]byte
 	// results answers a repeated slice as a repeated launcher_start id is answered: the same
 	// result for the same payload, a refusal for a different one under an id already used.
@@ -60,14 +62,10 @@ type bundleRestore struct {
 }
 
 // restoreResult is what one start's call on the pod's restore answers: whether the workspace
-// holds the released work, the notice the role's log and the agent's own message carry, and
-// whether this is the start that ran the restore — the one that owes the daemon its outcome.
+// holds the released work, and the notice the role's log and the agent's own message carry.
 type restoreResult struct {
 	Restored bool
 	Notice   string
-	// Ran is true for the one start that applied the bundle, and false for every start that
-	// found the restore already done, that was sent no bundle, or that works no workspace.
-	Ran bool
 }
 
 // receive takes one slice of the bundle. The sequence is rebuilt in memory and nothing is written
@@ -91,19 +89,20 @@ func (r *bundleRestore) receive(frame shimwire.LauncherBundle) shimwire.Launcher
 		return prior
 	}
 	if frame.ID != r.sequence {
-		r.sequence, r.count, r.digest = frame.ID, frame.Count, frame.SHA256
+		r.sequence, r.count, r.digest, r.release = frame.ID, frame.Count, frame.SHA256, frame.Release
 		r.slices = make([][]byte, frame.Count)
 		clear(r.results)
 	}
-	if frame.Count != r.count || frame.SHA256 != r.digest {
+	if frame.Count != r.count || frame.SHA256 != r.digest || frame.Release != r.release {
 		return shimwire.LauncherBundleResult{ID: frame.ID, Index: frame.Index,
-			Error: fmt.Sprintf("launcher_bundle %d of %d does not match its sequence's %d slices of %s", frame.Index, frame.Count, r.count, r.digest)}
+			Error: fmt.Sprintf("launcher_bundle %d of %d of release %d does not match its sequence's %d slices of %s of release %d",
+				frame.Index, frame.Count, frame.Release, r.count, r.digest, r.release)}
 	}
 	r.slices[frame.Index] = frame.Payload
 	result := shimwire.LauncherBundleResult{ID: frame.ID, Index: frame.Index, OK: true}
 	if whole := r.whole(); whole != nil {
 		if got := shimwire.BundleDigest(whole); got != r.digest {
-			r.sequence, r.count, r.digest, r.slices = "", 0, "", nil
+			r.sequence, r.count, r.digest, r.release, r.slices = "", 0, "", 0, nil
 			clear(r.results)
 			return shimwire.LauncherBundleResult{ID: frame.ID, Index: frame.Index,
 				Error: fmt.Sprintf("launcher_bundle sequence rebuilt to %s, not the %s its slices declared", got, frame.SHA256)}
@@ -143,8 +142,7 @@ func (r *bundleRestore) whole() []byte {
 // apply restores the held bundle into the workspace env names, once per pod, and answers what the
 // start that called it has to say: nothing at all when no bundle was sent, when one was already
 // restored with nothing to say, or when the generation works no workspace. A second role starting
-// while the restore runs waits here for it and is given the same notice, and Ran false: the
-// outcome is reported once, by the start that produced it.
+// while the restore runs waits here for it and is given the same notice.
 func (r *bundleRestore) apply(ctx context.Context, env []string) restoreResult {
 	// A manager built without one — a test's, which serves no daemon that could send a bundle —
 	// restores nothing and waits for nothing.
@@ -177,11 +175,11 @@ func (r *bundleRestore) apply(ctx context.Context, env []string) restoreResult {
 	} else {
 		r.restored, r.notice = restoreWorkspace(ctx, dir, env, bundle)
 	}
-	r.confirm = &shimwire.LauncherRestored{ID: r.sequence, OK: r.restored}
+	r.confirm = &shimwire.LauncherRestored{ID: r.sequence, Release: r.release, OK: r.restored}
 	if !r.restored {
 		r.confirm.Error = r.notice
 	}
-	return restoreResult{Restored: r.restored, Notice: r.notice, Ran: true}
+	return restoreResult{Restored: r.restored, Notice: r.notice}
 }
 
 // owed is the report the daemon has not been given yet, and nil when none is: every connection
@@ -209,14 +207,35 @@ func (r *bundleRestore) sent(report *shimwire.LauncherRestored) {
 
 // restoreWorkspace puts one saved bundle back into the workspace at dir and answers the notice of
 // what it restored, or of what was lost and why. A restore that fails leaves the workspace as
-// provisioning made it — what the issue's branch holds — and the roles start on that.
+// provisioning made it — what the issue's branch holds — and the roles start on that. The daemon
+// keeps the bundle of a restore that failed and releases no pod of the issue while it holds one,
+// so the work the notice names is the issue's next pod's to restore.
 func restoreWorkspace(ctx context.Context, dir string, env []string, b shimwire.WorkspaceBundle) (bool, string) {
 	// Every reason is written as one line (oneLine), however many lines the tool that failed
 	// wrote: the notice goes to the container's log, where one line is one notice.
 	lost := func(reason string) (bool, string) {
 		return false, fmt.Sprintf("the released workspace's saved work was not restored (%s); this workspace holds only what was pushed,"+
-			" and the work of %d head(s) and %d bookmark(s) saved at %s is in the daemon's database alone",
+			" and the work of %d head(s) and %d bookmark(s) saved at %s is in the daemon's database alone, for the issue's next pod",
 			oneLine(reason), len(b.Tips), len(b.Bookmarks), b.At.UTC().Format(time.RFC3339))
+	}
+	// A bundle is applied to the workspace the pod that replaces the released one provisioned,
+	// and to no other. The workspace the save was taken from is on the released pod's disk, and a
+	// roles container that restarts on a disk of its own comes back to it with a launcher process
+	// that holds no record of the restore it already ran: applying there would `jj edit` back to
+	// the saved head and move bookmarks `--allow-backwards` over whatever the roles have done
+	// since the save. Provisioning records when it created the workspace (workspace.Created), so
+	// a record later than the save is the proof that this workspace is not the one the work came
+	// out of; anything else keeps the bundle for the issue's next pod rather than risking that
+	// work.
+	created, ok, err := workspace.Created(dir)
+	switch {
+	case err != nil:
+		return lost(err.Error())
+	case !ok:
+		return lost(fmt.Sprintf("the workspace %s records no creation, so it cannot be told from the one the work was saved from", dir))
+	case !created.After(b.At):
+		return lost(fmt.Sprintf("the workspace %s was created at %s, before the work was saved, so it is the workspace the work came out of and not one provisioned since",
+			dir, created.UTC().Format(time.RFC3339)))
 	}
 	gitDir, err := workspace.GitDir(dir)
 	if err != nil {

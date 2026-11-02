@@ -224,16 +224,17 @@ func (s *Store) RecordPodHold(ctx context.Context, hold PodHold) error {
 	return nil
 }
 
-// EndPodHoldStreaks ends every hold streak of a pod but the one for except, "" ending them all:
-// the daemon's own call for a pass of the idle rule that held the pod for no reason worth a row
-// — it was released, it is not idle yet, or it has no pod at all — after which the next pass
-// that does read a reason opens a streak of its own.
-func (s *Store) EndPodHoldStreaks(ctx context.Context, project, issue, except string) error {
+// EndPodHoldStreaks ends every hold streak of a pod: the daemon's own call for a pass of the
+// idle rule that held the pod for no reason worth a row — it was released, it is not idle yet,
+// or it has no pod at all — after which the next pass that does read a reason opens a streak of
+// its own. A pass that reads a reason records it instead (RecordPodHold), which ends the
+// streaks of every other reason in the same transaction.
+func (s *Store) EndPodHoldStreaks(ctx context.Context, project, issue string) error {
 	if project == "" || issue == "" {
 		return errors.New("ending a pod's hold streaks needs its project and issue")
 	}
 	if err := s.Tx(ctx, func(tx pgx.Tx) error {
-		return endPodHoldStreaks(ctx, tx, project, issue, except)
+		return endPodHoldStreaks(ctx, tx, project, issue, "")
 	}); err != nil {
 		return fmt.Errorf("end the hold streaks of %s: %w", issue, err)
 	}

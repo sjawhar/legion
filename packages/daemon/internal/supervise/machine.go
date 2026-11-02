@@ -430,12 +430,12 @@ var ErrHeldByOperator = wait.New("the suspension holds until the operator resume
 
 // Machine is one claim's decision owner.
 type Machine struct {
-	mu         sync.Mutex
-	ctx        context.Context
-	deps       Deps
-	log        *slog.Logger
-	claim      Claim
-	onTerminal func(Claim, ClaimState)
+	mu             sync.Mutex
+	ctx            context.Context
+	deps           Deps
+	log            *slog.Logger
+	claim          Claim
+	onDurableState func(Claim, ClaimState)
 
 	timers map[TimerKind]armed
 	seq    uint64
@@ -782,18 +782,20 @@ func (m *Machine) unlock() {
 	m.mu.Unlock()
 }
 
-// OnTerminal installs the daemon callback for the durable transitions it acts on: ready, working
-// and failed. The callback runs after the transition's claim write has succeeded, and a machine
-// keeps one, so a daemon that observes more than one of them observes them in that one callback.
-func (m *Machine) OnTerminal(callback func(Claim, ClaimState)) {
+// OnDurableState installs the daemon callback for the durable transitions it acts on: ready,
+// working and failed. Two of them are terminal for the workflow and one, working, is not: the
+// daemon reads a turn starting to stamp a woken pod's first turn. The callback runs after the
+// transition's claim write has succeeded, and a machine keeps one, so a daemon that observes
+// more than one of them observes them in that one callback.
+func (m *Machine) OnDurableState(callback func(Claim, ClaimState)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.onTerminal = callback
+	m.onDurableState = callback
 }
 
-func (m *Machine) terminal(state ClaimState) {
-	if m.onTerminal != nil {
-		m.onTerminal(copyClaim(m.claim), state)
+func (m *Machine) durableState(state ClaimState) {
+	if m.onDurableState != nil {
+		m.onDurableState(copyClaim(m.claim), state)
 	}
 }
 
@@ -1137,7 +1139,7 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 	if err := m.persist(ctx); err != nil {
 		return err
 	}
-	m.terminal(StateFailed)
+	m.durableState(StateFailed)
 	return nil
 }
 

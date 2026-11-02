@@ -50,42 +50,48 @@ const (
 	// word for "my release is already running", never a release that stopped short: a release
 	// cancelled at one of its own rows records IdleHoldOvertaken or IdleHoldUnauthorized.
 	IdleHoldReleasing
+	// IdleHoldBundleUnrestored: a release of this pod saved a bundle of unpushed work whose
+	// restore no pod has confirmed. Releasing the pod again would store a bundle of a workspace
+	// that never had that work over the one that does.
+	IdleHoldBundleUnrestored
 	// IdleHoldBundleTooLarge: the workspace's unpushed work does not fit the bundle a release
 	// carries (runtime.MaxWorkspaceBundleBytes), so the pod is kept and the work with it.
 	IdleHoldBundleTooLarge
 	// IdleHoldBundleSave: the bundle could not be built or could not be saved, so the pod is kept.
 	IdleHoldBundleSave
 	// IdleHoldOvertaken: the pod was given work after its release was marked — a claim of it was
-	// started or resumed, or holds a process, at any of the release's role stops, or, at the
-	// first of them, before any role process was stopped, a task, notice, message or start
-	// reached a role of the pod — so that role stop cancelled the release and the roles go on in
-	// the same pod.
+	// started or resumed, or holds a process, at any of the release's role stops or at its
+	// teardown, or, at the first of the stops, before any role process was stopped, a task,
+	// notice, message or start reached a role of the pod — so that row cancelled the release
+	// and the roles go on in the same pod. It is one hold wherever the release read it, because
+	// it is one thing that happened (store.ReleaseCauseOvertaken).
 	IdleHoldOvertaken
 	// IdleHoldUnauthorized: the store no longer authorized the teardown when it asked — the run
 	// the release was taken against has moved on, the issue has left the workflow, its tree
-	// lingers or its cleanup is reserved, or a role of the pod was started again — so the
-	// teardown cancelled the release instead of deleting the pod.
+	// lingers or its cleanup is reserved — so the teardown cancelled the release instead of
+	// deleting the pod (store.ReleaseCauseUnauthorized).
 	IdleHoldUnauthorized
 )
 
 var idleHoldNames = map[IdleHold]string{
-	IdleHoldNone:           "none",
-	IdleHoldTreeNotLive:    "tree_not_live",
-	IdleHoldAwaitingPerson: "awaiting_person",
-	IdleHoldImage:          "image",
-	IdleHoldPluginContract: "plugin_contract",
-	IdleHoldInTurn:         "in_turn",
-	IdleHoldDelivery:       "delivery_waiting",
-	IdleHoldBackgroundWork: "background_work",
-	IdleHoldUnreported:     "unreported",
-	IdleHoldReminder:       "reminder_due",
-	IdleHoldNotIdle:        "not_idle",
-	IdleHoldNoPod:          "no_pod",
-	IdleHoldReleasing:      "releasing",
-	IdleHoldBundleTooLarge: "bundle_too_large",
-	IdleHoldBundleSave:     "bundle_save_failed",
-	IdleHoldOvertaken:      "overtaken",
-	IdleHoldUnauthorized:   "unauthorized",
+	IdleHoldNone:             "none",
+	IdleHoldTreeNotLive:      "tree_not_live",
+	IdleHoldAwaitingPerson:   "awaiting_person",
+	IdleHoldImage:            "image",
+	IdleHoldPluginContract:   "plugin_contract",
+	IdleHoldInTurn:           "in_turn",
+	IdleHoldDelivery:         "delivery_waiting",
+	IdleHoldBackgroundWork:   "background_work",
+	IdleHoldUnreported:       "unreported",
+	IdleHoldReminder:         "reminder_due",
+	IdleHoldNotIdle:          "not_idle",
+	IdleHoldNoPod:            "no_pod",
+	IdleHoldReleasing:        "releasing",
+	IdleHoldBundleUnrestored: "bundle_unrestored",
+	IdleHoldBundleTooLarge:   "bundle_too_large",
+	IdleHoldBundleSave:       "bundle_save_failed",
+	IdleHoldOvertaken:        "overtaken",
+	IdleHoldUnauthorized:     "unauthorized",
 }
 
 // String is the hold's recorded name, which a reader of the daemon's release records reads.
@@ -119,7 +125,13 @@ type IdleDecision struct {
 // decision reports:
 //
 //   - the issue is in the workflow and its tree is live: neither the issue nor its root has left
-//     the workflow, and neither lingers (TreeLive). A pod in that state is a close's to stop;
+//     the workflow, and neither lingers (pods.InWorkflowNotLingering). A pod in that state is a
+//     close's to stop;
+//
+//   - no bundle of the issue's unpushed work is waiting to be restored. A release saves that
+//     work out of the pod it deletes, and the pod that replaces it puts it back; until a
+//     restore is confirmed, a second release would take a bundle of a workspace that never had
+//     that work and store it over the one that does;
 //
 //   - the pod is not a root's that waits on an answer a person has not given. A root whose answer
 //     has come waits only for its slot and qualifies, and the children of a root that waits on a
@@ -155,8 +167,11 @@ func IdleRelease(view pods.IdleView, now time.Time, idle time.Duration, onConfig
 	if view.Releasing {
 		return IdleDecision{Hold: IdleHoldReleasing}
 	}
-	if !idleTreeLive(view) {
+	if !pods.InWorkflowNotLingering(view.Standing(), view.RootStanding(), record.OutOfWorkflow) {
 		return IdleDecision{Hold: IdleHoldTreeNotLive}
+	}
+	if view.BundleUnrestored {
+		return IdleDecision{Hold: IdleHoldBundleUnrestored}
 	}
 	if view.IsRoot() && view.Root.AwaitingPerson && !view.Root.Answered {
 		return IdleDecision{Hold: IdleHoldAwaitingPerson}
@@ -211,14 +226,6 @@ func IdleRelease(view pods.IdleView, now time.Time, idle time.Duration, onConfig
 		return IdleDecision{Hold: IdleHoldNotIdle}
 	}
 	return IdleDecision{Release: true, Roles: roles}
-}
-
-// idleTreeLive is the live-tree gate over the view the store read: the view carries each
-// issue's status, its phase and its linger, which is all TreeLive reads of either.
-func idleTreeLive(view pods.IdleView) bool {
-	return TreeLive(
-		record.Issue{Key: view.Issue, Status: view.Status, Phase: view.Phase, LingerUntil: view.LingerUntil},
-		record.Issue{Key: view.Tree, Status: view.Root.Status, Phase: view.Root.Phase, LingerUntil: view.Root.LingerUntil})
 }
 
 // idleStateReleasable is whether a live claim's state is one a release may suspend: an agent that

@@ -283,6 +283,6 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	// Nothing could place the message, and a session of a released Legion issue pod is exactly
 	// that: gone from the bucket with its pod. The wake is reported once per message, beside the
 	// give-up, so the pod comes back and the sender's next attempt reaches it.
-	reportAgentWake(cfg.client, cfg.logger, sessionID)
+	reportAgentWake(cfg.wakes, cfg.logger, sessionID)
 	message.finalize(false)
 }

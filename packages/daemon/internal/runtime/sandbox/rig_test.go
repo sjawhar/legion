@@ -900,9 +900,12 @@ func (g *rig) connectRunning(token claim.Token, running uint64) {
 		// held is the slices of each bundle sequence that arrived, as the real launcher holds
 		// them: the whole of one is answered Held (internal/launcher's bundleRestore), and the
 		// start that follows applies the bundle and reports what the restore did, which is what
-		// the daemon drops its saved copy on. whole names the sequence awaiting that start.
+		// the daemon drops its saved copy on. whole names the sequence awaiting that start, and
+		// release the release whose save it carried, which the report names so that the daemon
+		// deletes that release's bundle and no other.
 		held := map[string]map[int]bool{}
 		whole := ""
+		var release int64
 		reader := bufio.NewReader(client)
 		for {
 			line, err := reader.ReadBytes('\n')
@@ -928,8 +931,8 @@ func (g *rig) connectRunning(token claim.Token, running uint64) {
 				// The real launcher restores the bundle inside the start, before it answers it
 				// (internal/launcher's manager.start), so the report crosses first.
 				if whole != "" {
-					_ = writer.WriteFrame(shimwire.LauncherRestored{ID: whole, OK: g.failRestore == "", Error: g.failRestore})
-					whole = ""
+					_ = writer.WriteFrame(shimwire.LauncherRestored{ID: whole, Release: release, OK: g.failRestore == "", Error: g.failRestore})
+					whole, release = "", 0
 				}
 				running = command.Generation
 				_ = writer.WriteFrame(shimwire.LauncherStartResult{ID: command.ID, OK: true, RunningGeneration: command.Generation})
@@ -958,7 +961,7 @@ func (g *rig) connectRunning(token claim.Token, running uint64) {
 				held[command.ID][command.Index] = true
 				all := len(held[command.ID]) == command.Count
 				if all {
-					whole = command.ID
+					whole, release = command.ID, command.Release
 				}
 				_ = writer.WriteFrame(shimwire.LauncherBundleResult{
 					ID: command.ID, Index: command.Index, OK: true, Held: all,

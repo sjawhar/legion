@@ -94,7 +94,7 @@ func TestAPodsHoldStreakEndsWhenItIsReleasedOrItsReasonChanges(t *testing.T) {
 
 	// A pass that holds the pod for nothing worth a row ends what is running, so the next hold
 	// of that reason is a streak of its own rather than a continuation days later.
-	if err := st.EndPodHoldStreaks(ctx, "legion", rootIssue, ""); err != nil {
+	if err := st.EndPodHoldStreaks(ctx, "legion", rootIssue); err != nil {
 		t.Fatalf("end the streaks: %v", err)
 	}
 	hold("unreported", 5)

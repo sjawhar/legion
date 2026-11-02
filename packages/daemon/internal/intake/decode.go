@@ -177,10 +177,10 @@ const legionWakeSubject = "notifications.legion.wake"
 // read as now. The subject is a stream subject, and a publisher that reaches it chooses every
 // field of the envelope and the payload, this `at` and the envelope's source among them; a
 // `listener_ready` dated in the year 9999 would otherwise hold R7's gate open for good
-// (store.RecordListenerReady keeps the greatest it is given), so a session that can publish
-// could have pods released into a silence nothing wakes them out of. The listener refuses a
-// client publish on its own subject as well (packages/envoy/cmd/listener/api.go), so a forged
-// report has to reach the bus directly; this is the half that holds whatever does.
+// (store.PodRecords.RecordListenerReady keeps the greatest it is given), so a session that can
+// publish could have pods released into a silence nothing wakes them out of. The listener
+// refuses a client publish on its own subject as well (packages/envoy/cmd/listener/api.go), so
+// a forged report has to reach the bus directly; this is the half that holds whatever does.
 func decodeListenerWake(eventID, payload string) (Fact, error) {
 	var report struct {
 		Kind    string `json:"kind"`

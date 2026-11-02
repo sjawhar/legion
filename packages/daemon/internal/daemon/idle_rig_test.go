@@ -17,7 +17,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go/jetstream"
-	"k8s.io/client-go/rest"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
@@ -474,11 +473,7 @@ func (r *idleWakeRig) newRuntime(ctx context.Context, listener *stream.Listener,
 	opts.Agent = idleRigAgentTool(r.t, tools)
 	opts.DaemonURL = r.cfg.DaemonURL
 	opts.EnvoyURL = r.cfg.EnvoyURL
-	// The stand-in API serves JSON alone, where a real API server serves protobuf to the typed
-	// client as well, so the client configuration names JSON for both directions.
-	rt, err := sandbox.New(ctx, &rest.Config{Host: r.kube.url, ContentConfig: rest.ContentConfig{
-		ContentType: "application/json", AcceptContentTypes: "application/json",
-	}}, opts)
+	rt, err := sandbox.New(ctx, sandboxRESTConfig(r.kube.url), opts)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox.New: %w", err)
 	}

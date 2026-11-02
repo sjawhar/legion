@@ -150,30 +150,67 @@ func publishWithinBudget(budget context.Context, client *bus.Client, item contra
 	return client.PublishWithin(ctx, item)
 }
 
+// wakeReportsInFlight is how many wake reports may be retrying at once. One report holds its
+// goroutine for as long as wakeReportBudget, and during a bus outage every role send with no
+// holder and every message nothing can place raises one, so an unbounded reporter turns a
+// minutes-long outage into a goroutine and a report's worth of memory per such request. Past
+// the cap a report is dropped and said so: the listener has not reached the stream for minutes,
+// which its own liveness report already tells every daemon, and a daemon that reads no fresh
+// report releases no pod — so there is no released pod left for the dropped report to wake.
+const wakeReportsInFlight = 64
+
+// wakeReporter publishes wake reports off the paths that raise them: under the listener's own
+// lifetime, so the shutdown ends every retry still running, and no more than
+// wakeReportsInFlight at a time.
+type wakeReporter struct {
+	lifetime context.Context
+	client   *bus.Client
+	slots    chan struct{}
+}
+
+func newWakeReporter(lifetime context.Context, client *bus.Client) *wakeReporter {
+	return &wakeReporter{lifetime: lifetime, client: client, slots: make(chan struct{}, wakeReportsInFlight)}
+}
+
+// report publishes one report off the caller's path. The caller is writing a 404 the report
+// owes nothing, and every role send with no holder raises one — including the common case where
+// no daemon holds a released claim of that role at all — so publishing it inline would put the
+// report's retries in front of each of those 404s.
+func (r *wakeReporter) report(logger *logging.Logger, report wakeReport) {
+	if r == nil || r.client == nil {
+		return
+	}
+	select {
+	case r.slots <- struct{}{}:
+	default:
+		logger.Warn("legion wake report dropped: too many are already retrying",
+			slog.String("kind", report.Kind), slog.String("role", report.Role),
+			slog.String("session", report.Session), slog.Int("inFlight", wakeReportsInFlight))
+		return
+	}
+	go func() {
+		defer func() { <-r.slots }()
+		publishWakeReport(r.lifetime, r.client, logger, report)
+	}()
+}
+
 // reportRoleWake reports that a message was published to role and no live session held it. The
 // role is the claim token a Legion role topic is named by, which is what the daemon matches its
 // own released claims on.
-//
-// The report is published off the caller's path. The caller is writing a 404 the report owes
-// nothing, and every role send with no holder raises one — including the common case where no
-// daemon holds a released claim of that role at all — so publishing it inline would put the
-// report's retries in front of each of those 404s. Its own context is the process's: a report
-// raised by a request outlives that request, because the pod it wakes is owed the report
-// however the caller's connection ends.
 func reportRoleWake(d *listenerDeps, logger *logging.Logger, role string) {
 	if d == nil || role == "" {
 		return
 	}
-	go publishWakeReport(context.Background(), d.client, logger, wakeReport{Kind: wakeKindRole, Role: role})
+	d.wakes.report(logger, wakeReport{Kind: wakeKindRole, Role: role})
 }
 
 // reportAgentWake reports that a message was sent to the agent subject of sessionID and nothing
-// could place it. It is published off the caller's path for the reason reportRoleWake is.
-func reportAgentWake(client *bus.Client, logger *logging.Logger, sessionID string) {
+// could place it.
+func reportAgentWake(wakes *wakeReporter, logger *logging.Logger, sessionID string) {
 	if sessionID == "" {
 		return
 	}
-	go publishWakeReport(context.Background(), client, logger, wakeReport{Kind: wakeKindAgent, Session: sessionID})
+	wakes.report(logger, wakeReport{Kind: wakeKindAgent, Session: sessionID})
 }
 
 // startListenerReadyReports publishes this listener's liveness report at once and every

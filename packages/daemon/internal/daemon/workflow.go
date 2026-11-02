@@ -608,7 +608,7 @@ func (w *workflowRuntime) attach(supervision *supervision) {
 		supervision.supervisor.store, w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
 		supervision.plan.tools, w.log)
 	w.outboxWake.Store(w.outbox)
-	supervision.supervisor.OnTerminal(w.claimTerminal)
+	supervision.supervisor.OnDurableState(w.claimDurableState)
 	w.attachIdleRelease(supervision)
 }
 
@@ -755,11 +755,11 @@ func (w *workflowRuntime) terminal(c supervise.Claim, state supervise.ClaimState
 	}
 }
 
-// claimTerminal is the daemon's one durable-state callback, because a supervisor keeps one
-// (supervisor.OnTerminal): a claim's ready and its failure are workflow facts (terminal), and the
-// same transitions measure a released pod's resume — its replacement pod is up at the first
+// claimDurableState is the daemon's one durable-state callback, because a supervisor keeps one
+// (supervisor.OnDurableState): a claim's ready and its failure are workflow facts (terminal), and
+// the same transitions measure a released pod's resume — its replacement pod is up at the first
 // ready, and the woken role took its work at the first turn (podResume).
-func (w *workflowRuntime) claimTerminal(c supervise.Claim, state supervise.ClaimState) {
+func (w *workflowRuntime) claimDurableState(c supervise.Claim, state supervise.ClaimState) {
 	w.podResume(c, state)
 	if state == supervise.StateReady || state == supervise.StateFailed {
 		w.terminal(c, state)

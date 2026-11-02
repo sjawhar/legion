@@ -3,6 +3,8 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"io"
+	"log/slog"
 	"maps"
 	"slices"
 	"testing"
@@ -11,6 +13,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
+
+// testRelease is the id of the idle release whose save the fixture's bundle carries: the daemon
+// deletes the bundle of the release a launcher's restore report names, so a stored bundle has one.
+const testRelease int64 = 11
 
 // savedWorkspaceBundle is a release's saved work as the store holds it: more than one
 // shimwire.LauncherBundlePayloadBytes of git bundle, so the hop to the launcher is a sequence of
@@ -22,6 +28,7 @@ func savedWorkspaceBundle() runtime.WorkspaceBundle {
 		Tips:      []string{"da4f9f492e9f8349389c243743e0a000cd1c676f"},
 		Bookmarks: map[string]string{"legion/" + testTree: "dffe88ae2f793e13436cef3921adc988433fbd4e"},
 		At:        time.Date(2026, 11, 2, 9, 30, 0, 0, time.UTC),
+		Release:   testRelease,
 	}
 }
 
@@ -42,11 +49,11 @@ func frameTypes(frames []shimwire.Frame) []string {
 func TestASavedWorkspaceBundleReachesThePodsLauncherBeforeItStartsAnyRole(t *testing.T) {
 	st := migratedStore(t)
 	saved := savedWorkspaceBundle()
-	if err := st.PutWorkspaceBundle(context.Background(), testTree, saved); err != nil {
+	if err := st.PutWorkspaceBundle(context.Background(), testTree, saved.Release, saved); err != nil {
 		t.Fatalf("save the released workspace's bundle: %v", err)
 	}
 	g := newRig(t, nil, withOptions(func(o *Options) {
-		o.SavedWorkspaceBundle, o.WorkspaceBundleRestored = st.WorkspaceBundle, st.DeleteWorkspaceBundle
+		o.SavedWorkspaceBundle, o.WorkspaceBundleRestored = st.WorkspaceBundle, st.DeleteRestoredWorkspaceBundle
 	}))
 	spec := workerSpec(t)
 	g.spawn(spec)
@@ -106,12 +113,12 @@ func TestASavedWorkspaceBundleReachesThePodsLauncherBeforeItStartsAnyRole(t *tes
 func TestAFailedRestoreKeepsTheSavedWorkForTheIssuesNextPod(t *testing.T) {
 	st := migratedStore(t)
 	saved := savedWorkspaceBundle()
-	if err := st.PutWorkspaceBundle(context.Background(), testTree, saved); err != nil {
+	if err := st.PutWorkspaceBundle(context.Background(), testTree, saved.Release, saved); err != nil {
 		t.Fatalf("save the released workspace's bundle: %v", err)
 	}
 	const refusal = "git bundle unbundle: object not found"
 	g := newRig(t, nil, withFailedRestore(refusal), withOptions(func(o *Options) {
-		o.SavedWorkspaceBundle, o.WorkspaceBundleRestored = st.WorkspaceBundle, st.DeleteWorkspaceBundle
+		o.SavedWorkspaceBundle, o.WorkspaceBundleRestored = st.WorkspaceBundle, st.DeleteRestoredWorkspaceBundle
 	}))
 	spec := workerSpec(t)
 	loc := g.spawn(spec)
@@ -133,6 +140,54 @@ func TestAFailedRestoreKeepsTheSavedWorkForTheIssuesNextPod(t *testing.T) {
 	}
 }
 
+// A launcher keeps the report of its restore until some connection carries it, so one can reach
+// the daemon after the issue has been released again and that release has saved a bundle of its
+// own. The report names the release it restored, and the delete reads it: the newer bundle stays,
+// which is the whole of the work, since the teardown of that newer release took the disk it came
+// off.
+func TestALateRestoreReportLeavesTheBundleOfANewerRelease(t *testing.T) {
+	st := migratedStore(t)
+	ctx := context.Background()
+	first := savedWorkspaceBundle()
+	if err := st.PutWorkspaceBundle(ctx, testTree, first.Release, first); err != nil {
+		t.Fatalf("save the released workspace's bundle: %v", err)
+	}
+	// The issue woke, worked and was released again while the first pod's launcher still held
+	// its report.
+	second := savedWorkspaceBundle()
+	second.Bundle, second.Head, second.Release = []byte("PACK the work of the second release"), "0a8f0aee63b13682fefe975ba0cc51da6f2ba9e9", first.Release+1
+	if err := st.PutWorkspaceBundle(ctx, testTree, second.Release, second); err != nil {
+		t.Fatalf("save the second release's bundle: %v", err)
+	}
+
+	d := newLaunchers(st.WorkspaceBundle, st.DeleteRestoredWorkspaceBundle, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	spec := workerSpec(t)
+	session := d.accept(spec.Claim, testTree, shimwire.LauncherHello{LauncherID: "late", PodUID: "pod-uid"})
+	frames, err := bundleFrames(testTree, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.restoreReported(session, shimwire.LauncherRestored{ID: frames[0].ID, Release: first.Release, OK: true})
+
+	kept, held, err := st.WorkspaceBundle(ctx, testTree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !held || !bytes.Equal(kept.Bundle, second.Bundle) || kept.Release != second.Release {
+		t.Fatalf("after the first release's report the store holds %q of release %d (held=%t), want the %q release %d saved since",
+			kept.Bundle, kept.Release, held, second.Bundle, second.Release)
+	}
+	// The pod of the second release restores it, and that report drops it.
+	later, err := bundleFrames(testTree, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.restoreReported(session, shimwire.LauncherRestored{ID: later[0].ID, Release: second.Release, OK: true})
+	if _, held, err := st.WorkspaceBundle(ctx, testTree); err != nil || held {
+		t.Fatalf("after the second release's report the store holds the bundle = %t (%v), want it deleted", held, err)
+	}
+}
+
 // A launcher that refuses a slice costs the restore and nothing else: the role starts on the
 // workspace the pod's own fetch provisioned, the launcher writes the agent the notice of what was
 // lost, and the saved work stays in the daemon's database for the issue's next pod. A pod that
@@ -140,12 +195,12 @@ func TestAFailedRestoreKeepsTheSavedWorkForTheIssuesNextPod(t *testing.T) {
 func TestARefusedBundleSliceStillStartsTheRoleAndKeepsTheSavedWork(t *testing.T) {
 	st := migratedStore(t)
 	saved := savedWorkspaceBundle()
-	if err := st.PutWorkspaceBundle(context.Background(), testTree, saved); err != nil {
+	if err := st.PutWorkspaceBundle(context.Background(), testTree, saved.Release, saved); err != nil {
 		t.Fatalf("save the released workspace's bundle: %v", err)
 	}
 	const refusal = "launcher_bundle sequence rebuilt to another digest than its slices declared"
 	g := newRig(t, nil, withRefusedBundle(refusal), withOptions(func(o *Options) {
-		o.SavedWorkspaceBundle, o.WorkspaceBundleRestored = st.WorkspaceBundle, st.DeleteWorkspaceBundle
+		o.SavedWorkspaceBundle, o.WorkspaceBundleRestored = st.WorkspaceBundle, st.DeleteRestoredWorkspaceBundle
 	}))
 	spec := workerSpec(t)
 	loc := g.spawn(spec)

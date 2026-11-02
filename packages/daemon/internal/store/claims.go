@@ -54,11 +54,21 @@ func (s *Store) PutClaim(ctx context.Context, c supervise.Claim) error {
 // pod would then be released on a reading the session has already replaced. It answers whether
 // the store holds the claim at all, which a later report of a claim the daemon has forgotten
 // does not.
+//
+// The report's own clock is bounded to the daemon's, as the listener's is (decodeListenerWake):
+// the session chooses every field of what it sends, and one reading dated ahead of the daemon's
+// clock — a session whose host stepped its clock forward, corrected back afterwards — would
+// drop every honest report after it under that same ordering guard, while the stale reading it
+// left behind went on counting as current, background work and all.
 func (s *Store) PutClaimActivity(ctx context.Context, token claim.Token, a claim.SessionActivity) (bool, error) {
 	var reminder *time.Time
 	if a.Phase.NextReminderAt != nil && !a.Phase.NextReminderAt.IsZero() {
 		at := a.Phase.NextReminderAt.UTC()
 		reminder = &at
+	}
+	at := a.At.UTC()
+	if received := time.Now().UTC(); at.After(received) {
+		at = received
 	}
 	var known bool
 	err := s.pool.QueryRow(ctx, `with reported as (
@@ -66,7 +76,7 @@ func (s *Store) PutClaimActivity(ctx context.Context, token claim.Token, a claim
 			activity_next_reminder_at = $5, updated_at = now()
 		where token = $1 and (activity_at is null or activity_at <= $2) returning token)
 		select exists (select 1 from claims where token = $1)`,
-		string(token), a.At.UTC(), a.BackgroundWork.Running,
+		string(token), at, a.BackgroundWork.Running,
 		strings.Join(a.BackgroundWork.Kinds, ","), reminder,
 	).Scan(&known)
 	if err != nil {

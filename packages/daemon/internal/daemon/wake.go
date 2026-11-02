@@ -85,7 +85,8 @@ func (w *workflowRuntime) tickWakes(ctx context.Context) {
 // fireDueBackstops applies one PodBackstopDue fact per backstop of the project due at or before
 // now. The row is the durable half and the fact the acting half: a backstop that came due while
 // the daemon was down is read by the first pass after it starts, and the row's conditional fire
-// (store.FirePodBackstop) is what makes two passes that read the same row wake its pod once.
+// (store.PodRecords.FirePodBackstop) is what makes two passes that read the same row wake its
+// pod once.
 func (w *workflowRuntime) fireDueBackstops(ctx context.Context, now time.Time) {
 	due, err := w.idleStore.DuePodBackstops(ctx, w.projectID, now)
 	if err != nil {
@@ -202,13 +203,22 @@ func (w *workflowRuntime) stampPodResume(ctx context.Context, issue string, role
 // It answers whether the claim was released and the wake taken. key is what makes the wake one
 // wake however often the row retries — the row's id — so a notice that backs off for ten minutes
 // resumes the claim once. A claim of an issue that has left the workflow, or whose tree lingers,
-// is not woken: that pod is a close's to stop.
+// is not woken: that pod is a close's to stop. An outbox with no supervisor — a test's, which
+// supervises nothing — wakes nothing: there is no machine to read a claim's state from.
+//
+// The claim is read from the machine's View, which never waits on the decision in flight: a
+// machine holds its lock through the runtime call its decision makes, so a read that waited
+// would hold the notice and the phase-ended message behind a Sandbox relaunch waiting on the
+// cluster, which is the defect LEGION-650 fixed in the routing beside this read.
 func (r *outbox) wakeForDelivery(ctx context.Context, token claim.Token, key, detail string) (bool, error) {
+	if r.supervisor == nil {
+		return false, nil
+	}
 	machine, found := r.supervisor.Machine(token)
 	if !found {
 		return false, nil
 	}
-	held := machine.Claim()
+	held := machine.View()
 	if !held.Released() {
 		return false, nil
 	}
@@ -220,7 +230,7 @@ func (r *outbox) wakeForDelivery(ctx context.Context, token claim.Token, key, de
 	if err != nil {
 		return false, err
 	}
-	if root == nil || !workflow.TreeLive(issue, *root) {
+	if root == nil || !pods.InWorkflowNotLingering(issue.Standing(), root.Standing(), record.OutOfWorkflow) {
 		return false, nil
 	}
 	taken, err := r.trees.TakePodWake(ctx, r.project, issue.Key, held.Role, pods.WakeDelivery, key, r.now().UTC())

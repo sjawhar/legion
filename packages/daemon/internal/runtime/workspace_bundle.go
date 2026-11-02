@@ -29,6 +29,14 @@ type WorkspaceBundle struct {
 	Bookmarks map[string]string
 	// At is when the shim took the bundle.
 	At time.Time
+	// Release is the id of the release that saved the row this bundle was read from, which the
+	// store fills on the read. The save takes that id as an argument of its own
+	// (store.Store.PutWorkspaceBundle): the bundle itself is the shim's, built in a pod that
+	// knows nothing of the release, and the id is the release's. The restore of the pod that
+	// replaces the released one carries it to the launcher and back, so the report that confirms
+	// a restore names the release whose work it put back and deletes no other
+	// (internal/runtime/sandbox's restoreReported).
+	Release int64
 }
 
 // Size is the bundle's length in bytes, which the release records and the 40 MiB bound reads.

@@ -1571,8 +1571,8 @@ func TestPlainStateNamesTheRootsWaitingOnAPerson(t *testing.T) {
 // there are; with none the line says so.
 //
 // The state body names no claim's suspender — every plugin parses it with the strict schema of
-// its own contract — so the command reads that from the operator claim list, with the bearer its
-// configuration names (nameStrandedSuspensions). Read without a configuration, as a pane reads,
+// its own contract — so the command reads that from the operator claim list, with the bearer
+// --operator-token-file names (strandedSuspenders). Read without that flag, as a pane reads,
 // there is no bearer and a released claim reads as the suspended worker it is.
 func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
@@ -1587,9 +1587,9 @@ func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 		`{"issue":"LEGION-210","role":"reviewer","state":"failed"}]`
 	for _, tc := range []struct {
 		name, stranded, want string
-		// configured reads the daemon through a legion.yaml naming an operator token, as an
-		// operator on the daemon's host does; otherwise the command reads it as a pane does.
-		configured bool
+		// bearer reads the daemon with --operator-token-file, as an operator does; otherwise the
+		// command reads it as a pane does, with no bearer to name a suspender with.
+		bearer bool
 	}{
 		{
 			name: "every move",
@@ -1606,7 +1606,7 @@ func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 		// the pod back reads as that, under a move of its own, never as a suspension to resume or
 		// a failure to retry.
 		{
-			name: "a released claim apart from a suspended and a failed one", configured: true,
+			name: "a released claim apart from a suspended and a failed one", bearer: true,
 			stranded: released,
 			want: "claims nothing will wake: 3 — suspended workers, each brought back as its suspendedBy calls for (legion claims list --json) LEGION-209 tester; " +
 				"released, woken over ten minutes ago and the pod never came back LEGION-208 implementer; failed, needs a workflow start LEGION-210 reviewer\n",
@@ -1635,13 +1635,11 @@ func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 			defer server.Close()
 			t.Chdir(t.TempDir())
 			t.Setenv("LEGION_ISSUE", "")
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
 
 			args := []string{"legion", "state"}
-			if tc.configured {
-				path, _ := workflowConfig(t, server.Listener.Addr().(*net.TCPAddr).Port, "")
-				args = append(args, "--config", path)
-			} else {
-				t.Setenv("LEGION_DAEMON_URL", server.URL)
+			if tc.bearer {
+				args = append(args, "--operator-token-file", writeFile(t, "operator-token", "operator-token\n"))
 			}
 
 			var out, errb bytes.Buffer

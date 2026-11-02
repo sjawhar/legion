@@ -670,6 +670,41 @@ func TestAnActivityReportNeverOverwritesANewerOne(t *testing.T) {
 	}
 }
 
+// A session chooses the time it reports. One dated ahead of the daemon's clock — a host whose
+// clock stepped forward and was corrected back afterwards — would, under the ordering guard
+// above, drop every honest report after it while the reading it left stood as current,
+// background work and all. It is bounded to the daemon's receipt time, as the listener's report
+// is (intake.decodeListenerWake).
+func TestAnActivityReportDatedAheadOfTheDaemonIsBoundedToItsReceipt(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	c := tmuxClaim("legion-LEGION-210-implementer")
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+
+	before := time.Now().UTC()
+	ahead := claim.SessionActivity{At: before.Add(2 * time.Hour),
+		BackgroundWork: claim.BackgroundWork{Running: true, Kinds: []string{"async-job"}}}
+	if known, err := store.PutClaimActivity(ctx, c.Token, ahead); err != nil || !known {
+		t.Fatalf("PutClaimActivity of the report dated ahead = %t, %v", known, err)
+	}
+	stored, _, _, _ := storedActivity(t, store, c.Token)
+	if stored.Before(before) || stored.After(time.Now().UTC()) {
+		t.Fatalf("a report dated %s was stored as %s, want the daemon's receipt time", ahead.At, stored)
+	}
+
+	// The session's next honest report is written, which is what the unbounded time cost.
+	honest := claim.SessionActivity{At: time.Now().UTC()}
+	if known, err := store.PutClaimActivity(ctx, c.Token, honest); err != nil || !known {
+		t.Fatalf("PutClaimActivity of the honest report = %t, %v", known, err)
+	}
+	if _, background, kinds, _ := storedActivity(t, store, c.Token); background || kinds != "" {
+		t.Fatalf("after the honest report the row reads background %t, kinds %q; want the quiet reading written",
+			background, kinds)
+	}
+}
+
 // A report for a claim the daemon has forgotten is nothing to record, and says so: the route
 // answers it as it answers a wrong secret. A report the ordering guard drops is not that.
 func TestAnActivityReportOfAnUnknownClaimIsNotRecorded(t *testing.T) {

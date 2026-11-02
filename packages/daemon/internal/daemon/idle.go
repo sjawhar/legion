@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/pods"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -85,11 +86,12 @@ func (w *workflowRuntime) releaseIdlePod(ctx context.Context, issue string) {
 	now := time.Now().UTC()
 	onConfiguredImage := w.idleImages.IssuePodRunsConfiguredImage(issue)
 	var decision workflow.IdleDecision
-	var quiet bool
+	var quiet, holding bool
 	marked, err := w.idleStore.ReleaseIdleIssue(ctx, w.projectID, issue, func(view pods.IdleView) (store.IdleReleaseMark, error) {
 		decision = workflow.IdleRelease(view, now, w.idlePeriod, onConfiguredImage, api.DaemonAPIVersion)
 		since, found := view.QuietSince()
 		quiet = found && now.Sub(since) >= w.idlePeriod
+		holding = view.Holding
 		if !decision.Release {
 			return store.IdleReleaseMark{}, nil
 		}
@@ -102,10 +104,15 @@ func (w *workflowRuntime) releaseIdlePod(ctx context.Context, issue string) {
 	if !marked {
 		detail := strings.Join(decision.HoldKinds, ",")
 		w.log.Debug("idle release: the pod is kept", "issue", issue, "hold", decision.Hold.String(), "detail", detail)
-		if !quiet {
-			// The pod did something inside the idle period, so no hold of it is running: every
-			// streak it has ends here and a later pass that holds it starts a new one.
-			endIdleHolds(ctx, w.idleStore, w.projectID, issue, "", w.log)
+		if !quiet || !recordableHold(decision.Hold) {
+			// The pod did something inside the idle period, or what kept it is nothing a
+			// deployment reads as a hold: either way no hold of it is running, so the streak it
+			// had ends and a later pass that holds it starts a new one. A pod with no streak is
+			// left alone — nearly every pass over a working pod is this one, and an update that
+			// matches no row costs a write transaction all the same.
+			if holding {
+				endIdleHolds(ctx, w.idleStore, w.projectID, issue, w.log)
+			}
 			return
 		}
 		recordIdleHold(ctx, w.idleStore, w.projectID, issue, decision.Hold, detail, now, w.log)
@@ -118,7 +125,6 @@ func (w *workflowRuntime) releaseIdlePod(ctx context.Context, issue string) {
 
 // recordableHold is whether a hold is one a deployment reads as "release would have taken this
 // pod and something stopped it". Four of workflow's values are not:
-//
 //   - IdleHoldNone is a release, not a hold;
 //   - IdleHoldNotIdle is a pod that is simply not idle yet, which is every working pod on nearly
 //     every tick and says nothing about release;
@@ -127,6 +133,9 @@ func (w *workflowRuntime) releaseIdlePod(ctx context.Context, issue string) {
 //     from the pod's own claims);
 //   - IdleHoldReleasing is this daemon's own release already running on the lane, so recording it
 //     would count every release again, once per tick of its teardown.
+//
+// The pass that reads one of them ends the pod's streaks instead of recording, which is the one
+// place a streak ends outside a hold of another reason (releaseIdlePod).
 //
 // Every other value is a reason worth a row, the ones that are working as designed
 // (background_work, in_turn, delivery_waiting, reminder_due, awaiting_person) as much as the
@@ -146,16 +155,13 @@ func recordableHold(hold workflow.IdleHold) bool {
 
 // recordIdleHold records one pass of the idle rule that kept a pod past the idle period, under
 // the rule's own word for the reason and the detail that word leaves out ("" where there is
-// none), and ends every streak of that pod under another reason (store.RecordPodHold). A hold no
-// deployment reads as a hold ends every streak of the pod instead: nothing is keeping it now. A
+// none), and ends every streak of that pod under another reason (store.RecordPodHold). Its
+// caller has read recordableHold: a hold no deployment reads as a hold is a streak to end and
+// not a row to write, and ending it is the caller's, which knows whether the pod has one. A
 // record that cannot be written is logged and nothing else: the records are a deployment's
 // measurement, and a release is a saving, so nothing waits on either.
 func recordIdleHold(ctx context.Context, st *store.Store, project, issue string, hold workflow.IdleHold, detail string, at time.Time, log *slog.Logger) {
-	if st == nil {
-		return
-	}
-	if !recordableHold(hold) {
-		endIdleHolds(ctx, st, project, issue, "", log)
+	if st == nil || !recordableHold(hold) {
 		return
 	}
 	if err := st.RecordPodHold(ctx, store.PodHold{Project: project, Issue: issue, Reason: hold.String(), Detail: detail, At: at}); err != nil {
@@ -163,13 +169,13 @@ func recordIdleHold(ctx context.Context, st *store.Store, project, issue string,
 	}
 }
 
-// endIdleHolds ends every hold streak of a pod but except's ("" ending them all), which is what
-// a pass that reads no hold worth a row leaves behind.
-func endIdleHolds(ctx context.Context, st *store.Store, project, issue, except string, log *slog.Logger) {
+// endIdleHolds ends every hold streak of a pod, which is what a pass that reads no hold worth a
+// row leaves behind.
+func endIdleHolds(ctx context.Context, st *store.Store, project, issue string, log *slog.Logger) {
 	if st == nil {
 		return
 	}
-	if err := st.EndPodHoldStreaks(ctx, project, issue, except); err != nil {
+	if err := st.EndPodHoldStreaks(ctx, project, issue); err != nil {
 		log.Warn("idle release: could not end a pod's hold streaks", "issue", issue, "error", err)
 	}
 }
@@ -178,18 +184,22 @@ func endIdleHolds(ctx context.Context, st *store.Store, project, issue, except s
 // whose claims it suspended as released, the moment it completed, and the size of the bundle of
 // unpushed work it saved — zero when the workspace held none. It is called from the teardown
 // (releaseIssue), the one place both the bundle and the fact that the release finished are known.
-// A record that cannot be written is logged: the pod is already released, and nothing undoes that
-// for want of a row.
-func (r *outbox) recordPodRelease(ctx context.Context, issue string, generation uint64, bundleBytes int) {
+//
+// The roles are the ones this release's own stops suspended, as its mark recorded them
+// (store.ReleaseSuspendedClaim), and never every released claim of the issue: a claim an earlier
+// release left `released` and no wake has brought back is still released now, and counting it
+// here would charge this release with a role it never touched and the hours that role's pod was
+// gone a second time.
+//
+// A record that cannot be written is logged: the pod is already released, and nothing undoes
+// that for want of a row.
+func (r *outbox) recordPodRelease(ctx context.Context, issue string, generation uint64, suspended []claim.Role, bundleBytes int) {
 	if r.supervisor == nil || r.supervisor.store == nil {
 		return
 	}
-	var roles []string
-	for _, machine := range r.supervisor.supervised() {
-		c := machine.Claim()
-		if c.Issue == issue && c.Released() {
-			roles = append(roles, string(c.Role))
-		}
+	roles := make([]string, 0, len(suspended))
+	for _, role := range suspended {
+		roles = append(roles, string(role))
 	}
 	slices.Sort(roles)
 	if _, err := r.supervisor.store.RecordPodRelease(ctx, store.PodRelease{
@@ -198,6 +208,20 @@ func (r *outbox) recordPodRelease(ctx context.Context, issue string, generation 
 	}); err != nil {
 		r.log.Warn("outbox: could not record an issue pod's release", "issue", issue, "error", err)
 	}
+}
+
+// releaseHold is the hold a cancel the store decided is recorded under, and the sentence the
+// log line carries. The cause is the store's answer and not the row's, so a pod taken up again
+// is one reason in the records wherever the release read it: at a role stop, where the start or
+// the delivery arrives, and at the teardown, where the same read runs again.
+func releaseHold(cause store.ReleaseCause) (workflow.IdleHold, string) {
+	switch cause {
+	case store.ReleaseCauseOvertaken:
+		return workflow.IdleHoldOvertaken, "the pod was given work after its release was marked"
+	case store.ReleaseCauseUnauthorized:
+		return workflow.IdleHoldUnauthorized, "the store no longer authorizes it"
+	}
+	return workflow.IdleHoldUnauthorized, "the store did not authorize it and named no cause"
 }
 
 // recordPodHold writes the hold of a release that did not finish (cancelRelease): the pod was

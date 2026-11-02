@@ -125,8 +125,6 @@ func TestStrandedNamesAReleasedClaimOnlyWhenItsWakeNeverBroughtThePodBack(t *tes
 		{Issue: "LEGION-3", Role: string(claim.RoleArchitect), At: strandedNow.Add(-30 * time.Minute)},
 		// The same fact already recorded by the stuck pass, whatever the wake's age reads as now.
 		{Issue: "LEGION-4", Role: string(claim.RolePlanner), At: strandedNow, Stuck: true},
-		// Woken long ago and back: the role took its turn, so nothing is stranded.
-		{Issue: "LEGION-5", Role: string(claim.RoleMerger), At: strandedNow.Add(-time.Hour), FirstTurn: true},
 	}
 
 	got, err := Stranded(context.Background(), nil, s, claims, resumes, strandedNow)

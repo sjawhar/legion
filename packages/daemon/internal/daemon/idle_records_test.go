@@ -57,6 +57,27 @@ func TestAReleaseRecordsItsRolesAndTheBundleItSaved(t *testing.T) {
 	}
 }
 
+// A release records the roles its own stops suspended and no others. A pod can hold a claim an
+// earlier release left `released` and no wake has brought back, and counting that claim here
+// would charge this release with a role it never touched — and charge a reader of the records
+// for the hours that role's pod was gone twice over.
+func TestAReleaseRecordsNoRoleAnEarlierReleaseSuspended(t *testing.T) {
+	rig := newIdleRig(t)
+	ctx := context.Background()
+	rig.releasedArchitect(t)
+
+	rig.w.releaseIdlePod(ctx, rig.issue.Key)
+	rig.drain(t)
+
+	records := rig.records(t)
+	if len(records.Releases) != 1 {
+		t.Fatalf("releases = %+v, want the one the teardown completed", records.Releases)
+	}
+	if roles := records.Releases[0].Roles; len(roles) != 1 || roles[0] != "implementer" {
+		t.Fatalf("release roles = %v, want the one role this release's stop suspended", roles)
+	}
+}
+
 // A pod the rule read as idle and still did not release is a hold, recorded with the rule's own
 // name for the reason and the detail that word leaves out. A pod that is simply not idle yet is
 // not: the idle rule reports a hold for every working pod on every tick, and recording those

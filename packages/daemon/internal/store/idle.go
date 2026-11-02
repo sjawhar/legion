@@ -108,10 +108,9 @@ func (s *Store) ReleaseIdleIssue(ctx context.Context, project, issue string, dec
 		}
 		var first, boundary, last int64
 		for _, row := range mark.Rows {
-			var id int64
-			if err := tx.QueryRow(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token)
-				values ($1, $2, $3, 0, now(), '', '') returning id`, row.Kind, issue, string(row.Payload)).Scan(&id); err != nil {
-				return fmt.Errorf("queue the %s of %s's release: %w", row.Kind, issue, err)
+			id, err := insertOutboxRow(ctx, tx, issue, row)
+			if err != nil {
+				return err
 			}
 			if first == 0 {
 				first = id
@@ -143,6 +142,111 @@ func (s *Store) ReleaseIdleIssue(ctx context.Context, project, issue string, dec
 	return marked, nil
 }
 
+// insertOutboxRow queues one row of a release, encoded by the caller, and answers the id the
+// outbox gave it: the ids of the release's own rows are the range its mark is read against
+// (IssueReleaseStop), and a resume a cancel queues takes its id from the same sequence, above
+// every row of the release it ends.
+func insertOutboxRow(ctx context.Context, tx pgx.Tx, issue string, row IdleReleaseRow) (int64, error) {
+	var id int64
+	if err := tx.QueryRow(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token)
+		values ($1, $2, $3, 0, now(), '', '') returning id`, row.Kind, issue, string(row.Payload)).Scan(&id); err != nil {
+		return 0, fmt.Errorf("queue the %s of %s's release: %w", row.Kind, issue, err)
+	}
+	return id, nil
+}
+
+// ReleaseResumeRow builds the outbox row that brings one claim a cancelled release suspended
+// back, at the generation the cancel read of the issue. It is the caller's because the payload
+// is record's to encode, as every row of a release is (IdleReleaseRow).
+type ReleaseResumeRow func(role claim.Role, generation uint64) (IdleReleaseRow, error)
+
+// CancelIssueRelease ends a release that did not finish, in one transaction: the resume of each
+// claim this release suspended and still holds is queued, and the mark goes with them. The two
+// are one act because either alone is a wrong state of the pod: a mark deleted before the
+// resumes are durable leaves those roles `released` in a pod that still stands, with no backstop
+// — a release arms one only once its pod is gone — and nothing left to read that says they are
+// owed a process, since the next row of the release reads the release as over and the next idle
+// tick sees a pod whose claims are suspended. Queueing the resumes rather than relaunching here
+// is what makes them durable: the row is the daemon's own record of what the pod is owed, and
+// its lane retries it until the role has it back.
+//
+// It answers the roles it queued a resume for: the claims this release suspended that are still
+// suspended as `released`. A claim another path took over — a close, a linger, an operator —
+// is left to that path, which is what the source on the suspension says; one an earlier release
+// left `released` is no business of this release, which is why the mark's own set is read and
+// never every released claim of the issue. An issue the record no longer holds is given no
+// resume at all: its claims are a close's to end.
+func (s *Store) CancelIssueRelease(ctx context.Context, project, issue string, resume ReleaseResumeRow) ([]claim.Role, error) {
+	if project == "" || issue == "" || resume == nil {
+		return nil, errors.New("cancelling a release needs its project, its issue and the row that resumes a claim")
+	}
+	var resumed []claim.Role
+	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		resumed = nil
+		var suspended []string
+		err := tx.QueryRow(ctx, `select suspended from issue_releases where project = $1 and issue = $2`,
+			project, issue).Scan(&suspended)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		roles, err := stillReleasedRoles(ctx, tx, project, issue, suspended)
+		if err != nil {
+			return err
+		}
+		var generation int64
+		if len(roles) > 0 {
+			err := tx.QueryRow(ctx, `select generation from issues where key = $1`, issue).Scan(&generation)
+			if errors.Is(err, pgx.ErrNoRows) {
+				roles = nil
+			} else if err != nil {
+				return err
+			}
+		}
+		for _, role := range roles {
+			row, err := resume(role, uint64(generation))
+			if err != nil {
+				return err
+			}
+			if _, err := insertOutboxRow(ctx, tx, issue, row); err != nil {
+				return err
+			}
+			resumed = append(resumed, role)
+		}
+		return deleteIssueRelease(ctx, tx, project, issue)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("cancel the release of %s: %w", issue, err)
+	}
+	return resumed, nil
+}
+
+// stillReleasedRoles are the roles among suspended whose claims are still suspended as
+// `released`, in role order.
+func stillReleasedRoles(ctx context.Context, tx pgx.Tx, project, issue string, suspended []string) ([]claim.Role, error) {
+	if len(suspended) == 0 {
+		return nil, nil
+	}
+	rows, err := tx.Query(ctx, `select role from claims where project = $1 and issue = $2
+		and role = any($3) and state = 'suspended' and suspended_by = 'released' order by role`,
+		project, issue, suspended)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var roles []claim.Role
+	for rows.Next() {
+		var role string
+		if err := rows.Scan(&role); err != nil {
+			return nil, err
+		}
+		roles = append(roles, claim.Role(role))
+	}
+	return roles, rows.Err()
+}
+
 // ClearIssueRelease forgets the mark of issue's release, whether the release finished or was
 // cancelled, on the pool: the teardown's own call, outside any transaction. A mark already gone
 // is success, so a retried finish finishes.
@@ -154,8 +258,8 @@ func (s *Store) ClearIssueRelease(ctx context.Context, project, issue string) er
 }
 
 // deleteIssueRelease forgets the mark of issue's release through db, which is the pool for the
-// teardown's own call and the caller's transaction for a role stop that cancels the release
-// where it reads the boundary (IssueReleaseStop). One mark, one delete, whichever runs it.
+// teardown's own call and the caller's transaction for the cancel that queues the resumes of
+// the claims the release suspended (CancelIssueRelease). One mark, one delete, whichever runs it.
 func deleteIssueRelease(ctx context.Context, db execer, project, issue string) error {
 	_, err := db.Exec(ctx, `delete from issue_releases where project = $1 and issue = $2`, project, issue)
 	return err
@@ -219,6 +323,16 @@ func readIdleView(ctx context.Context, tx pgx.Tx, project, issue string) (pods.I
 	if err := tx.QueryRow(ctx, `select exists (select 1 from issue_releases where project = $1 and issue = $2)`,
 		project, issue).Scan(&view.Releasing); err != nil {
 		return pods.IdleView{}, fmt.Errorf("read whether %s is being released: %w", issue, err)
+	}
+	unrestored, err := workspaceBundleUnrestored(ctx, tx, issue)
+	if err != nil {
+		return pods.IdleView{}, err
+	}
+	view.BundleUnrestored = unrestored
+	if err := tx.QueryRow(ctx, `select exists (
+		select 1 from pod_holds where project = $1 and issue = $2 and not ended)`,
+		project, issue).Scan(&view.Holding); err != nil {
+		return pods.IdleView{}, fmt.Errorf("read whether a hold streak of %s is running: %w", issue, err)
 	}
 	return view, nil
 }

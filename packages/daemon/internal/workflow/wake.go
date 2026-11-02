@@ -192,8 +192,8 @@ func (e *Engine) podBackstopDue(ctx context.Context, tx pgx.Tx, fact intake.PodB
 
 // wakeReleased is the one act every wake of this file performs, and the one place the gates are
 // read: the claim is still released, and its tree is live — neither the issue nor its root has
-// left the workflow and neither lingers (TreeLive). A pod in any other state is a close's to stop
-// or an operator's to resume, never a wake's.
+// left the workflow and neither lingers (pods.InWorkflowNotLingering). A pod in any other state
+// is a close's to stop or an operator's to resume, never a wake's.
 //
 // A wake already taken under the same key wakes nothing a second time. A wake that takes it
 // records itself against the release it ends and cancels the woken role's backstop
@@ -208,7 +208,7 @@ func (e *Engine) wakeReleased(ctx context.Context, tx pgx.Tx, released supervise
 	if err != nil || root == nil {
 		return err
 	}
-	if !TreeLive(*issue, *root) {
+	if !pods.InWorkflowNotLingering(issue.Standing(), root.Standing(), record.OutOfWorkflow) {
 		return nil
 	}
 	taken, err := e.cfg.Pods.TakePodWake(ctx, tx, issue.Key, released.Role, kind, key, at)
@@ -217,16 +217,6 @@ func (e *Engine) wakeReleased(ctx context.Context, tx pgx.Tx, released supervise
 	}
 	e.log.Info("wake: a released pod is coming back", "issue", issue.Key, "role", released.Role, "kind", kind, "detail", detail)
 	return e.enqueue(ctx, tx, issue.Key, wakeRow(*issue, released.Role, WakeTask(kind, detail)))
-}
-
-// TreeLive is whether an issue and its tree root are still the workflow's to run: neither carries
-// a status or a phase that takes it out (InWorkflow), and neither lingers. It is the one gate
-// every path that acts on an idle or released pod reads — the idle rule, a wake applied inside a
-// fact, a wake the outbox takes for a delivery it holds, and the store's own authorization of a
-// release's teardown — because a pod whose tree has stopped being the workflow's is a close's to
-// stop, never a release's to take or a wake's to bring back.
-func TreeLive(issue, root record.Issue) bool {
-	return InWorkflow(issue) && InWorkflow(root) && !issue.Lingers() && !root.Lingers()
 }
 
 // OpenPhaseRole is the phase worker of an open phase, and "" where there is none: a phase no role

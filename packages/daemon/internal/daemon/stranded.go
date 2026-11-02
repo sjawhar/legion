@@ -47,8 +47,7 @@ func strandedReleaseWakes(ctx context.Context, st *store.Store, projectToken str
 	}
 	wakes := make([]workflow.ReleasedWake, 0, len(resumes))
 	for _, resume := range resumes {
-		wakes = append(wakes, workflow.ReleasedWake{Issue: resume.Issue, Role: resume.Role, At: resume.At,
-			FirstTurn: !resume.FirstTurnAt.IsZero(), Stuck: resume.Stuck})
+		wakes = append(wakes, workflow.ReleasedWake{Issue: resume.Issue, Role: resume.Role, At: resume.At, Stuck: resume.Stuck})
 	}
 	return wakes, nil
 }
@@ -91,7 +90,7 @@ func reportStranded(ctx context.Context, st *store.Store, records record.Store, 
 		return
 	}
 	attrs := []any{"project", project, "count", len(stranded)}
-	grouped := api.StrandedByMove(api.StrandedClaimsOf(stranded))
+	grouped := api.StrandedByMove(api.StrandedClaimsOf(stranded), api.SuspendersOf(stranded))
 	for _, move := range api.StrandedMoves() {
 		attrs = append(attrs, string(move), grouped[move])
 	}

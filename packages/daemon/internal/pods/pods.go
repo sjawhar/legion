@@ -119,11 +119,55 @@ type IdleView struct {
 	// Releasing is whether a release of this pod is already marked in progress, which no second
 	// release starts behind.
 	Releasing bool
+	// BundleUnrestored is whether the issue holds a saved workspace bundle whose restore is not
+	// recorded: work a release took out of a pod that no pod has put back. Releasing such a pod
+	// again would store a bundle over it, taken from a workspace that never had that work, so
+	// the rule keeps it until the restore is confirmed.
+	BundleUnrestored bool
+	// Holding is whether a hold streak of this pod is running (store's pod_holds). The rule
+	// never reads it: it is here because the daemon's pass needs it to know whether it has a
+	// streak to end, and the view is the one read of the pod that pass already makes.
+	Holding bool
 }
 
 // IsRoot is whether the issue is its tree's root, the one issue a root's own wait on a person
 // holds: the children of a root that waits on a person are released like any other issue.
 func (v IdleView) IsRoot() bool { return v.Issue == v.Tree }
+
+// Standing is where one issue stands in the three plain fields the pod gate reads: its phase,
+// its Dispatch status and whether it lingers after a close.
+type Standing struct {
+	Phase   phase.Phase
+	Status  string
+	Lingers bool
+}
+
+// Standing is the issue's own standing, and RootStanding its tree root's.
+func (v IdleView) Standing() Standing {
+	return Standing{Phase: v.Phase, Status: v.Status, Lingers: v.LingerUntil != nil}
+}
+
+func (v IdleView) RootStanding() Standing {
+	return Standing{Phase: v.Root.Phase, Status: v.Root.Status, Lingers: v.Root.LingerUntil != nil}
+}
+
+// InWorkflowNotLingering is whether an issue and its tree root are both still the workflow's to
+// run: neither carries a status that takes an issue out of the workflow (outOfWorkflow, which is
+// record.OutOfWorkflow — this package sits below record, so the rule is passed in rather than
+// restated), neither is done, and neither lingers after its close.
+//
+// It is the one gate every path that acts on an idle or released pod reads — the idle rule, a
+// wake applied inside a fact, a wake the outbox takes for a delivery it holds, and the store's
+// own authorization of a release's teardown — because a pod whose tree has stopped being the
+// workflow's is a close's to stop, never a release's to take or a wake's to bring back. Those
+// four sit in three packages that cannot import one another, which is why the rule lives here.
+func InWorkflowNotLingering(issue, root Standing, outOfWorkflow func(status string) bool) bool {
+	return issue.inWorkflow(outOfWorkflow) && root.inWorkflow(outOfWorkflow)
+}
+
+func (s Standing) inWorkflow(outOfWorkflow func(status string) bool) bool {
+	return !outOfWorkflow(s.Status) && s.Phase != phase.Done && !s.Lingers
+}
 
 // QuietSince is when anything of the pod was last recorded — the newest claim write of any of its
 // claims, state and activity report alike — and false while the pod has no claim at all.

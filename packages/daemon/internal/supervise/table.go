@@ -993,7 +993,7 @@ func agentBusy(reason string) bool {
 // delivery is in flight (sent and not yet answered, acknowledged and waiting, or possibly sent by
 // an earlier daemon). Any other turn is a foreign one, and confirms nothing.
 //
-// The persisted working state is reported to the daemon (Machine.OnTerminal), because a turn is
+// The persisted working state is reported to the daemon (Machine.OnDurableState), because a turn is
 // the one observation that a woken pod's role came back and took work, whether or not the wake
 // carried a delivery for it to confirm: a wake for a notice or a phase-ended message carries
 // none, and its resume would otherwise never be measured (R5).
@@ -1010,7 +1010,7 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	if err := persist(ctx); err != nil {
 		return err
 	}
-	m.terminal(StateWorking)
+	m.durableState(StateWorking)
 	return nil
 }
 
@@ -1205,7 +1205,7 @@ func finishReady(m *Machine, ctx context.Context) error {
 	if err := m.persist(ctx); err != nil {
 		return err
 	}
-	m.terminal(StateReady)
+	m.durableState(StateReady)
 	return m.sendPending(ctx)
 }
 
