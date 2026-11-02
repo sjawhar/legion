@@ -284,7 +284,54 @@ func (f *QuoteFinder) matches(quote string) ([]quoteMatch, error) {
 	if marker := atxHeadingMarker.FindString(quote); marker != "" && marker != quote {
 		return headingQuoteMatches(f.doc, f.text, quote[len(marker):]), nil
 	}
-	return quoteMatches(f.text, quote), nil
+	matches := quoteMatches(f.text, quote)
+	if len(matches) == 0 {
+		if kind, rest := listItemQuote(quote); rest != "" {
+			matches = listItemQuoteMatches(f.doc, f.text, kind, rest)
+		}
+	}
+	return matches, nil
+}
+
+// listItemTaskBox is a task item's box, `[ ]` or `[x]`, opening what follows a list marker: the
+// box renders as the item's checkbox, not as text the item holds.
+var listItemTaskBox = regexp.MustCompile(`^\[[ xX]\][ \t]+`)
+
+// listItemQuote reads a quote that opens with a list item's marker (`- `, `* `, `+ `, `5. `,
+// `5) `), and a task box after it, as the item's marker and the text after it, the marker's kind
+// and that text. A quote opening with no marker, or holding nothing after it, answers no text.
+func listItemQuote(quote string) (MarkerKind, string) {
+	marker, width := LeadingBlockMarker(quote)
+	if marker.Kind != MarkerOrdered && marker.Kind != MarkerBullet {
+		return MarkerNone, ""
+	}
+	rest := quote[width:]
+	rest = rest[len(listItemTaskBox.FindString(rest)):]
+	return marker.Kind, rest
+}
+
+// listItemQuoteMatches is every match of rest, a quote's text after a list marker of kind, that
+// begins where a list item of that kind begins its text: the marker selects the item, as a heading
+// quote's marker selects a heading, and the renderer writes it before the item's first paragraph,
+// so the text it is quoted with starts there. The item's number is not matched, only its kind.
+func listItemQuoteMatches(doc *Node, text flattenedText, kind MarkerKind, rest string) []quoteMatch {
+	candidates := quoteMatches(text, rest)
+	if len(candidates) == 0 {
+		return nil
+	}
+	var matches []quoteMatch
+	walk(doc, func(node *Node, path []int, pos, end int) bool {
+		if node.Type != "paragraph" || textblockMarker(doc, node, path).Kind != kind {
+			return true
+		}
+		for _, match := range candidates {
+			if match.From == pos+1 && match.To <= end-1 {
+				matches = append(matches, match)
+			}
+		}
+		return true
+	})
+	return matches
 }
 
 // TargetSpansBlocks reports whether r is not wholly contained by one
@@ -661,6 +708,8 @@ func markupInRange(marks []inlineMarkup, span range16) inlineMarkup {
 func quoteNotFound(doc *Node, quote string) error {
 	if marker := atxHeadingMarker.FindString(quote); marker != "" {
 		quote = quote[len(marker):]
+	} else if _, rest := listItemQuote(quote); rest != "" {
+		quote = rest
 	} else if rendered, marked := renderedMarkdownQuote(quote); marked {
 		quote = rendered.value
 	}
