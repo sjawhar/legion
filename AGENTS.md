@@ -362,6 +362,9 @@ A project's repositories are Dispatch's mapping (Settings → Repositories → P
 The daemon reads the mapping at boot and on Dispatch's `settings.repo_project.updated`, serves each mapped repository both GitHub Apps are installed on, and leaves out, and reports in `legion state --json` (`repositories.refused`), one either App is missing from.
 A repository whose installation read GitHub does not answer (any failure but a 404) is left out for now the same way and read again, 30 s doubling to 10 min, until GitHub answers;
 a served one whose read fails stays served.
+A repository that moved is named in `repository_renames`, a top-level key of `legion.yaml` (`- from: <old owner>/<name>` with `to: <new owner>/<name>`), and the daemon then treats the pair's two names as one repository wherever it compares a name, so the trees it recorded under the old name take the events GitHub sends under the new one, a pull request open at the transfer included.
+The equivalence is read-side only and rewrites no record, so keep the pair configured for as long as any record names the old repository;
+it serves no repository of its own, which is why a pair may be configured before the transfer, and `legion start --check-config` prints one line per pair.
 
 ## Version Control
 
@@ -533,6 +536,12 @@ Each item below names a task and where its code is, then notes on it.
   each build job ends with the tripwire `release-push.sh no-credential` (`release.yaml` keeps each package's version arguments once, in its `env:`, and its `legion_build` also decides from those lists the plugin pair it links);
   a job whose `if:` calls `always()` tests `needs.<job>.result` for every job whose outputs it reads, and a job whose `if:` calls no `always()` has no upstream job that carries an `if:` of its own (GitHub's implicit `success()` would skip it with that job, whatever its condition says).
   `.github/scripts/check-release-credentials.sh` fails the build otherwise
+
+- **Repository-dependent paths come from one script**
+  — the image a workflow pushes, the release URL it stamps into a binary, the `repository.url` npm matches against the publishing repository and the docs site's own address are derived from `$GITHUB_REPOSITORY` by `.github/scripts/repo-paths.sh`, never written as a literal in a workflow or in the docs config.
+  It prints one key (`repo-paths.sh docs_base`) or every `key=value`, answers today's `sjawhar/legion` off a runner, and `.github/scripts/repo-paths.test.sh` tests it in `ci.yaml`'s test job.
+  A job holding a credential runs no script of this repository, so it reads the value from the output of an upstream job that does (`release-envoy-listener.yaml`'s `targets`, `worker-image.yaml`'s `build`), or from a `workflow_call` input when that job was skipped (`worker-image.yaml`'s `image`, which `release.yaml` passes).
+  `docs/site/repo-paths.ts` is the docs build's adapter over the same script
 
 - **Changelog entries are fragment files**
   — a change that earns a changelog line adds a fragment to each package it changes that has a `.changie.yaml`:
