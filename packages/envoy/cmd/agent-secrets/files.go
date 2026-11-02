@@ -4,7 +4,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -30,27 +29,4 @@ func readPodToken(path string) (string, error) {
 		return "", fmt.Errorf("pod token file %s is empty", path)
 	}
 	return token, nil
-}
-
-// writeFileAtomic writes data to path by renaming a finished temporary file into place, so no
-// reader ever sees path half-written: a call waiting out a box's enrollment (awaitEnrollment)
-// reads key.pem and enrollment the moment each appears.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name()) // a no-op once the rename has taken it
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
 }

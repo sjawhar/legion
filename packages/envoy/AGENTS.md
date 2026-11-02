@@ -5294,7 +5294,7 @@ The variables, all unset by default, in which case every program works exactly a
 
 `agent-secrets login` is the one command a person runs to sign in on a machine.
 It makes a box key, runs Google's device authorization grant asking for `openid` and `email` and nothing else, trades the person's identity token with this machine's as the actor token, and registers that person's session under the launcher credential the trade mints.
-The box key and Google's refresh token are kept together in that person's own record, `<key dir>/signins/<sha256 of the lowercased address>.json`, mode `0600` in a `0700` directory (`writeFileAtomic` into `keyDir()`, the repository's own conventions), so the person's user alone reads them; the file is named for the hash and names the person inside it, so signing in again as the same person replaces that record and two addresses never land on one file.
+The box key and Google's refresh token are kept together in that person's own record, `<key dir>/signins/<sha256 of the lowercased address>.json`, mode `0600` in a `0700` directory (`brokerclient.WriteFileAtomic` into `keyDir()`, the repository's own conventions), so the person's user alone reads them; the file is named for the hash and names the person inside it, so signing in again as the same person replaces that record and two addresses never land on one file.
 One record per person, so a second person on the box signs in beside the first.
 A session with exactly one sign-in here uses it; with more than one it is refused until `AGENT_SECRETS_PERSON` says which, and the refusal names them.
 Every refusal a sign-in would cure names `agent-secrets login`.

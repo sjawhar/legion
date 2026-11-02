@@ -24,8 +24,6 @@ const (
 	// DefaultIAMCredentialsURL is Google's own IAM Credentials service, whose generateIdToken
 	// mints the identity token the broker reads.
 	DefaultIAMCredentialsURL = "https://iamcredentials.googleapis.com"
-	// poolGrantType is the grant the security token service takes, RFC 8693's own name.
-	poolGrantType = "urn:ietf:params:oauth:grant-type:token-exchange"
 	// poolRequestedTokenType is what the security token service answers: a federated access
 	// token, spendable at IAM Credentials and nowhere else this client asks.
 	poolRequestedTokenType = oauthwire.SubjectTokenTypeAccessToken
@@ -101,7 +99,7 @@ func (p *PoolIdentity) federate(ctx context.Context, subject, subjectType string
 	}
 	body, err := json.Marshal(map[string]string{
 		"audience":           p.Audience,
-		"grantType":          poolGrantType,
+		"grantType":          GrantTypeTokenExchange,
 		"requestedTokenType": poolRequestedTokenType,
 		"scope":              poolScope,
 		"subjectTokenType":   poolSubjectTokenType(subjectType),

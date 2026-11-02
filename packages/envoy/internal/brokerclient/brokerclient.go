@@ -41,12 +41,11 @@ import (
 const (
 	// TokenPath is the broker's token endpoint, where every trade is posted.
 	TokenPath = "/v1/oauth/token"
-	// GrantTypeTokenExchange is RFC 8693's own grant name, which the library the broker is
-	// built on spells in a package its callers cannot import.
+	// GrantTypeTokenExchange is RFC 8693's own grant name: what every trade at the broker's
+	// token endpoint asks for, and what Google's security token service takes for the same
+	// exchange (pool.go). The library the broker is built on spells it in a package its callers
+	// cannot import.
 	GrantTypeTokenExchange = "urn:ietf:params:oauth:grant-type:token-exchange"
-	// FormSession is the broker's own form parameter: the session name the minted token writes
-	// under. RFC 8693 has none, and an entry that fixes no session requires it.
-	FormSession = "session"
 
 	// DefaultRenewBefore is how long before an access token's expiry the client trades again, so
 	// a renewal lands with the held token still good and nothing of the caller's restarts. The
@@ -301,7 +300,7 @@ func (c *Client) trade(ctx context.Context) (*Token, error) {
 		"subject_token_type": {subjectType},
 	}
 	if c.session != "" {
-		form.Set(FormSession, c.session)
+		form.Set(oauthwire.FormSession, c.session)
 	}
 	if c.actor != nil {
 		actor, actorType, err := c.actor.Token(ctx)

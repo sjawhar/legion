@@ -169,8 +169,8 @@ func issuedClaims(t *testing.T) []string {
 		session := oauthstore.NewExchangeSession()
 		request := &oauth2.Request{
 			Form: url.Values{
-				FormSubjectTokenType: {subject.tokenType},
-				FormSession:          {claimsSessionName},
+				FormSubjectTokenType:  {subject.tokenType},
+				oauthwire.FormSession: {claimsSessionName},
 			},
 			Session: session,
 		}

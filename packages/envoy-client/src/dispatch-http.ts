@@ -1486,15 +1486,18 @@ export class DispatchClient {
     signal?: AbortSignal,
     callerKey?: string
   ): Promise<Response> {
-    const headers: Record<string, string> = {
-      Accept: accept,
-      ...(await this.#credential.headers(method, url)),
-    };
+    // The credential is presented once here, and again for each attempt the write loop makes
+    // below: a key-bound scheme signs one proof per request, so one presentation is one proof
+    // sent, never a second minted and discarded. It is asked before the loop so a credential
+    // that cannot answer throws here, out of the loop's reach, rather than being taken for a
+    // failed attempt.
+    const headers: Record<string, string> = { Accept: accept };
+    let presented = await this.#credential.headers(method, url);
     if (body !== undefined) headers["Content-Type"] = body.type;
     if (method !== "POST" && method !== "PATCH") {
       return this.fetchImpl(url, {
         method,
-        headers,
+        headers: { ...headers, ...presented },
         signal: signal === undefined ? this.#signal : AbortSignal.any([this.#signal, signal]),
         ...(body === undefined ? {} : { body: body.content }),
       });
@@ -1509,10 +1512,10 @@ export class DispatchClient {
       let answer: WriteAnswer | undefined;
       let thrown: unknown;
       try {
-        // Each attempt presents the credential afresh: a key-bound scheme signs one proof per
-        // request, and a resource server that keeps a replay store refuses a proof it has
-        // already seen.
-        const sent = { ...headers, ...(await this.#credential.headers(method, url)) };
+        // Each attempt after the first presents the credential afresh: a resource server that
+        // keeps a replay store refuses a proof it has already seen.
+        if (attempt > 1) presented = await this.#credential.headers(method, url);
+        const sent = { ...headers, ...presented };
         answer = await writeAnswer(await this.#attempt(url, method, sent, body, silenceMs), key);
         if (answer.echoed) KEYED_LAYER_SEEN.set(this.#baseUrl, this.#now());
         if (!answer.again) return answer.response;

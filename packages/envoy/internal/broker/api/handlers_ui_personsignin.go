@@ -53,8 +53,13 @@ type personSignInRevokedResponse struct {
 // listPersonSignIns lists the live sign-ins the person ?person= names made on their machines
 // (store.Store.PersonSignIns). The person is the one the caller names, which Dispatch filled
 // from its own session, exactly as the machine-login and grant lists take theirs.
+//
+// The login is canonicalized before it is read on, as the revoke beside it does: the table holds
+// lowercase logins and the query lowercases what it is given, so an address a caller spells with
+// surrounding space would otherwise match nothing and answer an empty list to a person who has
+// sign-ins.
 func (s *server) listPersonSignIns(w http.ResponseWriter, r *http.Request, _ string) {
-	person := r.URL.Query().Get("person")
+	person := record.CanonicalLogin(r.URL.Query().Get("person"))
 	if !requirePerson(w, person) {
 		return
 	}

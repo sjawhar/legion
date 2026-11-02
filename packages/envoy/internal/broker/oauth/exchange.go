@@ -27,16 +27,13 @@ import (
 // the one place the broker and its callers share.
 const tokenTypeAccessToken = oauthwire.SubjectTokenTypeAccessToken
 
-// The form parameters of an exchange request the broker reads itself. The library reads the rest
-// (RFC 8693 Section 2.1); FormSession is the broker's own, because RFC 8693 has no parameter for
-// the name a caller writes under.
+// The form parameter of an exchange request the broker reads itself; the library reads the rest
+// (RFC 8693 Section 2.1). The session name a caller asks to write under is oauthwire.FormSession,
+// the broker's own parameter, which the clients that send it read from that same declaration.
 const (
 	// FormSubjectTokenType is the request's subject_token_type, which says which kind of
 	// identity the caller is presenting and so which decision the exchange makes.
 	FormSubjectTokenType = "subject_token_type"
-	// FormSession is the session name the caller asks to write under. An entry that fixes a
-	// session refuses a request naming another; an entry that fixes none requires it.
-	FormSession = "session"
 )
 
 // The extra claims an exchanged access token carries, which are what an introspection answers
@@ -560,7 +557,7 @@ func (p *Provider) decide(_ context.Context, request oauth2.Requester, subjectTo
 	}
 	form := request.GetRequestForm()
 	subjectTokenType := form.Get(FormSubjectTokenType)
-	name := form.Get(FormSession)
+	name := form.Get(oauthwire.FormSession)
 	var claims exchange.Claims
 	var err error
 	switch subjectTokenType {

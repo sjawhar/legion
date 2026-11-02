@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/sjawhar/envoy/internal/googleidentity"
 )
 
@@ -41,6 +43,9 @@ type GoogleAccount struct {
 	mu     sync.Mutex
 	cached string
 	readAt time.Time
+	// flight is the one metadata read in progress, which every reader that finds nothing fresh
+	// enough joins rather than opening a second one.
+	flight singleflight.Group
 }
 
 // NewGoogleAccount is a reader of this machine's Google identity token for audience, which Read
@@ -58,16 +63,45 @@ func NewGoogleAccount(audience string) *GoogleAccount {
 // The read runs on a context of its own, bounded by internal/googleidentity's own timeout, rather
 // than on the request's: one request going away must not leave the next one without the machine's
 // identity, and the answer is cached for every caller.
+//
+// Readers that arrive while a read is in flight take its answer — the token, or the error it
+// failed with — instead of each asking the metadata server in turn, and the lock is released
+// around the read rather than held across it. This is what keeps a metadata server that has
+// stopped answering from costing the Nth queued caller N of internal/googleidentity's timeouts:
+// on a listener this read is on the per-request authentication path (introspect.go). The cost is
+// that concurrent readers no longer get a failure each of their own, which is what the followers
+// would have paid the timeout for.
 func (g *GoogleAccount) Read() (string, error) {
+	if token, fresh := g.fresh(); fresh {
+		return token, nil
+	}
+	shared, err, _ := g.flight.Do(g.Audience, func() (any, error) {
+		// The flight's own look at the cache: a reader that waited out this flight's predecessor
+		// would otherwise ask the metadata server again for a token just read.
+		if token, fresh := g.fresh(); fresh {
+			return token, nil
+		}
+		token, err := googleidentity.Token(context.Background(), g.Audience)
+		if err != nil {
+			return "", fmt.Errorf("brokertoken: read this machine's Google identity token for %s: %w", g.Audience, err)
+		}
+		g.mu.Lock()
+		g.cached, g.readAt = token, time.Now()
+		g.mu.Unlock()
+		return token, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return shared.(string), nil
+}
+
+// fresh is the cached token while it is younger than TTL, and false once it is not.
+func (g *GoogleAccount) fresh() (string, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.cached != "" && time.Since(g.readAt) < g.TTL {
-		return g.cached, nil
+		return g.cached, true
 	}
-	token, err := googleidentity.Token(context.Background(), g.Audience)
-	if err != nil {
-		return "", fmt.Errorf("brokertoken: read this machine's Google identity token for %s: %w", g.Audience, err)
-	}
-	g.cached, g.readAt = token, time.Now()
-	return token, nil
+	return "", false
 }

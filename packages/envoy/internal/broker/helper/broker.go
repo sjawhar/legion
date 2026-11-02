@@ -605,14 +605,10 @@ func (b *Broker) startIdentity(ctx context.Context) error {
 	var once sync.Once
 	go func() {
 		err := b.Identity.Run(ctx, func(_ context.Context, token *brokerclient.Token) error {
-			if token.CredentialID == "" {
-				return fmt.Errorf("the broker's token answer carries no %s, so this machine has no launcher credential to enrol sessions with", oauthwire.ExtraCredentialID)
+			if token.CredentialID == "" || token.CredentialExpiresAt.IsZero() {
+				return fmt.Errorf("the broker's token answer lacks a %s or an RFC 3339 %s, so this machine has no launcher credential to enrol sessions with", oauthwire.ExtraCredentialID, oauthwire.ExtraCredentialExpiresAt)
 			}
-			expires := token.CredentialExpiresAt
-			if expires.IsZero() {
-				expires = token.Expiry
-			}
-			cred := &machineCredential{key: b.Identity.Key(), id: token.CredentialID, expiresAt: expires.UTC(), gone: make(chan struct{})}
+			cred := &machineCredential{key: b.Identity.Key(), id: token.CredentialID, expiresAt: token.CredentialExpiresAt.UTC(), gone: make(chan struct{})}
 			b.credMu.Lock()
 			b.installCredential(cred, &loginState{State: "issued"})
 			b.credMu.Unlock()

@@ -608,10 +608,10 @@ func writeMachineSession(dir string, key *ecdsa.PrivateKey, enrollmentID string)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("make the key dir %s: %w", dir, err)
 	}
-	if err := writeFileAtomic(filepath.Join(dir, keyFile), pemBytes, 0o600); err != nil {
+	if err := brokerclient.WriteFileAtomic(filepath.Join(dir, keyFile), pemBytes, 0o600); err != nil {
 		return err
 	}
-	return writeFileAtomic(filepath.Join(dir, enrollmentFile), []byte(enrollmentID+"\n"), 0o600)
+	return brokerclient.WriteFileAtomic(filepath.Join(dir, enrollmentFile), []byte(enrollmentID+"\n"), 0o600)
 }
 
 // signInSigner is the signer of the person this session acts for, or nil where nobody has
@@ -713,7 +713,7 @@ func cmdKeygen(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets keygen: %v\n", err)
 		return 1
 	}
-	if err := writeFileAtomic(filepath.Join(*out, keyFile), pemBytes, 0o600); err != nil {
+	if err := brokerclient.WriteFileAtomic(filepath.Join(*out, keyFile), pemBytes, 0o600); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets keygen: %v\n", err)
 		return 1
 	}

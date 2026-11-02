@@ -120,7 +120,7 @@ func (s SignInStore) Write(record SignInRecord) error {
 		return err
 	}
 	path := s.Path(record.Person)
-	if err := writeFileAtomic(path, append(raw, '\n'), 0o600); err != nil {
+	if err := WriteFileAtomic(path, append(raw, '\n'), 0o600); err != nil {
 		return fmt.Errorf("keep %s's sign-in at %s: %w", record.Person, path, err)
 	}
 	return nil
@@ -205,9 +205,11 @@ func namesOf(records []SignInRecord) string {
 	return strings.Join(names, ", ")
 }
 
-// writeFileAtomic writes data to path by renaming a finished temporary file into place, so no
-// reader ever sees path half-written. cmd/agent-secrets writes its key dir the same way.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+// WriteFileAtomic writes data to path by renaming a finished temporary file into place, so no
+// reader ever sees path half-written: a sign-in record is read back by the next command while
+// this one is still running, and a call waiting out a box's enrollment (cmd/agent-secrets'
+// awaitEnrollment) reads key.pem and enrollment the moment each appears.
+func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
 		return err

@@ -1,7 +1,10 @@
 import { parseArgs } from "node:util";
 import { SQL } from "bun";
 import { z } from "zod";
-import type { ActiveDispatchConfig } from "../../packages/envoy-client/src/dispatch-config";
+import {
+  type ActiveDispatchConfig,
+  dispatchCredential,
+} from "../../packages/envoy-client/src/dispatch-config";
 import {
   DISPATCH_TOOL_DEADLINE_MS,
   DispatchClient,
@@ -203,7 +206,7 @@ type CoverageResult =
       readonly reads: number;
     };
 
-type DispatchConfig = Pick<ActiveDispatchConfig, "url" | "token">;
+type DispatchConfig = Pick<ActiveDispatchConfig, "url" | "token" | "brokered">;
 
 function parsePair(value: string): Pair {
   const split = value.indexOf("=");
@@ -579,20 +582,27 @@ async function readJson(
 
 export function liveDispatch(config: DispatchConfig): DispatchReads {
   // `dispatchSettings` already trimmed the URL's trailing slashes.
+  // The bearer, or the access token this machine traded its own identity for, with the proof
+  // that goes with it; the coverage read goes around DispatchClient, so it presents it itself.
+  const credential = dispatchCredential(config);
   // A client's deadline runs from its construction, so each read gets a client of its own.
-  const client = () => new DispatchClient(config.url, config.token);
+  const client = () => new DispatchClient(config.url, credential);
   return {
     // Public: it is sent no token.
     healthz: () =>
       readJson(`${config.url}/healthz`, {}, (status) => status === 200 || status === 503),
     search: (query, options) => client().search(query, options),
     issue: (key) => client().getIssue(key),
-    coverage: () =>
-      readJson(
-        `${config.url}/api/v1/search/coverage`,
-        { Authorization: `Bearer ${config.token}` },
+    coverage: async () => {
+      const url = `${config.url}/api/v1/search/coverage`;
+      return readJson(
+        url,
+        typeof credential === "string"
+          ? { Authorization: `Bearer ${credential}` }
+          : await credential.headers("GET", url),
         (status) => status >= 200 && status < 300
-      ),
+      );
+    },
   };
 }
 

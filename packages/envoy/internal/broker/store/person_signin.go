@@ -13,8 +13,9 @@ import (
 // the machine, and the times the row was made, last used and revoked.
 //
 // The exchange writes through RecordPersonSignIn in its own transaction, so the row and the
-// access token the trade mints land together or not at all; the routes Dispatch relays read and
-// revoke through the two methods below, on the pool.
+// access token the trade mints land together or not at all; the routes Dispatch relays list
+// through PersonSignIns on the pool and revoke through RevokePersonSignInTx, which takes the
+// caller's transaction because the launcher credential the sign-in held ends in it too.
 //
 // A revoked row is never deleted and never re-used: it is what refuses that box key for good, so
 // a person who revokes a sign-in is not undone by the box trading the very key again. A person

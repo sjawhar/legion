@@ -104,6 +104,11 @@ func TestThePersonSignInsListIsThatPersonsLiveSignIns(t *testing.T) {
 	if upper := ts.personSignIns(t, "Ada@Example.com"); len(upper) != 2 {
 		t.Fatalf("GET /v1/person-signins for the address in capitals = %+v, want the same two sign-ins", upper)
 	}
+	// And one spelled with space around it: the list canonicalizes what it is given, as the
+	// revoke beside it does, so a login the guard admits is the login that is read on.
+	if spaced := ts.personSignIns(t, " Ada@Example.com\t"); len(spaced) != 2 {
+		t.Fatalf("GET /v1/person-signins for the address with space around it = %+v, want the same two sign-ins", spaced)
+	}
 }
 
 // TestRevokingASignInEndsItAndLeavesThePersonsOthers: the revoke answers "revoked" with how many

@@ -22,6 +22,11 @@ const (
 	// refuses a public client that grant, but it presents no client credential: the subject
 	// token it carries and the proof of its own key are what the broker judges the request on.
 	ExchangeClientID = "dispatch-token-exchange"
+	// FormSession is the exchange request's own form parameter: the session name the minted
+	// token writes under. RFC 8693 registers none, so the broker defines this one; an entry
+	// that fixes a session refuses a request naming another, and an entry that fixes none
+	// requires it.
+	FormSession = "session"
 	// SubjectTokenTypeKubernetes is the subject_token_type a pod presents its projected
 	// Kubernetes service-account token under. RFC 8693 registers no name for one, so the broker
 	// defines this one and the exchange client is the only client that may present it.
