@@ -2,59 +2,75 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-627",
-  "previousHandoff": "9867d50be0d52b209985afb3bffbf964bcae4a69",
-  "round": "2, answering the tester's one failure at f7d47578: the required ci-filters gate. No runtime code changed in this round; the three edits are path filters in two workflow files.",
+  "previousHandoff": "9728d26b2a9318d3cbbcfe5ef32e0cf281ac9fa4",
+  "round": "3, answering review round 1 at code head d74ea872: two important index defects, seven minors, three prose items. Code head 29b084dac6da, three commits.",
   "proof": [
     {
-      "criterion": "The tester's failure: the required ci-filters gate must be green at the head. internal/dispatch/redeliver now imports internal/kvwatch, so cmd/dispatch's jobs read packages/envoy/internal/kvwatch/* while their path filters did not name it, and a change to that package would have skipped those jobs on the pull request and again on main.",
-      "surface": "The repository's own filter-coverage check, which is what the required ci-filters job runs: it recomputes each job's read set live with `go list -deps` over the job's real go commands and holds every ci.yaml filter to it, plus rule 8, which holds docs-pages.yaml's on.push.paths equal to the docs filter.",
-      "command": "cd /legion/workspaces/sjawhar/legion/infra-627 && .github/scripts/check-ci-filters.sh  (and its own tests, .github/scripts/check-ci-filters.test.sh)",
-      "observed": "Exit 0, no ::error line: `dispatch-memory: 1515 files, 0 uncovered`, `dispatch-multiprocess: 1515 files, 0 uncovered`, `.github/workflows/docs-pages.yaml: on.push.paths equals filter docs (170 patterns)`, and `every ci.yaml filter matches every file its job reads (28 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)`. The check's own tests: `Results: 139 passed, 0 failed`, exit 0.",
-      "headSha": "d74ea872eac4",
-      "negativeControl": "The same command before the three lines were added: `::error::55 CI filter problem(s)`, exit 1, eleven files of packages/envoy/internal/kvwatch times the five gates docs, dispatch, dispatch-browser-multiprocess, dispatch-memory and dispatch-multiprocess, each naming the go command that reads the package. That red is the regression lock; no Go test can hold this, since the gate is about which jobs a change starts."
+      "criterion": "Review 1: a record write the bucket refuses for any reason other than a lost compare-and-set is answered as ClaimedElsewhere with the sweep still complete, so the cursor passes the record's entry and the delivery is never read again; backfillIndex counts such a record indexed and writes the 72-hour marker. Both lose an open delivery.",
+      "surface": "The sweep against a real nats-server through a KV wrapper that refuses a guid.* write with an error that is not a conflict, in the shape sweep_test.go's pausedClaim and refusingIndex already use: the bucket answering a sweeper as the live bucket would under a refused write.",
+      "command": "cd /legion/workspaces/sjawhar/legion/infra-627/packages/envoy && DISPATCH_TEST_DATABASE_URL=\"postgres://legion_test@127.0.0.1:5433/legion_test_infra627?sslmode=disable\" go test ./internal/dispatch/redeliver/ -run 'TestARefusedRecordWriteLeavesTheDeliveryForTheNextSweep|TestABackfillWhoseRecordWriteIsRefusedLeavesTheIndexUnmarked' -count=1 -timeout 15m",
+      "observed": "Both pass at 29b084dac6da: the sweep reports Complete false, the cursor does not move, the next sweep with the wrapper gone redelivers the delivery, and a back-fill whose record write is refused leaves the index marker unwritten.",
+      "headSha": "29b084dac6da",
+      "negativeControl": "Run by the implementer against the code the review read, by reverting the fix in place. With putRecord answering a refused write as a lost compare-and-set again: `--- FAIL: TestARefusedRecordWriteLeavesTheDeliveryForTheNextSweep: the sweep reported itself complete: {... Outcome:claimed-elsewhere ... Complete:true}`. With that and the back-fill's written check both reverted, which is exactly the reviewed code: `--- FAIL: TestABackfillWhoseRecordWriteIsRefusedLeavesTheIndexUnmarked: reading the index marker gave <nil>, want nats: key not found: a back-fill that indexed no record marked the bucket, and nothing reads that record again for three days`. The working copy was restored from a copy taken before each control and the diff stat checked afterwards."
     },
     {
-      "criterion": "2h: two concurrent imports of one source share one GitHub sync, and a slow source blocks no other source of its project. Unchanged by this round; carried from round 1 and re-verified by the tester.",
-      "surface": "The HTTP route a person reaches through Settings -> Refresh and through `dispatch architecture-sync`: POST /api/v1/projects/CORE/architecture-sources/{owner}/{repo}/sync, against a booted envoy-dispatch with a throwaway GitHub App key and a fake App API that holds one repository's blob reads.",
-      "command": "cd /legion/scratch/tmp/infra627 && bash build.sh && bash e1.sh head   (control: bash e1.sh base)",
-      "observed": "A sibling source's sync answered 200 in 0.026 s while legion/arch was held 6.09 s in its blob read, and two concurrent syncs of one source cost 1 installation and 1 head lookup. The tester re-ran the same harness and observed 0.036 s and 1/1. This round changes no Go file, so the figures stand at d74ea872.",
-      "headSha": "f7d47578837e",
-      "negativeControl": "The same scripts against base 0642a37abdaaf47efc20ed2c8b126a2cd4c527d9: the sibling blocked 6.031 s (the tester measured 6.019 s) and two syncs cost 2 installation and 2 head lookups."
+      "criterion": "Review 2: a record an older build rewrites loses Pending, so the new build deletes its index entry as a stray while the 72-hour marker blocks the back-fill. That happens in an ordinary rolling deploy, and again after a rollback and roll-forward inside 72 hours.",
+      "surface": "The running sweep against a real nats-server over a bucket holding a record written in the base build's own JSON shape (no pending field) with an index entry naming it and the index marker set, in the sweep's window.",
+      "command": "cd /legion/workspaces/sjawhar/legion/infra-627/packages/envoy && DISPATCH_TEST_DATABASE_URL=\"postgres://legion_test@127.0.0.1:5433/legion_test_infra627?sslmode=disable\" go test ./internal/dispatch/redeliver/ -run TestAnIndexEntryWhoseRecordNamesNoneIsAdopted -count=1 -timeout 15m",
+      "observed": "Passes at 29b084dac6da: the entry is not deleted, the delivery is redelivered, and the record afterwards names an entry of its own again. The rule is written down where it is enforced: a record naming no entry disowns nothing, so its entry is adopted; only a record naming a different entry disowns this one, and decide's write for a record whose Pending is empty (sweep.go, before the Waiting return) gives it an entry again.",
+      "headSha": "29b084dac6da",
+      "negativeControl": "With the condition back to `current.Pending != key`, which is what the review read: `--- FAIL: TestAnIndexEntryWhoseRecordNamesNoneIsAdopted: guid-rewritten outcome \"\", want \"redelivered\"` -- the delivery was never decided, because its entry had been deleted as a stray."
     },
     {
-      "criterion": "2i: the running sweep reads only the deliveries the index says are due. Unchanged by this round; carried from round 1 and re-verified by the tester.",
-      "surface": "The running sweep in a booted envoy-dispatch against a real nats-server v2.10.29, its bucket holding N open, not-due delivery records, with /varz read either side of one sweep.",
-      "command": "cd /legion/scratch/tmp/infra627 && bash e2.sh head 1000 && bash e2.sh head 10000   (control: bash e2.sh base 1000|10000)",
-      "observed": "One sweep took 6 messages and 2,785 bytes off NATS at N=10,000, flat from N=1,000, with its own line reading `deliveries=0 index_entries=0 complete=true`. The tester re-ran it at N=10,000 and observed 6 messages / 2,784 bytes. This round changes no Go file, so the figures stand at d74ea872.",
-      "headSha": "f7d47578837e",
-      "negativeControl": "The same script against base 0642a37a: 2,005 messages and 1,103,435 bytes at N=1,000 and 20,006 messages and 11,042,288 bytes at N=10,000 (the tester measured 20,006 / 11,042,364), exactly linear in N."
+      "criterion": "2h: two concurrent imports of one source share one GitHub sync, and a slow source blocks no other source of its project. Re-measured at this head after the importer changes (the flight's move to its own file, and failed() writing on the flight's context).",
+      "surface": "POST /api/v1/projects/CORE/architecture-sources/{owner}/{repo}/sync on a booted envoy-dispatch with a throwaway GitHub App key and a fake App API that holds one repository's blob reads.",
+      "command": "cd /legion/scratch/tmp/infra627 && sed -i 's/^HEAD_COMMIT=.*/HEAD_COMMIT=29b084da/' build.sh && bash build.sh && bash e1.sh head",
+      "observed": "A sibling source's sync answered 200 in 0.024 s while legion/arch was held 6.10 s in its blob read; two concurrent syncs of one source cost 1 installation and 1 head lookup, with and without a hold on the installation lookup; GET /api/v1/projects/CORE/architecture answered 200 in 12.1 ms during the hold.",
+      "headSha": "29b084dac6da",
+      "negativeControl": "bash e1.sh base, the same harness against main's tip 0642a37abdaaf47efc20ed2c8b126a2cd4c527d9: the sibling blocked 6.031 s and two syncs cost 2 installation and 2 head lookups."
+    },
+    {
+      "criterion": "2i: the running sweep reads only the deliveries the index says are due. Re-measured at this head after the index code moved into index.go and both defects were fixed.",
+      "surface": "The running sweep in a booted envoy-dispatch against a real nats-server v2.10.29, its bucket holding 10,000 open, not-due records with their entries, /varz read either side of one sweep.",
+      "command": "cd /legion/scratch/tmp/infra627 && bash e2.sh head 10000",
+      "observed": "One sweep took 6 messages and 2,785 bytes off NATS, against an idle floor of 1 message and 1,177 bytes over a comparable 25 s window, with its own line reading deliveries=0 index_entries=0 complete=true.",
+      "headSha": "29b084dac6da",
+      "negativeControl": "bash e2.sh base 10000: 20,006 messages and 11,042,288 bytes for the same bucket, exactly linear in N."
     }
   ],
   "filesChanged": [
-    ".github/workflows/ci.yaml: `packages/envoy/internal/kvwatch/*` added to the `dispatch_server` anchor, which the dispatch, dispatch_browser_multiprocess and docs filters take, and to the `dispatch_command_tests` anchor, which dispatch_memory and dispatch_multiprocess take (its `packages/envoy/internal/dispatch/**` does not reach internal/kvwatch, which is outside internal/dispatch).",
-    ".github/workflows/docs-pages.yaml: the same pattern in on.push.paths, inside its flattened copy of *dispatch_server, which the check's rule 8 holds equal to the docs filter.",
-    "Nothing else. No Go file, no test, no document changed in this round."
+    "packages/envoy/internal/dispatch/redeliver/index.go: openDue's adoption rule and its stray margin, the back-fill's written check and the comment that claimed a rolling deploy needs no rule, the errNotWritten family, writeRecord, dropPending, indexMarked, indexKey, openRecord and sortOpenRecords, which moved here from sweep.go (133 -> 384 lines).",
+    "packages/envoy/internal/dispatch/redeliver/sweep.go: putRecord tells a lost compare-and-set from a refused write, Sweep's loop reports a decision that carries an outcome, undoClaim carries the bucket's error into its log line, attention's unreachable branch is gone, the package doc's waiting sentence, and the index's code is gone from it (1,197 -> 1,012 lines).",
+    "packages/envoy/internal/dispatch/redeliver/sweep_test.go: three regression tests (TestARefusedRecordWriteLeavesTheDeliveryForTheNextSweep, TestABackfillWhoseRecordWriteIsRefusedLeavesTheIndexUnmarked, TestAnIndexEntryWhoseRecordNamesNoneIsAdopted) with the refusingRecord wrapper, the base-shaped record helper and pendingOf; TestAContinuousDryRunLeavesAStrayIndexEntry's stray moved from now-1m to now-5m, since an entry inside the new margin is deliberately left alone.",
+    "packages/envoy/cmd/dispatch/README.md: waiting's definition in the running sweep.",
+    "packages/envoy/internal/dispatch/architecture/importer.go: failed() writes on the flight's own context, SyncProject's redundant guard removed, the flight's code moved out (1,056 -> 934 lines).",
+    "packages/envoy/internal/dispatch/architecture/flight.go (new): syncCount, syncFlight and (*Importer).flight.",
+    "packages/envoy/internal/dispatch/architecture/importer_test.go: one comment that described the change rather than the code.",
+    ".github/workflows/docs-pages.yaml: three block labels corrected to the count of the block under them, 15, 59 and 50. No pattern changed."
   ],
   "trickyParts": [
-    "Four tests of internal/dispatch/redeliver (the redeliverTestLeases ones) migrate into the database their DSN names, so they fail `permission denied for schema public` against $LEGION_TEST_PG_DSN, whose database this pod's login does not own. Run the package with DISPATCH_TEST_DATABASE_URL=postgres://legion_test@127.0.0.1:5433/legion_test_infra627?sslmode=disable. That is the pod, not the branch.",
-    "-race needs cgo on this pod: prefix CGO_ENABLED=1.",
-    "check-ci-filters.sh takes about 140 s and runs `go list -deps` with GOPROXY=off over an empty module cache. It is the one check that catches an import which changes which CI jobs a file starts, and nothing in the Go suites can stand in for it: run it after any change to a Go import graph that cmd/dispatch, cmd/legion or cmd/listener reach.",
-    "The evidence harness is /legion/scratch/tmp/infra627 (build.sh, e1.sh, e2.sh, e2-bytes.sh, e2-dryrun.sh); the tester's is /legion/scratch/tmp/t627 (e4.sh, e5.sh, e6.sh). Both build each envoy-dispatch from a git archive export of its commit, so re-running at another head is one edit of build.sh's HEAD_COMMIT."
+    "On this pod, `go test ./internal/dispatch/redeliver/ -count=2` ends FAIL with zero `--- FAIL` lines: storetest's drop of its isolated database needs pg_terminate_backend, which the login legion_test lacks. Read the `--- FAIL` count, not the package line. -count=1 is clean.",
+    "Four tests of that package (the redeliverTestLeases ones) migrate into the database their DSN names, so use DISPATCH_TEST_DATABASE_URL=postgres://legion_test@127.0.0.1:5433/legion_test_infra627?sslmode=disable rather than $LEGION_TEST_PG_DSN.",
+    "-race needs cgo here: prefix CGO_ENABLED=1.",
+    "check-ci-filters.sh takes about 140 s and is the only check that sees an import changing which CI jobs a file starts. Run it after any change to an import graph cmd/dispatch, cmd/legion or cmd/listener reach.",
+    "The evidence harness is /legion/scratch/tmp/infra627; its build.sh builds each envoy-dispatch from a git archive export of the commit its HEAD_COMMIT names, so re-running at another head is one edit of that line. The tester's own harness is /legion/scratch/tmp/t627 (e4.sh, e5.sh, e6.sh).",
+    "INFRA's pods were told at 23:47Z to restart onto the contract-44 image. This round's work was pushed to legion/INFRA-627-wip at 6c68ca4ef2e4 before the verification, so none of it depended on the rescue; that branch is deleted now that its content is on the issue branch in three commits."
   ],
   "deviations": [
-    "The spec's 2i names the index key as pending.<GUID> with the due time in the value; the due time is in the key instead, because a JetStream KV selects only by subject filter. Plan departure 1; the outcome is unchanged.",
-    "The spec's 2h clause about a read of the model is already true before the change, so it is answered by a labelled guard rather than a regression test. Plan departure 2.",
-    "The before/after line on the committed load reproduction can only show no regression, because neither changed path runs under that harness. Plan departure 3; it was run as written, three runs a side.",
+    "Two of the review's dead-code findings (item 7) are not carried, because its own important fixes make both live, and each is kept with a corrected comment: openDue's `seen` map, since a record naming no entry is adopted by each key that names it, so two entries can reach the loop for one delivery; and parsePendingKey's `at` return, which the stray repair's margin reads. attention's unreachable branch, the third, is removed as asked.",
+    "The spec's 2i names the index key as pending.<GUID> with the due time in the value; the due time is in the key instead. Plan departure 1.",
+    "The spec's 2h clause about a read of the model is already true before the change, so it is a labelled guard rather than a regression test. Plan departure 2.",
+    "The before/after line on the committed load reproduction can only show no regression. Plan departure 3; run as written in round 1, three runs a side.",
     "A caller that goes away no longer suppresses the record of its sync's deadline on the source row. Plan departure 4.",
-    "Lookback grows from 60 to 66 minutes (maxBackoff + 3*Interval), which the index requires. INFRA-514's architect accepted it at 2026-11-01T19:55:54Z.",
-    "The benchmark's ratio criterion is not met (index 2.40x ns/op, 8.81x B/op, 16.05x allocs/op for ten times the entries, against the plan's 1.3x and 1.2x); the residual is nats-server's per-subject work for the filtered consumer, not work per entry. INFRA-514's architect decided at 2026-11-01T19:55:54Z that this is a recorded departure, with no bucket of its own and no child issue."
+    "Lookback grows from 60 to 66 minutes, which the index requires; accepted by INFRA-514's architect at 2026-11-01T19:55:54Z.",
+    "The benchmark's ratio criterion is not met, the residual being nats-server's per-subject work for the filtered consumer; recorded as a departure by INFRA-514's architect at the same time, with no bucket of its own and no child issue."
   ],
   "openQuestions": [
     "None blocking."
   ],
   "discoveredComplexity": [
-    "A new import can be a CI defect with no test to catch it. internal/dispatch/redeliver importing internal/kvwatch widened what five gates read through `go list -deps ./cmd/dispatch` while their path filters stayed as they were, so a later change to internal/kvwatch would have skipped those jobs on the pull request and again on main, where nothing re-runs them. Only .github/scripts/check-ci-filters.sh sees it, and it is not in the fast local lane any Go change runs.",
-    "docs-pages.yaml carries a flattened copy of ci.yaml's *dispatch_server, and the check holds the two equal, so a pattern added to that anchor has to be added in both files.",
-    "Three comments in docs-pages.yaml label their flattened blocks with pattern counts that are already wrong and were wrong when they were last written: `*dispatch_server, 42 patterns` over a block of 49 (50 after this change, against the anchor's 53), `*bun_install, 16 patterns` over 15, and `*legion_command, 57 patterns` over 59. Nothing reads them: ci_filter_coverage.py has no count logic, and rule 8 compares the pattern lists alone. They are left as they are rather than replaced with a number whose meaning I would be inventing, since neither the block's count nor the anchor's explains 42; reported here and in the pull request so a reader is not misled."
+    "A KV write has three outcomes, not two, and reading it as two is how an index loses a delivery. The sweep had conflated a lost compare-and-set with a refused write everywhere a record was written; the first carries the delivery on in another sweeper's hands and the second carries nothing at all, and only the second must stop the cursor. The same distinction decides whether the back-fill may mark the bucket.",
+    "An index field a build may not carry is not a field whose absence means disowned. The record's Pending is absent in two different situations -- an older build rewrote the record, or the record never had an entry -- and in neither is deleting the entry right. Treating absence as adoption, and only a different value as disowning, is what carries a rolling deploy and a rollback.",
+    "A repair that deletes on sight races the writer it is repairing after. An entry is written before the record that names it, so an entry keyed in the current minute may be one another sweeper is about to name; the repair must only take entries older than the clock margin the rest of the file already uses."
   ]
 }
