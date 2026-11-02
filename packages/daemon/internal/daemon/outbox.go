@@ -297,15 +297,11 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause 
 		refusal, _ := dispatch.PermanentRefusal(cause)
 		r.log.Error("outbox status write refused by Dispatch and dropped; the issue's later writes go on",
 			"row", row.ID, "issue", row.Issue, "status", refusal.Status, "code", refusal.Code, "error", cause)
-		if value.Kind == record.HandOverStatusRow {
-			follow = func(tx pgx.Tx) error {
-				return r.records.DeleteHandoverAt(scoped, tx, row.Issue, value.HandOverTree, value.HandOverLinger)
-			}
-			told = func() {
-				r.log.Warn("outbox hand-over refused by Dispatch; its fence is dropped and the child is not handed to Legion",
-					"row", row.ID, "issue", row.Issue, "tree", value.HandOverTree, "linger", value.HandOverLinger)
-			}
+		rule, err := ruleFor(value.Kind)
+		if err != nil {
+			return fmt.Errorf("outbox row %d: %w", row.ID, err)
 		}
+		follow, told = rule.refused(scoped, r, row, value)
 	}
 	if err := pgx.BeginFunc(scoped, r.pool, func(tx pgx.Tx) error {
 		if follow != nil {
@@ -460,34 +456,24 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 	if r.dispatch == nil {
 		return errors.New("dispatch status executor has no Dispatch client")
 	}
+	rule, err := ruleFor(payload.Kind)
+	if err != nil {
+		return fmt.Errorf("outbox row %d: %w", row.ID, err)
+	}
 	issue, err := r.dispatch.GetIssue(ctx, row.Issue)
 	if err != nil {
 		return fmt.Errorf("read Dispatch issue %s before status write: %w", row.Issue, err)
 	}
-	if issue.Status != payload.ObservedStatus && issue.Status != payload.Status {
-		if payload.Kind == record.HandOverStatusRow {
-			if err := r.dropHandover(ctx, row.Issue, payload); err != nil {
-				return err
-			}
-		}
-		return nil
+	proceed, err := rule.firstAttempt(ctx, r, row, payload, issue)
+	if err != nil || !proceed {
+		return err
 	}
-	if payload.Kind == record.PersonHandoverStatusRow && !r.personHandoverStands(row, issue) {
+	// Somebody moved the issue after the row read it, so the write this row carries is
+	// superseded and the row finishes having written nothing. A kind with something of its own
+	// to settle when that happens — a hand-over's fence — has just settled it above, which is
+	// why the shared answer is taken after the rule rather than before it.
+	if statusMoved(payload, issue) {
 		return nil
-	}
-	if payload.Kind == record.HandOverStatusRow {
-		if holds, err := r.handOverHolds(ctx, row, payload); err != nil || !holds {
-			return err
-		}
-		if issue.Status == payload.Status && issue.HandedOver {
-			return r.consumeHandover(ctx, row, payload)
-		}
-		// Every hand-over write is conditional on the sequence just read (dispatch HandOver), the
-		// label added when the child lacks it, so a person's move since that read stands.
-		if err := r.dispatch.HandOver(ctx, issue, payload.Status); err != nil {
-			return fmt.Errorf("hand Dispatch issue %s to Legion as %s: %w", row.Issue, payload.Status, err)
-		}
-		return r.consumeHandover(ctx, row, payload)
 	}
 	if issue.Status == payload.Status {
 		return nil
@@ -537,6 +523,13 @@ const statusWriteReads = 3
 // slot. A change Dispatch recorded reaches the engine through its own event, with its actor
 // (dispatch://INFRA-714/spec R4); this read decides one thing, whether to write.
 func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload record.StatusWrite, read dispatch.Issue) error {
+	// The rule is resolved before the first write of the loop rather than at the refusal that
+	// asks it: a kind nobody gave a rule reaches Dispatch with nothing, whichever path brought
+	// its row here.
+	rule, err := ruleFor(payload.Kind)
+	if err != nil {
+		return fmt.Errorf("outbox row %d: %w", row.ID, err)
+	}
 	for range statusWriteReads {
 		_, err := r.dispatch.SetStatusAt(ctx, read, payload.Status)
 		if err == nil {
@@ -559,7 +552,7 @@ func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload 
 				"row", row.ID, "issue", row.Issue, "status", payload.Status, "observed", payload.ObservedStatus, "dispatch", read.Status)
 			return nil
 		}
-		wanted, err := r.stillWanted(ctx, row, payload, read)
+		wanted, err := rule.stillWanted(ctx, r, row, payload, read)
 		if err != nil || !wanted {
 			return err
 		}
@@ -568,46 +561,185 @@ func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload 
 		row.Issue, payload.Status, statusWriteReads)
 }
 
-// stillWanted says whether a row whose write Dispatch refused may write again, asking the rule its
-// own kind carries (record.StatusRowKind, the kind the payload stores). The caller has already
-// taken the two answers every kind shares — the status is the row's own, so someone else did this
-// work, or it is neither the row's nor the one it observed, so somebody moved the issue since —
-// and what is left is the question each kind answers differently.
-//
-// Three of the four are queued at a status that reads as out of the workflow, and for them the
-// ordinary rule reads backwards: a handover of either sort brings an issue into the workflow, and
-// a re-assert undoes a session's own move out of it. Asking record.OutOfWorkflow of any of them
-// would finish it without writing and log that its issue had left a workflow it never entered, or
-// had left one this very row exists to put it back in.
-//
-// There is a case per kind and no fallback: a kind added to record.StatusRowKinds without a rule
-// here fails its row, naming itself, rather than being judged by whichever rule a default would
-// lend it, which is review round 6's defect and what
-// TestEveryStatusRowKindHasAStillWantedRule holds this switch to.
-func (r *outbox) stillWanted(ctx context.Context, row record.OutboxRow, payload record.StatusWrite, read dispatch.Issue) (bool, error) {
-	switch payload.Kind {
+// statusRowRule is what one kind of status row (record.StatusRowKind) does: what its first
+// attempt settles against the issue Dispatch shows, and the rule its retry is judged by once
+// Dispatch has refused that write (ISSUE_CHANGED). Both decisions live on one value, and this
+// interface asks for both, so a kind given one and not the other does not build. A kind with a
+// first attempt of its own and no retry rule, or the reverse, is review round 6's defect again:
+// the half nobody wrote is lent to the row by whichever branch it falls through to, in silence.
+type statusRowRule interface {
+	// firstAttempt settles what this kind has to settle before the row's first write, against
+	// the issue as Dispatch shows it, and says whether that write is still to be made. A rule
+	// that has finished the row itself — the write is not wanted, or this kind makes its own —
+	// answers proceed false, and the row ends with the error it returns.
+	firstAttempt(ctx context.Context, r *outbox, row record.OutboxRow, payload record.StatusWrite, issue dispatch.Issue) (proceed bool, err error)
+	// stillWanted says whether a row whose write Dispatch refused may write again. The caller
+	// has already taken the two answers every kind shares — the status is the row's own, so
+	// someone else did this work, or it is neither the row's nor the one it observed, so
+	// somebody moved the issue since — and what is left is the question each kind answers
+	// differently.
+	//
+	// Three of the four are queued at a status that reads as out of the workflow, and for them
+	// the ordinary rule reads backwards: a handover of either sort brings an issue into the
+	// workflow, and a re-assert undoes a session's own move out of it. Asking
+	// record.OutOfWorkflow of any of them would finish it without writing and log that its issue
+	// had left a workflow it never entered, or had left one this very row exists to put it back
+	// in.
+	stillWanted(ctx context.Context, r *outbox, row record.OutboxRow, payload record.StatusWrite, read dispatch.Issue) (bool, error)
+	// refused is what this kind leaves behind when Dispatch's refusal of the write is permanent
+	// and the row is dropped (finishRefused): follow runs in the finishing transaction, told
+	// logs once that transaction commits, and nil for either says this kind leaves nothing
+	// behind. It is here rather than in finishRefused's own branch for the reason the other two
+	// are: it is a decision taken by the row's kind, and a kind whose clean-up nobody wrote
+	// would otherwise be dropped as an ordinary row leaves nothing, in silence.
+	refused(ctx context.Context, r *outbox, row record.OutboxRow, payload record.StatusWrite) (follow func(pgx.Tx) error, told func())
+}
+
+// ruleFor is the one place a status row's kind is read: a value per kind and no fallback, so a
+// kind added to record.StatusRowKinds without one here fails its row, naming itself, rather than
+// being judged by whichever rule a default would lend it, which is review round 6's defect.
+// TestEveryStatusRowKindHasARule holds the list and this switch to each other, and
+// TestAStatusRowKindWithNoRuleFailsBothPathsWithoutWriting holds a row of a kind this switch has
+// no value for to failing on both paths with nothing written.
+func ruleFor(kind record.StatusRowKind) (statusRowRule, error) {
+	switch kind {
 	case record.OrdinaryStatusRow:
-		return r.statusStillWanted(ctx, row, payload, read)
+		return ordinaryRule{}, nil
 	case record.PersonHandoverStatusRow:
-		return r.personHandoverStands(row, read), nil
+		return personHandoverRule{}, nil
 	case record.ReassertStatusRow:
-		// The read shows the status the session wrote, which the caller has just required, so the
-		// session's move still stands and the daemon's own status is still owed. Nothing else is
-		// asked: the record cannot be consulted for it, since the status this row restores is the
-		// one the record kept (workflow's keepStatus), and the issue's being out of the workflow
-		// in Dispatch's eyes is the very thing being undone.
-		return true, nil
+		return reassertRule{}, nil
 	case record.HandOverStatusRow:
-		// A hand-over's write is made by the hand-over branch of status, which returns there, so
-		// no hand-over reaches this rule today. Its rule is nonetheless its own: the fence the
-		// branch already passed, read again (handOverHolds) — the issue still that tree's and the
-		// root still lingering at the generation the row names — since what a refusal costs is
-		// the time for a reopen to take the child back, and the ordinary rule would read the todo
-		// this row writes as an issue out of the workflow.
-		return r.handOverHolds(ctx, row, payload)
+		return handOverRule{}, nil
 	default:
-		return false, fmt.Errorf("outbox row %d: status row kind %q has no still-wanted rule", row.ID, payload.Kind)
+		return nil, fmt.Errorf("status row kind %q has no rule", kind)
 	}
+}
+
+// statusMoved says whether somebody moved the issue since the row read the status it observed:
+// Dispatch shows neither that status nor the one the row carries, so the row's write is
+// superseded by a change made after it was queued.
+func statusMoved(payload record.StatusWrite, issue dispatch.Issue) bool {
+	return issue.Status != payload.ObservedStatus && issue.Status != payload.Status
+}
+
+// ordinaryRule judges the workflow moving an issue along inside the workflow
+// (record.OrdinaryStatusRow).
+type ordinaryRule struct{}
+
+// firstAttempt settles nothing of its own: an ordinary row's fences are the ones every kind
+// shares, which its caller has taken.
+func (ordinaryRule) firstAttempt(context.Context, *outbox, record.OutboxRow, record.StatusWrite, dispatch.Issue) (bool, error) {
+	return true, nil
+}
+
+func (ordinaryRule) stillWanted(ctx context.Context, r *outbox, row record.OutboxRow, payload record.StatusWrite, read dispatch.Issue) (bool, error) {
+	return r.statusStillWanted(ctx, row, payload, read)
+}
+
+// refused leaves nothing behind: an ordinary row's whole effect is the write Dispatch refused.
+func (ordinaryRule) refused(context.Context, *outbox, record.OutboxRow, record.StatusWrite) (func(pgx.Tx) error, func()) {
+	return nil, nil
+}
+
+// personHandoverRule judges a person's handover (record.PersonHandoverStatusRow), which stands
+// only while the issue still carries the label that person put on it.
+type personHandoverRule struct{}
+
+func (personHandoverRule) firstAttempt(_ context.Context, r *outbox, row record.OutboxRow, payload record.StatusWrite, issue dispatch.Issue) (bool, error) {
+	// A row whose issue has moved since is superseded, which the caller settles for every kind
+	// alike, so the label is asked about only while the move this row answers still stands: a
+	// person who parked the root since is let stand silently rather than reported as one who
+	// took the label off.
+	if statusMoved(payload, issue) {
+		return true, nil
+	}
+	return r.personHandoverStands(row, issue), nil
+}
+
+func (personHandoverRule) stillWanted(_ context.Context, r *outbox, row record.OutboxRow, _ record.StatusWrite, read dispatch.Issue) (bool, error) {
+	return r.personHandoverStands(row, read), nil
+}
+
+// refused leaves nothing behind: the label this row would have put on the issue is part of the
+// write Dispatch refused, and the record holds nothing else for it.
+func (personHandoverRule) refused(context.Context, *outbox, record.OutboxRow, record.StatusWrite) (func(pgx.Tx) error, func()) {
+	return nil, nil
+}
+
+// reassertRule judges the daemon setting its own status back over one a session wrote
+// (record.ReassertStatusRow).
+type reassertRule struct{}
+
+// firstAttempt settles nothing of its own: what this row undoes is the move it observes, and the
+// caller has already required Dispatch to still show it.
+func (reassertRule) firstAttempt(context.Context, *outbox, record.OutboxRow, record.StatusWrite, dispatch.Issue) (bool, error) {
+	return true, nil
+}
+
+func (reassertRule) stillWanted(context.Context, *outbox, record.OutboxRow, record.StatusWrite, dispatch.Issue) (bool, error) {
+	// The read shows the status the session wrote, which the caller has just required, so the
+	// session's move still stands and the daemon's own status is still owed. Nothing else is
+	// asked: the record cannot be consulted for it, since the status this row restores is the
+	// one the record kept (workflow's keepStatus), and the issue's being out of the workflow
+	// in Dispatch's eyes is the very thing being undone.
+	return true, nil
+}
+
+// refused leaves nothing behind: the status the record kept is unchanged by a refusal, and the
+// next event about the issue decides what happens to it.
+func (reassertRule) refused(context.Context, *outbox, record.OutboxRow, record.StatusWrite) (func(pgx.Tx) error, func()) {
+	return nil, nil
+}
+
+// handOverRule judges a child of a closed tree handed to Legion (record.HandOverStatusRow): the
+// one kind whose first attempt makes the Dispatch write itself, since the status and the label
+// go over together.
+type handOverRule struct{}
+
+// firstAttempt hands the child over, so the write its caller would make is never reached: every
+// path of it finishes the row.
+func (handOverRule) firstAttempt(ctx context.Context, r *outbox, row record.OutboxRow, payload record.StatusWrite, issue dispatch.Issue) (bool, error) {
+	if statusMoved(payload, issue) {
+		// A person's move superseded the hand-over, so the fence it left goes with it.
+		return false, r.dropHandover(ctx, row.Issue, payload)
+	}
+	if holds, err := r.handOverHolds(ctx, row, payload); err != nil || !holds {
+		return false, err
+	}
+	if issue.Status == payload.Status && issue.HandedOver {
+		return false, r.consumeHandover(ctx, row, payload)
+	}
+	// Every hand-over write is conditional on the sequence just read (dispatch HandOver), the
+	// label added when the child lacks it, so a person's move since that read stands.
+	if err := r.dispatch.HandOver(ctx, issue, payload.Status); err != nil {
+		return false, fmt.Errorf("hand Dispatch issue %s to Legion as %s: %w", row.Issue, payload.Status, err)
+	}
+	return false, r.consumeHandover(ctx, row, payload)
+}
+
+func (handOverRule) stillWanted(ctx context.Context, r *outbox, row record.OutboxRow, payload record.StatusWrite, _ dispatch.Issue) (bool, error) {
+	// A hand-over's write is made by its own first attempt, which finishes the row there, so no
+	// hand-over reaches this rule today. Its rule is nonetheless its own: the fence that attempt
+	// already passed, read again (handOverHolds) — the issue still that tree's and the root
+	// still lingering at the generation the row names — since what a refusal costs is the time
+	// for a reopen to take the child back, and the ordinary rule would read the todo this row
+	// writes as an issue out of the workflow.
+	return r.handOverHolds(ctx, row, payload)
+}
+
+// refused drops the fence this hand-over left: the write that would hand the child to Legion
+// never lands, so no admission consumes the fence, and one left behind would keep naming the
+// child's own tree as its Sandbox's home (store.IssueSandboxHome) for good.
+func (handOverRule) refused(ctx context.Context, r *outbox, row record.OutboxRow, payload record.StatusWrite) (func(pgx.Tx) error, func()) {
+	follow := func(tx pgx.Tx) error {
+		return r.records.DeleteHandoverAt(ctx, tx, row.Issue, payload.HandOverTree, payload.HandOverLinger)
+	}
+	told := func() {
+		r.log.Warn("outbox hand-over refused by Dispatch; its fence is dropped and the child is not handed to Legion",
+			"row", row.ID, "issue", row.Issue, "tree", payload.HandOverTree, "linger", payload.HandOverLinger)
+	}
+	return follow, told
 }
 
 func (r *outbox) personHandoverStands(row record.OutboxRow, issue dispatch.Issue) bool {
