@@ -64,7 +64,7 @@ const roomBudgetBytes = 2 << 30
 const bytesOfHeapAnElement = 500
 
 // bytesOfHeapAStructHeld is the heap one copy of a document holds for each struct of its state
-// (countRoomStructs, the count the room's struct total keeps, structTotal). A copy is priced at its
+// (countRoomStructs, the count the room's struct total keeps, roomTotals). A copy is priced at its
 // elements (bytesOfHeapAnElement), its rendered bytes (bytesOfHeapARenderedByte) or its structs at
 // this price, whichever is the most (copyHeap), because a document's history, which no rendering
 // shows, can hold far more than the document renders: the long-edited document typed on until the
@@ -313,7 +313,7 @@ type roomBudget struct {
 	// it stops waiting, admitted or refused; no sweep's end clears it while one still waits.
 	wanted  int64
 	waiting int
-	// waiters is waiting, for the reader that takes no lock (Service.unlockState): while an
+	// waiters is waiting, for the readers that take no lock (sweepsForCloses): while an
 	// admission waits, a room that becomes closable starts a sweep, as it does while full is up.
 	waiters atomic.Int32
 	// pending is whether the last sweep to end left a charged room that something other than a
@@ -323,7 +323,8 @@ type roomBudget struct {
 	// changed is closed, and replaced, by every change to the budget while an admission waits, so
 	// each waiting admission weighs the budget again (await).
 	changed chan struct{}
-	// marked is how many loaded charges are closeOnceUnused, for the reader that takes no lock.
+	// marked is how many loaded charges are closeOnceUnused, for the reader that takes no lock
+	// (watchesForCloses).
 	marked atomic.Int32
 	// full is raised by a sweep that leaves the budget over its limit, having closed every room it
 	// could; never by one that leaves it within its limit but short of wanted (swept).
@@ -631,7 +632,7 @@ func roomWeight(heap, content, structure int64) int64 {
 }
 
 // copyHeap is the heap one copy of a document is priced at whose rendering is bytes long and makes
-// elements elements (renderedReplica.size), and whose state holds structs structs (structTotal, or
+// elements elements (renderedReplica.size), and whose state holds structs structs (roomTotals, or
 // a stored history's walk, storedStructs): its elements at bytesOfHeapAnElement, its rendered bytes
 // at bytesOfHeapARenderedByte or its structs at bytesOfHeapAStructHeld, whichever is the most. A
 // rendering goldmark stopped counting (elementsPastCounting) is priced from its bytes at the
@@ -905,8 +906,8 @@ type writtenWeighing struct {
 
 // walkedStruct weighs walked as the peer hook's weighing does, but for the apply-heap estimate
 // (structApplyHeap), which wrote never reads: it reads the structure (structureHeap) and whether
-// a struct integrated deleted (born) alone, so the estimate's re-walk of Any and JSON content is
-// not paid for a server write.
+// a struct integrated deleted (born) alone, so a server write pays not even the estimate's
+// arithmetic over what the walk counted in each struct's content (contentShape).
 func (w *writtenWeighing) walkedStruct(walked updateStruct) {
 	w.content.walkedStruct(walked)
 	w.structure.weighStruct(walked, applyCost{})
@@ -1076,6 +1077,24 @@ func (b *roomBudget) heaviest() []string {
 	}
 	slices.SortFunc(rooms, func(a, b string) int { return cmp.Compare(weights[b], weights[a]) })
 	return rooms
+}
+
+// sweepsForCloses reports, with no lock, whether a sweep may close a room something has just let
+// go of: the budget is full, so the last sweep closed every room it could and this one may have
+// become closable, or an admission waits on it (waiters), so a close may be what admits it.
+// Neither means no sweep has anything to do with that room, and the budget is left untouched:
+// a change to it starts a sweep of its own (unlock), which a kick of a room no sweep wants would
+// be (Service.unlockState, kick).
+func (b *roomBudget) sweepsForCloses() bool {
+	return b.full.Load() || b.waiters.Load() > 0
+}
+
+// watchesForCloses reports, with no lock, whether the budget wants any room closed at all: a sweep
+// may close one (sweepsForCloses), or a room is marked as opened over the budget and closed once
+// nothing holds it (marked, Service.closeIfOpenedOverBudget). Where it is false, a room whose
+// state has just been let go is left as it is (Service.unlockState).
+func (b *roomBudget) watchesForCloses() bool {
+	return b.sweepsForCloses() || b.marked.Load() > 0
 }
 
 // kick is a report that room may have become closable: its state holds nothing more while the
@@ -1343,7 +1362,7 @@ func (s *Service) storedRoomReservation(ctx context.Context, room string) (int64
 // transaction, and weighs itself in it - the version's markdown and the largest row of the history
 // it will walk (weighStoredCount) - before it covers a grant of the copy-heap bound for what those
 // hold (storedCountWeight). So counts of different documents run beside each other, as many as the
-// bound has room for, in the order they asked for their weight (copyHeaps), rather than one at a
+// bound has room for, in the order they asked for their weight (podCopyHeaps), rather than one at a
 // time: fifty browsers opening fifty documents of a mebibyte at once, their rooms loading beside
 // the counts, were refused in two minutes while the counts took one turn at a time, and in 16.1
 // to 20.5 s once each count held a grant instead, the last of the thirty-nine the element price of
@@ -1355,7 +1374,7 @@ func (s *Service) storedRoomReservation(ctx context.Context, room string) (int64
 // admitted the last at 1m15.2s
 // (TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays). The grant is covered inside the
 // transaction the count already holds, so no holder of the bound waits for a pooled connection
-// (copyHeaps).
+// (podCopyHeaps).
 //
 // The wait for that grant lasts as long as wanted holds, which is for as long as any admission
 // still waits for this count. Only once the grant is held does the count's own read bound start,
@@ -1621,7 +1640,7 @@ func (c *storedCounts) forgetLocked(key string, flight *countFlight) {
 // its load's count (keepReplica), in place of the reservations of the sockets admitted to it, and
 // hands the replica the charge its counts re-base from then on (renderedReplica.storeCounted). The
 // load is priced from that count, the rendering's bytes and the struct total the replica counted
-// at the load (newStructTotal), whichever is the most (copyHeap). The charge lists live's delete
+// at the load (newRoomTotals), whichever is the most (copyHeap). The charge lists live's delete
 // set as the ranges the room holds deleted (deletedRuns) before the replica hands it to the peer
 // hook: a walk of the document's whole store, beside the load's rendering of it, which is not a
 // keystroke.

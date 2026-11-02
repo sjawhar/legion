@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/reearth/ygo/persistence"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -45,22 +46,11 @@ import (
 // in the replica's build. One path's figure moved by up to a fifth from one run to the other.
 const copyHeapPerByte = 48
 
-// copyHeapBound is the most the full-state decodes are granted at once at the calibration: the
-// third of what that Go memory limit leaves above the room budget, the cold reads' cache and the
-// pressure reserve past the budget's limit (heapAboveTheReserve) that neither the apply-heap
-// bound nor the slack takes, 1,181,116,006 - applyHeapBound 393,705,335 - heapSlackBytes
-// 393,705,335 = 393,705,336 bytes, about 375 MiB. A process holding another limit bounds them at
-// that limit's own third (MemoryBounds.CopyHeap), which the boot sizes the pod's bound from
-// (New).
-// Every load of a document at or near the decode cap measured holds less above what
-// it leaves than the whole bound: the heaviest load measured held 303,430,664 bytes live beside its
-// two copies (copyHeapPerByte), and the heaviest decode of any path 320,762,656, 72,942,680 under
-// the bound. Weighed at copyHeapPerByte, a mebibyte of prose (145,691,520 bytes) decodes two at a
-// time; a run of a million keystrokes (383,220,432) one at a time; the agent-rewritten and
-// long-edited documents at the decode cap weigh more than the whole bound (602,726,112 and
-// 692,509,680), and each waits for all of it and runs alone, never refused, since a stored document
-// must always load (copyGrant.cover).
-const copyHeapBound = heapAboveTheReserve - applyHeapBound - heapSlackBytes
+// copyHeapName is what the copy-heap bound's grants are logged as (logHeapGrant, weighedHeaps).
+// The bound itself is the pod's (podCopyHeaps), sized from MemoryBounds.CopyHeap, and what every
+// load of a document at or near the decode cap measured holds above what it leaves fits inside
+// it: see that field.
+const copyHeapName = "copy"
 
 // storedCountHeapPerByte is the heap a count of a stored version is granted for each byte of the
 // version's markdown (storedCountWeight): the bytes themselves, read into a string the count holds
@@ -108,22 +98,26 @@ func storedCountWeight(markdown, row int64) int64 {
 	return min(markdown*storedCountHeapPerByte, storedCountHeapAtMost) + row*storedCountHeapPerStoredRowByte
 }
 
-// copyHeaps is the pod's bound on the heap its full-state decodes hold (copyHeapBound). Its zero
-// value is ready: the bound is made on first use. Waiters are served in the order they came
-// (semaphore.Weighted), so a decode waiting for the whole bound is not passed over by lighter ones
-// behind it, and every one after it waits until it has run.
+// weighedHeaps is a bound on the estimated heap of one kind of work, held in weighed parts by its
+// holders (heapGrant). There are two: the pod's bound on what its full-state decodes hold
+// (podCopyHeaps, MemoryBounds.CopyHeap) and the service's on the estimated heap of its weighed
+// applies of browsers' updates (Service.applyHeaps, MemoryBounds.ApplyHeap). Waiters are served
+// in the order they came (semaphore.Weighted), so a holder waiting for the whole bound is not
+// passed over by lighter ones behind it, and every one after it waits until it has run; a weight
+// past the whole bound waits for all of it and runs alone, refused by neither bound
+// (heapGrant.coverWeight).
 //
-// It cannot deadlock, because a holder of any part of it waits for nothing another holder or a
-// waiter can hold: between its cover and its release it decodes, renders, counts or reads the
-// rows of the transaction it already holds, takes no lock held across a wait, takes no pooled
-// connection - a fold covers its grant inside the transaction it already holds, a count of a
-// stored version opens its own transaction and weighs itself in it before it covers
+// The copy-heap bound cannot deadlock, because a holder of any part of it waits for nothing
+// another holder or a waiter can hold: between its cover and its release it decodes, renders,
+// counts or reads the rows of the transaction it already holds, takes no lock held across a wait,
+// takes no pooled connection - a fold covers its grant inside the transaction it already holds, a
+// count of a stored version opens its own transaction and weighs itself in it before it covers
 // (countStoredVersion), and a room's load gives its grant back before onLoadDocument reads the
 // store - runs no update observer, since ygo decodes a loading room's state before the room
 // registers any and no holder commits on a resident room, and acquires no second grant: a decode
 // under a context carrying a grant covers itself on that one (withCopyGrant), so a room load's
 // fold, its decode and ygo's decode share the load's, and a grant that must grow gives back what
-// it holds before it waits for the whole weight (copyGrant.cover). A waiter may hold anything - a
+// it holds before it waits for the whole weight (heapGrant.cover). A waiter may hold anything - a
 // write's transaction, its owner row and advisory lock, a compaction's advisory lock and
 // connection, a connection of the rooms pool or of the shared pool, which is what a count holds
 // while it waits, the measurer's turn, a replica's lock, a loading room's ready barrier - since
@@ -131,12 +125,14 @@ func storedCountWeight(markdown, row int64) int64 {
 // whose request ends returns its context's error holding nothing. An admission waiting for
 // another admission's count of the same version holds no part of the bound either
 // (storedCounts.await).
-type copyHeaps struct {
+type weighedHeaps struct {
+	// name is what its grants are logged as (logHeapGrant): copyHeapName or applyHeapName.
+	name string
+	// size is the bound, always set by whoever built it (newWeighedHeaps): the process's
+	// MemoryBounds.CopyHeap, the service's MemoryBounds.ApplyHeap, or a test's.
+	size  int64
 	once  sync.Once
 	bound *semaphore.Weighted
-	// size is the bound: the process's MemoryBounds.CopyHeap, or a test's. Zero is the
-	// calibration's copyHeapBound.
-	size int64
 	// held is what the grants hold of the bound now.
 	held atomic.Int64
 	// waiting runs, in a test, as a grant finds the bound too full for its weight and starts to
@@ -145,38 +141,48 @@ type copyHeaps struct {
 	granted func(held int64)
 }
 
-// podCopyHeaps is the process's bound, shared by every service and store in it as the memory it
-// bounds is: the calibration's copyHeapBound until a service built at another Go memory limit
-// sizes it from that limit (New), and a test swaps in one of its own (useCopyHeaps).
-var podCopyHeaps atomic.Pointer[copyHeaps]
-
-func init() { podCopyHeaps.Store(&copyHeaps{}) }
-
-// limit is the bound's size.
-func (h *copyHeaps) limit() int64 {
-	if h.size > 0 {
-		return h.size
-	}
-	return copyHeapBound
+// newWeighedHeaps is a bound of size bytes whose grants are logged as name.
+func newWeighedHeaps(name string, size int64) *weighedHeaps {
+	return &weighedHeaps{name: name, size: size}
 }
 
+// podCopyHeaps is the process's copy-heap bound, shared by every service and store in it as the
+// memory it bounds is: the calibration's until a service built at another Go memory limit sizes
+// it from that limit (New), and a test swaps in one of its own (useCopyHeaps).
+var podCopyHeaps atomic.Pointer[weighedHeaps]
+
+func init() { podCopyHeaps.Store(newWeighedHeaps(copyHeapName, calibratedBounds.CopyHeap)) }
+
 // semaphore is the bound, made on first use.
-func (h *copyHeaps) semaphore() *semaphore.Weighted {
-	h.once.Do(func() { h.bound = semaphore.NewWeighted(h.limit()) })
+func (h *weighedHeaps) semaphore() *semaphore.Weighted {
+	h.once.Do(func() { h.bound = semaphore.NewWeighted(h.size) })
 	return h.bound
 }
 
+// hold waits until it holds weight of the bound, or the whole bound for a weight past it, and
+// returns what gives it back: a grant of its own, covered and released (heapGrant), which logs it
+// where it waited long or ran alone (logHeapGrant). With a context that is never done the wait
+// returns only once it holds what it asked for, so it cannot fail. It is how the apply-heap bound
+// is held, for one apply from its weighing to its return (Service.weighPeerUpdate), where the
+// copy-heap bound's holders cover a grant they carry from decode to decode.
+func (h *weighedHeaps) hold(weight uint64) (release func()) {
+	grant := &heapGrant{heaps: h}
+	_ = grant.coverWeight(context.Background(), int64(min(weight, uint64(h.size))))
+	return grant.release
+}
+
 // copyHeapWeight is what a decode of bytes of encoded state is granted, before the bound caps it
-// (copyGrant.cover).
+// (heapGrant.cover).
 func copyHeapWeight(bytes int) int64 {
 	return int64(bytes) * copyHeapPerByte
 }
 
-// copyGrant is one holder's part of the bound: held of it, nothing once released. One holder uses
-// it at a time: the goroutine whose decodes it covers, or for a room's load the load's record,
-// whose lock it is given back under (roomLoad.take).
-type copyGrant struct {
-	heaps *copyHeaps
+// heapGrant is one holder's part of a bound: held of it, nothing once released. One holder uses it
+// at a time: the goroutine whose decodes it covers, or for a room's load the load's record, whose
+// lock it is given back under (roomLoad.take), or the one apply a grant of the apply-heap bound
+// covers (weighedHeaps.hold).
+type heapGrant struct {
+	heaps *weighedHeaps
 	held  int64
 	// waited is how long the grant waited for what it holds, and since when it has held it, both
 	// for its release's log line (logHeapGrant).
@@ -184,26 +190,27 @@ type copyGrant struct {
 	since  time.Time
 }
 
-// newCopyGrant is a grant of the pod's bound holding nothing.
-func newCopyGrant() *copyGrant {
-	return &copyGrant{heaps: podCopyHeaps.Load()}
+// newCopyGrant is a grant of the pod's copy-heap bound holding nothing.
+func newCopyGrant() *heapGrant {
+	return &heapGrant{heaps: podCopyHeaps.Load()}
 }
 
 // cover makes g hold the weight of a decode of bytes of encoded state, waiting within ctx
 // (coverWeight).
-func (g *copyGrant) cover(ctx context.Context, bytes int) error {
+func (g *heapGrant) cover(ctx context.Context, bytes int) error {
 	return g.coverWeight(ctx, copyHeapWeight(bytes))
 }
 
-// coverWeight makes g hold weight of the bound, waiting within ctx: what a decode's state is
-// weighed at (copyHeapWeight) or what a count of a stored version is granted (storedCountWeight).
+// coverWeight makes g hold weight of its bound, waiting within ctx: what a decode's state is
+// weighed at (copyHeapWeight), what a count of a stored version is granted (storedCountWeight),
+// or what an apply's estimate asks of the apply-heap bound (weighedHeaps.hold).
 // A grant that already holds that much holds what it holds. One that holds less gives it back
 // before it waits for the whole weight, so no holder waits while it holds any part of the bound.
 // A weight past the whole bound waits for the whole bound and runs alone: a stored document must
 // always load, and must always be counted. A wait ctx ends returns ctx's error and leaves g
 // holding nothing.
-func (g *copyGrant) coverWeight(ctx context.Context, weight int64) error {
-	weight = min(weight, g.heaps.limit())
+func (g *heapGrant) coverWeight(ctx context.Context, weight int64) error {
+	weight = min(weight, g.heaps.size)
 	if weight <= g.held {
 		return nil
 	}
@@ -229,13 +236,13 @@ func (g *copyGrant) coverWeight(ctx context.Context, weight int64) error {
 
 // release gives back what g holds, and logs it where it waited long or held the whole bound
 // (logHeapGrant). A grant holding nothing gives back nothing.
-func (g *copyGrant) release() {
+func (g *heapGrant) release() {
 	if g == nil || g.held == 0 {
 		return
 	}
 	g.heaps.held.Add(-g.held)
 	g.heaps.semaphore().Release(g.held)
-	logHeapGrant("copy", g.held, g.heaps.limit(), g.waited, time.Since(g.since))
+	logHeapGrant(g.heaps.name, g.held, g.heaps.size, g.waited, time.Since(g.since))
 	g.held = 0
 }
 
@@ -244,7 +251,7 @@ type copyGrantKey struct{}
 
 // carriedBy is ctx carrying g, so a decode under it covers itself on g (holdCopy) rather than
 // acquire a grant of its own inside g's.
-func (g *copyGrant) carriedBy(ctx context.Context) context.Context {
+func (g *heapGrant) carriedBy(ctx context.Context) context.Context {
 	return context.WithValue(ctx, copyGrantKey{}, g)
 }
 
@@ -252,15 +259,15 @@ func (g *copyGrant) carriedBy(ctx context.Context) context.Context {
 // owner releases, with a done that releases nothing, or a new one, with a done that releases it.
 // A decode under ctx covers itself on that grant (holdCopy), so the decodes one holder makes in
 // turn share one grant rather than nest a second acquire inside the first.
-func withCopyGrant(ctx context.Context) (context.Context, *copyGrant, func()) {
-	if grant, ok := ctx.Value(copyGrantKey{}).(*copyGrant); ok {
+func withCopyGrant(ctx context.Context) (context.Context, *heapGrant, func()) {
+	if grant, ok := ctx.Value(copyGrantKey{}).(*heapGrant); ok {
 		return ctx, grant, func() {}
 	}
 	grant := newCopyGrant()
 	return grant.carriedBy(ctx), grant, grant.release
 }
 
-// holdCopy covers a decode of bytes of encoded state (copyGrant.cover) on the grant ctx carries,
+// holdCopy covers a decode of bytes of encoded state (heapGrant.cover) on the grant ctx carries,
 // or on one of its own, and returns what ends the hold: nothing for a grant ctx carries, whose
 // owner releases it, and the release of its own.
 func holdCopy(ctx context.Context, bytes int) (func(), error) {
@@ -271,23 +278,74 @@ func holdCopy(ctx context.Context, bytes int) (func(), error) {
 	return done, nil
 }
 
+// loadedHistory is a document's stored history, read and decoded under one grant of the copy-heap
+// bound (loadDecodedHistory).
+type loadedHistory struct {
+	// loaded is what the read returned: the history's bytes and the version they stand at.
+	loaded persistence.LoadResult
+	// decoded is the decode of those bytes, as a room's load decodes them (decodeStoredState),
+	// and nothing where refused is not nil. Its doc is nil for an empty history, which decodes
+	// into nothing.
+	decoded decodedState
+	// refused is ygo's refusal of the history, the document's own failure rather than the
+	// service's, and nil for one that decoded: a history no room can load, which each reader
+	// answers its own way (loadTree's ErrDocumentUnloadable, rebuildSource's reason to rebuild,
+	// LoadDoc's failure of the load).
+	refused error
+}
+
+// loadDecodedHistory reads artifactID's stored history through load and decodes it, both covered
+// by one grant of the copy-heap bound: the grant ctx carries, whose owner gives it back, or one of
+// its own, which it gives back before it returns, so no caller releases a grant by hand
+// (withCopyGrant). It is the one way the service reads a history it decodes - a socket's
+// admission (loadTree), a room's load (loadDecoded) and a rebuild's source (rebuildSource) - so
+// that no new way out of one of them can leave a grant held.
+//
+// copies is how many copies of the history its caller holds live at once, which the grant is
+// weighed for: one for a caller that keeps the decode alone, two for one that decodes the state
+// again beside it (rebuildSource). refuse, where it is not nil, is read from the history before
+// the grant is covered and before anything is decoded (loadableHistory), for a history no decode
+// should be paid for.
+//
+// The read's fold, when the history holds several updates, covers the grant inside the read's
+// transaction (fold), and the decode covers it for the state the read returned. The error is the
+// read's, the refusal's or the grant's, a wait ctx ended included, and leaves nothing decoded;
+// ygo's refusal of the bytes themselves is the history's refused.
+func loadDecodedHistory(ctx context.Context, load VersionedStore, artifactID string, copies int, refuse func(update []byte) error) (loadedHistory, error) {
+	ctx, grant, done := withCopyGrant(ctx)
+	defer done()
+	loaded, err := load.Load(ctx, artifactID)
+	if err == nil && refuse != nil {
+		err = refuse(loaded.Update)
+	}
+	if err == nil {
+		err = grant.cover(ctx, copies*len(loaded.Update))
+	}
+	if err != nil {
+		return loadedHistory{}, err
+	}
+	decoded, refused := decodeStoredState(loaded.Update)
+	return loadedHistory{loaded: loaded, decoded: decoded, refused: refused}, nil
+}
+
 // holdServerCopy is holdCopy for a decode of the server's own that no request waits on: the
 // replica's build, the measurer's copy, the copy of a room loaded without this service's
 // persistence. Its wait has no deadline, and ends, since every holder gives its part back
-// (copyHeaps).
+// (weighedHeaps).
 func holdServerCopy(bytes int) func() {
 	release, _ := holdCopy(context.Background(), bytes)
 	return release
 }
 
-// heapGrantLogged is how long a grant of the apply-heap bound (applyHeaps) or of the copy-heap
-// bound (copyHeaps) may have waited for its weight before its release is logged (logHeapGrant):
+// heapGrantLogged is how long a grant of a weighed heap bound (weighedHeaps) may have waited for
+// its weight before its release is logged (logHeapGrant):
 // a tenth of a second, past any wait on a lock or the scheduler and short of the second or more a
 // heavy apply or decode takes, so the line names the turns a burst of heavy work made a holder
 // wait for and stays quiet while the bounds are not crowded.
 const heapGrantLogged = 100 * time.Millisecond
 
-// logHeapGrant logs a grant of bound, "apply" or "copy", as it is given back, where it waited
+// logHeapGrant logs a grant of bound, applyHeapName or copyHeapName, as it is given back, where
+// it waited
 // heapGrantLogged or longer for its weight, or held all size bytes of its bound and so ran alone
 // among that bound's holders: its weight, how long it waited, and how long it held it, the line's
 // time being when it gave it back. An operator reads from it how long a burst of heavy work made

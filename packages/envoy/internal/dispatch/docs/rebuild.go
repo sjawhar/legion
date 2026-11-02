@@ -33,24 +33,14 @@ type RebuildReport struct {
 // splits it can cause.
 const smallestReplacementAdds = 1 + splitsAStructCanCause + splitsAStructCanCause
 
-// historyScans is how many items a re-scan of state, a document's encoded Yjs state, scans - the
-// state applied into a fresh document in one remote transaction (rescan), ygo's count of that
-// transaction's scans (Transaction.IntegrateScanned, sjawhar/ygo v1.51.3-sami.7,
-// crdt/transaction.go:95-108) - and whether it could be counted: a state the decode refused is
-// not. It is the count a room's load starts the room's scan total at (roomScans), from the same
-// decode of the same state.
-func historyScans(state []byte) (uint64, bool) {
-	scans, err := rescan(state)
-	return scans, err == nil
-}
-
 // nearACap reports whether doc, a document's decoded history or its live room, stands so near a
 // cap that it must be rebuilt, and why. Near the decode cap means a write's smallest replacement
 // would carry it past the cap: its struct total as a load decodes it (countRoomStructs) and
 // smallestReplacementAdds pass maxUpdateItems, so refuseUndecodable refuses every write that adds
 // a struct, as it refuses the write of a document no room holds by the count of its fork, a
 // decode of the same history (leavesRoomPastDecodeCap). Near the scan total means a re-scan of
-// its state (historyScans) scans at least roomScanTotal less honestHandoffScans items. Both tests
+// its state (rescan) scans at least roomScanTotal less honestHandoffScans items, a state the
+// decode refuses counting as no answer. Both tests
 // read the one encode of doc's state below, taken after its parked structs as countRoomStructs
 // takes them, so neither pays an encode of its own and both answer for the same state.
 //
@@ -73,7 +63,7 @@ func nearACap(ctx context.Context, doc *crdt.Doc) (why string, near bool, err er
 		return fmt.Sprintf("the document's live state holds %d structs, and a write's smallest replacement, %d more, would carry it past the %d ygo decodes in one update",
 			structs, smallestReplacementAdds, maxUpdateItems), true, nil
 	}
-	if scans, counted := historyScans(state); counted && scans+honestHandoffScans >= roomScanTotal {
+	if scans, err := rescan(state); err == nil && scans+honestHandoffScans >= roomScanTotal {
 		return fmt.Sprintf("a re-scan of the document's live state scans %d items, within %d of the %d a room's history may scan",
 			scans, honestHandoffScans, roomScanTotal), true, nil
 	}
@@ -331,23 +321,26 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 // rebuildSource is what a rebuild of artifactID starts from: the stored history decoded (nil for
 // one that does not decode), why it must be rebuilt - how near a cap it stands (nearACap), or the
 // decode's refusal - and the clients it retires. A history that loads and stands near no cap is
-// ErrDocumentLoads. The read's fold, its decode and the check's re-scan of it run under one grant
-// of the copy-heap bound, whose wait ends with ctx, given back once the history is the rebuild's.
+// ErrDocumentLoads. The read's fold, its decode (loadDecodedHistory) and the check's re-scan of it
+// run under one grant of the copy-heap bound, whose wait ends with ctx, held here rather than by
+// the read, since the check runs inside it, and given back once the history is the rebuild's.
 // The grant is weighed for two decodes of the history's bytes, since the check decodes the state
 // again while this decode's document is kept, and the two are alive at once.
 func (s *Service) rebuildSource(ctx context.Context, artifactID string) (*crdt.Doc, string, map[crdt.ClientID]uint64, error) {
-	ctx, grant, done := withCopyGrant(ctx)
+	ctx, _, done := withCopyGrant(ctx)
 	defer done()
-	loaded, err := s.persistence.Load(ctx, artifactID)
-	if err == nil {
-		err = grant.cover(ctx, 2*len(loaded.Update))
-	}
+	read, err := loadDecodedHistory(ctx, s.persistence, artifactID, 2, nil)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("%w: load document before rebuild: %v", ErrServiceUnavailable, err)
 	}
-	history, validationErr := decodeHistory(loaded.Update)
-	if validationErr != nil {
-		return nil, validationErr.Error(), undecodableHistoryClients(loaded.Update), nil
+	if read.refused != nil {
+		return nil, read.refused.Error(), undecodableHistoryClients(read.loaded.Update), nil
+	}
+	// An empty history decodes into no document at all (decodeStoredState); what a rebuild of it
+	// starts from is the empty document a room's load of it would hold.
+	history := read.decoded.doc
+	if history == nil {
+		history = newDocumentCopy()
 	}
 	why, near, err := nearACap(ctx, history)
 	if err != nil {
@@ -357,19 +350,6 @@ func (s *Service) rebuildSource(ctx context.Context, artifactID string) (*crdt.D
 		return nil, "", nil, fmt.Errorf("%w: document %s", ErrDocumentLoads, artifactID)
 	}
 	return history, why, historyClients(history), nil
-}
-
-// decodeHistory decodes a stored history as validateUpdate does, as a room's load will, and returns
-// the decoded document, or ygo's refusal of it and no document.
-func decodeHistory(update []byte) (*crdt.Doc, error) {
-	history := newDocumentCopy()
-	if len(update) == 0 {
-		return history, nil
-	}
-	if err := crdt.ApplyUpdateV1(history, update, nil); err != nil {
-		return nil, err
-	}
-	return history, nil
 }
 
 // rebuiltSeed writes tree into a fresh document, as encodeDocumentTree does, with the retired

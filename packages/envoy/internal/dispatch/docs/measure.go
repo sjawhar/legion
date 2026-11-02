@@ -180,7 +180,7 @@ func (m *elementMeasurer) next() (weak.Pointer[renderedReplica], bool) {
 
 // count counts the rendering replica has waiting, stores the count where the room budget reads it,
 // and re-bases the room's counted and uncounted parts on it (storeCounted). In the same turn it
-// counts the room's struct total afresh (structTotal.recountLive), an encode of the live
+// counts the room's struct total afresh (roomTotals.recountLive), an encode of the live
 // document's state and a walk of it, which re-bases the total the peer update hook refuses past
 // the decode cap on, and which the re-base prices the room's counted part by beside the element
 // count and the rendering's bytes, whichever is the most (copyHeap): neither count touches the
@@ -195,7 +195,7 @@ func (m *elementMeasurer) count(replica weak.Pointer[renderedReplica]) {
 	if m.beforeCount != nil {
 		m.beforeCount(*markdown)
 	}
-	var structs *structTotal
+	var structs *roomTotals
 	if held := replica.Value(); held != nil {
 		structs = held.structs
 	}
@@ -219,7 +219,7 @@ func (m *elementMeasurer) count(replica weak.Pointer[renderedReplica]) {
 // on the copy run under a grant of the copy-heap bound of their own (holdServerCopy), covered once
 // doc's state is encoded, which takes doc's lock, and given back with the copy. Its wait has no
 // deadline, as the turn's has none: no holder of the bound waits for the turn or for anything a
-// waiter holds (copyHeaps).
+// waiter holds (podCopyHeaps).
 //
 // The one encode of doc's state below is both doc's own total, counted from it as countRoomStructs
 // counts a room's (its parked structs read first), and what the copy is decoded from, so a turn
@@ -306,7 +306,7 @@ func takeUncounted(replica weak.Pointer[renderedReplica]) (*string, uint64, int6
 // storeCounted stores elements, the count of the bytes-long rendering the replica's publication-th
 // publication made when the room had added content bytes of content, and re-bases the room's
 // charge on its price with the room's struct total as the measurer has just counted it in the same
-// turn (copyHeap, structTotal.countedStructs, roomCharge.measured), unless a later publication has
+// turn (copyHeap, roomTotals.countedStructs, roomCharge.measured), unless a later publication has
 // already stored a count of its own: the room's load, or a rendering the room could not read.
 // Those are newer than this count, and a count landing after them would put an older document's
 // weight back on the room. The content it clears from the uncounted part is what the room had

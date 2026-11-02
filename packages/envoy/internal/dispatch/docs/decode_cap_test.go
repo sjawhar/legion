@@ -729,7 +729,7 @@ func parkedFork(t *testing.T, parked int) *crdt.Doc {
 // cold write's has not (coldFork), so the fork's own total is what answers.
 func TestAWriteLeavingParkedStructsPastTheDecodeCapIsRefusedAsUndecodable(t *testing.T) {
 	skipAtTheBoundsUnderRace(t)
-	service := &Service{}
+	service := calibratedService()
 	cold := &liveWrite{cold: true}
 	past := parkedFork(t, maxUpdateItems/(1+splitsAStructCanCause)+1)
 	if clocks := clockSum(past); clocks > 16 {
@@ -822,7 +822,7 @@ func TestAWriteIsRefusedAsUndecodableByTheRoomItsForkUndercounts(t *testing.T) {
 			t.Fatalf("the room counts %d structs, its fork %d before the write and %d after, want the written fork within the %d cap and the room %d past the fork before it",
 				roomCount, forkedBefore, forked, maxUpdateItems, runs*99/100)
 		}
-		service := &Service{}
+		service := calibratedService()
 		counts := recordWriteCounts(service)
 		err := service.refuseUndecodable(write, fork, updates)
 		if !errors.Is(err, ErrDocumentTooLarge) || !strings.Contains(err.Error(), "this change would leave the document's live state past the 1048576 items ygo decodes in one update") {
@@ -846,7 +846,7 @@ func TestAWriteIsRefusedAsUndecodableByTheRoomItsForkUndercounts(t *testing.T) {
 			text := fork.GetText("t")
 			fork.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "a short write", nil) })
 		})
-		service := &Service{}
+		service := calibratedService()
 		counts := recordWriteCounts(service)
 		if err := service.refuseUndecodable(write, fork, updates); err != nil {
 			t.Fatalf("refuseUndecodable of a short write to a short room: %v, want nil", err)

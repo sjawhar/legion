@@ -88,7 +88,7 @@ func (c *countRecorder) times() []time.Time {
 // A rendering an update publishes is counted off the update observer, and the count reaches the
 // atomic the room budget reads, while the bytes the peer update hook weighs are there at once.
 func TestTheMeasurerCountsARenderingAnUpdatePublishes(t *testing.T) {
-	service := &Service{}
+	service := calibratedService()
 	service.measurer.interval = noInterval
 	recorder := recordCounts(&service.measurer)
 	close(recorder.release)
@@ -115,7 +115,7 @@ func TestTheMeasurerCountsARenderingAnUpdatePublishes(t *testing.T) {
 // A room's load counts its rendering on the loading goroutine, so the room never starts with no
 // element count: the count is there when keepReplica returns, and the measurer parsed nothing.
 func TestARoomsLoadMeasuresItsRenderingAtOnce(t *testing.T) {
-	service := &Service{}
+	service := calibratedService()
 	recorder := recordCounts(&service.measurer)
 	close(recorder.release)
 	rendering := headings(1)
@@ -132,7 +132,7 @@ func TestARoomsLoadMeasuresItsRenderingAtOnce(t *testing.T) {
 // A small rendering is counted as a large one is: the room budget charges every room by its
 // elements, and a small document can make tens of thousands of them, so none is published as zero.
 func TestASmallRenderingIsCountedToo(t *testing.T) {
-	service := &Service{}
+	service := calibratedService()
 	service.measurer.interval = noInterval
 	recorder := recordCounts(&service.measurer)
 	close(recorder.release)
@@ -155,7 +155,7 @@ func TestASmallRenderingIsCountedToo(t *testing.T) {
 // A room typed into faster than it is counted is counted at its latest rendering: renderings
 // published while a count runs replace each other, and only the last is parsed after it.
 func TestTheMeasurerCountsARoomsLatestRenderingRatherThanEach(t *testing.T) {
-	service := &Service{}
+	service := calibratedService()
 	service.measurer.interval = noInterval
 	recorder := recordCounts(&service.measurer)
 	loaded := "# Title\n"
@@ -183,7 +183,7 @@ func TestTheMeasurerCountsARoomsLatestRenderingRatherThanEach(t *testing.T) {
 // hook weighs are published at once all the same.
 func TestTheMeasurerCountsARoomAtMostOncePerInterval(t *testing.T) {
 	const interval = 300 * time.Millisecond
-	service := &Service{}
+	service := calibratedService()
 	service.measurer.interval = interval
 	recorder := recordCounts(&service.measurer)
 	close(recorder.release)
@@ -219,7 +219,7 @@ func TestTheMeasurerCountsARoomAtMostOncePerInterval(t *testing.T) {
 // A rendering the room could not read publishes no measurement, neither at once nor once a count
 // of an earlier rendering lands, and a rendering it withdrew from the queue is never parsed.
 func TestAnUnreadableRenderingPublishesNoMeasurement(t *testing.T) {
-	service := &Service{}
+	service := calibratedService()
 	service.measurer.interval = noInterval
 	recorder := recordCounts(&service.measurer)
 	loaded := "# Title\n"
@@ -251,7 +251,7 @@ func TestAnUnreadableRenderingPublishesNoMeasurement(t *testing.T) {
 // A retired room's replica, a whole copy of its document, is not kept alive by the measurer's queue
 // while the room waits its turn behind another room's count.
 func TestTheMeasurerKeepsNoRetiredRoomsReplica(t *testing.T) {
-	service := &Service{}
+	service := calibratedService()
 	service.measurer.interval = noInterval
 	recorder := recordCounts(&service.measurer)
 	loaded := "# Title\n"
@@ -275,7 +275,7 @@ func TestTheMeasurerKeepsNoRetiredRoomsReplica(t *testing.T) {
 // Nor is it kept alive while it waits out the interval since its last count: the timer it waits on
 // holds it weakly too, and the count it was waiting for never runs.
 func TestTheMeasurerKeepsNoRetiredRoomsReplicaWaitingOutTheInterval(t *testing.T) {
-	service := &Service{}
+	service := calibratedService()
 	service.measurer.interval = 2 * time.Second
 	recorder := recordCounts(&service.measurer)
 	close(recorder.release)
@@ -302,7 +302,7 @@ func queueRetiredRoom(service *Service, rendering string) weak.Pointer[renderedR
 // Shutdown stops the measurer: it waits for the count in flight, which still lands, and no
 // rendering published after it is counted.
 func TestTheMeasurerStopsWithTheService(t *testing.T) {
-	service := &Service{}
+	service := calibratedService()
 	service.measurer.interval = noInterval
 	recorder := recordCounts(&service.measurer)
 	loaded := "# Title\n"

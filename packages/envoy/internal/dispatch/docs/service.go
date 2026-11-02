@@ -326,11 +326,12 @@ type Service struct {
 	// refused (reserveRoom): the settle delay and admissionFlushAllowance, which New sets. Zero in a
 	// service New did not build (a test's), whose admission is refused at once.
 	admissionWait time.Duration
-	// applyHeaps is the pod's bound on the estimated heap of browsers' applies, memory.ApplyHeap
-	// of it, out of which an admitted update whose own share of its estimate passes
-	// unweighedApplyHeapBytes holds its estimate, or all of it for an estimate past it, while it
-	// applies (weighPeerUpdate). Its zero value is ready.
-	applyHeaps applyHeaps
+	// applyHeaps is the service's bound on the estimated heap of browsers' applies,
+	// memory.ApplyHeap of it, out of which an admitted update whose own share of its estimate
+	// passes unweighedApplyHeapBytes holds its estimate, or all of it for an estimate past it,
+	// while it applies (weighPeerUpdate, weighedHeaps). Whoever builds the service sizes it: New
+	// from the process's bounds, a test from the calibration's (calibratedService).
+	applyHeaps *weighedHeaps
 	// instances lists, for each resident room document, what that instance records about the
 	// durable history behind it (*roomInstance): the updates whose writes can have recorded a
 	// pending author, and the durable version the instance stands at, keyed by a weak pointer to
@@ -683,15 +684,15 @@ func New(deps Deps) *Service {
 		memory:            bounds,
 		reads:             newDocumentReads(bounds.DocumentReadCache),
 		budget:            roomBudget{limit: bounds.RoomBudget},
-		applyHeaps:        applyHeaps{size: bounds.ApplyHeap},
+		applyHeaps:        newWeighedHeaps(applyHeapName, bounds.ApplyHeap),
 		admissionWait:     settle + admissionFlushAllowance,
 	}
 	// The copy-heap bound is the process's, not one service's, because the memory it bounds is
-	// the process's: every service and store in it shares one (copyHeaps, podCopyHeaps). A
+	// the process's: every service and store in it shares one (weighedHeaps, podCopyHeaps). A
 	// service at the calibration leaves it as it stands, so a test that swapped its own keeps it;
 	// a boot that read another limit sizes it from that limit, before anything decodes.
-	if bounds.CopyHeap != copyHeapBound {
-		podCopyHeaps.Store(&copyHeaps{size: bounds.CopyHeap})
+	if bounds.CopyHeap != calibratedBounds.CopyHeap {
+		podCopyHeaps.Store(newWeighedHeaps(copyHeapName, bounds.CopyHeap))
 	}
 	service.budget.sweep = service.sweepRooms
 	adapter := &servicePersistenceAdapter{store: persist, service: service}
@@ -764,16 +765,6 @@ func New(deps Deps) *Service {
 	srv.OnPeerUpdate = service.weighPeerUpdate
 
 	return service
-}
-
-// bounds is what the process's Go memory limit gives this service (memory): the calibration for a
-// service New did not build, which is every test's that names no limit of its own. The hook reads
-// it on a peer's read loop for every update it weighs, so it is a field read and no lock.
-func (s *Service) bounds() MemoryBounds {
-	if s.memory.Limit == 0 {
-		return calibratedBounds
-	}
-	return s.memory
 }
 
 // ShutdownDrainBudget bounds the part of Shutdown that waits on document work - each room's durable

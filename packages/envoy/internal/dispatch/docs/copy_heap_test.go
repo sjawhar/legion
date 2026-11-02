@@ -110,7 +110,7 @@ func copyTransient(cost loadCost) int64 {
 // it; a write's fork from the store (coldFork) and from a resident room it has never forked
 // (warmFork's rebuild); the replica's build from a base (renderedReplica.start); the measurer's
 // copy for a server write (structsAfter); a rebuild's decode and re-scan of the history
-// (decodeHistory, nearACap); and, with an empty update stored after the state, the room's load
+// (loadDecodedHistory, nearACap); and, with an empty update stored after the state, the room's load
 // that folds the history first, a cold read's fold (LoadDocument) and compaction's (Compact). A
 // fold is weighed by every stored update it folds, or by the state it makes where that is larger.
 // Each path starts from the state as the whole stored history, since a closed room compacts what
@@ -260,10 +260,7 @@ func measureCopyPaths(t *testing.T, state []byte, atCap bool) {
 		// The rebuild is granted twice this state's weight for the two decodes it holds at once
 		// (rebuildSource); the row holds them to one state's weight, the stricter figure.
 		{"a rebuild's decode and re-scan of the history", func() {}, stored, func() any {
-			history, err := decodeHistory(state)
-			if err != nil {
-				t.Fatal(err)
-			}
+			history := decodedHistory(t, state)
 			if _, _, err := nearACap(ctx, history); err != nil {
 				t.Fatal(err)
 			}
@@ -294,7 +291,7 @@ func measureCopyPaths(t *testing.T, state []byte, atCap bool) {
 		}()
 		live = nil
 		transient := copyTransient(cost)
-		grant := min(copyHeapWeight(bytes), copyHeapBound)
+		grant := min(copyHeapWeight(bytes), calibratedBounds.CopyHeap)
 		t.Logf("%d-byte state, %s: %s, %d bytes allocated, %d peak, %d held; %d transient, %.1f a byte of %d, against a %d-byte grant",
 			len(state), path.name, cost.took.Round(time.Millisecond), cost.allocated, cost.peak, cost.held,
 			transient, float64(transient)/float64(bytes), bytes, grant)
@@ -302,15 +299,15 @@ func measureCopyPaths(t *testing.T, state []byte, atCap bool) {
 			t.Errorf("%s holds %d bytes above what it leaves, %.1f a byte of its %d, past its %d-byte grant",
 				path.name, transient, float64(transient)/float64(bytes), bytes, grant)
 		}
-		if atCap && transient > copyHeapBound {
+		if atCap && transient > calibratedBounds.CopyHeap {
 			t.Errorf("%s of a document at the decode cap holds %d bytes above what it leaves, past the %d-byte bound",
-				path.name, transient, int64(copyHeapBound))
+				path.name, transient, calibratedBounds.CopyHeap)
 		}
 	}
 }
 
 // useCopyHeaps makes heaps the process's copy-heap bound for the rest of t (podCopyHeaps).
-func useCopyHeaps(t *testing.T, heaps *copyHeaps) *copyHeaps {
+func useCopyHeaps(t *testing.T, heaps *weighedHeaps) *weighedHeaps {
 	t.Helper()
 	previous := podCopyHeaps.Swap(heaps)
 	t.Cleanup(func() { podCopyHeaps.Store(previous) })
@@ -482,13 +479,13 @@ func TestALoadWhoseFoldRunsWhileTheCopyBoundIsFullFoldsOnTheLoadsOwnGrant(t *tes
 		t.Fatalf("the %d-byte history folds into a %d-byte state, past it: the load's decode would weigh more than its fold", history, len(folded.Update))
 	}
 	weight := copyHeapWeight(history)
-	heaps := useCopyHeaps(t, &copyHeaps{size: 2 * weight})
+	heaps := useCopyHeaps(t, newWeighedHeaps(copyHeapName, 2*weight))
 	var grants heldGrants
 	var filled int64
 	heaps.granted = func(held int64) {
 		grants.record(held)
 		if filled == 0 {
-			filled = heaps.limit() - held
+			filled = heaps.size - held
 			if !heaps.semaphore().TryAcquire(filled) {
 				t.Errorf("the bound had no %d bytes left beside the load's %d", filled, held)
 			}
@@ -526,7 +523,7 @@ func TestACopyHeavierThanTheWholeCopyBoundWaitsForItToEmptyAndThenHoldsAllOfIt(t
 	service, artifactID := newTestService(t)
 	state := proseState(t, 16<<10)
 	storeHistory(t, service, artifactID, state)
-	heaps := useCopyHeaps(t, &copyHeaps{size: copyHeapWeight(len(state)) / 2})
+	heaps := useCopyHeaps(t, newWeighedHeaps(copyHeapName, copyHeapWeight(len(state))/2))
 	if !heaps.semaphore().TryAcquire(1) {
 		t.Fatal("the empty bound refused a byte")
 	}
@@ -539,8 +536,8 @@ func TestACopyHeavierThanTheWholeCopyBoundWaitsForItToEmptyAndThenHoldsAllOfIt(t
 	go func() { loaded <- loadRoomOf(service, artifactID) }()
 	select {
 	case weight := <-waited:
-		if weight != heaps.limit() {
-			t.Errorf("the load waits for %d bytes, want the whole %d-byte bound", weight, heaps.limit())
+		if weight != heaps.size {
+			t.Errorf("the load waits for %d bytes, want the whole %d-byte bound", weight, heaps.size)
 		}
 	case err := <-loaded:
 		t.Fatalf("the load finished (%v) while a byte of the bound was held", err)
@@ -561,8 +558,8 @@ func TestACopyHeavierThanTheWholeCopyBoundWaitsForItToEmptyAndThenHoldsAllOfIt(t
 	case <-time.After(30 * time.Second):
 		t.Fatal("the load did not finish in 30 s once the bound was empty")
 	}
-	if got := grants.all(); len(got) != 1 || got[0] != heaps.limit() {
-		t.Fatalf("the load was granted %v, want the whole %d-byte bound once", got, heaps.limit())
+	if got := grants.all(); len(got) != 1 || got[0] != heaps.size {
+		t.Fatalf("the load was granted %v, want the whole %d-byte bound once", got, heaps.size)
 	}
 	if held := heaps.held.Load(); held != 0 {
 		t.Fatalf("the load still holds %d bytes of the bound once loaded", held)
@@ -581,7 +578,7 @@ func TestConcurrentLoadsNeverHoldMoreOfTheCopyBoundThanItHas(t *testing.T) {
 		storeHistory(t, service, room, state)
 	}
 	weight := copyHeapWeight(len(state))
-	heaps := useCopyHeaps(t, &copyHeaps{size: 2*weight + weight/2})
+	heaps := useCopyHeaps(t, newWeighedHeaps(copyHeapName, 2*weight+weight/2))
 	var most atomic.Int64
 	heaps.granted = func(held int64) {
 		for seen := most.Load(); held > seen && !most.CompareAndSwap(seen, held); seen = most.Load() {
@@ -602,9 +599,9 @@ func TestConcurrentLoadsNeverHoldMoreOfTheCopyBoundThanItHas(t *testing.T) {
 			t.Fatal("the loads did not all finish in 60 s")
 		}
 	}
-	if got := most.Load(); got > heaps.limit() || got < 2*weight {
+	if got := most.Load(); got > heaps.size || got < 2*weight {
 		t.Fatalf("the loads held %d bytes of the bound at most, want two %d-byte grants at once and never past the %d-byte bound",
-			got, weight, heaps.limit())
+			got, weight, heaps.size)
 	}
 	for _, room := range rooms {
 		if roomDocument(t, service, room) == nil {
@@ -627,8 +624,8 @@ func TestAnAdmissionWhoseRequestEndsWhileItWaitsForTheCopyBoundAnswersItsErrorAn
 	if _, err := service.persistence.AppendUpdate(ctx, artifactID, emptyUpdate); err != nil {
 		t.Fatal(err)
 	}
-	heaps := useCopyHeaps(t, &copyHeaps{size: 4 * copyHeapWeight(storedUpdateBytes(t, service.store, artifactID))})
-	if !heaps.semaphore().TryAcquire(heaps.limit()) {
+	heaps := useCopyHeaps(t, newWeighedHeaps(copyHeapName, 4*copyHeapWeight(storedUpdateBytes(t, service.store, artifactID))))
+	if !heaps.semaphore().TryAcquire(heaps.size) {
 		t.Fatal("the empty bound refused all of itself")
 	}
 	waiting := make(chan struct{})
@@ -665,16 +662,16 @@ func TestAnAdmissionWhoseRequestEndsWhileItWaitsForTheCopyBoundAnswersItsErrorAn
 	if held := heaps.held.Load(); held != 0 {
 		t.Fatalf("the ended admission holds %d bytes of the bound", held)
 	}
-	heaps.semaphore().Release(heaps.limit())
+	heaps.semaphore().Release(heaps.size)
 	_, preload, err := service.loadTree(ctx, artifactID)
 	if err != nil || preload == nil || preload.decoded.doc == nil {
 		t.Fatalf("the next admission answered %v with preload %v, want the history decoded", err, preload)
 	}
 	service.leavePreload(artifactID, preload)()
-	if !heaps.semaphore().TryAcquire(heaps.limit()) {
+	if !heaps.semaphore().TryAcquire(heaps.size) {
 		t.Fatal("part of the bound is still held once both admissions have answered")
 	}
-	heaps.semaphore().Release(heaps.limit())
+	heaps.semaphore().Release(heaps.size)
 }
 
 // A rebuild's check of a resident room decodes the room's whole state before the rebuild decides
@@ -694,7 +691,7 @@ func TestARebuildOfAResidentDocumentTakesTheCopyBoundBeforeItWeighsIt(t *testing
 		t.Fatalf("load the room: %v", err)
 	}
 	decode := copyHeapWeight(len(crdt.EncodeStateAsUpdateV1(roomDocument(t, service, artifactID), nil)))
-	heaps := useCopyHeaps(t, &copyHeaps{size: decode / 2})
+	heaps := useCopyHeaps(t, newWeighedHeaps(copyHeapName, decode/2))
 	if !heaps.semaphore().TryAcquire(1) {
 		t.Fatal("the empty bound refused a byte")
 	}
@@ -717,8 +714,8 @@ func TestARebuildOfAResidentDocumentTakesTheCopyBoundBeforeItWeighsIt(t *testing
 	}()
 	select {
 	case weight := <-waited:
-		if weight != heaps.limit() {
-			t.Errorf("the rebuild's check waits for %d bytes, want the whole %d-byte bound", weight, heaps.limit())
+		if weight != heaps.size {
+			t.Errorf("the rebuild's check waits for %d bytes, want the whole %d-byte bound", weight, heaps.size)
 		}
 	case err := <-answered:
 		t.Fatalf("the rebuild answered %v while a byte of the bound was held: its check decoded the resident room's state outside the bound", err)
@@ -739,8 +736,8 @@ func TestARebuildOfAResidentDocumentTakesTheCopyBoundBeforeItWeighsIt(t *testing
 	case <-time.After(30 * time.Second):
 		t.Fatal("the rebuild did not answer in 30 s once the bound was empty")
 	}
-	if got := grants.all(); len(got) != 1 || got[0] != heaps.limit() {
-		t.Fatalf("the rebuild's check was granted %v, want the whole %d-byte bound once", got, heaps.limit())
+	if got := grants.all(); len(got) != 1 || got[0] != heaps.size {
+		t.Fatalf("the rebuild's check was granted %v, want the whole %d-byte bound once", got, heaps.size)
 	}
 	if held := heaps.held.Load(); held != 0 {
 		t.Fatalf("the refused rebuild still holds %d bytes of the bound", held)

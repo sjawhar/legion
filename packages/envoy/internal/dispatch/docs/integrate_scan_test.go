@@ -239,7 +239,8 @@ type roomPicture struct {
 func pictureRoom(service *Service, room *crdt.Doc, replica *renderedReplica, charge *roomCharge) roomPicture {
 	picture := roomPicture{state: crdt.EncodeStateAsUpdateV1(room, nil), used: budgetUsed(service)}
 	picture.structure, _, _, _ = chargeParts(charge)
-	picture.total, picture.stale = replica.structs.running()
+	running, stale := replica.structs.runningTotals()
+	picture.total, picture.stale = running.structs, stale
 	charge.deleted.mu.RLock()
 	picture.deletes = make(map[uint64][]clockRun, len(charge.deleted.clients))
 	for client, runs := range charge.deleted.clients {

@@ -647,7 +647,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// The state goes into the room's own document here rather than through ygo (LoadDoc). It is
 	// the last thing the load's grant of the copy-heap bound covers, so the grant is given back
 	// as soon as it returns: the reads below wait on the rooms pool, and must hold no part of the
-	// bound while they do (copyHeaps).
+	// bound while they do (podCopyHeaps).
 	applyErr := s.applyLoadedState(room, doc, taken.state)
 	taken.grant.release()
 	if applyErr != nil {
@@ -1017,28 +1017,21 @@ func (s *Service) settleLastPeer(_ context.Context, room string) {
 	s.settleRoom(room, generation)
 }
 
-// loadDecoded is LoadDoc's own read of room's stored state and its decode (decodeStoredState),
-// both under grant, the load's (loadedState.grant): the read's fold of a history of several
-// updates covers it inside the read's transaction (fold), and the decode covers it for the state
-// the read returned, which the room's load applies into the room's own document on the same grant
-// (applyLoadedState). ygo hands LoadDoc no context, so each cover waits until it holds its weight,
-// holding no part of the bound meanwhile (copyGrant.cover).
+// loadDecoded is LoadDoc's own read of room's stored state and its decode
+// (loadDecodedHistory), both under grant, the load's (loadedState.grant): the read's fold of a
+// history of several updates covers it inside the read's transaction (fold), and the decode
+// covers it for the state the read returned, which the room's load applies into the room's own
+// document on the same grant (applyLoadedState). ygo hands LoadDoc no context, so each cover
+// waits until it holds its weight, holding no part of the bound meanwhile (heapGrant.cover), and
+// the grant is the caller's to give back rather than the helper's.
 //
 // A history too large for one update is refused from its header, before the grant is covered and
 // before anything is decoded (loadableHistory): no room could take it, and the refusal names the
 // item count the header declares rather than whatever a decode of those bytes would say.
-func (a *servicePersistenceAdapter) loadDecoded(room string, grant *copyGrant) (persistence.LoadResult, decodedState, error) {
-	ctx := grant.carriedBy(context.Background())
-	result, err := a.store.Load(ctx, room)
-	if err == nil {
-		err = loadableHistory(result.Update)
-	}
-	if err == nil {
-		err = grant.cover(ctx, len(result.Update))
-	}
+func (a *servicePersistenceAdapter) loadDecoded(room string, grant *heapGrant) (persistence.LoadResult, decodedState, error) {
+	history, err := loadDecodedHistory(grant.carriedBy(context.Background()), a.store, room, 1, loadableHistory)
 	if err != nil {
 		return persistence.LoadResult{}, decodedState{}, err
 	}
-	decoded, err := decodeStoredState(result.Update)
-	return result, decoded, err
+	return history.loaded, history.decoded, history.refused
 }

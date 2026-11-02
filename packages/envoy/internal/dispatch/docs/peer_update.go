@@ -2,7 +2,6 @@ package docs
 
 import (
 	"cmp"
-	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,12 +9,10 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
-	"time"
 	"weak"
 
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/provider/websocket"
-	"golang.org/x/sync/semaphore"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -35,7 +32,7 @@ import (
 // keystroke on such a document that already takes between half a second and a second. What it does
 // instead is read the update itself in one pass that decodes nothing and allocates nothing per
 // struct (walkUpdate), and weigh what that pass finds against the room's last published rendering
-// (renderedReplica.publishSize) and the room's struct total (structTotal): work proportional to the
+// (renderedReplica.publishSize) and the room's struct total (roomTotals): work proportional to the
 // update rather than to the document, which for a keystroke is a walk of a few dozen bytes.
 //
 // The hook weighs bytes and not elements. Counting a rendering's elements is a whole goldmark
@@ -63,7 +60,7 @@ import (
 // updates were folded. A browser can get there without passing the byte bound - a frame of GC
 // structs is two bytes a struct and renders nothing - so the hook keeps each room's struct total
 // and refuses with DocumentTooLargeCloseCode an update that would take it past the cap, whatever it
-// inserts or deletes (structTotal).
+// inserts or deletes (roomTotals).
 //
 // The document has a third bound, which neither bytes nor structs see: what a room holds that is
 // not text, a value of any size in one clock and one struct. The server's own writes bound the
@@ -73,7 +70,7 @@ import (
 // from 264 bytes to 80,001,457 with its rendering at 42, past the message floor every browser of
 // the document then reconnects against. So the room keeps an unrendered total beside its struct
 // total, and the hook refuses with DocumentTooLargeCloseCode an update that adds unrendered bytes
-// past maxUnrenderedBytes (unrenderedBytes, structTotal).
+// past maxUnrenderedBytes (unrenderedBytes, roomTotals).
 //
 // The unrendered total does not see everything a frame is made of: text inside an element nested
 // under the margin reads as text, which the walk cannot place, so one struct of it could carry the
@@ -354,7 +351,7 @@ const peerWriteQueueBytes = 60 << 20
 // it inserts nothing at all. Then the room's totals admit it only while what it would add keeps
 // its struct total within maxUpdateItems, its unrendered bytes, when it adds any, within
 // maxUnrenderedBytes, and its frame total, when it inserts anything, within heaviestHandoffBound
-// (structTotal.admits). Each refusal of the five is the document's own, DocumentTooLargeCloseCode.
+// (roomTotals.admits). Each refusal of the five is the document's own, DocumentTooLargeCloseCode.
 //
 // The unrendered bytes are what the byte and clock rules cannot see (unrenderedBytes): a value of
 // any size is one clock, and one in the margin or in an element's attributes renders nothing, so a
@@ -409,7 +406,8 @@ const peerWriteQueueBytes = 60 << 20
 // reaches it (TestAnHonestHandoffAtTheHeaviestFrameIsNeverRefusedAsTooHeavy), and a client that
 // sends such a frame would send it again on every reconnect. An
 // admitted update whose own share of the estimate passes unweighedApplyHeapBytes applies only once
-// it holds its estimate, the marks its scans can make included, out of the bound (applyHeaps), or
+// it holds its estimate, the marks its scans can make included, out of the bound
+// (Service.applyHeaps), or
 // the whole bound for an estimate past it, which then applies alone, so a reconnect storm's
 // whole-state handoffs decode as many at a time as the bound has room for rather than all at once,
 // and no honest handoff is refused for its weight; typing never waits on it.
@@ -427,7 +425,7 @@ const peerWriteQueueBytes = 60 << 20
 // An apply that fails leaves no trace but its scans. The room's bounded document takes every
 // remote update it refuses back out whole, whatever the error, and fires no observer for it
 // (crdt/apply_rollback.go:9-21), so the hook takes back what it booked for the update: its
-// reservation of the struct total (structTotal.unreserve), a structure charge taken before the
+// reservation of the struct total (roomTotals.unreserve), a structure charge taken before the
 // apply under pressure (roomCharge.gaveBack), and it charges no structure and lists none of its
 // delete ranges as the room's; what its scans passed before the refusal it reports
 // (crdt.RefusedUpdateError), and the room's scan total keeps it (roomScans.settle), since the work
@@ -483,7 +481,7 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 	own := weighed.ownApplyHeap(len(info.Update))
 	weighs := own > unweighedApplyHeapBytes
 	heap := own + weighed.roomApplyHeap(structs.roomStructs(info.Doc))
-	if tooHeavy := s.bounds().ApplyTooHeavy; heap > uint64(tooHeavy) {
+	if tooHeavy := s.memory.ApplyTooHeavy; heap > uint64(tooHeavy) {
 		return refusedWith(documentTooLarge(), fmt.Errorf("%w: its apply is estimated to allocate %d bytes, past the %d bytes the pod lets any apply hold, even alone",
 			errApplyTooHeavy, heap, tooHeavy))
 	}
@@ -501,7 +499,7 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 	added := weighed.addition()
 	// The reservation is what keeps two browsers of one room weighed at once from each passing
 	// a bound's check and together passing the bound: each counts the other's addition while it
-	// is in flight (structTotal.reserve). No lock is held across the apply, so another browser
+	// is in flight (roomTotals.reserve). No lock is held across the apply, so another browser
 	// of the room is weighed and applied while this apply runs, its observers included.
 	if !structs.reserve(info.Doc, added) {
 		return documentTooLarge()
@@ -548,7 +546,7 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 	}
 	// Moved to what the hook admitted only after the apply returns, so a recount that read the
 	// total's admissions before its encode cannot miss what this apply integrated
-	// (structTotal.recount). Its delete ranges are listed as the room's, so a later update
+	// (roomTotals.recount). Its delete ranges are listed as the room's, so a later update
 	// carrying them again is charged nothing for them (deletedRuns).
 	structs.landed(added)
 	if !charged {
@@ -633,7 +631,7 @@ func (s *Service) refusedUnderPressure(weighed *peerWeighing, charge *roomCharge
 		return true
 	}
 	structure := weighed.structureHeap()
-	return structure > 0 && !s.budget.growWithin(charge, structure, s.bounds().PressureReserve)
+	return structure > 0 && !s.budget.growWithin(charge, structure, s.memory.PressureReserve)
 }
 
 // roomWeighingOf is what the hook reads of the room holding live (keepReplica), or nil for a
@@ -695,8 +693,8 @@ type peerWeighing struct {
 	// clocks the room's delete set holds from then on (deletedRuns.record).
 	born bool
 	// retired is the clients the room's history lists as retired by a rebuild, each with the clock
-	// it had reached (structTotal.retired), nil for a room never rebuilt or no load listed, and
-	// entries where that list's own entries sit (structTotal.entries). former is whether the update
+	// it had reached (roomTotals.retired), nil for a room never rebuilt or no load listed, and
+	// entries where that list's own entries sit (roomTotals.entries). former is whether the update
 	// carries a client group of a retired client starting below that clock (walkedGroup), which
 	// only a browser holding the replaced history sends; forged whether it changes the list - an
 	// entry past the room's state, a struct naming an entry as its origin, which is how an
@@ -751,8 +749,8 @@ func (w *peerWeighing) walkedStruct(walked updateStruct) {
 }
 
 // weighStruct weighs walked, whose share of the apply's estimate is cost. It is walkedStruct's
-// body with that share passed in, so that a weighing no reader of the estimate holds pays no walk
-// for it (writtenWeighing.walkedStruct).
+// body with that share passed in, so that a weighing no reader of the estimate holds pays not
+// even its arithmetic (writtenWeighing.walkedStruct).
 func (w *peerWeighing) weighStruct(walked updateStruct, cost applyCost) {
 	w.decoded += cost.decode
 	if walked.kind == structSkip {
@@ -831,7 +829,7 @@ func (w *peerWeighing) added() uint64 {
 	return w.structs*(1+splitsAStructCanCause) + w.deleteStructs
 }
 
-// addition is what the walked update can add to the room's totals (structTotal): its structs
+// addition is what the walked update can add to the room's totals (roomTotals): its structs
 // (added), its unrendered bytes and its frame bytes, and whether it inserts a struct.
 func (w *peerWeighing) addition() roomCount {
 	return roomCount{structs: w.added(), unrendered: w.unrendered, frame: w.frame, inserts: w.structs > 0}
@@ -1025,7 +1023,7 @@ func deletionReserve(walked updateStruct) uint64 {
 	return added - min(added, givenBack)
 }
 
-// roomCount is a room's state as the hook's totals weigh it (structTotal): its structs, which the
+// roomCount is a room's state as the hook's totals weigh it (roomTotals): its structs, which the
 // decode cap bounds; its unrendered bytes (unrenderedBytes), which maxUnrenderedBytes bounds; and
 // its whole-state frame's bytes with what deleting what it holds can add (deletionReserve, and
 // frameBytes and deleteFrameBytes for an addition), which heaviestHandoffBound bounds. inserts is
@@ -1034,6 +1032,51 @@ func deletionReserve(walked updateStruct) uint64 {
 type roomCount struct {
 	structs, unrendered, frame uint64
 	inserts                    bool
+}
+
+// plus is the three totals of c and other summed, each with its own. inserts is the caller's
+// question about one addition, not a total, so it is left as c's.
+func (c roomCount) plus(other roomCount) roomCount {
+	c.structs += other.structs
+	c.unrendered += other.unrendered
+	c.frame += other.frame
+	return c
+}
+
+// minus is other's three totals taken off c's, each off its own. A total only grows and is never
+// taken off a smaller one of its own (roomTotals), so none of the three wraps.
+func (c roomCount) minus(other roomCount) roomCount {
+	c.structs -= other.structs
+	c.unrendered -= other.unrendered
+	c.frame -= other.frame
+	return c
+}
+
+// atomicRoomCount is a roomCount every holder of the hook's totals reads and writes without a lock
+// (roomTotals): the three totals as three atomics, so that each operation on them names them once.
+// The three are not read together: a reader sees each as it stood when it read it, which is what
+// the order the totals are written in makes safe (roomTotals).
+type atomicRoomCount struct {
+	structs, unrendered, frame atomic.Uint64
+}
+
+// add adds each of added's three totals to its own.
+func (a *atomicRoomCount) add(added roomCount) {
+	a.structs.Add(added.structs)
+	a.unrendered.Add(added.unrendered)
+	a.frame.Add(added.frame)
+}
+
+// sub takes each of added's three totals off its own.
+func (a *atomicRoomCount) sub(added roomCount) {
+	a.structs.Add(-added.structs)
+	a.unrendered.Add(-added.unrendered)
+	a.frame.Add(-added.frame)
+}
+
+// load is the three totals as they stand, structs first.
+func (a *atomicRoomCount) load() roomCount {
+	return roomCount{structs: a.structs.Load(), unrendered: a.unrendered.Load(), frame: a.frame.Load()}
 }
 
 // fitsBounds reports whether a room holding held can take added within the decode cap; when added
@@ -1072,7 +1115,9 @@ const structTotalStaleMargin = maxUpdateItems / 8
 // re-encodes its state once in every few thousand keystrokes rather than on each.
 const structTotalRecheck = maxUpdateItems / 64
 
-// structTotal is a room's struct total, the number of structs its whole state holds as ygo
+// roomTotals is what the hook keeps of one room: its three running totals (roomCount) and the
+// clients the room's history lists as retired (retired, entries). The first of the three is its
+// struct total, the number of structs its whole state holds as ygo
 // decodes it, against which the hook refuses an update that would take the room past the decode
 // cap (maxUpdateItems). Measured on this branch: a second GC-struct frame of 600,000 structs left a
 // room whose 2,200,030-byte state no longer decoded, though each frame alone was within the cap
@@ -1141,10 +1186,10 @@ const structTotalRecheck = maxUpdateItems / 64
 // An apply in flight at the read and landing before the encode is in the count, and still in
 // inflight, or in admitted past countedAdmitted once it moves: counted twice, which overstates the
 // total. One landing after the encode is in inflight or moves to admitted after the read: counted
-// once. A move adds to admitted before it takes from inflight, and running reads inflight before
-// admitted, so a move between running's two reads is seen at least once. The same order holds
+// once. A move adds to admitted before it takes from inflight, and runningTotals reads inflight
+// before admitted, so a move between its two reads is seen at least once. The same order holds
 // for writes, so a write that landed after a count's encode leaves the total stale.
-type structTotal struct {
+type roomTotals struct {
 	live weak.Pointer[crdt.Doc]
 	// count is countRoom, but for a test's, which counts the counts.
 	count func(doc *crdt.Doc) roomCount
@@ -1165,14 +1210,12 @@ type structTotal struct {
 	originMu sync.Mutex
 	origins  map[any]int
 
-	// inflight is the sum of the struct additions the hook has reserved whose applies have not yet
-	// returned, and inflightUnrendered and inflightFrame of their unrendered and frame bytes.
-	// admitted, admittedUnrendered and admittedFrame are the same sums for every addition whose
-	// apply has returned, and writes the number of transactions the observer has seen that were
-	// not a hook's apply; those four only grow.
-	inflight, admitted, writes             atomic.Uint64
-	inflightUnrendered, admittedUnrendered atomic.Uint64
-	inflightFrame, admittedFrame           atomic.Uint64
+	// inflight is the sum of the additions the hook has reserved whose applies have not yet
+	// returned, all three totals of each; admitted is the same sum for every addition whose apply
+	// has returned, and writes the number of transactions the observer has seen that were not a
+	// hook's apply. admitted and writes only grow.
+	inflight, admitted atomicRoomCount
+	writes             atomic.Uint64
 
 	// mu guards the last count - counted, with the admissions and writes as they were read before
 	// it - and the hook's last confirmation: whether one was taken and the admissions when it was.
@@ -1184,11 +1227,11 @@ type structTotal struct {
 	confirmedAdmitted roomCount
 }
 
-// newStructTotal is live's totals, counted once now, at the room's load, with the clients live's
+// newRoomTotals is live's totals, counted once now, at the room's load, with the clients live's
 // history lists as retired and where it lists them.
-func newStructTotal(live *crdt.Doc) *structTotal {
+func newRoomTotals(live *crdt.Doc) *roomTotals {
 	retired := retiredClientsOf(live)
-	total := &structTotal{live: weak.Make(live), count: countRoom, retired: retired}
+	total := &roomTotals{live: weak.Make(live), count: countRoom, retired: retired}
 	if retired != nil {
 		total.entries = retiredEntriesOf(live)
 	}
@@ -1231,9 +1274,9 @@ func retiredClock(value any) (uint64, bool) {
 	return 0, false
 }
 
-// retiredClients is the clients the room's history lists as retired (structTotal.retired), nil for
+// retiredClients is the clients the room's history lists as retired (roomTotals.retired), nil for
 // a total no load made.
-func (t *structTotal) retiredClients() map[crdt.ClientID]uint64 {
+func (t *roomTotals) retiredClients() map[crdt.ClientID]uint64 {
 	if t == nil {
 		return nil
 	}
@@ -1296,9 +1339,9 @@ func (e retiredEntries) overlap(client, clock, length uint64) bool {
 	return at < len(runs) && runs[at].Clock < clock+length
 }
 
-// retiredEntries is where the room's history holds its retired clients' list (structTotal.entries),
+// retiredEntries is where the room's history holds its retired clients' list (roomTotals.entries),
 // nil for a room never rebuilt or a total no load made.
-func (t *structTotal) retiredEntries() retiredEntries {
+func (t *roomTotals) retiredEntries() retiredEntries {
 	if t == nil {
 		return nil
 	}
@@ -1307,7 +1350,7 @@ func (t *structTotal) retiredEntries() retiredEntries {
 
 // observed is the total's update observer: a transaction that is not one of the hook's applies
 // marks the total stale.
-func (t *structTotal) observed(_ []byte, origin any) {
+func (t *roomTotals) observed(_ []byte, origin any) {
 	if !t.hookApplies(origin) {
 		t.writes.Add(1)
 	}
@@ -1320,7 +1363,7 @@ func (t *structTotal) observed(_ []byte, origin any) {
 // finds each of the hook's updates while its apply is still running; any other origin is the
 // server's own write, whose structure that observer charges (renderedReplica.chargeAdded). Nil, a
 // total no load made, runs no apply of the hook's.
-func (t *structTotal) hookApplies(origin any) bool {
+func (t *roomTotals) hookApplies(origin any) bool {
 	if t == nil {
 		return false
 	}
@@ -1330,11 +1373,11 @@ func (t *structTotal) hookApplies(origin any) bool {
 }
 
 // countedStructs is the struct total of the room's last exact count (countRoomStructs): the one
-// its load made (newStructTotal), then each count since - the measurer's in its turn
+// its load made (newRoomTotals), then each count since - the measurer's in its turn
 // (recountLive), or a confirmation of the hook's (confirm). It is the struct count the room
 // budget prices one copy of the room at (copyHeap); what the hook has admitted since the count is
 // in the room's structure part already. Zero for a total no load made.
-func (t *structTotal) countedStructs() int64 {
+func (t *roomTotals) countedStructs() int64 {
 	if t == nil {
 		return 0
 	}
@@ -1344,7 +1387,7 @@ func (t *structTotal) countedStructs() int64 {
 }
 
 // applying runs apply, which applies an update with origin, as one of the hook's own applies.
-func (t *structTotal) applying(origin any, apply func() error) error {
+func (t *roomTotals) applying(origin any, apply func() error) error {
 	if t == nil {
 		return apply()
 	}
@@ -1367,7 +1410,7 @@ func (t *structTotal) applying(origin any, apply func() error) error {
 // reserve reports whether doc, the room's live document, can take added within the decode cap, the
 // unrendered bound and F beside every reservation in flight (admits), and if it can, reserves added
 // for an apply the caller then makes and ends with landed, or abandons with unreserve.
-func (t *structTotal) reserve(doc *crdt.Doc, added roomCount) bool {
+func (t *roomTotals) reserve(doc *crdt.Doc, added roomCount) bool {
 	if t == nil {
 		return t.admits(doc, added)
 	}
@@ -1376,54 +1419,35 @@ func (t *structTotal) reserve(doc *crdt.Doc, added roomCount) bool {
 	if !t.admits(doc, added) {
 		return false
 	}
-	t.inflight.Add(added.structs)
-	t.inflightUnrendered.Add(added.unrendered)
-	t.inflightFrame.Add(added.frame)
+	t.inflight.add(added)
 	return true
 }
 
 // landed moves added, a reservation whose apply has returned, from inflight to admitted: to
 // admitted first, so a running total read between the two never misses it.
-func (t *structTotal) landed(added roomCount) {
+func (t *roomTotals) landed(added roomCount) {
 	if t != nil {
-		t.admitted.Add(added.structs)
-		t.admittedUnrendered.Add(added.unrendered)
-		t.admittedFrame.Add(added.frame)
-		t.inflight.Add(-added.structs)
-		t.inflightUnrendered.Add(-added.unrendered)
-		t.inflightFrame.Add(-added.frame)
+		t.admitted.add(added)
+		t.inflight.sub(added)
 	}
 }
 
 // unreserve gives back added, a reservation no apply followed or whose apply failed.
-func (t *structTotal) unreserve(added roomCount) {
+func (t *roomTotals) unreserve(added roomCount) {
 	if t != nil {
-		t.inflight.Add(-added.structs)
-		t.inflightUnrendered.Add(-added.unrendered)
-		t.inflightFrame.Add(-added.frame)
+		t.inflight.sub(added)
 	}
 }
 
-// running is the struct total as it stands - the last count, what the hook admitted since and
-// what it has in flight - and whether a write the hook did not see has landed since the count.
-func (t *structTotal) running() (total uint64, stale bool) {
-	totals, stale := t.runningTotals()
-	return totals.structs, stale
-}
-
-// runningTotals is the three totals as they stand, and whether a write the hook did not see has
-// landed since the count. Each inflight is read before its admitted (structTotal gives why).
-func (t *structTotal) runningTotals() (total roomCount, stale bool) {
+// runningTotals is the three totals as they stand - the last count, what the hook admitted since
+// and what it has in flight - and whether a write the hook did not see has landed since the
+// count. The reservations in flight are read before the admissions (roomTotals gives why).
+func (t *roomTotals) runningTotals() (total roomCount, stale bool) {
 	t.mu.Lock()
 	counted, admitted, writes := t.counted, t.countedAdmitted, t.countedWrites
 	t.mu.Unlock()
-	inflight := roomCount{structs: t.inflight.Load(), unrendered: t.inflightUnrendered.Load(), frame: t.inflightFrame.Load()}
-	now := roomCount{structs: t.admitted.Load(), unrendered: t.admittedUnrendered.Load(), frame: t.admittedFrame.Load()}
-	return roomCount{
-		structs:    counted.structs + inflight.structs + now.structs - admitted.structs,
-		unrendered: counted.unrendered + inflight.unrendered + now.unrendered - admitted.unrendered,
-		frame:      counted.frame + inflight.frame + now.frame - admitted.frame,
-	}, t.writes.Load() != writes
+	inflight := t.inflight.load()
+	return counted.plus(inflight).plus(t.admitted.load().minus(admitted)), t.writes.Load() != writes
 }
 
 // roomStructs is the room's struct total as it stands, which the apply heap's estimate takes as
@@ -1431,12 +1455,12 @@ func (t *structTotal) runningTotals() (total roomCount, stale bool) {
 // made stale lags what the server's writes added since the last count, until the measurer's next
 // count re-bases it (elementMeasurer.count). A nil total, a room no load listed, is counted
 // afresh.
-func (t *structTotal) roomStructs(doc *crdt.Doc) uint64 {
+func (t *roomTotals) roomStructs(doc *crdt.Doc) uint64 {
 	if t == nil {
 		return countRoomStructs(doc)
 	}
-	total, _ := t.running()
-	return total
+	total, _ := t.runningTotals()
+	return total.structs
 }
 
 // admits reports whether doc, the room's live document, can take added within the decode cap,
@@ -1460,7 +1484,7 @@ func (t *structTotal) roomStructs(doc *crdt.Doc) uint64 {
 // decode.
 //
 // A nil total, a room no load listed, is counted afresh for each update.
-func (t *structTotal) admits(doc *crdt.Doc, added roomCount) bool {
+func (t *roomTotals) admits(doc *crdt.Doc, added roomCount) bool {
 	if t == nil {
 		return fitsBounds(countRoom(doc), added)
 	}
@@ -1483,17 +1507,19 @@ func (t *structTotal) admits(doc *crdt.Doc, added roomCount) bool {
 // was taken, nothing the hook did not see has landed since (stale), and the hook has admitted less
 // than structTotalRecheck structs, unrenderedRecheck unrendered bytes and frameRecheck frame bytes
 // since it.
-func (t *structTotal) confirmationHolds(stale bool) bool {
+func (t *roomTotals) confirmationHolds(stale bool) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return !stale && t.confirmed &&
-		t.admitted.Load()-t.confirmedAdmitted.structs < structTotalRecheck &&
-		t.admittedUnrendered.Load()-t.confirmedAdmitted.unrendered < unrenderedRecheck &&
-		t.admittedFrame.Load()-t.confirmedAdmitted.frame < frameRecheck
+	if stale || !t.confirmed {
+		return false
+	}
+	since := t.admitted.load().minus(t.confirmedAdmitted)
+	return since.structs < structTotalRecheck && since.unrendered < unrenderedRecheck &&
+		since.frame < frameRecheck
 }
 
 // confirm re-bases the totals on an exact count of doc and records it as the hook's confirmation.
-func (t *structTotal) confirm(doc *crdt.Doc) {
+func (t *roomTotals) confirm(doc *crdt.Doc) {
 	admitted := t.recount(doc)
 	t.mu.Lock()
 	t.confirmed, t.confirmedAdmitted = true, admitted
@@ -1502,7 +1528,7 @@ func (t *structTotal) confirm(doc *crdt.Doc) {
 
 // recountLive re-bases the totals on an exact count of the room's live document, if it is still
 // resident: the measurer's count, in its turn.
-func (t *structTotal) recountLive() {
+func (t *roomTotals) recountLive() {
 	if t == nil {
 		return
 	}
@@ -1513,8 +1539,8 @@ func (t *structTotal) recountLive() {
 
 // recount re-bases the totals on an exact count of doc, and returns the admissions it was counted
 // against.
-func (t *structTotal) recount(doc *crdt.Doc) roomCount {
-	admitted := roomCount{structs: t.admitted.Load(), unrendered: t.admittedUnrendered.Load(), frame: t.admittedFrame.Load()}
+func (t *roomTotals) recount(doc *crdt.Doc) roomCount {
+	admitted := t.admitted.load()
 	writes := t.writes.Load()
 	counted := t.count(doc)
 	t.mu.Lock()
@@ -1572,125 +1598,15 @@ func structTotalOf(tally updateTally, err error, pending crdt.PendingStats) uint
 }
 
 // errApplyTooHeavy is why the hook refuses an update whose apply alone is estimated to allocate
-// more than applyTooHeavyBytes: no turn could hold it, even alone. It is never applied, and the
-// hook answers it with the document's own close, DocumentTooLargeCloseCode and
-// DocumentTooLargeCloseReason, this error behind it (refusedWith), as it answers a frame the walk
-// refuses.
+// more than the service's MemoryBounds.ApplyTooHeavy: no turn could hold it, even alone. It is
+// never applied, and the hook answers it with the document's own close,
+// DocumentTooLargeCloseCode and DocumentTooLargeCloseReason, this error behind it (refusedWith),
+// as it answers a frame the walk refuses.
 var errApplyTooHeavy = errors.New("the update is heavier to apply than the pod can hold")
 
-// calibratedGoMemoryLimitBytes is the Go memory limit every bound in this package is calibrated
-// at, and the limit a service runs under when its process holds none: 90 per cent of a
-// container's 4 GiB, 3,865,470,566 bytes, which is what Dispatch's deployment gave it while
-// these figures were measured. The production pod is larger now - 32Gi, whose 90 per cent is
-// 30,923,764,531 (setGoMemoryLimit, cmd/dispatch/main.go) - and a process holding another limit
-// runs under this calibration scaled to that limit (BoundsForLimit), not under these constants:
-// each is what its bound comes to at this limit alone.
-const calibratedGoMemoryLimitBytes = 4 << 30 * 9 / 10
-
-// heapAboveTheReserve is what the calibration leaves above the room budget, the cold reads' cache
-// and the pressure reserve the budget's charges may pass its limit by: 3,865,470,566 -
-// roomBudgetBytes 2,147,483,648 - documentReadBudget 268,435,456 - pressureReserveBytes
-// 268,435,456 = 1,181,116,006 bytes. The architect's ruling splits it three ways: the apply-heap
-// bound (applyHeapBound), the copy-heap bound (copyHeapBound) and slack named for what neither
-// bound weighs (heapSlackBytes), a third each. The ruling's words are "a quarter of what the limit
-// leaves above the reserve to each bound, and a quarter as named slack", which come to three
-// quarters and leave the last quarter to nothing; a third each is taken as what "the three-way
-// split" means, so that every byte of it has a named holder. A process holding another limit
-// splits what that limit leaves above its own room budget, cache and reserve the same way
-// (MemoryBounds).
-const heapAboveTheReserve = calibratedGoMemoryLimitBytes - roomBudgetBytes - documentReadBudget - pressureReserveBytes
-
-// applyHeapBound is the most heap, by their estimates (peerWeighing.applyHeap), that the pod's
-// weighed applies of browsers' updates hold at once at the calibration (applyHeaps): a third of
-// heapAboveTheReserve, 1,181,116,006 / 3 = 393,705,335 bytes, about 375 MiB, and at another
-// limit a third of what that limit leaves above its own reserve (MemoryBounds.ApplyHeap). The
-// copy-heap bound (copyHeapBound), which holds the full-state decodes of loads, forks and folds,
-// takes another third, and the slack
-// (heapSlackBytes) the last, where the applies under unweighedApplyHeapBytes run. A weighed apply
-// whose estimate passes the bound is never refused for it: it waits for the whole bound and then
-// holds all of it, so it runs alone (applyHeaps.hold), as a copy past the copy-heap bound does.
-// Only an estimate past applyTooHeavyBytes is refused (errApplyTooHeavy).
-//
-// It is not in the spec: it is the plan's departure 8, large applies taking turns, weighed by each
-// apply's estimate rather than counted in slots. Every browser's first sync hands over its whole
-// state, and ygo's apply decodes every struct of it, and every value of each, before decodeAndPark
-// drops what the room already holds (sjawhar/ygo v1.54.1-sami.1, crdt/update.go:807-942, the
-// values at :1222-1263), so fifty browsers reconnecting at once to rooms of heavy documents would
-// otherwise decode fifty handoffs at the same moment. A count of slots sized for the heaviest
-// handoff could not bound an update the editor never sends, whose apply allocates in proportion
-// to the values it carries whatever the room holds: 25,165,779 bytes of null values in one struct
-// for a client whose every clock the room held allocated 805,307,736 bytes in one apply, though it
-// inserted nothing and added no struct. Measured on 2026-10-28
-// (TestEveryApplysTransientHeapIsWithinItsEstimate), the 5,360,879-byte handoff of the heaviest
-// document the server's own writes can leave is estimated at 71,356,658 bytes into the room
-// holding it, against the 33,410,168 it allocates there, so five such handoffs apply at once, and
-// at 234,999,499 into a fresh room, whose budget gives it the per-frame ceiling
-// (perFrameScanCeiling) for the 49,156 items decoding a whole document into one holding nothing
-// scans, against the 113,178,024 its apply allocates there, so one applies at a time. The
-// 9,577,606-byte handoff of that document grown through the creep allowance (maxMessageBytes,
-// TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor) is estimated at 157,797,184
-// into the room holding it, so two apply at once, and at 482,930,134 into a fresh room, past the
-// bound, so it runs alone.
-const applyHeapBound = heapAboveTheReserve / 3
-
-// heapSlackBytes is the third of heapAboveTheReserve that neither bound grants at the
-// calibration, 1,181,116,006 / 3 = 393,705,335 bytes, about 375 MiB, and at another limit a
-// third of what that limit leaves above its own reserve (MemoryBounds.HeapSlack): the slack for
-// what no bound weighs - the request path, the applies of browsers' updates under
-// unweighedApplyHeapBytes, one for each browser's read loop at
-// most, the measurer's parse of a rendering, up to about 130 MiB for a mebibyte of the heaviest
-// shape (pmdoc/elements.go:31-37), and the collector, which needs headroom under the Go memory
-// limit to free garbage before it reaches it. An apply estimated past applyHeapBound, which runs
-// alone, may reach into it too, up to applyTooHeavyBytes.
-//
-// Nothing in Dispatch reads or sets GOGC: the collector runs at the runtime's own ratio, and what
-// holds the pod inside its memory is the Go memory limit the runtime holds. At that default the
-// heap goal is twice the live heap, which past half the limit is the limit itself, so a server
-// whose budget is full keeps every byte of garbage the limit allows - the budget's unused room,
-// both heap bounds and this slack together - and the memory it holds parks under the limit. That
-// memory is what a pod's kernel charges it: what the runtime holds less what it has released,
-// which is the figure the limit bounds. Measured on 2026-11-01 with the real-process drive of the
-// worst case the bounds allow (cmd/dispatch,
-// TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory, three steps: the budget filled,
-// the cold reads' cache filled, the heaviest handoffs applying beside full copy bounds), it peaked
-// by step at 2,856, 3,620 and 3,237 MiB of the pod's 4,096, 476 MiB under it, the drive taking
-// 405 s and the keystrokes a person typed through both heavy steps answered in a 99th percentile
-// of 92 ms.
-//
-// The VmRSS that run read was 2,862, 3,625 and 3,749 MiB, each above the charge, and is not what a
-// pod is charged: this repository's sandboxes run under gVisor, whose VmRSS keeps every page the
-// runtime has handed back unless the madvise(MADV_DONTNEED) that released it covered 2 MiB or
-// more, and the scavenger releases in smaller pieces (cmd/dispatch, peakResident, which reads the
-// charged figure from the server's own memory trace). Dispatch's own pods are not sandboxed - the
-// GKE Autopilot deployment names no runtimeClassName and no GKE Sandbox node pool
-// (infra/gcp/dispatch_kube.go:492-501) - so what is charged there is what the limit bounds. The
-// 4,302 and 4,424 MiB earlier runs of that drive recorded were VmRSS read on this sandbox, not
-// memory any pod was charged.
-const heapSlackBytes = heapAboveTheReserve / 3
-
-// applyTooHeavyBytes is the estimate (peerWeighing.applyHeap) past which the hook refuses an
-// update as too heavy to apply at the calibration (errApplyTooHeavy): all of heapAboveTheReserve,
-// 1,181,116,006 bytes, both bounds and the slack together, so that no apply is refused that could
-// run with every other weighed heap at rest; at another limit it is all of what that limit leaves
-// above its own reserve (MemoryBounds.ApplyTooHeavy). An update estimated past applyHeapBound and
-// within it is never refused: it waits for the whole apply bound and then runs alone
-// (applyHeaps.hold). The estimate bounds what an apply allocates from above: the heaviest
-// server-written document's handoff is
-// estimated at 71,356,658 bytes and allocates 33,410,168, and no handoff of the editor's is
-// estimated past three times what it allocates (TestEveryApplysTransientHeapIsWithinItsEstimate).
-//
-// It stays above the estimate of every honest whole-state handoff at F, the heaviest frame the
-// hook lets a browser hand over (heaviestHandoffBound), measured on 2026-10-28 into the room
-// holding each (TestAnHonestHandoffAtTheHeaviestFrameIsNeverRefusedAsTooHeavy): 904,378,600 bytes
-// for the heaviest, the long-edited document typed on until 4,096 structs short of the decode cap
-// and padded to F by text nested under the margin, 276,737,406 under this line; 657,900,131 for
-// the long-edited fixture padded the same way, and 404,291,526 for a paragraph. A frame of null
-// values at the message floor, 56,623,059 bytes, which the editor never sends, is estimated at
-// 3,737,127,910 (TestAnUpdateHeavierThanAnyApplyMayHoldIsNeverApplied), past it, and refused.
-const applyTooHeavyBytes = heapAboveTheReserve
-
 // unweighedApplyHeapBytes is the update's own share of its estimate (peerWeighing.ownApplyHeap)
-// at or under which an admitted update applies without waiting on applyHeapBound: 2 MiB, over
+// at or under which an admitted update applies without waiting on the apply-heap bound
+// (MemoryBounds.ApplyHeap): 2 MiB, over
 // three times the own share of the editor's 64 KiB paste (the creep cap's size, far past a
 // keystroke) into the heaviest document and over four hundred times a keystroke's, so typing never
 // waits on a reconnect storm's handoffs (TestEveryApplysTransientHeapIsWithinItsEstimate). The
@@ -1698,50 +1614,18 @@ const applyTooHeavyBytes = heapAboveTheReserve
 // transaction on a room pays for the room's clients and deleted items, the server's own writes
 // included, and ygo runs one transaction at a time in a room (its document lock), so that share is
 // paid at most once a room at any moment. An unweighed apply runs beside the bound, one per
-// browser's read loop at most, in the slack neither bound grants (heapSlackBytes).
+// browser's read loop at most, in the slack neither bound grants (MemoryBounds.HeapSlack).
 const unweighedApplyHeapBytes = 2 << 20
 
-// applyHeaps is the service's bound on the estimated heap of its weighed applies,
-// MemoryBounds.ApplyHeap of it. Its zero value is ready: the bound is made on first use, at the
-// calibration's applyHeapBound for a service that named no size (New). A waiter has no timeout -
-// it is a browser's read loop waiting its turn, and the browser's next frame waits with it - and
-// holds nothing while it waits, neither part of the bound nor its room's admission lock. Waiters
-// are served in the order they came (semaphore.Weighted), so a heavy handoff is not passed over
-// forever by lighter ones behind it.
-type applyHeaps struct {
-	once  sync.Once
-	bound *semaphore.Weighted
-	// size is the bound: the service's MemoryBounds.ApplyHeap, zero for applyHeapBound.
-	size int64
-}
-
-// limit is the bound's size.
-func (h *applyHeaps) limit() int64 {
-	if h.size > 0 {
-		return h.size
-	}
-	return applyHeapBound
-}
-
-// hold waits until it holds heap of the bound, or the whole bound for a heap past it, and returns
-// what gives it back, which logs the grant where it waited long or held the whole bound
-// (logHeapGrant). With a context that is never done Acquire returns only once it holds what it
-// asked for, so it cannot fail.
-func (h *applyHeaps) hold(heap uint64) (release func()) {
-	size := h.limit()
-	h.once.Do(func() { h.bound = semaphore.NewWeighted(size) })
-	held := int64(min(heap, uint64(size)))
-	started := time.Now()
-	_ = h.bound.Acquire(context.Background(), held)
-	granted := time.Now()
-	return func() {
-		h.bound.Release(held)
-		logHeapGrant("apply", held, size, granted.Sub(started), time.Since(granted))
-	}
-}
+// applyHeapName is what the apply-heap bound's grants are logged as (logHeapGrant, weighedHeaps).
+// The bound itself is the service's (Service.applyHeaps), sized from MemoryBounds.ApplyHeap, and
+// a waiter on it has no timeout - it is a browser's read loop waiting its turn, and the browser's
+// next frame waits with it - and holds nothing while it waits, neither part of the bound nor its
+// room's admission lock.
+const applyHeapName = "apply"
 
 // applyHeap is the estimate of what ygo's apply of the walked update allocates, frame its bytes,
-// into a room of roomStructs structs (structTotal.roomStructs): an upper bound, every factor below
+// into a room of roomStructs structs (roomTotals.roomStructs): an upper bound, every factor below
 // set from TestEveryApplysTransientHeapIsWithinItsEstimate's measurement of ygo's apply at scale
 // (runtime.MemStats.TotalAlloc across one apply, which bounds what the apply holds at its peak
 // from above), into a room's bounded document (newRoomScans) with an update observer, as every
@@ -1880,7 +1764,7 @@ const (
 	// measured for each of 10,000 ranges splitting the room's string, the room's deleted items
 	// included, and 129 for a range of a client the room has not seen.
 	applyHeapPerDeleteRange = 768
-	// applyHeapPerAnyValue is each lib0 Any value, at every depth (anyValuesApplyHeap): its slot in
+	// applyHeapPerAnyValue is each lib0 Any value, at every depth (contentShape.anyHeap): its slot in
 	// the item's values and their normalised copy, a boxed scalar or string header, and the copy a
 	// partly held item's split makes of its values. 3,835,480 bytes measured for 100,000 null
 	// values in one struct, 38 a value.
@@ -1898,7 +1782,7 @@ const (
 	// slots, at a load as low as a map just past a growth leaves them. 124 bytes an entry
 	// measured for maps of 10,000 entries, with each entry's key and value.
 	applyHeapPerAnyMapEntry = 64
-	// applyHeapPerJSONText is each JSON text ygo decodes with encoding/json (jsonTextApplyHeap):
+	// applyHeapPerJSONText is each JSON text ygo decodes with encoding/json (contentShape.jsonHeap):
 	// its slot in the item's values and what encoding/json allocates for any text. 80 bytes
 	// measured for a null text.
 	applyHeapPerJSONText = 64
@@ -1941,8 +1825,9 @@ func (c *applyCost) add(other applyCost) {
 	c.integrate += other.integrate
 }
 
-// structApplyHeap is walked's applyCost. walkUpdate has read walked's content already and refuses
-// an update it cannot, so the readers below read what they know is there.
+// structApplyHeap is walked's applyCost: arithmetic over what the walk counted inside its content
+// as it read it (contentShape), so that the content is read once, by the walk that also refuses
+// what ygo's decode would refuse (walkUpdate).
 func structApplyHeap(walked updateStruct) applyCost {
 	switch walked.kind {
 	case structGC, structSkip:
@@ -1952,146 +1837,43 @@ func structApplyHeap(walked updateStruct) applyCost {
 	if walked.keyed {
 		cost.decode += applyHeapPerKey
 	}
-	content, pos := walked.content, 0
-	switch walked.kind {
-	case structType:
+	if walked.kind == structType {
 		cost.add(applyCost{decode: applyHeapPerType, integrate: applyHeapPerNewType})
-	case structAny:
-		n, _ := readVarUint(content, &pos)
-		cost.add(anyValuesApplyHeap(content, &pos, n))
-	case structJSON:
-		cost.add(jsonContentApplyHeap(content))
-	case structEmbed:
-		text, _ := readVarBytes(content, &pos)
-		cost.add(jsonTextApplyHeap(text))
-	case structFormat:
-		readVarBytes(content, &pos)
-		text, _ := readVarBytes(content, &pos)
-		cost.add(jsonTextApplyHeap(text))
 	}
+	shape := walked.shape
+	if !shape.jsonReadAsAny {
+		cost.add(shape.anyHeap())
+		cost.add(shape.jsonHeap())
+		return cost
+	}
+	// A ContentJSON item whose values read only as lib0 Any is charged both readings, the values
+	// slice the failed reading of them as JSON text made included (contentShape.jsonReadAsAny);
+	// integrated, every value is written as JSON text again, taken at four bytes of text for each
+	// byte of lib0 Any, and the values the first reading read are not written twice.
+	cost.decode += shape.anyHeap().decode + shape.jsonHeap().decode + walked.length*applyHeapPerJSONText
+	cost.integrate += walked.length*applyHeapPerNewJSONText + 4*applyHeapPerNewJSONByte*uint64(len(walked.content))
 	return cost
 }
 
-// jsonContentApplyHeap is the applyCost of a ContentJSON item's content. ygo reads its values as
-// JSON text, and when the first starts with a lib0 Any tag and some text does not read, reads them
-// all again as lib0 Any (decodeContent's wireJSON case, crdt/update.go:1051-1082), so such an item
-// is charged both readings, the values slice the failed reading made included; integrated, every
-// value is written as JSON text again, taken at four bytes of text for each byte of lib0 Any.
-func jsonContentApplyHeap(content []byte) applyCost {
-	pos := 0
-	n, _ := readVarUint(content, &pos)
-	legacy := n > 0 && pos < len(content) && isAnyTag(content[pos])
-	start := pos
-	var cost applyCost
-	for range n {
-		text, ok := readVarBytes(content, &pos)
-		if ok {
-			cost.add(jsonTextApplyHeap(text))
-		}
-		if legacy && (!ok || !jsonUnmarshals(text)) {
-			pos = start
-			values := anyValuesApplyHeap(content, &pos, n)
-			return applyCost{
-				decode:    cost.decode + n*applyHeapPerJSONText + values.decode,
-				integrate: n*applyHeapPerNewJSONText + 4*applyHeapPerNewJSONByte*uint64(len(content)),
-			}
-		}
-		if !ok {
-			break
-		}
-	}
-	return cost
-}
-
-// jsonTextApplyHeap is the applyCost of one JSON text ygo decodes with encoding/json: the text, its
-// containers and its separators, counted outside its strings, and its bytes beyond the frame's
-// price.
-func jsonTextApplyHeap(text []byte) applyCost {
-	containers, separators := uint64(0), uint64(0)
-	for j := 0; j < len(text); j++ {
-		switch text[j] {
-		case '"':
-			for j++; j < len(text) && text[j] != '"'; j++ {
-				if text[j] == '\\' {
-					j++
-				}
-			}
-		case '{', '[':
-			containers++
-		case ',', ':':
-			separators++
-		}
-	}
+// anyHeap is the applyCost of the lib0 Any values the walk counted in a struct's content, each
+// value at every depth with its arrays, its maps and those maps' entries, as anycodec's readAny
+// reads them (internal/anycodec/decoder.go:261-393).
+func (s contentShape) anyHeap() applyCost {
 	return applyCost{
-		decode: applyHeapPerJSONText + containers*applyHeapPerJSONContainer + separators*applyHeapPerJSONMember +
-			uint64(len(text))*applyHeapPerJSONByte,
-		integrate: applyHeapPerNewJSONText + separators*applyHeapPerNewJSONMember +
-			uint64(len(text))*applyHeapPerNewJSONByte,
+		decode: s.anyValues*applyHeapPerAnyValue + s.anyArrays*applyHeapPerAnyArray +
+			s.anyMaps*applyHeapPerAnyMap + s.anyEntries*applyHeapPerAnyMapEntry,
+		integrate: s.anyValues * applyHeapPerNewAnyValue,
 	}
 }
 
-// anyValuesApplyHeap is the applyCost of the n lib0 Any values at *pos in buf, each value at every
-// depth with its arrays and maps, read as anycodec's readAny reads them
-// (internal/anycodec/decoder.go:261-393).
-func anyValuesApplyHeap(buf []byte, pos *int, n uint64) applyCost {
-	var shape anyShape
-	for range n {
-		if !shape.value(buf, pos, 0) {
-			break
-		}
-	}
+// jsonHeap is the applyCost of the JSON texts the walk counted in a struct's content, which ygo
+// decodes with encoding/json: each text, its containers and its separators, counted outside its
+// strings, and its bytes beyond the frame's price.
+func (s contentShape) jsonHeap() applyCost {
 	return applyCost{
-		decode: shape.values*applyHeapPerAnyValue + shape.arrays*applyHeapPerAnyArray +
-			shape.maps*applyHeapPerAnyMap + shape.entries*applyHeapPerAnyMapEntry,
-		integrate: shape.values * applyHeapPerNewAnyValue,
+		decode: s.jsonTexts*applyHeapPerJSONText + s.jsonContainers*applyHeapPerJSONContainer +
+			s.jsonSeparators*applyHeapPerJSONMember + s.jsonBytes*applyHeapPerJSONByte,
+		integrate: s.jsonTexts*applyHeapPerNewJSONText + s.jsonSeparators*applyHeapPerNewJSONMember +
+			s.jsonBytes*applyHeapPerNewJSONByte,
 	}
-}
-
-// anyShape counts the parts of lib0 Any values ygo's decode allocates for: values at every depth,
-// arrays, maps, and map entries past each map's first group of eight slots.
-type anyShape struct {
-	values, arrays, maps, entries uint64
-}
-
-// value reads one Any value at *pos into the shape and reports whether it read.
-func (s *anyShape) value(buf []byte, pos *int, depth int) bool {
-	if depth > maxAnyDepth || *pos >= len(buf) {
-		return false
-	}
-	tag := buf[*pos]
-	*pos++
-	s.values++
-	switch tag {
-	case 125: // integer
-		return readVarInt(buf, pos)
-	case 124: // float32
-		*pos += 4
-	case 123, 122: // float64, bigint64
-		*pos += 8
-	case 119, 116: // string, binary
-		_, ok := readVarBytes(buf, pos)
-		return ok
-	case 117, 118: // array, object
-		n, ok := readVarUint(buf, pos)
-		if !ok {
-			return false
-		}
-		if tag == 117 {
-			s.arrays++
-		} else {
-			s.maps++
-			s.entries += n - min(n, 8)
-		}
-		for range n {
-			if tag == 118 {
-				if _, ok := readVarBytes(buf, pos); !ok {
-					return false
-				}
-			}
-			if !s.value(buf, pos, depth+1) {
-				return false
-			}
-		}
-	}
-	return *pos <= len(buf)
 }

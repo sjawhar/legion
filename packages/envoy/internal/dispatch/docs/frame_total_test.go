@@ -59,7 +59,7 @@ func weighedPeer(t *testing.T, room *crdt.Doc, update []byte) peerWeighing {
 // framePadded makes replica's totals count the room's whole-state frame as pad bytes more than it
 // is, so a test can stand the frame total at F without building a room of forty-five mebibytes, and
 // recounts them; it counts the counts as countedStructTotal does.
-func framePadded(t *testing.T, replica *renderedReplica, room *crdt.Doc, pad uint64) (*structTotal, *atomic.Int64) {
+func framePadded(t *testing.T, replica *renderedReplica, room *crdt.Doc, pad uint64) (*roomTotals, *atomic.Int64) {
 	t.Helper()
 	total, counts := countedStructTotal(t, replica)
 	total.count = func(doc *crdt.Doc) roomCount {

@@ -50,7 +50,7 @@ type loadedState struct {
 	// they wait. Whoever takes the record gives the grant back: onLoadDocument, once its apply has
 	// returned, and the room's next load, which replaces a record ygo never handed to that hook
 	// (beginRoomLoad).
-	grant *copyGrant
+	grant *heapGrant
 }
 
 // roomLoad is one room load's record of the durable history behind the room it loads, kept from
@@ -97,7 +97,7 @@ func (s *Service) beginRoomLoad(room string) *roomLoad {
 // holds every update through, the state through that head, which the room's load applies itself
 // (applyLoadedState), the decode of that state it made of its own, and the grant that covers that
 // decode and that apply after it.
-func (load *roomLoad) read(head persistence.Version, state []byte, decoded decodedState, grant *copyGrant) {
+func (load *roomLoad) read(head persistence.Version, state []byte, decoded decodedState, grant *heapGrant) {
 	load.mu.Lock()
 	defer load.mu.Unlock()
 	load.head, load.loaded = int64(head), loadedState{state: state, decoded: decoded, grant: grant}

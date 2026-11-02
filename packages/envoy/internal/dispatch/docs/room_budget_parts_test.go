@@ -365,7 +365,8 @@ func TestTheRoomBudgetChargesEveryServerWritesStructureAndRefusesNone(t *testing
 // do not reach; once a paste takes it past, the rendering is counted at once, both while the room
 // waits out the interval and when it waits for nothing.
 func TestTheMeasurerCountsARoomEarlyOnceItsUncountedPartPassesTheThresholdAndNeverForTyping(t *testing.T) {
-	service := &Service{budget: roomBudget{limit: roomBudgetBytes}}
+	service := calibratedService()
+	service.budget.limit = roomBudgetBytes
 	service.measurer.interval = time.Hour
 	counted := make(chan string, 4)
 	service.measurer.beforeCount = func(markdown string) { counted <- markdown }

@@ -877,7 +877,7 @@ func TestTheHeaviestHandoffTheBoundsAllowIsNotClosedForSize(t *testing.T) {
 // editor does on every connect, and then edits: the budget admits within one room of the same
 // number and refuses the rest at admission, every browser one or the other and none answered 503,
 // though the counts of their fifty stored versions and the loads of their rooms share one bound
-// (storedCountWeight, copyHeaps) and the last of them waits for the ones before it; and no
+// (storedCountWeight, podCopyHeaps) and the last of them waits for the ones before it; and no
 // admitted browser's handoff or first edit is refused, since a handoff of the state the room
 // holds adds nothing to its charge (deletedRuns) and each room's second copy was charged before
 // the edit made it.
@@ -1152,7 +1152,7 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 			group.Wait()
 		})
 		// What the browsers waited for: the counts of their stored versions and the decodes of
-		// their rooms' loads share the copy-heap bound (storedCountWeight, copyHeaps), and the
+		// their rooms' loads share the copy-heap bound (storedCountWeight, podCopyHeaps), and the
 		// line says how long its longest waiter waited and its longest holder held it.
 		logHeapGrants(t, "the burst", heapGrants(t, server.output.String()))
 		applied, atAdmission, atHandoff, atEdit, unavailable := 0, 0, 0, 0, 0
@@ -2498,8 +2498,9 @@ const (
 	// and its structs (copyHeap, :615-625), from which storedShape computes what an admission
 	// reserves; the struct-dense drives fail unless the server's refusals name that reservation.
 	bytesOfHeapARenderedByteForTest = 12
-	// applyHeapBoundForTest mirrors applyHeapBound (internal/dispatch/docs/peer_update.go:1459)
-	// and copyHeapBoundForTest copyHeapBound (copy_heap.go:54): a third each of what the Go limit
+	// applyHeapBoundForTest mirrors docs.MemoryBounds.ApplyHeap at the calibration
+	// (internal/dispatch/docs/memory_bounds.go) and copyHeapBoundForTest its CopyHeap: a third
+	// each of what the Go limit
 	// leaves above the room budget, the cold reads' cache and the pressure reserve. The server
 	// names its bound in the line it logs for a grant (heapGrantLine), and the heaviest-apply drive
 	// fails unless each is this number.

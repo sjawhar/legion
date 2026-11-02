@@ -129,7 +129,7 @@ func foldThrough(ctx context.Context, tx pgx.Tx, room string, version persistenc
 // document and the update being applied hold at most, and then, before the read-back decodes the
 // state, by that state where it is larger: a delete inside an item splits it, so a state can carry
 // more than the updates that made it. The grant is covered inside tx, whose connection a waiter
-// holds while it waits: no holder of the bound waits for a connection (copyHeaps).
+// holds while it waits: no holder of the bound waits for a connection (podCopyHeaps).
 func fold(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) (state []byte, readBack *crdt.Doc, misread error, err error) {
 	ctx, grant, done := withCopyGrant(ctx)
 	defer done()

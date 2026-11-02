@@ -219,21 +219,21 @@ func (s *Service) lookUpState(room string, create bool) *roomState {
 
 // unlockState unlocks state, room's, forgetting it first when it holds nothing
 // (releaseIfUnusedLocked). A loaded room whose state holds nothing may be one the room budget is
-// waiting to close. While the budget is full, or an admission waits on it (roomBudget.waiters),
-// it may be a room the last sweep could not close that has just become closable, so it starts a
-// sweep, which closes the room and lowers the signal or admits the admission (sweepRooms,
+// waiting to close, which the budget answers without its lock
+// (roomBudget.sweepsForCloses, watchesForCloses): while it is full, or an admission waits on it,
+// the room may be one the last sweep could not close that has just become closable, so it starts
+// a sweep, which closes the room and lowers the signal or admits the admission (sweepRooms,
 // roomBudget.kick). While any room is marked as opened over the budget, it may be that room, now
 // free of the work that opened it (closeIfOpenedOverBudget). Each takes the state again itself,
 // so it starts once the lock is released.
 func (s *Service) unlockState(room string, state *roomState) {
 	s.releaseIfUnusedLocked(room, state)
-	watched := s.budget.full.Load() || s.budget.waiters.Load() > 0 || s.budget.marked.Load() > 0
-	closable := watched && !state.released && s.unusedLocked(state) && s.srv.GetDoc(room) != nil
+	closable := s.budget.watchesForCloses() && !state.released && s.unusedLocked(state) && s.srv.GetDoc(room) != nil
 	state.mu.Unlock()
 	if !closable {
 		return
 	}
-	if s.budget.full.Load() || s.budget.waiters.Load() > 0 {
+	if s.budget.sweepsForCloses() {
 		s.budget.kick(room)
 	}
 	s.closeIfOpenedOverBudget(room)

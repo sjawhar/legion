@@ -57,7 +57,7 @@ func BenchmarkLiveDocumentRead(b *testing.B) {
 				}
 			})
 			b.Run(name+"/"+read.name+"/replica", func(b *testing.B) {
-				replica := observedReplica(b, &Service{}, live, nil)
+				replica := observedReplica(b, calibratedService(), live, nil)
 				for b.Loop() {
 					doc := replica.hold()
 					if doc == nil {
@@ -157,7 +157,8 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				service := &Service{budget: roomBudget{limit: roomBudgetBytes}}
+				service := calibratedService()
+				service.budget.limit = roomBudgetBytes
 				replica := observedReplica(b, service, live, &rendering)
 				service.chargeLoadedRoom("bench", live, replica)
 				for b.Loop() {
@@ -211,7 +212,7 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 // KiB room, the size BenchmarkKeystrokeBesideReads types into. Every update is walked
 // (walkUpdate), netted against the room's state vector and its apply's heap estimated from the same
 // walk (peerWeighing.applyHeap), and its addition weighed against the room's struct total
-// (structTotal) under the room's admission lock; it is weighed twice: against a room whose
+// (roomTotals) under the room's admission lock; it is weighed twice: against a room whose
 // published measurement is under the bound, where the walk's bytes admit it, and against a room
 // whose measurement is at pmdoc.MaxDocumentBytes, where what the walk found it inserts beyond the
 // room's state is weighed too. The apply the hook is handed does nothing: what
@@ -233,7 +234,7 @@ func BenchmarkPeerUpdateWeighing(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	service := &Service{}
+	service := calibratedService()
 	replica := service.keepReplica(live, nil, &rendering, nil)
 	update := benchmarkKeystrokeUpdate(b, live)
 	published, _, measured := replica.size()

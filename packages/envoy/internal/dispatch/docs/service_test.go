@@ -40,6 +40,17 @@ func headerIdentity(database *store.Store) identity.HeaderIdentity {
 	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, testSigningKey, nil)}
 }
 
+// calibratedService is a service holding the calibration's memory bounds and nothing else: the
+// bounds a process that names no Go memory limit runs under (calibratedBounds), which is what
+// every figure this package measures was measured against. A test that drives one part of the
+// service - the peer update hook, the measurer, a replica - builds one of these and sets the
+// fields that part reads, where a test of the whole service builds New's (newTestService). Both
+// the bounds the hook reads (Service.memory) and the apply-heap bound it holds out of
+// (Service.applyHeaps) are sized here, since the service is never built without them.
+func calibratedService() *Service {
+	return &Service{memory: calibratedBounds, applyHeaps: newWeighedHeaps(applyHeapName, calibratedBounds.ApplyHeap)}
+}
+
 func newTestService(t *testing.T) (*Service, string) {
 	t.Helper()
 	database := storetest.Open(t)

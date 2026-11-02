@@ -143,7 +143,8 @@ func TestTheRoomBudgetChargesARoomItsCountItsUncountedContentAndItsStructure(t *
 // and at a later count alike.
 func TestTheMeasurersCountClearsOnlyTheContentAddedUpToTheRenderingItMeasured(t *testing.T) {
 	const densest = bytesOfHeapAByteAtTheDensest * roomCopies
-	service := &Service{budget: roomBudget{limit: roomBudgetBytes}}
+	service := calibratedService()
+	service.budget.limit = roomBudgetBytes
 	service.measurer.interval = noInterval
 	// Each count the measurer starts is handed over here and held until the test releases it.
 	counting, release := make(chan string, 2), make(chan struct{}, 2)
@@ -763,7 +764,7 @@ func TestTwoAdmissionsAtOnceCountTheStoredVersionOnce(t *testing.T) {
 }
 
 // The counts of distinct documents each wait for a grant of the copy-heap bound, in the order they
-// asked for it (copyHeaps), so in a burst that fills the bound the last of them waits for every
+// asked for it (podCopyHeaps), so in a burst that fills the bound the last of them waits for every
 // count before it. Each count's read bound (coldReadTimeout) starts once it holds that grant, not
 // when its admission asks: against a bound one count fills, n admissions of n documents whose
 // counts each take twice the bound over n, the burst together twice the bound, all complete, none
@@ -776,7 +777,7 @@ func TestABurstOfAdmissionsToDistinctDocumentsCountsEachWithinItsOwnReadBound(t 
 	database := storetest.Open(t)
 	service := newRoomBudgetService(t, database, NewPgVersioned(database))
 	rooms := createDocuments(t, database, n)
-	useCopyHeaps(t, &copyHeaps{size: storedCountGrant(t, database, rooms[0], 1)})
+	useCopyHeaps(t, newWeighedHeaps(copyHeapName, storedCountGrant(t, database, rooms[0], 1)))
 	oldTimeout := coldReadTimeout
 	coldReadTimeout = bound
 	t.Cleanup(func() { coldReadTimeout = oldTimeout })
@@ -840,7 +841,7 @@ func TestAnAdmissionWhoseRequestEndsWhileItsCountWaitsForItsGrantLeavesTheCountT
 	service := newRoomBudgetService(t, database, NewPgVersioned(database))
 	ids := createDocuments(t, database, 3)
 	held, shared, abandoned := ids[0], ids[1], ids[2]
-	useCopyHeaps(t, &copyHeaps{size: storedCountGrant(t, database, held, 1)})
+	useCopyHeaps(t, newWeighedHeaps(copyHeapName, storedCountGrant(t, database, held, 1)))
 	var mu sync.Mutex
 	parsed := map[string]int{}
 	counting, release := make(chan struct{}, 1), make(chan struct{})
@@ -954,7 +955,7 @@ func TestCountsOfStoredVersionsRunBesideEachOtherWithinTheCopyHeapBound(t *testi
 	service := newRoomBudgetService(t, database, NewPgVersioned(database))
 	rooms := createDocuments(t, database, n)
 	weight := storedCountGrant(t, database, rooms[0], 1)
-	heaps := useCopyHeaps(t, &copyHeaps{size: together * weight})
+	heaps := useCopyHeaps(t, newWeighedHeaps(copyHeapName, together*weight))
 	var most atomic.Int64
 	heaps.granted = func(held int64) {
 		for seen := most.Load(); held > seen && !most.CompareAndSwap(seen, held); seen = most.Load() {
@@ -992,7 +993,7 @@ func TestCountsOfStoredVersionsRunBesideEachOtherWithinTheCopyHeapBound(t *testi
 	// The fourth count waits for its grant: nothing else gives one back while these three are held.
 	select {
 	case room := <-counting:
-		t.Fatalf("a fourth count of %s started with the %d-byte bound held by %d counts of %d bytes each", room, heaps.limit(), together, weight)
+		t.Fatalf("a fourth count of %s started with the %d-byte bound held by %d counts of %d bytes each", room, heaps.size, together, weight)
 	case <-time.After(250 * time.Millisecond):
 	}
 	if parses.Load() != together {
@@ -1018,12 +1019,12 @@ func TestCountsOfStoredVersionsRunBesideEachOtherWithinTheCopyHeapBound(t *testi
 		}
 	}
 	t.Logf("%d counts of %d bytes each against a %d-byte bound: %d ran at once, the bound holding %d at its most",
-		n, weight, heaps.limit(), together, most.Load())
+		n, weight, heaps.size, together, most.Load())
 	if parses.Load() != n {
 		t.Fatalf("the burst parsed %d times, want each of the %d documents counted once", parses.Load(), n)
 	}
-	if most.Load() != heaps.limit() {
-		t.Fatalf("the bound held %d bytes at its most, want all %d of it: %d counts of %d bytes ran at once", most.Load(), heaps.limit(), together, weight)
+	if most.Load() != heaps.size {
+		t.Fatalf("the bound held %d bytes at its most, want all %d of it: %d counts of %d bytes ran at once", most.Load(), heaps.size, together, weight)
 	}
 }
 
@@ -1408,7 +1409,7 @@ func storedHistoryStructs(t *testing.T, database *store.Store, room string) int6
 	return int64(structs)
 }
 
-// liveStructs is the struct total room's resident document counted last (structTotal), which its
+// liveStructs is the struct total room's resident document counted last (roomTotals), which its
 // load charged it by.
 func liveStructs(t *testing.T, service *Service, room string) int64 {
 	t.Helper()

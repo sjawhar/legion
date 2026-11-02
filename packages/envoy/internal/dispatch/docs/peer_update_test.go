@@ -23,6 +23,14 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
+// The apply-heap bound and the too-heavy line of a service at the calibration, which is what
+// every test here builds (calibratedBounds, calibratedService), as unsigned, which is how the
+// hook's estimates of an apply's heap are counted (peerWeighing.applyHeap).
+var (
+	calibratedApplyHeap     = uint64(calibratedBounds.ApplyHeap)
+	calibratedApplyTooHeavy = uint64(calibratedBounds.ApplyTooHeavy)
+)
+
 // The hook is driven here at its own level, as ygo drives it: the room's document, the update's
 // bytes, and an apply that applies the update to that document exactly as the room's own does
 // (sjawhar/ygo v1.54.1-sami.1, provider/websocket/peer_update.go:84-89). What a real browser meets
@@ -233,6 +241,14 @@ func TestAPeerUpdateIsWeighedAgainstTheRoomsLastMeasurement(t *testing.T) {
 	}
 }
 
+// runningStructs is the struct total of the room's totals as it stands, and whether a write the
+// hook did not see has landed since the count (roomTotals.runningTotals): the one of the three
+// totals these tests read on its own.
+func (t *roomTotals) runningStructs() (uint64, bool) {
+	running, stale := t.runningTotals()
+	return running.structs, stale
+}
+
 // peerUpdateRoom is a room holding markdown, bounded as every room's document is (newRoomScans),
 // with the measurement its load publishes (keepReplica), and nothing else of the service: the hook
 // reads the room's document and that measurement alone. leastBytes is what the rendering must
@@ -257,7 +273,7 @@ func peerUpdateRoom(t *testing.T, markdown string, leastBytes int) (*Service, *c
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := &Service{}
+	service := calibratedService()
 	replica := service.keepReplica(room, nil, &rendering, nil)
 	bytes, elements, measured := replica.size()
 	if !measured || bytes < int64(leastBytes) {
@@ -393,7 +409,7 @@ func proseAtLeast(bytes int) string {
 // maxAnchorBytes - whose whole state is far more than its markdown: growth.go:14-18 records
 // thirty-two suggestions of 900 KB that left the markdown as it was. What this does not weigh is
 // the items a long edit history tombstones, which no rendering shows and which the decode cap
-// bounds instead (maxUpdateItems: refuseUndecodable, and the peer update hook's structTotal);
+// bounds instead (maxUpdateItems: refuseUndecodable, and the peer update hook's roomTotals);
 // TestTheHeaviestWholeStateFrameTheServerStoresFitsTheMessageFloor weighs those.
 func TestTheHeaviestWholeStateFrameFitsTheMessageFloor(t *testing.T) {
 	frame := len(crdt.EncodeStateAsUpdateV1(heaviestDocument(t), nil))
@@ -609,7 +625,7 @@ func TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor(t *testing
 	}
 	serverWritten := len(crdt.EncodeStateAsUpdateV1(room, nil))
 	serverUnrendered := countRoom(room).unrendered
-	service := &Service{}
+	service := calibratedService()
 	replica := service.keepReplica(room, nil, &rendering, nil)
 	// A client id of five bytes, the most a lib0 varint of one takes, which most random ids are:
 	// every origin of every struct the browser writes names it, so a smaller one would measure a
@@ -692,7 +708,7 @@ func TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor(t *testing
 	held, _ := applyHeapEstimate(t, room, state)
 	handedOver, _ := applyHeapEstimate(t, newDocumentCopy(), state)
 	t.Logf("its handoff is estimated at %d bytes into the room holding it and %d into a fresh one, against the %d-byte apply heap bound",
-		held, handedOver, uint64(applyHeapBound))
+		held, handedOver, calibratedApplyHeap)
 	if frame*4 > maxMessageBytes {
 		t.Fatalf("the heaviest whole-state frame a browser can grow is %d bytes, past a quarter of the %d-byte message floor: "+
 			"measure it again and set the floor at four times it, or take it back to the design if four times it passes the 64 MiB ygo allowed before",
@@ -798,7 +814,7 @@ func requireRefusedTooLarge(t *testing.T, err error, called bool, room *crdt.Doc
 
 // countedStructTotal is replica's totals with their counts counted: the count of the room's state
 // the hook or the measurer takes calls it once each.
-func countedStructTotal(t *testing.T, replica *renderedReplica) (*structTotal, *atomic.Int64) {
+func countedStructTotal(t *testing.T, replica *renderedReplica) (*roomTotals, *atomic.Int64) {
 	t.Helper()
 	total := replica.structs
 	if total == nil {
@@ -992,7 +1008,7 @@ func TestEveryRefusalOfTheHookCarriesItsOwnCodeAndReason(t *testing.T) {
 			name: "an update past the decode cap", code: contracts.DocumentTooLargeCloseCode, reason: contracts.DocumentTooLargeCloseReason,
 			refusal: func(t *testing.T) (*Service, *crdt.Doc, []byte, any) {
 				service, room, replica := peerUpdateRoom(t, ordinary, 0)
-				held, _ := replica.structs.running()
+				held, _ := replica.structs.runningStructs()
 				return service, room, gcFrameFrom(7, int((maxUpdateItems-held)/(1+splitsAStructCanCause))+1), replica
 			},
 		},
@@ -1102,7 +1118,7 @@ func TestAnUpdatePastTheRoomsStructTotalIsRefused(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			service, room, replica := peerUpdateRoom(t, ordinary, 0)
 			total, counts := countedStructTotal(t, replica)
-			held, stale := total.running()
+			held, stale := total.runningStructs()
 			if stale || held != countRoomStructs(room) {
 				t.Fatalf("the room's total is %d (stale %t), want its exact count %d", held, stale, countRoomStructs(room))
 			}
@@ -1123,7 +1139,7 @@ func TestAnUpdatePastTheRoomsStructTotalIsRefused(t *testing.T) {
 			if err != nil || !called {
 				t.Fatalf("the hook answered %v (applied %t), want the update admitted", err, called)
 			}
-			if after, _ := total.running(); after > maxUpdateItems || countRoomStructs(room) > after {
+			if after, _ := total.runningStructs(); after > maxUpdateItems || countRoomStructs(room) > after {
 				t.Fatalf("the room's total is %d after the update, want within %d and no less than its exact count %d", after, maxUpdateItems, countRoomStructs(room))
 			}
 		})
@@ -1136,7 +1152,7 @@ func TestAnUpdatePastTheRoomsStructTotalIsRefused(t *testing.T) {
 func TestARunningStructTotalPastTheCapIsConfirmedBeforeItRefuses(t *testing.T) {
 	service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
 	total, counts := countedStructTotal(t, replica)
-	total.admitted.Add(maxUpdateItems)
+	total.admitted.add(roomCount{structs: maxUpdateItems})
 	update := peerTyping(t, room, "y")
 	weighed := peerWeighing{held: room.StateVector()}
 	if _, err := walkUpdate(update, fromPeer, &weighed); err != nil {
@@ -1151,7 +1167,7 @@ func TestARunningStructTotalPastTheCapIsConfirmedBeforeItRefuses(t *testing.T) {
 	if counts.Load() != 1 {
 		t.Fatalf("the hook counted the room %d times, want one confirmation", counts.Load())
 	}
-	if after, _ := total.running(); after != exact+weighed.added() {
+	if after, _ := total.runningStructs(); after != exact+weighed.added() {
 		t.Fatalf("the room's total is %d after the confirmation, want the count's %d and the keystroke's %d", after, exact, weighed.added())
 	}
 }
@@ -1173,15 +1189,15 @@ func TestAStaleStructTotalNearTheCapIsConfirmedBeforeItAdmits(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
 			total, counts := countedStructTotal(t, replica)
-			held, _ := total.running()
-			total.admitted.Add(maxUpdateItems - row.short - held)
+			held, _ := total.runningStructs()
+			total.admitted.add(roomCount{structs: maxUpdateItems - row.short - held})
 			if row.stale {
 				// A server write: a transaction on the room of an origin that is not a hook's
 				// apply, as Server.Apply's are.
 				text := firstText(room.GetXmlFragment(fragmentName))
 				room.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "s", nil) }, "server")
 			}
-			if _, stale := total.running(); stale != row.stale {
+			if _, stale := total.runningStructs(); stale != row.stale {
 				t.Fatalf("the total reads stale %t, want %t", stale, row.stale)
 			}
 			err, called := weighInto(service, room, peerTyping(t, room, "y"))
@@ -1192,7 +1208,7 @@ func TestAStaleStructTotalNearTheCapIsConfirmedBeforeItAdmits(t *testing.T) {
 			if confirmed := counts.Load() == 1; confirmed != row.confirmed || counts.Load() > 1 {
 				t.Fatalf("the hook counted the room %d times, want a confirmation: %t", counts.Load(), row.confirmed)
 			}
-			if _, stale := total.running(); stale != (row.stale && !row.confirmed) {
+			if _, stale := total.runningStructs(); stale != (row.stale && !row.confirmed) {
 				t.Fatalf("the total reads stale %t after the keystroke, want %t", stale, row.stale && !row.confirmed)
 			}
 		})
@@ -1205,7 +1221,7 @@ func TestAStaleStructTotalNearTheCapIsConfirmedBeforeItAdmits(t *testing.T) {
 func TestTheStructTotalsConfirmationIsReusedWithinASixtyFourthOfTheCap(t *testing.T) {
 	service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
 	total, counts := countedStructTotal(t, replica)
-	held, _ := total.running()
+	held, _ := total.runningStructs()
 	// What the room cannot take is the same frame each time, since nothing refused moves the room.
 	pastTheCap := gcFrameFrom(7, int((maxUpdateItems-held)/(1+splitsAStructCanCause))+1)
 	refuse := func(wantCounts int64) {
@@ -1275,11 +1291,11 @@ func TestTheStructTotalALoadCountsIsTheWalkOfTheRoomsEncodedState(t *testing.T) 
 	if walked.structs < integrated.structs+uint64(pending.Items) {
 		t.Fatalf("the room's encoded state walks %d structs, want its %d integrated and its %d parked", walked.structs, integrated.structs, pending.Items)
 	}
-	service := &Service{}
+	service := calibratedService()
 	rendering := "# Title\n\nOne paragraph of ordinary prose.\n"
 	replica := service.keepReplica(room, nil, &rendering, nil)
 	want := walked.structs + splitsAStructCanCause*uint64(pending.Items+pending.DeleteRanges)
-	if total, stale := replica.structs.running(); total != want || stale {
+	if total, stale := replica.structs.runningStructs(); total != want || stale {
 		t.Fatalf("the load counted a total of %d (stale %t), want the walk's %d structs and the splits of %d parked structs and %d parked ranges, %d",
 			total, stale, walked.structs, pending.Items, pending.DeleteRanges, want)
 	}
@@ -1355,7 +1371,7 @@ func TestADeleteRangeTheRoomHoldsAddsNothingToTheStructTotal(t *testing.T) {
 			if after-before > row.added || (row.added == 0 && after != before) {
 				t.Fatalf("the range took the room's count from %d to %d, want it to grow by no more than the %d it added", before, after, row.added)
 			}
-			if total, stale := replica.structs.running(); total < after || stale {
+			if total, stale := replica.structs.runningStructs(); total < after || stale {
 				t.Fatalf("the room's total is %d (stale %t), want no less than its exact count %d", total, stale, after)
 			}
 			runtime.KeepAlive(replica)
@@ -1369,12 +1385,12 @@ func TestTheMeasurersCountReBasesTheStructTotal(t *testing.T) {
 	service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
 	service.measurer.interval = noInterval
 	total, counts := countedStructTotal(t, replica)
-	total.admitted.Add(maxUpdateItems / 2)
+	total.admitted.add(roomCount{structs: maxUpdateItems / 2})
 	rendering := headings(1)
 	replica.publishSize(&rendering)
 	service.measurer.waitIdle()
 	runtime.KeepAlive(room)
-	if got, stale := total.running(); counts.Load() != 1 || got != countRoomStructs(room) || stale {
+	if got, stale := total.runningStructs(); counts.Load() != 1 || got != countRoomStructs(room) || stale {
 		t.Fatalf("after the measurer's count the total is %d (stale %t, %d counts), want the room's exact count %d", got, stale, counts.Load(), countRoomStructs(room))
 	}
 }
@@ -1436,7 +1452,7 @@ func TestAPeerUpdateIsAppliedWhileAnotherBrowsersApplyIsStillRunning(t *testing.
 	case <-time.After(10 * time.Second):
 		t.Fatal("the second browser's keystroke waited on the first browser's apply")
 	}
-	if running, stale := total.running(); running < countRoomStructs(room) || stale {
+	if running, stale := total.runningStructs(); running < countRoomStructs(room) || stale {
 		t.Fatalf("with the first apply in flight the total is %d (stale %t), want no less than the room's exact count %d and fresh", running, stale, countRoomStructs(room))
 	}
 
@@ -1444,7 +1460,7 @@ func TestAPeerUpdateIsAppliedWhileAnotherBrowsersApplyIsStillRunning(t *testing.
 	if err := <-firstAnswer; err != nil {
 		t.Fatalf("the hook answered %v for the first browser's keystroke, want it admitted", err)
 	}
-	running, stale := total.running()
+	running, stale := total.runningStructs()
 	if running < countRoomStructs(room) || stale {
 		t.Fatalf("after both applies the total is %d (stale %t), want no less than the room's exact count %d and fresh", running, stale, countRoomStructs(room))
 	}
@@ -1489,7 +1505,7 @@ func TestTwoReservationsOfTheStructTotalNearTheCapCannotBothPassIt(t *testing.T)
 		if err := <-firstAnswer; err != nil {
 			t.Fatalf("the hook answered %v for the first update, want it admitted", err)
 		}
-		if running, _ := total.running(); running != near+added {
+		if running, _ := total.runningStructs(); running != near+added {
 			t.Fatalf("the total is %d once the first update landed, want the count's %d and its %d", running, near, added)
 		}
 		runtime.KeepAlive(replica)
@@ -1518,7 +1534,7 @@ func TestTwoReservationsOfTheStructTotalNearTheCapCannotBothPassIt(t *testing.T)
 		if passed.Load() != fit {
 			t.Fatalf("%d of %d racing reservations passed, want the %d the cap has room for", passed.Load(), racers, fit)
 		}
-		if running, _ := total.running(); running != near+fit*added || running > maxUpdateItems {
+		if running, _ := total.runningStructs(); running != near+fit*added || running > maxUpdateItems {
 			t.Fatalf("the total is %d with the reservations in flight, want %d and within the %d cap", running, near+fit*added, maxUpdateItems)
 		}
 		runtime.KeepAlive(replica)
@@ -1526,7 +1542,7 @@ func TestTwoReservationsOfTheStructTotalNearTheCapCannotBothPassIt(t *testing.T)
 }
 
 // applyHeapEstimate is the estimate the hook computes for update arriving at room, a room no load
-// listed (peerWeighing.applyHeap, structTotal.roomStructs), and the update's own share of it
+// listed (peerWeighing.applyHeap, roomTotals.roomStructs), and the update's own share of it
 // (peerWeighing.ownApplyHeap). The update is walked as a room's own state is (fromRoom), which
 // refuses only what ygo cannot decode: the source decides what the walk refuses and nothing of
 // what it hands the weighing, so the estimate of an update the hook admits is the hook's, and the
@@ -1538,7 +1554,7 @@ func applyHeapEstimate(t *testing.T, room *crdt.Doc, update []byte) (estimate, o
 	if _, err := walkUpdate(update, fromRoom, &weighed); err != nil {
 		t.Fatal(err)
 	}
-	var unlisted *structTotal
+	var unlisted *roomTotals
 	return weighed.applyHeap(len(update), unlisted.roomStructs(room)), weighed.ownApplyHeap(len(update))
 }
 
@@ -1913,9 +1929,9 @@ func TestEveryApplysTransientHeapIsWithinItsEstimate(t *testing.T) {
 		_, typed := applyHeapEstimate(t, holding(heaviestState)(t), keystroke(t))
 		t.Logf("the heaviest handoff is estimated at %d bytes into the room holding it, %d into a fresh one; a 64 KiB paste's own share is %d, a keystroke's %d",
 			held, handedOver, pasted, typed)
-		if 5*held > applyHeapBound || handedOver > applyHeapBound {
+		if 5*held > calibratedApplyHeap || handedOver > calibratedApplyHeap {
 			t.Errorf("the heaviest handoff is estimated at %d bytes into the room holding it and %d into a fresh one, past a fifth and the whole of the %d-byte bound",
-				held, handedOver, uint64(applyHeapBound))
+				held, handedOver, calibratedApplyHeap)
 		}
 		if 3*pasted > unweighedApplyHeapBytes || 400*typed > unweighedApplyHeapBytes {
 			t.Errorf("a 64 KiB paste's own share is %d bytes and a keystroke's %d, past a third and a four-hundredth of the %d unweighed",
@@ -1956,7 +1972,7 @@ func builtOnce[V any](build func(t *testing.T) V) func(t *testing.T) V {
 // fails the test rather than hanging it.
 func TestTheApplyHeapBoundHoldsConcurrentApplies(t *testing.T) {
 	const heavyValues = 4_000_000
-	service := &Service{}
+	service := calibratedService()
 	heavy := marginValues(heavyValues, nil)
 	heldClocks := func(room *crdt.Doc) *crdt.Doc {
 		t.Helper()
@@ -1966,7 +1982,7 @@ func TestTheApplyHeapBoundHoldsConcurrentApplies(t *testing.T) {
 		return boundRoomDocument(room)
 	}
 	estimate, own := applyHeapEstimate(t, heldClocks(newDocumentCopy()), heavy)
-	fits := int(applyHeapBound / estimate)
+	fits := int(calibratedApplyHeap / estimate)
 	if own <= unweighedApplyHeapBytes || fits < 1 || fits > 8 {
 		t.Fatalf("the heavy update is estimated at %d bytes, its own share %d, %d to the bound, want its share past %d and a few to the bound",
 			estimate, own, fits, unweighedApplyHeapBytes)
@@ -2080,9 +2096,9 @@ func TestTheApplyHeapBoundHoldsConcurrentApplies(t *testing.T) {
 	for err := range refused {
 		t.Errorf("the hook refused a heavy update: %v", err)
 	}
-	if got := most.Load(); got > applyHeapBound || got < uint64(fits)*estimate {
+	if got := most.Load(); got > calibratedApplyHeap || got < uint64(fits)*estimate {
 		t.Fatalf("the heavy applies held %d bytes of estimate at most, want at least the %d of %d at once and never past the %d-byte bound",
-			got, uint64(fits)*estimate, fits, applyHeapBound)
+			got, uint64(fits)*estimate, fits, calibratedApplyHeap)
 	}
 }
 
@@ -2094,7 +2110,7 @@ func TestTheApplyHeapBoundHoldsConcurrentApplies(t *testing.T) {
 // bound applies first and holds its part until released, and one past the bound waits until then.
 func TestAnApplyPastTheApplyHeapBoundWaitsForAllOfItAndRunsAlone(t *testing.T) {
 	const lightValues, heavyValues = 4_000_000, 7_000_000
-	service := &Service{}
+	service := calibratedService()
 	holding := func(values int) *crdt.Doc {
 		room := newDocumentCopy()
 		if err := crdt.ApplyUpdateV1(room, newV1Frame(1).group(1, 7, 0).gc(uint64(values)).noDeletes(), nil); err != nil {
@@ -2107,10 +2123,10 @@ func TestAnApplyPastTheApplyHeapBoundWaitsForAllOfItAndRunsAlone(t *testing.T) {
 	lightEstimate, _ := applyHeapEstimate(t, lightRoom, light)
 	heavyEstimate, own := applyHeapEstimate(t, heavyRoom, heavy)
 	t.Logf("the light update is estimated at %d bytes and the heavy one at %d, against the %d-byte bound and the %d-byte line",
-		lightEstimate, heavyEstimate, uint64(applyHeapBound), uint64(applyTooHeavyBytes))
-	if lightEstimate >= applyHeapBound || heavyEstimate <= applyHeapBound || heavyEstimate > applyTooHeavyBytes || own <= unweighedApplyHeapBytes {
+		lightEstimate, heavyEstimate, calibratedApplyHeap, calibratedApplyTooHeavy)
+	if lightEstimate >= calibratedApplyHeap || heavyEstimate <= calibratedApplyHeap || heavyEstimate > calibratedApplyTooHeavy || own <= unweighedApplyHeapBytes {
 		t.Fatalf("the light update is estimated at %d bytes and the heavy one at %d, its own share %d, want the light under the %d-byte bound and the heavy past it, within the %d-byte line and weighed",
-			lightEstimate, heavyEstimate, own, uint64(applyHeapBound), uint64(applyTooHeavyBytes))
+			lightEstimate, heavyEstimate, own, calibratedApplyHeap, calibratedApplyTooHeavy)
 	}
 	release := make(chan struct{})
 	lightStarted, heavyStarted := make(chan struct{}), make(chan bool, 1)
@@ -2172,12 +2188,13 @@ func TestAnApplyPastTheApplyHeapBoundWaitsForAllOfItAndRunsAlone(t *testing.T) {
 			t.Errorf("the hook refused an update: %v", err)
 		}
 	}
-	if !service.applyHeaps.bound.TryAcquire(applyHeapBound) {
+	if !service.applyHeaps.bound.TryAcquire(int64(calibratedApplyHeap)) {
 		t.Fatal("the applies left part of the bound held once both had returned")
 	}
 }
 
-// An update whose estimate alone passes applyTooHeavyBytes could not apply even alone, so the
+// An update whose estimate alone passes the calibration's MemoryBounds.ApplyTooHeavy could not
+// apply even alone, so the
 // hook refuses it with the document's own close, 4413 DOC_TOO_LARGE, errApplyTooHeavy behind it
 // (refusedWith), as it refuses a frame the walk refuses, and never applies
 // it: a frame at the message floor of null values for a client whose every clock the room already
@@ -2199,10 +2216,10 @@ func TestAnUpdateHeavierThanAnyApplyMayHoldIsNeverApplied(t *testing.T) {
 		t.Fatalf("the %d-byte update inserts %d and adds %d structs, want a frame within the floor that inserts and adds nothing", len(update), weighed.inserted, weighed.added())
 	}
 	estimate := weighed.applyHeap(len(update), replica.structs.roomStructs(room))
-	if estimate <= applyTooHeavyBytes {
-		t.Fatalf("the %d-byte update is estimated at %d bytes, within the %d-byte line", len(update), estimate, uint64(applyTooHeavyBytes))
+	if estimate <= calibratedApplyTooHeavy {
+		t.Fatalf("the %d-byte update is estimated at %d bytes, within the %d-byte line", len(update), estimate, calibratedApplyTooHeavy)
 	}
-	t.Logf("a %d-byte update of null values is estimated at %d bytes, against the %d-byte line", len(update), estimate, uint64(applyTooHeavyBytes))
+	t.Logf("a %d-byte update of null values is estimated at %d bytes, against the %d-byte line", len(update), estimate, calibratedApplyTooHeavy)
 	held := room.StateVector()
 	before := crdt.EncodeStateAsUpdateV1(room, nil)
 	err, called := weighInto(service, room, update)
@@ -2284,12 +2301,12 @@ func TestAnHonestHandoffAtTheHeaviestFrameIsNeverRefusedAsTooHeavy(t *testing.T)
 			room, handoff := handoffAtTheHeaviestFrame(t, row.state(t), !row.atCap)
 			estimate, own := applyHeapEstimate(t, room, handoff)
 			t.Logf("a %d-byte handoff, against F's %d, into a room of %d structs is estimated at %d bytes, its own share %d; the apply-heap bound is %d and the too-heavy line %d",
-				len(handoff), uint64(heaviestHandoffBound), countRoomStructs(room), estimate, own, uint64(applyHeapBound), uint64(applyTooHeavyBytes))
+				len(handoff), uint64(heaviestHandoffBound), countRoomStructs(room), estimate, own, calibratedApplyHeap, calibratedApplyTooHeavy)
 			if !row.atCap && len(handoff) < heaviestHandoffBound-64<<10 {
 				t.Fatalf("the handoff is %d bytes, want it within 64 KiB of F's %d", len(handoff), uint64(heaviestHandoffBound))
 			}
-			if estimate > applyTooHeavyBytes {
-				t.Errorf("the handoff is estimated at %d bytes, past the %d-byte line past which an apply is refused as too heavy", estimate, uint64(applyTooHeavyBytes))
+			if estimate > calibratedApplyTooHeavy {
+				t.Errorf("the handoff is estimated at %d bytes, past the %d-byte line past which an apply is refused as too heavy", estimate, calibratedApplyTooHeavy)
 			}
 			rendering, err := renderDocument(room)
 			if err != nil {
@@ -2297,7 +2314,8 @@ func TestAnHonestHandoffAtTheHeaviestFrameIsNeverRefusedAsTooHeavy(t *testing.T)
 			}
 			// The room's load charges it, which lists its delete set as the ranges it holds
 			// deleted (deletedRuns), so a handoff carrying them is weighed as adding none.
-			service := &Service{budget: roomBudget{limit: roomBudgetBytes}}
+			service := calibratedService()
+			service.budget.limit = roomBudgetBytes
 			replica := service.keepReplica(room, nil, &rendering, nil)
 			service.chargeLoadedRoom("room", room, replica)
 			called, alone := false, false
@@ -2322,8 +2340,8 @@ func TestAnHonestHandoffAtTheHeaviestFrameIsNeverRefusedAsTooHeavy(t *testing.T)
 			if err != nil || !called {
 				t.Fatalf("the hook answered %v (applied %t), want the handoff applied", err, called)
 			}
-			if past := estimate > applyHeapBound; alone != past {
-				t.Errorf("the handoff held the whole bound %t while it applied, want %t for an estimate of %d against the %d-byte bound", alone, past, estimate, uint64(applyHeapBound))
+			if past := estimate > calibratedApplyHeap; alone != past {
+				t.Errorf("the handoff held the whole bound %t while it applied, want %t for an estimate of %d against the %d-byte bound", alone, past, estimate, calibratedApplyHeap)
 			}
 		})
 	}
@@ -2367,7 +2385,7 @@ func handoffAtTheHeaviestFrame(t *testing.T, state []byte, pad bool) (room *crdt
 }
 
 // BenchmarkStructTotalConfirmation measures what the hook's confirmation of a room's struct total
-// costs the browser whose update it weighs (structTotal.confirm): an encode of the room's whole
+// costs the browser whose update it weighs (roomTotals.confirm): an encode of the room's whole
 // state and a walk of it (countRoomStructs), on a mebibyte of a room's shape. It reports the
 // encoded state's bytes beside the time and the allocation.
 func BenchmarkStructTotalConfirmation(b *testing.B) {

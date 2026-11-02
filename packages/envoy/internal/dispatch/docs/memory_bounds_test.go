@@ -24,10 +24,10 @@ func TestTheMemoryBoundsAtTheCalibrationAreTodaysConstants(t *testing.T) {
 		RoomBudget:        roomBudgetBytes,
 		DocumentReadCache: documentReadBudget,
 		PressureReserve:   pressureReserveBytes,
-		ApplyHeap:         applyHeapBound,
-		CopyHeap:          copyHeapBound,
-		HeapSlack:         heapSlackBytes,
-		ApplyTooHeavy:     applyTooHeavyBytes,
+		ApplyHeap:         393_705_335,
+		CopyHeap:          393_705_336,
+		HeapSlack:         393_705_335,
+		ApplyTooHeavy:     1_181_116_006,
 		PeerWriteQueue:    peerWriteQueueBytes,
 	}
 	if calibratedGoMemoryLimitBytes != want.Limit {

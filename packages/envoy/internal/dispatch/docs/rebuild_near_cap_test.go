@@ -196,10 +196,7 @@ func TestRebuildingADocumentAtTheDecodeCapLeavesItSmallAndReadingTheSame(t *test
 			if after != before {
 				t.Fatalf("the rebuilt document reads %d bytes, want the %d it read before", len(after), len(before))
 			}
-			history, err := decodeHistory(state)
-			if err != nil {
-				t.Fatal(err)
-			}
+			history := decodedHistory(t, state)
 			fresh, retired := freshStructs(t, loaded.Update), uint64(len(historyClients(history)))
 			if rebuilt > fresh+retired {
 				t.Fatalf("the rebuilt document holds %d structs, want no more than the %d of a fresh document of its text and its %d retired clients", rebuilt, fresh, retired)
@@ -211,14 +208,22 @@ func TestRebuildingADocumentAtTheDecodeCapLeavesItSmallAndReadingTheSame(t *test
 	}
 }
 
+// decodedHistory is update decoded as a room's load decodes it (decodeStoredState), the document
+// alone, failing t where ygo refuses it: what these tests read of a stored history.
+func decodedHistory(t *testing.T, update []byte) *crdt.Doc {
+	t.Helper()
+	decoded, err := decodeStoredState(update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return decoded.doc
+}
+
 // freshStructs is the struct total of a fresh document of the text update's document holds, as
 // an upload of it would seed it (encodeDocumentTree).
 func freshStructs(t *testing.T, update []byte) uint64 {
 	t.Helper()
-	doc, err := decodeHistory(update)
-	if err != nil {
-		t.Fatal(err)
-	}
+	doc := decodedHistory(t, update)
 	tree, err := treeOf(doc)
 	if err != nil {
 		t.Fatal(err)
@@ -227,10 +232,7 @@ func freshStructs(t *testing.T, update []byte) uint64 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fresh, err := decodeHistory(seed)
-	if err != nil {
-		t.Fatal(err)
-	}
+	fresh := decodedHistory(t, seed)
 	return countRoomStructs(fresh)
 }
 
@@ -269,7 +271,7 @@ func rebuiltRoom(t *testing.T, markdown string, retired map[crdt.ClientID]uint64
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := &Service{}
+	service := calibratedService()
 	return service, room, service.keepReplica(room, nil, &rendering, nil)
 }
 
@@ -452,17 +454,14 @@ func tangledHistory(t *testing.T, chain, scanners int) []byte {
 // A history whose re-scan stands within one honest offline handoff of the room's scan total
 // (roomScanTotal, honestHandoffScans) is near the scan total, which leaves every larger merge
 // refused, and a rebuild takes it: the rebuilt history re-scans fewer items than one honest
-// handoff (historyScans, a count of the re-scan's transaction) and reads the same text. The
+// handoff (rescan, a count of the re-scan's transaction) and reads the same text. The
 // tangle's scanners, about 2,000 scans each, are enough to pass the total less one handoff.
 func TestRebuildingADocumentNearTheScanTotalLeavesItWithASmallScanTotalAndReadingTheSame(t *testing.T) {
 	state := tangledHistory(t, 2_000, (roomScanTotal-honestHandoffScans)/2_000+2)
-	history, err := decodeHistory(state)
+	history := decodedHistory(t, state)
+	scans, err := rescan(crdt.EncodeStateAsUpdateV1(history, nil))
 	if err != nil {
-		t.Fatal(err)
-	}
-	scans, counted := historyScans(crdt.EncodeStateAsUpdateV1(history, nil))
-	if !counted {
-		t.Fatal("the tangled history's re-scan could not be counted")
+		t.Fatalf("the tangled history's re-scan could not be counted: %v", err)
 	}
 	if scans+honestHandoffScans < roomScanTotal {
 		t.Fatalf("the tangled history re-scans %d items, want it within %d of the %d scan total: tangle it further", scans, honestHandoffScans, roomScanTotal)
@@ -482,15 +481,12 @@ func TestRebuildingADocumentNearTheScanTotalLeavesItWithASmallScanTotalAndReadin
 	if err != nil {
 		t.Fatal(err)
 	}
-	rebuilt, err := decodeHistory(loaded.Update)
-	if err != nil {
-		t.Fatal(err)
-	}
+	rebuilt := decodedHistory(t, loaded.Update)
 	after, err := service.Text(ctx, artifactID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rescans, _ := historyScans(crdt.EncodeStateAsUpdateV1(rebuilt, nil)); rescans >= honestHandoffScans || after != before {
+	if rescans, _ := rescan(crdt.EncodeStateAsUpdateV1(rebuilt, nil)); rescans >= honestHandoffScans || after != before {
 		t.Fatalf("the rebuilt history re-scans %d items and reads %d bytes, want fewer than %d and the %d it read before", rescans, len(after), honestHandoffScans, len(before))
 	}
 }
@@ -554,8 +550,8 @@ func TestABrowserHoldingTheHistoryARebuildReplacedCannotHandItBack(t *testing.T)
 	if replica == nil || len(replica.structs.retiredClients()) == 0 {
 		t.Fatal("the rebuilt room lists no retired clients")
 	}
-	if total, _ := replica.structs.running(); total > maxUpdateItems/16 || countRoomStructs(live) > maxUpdateItems/16 {
-		t.Fatalf("after the reconnect the room's struct total is %d and its count %d, want both small", total, countRoomStructs(live))
+	if running, _ := replica.structs.runningTotals(); running.structs > maxUpdateItems/16 || countRoomStructs(live) > maxUpdateItems/16 {
+		t.Fatalf("after the reconnect the room's struct total is %d and its count %d, want both small", running.structs, countRoomStructs(live))
 	}
 	after, err := service.Text(ctx, artifactID)
 	if err != nil {
@@ -708,10 +704,7 @@ func TestABrowserHoldingAHistoryARebuildReplacedIsClosedThoughTheWalkRefusesItBe
 	if err != nil {
 		t.Fatal(err)
 	}
-	rebuiltHistory, err := decodeHistory(stored.Update)
-	if err != nil {
-		t.Fatal(err)
-	}
+	rebuiltHistory := decodedHistory(t, stored.Update)
 	if retired := retiredClientsOf(rebuiltHistory); len(retired) != 1 || retired[oneClientWriter] == 0 {
 		t.Fatalf("the rebuilt history lists %v as retired, want the one writer alone", retired)
 	}
@@ -752,10 +745,7 @@ func TestABrowserHoldingAHistoryARebuildReplacedIsClosedThoughTheWalkRefusesItBe
 		if err != nil {
 			t.Fatal(err)
 		}
-		history, err := decodeHistory(stored.Update)
-		if err != nil {
-			t.Fatal(err)
-		}
+		history := decodedHistory(t, stored.Update)
 		rendering, err := renderDocument(history)
 		return err == nil && strings.Contains(rendering, "fresh ") && !strings.Contains(rendering, "unsent")
 	})
@@ -833,7 +823,8 @@ func TestAWholeStateHandoffOfADocumentAtTheDecodeCapIsAdmitted(t *testing.T) {
 			}
 			before := crdt.EncodeStateAsUpdateV1(live, nil)
 			structs := countRoomStructs(live)
-			total, _ := replica.structs.running()
+			running, _ := replica.structs.runningTotals()
+			total := running.structs
 			handoff := crdt.EncodeStateAsUpdateV1(reader.Doc, nil)
 			tally, err := walkUpdate(handoff, fromPeer, nil)
 			if err != nil {
@@ -881,8 +872,8 @@ func TestAWholeStateHandoffOfADocumentAtTheDecodeCapIsAdmitted(t *testing.T) {
 			awaitAnswer(t, reconnected, "the document to a browser holding it")
 			confirmed(reconnected, "the browser that reconnected holding the document")
 			unchanged("the handoffs")
-			if after, _ := replica.structs.running(); after > total {
-				t.Fatalf("after the handoffs the room's struct total is %d, want no more than the %d it stood at", after, total)
+			if after, _ := replica.structs.runningTotals(); after.structs > total {
+				t.Fatalf("after the handoffs the room's struct total is %d, want no more than the %d it stood at", after.structs, total)
 			}
 
 			editing := holding()

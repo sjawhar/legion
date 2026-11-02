@@ -495,10 +495,10 @@ type renderedReplica struct {
 // keystrokes were answered in 14 to 55 ms.
 type roomWeighing struct {
 	// structs is the room's struct total, which the hook refuses an update past the decode cap on
-	// and each of the measurer's counts re-bases (structTotal); scans is the room's scan total and
+	// and each of the measurer's counts re-bases (roomTotals); scans is the room's scan total and
 	// the budget of each remote apply's scans (roomScans). Both are made by the room's load
 	// (keepReplica).
-	structs *structTotal
+	structs *roomTotals
 	scans   *roomScans
 	// bytes and elements are the size of the replica's latest published rendering, published
 	// beside it: bytes for the peer update hook to load (Service.weighPeerUpdate), elements for
@@ -528,7 +528,7 @@ func (w *roomWeighing) roomCharge() *roomCharge {
 }
 
 // totals are the room's struct and scan totals, both nil for a document no room's load listed.
-func (w *roomWeighing) totals() (*structTotal, *roomScans) {
+func (w *roomWeighing) totals() (*roomTotals, *roomScans) {
 	if w == nil {
 		return nil, nil
 	}
@@ -925,7 +925,7 @@ func (r *renderedReplica) standsAt(mark forkReadMark) bool {
 // The decode runs under a grant of the copy-heap bound of its own (holdServerCopy), given back
 // once the copy is the replica's. Its wait has no deadline: it is the update observer's, which
 // holds mu and has no request to end it. No observer runs under a grant, so the observer holds
-// none of the bound as it waits (copyHeaps).
+// none of the bound as it waits (podCopyHeaps).
 func (r *renderedReplica) start(room string, base []byte) {
 	published := r.markdown
 	release := holdServerCopy(len(base))
@@ -1072,7 +1072,7 @@ func (r *renderedReplica) drainedSeq(room string) (seq uint64, settles bool) {
 // a transaction added (contentAdded), whoever wrote it - a browser's update the peer hook
 // admitted, or the server's own write, a repair's included - never the update's bytes, which carry
 // the room's whole delete set on every transaction; and, for a transaction the hook did not apply
-// (structTotal.hookApplies) - an API write's publish, an injected update, settlement's repair, any
+// (roomTotals.hookApplies) - an API write's publish, an injected update, settlement's repair, any
 // other write of the server's own - its structure too, as the hook charges a browser's
 // (roomCharge.wrote), which refuses none of them. Each committed update is charged exactly once,
 // by the observer whose drain of the room's update log hands it over, whichever observer that is:
@@ -1117,13 +1117,13 @@ func (r *renderedReplica) chargeAdded(updates []crdt.LoggedUpdate) {
 // markdown is live's rendering at its load, nil for a document outside the schema. It is the
 // room's first measurement (publishLoadedSize), which the hook weighs the room's first peer update
 // against and the room budget charges the load by (chargeLoadedRoom). It also counts live's struct
-// total (newStructTotal), which the room budget charges the load by beside it (copyHeap), an
+// total (newRoomTotals), which the room budget charges the load by beside it (copyHeap), an
 // encode of live's state and a walk of it, here beside the load's rendering, which has already
 // walked the whole document; the load is not a keystroke. And it sets live's scan budget
 // (newRoomScans), so from here every remote apply on live is bounded, with nothing of the room's
 // scan total used until the load records its re-scan (roomScans.rescanned).
 func (s *Service) keepReplica(live *crdt.Doc, log *crdt.UpdateLog, markdown *string, decoded *crdt.Doc) *renderedReplica {
-	weighing := &roomWeighing{structs: newStructTotal(live), scans: newRoomScans(live)}
+	weighing := &roomWeighing{structs: newRoomTotals(live), scans: newRoomScans(live)}
 	replica := &renderedReplica{log: log, doc: decoded, markdown: markdown, measurer: &s.measurer, roomWeighing: weighing, paths: &s.renderPaths}
 	replica.epoch.Store(replicaEpochs.Add(1))
 	replica.publishLoadedSize(markdown)

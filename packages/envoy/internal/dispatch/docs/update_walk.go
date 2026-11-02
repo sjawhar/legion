@@ -11,7 +11,8 @@ import (
 
 // walkUpdate reads a Yjs V1 update in one pass, without decoding it: for each struct it yields
 // the struct's client, clock, length and kind, its origins, its size in the update, the encoded
-// bytes of its content and where its parent is named, and for each range of the delete set its
+// bytes of its content with what it counted inside them as it read them (contentShape) and where
+// its parent is named, and for each range of the delete set its
 // client, clock and length, and it allocates nothing per struct. It exists because ygo exports no
 // count of the structs an update carries. crdt.ContentIDsFromUpdateV1 returns clock runs that
 // IDSet.Add coalesces as it goes (sjawhar/ygo v1.51.3-sami.7, crdt/idset.go:83, merging at
@@ -318,6 +319,50 @@ type updateStruct struct {
 	// size is the struct's bytes in the update, its header and content, and for the first struct
 	// of a client's group the group's header too.
 	size int
+	// shape is what the walk counted inside content as it read it, for the one reader that prices
+	// the content rather than measuring it (contentShape, structApplyHeap).
+	shape contentShape
+}
+
+// contentShape is what a walk of one struct's content counted in it, the parts of ygo's decode of
+// that content that allocate: it is recorded by the walk that reads the content once
+// (updateWalker.skipAny, skipJSON), so that the apply heap's estimate of a struct is arithmetic
+// over these counts and no second reader of the same bytes can read them another way
+// (structApplyHeap).
+type contentShape struct {
+	// anyValues, anyArrays, anyMaps and anyEntries are the lib0 Any values the content carries at
+	// every depth, the arrays and maps among them, and the entries of those maps past each map's
+	// first group of eight slots.
+	anyValues, anyArrays, anyMaps, anyEntries uint64
+	// jsonTexts, jsonContainers, jsonSeparators and jsonBytes are the JSON texts the content
+	// carries that read as JSON, their objects and arrays, their separators counted outside their
+	// strings, which bound their members, and their bytes.
+	jsonTexts, jsonContainers, jsonSeparators, jsonBytes uint64
+	// jsonReadAsAny is a ContentJSON item whose values did not all read as JSON text and were
+	// read again as lib0 Any (updateWalker.content), so the counts above hold the texts the first
+	// reading read before it gave up as well as every value of the second.
+	jsonReadAsAny bool
+}
+
+// readJSONText counts one JSON text ygo decodes with encoding/json: the text itself, its objects
+// and arrays, and its separators, a ',' or a ':', counted outside its strings.
+func (s *contentShape) readJSONText(text []byte) {
+	s.jsonTexts++
+	s.jsonBytes += uint64(len(text))
+	for j := 0; j < len(text); j++ {
+		switch text[j] {
+		case '"':
+			for j++; j < len(text) && text[j] != '"'; j++ {
+				if text[j] == '\\' {
+					j++
+				}
+			}
+		case '{', '[':
+			s.jsonContainers++
+		case ',', ':':
+			s.jsonSeparators++
+		}
+	}
 }
 
 // structID is the ID of a struct, a client and a clock, as a struct names its origins.
@@ -413,6 +458,11 @@ type updateWalker struct {
 	pos     int
 	source  updateSource
 	refusal *updateRefusal
+	// shape is where the content readers count what they read, the shape of the struct being
+	// walked (contentShape). walkStruct clears it before it reads a struct's content and copies
+	// it onto that struct after; it is a value rather than a pointer into the struct so that no
+	// struct a walk reads escapes to the heap (TestTheUpdateWalkAllocatesNothingPerStruct).
+	shape contentShape
 }
 
 func (w *updateWalker) undecodable(reason string) {
@@ -469,8 +519,10 @@ func (w *updateWalker) walkStruct(walked *updateStruct) {
 	}
 	start := w.pos
 	walked.kind = structKind(info & 0x1f)
+	w.shape = contentShape{}
 	walked.length = w.content(walked.kind)
 	walked.content = w.buf[start:w.pos]
+	walked.shape = w.shape
 }
 
 // namedRoot sorts walked's root into the fragment, the margin, the retired clients or another
@@ -527,7 +579,7 @@ func (w *updateWalker) content(kind structKind) uint64 {
 		if w.skipJSONValues(n) {
 			return n
 		}
-		w.pos = start
+		w.pos, w.shape.jsonReadAsAny = start, true
 		for range n {
 			if !w.skipAny(0) {
 				w.undecodable("JSON that is neither JSON text nor lib0 Any")
@@ -689,7 +741,11 @@ func (w *updateWalker) skipJSON() bool {
 		return false
 	}
 	raw, ok := readVarBytes(w.buf, &w.pos)
-	return ok && jsonUnmarshals(raw)
+	if !ok {
+		return false
+	}
+	w.shape.readJSONText(raw)
+	return jsonUnmarshals(raw)
 }
 
 // jsonUnmarshals reports whether fmtValFromJSON takes raw: "undefined", or UTF-8 that
@@ -733,13 +789,15 @@ func jsonUnmarshals(raw []byte) bool {
 func isAnyTag(b byte) bool { return b >= 116 && b <= 127 }
 
 // skipAny reads one lib0 Any value at depth as anycodec's readAny skips it
-// (internal/anycodec/decoder.go:261-393) and reports whether it reads, recording no refusal.
+// (internal/anycodec/decoder.go:261-393) and reports whether it reads, recording no refusal. It
+// counts the value, and what nests under it, into the struct's shape (contentShape).
 func (w *updateWalker) skipAny(depth int) bool {
 	if depth > maxAnyDepth || w.pos >= len(w.buf) {
 		return false
 	}
 	tag := w.buf[w.pos]
 	w.pos++
+	w.shape.anyValues++
 	switch tag {
 	case 127, 126, 120, 121: // undefined, null, true, false
 		return true
@@ -759,6 +817,12 @@ func (w *updateWalker) skipAny(depth int) bool {
 		n, ok := readVarUint(w.buf, &w.pos)
 		if !ok || n > maxAnyElements || n > uint64(len(w.buf)-w.pos) {
 			return false
+		}
+		if tag == 117 {
+			w.shape.anyArrays++
+		} else {
+			w.shape.anyMaps++
+			w.shape.anyEntries += n - min(n, 8)
 		}
 		for range n {
 			if tag == 118 {

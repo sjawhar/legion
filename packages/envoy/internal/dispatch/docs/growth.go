@@ -380,7 +380,7 @@ func elements(size pmdoc.DocumentSize) string {
 // operation holds here is a transaction on the room: it wrote the fork, and the fork's read of the
 // room ended before the operation began (warmFork), so the encode can take the room document's
 // lock. A browser's edit landing between the count and the publish is the peer update hook's to
-// bound (structTotal).
+// bound (roomTotals).
 //
 // A write with no room behind it - a cold fork, built from the store while no room held the
 // document (coldFork), or a room evicted since the fork read it - reaches a room that loads from
@@ -546,7 +546,7 @@ type serverWrite struct {
 // The caller holds no transaction on doc, since the encode takes doc's lock, and a count in the
 // turn waiting on that lock while the transaction waited on the turn would hold both for good.
 // The answer is of doc as it is when the turn counts it: a browser's edit landing between it and
-// the write is the peer update hook's to bound (structTotal). The stamp and the sweep keep what
+// the write is the peer update hook's to bound (roomTotals). The stamp and the sweep keep what
 // they write within the bound they were answered on whatever such an edit leaves (stampBlockIDs,
 // unmarkExpired), and each of settlement's repairs lands on the one block its id names
 // (repairLive).

@@ -175,7 +175,7 @@ func TestTheUnrenderedTotalALoadCountsIsTheWalkOfTheRoomsEncodedState(t *testing
 	replica.publishSize(&rendering)
 	service.measurer.waitIdle()
 	// The room is held across the count, as it is while a room is resident: the total holds the
-	// live document weakly (structTotal.live, peer_update.go:984) and nothing here holds it but
+	// live document weakly (roomTotals.live, peer_update.go:984) and nothing here holds it but
 	// this frame - the service lists a room's replica under the document weakly too
 	// (listResident, tree.go:685) - so a room collected between the publication and the count
 	// leaves recountLive nothing to re-base on, and the total stays the load's count plus the
@@ -208,7 +208,7 @@ func TestAStaleUnrenderedTotalNearTheBoundIsConfirmedBeforeItAdmits(t *testing.T
 			service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
 			total, counts := countedStructTotal(t, replica)
 			running, _ := total.runningTotals()
-			total.admittedUnrendered.Add(maxUnrenderedBytes - row.short - running.unrendered)
+			total.admitted.add(roomCount{unrendered: maxUnrenderedBytes - row.short - running.unrendered})
 			if row.stale {
 				text := firstText(room.GetXmlFragment(fragmentName))
 				room.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "s", nil) }, "server")
@@ -250,7 +250,7 @@ func TestAnUnmeasuredRoomWeighsAPeerUpdateOnItsOwnBytes(t *testing.T) {
 			if err := crdt.ApplyUpdateV1(room, seed, nil); err != nil {
 				t.Fatal(err)
 			}
-			service := &Service{}
+			service := calibratedService()
 			if row.listed {
 				replica := service.keepReplica(room, nil, nil, nil)
 				t.Cleanup(func() { runtime.KeepAlive(replica) })

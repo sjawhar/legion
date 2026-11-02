@@ -39,7 +39,7 @@ func (s *Service) AfterSettleLockForTest(hook func(room string)) {
 // use the real budget.
 func (s *Service) SetRoomBudgetForTest(bytes int64) int64 {
 	if bytes <= 0 {
-		bytes = s.bounds().RoomBudget
+		bytes = s.memory.RoomBudget
 	}
 	s.budget.setLimit(bytes)
 	return bytes

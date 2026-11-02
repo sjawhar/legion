@@ -466,7 +466,7 @@ func scanCeilingRoom(b *testing.B, runner crdt.ClientID, run int) (*crdt.Doc, *r
 	if err != nil {
 		b.Fatal(err)
 	}
-	replica := observedReplica(b, &Service{}, room, &rendering)
+	replica := observedReplica(b, calibratedService(), room, &rendering)
 	unlocked := new(time.Time)
 	room.OnUpdate(func([]byte, any) {
 		if unlocked.IsZero() {
@@ -669,7 +669,7 @@ func TestAUsedUpRoomStillTakesTypingAndRefusesALargerApplyAsNeedingARebuild(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := &Service{}
+	service := calibratedService()
 	replica := service.keepReplica(room, nil, &rendering, nil)
 	loaded, err := rescan(state)
 	if err != nil {
