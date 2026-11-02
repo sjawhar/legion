@@ -239,26 +239,26 @@ func (p *Pool) Healthy(ctx context.Context) (int, error) {
 	return version, nil
 }
 
-// listenerPoolSize bounds the pool Listener and Dedicated take their connections from. Four
-// permanent connections dial through it - the delivery hub's and the event stream relay's
-// listeners, the process's shared listener hub (pglisten.Hub, on which the document rooms' room
-// sync and cmd/dispatch's woken background loops are registered, one connection for all of
-// their channels) and the document rooms' NOTIFY sender - and a fifth, the test hooks'
-// (api/test_hooks_fanout.go), under DISPATCH_TEST_HOOKS alone, which production never sets. Each
-// connection is hijacked as soon as it is opened, so it leaves with its caller and the pool holds
-// none between dials: what one bounds is dials in flight, not connections held. A caller
-// redialling while another dials waits that dial out, which is what a loop that dials and then
-// waits for notifications for the life of the process can afford, and what the sender's first
-// send after a failure can afford too.
+// listenerPoolSize bounds the pool Listener and Dedicated take their connections from. Five
+// permanent connections dial through it - the delivery hub's, the event stream relay's and the
+// events outbox's listeners, the process's shared listener hub (pglisten.Hub, on which the
+// document rooms' room sync and cmd/dispatch's woken background loops are registered, one
+// connection for all of their channels) and the document rooms' NOTIFY sender - and a sixth, the
+// test hooks' (api/test_hooks_fanout.go), under DISPATCH_TEST_HOOKS alone, which production never
+// sets. Each connection is hijacked as soon as it is opened, so it leaves with its caller and the
+// pool holds none between dials: what one bounds is dials in flight, not connections held. A
+// caller redialling while another dials waits that dial out, which is what a loop that dials and
+// then waits for notifications for the life of the process can afford, and what the sender's
+// first send after a failure can afford too.
 const listenerPoolSize = 1
 
 // Listener returns one connection of its own for LISTEN, from a one-connection pool opened from the
 // shared pool's configuration and hijacked, so it holds no shared connection. The caller closes it.
-// The delivery hub (api/delivery_live_hub.go), the event stream relay (api/event_stream_relay.go)
-// and, under the test hooks, their fan-out (api/test_hooks_fanout.go) each hold one for as long as
-// they wait for notifications, which is the life of the process: a connection of the shared pool
-// held that long would be one fewer for every request, and a LISTEN on a pooled connection would
-// end when the pool recycled it.
+// The delivery hub (api/delivery_live_hub.go), the event stream relay (api/event_stream_relay.go),
+// the events outbox (outbox/lease.go) and, under the test hooks, their fan-out
+// (api/test_hooks_fanout.go) each hold one for as long as they wait for notifications, which is
+// the life of the process: a connection of the shared pool held that long would be one fewer for
+// every request, and a LISTEN on a pooled connection would end when the pool recycled it.
 func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 	listen, err := p.separate(&p.listen, listenerPoolSize, "listener")
 	if err != nil {
@@ -329,10 +329,13 @@ func (p *Pool) Leases() (*pgxpool.Pool, error) {
 	return p.separate(&p.leases, leasePoolSize, "loop leases")
 }
 
-// outboxPoolSize bounds the pool the events outbox reads and records events through. The outbox
-// is one goroutine that runs one statement at a time and closes each cursor before its next
-// statement, so one connection is every connection it can use.
-const outboxPoolSize = 1
+// outboxPoolSize bounds the pool the events outbox reads and records events through, and takes
+// and renews its publisher hold on (duty.Hold). The outbox's scan is one goroutine that runs one
+// statement at a time and closes each cursor before its next statement, and the hold's renewal
+// runs beside it on a goroutine of its own, so two connections are every connection it can use: a
+// renewal never waits behind a batch's statement, which may take up to the five seconds a batch's
+// record is allowed, longer than the hold's two seconds between renewals.
+const outboxPoolSize = 2
 
 // registryPoolSize bounds the pool the registry of live server processes stamps this process's row
 // through: processes.Register opens it from this pool's configuration with MaxConns 1, outside the
@@ -340,11 +343,14 @@ const outboxPoolSize = 1
 const registryPoolSize = 1
 
 // permanentListeners is how many connections the listener pool dials and hands off for the life
-// of the process: the delivery hub's and the event stream relay's listeners (Listener), and the
-// document rooms' two (Dedicated): the shared listener hub that room sync and cmd/dispatch's
-// woken background loops are registered on, and the NOTIFY sender, which opens at the first send
-// and then stays open.
-const permanentListeners = 4
+// of the process: the delivery hub's, the event stream relay's and the events outbox's listeners
+// (Listener), and the document rooms' two (Dedicated): the shared listener hub that room sync and
+// cmd/dispatch's woken background loops are registered on, and the NOTIFY sender, which opens at
+// the first send and then stays open. The outbox's LISTEN on dispatch_events and
+// dispatch_duty_holds is its own rather than a registration on the hub, as the delivery hub's and
+// the relay's are: cmd/dispatch builds the outbox only with NATS, and the LISTEN starts and stops
+// inside outbox.Outbox.Run, while the hub takes no registration once it runs.
+const permanentListeners = 5
 
 // ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres:
 // every pool's size, the registry's own pool (processes.Register) and the event horizon's
@@ -352,10 +358,11 @@ const permanentListeners = 4
 // and hands off rather than holds.
 const ConnectionsPerProcess = sharedPoolSize + roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + registryPoolSize + horizonPoolSize + permanentListeners
 
-// Outbox is the pool the events outbox claims, reads and records events through, and reads the
-// followers and authors a publish routes to. Under load the API's requests queue for the shared
-// pool's connections, and an outbox statement queued behind them holds back every event behind
-// it; on a pool of its own it waits for none of them, and holds no connection a request could use.
+// Outbox is the pool the events outbox reads and records events through, reads the
+// followers and authors a publish routes to, and holds its publisher hold on. Under load the API's
+// requests queue for the shared pool's connections, and an outbox statement queued behind them
+// holds back every event behind it, or lets the hold lapse; on a pool of its own it waits for none
+// of them, and holds no connection a request could use.
 func (p *Pool) Outbox() (*Pool, error) {
 	opened, err := p.separate(&p.outbox, outboxPoolSize, "events outbox")
 	if err != nil {

@@ -4,12 +4,13 @@
 // so what one process commits reaches the others only through the database, and a connection
 // waiting for a notification must outlive every failure between it and the server. Its Dispatch
 // users are the delivery hub, the event stream relay and, under DISPATCH_TEST_HOOKS alone, the
-// test hooks' fan-out to every process (internal/dispatch/api), and the process's shared listener
-// hub (Hub), on which the document rooms' room sync is registered (internal/dispatch/docs) and
-// every change-driven background loop of the server takes its wake (cmd/dispatch); the other is
-// the broker's cross-pod secret-reread fan-out (internal/broker/reread). Serving two programs is
-// why the package sits here rather than under internal/dispatch, as internal/pgmigrate does for
-// the two migration runners.
+// test hooks' fan-out to every process (internal/dispatch/api), the events outbox
+// (internal/dispatch/outbox), and the process's shared listener hub (Hub), on which the document
+// rooms' room sync is registered (internal/dispatch/docs) and every change-driven background
+// loop of the server takes its wake (cmd/dispatch); the other is the broker's cross-pod
+// secret-reread fan-out (internal/broker/reread). Serving two programs is why the package sits
+// here rather than under internal/dispatch, as internal/pgmigrate does for the two migration
+// runners.
 package pglisten
 
 import (
@@ -49,7 +50,7 @@ type Listener struct {
 	// names neither leaves the reader of one of those logs to guess which program lost its
 	// database. Empty is "dispatch" (owner), the exact text this line carried while the package
 	// was Dispatch's alone, so a deployment alarming on that text keeps matching whatever a new
-	// caller forgets to set; the three Dispatch call sites set it all the same, so each reads at
+	// caller forgets to set; the five Dispatch call sites set it all the same, so each reads at
 	// its own site which subsystem it is.
 	Owner string
 	// Dial opens the connection the listener hijacks for itself: a caller passes

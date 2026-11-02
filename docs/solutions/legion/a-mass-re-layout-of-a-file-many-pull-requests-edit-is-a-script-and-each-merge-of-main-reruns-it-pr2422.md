@@ -23,9 +23,11 @@ related_issues:
   that commit's files and compares the bytes with `cmp`.
 - Expect a rerun to need a new anchor when main grows a part past a limit the script enforces.
   Add the anchor in the script, not in the output.
-- Retro deletes `.legion/<issue>/`, so the pull request body fetches the script at a pinned commit
-  (`gh api "repos/<owner>/<repo>/contents/<path>?ref=<sha>"`). Check that the pinned commit holds the
-  script's final version.
+- Keep the script out of the tree the merge carries, and have the pull request body fetch it at a
+  pinned commit (`gh api "repos/<owner>/<repo>/contents/<path>?ref=<sha>"`). Check that the pinned
+  commit holds the script's final version. Before sjawhar/legion#2354 the script lived under
+  `.legion/<issue>/`, which retro deleted; since then no phase writes `.legion/` and retro deletes
+  nothing.
 
 ## Evidence
 

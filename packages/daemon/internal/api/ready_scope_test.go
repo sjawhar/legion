@@ -14,8 +14,8 @@ import (
 
 // smokeRetroCompare is GitHub's compare of the approved head of sjawhar/legion-smoke#589
 // (7733416e7) with the head the daemon merged (ea3e449ed), its issue key spelled LEGION-208 as this
-// harness's issue is: retro's two learnings added under docs/solutions/, and its last commit's
-// removal of the issue's four handoffs.
+// harness's issue is: retro's two learnings added under docs/solutions/, and the removal of the
+// issue's four handoffs.
 const smokeRetroCompare = `{"status":"ahead","ahead_by":2,"files":[` +
 	`{"filename":".legion/LEGION-208/implement.json","status":"removed"},` +
 	`{"filename":".legion/LEGION-208/plan.json","status":"removed"},` +
@@ -25,13 +25,22 @@ const smokeRetroCompare = `{"status":"ahead","ahead_by":2,"files":[` +
 	`{"filename":"docs/solutions/legion/proving-a-change-with-no-runtime-LEGION-208.md","status":"added"}]}`
 
 // After the reviewer approves a head, retro's commits sit above it: its learnings under
-// docs/solutions/, and its last commit's removal of the issue's own .legion/<issue>/. READY reads
+// docs/solutions/. So may the removal of .legion/, where Legion's handoffs lived before they moved
+// to the Dispatch issue: legion handoffs import removes the whole directory, which can hold other
+// issues' directories merged from older branches, from a branch whose approval stands. READY reads
 // GitHub's compare of the approved head with READY's head, as the implement App for the
 // repository's owner, and publishes a READY whose change since the approval is only those, as
-// legion-smoke#589's was, or none at all.
+// legion-smoke#589's was, or none at all, with no new review round.
 func TestHandoffCompleteReadyAcceptsOnlyRetrosChangesAboveTheApprovedHead(t *testing.T) {
 	for _, tc := range []struct{ name, compare string }{
 		{"legion-smoke#589's retro: two learnings added and the issue's handoffs removed", smokeRetroCompare},
+		{"the removal of .legion/ alone", `{"status":"ahead","files":[` +
+			`{"filename":".legion/LEGION-208/plan.json","status":"removed"},` +
+			`{"filename":".legion/LEGION-208/review.json","status":"removed"}]}`},
+		{"the removal of .legion/ with another issue's directory merged from an older branch", `{"status":"ahead","files":[` +
+			`{"filename":".legion/LEGION-208/review.json","status":"removed"},` +
+			`{"filename":".legion/OTHER-1/plan.json","status":"removed"},` +
+			`{"filename":".legion/OTHER-1/implement.json","status":"removed"}]}`},
 		{"a READY at the approved head itself", `{"status":"identical","files":[]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -60,11 +69,12 @@ func TestHandoffCompleteReadyAcceptsOnlyRetrosChangesAboveTheApprovedHead(t *tes
 
 // Anything else above the approved head is a change no review approved, and READY is refused with
 // READY_UNREVIEWED_CHANGE, naming the paths, so the merger sends the issue back to review: a change
-// to the product, a path that only resembles retro's (a sibling of docs/solutions/, another
-// issue's handoffs), and a rename whose old name is outside them. A compare GitHub may have cut
-// short leaves a path unread, and a head the approved one is not an ancestor of (a rewrite, or a
-// head behind the approval) is not the approved code plus anything, so each is refused the same
-// way, as is an approved head GitHub does not know. Nothing is recorded for any of them.
+// to the product, a path that only resembles retro's (a sibling of docs/solutions/), a file under
+// .legion/ added or modified rather than removed, and a rename whose old name is outside them. A
+// compare GitHub may have cut short leaves a path unread, and a head the approved one is not an
+// ancestor of (a rewrite, or a head behind the approval) is not the approved code plus anything, so
+// each is refused the same way, as is an approved head GitHub does not know. Nothing is recorded
+// for any of them.
 func TestHandoffCompleteReadyRefusesAChangeAboveTheApprovedHeadNoReviewApproved(t *testing.T) {
 	compare := func(status string, files ...string) string {
 		return fmt.Sprintf(`{"status":%q,"files":[%s]}`, status, strings.Join(files, ","))
@@ -85,10 +95,15 @@ func TestHandoffCompleteReadyRefusesAChangeAboveTheApprovedHeadNoReviewApproved(
 			want: []string{code, "src/main.go", approvedSHA[:12], "reviewing"}},
 		{name: "a sibling of docs/solutions/", compare: compare("ahead", append(retro, file("docs/solutions-old/note.md"))...),
 			want: []string{code, "docs/solutions-old/note.md"}},
-		{name: "another issue's handoffs", compare: compare("ahead", append(retro, `{"filename":".legion/OTHER-1/plan.json","status":"removed"}`)...),
+		{name: "a handoff file added under .legion/", compare: compare("ahead", append(retro, `{"filename":".legion/LEGION-208/test.json","status":"added"}`)...),
+			want: []string{code, ".legion/LEGION-208/test.json"}},
+		{name: "another issue's handoff file added under .legion/", compare: compare("ahead", append(retro, `{"filename":".legion/OTHER-1/plan.json","status":"added"}`)...),
 			want: []string{code, ".legion/OTHER-1/plan.json"}},
-		{name: "the handoffs directory's own name as a file", compare: compare("ahead", file(".legion/LEGION-208")),
-			want: []string{code, ".legion/LEGION-208"}},
+		{name: "a handoff file modified under .legion/", compare: compare("ahead", append(retro, file(".legion/LEGION-208/implement.json"))...),
+			want: []string{code, ".legion/LEGION-208/implement.json"}},
+		{name: "a file renamed out of .legion/", compare: compare("ahead",
+			`{"filename":"docs/solutions/legion/moved.md","previous_filename":".legion/LEGION-208/moved.md","status":"renamed"}`),
+			want: []string{code, ".legion/LEGION-208/moved.md"}},
 		{name: "a rename out of the product into docs/solutions/", compare: compare("ahead",
 			`{"filename":"docs/solutions/legion/moved.md","previous_filename":"src/moved.md","status":"renamed"}`),
 			want: []string{code, "src/moved.md"}},
@@ -225,19 +240,24 @@ func TestHandoffCompleteReadyRefusesWhenGitHubFailsTheCompare(t *testing.T) {
 	}
 }
 
-// A pull request a person already merged is published unread, as before: its head can no longer
-// change, and no compare is asked for.
+// A pull request a person already merged is published unread, its answer saying so: its head can
+// no longer change, and the workflow takes it on to the production check only on that READY. No
+// compare is asked for, nor anything but the pull request itself.
 func TestHandoffCompleteReadyComparesNothingForAMergedPullRequest(t *testing.T) {
+	const alreadyMerged = `pull request #42 is already merged, so READY was published without reading its head`
 	github := newHandoffGitHub(t)
 	github.set(func(g *handoffGitHub) {
 		g.merged = true
 		g.compare = `{"status":"ahead","files":[{"filename":"src/main.go","status":"modified"}]}`
 	})
-	h, _, merger := newReadyHarness(t, github)
-	if code, body := ready(t, h, merger); code != http.StatusOK || !strings.Contains(body, "already merged") {
-		t.Fatalf("READY of a merged pull request = %d %q", code, body)
+	h, facts, merger := newReadyHarness(t, github)
+	if code, body := ready(t, h, merger); code != http.StatusOK || body != alreadyMerged {
+		t.Fatalf("READY of a merged pull request = %d %q; want it published saying %q", code, body, alreadyMerged)
 	}
-	if got := github.compares(); len(got) != 0 {
-		t.Fatalf("READY compared %v for a merged pull request, want nothing", got)
+	if got := github.serves(); len(got) != 1 || got[0] != "pulls/42" {
+		t.Fatalf("READY of a merged pull request read %v, want the pull request alone", got)
+	}
+	if got := facts.recorded(); len(got) != 1 {
+		t.Fatalf("handoff facts = %#v, want the one READY", got)
 	}
 }

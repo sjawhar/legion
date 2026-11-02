@@ -14,8 +14,10 @@ import (
 // channel registered. In envoy-dispatch the document rooms' room sync registers on it
 // (internal/dispatch/docs, RegisterRoomSync) and so does every change-driven background loop
 // cmd/dispatch starts - the embedding queue, the reference excerpts, the edit notices, the
-// suggestion outcomes and the delivery settings - each of which waits on a Wake; the delivery hub
-// and the event stream relay (internal/dispatch/api) still hold a Listener of their own each.
+// suggestion outcomes and the delivery settings - each of which waits on a Wake. The delivery
+// hub, the event stream relay (internal/dispatch/api) and the events outbox
+// (internal/dispatch/outbox) still hold a Listener of their own each, since each starts and
+// stops that listener with its own run loop.
 // Every subsystem given a Listener of its own holds one more connection for the life of the
 // process, one fewer for everything else on the database; and the hub's connection is also what
 // other processes read to learn which processes are listening (the caller names it through Dial),

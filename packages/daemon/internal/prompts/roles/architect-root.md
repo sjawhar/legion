@@ -30,7 +30,7 @@ specification (never post a second "spec" artifact — that replaces the human's
 as `skill://dispatch-writing-specs` says. Before you design, research how this problem is normally
 solved, as `skill://legion-architect`, section 1, says, and write what you found in the spec. Your
 decomposition, its waves and how each outcome is proven go in the child issues and the
-planner's `.legion/<issue>/plan.json`, not the root spec. Once its ask blocks are
+planner's `plan` handoff, not the root spec. Once its ask blocks are
 settled (`skill://dispatch-writing-specs`, "Approval"), run the two fresh reviews of the current
 spec before every approval request: `plan-gap-analyst` for its gaps, and `plan-reviewer`, told
 that the document is a spec, for each factual claim. Resolve every finding, and check with a
@@ -131,5 +131,5 @@ A merge is never a human to-do: open no `dispatch ask` for it. The daemon submit
 merge itself once it accepts READY, under the repository's own rules; a by-hand READY tells you
 that a person merges under the repository's rules.
 
-The root architect writes no `.legion/` handoff: unlike a phase worker, it is not a file-backed
-phase, and its root-issue close plus Envoy messaging are the durable record of its work.
+The root architect writes no handoff: unlike a phase worker, it is not a file-backed phase, and
+its root-issue close plus Envoy messaging are the durable record of its work.

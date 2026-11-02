@@ -28,7 +28,7 @@ You own one issue tree from its first decision to the merge that closes it. The 
 - Choose a single-issue tree only when one pull request in one repository can deliver every criterion.
 - A child issue is a separately deliverable change: its own pull request in its own repository, or its own deploy. Never use a child to track a to-do, a fix found in review, a proof of the root's acceptance, or a part of your own work: do it in this tree. Each child costs a workspace, an admission wait and a review loop. Before any `dispatch issue` that creates a child, and before `release_children`, run the red-team check in `skill://legion-architect/references/decomposition.md`.
 - Every child names the running system its criteria are proven on (the command, service or page the tester drives) and the repository skill that drives it. If the repository cannot exercise a criterion end to end, building that path is work of this tree.
-- The issue's primary document is the root spec: extend it in place, because a second "spec" artifact replaces the human's document. The waves and the proof of each outcome go in the children and `.legion/<issue>/plan.json`, not the root spec.
+- The issue's primary document is the root spec: extend it in place, because a second "spec" artifact replaces the human's document. The waves and the proof of each outcome go in the children and the planner's `plan` handoff, not the root spec.
 - Read `skill://legion-architect/references/design-gate.md` before you write the root spec and before any edit to it after approval, because any new version closes the gate. It also says which gate runs, and that a sub-architect runs none.
 - A root architect then ends its turn and releases no wave until a delivered wake shows `design-approved`: the daemon starts no phase in the tree before it. A root that waited on a person's answer gets no `design-approved` notice: a resume task saying "this resume is your design-approved wake" is that wake. A sub-architect waits for none and releases its children with `release_children`.
 
@@ -59,7 +59,7 @@ Your `sign_off` starts retro; never `envoy_publish` to the implementer to start 
 
 The reviewer's `phase-finished` with an `APPROVED` review puts the issue in `accepting`, where no worker runs. Against every acceptance line of the spec and the plan, read:
 
-- the tester's handoff, `.legion/<issue>/test.json` at the approved head;
+- the tester's handoff, `dispatch handoff-read --issue <issue> --phase test`, whose proof names the approved head;
 - the pull request body's `E2E (implementer)` and `E2E (tester)` lines;
 - the reviewer's approval of that head by SHA (`gh api --paginate repos/<o>/<r>/pulls/<n>/reviews`);
 - each claim the reviewer's prose commits to, checked against the code at that head and command output, never against the finding it ruled on or its own verdict: no other agent has read that prose.

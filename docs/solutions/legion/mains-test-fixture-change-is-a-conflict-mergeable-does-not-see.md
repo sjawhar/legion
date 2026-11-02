@@ -80,7 +80,8 @@ jj -R "$LEGION_WORKSPACE" diff --from "fork_point(main@origin | <tip>)" --to <ti
   --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum
 # 2. a forward merge from the bookmark, not a rewrite (LEGION-118: rebase forms rewrite
 #    descendants of a rewritten commit, including another tree's stacked branch; merging from
-#    `@` risks an undescribed handoff-split leftover, which `jj git push` refuses)
+#    `@` risks an undescribed leftover commit, which `jj git push` refuses — before
+#    sjawhar/legion#2354 a handoff split left one)
 jj -R "$LEGION_WORKSPACE" new legion/<KEY> main@origin -m "merge: resolve conflict against main@origin"
 # 3. merged-only: must EQUAL step 1 -- the text merge itself changed nothing in the product
 # 4. adapt, gates, one commit, then the fingerprint again: differs by that commit alone
@@ -103,7 +104,9 @@ the fixed drain for exactly a decline that does no I/O. The positive event (`wor
 already awaited: it is published inside the drain the test `await`s.
 
 Push is a sideways bookmark move (`[move sideways from … to …]`) — the expected force-push of a
-rebased branch. `.legion/` stays deleted on the new head; no handoff is written for this push.
+rebased branch. No handoff goes with this push. A handoff is a record on the Dispatch issue,
+written when the round completes. Before sjawhar/legion#2354 `.legion/` stayed deleted on the new
+head and no handoff file was written for this push.
 
 ## Related
 
