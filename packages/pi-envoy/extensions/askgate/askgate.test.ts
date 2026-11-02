@@ -5718,7 +5718,9 @@ describe("a marker the gate mints, checked by the real dispatch CLI", () => {
       const posted = await post(command, g.store);
       expect(posted.code).toBe(1);
       expect(posted.stdout).toContain(`${CHANGED} (\`${form} ${file}\`)`);
-      expect(posted.stdout).toContain("Send the call again in a later message than the one that changes the file.");
+      expect(posted.stdout).toContain(
+        "Send the call again in a later message than the one that changes the file."
+      );
       expect(posted.sent).toEqual([]);
     }, 30_000);
 
