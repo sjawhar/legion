@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 	"github.com/sjawhar/envoy/internal/redact"
 )
 
@@ -102,21 +103,32 @@ type loginState struct {
 }
 
 // Broker is the helper's view of the secrets broker: the launcher routes (Enroll, Revoke)
-// authenticate with a machineCredential minted by a human-approved machine login (Login, an OAuth
-// device grant on the broker's own token endpoint), kept at MachineFile and refreshed daily
-// (Start), and Renew authenticates with the session's own proof, exactly as before.
+// authenticate with a machineCredential, and Renew authenticates with the session's own proof,
+// exactly as before. That credential comes one of two ways. Where this machine proves an
+// identity of its own (Identity: a Google identity token, a projected Kubernetes token, a token
+// minted through a workload identity pool), the credential is the one the broker's RFC 8693
+// exchange mints for it, traded at Start and traded again before it lapses, with no person in
+// it at all. Where it proves none, the credential is the one a human-approved machine login
+// mints (Login, an OAuth device grant on the broker's own token endpoint), kept at MachineFile
+// and refreshed daily (Start).
 type Broker struct {
 	URL          string
 	OperatorFile string // login_hint source; read per login, as before
 	// MachineFile is where the helper keeps its machine login across restarts (AGENT_SECRETS_MACHINE_FILE).
 	MachineFile string
-	HTTP        *http.Client
-	// Log records every change of the launcher credential: a machine login installing one, a
-	// restart resuming one, a refresh moving its expiry, the warning a day before it lapses, and
-	// the helper dropping it, when the broker refuses it or its refresh or it reaches its expiry.
-	// Its lines carry the credential id, its expiry, the operator the login was signed with (its
-	// login_hint) and the broker's refusal code, which are identifiers, never a proof, a token, a
-	// request object or key material. Nil logs nothing.
+	// Identity, when set, is this machine's own identity at the broker's token exchange, which
+	// answers a launcher credential of its own. It replaces the machine login entirely: Start
+	// reads no machine file, no device grant runs, nothing is kept on disk (a restart trades
+	// again), and the renewal is a fresh identity token traded again, this grant issuing no
+	// refresh token. Nil is a machine that proves nothing of its own and logs in as before.
+	Identity *brokerclient.Client
+	HTTP     *http.Client
+	// Log records every change of the launcher credential: a machine login or a trade installing
+	// one, a restart resuming one, a refresh moving its expiry, the warning a day before it
+	// lapses, and the helper dropping it, when the broker refuses it or its refresh or it
+	// reaches its expiry. Its lines carry the credential id, its expiry, the operator the login
+	// was signed with (its login_hint) and the broker's refusal code, which are identifiers,
+	// never a proof, a token, a request object or key material. Nil logs nothing.
 	Log *slog.Logger
 
 	cred    atomic.Pointer[machineCredential]
@@ -524,6 +536,9 @@ func (b *Broker) retireReplaced(old *machineCredential) {
 // loop to retry it on the retrySchedule. A file that is there but is not a machine login, or that
 // others can read, is an error naming it.
 func (b *Broker) Start(ctx context.Context) error {
+	if b.Identity != nil {
+		return b.startIdentity(ctx)
+	}
 	if err := RemoveLeftoverMachineTemps(b.MachineFile); err != nil {
 		b.logger().Error("removing the temporary files an interrupted machine file save left", "machine_file", b.MachineFile, "error", err)
 	}
@@ -571,6 +586,51 @@ func (b *Broker) Start(ctx context.Context) error {
 		first = b.nextRefresh(b.refreshEveryOrDefault())
 	}
 	go b.refreshLoop(ctx, first, sched)
+	return nil
+}
+
+// startIdentity is Start for a machine that proves an identity of its own: the token client
+// trades it for one of the broker's access tokens, whose launcher credential the helper then
+// enrolls sessions with, and keeps trading before each one lapses (brokerclient.Client.Run) until
+// ctx ends. Nothing is kept on disk and no person is asked: a restart trades again.
+//
+// It waits startRefreshBound (5 s) for the first credential, so a helper on a reachable broker
+// listens with one in hand, well inside the 10 s `agent-secrets register` waits for the socket;
+// a broker that is slower or down leaves the helper listening with none, answering NO_CREDENTIAL
+// while the loop keeps trading, as it does for a machine whose login has lapsed. A refusal of
+// the identity itself stops the loop, logged at ERROR: no retry cures it, and the operator's
+// deployment is what has to change.
+func (b *Broker) startIdentity(ctx context.Context) error {
+	first := make(chan struct{})
+	var once sync.Once
+	go func() {
+		err := b.Identity.Run(ctx, func(_ context.Context, token *brokerclient.Token) error {
+			if token.CredentialID == "" {
+				return fmt.Errorf("the broker's token answer carries no %s, so this machine has no launcher credential to enrol sessions with", oauthwire.ExtraCredentialID)
+			}
+			expires := token.CredentialExpiresAt
+			if expires.IsZero() {
+				expires = token.Expiry
+			}
+			cred := &machineCredential{key: b.Identity.Key(), id: token.CredentialID, expiresAt: expires.UTC(), gone: make(chan struct{})}
+			b.credMu.Lock()
+			b.installCredential(cred, &loginState{State: "issued"})
+			b.credMu.Unlock()
+			b.logger().Info("the helper traded this machine's identity for its launcher credential",
+				"credential_id", cred.id, "expires_at", cred.expiresAt.Format(time.RFC3339))
+			once.Do(func() { close(first) })
+			return nil
+		})
+		if err != nil {
+			b.logger().Error("the helper stopped trading this machine's identity; it enrols no session until this is fixed", "error", redact.Error(err, b.URL))
+		}
+		once.Do(func() { close(first) })
+	}()
+	select {
+	case <-first:
+	case <-time.After(b.startRefreshBoundOrDefault()):
+	case <-ctx.Done():
+	}
 	return nil
 }
 

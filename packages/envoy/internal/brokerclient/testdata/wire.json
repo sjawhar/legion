@@ -1,0 +1,262 @@
+{
+  "version": 1,
+  "about": [
+    "The wire contract of the secrets broker's RFC 8693 token exchange, as its two clients speak it: the Go client of packages/envoy/internal/brokerclient and the TypeScript client of packages/broker-client.",
+    "Each suite reads this one file and replays every exchange below against a stub broker of its own, so neither client's idea of the contract is only its own.",
+    "The rule that makes 'one contract' checkable rather than asserted: form, proof.header and proof.claims are the WHOLE of what a request carries. A suite asserts set equality, not containment, so a field one client starts sending without an entry here fails that client's own test, and a field added here fails the other client's test until it sends it too. expect.token is read the same way: it is the whole of what a client may take from an answer, so a client that starts reading another member of the answer fails until this file names it.",
+    "A value of the form ${name} is a placeholder each suite substitutes or checks by shape; placeholders names them. Everything else is literal and compared byte for byte.",
+    "There is no audience parameter: the broker's exchange has none. A subject token's own audience is what names the broker it may be spent at (BROKER_EXCHANGE_K8S_AUDIENCE, BROKER_GOOGLE_OIDC_AUDIENCE, BROKER_SIGNIN_DEVICE_AUDIENCE), and a client that posted one would be posting a field the broker does not read."
+  ],
+  "endpoint": {
+    "method": "POST",
+    "path": "/v1/oauth/token",
+    "content_type": "application/x-www-form-urlencoded"
+  },
+  "placeholders": {
+    "${subject_token}": "the token the exchange's subject source answered at this trade",
+    "${actor_token}": "the token the actor source answered at this trade",
+    "${session}": "the session name the client was configured with, as the entry's session names it",
+    "${token_endpoint}": "the stub broker's own origin followed by endpoint.path, with no query and no fragment",
+    "${jti}": "a value this request alone carries: non-empty, and never equal to another request's",
+    "${iat}": "the time the proof was signed, in whole seconds, within a minute of the suite's clock",
+    "${public_jwk}": "the public half of the client's own key: an EC P-256 JWK carrying x and y and no d member at all"
+  },
+  "exchanges": [
+    {
+      "name": "a pod trades its projected Kubernetes service-account token",
+      "about": "The identity a pod already holds, read from the file its runtime mounts and read again at every renewal, since the kubelet rewrites it in place.",
+      "subject": {
+        "kind": "kubernetes-projected-file",
+        "token": "projected.service.account.token",
+        "token_type": "urn:envoy:params:oauth:token-type:kubernetes-service-account"
+      },
+      "session": "example-worker-session",
+      "form": {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "client_id": "dispatch-token-exchange",
+        "subject_token": "${subject_token}",
+        "subject_token_type": "urn:envoy:params:oauth:token-type:kubernetes-service-account",
+        "session": "${session}"
+      },
+      "proof": {
+        "header": { "typ": "dpop+jwt", "alg": "ES256", "jwk": "${public_jwk}" },
+        "claims": { "jti": "${jti}", "htm": "POST", "htu": "${token_endpoint}", "iat": "${iat}" }
+      },
+      "answer": {
+        "status": 200,
+        "body": {
+          "access_token": "broker-access-token-for-the-pod",
+          "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+          "token_type": "DPoP",
+          "expires_in": 3600,
+          "credential_id": "cred-pod-1",
+          "credential_expires_at": "2026-12-01T00:00:00Z"
+        }
+      },
+      "expect": {
+        "outcome": "accept",
+        "token": {
+          "access_token": "broker-access-token-for-the-pod",
+          "token_type": "DPoP",
+          "expires_in": 3600,
+          "credential_id": "cred-pod-1",
+          "credential_expires_at": "2026-12-01T00:00:00Z"
+        }
+      }
+    },
+    {
+      "name": "a machine trades its Google identity token",
+      "about": "A Compute Engine machine's own identity token, asked of its metadata server with format=full and fetched through no proxy. An entry that fixes the session leaves the client naming none.",
+      "subject": {
+        "kind": "google-metadata",
+        "token": "google.machine.identity.token",
+        "token_type": "urn:envoy:params:oauth:token-type:google-identity"
+      },
+      "session": "",
+      "form": {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "client_id": "dispatch-token-exchange",
+        "subject_token": "${subject_token}",
+        "subject_token_type": "urn:envoy:params:oauth:token-type:google-identity"
+      },
+      "proof": {
+        "header": { "typ": "dpop+jwt", "alg": "ES256", "jwk": "${public_jwk}" },
+        "claims": { "jti": "${jti}", "htm": "POST", "htu": "${token_endpoint}", "iat": "${iat}" }
+      },
+      "answer": {
+        "status": 200,
+        "body": {
+          "access_token": "broker-access-token-for-the-machine",
+          "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+          "token_type": "DPoP",
+          "expires_in": 1800,
+          "credential_id": "cred-machine-1",
+          "credential_expires_at": "2026-12-02T00:00:00Z"
+        }
+      },
+      "expect": {
+        "outcome": "accept",
+        "token": {
+          "access_token": "broker-access-token-for-the-machine",
+          "token_type": "DPoP",
+          "expires_in": 1800,
+          "credential_id": "cred-machine-1",
+          "credential_expires_at": "2026-12-02T00:00:00Z"
+        }
+      }
+    },
+    {
+      "name": "a person trades their sign-in with the machine as the actor",
+      "about": "The one request that carries two tokens: the person's own Google identity token from the device grant, and the machine's as the actor token, under a type of its own because what it proves is which box the person is asking from.",
+      "subject": {
+        "kind": "person-device-sign-in",
+        "token": "person.google.identity.token",
+        "token_type": "urn:envoy:params:oauth:token-type:person-google-identity"
+      },
+      "actor": {
+        "kind": "google-metadata",
+        "token": "google.machine.identity.token",
+        "token_type": "urn:envoy:params:oauth:token-type:machine-google-identity"
+      },
+      "session": "ada-box-1",
+      "form": {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "client_id": "dispatch-token-exchange",
+        "subject_token": "${subject_token}",
+        "subject_token_type": "urn:envoy:params:oauth:token-type:person-google-identity",
+        "actor_token": "${actor_token}",
+        "actor_token_type": "urn:envoy:params:oauth:token-type:machine-google-identity",
+        "session": "${session}"
+      },
+      "proof": {
+        "header": { "typ": "dpop+jwt", "alg": "ES256", "jwk": "${public_jwk}" },
+        "claims": { "jti": "${jti}", "htm": "POST", "htu": "${token_endpoint}", "iat": "${iat}" }
+      },
+      "answer": {
+        "status": 200,
+        "body": {
+          "access_token": "broker-access-token-for-the-person",
+          "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+          "token_type": "DPoP",
+          "expires_in": 3600,
+          "credential_id": "cred-signin-1",
+          "credential_expires_at": "2026-12-03T00:00:00Z"
+        }
+      },
+      "expect": {
+        "outcome": "accept",
+        "token": {
+          "access_token": "broker-access-token-for-the-person",
+          "token_type": "DPoP",
+          "expires_in": 3600,
+          "credential_id": "cred-signin-1",
+          "credential_expires_at": "2026-12-03T00:00:00Z"
+        }
+      }
+    },
+    {
+      "name": "the broker refuses the identity",
+      "about": "An identity no entry lists, a revoked sign-in, a token of the wrong audience: a refusal no retry can cure. The client stops with a plain error carrying what the broker said, and holds no token.",
+      "subject": {
+        "kind": "kubernetes-projected-file",
+        "token": "projected.service.account.token",
+        "token_type": "urn:envoy:params:oauth:token-type:kubernetes-service-account"
+      },
+      "session": "example-worker-session",
+      "form": {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "client_id": "dispatch-token-exchange",
+        "subject_token": "${subject_token}",
+        "subject_token_type": "urn:envoy:params:oauth:token-type:kubernetes-service-account",
+        "session": "${session}"
+      },
+      "proof": {
+        "header": { "typ": "dpop+jwt", "alg": "ES256", "jwk": "${public_jwk}" },
+        "claims": { "jti": "${jti}", "htm": "POST", "htu": "${token_endpoint}", "iat": "${iat}" }
+      },
+      "answer": {
+        "status": 400,
+        "body": {
+          "error": "invalid_grant",
+          "error_description": "no entry lists the account this token names"
+        }
+      },
+      "expect": {
+        "outcome": "refuse",
+        "permanent": true,
+        "error_contains": "no entry lists the account this token names"
+      }
+    },
+    {
+      "name": "an answer that carries a refresh token",
+      "about": "This grant issues none: a renewal is a fresh subject token traded again. A client that kept one would hold a credential the contract says is never minted, so an answer carrying one is refused.",
+      "subject": {
+        "kind": "kubernetes-projected-file",
+        "token": "projected.service.account.token",
+        "token_type": "urn:envoy:params:oauth:token-type:kubernetes-service-account"
+      },
+      "session": "example-worker-session",
+      "form": {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "client_id": "dispatch-token-exchange",
+        "subject_token": "${subject_token}",
+        "subject_token_type": "urn:envoy:params:oauth:token-type:kubernetes-service-account",
+        "session": "${session}"
+      },
+      "proof": {
+        "header": { "typ": "dpop+jwt", "alg": "ES256", "jwk": "${public_jwk}" },
+        "claims": { "jti": "${jti}", "htm": "POST", "htu": "${token_endpoint}", "iat": "${iat}" }
+      },
+      "answer": {
+        "status": 200,
+        "body": {
+          "access_token": "broker-access-token-with-a-refresh-token",
+          "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+          "token_type": "DPoP",
+          "expires_in": 3600,
+          "refresh_token": "a-refresh-token-this-grant-never-issues"
+        }
+      },
+      "expect": {
+        "outcome": "refuse",
+        "permanent": false,
+        "error_contains": "refresh token"
+      }
+    },
+    {
+      "name": "an answer of a token type that is not DPoP",
+      "about": "Every token this grant mints is bound to the key the caller proved. A bearer token would be one a copy of the answer could spend, so the client refuses it rather than presenting it.",
+      "subject": {
+        "kind": "kubernetes-projected-file",
+        "token": "projected.service.account.token",
+        "token_type": "urn:envoy:params:oauth:token-type:kubernetes-service-account"
+      },
+      "session": "example-worker-session",
+      "form": {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "client_id": "dispatch-token-exchange",
+        "subject_token": "${subject_token}",
+        "subject_token_type": "urn:envoy:params:oauth:token-type:kubernetes-service-account",
+        "session": "${session}"
+      },
+      "proof": {
+        "header": { "typ": "dpop+jwt", "alg": "ES256", "jwk": "${public_jwk}" },
+        "claims": { "jti": "${jti}", "htm": "POST", "htu": "${token_endpoint}", "iat": "${iat}" }
+      },
+      "answer": {
+        "status": 200,
+        "body": {
+          "access_token": "a-bearer-token",
+          "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+          "token_type": "Bearer",
+          "expires_in": 3600
+        }
+      },
+      "expect": {
+        "outcome": "refuse",
+        "permanent": false,
+        "error_contains": "token_type"
+      }
+    }
+  ]
+}

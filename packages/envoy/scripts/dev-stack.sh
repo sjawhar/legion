@@ -201,6 +201,16 @@ SIGNIN_SECRET_FILE="$WORK_DIR/signin-client-secret"
 SIGNIN_DOMAIN="${APPROVER_LOGIN#*@}"
 DEVICE_CLIENT_ID="dev-stack-device"
 DEVICE_SECRET_FILE="$WORK_DIR/device-client-secret"
+# This stack's machine: a fleet of one, whose Google identity token the broker takes as a subject
+# of its exchange and as the actor token of a person's sign-in. The issuer mints it through a
+# device-flow client of its own, so the machine's audience and the person's are two audiences and
+# neither token is spendable where the other is. The account is a Google service account's shape
+# in an example project; nothing here reaches Google.
+MACHINE_CLIENT_ID="dev-stack-machine"
+MACHINE_SECRET_FILE="$WORK_DIR/machine-client-secret"
+FLEET_SERVICE="example-fleet"
+FLEET_ACCOUNT="example-fleet@example-project.iam.gserviceaccount.com"
+METADATA_SCRIPT="$WORK_DIR/dev-metadata.py"
 
 BROKER_DB="dev_stack_broker_${RUN_SUFFIX}"
 DISPATCH_DB="dev_stack_dispatch_${RUN_SUFFIX}"
@@ -361,6 +371,7 @@ DISPATCH_URL="http://127.0.0.1:${DISPATCH_PORT}"
 # command line. ---
 (umask 077 && od -An -N32 -tx1 /dev/urandom | tr -d ' \n' >"$SIGNIN_SECRET_FILE")
 (umask 077 && od -An -N32 -tx1 /dev/urandom | tr -d ' \n' >"$DEVICE_SECRET_FILE")
+(umask 077 && od -An -N32 -tx1 /dev/urandom | tr -d ' \n' >"$MACHINE_SECRET_FILE")
 echo "dev-stack: starting dev-oidc-issuer..." >&2
 : >"$ISSUER_LOG"
 env -i PATH="$PATH" "$BIN_DIR/dev-oidc-issuer" \
@@ -371,6 +382,7 @@ env -i PATH="$PATH" "$BIN_DIR/dev-oidc-issuer" \
   --token "$BROKER_AUDIENCE=$REGISTRAR_ACCOUNT=$REGISTRAR_TOKEN_FILE" \
   --code-flow "$SIGNIN_CLIENT_ID=$SIGNIN_SECRET_FILE" \
   --device-flow "$DEVICE_CLIENT_ID=$DEVICE_SECRET_FILE" \
+  --device-flow "$MACHINE_CLIENT_ID=$MACHINE_SECRET_FILE" \
   --sign-in-as "$APPROVER_LOGIN" \
   >"$ISSUER_LOG" 2>&1 &
 ISSUER_PID=$!
@@ -379,8 +391,9 @@ ISSUER_URL="$awaited"
 echo "dev-stack: dev-oidc-issuer $ISSUER_URL" >&2
 
 # --- The broker, on a fake Secrets Manager holding one agent-tier secret its owner's sessions get
-# without asking and one human-tier secret its owner approves, both owned by the person the issuer
-# signs in. BROKER_LISTEN_ADDR and BROKER_PUBLIC_URL are port 0: cmd/broker reads a public URL
+# without asking, one human-tier secret its owner approves — both owned by the person the issuer
+# signs in — and one the fleet's service owns, which this stack's machine reads and no person's
+# session does. BROKER_LISTEN_ADDR and BROKER_PUBLIC_URL are port 0: cmd/broker reads a public URL
 # whose port is 0 as "derive it from whatever address I bind", and the real one is read from its
 # own listening line below. BROKER_DRAIN_SECONDS=0 turns off the five-second drain that exists to
 # outlast a Kubernetes EndpointSlice propagation nothing here has. ---
@@ -389,7 +402,9 @@ cat >"$FAKE_SECRETS_FILE" <<EOF
   {"name": "${SECRETS_PREFIX}demo-read-token", "kms_key_id": "${SECRETS_KMS_KEY_ARN}",
    "tags": {"owner": "${APPROVER_LOGIN}", "tier": "agent"}, "value": "demo-read-token-value"},
   {"name": "${SECRETS_PREFIX}demo-api-key", "kms_key_id": "${SECRETS_KMS_KEY_ARN}",
-   "tags": {"owner": "${APPROVER_LOGIN}", "tier": "human"}, "value": "demo-api-key-value"}
+   "tags": {"owner": "${APPROVER_LOGIN}", "tier": "human"}, "value": "demo-api-key-value"},
+  {"name": "${SECRETS_PREFIX}fleet-token", "kms_key_id": "${SECRETS_KMS_KEY_ARN}",
+   "tags": {"owner": "${FLEET_SERVICE}", "tier": "agent"}, "value": "fleet-token-value"}
 ]}
 EOF
 chmod 600 "$FAKE_SECRETS_FILE"
@@ -414,6 +429,10 @@ env -i PATH="$PATH" \
   BROKER_SIGNIN_DOMAIN="$SIGNIN_DOMAIN" \
   BROKER_EXCHANGE_K8S_AUDIENCE="$EXCHANGE_AUDIENCE" \
   BROKER_EXCHANGE_ACCOUNTS="$EXCHANGE_ACCOUNT=$EXCHANGE_PROJECT=$APPROVER_LOGIN" \
+  BROKER_GOOGLE_OIDC_ISSUER="$ISSUER_URL" \
+  BROKER_GOOGLE_OIDC_AUDIENCE="$MACHINE_CLIENT_ID" \
+  BROKER_VM_SERVICES="$FLEET_SERVICE=$FLEET_ACCOUNT" \
+  BROKER_SIGNIN_DEVICE_AUDIENCE="$DEVICE_CLIENT_ID" \
   BROKER_SERVICE_LOGINS="legion-daemon=$REGISTRAR_ACCOUNT" \
   "$BIN_DIR/broker" >"$BROKER_LOG" 2>&1 &
 BROKER_PID=$!
@@ -513,6 +532,117 @@ DISPATCH_URL="http://$awaited"
 until_true "Dispatch's route index" curl -sf "$DISPATCH_URL/api/v1"
 echo "dev-stack: dispatch $DISPATCH_URL" >&2
 
+# --- The stand-in for a Compute Engine metadata server, written here and started by whoever
+# wants it. This stack has no cloud, so a machine's Google identity token comes from the one
+# issuer that can mint one with an `email` claim: dev-oidc-issuer's device grant, driven in four
+# loopback calls (a device authorization; the machine's claims queued at /_dev/sign-in-as; the
+# approval at /_dev/approve-device-code, which is what a person typing a code in at Google
+# stands for; and the poll). It serves exactly the path internal/googleidentity asks
+# (?format=full, Metadata-Flavor: Google), so GCE_METADATA_HOST pointed at it drives the real
+# reader, the real client and the real broker.
+#
+# dev-stack.sh starts no process for it: scripts/dev-stack.test.sh drives this driver with a
+# fake python3 that runs held-port.py and refuses every other script, and this stand-in is not
+# part of the stack anyway — it stands in for the machine the stack runs on. The banner below
+# prints the three lines that start it. ---
+cat >"$METADATA_SCRIPT" <<PY
+#!/usr/bin/env python3
+"""A stand-in for the Compute Engine metadata server, for dev-stack.sh (which wrote this file).
+
+It answers one path, the instance's identity token, by minting a fresh one at this run's
+dev-oidc-issuer through that issuer's device grant: the machine's own claims are queued at the
+issuer's loopback sign-in control and the pending code is approved at once, which is this
+stack's stand-in for a person typing a code in at Google. The token is cached until it is a
+quarter spent, so a renewal gets a token of its own.
+"""
+import http.server, json, socket, sys, threading, time, urllib.parse, urllib.request
+
+ISSUER = "$ISSUER_URL"
+CLIENT_ID = "$MACHINE_CLIENT_ID"
+SECRET_FILE = "$MACHINE_SECRET_FILE"
+ACCOUNT = "$FLEET_ACCOUNT"
+PORT_FILE = "$WORK_DIR/metadata-port"
+IDENTITY_PATH = "/computeMetadata/v1/instance/service-accounts/default/identity"
+CACHE_SECONDS = 600
+
+lock = threading.Lock()
+cached = {"token": "", "at": 0.0}
+
+def post(url, form=None, body=None):
+    if form is not None:
+        data = urllib.parse.urlencode(form).encode()
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    else:
+        data = json.dumps(body).encode()
+        headers = {"Content-Type": "application/json"}
+    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    with urllib.request.urlopen(request, timeout=10) as answer:
+        raw = answer.read()
+    return json.loads(raw) if raw.strip() else {}
+
+def mint():
+    secret = open(SECRET_FILE).read().strip()
+    authorization = post(ISSUER + "/device_authorization",
+                         form={"client_id": CLIENT_ID, "scope": "openid email"})
+    post(ISSUER + "/_dev/sign-in-as",
+         body={"sub": ACCOUNT, "email": ACCOUNT, "email_verified": True})
+    post(ISSUER + "/_dev/approve-device-code", body={"user_code": authorization["user_code"]})
+    answered = post(ISSUER + "/token", form={
+        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+        "device_code": authorization["device_code"],
+        "client_id": CLIENT_ID, "client_secret": secret})
+    return answered["id_token"]
+
+def identity():
+    with lock:
+        if cached["token"] and time.time() - cached["at"] < CACHE_SECONDS:
+            return cached["token"]
+        cached["token"], cached["at"] = mint(), time.time()
+        return cached["token"]
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        query = urllib.parse.parse_qs(parsed.query)
+        if parsed.path != IDENTITY_PATH:
+            return self.refuse(404, "this stand-in serves the instance identity path alone")
+        if self.headers.get("Metadata-Flavor") != "Google":
+            return self.refuse(403, "a metadata request carries Metadata-Flavor: Google")
+        if query.get("format", [""])[0] != "full":
+            return self.refuse(400, "the identity must be asked for with format=full")
+        if query.get("audience", [""])[0] != CLIENT_ID:
+            return self.refuse(400, "this stand-in mints for one audience: " + CLIENT_ID)
+        try:
+            token = identity().encode()
+        except Exception as failure:  # the issuer is down, or refused this client
+            return self.refuse(502, "mint an identity token at " + ISSUER + ": " + str(failure))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(token)))
+        self.end_headers()
+        self.wfile.write(token)
+
+    def refuse(self, status, message):
+        body = message.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write("dev-metadata: " + (fmt % args) + "\n")
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+port = server.socket.getsockname()[1]
+with open(PORT_FILE, "w") as handle:
+    handle.write(str(port) + "\n")
+sys.stderr.write("dev-metadata: listening host=127.0.0.1:%d\n" % port)
+sys.stderr.flush()
+server.serve_forever()
+PY
+chmod 700 "$METADATA_SCRIPT"
+
 cat <<EOF
 
 dev-stack: ready.
@@ -536,20 +666,45 @@ dev-stack: ready.
   export DEV_STACK_POD_TOKEN_FILE=$POD_TOKEN_FILE
   export DEV_STACK_REGISTRAR_TOKEN_FILE=$REGISTRAR_TOKEN_FILE
   export DEV_STACK_LISTENER_TOKEN_FILE=$LISTENER_TOKEN_FILE
+  export DEV_STACK_MACHINE_ACCOUNT=$FLEET_ACCOUNT
+  export DEV_STACK_METADATA_SCRIPT=$METADATA_SCRIPT
+
+  the Go token client, for a session that trades this machine's identity or signs a person in:
+
+  export AGENT_SECRETS_MACHINE_IDENTITY=metadata
+  export AGENT_SECRETS_MACHINE_AUDIENCE=$MACHINE_CLIENT_ID
+  export AGENT_SECRETS_SIGNIN_ISSUER=$ISSUER_URL
+  export AGENT_SECRETS_SIGNIN_CLIENT_ID=$DEVICE_CLIENT_ID
+  export AGENT_SECRETS_SIGNIN_CLIENT_SECRET_FILE=$DEVICE_SECRET_FILE
 
   binaries:   $BIN_DIR
   logs:       $LOG_DIR  (one per process)
   databases:  $BROKER_DB and $DISPATCH_DB on $DISPLAY_SERVER (created and dropped by this run)
-  fake secrets: $FAKE_SECRETS_FILE  (DEMO_READ_TOKEN at the agent tier, DEMO_API_KEY at the human tier, both owned by $APPROVER_LOGIN)
+  fake secrets: $FAKE_SECRETS_FILE  (DEMO_READ_TOKEN at the agent tier and DEMO_API_KEY at the
+                human tier, both owned by $APPROVER_LOGIN; FLEET_TOKEN at the agent tier, owned
+                by the service $FLEET_SERVICE, which this machine's own sessions read and no
+                person's session does)
+
+  This stack has no cloud, so a machine's Google identity token comes from a stand-in for the
+  Compute Engine metadata server, written for you at $METADATA_SCRIPT. Start it and point the
+  client at it (it mints through dev-oidc-issuer's device grant for $FLEET_ACCOUNT):
+
+    python3 $METADATA_SCRIPT >$LOG_DIR/dev-metadata.log 2>&1 &
+    until [ -s $WORK_DIR/metadata-port ]; do sleep 0.1; done
+    export GCE_METADATA_HOST=127.0.0.1:\$(cat $WORK_DIR/metadata-port)
+
+  With that and the client's variables above, in a shell with no AGENT_SECRETS_HELPER_SOCK,
+  \`agent-secrets FLEET_TOKEN -- <command>\` trades this machine's identity for a launcher
+  credential, registers a key of its own under it and reads the fleet's secret; and
+  \`agent-secrets login\` signs a person in, printing the code to approve with
+  POST $ISSUER_URL/_dev/approve-device-code and {"user_code": "..."}, after which that person's
+  session reads DEMO_READ_TOKEN as them.
 
   Sign in to Dispatch at $DISPATCH_URL/auth/_dev/signin?login=$APPROVER_LOGIN, and approve a
   secret request on the broker's own page, $BROKER_URL/approve/<record>, which signs the same
   person in at dev-oidc-issuer with no page to fill in. The pod $EXCHANGE_ACCOUNT exchanges
   $EXCHANGE_TOKEN_FILE's token for an access token that writes $EXCHANGE_PROJECT as
-  $APPROVER_LOGIN, under the session $EXCHANGE_SESSION this run registered it for. A device
-  sign-in: POST $ISSUER_URL/device_authorization as the client $DEVICE_CLIENT_ID, then
-  POST $ISSUER_URL/_dev/approve-device-code with {"user_code": "..."} for the person who would
-  type that code in at Google.
+  $APPROVER_LOGIN, under the session $EXCHANGE_SESSION this run registered it for.
 
   That access token reaches the listener too: POST \$ENVOY_URL/v1/messages/send under
   \`Authorization: DPoP <token>\` with a DPoP proof of the key it is bound to acts as

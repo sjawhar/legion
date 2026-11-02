@@ -5259,3 +5259,41 @@ the `build` matrix job builds only `legion-envoy-<arch>.tar.gz` (envoy-listener 
 Each `agent-secrets` tarball also holds `agent-secrets/THIRD_PARTY_NOTICES`, the licenses of the Go modules its binaries compile in, and the lint job of `ci.yaml` writes those notices for every archive and compiles the darwin client on each pull request whose change its `go_notices` filter matches.
 A host installs both binaries from this release (through the operator's dotfiles, under the broker design's devbox-enrollment plan), and a laptop the CLI.
 
+
+### The Go token client, `agent-secrets login`, and the machine identities
+
+`internal/brokerclient` is this repository's one Go client of the broker's RFC 8693 token exchange, and `packages/envoy/brokerclient` is a public re-export of it, the facade `packages/daemon`'s `legion controller start` imports for the reason `packages/envoy/brokertest` exists: Go's internal-package rule stops a foreign module importing `internal/...`.
+`internal/broker/helper/dpop.go` now forwards to it as well, so the repository holds one RFC 9449 signer rather than two.
+Each process makes its own key and sends only its public half; the grant issues no refresh token, so a renewal is a fresh subject token traded again, which is why every identity is read afresh at every trade.
+`Client.Token` answers the token in hand while it is live and the broker is merely unreachable, and answers the error once the broker has refused the identity or nothing live is left, so a caller that writes only with what it was given never writes with no identity; `Client.Run` keeps one token live, retrying a broker that does not answer from 15 s doubling to 5 minutes and stopping with a plain error on a refusal, which no retry cures.
+
+The wire contract both this client and the TypeScript client of a later task are held to is the corpus at `internal/brokerclient/testdata/wire.json`.
+Each suite replays every exchange in it against a stub broker of its own and asserts set equality — the corpus is the whole of what a request may carry and the whole of what a client may read out of an answer — so a field one client starts sending or reading without an entry there fails that client's own test, and a field added there fails the other client until it sends it too.
+It lives in the Go package's `testdata` because the Go half is the half that exists today; the TypeScript suite reads it by relative path.
+
+The variables, all unset by default, in which case every program works exactly as it did:
+
+| Variable | Form | Default | What it does |
+| --- | --- | --- | --- |
+| `AGENT_SECRETS_MACHINE_IDENTITY` | `kubernetes`, `metadata` or `pool` | unset | the identity this machine proves at the exchange; unset, it proves none |
+| `AGENT_SECRETS_MACHINE_TOKEN_FILE` | a path | unset | the projected Kubernetes service-account token `kubernetes` reads and `pool` federates |
+| `AGENT_SECRETS_MACHINE_AUDIENCE` | an audience | unset | the `aud` of this machine's Google identity token, which `metadata` mints for and `pool` names on its mint |
+| `AGENT_SECRETS_POOL_AUDIENCE` | `//iam.googleapis.com/projects/…` | unset | the workload identity pool provider an external credential is traded at |
+| `AGENT_SECRETS_POOL_ACCOUNT` | a service account | unset | the managed identity `generateIdToken` is called on, with `includeEmail` |
+| `AGENT_SECRETS_SESSION` | a session name | unset | the session a trade writes under, where the deployment's entry fixes none |
+| `AGENT_SECRETS_PERSON` | an address | unset | which person a session acts for, where more than one has signed in here |
+| `AGENT_SECRETS_SIGNIN_CLIENT_ID` | an OAuth client id | unset | the device-flow client `agent-secrets login` signs a person in as |
+| `AGENT_SECRETS_SIGNIN_CLIENT_SECRET_FILE` | a path | unset | that client's secret, in a file rather than a variable |
+| `AGENT_SECRETS_SIGNIN_ISSUER` | an issuer URL | `https://accounts.google.com` | where a person signs in; a dev stack names its own |
+
+`agent-secrets login` is the one command a person runs to sign in on a machine.
+It makes a box key, runs Google's device authorization grant asking for `openid` and `email` and nothing else, trades the person's identity token with this machine's as the actor token, and registers that person's session under the launcher credential the trade mints.
+The box key and Google's refresh token are kept together in that person's own record, `<key dir>/signins/<sha256 of the lowercased address>.json`, mode `0600` in a `0700` directory (`writeFileAtomic` into `keyDir()`, the repository's own conventions), so the person's user alone reads them; the file is named for the hash and names the person inside it, so signing in again as the same person replaces that record and two addresses never land on one file.
+One record per person, so a second person on the box signs in beside the first.
+A session with exactly one sign-in here uses it; with more than one it is refused until `AGENT_SECRETS_PERSON` says which, and the refusal names them.
+Every refusal a sign-in would cure names `agent-secrets login`.
+
+`selectSigner` therefore tries, in order: a key dir holding `key.pem` and an enrollment (a box or pod a launcher set up), a person's sign-in record, a helper socket, and last a machine identity of this machine's own.
+That last branch is how a pod with no launcher and no helper enrols itself: it trades, registers a key it makes, and writes that key and the enrollment into the key dir as a launcher would have, so the next call takes the file branch and trades nothing.
+`agent-secrets-helper` takes the same route for its launcher credential when `AGENT_SECRETS_MACHINE_IDENTITY` is set: no machine file, no device grant, nobody approving the machine, and the credential traded again before it lapses.
+`legion controller start` mints the controller's own Dispatch token the same way and writes it as a `<NAME>_FILE` pointer under the state directory, renewing it while Oh My Pi runs and logging each renewal to `<state_dir>/dispatch-token.log`; with no machine identity it reads the `dispatch_token_file` its configuration names, as it always has.

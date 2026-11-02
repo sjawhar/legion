@@ -31,6 +31,8 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
+	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 	"github.com/sjawhar/envoy/internal/buildversion"
 	"github.com/sjawhar/envoy/internal/redact"
 )
@@ -41,16 +43,30 @@ type config struct {
 	OperatorFile string
 	MachineFile  string
 	StatePath    string
+	// Identity is this machine's own identity at the broker's token exchange
+	// (AGENT_SECRETS_MACHINE_IDENTITY and the variables it needs), or nil where this machine
+	// proves none and is logged in by a person as before. With one, the helper's launcher
+	// credential is the one that exchange mints, and nobody approves this machine at all.
+	Identity brokerclient.Source
+	// Session is the session name a trade writes under (AGENT_SECRETS_SESSION), empty where
+	// the deployment's entry fixes one.
+	Session string
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
 	home := getenv("HOME")
 	cfg := config{
-		URL:          strings.TrimSuffix(getenv("AGENT_SECRETS_URL"), "/"),
+		URL:          strings.TrimSuffix(getenv(brokerclient.BrokerURLVar), "/"),
 		Socket:       getenv("AGENT_SECRETS_HELPER_SOCK"),
 		OperatorFile: getenv("AGENT_SECRETS_OPERATOR_FILE"),
 		MachineFile:  getenv("AGENT_SECRETS_MACHINE_FILE"),
+		Session:      strings.TrimSpace(getenv(brokerclient.SessionVar)),
 	}
+	identity, err := brokerclient.MachineIdentity(getenv)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.Identity = identity
 	// AGENT_SECRETS_URL is checked by serve, not here: `sessions` needs only the socket, and
 	// the installer's restart guard runs it without the unit's environment.
 	if cfg.Socket == "" {
@@ -85,7 +101,18 @@ environment:
                                (default ~/.config/agent-secrets/operator)
   AGENT_SECRETS_MACHINE_FILE   where the helper keeps this machine's login (its key and refresh
                                token, mode 0600), so a restart resumes it; install writes it into
-                               the unit when set (default ~/.config/agent-secrets/machine.json)
+                               the unit when set (default ~/.config/agent-secrets/machine.json).
+                               A machine that proves an identity of its own keeps no such file
+  AGENT_SECRETS_MACHINE_IDENTITY
+                               the identity this machine proves at the broker's token exchange:
+                               kubernetes (AGENT_SECRETS_MACHINE_TOKEN_FILE), metadata
+                               (AGENT_SECRETS_MACHINE_AUDIENCE) or pool (both, with
+                               AGENT_SECRETS_POOL_AUDIENCE and AGENT_SECRETS_POOL_ACCOUNT).
+                               With it the helper's launcher credential is the one that exchange
+                               mints, traded again before it lapses, and no person approves this
+                               machine; unset, a person logs it in as before
+  AGENT_SECRETS_SESSION        the session name a trade writes under, where the deployment's
+                               entry fixes none
 
 install refuses a relative path in any of these variables: the unit's helper runs elsewhere.
 `
@@ -141,10 +168,14 @@ func serve(cfg config) error {
 		return err
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	identity, err := identityClient(cfg, log)
+	if err != nil {
+		return err
+	}
 	srv := &helper.Server{
 		Registry: helper.NewRegistry(cfg.StatePath),
 		Broker: &helper.Broker{URL: cfg.URL, OperatorFile: cfg.OperatorFile, MachineFile: cfg.MachineFile,
-			HTTP: &http.Client{Timeout: 30 * time.Second}, Log: log},
+			Identity: identity, HTTP: &http.Client{Timeout: 30 * time.Second}, Log: log},
 		Hostname: hostname,
 		PeerOf:   helper.PeerOf,
 		Log:      log,
@@ -196,6 +227,24 @@ func serve(cfg config) error {
 	// broker's URL is logged without a credential it may carry.
 	log.Info("agent-secrets-helper listening", "socket", cfg.Socket, "broker", redact.URL(cfg.URL), "version", buildversion.String())
 	return srv.Serve(ctx, ln)
+}
+
+// identityClient is the token client for the identity this machine proves, or nil where it
+// proves none. The key is made here, in this process, and only its public half ever reaches the
+// broker: it is the key every launcher proof the helper signs is signed with, and it lives as
+// long as the process does, so a restart proves a new one and trades again.
+func identityClient(cfg config, log *slog.Logger) (*brokerclient.Client, error) {
+	if cfg.Identity == nil {
+		return nil, nil
+	}
+	key, err := proof.NewKey()
+	if err != nil {
+		return nil, fmt.Errorf("make this machine's key: %w", err)
+	}
+	return brokerclient.New(brokerclient.Config{
+		BrokerURL: cfg.URL, Key: key, Subject: cfg.Identity, Session: cfg.Session,
+		HTTP: brokerclient.HTTPClient(), Log: log,
+	})
 }
 
 // claimSocket takes the helper's claim on sock: an exclusive flock on sock+".lock" (0600, beside

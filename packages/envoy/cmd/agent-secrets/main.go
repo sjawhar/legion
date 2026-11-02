@@ -23,6 +23,7 @@
 //	agent-secrets unenroll --helper --enrollment <id>
 //	agent-secrets machine login|login-status|list [--json]|revoke <credential_id>
 //	agent-secrets grant list [--json]|revoke <grant_id>
+//	agent-secrets login
 //	agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]
 //	agent-secrets identity
 //	agent-secrets renew [--pod-token-file FILE]
@@ -83,6 +84,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 	"github.com/sjawhar/envoy/internal/buildversion"
 )
 
@@ -128,6 +130,8 @@ var commands = []command{
 		"List the live grants of your sessions and those you approved, under this machine's login:\neach one's id, secrets, how it was granted, who approved it, its session and operator, and\nwhen it expires. Dispatch's Live grants page lists the same."},
 	{"grant revoke", "agent-secrets grant revoke <grant_id>",
 		"End a grant as its operator or approver, under this machine's login, as Dispatch's Live\ngrants page does. Ending an automatic grant also makes its session ask before it gets those\nsecrets again."},
+	{"login", "agent-secrets login",
+		"Sign in on this machine as yourself: print the code to type in at Google, then record the\nsign-in at the secrets broker, which binds it to a box key this machine makes. Every session\nof yours on this machine then acts as you. A second person signs in beside you, and\nAGENT_SECRETS_PERSON then says which of you a session acts for."},
 	{"register", "agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]",
 		"Register this process with agent-secrets-helper as a machine session. With --exec, run COMMAND\nas this same process, so it and everything it starts are that session."},
 	{"identity", "agent-secrets identity",
@@ -170,6 +174,33 @@ environment:
   OMP_SESSION_ID             the agent session the broker names and notifies if a pending request
                              expires; falls back to ENVOY_SESSION_ID, then CLAUDE_CODE_SESSION_ID,
                              so a harness that sets one of those instead still names its session
+  AGENT_SECRETS_PERSON       which person a session acts for, where more than one has signed in
+                             on this machine with agent-secrets login; with one sign-in it is
+                             that person, and with more and this unset every form that needs a
+                             session identity refuses and names them
+  AGENT_SECRETS_SIGNIN_CLIENT_ID
+                             the device-flow client agent-secrets login signs a person in as
+  AGENT_SECRETS_SIGNIN_CLIENT_SECRET_FILE
+                             a file holding that client's secret
+  AGENT_SECRETS_SIGNIN_ISSUER
+                             where a person signs in (default https://accounts.google.com); a dev
+                             stack names its own issuer
+  AGENT_SECRETS_MACHINE_IDENTITY
+                             the identity this machine proves at the broker's token exchange,
+                             which a person's sign-in presents as the actor token: kubernetes
+                             (AGENT_SECRETS_MACHINE_TOKEN_FILE), metadata
+                             (AGENT_SECRETS_MACHINE_AUDIENCE) or pool (both, with
+                             AGENT_SECRETS_POOL_AUDIENCE and AGENT_SECRETS_POOL_ACCOUNT)
+  AGENT_SECRETS_MACHINE_TOKEN_FILE
+                             this machine's projected Kubernetes service-account token
+  AGENT_SECRETS_MACHINE_AUDIENCE
+                             the audience of this machine's Google identity token
+  AGENT_SECRETS_POOL_AUDIENCE
+                             the workload identity pool provider an external credential is
+                             traded at, the full //iam.googleapis.com/projects/... resource name
+  AGENT_SECRETS_POOL_ACCOUNT the managed identity generateIdToken is called on
+  AGENT_SECRETS_SESSION      the session name a trade writes under, where the deployment's entry
+                             fixes none
   AWS_PROFILE                the AWS profile the secret forms sign in with when --profile names
                              none (else the AWS SDK's default credential chain); every secret
                              form needs a sign-in in the broker's account, and a write your own
@@ -205,6 +236,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdUnenroll(args[1:], stdout, stderr)
 	case "machine", "grant":
 		return cmdGroup(args[0], args[1:], stdout, stderr)
+	case "login":
+		return cmdLogin(args[1:], stdout, stderr)
 	case "register":
 		return cmdRegister(args[1:], stdout, stderr)
 	case "renew":
@@ -434,29 +467,38 @@ func loadKey(path string) (*ecdsa.PrivateKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
+	return parseKeyPEM(data, path)
+}
+
+// parseKeyPEM is a session key as its PKCS#8 PEM bytes hold it, named for the refusal: a key dir's
+// key.pem, or the box key inside a person's sign-in record (signin.go).
+func parseKeyPEM(data []byte, name string) (*ecdsa.PrivateKey, error) {
 	block, _ := pem.Decode(data)
 	if block == nil {
-		return nil, fmt.Errorf("%s: not a PEM file", path)
+		return nil, fmt.Errorf("%s: not a PEM file", name)
 	}
 	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	key, ok := parsed.(*ecdsa.PrivateKey)
 	if !ok {
-		return nil, fmt.Errorf("%s: not an ECDSA private key", path)
+		return nil, fmt.Errorf("%s: not an ECDSA private key", name)
 	}
 	return key, nil
 }
 
 // buildSigner selects and builds this process's Signer: an agent box or pod signs with the key
-// and enrollment id it keeps in its key dir (file mode); a machine session has no key of its own and
+// and enrollment id it keeps in its key dir (file mode); a person who ran `agent-secrets login`
+// on this machine signs with the box key and enrollment in their own sign-in record (sign-in
+// mode, signin.go); a machine session has no key of its own and
 // asks agent-secrets-helper over its socket, which signs only for processes descending from a
 // session `agent-secrets register` registered (helper mode). The key dir and socket are
 // AGENT_SECRETS_KEY_DIR and AGENT_SECRETS_HELPER_SOCK, or their defaults where those are unset
 // (identity.go). While a box's launcher is still enrolling it (a fresh enrollment.pending in the
 // key dir), this first waits for key.pem and enrollment, for AGENT_SECRETS_ENROLL_WAIT at most.
-// The enrollment id it returns is file mode's own; helper mode returns "" because nothing needs
+// The enrollment id it returns is file mode's and sign-in mode's own; helper mode returns ""
+// because nothing needs
 // it as a literal except RenewEnrollment's URL path, and a machine session's lease is renewed by
 // the helper itself — cmdRenew refuses outright once it sees an empty id from a successful build.
 func buildSigner() (enrollmentID string, signer Signer, err error) {
@@ -491,11 +533,113 @@ func selectSigner(dir string) (string, Signer, error) {
 		}
 		return id, &fileSigner{key: key, enrollmentID: id}, nil
 	}
+	if record, err := signInSigner(); err != nil {
+		return "", nil, err
+	} else if record != nil {
+		return record.enrollmentID, record, nil
+	}
 	sock, named := helperSocket()
 	if named || exists(sock) {
 		return "", &helperSigner{sock: sock}, nil
 	}
-	return "", nil, fmt.Errorf("no session identity: the key dir %s has no key.pem (AGENT_SECRETS_KEY_DIR; an agent box or pod is enrolled by its launcher) and no helper socket is set or at %s (AGENT_SECRETS_HELPER_SOCK; a machine session is registered by `agent-secrets register`)", dir, sock)
+	if signer, err := machineSigner(dir); err != nil {
+		return "", nil, err
+	} else if signer != nil {
+		return signer.enrollmentID, signer, nil
+	}
+	return "", nil, fmt.Errorf("no session identity: the key dir %s has no key.pem (AGENT_SECRETS_KEY_DIR; an agent box or pod is enrolled by its launcher), nobody has run `agent-secrets login` here, this machine proves no identity of its own (%s), and no helper socket is set or at %s (AGENT_SECRETS_HELPER_SOCK; a machine session is registered by `agent-secrets register`)", dir, brokerclient.IdentityVar, sock)
+}
+
+// machineSigner is the signer of a machine that proves an identity of its own and holds no
+// launcher and no helper — a pod, which nobody enrols. It trades that identity for a launcher
+// credential, registers a key it makes here under it, and writes the key and the enrollment
+// into the key dir exactly as a launcher would have, so the next call of this machine's takes
+// the file branch above and trades nothing. It answers nil where this machine proves no
+// identity, which is every deployment that has not turned the exchange on.
+func machineSigner(dir string) (*fileSigner, error) {
+	identity, err := brokerclient.MachineIdentity(os.Getenv)
+	if err != nil || identity == nil {
+		return nil, err
+	}
+	base := brokerBaseURL()
+	if base == "" {
+		return nil, fmt.Errorf("%s names the identity this machine proves, so %s must name the secrets broker it proves it to", brokerclient.IdentityVar, brokerURLVar)
+	}
+	key, err := proof.NewKey()
+	if err != nil {
+		return nil, err
+	}
+	thumbprint, err := proof.Thumbprint(&key.PublicKey)
+	if err != nil {
+		return nil, err
+	}
+	client, err := brokerclient.New(brokerclient.Config{
+		BrokerURL: base, Key: key, Subject: identity,
+		Session: os.Getenv(brokerclient.SessionVar), HTTP: brokerclient.HTTPClient(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	ctx := context.Background()
+	token, err := client.Token(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if token.CredentialID == "" {
+		return nil, errors.New("the broker took this machine's identity but named no launcher credential, so no session can be registered under it")
+	}
+	enrollmentID, err := enrollUnderCredential(ctx, base, key, thumbprint, token.CredentialID, "this machine")
+	if err != nil {
+		return nil, err
+	}
+	if err := writeMachineSession(dir, key, enrollmentID); err != nil {
+		return nil, err
+	}
+	return &fileSigner{key: key, enrollmentID: enrollmentID}, nil
+}
+
+// writeMachineSession keeps the key and the enrollment a machine registered for itself, in the
+// key dir and in the modes a launcher writes them with (a 0700 directory, a 0600 key).
+func writeMachineSession(dir string, key *ecdsa.PrivateKey, enrollmentID string) error {
+	pemBytes, err := encodeKeyPEM(key)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("make the key dir %s: %w", dir, err)
+	}
+	if err := writeFileAtomic(filepath.Join(dir, keyFile), pemBytes, 0o600); err != nil {
+		return err
+	}
+	return writeFileAtomic(filepath.Join(dir, enrollmentFile), []byte(enrollmentID+"\n"), 0o600)
+}
+
+// signInSigner is the signer of the person this session acts for, or nil where nobody has
+// signed in on this machine (in which case the caller goes on to the helper). A box with
+// sign-ins but no way to say which one this session is refuses here, naming them: a command
+// must never read one colleague's secrets under another's name. A sign-in whose enrollment has
+// not been made yet is registered now, under a fresh trade of that person's identity, and the
+// record is rewritten with it, so a record that outlived its enrollment heals itself.
+func signInSigner() (*fileSigner, error) {
+	store := signInStore()
+	records, err := store.List()
+	if err != nil || len(records) == 0 {
+		return nil, err
+	}
+	record, err := store.Choose(os.Getenv(personVar))
+	if err != nil {
+		return nil, err
+	}
+	key, err := record.Key()
+	if err != nil {
+		return nil, err
+	}
+	if record.EnrollmentID == "" {
+		if record, err = registerSignInSession(context.Background(), record, key); err != nil {
+			return nil, err
+		}
+	}
+	return &fileSigner{key: key, enrollmentID: record.EnrollmentID}, nil
 }
 
 // sessionContext resolves the broker URL and this process's Signer every session-authenticated

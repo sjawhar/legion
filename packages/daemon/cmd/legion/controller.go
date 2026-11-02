@@ -17,6 +17,8 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/sjawhar/envoy/brokerclient"
+
 	"github.com/sjawhar/legion/daemon/internal/api"
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim" // main_test.go's `claim` helper holds the bare name
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -140,7 +142,10 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 			return 0, err
 		}
 	}
-	if cfg.DispatchTokenFile != "" {
+	// A machine that proves an identity of its own mints the controller's Dispatch token below
+	// (controllerStartDispatchToken) and never reads the configured pointer, so a file that is
+	// there only for the loader's sake is not checked here either.
+	if cfg.DispatchTokenFile != "" && os.Getenv(brokerclient.IdentityVar) == "" {
 		if _, err := config.ReadSecretPointer("dispatch_token_file", cfg.DispatchTokenFile); err != nil {
 			return 0, err
 		}
@@ -222,6 +227,14 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	defer stopGitHubRefresh()
 	if defaultOwner != "" {
 		env["GH_CONFIG_DIR"] = ghconfig.OwnerDir(controllerGHDir(stateDir), defaultOwner)
+	}
+	stopDispatchToken, dispatchTokenFile, err := controllerStartDispatchToken(ctx, stateDir, stderr)
+	if err != nil {
+		return 0, err
+	}
+	defer stopDispatchToken()
+	if dispatchTokenFile != "" {
+		env["DISPATCH_TOKEN_FILE"] = dispatchTokenFile
 	}
 	composer, err := prompts.New(stateDir)
 	if err != nil {
