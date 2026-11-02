@@ -299,6 +299,37 @@ describe("sessionAnswersWords", () => {
     expect(shown.length).toBeLessThan(items.length);
     expect(read.words).toEqual(sessionAnswersWords(shown));
   });
+
+  test("a cached list's words are those its own text shows, and an edit to an item it leaves out changes none", async () => {
+    const items = Array.from({ length: 12 }, (_, index) =>
+      message(`item-${index}`, hoursAgo(index + 1), `${index}:${"w".repeat(1_000)}`)
+    );
+    let answer = () => listed(items);
+    const { fetchImpl } = fakeDispatch(() => answer());
+    const options = {
+      session: newSession(),
+      dispatch: dispatchAt(),
+      env: envAt(stateDir()),
+      fetchImpl,
+      now: () => NOW,
+    };
+    const fresh = await readSessionAnswers(options);
+    // The oldest item is past the cap; a person edits it.
+    const edited = items.map((item, index) =>
+      index === items.length - 1 ? { ...item, text: `${item.text} edited` } : item
+    );
+    answer = () => listed(edited);
+    const afterEdit = await readSessionAnswers(options);
+    expect(afterEdit.text).toBe(fresh.text);
+    expect(afterEdit.words).toEqual(fresh.words);
+    // A failed read carries the cache under a longer header.
+    answer = () => json({ code: "INTERNAL", error: "database is down" }, 500);
+    const cached = await readSessionAnswers(options);
+    expect(cached.source).toBe("cache");
+    expect(cached.words).toEqual(
+      sessionAnswersWords(edited.filter((item) => cached.text?.includes(item.text)))
+    );
+  });
 });
 
 describe("renderSessionAnswersList", () => {
