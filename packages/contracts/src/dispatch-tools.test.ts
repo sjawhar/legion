@@ -718,6 +718,18 @@ describe("dispatchToolSpecs", () => {
     );
   });
 
+  test("takes a file's version and a box on a comment", () => {
+    const schema = schemaFor("dispatch_comment");
+    const comment = { issue: "DSP-1", artifact: "chart-png", body: "This bar looks low." };
+
+    expect(schema.safeParse({ ...comment, box: "0.62,0.1,0.3,0.25", version: 2 })).toMatchObject({
+      data: { box: "0.62,0.1,0.3,0.25", version: 2 },
+      success: true,
+    });
+    expect(schema.safeParse({ ...comment, version: 0 }).success).toBe(false);
+    expect(schema.safeParse({ ...comment, version: 1.5 }).success).toBe(false);
+  });
+
   test("rejects a document edit with an unknown operation", () => {
     expect(
       schemaFor("dispatch_doc_edit").safeParse({

@@ -113,14 +113,36 @@ export interface CreatedAgentToken extends AgentToken {
   readonly token: string;
 }
 
+/** Part of a picture, as fractions of its width and height measured from its top-left corner, so
+ *  it covers the same part of the picture at any size it is drawn. Each is finite, `left` and `top`
+ *  at least 0, `width` and `height` above 0, and `left + width` and `top + height` at most 1. */
+export interface AnchorBox {
+  readonly left: number;
+  readonly top: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+/** What an anchor names: absent for a passage of a Markdown document (its mark, quote and block),
+ *  `file` for a whole uploaded file that is not a document, or with `box` part of a picture. */
+export type AnchorKind = "file";
+
 export interface Anchor {
+  /** `file` for a comment on a whole uploaded file or, with `box`, on part of a picture; absent on
+   *  an anchor in a Markdown document. A file anchor's `quote` is empty, its `block_id` null, its
+   *  `mark_id` the comment's own id, and it is never orphaned. */
+  readonly kind?: AnchorKind;
   readonly artifact_id: string;
   /** Stable owner block for new anchors; null for legacy rows awaiting backfill. */
   readonly block_id: string | null;
   readonly mark_id: string;
+  /** The document version the anchor was written against, or for a file anchor the version of
+   *  the file the comment is about, which never moves. */
   readonly version: number;
   readonly quote: string;
   readonly orphaned: boolean;
+  /** The part of the picture a file anchor marks; absent on a comment about the whole file. */
+  readonly box?: AnchorBox;
 }
 
 export type AnchorInput =
@@ -129,12 +151,27 @@ export type AnchorInput =
       readonly quote: string;
       readonly occurrence?: number;
       readonly mark_id?: never;
+      readonly version?: never;
+      readonly box?: never;
     }
   | {
       readonly artifact: string;
       readonly mark_id: string;
       readonly quote?: never;
       readonly occurrence?: never;
+      readonly version?: never;
+      readonly box?: never;
+    }
+  | {
+      /** A whole uploaded file that is not a Markdown document, or with `box` part of a picture,
+       *  at `version` (the file's latest when absent). Comments only: an ask or a suggestion
+       *  names a passage of a document. */
+      readonly artifact: string;
+      readonly version?: number;
+      readonly box?: AnchorBox;
+      readonly quote?: never;
+      readonly occurrence?: never;
+      readonly mark_id?: never;
     };
 
 export interface Project {
@@ -3393,12 +3430,21 @@ export const CommentEventPayloadSchema = z
     turn: z.enum(ASK_TURNS).nullish(),
     anchor: z
       .object({
+        kind: z.string().optional(),
         artifact_id: z.string().optional(),
         block_id: z.string().nullable().optional(),
         mark_id: z.string().optional(),
         orphaned: z.boolean().optional(),
         quote: z.string().optional(),
         version: z.number().int().optional(),
+        box: z
+          .object({
+            left: z.number(),
+            top: z.number(),
+            width: z.number(),
+            height: z.number(),
+          })
+          .optional(),
       })
       .nullish(),
     suggestion: z.object({ replace_with: z.string().optional() }).nullish(),

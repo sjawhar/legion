@@ -15,7 +15,7 @@ import (
 // transaction is open, where a second pooled connection is what deadlocks the pool
 // (store.ErrNestedAcquire), and it reads the document as the transaction's own writes left it.
 func (s *server) commentProjectionKind(ctx context.Context, comment model.Comment) (string, error) {
-	if comment.Suggestion == nil || comment.Anchor == nil {
+	if comment.Suggestion == nil || !comment.Anchor.OnText() {
 		return "", nil
 	}
 	return s.deps.Docs.SuggestionKind(ctx, comment.Anchor.ArtifactID, comment.Anchor.MarkID)

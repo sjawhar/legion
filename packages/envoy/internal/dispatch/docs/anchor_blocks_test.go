@@ -204,3 +204,65 @@ func TestBlockForQuoteLeavesTopLevelCrossBlockAnchorsUnpinned(t *testing.T) {
 		t.Fatalf("cross-block quote block_id = %q, want empty", blockID)
 	}
 }
+
+// A comment on an uploaded file has an anchor with no block, and no document holds a block for it:
+// the backfill leaves it as it is and still pins the text anchors beside it, rather than failing the
+// whole run on a file it cannot read as a document.
+func TestBackfillAnchorBlocksLeavesFileAnchorsAlone(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "Introduction.\n\nTarget passage.\n")
+	commentID := insertAnchoredComment(t, service, artifactID, "Target passage")
+	ctx := context.Background()
+	var pictureID string
+	if err := service.store.Pool.QueryRow(ctx, `
+		insert into artifacts (issue_key, project_key, slug, name, kind, created_by)
+		values ('DOC-1', 'DOC', 'chart-png', 'chart.png', 'image', '{"kind":"user","id":"alice"}')
+		returning id::text
+	`).Scan(&pictureID); err != nil {
+		t.Fatalf("create picture: %v", err)
+	}
+	fileCommentID := "00000000-0000-4000-8000-000000000099"
+	fileAnchor := `{"kind":"file","artifact_id":"` + pictureID + `","block_id":null,"mark_id":"` + fileCommentID +
+		`","version":1,"quote":"","orphaned":false,"box":{"left":0.1,"top":0.1,"width":0.5,"height":0.5}}`
+	if _, err := service.store.Pool.Exec(ctx, `
+		insert into comments (id, issue_key, author, body, anchor)
+		values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'This bar.', $2)
+	`, fileCommentID, fileAnchor); err != nil {
+		t.Fatalf("insert file comment: %v", err)
+	}
+
+	result, err := service.BackfillAnchorBlocks(ctx)
+	if err != nil {
+		t.Fatalf("backfill beside a file anchor: %v", err)
+	}
+	if result.Comments != 1 || result.Skipped != 0 {
+		t.Fatalf("backfill = %#v, want the text comment pinned and the file comment not counted", result)
+	}
+	var pinned string
+	if err := service.store.Pool.QueryRow(ctx, `select coalesce(anchor->>'block_id', '') from comments where id = $1`, commentID).Scan(&pinned); err != nil || pinned == "" {
+		t.Fatalf("text comment block id = %q, %v, want a pinned block", pinned, err)
+	}
+	var stored []byte
+	if err := service.store.Pool.QueryRow(ctx, `select anchor from comments where id = $1`, fileCommentID).Scan(&stored); err != nil {
+		t.Fatalf("load file anchor: %v", err)
+	}
+	var got, want map[string]any
+	if err := json.Unmarshal(stored, &got); err != nil {
+		t.Fatalf("decode file anchor: %v", err)
+	}
+	if err := json.Unmarshal([]byte(fileAnchor), &want); err != nil {
+		t.Fatalf("decode seeded file anchor: %v", err)
+	}
+	if gotJSON, _ := json.Marshal(got); string(gotJSON) != mustJSON(t, want) {
+		t.Fatalf("file anchor after backfill = %s, want it unchanged %s", gotJSON, fileAnchor)
+	}
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("encode %#v: %v", value, err)
+	}
+	return string(encoded)
+}

@@ -47,6 +47,43 @@ func seedDocument(t *testing.T, database *store.Store, issueKey *string, slug st
 	return id
 }
 
+// seedUpload inserts a file of kind ("image" or "file") creator uploaded, owned as seedDocument's
+// document is, with one version per entry of versions crediting that entry's authors, and returns
+// its id.
+func seedUpload(t *testing.T, database *store.Store, issueKey *string, slug, kind string, creator model.Actor, versions ...[]model.Actor) string {
+	t.Helper()
+	ctx := context.Background()
+	creatorJSON, err := json.Marshal(creator)
+	if err != nil {
+		t.Fatalf("encode upload creator: %v", err)
+	}
+	var id string
+	if err := database.Pool.QueryRow(ctx, `
+		insert into artifacts (issue_key, project_key, slug, name, kind, created_by)
+		values ($1, 'TT', $2, $2 || '.bin', $3, $4)
+		returning id::text
+	`, issueKey, slug, kind, creatorJSON).Scan(&id); err != nil {
+		t.Fatalf("create upload %s: %v", slug, err)
+	}
+	for index, authors := range versions {
+		encoded, err := json.Marshal(authors)
+		if err != nil {
+			t.Fatalf("encode version authors: %v", err)
+		}
+		if _, err := database.Pool.Exec(ctx, `
+			insert into artifact_versions (artifact_id, number, mime, size, authors) values ($1, $2, 'application/octet-stream', 1, $3)
+		`, id, index+1, encoded); err != nil {
+			t.Fatalf("create version %d of %s: %v", index+1, slug, err)
+		}
+	}
+	return id
+}
+
+// fileAnchorOn is a comment's anchor on the whole of the uploaded file artifactID.
+func fileAnchorOn(artifactID string) map[string]any {
+	return map[string]any{"kind": "file", "artifact_id": artifactID, "mark_id": "comment-1", "quote": "", "version": 1}
+}
+
 // seedDocumentComment inserts a comment author wrote on a project document, and returns its id.
 func seedDocumentComment(t *testing.T, database *store.Store, artifactID string, author model.Actor) string {
 	t.Helper()
@@ -126,25 +163,46 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 			wantAgents: []string{"notifications.agent.session-writer"},
 		},
 		{
-			name: "a comment on a project image reaches no document author",
+			name: "a person's comment on a project picture reaches the session that uploaded it",
 			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
-				creator, err := json.Marshal(writer)
-				if err != nil {
-					t.Fatalf("encode image creator: %v", err)
-				}
-				var image string
-				if err := database.Pool.QueryRow(context.Background(), `
-					insert into artifacts (project_key, slug, name, kind, created_by)
-					values ('TT', 'diagram', 'diagram.png', 'image', $1)
-					returning id::text
-				`, creator).Scan(&image); err != nil {
-					t.Fatalf("create image: %v", err)
-				}
+				image := seedUpload(t, database, nil, "diagram", "image", writer, []model.Actor{writer})
 				return model.Event{ArtifactID: new(image), Project: "TT", Type: "comment.created", Actor: alice, Payload: map[string]any{
-					"id": "00000000-0000-0000-0000-000000000014",
+					"id": "00000000-0000-0000-0000-000000000014", "anchor": fileAnchorOn(image),
 				}}, "diagram"
 			},
-			wantAgents: []string{},
+			wantAgents: []string{"notifications.agent.session-writer"},
+		},
+		{
+			name: "a person's comment an older Dispatch wrote on a whole project picture, with no anchor, reaches its uploader",
+			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
+				image := seedUpload(t, database, nil, "diagram", "image", writer, []model.Actor{writer})
+				return model.Event{ArtifactID: new(image), Project: "TT", Type: "comment.created", Actor: alice, Payload: map[string]any{
+					"id": "00000000-0000-0000-0000-000000000017",
+				}}, "diagram"
+			},
+			wantAgents: []string{"notifications.agent.session-writer"},
+		},
+		{
+			name: "a person's comment on part of an issue's picture reaches every session that uploaded a version",
+			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
+				image := seedUpload(t, database, new("T-1"), "chart", "image", writer, []model.Actor{writer}, []model.Actor{editor})
+				anchor := fileAnchorOn(image)
+				anchor["box"] = map[string]any{"left": 0.1, "top": 0.1, "width": 0.5, "height": 0.5}
+				return model.Event{IssueKey: new("T-1"), Type: "comment.created", Actor: alice, Payload: map[string]any{
+					"id": "00000000-0000-0000-0000-000000000015", "anchor": anchor,
+				}}, ""
+			},
+			wantAgents: []string{"notifications.agent.session-writer", "notifications.agent.session-editor"},
+		},
+		{
+			name: "a person's comment on a whole file reaches the session that uploaded it",
+			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
+				table := seedUpload(t, database, new("T-1"), "results", "file", writer, []model.Actor{writer})
+				return model.Event{IssueKey: new("T-1"), Type: "comment.created", Actor: alice, Payload: map[string]any{
+					"id": "00000000-0000-0000-0000-000000000016", "anchor": fileAnchorOn(table),
+				}}, ""
+			},
+			wantAgents: []string{"notifications.agent.session-writer"},
 		},
 		{
 			name: "every session the document credits is reached once, the creator first",

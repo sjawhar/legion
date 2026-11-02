@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 	"strings"
 
@@ -24,6 +25,13 @@ func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, owner owner, inpu
 	artifactRef := strings.TrimSpace(input.Artifact)
 	if artifactRef == "" {
 		return nil, "", nil, errorf(http.StatusBadRequest, "INVALID_ANCHOR", "anchor artifact is required")
+	}
+	if input.OnFile() {
+		anchor, name, err := s.resolveFileAnchor(ctx, tx, owner, input, kind, rowID, artifactRef)
+		return anchor, name, nil, err
+	}
+	if input.Version != nil || input.Box != nil {
+		return nil, "", nil, errorf(http.StatusBadRequest, "INVALID_ANCHOR", "version and box go only with a comment on an uploaded file, which takes no quote or mark_id")
 	}
 	quotePath := input.Quote != nil && input.MarkID == nil
 	markPath := input.Quote == nil && input.MarkID != nil && input.Occurrence == nil
@@ -79,6 +87,91 @@ func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, owner owner, inpu
 		return &anchor, artifact.Name, &snapshot, nil
 	}
 	return &anchor, artifact.Name, nil, nil
+}
+
+// boxTolerance is how far past the picture's right edge or bottom a box's far side may reach: a
+// browser's fractions of a box drawn to the very edge can sum a rounding error above 1.
+const boxTolerance = 1e-9
+
+// resolveFileAnchor resolves a comment's anchor on an uploaded file that is not a Markdown document:
+// the file, the version the comment is about (the file's latest when the input names none), and on
+// a picture the box. It marks nothing in any document, so it writes no version and its anchor is
+// never refreshed or orphaned; its mark id is the comment's own, as a quote anchor's is.
+func (s *server) resolveFileAnchor(ctx context.Context, tx pgx.Tx, owner owner, input *model.AnchorInput, kind docs.MarkKind, rowID, artifactRef string) (*model.Anchor, string, error) {
+	switch kind {
+	case docs.MarkAsk:
+		return nil, "", errorf(http.StatusBadRequest, "INVALID_ANCHOR", "an ask names a passage of a document: give quote or mark_id. To ask about an uploaded file, comment on it or ask on the issue")
+	case docs.MarkSuggestion:
+		return nil, "", errorf(http.StatusBadRequest, "INVALID_ANCHOR", "a suggestion replaces quoted text of a document: give quote or mark_id. Comment on an uploaded file instead")
+	}
+	box, err := anchorBox(input.Box)
+	if err != nil {
+		return nil, "", err
+	}
+	artifact, err := s.lockAnchorArtifact(ctx, tx, owner, artifactRef)
+	if err != nil {
+		return nil, "", err
+	}
+	if artifact.Kind == "doc" {
+		return nil, "", errorf(http.StatusBadRequest, "INVALID_ANCHOR", "a comment on a document names a passage: give quote or mark_id. A comment on a whole file, or on part of a picture, is for an uploaded file that is not a document")
+	}
+	if box != nil && artifact.Kind != "image" {
+		return nil, "", errorf(http.StatusBadRequest, "NOT_PICTURE", "a box marks part of a picture, and %s is an uploaded file that is not one: comment on the whole file without a box", artifact.Name)
+	}
+	// The artifact's key-share lock keeps its row; a version written meanwhile only adds a later
+	// number, so the latest read here is the newest the comment could have been written on.
+	var latest int
+	if err := tx.QueryRow(ctx, `select coalesce(max(number), 0) from artifact_versions where artifact_id = $1`, artifact.ID).Scan(&latest); err != nil {
+		return nil, "", err
+	}
+	version := latest
+	if input.Version != nil {
+		version = *input.Version
+		// artifact_versions.number is an integer column, so a number past it is no version, and is
+		// refused here rather than as a parameter Postgres cannot take.
+		exists := version >= 1 && version <= math.MaxInt32
+		if exists {
+			if err := tx.QueryRow(ctx, `select exists (select 1 from artifact_versions where artifact_id = $1 and number = $2)`, artifact.ID, version).Scan(&exists); err != nil {
+				return nil, "", err
+			}
+		}
+		if !exists {
+			return nil, "", errorf(http.StatusBadRequest, "INVALID_ANCHOR", "version %d is not a version of %s, whose latest is version %d", version, artifact.Name, latest)
+		}
+	}
+	if version == 0 {
+		return nil, "", errorf(http.StatusBadRequest, "INVALID_ANCHOR", "%s has no version to comment on", artifact.Name)
+	}
+	return &model.Anchor{
+		Kind:       model.AnchorKindFile,
+		ArtifactID: artifact.ID,
+		MarkID:     rowID,
+		Version:    version,
+		Box:        box,
+	}, artifact.Name, nil
+}
+
+// anchorBox checks a request's box: four fractions of the picture, inside it and covering some of
+// it. JSON carries no NaN or infinity, so every side it decodes is finite.
+func anchorBox(input *model.AnchorBoxInput) (*model.AnchorBox, error) {
+	if input == nil {
+		return nil, nil
+	}
+	if input.Left == nil || input.Top == nil || input.Width == nil || input.Height == nil {
+		return nil, errorf(http.StatusBadRequest, "INVALID_ANCHOR", "box needs left, top, width and height, each a fraction of the picture's width or height")
+	}
+	box := model.AnchorBox{Left: *input.Left, Top: *input.Top, Width: *input.Width, Height: *input.Height}
+	switch {
+	case box.Left < 0 || box.Top < 0:
+		return nil, errorf(http.StatusBadRequest, "INVALID_ANCHOR", "box left and top must be at least 0: they are fractions of the picture from its top-left corner")
+	case box.Width <= 0 || box.Height <= 0:
+		return nil, errorf(http.StatusBadRequest, "INVALID_ANCHOR", "box width and height must be greater than 0")
+	case box.Left+box.Width > 1+boxTolerance:
+		return nil, errorf(http.StatusBadRequest, "INVALID_ANCHOR", "box left + width must be at most 1: the box runs past the picture's right edge")
+	case box.Top+box.Height > 1+boxTolerance:
+		return nil, errorf(http.StatusBadRequest, "INVALID_ANCHOR", "box top + height must be at most 1: the box runs past the picture's bottom")
+	}
+	return &box, nil
 }
 
 func (s *server) lockAnchorArtifact(ctx context.Context, tx pgx.Tx, owner owner, artifactRef string) (model.Artifact, error) {

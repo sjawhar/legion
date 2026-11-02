@@ -826,6 +826,52 @@ test("a comment on the primary document links to the Spec route, not its artifac
   }
 });
 
+// A thread on part of a picture names its box and version in place of a quote, and its link opens
+// the picture at the version the box was drawn on, since the picture has had another since.
+test("a comment on part of a picture links to the picture at its box's version", async () => {
+  const chart: Artifact = {
+    ...secondaryDocument,
+    id: "chart-id",
+    kind: "image",
+    name: "chart.png",
+    slug: "chart-png",
+    versions: [
+      { authors: [], created_at: "2026-09-09T00:00:00Z", named: false, number: 1, summary: null },
+      { authors: [], created_at: "2026-09-10T00:00:00Z", named: false, number: 2, summary: null },
+    ],
+  };
+  const boxed = comment("comment-1", {
+    anchor: {
+      artifact_id: "chart-id",
+      block_id: null,
+      box: { height: 0.25, left: 0.62, top: 0.1, width: 0.3 },
+      kind: "file",
+      mark_id: "comment-1",
+      orphaned: false,
+      quote: "",
+      version: 1,
+    },
+    body: "This bar looks low.",
+  });
+  const stub = stubLists({ comments: [boxed] });
+  const queryClient = newQueryClient();
+  queryClient.setQueryData(["whoami"], { login: "alice" });
+  const view = render(
+    tab({ "CORE-1": issueState() }, true, queryClient, false, new Map([["chart-id", chart]]))
+  );
+
+  try {
+    await screen.findByText("This bar looks low.");
+    expect(await screen.findByText("Box 1 · version 1")).toBeDefined();
+    expect(screen.getByRole("link", { name: "View on chart.png" }).getAttribute("href")).toBe(
+      "/issues/CORE-1/artifacts/chart-png?v=1&comment=comment-1"
+    );
+  } finally {
+    view.unmount();
+    stub.restore();
+  }
+});
+
 test("the filter opens on All, and Open and Closed partition the list", async () => {
   const stub = stubLists({
     asks: [

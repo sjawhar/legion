@@ -80,7 +80,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 	comment.Resolved = false
 	comment.ResolvedBy = nil
 	comment.ResolvedAt = nil
-	if comment.Anchor != nil {
+	if comment.Anchor.OnText() {
 		replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", comment.ID)
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -201,7 +201,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if comment.Anchor != nil {
+	if comment.Anchor.OnText() {
 		replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", comment.ID)
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -320,7 +320,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			writeError(w, "ALREADY_ACTIONED", http.StatusConflict, "suggestion has already been actioned")
 			return
 		}
-		if action == "accept" && comment.Anchor == nil {
+		if action == "accept" && !comment.Anchor.OnText() {
 			writeError(w, "INVALID_SUGGESTION", http.StatusBadRequest, "accept requires an anchored suggestion")
 			return
 		}
@@ -332,7 +332,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		if kindErr == nil {
 			projectionKind = kind
 		}
-		if comment.Anchor != nil {
+		if comment.Anchor.OnText() {
 			var markErr error
 			if action == "accept" {
 				markErr = s.deps.Docs.AcceptSuggestion(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, comment.Suggestion.ReplaceWith, actor)
@@ -392,7 +392,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		comment.ResolvedBy = &actor
 		comment.ResolvedAt = timestampPtr(&resolvedAt)
 	}
-	if comment.Anchor != nil {
+	if comment.Anchor.OnText() {
 		replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", comment.ID)
 		if err != nil {
 			s.writeHandlerError(w, err)

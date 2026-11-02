@@ -73,7 +73,14 @@ export function ArtifactRoutePanel({
                 {artifact.kind === "doc" ? (
                   children
                 ) : (
-                  <ArtifactBlobView artifact={artifact} version={artifactRoute.version} />
+                  <ArtifactBlobView
+                    artifact={artifact}
+                    comments={{
+                      isClosed,
+                      owner: { issueKey: artifactRoute.key, kind: "issue" },
+                    }}
+                    version={artifactRoute.version}
+                  />
                 )}
               </ArtifactHeader>
               <ArtifactDetails artifact={artifact} />

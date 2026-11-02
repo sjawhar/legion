@@ -4911,22 +4911,24 @@ describe("executeDispatchTool", () => {
       ]);
     });
 
-    test("comment refuses a document it would post past without a quote", async () => {
+    test("comment refuses the spec it would post past without a quote", async () => {
       const dropped = (document: string) =>
         `dispatch comment posts on the issue unless quote anchors it in a document, so document ${document} would be dropped: add --quote to comment on a passage of it, or name only the issue`;
+      // Any other document is refused once its read shows it is one: with no quote, an uploaded
+      // file is the comment's anchor.
       expect(
-        await problemsOf("dispatch_comment", { issue: "DSP-42", artifact: "notes.md", body: "x" })
-      ).toEqual([dropped("notes.md")]);
+        await problemsOf("dispatch_comment", { issue: "DSP-42", artifact: "spec", body: "x" })
+      ).toEqual([dropped("spec")]);
       expect(
         await problemsOf("dispatch_comment", { ref: "dispatch://DSP-42/spec", body: "x" })
       ).toEqual([dropped("spec")]);
       expect(
         await problemsOf(
           "dispatch_comment",
-          { artifact: "notes.md", reply_to: commentID, body: "x" },
+          { artifact: "spec", reply_to: commentID, body: "x" },
           { LEGION_ISSUE: "DSP-42" }
         )
-      ).toEqual([dropped("notes.md")]);
+      ).toEqual([dropped("spec")]);
       expect(
         await problemsOf("dispatch_comment", {
           ref: "dispatch://DSP-42/artifact/notes-md@v2",
@@ -4936,6 +4938,59 @@ describe("executeDispatchTool", () => {
       ).toEqual([
         "dispatch comment acts on the live document, so the version ref dispatch://DSP-42/artifact/notes-md@v2 names would be dropped: drop its @v2",
       ]);
+    });
+
+    test("comment refuses a box that is not four fractions inside the picture", async () => {
+      const box = (text: string) =>
+        problemsOf("dispatch_comment", {
+          issue: "DSP-42",
+          artifact: "chart-png",
+          box: text,
+          body: "x",
+        });
+      const shape = (text: string) =>
+        `box must be four fractions left,top,width,height separated by commas, such as 0.62,0.1,0.3,0.25; got "${text}"`;
+      expect(await box("0.1,0.2,0.3")).toEqual([shape("0.1,0.2,0.3")]);
+      expect(await box("left,0,0.5,0.5")).toEqual([shape("left,0,0.5,0.5")]);
+      expect(await box("0.1,0.2,0.3,0.4,0.5")).toEqual([shape("0.1,0.2,0.3,0.4,0.5")]);
+      expect(await box("-0.1,0,0.5,0.5")).toEqual([
+        "box left and top must be at least 0: they are fractions of the picture from its top-left corner",
+      ]);
+      expect(await box("0.1,0.1,0,0.5")).toEqual(["box width and height must be greater than 0"]);
+      expect(await box("0.8,0,0.3,0.5")).toEqual([
+        "box left + width must be at most 1: the box runs past the picture's right edge",
+      ]);
+      expect(await box("0,0.6,0.3,0.5")).toEqual([
+        "box top + height must be at most 1: the box runs past the picture's bottom",
+      ]);
+    });
+
+    test("comment refuses a box or version beside a quote, on a reply, or with no file", async () => {
+      expect(
+        await problemsOf("dispatch_comment", {
+          issue: "DSP-42",
+          artifact: "chart-png",
+          quote: "x",
+          box: "0,0,0.5,0.5",
+          body: "x",
+        })
+      ).toEqual([
+        "box and version name an uploaded file, which takes no quote: drop --quote to comment on the file, or drop --box and --version to comment on a passage",
+      ]);
+      expect(
+        await problemsOf("dispatch_comment", {
+          issue: "DSP-42",
+          artifact: "chart-png",
+          reply_to: commentID,
+          version: 1,
+          body: "x",
+        })
+      ).toEqual([
+        "a reply joins its thread and keeps the thread's anchor, so box and version would be dropped: drop them",
+      ]);
+      expect(
+        await problemsOf("dispatch_comment", { issue: "DSP-42", box: "0,0,0.5,0.5", body: "x" })
+      ).toEqual(["box and version name part of an uploaded file: add --artifact naming the file"]);
     });
 
     test("ask refuses a document it would open past without an anchor, and two documents", async () => {
@@ -6248,11 +6303,89 @@ describe("executeDispatchTool", () => {
     ],
     open_asks: [],
   };
-  function fileServer(requests: string[]) {
-    return (async (url: RequestInfo | URL): Promise<Response> => {
+  const chartComments = [
+    {
+      id: "c-box",
+      issue_key: "DSP-42",
+      author: { kind: "user", id: "sami" },
+      body: "This bar looks low.",
+      anchor: {
+        kind: "file",
+        artifact_id: "image-8",
+        block_id: null,
+        mark_id: "c-box",
+        version: 1,
+        quote: "",
+        orphaned: false,
+        box: { left: 0.62, top: 0.1, width: 0.3, height: 0.25 },
+      },
+      reply_to: null,
+      ask_id: null,
+      resolved: false,
+      created_at: "2026-10-20T10:00:00Z",
+    },
+    {
+      id: "c-box-reply",
+      issue_key: "DSP-42",
+      author: { kind: "session", id: "session-1" },
+      body: "It is the smaller run.",
+      anchor: null,
+      reply_to: "c-box",
+      ask_id: null,
+      resolved: false,
+      created_at: "2026-10-20T11:00:00Z",
+    },
+    {
+      id: "c-whole",
+      issue_key: "DSP-42",
+      author: { kind: "user", id: "sami" },
+      body: "Which sweep is this?",
+      anchor: {
+        kind: "file",
+        artifact_id: "image-8",
+        block_id: null,
+        mark_id: "c-whole",
+        version: 1,
+        quote: "",
+        orphaned: false,
+      },
+      reply_to: null,
+      ask_id: null,
+      resolved: false,
+      created_at: "2026-10-20T12:00:00Z",
+    },
+    {
+      id: "c-done",
+      issue_key: "DSP-42",
+      author: { kind: "user", id: "sami" },
+      body: "Resolved already.",
+      anchor: {
+        kind: "file",
+        artifact_id: "image-8",
+        block_id: null,
+        mark_id: "c-done",
+        version: 1,
+        quote: "",
+        orphaned: false,
+      },
+      reply_to: null,
+      ask_id: null,
+      resolved: true,
+      created_at: "2026-10-20T13:00:00Z",
+    },
+  ];
+  function fileServer(requests: string[], posted: unknown[] = []) {
+    return (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const target = new URL(String(url));
       requests.push(target.pathname + target.search);
       if (target.pathname === "/api/v1/issues/DSP-42") return response(fileIssue);
+      if (target.pathname === "/api/v1/issues/DSP-42/comments") {
+        if (init?.method === "POST") {
+          posted.push(JSON.parse(String(init.body)));
+          return response({ id: "c-new", issue_key: "DSP-42", anchor: null }, 201);
+        }
+        return response(chartComments);
+      }
       if (/^\/api\/v1\/artifacts\/(file-7|image-8)\/text$/.test(target.pathname)) {
         return response({ code: "NOT_DOCUMENT", error: "artifact is not a document" }, 400);
       }
@@ -6303,8 +6436,10 @@ describe("executeDispatchTool", () => {
     expect(requests).toEqual([
       "/api/v1/issues/DSP-42",
       "/api/v1/artifacts/file-7/versions/2",
+      "/api/v1/issues/DSP-42/comments",
       "/api/v1/issues/DSP-42",
       "/api/v1/artifacts/file-7/versions/1",
+      "/api/v1/issues/DSP-42/comments",
     ]);
   });
 
@@ -6322,12 +6457,174 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result).toEqual({
-      text:
+      text: [
         "chart.png is an uploaded image/png file (version 1, 6 bytes) that is not UTF-8 text, so " +
-        "dispatch doc-read cannot show it. GET /api/v1/artifacts/image-8/versions/1 serves its bytes.",
+          "dispatch doc-read cannot show it. GET /api/v1/artifacts/image-8/versions/1 serves its bytes.",
+        "Open threads on chart.png:",
+        [
+          "comment c-box · user sami · 2026-10-20T10:00:00Z",
+          "On part of the picture, version 1: box left 0.62, top 0.1, width 0.3, height 0.25 (fractions of its width and height from its top-left corner)",
+          "Body: This bar looks low.",
+          "reply c-box-reply · session session-1 · 2026-10-20T11:00:00Z",
+          "Body: It is the smaller run.",
+        ].join("\n"),
+        [
+          "comment c-whole · user sami · 2026-10-20T12:00:00Z",
+          "On the whole file, version 1",
+          "Body: Which sweep is this?",
+        ].join("\n"),
+        "Resolved threads on chart.png:",
+        [
+          "comment c-done · user sami · 2026-10-20T13:00:00Z",
+          "On the whole file, version 1",
+          "Body: Resolved already.",
+        ].join("\n"),
+      ].join("\n\n"),
       details: { issue: "DSP-42" },
     });
-    expect(requests).toEqual(["/api/v1/issues/DSP-42", "/api/v1/artifacts/image-8/versions/1"]);
+    expect(requests).toEqual([
+      "/api/v1/issues/DSP-42",
+      "/api/v1/artifacts/image-8/versions/1",
+      "/api/v1/issues/DSP-42/comments",
+    ]);
+  });
+
+  test("dispatch_comment anchors to an uploaded file with no quote, and to a box on a picture", async () => {
+    const posted: unknown[] = [];
+    const comment = (args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { issue: "DSP-42", body: "This bar looks low.", ...args },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fileServer([], posted),
+      });
+
+    await comment({ artifact: "chart-png", box: "0.62,0.1,0.3,0.25" });
+    await comment({ artifact: "chart.png", box: " 0, 0 ,1,1 ", version: 1 });
+    await comment({ artifact: "sweep-json" });
+    await comment({ artifact: "sweep-json", version: 1 });
+    // The address dispatch doc-read prints for a picture names the version the box is on.
+    await executeDispatchTool({
+      tool: "dispatch_comment",
+      args: {
+        ref: "dispatch://DSP-42/artifact/chart-png@v1",
+        box: "0.1,0.1,0.2,0.2",
+        body: "Here.",
+      },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fileServer([], posted),
+    });
+    expect(posted).toEqual([
+      expect.objectContaining({
+        anchor: { artifact: "image-8", box: { left: 0.62, top: 0.1, width: 0.3, height: 0.25 } },
+      }),
+      expect.objectContaining({
+        anchor: { artifact: "image-8", version: 1, box: { left: 0, top: 0, width: 1, height: 1 } },
+      }),
+      expect.objectContaining({ anchor: { artifact: "file-7" } }),
+      expect.objectContaining({ anchor: { artifact: "file-7", version: 1 } }),
+      expect.objectContaining({
+        anchor: {
+          artifact: "image-8",
+          version: 1,
+          box: { left: 0.1, top: 0.1, width: 0.2, height: 0.2 },
+        },
+      }),
+    ]);
+  });
+
+  // A reply keeps its thread's anchor, so the server refuses a quote on one; the command sends
+  // the quote rather than posting the reply without it.
+  test("dispatch_comment sends a reply's quote for Dispatch to refuse, never drops it", async () => {
+    const posted: unknown[] = [];
+    await executeDispatchTool({
+      tool: "dispatch_comment",
+      args: {
+        issue: "DSP-42",
+        artifact: "spec",
+        quote: "the passage",
+        reply_to: "cccccccc-0000-4000-8000-000000000042",
+        body: "Agreed.",
+      },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fileServer([], posted),
+    });
+    expect(posted).toEqual([
+      expect.objectContaining({
+        anchor: { artifact: "artifact-42", quote: "the passage" },
+        reply_to: "cccccccc-0000-4000-8000-000000000042",
+      }),
+    ]);
+  });
+
+  // A file's own read never depended on its comments: a comment read that fails leaves the file
+  // shown, and says what could not be read.
+  test("dispatch_doc_read shows a file whose comments cannot be read, and says so", async () => {
+    const files = fileServer([]);
+    const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (new URL(String(url)).pathname === "/api/v1/issues/DSP-42/comments") {
+        return response({ code: "INTERNAL", error: "internal server error" }, 500);
+      }
+      return files(url, init);
+    }) as typeof fetch;
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { issue: "DSP-42", artifact: "sweep-json" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    });
+    expect(result.text.startsWith("File sweep.json: application/json, version 2, 17 bytes.")).toBe(
+      true
+    );
+    expect(result.text).toContain("The comments on sweep.json could not be read:");
+  });
+
+  test("dispatch_comment refuses a box on a file that is not a picture, and a box or version on a document", async () => {
+    const refused = (args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { issue: "DSP-42", body: "Here.", ...args },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fileServer([]),
+      }).then(
+        () => {
+          throw new Error("dispatch_comment was not refused");
+        },
+        (error: unknown) => {
+          if (!(error instanceof ToolInputError)) throw error;
+          return error.problems;
+        }
+      );
+
+    expect(await refused({ artifact: "sweep-json", box: "0,0,0.5,0.5" })).toEqual([
+      "a box marks part of a picture, and sweep.json is an uploaded file that is not one: drop --box to comment on the whole file",
+    ]);
+    expect(await refused({ artifact: "spec", version: 1 })).toEqual([
+      "spec.md is a Markdown document, so --box and --version, which name part of an uploaded file, would be dropped: comment on a passage of it with --quote",
+    ]);
+    expect(await refused({ artifact: "spec" })).toEqual([
+      "dispatch comment posts on the issue unless quote anchors it in a document, so document spec would be dropped: add --quote to comment on a passage of it, or name only the issue",
+    ]);
   });
 
   test("dispatch_doc_read starts project document and mark reads before any response resolves", async () => {
@@ -7696,6 +7993,68 @@ describe("executeDispatchTool", () => {
       ])
     );
     expect(issue.text).toBe("# artifact-doc");
+  });
+
+  test("a comment on a project's picture anchors to it, and one on a project document with no quote does not", async () => {
+    const posted: Array<{ path: string; body: unknown }> = [];
+    const base = projectDispatch(
+      [
+        projectDocument("artifact-doc", "notes", "notes.md"),
+        {
+          ...projectDocument("artifact-image", "chart-png", "chart.png"),
+          kind: "image",
+          versions: [
+            {
+              number: 1,
+              named: false,
+              summary: null,
+              authors: [],
+              created_at: "2026-09-27T00:00:00Z",
+            },
+          ],
+        },
+      ],
+      []
+    );
+    const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const request = new URL(String(url));
+      if (init?.method === "POST" && request.pathname.endsWith("/comments")) {
+        posted.push({ path: request.pathname, body: JSON.parse(String(init.body)) });
+        return response({ id: "c-new", issue_key: null, anchor: null }, 201);
+      }
+      return base(url, init);
+    }) as typeof fetch;
+    for (const args of [
+      { artifact: "chart-png", box: "0.5,0.5,0.25,0.25" },
+      { artifact: "notes" },
+    ]) {
+      await executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { project: "GREF", body: "Here.", ...args },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      });
+    }
+    expect(posted).toEqual([
+      {
+        path: "/api/v1/artifacts/artifact-image/comments",
+        body: expect.objectContaining({
+          anchor: {
+            artifact: "artifact-image",
+            box: { left: 0.5, top: 0.5, width: 0.25, height: 0.25 },
+          },
+        }),
+      },
+      {
+        path: "/api/v1/artifacts/artifact-doc/comments",
+        body: expect.objectContaining({ body: "Here." }),
+      },
+    ]);
+    expect(posted[1]?.body).not.toHaveProperty("anchor");
   });
 
   test("a bare project reference fails with the route read's error, and with the list read's after a route hit", async () => {

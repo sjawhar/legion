@@ -5,6 +5,7 @@ export type {
   AgentLiveView,
   AgentToken,
   Anchor,
+  AnchorBox,
   AnchorInput,
   AnswerAskInput,
   ArchitectureSource,

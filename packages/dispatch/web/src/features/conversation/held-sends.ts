@@ -215,6 +215,21 @@ const keptComposerSend = shape.record({
     ask: keptAsk,
     draft: keptDraft,
     edit: shape.nullable(keptEdit),
+    // A comment on an uploaded file: its version, and on a picture the box the reader drew.
+    fileAnchor: shape.optional(
+      shape.record({
+        artifact: shape.string,
+        box: shape.optional(
+          shape.record({
+            height: shape.number,
+            left: shape.number,
+            top: shape.number,
+            width: shape.number,
+          })
+        ),
+        version: shape.number,
+      })
+    ),
     kind: shape.oneOf("ask", "comment", "suggestion"),
     owner: shape.either(
       shape.record({ issueKey: shape.string, kind: shape.oneOf("issue") }),

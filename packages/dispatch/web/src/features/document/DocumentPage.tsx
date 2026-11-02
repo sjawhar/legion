@@ -157,7 +157,18 @@ export function DocumentPage(): ReactNode {
             version={version}
           />
         ) : (
-          <ArtifactBlobView artifact={artifact.data} version={version} />
+          <ArtifactBlobView
+            artifact={artifact.data}
+            comments={{
+              isClosed: false,
+              owner: {
+                artifactId: artifact.data.id,
+                kind: "artifact",
+                project: artifact.data.project,
+              },
+            }}
+            version={version}
+          />
         )}
       </ArtifactHeader>
       <ReferencedBy reference={buildDispatchReference(documentReferenceRoute(artifact.data))} />

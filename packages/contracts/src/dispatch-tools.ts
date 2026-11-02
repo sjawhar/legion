@@ -800,21 +800,41 @@ export const dispatchToolSpecs = [
     name: "dispatch_comment",
     example: { issue: "DSP-1", body: "Looks good." },
     description:
-      "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " +
-      "Do not use it for an exact replacement; use " +
+      "Add review feedback to an issue or project document quote, to an uploaded file that is not a document " +
+      "(artifact with no quote: the whole file; with box: part of a picture), or reply to a question asked " +
+      "with dispatch ask. Do not use it for an exact replacement; use " +
       `dispatch suggest instead. A quote anchor is pinned to its block. A reply under an open ask asks for clarification, not an answer: answer it with reply_to_ask, or reword the ask with dispatch edit-ask, rather than opening a second ask. Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
       artifact: z
         .string()
-        .describe("Project document artifact id, slug, or filename required when quote is given.")
+        .describe(
+          "Document or uploaded file: artifact id, slug, or filename. Required with quote or box. " +
+            "On an issue, a Markdown document needs quote; a file that is not a document (a picture, " +
+            "a PDF, a CSV) takes no quote and the comment is about the whole file, or with box part " +
+            "of a picture."
+        )
         .optional(),
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       quote: z.string().describe("Optional exact quoted document text.").optional(),
       occurrence: z
         .number({ int: true, min: 0 })
         .describe("Optional zero-based occurrence of quote.")
+        .optional(),
+      box: z
+        .string()
+        .describe(
+          "Only on a picture: the part the comment is about, as four fractions of the picture's " +
+            "width and height from its top-left corner, left,top,width,height (0.62,0.1,0.3,0.25 is " +
+            "a box starting 62% across and 10% down, 30% wide and 25% tall)."
+        )
+        .optional(),
+      version: z
+        .number({ int: true, min: 1 })
+        .describe(
+          "Only on an uploaded file: the version the comment is about; the file's latest when omitted."
+        )
         .optional(),
       body: z
         .string({ max: DISPATCH_BODY_MAX })

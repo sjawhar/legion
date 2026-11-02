@@ -93,3 +93,45 @@ test("an architecture import names the repository it came from; a retained event
     activityDescription({ ...projectEvent, payload: { error }, type: "architecture.sync_failed" })
   ).toEqual(["failed to sync the architecture model: duplicate component id api"]);
 });
+
+// A comment on an uploaded file has no quote: its line says which part of the file and which
+// version, where a comment on a passage quotes it.
+test("a comment on a file says whether it is on part of the picture or the whole file, and its version", () => {
+  const actor = { id: "alice", kind: "user" as const };
+  const commentOn = (anchor: Record<string, unknown>): Event =>
+    ({
+      actor,
+      created_at: "2026-11-01T10:00:00Z",
+      id: 7,
+      issue_key: "CORE-1",
+      notify: true,
+      payload: {
+        anchor: {
+          artifact_id: "chart-id",
+          block_id: null,
+          kind: "file",
+          mark_id: "c-1",
+          orphaned: false,
+          quote: "",
+          ...anchor,
+        },
+        artifact_name: "chart.png",
+        ask_id: null,
+        author: actor,
+        body: "This bar looks low.",
+        created_at: "2026-11-01T10:00:00Z",
+        id: "c-1",
+        reply_to: null,
+      },
+      seq: 7,
+      type: "comment.created",
+    }) as Event;
+  expect(
+    activityDescription(
+      commentOn({ box: { height: 0.2, left: 0.1, top: 0.1, width: 0.2 }, version: 2 })
+    )
+  ).toEqual(["commented on chart.png (part of the picture, version 2)"]);
+  expect(activityDescription(commentOn({ version: 3 }))).toEqual([
+    "commented on chart.png (the whole file, version 3)",
+  ]);
+});

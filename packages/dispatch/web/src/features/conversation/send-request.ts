@@ -1,5 +1,6 @@
 import { api, type WriteBounds } from "../../api/client";
 import type {
+  AnchorInput,
   AskOption,
   AskUrgency,
   CreateAgentMessageInput,
@@ -15,6 +16,7 @@ import type {
   ComposerAnchor,
   ComposerKind,
   ComposerOwner,
+  FileComposerAnchor,
   ReplyTarget,
 } from "./composer-model";
 
@@ -55,6 +57,10 @@ export const saveCommentEdit: SaveCommentEdit = (id, body, carried, bounds) =>
  */
 export interface SentRequest {
   readonly anchor: ComposerAnchor | undefined;
+  /** A comment's anchor on an uploaded file (`FileComposerAnchor`), in place of `anchor`, which a
+   *  passage's composer carries; absent from a send of every other composer and from one kept by a
+   *  build before files took comments. */
+  readonly fileAnchor?: FileComposerAnchor;
   readonly ask: {
     readonly multiple: boolean;
     readonly options: readonly AskOption[];
@@ -203,6 +209,7 @@ export function unedited(refused: SentRequest, next: Omit<SentRequest, "sendKey"
     JSON.stringify(refused.owner) === JSON.stringify(next.owner) &&
     refused.anchor?.artifact === next.anchor?.artifact &&
     refused.anchor?.mark_id === next.anchor?.mark_id &&
+    JSON.stringify(refused.fileAnchor) === JSON.stringify(next.fileAnchor) &&
     refused.replyTo?.id === next.replyTo?.id &&
     refused.edit?.id === next.edit?.id &&
     refused.draft.body === next.draft.body &&
@@ -249,10 +256,18 @@ function attempt(
   sent: SentRequest & { readonly owner: Exclude<ComposerOwner, { kind: "session" }> },
   bounds: WriteBounds
 ): Promise<unknown> {
-  const { anchor, ask, draft, kind, owner, plainDelivery, replyTo } = sent;
+  const { anchor, ask, draft, fileAnchor, kind, owner, plainDelivery, replyTo } = sent;
   const { body, mentions, replacement } = draft;
-  const selection =
-    anchor === undefined ? undefined : { artifact: anchor.artifact, mark_id: anchor.mark_id };
+  const selection: AnchorInput | undefined =
+    anchor !== undefined
+      ? { artifact: anchor.artifact, mark_id: anchor.mark_id }
+      : fileAnchor === undefined
+        ? undefined
+        : {
+            artifact: fileAnchor.artifact,
+            version: fileAnchor.version,
+            ...(fileAnchor.box === undefined ? {} : { box: fileAnchor.box }),
+          };
   if (kind === "ask") {
     const input = {
       anchor: selection,

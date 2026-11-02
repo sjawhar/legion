@@ -1,8 +1,9 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 
-import { ApiError } from "../../api/client";
+import { ApiError, api, type WriteBounds } from "../../api/client";
+import type { Comment } from "../../api/types";
 import { SendInterruptedError, SendStoppedError } from "../writes/keyed-write";
-import { requestFor, type SentRequest } from "./send-request";
+import { requestFor, type SentRequest, sendAttempt, unedited } from "./send-request";
 
 /** A message to the Planner's session, as Send froze it, under key `send-1`. */
 const refused: SentRequest = {
@@ -79,4 +80,66 @@ test("a comment's Retry after Dispatch's refusal is the request the composer sho
   expect(retried.plainDelivery).toBe("aside");
   expect(retried.sendKey).not.toBe("send-1");
   expect(requestFor(undefined, undefined, next).sendKey).not.toBe("send-1");
+});
+
+const box = { left: 0.62, top: 0.1, width: 0.3, height: 0.25 };
+const onFile: SentRequest = {
+  ...refused,
+  draft: { body: "This bar looks low.", mentions: [], replacement: "" },
+  fileAnchor: { artifact: "chart-id", box, version: 2 },
+  owner: { issueKey: "CORE-1", kind: "issue" },
+  pickedDelivery: undefined,
+};
+
+// The file page's Comment box sends the file, the version it shows and the box the reader drew as
+// the comment's anchor; a project's file goes to that file's own comment route.
+test("a comment on a file carries its version and box as the comment's anchor", async () => {
+  const calls: unknown[] = [];
+  const issue = spyOn(api, "createComment").mockImplementation(async (key, input) => {
+    calls.push(["issue", key, input]);
+    return {} as Comment;
+  });
+  const project = spyOn(api, "createArtifactComment").mockImplementation(async (id, input) => {
+    calls.push(["project", id, input]);
+    return {} as Comment;
+  });
+  try {
+    await sendAttempt(onFile)({} as WriteBounds);
+    const whole: SentRequest = {
+      ...onFile,
+      fileAnchor: { artifact: "table-id", version: 1 },
+      owner: { artifactId: "table-id", kind: "artifact", project: "CORE" },
+    };
+    await sendAttempt(whole)({} as WriteBounds);
+  } finally {
+    issue.mockRestore();
+    project.mockRestore();
+  }
+  expect(calls).toEqual([
+    [
+      "issue",
+      "CORE-1",
+      { body: "This bar looks low.", anchor: { artifact: "chart-id", version: 2, box } },
+    ],
+    [
+      "project",
+      "table-id",
+      { body: "This bar looks low.", anchor: { artifact: "table-id", version: 1 } },
+    ],
+  ]);
+});
+
+// A box redrawn, or another version shown, is another comment: Retry sends what the page shows now.
+test("a comment on another box or version of the file is not the refused send unedited", () => {
+  const { sendKey: _key, ...shownNow } = onFile;
+  expect(unedited(onFile, shownNow)).toBe(true);
+  expect(
+    unedited(onFile, {
+      ...shownNow,
+      fileAnchor: { artifact: "chart-id", version: 2, box: { ...box, left: 0.5 } },
+    })
+  ).toBe(false);
+  expect(
+    unedited(onFile, { ...shownNow, fileAnchor: { artifact: "chart-id", version: 1, box } })
+  ).toBe(false);
 });
