@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 	"github.com/sjawhar/envoy/internal/buildversion"
 	"github.com/sjawhar/envoy/internal/redact"
 )
@@ -132,6 +133,10 @@ func main() {
 // it, and it exits 0, as a requested stop does, after a WARN line naming the signal, how many
 // sessions it had registered and whether it held a launcher credential: the journal says why it
 // stopped even when the unit's own log says only that it ended.
+//
+// On a machine with an identity of its own (AGENT_SECRETS_MACHINE_IDENTITY), the launcher
+// credential comes from the token client instead (machineClient), no machine file is read or
+// claimed, and no person logs this machine in.
 func serve(cfg config) error {
 	if strings.TrimSpace(cfg.URL) == "" {
 		return errors.New("AGENT_SECRETS_URL is required (the secrets broker, e.g. https://secrets.internal.example)")
@@ -141,10 +146,14 @@ func serve(cfg config) error {
 		return err
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	machine, err := machineClient(cfg, log)
+	if err != nil {
+		return err
+	}
 	srv := &helper.Server{
 		Registry: helper.NewRegistry(cfg.StatePath),
 		Broker: &helper.Broker{URL: cfg.URL, OperatorFile: cfg.OperatorFile, MachineFile: cfg.MachineFile,
-			HTTP: &http.Client{Timeout: 30 * time.Second}, Log: log},
+			Machine: machine, HTTP: &http.Client{Timeout: 30 * time.Second}, Log: log},
 		Hostname: hostname,
 		PeerOf:   helper.PeerOf,
 		Log:      log,
@@ -196,6 +205,37 @@ func serve(cfg config) error {
 	// broker's URL is logged without a credential it may carry.
 	log.Info("agent-secrets-helper listening", "socket", cfg.Socket, "broker", redact.URL(cfg.URL), "version", buildversion.String())
 	return srv.Serve(ctx, ln)
+}
+
+// machineClient is the token client this helper gets its launcher credential from, or nil on a
+// machine with no identity of its own, which is every machine until
+// AGENT_SECRETS_MACHINE_IDENTITY names one. The key is this process's own, made here and never
+// written anywhere: the broker is sent its public half in every DPoP proof, binds the access
+// token to it, and keys the launcher credential it mints by it, so a restart of the helper
+// trades a credential of its own and the one it held lapses unrenewed.
+//
+// A variable that names a source without what that source needs refuses the start, naming both:
+// a helper that cannot prove who this machine is would listen and refuse every enrolment, which
+// reads as a broker outage rather than as a machine nobody configured.
+func machineClient(cfg config, log *slog.Logger) (*brokerclient.Client, error) {
+	source, err := brokerclient.MachineSource(os.Getenv)
+	if err != nil || source == nil {
+		return nil, err
+	}
+	key, err := brokerclient.NewKey()
+	if err != nil {
+		return nil, err
+	}
+	session, err := brokerclient.SessionName(os.Getenv, "")
+	if err != nil {
+		return nil, err
+	}
+	log.Info("this machine presents an identity of its own to the broker's token exchange",
+		"identity", source.Name(), "session", session)
+	return &brokerclient.Client{
+		BrokerURL: cfg.URL, Key: key, Subject: source, Session: session,
+		HTTP: &http.Client{Timeout: 30 * time.Second}, Log: log,
+	}, nil
 }
 
 // claimSocket takes the helper's claim on sock: an exclusive flock on sock+".lock" (0600, beside

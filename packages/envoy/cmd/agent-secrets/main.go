@@ -110,6 +110,8 @@ type command struct {
 
 // commands is every form, in the order usage lists them.
 var commands = []command{
+	{"login", "agent-secrets login",
+		"Sign in on this machine: print the code to type at the sign-in page, wait for it, and keep\nthis machine's box key beside the sign-in, readable by you alone. Every form afterwards acts\nfor you and reads your secrets. A second person signs in beside you; AGENT_SECRETS_PERSON\nthen names whose session a form is."},
 	{"keygen", "agent-secrets keygen --out <dir>",
 		"Write a new signing key to <dir>/key.pem and print its thumbprint. A box's launcher runs it\ninside the box before enrolling it."},
 	{"enroll", "agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]",
@@ -197,6 +199,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "--version":
 		fmt.Fprintf(stdout, "agent-secrets %s\n", buildversion.String())
 		return 0
+	case "login":
+		return cmdLogin(args[1:], stdout, stderr)
 	case "keygen":
 		return cmdKeygen(args[1:], stdout, stderr)
 	case "enroll":
@@ -434,17 +438,27 @@ func loadKey(path string) (*ecdsa.PrivateKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	block, _ := pem.Decode(data)
-	if block == nil {
-		return nil, fmt.Errorf("%s: not a PEM file", path)
-	}
-	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	key, err := parseKeyPEM(data)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	return key, nil
+}
+
+// parseKeyPEM reads the PKCS8 PEM encodeKeyPEM writes, whether it came from a file (loadKey) or
+// from a sign-in record (login.go), so one decoder reads every key this binary wrote.
+func parseKeyPEM(data []byte) (*ecdsa.PrivateKey, error) {
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, errors.New("not a PEM file")
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
 	key, ok := parsed.(*ecdsa.PrivateKey)
 	if !ok {
-		return nil, fmt.Errorf("%s: not an ECDSA private key", path)
+		return nil, errors.New("not an ECDSA private key")
 	}
 	return key, nil
 }

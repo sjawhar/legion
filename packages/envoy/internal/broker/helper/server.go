@@ -358,8 +358,11 @@ func (s *Server) signLauncher(peer *Peer, pid int, method, url string) Response 
 	}
 	peer.Close()
 	compact, cred, err := s.Broker.launcherProof(method, url)
+	// err's own words, which are noCredentialMsg on a machine a person logs in and
+	// noMachineIdentityMsg on one that presents an identity of its own: a machine nobody logs
+	// in must never be answered with a login to run.
 	if errors.Is(err, errNoCredential) {
-		return Response{Code: CodeNoCredential, Error: noCredentialMsg}
+		return Response{Code: CodeNoCredential, Error: err.Error()}
 	}
 	if err != nil {
 		return Response{Code: CodeSign, Error: err.Error()}

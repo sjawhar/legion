@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 	"github.com/sjawhar/envoy/internal/redact"
 )
 
@@ -37,6 +38,22 @@ import (
 const noCredentialMsg = "no machine credential; run: agent-secrets machine login"
 
 var errNoCredential = errors.New(noCredentialMsg)
+
+// noMachineIdentityMsg is what a helper that trades this machine's own identity (Broker.Machine)
+// says in place of noCredentialMsg: no person logs such a machine in, so naming a login would
+// send its operator to a ceremony that does nothing. The helper's own log says why the trade
+// failed, and the machine keeps trying.
+const noMachineIdentityMsg = "no machine credential; this machine's own identity has not been traded for one yet, and the helper's log says why"
+
+// It is an errNoCredential, so every caller that tests for one — the socket's refusals, the
+// enrolment retry — reads it as the same thing and prints its own words.
+var errNoMachineIdentity error = noMachineIdentityError{}
+
+type noMachineIdentityError struct{}
+
+func (noMachineIdentityError) Error() string { return noMachineIdentityMsg }
+
+func (noMachineIdentityError) Is(target error) bool { return target == errNoCredential }
 
 // The refresh loop's defaults: a refresh a day at most; after a refresh the broker did not answer
 // (any transport error: a refused, unanswered or unresolved dial, a timeout, a lost answer, a
@@ -102,15 +119,27 @@ type loginState struct {
 }
 
 // Broker is the helper's view of the secrets broker: the launcher routes (Enroll, Revoke)
-// authenticate with a machineCredential minted by a human-approved machine login (Login, an OAuth
-// device grant on the broker's own token endpoint), kept at MachineFile and refreshed daily
-// (Start), and Renew authenticates with the session's own proof, exactly as before.
+// authenticate with a machineCredential, and Renew authenticates with the session's own proof,
+// exactly as before.
+//
+// That credential comes one of two ways. On a machine with an identity of its own (Machine set),
+// the token client trades that identity for it and keeps it fresh, and no person logs the
+// machine in. On every other machine it is minted by a human-approved machine login (Login, an
+// OAuth device grant on the broker's own token endpoint), kept at MachineFile and refreshed
+// daily (Start).
 type Broker struct {
 	URL          string
 	OperatorFile string // login_hint source; read per login, as before
 	// MachineFile is where the helper keeps its machine login across restarts (AGENT_SECRETS_MACHINE_FILE).
 	MachineFile string
-	HTTP        *http.Client
+	// Machine, when set, is the token client this helper gets its launcher credential from: it
+	// trades this machine's own identity (internal/brokerclient) for an access token whose
+	// extras name a launcher credential, and trades again before that token lapses. With it set
+	// the helper keeps no machine file, runs no device grant and spends no refresh token — this
+	// grant issues none — and a trade that fails leaves the helper holding nothing, so every
+	// enrolment is refused rather than made as nobody.
+	Machine *brokerclient.Client
+	HTTP    *http.Client
 	// Log records every change of the launcher credential: a machine login installing one, a
 	// restart resuming one, a refresh moving its expiry, the warning a day before it lapses, and
 	// the helper dropping it, when the broker refuses it or its refresh or it reaches its expiry.
@@ -284,7 +313,13 @@ func machineFileFrom(key *ecdsa.PrivateKey, tok *oauth2.Token) (*MachineFile, er
 // denial/expiry. It never retries past a terminal state, and a later Login while one is still
 // pending just reports it. A login while a credential is held mints a new key and a new login,
 // which replaces the held one only once it is issued.
+//
+// A machine with an identity of its own (Machine) has no device login to run, and this refuses
+// rather than opening one the broker would never bind to anything.
 func (b *Broker) Login(ctx context.Context, hostname string) (string, error) {
+	if b.Machine != nil {
+		return "", errors.New("this machine signs in with its own identity, so there is no machine login to run; a person signs in on it with: agent-secrets login")
+	}
 	b.loginMu.Lock()
 	defer b.loginMu.Unlock()
 	if ls := b.login.Load(); ls != nil && ls.State == "pending" {
@@ -523,7 +558,14 @@ func (b *Broker) retireReplaced(old *machineCredential) {
 // installs the kept login as issued, though the broker may have ended it, and leaves the refresh
 // loop to retry it on the retrySchedule. A file that is there but is not a machine login, or that
 // others can read, is an error naming it.
+//
+// On a machine with an identity of its own (Machine), none of that happens: the token client
+// trades that identity for the launcher credential instead (startMachineIdentity), and no
+// machine file is read, written or claimed.
 func (b *Broker) Start(ctx context.Context) error {
+	if b.Machine != nil {
+		return b.startMachineIdentity(ctx)
+	}
 	if err := RemoveLeftoverMachineTemps(b.MachineFile); err != nil {
 		b.logger().Error("removing the temporary files an interrupted machine file save left", "machine_file", b.MachineFile, "error", err)
 	}
@@ -572,6 +614,68 @@ func (b *Broker) Start(ctx context.Context) error {
 	}
 	go b.refreshLoop(ctx, first, sched)
 	return nil
+}
+
+// startMachineIdentity keeps this machine's launcher credential coming from its own identity:
+// the token client trades that identity for an access token whose extras name a credential, and
+// trades again before the token lapses, each trade installing the credential it names
+// (installCredential) so every session the helper enrols signs with the key that trade proved.
+// It waits startRefreshBound (5 s) for the first credential, so the socket usually listens with
+// one, and then leaves the loop running until ctx ends.
+//
+// A trade the broker refuses, or one whose identity cannot be read, stops the client with a
+// plain error (brokerclient.Client.Run). The helper logs that error and starts the client again
+// after refreshRetry, because a machine is not a person and has no ceremony to be sent to: the
+// broker may be down, or its configuration may not list this machine yet. Until a trade
+// succeeds the helper holds no credential, so every enrolment is refused (errNoMachineIdentity)
+// rather than made as nobody.
+func (b *Broker) startMachineIdentity(ctx context.Context) error {
+	first := make(chan struct{})
+	var once sync.Once
+	go func() {
+		for ctx.Err() == nil {
+			err := b.Machine.Run(ctx, func(token *brokerclient.Token) error {
+				cred, err := b.machineCredentialOf(token)
+				if err != nil {
+					return err
+				}
+				b.credMu.Lock()
+				b.installCredential(cred, &loginState{State: "issued"})
+				b.credMu.Unlock()
+				b.logger().Info("the helper traded this machine's own identity for a launcher credential",
+					"credential_id", cred.id, "expires_at", cred.expiresAt.Format(time.RFC3339))
+				once.Do(func() { close(first) })
+				return nil
+			})
+			if err == nil || ctx.Err() != nil {
+				return
+			}
+			b.logger().Error("this machine's identity got no launcher credential; no session can enrol until it does",
+				"broker", redact.URL(b.URL), "retry_in", b.refreshRetryOrDefault().String(), "error", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(b.refreshRetryOrDefault()):
+			}
+		}
+	}()
+	select {
+	case <-first:
+	case <-ctx.Done():
+	case <-time.After(b.startRefreshBoundOrDefault()):
+	}
+	return nil
+}
+
+// machineCredentialOf is the launcher credential a trade's token names, signed for by the very
+// key the trade's DPoP proof presented. A token answer naming none is a broker that minted no
+// credential for this machine, which no enrolment can be made under.
+func (b *Broker) machineCredentialOf(token *brokerclient.Token) (*machineCredential, error) {
+	if token.CredentialID == "" || token.CredentialExpiresAt.IsZero() {
+		return nil, fmt.Errorf("the broker's token answer names no %s and %s, so this machine has no launcher credential to enrol sessions under",
+			oauthwire.ExtraCredentialID, oauthwire.ExtraCredentialExpiresAt)
+	}
+	return &machineCredential{key: b.Machine.Key, id: token.CredentialID, expiresAt: token.CredentialExpiresAt.UTC(), gone: make(chan struct{})}, nil
 }
 
 func (b *Broker) startRefreshBoundOrDefault() time.Duration {
@@ -1039,15 +1143,26 @@ type leaseReply struct {
 }
 
 // launcherProof signs a launcher proof with the current machine credential, or fails with
-// errNoCredential if there is none yet. It returns the credential it signed with, so a caller
-// whose call the broker then refuses clears exactly that one (clearOnInvalid).
+// noCredential's error if there is none yet. It returns the credential it signed with, so a
+// caller whose call the broker then refuses clears exactly that one (clearOnInvalid).
 func (b *Broker) launcherProof(method, url string) (string, *machineCredential, error) {
 	cred := b.cred.Load()
 	if cred == nil {
-		return "", nil, errNoCredential
+		return "", nil, b.noCredential()
 	}
 	compact, err := proof.SignLauncher(cred.key, cred.id, method, url, time.Now())
 	return compact, cred, err
+}
+
+// noCredential is what a launcher call fails with while the helper holds none: errNoCredential,
+// whose message sends an operator to the machine login, and on a machine that trades its own
+// identity errNoMachineIdentity, whose message names no login because none would help there.
+// Both answer errors.Is(err, errNoCredential), which is what every caller tests.
+func (b *Broker) noCredential() error {
+	if b.Machine != nil {
+		return errNoMachineIdentity
+	}
+	return errNoCredential
 }
 
 // clearOnInvalid drops the machine credential (dropRefused) and reports it missing whenever err
@@ -1072,7 +1187,7 @@ func (b *Broker) clearOnInvalid(cred *machineCredential, err error) error {
 	if !dropped && held {
 		return err
 	}
-	return errNoCredential
+	return b.noCredential()
 }
 
 // drop stops holding cred, if the helper still does, records why, logs at ERROR that it did,
