@@ -92,7 +92,8 @@ Each item below names a task and where its code is, then notes on it.
 
 - **Session delivery**: `internal/session/session.go`
 
-  what a delivery to a resolved session comes to (`session.Resolve`): the session's own consumer relays the message, or the session takes it off its own NATS subscription
+  what a delivery to a resolved session comes to (`session.Resolve(item, sessionID, entry, storedSeq)`): the session's own consumer relays the message, the session takes it off its own NATS subscription, or the entry records no way of receiving at all (`session.ErrNoSessionRecord`, which a nil entry gives too).
+  The agent path reaches it through one call, `session.HandleAgentMessage(item, sessionID, machineID, interest, entry, storedSeq)`.
 
 - **Session consumers**: `internal/bus/session_consumers.go`, `cmd/listener/session_delivery.go`, `cmd/listener/session_relay.go`
 
@@ -3025,8 +3026,8 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
 
 - An agent delivery (`notifications.agent.<session>`) reads the session it delivers to from the session bucket itself, bounded by `deliverySessionReadTimeout` (2 s), and one cause answers an unplaced attempt:
   no session record it could deliver through (`session.ErrNoSessionRecord`, logged and labelled `no_session_record`), which is no entry at all or an entry that records no way the session receives a message.
-  `session.ReasonNone` reaches that branch in no deployed listener:
-  the one undelivered, error-free answer that carries it is a session another listener owns, which `session.HandleAgentMessage` reports as `OwnedElsewhere` and the agent delivery acknowledges silently before the unplaced branch.
+  A session another listener owns never reaches that branch:
+  `session.HandleAgentMessage` reports it as `OwnedElsewhere`, and the agent delivery acknowledges it silently, with no delivery, no exception and no NAK.
   A delivery this listener cannot place is NAK'd with a 5 s delay (`unplaceableRetryDelay`) and redelivered, and its window is counted from the message's first delivery, never from the time the stream stored it:
   `ENVOY_UNPLACEABLE_RETRY_WINDOW` (`defaultUnplaceableRetryWindow`, 60 s;
   a value `time.ParseDuration` refuses is one WARN and the default stands) is spent as whole deferrals of that delay, so it buys `window / unplaceableRetryDelay` of them (12 at the default), `md.NumDelivered` counts them, and the delivery after the last deferral its cause is allowed is given up.
@@ -3059,16 +3060,16 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   The message is not NAK'd, it keeps its attempt-cache entry, so a redelivery that a lost ACK brings is dropped as `listener attempt-dedupe skip` rather than delivered again, and it is ACKed.
 
 - No path NAKs a message whose `no_holder` notice could not be published:
-  the helper that did was `publishNoHolderExceptionOrNak`, which this change left reachable from the generic fanout alone, where a topic is never a control topic, so it owed no notice and is deleted.
-  Both causes are deferred, and so is a bucket read that did not answer, which says nothing about the session:
-  it leaves no entry, and an entry-less attempt reports `ReasonNoSessionRecord`, which holds the window open for it.
-  What is given up at once is a core delivery or a message whose JetStream metadata cannot be read, which nothing would redeliver or bound;
-  the defensive `session.ReasonNone` arm is given up at once too, but no deployed listener reaches it.
+  an exception no publish took is logged `listener exception publish failed` and nothing else, and the one outcome that reads that failure is the fan-out's refusal, which clears the attempt record it had written (`exceptionFailureClearsAttempt`) and still acknowledges the message.
+  That cause is deferred, and so is a bucket read that did not answer, which says nothing about the session:
+  it leaves no entry, and an attempt with no entry reports `session.ErrNoSessionRecord`, which holds the window open for it.
+  What is given up at once is a core delivery or a message whose JetStream metadata cannot be read, which nothing would redeliver or bound.
   The interest path's own failures never reach that branch: they NAK with an error and are counted `failed`.
   A fanout delivery that fails to a session that is live is NAK'd for retry (up to MaxDeliver attempts over the stream's MaxAge window);
   one whose session is not live is counted a dead delivery and acknowledged.
 
-- A deferral (`finalizeAfter`) and every other settle of a durable message go through its `durableSettle`, which NAKs after the longest delay any of its parties asked for.
+- A durable message is settled once, by the handler that took it: `finalize` acknowledges it, or NAKs it after `durableRetryDelay` (30 s) when the path asks for a retry, and `finalizeAfter` NAKs it after the delay the path names (a deferral's `unplaceableRetryDelay`, 5 s).
+  Every path of the handler settles the message and returns, so no two settle one message, and a core or role-lane message is settled by nothing: nothing redelivers one.
 
 - CI settlements are published by the listeners that receive GitHub webhooks, which in production is the Fargate listener behind the webhook load balancer (its deployment sets `ENVOY_WEBHOOKS=github,slack`).
   Only the GitHub route records checks, so a listener whose `ENVOY_WEBHOOKS` does not name `github` - the on-prem fleet's, which sets no webhook variable - opens no CI store:

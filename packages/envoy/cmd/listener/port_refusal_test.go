@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -18,46 +20,77 @@ import (
 // port is accepted and answered port 0 by the session list, and the two environment variables the
 // deleted paths were configured by are warned about once each and ignored.
 
-// A registration whose port is above 0 is answered 400, and the refusal names the port field in
-// its expected list, which is how every other refusal of this route names the field a caller must
-// change (writeJSONError). A session that registered a port would wait for messages nothing
-// sends: no listener opens a connection to a session any more.
+// A registration whose port is above 0 is answered 400, whatever the port, and the refusal names
+// the port field in its expected list, which is how every other refusal of this route names the
+// field a caller must change (writeJSONError). A session that registered a port would wait for
+// messages nothing sends: no listener opens a connection to a session any more. The refusal is
+// answered before anything is stored, so neither the session's interests nor its session entry
+// appear.
 func TestARegistrationWithAPortIsAnswered400NamingThePortField(t *testing.T) {
 	rig := newSessionConsumerRig(t)
-	const sessionID = "ses_a1_refused"
 
-	recorder := httptest.NewRecorder()
-	rig.mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe",
-		strings.NewReader(`{"session_id":"`+sessionID+`","self_subscribed":true,"topics":[],"port":1}`)))
+	for index, port := range []int{1, 4242, 65535} {
+		t.Run(fmt.Sprintf("port %d", port), func(t *testing.T) {
+			sessionID := fmt.Sprintf("ses_a1_refused_%d", index)
+			recorder := httptest.NewRecorder()
+			rig.mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe",
+				strings.NewReader(fmt.Sprintf(`{"session_id":%q,"self_subscribed":true,"topics":["notifications.team.example"],"port":%d}`, sessionID, port))))
 
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
-	}
-	var refusal apiError
-	if err := json.Unmarshal(recorder.Body.Bytes(), &refusal); err != nil {
-		t.Fatalf("decode the refusal %s: %v", recorder.Body.String(), err)
-	}
-	if !reflect.DeepEqual(refusal.Expected, []string{"port"}) {
-		t.Fatalf("the refusal expects %v, want [port]: body %s", refusal.Expected, recorder.Body.String())
-	}
-	if !strings.Contains(refusal.Error, "port") {
-		t.Fatalf("the refusal reads %q, want it naming the port field", refusal.Error)
-	}
-	if _, err := rig.harness.sessions.Get(sessionID); err == nil {
-		t.Fatalf("the refused registration wrote a session entry for %s", sessionID)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
+			}
+			var refusal apiError
+			if err := json.Unmarshal(recorder.Body.Bytes(), &refusal); err != nil {
+				t.Fatalf("decode the refusal %s: %v", recorder.Body.String(), err)
+			}
+			if !reflect.DeepEqual(refusal.Expected, []string{"port"}) {
+				t.Fatalf("the refusal expects %v, want [port]: body %s", refusal.Expected, recorder.Body.String())
+			}
+			if !strings.Contains(refusal.Error, "port") {
+				t.Fatalf("the refusal reads %q, want it naming the port field", refusal.Error)
+			}
+			if interest, err := rig.harness.registry.Get(context.Background(), sessionID); err == nil {
+				t.Fatalf("the refused registration wrote interests %+v", interest)
+			}
+			if _, err := rig.harness.sessions.Get(sessionID); err == nil {
+				t.Fatalf("the refused registration wrote a session entry for %s", sessionID)
+			}
+		})
 	}
 }
 
 // A registration with no port that asks for the session's own consumer is accepted, and the
 // session list answers port 0 for it: the field stays in the answer, always 0, because every
-// released client parses it (packages/envoy-client/src/transport.ts).
+// released client parses it (packages/envoy-client/src/transport.ts). The stored entry records
+// port 0 too, and the host the registration carried, which nothing dials, as it came.
 func TestARegistrationWithNoPortIsAcceptedAndListedAtPortZero(t *testing.T) {
 	rig := newSessionConsumerRig(t)
 	const sessionID = "ses_a1_accepted"
+	const host = "example-host:80"
 
-	answer := rig.subscribe(t, consumerRegistration(sessionID, "epoch-1"))
+	registration, err := json.Marshal(map[string]any{
+		"session_id":      sessionID,
+		"self_subscribed": true,
+		"topics":          []string{},
+		"host":            host,
+		"delivery":        map[string]any{"consumer": true, "epoch": "epoch-1"},
+	})
+	if err != nil {
+		t.Fatalf("encode the registration of %s: %v", sessionID, err)
+	}
+	answer := rig.subscribe(t, string(registration))
 	if answer.Delivery == nil || answer.Delivery.Mode != "consumer" {
 		t.Fatalf("answer %s, want delivery mode consumer", answer.raw)
+	}
+	entry, err := rig.harness.sessions.Get(sessionID)
+	if err != nil {
+		t.Fatalf("read the stored entry of %s: %v", sessionID, err)
+	}
+	if entry.Port != 0 {
+		t.Fatalf("the stored entry records port %d, want none: no registration carries one", entry.Port)
+	}
+	if entry.Host != host {
+		t.Fatalf("the stored entry records host %q, want %q as it came", entry.Host, host)
 	}
 
 	recorder := httptest.NewRecorder()

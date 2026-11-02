@@ -713,8 +713,8 @@ func main() {
 	}
 	logger := logging.New(cfg.MachineID)
 	// The first lines of the log belong to the settings a deployment still carries and this
-	// listener no longer reads, before it does any other work, so an operator reading from the
-	// top meets them (dispatch://INFRA-889 deleted both).
+	// listener does not read, before it does any other work, so an operator reading from the top
+	// meets them.
 	warnIgnoredEnv(logger, "ENVOY_HOST_BRIDGE", "the listener no longer pushes a message to a session's serve port, so it opens no connection this would address")
 	warnIgnoredEnv(logger, "ENVOY_SUBSCRIBE_ALL_TOPICS", "the listener no longer holds a live topics subscription, so there is no such subscription to turn on")
 	apiToken := os.Getenv("ENVOY_API_TOKEN")

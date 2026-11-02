@@ -446,9 +446,11 @@ func topicRecipients(d *listenerDeps, item contracts.Envelope) []string {
 // publish, so the refusal is the recipient's subject or the grant's, not the sender's input.
 //
 // Only a receipt that arrived through the route counts, which is why it reads the route's own
-// record (listenerDeps.confirmed) and not the delivery handlers' cache: the durable reads this
-// send's own publish back off the stream, and the fanout it runs records there every
-// self-subscribed session on this machine whose delivery it skipped, having heard nothing from it.
+// record (listenerDeps.confirmed) and not the delivery handlers' dedupe cache: that cache holds
+// the session a delivery handed the message to and the session whose delivery it skipped alike,
+// and neither entry is a recipient's word that it has the message. An ad-hoc topic's own publish
+// is core NATS, which the stream does not store (sendToTopic below), so no delivery handler reads
+// this send back at all: the receipts this loop records are the only account of who took it.
 func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.Envelope, sessionID string) sendOutcome {
 	var lastForward error
 	for {

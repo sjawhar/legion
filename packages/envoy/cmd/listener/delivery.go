@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -105,48 +104,6 @@ const (
 // delivery asked for a retry.
 const durableRetryDelay = 30 * time.Second
 
-// durableSettle settles one durable message once its handler has ended: it acks the message, or
-// NAKs it when the handler asked for a retry, after the delay the handler asked for
-// (durableRetryDelay for end's retry). Every acknowledgement call on the message goes through it,
-// under its lock, so a message is settled once however many paths of a handler reach it.
-type durableSettle struct {
-	mu      sync.Mutex
-	msg     *nats.Msg
-	settled bool
-}
-
-func newDurableSettle(msg *nats.Msg) *durableSettle {
-	return &durableSettle{msg: msg}
-}
-
-// end settles the message, asking for a retry after durableRetryDelay when retry is set.
-func (s *durableSettle) end(retry bool) {
-	if retry {
-		s.retryAfter(durableRetryDelay)
-		return
-	}
-	s.finish(false, 0)
-}
-
-// retryAfter settles the message, asking for a retry after delay.
-func (s *durableSettle) retryAfter(delay time.Duration) {
-	s.finish(true, delay)
-}
-
-func (s *durableSettle) finish(retry bool, delay time.Duration) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.settled {
-		return
-	}
-	s.settled = true
-	if retry {
-		_ = s.msg.NakWithDelay(delay)
-		return
-	}
-	_ = s.msg.Ack()
-}
-
 type deliveryMessage struct {
 	data []byte
 	mode deliveryMode
@@ -160,8 +117,6 @@ type deliveryMessage struct {
 	// nothing (unplaceableAgentDelivery) and is in no consumer's window as far as this listener
 	// can tell (storedSeq 0).
 	metadata *nats.MsgMetadata
-	// settle acknowledges a durable message once its handler has ended.
-	settle *durableSettle
 }
 
 // storedSeq is the stream sequence of a durable message, which decides whether a session's
@@ -183,7 +138,11 @@ func (message deliveryMessage) finalize(retry bool) {
 	if message.mode != durableDelivery {
 		return
 	}
-	message.settle.end(retry)
+	if retry {
+		_ = message.msg.NakWithDelay(durableRetryDelay)
+		return
+	}
+	_ = message.msg.Ack()
 }
 
 // finalizeAfter asks the stream to redeliver this message after delay, for a path whose own
@@ -193,7 +152,7 @@ func (message deliveryMessage) finalizeAfter(delay time.Duration) {
 	if message.mode != durableDelivery {
 		return
 	}
-	message.settle.retryAfter(delay)
+	_ = message.msg.NakWithDelay(delay)
 }
 
 // jetStreamDeliveryHandler is the durable's handler. It reads the message's JetStream metadata
@@ -204,7 +163,7 @@ func (message deliveryMessage) finalizeAfter(delay time.Duration) {
 func jetStreamDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
 	handler := listenerDeliveryHandler(cfg)
 	return func(msg *nats.Msg) {
-		message := deliveryMessage{data: msg.Data, mode: durableDelivery, msg: msg, settle: newDurableSettle(msg)}
+		message := deliveryMessage{data: msg.Data, mode: durableDelivery, msg: msg}
 		if metadata, err := msg.Metadata(); err == nil {
 			message.metadata = metadata
 		}

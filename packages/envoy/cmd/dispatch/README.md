@@ -2038,7 +2038,7 @@ Each item below names a path with its method and identity, then its purpose.
 
   The process's metrics in the Prometheus text format:
   `envoy_dispatch_outbox_publish_failures_total{reason}`, one count per destination of an outbox publish attempt that was not reached, `reason` being `denied` (the server refused it under the connection's own publish permissions), `refused` (NATS refuses the envelope or its subject however often it is retried), `holder` (a role forward its holder's resolution held pending, with nothing sent), `unanswered` (NATS took the forward and the answer never came:
-  the role holder's receipt, or, for a holder with a serving port, the stream's acknowledgement of the stored copy) or `failed` (every other failure).
+  the role holder's receipt, or, for a holder whose entry an earlier listener stored with a port, the stream's acknowledgement of the stored copy) or `failed` (every other failure).
   It is answered above the router, so it is never the dashboard's shell, and whoever reaches the HTTP port can read it.
   Nothing scrapes it yet.
 
