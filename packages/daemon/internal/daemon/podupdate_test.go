@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -955,6 +956,154 @@ func TestPodUpdateEndsAGonePodsRoundWithNoMessageWhenEveryWorkerAnswered(t *test
 	if calls := rig.replacements(); len(calls) != 0 {
 		t.Fatalf("ReplacePod called %d times for a pod that is not there", len(calls))
 	}
+}
+
+// A round every worker answered whose claims stop recording its pod between the sweep's
+// snapshot and the live read the replacement is decided from: an operator suspended the one
+// answered worker, and the suspension let its process go (letGo clears the locator). The pod is
+// still there and still drifted, so nothing is replaced, nothing is logged as replaced, and the
+// round stays open on the claims with their answers standing. Ended here, the round would leave
+// a drifted pod nothing has replaced, the task it was holding would go out, and the next tick
+// would open the same round over the same pod again.
+//
+// The claim records the pod again when its operator resumes it, and the sweep that reads it
+// there replaces the pod and ends the round, which is the only end the round had left.
+func TestPodUpdateKeepsARoundWhoseLiveClaimStopsRecordingItsLivePod(t *testing.T) {
+	const replaced = "supervise: every worker of this update round has answered; the pod is replaced and the round is over"
+	rig := newPodUpdateRig(t, readyWorker(claim.RoleImplementer))
+	rig.drifts(podUpdateDrift)
+
+	rig.tick()
+	rig.awaitRound(claim.RoleImplementer, podUpdateRound)
+	rig.signal(claim.RoleImplementer, "a1b2c3d")
+	rig.settleAll()
+
+	// The group this tick carries, read while the worker still records the round's pod. Minutes
+	// later in that same tick its operator suspends it, so the live read finds no pod at all.
+	group := rig.snapshot()
+	rig.suspendByOperator(claim.RoleImplementer)
+
+	rig.s.reconcilePodUpdates(rig.ctx, group)
+
+	if calls := rig.replacements(); len(calls) != 0 {
+		t.Fatalf("the pod was replaced %d times with no claim recording a process in it", len(calls))
+	}
+	if lines := loggedLines(t, rig.logs.String(), replaced); len(lines) != 0 {
+		t.Fatalf("the sweep logged the pod replaced %d times having replaced nothing: %+v", len(lines), lines)
+	}
+	if messages := rig.messages(); len(messages) != 0 {
+		t.Fatalf("the issue was written %q of a pod that is still there", messages)
+	}
+	if notices := rig.notices(); len(notices) != 0 {
+		t.Fatalf("the controller was told %+v of a round one sweep away from its replacement", notices)
+	}
+	if c := rig.claimOf(claim.RoleImplementer); c.UpdateRound != podUpdateRound || c.UpdateSignalledAt == nil {
+		t.Fatalf("the claim after the sweep = round %q answered=%t, want the round open on it and its answer standing",
+			c.UpdateRound, c.UpdateSignalledAt != nil)
+	}
+
+	rig.resumeInPod(claim.RoleImplementer)
+
+	rig.awaitReplacement(1, "at the sweep that read the round's own pod recorded again")
+	rig.awaitClaim(claim.RoleImplementer, "its round to end with the replacement",
+		func(c supervise.Claim) bool { return c.UpdateRound == "" })
+}
+
+// suspendByOperator is the operator suspending a claim, settled: the process goes with the
+// suspension (letGo clears the locator), and the machine is deciding nothing by the time it
+// returns, since a sweep's live read counts a claim whose machine is deciding as one that has
+// not answered (roundGroup's mask) and would decide something else entirely.
+func (r *podUpdateRig) suspendByOperator(role claim.Role) {
+	r.t.Helper()
+	r.handle(role, supervise.RequestSuspend{Claim: r.tokens[role], By: supervise.SuspendedByOperator})
+	r.awaitClaim(role, "the operator's suspension to let its process go", func(c supervise.Claim) bool {
+		return c.State == supervise.StateSuspended && c.Locator == nil
+	})
+	r.settleAll()
+}
+
+// resumeInPod is the operator resuming a suspended claim of an open round: the session is
+// relaunched, and a launch into a pod that has merely drifted keeps that pod, so the process
+// comes up in the very pod the round is open over. The claim is a worker of that round again
+// with its answer standing (Claim.leftPodRound), and it registers and readies there as
+// startInPod's role does.
+func (r *podUpdateRig) resumeInPod(role claim.Role) {
+	r.t.Helper()
+	token := r.tokens[role]
+	conn := fake.NewConn()
+	r.conns.Register(token, conn)
+	r.workers[role] = conn
+	r.rt.ScriptResume(fake.SpawnResult{Locator: *podUpdateLocator(token, podUpdateIssue, podUpdatePod)})
+	r.handle(role, supervise.RequestResume{Claim: token})
+	generation := r.claimOf(role).Generation
+	for _, ev := range []supervise.Event{
+		supervise.StreamHello{Claim: token, Generation: generation},
+		supervise.RequestRegister{Claim: token, Generation: generation, Session: "ses_" + string(role),
+			SessionFile: "/sessions/" + string(role) + ".jsonl", CapabilityHash: []byte(role), PluginContract: api.DaemonAPIVersion},
+		supervise.RequestReady{Claim: token, Generation: generation, Session: "ses_" + string(role)},
+	} {
+		r.handle(role, ev)
+	}
+	if c := r.claimOf(role); c.State != supervise.StateReady || podOf(c.Locator) != podUpdatePod {
+		r.t.Fatalf("the %s its operator resumed is %s at %+v, want it ready in the round's own pod %s",
+			role, c.State, c.Locator, podUpdatePod)
+	}
+}
+
+// The same round whose live claims record no process in its pod, with the pod really gone: it
+// was replaced where it stood for a failure of its own while the sweep ran. There is nothing to
+// replace it through and nothing to wait for, so the round ends there, through the one path
+// every reading of a gone pod ends a round by (endRoundOverAGonePod), and the issue is written
+// what that path writes: nothing, because every worker of this round had answered and the pod
+// took nothing unpushed with it.
+func TestPodUpdateEndsTheRoundWhenTheRuntimeSaysItsUnrecordedPodIsGone(t *testing.T) {
+	const overAGonePod = "supervise: the pod of this issue's update round is not there, and every claim of the round had answered; nothing was lost and the round is over"
+	rig := newPodUpdateRig(t, readyWorker(claim.RoleImplementer))
+	rig.drifts(podUpdateDrift)
+
+	rig.tick()
+	rig.awaitRound(claim.RoleImplementer, podUpdateRound)
+	rig.signal(claim.RoleImplementer, "a1b2c3d")
+	rig.settleAll()
+
+	group := rig.snapshot()
+	rig.suspendByOperator(claim.RoleImplementer)
+	rig.s.runtime = &podGoneAfterTheDriftRead{Runtime: rig.rt}
+
+	rig.s.reconcilePodUpdates(rig.ctx, group)
+
+	rig.awaitClaim(claim.RoleImplementer, "its round to end with the pod that is not there",
+		func(c supervise.Claim) bool { return c.UpdateRound == "" })
+	if lines := loggedLines(t, rig.logs.String(), overAGonePod); len(lines) != 1 {
+		t.Fatalf("the sweep ended the round over a gone pod %d times, want once: %+v", len(lines), lines)
+	}
+	if messages := rig.messages(); len(messages) != 0 {
+		t.Fatalf("the issue was written %q; every worker of the round had answered, so the pod took nothing unpushed with it", messages)
+	}
+	if notices := rig.notices(); len(notices) != 0 {
+		t.Fatalf("the controller was told %+v of a round that ended with nothing lost", notices)
+	}
+	if calls := rig.replacements(); len(calls) != 0 {
+		t.Fatalf("ReplacePod called %d times for a pod that is not there", len(calls))
+	}
+}
+
+// podGoneAfterTheDriftRead is the runtime with the round's pod going while one sweep runs: the
+// first read of a pod answers what the test scripted, and every read after it answers
+// runtime.ErrPodGone, as a runtime answers a pod replaced where it stood a moment before. The
+// sweep reads the drift of the pod the claims record first and asks about the round's own pod
+// last, so the pod is there when the round is found complete and gone when the round asks what
+// became of it — the window this round can only end in as a gone pod's round.
+type podGoneAfterTheDriftRead struct {
+	runtime.Runtime
+	reads atomic.Int64
+}
+
+func (r *podGoneAfterTheDriftRead) PodDrift(ctx context.Context, k runtime.Known) ([]string, error) {
+	if r.reads.Add(1) == 1 {
+		return r.Runtime.PodDrift(ctx, k)
+	}
+	return nil, runtime.ErrPodGone
 }
 
 // A round ends in three ways, and none of them leaves its worker a word from the daemon. The
