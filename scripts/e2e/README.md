@@ -2933,12 +2933,17 @@ The transcript records the duration of each wait.
 
 - `cleanup-is-complete`: The second controller quits.
   Each service and container stops.
+  Once both tmux servers are gone, the script stops what the agent sessions started detached (`stop_agent_daemons`):
+  Oh My Pi runs a session's background services, the blob broker and its tunnel helper among them, under a per-project daemon broker in a session of its own, which writes `broker.pid` in its runtime directory under the run's work directory.
+  For each `broker.pid` there, each process of that broker's session is stopped when it carries that runtime directory in `OMP_DAEMON_RUNTIME_DIR` or is one of the run's processes.
+  No process is stopped for its working directory alone.
+  Every process of the run then ends within 600 s; a survivor fails the check, and the check first prints its `ps` line (pid, ppid, process group, session, start time and command line).
   The branch `legion/<tree>` of each tree is gone from `sjawhar/legion-smoke` (GitHub answers 404).
   The work directory is gone.
 
 The last line is `parked decision devbox e2e: PASS` or `parked decision devbox e2e: FAIL (check <name>)`.
 The EXIT trap does the same cleanup on each exit:
-it stops the controllers, the daemon, Dispatch, the listener and the containers, closes the open pull requests of the run, removes its branches, and copies each session of the profile into the evidence directory.
+it stops the controllers, the daemon, Dispatch, the listener, the agent sessions' daemon brokers and the containers, closes the open pull requests of the run, removes its branches, and copies each session of the profile into the evidence directory.
 A pass leaves nothing but the evidence directory.
 A failure also leaves the work directory, and prints its path.
 

@@ -169,6 +169,7 @@ cleanup() {
   stop_pid "$daemon_keeper_pid"
   stop_pid "$dispatch_keeper_pid"
   TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
+  stop_agent_daemons
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
   docker rm -f "$pg_container" "$nats_container" >/dev/null 2>&1 || true
   close_unpassed_run_pull_requests
@@ -494,7 +495,7 @@ since() { printf '%ss' "$((SECONDS - $1))"; }
 # ended four minutes later. A wait that can make a single attempt is not a wait, and a longer
 # deadline alone would only be a new wager on the machine.
 wait_for_run_processes() {
-  local limit=${1:-600} floor=${2:-10} polls=0 started=$SECONDS beat=$SECONDS left
+  local limit=${1:-600} floor=${2:-10} polls=0 started=$SECONDS beat=$SECONDS left line
   note "waiting up to ${limit}s and at least $floor polls for every process of the run to end"
   while :; do
     polls=$((polls + 1))
@@ -505,6 +506,9 @@ wait_for_run_processes() {
       return 0
     fi
     if ((SECONDS - started >= limit && polls >= floor)); then
+      # Each survivor's line, read before the EXIT trap's sweep kills it, so the failure names what
+      # each process was and whose session it ran in.
+      while IFS= read -r line; do note "$line"; done < <(ps -o pid,ppid,pgid,sid,lstart,args -p "${left//$'\n'/,}" 2>&1 || true)
       fail "timed out after $(since "$started") ($polls polls) waiting for every process of the run to end; still running: ${left//$'\n'/ }"
     fi
     if ((SECONDS - beat >= 60)); then
@@ -513,6 +517,62 @@ wait_for_run_processes() {
     fi
     sleep 0.5
   done
+}
+
+# stop_agent_daemons stops the processes the run's Oh My Pi sessions leave running once their panes
+# are gone. Oh My Pi runs a session's background services (the blob broker that publishes images,
+# and the tunnel helper the blob broker starts) under a per-project daemon broker, which it spawns
+# detached, a session leader of its own, and which writes its pid to broker.pid in its runtime
+# directory, OMP_DAEMON_RUNTIME_DIR in its environment: under the profile's state, so under $work
+# for every pane and controller of the run. tmux kill-server ends the panes, not those sessions:
+# the devbox run at 6512c7fc left four such processes alive through cleanup-is-complete's 600 s
+# wait, each beside a blob-tunnel log. This reads every broker.pid under $work and signals each
+# process of that broker's session (session id equal to the broker's pid, which the services it
+# supervises and their helpers inherit, the broker itself gone or not), TERM first and KILL after
+# 10 s. A member is signalled only when it also carries that runtime directory in
+# OMP_DAEMON_RUNTIME_DIR or is one of the run's by run_processes's reading, so a session the kernel
+# later gave the same id is left alone. It finds nothing by working directory alone: what it misses,
+# cleanup-is-complete's wait still names.
+stop_agent_daemons() {
+  local file dir real leader p stat sid line env_dir i alive
+  local -a run=() targets=() environ=()
+  local -A dirs=()
+  while IFS= read -r -d '' file; do
+    leader=$(jq -r '.pid // empty' "$file" 2>/dev/null) || continue
+    [[ $leader =~ ^[1-9][0-9]*$ ]] || continue
+    dir=${file%/broker.pid}
+    real=$(realpath -e -- "$dir" 2>/dev/null) || real=$dir
+    dirs[$leader]="$dir $real"
+  done < <(find "$work" -name broker.pid -type f -print0 2>/dev/null || :)
+  ((${#dirs[@]} > 0)) || return 0
+  mapfile -t run < <(run_processes || true)
+  for p in /proc/[0-9]*; do
+    { read -r stat <"$p/stat"; } 2>/dev/null || continue
+    # The fields after the command, which may itself hold spaces or parentheses: state, ppid,
+    # process group, session.
+    read -r _ _ _ sid _ <<<"${stat##*\) }"
+    [ -n "${dirs[$sid]+set}" ] || continue
+    env_dir=
+    environ=()
+    { mapfile -d '' -t environ <"$p/environ"; } 2>/dev/null || true
+    for line in ${environ[@]+"${environ[@]}"}; do
+      case $line in OMP_DAEMON_RUNTIME_DIR=*) env_dir=${line#*=} ;; esac
+    done
+    if { [ -n "$env_dir" ] && [[ " ${dirs[$sid]} " == *" $env_dir "* ]]; } || [[ " ${run[*]} " == *" ${p#/proc/} "* ]]; then
+      targets+=("${p#/proc/}")
+    fi
+  done
+  ((${#targets[@]} > 0)) || return 0
+  note "stopping ${#targets[@]} processes of ${#dirs[@]} Oh My Pi daemon broker sessions: ${targets[*]}"
+  kill -TERM "${targets[@]}" 2>/dev/null || true
+  for i in $(seq 1 50); do
+    alive=
+    for p in "${targets[@]}"; do ! kill -0 "$p" 2>/dev/null || alive=1; done
+    [ -n "$alive" ] || return 0
+    sleep 0.2
+  done
+  kill -KILL "${targets[@]}" 2>/dev/null || true
+  return 0
 }
 
 # ---- checkpoints --------------------------------------------------------------------------------------
@@ -947,6 +1007,8 @@ stop_pid "$listener_pid"
 stop_pid "$daemon_keeper_pid"
 stop_pid "$dispatch_keeper_pid"
 TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
+# The panes are gone; what their sessions started detached is not (stop_agent_daemons).
+stop_agent_daemons
 for pid in $daemon_pid $dispatch_pid $listener_pid $daemon_keeper_pid $dispatch_keeper_pid; do
   ! kill -0 "$pid" 2>/dev/null || fail "process $pid still runs"
 done
