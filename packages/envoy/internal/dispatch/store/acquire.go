@@ -27,7 +27,7 @@ const (
 	ListenPool = "listen"
 	// LeasesPool is where a leased maintenance pass holds its lease (Pool.Leases).
 	LeasesPool = "leases"
-	// OutboxPool is the events outbox's one connection (Pool.Outbox).
+	// OutboxPool is the events outbox's two connections, its scan's and its hold renewal's (Pool.Outbox).
 	OutboxPool = "outbox"
 	// BackgroundPool is the background loops' pool (Pool.Background).
 	BackgroundPool = "background"
@@ -87,8 +87,9 @@ const (
 
 // defaultAcquireBound is pool name's acquire bound; zero is none. The health probe bounds its own
 // wait, dial and query together (healthProbeTimeout), so its acquire needs nothing more; the
-// outbox and the registry are each their pool's only caller, one statement or transaction at a
-// time, and hold at most its one connection, so their acquires never wait behind another caller.
+// registry is its pool's only caller and the outbox's pool has one connection for each of its two
+// callers (its scan and its hold renewal), each running one statement or transaction at a time
+// and holding at most one connection, so their acquires never wait behind another caller.
 func defaultAcquireBound(name string) time.Duration {
 	switch name {
 	case RequestsPool, RoomsPool, LivePool, HorizonPool:
