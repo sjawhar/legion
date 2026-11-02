@@ -1403,7 +1403,8 @@ pg_disk_watch() {
       committed=1
     fi
     # The volume read is a foreground exec, so a TERM that came during it runs its trap only once
-    # the read is over: the step it watched has ended, and nothing of it is recorded or stopped.
+    # the read is over: the step it watched has ended, so no failure is recorded and no job is
+    # stopped (the reading itself stays in the step's .pg-disk.jsonl, as every reading does).
     ((stopped == 0)) || return 0
     guard=0
     runner_stop "$job" || guard=$?
@@ -1728,8 +1729,10 @@ runner_stop() {
 runner_wait() {
   local name=$1 deadline=$((EPOCHSECONDS + $2)) log_dir=${3:-$RUN_DIR/logs} pid=${4:-} start=${5:-} rc guard
   # signal is the stop that falls due next (TERM, then KILL, then none once both left this pod),
-  # and due the time it fell due: the deadline for the TERM, a grace after the TERM left for the
-  # KILL, and a grace after the KILL left for the exit status. Each gets one grace from due.
+  # and due is when it falls due: the deadline for the TERM, a grace after the TERM left for the
+  # KILL. Each signal gets one grace from due before the wait gives up on it. Once both have left
+  # this pod, due is the end itself: a grace after the KILL, when the wait gives up on the exit
+  # status.
   local signal=TERM due=$deadline sent=0
   while :; do
     if [ -n "$pid" ] && step_gone "$pid" "$start"; then
