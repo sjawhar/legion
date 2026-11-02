@@ -11,7 +11,7 @@ Reach shared understanding with the person at the least cost of their time. A Le
 
 ## The outline
 
-Find the issue's project with `dispatch projects` or `search`, never the environment. The spec's `##` parts, in order:
+Find the issue's project with `dispatch projects` or `dispatch search`, never the environment. The spec's `##` parts, in order:
 
 Part | Content
 --- | ---
@@ -31,18 +31,18 @@ For each spec, ask, comment and message:
 
 - Write in `skill://asd-ste100`'s strict mode.
 - Write about the current design, never the person or how people reached it, and never quote people or upload their words.
-- Link each source where the person wrote it. With no link, state the design.
+- Link each source where the person wrote it, each id whole. With no link, state the design.
 - Cite code by file and symbol, never a line number: it goes stale at the next edit.
-- A sentence that cites a gate passing (a test, review, check or proof) also says what the pass does not show: "The tests pass; they catch a wrong verdict, not a missing one."
+- A sentence that cites a gate passing (test, review, check, proof) also says what the pass does not show: "Tests pass: a wrong verdict, not a missing one."
 - Name your session only if a reader must reach it.
 - Keep only text that helps a reader understand, decide, build, check.
 - Explain each name or term a new reader may not know, and what each issue you name does for them.
-- Name a requirement or check by what it is, never its number.
+- In an ask, ask block, comment or message, name a requirement or check by what it is, never its number.
 
 ## Questions
 
 - Name the concrete case first: which machines, files, sessions or people, and the numbers. Then ask the choice in those terms, never "Which option?".
-- A choice inside what the person asked for, or one their messages favour, is settled: decide it.
+- A choice inside what the person asked for, or one their messages favour, is yours: decide it.
 - Ask only for the person's authority, taste or risk appetite, when options differ on what they care about.
 - Ask with an [ask block](skill://dispatch/SKILL.md#asks-and-ask-blocks): 2 to 4 options with costs, your recommendation and its reason, answerable on a phone.
 
@@ -55,21 +55,21 @@ For each spec, ask, comment and message:
 
 ## Decisions
 
-Each choice you made alone, and each a person made in an answered ask, is a `##` section of the issue's `decisions.md` (`dispatch artifact`, then `doc-edit`).
+Each choice you made alone, and each a person made in an answered ask, is a `##` section of the issue's `decisions.md`.
 
 - The heading names the choice; the text gives the reason and the options weighed.
-- Link each spec block it shaped, `dispatch://KEY/spec#b-<id>` (`doc-read --blocks` lists the ids), and a person's decision its ask.
+- Link each spec block it shaped, `dispatch://KEY/spec#b-<id>` (`doc-read --blocks` lists the ids), and a person's decision its ask, `dispatch://KEY/ask/<id>`.
 - An unsure section adds a paragraph that starts `Unsure:`: what would change your mind.
 - A replaced section moves under a final `## Replaced` as a `###`.
 
 ## Old specs
 
-At your next edit, rewrite a spec outside the outline whole in one version, moving its ask blocks with `doc-edit`'s `move`. Kept text follows the text rules: restate each retelling, quotation or unlinked attribution as design, or cut it.
+At your next edit, rewrite a spec outside the outline whole in one version, moving its ask blocks with `doc-edit`'s `move`; restate each retelling, quotation or unlinked attribution as design, or cut it.
 
 ## Approval
 
 - Request approval once: each ask block answered or waived, each claim checked, this version unapproved. Unbuilt acceptance checks never delay it.
-- After approval, version only a change to scope, acceptance, cost, risk or a person's decision, all at once. Put other fixes in the plan or a comment.
+- After approval, version only a change to scope, acceptance, cost, risk or a person's decision, all at once; put other fixes in the plan or a comment.
 
 ## The plan
 
