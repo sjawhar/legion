@@ -49,7 +49,8 @@ type Ledger struct {
 	rebuilds []string
 	// readBacks holds, per document this transaction wrote whole (SeedText, ReplaceText), the
 	// read-back its parse already made of the markdown it stores (pmdoc.ParseWritten), so a step
-	// of the same request that reads that markdown again shares the parse (ReadBackOf).
+	// of the same request that reads that markdown again shares the parse (ReadBackOf). Discard
+	// drops them when the request ends: each is a whole parsed tree of its document.
 	readBacks map[string]pmdoc.WrittenReadBack
 	// copies are the documents showing a copy of an ask this transaction answered or resolved,
 	// whose settlement it marked owed (SettleCopiesOf); Commit arms each once it has committed.
@@ -396,13 +397,20 @@ func (s *Service) commitConsuming(ctx context.Context, tx pgx.Tx, captures []roo
 
 // Discard drops what a transaction that did not commit left behind: its live writes, which no
 // room ever saw, and the rooms its rebuilds held. A version it wrote marked nothing it read, so
-// its authors stay where they were. After Commit it does nothing.
+// its authors stay where they were. After Commit only the read-backs are left to drop. Every
+// caller defers it, so it is where the request's use of the ledger ends.
 func (l *Ledger) Discard() {
 	for _, artifactID := range l.order {
 		l.service.finishLiveWrite(l.live[artifactID])
 	}
 	l.versions = nil
 	l.flushes = nil
+	// The read-backs serve the request that made them and nothing after it (ReadBackOf), while
+	// the ledger outlives the request by a long way: a pooled pgx connection keeps the context of
+	// the queries it last served (liveWrite.releaseFork says why that matters), and this ledger
+	// is a value of that context. Kept, a whole parsed tree of every document the transaction
+	// wrote whole stayed resident beside the document's room.
+	l.readBacks = nil
 	l.endRebuilds()
 }
 
