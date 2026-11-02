@@ -108,12 +108,10 @@ const PATH_KEEPS_BYTES =
 
 const ARTIFACT_CONTENT_NAME_RULE = `${CONTENT_IS_MARKDOWN}, so with content the name ends in .md or .markdown or has no extension; upload any other file (.jsonl, .tsv, .json, .txt) with ${PATH_KEEPS_BYTES}.`;
 
-/** A name's extension: what follows its last dot when that holds no blank. A run of digits there
- *  is an extension only in a name with no blank, so a filename such as "rows.jsonl.1" has one and
- *  a title's version number, as in "plan v1.2", is none. */
+/** A name's extension: what follows its last dot when that holds no blank. Digits count, so
+ *  "rows.jsonl.1" has one, and so does a title such as "plan v1.2", which takes content once it
+ *  ends in .md. */
 const NAME_EXTENSION = /\.([^\s.]+)$/u;
-
-const DIGITS = /^\d+$/;
 
 const MARKDOWN_EXTENSION = /^(md|markdown)$/i;
 
@@ -135,10 +133,8 @@ function artifactProblem(value: unknown): string | undefined {
     return ARTIFACT_OWNER_AND_SOURCE_RULE;
   }
   if (typeof input.content !== "string" || typeof input.name !== "string") return undefined;
-  const name = input.name.trim();
-  const extension = NAME_EXTENSION.exec(name)?.[1];
+  const extension = NAME_EXTENSION.exec(input.name.trim())?.[1];
   if (extension === undefined || MARKDOWN_EXTENSION.test(extension)) return undefined;
-  if (DIGITS.test(extension) && /\s/.test(name)) return undefined;
   return `${CONTENT_IS_MARKDOWN}, and ${JSON.stringify(input.name)} is not a Markdown name. Upload the file under the same name with ${PATH_KEEPS_BYTES}; content takes a name ending in .md or .markdown or with no extension.`;
 }
 

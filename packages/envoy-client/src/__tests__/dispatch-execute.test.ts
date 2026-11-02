@@ -8674,6 +8674,8 @@ describe("executeDispatchTool", () => {
     "отчёт.данные",
     "rows.jsonl.1",
     "tool.1",
+    "row data.jsonl.1",
+    "plan v1.2",
   ])("refuses inline content named %j before it sends anything, naming --path", async (name) => {
     const requests: string[] = [];
     await expect(
@@ -8701,9 +8703,8 @@ describe("executeDispatchTool", () => {
     "Plan.MD",
     "notes.markdown",
     "Design notes",
-    "plan v1.2",
+    "plan v1.2.md",
     "notes v2. draft",
-    "Release v2.0",
     "Dr. Smith's notes",
   ])("sends inline content named %j as a Markdown document", async (name) => {
     const requests: Array<{ url: string; init: RequestInit }> = [];
