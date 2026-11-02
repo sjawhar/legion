@@ -53,6 +53,12 @@ func TestEveryQueuedStatusRowCarriesItsKindAfter20261102003600(t *testing.T) {
 			payload: `{"status":"todo","observedStatus":"backlog","personHandover":true}`},
 		{name: "an unmarked close, as a merge queued one", issue: "LEGION-214", want: record.CloseStatusRow,
 			payload: `{"status":"done","observedStatus":"in_progress","reason":"merged"}`},
+		// A write of done observed at done matches the re-assert arm and the close arm alike. The
+		// re-assert arm is first and wins, which is right for the row main queued in that shape:
+		// its sessionStatusWrite re-asserting the daemon's own done over a session's.
+		{name: "a write that matches the re-assert arm and the close arm", issue: "LEGION-216",
+			want:    record.ReassertStatusRow,
+			payload: `{"status":"done","observedStatus":"done"}`},
 	}
 	for _, row := range rows {
 		if _, err := store.Pool().Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error)

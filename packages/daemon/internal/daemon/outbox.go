@@ -773,13 +773,9 @@ func closeStands(ctx context.Context, r *outbox, row record.OutboxRow, payload r
 	if payload.CloseGeneration == 0 {
 		return true, nil
 	}
-	var issue *record.Issue
-	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		var err error
-		issue, err = r.records.Issue(ctx, tx, row.Issue)
-		return err
-	}); err != nil {
-		return false, fmt.Errorf("read workflow issue %s to judge the close queued for it: %w", row.Issue, err)
+	issue, err := r.recordedIssue(ctx, row.Issue)
+	if err != nil {
+		return false, fmt.Errorf("judge the close queued for %s: %w", row.Issue, err)
 	}
 	if issue != nil && issue.Generation != payload.CloseGeneration {
 		r.log.Info("outbox close finished without writing: the issue was taken back into the workflow in a generation of its own",
@@ -813,13 +809,9 @@ func (r *outbox) personHandoverStands(row record.OutboxRow, issue dispatch.Issue
 func (r *outbox) statusStillWanted(ctx context.Context, row record.OutboxRow, payload record.StatusWrite, read dispatch.Issue) (bool, error) {
 	left := record.OutOfWorkflow(read.Status)
 	if !left {
-		var issue *record.Issue
-		if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-			var err error
-			issue, err = r.records.Issue(ctx, tx, row.Issue)
-			return err
-		}); err != nil {
-			return false, fmt.Errorf("read workflow issue %s after it changed under its status write: %w", row.Issue, err)
+		issue, err := r.recordedIssue(ctx, row.Issue)
+		if err != nil {
+			return false, fmt.Errorf("judge the status write of %s: %w", row.Issue, err)
 		}
 		left = issue != nil && !workflow.InWorkflow(*issue)
 	}
@@ -2227,14 +2219,27 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 	return nil
 }
 
-func (r *outbox) issue(ctx context.Context, key string) (record.Issue, error) {
+// recordedIssue is key's issue as the record holds it, nil when the daemon keeps none: the one
+// read every rule and executor that asks the record goes through (closeStands,
+// statusStillWanted, issue), so there is one transaction shape and one failure message for it.
+func (r *outbox) recordedIssue(ctx context.Context, key string) (*record.Issue, error) {
 	var issue *record.Issue
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		var err error
 		issue, err = r.records.Issue(ctx, tx, key)
 		return err
 	}); err != nil {
-		return record.Issue{}, fmt.Errorf("read workflow issue %s: %w", key, err)
+		return nil, fmt.Errorf("read workflow issue %s: %w", key, err)
+	}
+	return issue, nil
+}
+
+// issue is recordedIssue where the caller's work has no meaning without the record: an issue the
+// daemon keeps none of is that caller's failure, not an answer.
+func (r *outbox) issue(ctx context.Context, key string) (record.Issue, error) {
+	issue, err := r.recordedIssue(ctx, key)
+	if err != nil {
+		return record.Issue{}, err
 	}
 	if issue == nil {
 		return record.Issue{}, fmt.Errorf("workflow issue %s is not recorded", key)
