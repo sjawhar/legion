@@ -32,7 +32,7 @@ For each spec, ask, comment and message:
 - Write in `skill://asd-ste100`'s strict mode.
 - Write about the current design, never the person or how people reached it, and never quote people or upload their words.
 - Link each source where the person wrote it, each id whole. With no link, state the design.
-- Cite code by file and symbol, never a line number: it goes stale at the next edit.
+- In a spec, cite code by file and symbol, never a line number: it goes stale at the next edit.
 - A sentence that cites a gate passing (test, review, check, proof) also says what the pass does not show: "Tests pass: a wrong verdict, not a missing one."
 - Name your session only if a reader must reach it.
 - Keep only text that helps a reader understand, decide, build, check.
