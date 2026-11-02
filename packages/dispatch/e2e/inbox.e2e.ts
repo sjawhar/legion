@@ -1021,12 +1021,12 @@ test("a pending credential request naming only the request's session id shows it
   }
 });
 
-// A broker older than its approval page names no `approve_url`, and serves no page of its own:
-// the row is listed and counted as any other, and keeps the link it had before that page
-// existed, to the record's own Dispatch page, where such a request is still decided. A Dispatch
-// from this rollout step runs against such a broker whenever Dispatch's pin moved first, or the
-// broker's apply was stopped or rolled back.
-test("a pending secret request with no approve_url is listed, counted, and links to the record's own Dispatch page", async ({
+// A broker older than its approval page names no `approve_url`, and serves no page of its own.
+// Dispatch decides no secret request of its own any more, and the record page it used to link
+// to is deleted, so the row is listed and counted with its summary as plain text, linking
+// nowhere. A Dispatch from this rollout step runs against such a broker whenever Dispatch's pin
+// moved first, or the broker's apply was stopped or rolled back.
+test("a credential record path with no approve_url renders an unlinked row", async ({
   browser,
 }) => {
   const alice = await asUser(browser, "alice");
@@ -1046,10 +1046,25 @@ test("a pending secret request with no approve_url is listed, counted, and links
     const requests = page.getByRole("region", { name: "Credential requests" });
     const row = requests.getByRole("listitem").filter({ hasText: "OLD_BROKER_KEY" });
     await expect(row).toContainText("Secret request");
-    const link = requests.getByRole("link");
-    await expect(link).toHaveCount(1);
-    await expect(link).toHaveAttribute("href", "/credentials/record-old-broker");
+    await expect(requests.getByRole("link")).toHaveCount(0);
+    await expect(requests.locator("a")).toHaveCount(0);
     await expect(page.getByText(/^Needs you 1$/).first()).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
+
+// The record's own Dispatch page is gone, and `/credentials/*` renders the Inbox instead
+// (web/src/app.tsx), so an address a person kept from before that deletion - a bookmark, or the
+// link an older Dispatch put on the row above - opens the Inbox rather than the not-found page.
+test("a credential record path opens the Inbox", async ({ browser }) => {
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+
+    await page.goto("/credentials/record-old-broker");
+    await expect(page.getByRole("heading", { exact: true, level: 1, name: "Inbox" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Page not found" })).toHaveCount(0);
   } finally {
     await alice.close();
   }

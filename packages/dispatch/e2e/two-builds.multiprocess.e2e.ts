@@ -10,7 +10,7 @@ import {
   test,
 } from "@playwright/test";
 
-import type { ArtifactUploadResponse, CredentialRecord } from "../web/src/api/types";
+import type { ArtifactUploadResponse } from "../web/src/api/types";
 import { type FakeSession, setLiveSessions } from "./agents";
 import {
   baseUrl,
@@ -29,7 +29,6 @@ import {
 } from "./api";
 import { seedDeliveryFixture } from "./delivery-seed";
 import { connectedDot, documentEditor } from "./editor";
-import { setCredentialRecords } from "./fake-broker-helpers";
 import { seedFakeGithub } from "./fake-github-helpers";
 import {
   type DispatchProcess,
@@ -126,7 +125,6 @@ const shown = {
   agentReply: "The release notes are read.",
   child: "Split the rollout",
   comment: "The rollout waits on the canary.",
-  credentialReason: "need it for the rollout",
   document: "The handbook explains the rollout.",
   issue: "Roll out two builds",
   issueArtifact: "These notes track the rollout.",
@@ -141,23 +139,6 @@ const diagram = { from: "Canary", to: "Rollout" };
 const messageAuthor = {
   actor: { id: "e2e-two-builds-agent", kind: "session" as const },
   as: "agent" as const,
-};
-
-const credentialRecord: CredentialRecord = {
-  approver: "alice",
-  decided: null,
-  enrollment: { kind: "session", operator: "alice", runtime_id: "host-alice:559:0", slot: null },
-  expires_at: new Date(Date.now() + 3_600_000).toISOString(),
-  identifiers: ["ROLLOUT_API_KEY"],
-  kind: "agent_secret",
-  lifetime_seconds: 3600,
-  record_id: "record-two-builds",
-  requested_at: new Date().toISOString(),
-  reason: shown.credentialReason,
-  rules_version: "rules-v1",
-  service: null,
-  session: { enrollment: session.session_id, request: session.session_id },
-  state: "pending",
 };
 
 /** The 1x1 PNG e2e/artifacts.e2e.ts uploads. */
@@ -193,8 +174,7 @@ interface Seeded {
 /** What every route needs to show its own content rather than an empty or missing state: a
  *  project with an architecture source, an issue with a spec, a child, a comment, a message
  *  holding a Mermaid diagram and a document artifact, a project document, a live session with a
- *  broadcast, a replayed conversation and a picture, a credential record, and the delivery
- *  timeline's runs. */
+ *  broadcast, a replayed conversation and a picture, and the delivery timeline's runs. */
 async function seedEveryRoute(): Promise<Seeded> {
   await setLiveSessions([session]);
   await createProject({ key: "CORE", name: "Core" });
@@ -267,7 +247,6 @@ async function seedEveryRoute(): Promise<Seeded> {
     "replay"
   );
   const agentArtifact = await uploadAgentPicture(session.session_id);
-  await setCredentialRecords([credentialRecord]);
   await seedDeliveryFixture();
   return {
     agentArtifact,
@@ -443,12 +422,9 @@ function visits(seed: Seeded): readonly Visit[] {
       url: `/projects/CORE/documents/${seed.document}`,
     },
     {
-      route: "/credentials/:recordId",
-      shows: (page) => [
-        heading(page, "Credential request"),
-        page.getByText(shown.credentialReason, { exact: true }),
-      ],
-      url: `/credentials/${credentialRecord.record_id}`,
+      route: "/credentials/*",
+      shows: (page) => [heading(page, "Inbox")],
+      url: "/credentials/record-old-broker",
     },
     {
       route: "/credentials/machine",

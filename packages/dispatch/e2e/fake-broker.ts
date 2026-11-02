@@ -7,20 +7,19 @@ import type {
 import { harnessPorts } from "./harness-ports";
 
 // The secrets broker's reads Dispatch relays on every Inbox and Settings load: `GET /v1/pending`
-// (the credential requests waiting on an approver), `GET /v1/credential-requests/{id}` (one
-// record's full detail, for the record page) and `GET /v1/grants` (the live grants of a person's
-// sessions and those the person approved), and the two routes Dispatch's machine-login page
-// drives: `POST /v1/machine-logins/lookup` (the pending login a typed code selects) and
+// (the credential requests waiting on an approver) and `GET /v1/grants` (the live grants of a
+// person's sessions and those the person approved), and the two routes Dispatch's machine-login
+// page drives: `POST /v1/machine-logins/lookup` (the pending login a typed code selects) and
 // `POST /v1/credential-requests/{id}/approve|deny` (that login's decision, carrying the code
 // again). The server reaches this through
 // DISPATCH_AGENT_SECRETS_URL (run-server.sh) whenever the harness switch is left unset
 // (e2e/harness-broker.ts), and it lists nothing until a test seeds a request through
-// /__fixture/pending, a record through /__fixture/records or a machine login through
-// /__fixture/machine-logins, relaying each row as seeded: a
-// secret request's row carries the `approve_url` of its page on the broker that the Inbox links
-// to (an absolute URL, which e2e/broker-approval.e2e.ts points at a record on the real broker,
-// e2e/run-broker.sh), a machine login's row none. It verifies no caller: the token the server
-// presents, e2e/fake-broker-account-token's, is never read. Every other broker route answers 404.
+// /__fixture/pending or a machine login through /__fixture/machine-logins, relaying each row as
+// seeded: a secret request's row carries the `approve_url` of its page on the broker that the
+// Inbox links to (an absolute URL, which e2e/broker-approval.e2e.ts points at a record on the
+// real broker, e2e/run-broker.sh), a machine login's row none. It verifies no caller: the token
+// the server presents, e2e/fake-broker-account-token's, is never read. Every other broker route
+// answers 404.
 
 /** A pending credential request as the broker lists it, beside the approver it waits on: the row
  *  is the SPA's own type, so a change to the contract fails the typecheck here too. */
@@ -39,11 +38,10 @@ export interface FakeMachineLogin {
 interface FakeBrokerState {
   machineLogins: FakeMachineLogin[];
   pending: FakePendingRequest[];
-  records: Record<string, CredentialRecord>;
 }
 
 function emptyState(): FakeBrokerState {
-  return { machineLogins: [], pending: [], records: {} };
+  return { machineLogins: [], pending: [] };
 }
 
 let state = emptyState();
@@ -109,14 +107,6 @@ const server = Bun.serve({
       };
       return Response.json(body);
     }
-    if (request.method === "GET" && url.pathname.startsWith("/v1/credential-requests/")) {
-      const recordID = decodeURIComponent(url.pathname.slice("/v1/credential-requests/".length));
-      const record = state.records[recordID];
-      if (record === undefined) {
-        return brokerError(404, "NOT_FOUND", "no such credential request");
-      }
-      return Response.json(record);
-    }
     if (request.method === "GET" && url.pathname === "/v1/grants") {
       return Response.json({ grants: [] });
     }
@@ -146,11 +136,6 @@ const server = Bun.serve({
     if (request.method === "PUT" && url.pathname === "/__fixture/pending") {
       const pending = (await request.json()) as FakePendingRequest[];
       state = { ...state, pending };
-      return Response.json({ ok: true });
-    }
-    if (request.method === "PUT" && url.pathname === "/__fixture/records") {
-      const records = (await request.json()) as CredentialRecord[];
-      state = { ...state, records: Object.fromEntries(records.map((r) => [r.record_id, r])) };
       return Response.json({ ok: true });
     }
     if (request.method === "PUT" && url.pathname === "/__fixture/machine-logins") {

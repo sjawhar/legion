@@ -27,7 +27,7 @@ export const walkRoutes = [
   { page: "ProjectPage", path: "/projects/:key/issues" },
   { page: "ProjectPage", path: "/projects/:key/documents" },
   { page: "DocumentPage", path: "/projects/:key/documents/:slug" },
-  { page: "CredentialRecordPage", path: "/credentials/:recordId" },
+  { page: "InboxPage", path: "/credentials/*" },
   { page: "MachineLoginPage", path: "/credentials/machine" },
   { page: "SettingsPage", path: "/settings" },
   { page: "DeliveryPage", path: "/delivery" },
