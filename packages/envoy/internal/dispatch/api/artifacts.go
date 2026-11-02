@@ -414,8 +414,9 @@ func (s *server) storeArtifact(
 ) {
 	checksum := sha256.Sum256(input.content)
 	sha := hex.EncodeToString(checksum[:])
-	// A file's object is written before the transaction opens (putUploadedFile, artifact_files.go).
-	if !s.putUploadedFile(w, r, kind, sha, input) {
+	// A file's object is written before the transaction opens, once the refusals the transaction
+	// would make have been made (putUploadedFile, artifact_files.go).
+	if !s.putUploadedFile(w, r, kind, sha, input, target) {
 		return
 	}
 	tx, err := s.begin(r.Context())
@@ -491,9 +492,7 @@ func (s *server) storeArtifact(
 		s.writeHandlerError(w, err)
 		return
 	} else if artifact.Kind != kind {
-		s.writeHandlerError(w, errorf(http.StatusBadRequest, "ARTIFACT_KIND_MISMATCH",
-			"%q names artifact %s (%s), whose kind is %s; this upload's kind is %s, so it cannot be its next version: give it another name",
-			input.name, artifact.Slug, artifact.Name, artifact.Kind, kind))
+		s.writeHandlerError(w, artifactKindMismatch(input.name, artifact, kind))
 		return
 	}
 	// A project document's owner row is the artifact itself, and until here this transaction
@@ -1520,6 +1519,14 @@ func artifactSlug(name string) string {
 		return "artifact"
 	}
 	return result
+}
+
+// artifactKindMismatch is the 400 refusing an upload under name, of kind, as the next version of
+// artifact, the one the name or slug finds, whose kind is another.
+func artifactKindMismatch(name string, artifact model.Artifact, kind string) error {
+	return errorf(http.StatusBadRequest, "ARTIFACT_KIND_MISMATCH",
+		"%q names artifact %s (%s), whose kind is %s; this upload's kind is %s, so it cannot be its next version: give it another name",
+		name, artifact.Slug, artifact.Name, artifact.Kind, kind)
 }
 
 // newArtifactNameRefusal is the 400 refusing a new artifact's name past maxNewArtifactKeyBytes,
