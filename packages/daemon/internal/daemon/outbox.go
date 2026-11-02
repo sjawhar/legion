@@ -112,6 +112,11 @@ type outbox struct {
 	// githubAPI is the GitHub REST root an issue_branch row creates its issue's branch under: the
 	// workflow's (workflowRuntime.githubAPI), which empty, in production, is https://api.github.com.
 	githubAPI string
+	// renames is the deployment's repository equivalence (`repository_renames`, the mapping's
+	// ghrepo.Renames): a deploy run's head repository is the one GitHub names it today, while a
+	// check's record keeps the name it was written under, so the two are compared through it
+	// (checkDeployRun). The zero value compares exactly as a comparison without case does.
+	renames ghrepo.Renames
 	// limits is every GitHub rate limit a row met, by the budget it exhausted, held until its
 	// deadline: a row that spends one of those budgets waits for the latest deadline among them
 	// (standingLimit) rather than meet a limit again. The lanes run rows on many goroutines, so
@@ -138,13 +143,13 @@ type outboxTrees interface {
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
 }
 
-func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir, githubAPI string, tools map[string]string, log *slog.Logger) *outbox {
+func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir, githubAPI string, renames ghrepo.Renames, tools map[string]string, log *slog.Logger) *outbox {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, trees: trees, tokens: tokens,
-		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, githubAPI: githubAPI,
+		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, githubAPI: githubAPI, renames: renames,
 		log: log, now: time.Now, clock: supervise.RealClock{},
 		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
 		// test injects its own `provision`, so only this production closure starts codegraph.
@@ -1578,10 +1583,13 @@ type deployJob struct {
 // merged_at, the cutoff, and its merge commit, recorded when the check has none (adoptMergeCommit)
 // as a build compare records it. The run attempt is read from GitHub rather than trusted from the
 // envelope the row was queued from, which anyone holding an Envoy bearer can publish: a run of
-// another workflow file, branch or head repository, or one a pull request triggered (whose head is
-// the pull request's, never production's), wakes nothing, and neither does a run GitHub does not
-// know (404); each is logged. Nor does an attempt GitHub does not name `completed`, whatever the
-// envelope said: a forged completion of an attempt still running would wake the check mid-run and
+// another workflow file or branch, one whose head repository is neither the check's nor the other
+// name of a configured rename of it (`repository_renames`: GitHub answers a repository's name as
+// it is today, while the check's record keeps the name it was written under), or one a pull
+// request triggered (whose head is the pull request's, never production's), wakes nothing, and
+// neither does a run GitHub does not know (404); each is logged. Nor does an attempt GitHub does
+// not name `completed`, whatever the envelope said: a forged completion of an attempt still
+// running would wake the check mid-run and
 // spend the jobs' event ids, so the genuine completion would wake nothing. It is logged and
 // finishes without a retry, since the attempt's own completion queues a row of its own. A completed
 // attempt is read whatever its conclusion: a failed run whose deploy step succeeded still deployed.
@@ -1646,7 +1654,7 @@ func (r *outbox) checkDeployRun(ctx context.Context, row record.OutboxRow, paylo
 		why = fmt.Sprintf("the run is of workflow %q, not %q", run.Path, deploy.Workflow)
 	case run.HeadBranch != deploy.Branch:
 		why = fmt.Sprintf("the run is on branch %q, not the default branch %q", run.HeadBranch, deploy.Branch)
-	case !strings.EqualFold(run.HeadRepository.FullName, check.Repo):
+	case !r.renames.Same(run.HeadRepository.FullName, check.Repo):
 		why = fmt.Sprintf("the run's head repository is %q, not %s", run.HeadRepository.FullName, check.Repo)
 	case run.Event == "pull_request" || run.Event == "pull_request_target":
 		why = fmt.Sprintf("a %s event triggered the run", run.Event)

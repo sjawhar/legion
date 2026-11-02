@@ -50,7 +50,7 @@ func GitHubCredential(tokens Tokens, owners func() []string, renames ghrepo.Rena
 		log = slog.Default()
 	}
 	var conflictMu sync.Mutex
-	conflicted := map[string]bool{}
+	conflicted := map[ghrepo.Rename]bool{}
 	return func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
 		appRole := AppRoleFor(role)
 		owner = strings.ToLower(owner)
@@ -70,8 +70,8 @@ func GitHubCredential(tokens Tokens, owners func() []string, renames ghrepo.Rena
 				continue
 			case all[from]:
 				conflictMu.Lock()
-				if key := pair.From.String() + " -> " + pair.To.String(); !conflicted[key] {
-					conflicted[key] = true
+				if !conflicted[pair] {
+					conflicted[pair] = true
 					log.Warn("appauth: a configured repository rename moved a repository between two owners of this project, so each owner keeps its own gh directory and its own token",
 						"from", pair.From.String(), "to", pair.To.String(), "owner", from)
 				}
@@ -104,16 +104,17 @@ func GitHubCredential(tokens Tokens, owners func() []string, renames ghrepo.Rena
 			}
 			return name
 		}
-		write := ""
-		if writer != "" {
-			write = mintFor(writer)
-		}
+		// writer is the empty owner for the controller, which writes to none, and mintFor answers
+		// it unchanged, since no alias is keyed by it: write is then an owner no target equals.
+		write := mintFor(writer)
 		bundle := ghconfig.Bundle{Default: owner, Owners: make(map[string]ghconfig.Rendered, len(names))}
 		if owner == "" {
 			bundle.Default = names[0]
 		}
 		// A pair's two directories hold one entry, so its lease is minted once however many
-		// directories carry it; with no alias every directory mints its own, as it always has.
+		// directories carry it; with no alias every directory mints its own, as it always has. The
+		// target alone keys them: whether a target's lease is the write one is `target == write`,
+		// so one target is never both kinds.
 		entries := map[string]ghconfig.Rendered{}
 		for _, name := range names {
 			target := mintFor(name)
@@ -121,14 +122,14 @@ func GitHubCredential(tokens Tokens, owners func() []string, renames ghrepo.Rena
 			if target == write {
 				mint, how = tokens.Token, ""
 			}
-			entry, held := entries[how+target]
+			entry, held := entries[target]
 			if !held {
 				lease, err := mint(ctx, appRole, target)
 				if err != nil {
 					return ghconfig.Bundle{}, fmt.Errorf("mint the %s%s App lease for %s on %s: %w", how, appRole, role, target, err)
 				}
 				entry = ghconfig.Render(lease.Token, string(appRole), lease.ExpiresAt)
-				entries[how+target] = entry
+				entries[target] = entry
 			}
 			bundle.Owners[name] = entry
 		}

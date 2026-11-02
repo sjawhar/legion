@@ -6,9 +6,6 @@ import (
 	"testing"
 )
 
-// rename is a pair written as a test fixture, each side one Parse takes.
-func rename(from, to string) Rename { return Rename{From: MustParse(from), To: MustParse(to)} }
-
 // The zero value — a deployment that configures no rename — answers exactly as strings.EqualFold
 // does, holds no pair and knows no partner.
 func TestZeroRenamesAnswerAsEqualFold(t *testing.T) {
@@ -41,7 +38,7 @@ func TestZeroRenamesAnswerAsEqualFold(t *testing.T) {
 // A configured pair is one repository in both directions and in any case; an unrelated name is
 // neither side's, and a string that is no `<owner>/<name>` is equal to nothing but itself.
 func TestConfiguredRenamesAreOneRepositoryBothWays(t *testing.T) {
-	renames, err := NewRenames([]Rename{rename("sjawhar/legion", "cybermonklabs/legion"), rename("acme/widgets", "acme/gadgets")})
+	renames, err := NewRenames([]Rename{MustRename("sjawhar/legion", "cybermonklabs/legion"), MustRename("acme/widgets", "acme/gadgets")})
 	if err != nil {
 		t.Fatalf("NewRenames: %v", err)
 	}
@@ -85,12 +82,12 @@ func TestConfiguredRenamesAreOneRepositoryBothWays(t *testing.T) {
 			t.Errorf("Partner(%q) = %s, %v, want none", unconfigured, partner, found)
 		}
 	}
-	want := []Rename{rename("sjawhar/legion", "cybermonklabs/legion"), rename("acme/widgets", "acme/gadgets")}
+	want := []Rename{MustRename("sjawhar/legion", "cybermonklabs/legion"), MustRename("acme/widgets", "acme/gadgets")}
 	if pairs := renames.Pairs(); !slices.Equal(pairs, want) {
 		t.Errorf("Pairs() = %v, want the configured order %v", pairs, want)
 	}
 	// Pairs hands out a copy: changing it changes no answer.
-	renames.Pairs()[0] = rename("other/one", "other/two")
+	renames.Pairs()[0] = MustRename("other/one", "other/two")
 	if !renames.Same("sjawhar/legion", "cybermonklabs/legion") {
 		t.Error("changing the slice Pairs returned changed the equivalence")
 	}
@@ -104,21 +101,21 @@ func TestNewRenamesRefusals(t *testing.T) {
 		pairs []Rename
 		want  string
 	}{
-		{"to itself", []Rename{rename("sjawhar/legion", "sjawhar/legion")},
+		{"to itself", []Rename{MustRename("sjawhar/legion", "sjawhar/legion")},
 			"rename 0 (sjawhar/legion -> sjawhar/legion) renames a repository to itself: from and to name two repositories, compared without case"},
-		{"to itself in another case", []Rename{rename("acme/widgets", "acme/Widgets")},
+		{"to itself in another case", []Rename{MustRename("acme/widgets", "acme/Widgets")},
 			"rename 0 (acme/widgets -> acme/Widgets) renames a repository to itself: from and to name two repositories, compared without case"},
-		{"one from twice", []Rename{rename("acme/widgets", "acme/gadgets"), rename("ACME/Widgets", "other/one")},
+		{"one from twice", []Rename{MustRename("acme/widgets", "acme/gadgets"), MustRename("ACME/Widgets", "other/one")},
 			"rename 1 (ACME/Widgets -> other/one) and rename 0 (acme/widgets -> acme/gadgets) both rename ACME/Widgets: a repository moved to one name"},
-		{"one to twice", []Rename{rename("acme/widgets", "acme/gadgets"), rename("other/one", "ACME/Gadgets")},
+		{"one to twice", []Rename{MustRename("acme/widgets", "acme/gadgets"), MustRename("other/one", "ACME/Gadgets")},
 			"rename 1 (other/one -> ACME/Gadgets) and rename 0 (acme/widgets -> acme/gadgets) both name ACME/Gadgets as the repository moved to: a repository moved from one name"},
-		{"a chain forwards", []Rename{rename("a/b", "c/d"), rename("C/D", "e/f")},
+		{"a chain forwards", []Rename{MustRename("a/b", "c/d"), MustRename("C/D", "e/f")},
 			"rename 1 (C/D -> e/f) chains onto rename 0 (a/b -> c/d) through C/D: a rename pairs two names, never a chain of three"},
-		{"a chain backwards", []Rename{rename("c/d", "e/f"), rename("a/b", "C/D")},
+		{"a chain backwards", []Rename{MustRename("c/d", "e/f"), MustRename("a/b", "C/D")},
 			"rename 1 (a/b -> C/D) chains onto rename 0 (c/d -> e/f) through C/D: a rename pairs two names, never a chain of three"},
 		{"no from", []Rename{{To: MustParse("acme/widgets")}},
 			"rename 0 names no repository in from: a rename is the repository as it was and the one it moved to"},
-		{"no to", []Rename{rename("a/b", "c/d"), {From: MustParse("acme/widgets")}},
+		{"no to", []Rename{MustRename("a/b", "c/d"), {From: MustParse("acme/widgets")}},
 			"rename 1 names no repository in to: a rename is the repository as it was and the one it moved to"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -157,7 +154,7 @@ func TestLookupsAreTheNameThenItsPartner(t *testing.T) {
 			t.Errorf("zero Renames.Lookups(%q) = %q, want %q alone", name, got, name)
 		}
 	}
-	renames, err := NewRenames([]Rename{rename("sjawhar/legion", "cybermonklabs/legion"), rename("acme/widgets", "acme/gadgets")})
+	renames, err := NewRenames([]Rename{MustRename("sjawhar/legion", "cybermonklabs/legion"), MustRename("acme/widgets", "acme/gadgets")})
 	if err != nil {
 		t.Fatalf("NewRenames: %v", err)
 	}

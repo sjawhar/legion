@@ -167,18 +167,15 @@ func (r *repositories) Refused() []refusedRepository {
 // lookup is the served repository resolved names, in any spelling, or why Legion does not serve
 // it: left out (leftOut) with its reason, or not mapped to the project at all. unread is a
 // repository left out for now because its installation read failed (refusedRepository.readErr).
-// A name the mapping does not hold falls through a configured rename (renames) to its partner,
-// and the answer is the partner the mapping holds, so an issue resolved to the repository as it
-// was is recorded on the one the project serves, under one name: Resolution.Repo and
-// Resolution.GitHubRepo agree, as a record demands (record.Store.PutIssue).
+// The mapping is read under each name resolved is looked up by (ghrepo.Renames.Lookups): the name
+// itself, and then the other name of the configured rename that names it, so an issue resolved to
+// the repository as it was is recorded on the one the project serves, under one name:
+// Resolution.Repo and Resolution.GitHubRepo agree, as a record demands (record.Store.PutIssue).
 func (r *repositories) lookup(resolved string) (mapped mappedRepository, refusal string, leftOut, unread bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if mapped, refusal, leftOut, unread, held := r.held(resolved); held {
-		return mapped, refusal, leftOut, unread
-	}
-	if partner, renamed := r.renames.Partner(resolved); renamed {
-		if mapped, refusal, leftOut, unread, held := r.held(partner.String()); held {
+	for _, name := range r.renames.Lookups(resolved) {
+		if mapped, refusal, leftOut, unread, held := r.held(name); held {
 			return mapped, refusal, leftOut, unread
 		}
 	}
@@ -1168,12 +1165,20 @@ func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, serv
 		}
 		heard[strings.ToLower(repo.String())] = repo
 	}
-	for _, repo := range slices.Collect(maps.Values(heard)) {
-		partner, renamed := w.repositories.renames.Partner(repo.String())
-		if !renamed {
-			continue
+	// One pass over the configured pairs, not over everything heard: a deployment configures no
+	// pair at all nearly always, and this runs at every boot and consumer re-open. Both sides are
+	// read before either is added, so a pair whose two names are both heard replaces both with the
+	// pair's own spelling, as a pass over the heard set did, and neither addition is seen by the
+	// other's test.
+	for _, pair := range w.repositories.renames.Pairs() {
+		_, heardFrom := heard[strings.ToLower(pair.From.String())]
+		_, heardTo := heard[strings.ToLower(pair.To.String())]
+		if heardFrom {
+			heard[strings.ToLower(pair.To.String())] = pair.To
 		}
-		heard[strings.ToLower(partner.String())] = partner
+		if heardTo {
+			heard[strings.ToLower(pair.From.String())] = pair.From
+		}
 	}
 	repos := make([]ghrepo.Repository, 0, len(heard))
 	for _, repo := range heard {

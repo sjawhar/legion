@@ -444,7 +444,7 @@ func TestAReviewNamingARenamedRepositoryReadsThePermissionOfTheRecordedPullReque
 		asked []string
 		want  bool
 	}{
-		{name: "the pair configured", renames: mustRenames(t, renamedWidgets), want: true,
+		{name: "the pair configured", renames: ghrepo.MustRenames(renamedWidgets), want: true,
 			asked: []string{"/repos/cybermonklabs/widgets/collaborators/a-writer/permission"}},
 		{name: "no pair configured", renames: ghrepo.Renames{}},
 	} {

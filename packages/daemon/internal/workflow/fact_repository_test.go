@@ -80,25 +80,15 @@ func TestAPullRequestInAnotherSpellingOfTheIssuesRepositoryIsItsOwn(t *testing.T
 // renamedLegion is the repository equivalence the tests of a configured rename read: sjawhar/legion
 // as the records of a tree opened before the transfer keep it, and cybermonklabs/legion as GitHub
 // names it after.
-var renamedLegion = mustRenames(ghrepo.Rename{From: ghrepo.MustParse("sjawhar/legion"), To: ghrepo.MustParse("cybermonklabs/legion")})
-
-// mustRenames is the equivalence pairs configure, for a test that configures a pair it wrote.
-func mustRenames(pairs ...ghrepo.Rename) ghrepo.Renames {
-	renames, err := ghrepo.NewRenames(pairs)
-	if err != nil {
-		panic(err)
-	}
-	return renames
-}
+var renamedLegion = ghrepo.MustRenames(ghrepo.MustRename("sjawhar/legion", "cybermonklabs/legion"))
 
 // renamedEngine is the workflow tests' engine (testEngine) under the repository equivalence
-// renames: the one line of Config a configured rename changes.
+// renames: the one field of Config a configured rename changes, set on the engine's own copy,
+// which New stores, so these tests read the one config every other workflow test reads.
 func renamedEngine(renames ghrepo.Renames) *Engine {
-	return New(record.NewStore(), Config{
-		Project: "LEGION", DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, ReviewAppLogin: testReviewApp,
-		Repositories: testRepositories, RepositoryRenames: renames,
-		Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
-	}, nil)
+	engine := testEngine(config.DesignGateRootIssues, nil)
+	engine.cfg.RepositoryRenames = renames
+	return engine
 }
 
 // seedRenamedTree seeds LEGION-209, a child of the open tree recorded on sjawhar/legion and in

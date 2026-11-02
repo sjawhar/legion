@@ -121,17 +121,7 @@ func TestGitHubCredentialBundlesEveryOwnerOfTheProject(t *testing.T) {
 
 // legionRename is the pair a deployment configures over sjawhar/legion's transfer to
 // cybermonklabs: one repository under two names, whose owners the bundle holds one entry for.
-var legionRename = ghrepo.Rename{From: ghrepo.MustParse("sjawhar/legion"), To: ghrepo.MustParse("cybermonklabs/legion")}
-
-// mustRenames is the equivalence pairs configure, for a test that configures a pair it wrote.
-func mustRenames(t *testing.T, pairs ...ghrepo.Rename) ghrepo.Renames {
-	t.Helper()
-	renames, err := ghrepo.NewRenames(pairs)
-	if err != nil {
-		t.Fatalf("NewRenames(%v): %v", pairs, err)
-	}
-	return renames
-}
+var legionRename = ghrepo.MustRename("sjawhar/legion", "cybermonklabs/legion")
 
 // A configured rename whose `to` the project owns is one pair of owners: the bundle's sjawhar
 // directory and its cybermonklabs directory hold one entry, minted once for cybermonklabs, the
@@ -175,7 +165,7 @@ func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var minted []string
-			credential := GitHubCredential(countingTokens{minted: &minted}, owners, mustRenames(t, legionRename), nil)
+			credential := GitHubCredential(countingTokens{minted: &minted}, owners, ghrepo.MustRenames(legionRename), nil)
 			bundle, err := credential(context.Background(), tc.role, tc.owner)
 			if err != nil {
 				t.Fatalf("credential: %v", err)
@@ -229,7 +219,7 @@ func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
 		var minted []string
 		var logged bytes.Buffer
 		both := func() []string { return []string{"Cybermonklabs", "sjawhar"} }
-		credential := GitHubCredential(countingTokens{minted: &minted}, both, mustRenames(t, legionRename), slog.New(slog.NewTextHandler(&logged, nil)))
+		credential := GitHubCredential(countingTokens{minted: &minted}, both, ghrepo.MustRenames(legionRename), slog.New(slog.NewTextHandler(&logged, nil)))
 		bundle, err := credential(context.Background(), claim.RoleImplementer, "cybermonklabs")
 		if err != nil {
 			t.Fatalf("credential: %v", err)

@@ -84,6 +84,12 @@ func (r Renames) Same(a, b string) bool {
 // Partner is the other name of name's pair, and whether a pair names it. It answers from either
 // side: the repository as it was answers the one it moved to, and the other way round.
 func (r Renames) Partner(name string) (Repository, bool) {
+	// The zero value every deployment that configures no rename carries holds a nil map, and the
+	// lowercasing below allocates whenever the name carries GitHub's capitals: this comparison is
+	// made wherever the daemon compares a repository, so the nil map answers before it.
+	if r.partner == nil {
+		return Repository{}, false
+	}
 	partner, found := r.partner[strings.ToLower(name)]
 	return partner, found
 }
@@ -111,3 +117,19 @@ func (r Renames) Pairs() []Rename { return slices.Clone(r.pairs) }
 
 // IsZero is whether r holds no pair, the zero value a deployment that configures none carries.
 func (r Renames) IsZero() bool { return len(r.pairs) == 0 }
+
+// MustRename is the pair from and to name, for a caller who wrote both as literals, a test's
+// fixture: it panics on a name Parse refuses (MustParse).
+func MustRename(from, to string) Rename {
+	return Rename{From: MustParse(from), To: MustParse(to)}
+}
+
+// MustRenames is NewRenames of pairs a caller wrote as literals, a test's fixture: it panics on
+// pairs NewRenames refuses.
+func MustRenames(pairs ...Rename) Renames {
+	renames, err := NewRenames(pairs)
+	if err != nil {
+		panic(err)
+	}
+	return renames
+}

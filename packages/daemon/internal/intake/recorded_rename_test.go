@@ -8,16 +8,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
-// mustRenames is the equivalence pairs configure, for a test that configures a pair it wrote.
-func mustRenames(t *testing.T, pairs ...ghrepo.Rename) ghrepo.Renames {
-	t.Helper()
-	renames, err := ghrepo.NewRenames(pairs)
-	if err != nil {
-		t.Fatalf("NewRenames(%v): %v", pairs, err)
-	}
-	return renames
-}
-
 // A review or a checks settlement of a pull request already open when its repository was
 // transferred is one the daemon records: the row keeps sjawhar/legion, the name the pull request
 // opened under, while the event names cybermonklabs/legion, so the read asks under both names of
@@ -28,7 +18,7 @@ func mustRenames(t *testing.T, pairs ...ghrepo.Rename) ghrepo.Renames {
 func TestAReviewOfAPullRequestRecordedUnderTheOtherNameOfARenameIsRecorded(t *testing.T) {
 	pool := migratedPool(t)
 	recordPullRequest(t, pool, "LEGION-208", 42)
-	renamed := mustRenames(t, ghrepo.Rename{From: ghrepo.MustParse("sjawhar/legion"), To: ghrepo.MustParse("cybermonklabs/legion")})
+	renamed := ghrepo.MustRenames(ghrepo.MustRename("sjawhar/legion", "cybermonklabs/legion"))
 	for _, tc := range []struct {
 		name    string
 		renames ghrepo.Renames

@@ -598,7 +598,7 @@ func (w *workflowRuntime) attach(supervision *supervision) {
 	w.log.Info("legion workflow boot stage", "stage", "outbox")
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
 		supervision.supervisor.store, w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
-		supervision.plan.tools, w.log)
+		w.repositories.renames, supervision.plan.tools, w.log)
 	w.outboxWake.Store(w.outbox)
 	supervision.supervisor.OnTerminal(w.terminal)
 }

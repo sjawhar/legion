@@ -24,6 +24,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
@@ -186,21 +187,27 @@ type server struct {
 	controllerMu sync.Mutex
 	tokens       appauth.Tokens
 	githubOwners func() []string
-	renames      ghrepo.Renames
-	githubAPI    string
-	mergeRules   func(project string) config.MergeRules
-	grants       *credential.Grants
-	releaser     store.TreeReleaser
-	trees        TreeLifecycles
-	pool         *pgxpool.Pool
-	handlers     []intake.Handler
-	prepare      func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
-	unread       func(resolved string) bool
-	await        func(repo, tree, child, parent string)
-	roleFor      func(phase.Phase) claim.Role
-	records      record.Store
-	dispatch     dispatch.Client
-	claimReady   func(c supervise.Claim)
+	// credential is the one closure the controller's credential route serves its bundle from
+	// (appauth.GitHubCredential over tokens, githubOwners and Options.RepositoryRenames), built
+	// once here because it carries the dedupe of the warning a rename between two owners of the
+	// project logs: a controller refreshes its credential every minute, and a closure built per
+	// request would log that warning on every one of them. Nil when no token source is
+	// configured, which the route refuses before it calls this.
+	credential runtime.GitHubCredential
+	githubAPI  string
+	mergeRules func(project string) config.MergeRules
+	grants     *credential.Grants
+	releaser   store.TreeReleaser
+	trees      TreeLifecycles
+	pool       *pgxpool.Pool
+	handlers   []intake.Handler
+	prepare    func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
+	unread     func(resolved string) bool
+	await      func(repo, tree, child, parent string)
+	roleFor    func(phase.Phase) claim.Role
+	records    record.Store
+	dispatch   dispatch.Client
+	claimReady func(c supervise.Claim)
 	// promptAgents and capabilityReported are Options.PromptAgents and Options.CapabilityReported.
 	promptAgents       []string
 	capabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
@@ -236,7 +243,6 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		pluginRelaunchable: opts.PluginRelaunchable,
 		tokens:             opts.Tokens,
 		githubOwners:       opts.GitHubOwners,
-		renames:            opts.RepositoryRenames,
 		githubAPI:          opts.GitHubAPI,
 		mergeRules:         opts.MergeRules,
 		releaser:           opts.Releaser,
@@ -275,6 +281,9 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	}
 	if s.decisions == nil {
 		s.decisions = NewRouteDecisions()
+	}
+	if s.tokens != nil {
+		s.credential = appauth.GitHubCredential(s.tokens, s.githubOwners, opts.RepositoryRenames, s.log)
 	}
 
 	mux := http.NewServeMux()

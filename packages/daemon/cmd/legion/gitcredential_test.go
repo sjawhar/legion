@@ -240,7 +240,7 @@ func TestGitCredentialAnswersARenamedRepositoryWithTheOwnerItMovedTo(t *testing.
 		renames ghrepo.Renames
 		token   string
 	}{
-		{name: "the pair configured", renames: mustRenames(t, ghrepo.Rename{From: ghrepo.MustParse("sjawhar/legion"), To: ghrepo.MustParse("cybermonklabs/legion")}),
+		{name: "the pair configured", renames: ghrepo.MustRenames(ghrepo.MustRename("sjawhar/legion", "cybermonklabs/legion")),
 			token: "ghs_implement_write_cybermonklabs"},
 		{name: "no pair configured", renames: ghrepo.Renames{}, token: "ghs_implement_write_sjawhar"},
 	} {
@@ -255,14 +255,4 @@ func TestGitCredentialAnswersARenamedRepositoryWithTheOwnerItMovedTo(t *testing.
 			}
 		})
 	}
-}
-
-// mustRenames is the equivalence pairs configure, for a test that configures a pair it wrote.
-func mustRenames(t *testing.T, pairs ...ghrepo.Rename) ghrepo.Renames {
-	t.Helper()
-	renames, err := ghrepo.NewRenames(pairs)
-	if err != nil {
-		t.Fatalf("NewRenames(%v): %v", pairs, err)
-	}
-	return renames
 }

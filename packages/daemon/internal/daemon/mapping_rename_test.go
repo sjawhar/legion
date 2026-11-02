@@ -13,17 +13,7 @@ import (
 // renamedWidgets is the pair a deployment configures on the day its key is deployed, before the
 // transfer: acme/widgets, which Dispatch maps and GitHub still holds, and cybermonklabs/widgets,
 // the name the repository moves to, which no mapping names and GitHub does not have yet.
-var renamedWidgets = ghrepo.Rename{From: ghrepo.MustParse("acme/widgets"), To: ghrepo.MustParse("cybermonklabs/widgets")}
-
-// mustRenames is the equivalence pairs configure, for a test that configures a pair it wrote.
-func mustRenames(t *testing.T, pairs ...ghrepo.Rename) ghrepo.Renames {
-	t.Helper()
-	renames, err := ghrepo.NewRenames(pairs)
-	if err != nil {
-		t.Fatalf("NewRenames(%v): %v", pairs, err)
-	}
-	return renames
-}
+var renamedWidgets = ghrepo.MustRename("acme/widgets", "cybermonklabs/widgets")
 
 // A rename configured before the transfer names a repository Dispatch does not map: the boot's
 // mapping read answers all the same, the project serves exactly what Dispatch maps, and the owners
@@ -45,7 +35,7 @@ func TestARenameConfiguredBeforeTheTransferIsHeardWhileTheServedSetIsUnchanged(t
 		// warnings is how often the boot says the pair names a repository it does not serve.
 		warnings int
 	}{
-		{name: "the pair configured", renames: mustRenames(t, renamedWidgets), warnings: 1,
+		{name: "the pair configured", renames: ghrepo.MustRenames(renamedWidgets), warnings: 1,
 			heard: []string{"acme/widgets", "cybermonklabs/widgets", "zeta/tools"}},
 		{name: "no pair configured", renames: ghrepo.Renames{}, heard: []string{"acme/widgets", "zeta/tools"}},
 	} {
