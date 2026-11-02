@@ -3,6 +3,8 @@ package supervise
 import (
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/phase"
 )
 
 const (
@@ -62,10 +64,10 @@ func TestTheFreshSessionsFirstTaskNamesTheSessionItReplacedAndWhatOutlivedIt(t *
 	h.must(RequestDeliver{Claim: h.token, Task: "Continue Workflow. Issue: LEGION-209. Phase: implementing."})
 
 	first := h.wantPrompts(base + 1)[base].Message
-	for _, want := range []string{
+	for _, want := range append([]string{
 		session, "abandoned", refusal,
-		"legion/LEGION-209", ".legion/LEGION-209/", "plan.json", "implement.json", "test.json", "review.json",
-	} {
+		"legion/LEGION-209", "dispatch handoff-read --issue LEGION-209 --phase",
+	}, handoffWordsWanted()...) {
 		if !strings.Contains(first, want) {
 			t.Errorf("the first task of the fresh session does not name %q:\n%s", want, first)
 		}
@@ -146,7 +148,7 @@ func TestARefusedPromptLeavesTheAbandonedSessionStillToBeTold(t *testing.T) {
 	h.must(StreamHello{Claim: h.token, Generation: h.generation()})
 
 	taken := h.wantPrompts(base + 2)[base+1].Message
-	for _, want := range []string{session, "abandoned", refusal, "legion/LEGION-209", ".legion/LEGION-209/"} {
+	for _, want := range []string{session, "abandoned", refusal, "legion/LEGION-209", "dispatch handoff-read --issue LEGION-209 --phase"} {
 		if !strings.Contains(taken, want) {
 			t.Errorf("the task the agent acknowledged does not name %q:\n%s", want, taken)
 		}
@@ -164,4 +166,20 @@ func TestARefusedPromptLeavesTheAbandonedSessionStillToBeTold(t *testing.T) {
 	if next := h.wantPrompts(base + 3)[base+2].Message; next != "the next task" {
 		t.Errorf("the task after the one the agent acknowledged is %q, want the task alone", next)
 	}
+}
+
+// handoffWordsWanted is every phase word a handoff record is written under, read from the phases
+// themselves as the prompt builds its list (delivery's handoffWords): a phase that gains a handoff
+// is asserted here without anyone remembering to come back and add its word.
+func handoffWordsWanted() []string {
+	words := make([]string, 0, len(phase.All))
+	for _, p := range phase.All {
+		if word, _, ok := phase.Handoff(p); ok {
+			words = append(words, word)
+		}
+	}
+	if len(words) == 0 {
+		panic("no phase has a handoff record: the prompt would name none")
+	}
+	return words
 }

@@ -189,10 +189,10 @@ func TestDefaultBranchRefusesARepositoryItCannotRead(t *testing.T) {
 }
 
 // The branch starts at the base's own commit, whatever the base's tree holds: no role of the issue
-// has run yet, and nothing a role reads comes from another issue's directory (each tree reads and
-// writes only .legion/<its issue>/, and retro removes its own before READY, so no merge carries one
-// onto the default branch; dispatch://LEGION-605). Create reads the base's ref and creates the
-// branch there, and reads, posts or commits no tree: the fake answers nothing else.
+// has run yet, and nothing a role reads comes from the branch's tree, since every phase's handoff
+// is a record on the issue's Dispatch issue rather than a file on the branch (sjawhar/legion#2354).
+// Create reads the base's ref and creates the branch there, and reads, posts or commits no tree:
+// the fake answers nothing else.
 func TestCreateMakesTheBranchAtTheBaseOrLeavesTheOneGitHubHas(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
