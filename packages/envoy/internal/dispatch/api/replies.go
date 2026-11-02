@@ -243,12 +243,11 @@ func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// A closed issue is not refused: reading a thread on a closed issue is reading it.
-	switch {
-	case issueKey != nil:
-		err = store.LockOwnerShared(r.Context(), tx, store.IssueOwner(*issueKey))
-	case artifactID != nil:
-		err = store.LockOwnerShared(r.Context(), tx, store.ArtifactOwner(*artifactID))
+	// A closed issue is not refused: reading a thread on a closed issue is reading it. The lock
+	// is the one every reader and writer of the thread's rows takes (store.OwnerOf); a direct
+	// message's thread names no owner and takes none.
+	if owner := store.OwnerOf(issueKey, artifactID); owner != nil {
+		err = store.LockOwnerShared(r.Context(), tx, *owner)
 	}
 	if err != nil {
 		s.writeHandlerError(w, err)

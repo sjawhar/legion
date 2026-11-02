@@ -502,7 +502,7 @@ func pendingRefKey(ctx context.Context, artifactID string) (string, bool) {
 }
 
 // pendingApproval is a document's open approval request as the writes this transaction has queued
-// leave it: ask is the row as moved to the transaction's version (moveApprovalAsk), edited_at
+// leave it: ask is the row as moved to the transaction's version (MoveApprovalAsk), edited_at
 // included, and closed says a queued answer closes it (carryApproval).
 type pendingApproval struct {
 	ask    *model.Ask

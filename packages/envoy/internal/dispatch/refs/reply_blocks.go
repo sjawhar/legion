@@ -24,8 +24,8 @@ import (
 // (PlanItemIfOwed) and writes it before its own writes. The caller holds the item's owner, the
 // reconciliation included, and a reply holds the message row it answers; the index takes the
 // state row after them. It reports whether the item was owed and so indexed. It is PlanItemIfOwed
-// and Queue back to back, the queued statements run at once as a batch of their own; a
-// transaction that decides before it writes plans the repair and queues it in its write phase,
+// and ItemRepair.Write back to back, the repair's statements run at once as a batch of their own;
+// a transaction that decides before it writes plans the repair and queues it in its write phase,
 // reading the blocks it leaves from the plan (ItemRepair.Block).
 func IndexItemIfOwed(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID, serverURL string) (bool, error) {
 	repair, err := PlanItemIfOwed(ctx, tx, kind, itemID, serverURL)
@@ -35,11 +35,8 @@ func IndexItemIfOwed(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID, serv
 	if !repair.Owed() {
 		return false, nil
 	}
-	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
-		repair.Queue(b)
-		return nil
-	}); err != nil {
-		return false, fmt.Errorf("index the blocks of %s %s: %w", kind, itemID, err)
+	if err := repair.Write(ctx, tx); err != nil {
+		return false, err
 	}
 	return true, nil
 }
@@ -123,6 +120,23 @@ func (r ItemRepair) Queue(b *store.WriteBatch) {
 	if r.mentions {
 		r.refs.Queue(b)
 	}
+}
+
+// Write runs the repair's writes at once, as a batch of their own (Queue, store.RunWrite), for a
+// caller with no write phase to queue them on: it is where a repair runs when nothing holds it
+// until later, and the one place that decides how one runs. A repair the item owes none writes
+// nothing.
+func (r ItemRepair) Write(ctx context.Context, tx pgx.Tx) error {
+	if !r.owed {
+		return nil
+	}
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		r.Queue(b)
+		return nil
+	}); err != nil {
+		return fmt.Errorf("index the blocks of %s %s: %w", r.kind, r.itemID, err)
+	}
+	return nil
 }
 
 // Block is the node id and stored excerpt of block blockID of the item as the repair leaves it,

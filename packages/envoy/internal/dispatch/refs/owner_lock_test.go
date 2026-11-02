@@ -20,45 +20,6 @@ type drainAnswer struct {
 	err     error
 }
 
-// ownerLockWaiters counts this test database's backends waiting on an owner lock (the statement
-// store.LockOwner runs, which names its result owner_lock), and how many of them hold a
-// transaction id while they wait, as api/write_phase_test.go's reader of the same view does.
-func ownerLockWaiters(t *testing.T, database *store.Store) (waiting, holdingXid int) {
-	t.Helper()
-	if err := database.Pool.QueryRow(context.Background(), `
-		select count(*), count(*) filter (where backend_xid is not null)
-		from pg_stat_activity
-		where datname = current_database() and wait_event_type = 'Lock' and wait_event = 'advisory'
-		  and query like '%owner_lock%' and pid <> pg_backend_pid()
-	`).Scan(&waiting, &holdingXid); err != nil {
-		t.Fatalf("read pg_stat_activity: %v", err)
-	}
-	return waiting, holdingXid
-}
-
-// awaitOwnerLockWaiter waits until a backend waits on an owner lock and answers how many of the
-// waiters hold a transaction id. A drain that answers first never waited for the lock the edit
-// holds, which is what the test is about, so it fails there.
-func awaitOwnerLockWaiter(t *testing.T, database *store.Store, answered <-chan drainAnswer) int {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		select {
-		case answer := <-answered:
-			t.Fatalf("the drain answered (indexed %v, error %v) without waiting for the comment's owner lock, which the edit holds through its read phase",
-				answer.indexed, answer.err)
-		default:
-		}
-		if waiting, holdingXid := ownerLockWaiters(t, database); waiting > 0 {
-			return holdingXid
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the drain never waited on the comment's owner lock within 10s")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
 // commentRows is the rows query reads of comment, each row a single text column, for a fixture
 // the test compares whole.
 func commentRows(t *testing.T, database *store.Store, what, query, comment string) []string {
@@ -223,7 +184,12 @@ func TestADrainOfACommentWaitsForItsOwnerLock(t *testing.T) {
 			go func() {
 				drained <- drainer.drain(ctx, database, comment, enqueuedAt)
 			}()
-			if holdingXid := awaitOwnerLockWaiter(t, database, drained); holdingXid != 0 {
+			answer, early, holdingXid := storetest.AwaitOwnerLockWaiter(t, database, "the drain", drained)
+			if early {
+				t.Fatalf("the drain answered (indexed %v, error %v) without waiting for the comment's owner lock, which the edit holds through its read phase",
+					answer.indexed, answer.err)
+			}
+			if holdingXid != 0 {
 				t.Fatalf("%d backends hold a transaction id while they wait on the owner lock, want none: the drain reads and plans before its first write", holdingXid)
 			}
 			var revision int

@@ -119,7 +119,7 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 
 	reason := fmt.Sprintf(carryReason, review.Version)
 	var askID *string
-	// The request as the version write's own move left it (moveApprovalAsk), which names this
+	// The request as the version write's own move left it (MoveApprovalAsk), which names this
 	// version already.
 	open, err := openApprovalAsk(ctx, tx, artifactID)
 	if err != nil {
