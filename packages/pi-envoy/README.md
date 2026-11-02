@@ -284,6 +284,11 @@ dispatch artifact --issue LEGION-1 --name spec.md --content-file - <<'EOF'
 EOF
 ```
 
+Inline content is stored as a Markdown document, so `--content` and `--content-file` take only a
+`--name` that ends in `.md` or `.markdown` or has no extension. The command refuses any other name
+(`rows.jsonl`, `sizes.tsv`) before it sends anything and names `--path`, which stores the file's
+bytes unchanged under that name.
+
 `dispatch handoff-write --issue <KEY> --phase <phase> --body-file <path>` records a Legion phase
 handoff on its issue as this session: the file's text, one JSON object, is stored exactly as
 written, and each write is the phase's next version. Keep the file outside the workspace (such as
