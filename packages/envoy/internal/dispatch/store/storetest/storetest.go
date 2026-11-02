@@ -8,6 +8,16 @@
 // otherwise do, so a package's wall time would scale with its test count times the speed of the
 // Postgres it runs against; a clone costs one create database.
 //
+// A clone copies the template's files (strategy file_copy). Postgres's default from 15, strategy
+// wal_log, writes every page of the template into the write-ahead log instead: 6.4 MB of the
+// 12.7 MB template per clone, 16 GiB over one run of the api and docs packages. A file copy writes
+// a few hundred bytes of log; Postgres forces a checkpoint before and after the copy.
+//
+// The harness changes no Postgres setting: fsync, full_page_writes and max_wal_size belong to the
+// whole server DatabaseURLEnv names, which can hold other databases (the one
+// packages/envoy/scripts/dev-postgres.sh runs holds the local Dispatch's), and a change to them
+// outlives the run.
+//
 // A test's database is dropped in the background once the test ends, and Main waits for the
 // drops. Dropping a database forces a checkpoint and waits for it, and every package testing
 // against the same server queues on its one checkpointer: a test that waited for its own drop
@@ -66,7 +76,7 @@ func Open(t testing.TB) *store.Store {
 
 	ctx := context.Background()
 	name := randomName(t, "dispatch_test_")
-	if _, err := shared.admin.Exec(ctx, "create database "+name+" template "+shared.template); err != nil {
+	if _, err := shared.admin.Exec(ctx, cloneStatement(name)); err != nil {
 		t.Fatalf("clone isolated database from template: %v", err)
 	}
 	t.Cleanup(func() { dropDatabase(name) })
@@ -76,6 +86,12 @@ func Open(t testing.TB) *store.Store {
 	}
 	t.Cleanup(database.Pool.Close)
 	return database
+}
+
+// cloneStatement returns the create database that makes name a copy of the template's files
+// rather than a copy through the write-ahead log (the package comment says why).
+func cloneStatement(name string) string {
+	return "create database " + name + " template " + shared.template + " strategy file_copy"
 }
 
 // Main runs the package's tests, waits for their databases to drop, then drops the template Open
