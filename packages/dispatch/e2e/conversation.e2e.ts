@@ -186,6 +186,9 @@ test("Conversation owns the route, lists one card per message newest first, and 
   }
 });
 
+// SLOW(>=2s): the edit has to land on a Conversation that is already open, so the row waits out
+// the page's own refresh before the card can be read again, then walks the same ask through the
+// Activity tab, back, and the Inbox - three surfaces the one edit has to reach.
 test("Conversation updates an open ask in place after an agent edit and preserves its prior question", async ({
   browser,
 }, testInfo) => {
@@ -253,9 +256,12 @@ test("a deep link to an old unanchored comment scrolls its Conversation turn int
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Old comment target" });
   const comment = await createComment(issue.key, { body: "Deep linked comment" }, agent);
-  // Serial: the server appends one event at a time per issue, so bursts of these only queue up
-  // behind each other (measured: 210 writes cost the same either way).
-  for (let index = 0; index < 210; index += 1) {
+  // Forty newer turns put the linked comment at the foot of a Conversation thousands of pixels
+  // tall - 2,700 px at 1280x720, 6,400 px on the iPhone (measured) - which is the distance the
+  // landing has to cover. More only lengthens the seed: the server appends one event at a time
+  // per issue, so these cannot be sent as a burst (measured: 210 writes cost the same either
+  // way), and each costs the row its own round trip.
+  for (let index = 0; index < 40; index += 1) {
     await createMessage(issue.key, { body: `Newer message ${index}` }, agent);
   }
 

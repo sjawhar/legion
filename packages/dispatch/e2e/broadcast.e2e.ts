@@ -277,6 +277,9 @@ test("a broadcast written as a numbered list renders as a list on the broadcast 
   }
 });
 
+// SLOW(>=2s): the Tester's send can only be seen to have failed once the listener take-over
+// window has passed - half a second, the harness's own shortened one - and the row then sends
+// it again and waits for the second verdict on the broadcast page it navigated to.
 test("a session that goes away before the send is excluded by the server and named on the broadcast, and a failed recipient can be retried there", async ({
   browser,
 }, testInfo) => {

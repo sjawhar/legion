@@ -205,6 +205,10 @@ test("a page chunk that fails on every load reloads three times and then shows t
 // page stays the reader's. The Navigation API's `navigate` event fires for it with `downloadRequest`
 // set and `destination.sameDocument` false, and a chunk that fails after it must still reload the
 // page, as on any page nobody is leaving.
+// SLOW(>=2s): the row's subject is a real download followed by a real reload, so it pays the
+// first page load, the Artifacts tab, the browser writing the downloaded file, and the second
+// load the failing chunk forces - in Firefox, which announces a download as two navigations
+// and so makes the row read the whole event order as well.
 test("a chunk that fails after a Download link was followed reloads the page", async ({
   browser,
 }, testInfo) => {

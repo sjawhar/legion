@@ -28,6 +28,9 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): one row for the whole project page - nine issues seeded across eight statuses,
+// the grouped board over them, eight filter presses, and the Documents tab down to a created
+// document with its editor. Each clause of the title is a press the row has to make.
 test("project page groups issues by status in board order; filters narrow issues; documents stay scoped to the project @phone", async ({
   browser,
 }, testInfo) => {

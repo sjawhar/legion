@@ -871,6 +871,10 @@ test("a pin on a turn pressed during an outage survives a reload and lands once 
   }
 });
 
+// SLOW(>=2s): the kept write is only observable across a real reload, so the row pays two issue
+// page loads, the browser's own "leave this page?" prompt between them, and the resumed write's
+// round trip after it - in Firefox, one of the engines this spec runs in because each keeps a
+// tab's storage and asks before it unloads its own way.
 test("the issue header's pin pressed during an outage survives a reload and lands once the network is back @phone", async ({
   browser,
 }) => {

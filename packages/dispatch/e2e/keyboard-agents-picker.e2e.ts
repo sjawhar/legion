@@ -194,6 +194,9 @@ test.describe("agents page", () => {
   // A message on its way to the server is addressed already, so its issue cannot change under it,
   // and the text the server is taking must never come back to the composer, enabled - one
   // Ctrl+Enter from sending it twice.
+  // SLOW(>=2s): the Agents page is mounted, a message is typed and held mid-flight, the help
+  // dialog is opened over it and the send is then let go - every step a keyboard round trip
+  // through WebKit, the engine whose own `change` dispatch this spec's picker rule rests on.
   test("a send in flight holds the picker, and the sent text never comes back", async ({
     browser,
   }) => {
@@ -779,6 +782,9 @@ test.describe("agents page", () => {
   // An issue comment reaches this agent only by mentioning it, so the reset a send makes seeds the
   // mention again, as a mount does - the next message is as addressed as the first. A direct
   // message already reaches its session, and its channel seeds nothing.
+  // SLOW(>=2s): three messages typed key by key and sent, each waited for on the wire - the row
+  // proves what every send seeds back into the composer, so none of the three can go - over
+  // WebKit's own keyboard dispatch, which is why this spec runs there.
   test("every message sent on an issue mentions the agent, and a direct one carries none", async ({
     browser,
   }) => {
@@ -894,6 +900,9 @@ test.describe("agents page", () => {
   // A message on its way holds the picker and Reply of the row that sent it, and its draft, until
   // the server answers. A reader who leaves the page mid-send and comes back finds the row holding
   // the same send - the draft, the picker and Reply held - and its answer lands there.
+  // SLOW(>=2s): the held send has to survive the reader leaving and coming back, so the row
+  // drives the Agents page, the Inbox and the Agents page again from the keyboard before it
+  // lets the send go, each step a round trip through WebKit's own key handling.
   test("a row back after the reader left mid-send holds the send it left, which then lands there", async ({
     browser,
   }) => {

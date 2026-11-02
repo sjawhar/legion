@@ -415,6 +415,9 @@ test("a mermaid source the renderer refuses shows the reason and its source, and
 // page timer, so the clock fires it rather than the row waiting 5 s for it; the responsiveness
 // samples run first, on the clock at real speed (`install` alone does not pause it), since an
 // advanced clock would make a sample read its deadline for free.
+// SLOW(>=2s): the worker chunk has to load and take the source for real, and the proof that the
+// page's own thread keeps answering while it holds it is five samples of a tenth of a second
+// each, at real speed; only the limit's own five seconds are spent on the clock.
 test("a diagram too large to draw in time shows the reason, and the page keeps responding @phone", async ({
   browser,
 }, testInfo) => {

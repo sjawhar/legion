@@ -259,6 +259,9 @@ test("an agent's quote-anchored comment and ask render as highlights in open edi
   }
 });
 
+// SLOW(>=2s): two signed-in readers are two browser contexts with an editor each, and the row
+// proves one reader's edits move the other's highlights: four marks placed on both sides, then
+// a typed insert and a deletion carried across the shared document.
 test("highlights follow edits in the other browser and preserve their anchor state @phone", async ({
   browser,
 }) => {

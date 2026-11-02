@@ -76,6 +76,9 @@ test("a reader scrolled up keeps their Conversation viewport when a new card arr
   }
 });
 
+// SLOW(>=2s): the card has to arrive at a page that is already loaded, so the row waits out the
+// page's own refresh of the Conversation - the event feed's batch window and the refetch floor
+// a fresh load leaves behind - which is the path the anchoring rule runs on.
 test("a reader at the Conversation top follows a new card @phone", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Attention test" });
@@ -108,6 +111,9 @@ test("a reader at the Conversation top follows a new card @phone", async ({ brow
 // Paging is the Activity tab's: the Conversation reads each of its three lists whole and offers
 // no `Load older` at all. Older events land beneath the rows already on screen, so the row the
 // reader is on does not move.
+// SLOW(>=2s): a second Activity page only exists past the tab's 200-row page, and the server
+// appends an issue's events one at a time, so the 205 seeded events cost 205 round trips
+// (measured: sending them as a burst costs the same). The two tabs then render all of them.
 test("loading older Activity rows keeps the reader anchor @phone", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Older events" });

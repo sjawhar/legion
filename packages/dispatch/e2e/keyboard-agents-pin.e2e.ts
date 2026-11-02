@@ -547,6 +547,9 @@ test.describe("agents page pins", () => {
 
   // The same loss by the other road into a closed fold: Shift+P hands an open, pinned row back
   // to it.
+  // SLOW(>=2s): the reply has to reach a page that is already loaded, twice - hidden in the
+  // fold, then on screen - and each arrival waits out the page's own refresh of the agents
+  // list, which is the path the read mark is written on.
   test("an open row Shift+P unpins into a closed fold marks nothing read there", async ({
     browser,
   }) => {

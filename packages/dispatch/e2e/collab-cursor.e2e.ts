@@ -77,6 +77,8 @@ for (const { name, edge, type, code } of cases) {
   });
 }
 
+// SLOW(>=2s): two signed-in collaborators are two browser contexts with an editor each, in the
+// engine that misplaces a caret drawn beside another; the time is two WebKit editor mounts.
 test("a reader outside the editor sees a collaborator's cursor even where their own stale selection sits", async ({
   browser,
 }) => {

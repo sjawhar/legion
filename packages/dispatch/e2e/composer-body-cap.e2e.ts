@@ -22,6 +22,9 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): two bodies of the limit go in through the page's own editing pipeline and come
+// back out again - 32,000 characters each way, twice. The size of the cap is what the row
+// proves, so the characters are the row, not its fixture.
 test("the comment composer takes a whole body of the limit, and holds a longer one to it", async ({
   browser,
 }) => {

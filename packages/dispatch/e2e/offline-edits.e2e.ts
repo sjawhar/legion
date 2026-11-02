@@ -79,6 +79,8 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): surviving a reload is the claim, so two document loads with a Yjs sync each are
+// the floor, in the engines whose own browser storage this spec exists to cover.
 test("an edit typed while the document transport is down survives a reload", async ({
   browser,
 }) => {
@@ -106,6 +108,8 @@ test("an edit typed while the document transport is down survives a reload", asy
   }
 });
 
+// SLOW(>=2s): two document loads with a Yjs sync each, the severed socket's reconnect, and the
+// IndexedDB store read on both sides of the reload - the clearing is what the row proves.
 test("unsent edits are named, then cleared after acknowledgement and a connected reload", async ({
   browser,
 }) => {
@@ -282,6 +286,8 @@ test("a reopened issue's page names no unsent edit before typing, and an edit ty
   }
 });
 
+// SLOW(>=2s): two document loads with a Yjs sync each; the row's claim is about what the second
+// one finds in the tab's store, so neither load can go.
 test("an edit applied before its acknowledgement clears its row on reload", async ({ browser }) => {
   const issue = await makeIssue();
   const alice = await asUser(browser, "alice");

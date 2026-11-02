@@ -313,6 +313,9 @@ test("a broadcast held through a reload is resumed under its key, and each agent
 // its own key, and the writes to one session go out in the order they were pressed. Two presses
 // while the network is down are both held, Send stays pressable, and once the network is back the
 // session hears the first and then the second, each once.
+// SLOW(>=2s): two held sends have to be let go one after the other, and each waits out the
+// backoff of the attempt before it; the page's clock is driven in steps rather than waited on,
+// and a step still costs the live view a round of renders. That ordering is the claim.
 test("two live-view sends pressed during an outage go out in press order, each once, with Send pressable throughout @phone", async ({
   browser,
 }) => {

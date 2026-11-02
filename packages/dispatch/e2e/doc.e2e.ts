@@ -186,14 +186,15 @@ test("two users edit the same spec, see each other's text and cursor, and settle
   const bob = await asUser(browser, "bob");
 
   try {
-    const alicePage = await alice.newPage();
-    await alicePage.goto(`/issues/${issue.key}/spec`);
+    const [alicePage, bobPage] = await Promise.all([alice.newPage(), bob.newPage()]);
+    // The two readers' loads overlap: neither waits on the other to mount its editor.
+    await Promise.all([
+      alicePage.goto(`/issues/${issue.key}/spec`),
+      bobPage.goto(`/issues/${issue.key}/spec`),
+    ]);
     const aliceEditor = documentEditor(alicePage);
-    await expect(aliceEditor).toContainText("Use SQLite");
-
-    const bobPage = await bob.newPage();
-    await bobPage.goto(`/issues/${issue.key}/spec`);
     const bobEditor = documentEditor(bobPage);
+    await expect(aliceEditor).toContainText("Use SQLite");
     await expect(bobEditor).toContainText("Use SQLite");
     await expect(connectedDot(alicePage)).toHaveText("connected");
     await expect(connectedDot(bobPage)).toHaveText("connected");
