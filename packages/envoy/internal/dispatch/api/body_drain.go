@@ -715,6 +715,11 @@ func (w *drainingWriter) Unwrap() http.ResponseWriter {
 // once much of that buffer has drained, so each write is allowed the time that buffer takes to
 // drain at the floor on top of the idle bound (movingDeadline.drain), and a client that stops
 // reading is cut within idle plus that drain.
+//
+// A read whose deadline is its row's own, a file version download, has that deadline stopped at
+// this answer's first header or byte (beginsAnswer): the deadline bounds the work before the
+// answer, and from the first byte on this bound alone says how long the answer may take, so a
+// download of a large file to a slow but steady reader is written in full.
 // Only a read is wrapped (serveRoute), and the websockets are mounted outside it, so no
 // long-lived connection is bounded here.
 type boundedAnswer struct {
@@ -723,6 +728,20 @@ type boundedAnswer struct {
 	// control is the connection's own controller, which set writes the deadline through and
 	// Flush flushes through.
 	control *http.ResponseController
+	// beginsAnswer is what the answer's first header or byte does to the read's own deadline:
+	// a download stops it there, since from the first byte on the transfer bound alone decides
+	// how long the answer may take (servedAsRead, admission.WithDeadlineUntilAnswer). Nil for
+	// every other read, whose deadline runs for its whole length.
+	beginsAnswer func()
+}
+
+// begin stops the read's deadline at the answer's first header or byte, once: from there the
+// answer is bounded by its transfer alone.
+func (a *boundedAnswer) begin() {
+	if a.beginsAnswer != nil {
+		a.beginsAnswer()
+		a.beginsAnswer = nil
+	}
 }
 
 // answerSlice is how much of one Write goes to net/http at a time. The bound is armed before
@@ -739,11 +758,13 @@ type boundedAnswer struct {
 const answerSlice = 64 << 10
 
 func (a *boundedAnswer) WriteHeader(status int) {
+	a.begin()
 	a.arm()
 	a.ResponseWriter.WriteHeader(status)
 }
 
 func (a *boundedAnswer) Write(p []byte) (int, error) {
+	a.begin()
 	written := 0
 	for {
 		slice := p[written:]

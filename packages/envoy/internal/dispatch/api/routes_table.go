@@ -189,8 +189,10 @@ type apiRoute struct {
 	// TestHook marks a route TestHooksEnabled mounts: a test's own route is neither admitted nor
 	// bounded by a deadline.
 	TestHook bool
-	// Deadline replaces the server's read deadline (defaultReadDeadline) for a read whose work is
-	// bounded by the bytes it moves rather than by the database. Only a read has a deadline, and
+	// Deadline replaces the server's read deadline (defaultReadDeadline) for a read that bounds
+	// the work it does before its answer rather than the whole of it: it stops at the answer's
+	// first byte, after which the answer's transfer bound alone decides how long the bytes may
+	// take (servedAsRead, admission.WithDeadlineUntilAnswer). Only a read has a deadline, and
 	// download, the only row constructor that sets one, is given one only by reads.
 	Deadline time.Duration
 	// Weight is how many of its class's admission units a request takes (admission.Limiter): the
@@ -229,9 +231,13 @@ func (r apiRoute) pinsConnection() bool {
 	return r.Method == http.MethodGet && !r.TestHook && r.Weight <= 1 && r.Deadline == 0
 }
 
-// downloadDeadline is the deadline of the four file version downloads, which move a file up to
-// files.MaxObjectSize over whatever link the client has: five minutes is what such a transfer is
-// given before the server gives up on it, where a read of the database gets defaultReadDeadline.
+// downloadDeadline is the deadline of the four file version downloads: five minutes for the work
+// a download does before its answer begins - its row's read and the file store's open, which the
+// store bounds at files.OpenTimeout of its own - where a read of the database gets
+// defaultReadDeadline. It bounds none of the transfer that follows: from the answer's first byte
+// the file's bytes move at the reader's pace, which the answer's own bound measures (no silence
+// longer than the idle bound, and the floor after the grace), so a file up to
+// files.MaxObjectSize reaches a slow but steady reader however long that takes.
 const downloadDeadline = 5 * time.Minute
 
 // concurrentReadWeight is the weight of a route that runs its reads side by side, at most two at
@@ -273,7 +279,8 @@ func replays(route apiRoute, replay keyedReplay) apiRoute {
 	return route
 }
 
-// download is a file version download, read under downloadDeadline instead of the server's.
+// download is a file version download, whose work before its answer is read under
+// downloadDeadline instead of the server's.
 func download(row routeRow) apiRoute {
 	return apiRoute{routeRow: row, Deadline: downloadDeadline}
 }

@@ -110,3 +110,36 @@ func TestWriteRefusedAnswersTooManyRequestsOverloaded(t *testing.T) {
 	WriteRefused(w, &Refusal{Class: Write, Reason: QueueFull})
 	assertRetryable(t, w, http.StatusTooManyRequests, CodeOverloaded)
 }
+
+// A download's deadline bounds the work before its answer and stops there
+// (WithDeadlineUntilAnswer): until stop its passing ends the context with ErrRequestDeadline, as
+// WithDeadline's does and DeadlinePassed reads it; after stop nothing but the parent, or cancel,
+// ends it, so the answer's own transfer bound is all the rest of the download waits on.
+func TestADeadlineStoppedAtTheAnswerBoundsOnlyTheWorkBeforeIt(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+
+	ran, cancelRan, stop := WithDeadlineUntilAnswer(context.Background(), timeout)
+	defer cancelRan()
+	<-ran.Done()
+	if !DeadlinePassed(ran) {
+		t.Fatalf("a read that never answered ended with cause %v, want %v", context.Cause(ran), ErrRequestDeadline)
+	}
+	stop() // the answer began after the deadline: the context stays ended.
+	if !DeadlinePassed(ran) {
+		t.Fatalf("stopping an ended read's deadline left cause %v, want %v", context.Cause(ran), ErrRequestDeadline)
+	}
+
+	answered, cancelAnswered, stopAnswered := WithDeadlineUntilAnswer(context.Background(), timeout)
+	defer cancelAnswered()
+	stopAnswered()
+	time.Sleep(4 * timeout)
+	if answered.Err() != nil {
+		t.Fatalf("a download whose answer began ended %v within %v of its %v deadline, want it left running",
+			context.Cause(answered), 4*timeout, timeout)
+	}
+	cancelAnswered()
+	if !errors.Is(answered.Err(), context.Canceled) || DeadlinePassed(answered) {
+		t.Fatalf("the cancelled read ended with %v (cause %v), want the plain cancellation of a request that is over",
+			answered.Err(), context.Cause(answered))
+	}
+}

@@ -11,6 +11,13 @@ body: |-
   and 4 MiB at 32 KB/s, about two and a half minutes, while one that keeps reading at or above the
   floor is never cut by a blocked write, where a 4 MiB answer written in one call was cut at 15 to
   17 seconds for every reader below about 200 KB/s.
+  A file version download is bounded that way too: its own 5-minute deadline bounds the work
+  before its answer - reading the row and opening the file store - and stops at the answer's
+  first byte, so a reader steadily above the floor is sent a whole file however long that takes,
+  where a 25 MiB file read below about 85 KB/s was cut at 5 minutes and left the client a 200
+  short of its Content-Length with nothing logged. A download its reader does cut - one that
+  stops reading, or falls below the floor - is logged once at INFO, naming the artifact, the
+  version, the bytes written and the file's size, and its connection is closed under it.
   A write whose client is already sending now reads its whole body off the connection before it
   asks admission for room, where the server has none for it: it waits for room holding no unit,
   with nothing of its request left on the wire, so the time its body takes is none of its wait

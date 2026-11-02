@@ -23,8 +23,9 @@ const (
 	// connection (store.ErrPoolBusy), answered 503. A write may have committed part of what it does
 	// before the wait that failed it.
 	CodeDatabaseBusy = "DATABASE_BUSY"
-	// CodeRequestTimeout is a read that ran past its deadline (WithDeadline), answered 503. Only
-	// reads have a deadline: a write runs to completion once admitted.
+	// CodeRequestTimeout is a read that ran past its deadline (WithDeadline,
+	// WithDeadlineUntilAnswer), answered 503. Only reads have a deadline: a write runs to
+	// completion once admitted.
 	CodeRequestTimeout = "REQUEST_TIMEOUT"
 )
 
@@ -33,14 +34,39 @@ const (
 // have passed.
 const RetryAfter = "1"
 
-// ErrRequestDeadline is the cause of a read's context whose deadline passed (WithDeadline). It
-// tells the read's own deadline from every other deadline its handler meets - a pool's acquire
-// bound, a client's timeout of its own - so only it is answered REQUEST_TIMEOUT.
+// ErrRequestDeadline is the cause of a read's context whose deadline passed (WithDeadline,
+// WithDeadlineUntilAnswer). It tells the read's own deadline from every other deadline its
+// handler meets - a pool's acquire bound, a client's timeout of its own - so only it is answered
+// REQUEST_TIMEOUT.
 var ErrRequestDeadline = errors.New("the read ran past its deadline")
 
 // WithDeadline bounds a read's context at timeout, with ErrRequestDeadline as the cause.
 func WithDeadline(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeoutCause(ctx, timeout, ErrRequestDeadline)
+}
+
+// WithDeadlineUntilAnswer bounds a read's context at timeout as WithDeadline does, and hands back
+// a stop that takes that bound off: a read whose answer has begun is no longer bounded by it, and
+// nothing but the answer's own transfer bound (the api package's boundedAnswer) decides how long
+// the rest of it may take. Until stop is called the context ends at timeout with
+// ErrRequestDeadline as its cause, so DeadlinePassed tells this deadline from every other one
+// exactly as it does WithDeadline's; after it the context ends only with its parent, or with
+// cancel.
+//
+// A file version download is the read that needs it (apiRoute.Deadline): the deadline bounds the
+// work the server does for itself - the row's read and the store's open - and the bytes that
+// follow move at the reader's pace, which the transfer bound already measures. Its context
+// carries no deadline of its own (ctx.Deadline), since nothing says when it ends: a statement run
+// under it is bounded by its pool's acquire bound and by the commit bound, as every other
+// statement is.
+func WithDeadlineUntilAnswer(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc, func()) {
+	ctx, cancel := context.WithCancelCause(ctx)
+	timer := time.AfterFunc(timeout, func() { cancel(ErrRequestDeadline) })
+	stop := func() { timer.Stop() }
+	return ctx, func() {
+		timer.Stop()
+		cancel(nil)
+	}, stop
 }
 
 // DeadlinePassed reports whether ctx is a read's context whose own deadline has passed.

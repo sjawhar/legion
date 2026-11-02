@@ -109,6 +109,9 @@ type testServerOptions struct {
 	admission *admission.Limiter
 	// readDeadline replaces the server's read deadline; zero is the deployment's.
 	readDeadline time.Duration
+	// downloadDeadline replaces the deadline a file version download's work before its answer
+	// runs under (downloadDeadline, five minutes); zero is the deployment's.
+	downloadDeadline time.Duration
 	// requestPoolSize and acquireBound replace the request pool's size and its acquire bound
 	// (store.BoundAcquires), each when non-zero, so a test can fill the pool and see a request
 	// refused within a fraction of a second.
@@ -266,6 +269,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		StreamHeartbeat:        options.streamHeartbeat,
 		Admission:              options.admission,
 		ReadDeadline:           options.readDeadline,
+		DownloadDeadline:       options.downloadDeadline,
 		EnvoyURL:               options.envoyURL,
 		EnvoyTimeout:           options.envoyTimeout,
 		ListenerTakeoverWindow: cmp.Or(options.takeoverWindow, testTakeoverWindow),

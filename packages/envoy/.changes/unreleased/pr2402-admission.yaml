@@ -29,8 +29,10 @@ body: |-
   and resumed queues again where it arrived, ahead of every write that arrived after it, and is
   refused only within what is left of its one wait, where a second whole wait refused writes
   the server had already admitted (at ten times the load, refusals reached a p99 of 2.1 seconds
-  and a maximum of 5.8). A read has a deadline of 20 seconds, 5 minutes for the four file
-  version downloads, and past it is `503 REQUEST_TIMEOUT`; a write has none and runs to completion
+  and a maximum of 5.8). A read has a deadline of 20 seconds, and a file version download 5
+  minutes for the work it does before its answer begins - reading its row and opening the file
+  store - after which the answer's own bounds carry the file's bytes however long its reader
+  takes; past either is `503 REQUEST_TIMEOUT`. A write has none and runs to completion
   once admitted, and every transaction commits apart from its caller's cancellation, within 10
   seconds. A request whose handler waited its pool's bound for a database connection is `503
   DATABASE_BUSY`, which now means exactly that: every pool, the document loads' and the leases'

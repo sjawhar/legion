@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 
 	"github.com/sjawhar/envoy/internal/dispatch/admission"
@@ -52,6 +53,14 @@ func (s *server) putUploadedFile(w http.ResponseWriter, r *http.Request, kind, s
 // short; a body that fails after that, or does not hash to the row's hash, aborts the response
 // mid-stream rather than ending it as if whole.
 //
+// The read's own deadline (downloadDeadline) stops at those headers, so what bounds the bytes
+// that follow is the answer's transfer bound alone (boundedAnswer): a reader that keeps to it is
+// sent the whole file however long that takes, and one that stops, or falls below the floor, has
+// its write fail with os.ErrDeadlineExceeded. Such a download is logged once at INFO and the
+// connection aborted, as the store's own failures are, so the client sees a cut connection
+// rather than a clean 200 short of its Content-Length; a client that went away is answered
+// nothing, having nobody left to read it.
+//
 // A version's bytes never change, so a browser keeps them for a year without asking again: the
 // pictures a conversation shows inline are fetched once. `private`, since the route is
 // authenticated and no shared cache may hold them. A document version is not served here and
@@ -70,7 +79,10 @@ func (s *server) serveFileVersion(w http.ResponseWriter, r *http.Request, artifa
 	}
 	if content != nil {
 		headers(int64(len(content)))
-		_, _ = w.Write(content)
+		written, err := w.Write(content)
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			cutDownload(artifactID, number, sha, int64(written), int64(len(content)))
+		}
 		return
 	}
 	if s.deps.Files == nil {
@@ -107,11 +119,50 @@ func (s *server) serveFileVersion(w http.ResponseWriter, r *http.Request, artifa
 		return
 	}
 	headers(object.Size)
-	if _, err := io.Copy(w, object.Body); err != nil {
-		if r.Context().Err() != nil {
+	answer := &downloadWriter{ResponseWriter: w}
+	if _, err := io.Copy(answer, object.Body); err != nil {
+		switch {
+		case errors.Is(answer.failure, os.ErrDeadlineExceeded):
+			cutDownload(artifactID, number, sha, answer.written, object.Size)
+		case admission.DeadlinePassed(r.Context()):
+			// The deadline fired before the headers went out (servedAsRead stops it there), so
+			// the work before the answer - the row's read, the store's open - took the five
+			// minutes the row allows it.
+			slog.Info("dispatch: a file version's download ran past its deadline before its answer began",
+				"artifact", artifactID, "version", number, "sha256", *sha, "written", answer.written, "size", object.Size)
+		case r.Context().Err() != nil:
 			return // The client went away; nothing to tell it.
+		default:
+			slog.Error("dispatch: stream a file version from the file store", "artifact", artifactID, "version", number, "sha256", *sha, "error", err)
 		}
-		slog.Error("dispatch: stream a file version from the file store", "artifact", artifactID, "version", number, "sha256", *sha, "error", err)
 		panic(http.ErrAbortHandler)
 	}
+}
+
+// cutDownload is the line a download whose write failed on the answer's transfer bound writes:
+// its reader stopped reading, or fell below the floor, and the bytes it was sent are short of the
+// Content-Length it was promised. INFO, since it is the reader's doing and no fault of the
+// server's, and once per download, the write that failed being the last one made.
+func cutDownload(artifactID string, number int, sha *string, written, size int64) {
+	slog.Info("dispatch: a file version's download was cut: its reader stopped or fell below the floor",
+		"artifact", artifactID, "version", number, "sha256", deref(sha), "written", written, "size", size)
+}
+
+// downloadWriter is the answer a store-backed version is copied into: it counts what reached the
+// client and keeps the failure of the write that failed, since io.Copy reports a write that
+// failed and a read of the object that failed as one error and the two are answered differently
+// (serveFileVersion).
+type downloadWriter struct {
+	http.ResponseWriter
+	written int64
+	failure error
+}
+
+func (d *downloadWriter) Write(p []byte) (int, error) {
+	n, err := d.ResponseWriter.Write(p)
+	d.written += int64(n)
+	if err != nil {
+		d.failure = err
+	}
+	return n, err
 }

@@ -128,6 +128,11 @@ type Deps struct {
 	// otherwise (apiRoute.Deadline); zero is defaultReadDeadline. A test sets a short one. A write
 	// has no deadline.
 	ReadDeadline time.Duration
+	// DownloadDeadline replaces the deadline of the four file version downloads
+	// (downloadDeadline, apiRoute.Deadline), which bounds the work each does before its answer
+	// begins; zero is the row's own five minutes. Only a test sets one, so a download whose
+	// deadline passes under it is the test's choice rather than five minutes of wall clock.
+	DownloadDeadline time.Duration
 	// RouteRosterTTL replaces how long a stored listener answer serves issue reads and agents
 	// lists (routeRosterTTL, issue_route_status.go). Zero keeps five seconds; only a test process
 	// sets another (cmd/dispatch: DISPATCH_TEST_ROUTE_ROSTER_TTL, under the test hooks), so a row
@@ -205,9 +210,11 @@ type DepsInput struct {
 	// (Deps.StreamHeartbeat). Zero keeps fifteen seconds; a test proving a connection closes
 	// sets a short one.
 	StreamHeartbeat time.Duration
-	// Admission and ReadDeadline are Deps.Admission and Deps.ReadDeadline.
-	Admission    *admission.Limiter
-	ReadDeadline time.Duration
+	// Admission, ReadDeadline and DownloadDeadline are Deps.Admission, Deps.ReadDeadline and
+	// Deps.DownloadDeadline.
+	Admission        *admission.Limiter
+	ReadDeadline     time.Duration
+	DownloadDeadline time.Duration
 	// RouteRosterTTL replaces the five seconds a stored listener answer serves issue reads and
 	// agents lists; see Deps.RouteRosterTTL.
 	RouteRosterTTL time.Duration
@@ -288,6 +295,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		StreamHeartbeat:        heartbeat,
 		Admission:              input.Admission,
 		ReadDeadline:           input.ReadDeadline,
+		DownloadDeadline:       input.DownloadDeadline,
 		RouteRosterTTL:         input.RouteRosterTTL,
 		ListenerTakeoverWindow: input.ListenerTakeoverWindow,
 		TestHookTimeout:        input.TestHookTimeout,
@@ -695,10 +703,14 @@ func (s *server) serveRoute(route apiRoute, limiter *admission.Limiter, deadline
 	handler = s.refuseUnstorableParameters(route.Pattern, handler)
 	if !route.TestHook {
 		if route.Method == http.MethodGet {
-			if route.Deadline != 0 {
-				deadline = route.Deadline
+			// A row with a deadline of its own is a download (downloadDeadline), which the
+			// deployment leaves at the row's five minutes and a test shortens
+			// (Deps.DownloadDeadline); it is also the read whose deadline stops at its answer.
+			untilAnswer := route.Deadline != 0
+			if untilAnswer {
+				deadline = cmp.Or(s.deps.DownloadDeadline, route.Deadline)
 			}
-			handler = servedAsRead(deadline, s.transfer.orDefault(), route.pinsConnection(), handler)
+			handler = s.servedAsRead(deadline, untilAnswer, route.pinsConnection(), handler)
 		}
 		handler = admitted(limiter, route.Weight, handler)
 	}
@@ -786,20 +798,38 @@ func admitted(limiter *admission.Limiter, weight int, handler http.HandlerFunc) 
 	}
 }
 
-// servedAsRead runs a read's handler under deadline (admission.WithDeadline), whose passing
-// writeHandlerError answers 503 REQUEST_TIMEOUT, and, where pin is set, with every request-pool
-// statement it runs on the one connection its first statement takes, given back when the handler
-// returns (store.PinConnection, apiRoute.pinsConnection). The answer is written under bounds of
-// its own (boundedAnswer).
-func servedAsRead(deadline time.Duration, bounds transferBounds, pin bool, handler http.HandlerFunc) http.HandlerFunc {
+// servedAsRead runs a read's handler under deadline, whose passing writeHandlerError answers 503
+// REQUEST_TIMEOUT, and, where pin is set, with every request-pool statement it runs on the one
+// connection its first statement takes, given back when the handler returns
+// (store.PinConnection, apiRoute.pinsConnection). The answer is written under bounds of its own
+// (boundedAnswer), the server's own transfer bounds, read at each request as the drain reads
+// them (drainBeforeAnswer).
+//
+// An ordinary read is bounded for its whole length (admission.WithDeadline): its work is the
+// database's, and an answer it has begun is written from what it already read. A read whose
+// deadline is its row's own, the file version downloads (untilAnswer, apiRoute.Deadline), is
+// bounded only until its answer begins (admission.WithDeadlineUntilAnswer): the deadline bounds
+// the work before the first byte - the row's read and the store's open - and the answer's own
+// transfer bound decides how long the bytes that follow may take, since from there the read is
+// waiting on its reader's pace and nothing else. boundedAnswer stops it at the answer's first
+// header or byte (boundedAnswer.beginsAnswer).
+func (s *server) servedAsRead(deadline time.Duration, untilAnswer bool, pin bool, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := admission.WithDeadline(r.Context(), deadline)
+		var ctx context.Context
+		var cancel context.CancelFunc
+		var beginsAnswer func()
+		if untilAnswer {
+			ctx, cancel, beginsAnswer = admission.WithDeadlineUntilAnswer(r.Context(), deadline)
+		} else {
+			ctx, cancel = admission.WithDeadline(r.Context(), deadline)
+		}
 		defer cancel()
 		control := http.NewResponseController(w)
 		answer := &boundedAnswer{
 			ResponseWriter: w,
-			movingDeadline: movingDeadline{set: control.SetWriteDeadline, bounds: bounds, buffered: true},
+			movingDeadline: movingDeadline{set: control.SetWriteDeadline, bounds: s.transfer.orDefault(), buffered: true},
 			control:        control,
+			beginsAnswer:   beginsAnswer,
 		}
 		defer answer.lift()
 		if pin {
