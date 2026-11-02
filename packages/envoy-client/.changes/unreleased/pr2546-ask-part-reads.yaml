@@ -1,0 +1,6 @@
+kind: Added
+body: |-
+    `dispatch read` of an ask names each option and its answer by that part's own reference (`dispatch://KEY/ask/<id>#b-<part>`) and lists what points at that part under it, leaving every other backlink under the ask; `dispatch read --ref` of a part says which part it read (`Option b2 of ask <id> (changed in revision 1):`); and `dispatch comment --reply-to-ask` takes a part reference, threading the reply under the ask and naming the part it answers.
+time: 2026-10-30T00:00:00.000000000Z
+custom:
+    Issue: pr2546

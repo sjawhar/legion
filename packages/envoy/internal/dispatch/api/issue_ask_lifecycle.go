@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 // withdrawnResolution is the resolution kind an issue's close records on each ask it withdraws.
@@ -165,13 +167,26 @@ func (s *server) restoreIssueAsksTx(ctx context.Context, tx pgx.Tx, issueKey str
 		return nil, nil, err
 	}
 	appended := make([]model.Event, 0, len(restored))
+	restoredAt := time.Now().UTC()
 	for _, ask := range restored {
-		payload, err := events.AskEventPayload(ctx, tx, ask, model.ReferenceChanges{})
+		// The restore took each ask's answer off, which removes its answer part: index the
+		// parts in the transaction that wrote the row, and let the ask.opened name what that
+		// moved.
+		changes, err := s.indexAskParts(ctx, tx, ask, restoredAt, model.ReferenceChanges{})
+		if err != nil {
+			return nil, nil, err
+		}
+		payload, err := events.AskEventPayload(ctx, tx, ask, changes)
 		if err != nil {
 			return nil, nil, err
 		}
 		event, err := s.appendEvent(ctx, tx, issueOwner(issueKey).event("ask.opened", actor, payload))
 		if err != nil {
+			return nil, nil, err
+		}
+		// The part rows the restore moved are new rows of this transaction, so they take the
+		// event's id and a ?since= read lists them.
+		if err := refs.Stamp(ctx, tx, "ask", ask.ID, event.ID); err != nil {
 			return nil, nil, err
 		}
 		appended = append(appended, event)

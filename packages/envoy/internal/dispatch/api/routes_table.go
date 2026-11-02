@@ -431,7 +431,7 @@ func (s *server) routes() []apiRoute {
 		served(routeRow{http.MethodPost, "/api/v1/asks/{id}/answer", authHuman, "Answer an ask with selected options and/or text.", s.answerAsk}),
 		served(routeRow{http.MethodPost, "/api/v1/asks/{id}/resolve", authAny, "Retract or resolve an ask without answering it (kind retracted or resolved; withdrawn is written only by an issue's close, and an ask on a closed issue is 409 ISSUE_CLOSED); a block ask's block records it too.", s.resolveAsk}),
 		served(routeRow{http.MethodGet, "/api/v1/issues/{key}/comments", authAny, "List an issue's comments; ?artifact= scopes to a document.", s.listComments}),
-		replays(served(routeRow{http.MethodPost, "/api/v1/issues/{key}/comments", authAny, "Comment on an issue, a document quote, or an ask. A reply names the comment it answers in reply_to, and one block of it in reply_to_block.", s.createComment}), replayRecovered(s, s.replayComment)),
+		replays(served(routeRow{http.MethodPost, "/api/v1/issues/{key}/comments", authAny, "Comment on an issue, a document quote, or an ask. A reply names the comment it answers in reply_to, and one block of it in reply_to_block; with ask_id in place of reply_to, reply_to_block names one part of that ask.", s.createComment}), replayRecovered(s, s.replayComment)),
 		served(routeRow{http.MethodPost, "/api/v1/comments/{id}/resolve", authAny, "Resolve a comment thread.", s.resolveComment}),
 		served(routeRow{http.MethodPost, "/api/v1/comments/{id}/reopen", authHuman, "Reopen a resolved comment thread.", s.reopenComment}),
 		served(routeRow{http.MethodGet, "/api/v1/comments/{id}", authAny, "Read one comment with its thread.", s.getComment}),

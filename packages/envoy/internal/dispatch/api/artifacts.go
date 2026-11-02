@@ -523,9 +523,7 @@ func (s *server) lockArtifactStore(
 	} else if err != nil {
 		return artifactStore{}, err
 	} else if artifact.Kind != kind {
-		return artifactStore{}, errorf(http.StatusBadRequest, "ARTIFACT_KIND_MISMATCH",
-			"%q names artifact %s (%s), whose kind is %s; this upload's kind is %s, so it cannot be its next version: give it another name",
-			input.name, artifact.Slug, artifact.Name, artifact.Kind, kind)
+		return artifactStore{}, artifactKindMismatch(input.name, artifact, kind)
 	}
 	// A project document's owner row is the artifact itself, and until here this transaction
 	// has not locked it: the issue branch above locks its issue, but this one only read its
@@ -551,8 +549,9 @@ func (s *server) storeArtifact(
 ) {
 	checksum := sha256.Sum256(input.content)
 	sha := hex.EncodeToString(checksum[:])
-	// A file's object is written before the transaction opens (putUploadedFile, artifact_files.go).
-	if !s.putUploadedFile(w, r, kind, sha, input) {
+	// A file's object is written before the transaction opens, once the refusals the transaction
+	// would make have been made (putUploadedFile, artifact_files.go).
+	if !s.putUploadedFile(w, r, kind, sha, input, target) {
 		return
 	}
 	// An upload to an existing document replaces its live text, so it queues for the document's
@@ -1483,8 +1482,7 @@ const (
 )
 
 func (s *server) findArtifactByNameOrSlug(ctx context.Context, q queryer, target artifactTarget, name string) (model.Artifact, error) {
-	query, owner := target.ownerLookup(artifactByNameOrSlugSQL, agentArtifactByNameOrSlugSQL)
-	artifact, err := scanArtifact(q.QueryRow(ctx, query, owner, name))
+	artifact, err := lookupArtifactByNameOrSlug(ctx, q, target, name)
 	if err != nil {
 		return model.Artifact{}, err
 	}
@@ -1494,6 +1492,12 @@ func (s *server) findArtifactByNameOrSlug(ctx context.Context, q queryer, target
 	}
 	artifact.Versions = versions
 	return artifact, nil
+}
+
+// lookupArtifactByNameOrSlug reads the artifact name finds under target's owner, without its versions.
+func lookupArtifactByNameOrSlug(ctx context.Context, q queryer, target artifactTarget, name string) (model.Artifact, error) {
+	query, owner := target.ownerLookup(artifactByNameOrSlugSQL, agentArtifactByNameOrSlugSQL)
+	return scanArtifact(q.QueryRow(ctx, query, owner, name))
 }
 
 // versionColumns is the column list a version read selects over artifact_versions aliased v, in
@@ -1588,6 +1592,14 @@ func artifactSlug(name string) string {
 		return "artifact"
 	}
 	return result
+}
+
+// artifactKindMismatch is the 400 refusing an upload under name, of kind, as the next version of
+// artifact, the one the name or slug finds, whose kind is another.
+func artifactKindMismatch(name string, artifact model.Artifact, kind string) error {
+	return errorf(http.StatusBadRequest, "ARTIFACT_KIND_MISMATCH",
+		"%q names artifact %s (%s), whose kind is %s; this upload's kind is %s, so it cannot be its next version: give it another name",
+		name, artifact.Slug, artifact.Name, artifact.Kind, kind)
 }
 
 // newArtifactNameRefusal is the 400 refusing a new artifact's name past maxNewArtifactKeyBytes,
