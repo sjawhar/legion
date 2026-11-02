@@ -364,6 +364,57 @@ test("a view block under a grant pinned to version 1 gets version 1, and @v3 is 
   }
 });
 
+test("a view block whose grant pins a version over 16 MiB sends no data and says so", async ({
+  browser,
+}) => {
+  // The upload of 17 MiB, and the block's own read of the version's size, take longer than the
+  // default a row of this file is given.
+  test.setTimeout(60_000);
+  await createProject({ key: "CORE", name: "Core" });
+  const fixture = await seedIssuePage("Pinned over the limit");
+  // Version 1 is over the limit on its own and version 2 is a few bytes. The reference pins
+  // nothing, so the grant's pin alone decides that version 1 is what the page would be given,
+  // and version 1's bytes are what the block weighs (R6).
+  await uploadIssueFile(fixture.issue, {
+    content: "x".repeat(17 * 1024 * 1024),
+    name: "huge.json",
+    type: "application/json",
+  });
+  await uploadIssueFile(fixture.issue, {
+    content: attempts(3),
+    name: "huge.json",
+    type: "application/json",
+  });
+  const hugeRef = `dispatch://${fixture.issue}/artifact/huge-json`;
+  await createArtifactGrant(fixture.pageId, `${hugeRef}@v1`);
+  const document = await createProjectDocument("CORE", {
+    content: viewDirective({
+      caption: "A huge version, pinned by the grant.",
+      data: hugeRef,
+      page: fixture.pageRef,
+    }),
+    name: "Pinned over the limit",
+  });
+  const reader = await asUser(browser, "bob");
+  try {
+    const page = await reader.newPage();
+    await page.goto(`/projects/CORE/documents/${document.artifact.slug}`);
+    const block = viewBlock(page, "A huge version, pinned by the grant.");
+    await expect(
+      block.getByText(
+        "data — the data files together are larger than 16 MiB, so Dispatch sends no data"
+      ),
+      "R6: the grant's pin is the version the block weighs, so version 1 is over the limit"
+    ).toBeVisible();
+    await expect(
+      block.frameLocator("iframe").locator("#entries"),
+      "R6: and the page is given no data at all"
+    ).toHaveText("no data message");
+  } finally {
+    await reader.close();
+  }
+});
+
 test("a view block under a grant without a version takes a new data version in the same frame", async ({
   browser,
 }) => {

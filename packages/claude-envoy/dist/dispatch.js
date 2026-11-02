@@ -14584,6 +14584,11 @@ var IssueDeployedEventPayloadSchema = strictObject({
   run_id: number2().int().positive(),
   completed_at: exports_iso.datetime()
 });
+var HandoffRecordedPayloadSchema = strictObject({
+  handoff_id: string2(),
+  phase: string2(),
+  version: number2().int().positive()
+});
 var DispatchServerStartedPayloadSchema = strictObject({
   commit: string2().min(1),
   started_at: exports_iso.datetime()
@@ -15008,6 +15013,39 @@ function imagesArgument(z, owner, cap) {
 var ASK_URGENCIES = ["low", "med", "high", "blocking"];
 var ASK_QUESTION_MAX = 2000;
 var DISPATCH_BODY_MAX = 32000;
+var DISPATCH_HANDOFF_BODY_MAX = 262144;
+var HANDOFF_PHASE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+var HANDOFF_PHASE_RULE_WORDS = "a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement";
+var HANDOFF_PHASE_RULE = `phase is not a handoff phase: ${HANDOFF_PHASE_RULE_WORDS}`;
+function isJsonObjectText(text) {
+  try {
+    const parsed = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+function handoffProblem(value) {
+  const { phase, body } = value;
+  if (typeof phase === "string" && !HANDOFF_PHASE_PATTERN.test(phase))
+    return HANDOFF_PHASE_RULE;
+  if (typeof body !== "string")
+    return;
+  const bytes = new TextEncoder().encode(body).length;
+  if (bytes > DISPATCH_HANDOFF_BODY_MAX) {
+    return `body is ${bytes - DISPATCH_HANDOFF_BODY_MAX} bytes over the ${DISPATCH_HANDOFF_BODY_MAX}-byte limit (${bytes}/${DISPATCH_HANDOFF_BODY_MAX})`;
+  }
+  if (!isJsonObjectText(body)) {
+    return 'body is not one JSON object: a handoff body is a JSON object such as {"schemaVersion":1}';
+  }
+  return;
+}
+var HANDOFF_RULE = `${HANDOFF_PHASE_RULE}; the body is one JSON object of at most ${DISPATCH_HANDOFF_BODY_MAX} bytes.`;
+var handoffValidation = {
+  check: (value) => handoffProblem(value) === undefined,
+  message: HANDOFF_RULE,
+  refusal: (value) => handoffProblem(value) ?? HANDOFF_RULE
+};
 var SEARCH_QUERY_MAX = 1000;
 var SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
 var SEARCH_KIND_DEPTH = 100;
@@ -15323,7 +15361,7 @@ var dispatchToolSpecs = [
     name: "dispatch_artifact",
     example: { issue: "DSP-1", name: "design.md", content: `# Design
 ` },
-    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " + "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " + "In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
+    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version, and so does uploading a document's slug (plan-md for plan.md). Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " + "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " + "In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key for an unlinked document.").optional(),
@@ -15468,6 +15506,34 @@ var dispatchToolSpecs = [
     example: {},
     description: "Who Dispatch takes this session for: {session, owner, service, project}. session is the session Dispatch records your writes as. It is the session your credential proved, and the tool says so when that is not the session you run in. owner is the lowercase email of the person you act for, and is the first choice of assignee for issues you create. owner is null under the shared token. With a null owner, a create with no assignee falls back to the parent's assignee and then to the project's default assignee. service is the subject of the verified service-account token that authenticated you, or null. project is the one project key your credential may write, or null when it names none.",
     arguments: () => ({}),
+    strict: true
+  },
+  {
+    name: "dispatch_handoff_write",
+    example: {
+      issue: "DSP-1",
+      phase: "implement",
+      body: '{"schemaVersion":1,"phase":"implement","issue":"DSP-1"}'
+    },
+    description: "Record this session's handoff for one phase of an issue: the body, one JSON object, is " + "stored on the issue exactly as sent, under this session, and read back byte for byte. Each " + "write is the next version (1, 2, ...) of that phase's handoff; earlier versions stay. Write " + "the body to a file outside your workspace and pass it with --body-file (- reads stdin). A " + "closed issue refuses it with 409 ISSUE_CLOSED, and a body over " + `${DISPATCH_HANDOFF_BODY_MAX} bytes with 413 CAP_EXCEEDED. Read it back with dispatch ` + `handoff-read. ${ISSUE_REFERENCE}`,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      phase: z.string().describe("The phase the handoff ends: a lowercase slug such as plan, implement, test or review."),
+      body: z.string({ min: 1 }).describe(`The handoff: one JSON object, at most ${DISPATCH_HANDOFF_BODY_MAX} bytes, stored and read back exactly as sent.`)
+    }),
+    validation: handoffValidation,
+    strict: true
+  },
+  {
+    name: "dispatch_handoff_read",
+    example: { issue: "DSP-1", phase: "implement" },
+    description: "Read the newest handoff recorded for one phase of an issue, or the version you name: one " + "line naming the phase, version, id, the session that wrote it and when, then the body " + "exactly as stored. A closed issue's handoffs read too. A phase with no handoff, or no " + `such version, is 404 HANDOFF_NOT_FOUND. ${ISSUE_REFERENCE}`,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      phase: z.string().describe("The handoff's phase: a lowercase slug such as plan, implement, test or review."),
+      version: z.number({ int: true, min: 1 }).describe("The version to read, from 1; omit it to read the newest.").optional()
+    }),
+    validation: handoffValidation,
     strict: true
   }
 ];
@@ -16631,6 +16697,35 @@ var KEYED_LAYER_MEMORY_MS = 5 * 60000;
 var KEYED_LAYER_SEEN = new Map;
 var KEYED_LAYER_PROBES = new Map;
 var KEY_LAYER_PROBE_MS = 5000;
+function keyedLayerMemory() {
+  const wall = Date.now();
+  const now = performance.now();
+  const kept = {};
+  for (const [origin, seen] of KEYED_LAYER_SEEN) {
+    const age = now - seen;
+    if (age >= 0 && age < KEYED_LAYER_MEMORY_MS) {
+      kept[origin] = new Date(wall - age).toISOString();
+    }
+  }
+  return kept;
+}
+function rememberKeyedLayer(saved) {
+  if (typeof saved !== "object" || saved === null)
+    return;
+  const wall = Date.now();
+  const now = performance.now();
+  for (const [origin, at] of Object.entries(saved)) {
+    if (typeof at !== "string")
+      continue;
+    const age = wall - Date.parse(at);
+    if (!(age >= 0 && age < KEYED_LAYER_MEMORY_MS))
+      continue;
+    const seen = now - age;
+    const known = KEYED_LAYER_SEEN.get(origin);
+    if (known === undefined || known < seen)
+      KEYED_LAYER_SEEN.set(origin, seen);
+  }
+}
 function keyEchoed(response, key) {
   const echoed = response.headers.get(IDEMPOTENCY_KEY_HEADER)?.trim() ?? "";
   return echoed.replace(/^"(.*)"$/, "$1") === key;
@@ -17096,6 +17191,26 @@ class DispatchClient {
   }
   async getComments(issue) {
     return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"]);
+  }
+  async writeHandoff(issue, phase, input) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "handoffs", phase], input);
+  }
+  async listHandoffs(issue) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "handoffs"]);
+  }
+  async latestHandoff(issue, phase) {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue),
+      "handoffs",
+      phase,
+      "latest"
+    ]);
+  }
+  async handoff(id) {
+    return this.#json("GET", ["api", "v1", "handoffs", id]);
   }
   async getIssueReferences(issue) {
     return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "references"], undefined, { versions: "latest" });
@@ -21078,6 +21193,61 @@ Document token: ${listed.token}`,
         details: await followedAskDetails(client, read.ask)
       };
     }
+    case "dispatch_handoff_write": {
+      if (!input.sessionId?.trim()) {
+        throw new Error("host session id is required for dispatch handoff-write");
+      }
+      let recorded;
+      try {
+        recorded = await client.writeHandoff(issue(), stringArg(args, "phase"), {
+          actor,
+          body: stringArg(args, "body")
+        });
+      } catch (error) {
+        throw refusalWithCode(error);
+      }
+      return {
+        text: `Recorded the ${recorded.phase} handoff of ${recorded.issue_key}, version ${recorded.version} (id ${recorded.id})`,
+        details: {
+          issue: recorded.issue_key,
+          phase: recorded.phase,
+          version: recorded.version,
+          handoff: recorded.id
+        }
+      };
+    }
+    case "dispatch_handoff_read": {
+      const issueKey = issue();
+      const phase = stringArg(args, "phase");
+      const version = optionalNumber(args, "version");
+      let handoff;
+      try {
+        if (version === undefined) {
+          handoff = await client.latestHandoff(issueKey, phase);
+        } else {
+          const listed = await client.listHandoffs(issueKey);
+          const ofPhase = listed.filter((summary) => summary.phase === phase);
+          const match = ofPhase.find((summary) => summary.version === version);
+          if (match === undefined) {
+            const newest = Math.max(0, ...ofPhase.map((summary) => summary.version));
+            throw new Error(`HANDOFF_NOT_FOUND: issue ${issueKey} has no ${phase} handoff version ${version}; ${newest === 0 ? `it has no ${phase} handoff at all` : `its newest ${phase} handoff is version ${newest}`}`);
+          }
+          handoff = await client.handoff(match.id);
+        }
+      } catch (error) {
+        throw refusalWithCode(error);
+      }
+      return {
+        text: `${handoff.issue_key} ${handoff.phase} handoff, version ${handoff.version} (id ${handoff.id}), written by ${actorText(handoff.author)} at ${handoff.created_at}
+${handoff.body}`,
+        details: {
+          issue: handoff.issue_key,
+          phase: handoff.phase,
+          version: handoff.version,
+          handoff: handoff.id
+        }
+      };
+    }
     case "dispatch_read": {
       const message = optionalString(args, "message");
       const picturesOf = (texts) => readPictures(client, picturesNewestFirst(texts), shown);
@@ -21321,13 +21491,15 @@ function loadSessionMemory(dir, sessionId) {
   const pictures = shownPictures(sessionId);
   for (const address of stringList(state.pictures))
     pictures.add(address);
+  rememberKeyedLayer(state.keyedLayer);
   return new Set(stringList(state.follows));
 }
 function writeMemory(dir, sessionId, follows) {
   const state = {
     advice: [...adviceMemory()],
     pictures: [...shownPictures(sessionId)],
-    follows: [...follows]
+    follows: [...follows],
+    keyedLayer: keyedLayerMemory()
   };
   writeAtomically(join4(dir, "state.json"), `${JSON.stringify(state)}
 `);
@@ -22559,9 +22731,10 @@ async function runDispatchCli(argv, rawEnv, io) {
     if (value !== undefined && value !== "")
       env[name] = value;
   }
+  const claudeSession = env.ENVOY_SESSION_ID ?? env.CLAUDE_CODE_SESSION_ID;
   const refuse = (text, code, tool, askgate) => {
     print(text);
-    const sessionId = env.CLAUDE_CODE_SESSION_ID ?? env.DISPATCH_SESSION_ID;
+    const sessionId = claudeSession ?? env.DISPATCH_SESSION_ID;
     if (sessionId !== undefined) {
       try {
         appendResult(sessionDirectory(env, sessionId), {
@@ -22593,8 +22766,7 @@ async function runDispatchCli(argv, rawEnv, io) {
   if (host === undefined) {
     return refuse(hostName === undefined ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell. From an agent's session, send the command as a bash call. To run dispatch by hand, set DISPATCH_HOST, and set DISPATCH_SESSION_ID to the id of your own session." : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp or claude.`, USAGE, parsed.tool);
   }
-  const sessionVariable = host === "claude" ? "CLAUDE_CODE_SESSION_ID" : "DISPATCH_SESSION_ID";
-  const sessionId = env[sessionVariable];
+  const [sessionId, sessionVariable] = host === "claude" ? [claudeSession, "ENVOY_SESSION_ID or CLAUDE_CODE_SESSION_ID"] : [env.DISPATCH_SESSION_ID, "DISPATCH_SESSION_ID"];
   if (sessionId === undefined) {
     return refuse(`dispatch: ${sessionVariable} is not set, so this call has no session to act as. The host plugin sets it in an agent's shell.`, USAGE, parsed.tool);
   }

@@ -21,6 +21,7 @@ import (
 // countingPublisher records every topic it is asked to publish, answering each with its entry in
 // failTopics, or else with fail (nil publishes).
 type countingPublisher struct {
+	publishOnly
 	mu         sync.Mutex
 	fail       error
 	failTopics map[string]error
@@ -37,9 +38,16 @@ func (p *countingPublisher) Publish(item contracts.Envelope) error {
 	return p.fail
 }
 
-func (p *countingPublisher) Window() bus.Sender { return p }
+func (p *countingPublisher) WindowUntil(deadline func() time.Time) bus.Sender {
+	return deadlineWindow{Sender: p, deadline: deadline}
+}
 
 func (p *countingPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	return answered(p.Publish(item))
+}
+
+// Request takes a role forward by its envelope's topic, the role's, as Publish takes a publish.
+func (p *countingPublisher) Request(_ string, item contracts.Envelope, _ bus.RequestOptions) <-chan error {
 	return answered(p.Publish(item))
 }
 
@@ -64,36 +72,52 @@ func seedThreeDestinationEvent(t *testing.T, database *store.Store, broker *even
 	})
 }
 
-// firstAttempt waits for the outbox's first attempt at event to be backed off.
-func firstAttempt(t *testing.T, database *store.Store, event model.Event) {
-	t.Helper()
-	waitFor(t, 5*time.Second, "the first attempt backed off", func() bool {
-		_, attempts := publishedDestinations(t, database, event.ID)
-		return attempts > 0
-	})
-}
-
-// A publish that fails for the connection (NATS unreachable, so each publish waits out its window)
-// ends the attempt at its first destination: the event's other destinations would each wait out
-// the same window, stalling every event queued behind it.
-func TestAConnectionFailureEndsTheAttemptAtItsFirstDestination(t *testing.T) {
+// A send that finds NATS unreachable (bus.ErrUnavailable) stops the batch: the sends already made
+// are answered, nothing further is sent - not the next event of a chain, nor any later one - and
+// the event is released with no attempt counted, to be sent again when a wake comes (a reconnect),
+// rather than sent again and again while NATS stays unreachable.
+func TestAnUnreachableNATSReleasesTheBatchAndSendsNothingAfterIt(t *testing.T) {
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	event := seedThreeDestinationEvent(t, database, broker)
-	publisher := &countingPublisher{fail: errors.New("bus: waiting for NATS to reconnect: context deadline exceeded")}
+	next := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: new("T-1"), Body: "Next"},
+	})
+	unreachable := fmt.Errorf("bus: %w: waiting for NATS to reconnect: context deadline exceeded", bus.ErrUnavailable)
+	publisher := &countingPublisher{fail: unreachable}
 	stop := run(t, database, publisher, broker)
 	defer stop()
 
-	firstAttempt(t, database, event)
-	if topics := publisher.attempted(); len(topics) != 1 {
-		t.Fatalf("one attempt published %v while NATS was unreachable, want only its first destination", topics)
+	waitFor(t, 5*time.Second, "the first event's three destinations tried", func() bool { return len(publisher.attempted()) >= 3 })
+	// The hold's first scan and the LISTEN connection's catch-up each wake one scan; after them
+	// nothing does.
+	time.Sleep(500 * time.Millisecond)
+	settled := len(publisher.attempted())
+	time.Sleep(time.Second)
+	topics := publisher.attempted()
+	if len(topics) != settled {
+		t.Fatalf("sent %d more envelopes with no wake while NATS was unreachable", len(topics)-settled)
+	}
+	firstHeads := []string{"notifications.dispatch.issue.T-1.comment.created", roleTopic, "notifications.agent.writer"}
+	for index, topic := range topics {
+		if topic != firstHeads[index%len(firstHeads)] {
+			t.Fatalf("sent %v while NATS was unreachable, want only the first event's three chain heads at each scan", topics)
+		}
+	}
+	for _, id := range []int64{event.ID, next.ID} {
+		destinations, attempts := publishedDestinations(t, database, id)
+		if len(destinations) != 0 || attempts != 0 || publishedAt(t, database, id) != nil {
+			t.Fatalf("event %d: published_destinations %v, attempt_count %d, published %v, want it released untouched",
+				id, destinations, attempts, publishedAt(t, database, id) != nil)
+		}
 	}
 }
 
-// A batch whose record write fails is left as a process that died before the write leaves it:
-// claimed, unmarked and with nothing recorded, so it is published again only once claimWindow
-// lapses (recordBatch), not at every scan while the store is failing.
-func TestABatchWhoseRecordWriteFailsStaysClaimedAndUnmarked(t *testing.T) {
+// A batch whose record write fails is left as it was read: nothing about it is recorded, no
+// attempt is counted, and once the store records again the event is published with every
+// destination it reached.
+func TestABatchWhoseRecordWriteFailsIsLeftAsItWasRead(t *testing.T) {
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	event := seedThreeDestinationEvent(t, database, broker)
@@ -106,31 +130,33 @@ func TestABatchWhoseRecordWriteFailsStaysClaimedAndUnmarked(t *testing.T) {
 		t.Fatalf("make the record write fail: %v", err)
 	}
 	publisher := &countingPublisher{}
-	sent := time.Now()
 	stop := run(t, database, publisher, broker)
 	defer stop()
 
-	waitFor(t, 5*time.Second, "the event's three destinations sent", func() bool { return len(publisher.attempted()) == 3 })
-	// Three scans' worth: a batch left unclaimed would be sent again at each.
-	for range 3 {
-		broker.Publish(model.Event{})
-	}
-	time.Sleep(200 * time.Millisecond)
-	if topics := publisher.attempted(); len(topics) != 3 {
-		t.Fatalf("published %v, want the three destinations once, the batch then held by its claim", topics)
-	}
+	waitFor(t, 5*time.Second, "the event's three destinations sent", func() bool { return len(publisher.attempted()) >= 3 })
 	destinations, attempts := publishedDestinations(t, database, event.ID)
 	if len(destinations) != 0 || attempts != 0 || publishedAt(t, database, event.ID) != nil {
 		t.Fatalf("published_destinations = %v, attempt_count = %d, published = %v, though the record write failed",
 			destinations, attempts, publishedAt(t, database, event.ID) != nil)
 	}
-	var nextAttempt time.Time
+	var nextAttempt *time.Time
 	if err := database.Pool.QueryRow(context.Background(),
 		`select next_attempt_at from events where id = $1`, event.ID).Scan(&nextAttempt); err != nil {
-		t.Fatalf("read the claim: %v", err)
+		t.Fatalf("read the event's next attempt: %v", err)
 	}
-	if nextAttempt.Before(sent.Add(claimWindow - time.Second)) {
-		t.Fatalf("next_attempt_at = %v, want the claim's, claimWindow past %v", nextAttempt, sent)
+	if nextAttempt != nil {
+		t.Fatalf("next_attempt_at = %v, though the record write failed", *nextAttempt)
+	}
+
+	if _, err := database.Pool.Exec(context.Background(), `drop trigger refuse_destination on events`); err != nil {
+		t.Fatalf("let the record write succeed: %v", err)
+	}
+	broker.Publish(model.Event{})
+	waitFor(t, 5*time.Second, "the event published once the store records again", func() bool {
+		return publishedAt(t, database, event.ID) != nil
+	})
+	if destinations, attempts := publishedDestinations(t, database, event.ID); len(destinations) != 3 || attempts != 0 {
+		t.Fatalf("published_destinations = %v and attempt_count %d, want the three destinations and no attempt", destinations, attempts)
 	}
 }
 
@@ -147,7 +173,7 @@ func publishOnce(t *testing.T, database *store.Store, publisher Publisher, event
 		t.Fatalf("decode payload: %v", err)
 	}
 	route := "role:reviewer"
-	return publish(context.Background(), Deps{Store: database, Publisher: publisher}, event, "", routing{route: &route}, map[string]struct{}{})
+	return publish(context.Background(), withHeldRoles(Deps{Store: database, Publisher: publisher}), event, "", routing{route: &route}, map[string]struct{}{})
 }
 
 func denial(subject string) error {
