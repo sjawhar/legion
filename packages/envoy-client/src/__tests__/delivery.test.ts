@@ -1879,3 +1879,42 @@ describe("renderInbound pictures", () => {
     expect(rendered.pictures).toBeUndefined();
   });
 });
+
+// A body is bounded block by block, so one event carries its first part alone and says so with
+// `body_truncated`. A host reads that off the delivery (`bodyTruncated`), and the rendered card
+// carries the same note the Go deliverer writes, naming the route that answers the whole item.
+describe("a body an event carried only in part", () => {
+  test("a targeted comment delivery carries bodyTruncated and the note", () => {
+    const rendered = renderInbound(
+      JSON.stringify(
+        envelope({
+          source: "dispatch",
+          payload: targetedCommentFrame({
+            ...targetedComment,
+            body: "The first paragraph.",
+            body_truncated: true,
+          }),
+        })
+      ),
+      reader
+    );
+
+    expect(rendered.delivery?.body).toBe("The first paragraph.");
+    expect(rendered.delivery?.bodyTruncated).toBe(true);
+    const decoded = decode(rendered.content) as { envoy: Record<string, unknown> };
+    expect(decoded.envoy.body_note).toBe(
+      `the body is its first part only; read it whole with GET /api/v1/comments/${targetedCommentID}`
+    );
+  });
+
+  test("a delivery whose body rode whole carries neither", () => {
+    const rendered = renderInbound(
+      JSON.stringify(envelope({ source: "dispatch", payload: targetedCommentFrame() })),
+      reader
+    );
+
+    expect(rendered.delivery?.bodyTruncated).toBeUndefined();
+    const decoded = decode(rendered.content) as { envoy: Record<string, unknown> };
+    expect(decoded.envoy.body_note).toBeUndefined();
+  });
+});

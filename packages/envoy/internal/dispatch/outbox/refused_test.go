@@ -78,10 +78,14 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
-// A destination NATS refuses is refused the same way however often the outbox retries it, so it
-// is done: the refusal is logged once, naming the event, the event's other destinations are
-// published, and the event is marked published instead of backing off forever.
-func TestRunTreatsADestinationNATSRefusesAsDone(t *testing.T) {
+// A destination NATS refuses is refused the same way however often the outbox retries it, so
+// the event goes out to it once more with its payload left out (standInEnvelope). This
+// publisher refuses that destination whatever it carries, so the stand-in is refused too and
+// the destination is done: both refusals are logged naming the event, the stand-in's own line
+// says it went out, the event's other destinations are published, and the event is marked
+// published instead of backing off forever. A stand-in the bus takes is in
+// event_share_nats_test.go, against a real NATS server.
+func TestRunSendsAStandInForARefusedDestinationAndIsDoneOnceThatIsRefusedToo(t *testing.T) {
 	var logged lockedBuffer
 	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
 
@@ -102,22 +106,26 @@ func TestRunTreatsADestinationNATSRefusesAsDone(t *testing.T) {
 		return publishedAt(t, database, event.ID) != nil
 	})
 	attempts, published := publisher.snapshot()
-	if attempts[refused] != 1 {
-		t.Fatalf("the refused destination was attempted %d times, want once", attempts[refused])
+	if attempts[refused] != 2 {
+		t.Fatalf("the refused destination was attempted %d times, want twice: the event, then its stand-in", attempts[refused])
 	}
 	if strings.Join(published, ",") != "notifications.role.reviewer" {
 		t.Fatalf("published %v, want the role route past the refused destination", published)
 	}
-	lines := 0
+	refusals, standIns := 0, 0
 	for _, line := range strings.Split(logged.String(), "\n") {
+		if !strings.Contains(line, fmt.Sprintf("event_id=%d", event.ID)) || !strings.Contains(line, refused) {
+			continue
+		}
 		if strings.Contains(line, "dispatch outbox: destination refused") {
-			lines++
-			if !strings.Contains(line, fmt.Sprintf("event_id=%d", event.ID)) || !strings.Contains(line, refused) {
-				t.Fatalf("refusal line %q does not name the event and its topic", line)
-			}
+			refusals++
+		}
+		if strings.Contains(line, "dispatch outbox: a stand-in went out with the payload left out") {
+			standIns++
 		}
 	}
-	if lines != 1 {
-		t.Fatalf("logged %d refusal lines, want one:\n%s", lines, logged.String())
+	if refusals != 2 || standIns != 1 {
+		t.Fatalf("logged %d refusal lines and %d stand-in lines naming the event and its topic, want two and one:\n%s",
+			refusals, standIns, logged.String())
 	}
 }

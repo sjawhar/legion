@@ -410,6 +410,9 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		if summary == "" {
 			summary = fmt.Sprintf("Accepted suggestion: %q → %q", comment.Anchor.Quote, comment.Suggestion.ReplaceWith)
 		}
+		// The version's name rides the artifact.version event, so it takes the part an event
+		// carries: a comment body is bounded block by block and can be far longer than that.
+		summary, _ = model.EventBody(summary)
 		named, err := s.deps.Docs.NamedVersion(documentCtx, comment.Anchor.ArtifactID, summary, actor)
 		if err != nil {
 			s.writeHandlerError(w, err)

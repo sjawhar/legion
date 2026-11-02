@@ -1,12 +1,14 @@
 import type { ReactNode } from "react";
+import { Link } from "react-router-dom";
 
 import type { Event } from "../../api/types";
-import { textMutedOnSurface, textPrimaryOnSurface } from "../../theme/classes";
+import { linkText, textMutedOnSurface, textPrimaryOnSurface } from "../../theme/classes";
 import { AskOptionList } from "../inbox/AskOptionList";
 import { eventDescription } from "../issue/event-description";
 import { AgentParts, AskResolutionLine } from "../refs/AgentName";
 import { askResolutionReason } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
+import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 
 type AskEvent = Extract<Event, { type: "ask.opened" | "ask.answered" | "ask.resolved" }>;
@@ -94,7 +96,30 @@ export function EventBody({
     event.type === "comment.created" ||
     event.type === "comment.answered"
   ) {
-    return <MarkdownBody markdown={event.payload.body} onRendered={onRendered} />;
+    const message = event.type.startsWith("message.");
+    // A body is bounded block by block, so one event carries its first part alone and says so
+    // (`body_truncated`). The reader is given the text the event holds and the item's own page,
+    // which reads the stored body whole.
+    const whole =
+      event.payload.body_truncated === true && event.issue_key !== null
+        ? buildIssuePath({
+            id: event.payload.id,
+            key: event.issue_key,
+            kind: message ? "message" : "comment",
+          })
+        : undefined;
+    return (
+      <>
+        <MarkdownBody markdown={event.payload.body} onRendered={onRendered} />
+        {whole === undefined ? null : (
+          <p className="mt-1 text-xs">
+            <Link className={`dispatch-inline-link underline ${linkText}`} to={whole}>
+              {message ? "Read the whole message" : "Read the whole comment"}
+            </Link>
+          </p>
+        )}
+      </>
+    );
   }
   return (
     <p className={`font-medium ${textPrimaryOnSurface}`}>

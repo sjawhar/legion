@@ -8,6 +8,10 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
+
+	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 // Actor identifies the user or agent session that caused a change. Service is
@@ -1511,12 +1515,52 @@ type ChangedReference struct {
 	Ref        string  `json:"ref,omitempty"`
 }
 
+// EventBody is the body an event carries and whether that is only its first part. A body is
+// bounded block by block now (itemblocks.Check, contracts.DispatchBlockUnits on each block and
+// contracts.DispatchItemBlocks on how many blocks it holds), so one body can be far longer than
+// any single NATS payload: an event carries the first contracts.DispatchEventBodyMax UTF-16
+// units of it and says so, and every reader gets the rest from the server by reading the item
+// itself (GET /api/v1/comments/{id}, GET /api/v1/messages/{id}).
+//
+// A body of at most that many units rides whole and answers false. A longer one is cut at the
+// last blank line inside the bound, else at the last line break inside it, else at the last
+// character boundary, and answers true; a cut that would leave nothing falls through to the rule
+// after it. The walk reads whole characters, so a character whose UTF-16 form is a surrogate
+// pair is carried whole or not at all. A byte that is not valid UTF-8 reads as U+FFFD and counts
+// as the one unit the JSON encoder writes for it, as itemblocks counts it.
+func EventBody(body string) (string, bool) {
+	units, end := 0, -1
+	for at := 0; at < len(body); {
+		r, size := utf8.DecodeRuneInString(body[at:])
+		if units+utf16.RuneLen(r) > contracts.DispatchEventBodyMax {
+			end = at
+			break
+		}
+		at += size
+		units += utf16.RuneLen(r)
+	}
+	if end < 0 {
+		return body, false
+	}
+	head := body[:end]
+	if cut := strings.LastIndex(head, "\n\n"); cut > 0 {
+		return head[:cut], true
+	}
+	if cut := strings.LastIndexByte(head, '\n'); cut > 0 {
+		return head[:cut], true
+	}
+	return head, true
+}
+
 // CommentEventPayload is the wire payload of comment.* and suggestion.* events:
 // the comment's own fields plus the anchored artifact's name. Comment is
 // embedded so the JSON stays flat, which is the shape every consumer reads.
 type CommentEventPayload struct {
 	Comment
-	ArtifactName string `json:"artifact_name"`
+	// BodyTruncated is that Body is the first part of the comment's body and not all of it
+	// (EventBody). A reader that needs the rest reads GET /api/v1/comments/{id}.
+	BodyTruncated bool   `json:"body_truncated,omitempty"`
+	ArtifactName  string `json:"artifact_name"`
 	// ProjectKey and ArtifactSlug identify the document owning an artifact comment,
 	// including direct author routes whose topic no longer carries document details.
 	ProjectKey   string `json:"project_key,omitempty"`
@@ -1623,7 +1667,10 @@ type MessageDelivery struct {
 // render "re: <preview>" without a second lookup.
 type MessageEventPayload struct {
 	Message
-	ReplyBody string `json:"reply_body,omitempty"`
+	// BodyTruncated is that Body is the first part of the message's body and not all of it
+	// (EventBody). A reader that needs the rest reads GET /api/v1/messages/{id}.
+	BodyTruncated bool   `json:"body_truncated,omitempty"`
+	ReplyBody     string `json:"reply_body,omitempty"`
 	// ThreadTarget is the target of the reply's thread root: the conversation the reply
 	// lands in, for a consumer that groups a thread under its root. A session replying to a
 	// message aimed at that session inherits no target of its own (the target would be

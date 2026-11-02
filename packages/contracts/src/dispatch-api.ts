@@ -1231,6 +1231,26 @@ export interface ThreadLoginsPayload {
   readonly thread_logins?: string[];
 }
 
+/** What of an item an event carries, on the `comment.*`, `suggestion.*` and `message.*` payloads.
+ *
+ *  `body_truncated` is that `body` is the first part of the item's body and not all of it. A
+ *  comment, comment edit, message or broadcast body is bounded block by block
+ *  (`DISPATCH_BLOCK_UNITS` on each block, `DISPATCH_ITEM_BLOCKS` on how many it holds), so one
+ *  body can be far longer than the `DISPATCH_EVENT_BODY_MAX` UTF-16 units an event carries, and
+ *  the rest is one read away: `GET /api/v1/comments/{id}` or `GET /api/v1/messages/{id}`. Envoy's
+ *  webhook normalizer writes a field of the same name, a string (`"true"`), on the payload of a
+ *  GitHub review whose body it cut; that is another payload and another field, and a reader must
+ *  not take one for the other.
+ *
+ *  `payload_omitted` is that the message bus refused this event whole, so Dispatch's outbox
+ *  published a stand-in in its place: the payload holds the original's top-level fields that are
+ *  short enough to send and nothing else, so `body` and every other long field is absent. The
+ *  item itself answers the rest. */
+export interface CarriedBodyPayload {
+  readonly body_truncated?: boolean;
+  readonly payload_omitted?: boolean;
+}
+
 /** What an `issue.created`, `issue.updated` or `issue.closed` write changed, read in its own
  *  transaction. Each field is absent from every other `issue.*` type and from an event written
  *  before the fields existed, which a reader takes as "anything may have changed". */
@@ -1441,6 +1461,7 @@ export interface AcceptSuggestionResponse extends Comment {
  */
 export interface CommentEventPayload
   extends Omit<Comment, "mentions" | "deliveries">,
+    CarriedBodyPayload,
     ReferenceChangesPayload,
     ThreadLoginsPayload {
   readonly mentions?: CommentMention[];
@@ -1773,7 +1794,11 @@ export interface ChangedReference {
 /** `thread_logins` (the message's thread root, up `in_reply_to`) is carried by an issue message's
  *  `message.created` and `message.answered`; a direct (issue-less) conversation has no Replies
  *  thread, so its messages carry none. */
-export interface MessageEventPayload extends Message, ReferenceChangesPayload, ThreadLoginsPayload {
+export interface MessageEventPayload
+  extends Message,
+    CarriedBodyPayload,
+    ReferenceChangesPayload,
+    ThreadLoginsPayload {
   /** First 160 characters of the reply target's body, or of the block it names (`reply_block`);
    *  empty otherwise. */
   readonly reply_body?: string;
@@ -3473,6 +3498,9 @@ export const CommentEventPayloadSchema = z
     project_key: z.string().optional(),
     artifact_slug: z.string().optional(),
     body: z.string().optional(),
+    // `CarriedBodyPayload` states what these two mean and who answers the rest.
+    body_truncated: z.boolean().optional(),
+    payload_omitted: z.boolean().optional(),
     reply_to: z.string().nullish(),
     ask_id: z.string().nullish(),
     ask_question: z.string().optional(),
@@ -3508,6 +3536,9 @@ export const CommentEventPayloadSchema = z
 export const MessageEventPayloadSchema = z.object({
   id: z.string().optional(),
   body: z.string().optional(),
+  // `CarriedBodyPayload` states what these two mean and who answers the rest.
+  body_truncated: z.boolean().optional(),
+  payload_omitted: z.boolean().optional(),
   target: z.string().nullish(),
   in_reply_to: z.string().nullish(),
   reply_body: z.string().optional(),

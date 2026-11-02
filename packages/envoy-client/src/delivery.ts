@@ -95,6 +95,10 @@ export type DispatchDelivery = {
   readonly replyFields: Readonly<Record<string, string>>;
   readonly issueKey: string | null;
   readonly body: string;
+  /** `body` is the first part of the item's body and not all of it, as the event payload's
+   *  `body_truncated` says (`CarriedBodyPayload` in `@legion/contracts`). A reader that needs
+   *  the rest reads the item itself through `DispatchClient`. */
+  readonly bodyTruncated?: boolean;
   /** The broadcast a message frame says its message is one recipient's copy of, when it names
    *  one. The frame is untrusted: this can only rule a user turn out, never in. */
   readonly broadcastId?: string;
@@ -494,6 +498,128 @@ function eventPictures(event: DispatchEvent): string[] {
     }
   }
   return typeof text === "string" ? pictureAddresses(text) : [];
+}
+
+/** The comment or message a Dispatch event names, as the item whose whole body a reader can go
+ *  and read. */
+export interface CarriedItem {
+  readonly resource: "comment" | "message";
+  readonly id: string;
+  readonly issueKey: string | null;
+}
+
+/** The item a `comment.*`, `suggestion.*` or `message.*` event names; undefined for every other
+ *  event, and for one whose payload names no id. */
+export function carriedItem(
+  event: Pick<DispatchEvent, "type" | "issue_key"> & { readonly payload: unknown }
+): CarriedItem | undefined {
+  const resource =
+    event.type.startsWith("comment.") || event.type.startsWith("suggestion.")
+      ? ("comment" as const)
+      : event.type.startsWith("message.")
+        ? ("message" as const)
+        : undefined;
+  if (resource === undefined || !isObject(event.payload)) return undefined;
+  const id = event.payload.id;
+  if (typeof id !== "string" || id === "") return undefined;
+  return { resource, id, issueKey: event.issue_key };
+}
+
+/** Whether an event payload says the body on it is the item's first part only
+ *  (`CarriedBodyPayload.body_truncated` in `@legion/contracts`). */
+export function bodyWasCut(payload: unknown): boolean {
+  return isObject(payload) && payload.body_truncated === true;
+}
+
+/** The Dispatch route that answers the whole item an event names. */
+function wholeItemRoute(item: CarriedItem): string {
+  return `GET /api/v1/${item.resource === "comment" ? "comments" : "messages"}/${item.id}`;
+}
+
+/** The note a reader is given when an event carries only the first part of an item's body: the
+ *  same sentence the Go deliverer writes as its `Note:` line (`internal/session/session.go`).
+ *  Undefined when the event says nothing was cut. */
+function carriedBodyNote(event: DispatchEvent): string | undefined {
+  if (!bodyWasCut(event.payload)) return undefined;
+  const item = carriedItem(event);
+  return item === undefined
+    ? "the body is its first part only"
+    : `the body is its first part only; read it whole with ${wholeItemRoute(item)}`;
+}
+
+/** The whole body of a comment or message, read from the server. Undefined when the read fails
+ *  or its answer does not hold the item, so the caller keeps the part its event carried: a body
+ *  the server will not answer is still better read in part than not at all. A direct message,
+ *  which belongs to no issue, is read through the session it was delivered to. */
+export async function wholeCarriedBody(
+  client: DispatchClient,
+  item: CarriedItem,
+  session?: string
+): Promise<string | undefined> {
+  try {
+    if (item.resource === "comment") {
+      const read = await client.getComment(item.id);
+      return [read.comment, ...read.replies].find((comment) => comment.id === item.id)?.body;
+    }
+    const read =
+      item.issueKey === null
+        ? session === undefined
+          ? undefined
+          : await client.getMessageThread(item.id, session)
+        : await client.getMessage(item.issueKey, item.id);
+    return read === undefined
+      ? undefined
+      : [read.message, ...read.replies].find((message) => message.id === item.id)?.body;
+  } catch {
+    return undefined;
+  }
+}
+
+/** `raw`, one inbound envelope's JSON, with the first part of a body the Dispatch event it
+ *  carries replaced by the whole body the server answers, and the `body_truncated` that said so
+ *  dropped. A body is bounded block by block, so one can be far longer than an event carries
+ *  (`CarriedBodyPayload` in `@legion/contracts`), and a host that prompts its agent with the
+ *  event alone would hand it a body that stops mid-thought.
+ *
+ *  `raw` comes back unchanged when nothing was cut, when the host has no Dispatch client, and
+ *  when the read fails: the agent is then handed the part the event carried, with the note that
+ *  says it is a part. */
+export async function withWholeEventBody(
+  raw: string,
+  dispatchClient: () => DispatchClient | undefined,
+  session?: string
+): Promise<string> {
+  let envelope: unknown;
+  try {
+    envelope = JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+  if (!isObject(envelope) || typeof envelope.payload !== "string") return raw;
+  let frame: unknown;
+  try {
+    frame = JSON.parse(envelope.payload);
+  } catch {
+    return raw;
+  }
+  if (!isObject(frame)) return raw;
+  // A mention delivery frame wraps the event; every other Dispatch envelope carries it flat.
+  const event = isObject(frame.event) ? frame.event : frame;
+  if (!isObject(event.payload) || !bodyWasCut(event.payload)) return raw;
+  if (typeof event.type !== "string") return raw;
+  const issueKey = typeof event.issue_key === "string" ? event.issue_key : null;
+  const item = carriedItem({ type: event.type, issue_key: issueKey, payload: event.payload });
+  if (item === undefined) return raw;
+  const client = dispatchClient();
+  if (client === undefined) return raw;
+  const body = await wholeCarriedBody(client, item, session);
+  if (body === undefined) return raw;
+  const { body_truncated: _cut, ...carried } = event.payload;
+  const whole = { ...event, payload: { ...carried, body } };
+  return JSON.stringify({
+    ...envelope,
+    payload: JSON.stringify(isObject(frame.event) ? { ...frame, event: whole } : whole),
+  });
 }
 
 export function senderLabel(envelope: DeliveryEnvelope): string {
@@ -912,6 +1038,9 @@ export function renderInbound(
   let rejectedDelivery: DispatchDelivery | undefined;
   let malformedDelivery = false;
   let pictures: string[] = [];
+  // The note a cut body earns on the rendered record, the one the Go deliverer writes as its
+  // `Note:` line (`internal/session/session.go`); undefined when nothing was cut.
+  let bodyNote: string | undefined;
   let inReplyTo = envelope.in_reply_to;
   // On an ask event the payload is the ask itself, whose author is another follower's
   // session when this session merely replied; naming it is not a spoof to flag.
@@ -1013,6 +1142,7 @@ export function renderInbound(
               replyFields: {},
               issueKey: frame.event.issue_key,
               body: message.data.body,
+              ...(message.data.body_truncated === true ? { bodyTruncated: true } : {}),
               ...(typeof message.data.broadcast_id === "string"
                 ? { broadcastId: message.data.broadcast_id }
                 : {}),
@@ -1041,6 +1171,7 @@ export function renderInbound(
               replyFields: { target: requested.data.target },
               issueKey: frame.event.issue_key,
               body: comment.data.body,
+              ...(comment.data.body_truncated === true ? { bodyTruncated: true } : {}),
             };
           }
         }
@@ -1064,6 +1195,7 @@ export function renderInbound(
           ...(compactRecord ?? { payload: dispatchPayloadForReader(frame.event, sessionID) }),
         };
         dispatchActor = frame.event.actor;
+        bodyNote = carriedBodyNote(frame.event);
         pictures = eventPictures(frame.event);
         if (frame.event.type === "artifact.human_edited") {
           const edit = ArtifactHumanEditedPayloadSchema.safeParse(frame.event.payload);
@@ -1158,6 +1290,7 @@ export function renderInbound(
           ...(summaryIsHead ? {} : { summary: payloadSummary }),
           ...(message === undefined ? {} : { message }),
         }),
+    ...(bodyNote === undefined ? {} : { body_note: bodyNote }),
     ...(foreignSession === undefined
       ? {}
       : {

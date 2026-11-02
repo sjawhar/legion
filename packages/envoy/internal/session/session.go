@@ -207,6 +207,18 @@ func (d Deliverer) Text(item contracts.Envelope) string {
 	if messageRendered {
 		lines = append(lines, "Message:", item.Payload)
 	}
+	if carried := carriedPayload(item); carried.bodyTruncated || carried.payloadOmitted {
+		if carried.bodyTruncated {
+			line := "Note: the body is its first part only"
+			if carried.route != "" {
+				line += "; read it whole with " + carried.route
+			}
+			lines = append(lines, line)
+		}
+		if carried.payloadOmitted {
+			lines = append(lines, "Note: this event was too large for the message bus, so it carries its short fields only")
+		}
+	}
 	if foreign := foreignSession(item); foreign != "" {
 		sender := item.SourceSession
 		if sender == "" {
@@ -237,6 +249,57 @@ func foreignSession(item contracts.Envelope) string {
 		}
 	}
 	return ""
+}
+
+// carried is what a Dispatch event says about the payload the envelope carries: bodyTruncated,
+// the body on it is the item's first part only, and payloadOmitted, the event was published as
+// a stand-in because the message bus refused it whole, so its payload holds short fields alone.
+// route is the Dispatch route that answers the whole item, "" when the event names none.
+type carried struct {
+	bodyTruncated  bool
+	payloadOmitted bool
+	route          string
+}
+
+// carriedPayload reads those two facts off item. Only Dispatch writes them, so no other
+// source's payload is decoded, and a payload that is not a Dispatch event decodes to nothing
+// said. A mention delivery frame wraps the event under `event`
+// (api/comment_delivery.go, api/message_delivery.go); every other Dispatch envelope carries the
+// event flat (outbox's envelope), and one decode reads either.
+func carriedPayload(item contracts.Envelope) carried {
+	if item.Source != "dispatch" || !strings.HasPrefix(item.Payload, "{") {
+		return carried{}
+	}
+	type event struct {
+		Type    string `json:"type"`
+		Payload struct {
+			ID             string `json:"id"`
+			BodyTruncated  bool   `json:"body_truncated"`
+			PayloadOmitted bool   `json:"payload_omitted"`
+		} `json:"payload"`
+	}
+	var frame struct {
+		event
+		Event *event `json:"event"`
+	}
+	if err := json.Unmarshal([]byte(item.Payload), &frame); err != nil {
+		return carried{}
+	}
+	read := frame.event
+	if frame.Event != nil {
+		read = *frame.Event
+	}
+	answer := carried{bodyTruncated: read.Payload.BodyTruncated, payloadOmitted: read.Payload.PayloadOmitted}
+	if read.Payload.ID == "" {
+		return answer
+	}
+	switch {
+	case strings.HasPrefix(read.Type, "comment."), strings.HasPrefix(read.Type, "suggestion."):
+		answer.route = "GET /api/v1/comments/" + read.Payload.ID
+	case strings.HasPrefix(read.Type, "message."):
+		answer.route = "GET /api/v1/messages/" + read.Payload.ID
+	}
+	return answer
 }
 
 // Push posts item to sessionID's serving port, the prompt_async push DeliverWithResultForEntry makes

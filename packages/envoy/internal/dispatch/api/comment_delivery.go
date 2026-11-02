@@ -95,9 +95,13 @@ func (s *server) sendResolvedDelivery(
 	if target.Delivery == "btw" {
 		expectsReply = "required"
 	}
+	// Message is the body a second time, beside the frame, and the listener puts it on the
+	// envelope: it takes the part an event carries (model.EventBody), as the frame's own copy
+	// does, so one send never carries a body twice at two lengths.
+	carried, _ := model.EventBody(body)
 	send, err := s.deps.Envoy.Send(ctx, dispatchenvoy.SendInput{
 		TargetSession:  *target.SessionID,
-		Message:        body,
+		Message:        carried,
 		Payload:        frame,
 		IdempotencyKey: idempotencyKey,
 		Urgency:        deref(urgency),

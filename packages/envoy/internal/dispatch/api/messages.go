@@ -551,12 +551,16 @@ func (t messageReplyThread) payload(
 	message model.Message,
 	changes model.ReferenceChanges,
 ) model.MessageEventPayload {
-	return model.MessageEventPayload{
+	payload := model.MessageEventPayload{
 		Message:                 message,
 		ReferenceChangesPayload: model.NewReferenceChangesPayload(changes),
 		ReplyBody:               t.ReplyBody,
 		ThreadTarget:            t.ThreadTarget,
 	}
+	// A body is bounded block by block, so it can be longer than one event carries: the event
+	// takes its first part and says so, and a reader gets the rest from the message itself.
+	payload.Body, payload.BodyTruncated = model.EventBody(message.Body)
+	return payload
 }
 
 // loadMessageReplyThread derives that for a stored message, for a caller that did not derive

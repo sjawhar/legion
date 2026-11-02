@@ -14,6 +14,7 @@ import type {
   Event,
 } from "@legion/contracts";
 import { overCapMessage, SESSION_ID_PATTERN } from "@legion/contracts";
+import { bodyWasCut, carriedItem, wholeCarriedBody } from "./delivery";
 import type { DispatchClient } from "./dispatch-http";
 import { parseDispatchRef } from "./dispatch-owner";
 import {
@@ -264,6 +265,25 @@ export function eventTexts(event: Event): DatedText[] {
   return texts
     .filter((text): text is string => typeof text === "string" && text !== "")
     .map((text) => ({ text, at: event.created_at }));
+}
+
+/** The texts the events of a read carry, dated, with a body the event carried only in part
+ *  (`body_truncated`) read whole from the server first. A picture an author embedded past the
+ *  cut is named nowhere in the event, so listing an issue's pictures off the events alone would
+ *  lose it. A read that fails leaves that event the part it carried. */
+export async function eventTextsWhole(
+  client: DispatchClient,
+  events: readonly Event[]
+): Promise<DatedText[]> {
+  const whole = await Promise.all(
+    events.map(async (event) => {
+      const item = bodyWasCut(event.payload) ? carriedItem(event) : undefined;
+      if (item === undefined) return eventTexts(event);
+      const body = await wholeCarriedBody(client, item);
+      return body === undefined ? eventTexts(event) : [{ text: body, at: event.created_at }];
+    })
+  );
+  return whole.flat();
 }
 
 /** Each picture a read shows, `PICTURES_SHOWN_MAX` and `PICTURES_SHOWN_MAX_BYTES` at most. */

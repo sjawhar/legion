@@ -105,7 +105,7 @@ import {
   type AgentArtifactRef,
   askTexts,
   datedBodies,
-  eventTexts,
+  eventTextsWhole,
   type LocalPicture,
   localPictures,
   type PicturesRead,
@@ -4865,7 +4865,7 @@ export async function executeDispatchTool(
       };
       if (ownerArguments.ref?.kind === "log") {
         const read = await client.read(issueKey, readEvents);
-        const pictures = await picturesOf(read.events.flatMap(eventTexts));
+        const pictures = await picturesOf(await eventTextsWhole(client, read.events));
         return {
           text: [logSummary(read.issue, read.events), ...pictures.lines].join("\n"),
           details: { issue: read.issue.key },
@@ -4893,7 +4893,7 @@ export async function executeDispatchTool(
         liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
         picturesOf([
           ...read.issue.open_asks.map((ask) => ({ text: ask.question, at: ask.created_at })),
-          ...read.events.flatMap(eventTexts),
+          ...(await eventTextsWhole(client, read.events)),
         ]),
       ]);
       return {
