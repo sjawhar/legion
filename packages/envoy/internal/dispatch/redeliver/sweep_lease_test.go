@@ -185,26 +185,34 @@ func (e *sweepEnds) times() []time.Time {
 	return slices.Clone(e.ends)
 }
 
-// The running sweep sweeps at start and then waits the interval plus up to a tenth of it again
-// after every sweep (duty.Jittered), drawn afresh each period, so two processes started together
-// drift apart rather than reaching the lease in step for the life of both. With the draw fixed at
-// its smallest and at its largest, the first sweep lists before any wait could have ended, and
-// each later one lists, measured from the end of the sweep before it, after exactly the interval
-// plus the draw - at least one interval, a plain ticker's being the interval less the sweep's own
-// time, and under 1.1 of one - allowing a little for the lease's own statements between the two.
-// Each wait of at least one interval reaches the next period, so every sweep runs and none is
-// skipped as served.
-func TestTheRunningSweepSweepsAtStartThenWaitsBetweenOneAndOnePointOneIntervals(t *testing.T) {
+// The running sweep lists at start and then waits the interval plus a draw in [0, interval/10)
+// after every sweep, which is what duty.Jittered makes. The draw is taken afresh every period, so
+// two processes started together drift apart rather than reaching the lease in step for the life
+// of both. Each row pins the draw by counting the calls the draw FixJitter installs receives,
+// rather than by the clock: Run takes one draw for every timer it arms, and each draw is over a
+// tenth of the interval. A Run that never draws, or that draws once and reuses the value for
+// every period, fails that count. The count has no upper bound, because Run arms one more timer
+// after the last sweep this test observes and duty.Exclusive may pass over a period. The wall
+// clock then proves what the count cannot: the first sweep lists before the shortest wait could
+// have ended, so the first sweep is not delayed, and each later sweep lists at least the
+// interval plus the draw after the sweep before it ended, so every sweep reaches the next period
+// and none is skipped as served.
+func TestTheRunningSweepSweepsAtStartThenDrawsItsWaitAfreshEachPeriod(t *testing.T) {
 	const (
 		interval = time.Second
 		sweeps   = 4
-		// The allowance covers the lease's statements between one sweep's summary and the next
-		// one's listing: the record of the pass and the unlock, then the next take and the
-		// period read. Those statements cost single-digit milliseconds on an idle machine, 2.72ms
-		// to 6.94ms over twelve waits in six runs. The rest of the slack is for a loaded runner
-		// that stalls between the summary and the listing. It stays under one interval, so a
-		// sweep that misses a whole period still fails the test.
+		// The allowance is slack above the wait this row's draw makes, not a pin on the draw: the
+		// draw is pinned by the count of the calls it receives. It covers the lease's statements
+		// between one sweep's summary and the next one's listing - the record of the pass and the
+		// unlock, then the next take and the period read, which cost single-digit milliseconds on
+		// an idle machine, 2.72ms to 6.94ms over twelve waits in six runs - and the rest of it is
+		// for a loaded runner that stalls between the summary and the listing. The lower bound
+		// proves the wait was at least the interval plus the draw; the allowance stays under one
+		// interval, so a sweep that misses a whole period still fails the upper bound.
 		leaseAllowance = interval / 2
+		// hangGuard only stops a hang: it is long enough that a starved runner still reaches its
+		// sweeps, and the waits below are what fail a sweep that ran late.
+		hangGuard = sweeps * 10 * interval
 	)
 	for _, tc := range []struct {
 		name string
@@ -217,7 +225,16 @@ func TestTheRunningSweepSweepsAtStartThenWaitsBetweenOneAndOnePointOneIntervals(
 		t.Run(tc.name, func(t *testing.T) {
 			// Each row opens the pool afresh, which clears the period the row before recorded.
 			leases := redeliverTestLeases(t)
-			redeliver.FixJitter(t, tc.draw)
+			var (
+				drawsMu sync.Mutex
+				draws   []time.Duration
+			)
+			redeliver.FixJitter(t, func(n time.Duration) time.Duration {
+				drawsMu.Lock()
+				draws = append(draws, n)
+				drawsMu.Unlock()
+				return tc.draw(n)
+			})
 			h := newHarness(t)
 			github := &timedGitHub{}
 			ends := &sweepEnds{}
@@ -233,16 +250,30 @@ func TestTheRunningSweepSweepsAtStartThenWaitsBetweenOneAndOnePointOneIntervals(
 				defer close(done)
 				sweeper.Run(ctx, interval, leases)
 			}()
-			for deadline := time.Now().Add(sweeps * 3 * interval); len(ends.times()) < sweeps; {
+			for deadline := time.Now().Add(hangGuard); len(ends.times()) < sweeps; {
 				if time.Now().After(deadline) {
 					cancel()
 					<-done
-					t.Fatalf("%d sweeps in %v, want %d: listings at %v", len(ends.times()), sweeps*3*interval, sweeps, github.times())
+					t.Fatalf("%d sweeps in %v, want %d: listings at %v", len(ends.times()), hangGuard, sweeps, github.times())
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
 			cancel()
 			<-done
+
+			drawsMu.Lock()
+			taken := slices.Clone(draws)
+			drawsMu.Unlock()
+			if len(taken) < sweeps-1 {
+				t.Errorf("the wait was drawn %d times over %d sweeps, want at least %d, one for each wait between them: drawn over %v",
+					len(taken), sweeps, sweeps-1, taken)
+			}
+			for index, n := range taken {
+				if n != interval/10 {
+					t.Errorf("draw %d was taken over %v, want %v, a tenth of the interval: drawn over %v",
+						index+1, n, interval/10, taken)
+				}
+			}
 
 			listings, finished := github.times(), ends.times()
 			if first := listings[0].Sub(started); first >= interval {
@@ -251,8 +282,8 @@ func TestTheRunningSweepSweepsAtStartThenWaitsBetweenOneAndOnePointOneIntervals(
 			for index := 1; index < sweeps; index++ {
 				wait := listings[index].Sub(finished[index-1])
 				if wait < tc.wait || wait >= tc.wait+leaseAllowance {
-					t.Errorf("sweep %d listed %v after sweep %d ended, want %v for this draw, within [%v, %v) with the lease's statements",
-						index+1, wait, index, tc.wait, tc.wait, tc.wait+leaseAllowance)
+					t.Errorf("sweep %d listed %v after sweep %d ended, want at least %v, the interval plus this row's draw, and under %v, where a skipped period would land, with the lease's statements between the two",
+						index+1, wait, index, tc.wait, tc.wait+leaseAllowance)
 				}
 			}
 		})
