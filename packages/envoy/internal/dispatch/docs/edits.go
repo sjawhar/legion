@@ -459,7 +459,7 @@ func operationPreconditionBlocks(tree *batchTree, op model.EditOp) ([]string, er
 }
 
 func quotePreconditionBlock(tree *batchTree, quote string, occurrence *int) ([]string, error) {
-	range_, err := findEditQuote(tree, "find", quote, occurrence)
+	range_, _, err := findEditQuote(tree, "find", quote, occurrence)
 	if err != nil {
 		return nil, err
 	}
@@ -991,7 +991,7 @@ func applyOperation(tree *batchTree, op model.EditOp, budget *pmdoc.WriteBudget)
 		if op.Find == "" {
 			return nil, invalidOp("find")
 		}
-		r, err := findEditQuote(tree, "find", op.Find, op.Occurrence)
+		r, byMarker, err := findEditQuote(tree, "find", op.Find, op.Occurrence)
 		if err != nil {
 			return nil, err
 		}
@@ -1004,7 +1004,7 @@ func applyOperation(tree *batchTree, op model.EditOp, budget *pmdoc.WriteBudget)
 			with = codeReplacement(op.With)
 		} else {
 			var replacement string
-			if replacement, level, err = replacementMarkdown(tree.node, r, op.Find, op.With); err != nil {
+			if replacement, level, err = replacementMarkdown(tree.node, r, op.Find, op.With, byMarker); err != nil {
 				return nil, err
 			}
 			// A task item's text replaced from its start by one opening with a checkbox is the
@@ -1090,7 +1090,7 @@ func applyOperation(tree *batchTree, op model.EditOp, budget *pmdoc.WriteBudget)
 		if op.Find == "" {
 			return nil, invalidOp("find or block")
 		}
-		r, err := findEditQuote(tree, "find", op.Find, op.Occurrence)
+		r, _, err := findEditQuote(tree, "find", op.Find, op.Occurrence)
 		if err != nil {
 			return nil, err
 		}
@@ -1271,10 +1271,11 @@ func anchorField(after bool) string {
 // replacementMarkdown resolves `with` against the marker the matched block already renders.
 // A replace is inline, so a `with` that opens with the block's own marker would write that
 // marker twice (`## ##`, `7. 7\.`, `4. 4\.`, `-    - `). A heading
-// rename is the one shape that keeps working: `find` carried the marker through the match, so
-// an identical one in `with` is the block's, and it is dropped. Every other repetition is
-// refused, and a marker of a different kind stays the literal text it has always been.
-func replacementMarkdown(tree *pmdoc.Node, r pmdoc.Range, find, with string) (text string, level int, err error) {
+// rename is one shape that keeps working: `find` carried the marker through the match, so an
+// identical one in `with` is the block's, and it is dropped. A list item a `find`'s marker
+// selected (byMarker, resolveEditQuote) is the other. Every other repetition is refused, and a
+// marker of a different kind stays the literal text it has always been.
+func replacementMarkdown(tree *pmdoc.Node, r pmdoc.Range, find, with string, byMarker bool) (text string, level int, err error) {
 	own, ok := pmdoc.MarkerAt(tree, r.From)
 	if !ok || own.Kind == pmdoc.MarkerNone {
 		return with, 0, nil
@@ -1295,15 +1296,12 @@ func replacementMarkdown(tree *pmdoc.Node, r pmdoc.Range, find, with string) (te
 		}
 		return with[width:], 0, nil
 	}
-	// A `find` that carried the list item's own kind of marker selected the item by it, as a
-	// heading's marker selects a heading, so the same kind of marker in `with` is the item's and is
-	// dropped. The item keeps its number: a list numbers its items by place. A `find` whose marker
-	// is text the item holds (`1999. was a year`, escaped in markdown) selected nothing by it.
-	if selector, selectorWidth := pmdoc.LeadingBlockMarker(find); selector.Kind == own.Kind {
-		at, ok := pmdoc.ContainingTextblock(tree, r.From)
-		if !ok || !strings.HasPrefix(pmdoc.TextContent(at.Node), strings.TrimSpace(find[:selectorWidth])) {
-			return with[width:], 0, nil
-		}
+	// A list item the `find`'s own marker selected (the find matched no text as written) is
+	// renamed as a heading is, so the marker in `with`, of the item's kind as the selection
+	// required, is the item's and is dropped. The item keeps its number: a list numbers its items
+	// by place. A `find` that matched as text carried its marker as text, and selected nothing.
+	if byMarker {
+		return with[width:], 0, nil
 	}
 	return "", 0, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
 		"with begins with a marker of the same kind as the matched block's own (%s, which the block renders as %q), so the result would carry it twice; omit the marker to replace the block's text, backslash-escape it (%s) to keep prose that merely looks like a marker, or use insert plus delete to change the block's kind, level or number",
@@ -1389,16 +1387,17 @@ func invalidMarkdownOp(field string, err error) error {
 }
 
 // findEditQuote resolves the quote field names, so a miss reports the field the caller wrote. It
-// resolves through the batch's one quote finder over that tree (batchTree.finder).
-func findEditQuote(tree *batchTree, field, quote string, occurrence *int) (pmdoc.Range, error) {
-	r, err := resolveEditQuote(tree, field, quote, occurrence)
+// resolves through the batch's one quote finder over that tree (batchTree.finder). byMarker
+// reports that the quote's leading list marker selected the item it matched (resolveEditQuote).
+func findEditQuote(tree *batchTree, field, quote string, occurrence *int) (r pmdoc.Range, byMarker bool, err error) {
+	r, byMarker, err = resolveEditQuote(tree, field, quote, occurrence)
 	if err != nil {
-		return pmdoc.Range{}, err
+		return pmdoc.Range{}, false, err
 	}
 	if pmdoc.TargetSpansBlocks(tree.node, r) {
-		return pmdoc.Range{}, quoteSpansBlocks(tree, field, quote, r)
+		return pmdoc.Range{}, false, quoteSpansBlocks(tree, field, quote, r)
 	}
-	return r, nil
+	return r, byMarker, nil
 }
 
 // quoteSpansBlocks is the refusal of quote, written in field, whose match r reaches past one
@@ -1413,51 +1412,80 @@ func quoteSpansBlocks(tree *batchTree, field, quote string, r pmdoc.Range) error
 	return refusal
 }
 
-func resolveEditQuote(tree *batchTree, field, quote string, occurrence *int) (pmdoc.Range, error) {
+// resolveEditQuote resolves quote as text the document holds and, when it matches none and opens
+// with a list item's marker, as the list items the marker selects (pmdoc.QuoteFinder.FindListItem),
+// reporting that in byMarker. The selection is a document edit's alone: a comment's or an ask's
+// quote is text the document held, so its marker is text.
+func resolveEditQuote(tree *batchTree, field, quote string, occurrence *int) (r pmdoc.Range, byMarker bool, err error) {
 	finder, err := tree.finder()
 	if err != nil {
-		return pmdoc.Range{}, err
+		return pmdoc.Range{}, false, err
 	}
-	r, err := finder.Find(quote, occurrence, nil)
+	r, err = finder.Find(quote, occurrence, nil)
 	if err == nil {
-		return r, nil
+		return r, false, nil
 	}
+	var missing *pmdoc.ErrQuoteNotFound
+	if errors.As(err, &missing) && missing.Matches == 0 && pmdoc.ParseListItemQuote(quote).Text != "" {
+		selected, selectErr := finder.FindListItem(quote, occurrence)
+		if selectErr == nil {
+			return selected, true, nil
+		}
+		// A selection the occurrence overshoots, or that several items answer, is the quote's
+		// answer; a selection of nothing leaves the miss as text.
+		var selectMissing *pmdoc.ErrQuoteNotFound
+		if !errors.As(selectErr, &selectMissing) || selectMissing.Matches > 0 {
+			err = selectErr
+		}
+	}
+	return pmdoc.Range{}, false, describeQuoteError(tree, field, quote, err)
+}
+
+// describeQuoteError dresses a quote finder's refusal of quote, written in field, for the caller.
+func describeQuoteError(tree *batchTree, field, quote string, err error) error {
 	var missing *pmdoc.ErrQuoteNotFound
 	if errors.As(err, &missing) {
 		if delimiter, unbalanced := pmdoc.UnbalancedInlineMark(quote); unbalanced {
 			// The quote may simply be wrong about the text and merely carry an odd delimiter, so
 			// the nearest blocks that would fix an ordinary miss stay in the message.
-			return pmdoc.Range{}, &ErrInvalidOp{Field: field, Reason: fmt.Sprintf(
+			return &ErrInvalidOp{Field: field, Reason: fmt.Sprintf(
 				"inline marks in %s must be balanced: %q opens a span the quote never closes, so it cannot match the text as rendered; quote the whole marked span or none of it; nearest blocks: %s",
 				field, delimiter, pmdoc.QuoteBlocks(missing.Nearest),
 			)}
 		}
 		if missing.Matches == 0 {
 			if cells := tableRowQuoted(tree.node, quote); len(cells) > 0 {
-				return pmdoc.Range{}, &ErrQuoteNotFound{Quote: quote, Field: field, Cells: cells}
+				return &ErrQuoteNotFound{Quote: quote, Field: field, Cells: cells}
 			}
 		}
-		return pmdoc.Range{}, &ErrQuoteNotFound{Quote: quote, Nearest: missing.Nearest, Matches: missing.Matches}
+		return &ErrQuoteNotFound{Quote: quote, Nearest: missing.Nearest, Matches: missing.Matches}
 	}
 	var ambiguous *pmdoc.ErrTargetAmbiguous
 	if errors.As(err, &ambiguous) {
-		return pmdoc.Range{}, &ErrAnchorAmbiguous{Kind: "quote", Target: quote, Candidates: ambiguous.Candidates}
+		return &ErrAnchorAmbiguous{Kind: "quote", Target: quote, Candidates: ambiguous.Candidates}
 	}
 	if errors.Is(err, pmdoc.ErrTargetSpansBlocks) {
-		return pmdoc.Range{}, &ErrQuoteSpansBlocks{Quote: quote, Field: field}
+		return &ErrQuoteSpansBlocks{Quote: quote, Field: field}
 	}
-	return pmdoc.Range{}, err
+	return err
 }
 
 // tableRowQuoted reads a quote that matched nothing as a table row written in markdown
 // (cellQuoteParts) and finds, in one walk of the document, the first row in document order holding
 // a run of consecutive cells that each hold their part (cellHolds). It answers those cells' texts,
-// one per part and in the parts' order. A quote with no unescaped pipe, or whose parts no run of
-// one row's cells holds, answers none, and its miss reads as any other.
+// one per part and in the parts' order. A quote of fewer than two parts runs across no cell
+// boundary, and one whose parts no run of one row's cells holds answers none: either miss reads as
+// any other.
 func tableRowQuoted(doc *pmdoc.Node, quote string) []string {
 	parts := cellQuoteParts(quote)
-	if len(parts) == 0 {
+	if len(parts) < 2 {
 		return nil
+	}
+	// Each part as the text its cell would show, its inline markdown (emphasis, links, code)
+	// rendered, read once rather than once a cell.
+	shown := make([]string, len(parts))
+	for index, part := range parts {
+		shown[index] = renderedInlineText(part)
 	}
 	var cells []string
 	// Walk stops at the first false, so a row that holds no run returns true and the walk goes on;
@@ -1474,7 +1502,7 @@ func tableRowQuoted(doc *pmdoc.Node, quote string) []string {
 			run := texts[start : start+len(parts)]
 			matched := true
 			for index, part := range parts {
-				if !cellHolds(run[index], part) {
+				if !cellHolds(run[index], part, shown[index]) {
 					matched = false
 					break
 				}
@@ -1489,33 +1517,50 @@ func tableRowQuoted(doc *pmdoc.Node, quote string) []string {
 	return cells
 }
 
-// cellHolds reports whether a cell's text holds part, a piece of a quote: compared with every run
-// of whitespace as one space, and again with the `**` and backticks the quote matcher tolerates
-// taken out, since a quote is written as rendered markdown and a cell's text carries no marks.
-func cellHolds(text, part string) bool {
+// cellHolds reports whether a cell's text holds part, a piece of a quote, or shown, the text that
+// piece renders as, each compared with every run of whitespace as one space. An empty part, the
+// space between two adjacent pipes, is an empty cell and holds only one.
+func cellHolds(text, part, shown string) bool {
 	text = strings.Join(strings.Fields(text), " ")
-	part = strings.Join(strings.Fields(part), " ")
-	if strings.Contains(text, part) {
-		return true
+	if part == "" {
+		return text == ""
 	}
-	bare := strings.NewReplacer("**", "", "`", "").Replace(part)
-	return bare != "" && strings.Contains(text, bare)
+	for _, piece := range []string{part, shown} {
+		piece = strings.Join(strings.Fields(piece), " ")
+		if piece != "" && strings.Contains(text, piece) {
+			return true
+		}
+	}
+	return false
+}
+
+// renderedInlineText is the text inline markdown renders as - `*a*` is `a`, `[x](u)` is `x` - or
+// the markdown itself when the parser refuses it.
+func renderedInlineText(markdown string) string {
+	nodes, err := pmdoc.ParseInline(markdown, pmdoc.NewWriteBudget())
+	if err != nil {
+		return markdown
+	}
+	var text strings.Builder
+	for _, node := range nodes {
+		text.WriteString(pmdoc.TextContent(node))
+	}
+	return text.String()
 }
 
 // cellQuoteParts is quote split as a markdown table row is split into cells: at every pipe after an
 // even run of backslashes (none included), inside code spans and links too, since a row ends a cell
 // there (pmdoc's splitAtEvenEscapedPipes). Each part is trimmed and read as the text its cell would
 // hold, a pipe after an odd run being the pipe a cell holds and each pair of backslashes before a
-// pipe one backslash; empty parts are dropped. A quote with no such pipe is no row, and has no
-// parts.
+// pipe one backslash. An empty part between two pipes is an empty cell and is kept; the empty text
+// before a leading pipe and after a trailing one is no cell and is dropped. A quote with no such
+// pipe is no row, and has no parts.
 func cellQuoteParts(quote string) []string {
 	var parts []string
 	var part strings.Builder
 	split := false
 	flush := func() {
-		if text := strings.TrimSpace(part.String()); text != "" {
-			parts = append(parts, text)
-		}
+		parts = append(parts, strings.TrimSpace(part.String()))
 		part.Reset()
 	}
 	for index := 0; index < len(quote); index++ {
@@ -1544,6 +1589,13 @@ func cellQuoteParts(quote string) []string {
 	flush()
 	if !split {
 		return nil
+	}
+	// The text before a leading pipe and after a trailing one is no cell.
+	if parts[0] == "" {
+		parts = parts[1:]
+	}
+	if len(parts) > 0 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
 	}
 	return parts
 }
@@ -1593,7 +1645,7 @@ func insertTarget(tree *batchTree, field, anchor string, occurrence *int) (pmdoc
 		r, err := valid.BlockRange(blockID)
 		return r, false, err
 	}
-	r, err := resolveEditQuote(tree, field, anchor, occurrence)
+	r, _, err := resolveEditQuote(tree, field, anchor, occurrence)
 	if err != nil {
 		return pmdoc.Range{}, true, err
 	}

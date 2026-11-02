@@ -2462,6 +2462,92 @@ func TestApplyOperationListMarkerQuoteMatchesTheTaskBox(t *testing.T) {
 	}
 }
 
+// A list marker selects an item only for a document edit's find or anchor: a comment's or an ask's
+// quote, and an upload re-anchoring one, read the marker as the text it was, so a cached quote
+// `5. deploy` never lands on an item `1. deploy`.
+func TestAListMarkerSelectsAnItemForADocumentEditAlone(t *testing.T) {
+	tree, err := parseInput("1. deploy\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pmdoc.FindQuote(tree, "5. deploy", nil, nil); !errors.Is(err, pmdoc.ErrTargetNotFound) {
+		t.Fatalf("anchor quote with a list marker = %v, want no match", err)
+	}
+	if _, err := pmdoc.NewQuoteFinder(tree).NearestFirst("5. deploy", 0); !errors.Is(err, pmdoc.ErrTargetNotFound) {
+		t.Fatalf("re-anchoring a quote with a list marker = %v, want no match", err)
+	}
+	if _, err := applyAlone(tree, model.EditOp{Op: "replace", Find: "5. deploy", With: "ship"}); err != nil {
+		t.Fatalf("document edit with a list marker = %v, want it to select the item", err)
+	}
+}
+
+// The selection reads each step of the matcher on its own, item text that opens with punctuation
+// is no marker text, and a find that matched as markup elsewhere selected nothing by its marker.
+func TestAListMarkerSelectionEdgeCases(t *testing.T) {
+	render := func(t *testing.T, out *pmdoc.Node) string {
+		t.Helper()
+		markdown, err := pmdoc.Render(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return markdown
+	}
+	// An exact match in a paragraph does not hide an item the text matches with its whitespace
+	// normalized.
+	tree, err := parseInput("ship now\n\n- ship  now\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := applyAlone(tree, model.EditOp{Op: "replace", Find: "- ship now", With: "- shipped"})
+	if err != nil || !strings.Contains(render(t, out), "- shipped") || !strings.Contains(render(t, out), "ship now\n") {
+		t.Fatalf("list-marker find beside an exact paragraph match = %v, want the item replaced", err)
+	}
+	// Item text that opens with punctuation like a marker's is the item's text.
+	for find, with := range map[string]string{"- -2 degrees": "- -3 degrees", "1. 1.2 release": "1. 1.3 release"} {
+		tree, err := parseInput("- -2 degrees\n\n1. 1.2 release\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := applyAlone(tree, model.EditOp{Op: "replace", Find: find, With: with})
+		if err != nil || !strings.Contains(render(t, out), with) {
+			t.Fatalf("replace %q with %q = %v, want the item's text replaced", find, with, err)
+		}
+	}
+	// A find whose markup matched an unchecked item's text selected nothing by its checked box,
+	// so a with carrying a marker is refused as it always was.
+	tree, err = parseInput("- [ ] **deploy**\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := applyAlone(tree, model.EditOp{Op: "replace", Find: "- [x] **deploy**", With: "- [ ] shipped"}); err == nil {
+		t.Fatal("a checked box matched by markup on an unchecked item = applied, want it refused")
+	}
+}
+
+// A row quote keeps an empty cell between two pipes, one part alone is no row, and a part written
+// with inline markdown matches the text its cell shows.
+func TestARowQuoteReadsEmptyAndFormattedCells(t *testing.T) {
+	tree, err := parseInput("| A | Gap | B |\n| --- | --- | --- |\n| A |  | B |\n| Item | Owner | x |\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for find, cells := range map[string]string{
+		"A | | B":                        `the cells are "A", "", "B"`,
+		"*Item* | [Owner](https://x.test)": `the cells are "Item", "Owner"`,
+	} {
+		_, err := applyAlone(tree, model.EditOp{Op: "replace", Find: find, With: "x"})
+		var missing *ErrQuoteNotFound
+		if !errors.As(err, &missing) || !strings.Contains(missing.Error(), cells) {
+			t.Fatalf("row quote %q = %v, want it to name %s", find, err, cells)
+		}
+	}
+	_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: "| Gap |", With: "x"})
+	var missing *ErrQuoteNotFound
+	if !errors.As(err, &missing) || strings.Contains(missing.Error(), "table cell") {
+		t.Fatalf("one cell between pipes = %v, want the ordinary miss", err)
+	}
+}
+
 // A row quote is split as a markdown row is split: a pipe after an odd run of backslashes is the
 // pipe a cell holds, and one after an even run ends a cell.
 func TestApplyOperationRowQuoteSplitsAtPipesAsARowDoes(t *testing.T) {

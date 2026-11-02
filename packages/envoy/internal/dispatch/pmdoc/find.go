@@ -195,6 +195,28 @@ func (f *QuoteFinder) Find(quote string, occurrence, near *int) (Range, error) {
 	if err != nil {
 		return Range{}, err
 	}
+	return f.choose(quote, matches, occurrence, near)
+}
+
+// FindListItem answers a quote that opens with a list item's marker (ParseListItemQuote) by the
+// items it selects (listItemQuoteMatches), choosing among them as Find chooses among a quote's
+// matches; a quote that selects no item is Find's miss. Only a document edit asks it, after Find
+// matched nothing: a quote a comment or an ask anchors is text the document held, whose marker
+// is text, so no anchor is ever read as a selector.
+func (f *QuoteFinder) FindListItem(quote string, occurrence *int) (Range, error) {
+	if err := f.prepare(); err != nil {
+		return Range{}, err
+	}
+	item := ParseListItemQuote(quote)
+	if item.Text == "" {
+		return Range{}, quoteNotFound(f.doc, quote)
+	}
+	return f.choose(quote, listItemQuoteMatches(f.doc, f.text, item), occurrence, nil)
+}
+
+// choose is the range quote's matches resolve to: the one the occurrence names, the only one, or
+// the one nearest near; otherwise the miss or the ambiguity Find answers.
+func (f *QuoteFinder) choose(quote string, matches []quoteMatch, occurrence, near *int) (Range, error) {
 	doc, text := f.doc, f.text
 	if len(matches) == 0 {
 		return Range{}, quoteNotFound(doc, quote)
@@ -263,11 +285,23 @@ func nearerFirst(near int) func(left, right quoteMatch) int {
 	}
 }
 
-// matches is every match of quote in the finder's document, preparing the document at the first
-// call: a heading quote's headings, otherwise the plain matcher cascade's.
+// matches is every match of quote in the finder's document: a heading quote's headings, otherwise
+// the plain matcher cascade's.
 func (f *QuoteFinder) matches(quote string) ([]quoteMatch, error) {
+	if err := f.prepare(); err != nil {
+		return nil, err
+	}
+	if marker := atxHeadingMarker.FindString(quote); marker != "" && marker != quote {
+		return headingQuoteMatches(f.doc, f.text, quote[len(marker):]), nil
+	}
+	return quoteMatches(f.text, quote), nil
+}
+
+// prepare validates the finder's document and flattens its text at the first call, and answers
+// what that found every call after.
+func (f *QuoteFinder) prepare() error {
 	if f.doc == nil {
-		return nil, fmt.Errorf("%w: FindQuote wants a document", ErrSchema)
+		return fmt.Errorf("%w: FindQuote wants a document", ErrSchema)
 	}
 	if !f.prepared {
 		f.prepared = true
@@ -278,19 +312,7 @@ func (f *QuoteFinder) matches(quote string) ([]quoteMatch, error) {
 			f.text = buildFlattenedText(f.doc)
 		}
 	}
-	if f.err != nil {
-		return nil, f.err
-	}
-	if marker := atxHeadingMarker.FindString(quote); marker != "" && marker != quote {
-		return headingQuoteMatches(f.doc, f.text, quote[len(marker):]), nil
-	}
-	matches := quoteMatches(f.text, quote)
-	if len(matches) == 0 {
-		if item := ParseListItemQuote(quote); item.Text != "" {
-			matches = listItemQuoteMatches(f.doc, f.text, item)
-		}
-	}
-	return matches, nil
+	return f.err
 }
 
 // listItemTaskBox is a task item's box, `[ ]` or `[x]`, opening what follows a list marker: the
@@ -327,13 +349,12 @@ func ParseListItemQuote(quote string) ListItemQuote {
 // its text: the marker selects the item, as a heading quote's marker selects a heading, and the
 // renderer writes it before the item's first paragraph, so the text it is quoted with starts
 // there. The item's number is not matched, only its kind, and a task box only a task item whose
-// box is in that state.
+// box is in that state. Each step of the matcher cascade is kept to those starts before the next
+// is tried, so an exact match elsewhere does not hide an item the text matches with its whitespace
+// normalized.
 func listItemQuoteMatches(doc *Node, text flattenedText, item ListItemQuote) []quoteMatch {
-	candidates := quoteMatches(text, item.Text)
-	if len(candidates) == 0 {
-		return nil
-	}
-	var matches []quoteMatch
+	type start struct{ from, end int }
+	var starts []start
 	walk(doc, func(node *Node, path []int, pos, end int) bool {
 		if node.Type != "paragraph" || textblockMarker(doc, node, path).Kind != item.Kind {
 			return true
@@ -345,14 +366,30 @@ func listItemQuoteMatches(doc *Node, text flattenedText, item ListItemQuote) []q
 				return true
 			}
 		}
-		for _, match := range candidates {
-			if match.From == pos+1 && match.To <= end-1 {
-				matches = append(matches, match)
-			}
-		}
+		starts = append(starts, start{from: pos + 1, end: end - 1})
 		return true
 	})
-	return matches
+	if len(starts) == 0 {
+		return nil
+	}
+	atAStart := func(candidates []quoteMatch) []quoteMatch {
+		var matches []quoteMatch
+		for _, match := range candidates {
+			for _, s := range starts {
+				if match.From == s.from && match.To <= s.end {
+					matches = append(matches, match)
+					break
+				}
+			}
+		}
+		return matches
+	}
+	for _, step := range []func(flattenedText, string) []quoteMatch{exactQuoteMatches, normalizedQuoteMatches, markdownQuoteMatches} {
+		if matches := atAStart(step(text, item.Text)); len(matches) > 0 {
+			return matches
+		}
+	}
+	return nil
 }
 
 // TargetSpansBlocks reports whether r is not wholly contained by one
