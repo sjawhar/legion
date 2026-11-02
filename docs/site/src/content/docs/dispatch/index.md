@@ -54,6 +54,25 @@ you have not read it.
 3. **Open its issue.** Choose the issue name at the top of the ask, or press `o` on a focused row.
    Read the Spec tab, then press `?` to see every keyboard shortcut on that page.
 
+## Reporting a problem
+
+When something in Dispatch itself looks wrong, choose **Report a problem**: it is a button in the
+`?` help panel and an action in the `Ctrl+K` palette, on every page. Say what went wrong, and paste
+or drop a screenshot into the box as you would into a comment. **Send report** files an issue in
+the project your Dispatch's Settings name for reports, and shows its key with a link. The issue
+holds your words and pictures, and also says which page you were on, the version of Dispatch that
+was running, your browser, your window's size, and that you reported it. It is labelled `report`
+and goes to that project's default assignee.
+
+When Settings also names an agent for reports, the form offers **Ask an agent to fix this**.
+Ticked, the new issue is routed to that agent's role, which wakes the agent holding it; the agent
+investigates and opens a pull request. The form tells you when no agent holds the role at that
+moment: the issue keeps its route, and anything anyone adds to it reaches the agent once one holds
+the role. Unticked, the issue is only filed.
+
+Until Settings names a project for reports, the form says reports are not set up and links to the
+setting ([First steps after it starts](/legion/dispatch/running-dispatch/#first-steps-after-it-starts)).
+
 ## Where to go next
 
 - [The Inbox and asks](/legion/dispatch/inbox-and-asks/): answering, asking back, snoozing, and

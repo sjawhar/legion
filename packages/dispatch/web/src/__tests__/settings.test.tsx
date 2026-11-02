@@ -42,6 +42,9 @@ function mappingServer(initial: RepoProject[]) {
   };
 }
 
+/** The Settings page's Problem reports section reads where reports go; none is set here. */
+const noReportSettings = { agent_route: null, project: null, updated_at: null, updated_by: null };
+
 function stubMatchMedia(): () => void {
   const originalMatchMedia = window.matchMedia;
   window.matchMedia = (() =>
@@ -85,6 +88,7 @@ test("human users manage repository project mappings from the settings route", a
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
   const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
+  const getReportSettings = spyOn(api, "getReportSettings").mockResolvedValue(noReportSettings);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
   ]);
@@ -175,6 +179,7 @@ test("human users manage repository project mappings from the settings route", a
     listArchitectureSources.mockRestore();
     listDefaults.mockRestore();
     getDeliverySettings.mockRestore();
+    getReportSettings.mockRestore();
     listProjects.mockRestore();
     putRepoProject.mockRestore();
     deleteRepoProject.mockRestore();
@@ -209,6 +214,7 @@ test("a delayed mapping response does not undo a newer default the page has read
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
   const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
+  const getReportSettings = spyOn(api, "getReportSettings").mockResolvedValue(noReportSettings);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
   ]);
@@ -258,6 +264,7 @@ test("a delayed mapping response does not undo a newer default the page has read
     listArchitectureSources.mockRestore();
     listDefaults.mockRestore();
     getDeliverySettings.mockRestore();
+    getReportSettings.mockRestore();
     listProjects.mockRestore();
     putRepoProject.mockRestore();
     restoreMatchMedia();
@@ -281,6 +288,7 @@ test("repository settings retries a failed mapping query", async () => {
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
   const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
+  const getReportSettings = spyOn(api, "getReportSettings").mockResolvedValue(noReportSettings);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
   ]);
@@ -313,6 +321,7 @@ test("repository settings retries a failed mapping query", async () => {
     listArchitectureSources.mockRestore();
     listDefaults.mockRestore();
     getDeliverySettings.mockRestore();
+    getReportSettings.mockRestore();
     listProjects.mockRestore();
   }
 });
@@ -334,6 +343,7 @@ test("a human creates a project from Settings and it appears in the mappings sel
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
   const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
+  const getReportSettings = spyOn(api, "getReportSettings").mockResolvedValue(noReportSettings);
   const listProjects = spyOn(api, "listProjects")
     .mockResolvedValueOnce([core])
     .mockResolvedValueOnce([core, created]);
@@ -379,6 +389,7 @@ test("a human creates a project from Settings and it appears in the mappings sel
     listArchitectureSources.mockRestore();
     listDefaults.mockRestore();
     getDeliverySettings.mockRestore();
+    getReportSettings.mockRestore();
     listProjects.mockRestore();
     createProject.mockRestore();
   }
@@ -400,6 +411,7 @@ test("creating a project with a taken key shows the server's error inline", asyn
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
   const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
+  const getReportSettings = spyOn(api, "getReportSettings").mockResolvedValue(noReportSettings);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([core]);
   const createProject = spyOn(api, "createProject").mockRejectedValue(
     new ApiError(409, { code: "PROJECT_EXISTS", error: "a project with this key already exists" })
@@ -436,6 +448,7 @@ test("creating a project with a taken key shows the server's error inline", asyn
     listArchitectureSources.mockRestore();
     listDefaults.mockRestore();
     getDeliverySettings.mockRestore();
+    getReportSettings.mockRestore();
     listProjects.mockRestore();
     createProject.mockRestore();
   }
@@ -494,6 +507,7 @@ function renderSettings(projects: string[]): {
     spyOn(api, "getCredentialPending").mockResolvedValue(null),
     spyOn(api, "listArchitectureSources").mockResolvedValue([]),
     spyOn(api, "getDeliverySettings").mockResolvedValue(null),
+    spyOn(api, "getReportSettings").mockResolvedValue(noReportSettings),
     spyOn(api, "listProjects").mockResolvedValue(
       projects.map((key) => ({ created_at: "2026-09-01T00:00:00Z", key, name: key }))
     ),

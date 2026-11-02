@@ -32,6 +32,7 @@ import {
   routeProjectOf,
 } from "./features/refs/routes";
 import { useRepliesCount } from "./features/replies/useRepliesCount";
+import { ReportProblemDialog } from "./features/report/ReportProblemDialog";
 import { SearchButton } from "./features/search/SearchButton";
 import { type PaletteMode, SearchPalette } from "./features/search/SearchPalette";
 import { SettingsPage } from "./features/settings/SettingsPage";
@@ -457,6 +458,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   // The registry as described when `?` fired (focus still on the caller); `null` while closed.
   const [helpSnapshot, setHelpSnapshot] = useState<readonly KeyBindingDescription[] | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
   const routeProject = routeProjectOf(location.pathname);
   useKeymap("global", [
     {
@@ -484,6 +486,13 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       run: () => setHelpSnapshot(appKeymap.describe()),
     },
     { id: "create", keys: "c", label: "Create issue", run: () => setCreateOpen(true) },
+    {
+      // No key of its own: the palette lists it, and `?` offers it as a button.
+      id: "report-problem",
+      keys: [],
+      label: "Report a problem",
+      run: () => setReportOpen(true),
+    },
     { id: "go-inbox", keys: "g i", label: "Go to Inbox", run: () => navigate("/") },
     { id: "go-agents", keys: "g a", label: "Go to Agents", run: () => navigate("/agents") },
     { id: "go-settings", keys: "g s", label: "Go to Settings", run: () => navigate("/settings") },
@@ -831,8 +840,13 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
         </ErrorBoundary>
         <SearchPalette mode={paletteMode} onClose={() => setPaletteMode(null)} />
         <InboxDrawer onClose={() => setInboxDrawerOpen(false)} open={inboxDrawerOpen} />
-        <ShortcutHelp onClose={() => setHelpSnapshot(null)} snapshot={helpSnapshot} />
+        <ShortcutHelp
+          onClose={() => setHelpSnapshot(null)}
+          onReport={() => setReportOpen(true)}
+          snapshot={helpSnapshot}
+        />
         {createOpen ? <CreateIssueDialog onClose={() => setCreateOpen(false)} /> : null}
+        {reportOpen ? <ReportProblemDialog onClose={() => setReportOpen(false)} /> : null}
         <RefPreviewHost />
       </div>
     </MarginProvider>

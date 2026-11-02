@@ -54,7 +54,10 @@ function indexAssetPath(source: string): string | undefined {
   return INDEX_ASSET_PATH.test(pathname) ? pathname : undefined;
 }
 
-function runningIndexAsset(): string {
+/** The build this tab runs, by its entry chunk (`/assets/index-<hash>.js`), the name
+ *  `GET /api/v1/dashboard/builds` gives a build; a page loaded with none (Vite's dev server) is
+ *  named by its build ID. A problem report names it as the page's build. */
+export function runningIndexAsset(): string {
   const scripts = document.querySelectorAll<HTMLScriptElement>("script[src]");
   for (const script of scripts) {
     const asset = indexAssetPath(script.src);

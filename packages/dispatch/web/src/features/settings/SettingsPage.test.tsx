@@ -6,10 +6,10 @@ import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { api } from "../../api/client";
 import { SettingsPage } from "./SettingsPage";
 
-function renderPage() {
+function renderPage(path = "/settings") {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
         <SettingsPage />
       </QueryClientProvider>
@@ -22,6 +22,12 @@ function renderPage() {
 function stubUnrelatedQueries() {
   return {
     getDeliverySettings: spyOn(api, "getDeliverySettings").mockResolvedValue(null),
+    getReportSettings: spyOn(api, "getReportSettings").mockResolvedValue({
+      agent_route: null,
+      project: null,
+      updated_at: null,
+      updated_by: null,
+    }),
     listAgentTokens: spyOn(api, "listAgentTokens").mockResolvedValue([]),
     listArchitectureSources: spyOn(api, "listArchitectureSources").mockResolvedValue([]),
     listProjectDefaultAssignees: spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]),
@@ -225,5 +231,25 @@ test("a grant with no expiry says it ends when its session ends", async () => {
     for (const spy of Object.values(unrelated)) {
       spy.mockRestore();
     }
+  }
+});
+
+test("a link to Problem reports brings that section into view", async () => {
+  const unrelated = stubUnrelatedQueries();
+  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
+  const scrolled: string[] = [];
+  const scrollIntoView = spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(
+    function (this: HTMLElement) {
+      scrolled.push(this.id);
+    }
+  );
+  try {
+    renderPage("/settings#problem-reports");
+    await waitFor(() => expect(scrolled).toContain("problem-reports"));
+    expect(screen.getByRole("heading", { name: "Problem reports" })).toBeTruthy();
+  } finally {
+    scrollIntoView.mockRestore();
+    getCredentialPending.mockRestore();
+    for (const spy of Object.values(unrelated)) spy.mockRestore();
   }
 });
