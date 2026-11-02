@@ -225,3 +225,52 @@ func TestTheRelaySendsAFollowedTopicTheDurablePathAlsoReads(t *testing.T) {
 	requireFrames(t, standIn.collect(t, 1, 15*time.Second), item)
 	standIn.none(t, time.Second)
 }
+
+// A message on a topic the session that published it follows is skipped for that session as an
+// echo: the fan-out hands it back to nobody, reports no failure of it, and records neither a
+// dedupe key nor an attempt for it, so the next event under that key still reaches it. Every
+// other session following the topic is taken the message as usual, recorded once.
+//
+// The core lane carries it: both sessions are on the core path, and the topic is an ad-hoc one
+// the stream does not store (bus.UsesCoreTransport), so no durable message of it exists at all.
+func TestTheFanoutSkipsAMessageOnAFollowedTopicAsAnEchoOfTheSessionThatPublishedIt(t *testing.T) {
+	harness := newListenerDeliveryHarness(t)
+	run := id.New()
+	sender := "ses_echo_sender_" + run
+	other := "ses_echo_other_" + run
+	topic := "notifications.team.echo-" + run
+	for _, sessionID := range []string{sender, other} {
+		if _, err := harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{topic}); err != nil {
+			t.Fatalf("register %s's interest: %v", sessionID, err)
+		}
+		if err := harness.sessions.Put(sessionID, session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine"}); err != nil {
+			t.Fatalf("register %s's entry: %v", sessionID, err)
+		}
+	}
+	probe := exceptionProbe(t, harness.client)
+
+	item := listenerTestEnvelope(topic, "echo-"+run)
+	item.SourceSession = sender
+	harness.coreHandler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush what the fan-out published: %v", err)
+	}
+
+	if harness.config.dedupeCache.Seen(item.DedupeKey, sender) || harness.config.attemptCache.Seen(item.DedupeKey, sender) {
+		t.Fatalf("the fan-out recorded %s as having been given the message it published itself", sender)
+	}
+	if !harness.config.dedupeCache.Seen(item.DedupeKey, other) {
+		t.Fatalf("the fan-out never recorded %s as having taken the message it follows the topic for", other)
+	}
+	noException(t, probe)
+
+	var echoes []string
+	for _, line := range strings.Split(harness.logs.String(), "\n") {
+		if strings.Contains(line, "listener skip echo") {
+			echoes = append(echoes, line)
+		}
+	}
+	if len(echoes) != 1 || !strings.Contains(echoes[0], sender) {
+		t.Fatalf("the fan-out logged %d echoes, want one naming %s:\n%s", len(echoes), sender, harness.logs.String())
+	}
+}
