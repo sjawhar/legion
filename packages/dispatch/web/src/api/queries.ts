@@ -90,6 +90,24 @@ export const issueQuery = (key: string | undefined) =>
       olderIssue(next, cached) ? cached : replaceEqualDeep(cached, next),
   });
 
+/** What each requirement of the issue's spec lacks (`GET /api/v1/issues/{key}/coverage`), which
+ *  the Spec tab draws beside the requirement. It hangs under the issue's own key so a write that
+ *  invalidates the issue re-reads the gaps with it. */
+export const issueCoverageQuery = (key: string) =>
+  queryOptions({
+    queryKey: ["issue", key, "coverage"],
+    queryFn: () => api.getIssueCoverage(key),
+  });
+
+/** The checks of the issue's Verification document and the results recorded against them
+ *  (`GET /api/v1/issues/{key}/results`), which the Verification tab draws. Under the issue's key
+ *  for the same reason as the coverage. */
+export const issueResultsQuery = (key: string) =>
+  queryOptions({
+    queryKey: ["issue", key, "results"],
+    queryFn: () => api.getIssueResults(key),
+  });
+
 /** The viewer's per-agent conversation state: each session's Clear, read mark, and count of
  *  unread replies to the viewer's direct messages. The navigation, the Agents page, and the
  *  live view all read this one key. */

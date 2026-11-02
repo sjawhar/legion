@@ -19,6 +19,7 @@ import { ArtifactRoutePanel } from "../artifacts/ArtifactRoutePanel";
 import { ConversationTab } from "../conversation/ConversationTab";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 import { outsideAskCard } from "../inbox/ask-card";
+import { PlanTab } from "../plan/PlanTab";
 import {
   buildReferencePath,
   documentRoute,
@@ -29,10 +30,12 @@ import {
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
+import { VerificationTab } from "../verification/VerificationTab";
 import { ChildrenTab } from "./ChildrenTab";
 import { IssueHeader } from "./IssueHeader";
 import { IssueTabs } from "./IssueTabs";
 import { stateForIssue } from "./pins";
+import { SpecRequirements } from "./SpecRequirements";
 import { SpecToolbar } from "./SpecToolbar";
 import { useIssueDetail } from "./useIssueDetail";
 import { useIssuePriority } from "./useIssuePriority";
@@ -138,6 +141,10 @@ function outsideInputsAndAskCards(): boolean {
 /** The tabs the chords reach, each through the tablist button `IssueTabs` renders for it. */
 const tabChords: readonly { keys: string; label: string; tab: IssueTab }[] = [
   { keys: "t s", label: "Spec tab", tab: "spec" },
+  // `t v` is Activity and `t c` the Conversation, so Verification takes its checks' `k`; `t p`
+  // is free (`p` alone focuses the priority, which is a different scope of key).
+  { keys: "t k", label: "Verification tab", tab: "verification" },
+  { keys: "t p", label: "Plan tab", tab: "plan" },
   { keys: "t c", label: "Conversation tab", tab: "conversation" },
   { keys: "t h", label: "Children tab", tab: "children" },
   { keys: "t a", label: "Artifacts tab", tab: "artifacts" },
@@ -156,8 +163,10 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
     highlightTerm,
     issue,
     primaryArtifact,
+    planArtifact,
     selectedArtifact,
     state,
+    verificationArtifact,
   } = useIssueDetail(route);
   const landing = useItemLanding(route, issue.data);
   const navigate = useNavigate();
@@ -279,7 +288,9 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
     artifacts: activeTab === "artifacts",
     children: activeTab === "children",
     conversation: activeTab === "conversation",
+    plan: activeTab === "plan",
     spec: activeTab === "spec",
+    verification: activeTab === "verification",
   }));
   if (!activatedTabs[activeTab]) {
     setActivatedTabs({ ...activatedTabs, [activeTab]: true });
@@ -394,21 +405,68 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         role="tabpanel"
       >
         {activatedTabs.spec && !(artifactRoute !== undefined && !isPrimaryArtifactRoute) ? (
-          <ArtifactDocument
-            artifact={primaryArtifact}
-            askId={askId}
-            commentId={commentId}
-            highlightTerm={highlightTerm}
-            isClosed={isClosed}
-            onToolbarChange={handleSpecToolbarChange}
-            owner={{ key: issueKey, kind: "issue" }}
-            onVersionChange={(version) => {
-              setSpecShowDiff(false);
-              selectDocumentVersion(primaryArtifact, version);
-            }}
-            showDiff={specShowDiff}
-            version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
-          />
+          <div className="space-y-4">
+            <ArtifactDocument
+              artifact={primaryArtifact}
+              askId={askId}
+              commentId={commentId}
+              highlightTerm={highlightTerm}
+              isClosed={isClosed}
+              onToolbarChange={handleSpecToolbarChange}
+              owner={{ key: issueKey, kind: "issue" }}
+              onVersionChange={(version) => {
+                setSpecShowDiff(false);
+                selectDocumentVersion(primaryArtifact, version);
+              }}
+              showDiff={specShowDiff}
+              version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
+            />
+            <SpecRequirements issueKey={issueKey} />
+          </div>
+        ) : null}
+      </div>
+      <div
+        aria-hidden={activeTab !== "verification"}
+        aria-labelledby="issue-verification-tab"
+        hidden={activeTab !== "verification"}
+        id="issue-verification-panel"
+        role="tabpanel"
+      >
+        {activatedTabs.verification ? (
+          <VerificationTab artifact={verificationArtifact} issueKey={issueKey}>
+            {verificationArtifact === undefined ? null : (
+              <ArtifactDocument
+                artifact={verificationArtifact}
+                isClosed={isClosed}
+                owner={{ key: issueKey, kind: "issue" }}
+                onVersionChange={(version) => selectDocumentVersion(verificationArtifact, version)}
+                showDiff={false}
+                version={undefined}
+              />
+            )}
+          </VerificationTab>
+        ) : null}
+      </div>
+      <div
+        aria-hidden={activeTab !== "plan"}
+        aria-labelledby="issue-plan-tab"
+        hidden={activeTab !== "plan"}
+        id="issue-plan-panel"
+        role="tabpanel"
+      >
+        {activatedTabs.plan ? (
+          <PlanTab artifact={planArtifact} issueKey={issueKey}>
+            {planArtifact === undefined ? null : (
+              <ArtifactDocument
+                artifact={planArtifact}
+                isClosed={isClosed}
+                owner={{ key: issueKey, kind: "issue" }}
+                onVersionChange={(version) => selectDocumentVersion(planArtifact, version)}
+                showDiff={false}
+                version={undefined}
+              />
+            )}
+          </PlanTab>
         ) : null}
       </div>
       <div

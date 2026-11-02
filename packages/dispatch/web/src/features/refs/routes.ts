@@ -24,6 +24,8 @@ import { pageInBound, routeInBound } from "./target-id";
 export type IssueRoute =
   | { key: string; kind: "issue" }
   | ({ key: string; kind: "spec" } & BlockTarget)
+  | { key: string; kind: "verification" }
+  | { key: string; kind: "plan" }
   | { key: string; kind: "conversation" }
   | { key: string; kind: "activity" }
   | { key: string; kind: "children" }
@@ -73,7 +75,14 @@ export interface InboxRoute {
    *  literal `unassigned`. */
   assignees?: readonly string[];
 }
-export type IssueTab = "spec" | "conversation" | "children" | "artifacts" | "activity";
+export type IssueTab =
+  | "spec"
+  | "verification"
+  | "plan"
+  | "conversation"
+  | "children"
+  | "artifacts"
+  | "activity";
 
 const projectKeyPattern = "[A-Z][A-Z0-9]{1,9}";
 const issueKeyPattern = `${projectKeyPattern}-[1-9]\\d*`;
@@ -136,6 +145,12 @@ export function issueTabForRoute(
   }
   if (route.kind === "artifacts") {
     return "artifacts";
+  }
+  if (route.kind === "verification") {
+    return "verification";
+  }
+  if (route.kind === "plan") {
+    return "plan";
   }
   if (route.kind === "artifact") {
     return isPrimaryDocumentArtifactRoute(route, artifact) ? "spec" : "artifacts";
@@ -228,6 +243,12 @@ function parseIssueReference(key: string, target: string | undefined): IssueRout
   }
   if (target === "spec") {
     return { key, kind: "spec" };
+  }
+  if (target === "verification") {
+    return { key, kind: "verification" };
+  }
+  if (target === "plan") {
+    return { key, kind: "plan" };
   }
   if (legacyLogReferencePattern.test(target) || target === "conversation") {
     return { key, kind: "conversation" };
@@ -336,6 +357,12 @@ export function parseIssuePath(pathname: string, search = ""): IssueRoute | unde
   }
   if (target === "spec") {
     return { key, kind: "spec" };
+  }
+  if (target === "verification") {
+    return { key, kind: "verification" };
+  }
+  if (target === "plan") {
+    return { key, kind: "plan" };
   }
   if (target === "conversation") {
     return { key, kind: "conversation" };
@@ -572,6 +599,12 @@ export function buildDispatchReference(route: DispatchReferenceRoute): string {
   if (route.kind === "spec") {
     return `${issue}/spec${block}`;
   }
+  if (route.kind === "verification") {
+    return `${issue}/verification`;
+  }
+  if (route.kind === "plan") {
+    return `${issue}/plan`;
+  }
   // The conversation keeps the `log` spelling every reference written before the Activity tab
   // existed used; activity, newer, is spelled as its own path is.
   if (route.kind === "conversation") {
@@ -754,6 +787,10 @@ export function shortForm(route: DispatchReferenceRoute): string {
       return route.key;
     case "spec":
       return `${route.key} spec${block}`;
+    case "verification":
+      return `${route.key} verification`;
+    case "plan":
+      return `${route.key} plan`;
     case "conversation":
       return `${route.key} log`;
     case "activity":
@@ -818,6 +855,12 @@ export function buildIssuePath(route: IssueRoute): string {
   }
   if (route.kind === "spec") {
     return `${issue}/spec`;
+  }
+  if (route.kind === "verification") {
+    return `${issue}/verification`;
+  }
+  if (route.kind === "plan") {
+    return `${issue}/plan`;
   }
   if (route.kind === "conversation") {
     return `${issue}/conversation`;
