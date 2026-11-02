@@ -9,8 +9,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -375,11 +379,67 @@ func bigDocumentMarkdown() string {
 	return markdown.String()
 }
 
+// DIAGNOSTIC (temporary, removed before the final push): pageSocket is the page's own end of a
+// slow socket. It counts what the page reads through it and remembers when its reads stopped and
+// how they ended. It embeds the *net.TCPConn, so the connection gorilla hands back still carries
+// SetReadBuffer and SyscallConn.
+type pageSocket struct {
+	*net.TCPConn
+	mu         sync.Mutex
+	bytesRead  int64
+	reads      int
+	lastReadAt time.Time
+	firstErr   error
+	firstErrAt time.Time
+}
+
+func (s *pageSocket) Read(buffer []byte) (int, error) {
+	n, err := s.TCPConn.Read(buffer)
+	now := time.Now()
+	s.mu.Lock()
+	if n > 0 {
+		s.bytesRead += int64(n)
+		s.reads++
+		s.lastReadAt = now
+	}
+	if err != nil && s.firstErr == nil {
+		s.firstErr, s.firstErrAt = err, now
+	}
+	s.mu.Unlock()
+	return n, err
+}
+
+// state is what the page has read through this socket so far.
+func (s *pageSocket) state() (bytesRead int64, reads int, lastReadAt time.Time, firstErr error, firstErrAt time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bytesRead, s.reads, s.lastReadAt, s.firstErr, s.firstErrAt
+}
+
+// receiveBuffer is the SO_RCVBUF the kernel has actually granted this socket, which is not what
+// SetReadBuffer asked for.
+func (s *pageSocket) receiveBuffer() (int, error) {
+	raw, err := s.TCPConn.SyscallConn()
+	if err != nil {
+		return 0, err
+	}
+	var size int
+	var optErr error
+	if err := raw.Control(func(fd uintptr) {
+		size, optErr = syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF)
+	}); err != nil {
+		return 0, err
+	}
+	return size, optErr
+}
+
 // dialSlowPage is dialPage on a connection whose receive buffer holds far less than the document's
 // sync message, so the server's write of that message is still part way through it while the page
-// reads nothing. The socket must be accepted, and closes when the test ends.
-func dialSlowPage(t *testing.T, serverURL, artifactID string, query url.Values) *gws.Conn {
+// reads nothing. The socket must be accepted, and closes when the test ends. Beside it, it returns
+// the page's own end of that connection (DIAGNOSTIC, temporary).
+func dialSlowPage(t *testing.T, serverURL, artifactID string, query url.Values) (*gws.Conn, *pageSocket) {
 	t.Helper()
+	var socket *pageSocket
 	dialer := gws.Dialer{NetDial: func(network, address string) (net.Conn, error) {
 		connection, err := net.Dial(network, address)
 		if err != nil {
@@ -393,7 +453,10 @@ func dialSlowPage(t *testing.T, serverURL, artifactID string, query url.Values) 
 			_ = tcp.Close()
 			return nil, err
 		}
-		return tcp, nil
+		// DIAGNOSTIC (temporary, removed before the final push): the page reads through a wrapper
+		// that counts its bytes.
+		socket = &pageSocket{TCPConn: tcp}
+		return socket, nil
 	}}
 	address := "ws" + strings.TrimPrefix(serverURL, "http") + "/ws/doc/" + artifactID + "?" + query.Encode()
 	connection, response, err := dialer.Dial(address, http.Header{"X-Dispatch-User": []string{"alice"}})
@@ -401,7 +464,7 @@ func dialSlowPage(t *testing.T, serverURL, artifactID string, query url.Values) 
 		t.Fatalf("connect a slow page presenting %v: response=%#v err=%v", query, response, err)
 	}
 	t.Cleanup(func() { _ = connection.Close() })
-	return connection
+	return connection, socket
 }
 
 // A revoke ends the socket with a close frame of ygo's own, which gorilla's WriteControl puts on
@@ -419,7 +482,7 @@ func TestARevokeWaitsForTheMessageTheServerHasInFlight(t *testing.T) {
 
 	// A page creating up to 1 represents everything this fleet creates, so its socket is admitted
 	// writable; it reads nothing, so the sync message stays part way out.
-	reader := dialSlowPage(t, server.URL, artifactID, page(1, 1))
+	reader, _ := dialSlowPage(t, server.URL, artifactID, page(1, 1))
 	time.Sleep(250 * time.Millisecond)
 
 	// A process that creates what this page cannot represent joins, and the re-check revokes it.
@@ -510,8 +573,19 @@ const revokedDrainReceiveBuffer = 4 << 20
 func TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, bigDocumentMarkdown())
-	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	// DIAGNOSTIC (temporary, removed before the final push): the server accepts through a
+	// listener that hands out connections counting what the server writes to them, so the slow
+	// page's own can be read below; httptest's Start takes server.URL from this listener, and
+	// gorilla's Hijack hands ygo the very connection it returned.
+	server := httptest.NewUnstartedServer(http.HandlerFunc(service.ServeHTTP))
+	accepted := &countingListener{Listener: server.Listener}
+	server.Listener = accepted
+	server.Start()
 	t.Cleanup(server.Close)
+	// DIAGNOSTIC (temporary, removed before the final push): the kernel's socket memory and
+	// orphan limits, which set how much a closed socket may still hold and for how long.
+	logKernelTuning(t)
+	serverPort := portOf(t, server.URL)
 
 	// The writer presents this build's numbers, which the fleet below still admits writable, so
 	// the re-check leaves its socket open. Its rounds leave the room holding megabytes of document
@@ -525,7 +599,15 @@ func TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole(t *testing.T) {
 	// The slow page connects last and reads nothing, so the server's write of all of that is still
 	// going out when the revoke arrives, and every round is still owed to it.
 	dialed := time.Now()
-	reader := dialSlowPage(t, server.URL, artifactID, page(1, 1))
+	reader, pageConn := dialSlowPage(t, server.URL, artifactID, page(1, 1))
+	// DIAGNOSTIC (temporary, removed before the final push): what the kernel granted the page's
+	// socket for the 4096 bytes dialSlowPage asked of it, and which accepted connection is the
+	// server's end of it.
+	logReceiveBuffer(t, pageConn, "right after the dial")
+	serverConn := accepted.find(pageConn.LocalAddr().String())
+	if serverConn == nil {
+		t.Logf("DIAGNOSTIC: no accepted connection has the page's local address %s", pageConn.LocalAddr())
+	}
 	time.Sleep(250 * time.Millisecond)
 	fleetProcess(t, service, 3, 2, 0)
 	fleet, err := readSchemaFleet(context.Background(), service.store.Pool)
@@ -536,6 +618,10 @@ func TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole(t *testing.T) {
 	// are read: this fleet still admits the writer's page, so the slow page's is the only socket
 	// it closes, and the end below is that revoke's and no other's.
 	revokedAt := time.Now()
+	if serverConn != nil {
+		// DIAGNOSTIC (temporary, removed before the final push): the writes below count from here.
+		serverConn.markRevoked(revokedAt)
+	}
 	revoked := service.schemaAdmissions.revokeUnless(fleet)
 	if len(revoked) != 1 {
 		t.Fatalf("the re-check revoked %d sockets, want the slow page's alone", len(revoked))
@@ -558,17 +644,72 @@ func TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole(t *testing.T) {
 	// has returned. Within revokedServerEndBound of the revoke this is the revoke's doing, since
 	// both deadlines ygo would end this socket on by itself fall far later.
 	requireRevokedSocketEnded(t, &service.schemaAdmissions, revoked[0], revokedAt)
+	// DIAGNOSTIC (temporary, removed before the final push): the server's side has ended; this is
+	// what it wrote to that connection and what the kernel still holds for either end of it.
+	if serverConn != nil {
+		t.Logf("DIAGNOSTIC server socket, once its ServeHTTP had returned: %s", serverConn.report(revokedAt))
+	}
+	logSocketState(t, serverPort, "right after the server's side ended")
 
 	// What is left is the page pulling what the server had already written to it out of the
 	// socket, which is the slowest part of this test on a loaded runner and says nothing about
 	// the revoke. It gets a buffer and a deadline wide enough to finish, and the end it then
 	// reads must still be one the provider reconnects on.
 	raiseReceiveBuffer(t, reader)
+	// DIAGNOSTIC (temporary, removed before the final push): what raising it actually granted.
+	logReceiveBuffer(t, pageConn, "right after raiseReceiveBuffer")
 	_ = reader.SetReadDeadline(time.Now().Add(revokedDrainBound))
+	// DIAGNOSTIC (temporary, removed before the final push): a ticker logs what the page has
+	// pulled out of the socket at the start of the drain and each second of it, and the kernel's
+	// view 5 s in. A drain that ends in milliseconds is logged once, at its start.
+	drainStart := time.Now()
+	var messages atomic.Int64
+	stopDrainLog, drainLogged := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(drainLogged)
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		sampled := false
+		sample := func(elapsed time.Duration) {
+			read, reads, lastReadAt, firstErr, _ := pageConn.state()
+			t.Logf("DIAGNOSTIC drain at %v: the page has read %d bytes in %d reads and %d messages; its last read with bytes was %s; first read error %v",
+				elapsed.Round(time.Millisecond), read, reads, messages.Load(), ago(lastReadAt), firstErr)
+			if !sampled && elapsed >= 5*time.Second {
+				sampled = true
+				logSocketState(t, serverPort, "5 s into the drain")
+			}
+		}
+		sample(0)
+		for {
+			select {
+			case <-stopDrainLog:
+				return
+			case now := <-ticker.C:
+				sample(now.Sub(drainStart))
+			}
+		}
+	}()
 	var ended error
 	for ended == nil {
 		_, _, ended = reader.ReadMessage()
+		if ended == nil {
+			messages.Add(1) // DIAGNOSTIC (temporary, removed before the final push).
+		}
 	}
+	// DIAGNOSTIC (temporary, removed before the final push): the drain is over, by the socket's
+	// end or by its deadline. Everything read above goes out in one place before the assertion,
+	// so a failure of it carries them.
+	drainTook := time.Since(drainStart)
+	close(stopDrainLog)
+	<-drainLogged
+	logSocketState(t, serverPort, "when the drain ended")
+	readBytes, reads, lastReadAt, firstErr, firstErrAt := pageConn.state()
+	serverReport := "no accepted connection matched the page"
+	if serverConn != nil {
+		serverReport = serverConn.report(revokedAt)
+	}
+	t.Logf("DIAGNOSTIC summary: server %s || page read %d bytes in %d reads and %d messages over a drain of %v; its last read with bytes was %s; first read error %v %s; the drain ended with %v",
+		serverReport, readBytes, reads, messages.Load(), drainTook.Round(time.Millisecond), ago(lastReadAt), firstErr, ago(firstErrAt), ended)
 	requireReconnectableEnd(t, ended, "the revoked page, reading two seconds after the revoke")
 
 	want, err := service.Text(context.Background(), artifactID)
@@ -608,10 +749,13 @@ func requireRevokedSocketEnded(t *testing.T, admissions *schemaAdmissions, admis
 // in it in few passes, for a test that is done with the small one dialSlowPage set.
 func raiseReceiveBuffer(t *testing.T, connection *gws.Conn) {
 	t.Helper()
-	tcp, ok := connection.UnderlyingConn().(*net.TCPConn)
+	// DIAGNOSTIC (temporary, removed before the final push): the page reads through pageSocket,
+	// which carries the *net.TCPConn this raises the buffer of.
+	socket, ok := connection.UnderlyingConn().(*pageSocket)
 	if !ok {
 		t.Fatalf("the page is reading a %T, want the TCP connection dialSlowPage opened", connection.UnderlyingConn())
 	}
+	tcp := socket.TCPConn
 	if err := tcp.SetReadBuffer(revokedDrainReceiveBuffer); err != nil {
 		t.Fatalf("raise the revoked page's receive buffer to %d bytes: %v", revokedDrainReceiveBuffer, err)
 	}
@@ -747,4 +891,170 @@ func TestARevokedPagesReconnectIsAdmittedBesideItsLateToken(t *testing.T) {
 			t.Errorf("%s = %#v, %v; want read-only", answer.what, config, err)
 		}
 	}
+}
+
+// DIAGNOSTIC (temporary, removed before the final push): countingListener hands every accepted
+// connection out as a serverSocket, so a test can find the one belonging to a page it dialled and
+// read what the server wrote to it. gorilla's Hijack hands ygo that same connection.
+type countingListener struct {
+	net.Listener
+	mu       sync.Mutex
+	accepted []*serverSocket
+}
+
+func (l *countingListener) Accept() (net.Conn, error) {
+	connection, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	socket := &serverSocket{Conn: connection}
+	l.mu.Lock()
+	l.accepted = append(l.accepted, socket)
+	l.mu.Unlock()
+	return socket, nil
+}
+
+// find is the accepted connection whose remote address is remote, a page's local address.
+func (l *countingListener) find(remote string) *serverSocket {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, socket := range l.accepted {
+		if socket.RemoteAddr().String() == remote {
+			return socket
+		}
+	}
+	return nil
+}
+
+// DIAGNOSTIC (temporary, removed before the final push): serverSocket is the server's end of one
+// accepted connection, counting what it wrote and when, and when it was closed.
+type serverSocket struct {
+	net.Conn
+	mu                   sync.Mutex
+	revokedAt            time.Time
+	written              int64
+	writtenAfterRevoke   int64
+	writes               int
+	inFlight             int
+	lastWriteAt          time.Time
+	lastWriteErr         error
+	closedAt             time.Time
+	writeInFlightAtClose bool
+	writesAfterClose     int
+	bytesAfterClose      int64
+}
+
+func (s *serverSocket) Write(payload []byte) (int, error) {
+	s.mu.Lock()
+	s.inFlight++
+	s.mu.Unlock()
+	n, err := s.Conn.Write(payload)
+	now := time.Now()
+	s.mu.Lock()
+	s.inFlight--
+	s.writes++
+	s.written += int64(n)
+	s.lastWriteAt, s.lastWriteErr = now, err
+	if !s.revokedAt.IsZero() && now.After(s.revokedAt) {
+		s.writtenAfterRevoke += int64(n)
+	}
+	if !s.closedAt.IsZero() && n > 0 {
+		s.writesAfterClose++
+		s.bytesAfterClose += int64(n)
+	}
+	s.mu.Unlock()
+	return n, err
+}
+
+func (s *serverSocket) Close() error {
+	now := time.Now()
+	s.mu.Lock()
+	if s.closedAt.IsZero() {
+		s.closedAt, s.writeInFlightAtClose = now, s.inFlight > 0
+	}
+	s.mu.Unlock()
+	return s.Conn.Close()
+}
+
+// markRevoked records the instant the test took the revoke, from which this counts the writes.
+func (s *serverSocket) markRevoked(at time.Time) {
+	s.mu.Lock()
+	s.revokedAt = at
+	s.mu.Unlock()
+}
+
+// report is what the server wrote to this connection, read against the revoke.
+func (s *serverSocket) report(revokedAt time.Time) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	when := func(at time.Time) string {
+		if at.IsZero() {
+			return "never"
+		}
+		return at.Sub(revokedAt).Round(time.Millisecond).String() + " after the revoke"
+	}
+	return fmt.Sprintf("wrote %d bytes in %d writes, %d of them after the revoke; its last write returned %v %s; its first Close was %s, with a write in flight=%t; %d writes of %d bytes returned after that Close; %d writes are still in flight",
+		s.written, s.writes, s.writtenAfterRevoke, s.lastWriteErr, when(s.lastWriteAt), when(s.closedAt),
+		s.writeInFlightAtClose, s.writesAfterClose, s.bytesAfterClose, s.inFlight)
+}
+
+// DIAGNOSTIC (temporary, removed before the final push): logReceiveBuffer logs the SO_RCVBUF the
+// kernel has actually granted the page's socket, which is not what SetReadBuffer asked of it.
+func logReceiveBuffer(t *testing.T, socket *pageSocket, when string) {
+	t.Helper()
+	size, err := socket.receiveBuffer()
+	if err != nil {
+		t.Logf("DIAGNOSTIC page SO_RCVBUF %s: %v", when, err)
+		return
+	}
+	t.Logf("DIAGNOSTIC page SO_RCVBUF %s: %d bytes", when, size)
+}
+
+// DIAGNOSTIC (temporary, removed before the final push): logSocketState logs the kernel's view of
+// both ends of the test's connections, which only Linux's ss shows; it says so and returns when ss
+// is not on PATH.
+func logSocketState(t *testing.T, port, when string) {
+	t.Helper()
+	path, err := exec.LookPath("ss")
+	if err != nil {
+		t.Logf("DIAGNOSTIC ss %s: ss is not on PATH (%v)", when, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	filter := fmt.Sprintf("( sport = :%s or dport = :%s )", port, port)
+	output, err := exec.CommandContext(ctx, path, "-tinoem", "state", "all", filter).CombinedOutput()
+	t.Logf("DIAGNOSTIC ss %s (err=%v):\n%s", when, err, output)
+}
+
+// DIAGNOSTIC (temporary, removed before the final push): logKernelTuning logs the kernel's socket
+// memory and orphan limits, skipping any this kernel does not have.
+func logKernelTuning(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"tcp_rmem", "tcp_wmem", "tcp_orphan_retries", "tcp_max_orphans"} {
+		contents, err := os.ReadFile("/proc/sys/net/ipv4/" + name)
+		if err != nil {
+			t.Logf("DIAGNOSTIC /proc/sys/net/ipv4/%s: %v", name, err)
+			continue
+		}
+		t.Logf("DIAGNOSTIC /proc/sys/net/ipv4/%s: %s", name, strings.TrimSpace(string(contents)))
+	}
+}
+
+// DIAGNOSTIC (temporary, removed before the final push): portOf is the port a test's server
+// listens on, for ss's filter, and ago reads a recorded instant against now.
+func portOf(t *testing.T, serverURL string) string {
+	t.Helper()
+	parsed, err := url.Parse(serverURL)
+	if err != nil {
+		t.Fatalf("read the port of the server's URL %q: %v", serverURL, err)
+	}
+	return parsed.Port()
+}
+
+func ago(at time.Time) string {
+	if at.IsZero() {
+		return "never"
+	}
+	return time.Since(at).Round(time.Millisecond).String() + " ago"
 }
