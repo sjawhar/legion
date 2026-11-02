@@ -230,6 +230,13 @@ const rows: readonly Row[] = [
 // Conversation tab with that thread open, so these rows measure what a reader who followed one
 // waits for: both of the card's parses of the body, preview and body, from the first comments GET.
 for (const row of rows) {
+  // SLOW(>=2s): the draw is the measurement. Each row of the table seeds its own body, opens a
+  // page that has loaded nothing and waits for the whole formatted shape - the comments GET of
+  // a body up to the comment cap, the parse (the worker's, or the page's own for the two bodies
+  // under its threshold) and the paint that attaches as many as 16,000 elements in batches -
+  // and the hold it asserts is read over exactly that. The heaviest body is 32,000 characters,
+  // which is what a reader is given to draw and what the bound is about, so no part of this is
+  // fixture a faster seed could take out.
   test(`Conversation draws a comment of ${row.name} without holding the main thread for a second`, async ({
     browser,
   }) => {
@@ -257,6 +264,9 @@ for (const row of rows) {
   });
 }
 
+// SLOW(>=2s): the 8,000 items are drawn before anything is read off them - the messages GET, the
+// worker's parse and the paint of 16,000 elements - and the hold this row bounds is read over
+// that draw, which is the row.
 test("Conversation draws a message of 8,000 list items without holding the main thread for a second", async ({
   browser,
 }) => {
@@ -289,6 +299,9 @@ test("Conversation draws a message of 8,000 list items without holding the main 
 // at `contracts.AskQuestionMax` (2,000 UTF-16 units), under the worker's own threshold, so no ask
 // question can carry this list. The surface under test is the same one - the Inbox's ask card,
 // drawing a body through `MarkdownBody` - and its reply is the longest body it ever draws.
+// SLOW(>=2s): the reply's 8,000 items are drawn in the card before the hold is read, and the
+// Inbox pays for them where a reader does: the inbox GET brings the card and its reply together,
+// so the parse and the paint of 16,000 elements are what this row waits out.
 test("the Inbox's ask card draws a reply of 8,000 list items without holding the main thread for a second", async ({
   browser,
 }) => {
@@ -327,6 +340,9 @@ test("the Inbox's ask card draws a reply of 8,000 list items without holding the
 // A hover card previews the target's body on one line (`MarkdownPreview`'s `paintOneLine`), so
 // the 8,000 items read as their 8,000 `x` separated by 7,999 spaces. The body still has to be
 // parsed whole, which is what froze the tab of a reader who only pointed at a reference.
+// SLOW(>=2s): a one-line preview of 8,000 items still parses all 8,000 of them, which is the
+// cost this row exists to bound: the conversation load, the reference's own comment GET and that
+// whole parse stand between the hover and the preview's 15,999 characters.
 test("a hover card of a comment of 8,000 list items draws without holding the main thread for a second", async ({
   browser,
 }) => {
@@ -410,6 +426,11 @@ async function atRest(
 
 // The reader's place is proven in Chromium and WebKit: the compensation reads layout the two
 // engines measure and anchor differently.
+// SLOW(>=2s): the row holds the body pending, reads the reader's place once the page has stopped
+// moving - 600 ms of one answer, since a deep link's own `New` marks relayout the document after
+// it lands (`atRest`) - and only then lets the 8,000 items format above that place. The late
+// paint it is about is that formatting, so the row pays a whole draw of 16,000 elements after a
+// whole load.
 test("a long comment above the reader keeps the comment they are reading where it was when it formats", async ({
   browser,
 }, testInfo) => {
@@ -494,6 +515,9 @@ async function scrollOnTheFirstBatch(page: Page, by: number): Promise<void> {
 // body's growth swallowed their own scroll whole (sjawhar/legion#2519). The row scrolls between
 // two batches and asks for exactly one thing: the card they are reading ends where their scroll
 // put it, with the rest of the body still landing above it.
+// SLOW(>=2s): the scroll has to land between two batches of the paint, so the row waits out the
+// page coming to rest (600 ms, `atRest`), then the ~32 batches the 8,000 items arrive in: the
+// window it measures exists only while that draw runs, and a shorter body has no such window.
 test("a reader who scrolls while a long body above them formats keeps where they scrolled to", async ({
   browser,
 }, testInfo) => {
@@ -563,6 +587,10 @@ async function underTheComposer(page: Page): Promise<number> {
   return newest.y - (composer.y + composer.height);
 }
 
+// SLOW(>=2s): a reader reaches Jump to latest only from a page of thirteen turns they have
+// scrolled back through, and the place it gives them is read once the page has come to rest
+// (600 ms, `atRest`). What the row proves - that the place survives the late paint - is then the
+// 8,000 items formatting under the composer, which is a whole draw of 16,000 elements.
 test("Jump to latest keeps a newest long comment under the composer when it formats late", async ({
   browser,
 }, testInfo) => {
@@ -611,6 +639,10 @@ test("Jump to latest keeps a newest long comment under the composer when it form
 // A reader who opens a long body reads its text while the worker is still parsing: it is in the
 // page as text, and it is theirs to select and copy. Nothing covers it and nothing turns
 // selection off, so a drag across the pending card answers with the body's own words.
+// SLOW(>=2s): the body has to be in the page as pending text for the drag to cross, so the row
+// loads the card with the worker's chunk held, drags across it, and then lets that same body
+// through to its 8,000 items - the selection is only worth proving of a body that still ends
+// formatted, and formatting 8,000 items is the draw it is.
 test("a long body's text can be selected while the worker still owes its formatting", async ({
   browser,
 }) => {
@@ -666,6 +698,9 @@ test("a long body's text can be selected while the worker still owes its formatt
 // reads the body as a list. `data-markdown-fallback` keeps meaning only that the parser itself
 // refused the body, so it is absent here. This row measures no main-thread gap: the page is
 // doing on its own thread what the worker could not.
+// SLOW(>=2s): with the worker's chunk refused, the 8,000 items are parsed and painted on the
+// page's own thread, which is the slower of the two paths by design and the one this row is
+// here to prove still ends in a formatted list.
 test("a comment of 8,000 list items still ends formatted when the parse worker's chunk cannot load", async ({
   browser,
 }) => {
