@@ -111,7 +111,9 @@ test("a person drags a box over a picture and comments on it; the box and its th
   await drag(page, [0.6, 0.1], [0.9, 0.35]);
   await expect(page.getByTestId("picture-box-draft")).toBeVisible();
   await expect(commentBox(page, "chart.png")).toContainText("On the box you drew, version 1.");
-  await commentBox(page, "chart.png").getByLabel("Comment", { exact: true }).fill("This bar looks low.");
+  await commentBox(page, "chart.png")
+    .getByLabel("Comment", { exact: true })
+    .fill("This bar looks low.");
   await commentBox(page, "chart.png").getByRole("button", { name: "Send" }).click();
 
   const drawn = page
@@ -139,7 +141,9 @@ test("a person drags a box over a picture and comments on it; the box and its th
   await expect(drawn).toHaveAttribute("aria-pressed", "true");
 
   // A comment with no box is on the whole picture.
-  await commentBox(page, "chart.png").getByLabel("Comment", { exact: true }).fill("Which run is this?");
+  await commentBox(page, "chart.png")
+    .getByLabel("Comment", { exact: true })
+    .fill("Which run is this?");
   await commentBox(page, "chart.png").getByRole("button", { name: "Send" }).click();
   await expect(marginCard(page, "Whole file · version 1")).toContainText("Which run is this?");
 
@@ -191,7 +195,9 @@ test("a comment on a file that is not a picture is on the whole file", async ({ 
   await page.goto(`/issues/${issue.key}/artifacts/results-csv`);
   await expect(commentBox(page, "results.csv")).toContainText("On the whole file, version 1.");
   await expect(page.getByRole("button", { name: "Draw a box" })).toHaveCount(0);
-  await commentBox(page, "results.csv").getByLabel("Comment", { exact: true }).fill("Run 1 looks off.");
+  await commentBox(page, "results.csv")
+    .getByLabel("Comment", { exact: true })
+    .fill("Run 1 looks off.");
   await commentBox(page, "results.csv").getByRole("button", { name: "Send" }).click();
   await expect(marginCard(page, "Whole file · version 1")).toContainText("Run 1 looks off.");
   const [stored] = await listComments(issue.key);
