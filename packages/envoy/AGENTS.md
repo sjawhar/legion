@@ -80,7 +80,7 @@ Each item below names a task and where its code is, then notes on it.
   `ENVOY_NATS_REPLICAS`, the deployment's replica count:
   a whole number from 1 to 5 (`bus.MaxReplicas`, which aws:WebhookListener's rendering also refuses above), default 1;
   0, a negative number, more than 5 or a word refuses startup naming the variable.
-  The stream and every bucket Envoy opens (`envoy_interests`, `envoy_roles`, `envoy_sessions`, `envoy_ci_state`, `envoy_webhook_redelivery`) are created at it, and one found with fewer copies is raised to it, at start and by the owning program's keeper every 30 seconds; more than 1 needs a clustered NATS.
+  The stream and every bucket Envoy opens (`envoy_interests`, `envoy_roles`, `envoy_sessions`, `envoy_ci_state`, `envoy_dpop_proofs`, `envoy_webhook_redelivery`) are created at it, and one found with fewer copies is raised to it, at start and by the owning program's keeper every 30 seconds; more than 1 needs a clustered NATS.
   `ENVOY_STREAM_MAX_BYTES`: a positive whole number of bytes, the stream's byte limit, past which a full stream refuses new publishes (`DiscardNew`;
   the retryable `bus.ErrStreamFull`) and keeps every stored message until it is 72 hours old.
   A GitHub webhook a full stream refuses is answered 503, and Dispatch's redelivery sweep (`internal/dispatch/redeliver`) asks GitHub to resend it, so it comes back once the stream has room;
@@ -3874,6 +3874,29 @@ Targeted issue `message.created` skips bound-route and author fan-out because th
 The exempt paths (`/healthz`, `/metrics`, `/webhook/*`) require neither.
 `/v1` is open only when neither is configured, so an empty `ENVOY_API_TOKEN` opens it only while no verifier is configured, and a non-loopback listener refuses to start with neither unless `ENVOY_API_ALLOW_UNAUTHENTICATED=1` is the temporary Fargate transition flag.
 The boot log names what is on: `shared token`, `oidc <issuer>`, both, or `disabled`.
+
+Beside the two bearers it takes one credential that is not a bearer: an access token the secrets broker issued, presented under RFC 9449's DPoP scheme as `Authorization: DPoP <token>` with a `DPoP:` proof header (`internal/brokertoken`, `cmd/listener/brokerauth.go`).
+Four variables configure it, all or none, and any of them set without the rest is a startup refusal naming what is missing:
+
+| Variable | Form | Default |
+| --- | --- | --- |
+| `ENVOY_AGENT_SECRETS_URL` | the broker's base URL, `https://host[:port]`; setting it is what turns the credential on | unset: the listener takes no broker token |
+| `ENVOY_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` | the path of this listener's projected Kubernetes ServiceAccount token, the bearer each introspection presents; a listener in a pod sets it | unset |
+| `ENVOY_AGENT_SECRETS_GOOGLE_AUDIENCE` | the audience this machine's Google identity token is minted for, read from the Compute Engine metadata server at call time (`internal/googleidentity`, `GCE_METADATA_HOST`); a listener on a VM, which holds no Kubernetes token, sets this instead of the file | unset |
+| `ENVOY_PUBLIC_URL` | this listener's own origin, an absolute http(s) URL with no path, which a proof's `htu` is checked against plus the request's path and never a forwarded header | unset |
+
+The account identity is the file or the audience and never both: the broker resolves the calling service from whichever token it is presented (`BROKER_API_ACCOUNTS`, which takes a Kubernetes subject or a Google account's email).
+Configuring the credential opens nothing and closes nothing: a request presenting no token is judged exactly as it was before it existed, so an open listener still serves one, the `Host` and `Content-Type` fences still apply, and the non-loopback fence still counts only the two bearers — a broker token says who is calling, never whether `/v1` may be reached.
+The scheme alone decides the kind, as RFC 9449 Section 7.2 requires, so a `DPoP` presentation is never retried as a bearer and a bearer is never read as one.
+A listener that takes broker tokens records every spent proof in the `envoy_dpop_proofs` KV bucket, whose records expire after the proof's acceptance window and a minute (`spentProofRetention`), so a proof captured from one replica is refused by every other; a bus with no JetStream is a startup refusal naming `ENVOY_AGENT_SECRETS_URL`, never a store in one process's memory.
+The boot log names it beside the bearers: `broker tokens at <url> as projected token <path>` or `as google audience <audience>`.
+
+A caller the broker names is bound to its session on the five routes that act as one — `/v1/interests/subscribe`, `/v1/interests/unsubscribe`, `/v1/roles/set`, `/v1/messages/send` and `/v1/messages/publish` — each refusing 403 a body whose `session_id` or `source_session` is another session, under one `listener: broker token acts as another session` warning naming both sessions and the path.
+A send or publish that names no `source_session` acts as no session and is not refused.
+The read routes that name another session by design (`GET /v1/registry/{session_id}`, `GET /v1/interests/{session_id}`, `GET /v1/sessions`) are not narrowed: every session looks another up.
+A token naming a service and no person (a machine nobody has signed in on) is admitted on all of them and bound to its own session like any other.
+A presentation the listener does not admit is one `listener: broker token rejected` warning carrying the class and the path, never the token or the proof: `not_configured`, `starting` (the spent-proof bucket is not open yet), `not_active` (unknown, revoked or expired), `key_mismatch`, `proof_invalid` (a replayed proof among them), `not_a_session`, `rate_limited`, `unavailable` and `check_failed`.
+Each is the same 401 `unauthorized` body the other credentials' refusals get, except the two that refuse nobody: the broker unreachable and the bucket still opening are 503s with `Retry-After`, since a caller told its token was refused would discard one that may be live, and a source address out of introspections is 429 with the wait its bucket gives (`brokertoken.DefaultAddressLimit`).
 A service-account token the verifier refuses is one `listener: service-account token rejected` warning carrying `oidc.Reason`'s class and the path
 — never the bearer, and never the class in the 401 body, which would tell an unauthenticated caller which credential the listener is configured for.
 The classes are `malformed`, `issuer`, `audience`, `expired`, `cancelled` (the request ended before the verdict

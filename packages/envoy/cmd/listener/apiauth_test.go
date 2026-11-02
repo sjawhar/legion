@@ -198,7 +198,7 @@ func TestAPIAuth(t *testing.T) {
 				configured = verifier
 			}
 			var logged bytes.Buffer
-			apiAuth(tc.token, configured, nil, logging.NewWithWriter("test-machine", &logged), next).
+			apiAuth(tc.token, configured, nil, nil, logging.NewWithWriter("test-machine", &logged), next).
 				ServeHTTP(recorder, request)
 
 			if recorder.Code != tc.wantStatus {
@@ -287,7 +287,7 @@ func TestAPIAuthValidatesV1BodyContentType(t *testing.T) {
 			}
 			recorder := httptest.NewRecorder()
 
-			apiAuth("", nil, nil, logging.NewWithWriter("test-machine", io.Discard), next).ServeHTTP(recorder, request)
+			apiAuth("", nil, nil, nil, logging.NewWithWriter("test-machine", io.Discard), next).ServeHTTP(recorder, request)
 
 			if recorder.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, tc.wantStatus, recorder.Body.String())
@@ -450,10 +450,11 @@ func TestResolveListenerOIDCConfig(t *testing.T) {
 
 func TestDescribeListenerAPIAuth(t *testing.T) {
 	cases := []struct {
-		name   string
-		token  string
-		issuer string
-		want   string
+		name    string
+		token   string
+		issuer  string
+		brokers *brokerTokens
+		want    string
 	}{
 		{
 			name: "neither is disabled",
@@ -475,12 +476,41 @@ func TestDescribeListenerAPIAuth(t *testing.T) {
 			issuer: "https://oidc.eks.example/id/CLUSTER",
 			want:   "shared token and oidc https://oidc.eks.example/id/CLUSTER",
 		},
+		{
+			name: "only broker tokens name the broker and the projected token it calls as",
+			brokers: newBrokerTokens(listenerBrokerConfig{
+				BrokerURL:        "https://broker.example",
+				AccountTokenFile: "/var/run/secrets/broker/token",
+				Origin:           "https://listener.example",
+			}),
+			want: "broker tokens at https://broker.example as projected token /var/run/secrets/broker/token",
+		},
+		{
+			name: "a listener on a VM names the audience it mints its machine identity for",
+			brokers: newBrokerTokens(listenerBrokerConfig{
+				BrokerURL:      "https://broker.example",
+				GoogleAudience: "legion-broker-pod",
+				Origin:         "https://listener.example",
+			}),
+			want: "broker tokens at https://broker.example as google audience legion-broker-pod",
+		},
+		{
+			name:   "all three name all three",
+			token:  "expected-token",
+			issuer: "https://oidc.eks.example/id/CLUSTER",
+			brokers: newBrokerTokens(listenerBrokerConfig{
+				BrokerURL:        "https://broker.example",
+				AccountTokenFile: "/var/run/secrets/broker/token",
+				Origin:           "https://listener.example",
+			}),
+			want: "shared token and oidc https://oidc.eks.example/id/CLUSTER and broker tokens at https://broker.example as projected token /var/run/secrets/broker/token",
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := describeListenerAPIAuth(tc.token, tc.issuer); got != tc.want {
-				t.Fatalf("describeListenerAPIAuth(token set: %t, %q) = %q, want %q", tc.token != "", tc.issuer, got, tc.want)
+			if got := describeListenerAPIAuth(tc.token, tc.issuer, tc.brokers); got != tc.want {
+				t.Fatalf("describeListenerAPIAuth(token set: %t, %q, brokers set: %t) = %q, want %q", tc.token != "", tc.issuer, tc.brokers != nil, got, tc.want)
 			}
 		})
 	}
@@ -534,7 +564,7 @@ func TestAPIAuthRefusesHostsAnUnauthenticatedListenerDoesNotServe(t *testing.T) 
 			recorder := httptest.NewRecorder()
 			var logged bytes.Buffer
 
-			apiAuth(tc.token, nil, allowed, logging.NewWithWriter("test-machine", &logged), next).ServeHTTP(recorder, request)
+			apiAuth(tc.token, nil, nil, allowed, logging.NewWithWriter("test-machine", &logged), next).ServeHTTP(recorder, request)
 
 			if recorder.Code != tc.wantStatus {
 				t.Fatalf("Host %q: status = %d, want %d; body = %s", tc.host, recorder.Code, tc.wantStatus, recorder.Body.String())

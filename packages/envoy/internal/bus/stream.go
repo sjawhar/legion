@@ -42,6 +42,13 @@ const (
 	SessionBucket = "envoy_sessions"
 	// CIStateBucket holds the CI state of each commit of a pull request (internal/cistore).
 	CIStateBucket = "envoy_ci_state"
+	// DPoPProofBucket holds one record per RFC 9449 proof a listener has already spent, keyed by
+	// the proof's 'jti' and target URI, so a captured proof presented a second time inside its
+	// acceptance window is refused by whichever listener of a deployment receives it
+	// (cmd/listener/brokerauth.go). Its records are the only ones Envoy keeps on a bucket TTL
+	// alone: nothing reads a record back, and a key that has outlived the window its proof could
+	// be presented in says nothing, so each key expires rather than being deleted.
+	DPoPProofBucket = "envoy_dpop_proofs"
 	// WebhookRedeliveryBucket holds the cursor and records of Dispatch's sweep of the GitHub App
 	// webhook's failed deliveries (internal/dispatch/redeliver).
 	WebhookRedeliveryBucket = "envoy_webhook_redelivery"
@@ -49,13 +56,14 @@ const (
 
 // ListenerBuckets reports the KV buckets envoy-listener opens, in the order its NATS grant lists
 // them: the interest and role-claim buckets (internal/store), the session registry
-// (internal/session), and the CI state bucket, which only a listener with the GitHub webhook route
-// opens (internal/cistore). The listener's keeper raises each of them (WithKeptBuckets), and
-// envoy-infra grants the listener and the host each one's calls
+// (internal/session), the CI state bucket, which only a listener with the GitHub webhook route
+// opens (internal/cistore), and the spent-proof bucket, which only a listener that takes broker
+// access tokens opens (cmd/listener/brokerauth.go). The listener's keeper raises each of them
+// (WithKeptBuckets), and envoy-infra grants the listener and the host each one's calls
 // (packages/envoy/infra/core/permissions.go), so a bucket named here is both kept and granted.
 // Each call returns a fresh slice, so no caller changes another's list.
 func ListenerBuckets() []string {
-	return []string{InterestBucket, RoleClaimBucket, SessionBucket, CIStateBucket}
+	return []string{InterestBucket, RoleClaimBucket, SessionBucket, CIStateBucket, DPoPProofBucket}
 }
 
 // NotificationTopicPrefix begins every notification topic: the subjects the stream carries, the

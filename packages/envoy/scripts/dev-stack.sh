@@ -25,12 +25,15 @@
 # "issuer listening url=", the broker's "broker listening addr=", natsd's "Listening for client
 # connections on", the listener's JSON "envoy-listener listening" addr, and Dispatch's
 # "dispatch: listening" addr. So a URL this script prints can only ever name this run's own
-# process, never one left over from another. Dispatch's port is the one exception to "bind, then
-# report": the broker must name Dispatch's machine-login page before it starts, and Dispatch must
-# name the broker's URL before it starts, so scripts/e2e/lib/held-port.py holds a socket on a port
-# the kernel chose for the whole run (as docs/site/media/broker/rig.sh does) and Dispatch serves
-# on it (DISPATCH_LISTEN_FD) rather than binding one; it still reports that port in its own
-# listening line, and that line is what this script reads.
+# process, never one left over from another. Two of the five are the exceptions to "bind, then
+# report", and both serve on a socket scripts/e2e/lib/held-port.py opened on a port the kernel
+# chose (as docs/site/media/broker/rig.sh does): Dispatch, because the broker must name its
+# machine-login page before it starts while Dispatch must name the broker's URL before it starts,
+# so a keeper holds that socket for the whole run and Dispatch serves on a copy of it
+# (DISPATCH_LISTEN_FD); and the listener, because it must be told its own public origin before it
+# starts, the origin a DPoP proof's target URI is checked against (ENVOY_PUBLIC_URL), so
+# held-port.py opens its socket and puts the port in that one variable (ENVOY_LISTEN_FD). Each
+# still reports its port in its own listening line, and those lines are what this script reads.
 #
 # Dispatch runs on its dev sign-in route (DISPATCH_DEV_SIGNIN=1), so a browser on this machine is
 # signed in as any person it names with no sign-in pool, and the broker's approval page signs a
@@ -61,7 +64,9 @@
 #   DEV_STACK_EXCHANGE_TOKEN_FILE         the pod's token for the broker's exchange audience
 #   DEV_STACK_POD_TOKEN_FILE              that same pod's token for the broker's own audience
 #   DEV_STACK_REGISTRAR_TOKEN_FILE        the service login that registers a pod for a session
-#   DEV_STACK_LISTENER_TOKEN_FILE         the caller "listener", which may introspect alone
+#   DEV_STACK_LISTENER_TOKEN_FILE         the caller "listener", which may introspect alone: the
+#                                         listener of this run presents it to check an access
+#                                         token a session sends /v1 under
 #
 # It then stays in the foreground until it is interrupted or any process it started stops. One
 # trap stops every process by the pid this script started it as, drops the two databases it
@@ -442,15 +447,29 @@ NATS_URL="nats://127.0.0.1:$awaited"
 echo "dev-stack: natsd $NATS_URL" >&2
 
 # --- The listener, on that bus. ENVOY_HOST_BRIDGE=127.0.0.1 because every session of this stack
-# runs on this machine, and PORT=0 for the kernel's choice, which it reports in its own listening
-# line. It serves /v1 with no credential, which the listener allows on loopback alone. ---
+# runs on this machine. It serves on a socket held-port.py opened on a port the kernel chose
+# (ENVOY_LISTEN_FD=3) rather than on PORT=0, for the reason Dispatch does: the listener has to be
+# told its own public origin before it starts, since a DPoP proof's target URI is checked against
+# that origin and nothing else, and `{port}` below is the port of that very socket (held-port.py
+# exec substitutes it). It still reports the address it serves on in its own listening line, and
+# that line is what this script reads.
+#
+# It takes three credentials: none, which is what every session of this stack uses and what the
+# listener allows on loopback; and a broker access token, which it checks at this run's broker
+# (ENVOY_AGENT_SECRETS_URL) as the caller "listener", presenting the projected token the issuer
+# wrote for it. A session holding such a token is bound to the session the broker named: it may
+# subscribe, claim a role, send and publish as that session and as no other.
 echo "dev-stack: starting listener..." >&2
 : >"$LISTENER_LOG"
-env -i PATH="$PATH" \
-  PORT=0 \
+python3 "$HELD_PORT" exec --host 127.0.0.1 --fd-env ENVOY_LISTEN_FD -- \
+  env -i PATH="$PATH" \
+  ENVOY_LISTEN_FD=3 \
   ENVOY_LISTEN_HOST=127.0.0.1 \
   ENVOY_MACHINE_ID="dev-stack-$RUN_SUFFIX" \
   ENVOY_HOST_BRIDGE=127.0.0.1 \
+  ENVOY_PUBLIC_URL="http://127.0.0.1:{port}" \
+  ENVOY_AGENT_SECRETS_URL="$BROKER_URL" \
+  ENVOY_AGENT_SECRETS_ACCOUNT_TOKEN_FILE="$LISTENER_TOKEN_FILE" \
   NATS_URLS="$NATS_URL" \
   "$BIN_DIR/listener" >"$LISTENER_LOG" 2>&1 &
 LISTENER_PID=$!
@@ -531,6 +550,11 @@ dev-stack: ready.
   sign-in: POST $ISSUER_URL/device_authorization as the client $DEVICE_CLIENT_ID, then
   POST $ISSUER_URL/_dev/approve-device-code with {"user_code": "..."} for the person who would
   type that code in at Google.
+
+  That access token reaches the listener too: POST \$ENVOY_URL/v1/messages/send under
+  \`Authorization: DPoP <token>\` with a DPoP proof of the key it is bound to acts as
+  $EXCHANGE_SESSION, and a body naming any other source_session is refused 403. The listener
+  checks it at $BROKER_URL as the caller "listener".
 
   Press Ctrl-C to stop every process and drop both databases.
 EOF

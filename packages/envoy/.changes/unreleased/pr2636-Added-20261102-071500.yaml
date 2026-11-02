@@ -1,0 +1,19 @@
+kind: Added
+body: |
+  The Envoy listener takes an access token the secrets broker issued, presented under RFC 9449's
+  DPoP scheme, beside its two bearers. `ENVOY_AGENT_SECRETS_URL` turns it on,
+  `ENVOY_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` or `ENVOY_AGENT_SECRETS_GOOGLE_AUDIENCE` is the
+  identity it calls introspection as (a projected Kubernetes token in a pod, this machine's
+  Google identity token on a VM), and `ENVOY_PUBLIC_URL` is the origin a proof's `htu` is checked
+  against; any one of them set without the rest refuses the start. A caller the broker names is
+  bound to its session on the five routes that act as one — subscribe, unsubscribe, `roles/set`,
+  `messages/send` and `messages/publish` — each refusing 403 a body naming another session, while
+  the read routes that name another session by design are untouched; a token naming a service and
+  no person is admitted as any other session's is. Spent proofs are recorded in the new
+  `envoy_dpop_proofs` KV bucket, which every listener of a deployment shares and whose subjects
+  the listener's NATS grant now covers, so a bus with no JetStream refuses the start rather than
+  leaving a proof replayable against another replica. A request presenting no token is judged
+  exactly as it was before.
+time: 2026-11-02T07:15:00.000000000Z
+custom:
+  Issue: pr2636

@@ -571,6 +571,10 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		body = request.messageBody
 		targetSession = strings.TrimSpace(request.TargetSession)
 		record.lane = targetSession
+		if refusal := sessionNotBound(r, logger, strings.TrimSpace(body.SourceSession)); refusal != "" {
+			record.refuse(w, http.StatusForbidden, outcomeCapabilityRefused, refusal, "source_session")
+			return
+		}
 		if targetSession == "" {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "target_session is required", "target_session")
 			return
@@ -730,6 +734,10 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		// The topic is recorded as the envelope will carry it, untrimmed, so a request refused for
 		// the spelling of its topic records the spelling that was refused.
 		record.lane = request.Topic
+		if refusal := sessionNotBound(r, logger, strings.TrimSpace(request.SourceSession)); refusal != "" {
+			record.refuse(w, http.StatusForbidden, outcomeCapabilityRefused, refusal, "source_session")
+			return
+		}
 		if strings.TrimSpace(request.Topic) == "" {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "topic is required", "topic")
 			return
@@ -1165,6 +1173,10 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
 			return
 		}
+		if refusal := sessionNotBound(r, logger, body.SessionID); refusal != "" {
+			writeJSONError(w, http.StatusForbidden, refusal, "session_id")
+			return
+		}
 		if body.Role == "" {
 			writeJSONError(w, http.StatusBadRequest, "role is required", "role")
 			return
@@ -1455,6 +1467,10 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
 			return
 		}
+		if refusal := sessionNotBound(r, logger, body.SessionID); refusal != "" {
+			writeJSONError(w, http.StatusForbidden, refusal, "session_id")
+			return
+		}
 		// A session on a serving port is reached at the host it records (session.Deliverer), so a
 		// host that could change the delivery URL's authority or path is refused before anything is
 		// written. An absent host is an older plugin's, and a registration with no port is never
@@ -1568,6 +1584,10 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 		body.SessionID = strings.TrimSpace(body.SessionID)
 		if body.SessionID == "" {
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
+			return
+		}
+		if refusal := sessionNotBound(r, logger, body.SessionID); refusal != "" {
+			writeJSONError(w, http.StatusForbidden, refusal, "session_id")
 			return
 		}
 		logger.Info("listener unsubscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics))

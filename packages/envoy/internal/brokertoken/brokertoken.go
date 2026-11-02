@@ -173,18 +173,19 @@ type Caller struct {
 
 // Options is what a Verifier needs. BrokerURL, Account, Origin, Replay and Address are required.
 type Options struct {
-	// BrokerURL is the secrets broker's base URL (DISPATCH_AGENT_SECRETS_URL), the origin
-	// IntrospectPath is asked on.
+	// BrokerURL is the secrets broker's base URL (DISPATCH_AGENT_SECRETS_URL for Dispatch,
+	// ENVOY_AGENT_SECRETS_URL for a listener), the origin IntrospectPath is asked on.
 	BrokerURL string
-	// Account reads Dispatch's own projected ServiceAccount token, the bearer each introspection
-	// presents.
-	Account *AccountToken
-	// Origin is Dispatch's own public origin (DISPATCH_SERVER_URL): an absolute http(s) URL with
-	// no path. A proof's 'htu' is checked against it plus the request's path, never against a
-	// forwarded header — see atOrigin.
+	// Account reads the caller's own platform identity, the bearer each introspection presents:
+	// a projected Kubernetes ServiceAccount token (AccountToken) or a machine's Google identity
+	// token (GoogleAccount).
+	Account Account
+	// Origin is the mounting program's own public origin (DISPATCH_SERVER_URL,
+	// ENVOY_PUBLIC_URL): an absolute http(s) URL with no path. A proof's 'htu' is checked
+	// against it plus the request's path, never against a forwarded header — see atOrigin.
 	Origin string
 	// Replay is where a spent proof is recorded, so a captured one cannot be presented twice
-	// (store.DPoPProofs for Dispatch).
+	// (store.DPoPProofs for Dispatch, the spent-proof KV bucket for a listener).
 	Replay rfc9449.DPoPReplayStorage
 	// Address is the source address one introspection bucket is keyed on (DefaultAddressLimit),
 	// read from the request as the deployment's own proxy-trust rule reads it — Dispatch passes
@@ -210,7 +211,7 @@ type Options struct {
 // and is built once per process.
 type Verifier struct {
 	brokerURL string
-	account   *AccountToken
+	account   Account
 	origin    *url.URL
 	// originTLS is the TLS state atOrigin puts on the request it rewrites: one empty state for
 	// the whole process when the origin is https, nil when it is not. Nothing reads more of it
