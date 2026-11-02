@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-251",
-  "previousHandoff": "5b31b3b7882744746ec35798def091e21065a2e4",
+  "previousHandoff": "6c8f837cbd06a7714d5b1009ab8898c90a77e6f3",
   "proof": [
     {
       "criterion": "Spec v5 A3: the proof no longer needs a session to park a waiting root; tree 5 checks that the daemon sets a session's park back, and foreign-park-stays covers the person-parked tree 4 (and the operator-parked tree 2)",
       "surface": "scripts/e2e/parked-decision-devbox.sh trees-parked, foreign-park-stays, walk-on-start, verdict; reasserted_status against the devbox run's own log line",
       "command": "bash -n; shellcheck v0.10.0 -x parked-decision-devbox.sh lib/install-key-file-model-route.sh lib/install-model-gateway.sh (from scripts/e2e); the command-word check (shfmt v3.10.0 --to-json lists every literal command word, bash resolves each after sourcing transcript, model-endpoint, rig, omp-home, workflow, leftovers and github-apps, the script's own functions counted); reasserted_status on a daemon.log fixture holding the run's line {\"msg\":\"workflow: a session wrote a lifecycle status; the daemon re-asserts its own\",\"issue\":\"PD93804605-4\",\"session\":\"stage3-architect-stand-in\",\"wrote\":\"backlog\",\"status\":\"in_progress\"}",
       "observed": "bash -n passes on all four shell files; shellcheck exits 0 on the script and the key-file and gateway libs (install-box-login-route.sh keeps its existing SC2015 info at line 152, an A && B || fail whose C is meant). Command-word check: 126 words, unresolved only docker, mise and tmux, the devbox tools the prerequisites loop requires and this pod lacks. reasserted_status prints in_progress for PD93804605-4 (exit 0), and exits 4 printing nothing for an issue with no such line or for another session. Tree 5 now: the stand-in PATCHes backlog, then the run waits for that log line, for Dispatch to show the logged status written back by legion-daemon:<project> after the PATCH, and checks tree 5 still waits on its gate and is not parked; it gets no question, and foreign-park-stays, walk-on-start and verdict read trees 2 and 4 (and 1 to 4).",
-      "headSha": "418b43208e4a875ebf30fcf6eff0b26db6495bce",
+      "headSha": "79fd47725984cb94e45050ec343bcb6b762a25bc",
       "negativeControl": "reasserted_status with dispatch_agent_session set to another session, or for an issue the log does not name, exits 4: the check waits for the stand-in's own write on tree 5 and nothing else."
     },
     {
@@ -17,8 +17,16 @@
       "surface": "lib/install-key-file-model-route.sh run as the script runs it, with --base-url, into a fresh make_omp_home profile, then Oh My Pi 18.13.3 (/opt/omp/bin/omp) started in a pty (script -qfec) under that profile",
       "command": "bash lib/install-key-file-model-route.sh --profile pd-wizard-<m> --home <home> --dest <dest> --key-dir <dir> --key-file <0600 placeholder> --base-url https://gateway.internal.example; HOME=<home> OMP_PROFILE=pd-wizard-<m> TERM=xterm-256color timeout 25 script -qfec /opt/omp/bin/omp <log>; bun test scripts/e2e/lib/install-key-file-model-route.test.ts install-model-gateway.test.ts install-box-login-route.test.ts model-endpoint.test.ts",
       "observed": "models.yml baseUrl is https://gateway.internal.example. With the lib's config.yml (setupVersion: 2) the pane shows the splash and no 'Setup step'; the pinned build's CURRENT_SETUP_VERSION is 2 (read from the binary: `var n0 = 2`, scenes minVersion 1 and 2). The four lib test files pass, 48 tests. The script itself in this pod stops at prerequisites ('FAIL prerequisites: docker is required'): the pod has no docker, tmux or mise, so the rig cannot run here.",
-      "headSha": "418b43208e4a875ebf30fcf6eff0b26db6495bce",
+      "headSha": "79fd47725984cb94e45050ec343bcb6b762a25bc",
       "negativeControl": "The same profile with the setupVersion line removed: the pane shows 'Setup step', the wizard that held controller-up on sami-leanperf."
+    },
+    {
+      "criterion": "Forward merge of main, which GitHub reported CONFLICTING at 6c8f837c (merge, never a rebase)",
+      "surface": "jj new legion/INFRA-251 main@origin (main 11ca14268e01); the one conflict, packages/daemon/internal/dispatch/types.go, holds this branch's Approval.LatestReviewer and main's Handoff types, both additions, both kept",
+      "command": "cd packages/daemon && go build ./... && go vet ./internal/dispatch/ ./internal/workflow/ ./internal/admit/ && go test -count=1 ./internal/dispatch/",
+      "observed": "Build and vet clean; internal/dispatch ok. The unchanged-diff fingerprint (sha256 of the changed lines, excluding .legion/ and docs/solutions/) is ce857281c5b212e5 before (fork point to 6c8f837c) and after (main to the merge), 81 files, +12484 -265 on both sides.",
+      "headSha": "79fd47725984cb94e45050ec343bcb6b762a25bc",
+      "negativeControl": "Before the merge GitHub reported mergeable=CONFLICTING on 6c8f837c."
     }
   ],
   "filesChanged": [
@@ -26,7 +34,8 @@
     "scripts/e2e/README.md",
     "scripts/e2e/lib/install-key-file-model-route.sh",
     "scripts/e2e/lib/install-model-gateway.sh",
-    "scripts/e2e/lib/install-box-login-route.sh"
+    "scripts/e2e/lib/install-box-login-route.sh",
+    "merge of main 11ca14268e01 (one conflict resolved, packages/daemon/internal/dispatch/types.go)"
   ],
   "deviations": [
     "install-box-login-route.sh also writes setupVersion: 2: it writes a fresh profile's config.yml the same way, so the same wizard would hold its panes.",
