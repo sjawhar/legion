@@ -64,7 +64,10 @@ projects:
 #                                      # moved to two owners (acme/a -> b/a with acme/c -> d/c),
 #                                      # since a gh directory is keyed by an owner and holds one
 #                                      # installation's token; several repositories of one owner
-#                                      # may move to one owner. --check-config prints one line
+#                                      # may move to one owner, and a rename inside the owner
+#                                      # (acme/a -> acme/b) counts as a move to that owner, so it
+#                                      # refuses acme/a -> acme/b beside acme/c -> d/c.
+#                                      # --check-config prints one line
 #                                      # per pair, to read the equivalence back before a transfer.
 gates:
   design: root-issues                  # a person approves each root's spec (the default); or off

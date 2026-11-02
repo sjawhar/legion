@@ -1276,8 +1276,11 @@ func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, serv
 }
 
 // issueRepository is the repository issue's record names and its recorded default branch: what
-// every launch of the issue's claims works (specs.repository) and the owner its commit identity is
-// minted for (adoptIdentity). An issue the workflow does not record, such as an operator's claim,
+// every launch of the issue's claims works (specs.repository) and what its commit identity is
+// read from (adoptIdentity). The identity is not minted for this repository's own owner: identity
+// maps it through serving first, so a tree recorded before a transfer is authored by the App on
+// the installation that holds the repository now. An issue the workflow does not record, such as
+// an operator's claim,
 // works the project's default repository, as Dispatch resolves an issue that names none, at its
 // default branch as GitHub names it (defaultBranches): a pod provisions its workspace from one, so
 // a launch on none would be refused. A project that serves no default repository refuses that

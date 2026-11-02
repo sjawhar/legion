@@ -316,12 +316,10 @@ func (s *server) implementationPullRequest(w http.ResponseWriter, r *http.Reques
 		return true
 	}
 	// This read is GitHub's own, so it is minted for and addressed at the repository GitHub holds
-	// the recorded one under now (serving): the record keeps the name it was written under for its
-	// whole life, while after a transfer the installation that covers the repository is the owner
-	// it moved to's, and that token is what the old name cannot supply. GitHub does answer the old
-	// address, with a 301 to the repository's id, so the served name here is for the log line and
-	// for keeping a write off a redirect, never the reason the call works. The fact applied below
-	// goes on naming issue.GitHubRepo, the name the record is held under.
+	// the recorded one under now (ghrepo.Renames.Serving, whose doc says why both halves are
+	// taken): the token is the half the old owner cannot supply, since after a transfer the
+	// installation covering the repository is the owner it moved to's. The log line above and the
+	// fact applied below go on naming issue.GitHubRepo, the name the record is held under.
 	repository := s.serving(recordedRepo)
 	lease, err := s.tokens.Token(ctx, appauth.Implement, repository.Owner())
 	if err != nil {
@@ -433,12 +431,10 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 		return readyAnswer{}, false
 	}
 	// READY's checks are GitHub's own reads, so they are minted for and addressed at the
-	// repository GitHub holds the recorded one under now: the record keeps the name it was
-	// written under for its whole life, while after a transfer the installation that covers the
-	// repository is the owner it moved to's, and that token is what the old owner cannot supply —
-	// a tree open at the transfer would never publish READY. GitHub does answer the old address,
-	// with a 301 to the repository's id, so the served name here is for the log line and for
-	// keeping a write off a redirect, never the reason the reads work.
+	// repository GitHub holds the recorded one under now (ghrepo.Renames.Serving, whose doc says
+	// why both halves are taken): the token is the half the old owner cannot supply, since after
+	// a transfer the installation covering the repository is the owner it moved to's, and without
+	// it a tree open at the transfer would never publish READY.
 	repository = s.serving(repository)
 	lease, ok := s.leaseForGrant(w, r, grant, appauth.Implement, repository.Owner())
 	if !ok {

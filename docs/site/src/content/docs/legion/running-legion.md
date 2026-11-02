@@ -381,7 +381,9 @@ What each part is for:
   repository renamed twice, a chain of two pairs (`a/b` to `c/d` with `c/d` to `e/f`), and one
   owner's repositories moved to two owners (`a/b` to `c/d` with `a/e` to `f/g`), since the gh
   directory a worker reads is keyed by an owner and holds one installation's token; several
-  repositories of one owner may move to one owner. `legion start --check-config` prints one line
+  repositories of one owner may move to one owner, and a rename inside the owner (`a/b` to `a/c`)
+  counts as a move to that owner, so `a/b` to `a/c` beside `a/e` to `f/g` is refused.
+  `legion start --check-config` prints one line
   per configured pair, so you can read back what the daemon will treat as one repository before
   the transfer.
 - **`daemon_url`**, **`envoy_url`**, **`dispatch_url`**, every **`nats_urls`** entry and the

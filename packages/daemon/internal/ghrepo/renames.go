@@ -171,10 +171,13 @@ func (r Renames) OwnerAliases(owned func(owner string) bool) (aliases map[string
 // pair when that name's owner is an alias target of OwnerAliases, and `recorded` itself otherwise.
 //
 // A record keeps the repository it was written under for its whole life, so every GitHub call the
-// daemon makes for a tree opened before a transfer starts from a name GitHub no longer serves and
-// an owner whose installation no longer covers it. This is the one place that name is mapped to
-// the one GitHub holds, for the token's owner and for the address together, so a REST write or a
-// GraphQL query reaches the repository rather than silently addressing nobody.
+// daemon makes for a tree opened before a transfer starts from a name whose owner's installation
+// no longer covers the repository. The token is what that costs: GitHub answers the old address
+// itself (a REST call to it redirects, and a GraphQL query resolves the repository), while no
+// token of the old owner reaches it. This is the one place a recorded name is mapped to the one
+// GitHub holds, and callers take both halves of the answer: its owner, which is the half they
+// cannot do without, and its name, which keeps a write off a redirect and names the repository
+// GitHub holds in whatever the caller writes down.
 //
 // A name no pair holds, a pair whose owners OwnerAliases makes no alias of (one inside a single
 // owner, one whose `to` owner the project does not own, one between two owners of the project),
