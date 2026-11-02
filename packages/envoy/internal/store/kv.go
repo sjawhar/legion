@@ -561,7 +561,7 @@ func (r *Registry) roleHolderRevision(role string) uint64 {
 func (r *Registry) applyRoleClaim(entry nats.KeyValueEntry) {
 	holder := ""
 	if entry.Operation() != nats.KeyValueDelete && entry.Operation() != nats.KeyValuePurge {
-		claim, err := decodeRoleClaim(entry.Value())
+		claim, err := DecodeRoleClaim(entry.Value())
 		if err != nil {
 			r.logger().Warn("role claim watcher found a claim it cannot read; it names no holder",
 				slog.String("role", entry.Key()),
@@ -944,9 +944,11 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 // failed, and reading it again returns the same record; each error wrapping it names which.
 var ErrMalformedRoleClaim = errors.New("malformed role claim")
 
-// decodeRoleClaim reads a stored claim: the fields RoleClaim names, every other key into its unknown
-// map, or a bare session id an earlier build stored.
-func decodeRoleClaim(value []byte) (RoleClaim, error) {
+// DecodeRoleClaim reads a stored role claim record: the fields RoleClaim names, every other key
+// into its unknown map, or a bare session id an earlier build stored. Any other record is
+// ErrMalformedRoleClaim. Dispatch's outbox reads the role bucket through it too (roles.Buckets),
+// so the two readers cannot drift.
+func DecodeRoleClaim(value []byte) (RoleClaim, error) {
 	var claim RoleClaim
 	unknown, err := DecodeKeeping(value, &claim, roleClaimKeys)
 	if err == nil {
@@ -987,7 +989,7 @@ func (r *Registry) roleClaim(ctx context.Context, role string) (RoleClaim, nats.
 	if err != nil {
 		return RoleClaim{}, nil, err
 	}
-	claim, err := decodeRoleClaim(entry.Value())
+	claim, err := DecodeRoleClaim(entry.Value())
 	if err != nil {
 		return RoleClaim{}, nil, err
 	}

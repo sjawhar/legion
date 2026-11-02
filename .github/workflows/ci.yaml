@@ -230,12 +230,15 @@ jobs:
             # packages/envoy/listenfd serves on the socket a test or harness holds (#2229).
             # internal/dispatch/dashboard and internal/dispatch/processes: cmd/dispatch imports them
             # (INFRA-559, INFRA-555).
+            # internal/roles and, through it, internal/store, internal/session and internal/kvwatch:
+            # the outbox's role forward resolves a role's holder with roles.ResolveHolder (#2395).
             dispatch_server: &dispatch_server
               - 'packages/envoy/cmd/dispatch/*'
               - 'packages/envoy/internal/broker/oauthwire/*'
               - 'packages/envoy/internal/brokertoken/*'
               - 'packages/envoy/internal/bus/*'
               - 'packages/envoy/internal/contracts/*'
+              - 'packages/envoy/internal/dedupe/*'
               - 'packages/envoy/internal/dispatch/accesslog/*'
               - 'packages/envoy/internal/dispatch/agentsecrets/*'
               - 'packages/envoy/internal/dispatch/agentstream/*'
@@ -275,13 +278,17 @@ jobs:
               - 'packages/envoy/internal/dispatch/text/*'
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/id/*'
+              - 'packages/envoy/internal/kvwatch/*'
               - 'packages/envoy/internal/metrics/*'
               - 'packages/envoy/internal/oidc/*'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
+              - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
+              - 'packages/envoy/internal/session/*'
+              - 'packages/envoy/internal/store/*'
               - 'packages/envoy/listenfd/*'
             # The daemon's `legion` command, `go list -deps ./cmd/legion` in packages/daemon (its
             # embedded probes, turnscope.yml and role prompts included, and the envoy package it
@@ -311,6 +318,7 @@ jobs:
               - 'packages/daemon/internal/ghconfig/*'
               - 'packages/daemon/internal/ghrepo/*'
               - 'packages/daemon/internal/githubrest/*'
+              - 'packages/daemon/internal/handoffimport/*'
               - 'packages/daemon/internal/intake/*'
               - 'packages/daemon/internal/launcher/*'
               - 'packages/daemon/internal/lookpath/*'
@@ -362,6 +370,7 @@ jobs:
               - 'packages/envoy/internal/logging/*'
               - 'packages/envoy/internal/metrics/*'
               - 'packages/envoy/internal/oidc/*'
+              - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
               - 'packages/envoy/internal/session/*'
               - 'packages/envoy/internal/store/*'
@@ -372,6 +381,10 @@ jobs:
             # the packages it compiles, with the whole of cmd/dispatch and internal/dispatch, whose
             # .go files cmd/dispatch/settings_test.go:137 walks, and the pod spec
             # cmd/dispatch/pod_grace_period_test.go:17 reads.
+            # internal/roles and, through it, internal/store, internal/session and internal/kvwatch:
+            # the outbox's role forward resolves a role's holder with roles.ResolveHolder (#2395);
+            # internal/dedupe comes with internal/session, whose registry keeps its delivery
+            # ledger's records.
             dispatch_command_tests: &dispatch_command_tests
               - 'packages/envoy/cmd/dispatch/**'
               - 'packages/envoy/internal/broker/oauthwire/*'
@@ -381,8 +394,10 @@ jobs:
               - 'packages/envoy/internal/bus/bustest/*'
               - 'packages/envoy/internal/cmdtest/*'
               - 'packages/envoy/internal/contracts/**'
+              - 'packages/envoy/internal/dedupe/*'
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/id/*'
+              - 'packages/envoy/internal/kvwatch/*'
               - 'packages/envoy/internal/logtest/*'
               - 'packages/envoy/internal/metrics/*'
               - 'packages/envoy/internal/oidc/**'
@@ -390,7 +405,10 @@ jobs:
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
+              - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
+              - 'packages/envoy/internal/session/*'
+              - 'packages/envoy/internal/store/*'
               - 'packages/envoy/internal/testsocks5/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/infra/gcp/testdata/dispatch-pod.golden'
@@ -837,11 +855,14 @@ jobs:
             # The pmdoc race job: the closure of `go test -race ./internal/dispatch/pmdoc/...`,
             # and the Bun install its tests need. pmdoc's tests run pmdoc/gen, which imports the
             # proof editor (internal/dispatch/pmdoc/update_test.go:236-239,
-            # render_readback_test.go:32), so the editor's package is here too.
+            # render_readback_test.go:32), so the editor's package is here too, and
+            # heavy_bodies_test.go:10 reads the body cap every writer of a comment meets
+            # (contracts.DispatchBodyMax), so the contracts package is too.
             envoy_go_race_pmdoc:
               - '.github/workflows/ci.yaml'
               - *bun_install
               - *go_workspace
+              - 'packages/envoy/internal/contracts/**'
               - 'packages/envoy/internal/cputest/*'
               - 'packages/envoy/internal/dispatch/docs/crafted/*'
               - 'packages/envoy/internal/dispatch/docs/docstest/*'

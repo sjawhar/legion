@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -76,7 +78,7 @@ func TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStream
 	if err := client.Publish(published); !errors.Is(err, ErrStreamFull) {
 		t.Fatalf("a publish of the delivery into the full stream = %v, want ErrStreamFull", err)
 	}
-	if err := <-client.Window().PublishAsync(sent); !errors.Is(err, ErrStreamFull) {
+	if err := <-client.WindowUntil(nil).PublishAsync(sent); !errors.Is(err, ErrStreamFull) {
 		t.Fatalf("a window's send of the delivery into the full stream = %v, want ErrStreamFull", err)
 	}
 
@@ -98,7 +100,7 @@ func TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStream
 	retry := func(when string) (publishErr, sendErr error) {
 		t.Helper()
 		publishErr = client.Publish(published)
-		sendErr = <-client.Window().PublishAsync(sent)
+		sendErr = <-client.WindowUntil(nil).PublishAsync(sent)
 		for _, answer := range []struct {
 			how  string
 			item contracts.Envelope
@@ -151,6 +153,11 @@ func TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStream
 type notStoredJetStream struct {
 	nats.JetStreamContext
 
+	// beforeAck, when not nil, runs before a window's send is given the stubbed acknowledgement,
+	// on a goroutine of its own, for a test that must move something - its window's deadline -
+	// while that send waits for its answer.
+	beforeAck func()
+
 	mu           sync.Mutex
 	publishArmed bool
 	sendArmed    bool
@@ -184,7 +191,14 @@ func (js *notStoredJetStream) Publish(subject string, data []byte, opts ...nats.
 func (js *notStoredJetStream) PublishMsgAsync(msg *nats.Msg, opts ...nats.PubOpt) (nats.PubAckFuture, error) {
 	if js.fire(&js.sendArmed) {
 		acknowledged := make(chan *nats.PubAck, 1)
-		acknowledged <- &nats.PubAck{Stream: Stream, Duplicate: true}
+		if js.beforeAck != nil {
+			go func() {
+				js.beforeAck()
+				acknowledged <- &nats.PubAck{Stream: Stream, Duplicate: true}
+			}()
+		} else {
+			acknowledged <- &nats.PubAck{Stream: Stream, Duplicate: true}
+		}
 		return duplicateWithNoSequence{acknowledged: acknowledged, msg: msg}, nil
 	}
 	return js.JetStreamContext.PublishMsgAsync(msg, opts...)
@@ -241,7 +255,7 @@ func TestADuplicateAcknowledgementOfAMessageTheStreamDoesNotHoldSendsTheEnvelope
 		if err := client.Publish(published); err != nil {
 			t.Fatalf("a publish acknowledged a duplicate the stream does not hold = %v, want the resend stored", err)
 		}
-		if err := <-client.Window().PublishAsync(sent); err != nil {
+		if err := <-client.WindowUntil(nil).PublishAsync(sent); err != nil {
 			t.Fatalf("a window's send acknowledged a duplicate the stream does not hold = %v, want the resend stored", err)
 		}
 		for _, item := range []contracts.Envelope{published, sent} {
@@ -284,12 +298,12 @@ func TestADuplicateAcknowledgementOfAMessageTheStreamDoesNotHoldSendsTheEnvelope
 		if err := client.Publish(published); !errors.Is(err, ErrStreamFull) {
 			t.Fatalf("a publish of the delivery into the full stream = %v, want ErrStreamFull", err)
 		}
-		if err := <-client.Window().PublishAsync(sent); !errors.Is(err, ErrStreamFull) {
+		if err := <-client.WindowUntil(nil).PublishAsync(sent); !errors.Is(err, ErrStreamFull) {
 			t.Fatalf("a window's send of the delivery into the full stream = %v, want ErrStreamFull", err)
 		}
 		stub.arm()
 		publishErr := client.Publish(published)
-		sendErr := <-client.Window().PublishAsync(sent)
+		sendErr := <-client.WindowUntil(nil).PublishAsync(sent)
 		for _, answer := range []struct {
 			how  string
 			item contracts.Envelope
@@ -304,4 +318,73 @@ func TestADuplicateAcknowledgementOfAMessageTheStreamDoesNotHoldSendsTheEnvelope
 			}
 		}
 	})
+}
+
+// A window's send that the stream acknowledges a duplicate with no sequence (ErrNotStored) is sent
+// once more without its id only while the window's deadline has not passed: the resend is a write,
+// and a publisher whose hold lapsed while the first answer was on its way writes nothing more. The
+// answer then wraps ErrNotStored and ErrWindowDeadline, and the stream holds nothing of it. The
+// same envelope through a window whose deadline is still ahead is stored.
+//
+// The server this module links, v2.15.2, gives no such acknowledgement of its own
+// (TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom), so it is
+// stubbed (notStoredJetStream) and the window's deadline passes while that send waits for it
+// (beforeAck); the sends around it go to a real server and are answered by it.
+func TestAWindowSendsNoResendOfANotStoredDuplicatePastItsDeadline(t *testing.T) {
+	client, err := ConnectOwningStream([]string{testnats.URL(t)})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(client.Close)
+	server := client.JS()
+	stub := &notStoredJetStream{JetStreamContext: server}
+	client.mu.Lock()
+	client.js = stub
+	client.mu.Unlock()
+
+	item := contracts.Envelope{
+		EventID: "event-fenced", Source: "dispatch", SourceEventID: "fenced",
+		Topic: "notifications.dispatch.issue.T-1.comment.created", DedupeKey: "dispatch.event.fenced",
+	}
+	if !contracts.DedupeKeyNamesTheUpstreamEvent(item) {
+		t.Fatal("the envelope publishes under no MsgId")
+	}
+	stored := func() bool {
+		t.Helper()
+		_, err := server.GetLastMsg(Stream, item.Topic)
+		if errors.Is(err, nats.ErrMsgNotFound) {
+			return false
+		}
+		if err != nil {
+			t.Fatalf("read %s: %v", item.Topic, err)
+		}
+		return true
+	}
+
+	var deadline atomic.Int64
+	deadline.Store(time.Now().Add(time.Hour).UnixNano())
+	// The deadline passes while the send waits, before its acknowledgement is read.
+	stub.beforeAck = func() { deadline.Store(time.Now().Add(-time.Second).UnixNano()) }
+	stub.arm()
+	window := client.WindowUntil(func() time.Time { return time.Unix(0, deadline.Load()) })
+	var sendErr error
+	select {
+	case sendErr = <-window.PublishAsync(item):
+	case <-time.After(10 * time.Second):
+		t.Fatal("the send was not answered within 10 s")
+	}
+	if !errors.Is(sendErr, ErrNotStored) || !errors.Is(sendErr, ErrWindowDeadline) {
+		t.Fatalf("a not-stored send whose window's deadline passed = %v, want ErrNotStored and ErrWindowDeadline", sendErr)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if stored() {
+		t.Fatal("the stream holds the envelope the window resent past its deadline")
+	}
+
+	if err := <-client.WindowUntil(func() time.Time { return time.Now().Add(time.Hour) }).PublishAsync(item); err != nil {
+		t.Fatalf("the same send through a window whose deadline is ahead = %v, want it stored", err)
+	}
+	if !stored() {
+		t.Fatal("the send through a window whose deadline is ahead answered nil and the stream does not hold it")
+	}
 }

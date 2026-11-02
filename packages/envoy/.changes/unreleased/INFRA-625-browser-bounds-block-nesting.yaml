@@ -1,0 +1,5 @@
+kind: Fixed
+body: A browser now reads a list or quote opener that would stand inside 100 blocks as the text it is, the bound Dispatch's document service already holds a write to, counting the same blocks except footnote definitions (a quote, a list, a list item and a typed block one each; the service counts a footnote definition too, so a body that nests inside footnote definitions can still draw here where the service would refuse it, never the other way round). Every document Dispatch stores reads exactly as it did. A body nested deeper than Dispatch would accept reads as its own text instead of taking the page down with it, which a few hundred `- ` markers on one line did by overflowing the editor parser's stack.
+time: 2026-10-29T23:56:34.107298609Z
+custom:
+    Issue: INFRA-625

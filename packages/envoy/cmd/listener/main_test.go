@@ -2677,7 +2677,7 @@ func TestListenerDeliveryHandler_RoleLaneForwardsToAHolderItsSessionCacheHasNotS
 	var mu sync.Mutex
 	var forwardedTo []string
 	cfg := harness.config
-	cfg.forwardRole = inlineForward(func(subject string, _ contracts.Envelope, _ time.Duration) error {
+	cfg.forwardRole = inlineForward(func(subject string, _ contracts.Envelope, _ string, _ time.Duration) error {
 		mu.Lock()
 		defer mu.Unlock()
 		forwardedTo = append(forwardedTo, subject)
@@ -2719,7 +2719,7 @@ func TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed(t *t
 	}
 	var forwards atomic.Int32
 	cfg := harness.config
-	cfg.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error {
+	cfg.forwardRole = inlineForward(func(string, contracts.Envelope, string, time.Duration) error {
 		forwards.Add(1)
 		return errors.New("nats: connection closed")
 	})
@@ -2775,7 +2775,7 @@ func TestListenerDeliveryHandler_RoleForwardRefusesUnadvertisedDeliveryMode(t *t
 	}
 	var forwards atomic.Int32
 	cfg := harness.config
-	cfg.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error {
+	cfg.forwardRole = inlineForward(func(string, contracts.Envelope, string, time.Duration) error {
 		forwards.Add(1)
 		return nil
 	})
@@ -2830,7 +2830,7 @@ func TestListenerDeliveryHandler_RoleForwardDedupeSkipsCapabilityRecheckOnRedeli
 	}
 	var forwards atomic.Int32
 	cfg := harness.config
-	cfg.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error {
+	cfg.forwardRole = inlineForward(func(string, contracts.Envelope, string, time.Duration) error {
 		forwards.Add(1)
 		return nil
 	})
@@ -2917,7 +2917,7 @@ func TestListenerDeliveryHandler_RoleForwardErrorSelectsTheReason(t *testing.T) 
 				t.Fatalf("claim role: %v", err)
 			}
 			cfg := harness.config
-			cfg.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error { return tc.forwardErr })
+			cfg.forwardRole = inlineForward(func(string, contracts.Envelope, string, time.Duration) error { return tc.forwardErr })
 			cfg = wireTestDeliveryWorkers(t, cfg)
 			handler := coreNATSDeliveryHandler(cfg)
 			item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "forward-error-kind-"+role)
@@ -3812,9 +3812,9 @@ func (l *pushLog) all() []string {
 
 // inlineForward is a role forward seam (listenerDeliveryHandlerConfig.forwardRole) whose publish
 // always succeeds and whose wait is forward: a test that stands in for the holder's answer.
-func inlineForward(forward func(subject string, item contracts.Envelope, timeout time.Duration) error) func(string, contracts.Envelope, time.Duration, bool) (func() error, error) {
-	return func(subject string, item contracts.Envelope, timeout time.Duration, _ bool) (func() error, error) {
-		return func() error { return forward(subject, item, timeout) }, nil
+func inlineForward(forward func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) error) func(string, contracts.Envelope, string, time.Duration, bool) (func() error, error) {
+	return func(subject string, item contracts.Envelope, msgID string, timeout time.Duration, _ bool) (func() error, error) {
+		return func() error { return forward(subject, item, msgID, timeout) }, nil
 	}
 }
 

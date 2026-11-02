@@ -561,7 +561,7 @@ test("live: a fresh page load opens the socket at the current head and stays wit
   // The socket is outside the HTTP request budget, and the sign-in check carries its event head.
   expect(apiRequestUrls.some((url) => new URL(url).pathname === "/api/v1/events")).toBe(false);
 
-  // Exactly 20 on desktop (chromium): whoami, the project sidebar's Inbox, Pinned,
+  // Exactly 21 on desktop (chromium): whoami, the project sidebar's Inbox, Pinned,
   // and Projects queries, me/state, issue detail, the shared inbox query for the
   // margin's open-ask count, the active-sessions read, the primary artifact's comments -
   // which the Conversation's own list shares rather than fetching again - the margin's own
@@ -578,14 +578,18 @@ test("live: a fresh page load opens the socket at the current head and stays wit
   // when its project maps one), me/agents/state, whose unread replies the Agents badge
   // counts on every page (the sidebar's on desktop, the compact header's on phone), and
   // the credential requests waiting on the viewer, which the Needs-you badge counts beside
-  // the inbox on every page, and `me/replies?limit=1`, whose total the Replies badge counts on
-  // every page (the sidebar's on desktop, the compact header's on phone).
+  // the inbox on every page, `me/replies?limit=1`, whose total the Replies badge counts on
+  // every page (the sidebar's on desktop, the compact header's on phone), and the
+  // Conversation's list of the issue's phase handoffs, which it shows beside the messages.
   // The Conversation pages no event log at all now that the history is the Activity tab's,
   // and the Activity panel is unmounted until its tab is opened. The phone project (iphone)
-  // does not fetch the sidebar while its drawer is closed, so it uses 18. Asserted exactly
+  // does not fetch the sidebar while its drawer is closed, so it uses 19. Asserted exactly
   // (not a ceiling) so a panel that starts eagerly fetching before its tab is ever opened
   // trips this immediately instead of only breaking some looser upper bound.
-  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 18 : 20);
+  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 19 : 21);
+  expect(
+    apiRequestUrls.filter((url) => url.endsWith(`/api/v1/issues/${issue.key}/handoffs`))
+  ).toHaveLength(1);
   expect(
     apiRequestUrls.filter((url) => url.endsWith("/api/v1/settings/repo-projects"))
   ).toHaveLength(1);

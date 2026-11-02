@@ -237,6 +237,10 @@ type connectCallbacks struct {
 	// connection of a client that connects in the background excepted: that one reports through
 	// connectFirstInBackground's connected instead, once the client has installed it.
 	reconnected func(*nats.Conn)
+	// disconnected, when not nil, runs once the connection has disconnected, after the line this
+	// package logs for it: a disconnect is a connection event the client reports to the callers
+	// waiting on one (Client.connectionChanged).
+	disconnected func()
 	// closed, when not nil, runs once the connection is closed: by Close or Drain, or by nats.go
 	// giving up on it (Client.onClosed).
 	closed func()
@@ -259,9 +263,10 @@ type connectCallbacks struct {
 // twice in a row, or a server -ERR it does not classify. Those two are why onClosed still starts a
 // recovery that dials a replacement. The reconnect buffer is off, so nothing is held and sent after its caller
 // saw an error: a publish while reconnecting waits for the reconnect instead
-// (ensureConnWithContext), and a publish that fails was not sent. AsyncErrorCB logs each error the
-// connection reports on its own and then hands it to callbacks.asyncErr, where the client reads
-// the server's refusal of its core subscription (onAsyncError).
+// (ensureConnWithContext), and a publish that fails was not sent. DisconnectedErrCB logs the
+// disconnect and then calls callbacks.disconnected. AsyncErrorCB logs each error the connection
+// reports on its own and then hands it to callbacks.asyncErr, where the client reads the
+// server's refusal of its core subscription (onAsyncError).
 func options(name string, urls []string, callbacks connectCallbacks, now func() time.Time) nats.Options {
 	// The throttle is built here, one per call, so it is per connection and has its own mutex:
 	// options is rebuilt for every dial attempt in connectWithContext's loop and only the attempt
@@ -289,9 +294,12 @@ func options(name string, urls []string, callbacks connectCallbacks, now func() 
 		note(nc, false)
 		if err != nil {
 			slog.Info("envoy nats disconnected", slog.String("name", name), slog.String("error", err.Error()))
-			return
+		} else {
+			slog.Info("envoy nats disconnected", slog.String("name", name))
 		}
-		slog.Info("envoy nats disconnected", slog.String("name", name))
+		if callbacks.disconnected != nil {
+			callbacks.disconnected()
+		}
 	}
 	// A reconnect attempt that fails is otherwise silent: nats.go retries in place forever, so a
 	// broker that is down leaves no line at all in the process's log. The servers come from urls,

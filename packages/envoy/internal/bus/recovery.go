@@ -14,30 +14,36 @@ import (
 // callbacks are what the client tells each of its connections to report its events to. nats.go
 // runs them one at a time, in the order of the events, on the connection's own dispatcher
 // goroutine, so each of them returns at once: the connected flag's moves are the stores and
-// clears of noteConnection, and a connection event's work is handed to a goroutine of the
-// client's (queueReconnect).
+// clears of noteConnection, the event is reported to the callers waiting on one
+// (connectionChanged), and a connection event's work is handed to a goroutine of the client's
+// (queueReconnect).
 func (c *Client) callbacks() connectCallbacks {
 	return connectCallbacks{
-		reconnected: c.queueReconnect,
-		closed:      c.onClosed,
-		asyncErr:    c.onAsyncError,
-		state:       c.noteConnection,
+		reconnected:  c.queueReconnect,
+		disconnected: c.connectionChanged,
+		closed:       c.onClosed,
+		asyncErr:     c.onAsyncError,
+		state:        c.noteConnection,
 	}
 }
 
 // queueReconnect takes a connection event of nc - its connect or its reconnect in place -
-// records what must be recorded in step with nats.go's own callbacks (countConnectionEvent) and
-// hands the work of it (onReconnect) to a goroutine of the client's, which works through the
-// events one at a time and in the order they were reported. It is wired as the reconnect
-// callback, which nats.go runs on the connection's dispatcher goroutine, the one goroutine every
-// callback of that connection runs on: restoring the subscriptions and running the hooks there
-// would hold the next disconnect behind them, and the connected flag, which the callbacks keep,
-// would read up for as long as the hooks took - 12 s of a failing hook's requests, where
-// cmd/listener's delivery lease releases the machine's record after 3 s of its receive signal
-// reading down. The flag is still moved on that goroutine alone (noteConnection), so a set and
-// the clear of a later disconnect keep nats.go's own order, and this callback returns before the
-// event's work begins.
+// reports it to the callers waiting on one (connectionChanged), records what must be recorded in
+// step with nats.go's own callbacks (countConnectionEvent) and hands the work of it (onReconnect)
+// to a goroutine of the client's, which works through the events one at a time and in the order
+// they were reported. It is wired as the reconnect callback, which nats.go runs on the
+// connection's dispatcher goroutine, the one goroutine every callback of that connection runs
+// on: restoring the subscriptions and running the hooks there would hold the next disconnect
+// behind them, and the connected flag, which the callbacks keep, would read up for as long as the
+// hooks took - 12 s of a failing hook's requests, where cmd/listener's delivery lease releases
+// the machine's record after 3 s of its receive signal reading down. The flag is still moved on
+// that goroutine alone (noteConnection), so a set and the clear of a later disconnect keep
+// nats.go's own order, and this callback returns before the event's work begins.
+//
+// The event is reported here, on the callback goroutine and before the work is queued, so a
+// publish waiting for the reconnect goes on without waiting for the re-subscribe and the hooks.
 func (c *Client) queueReconnect(nc *nats.Conn) {
+	c.connectionChanged()
 	c.countConnectionEvent(nc)
 	c.reconnectQueueMu.Lock()
 	c.reconnectQueue = append(c.reconnectQueue, nc)
@@ -102,9 +108,11 @@ func (c *Client) workThroughReconnects() {
 	}
 }
 
-// onClosed is wired as the ClosedCB callback. It launches recovery in a
-// background goroutine so the NATS library callback returns immediately.
+// onClosed is wired as the ClosedCB callback. It reports the connection event (ConnectionChanged)
+// and launches recovery in a background goroutine so the NATS library callback returns
+// immediately.
 func (c *Client) onClosed() {
+	c.connectionChanged()
 	go c.recover()
 }
 
@@ -129,7 +137,9 @@ func (c *Client) onConnect(nc *nats.Conn) {
 
 // onReconnect is a connection event's work: the subscriptions the connection lost are bound
 // again and the reconnect hooks are run for it. It runs on the client's own goroutine, never on
-// nats.go's callback goroutine (queueReconnect), and one event's work at a time.
+// nats.go's callback goroutine (queueReconnect), and one event's work at a time. The event
+// itself was reported before this work began (queueReconnect), so a publish waiting for the
+// reconnect went on without waiting for the re-subscribe and the hooks below.
 func (c *Client) onReconnect(nc *nats.Conn) {
 	// A reconnect after the client stopped belongs to a process that is shutting down: closeStopped
 	// closes the connection, or leaves it to the drain when the reconnect came before Drain stopped

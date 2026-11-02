@@ -663,3 +663,36 @@ func TestDurableAcknowledgesAStoredForwardCopyAndDeliversNothing(t *testing.T) {
 		t.Fatalf("the durable pushed the copy to serve-port sessions %d times, want none", got)
 	}
 }
+
+// A role message the publish route forwards twice, because its holder's first receipt never came,
+// is stored once on the holder's agent subject: each forward carries the same Nats-Msg-Id
+// (bus.ForwardMsgID of the forward's dedupe key and the subject), which the route chooses itself
+// since RequestCoreTo takes its MsgId from its caller, so the stream holds one copy per message
+// and recipient, not one per attempt; the durable acknowledges a stored forward copy and delivers
+// nothing.
+func TestPublishRouteStoresOneCopyOfARoleMessageItForwardsTwice(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const role = "stored-once"
+	const holder = "ses_stored_once"
+	claimRoleFor(t, harness.registry, harness.sessions, holder, role, nil)
+	frames := startStandIn(t, testnats.URL(t), holder, func(n int) bool { return n >= 2 })
+
+	recorder, elapsed := publishThrough(harness.publishDeps(t), `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"take this once","idempotency_key":"stored-once-1"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status %d after %s, want 200; body %s", recorder.Code, elapsed, recorder.Body.String())
+	}
+	expectFrames(t, frames, 2, 300*time.Millisecond)
+	subject := contracts.AgentSubject(holder)
+	// The stream takes what one connection sends in order, so once it has acknowledged a later
+	// message, both forwards before it are stored or dropped as duplicates.
+	if _, err := harness.client.JS().Publish(subject+"_after", []byte("{}")); err != nil {
+		t.Fatalf("publish the message after the forwards: %v", err)
+	}
+	info, err := harness.client.JS().StreamInfo(bus.Stream, &natsgo.StreamInfoRequest{SubjectsFilter: subject})
+	if err != nil {
+		t.Fatalf("read the stream: %v", err)
+	}
+	if got := info.State.Subjects[subject]; got != 1 {
+		t.Fatalf("the stream holds %d copies on %s after two forwards of one role message, want 1", got, subject)
+	}
+}

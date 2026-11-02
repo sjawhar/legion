@@ -54,6 +54,7 @@ not reach them:
 | `src/mermaid-render.ts` | `@legion/proof-editor/mermaid-render`, the DOM-free half: `renderMermaidMarkup` calls upstream's `renderProofMermaidSvg`, so the validation, renderer, colours and spacing are upstream's, and returns the unsanitized markup, or throws upstream's reason for a source it refuses. It touches no DOM, so its only caller is Dispatch's Web Worker, for comments and documents alike, off the reader's main thread, where beautiful-mermaid's and ELK's cost grows without bound with the diagram; in a browser worker the caller hides `self` during the call, or ELK's bundled engine takes the worker for its own and refuses every flowchart (Dispatch's `features/refs/mermaid-render.worker.ts`); it is also biome-checked |
 | `src/mermaid-code-block-view.ts` | The editor's view of every code block, in place of upstream's `mermaidDiagramsPlugin` (INFRA-532), whose view drew on the page's thread and put the diagram's `<style>`, with its Google Fonts `@import`, into the page. A plain block keeps upstream's DOM. A mermaid block is drawn by the host's `drawMermaid` (Dispatch's Web Worker) into the preview's shadow root with `showMermaidSvg`; its layout (preview, status line, the open source disclosure holding the `pre`) is set only in ProseMirror's own `update`, never when an answer arrives, so a late drawing cannot move the contentDOM under a caret; an edit asks again `EDIT_REDRAW_DELAY_MS` (300 ms) after the last change, cancelling the earlier request (a drawer never draws after its cancel), the shown drawing staying until the answer; `destroy` cancels. With no drawer, or one that never answers, the block shows its source, and an `unavailable` answer (no renderer can run) clears any earlier drawing and the status, so the block shows its source again. It imports nothing from upstream, so beautiful-mermaid and ELK stay out of the editor's chunk; it is also biome-checked |
 | `src/directive-container.ts` | `directiveContainerSyntax`, the micromark extension `remarkContainerDirectives` registers for the `:::name[label]{attributes}` container: a micromark document construct, held on the document tokenizer's container stack as a block quote or a list item is, in place of micromark-extension-directive's flow construct, which tokenized a block's content once for each block around it, so a body nesting `:::` a few thousand deep froze a reader's tab for about a minute (INFRA-581). It emits that package's token types, so `mdast-util-directive` builds the same `containerDirective` nodes from them; its `resolveAll` (`resolveDirectiveContainers`) and the `lazyContentEnd` construct keep the flow construct's reading of blank lines, lazy lines and the line endings after fences; and an opener standing inside `maxDirectiveNesting` (32) open directive containers does not open, so its line reads as the text it is. It reads an opener's name, label and attributes with the copied factories in `src/directive-factories.ts`; it is also biome-checked |
+| `src/block-nesting.ts` | The block-nesting bound: micromark's own `list` and `blockQuote` held to `maxBlockNesting` (100), the number of blocks Dispatch's document service lets a document open inside one another. "The block-nesting bound" below says why it rewrites the two constructs in place and what that rewrite reaches; it is also biome-checked |
 | `src/editor/schema/leaf-marks.ts` | `withoutLeafMarks`: a node that is inline, is a leaf and is not text - `html`, `image`, `hardbreak`, `footnote_reference` - may hold no mark, so every parse seam (`src/lib-headless.ts`'s `parseMarkdown`, `src/lib.ts`'s shared `parserCtx` and its `setMarkdown`) strips the emphasis, strong, strikethrough or link mark the markdown wrapped around one. Go's reader of the same document holds marks on text alone (`packages/envoy/internal/dispatch/pmdoc/node.go` refuses a mark on any node that is not text) and the editor's own collaborative store drops such a mark on the next round trip, so a document drew one way in the editor and another way in a comment or a past version. The rule is structural rather than a list of those four names, because that is the shape both readers have. The bottom-up walk returns the same node wherever nothing changed, so a document holding no marked leaf comes back as it went in, and it builds with `node.mark` and `node.copy` rather than `Node.fromJSON` or `doc.check()`, which validate attributes the commonmark preset's own image parser leaves `null`. It is composed beside `withBlockIds`, never folded into it, since that walk returns its input unchanged when no block was missing an id |
 | `src/nested-links.ts` | `remarkHoistNestedLinks` and the `$remark` plugin that registers it: a `link` holding a `link` is rewritten into siblings, the inner link beside the runs around it and each run wrapped in a copy of the outer link's `url` and `title`, so `[a <https://u.test> b](u)` reads as `a ` under the label's link, the autolink's text under its own, and ` b` under the label's again. The only markdown that nests the two is an autolink inside a link label, since CommonMark forbids an inline link there, and `@milkdown/transformer` cannot read that label as written: it holds one flat mark set, so the link mark runner's `closeMark` on the inner autolink removes the `link` type outright (`removeFromSet`) and every later run of the label was left with no link at all, where Go's reader gives it the label's link again (`packages/envoy/internal/dispatch/pmdoc/parse.go`). The hoisted spelling is the tree Go's renderer writes for itself (`[a ](u)<https://u.test>[ b](u)`), so both readers agree rather than meeting at a third reading. It is registered at every parse seam - the explicit chain in `src/lib-headless.ts` and, through `remarkCtx`, `src/lib.ts`'s shared `parserCtx` and its `setMarkdown` - and changes no output, since a unified transformer runs on `runSync` at parse and never on `stringify` |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
@@ -174,6 +175,51 @@ construct's `resolveAll`, which runs over the document's events once it is token
 which reaches this package through `mdast-util-from-markdown`, stays at 4.0.2 in `bun.lock`: a
 move must keep both working, and 4.0.3 is quadratic for quotes and lists (micromark/micromark#246).
 
+## The block-nesting bound
+
+`src/block-nesting.ts` holds micromark's `list` and `blockQuote` to `maxBlockNesting`, 100, which
+is `maxNesting` in `packages/envoy/internal/dispatch/pmdoc/nesting.go`, whose comment names this
+one back. Both count a quote, a list, a list item and a typed block as one block each, so a list
+opener takes two levels (the list and its first item) while a later item of an open list takes
+none, and `src/directive-container.ts` records a `:::` container's depth into the same count. An
+opener that would stand past the bound returns `nok` and its line reads as the text it is, the way
+a `:::` opener past `maxDirectiveNesting` does. Only a document the document service refuses can
+reach the bound, so every document it stores reads here exactly as it read before; past the bound,
+where micromark ran every open container's continuation on every line and a few hundred `- `
+markers on one line overflowed the stack of Milkdown's parser and of prosemirror-model's
+`DOMSerializer`, a reader now sees the text instead of losing the page (sjawhar/legion#2519).
+Footnote definitions are the one difference between the two counts: the service counts them, and
+this module does not, because the browser reads them through micromark-extension-gfm-footnote,
+whose construct it does not rewrite. That only lets the browser draw deeper than the service would
+accept, never shallower, so everything the service stores still reads the same.
+
+The module rewrites the two construct objects `micromark-core-commonmark` exports, in place and
+once, when `src/lib-remark-directive-plugin.ts` is imported. micromark's `disable` cannot express
+this bound: `create-tokenizer.js` refuses a construct whose name is disabled whoever passes it, so
+turning `list` and `blockQuote` off by name would also turn off the `effects.attempt(list, …)` and
+`effects.attempt(blockQuote, …)` each of them runs on itself to read a later item or a deeper `>`.
+Rewriting the objects instead makes the bound realm-wide, because every parser in the tree shares
+them: the page bundle, Dispatch's parse worker, the live editor's Milkdown parser (built by
+`@milkdown/preset-commonmark`, which passes through none of this package's unified processors) and
+the pmdoc fixture generator, which imports `@legion/proof-editor/headless`. A second copy of
+`micromark-core-commonmark` installed beside this one would carry constructs of its own and escape
+the rewrite, so `tests/heavy-bodies.test.ts` parses through a bare `unified().use(remarkParse)`
+processor as well: a duplicate copy fails that test.
+
+## The four dependency patches
+
+Four of the root `package.json`'s `patchedDependencies` entries are the parsers this package reads
+markdown with, patched so that a body costs time in proportion to its length rather than to its
+square (sjawhar/legion#2519). Each patch leaves the package's output as it was, and each patches
+both `lib/` and `dev/lib/`, because Vite resolves the `development` export condition.
+
+| Patch | What it makes linear |
+| --- | --- |
+| `micromark@4.0.2` | `lib/initialize/document.js`'s lazy-line test. `writeToChild` scanned every event of the child flow backwards on each lazy line; it now scans forward from a watermark of events already ended at or before the line's start, which can never be open across this line or a later one, since that offset only grows while one child flow lives and an end is never unset. The watermark is dropped when the event below it is no longer the one it was (a resolver rewrites events), for a new child flow, and at the end of input |
+| `micromark-core-commonmark@2.0.3` | `lib/label-end.js`. The scan for an opening `[` resumes where the scan of the previous `]` stopped and then goes on below the label start that `]` balanced, rather than walking every event again on each `]`; and the definition lookup is skipped outright where the document defines nothing, and otherwise bails, without serializing the label, once the label holds more characters that are not markdown whitespace than the longest defined identifier. `lib/list.js` takes a list item's blank-line continuation without asking `blankLine` whether the line is blank: that continuation opens with `effects.check(blankLine, …)`, and where the line is already over - the code is a line ending or the end of the document, which is what a line of only spaces and tabs is once the continuations above have taken their indentation - the answer is yes and the check's store and restore are work for nothing. Every open list item runs it once per blank line, so a body of D nested items and N blank lines runs D*N of them: on 50 nested items and 32 KB of blank lines, about two fifths of what micromark spent |
+| `micromark-extension-gfm-footnote@2.1.0` | `lib/syntax.js`'s call scan, the same backwards walk. Footnote definitions are flow constructs, so they are all known before text is tokenized: with none defined the walk is skipped, and otherwise it resumes where the previous `]`'s walk stopped |
+| `mdast-util-from-markdown@2.0.3` | `lib/index.js`'s `prepareList`, which spliced each list item's enter and its exit into the whole event array and so moved everything after them once per item. It now records where each one goes and `compile` rebuilds the events once, the sort being stable so an inner item's exit stays before an outer item's |
+
 ## The upstream boundary
 
 Everything `src/` imports as `proof-sdk-upstream/src/…` — the mark plugins, the mark popover,
@@ -258,7 +304,7 @@ would reorder the copy's imports. `upstream/` is excluded the same way, for the 
 it is tsc's output, not source. Anything legion writes here — `scripts/`, `tests/`,
 `src/block-pointers.ts`, `src/collab-cursor-plugin.ts`, `src/editor-highlights.ts`, `src/editor-change-decorations.ts`, `src/editor/schema/uuid.ts`, `src/trailing-newline-input.ts`,
 `src/record-mark-history.ts`, `src/record-mark-retype.ts`, `src/record-mark-target.ts`, `src/read-only-directives.ts`, `src/typed-block-drawing.ts`, `src/ask-content.ts`, `src/mermaid-svg.ts`, `src/mermaid-render.ts`, `src/mermaid-code-block-view.ts`,
-`src/directive-container.ts`,
+`src/directive-container.ts`, `src/block-nesting.ts`,
 `src/tests/harness.ts` — follow the
 repo's conventions and are checked: each is excluded by name from the first override of the root
 `biome.json`, the one that turns Biome off over the copy, and a new file of legion's own joins that
