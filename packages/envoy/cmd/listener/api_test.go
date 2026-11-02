@@ -2997,3 +2997,259 @@ func TestSessionEntryRouteRefusesANonGETMethod(t *testing.T) {
 		t.Fatalf("body = %s, want the file's own method refusal", body)
 	}
 }
+
+// noInterestRecordFixture is packages/contracts/fixtures/envoy-session-no-interests.json: the row
+// a live session with no interest record, no role claim and no capability has in GET /v1/sessions,
+// before and after the change that made that row's topics the empty list. Each row is kept as raw
+// JSON, key by key, because the defect under test is a JSON type: decoded into a []string, the
+// null the old listener wrote and the empty list the new one writes are the same Go value.
+type noInterestRecordFixture struct {
+	Comment          string                     `json:"comment"`
+	CapturedAtCommit string                     `json:"captured_at_commit"`
+	AfterThisChange  map[string]json.RawMessage `json:"after_this_change"`
+	BeforeThisChange map[string]json.RawMessage `json:"before_this_change"`
+}
+
+// readNoInterestRecordFixture reads that fixture from the contracts package, the path every other
+// fixture in this file is read by.
+func readNoInterestRecordFixture(t *testing.T) noInterestRecordFixture {
+	t.Helper()
+	raw, err := os.ReadFile("../../../contracts/fixtures/envoy-session-no-interests.json")
+	if err != nil {
+		t.Fatalf("read the no-interest-record fixture: %v", err)
+	}
+	var fixture noInterestRecordFixture
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatalf("decode the no-interest-record fixture: %v", err)
+	}
+	if len(fixture.AfterThisChange) == 0 || len(fixture.BeforeThisChange) == 0 {
+		t.Fatalf("the fixture carries no rows to compare: %+v", fixture)
+	}
+	return fixture
+}
+
+// noInterestRecordSessionID is the session the fixture's rows describe.
+func noInterestRecordSessionID(t *testing.T, row map[string]json.RawMessage) string {
+	t.Helper()
+	var sessionID string
+	if err := json.Unmarshal(row["session_id"], &sessionID); err != nil {
+		t.Fatalf("read the fixture row's session_id: %v", err)
+	}
+	return sessionID
+}
+
+// seedNoInterestRecordSession registers the session the fixture's after row describes, and writes
+// no interest record for it: a session with no record is the state under test, so the entry is
+// written here rather than through setupSessionsTest's ports map, which would give it that
+// helper's own machine id and directory instead of the fixture's.
+func seedNoInterestRecordSession(t *testing.T, sessions *session.SessionRegistry, row map[string]json.RawMessage) string {
+	t.Helper()
+	var fields struct {
+		SessionID      string `json:"session_id"`
+		MachineID      string `json:"machine_id"`
+		Dir            string `json:"dir"`
+		Port           int    `json:"port"`
+		Title          string `json:"title"`
+		SelfSubscribed bool   `json:"self_subscribed"`
+	}
+	raw, err := json.Marshal(row)
+	if err != nil {
+		t.Fatalf("re-encode the fixture row: %v", err)
+	}
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("read the fixture row's session entry fields: %v", err)
+	}
+	if err := sessions.Put(fields.SessionID, session.SessionEntry{
+		Port:           fields.Port,
+		MachineID:      fields.MachineID,
+		Dir:            fields.Dir,
+		Title:          fields.Title,
+		SelfSubscribed: fields.SelfSubscribed,
+	}); err != nil {
+		t.Fatalf("register %s: %v", fields.SessionID, err)
+	}
+	return fields.SessionID
+}
+
+// noInterestRecordClockKeys are the two values the listener takes from the clock, so the fixture
+// cannot state them: they are checked as integers equal to each other, never against the row.
+var noInterestRecordClockKeys = map[string]bool{"updated_at": true, "last_seen": true}
+
+// compareNoInterestRecordRow holds answer, the listener's raw JSON object, to want, the fixture's
+// row: the same keys, no key more and no key less, and for each key the same JSON bytes, so a null
+// and an empty list are different answers. The two clock keys are only required to be integers
+// equal to each other, since the listener writes the moment it registered the session.
+func compareNoInterestRecordRow(t *testing.T, what string, answer []byte, want map[string]json.RawMessage) {
+	t.Helper()
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(answer, &got); err != nil {
+		t.Fatalf("%s: decode the answer as a JSON object: %v; body = %s", what, err, answer)
+	}
+	for key := range got {
+		if _, ok := want[key]; !ok {
+			t.Errorf("%s: the answer carries %q = %s, which the fixture row does not state", what, key, got[key])
+		}
+	}
+	for key, wantValue := range want {
+		gotValue, ok := got[key]
+		if !ok {
+			t.Errorf("%s: the answer carries no %q; the fixture row states %s", what, key, wantValue)
+			continue
+		}
+		if noInterestRecordClockKeys[key] {
+			continue
+		}
+		if gotCompact, wantCompact := compactNoInterestRecordJSON(t, gotValue), compactNoInterestRecordJSON(t, wantValue); gotCompact != wantCompact {
+			t.Errorf("%s: %q = %s, want %s", what, key, gotCompact, wantCompact)
+		}
+	}
+	var updatedAt, lastSeen int64
+	if err := json.Unmarshal(got["updated_at"], &updatedAt); err != nil {
+		t.Errorf("%s: updated_at = %s, want an integer: %v", what, got["updated_at"], err)
+	}
+	if err := json.Unmarshal(got["last_seen"], &lastSeen); err != nil {
+		t.Errorf("%s: last_seen = %s, want an integer: %v", what, got["last_seen"], err)
+	}
+	if updatedAt != lastSeen {
+		t.Errorf("%s: updated_at = %d and last_seen = %d, want the one moment the session was registered",
+			what, updatedAt, lastSeen)
+	}
+}
+
+// compactNoInterestRecordJSON is one value's bytes with its formatting removed, so two values are
+// compared as JSON and not as whitespace.
+func compactNoInterestRecordJSON(t *testing.T, value json.RawMessage) string {
+	t.Helper()
+	var buffer bytes.Buffer
+	if err := json.Compact(&buffer, value); err != nil {
+		t.Fatalf("compact %s: %v", value, err)
+	}
+	return buffer.String()
+}
+
+// A session that registered and subscribed to nothing has no interest record, and its row in GET
+// /v1/sessions carries topics as the empty list, never null: a client that reads the row's topics
+// as a list iterates it without a null check. The row is read key by key, never into a sessionInfo,
+// which decodes null and [] into the same empty slice and so would pass on the row this test
+// exists to refuse.
+func TestSessionsListRowForASessionWithNoInterestRecordMatchesTheFixture(t *testing.T) {
+	fixture := readNoInterestRecordFixture(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	sessionID := seedNoInterestRecordSession(t, sessions, fixture.AfterThisChange)
+
+	list := httptest.NewRecorder()
+	sessionsHandler(registry, sessions).ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/v1/sessions", nil))
+	if list.Code != http.StatusOK {
+		t.Fatalf("GET /v1/sessions: status %d %s, want 200", list.Code, list.Body.String())
+	}
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal(list.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode the session list: %v; body = %s", err, list.Body.String())
+	}
+	var row map[string]json.RawMessage
+	for _, candidate := range rows {
+		if noInterestRecordSessionID(t, candidate) == sessionID {
+			row = candidate
+		}
+	}
+	if row == nil {
+		t.Fatalf("the list carries no row for %s; body = %s", sessionID, list.Body.String())
+	}
+	raw, err := json.Marshal(row)
+	if err != nil {
+		t.Fatalf("re-encode the listed row: %v", err)
+	}
+	compareNoInterestRecordRow(t, "GET /v1/sessions", raw, fixture.AfterThisChange)
+}
+
+// The per-session route and the list answer one shape built one way, so a caller holding a session
+// id reads the same row for a session with no interest record, its topics the empty list included.
+func TestSessionEntryRouteForASessionWithNoInterestRecordMatchesTheFixture(t *testing.T) {
+	fixture := readNoInterestRecordFixture(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	sessionID := seedNoInterestRecordSession(t, sessions, fixture.AfterThisChange)
+
+	answer := sessionEntryRoute(t, &listenerDeps{registry: registry, sessions: sessions}, sessionID)
+	if answer.Code != http.StatusOK {
+		t.Fatalf("GET /v1/registry/%s: status %d %s, want 200", sessionID, answer.Code, answer.Body.String())
+	}
+	compareNoInterestRecordRow(t, "GET /v1/registry/"+sessionID, answer.Body.Bytes(), fixture.AfterThisChange)
+}
+
+// The fixture states a whole row, so it can only stay whole while it names every key sessionInfo
+// writes. A field added to sessionInfo later fails this test, and the fixture cannot fall behind
+// the struct with no test saying so. Only plugin and plugin_version are absent from the row: they
+// are omitempty, and the fixture's session registered through a plugin that predates them.
+func TestSessionInfoKeysForASessionWithNoInterestRecordAreTheFixtureRowsKeys(t *testing.T) {
+	fixture := readNoInterestRecordFixture(t)
+	raw, err := json.Marshal(sessionInfo{
+		SessionID:      "ses_every_field",
+		MachineID:      "every-field-machine",
+		Host:           "every-field-host",
+		Dir:            "/every/field",
+		Port:           4242,
+		Title:          "every field set",
+		Capabilities:   []string{"aside"},
+		SelfSubscribed: true,
+		Topics:         []string{"notifications.agent"},
+		Roles:          []string{"reviewer"},
+		UpdatedAt:      1,
+		LastSeen:       1,
+		Plugin:         "every-field-plugin",
+		PluginVersion:  "1.0.0",
+	})
+	if err != nil {
+		t.Fatalf("encode a sessionInfo with every field set: %v", err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode that sessionInfo as a JSON object: %v", err)
+	}
+	want := map[string]bool{"plugin": true, "plugin_version": true}
+	for key := range fixture.AfterThisChange {
+		want[key] = true
+	}
+	for key := range got {
+		if !want[key] {
+			t.Errorf("sessionInfo writes %q, which is neither a fixture row key nor plugin or plugin_version; state it in the fixture", key)
+		}
+	}
+	for key := range want {
+		if _, ok := got[key]; !ok {
+			t.Errorf("sessionInfo writes no %q, which the fixture row states; the fixture is ahead of the struct", key)
+		}
+	}
+}
+
+// The fixture's before row is what the listener used to write for this session. The after row is
+// pinned to the listener itself by the two route tests above; nothing else reads the before row, so
+// this holds it to the same eleven values and to the one difference the change made: topics was
+// null and is now the empty list.
+func TestFixtureBeforeRowForASessionWithNoInterestRecordDiffersOnlyInTopics(t *testing.T) {
+	fixture := readNoInterestRecordFixture(t)
+	before, after := fixture.BeforeThisChange, fixture.AfterThisChange
+	for key := range before {
+		if _, ok := after[key]; !ok {
+			t.Errorf("the before row carries %q = %s, which the after row does not state", key, before[key])
+		}
+	}
+	for key, afterValue := range after {
+		beforeValue, ok := before[key]
+		if !ok {
+			t.Errorf("the before row carries no %q; the after row states %s", key, afterValue)
+			continue
+		}
+		if key == "topics" {
+			continue
+		}
+		if got, want := compactNoInterestRecordJSON(t, beforeValue), compactNoInterestRecordJSON(t, afterValue); got != want {
+			t.Errorf("the before row's %q = %s, want the after row's %s: the change touched topics alone", key, got, want)
+		}
+	}
+	if got := compactNoInterestRecordJSON(t, before["topics"]); got != "null" {
+		t.Errorf("the before row's topics = %s, want null, the value the listener used to write", got)
+	}
+	if got := compactNoInterestRecordJSON(t, after["topics"]); got != "[]" {
+		t.Errorf("the after row's topics = %s, want [], the value the listener writes now", got)
+	}
+}
