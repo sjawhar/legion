@@ -126,6 +126,7 @@ func TestEveryRouteRefusesABadProjectKeyInOneWording(t *testing.T) {
 		{"create project", http.MethodPost, "/api/v1/projects", "INVALID_PROJECT", map[string]string{"key": "bad", "name": "Bad"}},
 		{"create issue", http.MethodPost, "/api/v1/issues", "INVALID_ISSUE", map[string]string{"project": "bad", "title": "Title"}},
 		{"map a repository", http.MethodPut, "/api/v1/settings/repo-projects/owner/repo", "INVALID_REPO_PROJECT", map[string]string{"project": "bad"}},
+		{"set where reports go", http.MethodPut, "/api/v1/settings/reports", "REPORT_SETTINGS_INPUT", map[string]any{"project": "bad", "agent_route": nil}},
 		{"search", http.MethodGet, "/api/v1/search?q=ok&project=bad", "INVALID_PROJECT", nil},
 		{"related-item check", http.MethodGet, "/api/v1/projects/bad/related?title=ok", "INVALID_PROJECT", nil},
 		{"related-item check by POST", http.MethodPost, "/api/v1/projects/bad/related", "INVALID_PROJECT", map[string]string{"title": "ok"}},

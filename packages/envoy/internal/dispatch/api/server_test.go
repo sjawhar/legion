@@ -51,7 +51,9 @@ func sharedAgentTokens(t testing.TB, setting string) *auth.SharedAgentTokens {
 // testServerOptions configure the server an API test drives.
 type testServerOptions struct {
 	defaultProject string
-	testHooks      bool
+	// commit is the build commit the server reports (Deps.Commit), "" for none.
+	commit    string
+	testHooks bool
 	// app and githubAPIBase wire the GitHub App access-check client at a fake
 	// GitHub; both nil/empty leaves the client in its "no app credentials"
 	// state (every check answers ErrNoAppKey).
@@ -240,6 +242,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		Embedder:               options.embedder,
 		Files:                  options.files,
 		DashboardEntry:         options.dashboardEntry,
+		Commit:                 options.commit,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)

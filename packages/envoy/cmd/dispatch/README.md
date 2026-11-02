@@ -1365,6 +1365,12 @@ The column takes `block_refs` `ACCESS EXCLUSIVE` and the view `graph_edges` `ACC
 It refuses and rewrites no row; its census answers `0`.
 No shipped block type declares a `block[]` attribute, so no pointer row exists for a build that does not know one to drop.
 
+Migration `20261102024952_report_settings` creates `report_settings (singleton, project_key, agent_route, updated_by, updated_at)`, the one row saying where a report of a problem with Dispatch goes (`POST /api/v1/reports`, Routes below):
+the project its issue is filed in, and the role route of the agent a reporter may ask to fix it.
+It names its project without a foreign key, since a key to `projects` would take that table `SHARE ROW EXCLUSIVE` while the migration runs, which every issue create's update of its project row waits behind;
+the write checks the project exists, and a project is never deleted or renamed.
+It creates a table and touches no row, and the release before it neither reads nor writes it; its census answers `0`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
 On success it backfills each artifact's project and generated `ref_key`.
@@ -2158,6 +2164,23 @@ Each item below names a path with its method and identity, then its purpose.
   who an issue created with no assignee, by nobody, under no parent or under a parent with nobody on it, goes to — the last step of the create chain.
   `400 ASSIGNEE_NOT_ALLOWED` for an email nobody has signed in with, `400 INVALID_PROJECT` for a body without `assignee` or one whose `assignee` is neither a string nor null, `404 NOT_FOUND` for an unknown project.
   Human-only: no agent surface sets it.
+
+- `/api/v1/settings/reports` (GET; cookie, trusted header, or bearer; PUT: cookie or trusted header (human only))
+
+  Where a report of a problem with Dispatch goes, `{project, agent_route, updated_by, updated_at}`, each `null` until a person sets it.
+  PUT takes `{project, agent_route}`, both required, `null` or blank clearing one:
+  a project that exists, and a role route `role:<name>` of at most 128 bytes, since a role outlives the session that holds it and a session's id changes when its agent restarts.
+  `400 REPORT_SETTINGS_INPUT` names the problem, a malformed project key in the shared wording.
+  Like the delivery settings it appends no event.
+
+- `/api/v1/reports` (POST; cookie or trusted header (human only))
+
+  File a report of a problem with Dispatch from the page it is on: JSON, or multipart with the fields in a `report` part and up to ten `picture` parts (PNG, JPEG, GIF or WebP by their bytes, together at most 25 MiB).
+  The fields are `{body, page, page_build, user_agent, viewport {width, height}, ask_agent}`.
+  It writes, in one transaction, an issue labelled `report` in the project the report settings name, created by the reporter and given to that project's default assignee, each picture a file of the issue, and a spec holding the words, each picture inline, and where it happened:
+  the page, this server's commit (`buildCommit`, as `/healthz` reports it), the page's build, the browser, the window and the reporter.
+  With `ask_agent` the issue carries the settings' agent route from its first event, so its `issue.created`, a person's, is published to the role's holder, followed by each picture's `artifact.created`; a role nobody holds then drops the wake, and the issue keeps the route.
+  `201` the issue with `route_status`; `409 REPORTS_NOT_CONFIGURED` with no project set, `409 REPORTS_AGENT_NOT_CONFIGURED` for `ask_agent` with no agent set, `400 REPORT_INPUT` a field or file refused, `400 CAP_EXCEEDED` words past `DispatchBodyMax`.
 
 - `/api/v1/delivery/session-groups` (POST; cookie, trusted header, or bearer)
 

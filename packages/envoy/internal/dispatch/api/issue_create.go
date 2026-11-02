@@ -14,7 +14,9 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/rank"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -189,7 +191,8 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	components, componentsProvided, err := parseIssueComponents(input.Components)
+	// A components field that parsed is non-nil exactly when the create named one.
+	components, _, err := parseIssueComponents(input.Components)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -237,201 +240,46 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	// A create with blockers can close a wait cycle, and a create with a parent adds a link the
-	// depth cap counts (refuseParentTooDeep): both serialize on the project's dependency lock with
-	// every other blocker and parent write. A new issue with neither takes no dependency lock.
-	if len(blockers) > 0 || parentKey != "" {
-		if err := lockProjectIssueDependencies(r.Context(), tx, input.Project); err != nil {
+	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
+	defer ledger.Discard()
+	var spec string
+	if input.Spec != nil {
+		spec = *input.Spec
+	}
+	inserted, err := s.insertIssue(r.Context(), tx, documentCtx, ledger, issueInsert{
+		project:          input.Project,
+		title:            input.Title,
+		parentKey:        parentKey,
+		blockers:         blockers,
+		labels:           labels,
+		priority:         priority,
+		assignee:         assignee,
+		assigneeProvided: assigneeProvided,
+		components:       components,
+		repo:             repo,
+		externalRepo:     externalRepo,
+		externalNumber:   externalNumber,
+		spec:             spec,
+		actor:            actor,
+	})
+	if errors.Is(err, errExternalIssueExists) {
+		if err := tx.Rollback(r.Context()); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-	}
-	var parentAssignee *string
-	if parentKey != "" {
-		var parentProject string
-		err := tx.QueryRow(r.Context(), `select project_key, assignee from issues where key = $1`, parentKey).Scan(&parentProject, &parentAssignee)
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, "PARENT_INPUT", http.StatusBadRequest, fmt.Sprintf("parent issue %s not found", parentKey))
-			return
-		}
+		existingKey, err := s.resolveIssueRef(r.Context(), input.External)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		if parentProject != input.Project {
-			writeError(w, "PARENT_INPUT", http.StatusBadRequest, "parent must be in the same project")
-			return
-		}
-		if err := refuseParentTooDeep(r.Context(), tx, "", parentKey); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-	}
-	var number int
-	var projectDefaultAssignee *string
-	if err := tx.QueryRow(r.Context(), `
-		update projects
-		set next_number = next_number + 1
-		where key = $1
-		-- The default_assignee subquery is not the raw stored value: it yields the stored default
-		-- only when that email still names a person who has signed in (people.email is the primary
-		-- key, so this is one index probe inside a statement the create runs anyway), and null for
-		-- a project with no default or one whose default has gone stale.
-		returning next_number - 1, (select email from people where email = projects.default_assignee)
-	`, input.Project).Scan(&number, &projectDefaultAssignee); err != nil {
-		s.writeHandlerError(w, err)
+		s.respondWithExistingExternalIssue(w, r, existingKey, input.Project, actor)
 		return
 	}
-	// The project's stored default is the chain's last step, and this update already holds the
-	// project row: the decision moves below it so a create in a project with no default costs no
-	// round trip and takes no lock of its own.
-	if !assigneeProvided {
-		assignee = defaultAssignee(actor, parentAssignee, projectDefaultAssignee)
-	}
-	// The project row is locked from here; the mapping check takes its key-share lock only now, in
-	// the project-then-mapping order every mapping write follows (lockRepoProjectWrite).
-	if repo != nil {
-		if err := checkIssueRepoMapped(r.Context(), tx, *repo, input.Project); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-	}
-	key := fmt.Sprintf("%s-%d", input.Project, number)
-	actorJSON, err := encodeJSON(actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	var parent any
-	if parentKey != "" {
-		parent = parentKey
-	}
-	if err := lockProjectRankAllocation(r.Context(), tx, input.Project); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-
-	lastRank, err := lastProjectRank(r.Context(), tx, input.Project, "")
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	issueRank := rank.Between(lastRank, "")
-
-	if _, err := tx.Exec(r.Context(), `
-		insert into issues (key, project_key, number, title, parent_key, created_by, labels, priority, rank, assignee, repo)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-	`, key, input.Project, number, input.Title, parent, actorJSON, labels, priority, issueRank, assignee, repo); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if err := writeBlockedBy(r.Context(), tx, key, input.Project, blockers); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if componentsProvided {
-		if err := writeIssueComponents(r.Context(), tx, key, input.Project, *components); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-	}
-	if input.External != "" {
-		if _, err := tx.Exec(r.Context(), `
-			insert into issue_external_links (issue_key, url, kind) values ($1, $2, 'github_issue')
-		`, key, externalURL(externalRepo, externalNumber)); err != nil {
-			if !isUniqueViolation(err) {
-				s.writeHandlerError(w, err)
-				return
-			}
-			if err := tx.Rollback(r.Context()); err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
-			existingKey, err := s.resolveIssueRef(r.Context(), input.External)
-			if err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
-			s.respondWithExistingExternalIssue(w, r, existingKey, input.Project, actor)
-			return
-		}
-	}
-
-	var artifactID string
-	if err := tx.QueryRow(r.Context(), `
-		insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)
-		values ($1, $2, 'spec', 'spec.md', 'doc', true, $3)
-		returning id::text
-	`, key, input.Project, actorJSON).Scan(&artifactID); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	// An issue created without a spec gets an empty primary document.
-	var markdown string
-	if input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
-		markdown = *input.Spec
-	}
-	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
-	defer ledger.Discard()
-	markdown, err = s.deps.Docs.SeedText(documentCtx, artifactID, markdown, actor)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	authors, err := encodeJSON([]model.Actor{actor})
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if _, err := tx.Exec(r.Context(), `
-		insert into artifact_versions (artifact_id, number, markdown, authors, doc_update_version)
-		values ($1, 1, $2, $3, coalesce((select max(version) from doc_updates where artifact_id = $1), 0))
-	`, artifactID, markdown, authors); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	// documentReadBack is the rendering the seed stored, read back by its own parse (docs'
-	// Ledger.ReadBackOf), which the task count and the advice's blocks read in place of parsing
-	// the same markdown again (recordDocumentTaskProgress, documentBlocksFor).
-	documentReadBack := ledger.ReadBackOf(artifactID, markdown)
-	// The version row exists now, so the count names it (LEGION-542).
-	err = recordDocumentTaskProgress(r.Context(), tx, artifactID, documentReadBack, markdown)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	specChanges, err := s.deps.Docs.IndexDocumentReferences(documentCtx, artifactID, 1, markdown)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	issue, err := s.loadIssue(r.Context(), tx, key)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	issue.LastSeq++
-	// A new issue's blocked_by edges move each blocker's count, beside what its spec cites.
-	blockerChanges, err := issueEdgeChanges(r.Context(), tx, unsetIssue, issue, false)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	// A new issue changed every field it holds a value in, measured from an issue with none.
-	payload, err := newIssueEventPayload(r.Context(), tx, issue, refs.MergeChanges(specChanges, blockerChanges), issueChangedFields(unsetIssue, issue))
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event("issue.created", actor, payload))
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if err := refs.Stamp(r.Context(), tx, "artifact", artifactID, event.ID); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
+	key, issue := inserted.issue.Key, inserted.issue
 	advice := s.writeAdvice(
 		r.Context(), tx, "POST /api/v1/issues", key, actor, "", issue.Status,
 	)
@@ -442,23 +290,253 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	// A seeded spec never passed through a live edit, so nothing has queued the document
 	// closer that indexes its ask blocks and repairs block ids; queue it now that the
 	// transaction is durable.
-	s.deps.Docs.ScheduleSettlement(artifactID)
-	s.publish(event)
-	if advice != nil && input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
-		advice.documentBlocks = documentBlocksFor(documentReadBack, markdown)
+	s.deps.Docs.ScheduleSettlement(inserted.specID)
+	s.publish(inserted.event)
+	if advice != nil && strings.TrimSpace(spec) != "" {
+		advice.documentBlocks = documentBlocksFor(inserted.specReadBack, inserted.specMarkdown)
 	}
 	// The related-item check runs after the write committed, whatever writeAdvice
 	// answered, and waits at most relatedAllowance; its result rides the advice, or advice of its
 	// own when the write-advice read failed.
 	suggestions := s.relatedCheck(r.Context(), relatedInput{
 		project: input.Project,
-		text:    input.Title + "\n" + markdown,
+		text:    input.Title + "\n" + inserted.specMarkdown,
 		title:   input.Title,
 		source:  suggestionSource{kind: "issue", issueKey: key, actor: actor},
 		record:  true,
 	})
 	suggestions.TitleMatches = titleMatches
 	WriteJSON(w, http.StatusCreated, withSuggestions(issue, advice, suggestions))
+}
+
+// issueInsert is a new native issue as its route has checked it: what insertIssue writes.
+type issueInsert struct {
+	project          string
+	title            string
+	parentKey        string
+	blockers         []string
+	labels           []string
+	priority         *int
+	assignee         *string
+	assigneeProvided bool
+	// assigneeIsProjectDefault gives the issue to the project's default assignee, or nobody,
+	// whoever created it: a report's reporter is not the one who fixes it (reports.go).
+	assigneeIsProjectDefault bool
+	components               *componentsInput
+	repo                     *string
+	// route is the issue's route from its first event, nil for none: the route a report is given
+	// when its reporter asks an agent to fix it (reports.go).
+	route *string
+	// externalRepo and externalNumber name the GitHub issue a create imports, empty for none.
+	externalRepo   string
+	externalNumber string
+	spec           string
+	// beforeSpec, when set, runs once the issue's row and its spec's row exist, and answers the
+	// spec's text in place of spec: a report writes its pictures as the issue's own files there,
+	// so the spec it seeds can show them.
+	beforeSpec func(ctx context.Context, tx pgx.Tx, key string) (string, error)
+	actor      model.Actor
+}
+
+// insertedIssue is what insertIssue wrote: the issue as read back, its issue.created event,
+// appended but not published, and its spec's id, text and read-back.
+type insertedIssue struct {
+	issue        model.Issue
+	event        model.Event
+	specID       string
+	specMarkdown string
+	specReadBack *pmdoc.Node
+}
+
+// errExternalIssueExists is insertIssue finding the GitHub issue it imports already linked to an
+// issue, which another create imported meanwhile: its caller rolls back and answers that issue.
+var errExternalIssueExists = errors.New("the external issue is already imported")
+
+// insertIssue writes a new native issue inside tx, whose document operations documentCtx and
+// ledger record (Docs.Join): its number and rank, its row, its blockers, components and external
+// link, its spec, and its issue.created event. The caller has checked every field and commits.
+func (s *server) insertIssue(
+	ctx context.Context,
+	tx pgx.Tx,
+	documentCtx context.Context,
+	ledger *docs.Ledger,
+	in issueInsert,
+) (insertedIssue, error) {
+	// A create with blockers can close a wait cycle, and a create with a parent adds a link the
+	// depth cap counts (refuseParentTooDeep): both serialize on the project's dependency lock with
+	// every other blocker and parent write. A new issue with neither takes no dependency lock.
+	if len(in.blockers) > 0 || in.parentKey != "" {
+		if err := lockProjectIssueDependencies(ctx, tx, in.project); err != nil {
+			return insertedIssue{}, err
+		}
+	}
+	var parentAssignee *string
+	if in.parentKey != "" {
+		var parentProject string
+		err := tx.QueryRow(ctx, `select project_key, assignee from issues where key = $1`, in.parentKey).Scan(&parentProject, &parentAssignee)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return insertedIssue{}, errorf(http.StatusBadRequest, "PARENT_INPUT", "parent issue %s not found", in.parentKey)
+		}
+		if err != nil {
+			return insertedIssue{}, err
+		}
+		if parentProject != in.project {
+			return insertedIssue{}, errorf(http.StatusBadRequest, "PARENT_INPUT", "parent must be in the same project")
+		}
+		if err := refuseParentTooDeep(ctx, tx, "", in.parentKey); err != nil {
+			return insertedIssue{}, err
+		}
+	}
+	var number int
+	var projectDefaultAssignee *string
+	if err := tx.QueryRow(ctx, `
+		update projects
+		set next_number = next_number + 1
+		where key = $1
+		-- The default_assignee subquery is not the raw stored value: it yields the stored default
+		-- only when that email still names a person who has signed in (people.email is the primary
+		-- key, so this is one index probe inside a statement the create runs anyway), and null for
+		-- a project with no default or one whose default has gone stale.
+		returning next_number - 1, (select email from people where email = projects.default_assignee)
+	`, in.project).Scan(&number, &projectDefaultAssignee); err != nil {
+		return insertedIssue{}, err
+	}
+	// The project's stored default is the chain's last step, and this update already holds the
+	// project row: the decision moves below it so a create in a project with no default costs no
+	// round trip and takes no lock of its own.
+	assignee := in.assignee
+	switch {
+	case in.assigneeIsProjectDefault:
+		assignee = projectDefaultAssignee
+	case !in.assigneeProvided:
+		assignee = defaultAssignee(in.actor, parentAssignee, projectDefaultAssignee)
+	}
+	// The project row is locked from here; the mapping check takes its key-share lock only now, in
+	// the project-then-mapping order every mapping write follows (lockRepoProjectWrite).
+	if in.repo != nil {
+		if err := checkIssueRepoMapped(ctx, tx, *in.repo, in.project); err != nil {
+			return insertedIssue{}, err
+		}
+	}
+	key := fmt.Sprintf("%s-%d", in.project, number)
+	actorJSON, err := encodeJSON(in.actor)
+	if err != nil {
+		return insertedIssue{}, err
+	}
+	var parent any
+	if in.parentKey != "" {
+		parent = in.parentKey
+	}
+	if err := lockProjectRankAllocation(ctx, tx, in.project); err != nil {
+		return insertedIssue{}, err
+	}
+
+	lastRank, err := lastProjectRank(ctx, tx, in.project, "")
+	if err != nil {
+		return insertedIssue{}, err
+	}
+	issueRank := rank.Between(lastRank, "")
+
+	if _, err := tx.Exec(ctx, `
+		insert into issues (key, project_key, number, title, parent_key, created_by, labels, priority, rank, assignee, repo, route)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+	`, key, in.project, number, in.title, parent, actorJSON, in.labels, in.priority, issueRank, assignee, in.repo, in.route); err != nil {
+		return insertedIssue{}, err
+	}
+	if err := writeBlockedBy(ctx, tx, key, in.project, in.blockers); err != nil {
+		return insertedIssue{}, err
+	}
+	if in.components != nil {
+		if err := writeIssueComponents(ctx, tx, key, in.project, *in.components); err != nil {
+			return insertedIssue{}, err
+		}
+	}
+	if in.externalRepo != "" {
+		if _, err := tx.Exec(ctx, `
+			insert into issue_external_links (issue_key, url, kind) values ($1, $2, 'github_issue')
+		`, key, externalURL(in.externalRepo, in.externalNumber)); err != nil {
+			if isUniqueViolation(err) {
+				return insertedIssue{}, errExternalIssueExists
+			}
+			return insertedIssue{}, err
+		}
+	}
+
+	var artifactID string
+	if err := tx.QueryRow(ctx, `
+		insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)
+		values ($1, $2, 'spec', 'spec.md', 'doc', true, $3)
+		returning id::text
+	`, key, in.project, actorJSON).Scan(&artifactID); err != nil {
+		return insertedIssue{}, err
+	}
+	spec := in.spec
+	if in.beforeSpec != nil {
+		if spec, err = in.beforeSpec(ctx, tx, key); err != nil {
+			return insertedIssue{}, err
+		}
+	}
+	// An issue created without a spec gets an empty primary document.
+	var markdown string
+	if strings.TrimSpace(spec) != "" {
+		markdown = spec
+	}
+	markdown, err = s.deps.Docs.SeedText(documentCtx, artifactID, markdown, in.actor)
+	if err != nil {
+		return insertedIssue{}, err
+	}
+	authors, err := encodeJSON([]model.Actor{in.actor})
+	if err != nil {
+		return insertedIssue{}, err
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, authors, doc_update_version)
+		values ($1, 1, $2, $3, coalesce((select max(version) from doc_updates where artifact_id = $1), 0))
+	`, artifactID, markdown, authors); err != nil {
+		return insertedIssue{}, err
+	}
+	// documentReadBack is the rendering the seed stored, read back by its own parse (docs'
+	// Ledger.ReadBackOf), which the task count and the advice's blocks read in place of parsing
+	// the same markdown again (recordDocumentTaskProgress, documentBlocksFor).
+	documentReadBack := ledger.ReadBackOf(artifactID, markdown)
+	// The version row exists now, so the count names it (LEGION-542).
+	err = recordDocumentTaskProgress(ctx, tx, artifactID, documentReadBack, markdown)
+	if err != nil {
+		return insertedIssue{}, err
+	}
+	specChanges, err := s.deps.Docs.IndexDocumentReferences(documentCtx, artifactID, 1, markdown)
+	if err != nil {
+		return insertedIssue{}, err
+	}
+	issue, err := s.loadIssue(ctx, tx, key)
+	if err != nil {
+		return insertedIssue{}, err
+	}
+	issue.LastSeq++
+	// A new issue's blocked_by edges move each blocker's count, beside what its spec cites.
+	blockerChanges, err := issueEdgeChanges(ctx, tx, unsetIssue, issue, false)
+	if err != nil {
+		return insertedIssue{}, err
+	}
+	// A new issue changed every field it holds a value in, measured from an issue with none.
+	payload, err := newIssueEventPayload(ctx, tx, issue, refs.MergeChanges(specChanges, blockerChanges), issueChangedFields(unsetIssue, issue))
+	if err != nil {
+		return insertedIssue{}, err
+	}
+	event, err := s.appendEvent(ctx, tx, issueOwner(key).event("issue.created", in.actor, payload))
+	if err != nil {
+		return insertedIssue{}, err
+	}
+	if err := refs.Stamp(ctx, tx, "artifact", artifactID, event.ID); err != nil {
+		return insertedIssue{}, err
+	}
+	return insertedIssue{
+		issue:        issue,
+		event:        event,
+		specID:       artifactID,
+		specMarkdown: markdown,
+		specReadBack: documentReadBack,
+	}, nil
 }
 
 // forcedTitleMatchTimeout bounds the title-overlap read a forced issue create runs only to name

@@ -4225,6 +4225,49 @@ export interface DeliverySettingsInput {
 }
 
 /**
+ * Where a report of a problem with Dispatch goes: `GET /api/v1/settings/reports` answers it and
+ * `PUT /api/v1/settings/reports` answers what it stored. Every field is null until a person sets
+ * it; a null `project` means reports are not set up, and a null `agent_route` hides the report
+ * form's **Ask an agent to fix this** box.
+ */
+export interface ReportSettings {
+  /** The project a report's issue is filed in. */
+  readonly project: string | null;
+  /** The route a report's issue is given when its reporter asks an agent to fix it: always a role
+   *  route, `role:<name>`, since a role outlives the session that holds it. */
+  readonly agent_route: string | null;
+  readonly updated_by: Actor | null;
+  readonly updated_at: string | null;
+}
+
+/** `PUT /api/v1/settings/reports`'s body. Both fields are required; null or a blank string clears
+ *  one. A session route is refused (`400 REPORT_SETTINGS_INPUT`): its id changes when the agent
+ *  restarts. */
+export interface ReportSettingsInput {
+  readonly project: string | null;
+  readonly agent_route: string | null;
+}
+
+/** A report's fields, `POST /api/v1/reports`'s JSON body or its multipart `report` part; each
+ *  picture is a `picture` part beside it. The page details are what the browser reports. */
+export interface ReportInput {
+  /** The person's words, Markdown as a comment's are; at most `DISPATCH_BODY_MAX` characters. */
+  readonly body: string;
+  /** The page's address. */
+  readonly page: string;
+  /** The dashboard build the page runs. */
+  readonly page_build: string;
+  readonly user_agent: string;
+  /** The window's size in CSS pixels. */
+  readonly viewport: { readonly width: number; readonly height: number };
+  /** Route the new issue to the agent the report settings name. */
+  readonly ask_agent: boolean;
+}
+
+/** What `POST /api/v1/reports` answers: the new issue, with whether its route reaches anyone. */
+export type ReportResponse = Issue & IssueRouteReach;
+
+/**
  * One of the Delivery page's session groups: a stable id, a name and the agent sessions it holds.
  * A pull request whose first session is a member has the group as its Parent agent, under the
  * value `group:<id>`, so a rename keeps every filter and link that names it. A session is in at

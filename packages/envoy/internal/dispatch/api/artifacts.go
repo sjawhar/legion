@@ -509,10 +509,8 @@ func (s *server) storeArtifact(
 		return
 	}
 	var version model.Version
-	var summaryValue any
 	var documentSummary *string
 	if input.summary != "" {
-		summaryValue = input.summary
 		documentSummary = &input.summary
 	}
 	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
@@ -555,29 +553,8 @@ func (s *server) storeArtifact(
 			return
 		}
 	} else {
-		authors, err := encodeJSON([]model.Actor{actor})
+		version, err = s.insertFileVersion(r.Context(), tx, artifact.ID, nextNumber, input, sha, actor)
 		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		size := len(input.content)
-		content := input.content
-		if s.deps.Files != nil {
-			content = nil
-		}
-		var versionAuthors []byte
-		if err := tx.QueryRow(r.Context(), `
-			insert into artifact_versions (artifact_id, number, content, mime, size, sha256, authors, named, summary)
-			values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			returning number, named, summary, authors, created_at, size, mime, sha256
-		`, artifact.ID, nextNumber, content, input.contentType, size, sha, authors, input.summary != "", summaryValue).Scan(
-			&version.Number, &version.Named, &version.Summary, &versionAuthors, &version.CreatedAt,
-			&version.Size, &version.MIME, &version.SHA256,
-		); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		if err := json.Unmarshal(versionAuthors, &version.Authors); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -1564,4 +1541,47 @@ func (s *server) quiesceDocuments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.runTestHookEverywhere(w, r, testHookCall{Hook: hookQuiesceDocuments})
+}
+
+// insertFileVersion writes version number of the file artifact artifactID from input, whose bytes
+// hash to sha: in the row itself, or, when a file store holds the bytes (putUploadedFile wrote
+// them before the transaction), only the hash naming its object. An upload (storeArtifact) and a
+// report's pictures (reports.go) store their files through it.
+func (s *server) insertFileVersion(
+	ctx context.Context,
+	tx pgx.Tx,
+	artifactID string,
+	number int,
+	input artifactUploadInput,
+	sha string,
+	actor model.Actor,
+) (model.Version, error) {
+	authors, err := encodeJSON([]model.Actor{actor})
+	if err != nil {
+		return model.Version{}, err
+	}
+	var summary any
+	if input.summary != "" {
+		summary = input.summary
+	}
+	content := input.content
+	if s.deps.Files != nil {
+		content = nil
+	}
+	var version model.Version
+	var versionAuthors []byte
+	if err := tx.QueryRow(ctx, `
+		insert into artifact_versions (artifact_id, number, content, mime, size, sha256, authors, named, summary)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		returning number, named, summary, authors, created_at, size, mime, sha256
+	`, artifactID, number, content, input.contentType, len(input.content), sha, authors, input.summary != "", summary).Scan(
+		&version.Number, &version.Named, &version.Summary, &versionAuthors, &version.CreatedAt,
+		&version.Size, &version.MIME, &version.SHA256,
+	); err != nil {
+		return model.Version{}, err
+	}
+	if err := json.Unmarshal(versionAuthors, &version.Authors); err != nil {
+		return model.Version{}, err
+	}
+	return version, nil
 }

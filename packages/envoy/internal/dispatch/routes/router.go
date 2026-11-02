@@ -97,6 +97,9 @@ type AppContextOptions struct {
 	// when it published the build (dashboard.Publish); "" when it serves none. See
 	// api.DepsInput.
 	DashboardEntry string
+	// Commit is the legion commit this binary was built from, "" for a build that names none.
+	// See api.DepsInput.
+	Commit         string
 	Sessions       auth.SessionStore
 	People         auth.PeopleStore
 	Identity       identity.Identity
@@ -195,6 +198,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		RouteRosterTTL:         opts.RouteRosterTTL,
 		ListenerRosterUncached: opts.ListenerRosterUncached,
 		DashboardEntry:         opts.DashboardEntry,
+		Commit:                 opts.Commit,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("BuildAppContext: %w", err)
