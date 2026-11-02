@@ -21,6 +21,7 @@ import {
   buildReferencePath,
   type DispatchReferenceRoute,
   type IssueRoute,
+  type ReferencedArtifact,
   referencedArtifact,
 } from "./routes";
 import { referenceTargetKind } from "./target-id";
@@ -488,15 +489,54 @@ export function useReferenceTarget(
   }
   const text = markdown !== undefined && markdown.trim() !== "" ? markdown : undefined;
   const named = route === undefined ? undefined : referencedArtifact(route);
-  const pictureVersion = named?.version ?? artifact?.latest_version;
   return {
     title: artifact?.name ?? issue?.title,
     description: text ?? (artifact === undefined ? issue?.status : undefined),
-    picture:
-      named === undefined || artifact?.kind !== "image" || !pictureVersion
-        ? undefined
-        : artifactVersionPath(named.owner, named.slug, pictureVersion),
+    picture: named === undefined ? undefined : picturePath(named, artifact),
   };
+}
+
+/** The bytes route of the picture `named` shows: the version it pins, else `artifact`'s latest.
+ *  Undefined unless `artifact` (the document the reference names, once read) is an image with a
+ *  version, since a document or another file is no picture the browser can draw. */
+function picturePath(
+  named: ReferencedArtifact,
+  artifact: Pick<ReferenceArtifact, "kind" | "latest_version"> | undefined
+): string | undefined {
+  const version = named.version ?? artifact?.latest_version;
+  return artifact?.kind !== "image" || !version
+    ? undefined
+    : artifactVersionPath(named.owner, named.slug, version);
+}
+
+/** `useReferenceTarget`'s `picture`, for a caller outside React (the document editors' picture
+ *  node view): it reads the same summary queries through `queryClient`, so every picture of one
+ *  issue shares one summary read with the links and cards on the page. Undefined for a reference
+ *  to anything but an image artifact, or when its summary cannot be read. */
+export async function fetchPicturePath(
+  queryClient: QueryClient,
+  route: DispatchReferenceRoute
+): Promise<string | undefined> {
+  const named = referencedArtifact(route);
+  if (named === undefined) {
+    return undefined;
+  }
+  try {
+    let artifact: ReferenceArtifact | undefined;
+    if (route.kind === "document") {
+      artifact = await queryClient.fetchQuery(documentSummaryQuery(route.project, route.slug));
+    } else if (route.kind === "agent-artifact") {
+      artifact = agentReferenceArtifact(
+        await queryClient.fetchQuery(agentArtifactQuery(route.session, route.slug))
+      );
+    } else if (route.kind === "artifact") {
+      const summary = await queryClient.fetchQuery(issueSummaryQuery(route.key));
+      artifact = summary.documents.find((candidate) => candidate.slug === route.slug);
+    }
+    return picturePath(named, artifact);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Whether a reference's path waits on its issue: a block of an issue's spec pinned to a version

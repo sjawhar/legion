@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { Doc } from "yjs";
 
@@ -6,6 +6,7 @@ import { api } from "../../api/client";
 import { whoAmIQuery } from "../../api/queries";
 import type { Ask, BlockSchema } from "../../api/types";
 import { warmMarkdownRenderer } from "../refs/markdown-engine";
+import { fetchPicturePath } from "../refs/reference-target";
 import { Timestamp } from "../refs/Timestamp";
 import { AskBlockCard } from "./AskBlockCard";
 import { installTypedBlocks } from "./ask-block";
@@ -54,6 +55,7 @@ export function VersionView({
     queryFn: () => api.getArtifactVersion(artifactId, version),
   });
   const userQuery = useQuery(whoAmIQuery());
+  const queryClient = useQueryClient();
   const markdown =
     versionQuery.data !== undefined && "markdown" in versionQuery.data
       ? versionQuery.data.markdown
@@ -113,7 +115,9 @@ export function VersionView({
         editor.destroy();
         return;
       }
-      installTypedBlocks(editor.view, blockSchema, setAskBlockHosts);
+      installTypedBlocks(editor.view, blockSchema, setAskBlockHosts, (route) =>
+        fetchPicturePath(queryClient, route)
+      );
       const embedded =
         highlighted === undefined ? undefined : embedHighlight(markdown, highlighted);
       editor.setMarkdown(embedded ?? markdown);
@@ -148,7 +152,15 @@ export function VersionView({
       handle?.destroy();
       ydoc?.destroy();
     };
-  }, [blockSchema, changeBaseline, createEditor, highlighted, markdown, userQuery.data]);
+  }, [
+    blockSchema,
+    changeBaseline,
+    createEditor,
+    highlighted,
+    markdown,
+    queryClient,
+    userQuery.data,
+  ]);
 
   if (versionQuery.isPending) {
     return <p>Loading version…</p>;

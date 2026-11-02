@@ -190,9 +190,21 @@ test("a picture pasted into a direct message on the Agents page shows inline and
       `/api/v1/agents/${planner.session_id}/artifacts/shot-png/versions/1`
     );
 
-    // The picture opens its own page, which shows it and its versions.
+    // A click opens the picture at full size over the page, and a click on it closes it.
     await picture.click();
-    await expect(page).toHaveURL(`/agents/${planner.session_id}/artifacts/shot-png?v=1`);
+    const lightbox = page.getByRole("dialog", { name: "shot.png" });
+    await expectDrawn(
+      lightbox.getByRole("img", { name: "shot.png" }),
+      `/api/v1/agents/${planner.session_id}/artifacts/shot-png/versions/1`
+    );
+    await lightbox.click();
+    await expect(lightbox).toHaveCount(0);
+    await expect(page).not.toHaveURL(/\/artifacts\//);
+
+    // The picture's link still names its own page, which shows it and its versions.
+    const pagePath = await picture.locator("xpath=ancestor::a[1]").getAttribute("href");
+    expect(pagePath).toBe(`/agents/${planner.session_id}/artifacts/shot-png?v=1`);
+    await page.goto(pagePath ?? "");
     await expect(page.getByRole("heading", { name: "shot.png" })).toBeVisible();
     await expect(page.getByRole("img", { name: "shot.png version 1" })).toBeVisible();
     await expect(page.getByRole("region", { name: "Versions for shot.png" })).toBeVisible();
@@ -202,7 +214,7 @@ test("a picture pasted into a direct message on the Agents page shows inline and
   }
 });
 
-test("a picture written into a spec draws in the editor and in a past version, and its markdown is kept", async ({
+test("a picture written into a spec draws in the editor and in a past version, with or without a version, and its markdown is kept", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -231,10 +243,20 @@ test("a picture written into a spec draws in the editor and in a past version, a
     await expectSucceeded(sent);
 
     // An agent writes the line into the spec, as `dispatch doc-edit` does: a new version, whose
-    // number the server assigns. The paragraph after it is where the caret lands in a moment.
+    // number the server assigns. Beside it, the same picture written without `@vN`, which draws
+    // its latest version. The paragraph after them is where the caret lands in a moment.
+    const latestSyntax = `![latest shot](dispatch://${issue.key}/artifact/shot-png)`;
     await editArtifact(
       issue.primary_artifact_id,
-      { ops: [{ after: "end", markdown: `${syntax}\n\nBelow the picture.`, op: "insert" }] },
+      {
+        ops: [
+          {
+            after: "end",
+            markdown: `${syntax}\n\n${latestSyntax}\n\nBelow the picture.`,
+            op: "insert",
+          },
+        ],
+      },
       agentSession
     );
     const newestVersion = async () =>
@@ -246,6 +268,14 @@ test("a picture written into a spec draws in the editor and in a past version, a
 
     await openSpec(page, issue.key, "Below the picture.");
     await expectDrawn(documentEditor(page).getByRole("img", { name: "shot.png" }), src);
+    await expectDrawn(documentEditor(page).getByRole("img", { name: "latest shot" }), src);
+
+    // A click on a picture in the editor opens it at full size; a click on it closes it.
+    await documentEditor(page).getByRole("img", { name: "shot.png" }).click();
+    const lightbox = page.getByRole("dialog", { name: "shot.png" });
+    await expectDrawn(lightbox.getByRole("img", { name: "shot.png" }), src);
+    await lightbox.click();
+    await expect(lightbox).toHaveCount(0);
 
     // Editing around the picture keeps its line as it was written.
     await typeAtEnd(page, "Typed in the editor.");
@@ -253,11 +283,13 @@ test("a picture written into a spec draws in the editor and in a past version, a
       .poll(async () => (await getIssueArtifactText(issue.key, "spec")).markdown)
       .toContain("Typed in the editor.");
     expect((await getIssueArtifactText(issue.key, "spec")).markdown).toContain(syntax);
+    expect((await getIssueArtifactText(issue.key, "spec")).markdown).toContain(latestSyntax);
 
     // The past version draws it through the read-only view.
     await page.getByRole("combobox", { name: "Version" }).selectOption(String(pictured));
     const versionView = page.getByTestId("version-view");
     await expectDrawn(versionView.getByRole("img", { name: "shot.png" }), src);
+    await expectDrawn(versionView.getByRole("img", { name: "latest shot" }), src);
     await expect(versionView.getByRole("textbox", { name: "Document editor" })).toHaveAttribute(
       "contenteditable",
       "false"
@@ -267,7 +299,7 @@ test("a picture written into a spec draws in the editor and in a past version, a
   }
 });
 
-test("a picture line the browser cannot draw, or that pins no version, shows a link; a web picture stays an <img>", async ({
+test("a picture line the browser cannot draw, at a version or not, shows a link; a web picture stays an <img>", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
