@@ -98,11 +98,13 @@ type OutboxPayload interface{ OutboxKind() OutboxKind }
 
 // StatusRowKind is what a status row is for, and the one thing that decides the rule the outbox
 // judges its retry by (the daemon's stillWanted). It is stored in the payload rather than worked
-// out from the row's other fields: derived from a set of marks, a kind nobody gave a rule read as
-// the ordinary one and was judged by the ordinary rule in silence, which is review round 6's
-// defect. Every kind is named once, in StatusRowKinds, which the daemon's rule switch and the
-// tests of both packages read, so a kind added to that list and nowhere else fails its row and
-// reddens the package rather than borrowing another kind's rule.
+// out from the row's other fields: while the kind was derived from a set of marks, a kind nobody
+// had given a mark read as the ordinary one and was judged by the ordinary rule in silence, so a
+// row queued at a status out of the workflow — a re-assert of the daemon's own status over a
+// session's close, a person's handover, the daemon's own close — was dropped for standing at the
+// very status it exists to undo. Every kind is named once, in StatusRowKinds, which the daemon's
+// rule switch and the tests of both packages read, so a kind added to that list and nowhere else
+// fails its row and reddens the package rather than borrowing another kind's rule.
 type StatusRowKind string
 
 const (

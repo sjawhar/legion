@@ -65,12 +65,16 @@ func pullRequestStandIn(t *testing.T, head string, updated time.Time, listed *at
 	return server
 }
 
-// headReads is how many facts the read applied from its own read of a pull request's head.
+// headReads is how many facts the read applied from its own read of a pull request. The count is
+// by kind and project alone: a synchronize the read makes names the boot that made it, since two
+// reads of the same head are two moves to apply, while a push the read rebuilds names only the
+// two commits it moved between, so that the same push rebuilt by a later read is one fact
+// (readEventID). Matching the boot would see the first kind and never the second.
 func headReads(t *testing.T, pool *pgxpool.Pool, kind string) int {
 	t.Helper()
 	var n int
 	if err := pool.QueryRow(context.Background(),
-		`select count(*) from processed_events where source = 'github' and event_id like $1`, kind+":CAPTURE:test-boot:%").Scan(&n); err != nil {
+		`select count(*) from processed_events where source = 'github' and event_id like $1`, kind+":CAPTURE:%").Scan(&n); err != nil {
 		t.Fatalf("read the %s facts the read applied: %v", kind, err)
 	}
 	return n

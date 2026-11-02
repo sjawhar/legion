@@ -486,7 +486,7 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 			return fmt.Errorf("read Dispatch issue %s after posting the reason of its status write: %w", row.Issue, err)
 		}
 	}
-	return r.writeStatus(ctx, row, payload, issue)
+	return r.writeStatus(ctx, row, payload, rule, issue)
 }
 
 // statusWriteReads bounds how often one status row reads its issue again after Dispatch refused
@@ -509,20 +509,19 @@ const statusWriteReads = 3
 // change made after the row's read, which the row never writes over, whether it took the issue
 // out of the workflow or moved it along within one.
 //
-// What this read never does is reach the engine. It carries no actor (intake.ReadIssue), so the
-// engine would have to read every change it shows as a person's, and two of the daemon's own rows
-// exist precisely because a change was not a person's: a session's own close or park, which the
-// re-assert undoes, would be taken for a person ending the tree, lingering it and freeing its
-// slot. A change Dispatch recorded reaches the engine through its own event, with its actor
-// (dispatch://INFRA-714/spec R4); this read decides one thing, whether to write.
-func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload record.StatusWrite, read dispatch.Issue) error {
-	// The rule is resolved before the first write of the loop rather than at the refusal that
-	// asks it: a kind nobody gave a rule reaches Dispatch with nothing, whichever path brought
-	// its row here.
-	rule, err := ruleFor(payload.Kind)
-	if err != nil {
-		return fmt.Errorf("outbox row %d: %w", row.ID, err)
-	}
+// What this read never does is reach the engine. Dispatch's read says what the issue is now and
+// never who wrote it, so the engine would have to take every change it shows for a person's, and
+// two of the daemon's own rows exist precisely because a change was not a person's: a session's
+// own close or park, which the re-assert undoes, would be taken for a person ending the tree,
+// lingering it and freeing its slot. A change Dispatch recorded reaches the engine through its
+// own event, with its actor (dispatch://INFRA-714/spec R4); this read decides one thing, whether
+// to write.
+//
+// rule is the row's kind's rule, which its caller resolved once for the row (ruleFor) before
+// anything was written. It is resolved there rather than here, at the refusal that first asks
+// for it, so a kind nobody gave a rule fails its row before the first write and reaches Dispatch
+// with nothing, whichever path brought the row here.
+func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload record.StatusWrite, rule statusRowRule, read dispatch.Issue) error {
 	for range statusWriteReads {
 		_, err := r.dispatch.SetStatusAt(ctx, read, payload.Status)
 		if err == nil {
@@ -558,8 +557,9 @@ func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload 
 // attempt settles against the issue Dispatch shows, and the rule its retry is judged by once
 // Dispatch has refused that write (ISSUE_CHANGED). Both decisions live on one value, and this
 // interface asks for both, so a kind given one and not the other does not build. A kind with a
-// first attempt of its own and no retry rule, or the reverse, is review round 6's defect again:
-// the half nobody wrote is lent to the row by whichever branch it falls through to, in silence.
+// first attempt of its own and no retry rule, or the reverse, would bring back the silence the
+// kinds exist to end: the half nobody wrote is lent to the row by whichever branch it falls
+// through to, so the row is judged by a rule written for another kind and nothing says so.
 type statusRowRule interface {
 	// firstAttempt settles what this kind has to settle before the row's first write, against
 	// the issue as Dispatch shows it, and says whether that write is still to be made. A rule
@@ -590,7 +590,9 @@ type statusRowRule interface {
 
 // ruleFor is the one place a status row's kind is read: a value per kind and no fallback, so a
 // kind added to record.StatusRowKinds without one here fails its row, naming itself, rather than
-// being judged by whichever rule a default would lend it, which is review round 6's defect.
+// being judged in silence by whichever rule a default would lend it. An ordinary default reads
+// backwards for three of the five kinds, which are queued at a status out of the workflow, and
+// would drop the very row that exists to bring the issue back into one.
 // TestEveryStatusRowKindHasARule holds the list and this switch to each other, and
 // TestAStatusRowKindWithNoRuleFailsBothPathsWithoutWriting holds a row of a kind this switch has
 // no value for to failing on both paths with nothing written.
@@ -753,8 +755,8 @@ func (closeRule) firstAttempt(context.Context, *outbox, record.OutboxRow, record
 // while the record stands at the generation the row names. A person's reopen re-admits the issue
 // in a generation of its own, and that close is no longer owed: Dispatch holds what the person
 // put there. The ordinary rule cannot be asked here — it drops a row whose issue has left the
-// workflow, which is every close, so one refusal would leave the issue open in Dispatch while
-// the tree lingered (review round 7's finding, and the reason this kind exists).
+// workflow, which is every close, so one refusal would leave the issue open in Dispatch for good
+// while the tree lingered behind a close nobody ever wrote. That is the reason this kind exists.
 func (closeRule) stillWanted(ctx context.Context, r *outbox, row record.OutboxRow, payload record.StatusWrite, _ dispatch.Issue) (bool, error) {
 	if payload.CloseGeneration == 0 {
 		// A row migration 20261102003600 gave its kind, queued by a release that fenced the

@@ -541,8 +541,9 @@ func (d *boardDispatch) WebhookAppInstalled(context.Context, string) (bool, erro
 // Judged by statusStillWanted instead, whose record.OutOfWorkflow is true for exactly those three
 // statuses, every such row was dropped without writing and logged as having left a workflow its
 // issue had never entered; and the read applied on the triage path told admission the label was
-// nobody's — intake.ReadIssue carries no LabelSetter — which queued a `triage` wake for a root
-// the controller is told to leave alone (skills/legion-controller/references/triage.md).
+// nobody's — a read of Dispatch names no actor, so it carries no LabelSetter — which queued a
+// `triage` wake for a root the controller is told to leave alone
+// (skills/legion-controller/references/triage.md).
 //
 // The runner holds a real pool and the two handlers that would queue that wake (workflow.New and
 // admit.New, the pair the hand-over tests wire): with a nil pool applyRead returns before applying
@@ -748,9 +749,11 @@ const probeStatusRowKind = record.StatusRowKind("probe")
 // refusal sends it to — and reaches Dispatch with no write at all. Until the two decisions were
 // folded onto one value, such a row matched no branch of the first attempt and fell through to
 // the tail every ordinary row ends with: it wrote its status and answered nil, and only the
-// retry, which most rows never make, named it. The list and the switch are made to disagree from
-// this file rather than in the production list, so the hole is probed without one being left
-// open.
+// retry, which most rows never make, named it. The retry is handed the rule its caller resolved
+// for the row, so the retry's case resolves it the way the first attempt does (ruleFor) and
+// fails on that resolution, which is where a kind with no rule stops the row on that path. The
+// list and the switch are made to disagree from this file rather than in the production list, so
+// the hole is probed without one being left open.
 func TestAStatusRowKindWithNoRuleFailsBothPathsWithoutWriting(t *testing.T) {
 	listed := record.StatusRowKinds
 	record.StatusRowKinds = append(slices.Clone(listed), probeStatusRowKind)
@@ -777,7 +780,11 @@ func TestAStatusRowKindWithNoRuleFailsBothPathsWithoutWriting(t *testing.T) {
 		}},
 		{name: "the retry an ISSUE_CHANGED refusal sends the row to", refuseFirst: true,
 			run: func(ctx context.Context, runner *outbox) error {
-				return runner.writeStatus(ctx, row, payload, shown)
+				rule, err := ruleFor(payload.Kind)
+				if err != nil {
+					return fmt.Errorf("outbox row %d: %w", row.ID, err)
+				}
+				return runner.writeStatus(ctx, row, payload, rule, shown)
 			}},
 		{name: "the drop a permanent refusal makes", run: func(ctx context.Context, runner *outbox) error {
 			// finishRefused asks the kind what it leaves behind, so a kind with no rule fails
