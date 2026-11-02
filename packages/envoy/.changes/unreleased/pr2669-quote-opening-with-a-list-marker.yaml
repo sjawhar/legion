@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'A document edit whose quote opens with a list marker, such as `5. A fresh reviewer checks` or `- bullet two`, now selects the list item of that kind whose text starts with the rest, as a quote''s `# ` selects a heading; it matched nothing unless it also carried bold or code. The item''s number is not matched, and a `with` that opens with the same kind of marker replaces the item''s text under its own number. A miss says the marker is no text the item holds and quotes the text without it.'
+time: 2026-11-02T00:00:01Z
+custom:
+    Issue: pr2669
