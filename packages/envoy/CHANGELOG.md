@@ -1,5 +1,33 @@
 # Changelog
 
+## [27.2.0] - 2026-11-01
+
+### Added
+
+- A typed block's schema can declare an attribute of kind `block[]` that points at blocks of
+  documents: its value is canonical block references joined by exactly one space, anything else
+  refused (a block of a comment or a message with a reason of its own), and each block it names
+  is a graph edge from the typed block of a kind named by the attribute,
+  which `GET /api/v1/references?kind=` accepts. Its `targets` limit the block types it points at:
+  an agent's or API write introducing a pointer to an existing block of another type is refused
+  (`400 INVALID_MARKDOWN`, or `INVALID_OP` on `attributes` from `POST /edits`), a browser's edit
+  never is, and every block-aware read lists a pointer's edge only while its target has an allowed
+  type (migration `20261101144855_block_pointer_links`). No shipped block type declares one yet.
+
+### Fixed
+
+- A typed block's id now reads back from the markdown Dispatch stores as the block holds it. A
+  browser can give a block any id, and the renderer wrote it `#` and the id as it was, so an id
+  holding a space, `.`, a quote or another character the shortcut cannot hold, such as `a b`, read
+  back as another id plus an undeclared attribute: the document's markdown no longer read back,
+  and a pointer from such a block was indexed as a pointer by a version write and as a mention by
+  the block-index reconciliation. Such an id is now written `id="a b"`, with `&`, `"`, line feeds
+  and carriage returns as character references, which the browser editor reads as well; an id the
+  shortcut holds is written `#id` as before. Go now reads every id the browser editor's shortcut
+  does (`q:1`, `décision`) and `id="…"`, and refuses an id written twice, an empty one, a shortcut
+  holding `&`, and a `blockId` attribute; a block schema may declare no attribute named `id` or
+  `blockId`.
+
 ## [27.1.0] - 2026-11-01
 
 ### Added

@@ -393,6 +393,17 @@ func writeDocumentVersion(ctx context.Context, tx pgx.Tx, artifactID string, num
 	return version, nil
 }
 
+// recordDocumentTaskProgress records the task count of the document a write just stored.
+// readBack is the rendering that write stored, read back by its own parse (docs'
+// Ledger.ReadBackOf): the count reads that tree rather than parsing the same markdown again, and
+// parses markdown itself when the write left none.
+func recordDocumentTaskProgress(ctx context.Context, tx pgx.Tx, artifactID string, readBack *pmdoc.Node, markdown string) error {
+	if readBack != nil {
+		return docs.RecordTaskProgress(ctx, tx, artifactID, readBack)
+	}
+	return docs.RecordTaskProgressMarkdown(ctx, tx, artifactID, markdown)
+}
+
 func (s *server) storeArtifact(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -439,10 +450,14 @@ func (s *server) storeArtifact(
 			return
 		}
 		project = &loaded.Key
+		if err := lockProjectArtifacts(r.Context(), tx, loaded.Key); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	var artifact model.Artifact
 	var created bool
-	artifact, err = s.findArtifactByName(r.Context(), tx, target, input.name)
+	artifact, err = s.findArtifactByNameOrSlug(r.Context(), tx, target, input.name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		created = true
 		if refusal := newArtifactNameRefusal(input.name); refusal != nil {
@@ -476,7 +491,9 @@ func (s *server) storeArtifact(
 		s.writeHandlerError(w, err)
 		return
 	} else if artifact.Kind != kind {
-		writeError(w, "ARTIFACT_KIND_MISMATCH", http.StatusBadRequest, "uploaded content type does not match existing artifact")
+		s.writeHandlerError(w, errorf(http.StatusBadRequest, "ARTIFACT_KIND_MISMATCH",
+			"%q names artifact %s (%s), whose kind is %s; this upload's kind is %s, so it cannot be its next version: give it another name",
+			input.name, artifact.Slug, artifact.Name, artifact.Kind, kind))
 		return
 	}
 	// A project document's owner row is the artifact itself, and until here this transaction
@@ -507,6 +524,10 @@ func (s *server) storeArtifact(
 	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
 	defer ledger.Discard()
 	var documentMarkdown string
+	// documentReadBack is the rendering this write stored, read back by its own parse (docs'
+	// Ledger.ReadBackOf), which the task count and the advice's blocks read in place of parsing
+	// the same markdown again (recordDocumentTaskProgress, documentBlocksFor).
+	var documentReadBack *pmdoc.Node
 	var documentChanges model.ReferenceChanges
 	var movedEvents []model.Event
 	if kind == "doc" {
@@ -527,8 +548,10 @@ func (s *server) storeArtifact(
 		// The version credits the uploader alone, and holds the upload's write to the document,
 		// which clears the credit of every edit that write read when it changed the document.
 		ledger.WroteVersion(artifact.ID, version)
+		documentReadBack = ledger.ReadBackOf(artifact.ID, documentMarkdown)
 		// The version row exists now, so the count names it (LEGION-542).
-		if err := docs.RecordTaskProgressMarkdown(r.Context(), tx, artifact.ID, documentMarkdown); err != nil {
+		err = recordDocumentTaskProgress(r.Context(), tx, artifact.ID, documentReadBack, documentMarkdown)
+		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -635,7 +658,7 @@ func (s *server) storeArtifact(
 	s.publish(published...)
 	var blocks *documentBlocks
 	if kind == "doc" {
-		blocks = readDocumentBlocks(documentMarkdown)
+		blocks = documentBlocksFor(documentReadBack, documentMarkdown)
 	}
 	if advice != nil {
 		advice.documentBlocks = blocks
@@ -1374,20 +1397,25 @@ func scanArtifact(row pgx.Row) (model.Artifact, error) {
 // artifactOwnerKey is the owner part of ref_key (artifactTarget.refPrefix), which the 0071
 // trigger fills ref_key from, so a lookup by owner compares what ref_key was built from. Its
 // session arm, 'agent/' || session_id, has a second reader: an agent's conversation's lookups
-// (agentArtifactByNameSQL, agentArtifactSlugTakenSQL in agent_artifacts.go) compare session_id
+// (agentArtifactByNameOrSlugSQL, agentArtifactSlugTakenSQL in agent_artifacts.go) compare session_id
 // itself, so a change to ref_key's owner part changes both.
 const artifactOwnerKey = `coalesce(issue_key, project_key, 'agent/' || session_id)`
 
-// artifactByNameSQL and artifactSlugTakenSQL are an upload's two lookups by owner, $1 the owner
-// key and $2 the name or the slug; an agent's conversation runs its own pair
-// (artifactTarget.ownerLookup).
+// artifactByNameOrSlugSQL and artifactSlugTakenSQL are an upload's two lookups by owner, $1 the
+// owner key and $2 the name or the slug; an agent's conversation runs its own pair
+// (artifactTarget.ownerLookup). An upload's name finds the artifact whose name or slug it is, so a
+// name that is one artifact's slug is that artifact's next version rather than a second artifact
+// the same reference would also name. An owner that already holds two such artifacts (one whose
+// slug and another whose name it is, which uploads stored before this lookup read slugs) gets the
+// one whose slug it is, the one a read by that reference resolves to (resolveDocumentReference).
 const (
-	artifactByNameSQL    = `select ` + artifactColumns + ` from artifacts where ` + artifactOwnerKey + ` = $1 and name = $2`
+	artifactByNameOrSlugSQL = `select ` + artifactColumns + ` from artifacts where ` + artifactOwnerKey +
+		` = $1 and $2 in (name, slug) order by slug = $2 desc limit 1`
 	artifactSlugTakenSQL = `select exists(select 1 from artifacts where ` + artifactOwnerKey + ` = $1 and slug = $2)`
 )
 
-func (s *server) findArtifactByName(ctx context.Context, q queryer, target artifactTarget, name string) (model.Artifact, error) {
-	query, owner := target.ownerLookup(artifactByNameSQL, agentArtifactByNameSQL)
+func (s *server) findArtifactByNameOrSlug(ctx context.Context, q queryer, target artifactTarget, name string) (model.Artifact, error) {
+	query, owner := target.ownerLookup(artifactByNameOrSlugSQL, agentArtifactByNameOrSlugSQL)
 	artifact, err := scanArtifact(q.QueryRow(ctx, query, owner, name))
 	if err != nil {
 		return model.Artifact{}, err
@@ -1516,6 +1544,19 @@ func newArtifactKeyRefusal(target artifactTarget, slug string) error {
 	return errorf(http.StatusBadRequest, "INVALID_ARTIFACT",
 		"the reference key `%s/<slug>` this name gives a new artifact is %d bytes, past the %d bytes a new artifact's reference key may hold; give it a shorter name",
 		target.refPrefix(), key, maxNewArtifactKeyBytes)
+}
+
+// lockProjectArtifacts serialises one project's own uploads (its documents, not its issues') for
+// the rest of tx, as lockAgentArtifacts does a conversation's. A project's upload otherwise locks
+// no row before it looks its artifact up by name or slug and takes a new slug, so two uploads at
+// once - `plan.md` and `plan-md` - could each miss the other and leave two documents that one
+// reference names. Only these uploads take the lock, and they take it before any row or room, so
+// it joins no lock cycle.
+func lockProjectArtifacts(ctx context.Context, tx pgx.Tx, project string) error {
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('project-artifacts:' || $1))`, project); err != nil {
+		return fmt.Errorf("lock the project's documents: %w", err)
+	}
+	return nil
 }
 
 func (s *server) nextArtifactSlug(ctx context.Context, q queryer, target artifactTarget, name string) (string, error) {
