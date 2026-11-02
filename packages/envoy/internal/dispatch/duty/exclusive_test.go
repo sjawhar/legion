@@ -1,8 +1,11 @@
 package duty
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
@@ -203,6 +207,71 @@ func TestExclusiveLeavesThePeriodUnservedWhenShutdownCutsThePassShort(t *testing
 	ran := false
 	if !Exclusive(context.Background(), leases, name, time.Now(), period, func(context.Context) { ran = true }) || !ran {
 		t.Error("the next tick skipped a period the cut-short pass never served")
+	}
+}
+
+// A shutdown can arrive while the gate reads the loop's last pass on the lease's own connection.
+// That read must not end the connection, or the unlock after it runs on a closed connection. The
+// stopped gate starts no pass, gives the lease back with its unlock, and returns the connection to
+// the lease pool. A first gate leaves the period read prepared on that connection, as a running
+// process's earlier ticks do.
+func TestExclusiveFreesTheLeaseWhenShutdownInterruptsThePeriodRead(t *testing.T) {
+	database := storetest.Open(t)
+	leases := leasesOf(t, database)
+	var logs bytes.Buffer
+	logtest.SetDefault(t, slog.NewTextHandler(&logs, nil))
+	ctx := context.Background()
+	const name = "search-term-stats"
+
+	if !Exclusive(ctx, leases, "edit-notices", time.Now(), time.Hour, func(context.Context) {}) {
+		t.Fatal("the first gate did not run, so the lease connection has no prepared period read")
+	}
+
+	holder, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the transaction that holds duty_passes: %v", err)
+	}
+	defer func() { _ = holder.Rollback(context.Background()) }()
+	if _, err := holder.Exec(ctx, `lock table duty_passes in access exclusive mode`); err != nil {
+		t.Fatalf("hold duty_passes: %v", err)
+	}
+
+	stopping, stop := context.WithCancel(ctx)
+	defer stop()
+	passRan := false
+	answered := make(chan bool, 1)
+	go func() {
+		answered <- Exclusive(stopping, leases, name, time.Now(), time.Hour, func(context.Context) { passRan = true })
+	}()
+	if waiting := storetest.WaitForLockWaiters(t, holder, 1, 10*time.Second); waiting < 1 {
+		t.Fatal("the gate's period read never queued behind duty_passes")
+	}
+	stop()
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatalf("release duty_passes: %v", err)
+	}
+
+	select {
+	case ran := <-answered:
+		if ran {
+			t.Error("a gate stopped while it read its period reported a pass that ran")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the gate stopped while it read its period did not return")
+	}
+	if passRan {
+		t.Error("the gate started its pass after shutdown")
+	}
+	if output := logs.String(); strings.Contains(output, `msg="dispatch duty: free the lease"`) {
+		t.Fatalf("the stopped gate could not unlock its lease:\n%s", output)
+	}
+	if stat := leases.Stat(); stat.TotalConns() != 1 || stat.IdleConns() != 1 {
+		t.Fatalf("lease pool after the stopped gate: total %d, idle %d; want its connection returned",
+			stat.TotalConns(), stat.IdleConns())
+	}
+	ran := false
+	if !Exclusive(ctx, leases, name, time.Now(), time.Hour, func(context.Context) { ran = true }) || !ran {
+		t.Fatal("the next gate could not take the lease the stopped gate gave back")
 	}
 }
 
