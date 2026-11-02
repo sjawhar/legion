@@ -90,9 +90,26 @@ const ErrorWireSchema = z.object({
   expected: z.array(z.string()).optional(),
 });
 
+/**
+ * What a send or a publish answers: the envelope, and the fields the listener adds beside it.
+ * `.extend` drops anything not declared here, so a field the listener sends and this schema does
+ * not know never reaches a caller.
+ *
+ * `recipient` and `state` (`sendResponse`) are a send's; `holder`, `recipients` and
+ * `recipients_connected` (`publishResponse`) are a publish's. `state` is read as a string rather
+ * than a closed pair, as this file reads a delivery answer's `reason`, so a word a later listener
+ * adds still parses: only `stopped` is stopped, and anything else is the connected reading every
+ * release gave before the state existed. `last_seen` is unix milliseconds, sent for a stopped
+ * target alone. `recipients` and `recipients_connected` are absent from a role topic's answer and
+ * from a listener whose NATS user cannot read the known-session bucket; a count of zero is sent.
+ */
 const EnvelopeResponseSchema = EnvelopeSchema.extend({
   recipient: z.string().optional(),
   holder: z.string().optional(),
+  state: z.string().optional(),
+  last_seen: z.number().int().optional(),
+  recipients: z.number().int().nonnegative().optional(),
+  recipients_connected: z.number().int().nonnegative().optional(),
 });
 
 const ReplayWireSchema = z.object({
@@ -217,6 +234,17 @@ export type SubscribeInput = {
   readonly capabilities?: readonly string[];
   readonly driving: boolean;
   readonly selfSubscribed?: boolean;
+  /**
+   * Declares that this session answers the listener's presence check: the listener sends one
+   * request on the session's presence subject (`notifications.envoy.presence.<session id>`) when
+   * someone sends to it, and this plugin answers `{"session_id": …, "client_instance_id": …}`
+   * from its own NATS connection. Sent as `presence`, a field of its own rather than a delivery
+   * capability, because the capability list is the closed set of targeted-delivery modes
+   * (`DELIVERY_CAPABILITIES` in `@legion/contracts`) that Dispatch renders on its Agents page.
+   * Absent, the registration body is what it always was and the listener calls the session
+   * connected for as long as it holds a registry entry.
+   */
+  readonly presence?: boolean;
   /** Asks for consumer delivery (`DeliveryRequest`); absent keeps the core path. */
   readonly delivery?: DeliveryRequest;
   /**
@@ -295,6 +323,14 @@ export type SendInput = (AgentSourceInput | HumanSourceInput) &
     readonly targetSessionID: string;
     readonly message: string;
     readonly idempotencyKey?: string;
+    /**
+     * Store the message only for a target that is running: a stopped one is refused with 409
+     * (`the session is stopped`) and nothing is stored. Sent as `connected_only` and omitted
+     * unless set, so every other caller's request body is unchanged. Dispatch's model and effort
+     * switch is the one caller that sets it: it asks a session to change how it runs, which a
+     * session reading it three hours later must not act on.
+     */
+    readonly connectedOnly?: boolean;
   };
 
 export type PublishInput = (AgentSourceInput | HumanSourceInput) &
@@ -336,15 +372,36 @@ export type ListSessionsInput = {
   readonly title?: string;
 };
 
+/** What the listener was able to say about a session: connected now, or stopped and known. */
+export type SessionState = "connected" | "stopped";
+
 export type SendResult = {
   readonly envelope: Envelope;
   readonly recipient: string;
   readonly confirmed: boolean;
+  /**
+   * What the target was when the listener stored the message. `stopped` means the message waits
+   * on the session's topic for the stream's 72 hours and reaches it if it runs again in that
+   * time. A listener that answers no state reads as `connected`, which is what every release
+   * meant before the state existed.
+   */
+  readonly state: SessionState;
+  /** When a stopped target was last seen, in unix milliseconds; absent for a connected one. */
+  readonly lastSeen?: number;
 };
 
 export type PublishResult = {
   readonly envelope: Envelope;
   readonly holder?: string;
+  /**
+   * How many sessions other than the sender get this message, counted just before it was
+   * published; a stopped session Envoy still knows is one of them. Absent for a role topic, whose
+   * answer names its holder instead, and for a listener whose NATS user cannot read the
+   * known-session bucket, which is what production runs today; zero is a count, not an absence.
+   */
+  readonly recipients?: number;
+  /** How many of {@link PublishResult.recipients} are running now; absent whenever that is. */
+  readonly recipientsConnected?: number;
 };
 
 /** One followed subject of a replay request, read from after `after`, or, without one, started. */
@@ -510,6 +567,9 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
             ...(input.selfSubscribed === undefined
               ? {}
               : { self_subscribed: input.selfSubscribed }),
+            // This session answers the listener's presence check (`presence`), omitted when the
+            // caller declares nothing so an older listener sees an unchanged body.
+            ...(input.presence === undefined ? {} : { presence: input.presence }),
             ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
             // The client instance driving this session (`clientInstanceID`), omitted when the
             // caller has none so an older listener sees an unchanged body. The listener stores it
@@ -551,6 +611,9 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
             target_session: input.targetSessionID,
             message: input.message,
             idempotency_key: idempotencyKey,
+            // Refuse a stopped target rather than store for it (`connectedOnly`), omitted unless
+            // the caller asks so an older listener sees an unchanged body.
+            ...(input.connectedOnly === undefined ? {} : { connected_only: input.connectedOnly }),
             ...messageMetadata(input),
           })
         )
@@ -559,6 +622,10 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         envelope: response,
         recipient: response.recipient ?? input.targetSessionID,
         confirmed: response.recipient !== undefined,
+        // Only `stopped` is stopped: an answer with no state is an older listener's, and a word
+        // this build does not know says nothing about the target that is worth acting on.
+        state: response.state === "stopped" ? "stopped" : "connected",
+        ...(response.last_seen === undefined ? {} : { lastSeen: response.last_seen }),
       };
     },
     publish: async (input) => {
@@ -579,6 +646,10 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       return {
         envelope: response,
         ...(response.holder === undefined ? {} : { holder: response.holder }),
+        ...(response.recipients === undefined ? {} : { recipients: response.recipients }),
+        ...(response.recipients_connected === undefined
+          ? {}
+          : { recipientsConnected: response.recipients_connected }),
       };
     },
     unregisterSession: async (input) => {

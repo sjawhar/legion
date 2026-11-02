@@ -8,10 +8,29 @@ import {
 } from "@legion/contracts";
 import { z } from "zod";
 import { formatZodIssues, ToolInputError } from "./tool-input-errors";
-import type { MessageMetadataInput, SessionInfo } from "./transport";
+import type { MessageMetadataInput, SessionInfo, SessionState } from "./transport";
 
 const DELIVERY_CONTRACT =
   "Delivery is at-least-once, possibly out of order across topics; use id for dedupe and at for freshness.";
+
+/**
+ * How long the notification stream keeps a message a session has not read (the stream's max age,
+ * `packages/envoy/internal/bus/stream.go`), which is how long a message for a stopped session
+ * waits for it. The tool descriptions and the queued confirmation line read it from here, so the
+ * three say one number.
+ */
+const STORED_MESSAGE_HOURS = 72;
+
+const SEND_STATES =
+  "The answer says what the target was when Envoy stored the message: connected means it is " +
+  "running, stopped means it is not. Queued means Envoy keeps the message " +
+  `${STORED_MESSAGE_HOURS} hours, so it arrives if that session runs again in that time.`;
+
+const PUBLISH_COUNTS =
+  "The answer counts who gets it: recipients is every session other than you that the message " +
+  `goes to, one that is stopped and gets it when it runs again within ${STORED_MESSAGE_HOURS} hours included, and ` +
+  "recipients_connected is how many of those are running now. A listener that counts neither " +
+  "sends neither, and a role topic names its holder instead.";
 
 const STORED_DELIVERY =
   "Stored topics (agent, dispatch, github, slack, legion, ghostwispr, whatsapp; a role message " +
@@ -184,7 +203,7 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_send",
-    description: `Send an Envoy agent-to-agent message directly to another session by session ID. ${DELIVERY_CONTRACT}`,
+    description: `Send an Envoy agent-to-agent message directly to another session by session ID. ${DELIVERY_CONTRACT} ${SEND_STATES}`,
     arguments: (schema) => ({
       session_id: schema
         .string()
@@ -195,7 +214,7 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives such a live topic directly, yours included; a session the listener delivers to over a serve port is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives such a live topic directly, yours included; a session the listener delivers to over a serve port is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${PUBLISH_COUNTS} ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish,
   },
@@ -247,13 +266,68 @@ export const envoyToolSpecs = [
   },
 ] as const satisfies readonly ToolSpec[];
 
-/** The envoy_send confirmation line both hosts show the model. */
+/**
+ * When a stopped session was last seen, from `last_seen` (unix milliseconds), as a UTC instant to
+ * the second: `2026-11-02T09:15:00Z`. An instant rather than "4 minutes ago", so the line means
+ * the same whenever it is read again, in a transcript a day later included, and a test pins it
+ * without a clock.
+ */
+function lastSeenText(lastSeen: number): string {
+  return `${new Date(lastSeen).toISOString().slice(0, 19)}Z`;
+}
+
+/**
+ * The envoy_send confirmation line both hosts show the model.
+ *
+ * A connected target is sent to. A stopped one is queued: Envoy stored the message on that
+ * session's topic and it arrives if the session runs again within the stream's
+ * {@link STORED_MESSAGE_HOURS} hours. The queued line says `queued`, never `sent`, because
+ * nothing read the message and a model told "sent" waits for an answer that is not coming.
+ */
 export function sendConfirmationText(result: {
   readonly envelope: { readonly event_id: string };
   readonly recipient: string;
   readonly confirmed: boolean;
+  readonly state: SessionState;
+  readonly lastSeen?: number;
 }): string {
-  return `sent ${result.envelope.event_id} to ${result.recipient}${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
+  if (result.state === "stopped") {
+    const seen =
+      result.lastSeen === undefined ? "" : ` (last seen ${lastSeenText(result.lastSeen)})`;
+    return `queued ${result.envelope.event_id} for ${result.recipient}: the session is stopped${seen}; if it runs again within ${STORED_MESSAGE_HOURS} hours, it gets the message`;
+  }
+  return `sent ${result.envelope.event_id} to ${result.recipient}, which is connected${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
+}
+
+/**
+ * The envoy_publish confirmation line both hosts show the model, so one text is written once
+ * rather than once per host.
+ *
+ * A role topic's answer names its holder and carries no count, so it reads as it always did. A
+ * count of zero is the answer that matters most — nobody subscribes, so the message reaches
+ * nobody — and a listener that counts nothing (a role topic, or one whose NATS user cannot read
+ * the known-session bucket) sends no counts at all, which reads as the plain line every release
+ * wrote before the counts existed.
+ */
+export function publishConfirmationText(result: {
+  readonly envelope: { readonly event_id: string; readonly topic: string };
+  readonly holder?: string;
+  readonly recipients?: number;
+  readonly recipientsConnected?: number;
+}): string {
+  const published = `published ${result.envelope.event_id}`;
+  if (result.holder !== undefined) return `${published}; holder ${result.holder}`;
+  if (result.recipients === undefined) return published;
+  if (result.recipients === 0) {
+    return `${published}; no other session subscribes to ${result.envelope.topic}, so no other session gets it`;
+  }
+  // One recipient takes the singular: "to 1 other session (1 running now)". A model reading
+  // "1 other sessions" reads a bug in the sender before it reads the count.
+  const sessions =
+    result.recipients === 1 ? "1 other session" : `${result.recipients} other sessions`;
+  const running =
+    result.recipientsConnected === undefined ? "" : ` (${result.recipientsConnected} running now)`;
+  return `${published} to ${sessions}${running}`;
 }
 
 /**
