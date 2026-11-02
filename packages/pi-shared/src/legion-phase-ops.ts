@@ -11,6 +11,7 @@ import {
   type LegionDaemonClient,
   retryWhileDaemonRestarts,
 } from "./daemon-client";
+import type { HandoffReport } from "./handoff-record";
 
 /** The claim a session registered, as the phase ops need it, and as the claim boot
  * (`legion-claim-core`) records it: its own id, the claim token and the launch generation every
@@ -164,18 +165,21 @@ export function legionToolDescription(host: {
     "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " +
     "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " +
     "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " +
-    "yet), `ready: true` for the merger's READY. A handoff is a committed " +
-    "file, `.legion/<issue>/<phase>.json`: the pushed commit carrying it is found here, with the pane's jj, and reported, so write it, commit it and " +
-    "push the branch (`jj git push`) before calling; this call refuses, posting nothing, a handoff still in the working copy, missing, not committed " +
-    "on this branch, carried by another pane's commit, or not yet on `legion/<issue>@origin`, each naming the remedy. A production check report " +
+    "yet), `ready: true` for the merger's READY. A planning, implementing, testing or reviewing phase ends with a handoff record on the " +
+    "Dispatch issue: write it with `dispatch handoff-write --issue <issue> --phase <plan|implement|test|review> --body-file <file>` before " +
+    "calling. This call reads the phase's newest record from Dispatch and reports it; the implementer's round also reports the commit " +
+    "`legion/<issue>@origin` names, so push the branch first; retro and the merger's READY report the commit the workspace stands on. It " +
+    "refuses, posting nothing, a phase with no record, a Dispatch that does not answer, or an implementer's `@-` not yet on " +
+    "`legion/<issue>@origin`, each naming the remedy. A production check report " +
     "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " +
     "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " +
-    "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff), " +
+    "HANDOFF_SESSION_MISMATCH (another session wrote the record), HANDOFF_NOT_NEW (the record is the one you named for your previous phase: " +
+    "write this phase's handoff), " +
     "HANDOFF_STALE_ASSIGNMENT (the issue left your phase and came back while your turn ran, so this completion is of the assignment before the one " +
     "the phase hands you now: end the turn without completing; the task of the assignment it hands you now is work of its own, so do that work and " +
-    "complete it with a handoff of its own, never this commit or verdict again), the implementer's " +
-    "completion of implementing with no open pull request on `legion/<issue>` and none recorded merged (HANDOFF_NO_PULL_REQUEST: open it; one " +
-    "naming a closed pull request is the architect's to decide) and, for READY, each " +
+    "complete it with a handoff of its own, never this record or verdict again), the implementer's completion of implementing with no open " +
+    "pull request on `legion/<issue>` and none recorded " +
+    "merged (HANDOFF_NO_PULL_REQUEST: open it; one naming a closed pull request is the architect's to decide) and, for READY, each " +
     "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " +
     "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " +
     "ready_for_update answers the daemon's update task on this issue's pod: `round` is the round id that task names, and the " +
@@ -190,9 +194,10 @@ export function legionToolDescription(host: {
 export interface PhaseOpRuntime {
   readonly daemon: LegionDaemonClient;
   readonly claim: ClaimCapability;
-  /** The commit a completion of `phase` by `role` reports (`findHandoffCommit` with the pane's
-   * environment): throws naming the remedy when the handoff is not committed and pushed. */
-  readonly handoffCommit: (phase: LegionPhase, role: LegionRole) => Promise<string>;
+  /** What a completion of `phase` by `role` reports beside its summary (`findHandoffReport` with
+   * the pane's environment and Dispatch): throws naming the remedy when the phase has no handoff
+   * record, Dispatch does not answer, or the implementer's work is not pushed. */
+  readonly handoffReport: (phase: LegionPhase, role: LegionRole) => Promise<HandoffReport>;
   /** The head of `legion/<issue>@origin` the `ready_for_update` signal reports
    * (`findPushedBranchHead` with the pane's environment): `""` when the branch is not there. A
    * throw leaves the head out of the signal, which is still sent, and the throw's message goes
@@ -230,20 +235,20 @@ const ROOT_COMPLETION_REFUSAL =
 /**
  * Runs one phase op and answers its JSON result: `{ record }` for `read_record`, the daemon's
  * answer for `handoff_complete`, `{}` for `request_backward_move`, and `{}` for
- * `ready_for_update`, or `{ note }` when its branch-head lookup failed. A
- * refusal throws before any write, minting nothing and posting nothing: each problem
- * `PhaseOpArguments` finds, joined by `; `, a field the operation does not take named first,
- * then a root architect's completion, then each problem with the operation's own fields in the
- * order it takes them; then what the record decides (a check report's verdict, `pending` on a
- * phase completion, the issue a move names), then a refused handoff-commit lookup. A daemon
- * refusal throws its code and sentence.
+ * `ready_for_update`, or `{ note }` when its branch-head lookup failed. A refusal throws before
+ * any write, minting nothing and posting nothing: each problem `PhaseOpArguments` finds, joined
+ * by `; `, a field the operation does not take named first, then a root architect's completion,
+ * then each problem with the operation's own fields in the order it takes them; then what the
+ * record decides (a check report's verdict, `pending` on a phase completion, the issue a move
+ * names), then a refused handoff report (`findHandoffReport`). A daemon refusal throws its code
+ * and sentence.
  *
  * A completion is a phase's or the implementer's report on a look of its closed issue's
  * production check, told apart as the daemon tells them (`api.handoffComplete`): the
  * implementer's call on an issue no role works (`done`) whose `check` is open. A check report
  * names its verdict (`pass`, `pending` or `fail`) and nothing else: no handoff was written and
- * nothing pushed, so no commit is looked up and none is sent; `pending` is a check's verdict
- * alone, refused on a phase completion.
+ * nothing pushed, so no record or commit is looked up and none is sent; `pending` is a check's
+ * verdict alone, refused on a phase completion.
  */
 export async function executePhaseOp(
   runtime: PhaseOpRuntime,
@@ -274,10 +279,10 @@ export async function executePhaseOp(
     case "read_record":
       return { record: recordFrom(await daemon.state(), args.issue) };
     case "handoff_complete":
-      // Retried whole while the daemon restarts: the record, the commit and a fresh grant are read
-      // again on each attempt. A repeat never applies twice, but it cannot tell a landed attempt
-      // from a refused one (the daemon records both under the completion's key), so its refusal
-      // is passed on, marked as possibly following an applied attempt.
+      // Retried whole while the daemon restarts: the record, the handoff report and a fresh grant
+      // are read again on each attempt. A repeat never applies twice, but it cannot tell a landed
+      // attempt from a refused one (the daemon records both under the completion's key), so its
+      // refusal is passed on, marked as possibly following an applied attempt.
       return retryWhileDaemonRestarts(
         "handoff_complete",
         () => completeHandoff(runtime, args),
@@ -356,9 +361,9 @@ async function completeHandoff(
   // completion or a check report, by the daemon's own rule (`api/handoff.go`): the
   // implementer's call on an issue no role works (`done`) is a check report, whether or not
   // the record shows a check — a done issue whose check closed, or opened none, has no
-  // handoff for the implementer to commit, so no commit is looked up, and the daemon answers
-  // the report `CHECK_NOT_OPEN`. The report's own refusals (a verdict, no READY) apply while
-  // the record shows the check it is of. A refusal here posts nothing and mints nothing.
+  // handoff for the implementer to write, so no record or commit is looked up, and the daemon
+  // answers the report `CHECK_NOT_OPEN`. The report's own refusals (a verdict, no READY) apply
+  // while the record shows the check it is of. A refusal here posts nothing and mints nothing.
   const record = recordFrom(await daemon.state(), claim.issue);
   if (claim.role === "implementer" && record.phase === "done") {
     if (record.check !== undefined) {
@@ -383,14 +388,14 @@ async function completeHandoff(
       "handoff_complete's verdict is pass or fail on a phase completion; pending is a production check's"
     );
   }
-  // The commit is found before the grant is minted. The phase is the issue record's, the
-  // role the claim's.
-  const commit = await runtime.handoffCommit(record.phase, claim.role);
+  // The record and the commit are found before the grant is minted. The phase is the issue
+  // record's, the role the claim's.
+  const report = await runtime.handoffReport(record.phase, claim.role);
   return daemon.handoffComplete({
     grantId: await mintClaimGrant(daemon, claim),
     summary: args.summary,
     verdict: args.verdict ?? "",
     ready: args.ready ?? false,
-    commit,
+    ...report,
   });
 }

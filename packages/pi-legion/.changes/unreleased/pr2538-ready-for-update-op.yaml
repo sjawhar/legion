@@ -9,4 +9,4 @@ body: |-
   worker of that pod has answered, and holds the worker's next task until its process comes back
   on the new pod in the same session, where its workspace is provisioned afresh from the issue's
   pushed branch.
-  `legion.daemonApiVersion` is 45.
+  `legion.daemonApiVersion` is 46.

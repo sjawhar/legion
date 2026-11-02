@@ -169,13 +169,14 @@ describe("DispatchClient's writes", () => {
   beforeEach(forgetKeyedLayerMemory);
 
   test("send one Idempotency-Key per write call and none on a read, PUT or DELETE", async () => {
-    const { fetchImpl, sent } = scripted(Array.from({ length: 7 }, () => json({})));
+    const { fetchImpl, sent } = scripted(Array.from({ length: 8 }, () => json({})));
     const dispatch = client(fetchImpl, pacing().retry);
 
     await dispatch.comment("DSP-1", comment);
     await dispatch.comment("DSP-1", comment);
     await dispatch.updateIssue("DSP-1", { status: "testing", actor });
     await dispatch.syncArchitectureSource("DSP", "acme/infra");
+    await dispatch.writeHandoff("DSP-1", "implement", { actor, body: '{"schemaVersion":1}' });
     await dispatch.getIssue("DSP-1");
     await dispatch.followAsk("ask-1", "session-1", actor);
     await dispatch.unfollowAsk("ask-1", "session-1", actor);
@@ -186,14 +187,15 @@ describe("DispatchClient's writes", () => {
       "POST",
       "PATCH",
       "POST",
+      "POST",
       "GET",
       "PUT",
       "DELETE",
     ]);
-    for (const key of keys.slice(0, 4)) expect(key).toMatch(IDEMPOTENCY_KEY_PATTERN);
+    for (const key of keys.slice(0, 5)) expect(key).toMatch(IDEMPOTENCY_KEY_PATTERN);
     // Two presses are two writes: the same comment posted twice is two intents.
-    expect(new Set(keys.slice(0, 4)).size).toBe(4);
-    expect(keys.slice(4)).toEqual([undefined, undefined, undefined]);
+    expect(new Set(keys.slice(0, 5)).size).toBe(5);
+    expect(keys.slice(5)).toEqual([undefined, undefined, undefined]);
   });
 
   // A caller whose intent outlives the call names the key itself: AskGate's decision document is

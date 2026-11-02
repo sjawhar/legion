@@ -58,4 +58,7 @@ no `completed` key and with `previousHandoff` — had no evidence at the wording
 Retro ran it: three headless sessions on the tester, reviewer and implementer prompts composed
 from the shipping head's daemon module all wrote handoffs with no `completed` key and with
 `previousHandoff`, and the reviewer session's also carried `headReviewed`. The gap closed, and it
-closed because someone ran the sessions, not because someone noticed.
+closed because someone ran the sessions, not because someone noticed. Both `completed` and
+`previousHandoff` are gone since sjawhar/legion#2354, which made each handoff a versioned record
+on its Dispatch issue; what this page is about is re-running the round's own criterion at the head
+that ships, whatever the wording asks for.

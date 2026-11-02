@@ -8,4 +8,4 @@ body: |-
   blocks nothing, so that turn ends and the daemon sees it end. No reminder follows that turn:
   the daemon is what wakes the worker again, with the task it held behind the round, once the
   pod is replaced and its process comes back on the new pod in the same session.
-  `package.json`'s `legion.daemonApiVersion` is 45.
+  `package.json`'s `legion.daemonApiVersion` is 46.

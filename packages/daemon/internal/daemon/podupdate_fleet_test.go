@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -80,9 +82,11 @@ type fleetRig struct {
 	clock   *heldClock
 	grants  *credential.Grants
 	// api is the daemon's own HTTP handler over the same store: the completion route under test.
-	api    http.Handler
-	tokens map[fleetClaim]claim.Token
-	pods   map[string]string
+	api http.Handler
+	// handoffs is the Dispatch that route reads a completion's handoff record back from.
+	handoffs *fleetHandoffs
+	tokens   map[fleetClaim]claim.Token
+	pods     map[string]string
 }
 
 func newFleetRig(t *testing.T, issues ...fleetIssue) *fleetRig {
@@ -143,7 +147,8 @@ func newFleetRig(t *testing.T, issues ...fleetIssue) *fleetRig {
 	}
 	records := record.NewStore()
 	rig := &fleetRig{t: t, ctx: ctx, sup: sup, rt: rt, pool: pool, records: records, clock: clock,
-		grants: credential.New(nil), tokens: tokens, pods: pods}
+		grants: credential.New(nil), handoffs: &fleetHandoffs{handoffs: map[string]dispatch.Handoff{}},
+		tokens: tokens, pods: pods}
 	rig.s = &supervision{
 		cfg: config.Config{Project: "LEGION", PodUpdateRetask: podUpdateRetask, PodUpdateNotice: podUpdateNotice},
 		log: quietLogger(), plan: plan{clock: clock, project: podUpdateProject, pluginRelaunchable: true, orphanSweep: orphanSweepInterval},
@@ -154,6 +159,7 @@ func newFleetRig(t *testing.T, issues ...fleetIssue) *fleetRig {
 	rig.api = api.NewServer("127.0.0.1", 0, api.Options{
 		Supervisor: sup, Project: podUpdateProject, DispatchProject: "LEGION", PluginRelaunchable: true,
 		Pool: pool, Handlers: []intake.Handler{engine}, Record: records, Grants: rig.grants, Log: quietLogger(),
+		Dispatch: rig.handoffs,
 	}).Handler
 	return rig
 }
@@ -229,15 +235,84 @@ func (r *fleetRig) signal(issue string, role claim.Role, head string) {
 	}
 }
 
+// fleetHandoffs is the Dispatch the completion route reads a handoff record back from: the
+// records the rig's workers wrote with `dispatch handoff-write`, by id. Nothing else of Dispatch
+// is reached in a round, so every other read answers nothing.
+type fleetHandoffs struct {
+	mu       sync.Mutex
+	handoffs map[string]dispatch.Handoff
+}
+
+// write is one worker writing version 1 of its phase's handoff under its own session, and
+// answers the record's id. A second write of the same phase by the same session is the same
+// record, as a worker that completes twice names the one record it wrote.
+func (d *fleetHandoffs) write(issue, word, session string) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	id := fmt.Sprintf("handoff-%s-%s-v1", issue, word)
+	d.handoffs[id] = dispatch.Handoff{ID: id, IssueKey: issue, Phase: word, Version: 1,
+		Author: dispatch.HandoffAuthor{Kind: "session", ID: session}}
+	return id
+}
+
+func (d *fleetHandoffs) Handoff(_ context.Context, id string) (dispatch.Handoff, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	handoff, ok := d.handoffs[id]
+	if !ok {
+		return dispatch.Handoff{}, &dispatch.Error{Status: http.StatusNotFound, Code: dispatch.HandoffNotFound}
+	}
+	return handoff, nil
+}
+
+func (d *fleetHandoffs) ListIssues(context.Context, string, []string) ([]dispatch.IssueSummary, error) {
+	return nil, nil
+}
+func (d *fleetHandoffs) GetIssue(context.Context, string) (dispatch.Issue, error) {
+	return dispatch.Issue{}, nil
+}
+func (d *fleetHandoffs) SetStatus(context.Context, string, string) (dispatch.Issue, error) {
+	return dispatch.Issue{}, nil
+}
+func (d *fleetHandoffs) HandOver(context.Context, dispatch.Issue, string) error    { return nil }
+func (d *fleetHandoffs) PostMessage(context.Context, string, string) error         { return nil }
+func (d *fleetHandoffs) BuildCommit(context.Context) (string, error)               { return "", nil }
+func (d *fleetHandoffs) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
+func (d *fleetHandoffs) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
+	return nil, nil
+}
+func (d *fleetHandoffs) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, nil
+}
+func (d *fleetHandoffs) Approval(context.Context, string) (dispatch.Approval, error) {
+	return dispatch.Approval{}, nil
+}
+func (d *fleetHandoffs) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
+	return nil, nil
+}
+
 // complete is one worker's phase completion through the daemon's own route, with a grant minted
-// for its claim as the grants route mints one. It returns the status and the body.
-func (r *fleetRig) complete(issue string, role claim.Role, summary, commit string) (int, string) {
+// for its claim as the grants route mints one. A phase that ends with a handoff record has one
+// written on the Dispatch issue first, under the claim's own session, as the worker's
+// `dispatch handoff-write` writes it, and the completion names that record. It returns the status
+// and the body.
+func (r *fleetRig) complete(issue string, role claim.Role, summary string) (int, string) {
 	r.t.Helper()
-	grant, err := r.grants.Mint(r.claimOf(issue, role))
+	c := r.claimOf(issue, role)
+	grant, err := r.grants.Mint(c)
 	if err != nil {
 		r.t.Fatalf("mint a grant for %s's %s: %v", issue, role, err)
 	}
-	body, err := json.Marshal(api.HandoffCompleteRequest{GrantID: grant.ID, Summary: summary, Commit: commit})
+	stood := readIssue(r.t, r.pool, issue)
+	if stood == nil {
+		r.t.Fatalf("%s is not recorded", issue)
+	}
+	word, writer, ok := phase.Handoff(stood.Phase)
+	if !ok || writer != role {
+		r.t.Fatalf("%s stands at %s, whose handoff is not the %s's: this rig completes a phase its worker writes the handoff of", issue, stood.Phase, role)
+	}
+	body, err := json.Marshal(api.HandoffCompleteRequest{GrantID: grant.ID, Summary: summary,
+		HandoffID: r.handoffs.write(issue, word, c.Session), HandoffVersion: 1})
 	if err != nil {
 		r.t.Fatal(err)
 	}
@@ -393,7 +468,7 @@ func TestPodUpdateReplacesEachIssuesPodOnlyAfterItsOwnWorkersAnswer(t *testing.T
 
 	// A worker tasked by the round completes its phase through the daemon's own HTTP route, with
 	// the workflow engine behind it, while both rounds wait.
-	status, body := rig.complete(fleetIssueB, claim.RolePlanner, "planned; pushed before the pod goes", "b1b2c3d")
+	status, body := rig.complete(fleetIssueB, claim.RolePlanner, "planned; pushed before the pod goes")
 	if status != http.StatusOK {
 		t.Fatalf("the planner's completion in an open round = %d %s, want 200: the round refuses no completion", status, body)
 	}
@@ -484,7 +559,7 @@ func TestPodUpdateRoundServesAWorkerOnItsPreviousContract(t *testing.T) {
 		t.Fatalf("register the planner on the previous contract: %v", err)
 	}
 
-	status, body := rig.complete(fleetIssueB, claim.RolePlanner, "planned", "b1b2c3d")
+	status, body := rig.complete(fleetIssueB, claim.RolePlanner, "planned")
 	if status != http.StatusConflict || !strings.Contains(body, "STALE_PLUGIN_CONTRACT") {
 		t.Fatalf("the completion of a claim on the previous contract with no round open = %d %s, want 409 STALE_PLUGIN_CONTRACT", status, body)
 	}
@@ -499,7 +574,7 @@ func TestPodUpdateRoundServesAWorkerOnItsPreviousContract(t *testing.T) {
 		return rig.claimOf(fleetIssueB, claim.RolePlanner).UpdateRound == rig.round(fleetIssueB)
 	})
 
-	status, body = rig.complete(fleetIssueB, claim.RolePlanner, "planned; pushed for the round", "b1b2c3d")
+	status, body = rig.complete(fleetIssueB, claim.RolePlanner, "planned; pushed for the round")
 	if status != http.StatusOK {
 		t.Fatalf("the same completion while the round is open = %d %s, want 200: the round serves the claim on its previous contract", status, body)
 	}

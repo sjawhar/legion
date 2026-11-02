@@ -164,12 +164,6 @@ type workflowRuntime struct {
 	// held in memory only, so a restart's first pass judges again with the permission GitHub gives
 	// then. Only the pass touches it.
 	refusedReviews map[int64]bool
-	// uncarried is every comparison of an approved head with a recorded head, by repository, pull
-	// request and the two heads, that GitHub answered and that does not carry the approval
-	// (readApprovalCarry), so the pass does not ask again: the compare of two fixed commits never
-	// changes its answer. It is held in memory only; a restart's first pass asks again. Only the
-	// pass touches it.
-	uncarried map[string]bool
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.
