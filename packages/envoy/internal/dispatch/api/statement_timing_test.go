@@ -134,13 +134,22 @@ func TestStatementTimings(t *testing.T) {
 		// would be of a statement production never runs (relatedEFSearch).
 		Setup: []string{relatedEFSearch},
 	})
-	// The after text binds the lexemes ORed as $5; the before text builds that tsquery in a CTE
-	// of its own and takes four arguments.
-	probeArguments := []any{subjects.Project, lexemes, "", (*string)(nil)}
-	if side.relatedProbeSQL == relatedProbeSQL {
-		probeArguments = append(probeArguments, relatedProbeTSQuery(lexemes))
+	// The probe is the one document-arm statement whose before text runs on either schema: it
+	// reads artifact_versions through a lateral, and this release's schema still holds that
+	// table. So on the after side it is a pair, main's text and this one alternately on one
+	// database, which is the reading R6's bound is judged on and which the runner fails when
+	// the after median is not below the before. On the before side there is no after text to
+	// run, so main's own is measured alone, as the other four document-arm statements are.
+	// The after text binds the lexemes ORed as $5; main's builds that tsquery in a CTE of its
+	// own and takes four arguments.
+	mainProbeArguments := []any{subjects.Project, lexemes, "", (*string)(nil)}
+	if side.relatedProbeSQL != relatedProbeSQL {
+		runner.Head(t, "relatedProbeSQL"+label, benchtime.Statement{SQL: side.relatedProbeSQL, Args: mainProbeArguments})
+		return
 	}
-	runner.Head(t, "relatedProbeSQL"+label, benchtime.Statement{SQL: side.relatedProbeSQL, Args: probeArguments})
+	runner.Pair(t, "relatedProbeSQL",
+		benchtime.Statement{SQL: mainRelatedProbeSQL, Args: mainProbeArguments},
+		benchtime.Statement{SQL: relatedProbeSQL, Args: append(slices.Clone(mainProbeArguments), relatedProbeTSQuery(lexemes))})
 }
 
 // documentArmStatements are the five statements whose document arm this change moved onto
