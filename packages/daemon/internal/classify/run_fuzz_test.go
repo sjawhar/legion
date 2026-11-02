@@ -11,8 +11,8 @@ import (
 )
 
 // Random histories, delivered in random orders, give the judgement the pushes arriving first give,
-// and leave no head run open. A history moves a red h2 along h3..h(2+n), each push a handoff, code,
-// the review App's code or handoff, or a forced push; some heads are skipped (followHead past
+// and leave no head run open. A history moves a red h2 along h3..h(2+n), each push the
+// implementer's code or the review App's; some heads are skipped (followHead past
 // them); red and green settlements of the current or an earlier head arrive between the heads,
 // with clears of the head the required workflows were read at, a reopen at a head and a read of
 // the required set; and half the histories reset the branch to a commit it held before, then push
@@ -86,17 +86,7 @@ func randomHistory(rng *rand.Rand) ([]record.ClassifiedPush, []runFact) {
 	n := 2 + rng.IntN(4)
 	var pushes []record.ClassifiedPush
 	for i := 3; i < 3+n; i++ {
-		p := record.ClassifiedPush{SHA: fmt.Sprintf("h%d", i), Before: fmt.Sprintf("h%d", i-1)}
-		switch rng.IntN(5) {
-		case 0:
-			p.HandoffOnly = true
-		case 1:
-			p.ByReviewApp = true
-		case 2:
-			p.HandoffOnly, p.Forced = rng.IntN(2) == 0, true
-		case 3:
-			p.HandoffOnly, p.ByReviewApp = true, rng.IntN(2) == 0
-		}
+		p := record.ClassifiedPush{SHA: fmt.Sprintf("h%d", i), Before: fmt.Sprintf("h%d", i-1), ByReviewApp: rng.IntN(2) == 0}
 		pushes = append(pushes, p)
 	}
 	var facts []runFact
@@ -122,12 +112,12 @@ func randomHistory(rng *rand.Rand) ([]record.ClassifiedPush, []runFact) {
 	}
 	if rng.IntN(2) == 0 {
 		last, back := fmt.Sprintf("h%d", 2+n), fmt.Sprintf("h%d", 2+rng.IntN(n))
-		pushes = append(pushes, record.ClassifiedPush{SHA: back, Before: last, Forced: true, HandoffOnly: rng.IntN(2) == 0})
+		pushes = append(pushes, record.ClassifiedPush{SHA: back, Before: last, ByReviewApp: rng.IntN(2) == 0})
 		facts = append(facts, arrives(back))
 		if rng.IntN(2) == 0 {
 			settle(back)
 		}
-		pushes = append(pushes, record.ClassifiedPush{SHA: "hx", Before: back, HandoffOnly: rng.IntN(2) == 0, ByReviewApp: rng.IntN(2) == 0})
+		pushes = append(pushes, record.ClassifiedPush{SHA: "hx", Before: back, ByReviewApp: rng.IntN(2) == 0})
 		facts = append(facts, arrives("hx"))
 		if rng.IntN(2) == 0 {
 			settle("hx")
@@ -203,9 +193,9 @@ func deliver(f runFact, pr record.PullRequest) record.PullRequest {
 func TestABranchThatReturnsToACommitIsJudgedTheSameInEveryOrder(t *testing.T) {
 	red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
 		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2, PlannedRed: true}
-	reach := record.ClassifiedPush{SHA: "h3", Before: "h2", HandoffOnly: true, Forced: true}
+	reach := record.ClassifiedPush{SHA: "h3", Before: "h2"}
 	tests := record.ClassifiedPush{SHA: "h4", Before: "h3", ByReviewApp: true}
-	reset := record.ClassifiedPush{SHA: "h3", Before: "h4", HandoffOnly: true, Forced: true}
+	reset := record.ClassifiedPush{SHA: "h3", Before: "h4"}
 	fix := record.ClassifiedPush{SHA: "hx", Before: "h3"}
 	facts := []runFact{arrives("h3"), arrives("h4"), settles("h3", 2, "ci"), arrives("h3"), settles("h3", 3, "ci"), arrives("hx"), settles("hx", 4, "ci")}
 	want := red
@@ -276,8 +266,8 @@ func TestASettlementRedeliveredAfterAReopenStandsInEveryOrder(t *testing.T) {
 	}
 }
 
-// A head no chain of recorded pushes reaches is planned by every push that left it and may change
-// code, in whatever order they were recorded (unchainedPlan): h4 arrives from h2, and the pushes
+// A head no chain of recorded pushes reaches is planned by every push that left it, in whatever
+// order they were recorded (unchainedPlan): h4 arrives from h2, and the pushes
 // that left it came from h3 and h5, heads the branch never held. All the review App's plan the red;
 // any other's clears it.
 func TestAnUnchainedHeadIsPlannedTheSameInEveryOrderOfItsPushes(t *testing.T) {
@@ -289,8 +279,8 @@ func TestAnUnchainedHeadIsPlannedTheSameInEveryOrderOfItsPushes(t *testing.T) {
 		other   record.ClassifiedPush
 		planned bool
 	}{
-		{"another's forced push", record.ClassifiedPush{SHA: "h4", Before: "h5", Forced: true}, false},
-		{"the review App's forced push", record.ClassifiedPush{SHA: "h4", Before: "h5", Forced: true, ByReviewApp: true}, true},
+		{"another's push", record.ClassifiedPush{SHA: "h4", Before: "h5"}, false},
+		{"the review App's push", record.ClassifiedPush{SHA: "h4", Before: "h5", ByReviewApp: true}, true},
 	} {
 		for _, order := range [][]record.ClassifiedPush{{byApp, tc.other}, {tc.other, byApp}} {
 			pr := red

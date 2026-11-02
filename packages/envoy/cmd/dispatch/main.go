@@ -49,6 +49,7 @@ import (
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/pglisten"
 	"github.com/sjawhar/envoy/internal/redact"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/listenfd"
 )
 
@@ -416,7 +417,7 @@ func main() {
 	// whose loops would each run everywhere, so it ends here.
 	//
 	// The loops come in these shapes, so that a database nobody writes costs them nothing except
-	// where GitHub gives them nothing to wake on, and the four timers of the last shape:
+	// where GitHub gives them nothing to wake on, and the five timers of the last shape:
 	//   - woken loops, which run a pass at start and then only when a Postgres notification on the
 	//     shared listener below says their work may have changed, or when a due time their last
 	//     pass asked for comes round: the embedding queue (embedqueue.WakeChannel), the reference
@@ -448,9 +449,10 @@ func main() {
 	//     batch is full), the repair of closed and reopened issues' asks (api.RunIssueAskRepair,
 	//     every 10 minutes on a plain ticker, after the boot's own unleased pass), the prune of
 	//     the server process registry (processes.RunPrune, every minute, which joinRegistry starts
-	//     below) and the keyed writes' maintenance sweep (api.RunMaintenanceSweep, every minute),
-	//     each recording its passes in duty_passes like the timers above; each tick sends its
-	//     statements whether or not anything is owed.
+	//     below), the keyed writes' maintenance sweep (api.RunMaintenanceSweep, every minute) and
+	//     the document compaction sweep (docs.Service.RunCompactionSweep, every hour from a tick at
+	//     start, with or without NATS), each recording its passes in duty_passes like the timers
+	//     above; each tick sends its statements whether or not anything is owed.
 	//
 	// The shared listener is one pglisten.Hub per process, on one held connection of the store's
 	// listener pool, carrying every woken loop's channel. Every wake is registered before it runs
@@ -459,20 +461,27 @@ func main() {
 	// while nothing listened, so the hub signals every wake after each successful LISTEN, and a
 	// change made while it was redialing (backing off up to 30 s) is caught up then.
 	//
+	// The events outbox publishes under a hold of its own rather than such a lease
+	// (outbox.Outbox): it renews duty.Hold "dispatch-outbox" on its own pool every two seconds, so
+	// one process publishes at a time and the other takes over within seconds of a holder that
+	// stops, dies or loses NATS.
+	//
 	// Deliberately NOT leased, in three classes:
 	//   - already claims its own work, so two processes never do one unit of it twice: the
 	//     embedding queue (embedqueue, `for update skip locked`), the task progress
-	//     reconciliation (`for no key update ... skip locked`), the outbox's own publish scan
-	//     (its claim window) and the delivery intakes (NATS's push-durable exclusivity, which
-	//     delivery.StartIntakes takes).
+	//     reconciliation (`for no key update ... skip locked`) and the delivery intakes (NATS's
+	//     push-durable exclusivity, which delivery.StartIntakes takes).
 	//   - per-process by design, because each serves this process's own connections or memory:
 	//     the settlement resumption (it arms this process's rooms, and docs/resume.go says it
 	//     runs on an interval precisely because a rolling deploy overlaps two processes), the
 	//     shared wake listener (each process's loops wait on their own), the delivery live hub
 	//     and its listener (migration 0107_events_notify.up.sql states that purpose), the event
-	//     stream relay, the document rooms' timers, and the stale-room evictor (it closes the
-	//     rooms resident in this process that the other process's writes left behind the
-	//     durable head, so it has to run wherever a room is resident).
+	//     stream relay, the document rooms' timers, the document compaction queue (docs.New starts
+	//     it; it compacts the documents this process's own appends and loads noted, and the hourly
+	//     compaction sweep below is the leased pass over the documents doc_compaction_owed names,
+	//     those with rows to fold), and the stale-room evictor (it closes the rooms resident in
+	//     this process that the other process's writes left behind the durable head, so it has to
+	//     run wherever a room is resident).
 	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
 	//     retirePlainRefreshTokens, restoreDecidedWordings, repairIssueAsks and SeedRepoProjects
 	//     above, and the embedding coverage pass (two processes' passes at once leave what one
@@ -483,13 +492,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The outbox runs only with NATS, so a process with NATS disabled never publishes
+	// (outboxPublisher stays nil, and /healthz reports outbox_publisher false). outboxStopped is
+	// closed once its Run has returned - its last batch recorded and its hold released - which
+	// shutdown waits for before it closes the pool; it stays nil with no outbox.
+	var outboxPublisher *outbox.Outbox
+	var outboxStopped chan struct{}
 	// The registry /metrics serves (dispatchHandler), built whether or not NATS is configured:
 	// the probe answers from the moment the server does, and a process with no bus simply leaves
 	// the outbox's counter at zero.
 	met := metrics.New()
 	outboxPublishFailures := met.NewCounter(
 		"envoy_dispatch_outbox_publish_failures_total",
-		"Destinations of an outbox publish attempt that did not reach NATS, by reason: one per destination denied, refused or otherwise failed",
+		"Destinations of an outbox publish attempt that were not reached, by reason: denied (the server refused the send under the connection's own publish permissions), refused (NATS refuses it however often it is retried), holder (a role forward its holder's resolution held pending, with nothing sent), unanswered (NATS took the forward and the answer never came: the role holder's receipt, or, for a holder with a serving port, the stream's acknowledgement of the stored copy) or failed (every other failure)",
 	)
 	if natsClient != nil {
 		outboxPool, err := database.Pool.Outbox()
@@ -497,14 +512,23 @@ func main() {
 			slog.Error("dispatch: open the events outbox's pool", "error", err)
 			os.Exit(1)
 		}
-		go outbox.Run(ctx, outbox.Deps{
+		// One reader of the role and session buckets serves both: a role route's holder is read
+		// straight from the buckets on the bus client's connection, with no watcher.
+		holders := roles.NewBuckets(natsClient)
+		outboxPublisher = outbox.New(outbox.Deps{
 			Store:           &store.Store{Pool: outboxPool},
 			Publisher:       natsClient,
 			Broker:          broker,
-			Docs:            documentService,
-			Leases:          leases,
+			Listen:          database.Pool.Listener,
+			RoleClaims:      holders,
+			Sessions:        holders,
 			PublishFailures: outboxPublishFailures,
 		})
+		outboxStopped = make(chan struct{})
+		go func() {
+			defer close(outboxStopped)
+			outboxPublisher.Run(ctx)
+		}()
 	}
 	// embedqueue.Run no-ops when its own Deps.Embedder is nil, so this always starts: the server's
 	// embedding queue keeps coverage itself, so a later deploy that gives meaning search a place
@@ -559,6 +583,10 @@ func main() {
 	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
 	// inserts (LEGION-531), woken by the refs trigger that announces each mention left owed.
 	go documentService.RunReferenceExcerptReconciliation(ctx, leases, excerptsWake)
+	// Documents the compaction queues let go - every room a restart, a Shutdown or a Quiesce
+	// dropped from one - fold within an hour of coming due, whether or not NATS is configured
+	// (INFRA-593).
+	go documentService.RunCompactionSweep(ctx, leases)
 	// Each document's edit notice goes once its quiet window after a person's last
 	// settled version ends, as one artifact.human_edited event; the window is a row, so a notice
 	// still pending when this process stops is sent by the next sweep of either process. The sweep
@@ -648,7 +676,7 @@ func main() {
 	// timer and not a woken loop because no commit announces either, and it starts here because
 	// it resumes those deliveries through the API server built just above.
 	go api.RunMaintenanceSweep(ctx, database.Pool, api.MaintenanceSweepInterval, leases, background.ResumeDeliveries)
-	handler := dispatchHandler(routesHandler, met, database, natsClient, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
+	handler := dispatchHandler(routesHandler, met, database, natsClient, outboxPublisher, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
 	server := newHTTPServer(handler, time.Now)
 	// The server serves on the socket it inherited (DISPATCH_LISTEN_FD) or binds its address, and
 	// does either before serving, so a socket it cannot serve on or an address it cannot take ends
@@ -680,7 +708,7 @@ func main() {
 		os.Exit(1)
 	}
 	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, background.Wait, waitIntakes,
-		deregisterAfterDrain(registration), registration.Lost()); err != nil {
+		deregisterAfterDrain(registration), registration.Lost(), outboxStopped); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
 	}
@@ -1336,9 +1364,9 @@ func serverClient(extra ...bus.ConnectOption) []bus.ConnectOption {
 // it says only that the process answers, for a liveness or startup probe, which must not wait on
 // or fail with Postgres, NATS or the file store. /metrics is unauthenticated like the other two,
 // so whoever reaches Dispatch's HTTP port can read it, and registry serves it.
-func dispatchHandler(handler http.Handler, registry *metrics.Registry, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.Handler {
+func dispatchHandler(handler http.Handler, registry *metrics.Registry, database *store.Store, natsClient *bus.Client, publisher *outbox.Outbox, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit, announcer, issuers))
+	mux.Handle("GET /healthz", healthzHandler(database, natsClient, publisher, fileStore, commit, announcer, issuers))
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.Handle("GET /metrics", registry.Handler())
 	mux.Handle("/", handler)
@@ -1433,11 +1461,16 @@ func brokerTokenVerifier(boot bootConfig, database *store.Store, serverURL strin
 // migrations, so neither is ever filled with a guess; the Legion daemon reads fleet_commit, since
 // mid-roll whichever process answers it may serve a build the rest do not.
 //
+// `outbox_publisher` says whether this process publishes the events outbox now: true while it
+// holds the outbox's publisher hold and the hold's deadline has not passed, false when it stands
+// by, lost the hold, or runs with NATS disabled (publisher nil). One process of a deployment
+// publishes at a time, so a healthy process may well report false, and it never decides `ok`.
+//
 // `idempotency_keys` is true on every build that judges a write's Idempotency-Key (INFRA-258,
 // api/request_keys.go): the agents' client reads it before it retries a write under its key, since
 // an earlier Dispatch ignores the header and would run a retried write again. It is a fact of the
 // binary, never of the probe, so it is true whatever the database or NATS answer.
-func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.HandlerFunc {
+func healthzHandler(database *store.Store, natsClient *bus.Client, publisher *outbox.Outbox, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.HandlerFunc {
 	var reportedCommit *string
 	if commit != "" {
 		reportedCommit = &commit
@@ -1505,11 +1538,12 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 			Commit          *string `json:"commit"`
 			FleetCommit     *string `json:"fleet_commit"`
 			SchemaVersion   *int    `json:"schema_version"`
+			OutboxPublisher bool    `json:"outbox_publisher"`
 			IdempotencyKeys bool    `json:"idempotency_keys"`
 		}{
 			OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, SignIn: signInOK, ServiceTokens: serviceTokensOK,
 			Commit: reportedCommit, FleetCommit: announcer.FleetCommit(), SchemaVersion: schemaVersion,
-			IdempotencyKeys: true,
+			OutboxPublisher: publisher.Publishing(), IdempotencyKeys: true,
 		})
 	}
 }

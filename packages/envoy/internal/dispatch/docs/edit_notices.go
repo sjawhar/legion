@@ -166,7 +166,7 @@ const nextEditNoticeDue = `
 
 // RunEditNotices sends each document's edit notice once its quiet window ends: one
 // artifact.human_edited event, which reaches the sessions the document credits and its issue's
-// route (outbox.publishAuthorRoutes). It is a woken loop (duty.RunWoken) under the edit-notices
+// route (outbox.addAuthorRoutes). It is a woken loop (duty.RunWoken) under the edit-notices
 // lease: one sweep at start, then a sweep when wake is signalled - in the server, the
 // pglisten.Hub wake on EditNoticesChannel, which a trigger on document_edit_notices notifies each
 // time a writer gives a notice a due time, and which the hub also signals after each successful

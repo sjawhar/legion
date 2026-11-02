@@ -82,6 +82,7 @@ const READS = {
     key: ["references", "to", "dispatch://CORE/artifact/plan-md"],
   },
   grandparent: { key: issueQuery("CORE-00").queryKey },
+  handoffs: { key: ["handoffs", "CORE-1"] },
   inbox: { key: inboxQuery().queryKey },
   issuePanel: {
     data: { edges: [], node: { id: "CORE-1", kind: "issue" } },
@@ -108,6 +109,7 @@ const READS = {
     key: documentSummaryQuery("CORE", "notes-md").queryKey,
   },
   otherDocumentPage: { data: { id: "artifact-2" }, key: ["artifact-ref", "CORE/notes-md"] },
+  otherHandoffs: { key: ["handoffs", "CORE-9"] },
   otherIssueMessage: { key: messageQuery("CORE-9", "message-9").queryKey },
   otherProjectList: { key: projectIssuesQuery("OTHER", []).queryKey },
   // Another block of CORE-1's spec, which a link elsewhere on the page names.
@@ -570,6 +572,22 @@ const rules: Record<string, Rule> = {
       refreshes: ["detail", "log", "projectList"],
       spares: ["summary", "pinned", "inbox", "referencePicker", "projects", "replies", "userState"],
     },
+  "a recorded handoff refreshes the issue's handoff list and its log, and no rollup": {
+    event: event("handoff.recorded", { handoff_id: "handoff-1", phase: "implement", version: 2 }),
+    refreshes: ["handoffs", "detail", "log", "projectList"],
+    spares: [
+      "otherHandoffs",
+      "parent",
+      "grandparent",
+      "unrelatedDetail",
+      "referencesTab",
+      "summary",
+      "pinned",
+      "inbox",
+      "projects",
+      "replies",
+    ],
+  },
   "a message refreshes the issue's message reads, and the Replies of those in its thread": {
     event: event("message.created", { id: "message-2", thread_logins: ["alice"] }),
     refreshes: ["detail", "log", "message", "rootMessage", "conversationMessages", "replies"],
@@ -1043,6 +1061,11 @@ const eventsByType: Record<EventType, Event> = {
   "comment.edited": event("comment.edited", { anchor: null, id: "comment-1" }),
   "comment.reopened": event("comment.reopened", { anchor: null, id: "comment-1" }),
   "comment.resolved": event("comment.resolved", { anchor: null, id: "comment-1" }),
+  "handoff.recorded": event("handoff.recorded", {
+    handoff_id: "handoff-1",
+    phase: "implement",
+    version: 2,
+  }),
   "issue.claimed": event("issue.claimed", { key: "CORE-1" }),
   "issue.closed": event("issue.closed", issue({ status: "done" })),
   "issue.created": event("issue.created", issue()),
