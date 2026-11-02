@@ -488,6 +488,17 @@ bound. Dispatch's own refusal that carries no echo says its layer did not judge 
 it sets the memory aside and `/healthz` decides afresh. The probe runs only after a write has
 already failed, so the ordinary path makes no request of its own.
 
+The `dispatch` command runs each call in a process of its own, so it carries that memory in its
+session's `state.json` (`keyedLayer`: each origin with the wall-clock time of its last sighting,
+`keyedLayerMemory`), and the next call of the session takes in every sighting still under five
+minutes old (`rememberKeyedLayer`). Without it every call would know nothing and ask `/healthz`,
+which the load that stalled the write can keep from answering within 5 s, and the write would be
+reported as perhaps taken effect rather than asked again. A sighting the file dates more than five
+minutes back, ahead of the clock, or not as a time is passed over. The wall clock is the one clock
+calls share, so a clock set back between two calls stretches the five minutes by as much, and two
+calls racing in one session can bring back a sighting one of them set aside, which still ends
+five minutes after the answer that showed it.
+
 A non-2xx answer is thrown as `DispatchServiceError`. Dispatch's own refusal, JSON with a string
 `error`, is the error's message under its `code` (`HTTP_<status>` when the server set none), with
 `fromDispatch` true. Any other body — a gateway's HTML page, an empty body, JSON of another shape —
@@ -616,10 +627,11 @@ ledger, the memory) could not be written, the result still prints, with one line
 `dispatch-session-state.ts` keeps one directory per session under `DISPATCH_STATE_DIR` (default
 `<XDG_STATE_HOME or ~/.local/state>/dispatch/sessions/<id>`): `state.json` carries what a
 long-lived host remembered across calls (the triage lines and pictures already shown, the asks
-whose follow notice was printed), and `results.jsonl` gets one line per call with the tool's
-`details` or its refusal, a refusal the CLI made before the call reached Dispatch included, which
-pi-envoy's run-end check reads; a line that is not JSON is named
-(file and line number) and skipped. Directories idle for 14 days are removed, at most once a day.
+whose follow notice was printed, which Dispatch lately showed it runs the keyed layer), and
+`results.jsonl` gets one line per call with the tool's `details` or its refusal, a refusal the CLI
+made before the call reached Dispatch included, which pi-envoy's run-end check reads; a line that
+is not JSON is named (file and line number) and skipped. Directories idle for 14 days are removed,
+at most once a day.
 
 `bun bin/stand-in-gateway.ts --status 502 --body html` serves one non-Dispatch answer (`html`,
 `empty`, `text` or `json`, from `src/stand-in-gateway.ts`) on `--port` (ephemeral by default) and

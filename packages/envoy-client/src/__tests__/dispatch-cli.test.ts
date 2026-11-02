@@ -3,9 +3,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ArtifactBlock } from "@legion/contracts";
-import { DISPATCH_BODY_MAX, PROJECT_KEY_RULE } from "@legion/contracts";
+import { DISPATCH_BODY_MAX, IDEMPOTENCY_KEY_HEADER, PROJECT_KEY_RULE } from "@legion/contracts";
 import { cliRefusals, fitOutput, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
+import { forgetKeyedLayerMemory, KEYED_LAYER_MEMORY_MS } from "../dispatch-http";
 import { forgetShownPictures } from "../dispatch-picture-tools";
 
 interface Recorded {
@@ -355,6 +356,7 @@ beforeEach(() => {
   stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
   // Each run is its own process in production: nothing the library remembers carries over.
   resetAdviceMemory();
+  forgetKeyedLayerMemory();
 });
 
 function environment(
@@ -372,7 +374,8 @@ function environment(
 async function run(
   argv: readonly string[],
   extra: Record<string, string | undefined>,
-  stdin = ""
+  stdin = "",
+  fetchImpl?: typeof fetch
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   let stdout = "";
   let stderr = "";
@@ -385,6 +388,7 @@ async function run(
     },
     readText: (path) => (path === "-" ? stdin : readFileSync(path, "utf-8")),
     cwd: stateDir,
+    ...(fetchImpl === undefined ? {} : { fetchImpl }),
   });
   return { code, stdout, stderr };
 }
@@ -393,6 +397,41 @@ async function run(
 function nextProcess(sessionId: string): void {
   resetAdviceMemory();
   forgetShownPictures(sessionId);
+  forgetKeyedLayerMemory();
+}
+
+/**
+ * The test server behind Dispatch's keyed layer: every answer to a write carries its
+ * `Idempotency-Key` back, the first `failing` message posts fail in transport before they reach it,
+ * and `/healthz` never answers within its bound, as under the load that stalls a write.
+ */
+function keyedDispatch(failing: number): {
+  readonly fetchImpl: typeof fetch;
+  readonly keys: string[];
+  readonly probes: string[];
+} {
+  const keys: string[] = [];
+  const probes: string[] = [];
+  let left = failing;
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const request = new Request(input, init);
+    const { pathname } = new URL(request.url);
+    if (pathname === "/healthz") {
+      probes.push(pathname);
+      throw new DOMException("The operation timed out.", "TimeoutError");
+    }
+    const key = request.headers.get(IDEMPOTENCY_KEY_HEADER);
+    if (request.method === "POST" && pathname === "/api/v1/issues/DSP-1/messages") {
+      keys.push(key ?? "");
+      if (left-- > 0) throw new TypeError("fetch failed");
+    }
+    const answer = await fetch(request);
+    if (key === null) return answer;
+    const headers = new Headers(answer.headers);
+    headers.set(IDEMPOTENCY_KEY_HEADER, key);
+    return new Response(answer.body, { status: answer.status, headers });
+  }) as typeof fetch;
+  return { fetchImpl, keys, probes };
 }
 
 function ledger(sessionId: string): { tool: string; error?: string }[] {
@@ -572,6 +611,63 @@ describe("the dispatch CLI", () => {
     const second = await run(message, omp);
     expect(first.stdout).toContain("DSP-1 is still in triage");
     expect(second.stdout).not.toContain("is still in triage");
+  });
+
+  // Every `dispatch` command is a process of its own, so what one call saw of Dispatch's keyed
+  // layer reaches the next only through the session's state. A later call's write whose attempt
+  // fails is asked again under its key on that alone, without /healthz, which the load that
+  // stalled the write can keep from answering in time.
+  test("a failed write is asked again under its key when an earlier call of the session saw the keyed layer", async () => {
+    const message = ["message", "--issue", "DSP-1", "--body", "Deliverable landed."];
+    const first = keyedDispatch(0);
+    expect((await run(message, omp, "", first.fetchImpl)).code).toBe(0);
+    const state = JSON.parse(
+      readFileSync(join(stateDir, "sessions", "ses-1", "state.json"), "utf-8")
+    );
+    expect(Object.keys(state.keyedLayer)).toEqual([`http://127.0.0.1:${server.port}`]);
+    nextProcess("ses-1");
+    const stalled = keyedDispatch(1);
+    const second = await run(message, omp, "", stalled.fetchImpl);
+    expect(second.code).toBe(0);
+    expect(stalled.keys).toHaveLength(2);
+    expect(stalled.keys[1]).toBe(stalled.keys[0] ?? "");
+    expect(stalled.probes).toEqual([]);
+  });
+
+  // A sighting holds for KEYED_LAYER_MEMORY_MS from the answer that showed it, across processes as
+  // within one. One older than that, one dated ahead of the clock, and anything that is not a
+  // sighting say nothing, so the write asks /healthz and, with no yes from it, is reported rather
+  // than sent twice.
+  test("a carried sighting of the keyed layer is trusted only while it is under five minutes old", async () => {
+    const origin = `http://127.0.0.1:${server.port}`;
+    const message = ["message", "--issue", "DSP-1", "--body", "Deliverable landed."];
+    const dir = join(stateDir, "sessions", "ses-1");
+    mkdirSync(dir, { recursive: true });
+    const sighting = (ago: number) => ({ [origin]: new Date(Date.now() - ago).toISOString() });
+    const call = async (keyedLayer: unknown) => {
+      writeFileSync(
+        join(dir, "state.json"),
+        JSON.stringify({ advice: [], pictures: [], follows: [], keyedLayer })
+      );
+      nextProcess("ses-1");
+      const stalled = keyedDispatch(1);
+      const { code } = await run(message, omp, "", stalled.fetchImpl);
+      return { code, posts: stalled.keys.length, probes: stalled.probes.length };
+    };
+    expect(await call(sighting(60_000))).toEqual({ code: 0, posts: 2, probes: 0 });
+    for (const keyedLayer of [
+      sighting(KEYED_LAYER_MEMORY_MS + 1_000),
+      sighting(-60_000),
+      { [origin]: "yesterday" },
+      { [origin]: Date.now() },
+      "garbage",
+    ]) {
+      expect(await call(keyedLayer), JSON.stringify(keyedLayer)).toEqual({
+        code: 1,
+        posts: 1,
+        probes: 1,
+      });
+    }
   });
 
   test("a read from a Dispatch server older than the repository fields answers, warning on stderr", async () => {
