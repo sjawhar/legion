@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-556",
+  "previousHandoff": "38456e19ad9f56d1a821f35fd5b08dc443b991b3",
+  "round": 18,
+  "testedCodeHead": "a7a4239dd7d3",
+  "scope": "INFRA-63 architect, 2026-11-02T06:15Z, replacing the earlier round-18 scope: (1) the append takes 6 Postgres round trips not 10, counted by the tester, with the 1 s limit unchanged; coedit spec 20 runs on loopback and 20 behind a ~+1.25 ms/chunk proxy with p50 and max; the old append fails behind that proxy; (2) the new append keeps ordering, no lost or duplicated update, fold and compaction rows, and 1,000,000 schedules; (3) the two merges of main bring in only main's changes, with #2496's flush path the one storing path; (4) timestamp migrations 20261101181500-181502 with SQL unchanged, migrationid.go main's, TestMigrationSetTakesNumbersThenTimestamps and both guards; (5) 93 connections, every pin agreeing; (6) each memory fix fails with it removed, and main's upload memory tests pass; (7) ci-ok and pr-title at the code head.",
+  "implementerProof": {
+    "verdict": "rejected",
+    "how": "Re-ran at a7a4239d: the two-process file (160 pass), the docs package (788 pass), 1,000,000 schedules, main's memory tests, and the coedit spec on loopback and behind a proxy, all passing. Its round-trip claim does not hold: a warm keystroke takes 7 round trips on a real envoy-dispatch process, not 6. Its negative control, 'old append under the proxy: 16/20 failed', did not reproduce with the PR's previous code head 97e5e32d at +1.25 ms per chunk: 20/20 passed."
+  },
+  "failures": [
+    {
+      "criterion": "(1) A browser update's append takes 6 Postgres round trips, not 10",
+      "evidence": "7 at a7a4239d. Counted with the tester's TCP proxy, $TMPDIR/tester556/rtproxy (it counts a round trip each time the client speaks after the server, and names each statement's SQL from Parse/Bind; GET /reset and /stats on its control port), between the server and the pod's Postgres. A real envoy-dispatch process (throwaway multiprocess test, startPair through the proxy), warm keystroke: pg_advisory_lock | begin | pg_advisory_xact_lock | gate read | one batch (insert into doc_updates, doc_settlements_pending, doc_pending_authors) | commit | pg_advisory_unlock. The docs package's Service gave the same 7 for 20 of 20 keystrokes. The old append at 97e5e32d, counted the same way, is 10. The surplus is round trip 3: since main's #2496 a browser keystroke is stored through PgVersioned.AppendRoomFlush (persistence.go:192), which holds the room's session advisory lock (withRoomLock), and Service.flushThrough (flush.go:199) calls AppendRoomUpdateTx (persistence.go:258) with roomLocked=false, so appendUpdateTxClass takes pg_advisory_xact_lock again (persistence.go:327-330). 99117932's skip of that lock applies to appendUpdate, which the browser path no longer reaches after the merge. AppendRoomUpdateTx is also reached from Ledger.flushThrough inside live writes, which hold no session lock, so the flush must say whether its caller holds the lock. No red test is written: no hook in the store lets a test count statements, and the user-visible bound (1 s) holds. The proxy run above reproduces it. Evidence: https://github.com/sjawhar/legion/pull/2414 (round-18 tester comment)"
+    }
+  ],
+  "failed": 1,
+  "proof": [
+    {
+      "criterion": "(1) The 1 s limit holds, on loopback and behind a delay proxy, and the old append is slower behind the same proxy",
+      "surface": "Chromium on main's two-process harness (bun run e2e:multiprocess) from archived trees, with a throwaway copy of coedit.multiprocess.e2e.ts that times each of its four text steps from the last keystroke to the other page showing the text, polled every animation frame",
+      "command": "cd packages/dispatch && DATABASE_URL=<fresh db at 5433 or via rtproxy> bun run e2e:multiprocess -- zz-timed.multiprocess --repeat-each=20",
+      "observed": "Worst step of each run, 20 runs each. Head loopback: p50 84 ms, max 171 ms. Head behind +1.25 ms/chunk: p50 418 ms, max 531 ms, none over 1 s. Old (97e5e32d) behind +1.25 ms/chunk: p50 701 ms, max 791 ms, none over 1 s. Old behind +2 ms/chunk: p50 882 ms, max 1006 ms, 2 of 20 runs over 1 s. Head behind +2 ms/chunk: p50 528 ms, max 662 ms, none over 1 s.",
+      "headSha": "a7a4239dd7d3",
+      "negativeControl": "The old append crosses 1 s at +2 ms per chunk (2/20), where head stays at 662 ms or less. At +1.25 ms it did not fail on this pod (20/20)."
+    },
+    {
+      "criterion": "(2) The new append keeps ordering, no lost or duplicated update, the fold and compaction rows, and the interleaving invariants",
+      "surface": "the docs package, the two-process file and the schedule test, on the pod's test PostgreSQL",
+      "command": "go test -count=1 ./internal/dispatch/docs; go test -tags multiprocess -count=1 ./cmd/dispatch; DISPATCH_RELAY_SCHEDULES=1000000 go test -run TestEveryInterleavingOfARoomsAwarenessSettlesOnBothProcesses ./internal/dispatch/docs",
+      "observed": "Docs: 788 passed, 0 failed, 3 skipped (exit 1 only from storetest's teardown drop on the non-superuser login), including #2496's flush, stored-order, backfill-order, interleaved-peers, fold and compaction tests. Two-process: 160 passed, 0 failed, 1 skipped. 1,000,000 schedules on 2 workers and the 4 regression seeds: PASS in 267 s.",
+      "headSha": "a7a4239dd7d3",
+      "negativeControl": "With only the pending-settlement write dropped from the append's batch, 16 docs tests fail, e.g. TestAnAppendRecordsItsCreditInThePendingAuthors and TestASettlementOnTheOtherProcessNamesTheTypistWhoseAppendLandedLast."
+    },
+    {
+      "criterion": "(3) The merges bring in only main's changes, and #2496's flush path is the one storing path",
+      "surface": "git merge-tree against each merge's two parents; a file-by-file review (an oracle subagent, its findings checked) of every file that differs from the automatic merge",
+      "command": "git merge-tree --write-tree <p1> <p2>, then git diff <auto-tree> <merge> for 3e17301f, eaa2f41d and a7a4239d",
+      "observed": "3e17301f: 27 conflicted, 61 differing; eaa2f41d: 2; a7a4239d: 10. No change of either side lost and nothing new: every #2496 symbol survives and its four test files are byte-identical; all 17 #2496 tests are present. The only main tests removed are the stale-room evictor's, whose code the branch replaced; their cases sit in room_behind_head_test.go. a7a4239d keeps the exact union of both sides' tests (multiprocess_test.go 36 + 7 = 43; shutdown_test.go all 14 of main's). A browser update is stored via StoreUpdateContext -> AppendRoomFlush -> flushThrough; every other writer stores browser updates only through Ledger.flushThrough. The one exception is main's own fallback for an update with no recorded class (websocket.go:207). The ten files both sides changed in 3e17301f were checked by symbol and test inventories and the passing suites, not line by line.",
+      "headSha": "a7a4239dd7d3",
+      "negativeControl": "A lost test of either side would show in the inventories; none did."
+    },
+    {
+      "criterion": "(4) Timestamp migrations with the SQL unchanged, migrationid.go main's, and the guards",
+      "surface": "the migration files at 97e5e32d and a7a4239d; the store and migrationid packages",
+      "command": "diff of each renamed .up.sql and .census.sql; git diff 8fece625 a7a4239d -- packages/envoy/migrationid; go test -run 'Migration|Census' ./internal/dispatch/store; go test ./migrationid",
+      "observed": "Each of 20261101181500-181502 differs from 0158-0160 only in its first two comment lines. They sort after main's 20261101144901. migrationid/ is identical to main and its 9 tests pass. TestMigrationSetTakesNumbersThenTimestamps, TestEveryMigrationFileIsEmbedded, TestEveryMigrationFromTheCensusRuleOnDeclaresACensus, both TestTouchedTablesOfEveryMigration\u2026, both TestEveryShippedCensus\u2026 and TestCensusOnAMigratedDatabaseHasNothingPending pass. The three superuser census tests fail as on main; three more failed only in storetest's teardown drop.",
+      "headSha": "a7a4239dd7d3",
+      "negativeControl": "Any SQL change would show in the per-file diff; none did."
+    },
+    {
+      "criterion": "(5) 93 connections, every pin agreeing",
+      "surface": "store/pool.go at main 8fece625 and at a7a4239d; infra/gcp; docs",
+      "command": "grep the pool sizes; cd packages/envoy/infra && go test -run Connections ./gcp/",
+      "observed": "Main: 64+4+1+13+2+1+2+5 = 92; head: the same with 14 leases = 93. dispatchConnectionsPerPod = 93; TestDispatchConnectionsPerPodIsTheServers passes; running-dispatch.md and the changelog fragment say 93 (up from 92).",
+      "headSha": "a7a4239dd7d3",
+      "negativeControl": "TestDispatchConnectionsPerPodIsTheServers fails on any difference between the two constants."
+    },
+    {
+      "criterion": "(6) Each memory fix fails with it removed; main's upload memory tests pass",
+      "surface": "the docs package's three memory tests, 3 runs each, in head and in two scratch copies with b9740133 or 2e6f4ec0 reverse-applied",
+      "command": "go test -count=3 -run '^(TestUploadsToARoomInUseKeepMemoryWithinTheBound|TestUploadsOverOpenAnchorsKeepMemoryWithinTheBound|TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound)$' ./internal/dispatch/docs",
+      "observed": "Head: all three pass 3/3 (room-fed retained 0.62-0.86 MB against a 2.93 MB bound; anchors 0.52-0.71 MB against 2.33 MB).",
+      "headSha": "a7a4239dd7d3",
+      "negativeControl": "b9740133 reverted: TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound fails 3/3 (6.38-6.60 MB retained). 2e6f4ec0 reverted: TestUploadsToARoomInUseKeepMemoryWithinTheBound fails 1/3 (2,329,008 B against 2,273,434 B), and in every run the memory each write retains rises from 0.8-1.6 KB to 5.9-11.6 KB; that guard is weak."
+    }
+  ],
+  "ci": "Run 41393876939 at a7a4239d, read 2026-11-02T08:21Z: every lane that ran succeeded (lint, test, envoy-go, the four race lanes, dispatch-multiprocess, dispatch-browser-multiprocess, dispatch-memory, broker-multiprocess, envoy-smoke, envoy-infra-go and others) except dispatch, cancelled at 07:21:43Z in 'Browser-test dispatch dashboard' when the implementer's 38456e19 (removal of .legion/, no code) was pushed, which also left ci-ok cancelled. pr-title success in runs 41393876936 and 41396779079. The PR head is now 38456e19; this handoff sits on top of it. Between 07:59Z and 08:19Z the pod's GitHub credential had expired while INFRA's daemon was down."
+}
