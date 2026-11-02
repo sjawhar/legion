@@ -58,15 +58,16 @@ func liveNamedToken(jkt string) brokertoken.Introspection {
 }
 
 // serviceOnlyToken is the broker's answer for a machine nobody has signed in on: live, bound to
-// jkt, naming a session and the service its fleet is, and no person. The project is the one its
-// fleet entry names, which is the only project such a token may ever be read as covering.
+// jkt, naming a session and the service its fleet is, and no person. It names no project either.
+// The exchange mints this shape for one caller only, a machine whose fleet entry names neither a
+// person nor a project (broker/exchange's Set.Google), and marks it with the person scope, the
+// wire's word for a token held to no one project.
 func serviceOnlyToken(jkt string) brokertoken.Introspection {
 	return brokertoken.Introspection{
 		Active:       true,
 		Session:      brokerTestSession,
 		Service:      brokerTestService,
-		ProjectScope: brokertoken.ProjectScopeNamed,
-		Project:      brokerTestProject,
+		ProjectScope: brokertoken.ProjectScopePerson,
 		Scope:        "dispatch.write",
 		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
 		ClientID:     brokertoken.ExchangeClientID,
@@ -637,9 +638,9 @@ func TestTheRateRefusalCarriesTheWaitInItsHeader(t *testing.T) {
 }
 
 // TestAServiceOnlyBrokerTokenReadsAndIsNamedByWhoami: a machine nobody has signed in on holds a
-// token the broker says names a session and a service and no person. It is a session's
-// credential like any other — whoami names the session and the service, and a read answers —
-// and only its writes are refused (the test below).
+// token the broker says names a session and a service, no person and no project. It is a
+// session's credential like any other — whoami names the session and the service, and a read
+// answers — and only its writes are refused (the test below).
 func TestAServiceOnlyBrokerTokenReadsAndIsNamedByWhoami(t *testing.T) {
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
@@ -661,8 +662,8 @@ func TestAServiceOnlyBrokerTokenReadsAndIsNamedByWhoami(t *testing.T) {
 	if answer.Owner != nil {
 		t.Fatalf("whoami owner = %q, want null: the token names no person", *answer.Owner)
 	}
-	if answer.Project == nil || *answer.Project != brokerTestProject {
-		t.Fatalf("whoami project = %v, want the project the token's entry names", answer.Project)
+	if answer.Project != nil {
+		t.Fatalf("whoami project = %q, want null: the token is held to no one project", *answer.Project)
 	}
 
 	read := rig.serve(caller.presenting(t, http.MethodGet, "/api/v1/issues/"+own.issue, token, nil))

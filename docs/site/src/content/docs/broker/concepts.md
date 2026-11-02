@@ -134,6 +134,11 @@ broker's own endpoints:
 4. On approval the broker mints the launcher credential bound to the machine's key, and the
    machine's next poll gets a refresh token for it, bound to the same key (DPoP, RFC 9449).
 
+The device grant is served only while the broker is given a page for a person to type the code
+into (`BROKER_MACHINE_LOGIN_URL`). A deployment whose machines hold a Google identity leaves that
+unset: nothing prints a code, Dispatch serves no page to type one into, and each machine gets its
+launcher credential from the trade above instead, with nobody to approve it.
+
 The helper keeps the login (its key, the credential's id and expiry, and the current refresh
 token) in `AGENT_SECRETS_MACHINE_FILE` (`~/.config/agent-secrets/machine.json` by default),
 readable only by its user, so a restarted helper resumes it. It refreshes the login when it starts,
@@ -168,8 +173,8 @@ credential, so a box keeps working after the machine's credential expires, and t
 expired login, marked as expired with sessions still running, until its last session ends. Whoever
 approved a person's machine login is its operator. A lapsed or revoked login means logging the
 machine in again. A machine login nobody decides expires after 15 minutes, a fixed time rather than
-a setting (`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`). A machine logs in
-through the device grant alone: the earlier `POST /v1/launcher-credentials` login answers
+a setting (`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`). A person's machine
+logs in through the device grant alone: the earlier `POST /v1/launcher-credentials` login answers
 `405 Method Not Allowed` and its poll `GET /v1/launcher-credentials/{pending}` `404`. A service's login has no
 operator, so the machine-login page lists it for everyone signed in, and anyone may revoke it, which
 ends every pod it enrolled at once: a service login a person approved through a code before

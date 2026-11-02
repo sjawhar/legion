@@ -20,12 +20,14 @@ package api
 //     than move anything. So the project this check reads before the handler runs is the project
 //     the handler will write, and the check needs no transaction of its own.
 //   - The check is a no-op for a credential that carries no project: a browser cookie, a personal
-//     agent token, a Kubernetes service-account token and the shared token name none, and so does
-//     an access token the broker scoped to a person rather than to one project — a dev box
-//     session, whose `project_scope` is `person`, reaches brokerTokenActor with no Project and is
-//     unscoped here, with no second mechanism of its own. That is the rule and not a transitional
-//     measure: every caller that exists today writes exactly what it wrote before, which is what
-//     lets this deploy before anything presents a broker token.
+//     agent token, a Kubernetes service-account token and the shared token name none, and so do
+//     the two access tokens the broker scopes to a person rather than to one project, each of
+//     which reaches brokerTokenActor with no Project. One is a dev box session's, unscoped here
+//     with no second mechanism of its own; the other is a machine's that names a service and no
+//     person, whose every write writeNeedsASignedInPerson refuses below. Both carry
+//     `project_scope` `person`. That is the rule and not a transitional measure: every caller
+//     that exists today writes exactly what it wrote before, which is what lets this deploy
+//     before anything presents a broker token.
 //
 // For a credential that does name a project, the check fails closed: only a target that
 // resolves to that credential's own project reaches the handler. A target that resolves to

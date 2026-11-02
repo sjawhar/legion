@@ -1,6 +1,6 @@
 ---
 title: Revoke a session or a grant
-description: End a grant from Dispatch, from your shell or from the session holding it, cancel a pending request, end a session so nothing it held still works, and end a machine's login.
+description: End a grant from Dispatch, from your shell or from the session holding it, cancel a pending request, end a session so nothing it held still works, end a machine's login, and end your sign-in on a machine.
 sidebar:
   order: 12
 ---
@@ -257,6 +257,27 @@ machine login ends both, and its row stays on the machine-login page while eithe
 `expired, sessions still running` once the login has expired. Without Dispatch, end each box with
 `agent-secrets unenroll --helper --enrollment <id>`, run against a helper logged in as the box's
 operator, or stop its `agent-secrets renew`, after which it lapses within `BROKER_LEASE_SECONDS`.
+
+## End your sign-in on a machine
+
+Signing in on a machine with `agent-secrets login` gives that machine a login of its own carrying
+you, so a session it enrols reads your secrets
+([Concepts](/legion/broker/concepts/#sessions-and-enrollment)). Dispatch's **Settings** page
+lists those sign-ins beside your live grants, as **Sign-ins**: one row per machine you have
+signed in on and not revoked, naming the machine's fleet account, the first characters of the box
+key's thumbprint, which is what tells two boxes of one fleet apart, when you signed in there and
+when that box last used the sign-in. Click **Revoke** on a row and confirm.
+
+Revoking ends three things at once: the sign-in, so that box trades no token for you again; every
+access token it already minted, so the sessions running there lose Dispatch within seconds; and
+the machine login that sign-in held, so every session it enrolled ends as
+[ending a session](#end-a-session) does. Your sign-ins on other machines, and the fleet's own
+machine login, are untouched — the machine goes on reading what its service owns. Nobody sees or
+revokes anyone else's sign-ins: Dispatch names the person from its own session, so another
+person's id is an id the broker does not have.
+
+Signing in again with the very key that was revoked is refused: the box makes a new key, which is
+a sign-in of its own. Run `agent-secrets login` on the machine to sign in again.
 
 ## End a person's sign-in to the broker
 

@@ -604,7 +604,9 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 			handler = s.withinProjectScope(route, handler)
 			handler = s.withinSessionScope(route, handler)
 			// Outermost of the three, so a caller that may make no write at all is told that
-			// rather than which project the write it tried belongs to.
+			// rather than which session the write it tried belongs to. The project check has
+			// nothing to tell it: a token naming a service is held to no one project
+			// (broker_token.go).
 			handler = s.writeNeedsASignedInPerson(handler)
 			handler = s.refuseChangedLogin(handler)
 		}

@@ -150,8 +150,9 @@ func (s *server) brokerTokenActor(r *http.Request) (model.Actor, bool, error) {
 		actor.Service = &caller.Service
 	}
 	// Only a token the broker scoped to one project names one, which brokertoken.callerOf has
-	// already read: a dev box session's token is scoped to its person, who may write wherever
-	// they may, so it carries no project at all.
+	// already read. The two it scopes to a person instead carry no project at all: a dev box
+	// session's token, whose person may write wherever they may, and the token of a machine
+	// naming a service and no person, which its fleet entry holds to no project either.
 	if caller.Project != "" {
 		actor.Project = &caller.Project
 	}

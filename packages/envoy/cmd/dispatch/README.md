@@ -149,14 +149,14 @@ The server asks the broker what the token is (RFC 7662 introspection on `/v1/oau
 No setting of its own configures it.
 A revoked token therefore stops resolving within five seconds of the introspection that last called it live, not of the revocation:
 an introspection already in flight when the token is revoked is remembered from the moment it completes, and it may take up to five seconds to complete.
-A verified caller acts as the session the token names, for the person it names, and `actor` in the body does not decide that session:
+A verified caller acts as the session the token names, for the person it names, or, where the broker names none, for the service the machine holding it belongs to, and `actor` in the body does not decide that session:
 absent is accepted, one naming the same session is accepted and its `origin` kept, and one naming any other writer is `403 ACTOR_SESSION_MISMATCH` naming the session the token carries.
 A token scoped to one project carries that project on every actor it writes, set from the token and never from the body;
 a token scoped to its person names no single project and carries none.
 Each refusal is its own code and none repeats the token:
 `401 BROKER_TOKEN_NOT_ACTIVE` (the broker does not hold the token live), `401 BROKER_TOKEN_PROOF_INVALID` (the proof did not meet RFC 9449 Section 4.3, a proof presented twice included
 — a proof is single use by its `jti` and target URI), `401 BROKER_TOKEN_KEY_MISMATCH` (a sound proof signed by a key that is not the token's), `401 BROKER_TOKEN_NOT_A_SESSION` (the token is live but is no session's credential:
-it names no session or no person, or it was issued to a client other than the exchange a session's token comes from, which a machine login's own access token is
+it names no session, it names neither a person nor a service, or it was issued to a client other than the exchange a session's token comes from, which a machine login's own access token is
 — Dispatch records a write under the session its credential proved, so it acts on none of these rather than letting a body name a session for a credential that names none), `429 BROKER_TOKEN_RATE_LIMITED` (this source address's introspection bucket is empty;
 nothing was asked of the broker) and `503 BROKER_UNAVAILABLE` (the broker answered nothing, so the token was never judged
 — a 503 for the reason `OIDC_ISSUER_UNAVAILABLE` is one).
@@ -171,7 +171,7 @@ a `GET` row declares nothing), in four classes:
 *a project the body names* — the issue create alone, whose project its address does not name, so `createIssue` makes the same check itself once that project is settled;
 *the calling session's* — an agent conversation's own artifact and messages, the two routes a session answers its own delivery on, and the caller-private `me` rows;
 and *the deployment's* — the project create, the repository-to-project map, the delivery settings and session groups, the broadcast, and the credential and machine-login decisions.
-`Register` wraps every mutating route in two checks (`internal/dispatch/api/project_scope.go`), which run after the caller is resolved and before the handler, so no route is left to check either for itself.
+`Register` wraps every mutating route in three checks (`internal/dispatch/api/project_scope.go`), which run after the caller is resolved and before the handler, so no route is left to check any of them for itself.
 
 The project check resolves the project the addressed object belongs to
 — an issue key, a project key, an artifact id, an ask id, a comment id or a message id, each by one read
@@ -193,7 +193,13 @@ addressing another session's conversation is `403 SESSION_SCOPE`, naming the ses
 Only a broker-issued token proves a session;
 a cookie, a personal token, a Kubernetes service-account token and the shared token prove none and are untouched, so a person still uploads into the conversation they name.
 
-Both checks are a no-op for a credential that carries no project and proves no session
+The sign-in check refuses every write by a credential that names a service and no person
+— an access token the broker issued to a machine nobody has signed in on — `403 SIGN_IN_REQUIRED`, naming that service and `agent-secrets login`, the command that signs a person in on the machine.
+It stands in front of every mutating route whatever its class, and outermost of the three, so such a caller is told it may make no write at all rather than which project the write it tried belongs to.
+Its reads are untouched: the machine reads everything its session may read, and what it may not do is write, because Dispatch records a write under the person who made it and this credential names none.
+A broker token that does name a person, and every other credential, reaches the handler as before.
+
+The project and session checks are a no-op for a credential that carries no project and proves no session
 — a browser cookie, a personal agent token, a Kubernetes service-account token, the shared token, and an access token the broker scoped to a person rather than to one project.
 That is the rule and not a transitional measure: every caller that exists today writes exactly what it wrote before.
 
@@ -1473,47 +1479,26 @@ An argument `envoy-dispatch` does not know is refused with exit 2, never served,
 
 ## Stored-order check
 
-`envoy-dispatch stored-order [--artifact <uuid>]... [--since <RFC 3339 time>]` reads, and never
-writes, whether each document's stored history replays: folding its `doc_updates` rows in version
-order must give every row's `content_changed` (measured against the render the rows before it fold
-to, true when either side does not render) and every version's markdown at its
-`doc_update_version`, and no row may leave the fold holding parked structs. It reads
-`DATABASE_URL` as the other subcommands do and runs no migration; with no `--artifact` it checks
-every document. Each document is read in one repeatable-read transaction, which stays open while
-the check renders the document at every checked update: tens of thousands of updates hold one
-snapshot for minutes, and an open snapshot on the primary holds back vacuum. On production, pass
-`--since` or point `DATABASE_URL` at a read replica.
+`envoy-dispatch stored-order [--artifact <uuid>]... [--since <RFC 3339 time>]` reads, and never writes, whether each document's stored history replays: folding its `doc_updates` rows in version order must give every row's `content_changed` (measured against the render the rows before it fold to, true when either side does not render) and every version's markdown at its `doc_update_version`, and no row may leave the fold holding parked structs.
+It reads `DATABASE_URL` as the other subcommands do and runs no migration; with no `--artifact` it checks every document.
+Each document is read in one repeatable-read transaction, which stays open while the check renders the document at every checked update: tens of thousands of updates hold one snapshot for minutes, and an open snapshot on the primary holds back vacuum.
+On production, pass `--since` or point `DATABASE_URL` at a read replica.
 
-The oldest retained row is the base: compaction folds older history into it and a rebuild seeds
-the history there, so its own class is not checked and a version recorded before it is skipped. A
-history a prune rewrote after the base (a checkpoint standing, a gap, a version past the head or
-behind an earlier one) is refused. `--since` folds rows and versions created before that time
-without checking them, so history an earlier build wrote is not read as this build's: run it with
-the start of the window under test, while the rooms are resident and nothing is compacted.
+The oldest retained row is the base: compaction folds older history into it and a rebuild seeds the history there, so its own class is not checked and a version recorded before it is skipped.
+A history a prune rewrote after the base (a checkpoint standing, a gap, a version past the head or behind an earlier one) is refused.
+`--since` folds rows and versions created before that time without checking them, so history an earlier build wrote is not read as this build's: run it with the start of the window under test, while the rooms are resident and nothing is compacted.
 
-The check holds only for one renderer: run it from the same commit as the Dispatch whose history it
-reads. A version an earlier build rendered (a change to `pmdoc`'s Markdown output) differs from
-this build's render of the same state.
+The check holds only for one renderer: run it from the same commit as the Dispatch whose history it reads.
+A version an earlier build rendered (a change to `pmdoc`'s Markdown output) differs from this build's render of the same state.
 
-Output, every line starting `stored-order: `: one line per document (`<uuid> base=…
-updates_checked=… updates_skipped=… versions_checked=… versions_skipped=… mismatches=…`, with
-`refused="<reason>"` for a refused document), one line per mismatch (`class update=… stored=…
-expected=…`, `pending update=… parked_items=… parked_delete_ranges=…`, or `version number=…
-doc_update_version=… stored_md5=… stored_length=… fold_md5=… fold_length=…`), and last a summary
-(`documents=… clean=… mismatched=… refused=… failed=… unchecked=…`). It prints no document text. A
-document whose check compared no update and no version is `unchecked`, never clean. Exit 0 when
-every document checked is clean, 1 on any mismatch, refusal, read failure, missing `DATABASE_URL`,
-unchecked document `--artifact` names, or a run that checked no document at all (an empty database
-included), 2 on a usage error. So exit 0 always means the check compared something.
+Output, every line starting `stored-order: `: one line per document (`<uuid> base=… updates_checked=… updates_skipped=… versions_checked=… versions_skipped=… mismatches=…`, with `refused="<reason>"` for a refused document), one line per mismatch (`class update=… stored=… expected=…`, `pending update=… parked_items=… parked_delete_ranges=…`, or `version number=… doc_update_version=… stored_md5=… stored_length=… fold_md5=… fold_length=…`), and last a summary (`documents=… clean=… mismatched=… refused=… failed=… unchecked=…`).
+It prints no document text.
+A document whose check compared no update and no version is `unchecked`, never clean.
+Exit 0 when every document checked is clean, 1 on any mismatch, refusal, read failure, missing `DATABASE_URL`, unchecked document `--artifact` names, or a run that checked no document at all (an empty database included), 2 on a usage error.
+So exit 0 always means the check compared something.
 
-`packages/envoy/loadtest/browsertype` is the browser side of a load test this check judges: it
-connects peers to documents' rooms as people, each named in the server's identity header
-(`-identity-header`, `X-Dispatch-User` by default, on a server run with
-`DISPATCH_IDENTITY=header:<name>` and `DISPATCH_IDENTITY_HEADER_TRUSTED=1`, since a room admits no
-agent token), and types inside existing
-paragraphs at a set rate (`browsertype -h` lists its flags). A paragraph whose text
-holds a `-protect` value (repeatable) is never edited, so the text a load generator's own writes
-quote stays as it wrote it.
+`packages/envoy/loadtest/browsertype` is the browser side of a load test this check judges: it connects peers to documents' rooms as people, each named in the server's identity header (`-identity-header`, `X-Dispatch-User` by default, on a server run with `DISPATCH_IDENTITY=header:<name>` and `DISPATCH_IDENTITY_HEADER_TRUSTED=1`, since a room admits no agent token), and types inside existing paragraphs at a set rate (`browsertype -h` lists its flags).
+A paragraph whose text holds a `-protect` value (repeatable) is never edited, so the text a load generator's own writes quote stays as it wrote it.
 
 ## Reference graph
 
@@ -2153,8 +2138,8 @@ Each item below names a path with its method and identity, then its purpose.
 
 - `/api/v1/whoami` (GET; cookie, trusted header, bearer, or a broker-issued DPoP token)
 
-  Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service, session, project}` for every other credential (`owner` is a personal token's owner or a broker-issued token's person, by lowercase email, null for the shared token;
-  `service` is a verified service-account token's Kubernetes subject, null for every other credential;
+  Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service, session, project}` for every other credential (`owner` is a personal token's owner or a broker-issued token's person, by lowercase email, null for the shared token and for a broker-issued token that names a service;
+  `service` is a verified service-account token's Kubernetes subject, or the fleet a broker-issued token naming no person belongs to, null for every other credential;
   `session` is the session the credential itself proved, which only a broker-issued token does, null otherwise;
   `project` is the one project key that credential may write, null where it names none).
 

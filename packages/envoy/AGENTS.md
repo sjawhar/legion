@@ -2737,7 +2737,7 @@ A credential that names one project writes that project and nothing else, and ev
 Each mutating row of the route table declares what its write belongs to (`api/routes_table.go`'s `writeClasses`, stamped onto `apiRoute.Scope`;
 a `GET` row declares nothing, and a mutating row that declares nothing fails `TestEveryMutatingRouteIsClassed` and panics `Register` rather than being served unjudged).
 The four classes are *a project's* (the issue-key rows, the project-key rows, the artifact-id rows, the ask-id rows, the comment-id rows, and the message rows that carry an issue), *a project the body names* (the issue create alone, whose project its address does not name, so `createIssue` makes the same check itself once that project is settled), *the calling session's* (an agent conversation's own artifact and messages, the two routes a session answers its own delivery on, and the caller-private `me` rows) and *the deployment's* (the project create, the repository-to-project map, the delivery settings and session groups, the broadcast, and the credential and machine-login decisions).
-`Register` wraps every mutating route in `api.withinProjectScope` and `api.withinSessionScope` (`api/project_scope.go`), which run after the caller is resolved and before the handler, outside the keyed-write layer and the upload's spool, so a refused write claims no idempotency key and costs no body.
+`Register` wraps every mutating route in `api.withinProjectScope`, `api.withinSessionScope` and `api.writeNeedsASignedInPerson` (`api/project_scope.go`), which run after the caller is resolved and before the handler, outside the keyed-write layer and the upload's spool, so a refused write claims no idempotency key and costs no body.
 
 The project check resolves the project the addressed object belongs to
 — one resolver per addressing kind, each one read:
@@ -2761,7 +2761,13 @@ another session's path is `403 SESSION_SCOPE`, naming the session the credential
 A broker-issued token is the only credential that proves a session, so it is the only one this can refuse;
 the other rows of that class are held to their caller by their own handlers (`403 ACCEPT_FORBIDDEN` and `403 REPLY_FORBIDDEN` for an attempt that is not the caller's session's, `requireHuman` and the calling person's key for the `me` token rows), which is what the class comment on `scopeSession` records row by row.
 
-Both checks are a no-op for every credential that carries no project and proves no session (a cookie, a personal token, a Kubernetes service-account token, the shared token, and a broker token whose `project_scope` is `person`, which reaches `brokerTokenActor` with no `Project` and needs no mechanism of its own):
+The sign-in check is the outermost of the three, so a caller that may make no write at all is told that rather than which project the write it tried belongs to.
+It refuses every write by a credential that names a service and no person — a broker token of a machine nobody has signed in on — `403 SIGN_IN_REQUIRED` (`contracts.DispatchSignInRequired`, generated from `packages/contracts`), naming that service and `agent-secrets login`, the one command that makes the write possible.
+It stands in front of every mutating row whatever its class, for the reason the other two do: a route added later is covered by the table it joins rather than by a line someone remembered to write.
+Such a caller reads everything its session may read; what it may not do is write, since Dispatch records a write under the person who made it and this credential names none, so a session that accepted a delivery or answered an ask under it would write as nobody.
+Every other credential reaches the handler as before, a broker token that does name a person included, at the cost of the one header read `brokerCredentialActor` makes.
+
+The project and session checks are a no-op for every credential that carries no project and proves no session (a cookie, a personal token, a Kubernetes service-account token, the shared token, and a broker token whose `project_scope` is `person`, which reaches `brokerTokenActor` with no `Project` and needs no mechanism of its own), and the sign-in check is a no-op for every one of those, none of which names a service:
 that is the rule and not a transitional measure, and it is what lets Dispatch deploy before anything presents a broker token.
 
 ## Operational notes

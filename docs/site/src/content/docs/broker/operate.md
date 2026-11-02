@@ -44,13 +44,43 @@ BROKER_SECRETS_KMS_KEY_ARN=arn:aws:kms:<region>:<account>:key/<key id>
 AWS_REGION=<region>
 ```
 
-`BROKER_API_ACCOUNTS` lists the callers of the broker's named-caller routes, here Dispatch's server
-as the caller `dispatch`, each by its own Kubernetes ServiceAccount: a caller presents its projected
-token for `BROKER_K8S_OIDC_AUDIENCE`, which the broker verifies against `BROKER_K8S_OIDC_ISSUER`,
-so the list needs that pair. No secret is shared between the broker and Dispatch. A token that
-lives longer than an hour from its issue is refused, and an account the list does not name is
-answered `403 ACCOUNT_NOT_LISTED`. Through those routes Dispatch lists what waits on a person and
-relays a person's machine-login decisions and revokes; it decides no secret request
+`BROKER_MACHINE_LOGIN_URL` is the page where a person types a machine login's code, Dispatch's
+`/credentials/machine`. It is optional. With it, the device authorization grant's
+`verification_uri` names that page, so a machine shows its person where to go. Without it there is
+no device grant at all: `POST /v1/oauth/device_authorization` is not mounted and answers `404`,
+and the broker's authorization server metadata leaves the device code out of
+`grant_types_supported`, which is how Dispatch knows to serve no machine-code page. Everything
+else the OAuth provider serves — the token endpoint, the RFC 8693 token exchange, introspection
+and revocation — is served either way. Leave it unset in a deployment where every machine holds a
+cloud identity and nobody ever types a code. The boot line says which of the two this broker is:
+`machine login device grant state=on verification_uri=…`, or `state=off` naming the unset
+variable.
+
+`GET /.well-known/oauth-authorization-server` is that metadata, RFC 8414. It needs no credential,
+since it is what a client reads before it holds one, and nothing in it is a fact a caller could
+not learn by calling the endpoints it names. It names this broker's issuer
+(`BROKER_PUBLIC_URL`), its token, introspection and revocation endpoints, the grants it serves,
+the DPoP signing algorithms it takes, and the subject token types its exchange is configured
+with, so a client reads off one document what this deployment turned on rather than being
+configured with it twice.
+
+`BROKER_API_ACCOUNTS` lists the callers of the broker's named-caller routes, here Dispatch's
+server as the caller `dispatch`, each by its own account. An account is written in one of two
+forms, and the entry's own text says which: a Kubernetes ServiceAccount subject, as above, or
+`google:` and a Google service account's address
+(`listener=google:example-listener@example-project.iam.gserviceaccount.com`). A Kubernetes caller
+presents its projected token for `BROKER_K8S_OIDC_AUDIENCE`, verified against
+`BROKER_K8S_OIDC_ISSUER`, and is looked up by the token's `sub`, so such an entry needs that pair.
+A Google caller presents its machine's own Google identity token for `BROKER_GOOGLE_OIDC_AUDIENCE`
+— the audience every machine of the deployment already holds a token for, so the Envoy listener on
+a machine presents what its metadata server already hands it and mints no second token — verified
+against `BROKER_GOOGLE_OIDC_ISSUER`, and is looked up by the token's `email`, so such an entry
+needs that audience and no cluster at all. A project's default Google accounts and Google-managed
+service agents are refused here as they are in `BROKER_VM_SERVICES`. No secret is shared between
+the broker and its callers. A token that lives longer than an hour from its issue is refused, and
+an account the list does not name is answered `403 ACCOUNT_NOT_LISTED`. Through those routes
+Dispatch lists what waits on a person and relays a person's machine-login decisions, their
+machine-login revokes and their sign-in revokes; it decides no secret request
 ([Network and trust](#network-and-trust)).
 
 The four `BROKER_SIGNIN_*` settings are required, and a broker started without one of them exits
@@ -228,6 +258,17 @@ The broker refuses an exchange whose token is for another audience or does not v
 Google does not hold verified, whose account no entry lists, or whose Compute Engine project or
 instance name the entry's pins do not allow, each `400 invalid_request` naming what did not match.
 
+Two settings turn a person's sign-in on. `BROKER_SIGNIN_DEVICE_AUDIENCE` is the OAuth client id of
+the device-flow client `agent-secrets login` runs Google's device authorization grant as, which is
+the audience a person's own Google identity token must carry, since Google puts a client's id in
+the `aud` of the ID tokens it mints for it; set it to the same client id the machines are given as
+`AGENT_SECRETS_SIGNIN_CLIENT_ID`. `BROKER_SIGNIN_DOMAIN`, which the approval sign-in already
+needs, is the Workspace domain the person's `hd` claim must name, so a person outside it signs in
+nowhere. The issuer of both the person's token and the machine's is `BROKER_GOOGLE_OIDC_ISSUER`,
+`https://accounts.google.com` unless a dev stack names a stand-in, and the audience setting needs
+`BROKER_GOOGLE_OIDC_AUDIENCE`, whose machines are the boxes a person may sign in on. Unset, the
+broker accepts no person's sign-in and refuses either token type by name.
+
 Each machine holds a launcher credential of its own, keyed by
 `<account>@<project>/<zone>/<instance id>` for a token minted on a Compute Engine instance and by
 `<account>#<key thumbprint>` for one minted anywhere else, so one machine's trade never moves
@@ -246,6 +287,20 @@ refused.
 Whoever can get an identity token for the fleet's account logs in as its machines. Google Cloud IAM
 is that boundary: who may run a workload as the account (`iam.serviceAccounts.actAs` on it), and
 who may run code on a machine of the fleet, which can fetch that machine's token.
+
+On the machine itself there is no enrollment command to run and no key to place: `agent-secrets`,
+`agent-secrets-helper` and the Legion controller trade the identity the machine already holds
+whenever they find no key directory, no sign-in and no helper. What they read is
+`AGENT_SECRETS_URL`, the broker's public URL, and `AGENT_SECRETS_MACHINE_IDENTITY`, which says
+which identity this machine proves: `metadata` with `AGENT_SECRETS_MACHINE_AUDIENCE`, a Compute
+Engine machine's own token from its metadata server, which is the fleet above; `kubernetes` with
+`AGENT_SECRETS_MACHINE_TOKEN_FILE`, a pod's projected service-account token; or `pool` with
+`AGENT_SECRETS_POOL_AUDIENCE` and `AGENT_SECRETS_POOL_ACCOUNT`, a token minted through a workload
+identity pool. `AGENT_SECRETS_SESSION` names the session a trade writes under where the fleet's
+entry fixes none. For a person to sign in there, give the machine the device-flow client as
+`AGENT_SECRETS_SIGNIN_CLIENT_ID` and `AGENT_SECRETS_SIGNIN_CLIENT_SECRET_FILE`, the client whose
+id is `BROKER_SIGNIN_DEVICE_AUDIENCE`. With `AGENT_SECRETS_MACHINE_IDENTITY` unset nothing trades
+and every machine works as it did, through a machine login a person approves.
 
 ## Approval sign-in
 
