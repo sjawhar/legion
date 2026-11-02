@@ -1,7 +1,7 @@
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
-import { ApiError, api } from "../../api/client";
+import { ApiError, api, artifactVersionUrl } from "../../api/client";
 import type {
   ArtifactGrant,
   DocumentReferenceSummary,
@@ -48,15 +48,18 @@ interface SummaryResult {
   readonly isError: boolean;
 }
 
-/** One file of a block as its summary read answers: the version the block reads and that
- *  version's size, or why the file cannot show. Neither `cause` nor `id` means the read has not
- *  answered yet. */
+/** One file of a block as its summary read answers: the artifact's latest version, that
+ *  version's size, the version the reference asks for, or why the file cannot show. Neither
+ *  `cause` nor `id` means the read has not answered yet. The summary carries the latest
+ *  version's size alone, so `size` stands for the bytes the block sends only where the version
+ *  it sends is `latest`; any older version's size is one `versionSize` read. */
 interface FileState {
   readonly cause?: string;
   readonly id?: string;
+  readonly latest?: number;
   readonly name: string;
   readonly ref: string;
-  readonly size: number;
+  readonly size?: number;
   readonly version?: number;
 }
 
@@ -72,13 +75,21 @@ interface DataEntry {
   readonly version?: number;
 }
 
-/** The same-origin address of one version's bytes, which the block reads with the reader's own
- *  session, as every artifact read is made. `artifactVersionUrl`
- *  (`features/artifacts/ArtifactHeader.tsx`) writes the same string, and importing it here
- *  would close the cycle `ViewBlock → ArtifactHeader → ApprovalChip → MarkdownBody →
- *  useRenderedMarkdown → ViewBlock` that `lint/suspicious/noImportCycles` refuses. */
-function versionAddress(id: string, version: number): string {
-  return `/api/v1/artifacts/${encodeURIComponent(id)}/versions/${version}`;
+/** One version's size in bytes, as the `HEAD` of its address answers `Content-Length`. A
+ *  summary carries the latest version's size alone, so this is what a block weighs against the
+ *  16 MiB whenever the version it sends is an older one, whether the reference or the grant
+ *  pinned it (dispatch://INFRA-682, R6). The server answers the `HEAD` from the row's length,
+ *  reading none of the bytes. */
+async function versionSize(id: string, version: number): Promise<number> {
+  const response = await fetch(artifactVersionUrl(id, version), {
+    credentials: "same-origin",
+    method: "HEAD",
+  });
+  const length = Number(response.headers.get("Content-Length"));
+  if (!response.ok || !Number.isFinite(length)) {
+    throw new ApiError(response.status, { error: "this version's size cannot be read" });
+  }
+  return length;
 }
 
 /** What a read that failed says: the status Dispatch answered, or that it could not be reached
@@ -96,7 +107,7 @@ const noReadCauses: ReadonlyMap<string, string> = new Map();
 /** The file one summary read names, resolved to what the block needs of it. An issue's summary
  *  carries every document of that issue, so one read serves every file of one issue. */
 function resolveFile(file: ViewFile, result: SummaryResult): FileState {
-  const base = { name: file.slug, ref: file.reference, size: 0 };
+  const base = { name: file.slug, ref: file.reference };
   const summary = result.data;
   if (summary === undefined) {
     // Either the read has not answered yet, or it failed and the line says how.
@@ -126,7 +137,9 @@ function resolveFile(file: ViewFile, result: SummaryResult): FileState {
         pinned === undefined ? "this file has no version" : `this file has no version ${pinned}`,
     };
   }
-  return { ...named, id: record.id, size: record.size ?? 0, version: pinned ?? latest };
+  // The summary's size is the latest version's, and the version the block sends is the grant's
+  // to decide, so the two are weighed against each other where that version is known.
+  return { ...named, id: record.id, latest, size: record.size ?? 0, version: pinned ?? latest };
 }
 
 /**
@@ -241,6 +254,30 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
     staleTime: Number.POSITIVE_INFINITY,
   });
 
+  const rows = grants.data;
+  /** The grant that covers each data file and the version it gives the page: the version the
+   *  block weighs and sends. Index 0 is the page file, which no grant covers. */
+  const covers = states.map((state, index) =>
+    index === 0 || rows === undefined ? undefined : coveringGrant(rows, state, named[index].version)
+  );
+
+  /** Each data file's size where the summary does not carry it, which is a version a pin — the
+   *  reference's or the grant's — holds back from the latest: one `HEAD` of that version's
+   *  address. The key is the version's own, so one `HEAD` serves every block that names it, and
+   *  a file the block sends the latest version of asks nothing. The page file's own size is
+   *  weighed against nothing, so index 0 asks nothing either. */
+  const sizes = useQueries({
+    queries: states.map((state, index) => {
+      const version = covers[index]?.version;
+      return {
+        enabled: running && version !== undefined && version !== state.latest,
+        queryFn: () => versionSize(state.id ?? "", version ?? 0),
+        queryKey: ["artifact-version-size", state.id, version],
+        staleTime: Number.POSITIVE_INFINITY,
+      };
+    }),
+  });
+
   // Every line this block shows, in the order a reader reads them: what the attributes or the
   // page file cannot answer, then one line per data file, then what the frame itself answered.
   const lines: ViewLine[] = [];
@@ -254,17 +291,25 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
 
   // One pass over the data files: what goes to the page, what the reader is told, how many bytes
   // the grants cover, which grants cover them, and which versions the page has already had.
-  const rows = grants.data;
   const entries: DataEntry[] = [];
   let cover = "";
   let sendSignature = "";
   let bytes = 0;
+  /** A granted file whose size has not answered yet: until it does the block cannot say whether
+   *  its data passes the cap, so it sends none, as it sends none before the grants answer. */
+  let weighing = false;
   for (let index = 1; index < states.length; index += 1) {
     const state = states[index];
-    const grant = rows === undefined ? undefined : coveringGrant(rows, state, named[index].version);
+    const sizing = sizes[index];
+    const grant = covers[index];
     let entry: DataEntry;
-    if (state.cause !== undefined) {
-      lines.push({ cause: state.cause, ref: state.ref });
+    const cause =
+      state.cause ??
+      (sizing.isError
+        ? answerCause(sizing.error instanceof ApiError ? sizing.error.status : undefined, "file")
+        : undefined);
+    if (cause !== undefined) {
+      lines.push({ cause, ref: state.ref });
       entry = { error: "unreadable", ref: state.ref };
     } else if (grant === undefined) {
       if (rows !== undefined) {
@@ -272,7 +317,10 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
       }
       entry = { error: "not-granted", ref: state.ref };
     } else {
-      bytes += state.size;
+      // The size of the version the page is sent, which the summary holds for the latest alone.
+      const size = grant.version === state.latest ? state.size : sizing.data;
+      weighing ||= size === undefined;
+      bytes += size ?? 0;
       entry = { id: state.id, name: state.name, ref: state.ref, version: grant.version };
       const failure = readCauses.get(state.ref);
       if (failure !== undefined) {
@@ -283,20 +331,23 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
     cover += grant === undefined ? " none" : ` ${grant.id}`;
     sendSignature += ` ${entry.ref}@${entry.error ?? entry.version}`;
   }
-  const overBudget = rows !== undefined && bytes > MAX_DATA_BYTES;
+  const overBudget = rows !== undefined && !weighing && bytes > MAX_DATA_BYTES;
+  /** Nothing goes to the page while a size is still unknown, and nothing at all once the sizes
+   *  are in and they pass the cap. */
+  const holdData = weighing || overBudget;
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
-  /** The cap as the frame's own effect reads it: the page's `dispatch-view:ready` schedules the
-   *  first send, and it arrives whenever the page loads, which can be after the grants read
+  /** The hold as the frame's own effect reads it: the page's `dispatch-view:ready` schedules
+   *  the first send, and it arrives whenever the page loads, which can be after the grants read
    *  answered. Without this the cap would hold only for the sends the render schedules. */
-  const overBudgetRef = useRef(overBudget);
-  overBudgetRef.current = overBudget;
+  const holdDataRef = useRef(holdData);
+  holdDataRef.current = holdData;
 
   const pageVersion = pageState?.version;
   const pageAddress =
     pageId === undefined || pageVersion === undefined
       ? undefined
-      : `${versionAddress(pageId, pageVersion)}/page`;
+      : `${artifactVersionUrl(pageId, pageVersion)}/page`;
   const answered = head !== undefined && head.address === pageAddress ? head : undefined;
   const refusal = answered?.cause;
   const canRun = running && answered !== undefined && refusal === undefined && !movedAway;
@@ -386,7 +437,7 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
       version: number
     ): Promise<DataEntry> => {
       const { name, ref } = entry;
-      const response = await fetch(versionAddress(id, version), {
+      const response = await fetch(artifactVersionUrl(id, version), {
         credentials: "same-origin",
       }).catch(() => undefined);
       if (response === undefined || !response.ok) {
@@ -476,7 +527,7 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
     };
 
     const schedule = (): void => {
-      if (!ready || sendTimer !== 0 || overBudgetRef.current) {
+      if (!ready || sendTimer !== 0 || holdDataRef.current) {
         return;
       }
       sendTimer = window.setTimeout(
@@ -559,10 +610,10 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: a new signature is a new set of versions to send, which is what this effect schedules; the send itself reads the newest through a ref.
   useEffect(() => {
-    if (!overBudget) {
+    if (!holdData) {
       scheduleSend.current?.();
     }
-  }, [overBudget, sendSignature]);
+  }, [holdData, sendSignature]);
 
   // The panel where a person grants a data file sits on the page file's own view.
   const panel = attributes.kind === "files" ? buildReferencePath(attributes.page.route) : undefined;

@@ -31,6 +31,8 @@ import type {
   Event,
   GraphEdgeKind,
   GraphReferences,
+  Handoff,
+  HandoffSummary,
   Issue,
   IssueDetails,
   IssuePriority,
@@ -346,8 +348,9 @@ export const KEYED_LAYER_MEMORY_MS = 5 * 60_000;
 /**
  * The Dispatch origins this process has lately seen run the keyed-write layer, each with when it
  * last saw it (on `DispatchWriteRetry.now`'s clock): an answer that carried back the key its request
- * sent (`keyEchoed`), or a `/healthz` that said `idempotency_keys: true`. Only such a Dispatch is
- * asked again under a key; against any other a repeat would be a second write. An entry older than
+ * sent (`keyEchoed`), or a `/healthz` that said `idempotency_keys: true`, in this process or in an
+ * earlier one of the same `dispatch` session (`rememberKeyedLayer`). Only such a Dispatch is asked
+ * again under a key; against any other a repeat would be a second write. An entry older than
  * `KEYED_LAYER_MEMORY_MS` says nothing, and only a yes is kept: a probe that found no layer is asked
  * again by the next write that fails.
  */
@@ -370,6 +373,50 @@ const KEY_LAYER_PROBE_MS = 5_000;
 export function forgetKeyedLayerMemory(): void {
   KEYED_LAYER_SEEN.clear();
   KEYED_LAYER_PROBES.clear();
+}
+
+/**
+ * What this process has seen of the keyed layer within `KEYED_LAYER_MEMORY_MS`, each origin with
+ * the wall-clock time of its sighting, for a host that runs each call in a process of its own to
+ * hand to the next (`rememberKeyedLayer`): the `dispatch` command keeps it in its session's state,
+ * since otherwise every call would know nothing and ask `/healthz`, which the load that stalled
+ * the write can keep from answering in time. Read on the monotonic clock a client dates by when
+ * `DispatchWriteRetry.now` is unset, as the command's are.
+ */
+export function keyedLayerMemory(): Record<string, string> {
+  const wall = Date.now();
+  const now = performance.now();
+  const kept: Record<string, string> = {};
+  for (const [origin, seen] of KEYED_LAYER_SEEN) {
+    const age = now - seen;
+    if (age >= 0 && age < KEYED_LAYER_MEMORY_MS) {
+      kept[origin] = new Date(wall - age).toISOString();
+    }
+  }
+  return kept;
+}
+
+/**
+ * Takes in what an earlier process saw (`keyedLayerMemory`'s shape), so a yes still holds only
+ * `KEYED_LAYER_MEMORY_MS` from the answer that showed it. Anything else says nothing and is passed
+ * over: a value that is not that shape, a time that does not parse, one older than the bound and
+ * one ahead of the wall clock. The wall clock is the one clock processes share across a reboot
+ * (Bun's `process.hrtime` counts from its own process's start), so a wall clock set back between
+ * two calls stretches the bound by as much. A sighting this process already holds gives way only
+ * to a later one.
+ */
+export function rememberKeyedLayer(saved: unknown): void {
+  if (typeof saved !== "object" || saved === null) return;
+  const wall = Date.now();
+  const now = performance.now();
+  for (const [origin, at] of Object.entries(saved)) {
+    if (typeof at !== "string") continue;
+    const age = wall - Date.parse(at);
+    if (!(age >= 0 && age < KEYED_LAYER_MEMORY_MS)) continue;
+    const seen = now - age;
+    const known = KEYED_LAYER_SEEN.get(origin);
+    if (known === undefined || known < seen) KEYED_LAYER_SEEN.set(origin, seen);
+  }
 }
 
 /**
@@ -1334,6 +1381,45 @@ export class DispatchClient {
 
   async getComments(issue: string): Promise<Comment[]> {
     return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"]);
+  }
+
+  /** `POST /api/v1/issues/{key}/handoffs/{phase}`: records `body`, the handoff's exact text, as
+   *  the next version of the issue's phase, written by `actor`, the session it names. The text
+   *  travels as one JSON string, so the server stores the very characters it was given. */
+  async writeHandoff(
+    issue: string,
+    phase: string,
+    input: { readonly actor: Actor; readonly body: string }
+  ): Promise<HandoffSummary> {
+    return this.#json(
+      "POST",
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "handoffs", phase],
+      input
+    );
+  }
+
+  /** `GET /api/v1/issues/{key}/handoffs`: every handoff of the issue, newest first, without bodies. */
+  async listHandoffs(issue: string): Promise<HandoffSummary[]> {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "handoffs"]);
+  }
+
+  /** `GET /api/v1/issues/{key}/handoffs/{phase}/latest`: the phase's newest handoff with its body;
+   *  404 HANDOFF_NOT_FOUND when the phase has none. */
+  async latestHandoff(issue: string, phase: string): Promise<Handoff> {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue),
+      "handoffs",
+      phase,
+      "latest",
+    ]);
+  }
+
+  /** `GET /api/v1/handoffs/{id}`: one handoff by id, with its body. */
+  async handoff(id: string): Promise<Handoff> {
+    return this.#json("GET", ["api", "v1", "handoffs", id]);
   }
 
   async getIssueReferences(issue: string): Promise<IssueReferences> {

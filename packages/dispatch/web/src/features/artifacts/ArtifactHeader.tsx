@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
+import { artifactVersionUrl } from "../../api/client";
 import type { Artifact, Version } from "../../api/types";
 import {
   borderDefault,
@@ -31,10 +32,6 @@ import {
   documentRoute,
 } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-
-export function artifactVersionUrl(artifactID: string, version: number): string {
-  return `/api/v1/artifacts/${encodeURIComponent(artifactID)}/versions/${version}`;
-}
 
 export function formatArtifactBytes(bytes: number | undefined): string {
   if (bytes === undefined) {

@@ -301,6 +301,33 @@ describe("runRulesCheck: which asks a call opens", () => {
     });
     expect(check?.names).toEqual(["The ask block #region that starts 'Which region?'"]);
   });
+  test("an upload named after the document's slug replaces it too, so its stored asks are not new", async () => {
+    const check = await checkRules({
+      toolName: "dispatch_artifact",
+      tool: "dispatch artifact",
+      input: {
+        issue: "X-1",
+        name: "brief",
+        content: `${BRIEF}\n:::ask{#region}\nWhich region?\n:::\n`,
+      },
+    });
+    expect(check?.names).toEqual(["The ask block #region that starts 'Which region?'"]);
+  });
+  test("an upload named after the document's id is another document, so every ask in it is judged", async () => {
+    const check = await checkRules({
+      toolName: "dispatch_artifact",
+      tool: "dispatch artifact",
+      input: {
+        issue: "X-1",
+        name: "doc-brief",
+        content: `${BRIEF}\n:::ask{#region}\nWhich region?\n:::\n`,
+      },
+    });
+    expect(check?.names).toEqual([
+      "The ask block #window that starts 'Which deployment window?'",
+      "The ask block #region that starts 'Which region?'",
+    ]);
+  });
   test("only an upload leaves out the ids the document holds: a doc-edit insert of one is a new ask", async () => {
     const check = await checkRules({
       toolName: "dispatch_doc_edit",
