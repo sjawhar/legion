@@ -577,16 +577,16 @@ func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*cha
 			// Counted under the reason the send came to (countPublishFailure): a send the server
 			// refused under this connection's own publish permissions is a denial; a role forward
 			// its holder's resolution held pending sent nothing at all, and is counted under that
-			// holder rather than as a failure of the bus; a forward NATS took whose holder sent no
-			// receipt is unanswered, which the request reports as a receipt timeout with its
-			// publish confirmed; every other failure, an unconfirmed publish among them, is a
-			// failure.
+			// holder rather than as a failure of the bus; a forward NATS took whose stored copy
+			// the stream did not acknowledge is unanswered, which the request reports as not
+			// acknowledged with its publish confirmed; every other failure, an unconfirmed
+			// publish among them, is a failure.
 			switch forward := send.dest.forward; {
 			case errors.Is(err, bus.ErrPublishDenied):
 				deps.countPublishFailure("denied")
 			case forward != nil && forward.err != nil:
 				deps.countPublishFailure("holder")
-			case errors.Is(err, bus.ErrReceiptTimeout) && !errors.Is(err, bus.ErrPublishUnconfirmed):
+			case forward != nil && errors.Is(err, bus.ErrNotAcknowledged) && !errors.Is(err, bus.ErrPublishUnconfirmed):
 				deps.countPublishFailure("unanswered")
 			default:
 				deps.countPublishFailure("failed")

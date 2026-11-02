@@ -596,14 +596,14 @@ What the two processes share, and what each keeps to itself:
   an event goes to a session's subject, or to the owner's topic family, only after every earlier unpublished event of its owner bound there has reached it.
 
 - A batch does not block the next.
-  The holder runs up to four side by side, each reading only owners no other batch holds in flight, so an event waiting out a role holder's five-second receipt holds back its own owner's later events and nothing else;
+  The holder runs up to four side by side, each reading only owners no other batch holds in flight, so an event waiting out the five-second wait for the stream's acknowledgement of a role forward holds back its own owner's later events and nothing else;
   every other owner's events are read, sent and recorded beside it.
   An owner is settled, recorded and given back as soon as its own sends are answered rather than at its batch's end, so its next events follow at once.
   The batches run one statement at a time on the outbox's two connections, so the hold's renewal never waits behind them.
 
 - Each event reaches each receiver once, delivered at least once.
   A holder that dies between NATS's acknowledgement and the write that records it leaves the batch to be sent again by the next holder:
-  JetStream drops the repeat by its MsgId inside its 72-hour duplicate window, and a role's holder, to which the outbox forwards a role-routed event itself with a receipt, drops a repeat forward by its dedupe key.
+  JetStream drops the repeat by its MsgId inside its 72-hour duplicate window, and a role's holder, to which the outbox forwards a role-routed event itself, drops a repeat forward by its dedupe key.
   Dispatch publishes nothing on `notifications.role.*`.
 
 - A reader's events subscription on its live socket carries the other process's events.
@@ -2037,8 +2037,7 @@ Each item below names a path with its method and identity, then its purpose.
 - `/metrics` (GET; none)
 
   The process's metrics in the Prometheus text format:
-  `envoy_dispatch_outbox_publish_failures_total{reason}`, one count per destination of an outbox publish attempt that was not reached, `reason` being `denied` (the server refused it under the connection's own publish permissions), `refused` (NATS refuses the envelope or its subject however often it is retried), `holder` (a role forward its holder's resolution held pending, with nothing sent), `unanswered` (NATS took the forward and the answer never came:
-  the role holder's receipt, or, for a holder with a serving port, the stream's acknowledgement of the stored copy) or `failed` (every other failure).
+  `envoy_dispatch_outbox_publish_failures_total{reason}`, one count per destination of an outbox publish attempt that was not reached, `reason` being `denied` (the server refused it under the connection's own publish permissions), `refused` (NATS refuses the envelope or its subject however often it is retried), `holder` (a role forward its holder's resolution held pending, with nothing sent), `unanswered` (NATS took the forward and the stream did not acknowledge the copy it stored, which is the whole of a forward's answer) or `failed` (every other failure).
   It is answered above the router, so it is never the dashboard's shell, and whoever reaches the HTTP port can read it.
   Nothing scrapes it yet.
 

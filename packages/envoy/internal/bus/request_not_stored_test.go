@@ -12,17 +12,17 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// A role forward to a holder with a serving port is a window's Request to the holder's agent
-// subject, under the forward's ForwardMsgID and with AcceptStreamAck, which only the stream
-// answers. On a three-copy stream with a byte limit (in-process three-server cluster), a full
-// stream refuses such a forward and records its id at sequence 0 on the stream's leader, a purge
-// notwithstanding, so every later forward under the id is acknowledged a duplicate with no
-// sequence though nothing is stored (ErrNotStored). The request is then sent once more without its
-// id, which that record does not match: once the stream has room it is stored on the holder's
-// subject and the forward answers nil, where without that send the duplicate would answer nothing
-// and every retry would run out of time. A window whose deadline passes before the duplicate's
-// acknowledgement comes back sends nothing more: the forward answers ErrNotStored and
-// ErrWindowDeadline, and the stream holds nothing of it.
+// A role forward is a window's Request to the holder's agent subject, under the forward's
+// ForwardMsgID, which only the stream answers. On a three-copy stream with a byte limit
+// (in-process three-server cluster), a full stream refuses such a forward and records its id at
+// sequence 0 on the stream's leader, a purge notwithstanding, so every later forward under the
+// id is acknowledged a duplicate with no sequence though nothing is stored (ErrNotStored). The
+// request is then sent once more without its id, which that record does not match: once the
+// stream has room it is stored on the holder's subject and the forward answers nil, where
+// without that send the duplicate would answer nothing and every retry would run out of time. A
+// window whose deadline passes before the duplicate's acknowledgement comes back sends nothing
+// more: the forward answers ErrNotStored and ErrWindowDeadline, and the stream holds nothing of
+// it.
 func TestAForwardRequestTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom(t *testing.T) {
 	const limit = 16 << 10
 	cluster := testnats.StartCluster(t, 3)
@@ -104,7 +104,7 @@ func TestAForwardRequestTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom(
 
 	holder := contracts.AgentSubject("ses_forward_stored")
 	item := forward("stored")
-	opts := RequestOptions{MsgID: ForwardMsgID(item.DedupeKey, holder), AcceptStreamAck: true, Timeout: 2 * time.Second}
+	opts := RequestOptions{MsgID: ForwardMsgID(item.DedupeKey, holder), Timeout: 2 * time.Second}
 	refused(1, holder, item, opts)
 	if err := answer(client.WindowUntil(nil).Request(holder, item, opts)); err != nil {
 		t.Fatalf("the forward retried once the stream had room = %v, want nil", err)
@@ -115,7 +115,7 @@ func TestAForwardRequestTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom(
 
 	fencedHolder := contracts.AgentSubject("ses_forward_fenced")
 	fenced := forward("fenced")
-	fencedOpts := RequestOptions{MsgID: ForwardMsgID(fenced.DedupeKey, fencedHolder), AcceptStreamAck: true, Timeout: 5 * time.Second}
+	fencedOpts := RequestOptions{MsgID: ForwardMsgID(fenced.DedupeKey, fencedHolder), Timeout: 5 * time.Second}
 	refused(2, fencedHolder, fenced, fencedOpts)
 	var deadline atomic.Int64
 	deadline.Store(time.Now().Add(time.Hour).UnixNano())

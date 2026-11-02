@@ -41,7 +41,7 @@ func forwardEnvelope(name string) contracts.Envelope {
 }
 
 // responder subscribes subject on a connection of its own and answers each message with an empty
-// receipt, as a self-subscribed session does.
+// receipt, which answers no Request: nothing but the stream does.
 func responder(t *testing.T, url, subject string) {
 	t.Helper()
 	conn, err := natsgo.Connect(url)
@@ -69,22 +69,30 @@ func answerOf(t *testing.T, outcome <-chan error, within time.Duration) error {
 	}
 }
 
-// A Request returns on the receiver's empty receipt. The stream that captures the agent subject
-// acknowledges its copy too, and without AcceptStreamAck that acknowledgement is passed over.
-func TestARequestReturnsOnTheReceiversEmptyReceipt(t *testing.T) {
+// A Request is answered by the stream's acknowledgement of the copy it stored, and by nothing
+// else. An empty receipt is passed over, so a Request to a subject the stream does not capture
+// runs out of time though a subscriber of that subject answered it at once.
+func TestARequestIsAnsweredByTheStreamsAcknowledgementAlone(t *testing.T) {
 	_, url, client := requestClient(t)
-	subject := contracts.AgentSubject("ses_request_receipt")
-	responder(t, url, subject)
+	window := client.WindowUntil(nil)
 
-	err := answerOf(t, client.WindowUntil(nil).Request(subject, forwardEnvelope("receipt"), bus.RequestOptions{Timeout: 2 * time.Second}), 5*time.Second)
-	if err != nil {
-		t.Fatalf("a Request its receiver answered returned %v, want nil", err)
+	stored := contracts.AgentSubject("ses_request_stored")
+	if err := answerOf(t, window.Request(stored, forwardEnvelope("stored"), bus.RequestOptions{Timeout: 2 * time.Second}), 5*time.Second); err != nil {
+		t.Fatalf("a Request the stream acknowledged, with nobody subscribed to its subject, returned %v, want nil", err)
+	}
+
+	// No stream subject captures a role lane (bus.StreamSubjects), so the receipt below is the
+	// only reply this Request gets.
+	const uncaptured = "notifications.role.request-receipt"
+	responder(t, url, uncaptured)
+	err := answerOf(t, window.Request(uncaptured, forwardEnvelope("receipt"), bus.RequestOptions{Timeout: 300 * time.Millisecond}), 5*time.Second)
+	if !errors.Is(err, bus.ErrNotAcknowledged) {
+		t.Fatalf("a Request its receiver answered with an empty receipt returned %v, want ErrNotAcknowledged: the stream stored nothing of it", err)
 	}
 }
 
-// A Request nobody answers ends when its timeout runs out, as not acknowledged and as no receipt,
-// never as a lost connection: the server's no-responders answer is not a receipt and does not end
-// the wait.
+// A Request nobody answers ends when its timeout runs out, as not acknowledged, never as a lost
+// connection: the server's no-responders answer is no acknowledgement and does not end the wait.
 func TestARequestNobodyAnswersIsNotAcknowledgedWithinItsTimeout(t *testing.T) {
 	const timeout = 300 * time.Millisecond
 	_, _, client := requestClient(t)
@@ -92,8 +100,8 @@ func TestARequestNobodyAnswersIsNotAcknowledgedWithinItsTimeout(t *testing.T) {
 	started := time.Now()
 	err := answerOf(t, client.WindowUntil(nil).Request("notifications.role.request-nobody", forwardEnvelope("nobody"), bus.RequestOptions{Timeout: timeout}), 5*time.Second)
 	elapsed := time.Since(started)
-	if !errors.Is(err, bus.ErrNotAcknowledged) || !errors.Is(err, bus.ErrReceiptTimeout) || errors.Is(err, bus.ErrUnavailable) {
-		t.Fatalf("an unanswered Request returned %v, want ErrNotAcknowledged and ErrReceiptTimeout, not ErrUnavailable", err)
+	if !errors.Is(err, bus.ErrNotAcknowledged) || errors.Is(err, bus.ErrUnavailable) {
+		t.Fatalf("an unanswered Request returned %v, want ErrNotAcknowledged, not ErrUnavailable", err)
 	}
 	if elapsed < timeout || elapsed > 2*time.Second {
 		t.Fatalf("an unanswered Request returned after %s, want its %s timeout and not much more", elapsed, timeout)
@@ -101,19 +109,20 @@ func TestARequestNobodyAnswersIsNotAcknowledgedWithinItsTimeout(t *testing.T) {
 }
 
 // A Request that ran out of time says whether its publish was confirmed: one whose flush confirmed
-// the publish is a receipt timeout alone, a receiver that took the message and answered nothing,
-// and one whose flush could not confirm it wraps ErrPublishUnconfirmed with the flush's own
-// reason. A caller counts the two apart - Dispatch's outbox counts a role holder that sent no
-// receipt under `unanswered` and a forward that may never have left this process under `failed` -
-// and both still wrap ErrNotAcknowledged, so a caller that only backs the send off is unaffected.
+// the publish is not acknowledged alone, a request the server took and the stream stored nothing
+// of, and one whose flush could not confirm it wraps ErrPublishUnconfirmed with the flush's own
+// reason. A caller counts the two apart - Dispatch's outbox counts a role forward the stream did
+// not acknowledge under `unanswered` and a forward that may never have left this process under
+// `failed` - and both wrap ErrNotAcknowledged, so a caller that only backs the send off is
+// unaffected.
 func TestAnUnansweredRequestSaysWhetherItsPublishWasConfirmed(t *testing.T) {
 	server, _, client := requestClient(t)
 	window := client.WindowUntil(nil)
 
 	err := answerOf(t, window.Request("notifications.role.request-confirmed", forwardEnvelope("confirmed"),
 		bus.RequestOptions{Timeout: 300 * time.Millisecond}), 5*time.Second)
-	if !errors.Is(err, bus.ErrNotAcknowledged) || !errors.Is(err, bus.ErrReceiptTimeout) || errors.Is(err, bus.ErrPublishUnconfirmed) {
-		t.Fatalf("an unanswered Request whose publish was confirmed returned %v, want ErrReceiptTimeout and not ErrPublishUnconfirmed", err)
+	if !errors.Is(err, bus.ErrNotAcknowledged) || errors.Is(err, bus.ErrPublishUnconfirmed) {
+		t.Fatalf("an unanswered Request whose publish was confirmed returned %v, want ErrNotAcknowledged and not ErrPublishUnconfirmed", err)
 	}
 
 	// A frozen server answers the flush's PING with nothing, so the flush runs out of the
@@ -127,26 +136,8 @@ func TestAnUnansweredRequestSaysWhetherItsPublishWasConfirmed(t *testing.T) {
 	if !connected {
 		t.Fatal("the client lost its connection while the server was frozen; the Request says nothing about an unconfirmed flush")
 	}
-	if !errors.Is(err, bus.ErrPublishUnconfirmed) || !errors.Is(err, bus.ErrNotAcknowledged) || !errors.Is(err, bus.ErrReceiptTimeout) {
-		t.Fatalf("an unanswered Request whose flush ran out of time returned %v, want ErrReceiptTimeout wrapping ErrPublishUnconfirmed", err)
-	}
-}
-
-// The stream's acknowledgement of the copy it stored answers a Request only when AcceptStreamAck
-// says so, as for a holder delivered from that stored copy; otherwise the Request waits on for a
-// receipt that never comes.
-func TestARequestCountsTheStreamsAcknowledgementOnlyWhenAskedTo(t *testing.T) {
-	_, _, client := requestClient(t)
-	subject := contracts.AgentSubject("ses_request_stored")
-	window := client.WindowUntil(nil)
-
-	err := answerOf(t, window.Request(subject, forwardEnvelope("stored-ignored"), bus.RequestOptions{Timeout: 300 * time.Millisecond}), 5*time.Second)
-	if !errors.Is(err, bus.ErrNotAcknowledged) || !errors.Is(err, bus.ErrReceiptTimeout) {
-		t.Fatalf("a Request only the stream acknowledged returned %v without AcceptStreamAck, want ErrNotAcknowledged and ErrReceiptTimeout", err)
-	}
-	err = answerOf(t, window.Request(subject, forwardEnvelope("stored-accepted"), bus.RequestOptions{Timeout: 2 * time.Second, AcceptStreamAck: true}), 5*time.Second)
-	if err != nil {
-		t.Fatalf("a Request the stream acknowledged returned %v with AcceptStreamAck, want nil", err)
+	if !errors.Is(err, bus.ErrPublishUnconfirmed) || !errors.Is(err, bus.ErrNotAcknowledged) {
+		t.Fatalf("an unanswered Request whose flush ran out of time returned %v, want ErrNotAcknowledged wrapping ErrPublishUnconfirmed", err)
 	}
 }
 
@@ -161,12 +152,12 @@ func TestRequestsUnderOneMsgIDLeaveTheStreamOneCopy(t *testing.T) {
 	other := contracts.AgentSubject("ses_request_other")
 
 	for attempt := 1; attempt <= 2; attempt++ {
-		opts := bus.RequestOptions{MsgID: bus.ForwardMsgID(item.DedupeKey, holder), AcceptStreamAck: true, Timeout: 2 * time.Second}
+		opts := bus.RequestOptions{MsgID: bus.ForwardMsgID(item.DedupeKey, holder), Timeout: 2 * time.Second}
 		if err := answerOf(t, window.Request(holder, item, opts), 5*time.Second); err != nil {
 			t.Fatalf("attempt %d returned %v, want nil", attempt, err)
 		}
 	}
-	opts := bus.RequestOptions{MsgID: bus.ForwardMsgID(item.DedupeKey, other), AcceptStreamAck: true, Timeout: 2 * time.Second}
+	opts := bus.RequestOptions{MsgID: bus.ForwardMsgID(item.DedupeKey, other), Timeout: 2 * time.Second}
 	if err := answerOf(t, window.Request(other, item, opts), 5*time.Second); err != nil {
 		t.Fatalf("the Request to the second subject returned %v, want nil", err)
 	}
@@ -232,12 +223,11 @@ func TestARequestToASubjectNATSRefusesIsRefusedAtOnce(t *testing.T) {
 }
 
 // Many Requests in flight on one window, sent from several goroutines while others publish on it,
-// are each answered by their own receipt.
+// are each answered by the stream's acknowledgement of their own copy.
 func TestManyRequestsInFlightOnOneWindowEachTakeTheirOwnAnswer(t *testing.T) {
 	const senders = 20
-	_, url, client := requestClient(t)
+	_, _, client := requestClient(t)
 	subject := contracts.AgentSubject("ses_request_many")
-	responder(t, url, subject)
 	window := client.WindowUntil(nil)
 
 	var wg sync.WaitGroup

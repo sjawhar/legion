@@ -314,7 +314,7 @@ const throughputHolder = "ses_reviewer"
 
 // throughputRig is a real NATS server with its notification stream, the deployed bus client
 // reaching it through a latency proxy, a direct connection that reads what arrived and on which
-// role:reviewer's self-subscribed holder answers every forward with its receipt, and a migrated
+// role:reviewer's self-subscribed holder takes every forward and answers none, and a migrated
 // database whose shared pool is kept busy.
 type throughputRig struct {
 	database *store.Store
@@ -347,7 +347,6 @@ func newThroughputRig(t *testing.T, rtt time.Duration) *throughputRig {
 		rig.roleMu.Lock()
 		rig.role = append(rig.role, id)
 		rig.roleMu.Unlock()
-		_ = message.Respond(nil)
 	}); err != nil {
 		t.Fatalf("subscribe the role's holder: %v", err)
 	}
@@ -383,15 +382,15 @@ func (r *throughputRig) roleArrivals() []int64 {
 // 4.5 a second in production) when every NATS round trip carries a remote hub's latency and the
 // API keeps the shared database pool busy, and it keeps the order consumers rely on: each issue's
 // events reach each of its destinations in id order - its subject on the stream, a session's own
-// subject, the role's holder, forwarded to with a receipt (the Legion daemon fences an issue's
-// facts on their sequence and drops one older than the last it applied). Different issues' events
-// interleave as their sends' answers allow. It does so for a backlog of messages, for one whose
-// half are a person's replies in comment threads, which take the issue's claimant and a query of
-// the threads' sessions, and for one of a person's comments on issues with no route and no claim,
-// which take a query of the issues' primary documents' sessions and, for a reply, of the threads'
-// sessions. The rate, and the destinations each event type reached, are logged for comparison; the
-// count of destinations is checked last, so a publisher that reaches fewer still reports its rate
-// and order.
+// subject, the role's holder, forwarded to and acknowledged by the stream (the Legion daemon
+// fences an issue's facts on their sequence and drops one older than the last it applied).
+// Different issues' events interleave as their sends' answers allow. It does so for a backlog of
+// messages, for one whose half are a person's replies in comment threads, which take the issue's
+// claimant and a query of the threads' sessions, and for one of a person's comments on issues
+// with no route and no claim, which take a query of the issues' primary documents' sessions and,
+// for a reply, of the threads' sessions. The rate, and the destinations each event type reached,
+// are logged for comparison; the count of destinations is checked last, so a publisher that
+// reaches fewer still reports its rate and order.
 //
 // The burst cases put a batch of messages on one issue, the shape whose events share every
 // destination, so each destination takes them one round trip after another, and log the drain
@@ -494,7 +493,7 @@ func TestOutboxThroughputUnderRemoteLatency(t *testing.T) {
 							ownerSubjects++
 						}
 						// The holder's subject carries every issue's forwards, interleaved as their
-						// receipts allow: the order is each issue's.
+						// acknowledgements allow: the order is each issue's.
 						byIssue := map[string][]int64{}
 						for _, id := range ids {
 							byIssue[issueOf[id]] = append(byIssue[issueOf[id]], id)
