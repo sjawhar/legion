@@ -902,6 +902,25 @@ describe("DispatchClient's writes", () => {
     );
   });
 
+  // A timer can fire late on a loaded host, so a pause that ends past the bound starts no ask.
+  test("a pause that ends past the bound starts no ask", async () => {
+    const { retry, advance, clock, stall } = stalling();
+    const { fetchImpl, sent } = scripted([stall, ...Array.from({ length: 20 }, () => inFlight())]);
+    const late: DispatchWriteRetry = {
+      ...retry,
+      pause: async (ms) => {
+        advance(ms);
+        if (clock() > 52_000) advance(3_000);
+      },
+    };
+
+    await failure(client(fetchImpl, late).comment("DSP-1", comment));
+
+    // Asked at 0, 21, 23, then every 3 s to 50 s; the pause after 50 s ends at 56 s.
+    expect(sent).toHaveLength(12);
+    expect(clock()).toBe(56_000);
+  });
+
   // Whether the write may be asked again is decided afresh at each answer; that the call saw the
   // keyed layer judge it, which the message says, is never forgotten.
   test("a refusal the keyed layer did not judge stops the asking but keeps what the call saw", async () => {

@@ -457,6 +457,29 @@ describe("sending pictures", () => {
     expect(server.posted).toEqual([]);
   });
 
+  // A gateway's 502 can come after Dispatch stored the upload, so it is no refusal either, even
+  // where the write is not asked again (no keyed layer is known here).
+  test("an upload a gateway answered 502 is not said to have failed", async () => {
+    const server = dispatch((pathname, init) =>
+      pathname === "/api/v1/issues/DSP-41/artifacts" && init.method === "POST"
+        ? new Response("<html>502 Bad Gateway</html>", {
+            status: 502,
+            headers: { "Content-Type": "text/html" },
+          })
+        : undefined
+    );
+    const shot = file("gateway.png", PNG);
+
+    const failure = await refusal(
+      run("dispatch_message", { issue: "DSP-41", body: "Look.", images: [shot] }, server.fetchImpl)
+    );
+
+    expect(failure.message).toStartWith(`images: ${shot} may or may not have been uploaded: `);
+    expect(failure.message).toEndWith(". Nothing was posted.");
+    expect(failure.message).not.toContain("..");
+    expect(server.posted).toEqual([]);
+  });
+
   test("a text the uploads' own addresses carry over the cap is refused with nothing posted", async () => {
     // The owner already holds a file of this name at version 12, so its line is longer than the
     // one judged before the upload.

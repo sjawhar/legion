@@ -325,10 +325,10 @@ export interface DispatchWriteRetry {
  * Measured from the transcript store over 3,612 `dispatch` write commands that succeeded between
  * 2026-10-31 21:00Z and 2026-11-02 07:30Z, Dispatch's busiest days so far: p50 1.8 s, p90 10.5 s,
  * p95 19.6 s, p99 45.5 s, p99.9 62 s, each command timed whole, process start included, so an
- * upper bound on the write itself. 20 s of silence is that p95, and the longest silence under
- * which two silent attempts and a replay still fit in 55 s. Cutting off a healthy write costs
- * nothing against a Dispatch known to run the keyed layer, which goes on running it and replays
- * its answer.
+ * upper bound on the write itself. 20 s of silence is that p95, and two silent attempts and the
+ * ask that collects the answer still fit in 55 s (20 + 1 + 20 + 2 = 43 s). Cutting off a healthy
+ * write costs nothing against a Dispatch known to run the keyed layer, which goes on running it
+ * and replays its answer.
  */
 export const DISPATCH_WRITE_RETRY: DispatchWriteRetry = {
   pausesMs: [1_000, 2_000, 4_000, 8_000],
@@ -1661,15 +1661,25 @@ export class DispatchClient {
       );
       const latest = Math.min(started + (running ? inFlightWithinMs : withinMs), lastAsk);
       // Only a Dispatch that runs the keyed layer may be asked again: against any other a repeat
-      // would be a second write. The `/healthz` probe takes time of its own, so the bound is read
-      // again once it answers.
+      // would be a second write. The `/healthz` probe takes time of its own, and a timer can fire
+      // late on a loaded host, so the bound is read again after each of them.
       let again = scheduled !== undefined && this.#now() + wait <= latest;
       if (again) {
         again = answer?.echoed || (await this.#runsKeyedLayer(answer?.unjudged ?? false));
         sawKeyedLayer ||= again;
         again &&= this.#now() + wait <= latest;
       }
+      if (again) {
+        try {
+          await pause(wait, this.#signal);
+        } catch (error) {
+          throw this.#ended(error, request, attempt, reached, sawKeyedLayer);
+        }
+        again = this.#now() <= latest;
+      }
       if (!again) {
+        // An answer the write would have asked again after was read whole and rebuilt from its
+        // text (`writeAnswer`), so it holds no connection and can be read here.
         if (answer !== undefined) {
           return this.#unsettled(method, url, answer.response, reached, attempt, sawKeyedLayer);
         }
@@ -1682,12 +1692,6 @@ export class DispatchClient {
           );
         }
         throw thrown;
-      }
-      await answer?.response.body?.cancel().catch(() => undefined);
-      try {
-        await pause(wait, this.#signal);
-      } catch (error) {
-        throw this.#ended(error, request, attempt, reached, sawKeyedLayer);
       }
     }
   }
