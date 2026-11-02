@@ -2879,6 +2879,7 @@ describe("envoy OMP extension", () => {
         urgency: "blocking",
         expects_reply: "required",
         expires_at: 1_788_956_000_000,
+        idempotency_key: "0f6c1e3a-7d2b-4c8e-9a51-3b7e2d4f6a80",
       });
     expect(sent?.content[0]?.text).toBe(
       "sent evt_1 to ses_target (recipient unconfirmed by listener)"
@@ -2937,7 +2938,7 @@ describe("envoy OMP extension", () => {
           urgency: "blocking",
           expects_reply: "required",
           expires_at: 1_788_956_000_000,
-          idempotency_key: expect.any(String),
+          idempotency_key: "0f6c1e3a-7d2b-4c8e-9a51-3b7e2d4f6a80",
         },
       },
       {
@@ -3062,7 +3063,7 @@ describe("envoy OMP extension", () => {
       [
         "envoy_send was not called: 2 problems",
         '- expects_reply must be one of none|optional|required; got "no"',
-        '- unknown field "urgent"; allowed: session_id, message, in_reply_to, supersedes, urgency, expects_reply, expires_at',
+        '- unknown field "urgent"; allowed: session_id, message, in_reply_to, supersedes, urgency, expects_reply, expires_at, idempotency_key',
       ].join("\n")
     );
     expect(requests).toBe(0);

@@ -1,0 +1,10 @@
+kind: Fixed
+body: |-
+  A send any attempt of which got no answer (a timeout, a failed connection or an unreadable 2xx)
+  or a 5xx throws `EnvoySendUnconfirmedError` instead of the raw error, even when a later attempt
+  was refused: it says the message is not confirmed delivered, names the `idempotencyKey`, and
+  says in `resendSafe` whether Envoy recognises a resend under it inside the 72-hour duplicate
+  window as a repeat. A send refused with a 4xx on every attempt stays an `EnvoyApiError`.
+  `SendResult.duplicate` says the listener already held a send under that key. Each attempt reads
+  the answer's body under its deadline, inside the retry, and a 4xx whose body does not arrive is
+  still a refusal. `envoy_send` takes `idempotency_key` (a lower-case UUID).
