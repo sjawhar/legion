@@ -1,0 +1,16 @@
+kind: Fixed
+body: |-
+    A session consumer's relay no longer pushes a serving-port session a message it has already
+    delivered to it. The pair's record in the machine's delivery ledger is what says the message
+    landed, and one dropped connection could lose both that record and the acknowledgement of the
+    message: the server gave the message back after the reconnect, the relay's read of the ledger
+    failed too while the ledger's own connection was still reconnecting, and a ledger that could
+    not be read refused nothing, so the relay pushed the copy again. The relay now waits for the
+    ledger's answer, as the durable lane does, whichever order the session-consumer connection and
+    the ledger's reconnect in: a read that fails is retried once the ledger's connection is back
+    and then every second, with the message held unacknowledged and kept in progress meanwhile,
+    and the delivered record of a push the port took is written before the relay moves on to the
+    session's next message.
+time: 2026-11-02T23:30:00.000000000Z
+custom:
+    Issue: pr2404

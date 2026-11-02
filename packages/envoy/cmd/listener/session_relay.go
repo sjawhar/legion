@@ -931,9 +931,16 @@ func (m *sessionRelays) pushUntilAccepted(ctx context.Context, sessionID string,
 		// The port took it, so the pair is recorded delivered in the machine's shared ledger as
 		// the durable path records it (applyDeliveryOutcome's settleRecord): another copy of the
 		// same event, stored on another topic this session follows, is refused rather than pushed
-		// again, by this pod or the one that takes delivery over.
-		if recordErr := m.rules.ledger.Record(claim); recordErr != nil {
-			m.logger.Warn(ledgerUnavailableLine, slog.String("operation", "record"), slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("error", recordErr.Error()))
+		// again, by this pod or the one that takes delivery over. The relay waits for that record
+		// (recordDelivered) rather than moving on without it: the ack below shares the ledger's
+		// trouble often enough -- one dropped connection fails both -- and the copy the server
+		// then gives back is pushed again by whichever relay asks a ledger that holds only the
+		// attempt.
+		if !m.recordDelivered(ctx, sessionID, item, msg, claim) {
+			// The relay was stopped before the ledger took the record: the message stays unacked
+			// for the relay that pulls it next, which the attempt still standing holds until the
+			// ledger can answer for it.
+			return false, ctx.Err()
 		}
 		if ackErr := msg.Ack(); ackErr != nil {
 			m.logger.Warn("session relay could not ack a pushed message", slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("error", ackErr.Error()))
@@ -941,6 +948,34 @@ func (m *sessionRelays) pushUntilAccepted(ctx context.Context, sessionID string,
 		m.logger.DeliveryLog(slog.LevelInfo, "session relay pushed", sessionID, item.Topic, item.EventID, "delivered", slog.Int("attempts", attempt))
 		return true, nil
 	})
+}
+
+// recordDelivered records the pair delivered in the machine's shared ledger, asking again for as
+// long as the ledger cannot take the record: a pair left attempted is one a later pull of this
+// consumer, here or on the pod that takes delivery over, cannot tell from a push in flight, and
+// the message the port has already taken would be pushed again once that attempt lapsed. Each ask
+// waits out ledgerReconnectWait for the ledger's connection first, as the durable lane's does
+// (ledgerAttempt), and then relayHeldRecheck, so a ledger that fails with its connection up is
+// asked once a second rather than in a spin.
+//
+// msg is kept in progress and unacked throughout, so its ack wait never runs out under the wait;
+// the session's later messages wait behind it, as they wait behind a push the port keeps refusing
+// (pushUntilAccepted). It returns false when the relay was stopped before the record landed.
+func (m *sessionRelays) recordDelivered(ctx context.Context, sessionID string, item contracts.Envelope, msg bus.SessionMessage, claim dedupe.Attempt) bool {
+	for {
+		recordErr := m.rules.ledger.Record(claim)
+		if recordErr == nil {
+			return true
+		}
+		m.logger.Warn(ledgerUnavailableLine, slog.String("operation", "record"), slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.Bool("retry", true), slog.String("error", recordErr.Error()))
+		_ = msg.InProgress()
+		if m.cfg.ledgerReconnected != nil {
+			m.cfg.ledgerReconnected(ctx)
+		}
+		if waitUnlessDone(ctx, relayHeldRecheck) != nil {
+			return false
+		}
+	}
 }
 
 // refuseUnreachableAddress gives up a push the session's address refuses before any request is
@@ -998,6 +1033,10 @@ const (
 	// relayHoldsIt: another path is already pushing this message (an attempt record), so the relay
 	// neither pushes nor acks it yet (holdWhilePushedElsewhere).
 	relayHoldsIt
+	// relayDefersIt: the delivery ledger could not be read, so what the session already has and
+	// what is already on its way to it are both unknown; the relay neither pushes nor acks the
+	// message and asks the ledger again (holdWhilePushedElsewhere).
+	relayDefersIt
 	// relayStopped: the relay was stopped while it held the message, which stays unacked.
 	relayStopped
 )
@@ -1017,7 +1056,7 @@ const (
 //
 // A message on the session's agent subject, a role forward included, is addressed to this session
 // alone and is never refused here.
-func (m *sessionRelays) followedTopicVerdict(sessionID string, item contracts.Envelope) (relayVerdict, dedupe.Attempt) {
+func (m *sessionRelays) followedTopicVerdict(ctx context.Context, sessionID string, item contracts.Envelope) (relayVerdict, dedupe.Attempt) {
 	verdict, judgeErr := takeFollowedTopic, error(nil)
 	if !isControlTopic(item.Topic) {
 		mode, modeErr := envelopeDeliveryMode(item)
@@ -1031,11 +1070,23 @@ func (m *sessionRelays) followedTopicVerdict(sessionID string, item contracts.En
 	// on its way to it, from this pod or another of the machine's, and claims the pair for this
 	// relay when neither holds (dedupe.Proceed).
 	claim, ledgerErr := m.rules.ledger.Attempt(item.DedupeKey, sessionID)
+	if ledgerErr != nil && m.cfg.ledgerReconnected != nil && m.cfg.ledgerReconnected(ctx) {
+		// The call failed while the ledger's connection was reconnecting, as the durable lane's
+		// first call does (ledgerAttempt): ask once more now that the connection is back.
+		first := ledgerErr
+		if claim, ledgerErr = m.rules.ledger.Attempt(item.DedupeKey, sessionID); ledgerErr == nil {
+			m.logger.Info("delivery ledger answered once its connection was back", slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("first_error", first.Error()))
+		}
+	}
 	if ledgerErr != nil {
-		// A ledger that cannot be read refuses nothing: the relay pushes under the zero attempt,
-		// which settles nothing, and a copy the session already has it drops by its dedupe key.
-		m.logger.Warn(ledgerUnavailableLine, slog.String("operation", "attempt"), slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("error", ledgerErr.Error()))
-		claim = dedupe.Attempt{}
+		// A ledger that cannot be read refuses nothing, and a relay that pushed under its silence
+		// would push a copy of a message this pod had already delivered -- the one whose record or
+		// ack was lost with the same connection. The durable lane NAKs such a message for a retry
+		// (ledgerAttempt), and the relay defers it likewise: it pushes nothing until the ledger
+		// answers, whichever of the session's consumer connection and the ledger's connection
+		// comes back first.
+		m.logger.Warn(ledgerUnavailableLine, slog.String("operation", "attempt"), slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.Bool("retry", true), slog.String("error", ledgerErr.Error()))
+		return relayDefersIt, dedupe.Attempt{}
 	}
 	switch claim.Verdict {
 	case dedupe.Delivered:
@@ -1063,8 +1114,9 @@ func (m *sessionRelays) followedTopicVerdict(sessionID string, item contracts.En
 }
 
 // holdWhilePushedElsewhere judges item for the relay and holds msg while another path's push of it
-// is in flight, judging it again every relayHeldRecheck and keeping it in progress meanwhile. It
-// returns the verdict the hold ended on, relayStopped when the relay was stopped first.
+// is in flight, or while the delivery ledger cannot say whether one is, judging it again every
+// relayHeldRecheck and keeping it in progress meanwhile. It returns the verdict the hold ended on,
+// relayStopped when the relay was stopped first.
 //
 // Only a message the relay would otherwise push is held: followedTopicVerdict judges as if no
 // record stood, and acks a refusal the fan-out recorded as it reported it, so no refusal record
@@ -1091,20 +1143,35 @@ func (m *sessionRelays) followedTopicVerdict(sessionID string, item contracts.En
 // consumer's MaxAckPending (bus.SessionConsumerMaxAckPending) and are redelivered without limit
 // (MaxDeliver -1) until the relay takes each in turn, the redelivered copies of the ones it has
 // pushed by then acked and skipped (relayServingPort's pushedThrough).
+//
+// A ledger that cannot be read holds the message likewise (relayDefersIt), for as long as it
+// cannot: a push under its silence is the one way this relay sends a message twice, since the
+// record of the copy it has already delivered is exactly what the ledger holds. The durable lane
+// NAKs such a message for durableRetryDelay and meets the same ledger on the retry, so neither
+// lane pushes without the ledger's answer and neither gives up on it; each ask first waits out
+// ledgerReconnectWait for the ledger's connection, so a relay whose session-consumer connection
+// came back first sends nothing until the ledger's does.
 func (m *sessionRelays) holdWhilePushedElsewhere(ctx context.Context, sessionID string, item contracts.Envelope, msg bus.SessionMessage) (relayVerdict, dedupe.Attempt) {
 	var since time.Time
+	var resumed string
 	for {
-		verdict, claim := m.followedTopicVerdict(sessionID, item)
-		if verdict != relayHoldsIt {
+		verdict, claim := m.followedTopicVerdict(ctx, sessionID, item)
+		if verdict != relayHoldsIt && verdict != relayDefersIt {
 			if !since.IsZero() && verdict == relayPushesIt {
-				m.logger.DeliveryLog(slog.LevelInfo, "session relay pushes a message whose other push ended unlanded", sessionID, item.Topic, item.EventID, "retrying",
+				m.logger.DeliveryLog(slog.LevelInfo, resumed, sessionID, item.Topic, item.EventID, "retrying",
 					slog.String("dedupe_key", item.DedupeKey), slog.String("held", time.Since(since).String()))
 			}
 			return verdict, claim
 		}
 		if since.IsZero() {
 			since = time.Now()
-			m.logger.DeliveryLog(slog.LevelInfo, "session relay holds a message another path is pushing", sessionID, item.Topic, item.EventID, "retrying", slog.String("dedupe_key", item.DedupeKey))
+			held := "session relay holds a message another path is pushing"
+			resumed = "session relay pushes a message whose other push ended unlanded"
+			if verdict == relayDefersIt {
+				held = "session relay holds a message the delivery ledger cannot answer for"
+				resumed = "session relay pushes a message the delivery ledger answered for"
+			}
+			m.logger.DeliveryLog(slog.LevelInfo, held, sessionID, item.Topic, item.EventID, "retrying", slog.String("dedupe_key", item.DedupeKey))
 		}
 		_ = msg.InProgress()
 		if waitUnlessDone(ctx, relayHeldRecheck) != nil {

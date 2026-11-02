@@ -131,9 +131,14 @@ func TestALostLeaseDropsTheServingPortPushesOfItsTerm(t *testing.T) {
 // account for no better than a handler that ignored its own cancel, so the pod that takes the
 // record over settles for the ack wait rather than the hand-back's 3 s.
 func TestAStopWhoseServingPortPushIgnoresItsCancelMarksNoHandBack(t *testing.T) {
+	pushing := make(chan struct{}, 1)
 	harness := newListenerDeliveryHarness(t, listenerTransport(func(request *http.Request) (*http.Response, error) {
 		// A serve process that answers no cancel: the request runs its course whatever the push's
 		// context says, well past the stop's wait for the workers (servePortTermStopWait).
+		select {
+		case pushing <- struct{}{}:
+		default:
+		}
 		time.Sleep(2 * time.Second)
 		return listenerDeliveryResponse(http.StatusNoContent), nil
 	}))
@@ -151,8 +156,15 @@ func TestAStopWhoseServingPortPushIgnoresItsCancelMarksNoHandBack(t *testing.T) 
 	})
 
 	publish(t, harness.client, newEnvelope("agent", contracts.AgentSubject(sessionID), "the push that ignores its cancel"))
-	awaitDurablePending(t, harness.client, active, 1)
-
+	// The row is about the mark's gate on a worker still pushing, so the stop has to come while
+	// the worker's push is in the transport: a message only pending on the durable is one the
+	// stop can still take from the queue and hand back before any push began, and the pod would
+	// then mark the hand-over clean, rightly.
+	select {
+	case <-pushing:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the worker never pushed the message to the session's port")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	active.receiver.Stop(ctx)

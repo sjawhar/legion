@@ -350,6 +350,10 @@ standby answering `/v1`, answers as the active pod would:
   lane; an older one is taken over, since its writer died. A repeat with the same event id is
   possible after a hard take-over. A ledger that cannot be read NAKs the durable message for a
   retry; the role and live lanes then deliver without it and log `delivery ledger unavailable`.
+  The relay of a session's consumer defers likewise and pushes nothing until the ledger answers,
+  whichever order its own connection and the ledger's reconnect in, and it waits for the pair's
+  delivered record before it moves on: a pod that pushed under the ledger's silence would send
+  the session the copy its own lost record stands for.
 - **Delivery exceptions** carry an id derived from the event id, the recipient session and the
   reason, so a redelivery that fails the same way publishes an exception with the same id and
   dedupe key, which the stream stores once.

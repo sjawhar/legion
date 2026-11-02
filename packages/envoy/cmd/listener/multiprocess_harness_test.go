@@ -67,6 +67,14 @@ const (
 	// mpQuiet is how long a row watches for a repeat after every message arrived: past the ack wait
 	// (6 s), so a message a pod held without acking and that came back would have arrived.
 	mpQuiet = 8 * time.Second
+	// mpKillInFlight is how long before a SIGKILL a message's push may have landed and still count
+	// as in flight at the kill (requireOnceExceptInFlight): a pod that pushed a message earlier
+	// than this had time to record it delivered, so the pod taking over skips it and a repeat of
+	// it is a fault, while one pushed inside the window may have died with its record unwritten.
+	// A delivered record is one KV write, milliseconds on the box the rows run on; a second is
+	// three orders of magnitude over that and still far under the 6 s ack wait that brings the
+	// message back.
+	mpKillInFlight = time.Second
 )
 
 // mpHTTP is every row's HTTP client. Its timeout is the 10 s every answer a row asserts on must
@@ -948,6 +956,36 @@ func (s *mpServingPort) requireOnce(t *testing.T, messages []mpMessage) {
 	}
 	if len(wrong) > 0 {
 		t.Fatalf("%d of %d messages were not prompted exactly once: %v", len(wrong), len(messages), wrong)
+	}
+}
+
+// requireOnceExceptInFlight fails the test unless every message reached its session, and each
+// reached it exactly once, except that a message whose delivery was still in flight at moment -
+// the instant a pod was killed - may have reached it twice: that is the one repeat a hard
+// take-over allows (cmd/listener/README.md, "A repeat with the same event id is possible after a
+// hard take-over"), because the killed pod died between the push its session took and the
+// delivered record that would have told the pod taking over.
+//
+// A message counts as in flight at moment when it was published before it and its session had
+// not taken it, by its first prompt, more than window before it: an earlier prompt than that is
+// one the killed pod had time to record, and a repeat of it is a fault.
+func (s *mpServingPort) requireOnceExceptInFlight(t *testing.T, messages []mpMessage, moment time.Time, window time.Duration) {
+	t.Helper()
+	counts := s.counts()
+	var wrong []string
+	for _, m := range messages {
+		count, limit, want := counts[m.event], 1, "once"
+		took, taken := s.first(m.session, m.event)
+		if m.published.Before(moment) && (!taken || took.After(moment.Add(-window))) {
+			limit, want = 2, "once, or twice as a push in flight at the kill"
+		}
+		if count >= 1 && count <= limit {
+			continue
+		}
+		wrong = append(wrong, fmt.Sprintf("%s to %s prompted %d times, want %s", m.event, m.session, count, want))
+	}
+	if len(wrong) > 0 {
+		t.Fatalf("%d of %d messages were prompted neither once nor, in flight at the kill, twice: %v", len(wrong), len(messages), wrong)
 	}
 }
 
