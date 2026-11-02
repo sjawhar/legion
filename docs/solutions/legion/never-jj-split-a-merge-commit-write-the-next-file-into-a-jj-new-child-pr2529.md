@@ -16,19 +16,21 @@ related_issues:
 
 Extends docs/solutions/legion/long-lived-branch-mechanics-jj-new-and-merge-not-rebase.md.
 
-After a forward merge the working copy sits **on the merge commit**. Every file you add next —
-the round's handoff above all — goes into a `jj new` child:
+After a forward merge the working copy sits **on the merge commit**. Every file you add next — a
+retro's `docs/solutions/` note above all — goes into a `jj new` child:
 
 ```bash
 jj -R "$LEGION_WORKSPACE" new -m "<message>"   # then write the file
 ```
 
 **Never `jj split` there.** `jj split` puts the selected paths in the *first* commit, which keeps
-the original parents, and the remainder in a new child. On a merge that inverts the two: the
-handoff lands inside the merge, the resolution is exiled to the child, and the merge — whose
+the original parents, and the remainder in a new child. On a merge that inverts the two: the new
+file lands inside the merge, the resolution is exiled to the child, and the merge — whose
 content is its parents' auto-merge plus its own diff — is left holding the materialised conflict.
 `jj undo` recovers it, and in a workspace that is its own clone (the Kubernetes runtime's issue
 pod) that undo touches nothing else; where the operation log is shared, recover forward instead.
+Before sjawhar/legion#2354 the file was the round's handoff above all. A handoff is a record on
+the Dispatch issue now, so the files that meet this are the round's code and its docs.
 
 The collision is in the instructions, not in jj: the worker skill gives `jj split` as *the* way
 to commit a phase's work, and the forward-merge procedure leaves `@` on a merge. They meet exactly

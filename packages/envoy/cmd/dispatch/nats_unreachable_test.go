@@ -341,16 +341,35 @@ func (p *dispatchProcess) waitForLog(t *testing.T, within time.Duration, parts .
 	}
 }
 
-// readStreamFrom is every envelope the stream retains past head, read by sequence rather than
-// through a consumer so the read creates nothing on the server and cannot miss a message a
-// consumer's filter would skip. A sequence the stream no longer holds is passed over.
+// readStreamFrom is every envelope the stream retains past head, in sequence order
+// (readStreamMessagesFrom).
 func readStreamFrom(t *testing.T, js natsgo.JetStreamContext, head uint64) []contracts.Envelope {
+	t.Helper()
+	messages := readStreamMessagesFrom(t, js, head)
+	items := make([]contracts.Envelope, len(messages))
+	for i, message := range messages {
+		items[i] = message.item
+	}
+	return items
+}
+
+// streamMessage is one envelope the stream retains and its sequence there.
+type streamMessage struct {
+	seq  uint64
+	item contracts.Envelope
+}
+
+// readStreamMessagesFrom is every envelope the stream retains past head, in sequence order, read
+// by sequence rather than through a consumer so the read creates nothing on the server and cannot
+// miss a message a consumer's filter would skip. A sequence the stream no longer holds is passed
+// over.
+func readStreamMessagesFrom(t *testing.T, js natsgo.JetStreamContext, head uint64) []streamMessage {
 	t.Helper()
 	info, err := js.StreamInfo(bus.Stream)
 	if err != nil {
 		t.Fatalf("read the notification stream: %v", err)
 	}
-	var items []contracts.Envelope
+	var messages []streamMessage
 	for seq := head + 1; seq <= info.State.LastSeq; seq++ {
 		msg, err := js.GetMsg(bus.Stream, seq)
 		if err != nil {
@@ -363,9 +382,9 @@ func readStreamFrom(t *testing.T, js natsgo.JetStreamContext, head uint64) []con
 		if err := json.Unmarshal(msg.Data, &item); err != nil {
 			t.Fatalf("decode message %d of the notification stream: %v", seq, err)
 		}
-		items = append(items, item)
+		messages = append(messages, streamMessage{seq: seq, item: item})
 	}
-	return items
+	return messages
 }
 
 // deliveryDurables are the two push durables the delivery intakes bind, one subscriber each.
