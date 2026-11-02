@@ -41,15 +41,21 @@ import { asUser } from "./users";
  *   (cd packages/contracts && bun run build) && cd packages/dispatch && bun run build:web && \
  *     DATABASE_URL='postgres://…' bun e2e/run.ts -- bunx playwright test \
  *     --config e2e/playwright.config.ts --project=chromium \
- *     view-budget.e2e.ts -g 'a view block costs the reader at most 10,000 more bytes'
+ *     view-budget.e2e.ts -g 'a view block costs the reader at most 15,000 more bytes'
  *
  * The row prints `view budget: … bytes of JavaScript` for the document it opened, at the base
  * commit and at this one alike, so the two runs the pull request quotes are those two lines.
  */
 const BASE_JS_BYTES: number | undefined = 1_780_431;
 
-/** What R6 allows the change to add to that number. */
-const BUDGET_BYTES = 10_000;
+/**
+ * What R6 allows the change to add to that number. It read 10,000 until a person raised it to
+ * 15,000 (dispatch://INFRA-682/ask/78430e75-b453-402d-924c-9506a00c6073, the spec approved at
+ * version 11), having been shown what 10,000 would have cost: the four-frame budget and the
+ * repaint splice both removed, which together bought 1,434 bytes and still left the change
+ * 2,646 over, and which made a streamed agent turn rebuild a block's frame on every repaint.
+ */
+const BUDGET_BYTES = 15_000;
 
 const CAPTION = "Attempts of the kernel boot loop.";
 
@@ -137,7 +143,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("a view block costs the reader at most 10,000 more bytes of JavaScript", async ({
+test("a view block costs the reader at most 15,000 more bytes of JavaScript", async ({
   browser,
 }) => {
   test.skip(
