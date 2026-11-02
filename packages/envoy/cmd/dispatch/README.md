@@ -2411,7 +2411,7 @@ Each item below names a path with its method and identity, then its purpose.
   a document's, comment's or message's own read also lists the edges at its blocks, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`, and a reply that names a block of the comment or message read is listed once, under that block.
   A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`;
   pinned to a version (`#b-<id>@v<N>`; for a comment's block, a revision of the comment) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges.
-  `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`, `INVALID_REFERENCE` too for a message block pinned with `@v<N>` (a message never changes);
+  `400 INVALID_REFERENCE` / `INVALID_SINCE`, `INVALID_REFERENCE` too for a message block pinned with `@v<N>` (a message never changes);
   `404` for a node that does not exist, a block no current version or revision holds (unpinned) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at, or a revision past the comment's current one or that did not hold the block.
   A `since` read stops at the event log's safe horizon, and first waits up to 1 s for the horizon to pass every event committed before the read, so it answers every mention committed before it, the caller's own included;
   when an open transaction holds the horizon back past that wait, it answers the mentions at or below the horizon and a later read the rest.
