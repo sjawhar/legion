@@ -446,9 +446,9 @@ func topicRecipients(d *listenerDeps, item contracts.Envelope) []string {
 // publish, so the refusal is the recipient's subject or the grant's, not the sender's input.
 //
 // Only a receipt that arrived through the route counts, which is why it reads the route's own
-// record (listenerDeps.confirmed) and not the delivery handlers' cache: with the live topics lane
-// on, the lane receives this send's own publish on the topic, and its fanout records there every
-// self-subscribed session on this machine it skipped, having heard nothing from it.
+// record (listenerDeps.confirmed) and not the delivery handlers' cache: the durable reads this
+// send's own publish back off the stream, and the fanout it runs records there every
+// self-subscribed session on this machine whose delivery it skipped, having heard nothing from it.
 func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.Envelope, sessionID string) sendOutcome {
 	var lastForward error
 	for {

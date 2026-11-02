@@ -22,11 +22,10 @@ var ErrNoSessionRecord = errors.New("no session record")
 
 // Deliverer decides what a delivery to the session a delivery resolved comes to: the session's own
 // consumer relays the message, or the session takes it off its own NATS subscription. It holds no
-// session source of its own: every caller resolves the entry it decides on and hands it over
-// (DeliverWithResultForEntry), so the record the decision acts on is the one that caller read.
-type Deliverer struct {
-	MachineID string
-}
+// state at all: every caller resolves the entry it decides on and hands it over
+// (DeliverWithResultForEntry), so the record the decision acts on is the one that caller read, and
+// nothing of the listener it runs in enters the decision.
+type Deliverer struct{}
 
 // DeliveryResult describes a completed delivery attempt.
 type DeliveryResult struct {
@@ -41,7 +40,7 @@ type DeliveryResult struct {
 // DeliverWithResultForEntry decides the delivery through the session entry resolved for
 // this attempt. A nil entry produces ErrNoSessionRecord, the same result a
 // failed lookup produces, so a caller can avoid a second registry read. It is
-// the live and core paths' delivery: the message is not the durable's copy of a stored
+// the core path's delivery: the message is not the durable's copy of a stored
 // one, so a session on consumer delivery is left its consumer's copy whatever its sequence
 // (Resolve's storedSeq 0).
 func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest store.Interest, entry *SessionEntry) (DeliveryResult, error) {
