@@ -384,7 +384,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "branch push",
 			subject: "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208",
 			file:    "github/push.json",
-			want:    Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: "before-captured", After: "head-captured", ChangedPaths: new(".legion/plan.json\nsource.go"), Truncated: new("false"), Pusher: "author", Sender: "author"},
+			want:    Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: "before-captured", After: "head-captured", Pusher: "author", Sender: "author"},
 		},
 		{
 			name:    "comment",
@@ -1802,12 +1802,11 @@ func TestDecodeDispatchIssueNamesASessionActor(t *testing.T) {
 	}
 }
 
-// The listener's forced marker, GitHub's review id and the review's submission time reach the
-// facts: the workflow reads a push without the marker as forced and orders reviews by submission
-// time then id, so each must survive decoding exactly. A review id that is not a positive integer
-// is refused rather than read as none. A time that cannot be read is taken as none and reported,
-// since a review without one is still ordered, by its id.
-func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
+// GitHub's review id and the review's submission time reach the facts: the workflow orders reviews
+// by submission time then id, so each must survive decoding exactly. A review id that is not a
+// positive integer is refused rather than read as none. A time that cannot be read is taken as none
+// and reported, since a review without one is still ordered, by its id.
+func TestDecodingCarriesTheReviewOrder(t *testing.T) {
 	withPayload := func(t *testing.T, name, subject string, set map[string]any) (decodedMessage, error) {
 		t.Helper()
 		var envelope map[string]any
@@ -1833,15 +1832,8 @@ func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
 		}
 		return decodeMessage(subject, "CAPTURE", capturedRepositories, nil, data)
 	}
-	pushSubject := "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208"
 	reviewSubject := "notifications.github.sjawhar.legion.pr.42.review"
 
-	for _, forced := range []string{"true", "false"} {
-		decoded, err := withPayload(t, "push.json", pushSubject, map[string]any{"forced": forced})
-		if push, ok := decoded.Fact.(Push); err != nil || !ok || push.Forced == nil || *push.Forced != forced {
-			t.Fatalf("push with forced %q = %#v, %v", forced, decoded.Fact, err)
-		}
-	}
 	decoded, err := withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010",
 		"submitted_at": "2026-09-26T12:03:00+02:00"})
 	submitted := time.Date(2026, 9, 26, 10, 3, 0, 0, time.UTC)

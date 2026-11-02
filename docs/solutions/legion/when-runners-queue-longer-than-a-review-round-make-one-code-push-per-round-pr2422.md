@@ -16,11 +16,12 @@ related_issues:
 
 Extends docs/solutions/legion/an-implement-handoff-push-runs-ci-in-full-and-cancels-the-code-heads-runs-cite-the-tips-runs-and-give-the-lane-the-code-heads-image-LEGION-631.md.
 
-- A code push cancels the queued `CI` run of the push before it, as a handoff push without the
-  trailer does. When runners queue longer than a review round, every run is cancelled before it
-  starts, and no required check ever completes.
+- A code push cancels the queued `CI` run of the push before it. Before sjawhar/legion#2354 a
+  handoff push without the trailer did too. When runners queue longer than a review round, every
+  run is cancelled before it starts, and no required check ever completes.
 - Put each round's fixes and any merge of main into one code push: commit the fix, merge main on
-  top of it, and push once. After that push only handoff pushes follow, each with
+  top of it, and push once. A handoff is a record on the Dispatch issue, so that push is the
+  round's only one. Before sjawhar/legion#2354 only handoff pushes followed it, each with
   `skip-checks: true`.
 - Merge main only when GitHub reports the pull request `CONFLICTING`. A merge to stay current is
   one more code push that cancels the run.

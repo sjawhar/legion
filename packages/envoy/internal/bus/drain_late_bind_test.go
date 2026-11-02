@@ -61,7 +61,7 @@ func TestDrainLetsTheDeliveriesOfABindEndingAfterTheStopFinish(t *testing.T) {
 				if tc.late {
 					return
 				}
-				if err := client.RequestCoreTo(holderSubject, contracts.Envelope{EventID: "drain-late-bind"}, 2*time.Second); err != nil {
+				if err := client.RequestCoreTo(holderSubject, contracts.Envelope{EventID: "drain-late-bind"}, "", 2*time.Second); err != nil {
 					forwardErr.Store(err.Error())
 					return
 				}
