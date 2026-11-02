@@ -283,7 +283,6 @@ So redelivering a delivery that did reach the stream adds nothing to the stream.
 
 The cursor, one record per delivery acted on, one index entry per open delivery, keyed `pending.<YYYYMMDD>.<HH>.<MM>.<GUID>` by the minute that delivery next needs a sweep, and the marker that says when a back-fill last gave every open record an entry live in the JetStream KV bucket `envoy_webhook_redelivery`.
 Its 72-hour TTL matches GitHub's horizon, and an index entry a sweeper died before deleting expires with the records.
-The running sweep reads from that index the deliveries due in its window; the operator command reads every record there is.
 A sweep that meets open records an older build wrote without entries gives each one an entry and then writes the marker, which holds the moment that sweep started, at or before the scan it read the records with.
 Once that moment is further behind than the sweep's look-back, the next sweep reads every record again, so the whole-bucket read costs one sweep an hour at most for as long as those back-fills land: a back-fill that leaves a record unindexed writes no marker, so the sweep after it reads every record again;
 a sweep that reads a cursor an older build wrote — one carrying no mark of this build's — back-fills at once rather than waiting out that hour.

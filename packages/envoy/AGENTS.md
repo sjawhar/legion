@@ -84,7 +84,7 @@ Each item below names a task and where its code is, then notes on it.
   `ENVOY_STREAM_MAX_BYTES`: a positive whole number of bytes, the stream's byte limit, past which a full stream refuses new publishes (`DiscardNew`;
   the retryable `bus.ErrStreamFull`) and keeps every stored message until it is 72 hours old.
   A GitHub webhook a full stream refuses is answered 503, and Dispatch's redelivery sweep (`internal/dispatch/redeliver`) asks GitHub to resend it, so it comes back once the stream has room;
-  INFRA-493 extends that sweep to GitHub's 3-day redelivery window.
+  the sweep asks until GitHub records the delivery or 72 hours after its first failed attempt, GitHub's redelivery window.
   Unset, the stream is created with no limit and a start keeps a deployed one.
   Set, a start and the keeper raise a smaller deployed limit, or none, to it and never lower one, as for the copies, so an operator's raise of a full stream stands;
   lowering a limit is an operator step once every program's setting is lowered.
@@ -2407,8 +2407,6 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   404 without a source); and the `dispatch architecture-sync` command of this release riding the every-source route, or the one-source route with `--repo`.
   `DELETE /api/v1/projects/{key}/architecture-sources/{owner}/{repo}` deletes that source's `components` by the foreign key's cascade, and their `component_depends` by theirs, in the same transaction (the graph loses those component arms), then the `component_facts` rows whose component no source of the project projects any more (`architecture.DeleteOrphanComponentFacts`);
   every other source's components stay, and snapshots remain as history.
-  A sync that hits its own two-minute deadline while the caller is still alive is recorded on the row like any other failure (the record write runs on a cancel-free context);
-  a caller that has gone away records nothing.
   The state-change decision behind both events is made from the source's row as read under its lock, so the second of two server processes that fetched the same head (or hit the same failure) stays silent;
   a sync held by a recorded GitHub rate limit fails with text that names the limit by when it was recorded, never by its remaining wait, so one limit is one `sync_failed`.
   A `PUT` that re-saves a source (changing its branch) resets `last_tree_sha` with the other sync columns, so a byte-identical architecture directory on the new branch still re-projects once.
