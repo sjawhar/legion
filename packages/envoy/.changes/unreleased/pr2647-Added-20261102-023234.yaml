@@ -1,0 +1,5 @@
+kind: Added
+body: 'A `view` block in a document, comment, reply, ask or message draws an HTML page Dispatch holds, with the data files a person granted that page. `GET /api/v1/artifacts/{id}/versions/{number}/page` serves one version of a page file as HTML to a frame, under a Content-Security-Policy whose `sandbox` directive gives the page an opaque origin and whose `''none''` sources stop every request it could make; it answers `attachment` to any other request, and `404 ARTIFACT_NOT_FOUND`, `415 NOT_A_PAGE` or `413 PAGE_TOO_LARGE` to a refusal. `GET`, `POST` and `DELETE /api/v1/artifacts/{id}/grants` list, add and remove the data grants of a page file; only a person may write one, and every token gets `403 HUMAN_ONLY`. Each change writes the quiet event `artifact.grants_changed`. An issue summary and a document summary now carry each latest version''s `size`.'
+time: 2026-11-02T02:32:34.008029486Z
+custom:
+    Issue: pr2647

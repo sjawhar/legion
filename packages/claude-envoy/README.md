@@ -261,10 +261,11 @@ human approval surface.
 
 ## Skills
 
-The plugin ships seven skills, `claude-envoy:envoy`, `claude-envoy:dispatch`,
-`claude-envoy:dispatch-first`, `claude-envoy:dispatch-writing-specs`, `claude-envoy:asd-ste100`,
-`claude-envoy:outside-message` and `claude-envoy:plain-words`.
-The first four teach the Envoy tools, the `dispatch` command and how to write a spec; `asd-ste100` gives the
+The plugin ships eight skills, `claude-envoy:envoy`, `claude-envoy:dispatch`,
+`claude-envoy:dispatch-first`, `claude-envoy:dispatch-writing-specs`, `claude-envoy:dispatch-view`,
+`claude-envoy:asd-ste100`, `claude-envoy:outside-message` and `claude-envoy:plain-words`.
+The first four teach the Envoy tools, the `dispatch` command and how to write a spec; `dispatch-view`
+documents the `view` block and the HTML page it draws; `asd-ste100` gives the
 ASD-STE100 rules for text a person reads; `outside-message` holds the steps and the approval before text
 reaches a person outside the company, and `plain-words` the empty verb phrases to delete from any text a
 person reads.
@@ -275,7 +276,7 @@ on every `SessionStart` (startup, resume, clear, compact, fork) and `SubagentSta
 `hooks/hooks.json` bullet above describes; it sends a spec, or an ask, comment or message a person
 reads, to `dispatch-writing-specs`, which the session loads by name.
 
-`envoy`, `dispatch`, `dispatch-first`, `dispatch-writing-specs`, `asd-ste100`, `outside-message` and `plain-words` are the seven a standalone Claude Code session uses. The other root skills
+`envoy`, `dispatch`, `dispatch-first`, `dispatch-writing-specs`, `dispatch-view`, `asd-ste100`, `outside-message` and `plain-words` are the eight a standalone Claude Code session uses. The other root skills
 stay out of this plugin: they belong to Legion's roles (the architect, controller, oracle and retro
 skills, and the phase workers' `legion-worker` and `ce-simplify-code`) and to the reviewer's
 `thermonuclear-*` pair (`skills/AGENTS.md`). A phase worker on Claude Code gets them from the

@@ -1,0 +1,5 @@
+kind: Added
+body: 'The plugin ships an eighth skill, `dispatch-view`: how to write the HTML page a Dispatch `view` block draws. It documents the block and its `page` and `data` attributes, the three `postMessage` messages, every `error` code a data entry can carry, the grants a person sets and the ask that gets one, the limits on files, frames and messages, the rule to read only a message whose source is `window.parent`, and `minimal-page.html`, a working page to copy.'
+time: 2026-11-02T02:32:56.042533668Z
+custom:
+    Issue: pr2647

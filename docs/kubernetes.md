@@ -392,6 +392,8 @@ The Envoy plugin ships these skills in its `dist/skills`:
 
 - `dispatch-first`
 
+- `dispatch-view`
+
 - `dispatch-writing-specs`
 
 - `envoy`

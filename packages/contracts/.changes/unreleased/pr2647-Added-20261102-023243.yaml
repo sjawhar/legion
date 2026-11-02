@@ -1,0 +1,5 @@
+kind: Added
+body: 'The `view` block''s contracts: `ArtifactGrant` and `ArtifactGrantsResponse`, the data files a person granted one page file, and the `artifact.grants_changed` member of `DispatchEvent` with `ArtifactGrantsChangedEventPayload`. An issue summary document and a document summary now carry the latest version''s `size`, which a block reads to hold its data under the 16 MiB limit before it fetches any bytes.'
+time: 2026-11-02T02:32:43.737485096Z
+custom:
+    Issue: pr2647

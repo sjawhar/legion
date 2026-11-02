@@ -32,7 +32,10 @@
       A reload fires beforeunload itself, so that handler does not spend the budget again for the
       same failure. Storage that cannot be read or written reloads nothing, since nothing would
       bound the reloads.
-      Dispatch sends no Content-Security-Policy; one would have to allow this script by its hash.
+      Dispatch sends no Content-Security-Policy with the application shell; one would have to
+      allow this script by its hash. The one route that sends a policy is
+      GET /api/v1/artifacts/{id}/versions/{number}/page, which serves a view block's page under
+      sandbox allow-scripts and default-src 'none', in its own opaque origin.
     -->
     <script>
       (() => {
