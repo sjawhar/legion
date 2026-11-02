@@ -2,88 +2,50 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-879",
-  "previousHandoff": "",
+  "previousHandoff": "94489002a1329ffc43c27c9dc5bd834a45c57a91",
+  "round": "review round 1: the reviewer's three threads, all answered and resolved",
   "proof": [
     {
-      "criterion": "A2 (R2) — in Dispatch's browser suite, /credentials/<record> goes to the Inbox, and the redirect test fails at the commit before this change and passes at its head.",
-      "surface": "Dispatch's browser suite: a real chromium against the real Dispatch server, the real secrets broker and the fake broker, started by e2e/run.ts on a Postgres of this pod's own.",
-      "command": "cd packages/dispatch && DATABASE_URL=postgres://legion_test@127.0.0.1:5433/e2e_879_1793578794?sslmode=disable PATH=\"$PWD/node_modules/.bin:$PATH\" bun run build:web && bun e2e/run.ts -- playwright test --config e2e/playwright.config.ts e2e/inbox.e2e.ts --project chromium -g 'credential record path'",
-      "observed": "2 passed (6.5s): 'a credential record path opens the Inbox' (page.goto(\"/credentials/record-old-broker\") shows the level-1 heading Inbox and no 'Page not found' heading) and 'a credential record path with no approve_url renders an unlinked row' (the Credential requests region holds the Secret request summary and zero links).",
-      "headSha": "0cea853349e8ab73f71fe33955ea969924d7558c",
-      "negativeControl": "The same two tests, unchanged, against the base build: jj restore --from 05d6578981a4 packages/dispatch/web/src, then bun run build:web, then the same playwright command → 2 failed, with 'expect(locator).toHaveCount(expected) failed' for the link count and 'expect(locator).toBeVisible() failed' / 'element(s) not found' for the Inbox heading. The head's spec file was run against the base build rather than checking the base out whole, which would have taken the new tests with it."
+      "criterion": "Thread PRRT_kwDORFy7ds6ygtJo (Important) — the dead branches the removal left on the machine page are gone, and the page still renders and decides a machine login.",
+      "surface": "Dispatch's browser suite: a real chromium against the real Dispatch server and the real secrets broker, which drives /credentials/machine through the code lookup and the Approve button.",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://legion_test@127.0.0.1:5433/e2e_879_r2?sslmode=disable PATH=\"$PWD/node_modules/.bin:$PATH\" bun run build:web && bun e2e/run.ts -- playwright test --config e2e/playwright.config.ts e2e/inbox.e2e.ts e2e/machine-login.e2e.ts --project chromium -g 'credential record path|machine-login'",
+      "observed": "3 passed (11.1s): 'the machine-login page finds a pending login by its typed code and Approve decides it on the broker', and both 'credential record path' rows. CredentialRecordFacts now renders Kind (the literal 'Machine login'), Identifiers, Lifetime, Requested, Expires, Policy version, Approver, the reason and the approving sentence; the Enrollment fact, the Worker slot fact, the Session fact and its useAgents call are gone, as is the record.kind === \"launcher_credential\" half of the last condition.",
+      "headSha": "d4ee12282c97d45bf34b831a04a6f5fc260b5e6d",
+      "negativeControl": "The same machine-login spec is the control for the removal: it drives the only route that produces a CredentialRecord (POST /v1/machine-logins/lookup), so a fact the page still needed would have gone missing there. Beside it, `bun test web/src/features/credentials` → 45 pass 0 fail, with MachineLoginPage.test.tsx and MachineLoginPage.decided.test.tsx unmodified."
     },
     {
-      "criterion": "A2 (R2) second half — /credentials/machine still decides a machine login, and the route walk sees the Inbox at /credentials/*.",
-      "surface": "The same browser suite, plus the two-build multiprocess walk (two Dispatch processes serving two SPA builds), which visits every route of e2e/two-builds-routes.ts.",
-      "command": "cd packages/dispatch && bun e2e/run.ts -- playwright test --config e2e/playwright.config.ts e2e/machine-login.e2e.ts --project chromium; then DISPATCH_BUILD=e2e-b vite build --config web/vite.config.ts --outDir dist-b && DISPATCH_E2E_PROCESSES=2 DISPATCH_E2E_WEB_DIST_B=../dispatch/web/dist-b bun e2e/run.ts -- playwright test --config e2e/playwright.config.ts e2e/two-builds.multiprocess.e2e.ts --project chromium",
-      "observed": "machine-login.e2e.ts: 1 passed (5.9s), the page finds a pending login by its typed code and Approve decides it on the broker. The walk: 5 passed (1.3m), including both 'every route renders with its page from Dispatch A/B and every asset from the other', whose /credentials/* visit opens /credentials/record-old-broker and reads the Inbox heading.",
-      "headSha": "e869668573261b1f2476382da9318f3f0168cf50",
-      "negativeControl": "The walk's own route-parity test, e2e/__tests__/two-builds-routes.test.ts, is the control for the table: it parses app.tsx and deep-equals the list, and it failed (CredentialRecordPage at /credentials/:recordId against InboxPage at /credentials/*) between the app.tsx edit and the table edit, then passed."
+      "criterion": "Thread PRRT_kwDORFy7ds6ygtJr (Minor) — waitingOn's two switches are one, with the page as a suffix, and every one of the six sentences is byte for byte what it was.",
+      "surface": "cmd/agent-secrets' own tests, which build the real binary and run it against a fake broker over HTTP, under four pending fixtures and with AGENT_SECRETS_APPROVE_URL both set and unset.",
+      "command": "cd packages/envoy && go test -count=1 ./cmd/agent-secrets/ -run 'Pending|WaitsOn'",
+      "observed": "ok github.com/sjawhar/envoy/cmd/agent-secrets 22.298s. gofmt -l prints nothing; go build ./... and go vet ./cmd/agent-secrets/ are clean.",
+      "headSha": "d4ee12282c97d45bf34b831a04a6f5fc260b5e6d",
+      "negativeControl": "TestAPendingRequestWithoutABrokerPageNamesItsApproverAlone pins the three no-page sentences by exact string, and pendingSentences pins the three with a page; a suffix in the wrong place, or a tail moved before the page, fails one of the two. The eight fixture subtests run each wording under both values of AGENT_SECRETS_APPROVE_URL."
     },
     {
-      "criterion": "A2 (R2) third half — internal/dispatch/api/routes_table_test.go shows the record-read route gone.",
-      "surface": "The Dispatch server's own Go suite, against this pod's Postgres.",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://legion_test@127.0.0.1:5433/infra879_impl?sslmode=disable go test -count=1 ./internal/dispatch/api/ -run 'TestRoutes|Credential' && go test -count=1 ./internal/dispatch/agentsecrets/",
-      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/api 6.204s; ok github.com/sjawhar/envoy/internal/dispatch/agentsecrets 0.047s. registeredRoutes is 146, and the table holds no GET /api/v1/credential-requests/{id}.",
-      "headSha": "0cea853349e8ab73f71fe33955ea969924d7558c",
-      "negativeControl": "TestRoutesTablePinsEveryRegisteredRoute is itself the control: left at 147 after the row was deleted, it fails with 'routes() has 146 rows, want 147'."
-    },
-    {
-      "criterion": "A3 (R3) — the broker's record-read route is gone, the decide routes still refuse a secret request with 403 DECIDE_ON_BROKER_PAGE, and a machine login is still decided there with its code.",
-      "surface": "The broker's own Go suite (every request crosses the real mux) and cmd/broker's live binary test, against this pod's Postgres.",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://legion_test@127.0.0.1:5433/infra879_impl?sslmode=disable go test -count=1 ./internal/broker/api/ -run 'TestTheRecordReadRouteIsGone|TestEveryCallerDecidingASecretRequestGetsDecideOnBrokerPage|MachineLogin' -v; and go test -count=1 ./cmd/broker/ -run TestAListedAccountReachesOnlyItsOwnRoutes",
-      "observed": "13 PASS in internal/broker/api (9.128s), TestTheRecordReadRouteIsGone, TestEveryCallerDecidingASecretRequestGetsDecideOnBrokerPage and eleven machine-login tests among them; ok github.com/sjawhar/envoy/cmd/broker 16.537s for the account-powers table, now ten rows with nine relaying.",
-      "headSha": "0cea853349e8ab73f71fe33955ea969924d7558c",
-      "negativeControl": "TestTheRecordReadRouteIsGone reads back a record the store holds, which the old route answered 200 for (the test it replaces asserted exactly that at api_test.go:1247); it is red before this change and green after, so a 404 there says the mux has no such route rather than that the record is missing."
-    },
-    {
-      "criterion": "A4 (R4) — agent-secrets prints the broker's approve_url for a pending secret request, and the machine-login output is unchanged.",
-      "surface": "cmd/agent-secrets' own tests, which build the real binary and run it against a fake broker over HTTP.",
-      "command": "cd packages/envoy && go test -count=1 ./cmd/agent-secrets/ -run 'Pending|WaitsOn|MachineLogin' -v",
-      "observed": "ok github.com/sjawhar/envoy/cmd/agent-secrets 80.208s. TestRequestAndStatusNameWhomAPendingRequestWaitsOn and TestExecFormPendingExitsSeventyFiveWithNoChild pass for all four fixtures with AGENT_SECRETS_APPROVE_URL both unset and set, so the setting no longer changes a pending line; TestAPendingRequestWithoutABrokerPageNamesItsApproverAlone pins the three no-page sentences; TestMachineLoginPrintsTheCodeAndWaits, ...PrintsTheDispatchURLWhenApproveURLIsSet and ...PrintsTheBrokersVerificationURI pass unmodified.",
-      "headSha": "0cea853349e8ab73f71fe33955ea969924d7558c",
-      "negativeControl": "The two table tests run every fixture under AGENT_SECRETS_APPROVE_URL=https://dispatch.example/ as well as unset: a line that still built a Dispatch page would differ between the two runs and fail the second. machine.go is byte for byte unchanged (jj diff --stat prints 0 files changed)."
-    },
-    {
-      "criterion": "A5 (R5) — the documents say what is true after this change.",
-      "surface": "git, at the head of the issue branch.",
-      "command": "git grep -l -E 'credentials/:recordId|CredentialRecordPage|getCredentialRecord' -- docs README.md packages/envoy packages/dispatch ':!*CHANGELOG.md' ':!*/.changes/*' ':!docs/solutions' ':!*_test.go' ':!*.test.ts*' ':!*.e2e.ts'; git grep -n -E '/v1/credential-requests/\\{(id|record)\\}' -- packages docs README.md ':!*CHANGELOG.md' ':!docs/solutions'; git grep -n 'human.-auth proxy rows' packages/dispatch/AGENTS.md",
-      "observed": "The first grep prints nothing. The second names only the approve and deny routes (and the test lines and comments that quote them). The third reads 'the eight `human`-auth proxy rows', matching the eight rows credential_requests.go mounts; account_powers_test.go reads nine relay routes and all ten.",
-      "headSha": "0cea853349e8ab73f71fe33955ea969924d7558c",
-      "negativeControl": "The same first grep at the base, 05d6578981a4, prints packages/dispatch/AGENTS.md, packages/dispatch/e2e/two-builds-routes.ts, packages/dispatch/web/src/app.tsx and the four deleted web files."
+      "criterion": "Thread PRRT_kwDORFy7ds6ygtJt (Minor) — the first browser row's title says what it checks, and the acceptance command still selects exactly the two rows.",
+      "surface": "Playwright's own test listing, then the run itself.",
+      "command": "cd packages/dispatch && PATH=\"$PWD/node_modules/.bin:$PATH\" bunx playwright test --config e2e/playwright.config.ts e2e/inbox.e2e.ts --project chromium -g 'credential record path' --list",
+      "observed": "Total: 2 tests in 1 file — 'credential record path › a pending secret request with no approve_url is listed, counted, and renders an unlinked row' and 'credential record path › opens the Inbox'. Both pass in the run above.",
+      "headSha": "d4ee12282c97d45bf34b831a04a6f5fc260b5e6d",
+      "negativeControl": "The -g filter is the control: with the describe missing, the retitled row drops out of the selection and the listing reads one test rather than two."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/broker/api/routes_table.go, handlers_ui_records.go, api_test.go: the record-read route, readRecord, recordResponse.ApproveURL and wireRecord.ApproveURL go; TestTheRecordReadRouteLinksASecretRequestsPage becomes TestTheRecordReadRouteIsGone.",
-    "packages/envoy/internal/broker/requests/machine_read.go: RecordKind's doc loses its api.readRecord clause.",
-    "packages/envoy/cmd/broker/account_powers_test.go: the route row goes and the counts read nine relay routes of ten.",
-    "packages/envoy/internal/dispatch/api/routes_table.go, credential_requests.go, routes_table_test.go, credential_requests_test.go: the relay row and getCredentialRecord go, registeredRoutes is 146, and two tests move to GET /api/v1/credential-grants?approver=me.",
-    "packages/envoy/internal/dispatch/agentsecrets/client.go, client_test.go: Client.Record and its test go.",
-    "packages/envoy/cmd/agent-secrets/main.go, identity.go, main_test.go, source_test.go: waitingOn loses its recordID parameter and its six Dispatch arms for three that name the approver alone; pendingRecordID goes; the package comment, the help's AGENT_SECRETS_APPROVE_URL row and approveURL()'s doc name the machine-login page alone.",
-    "packages/dispatch/web/src/features/credentials/: CredentialRecordPage.tsx, its two test files and record.ts deleted; CredentialRequestsSection.tsx renders an unlinked row for a request with no page; CredentialDecisionButtons.tsx, CredentialRecordFacts.tsx, brokerPage.ts, CredentialSessionLines.tsx and session.ts lose the sentences that named the deleted page.",
-    "packages/dispatch/web/src/app.tsx, api/client.ts, api/types.ts, features/refs/routes.ts, features/refs/routes.test.ts: the lazy import and getCredentialRecord go, /credentials/* renders InboxPage, CredentialRecord.approve_url goes, and routeIsInbox answers true for that path.",
-    "packages/dispatch/e2e/: two-builds-routes.ts and the walk's visit follow app.tsx; the fake broker loses its records state, the GET /v1/credential-requests/ branch and the /__fixture/records seed; inbox.e2e.ts gains the two 'credential record path' rows.",
-    "packages/dispatch/AGENTS.md, packages/envoy/AGENTS.md, docs/site/src/content/docs/broker/guides/approve-a-request.md: the prose follows the removal.",
-    "packages/envoy/.changes/unreleased/pr2649-Removed-20261102-003422.yaml: the changelog fragment."
+    "packages/dispatch/web/src/features/credentials/CredentialRecordFacts.tsx: the Kind fact is the literal 'Machine login'; the Enrollment, Worker slot and Session facts, the useAgents call and three imports go; the last condition keeps only record.state === \"pending\"; the doc comment says the lookup returns machine logins alone.",
+    "packages/dispatch/web/src/features/credentials/CredentialSessionLines.tsx and session.ts: the Inbox row is their one caller, and the prose says so.",
+    "packages/dispatch/AGENTS.md: the session-lines citation, the machine page's facts list, and the enrollment.slot sentence, which moved into the grants paragraph, the one surface that still renders a slot.",
+    "packages/envoy/cmd/agent-secrets/main.go: waitingOn is one switch with the page as a suffix, and its doc comment says so.",
+    "packages/dispatch/e2e/inbox.e2e.ts: both rows are in test.describe(\"credential record path\", …), the first retitled."
   ],
   "trickyParts": [
-    "The browser rows are selected by the phrase 'credential record path', which both new test titles carry: `-g 'credential record path'` runs exactly those two and nothing else.",
-    "Running the browser suite in this pod: make a database of your own (`createdb -h 127.0.0.1 -p 5433 -U legion_test e2e_<stamp>`) and point DATABASE_URL at it, since the suite resets what it is given; `bunx playwright install chromium` with PLAYWRIGHT_BROWSERS_PATH left unset; `cd packages/contracts && bun run build` first, because Playwright resolves @legion/contracts through Node's conditions and reads dist/; and put packages/dispatch/node_modules/.bin on PATH, since e2e/run.ts spawns a bare `playwright`. Rebuild web/dist after every web/src edit: the rows serve the build, not the sources.",
-    "The one Playwright argument order that works is `playwright test --config e2e/playwright.config.ts <spec> --project chromium`: a spec written after --project is read as a second project name and the run dies with 'Project(s) ... not found'.",
-    "D1's route is `path=\"/credentials/*\"`, not the spec's literal `/credentials/:recordId`, because A5's grep forbids that string in app.tsx and e2e/two-builds-routes.ts. Rendering InboxPage under a second route made routeIsInbox wrong for that path, which the simplify pass caught: the shell decided the viewport and the peek-at-the-inbox drawer from it. routeIsInbox now matches the splat and excludes /credentials/machine, with a test.",
-    "The broker's and Dispatch's Go suites need a database of your own too: the pod's server refuses `create schema` in the shared `postgres` database (permission denied for database postgres), so BROKER_TEST_DATABASE_URL and DISPATCH_TEST_DATABASE_URL point at postgres://legion_test@127.0.0.1:5433/infra879_impl?sslmode=disable here."
+    "CredentialRecord.enrollment and .session stay on the TypeScript type although nothing reads them now: the broker still sends both fields on every record (buildRecordResponse), so the type is the response shape, which is the reason the reviewer itself gave for keeping RequestStatus.RecordID in Go. CredentialRecord.approve_url was different and was deleted: the broker no longer sends it at all.",
+    "Running the browser rows in this pod: a database of your own (createdb … e2e_879_r2) for DATABASE_URL, `cd packages/contracts && bun run build` first (Playwright resolves @legion/contracts through Node's conditions and reads dist/), packages/dispatch/node_modules/.bin on PATH, and the spec file written before --project, since a spec after it is read as a second project name."
   ],
-  "deviations": [
-    "One, the plan's own departure D1 and nothing further: the route is `/credentials/*` rendering InboxPage, where the spec's Design writes `/credentials/:recordId`. The behaviour the spec describes is what is built.",
-    "D2's wording is settled in the plan rather than by a person: the Inbox row renders the same summary unlinked, agent-secrets prints its three sentences without a URL, and the published guide's sentence names what the row renders instead of the string 'Decided on the secrets broker.', which is in no source file and never was. This is user-visible wording the architect may overrule.",
-    "The simplify pass applied three fixes beyond the plan's tasks, all caused by this diff: routeIsInbox (above), the now-unreachable CredentialRecord.approve_url field in api/types.ts, and the two session-line doc comments that still named the deleted record page."
-  ],
+  "deviations": [],
   "openQuestions": [
-    "Merge order with sjawhar/legion#2583 (feat/credential-page-kernel-facts) is settled by the INFRA-314 architect: INFRA-879 merges first and #2583 merges main forward after it. That pull request also edits packages/envoy/AGENTS.md and docs/site/.../approve-a-request.md, so the sentences changed in both files here are written on their own lines to keep its merge clean.",
-    "sjawhar/legion#2612 (legion/INFRA-317) owns e2e/inbox.e2e.ts and the browser suite's CI shape; #2519 and #2596 are ordinary rebases. Named for the architect, as the plan asks."
+    "One test of packages/dispatch fails in this pod and is not this change's: web/src/features/agents/AgentsPage.test.tsx, 'a live-view send out when the page reloads is sent again under its key and shown again', fails on await screen.findByRole after a lazy chunk loads. It fails the same way with app.tsx restored to the base 05d6578981a4 (84 pass 1 fail, three runs), and the full suite passed 3091/0 twice earlier today on this branch, so it is timing-sensitive under load rather than broken by this pull request. It touches nothing under features/credentials. Reported to the architect; no fix attempted here."
   ],
   "discoveredComplexity": [
-    "A1's checks against the production broker are the tester's rows and were not run here; the plan records R1's gate as already closed, with last_decision_at 2026-11-01T22:06:41.978747Z.",
-    "cmd/agent-secrets' full package does not pass in a Legion pod (gVisor answers SO_PEERPIDFD 'protocol not available' and denies the terminal ioctls), so the named subset ran here and CI's envoy-go job at the head covers the rest."
+    "The reviewer fixed one prose count itself, in c305b7423f90 (packages/envoy/AGENTS.md: relaysDecisions covers nine routes); that commit is in this branch below this round's two."
   ]
 }
