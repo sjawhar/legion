@@ -1374,12 +1374,13 @@ pg_disk_write() {
 #      same, so the watcher records that once, says the TERM did not leave this pod, and tries
 #      the stop again at its next poll, with that poll's own single read of the lock.
 #
-# One TERM trap holds for the whole function: it sets stopped and ends the nap the watcher is
-# in, and the watcher leaves at the next check -- the top of every poll, and again right after
-# the nap. So a TERM from pg_disk_watch_stop never cuts an act in half (the failure recorded,
-# the job stopped, the typing stopped); a TERM that lands between an act that failed and the
-# next nap leaves the watcher without acting again; and the step leaves no sleep of its own
-# behind.
+# One TERM trap holds for the whole function: it sets stopped and ends the nap the watcher is in,
+# and the watcher leaves at the next check -- the top of every poll, right after the nap starts and
+# again after it ends, and right before it acts, after the volume read. So a TERM from
+# pg_disk_watch_stop never cuts an act in half (the failure recorded, the job stopped, the typing
+# stopped); a TERM that lands between an act that failed and the next nap leaves the watcher without
+# acting again; a TERM during the volume read leaves it without acting at all; and the step leaves
+# no sleep of its own behind.
 pg_disk_watch() {
   local name=$1 dir=$2 job=$3 file=$4 pid=$5 start=$6 nap="" guard stopped=0 committed=0 recorded=0
   trap 'stopped=1; [ -z "$nap" ] || kill -- "$nap" 2>/dev/null' TERM
@@ -1387,6 +1388,8 @@ pg_disk_watch() {
     ((stopped == 0)) || return 0
     sleep "$PG_DISK_POLL_SECONDS" &
     nap=$!
+    # A TERM between the fork and that assignment found no nap to end, so it is ended here.
+    ((stopped == 0)) || { kill -- "$nap" 2>/dev/null; return 0; }
     wait "$nap" || true
     nap=""
     ((stopped == 0)) || return 0
@@ -1399,6 +1402,9 @@ pg_disk_watch() {
       pg_disk_low || continue
       committed=1
     fi
+    # The volume read is a foreground exec, so a TERM that came during it runs its trap only once
+    # the read is over: the step it watched has ended, and nothing of it is recorded or stopped.
+    ((stopped == 0)) || return 0
     guard=0
     runner_stop "$job" || guard=$?
     # The lock named this run, so the step failed on the volume whether or not kubectl took the
@@ -1703,79 +1709,67 @@ runner_stop() {
 # that answers decides it, for as long as that takes -- an API server no read of the lock
 # reaches blocks every run of this harness anyway.
 #
-# A TERM that left this pod (0) does not end the wait either: it keeps polling NAME's .rc and
-# prints timeout only once the job has recorded an exit status, so a step never goes on to its
-# after-work with its own load still running. RUNNER_STOP_GRACE_SECONDS bounds each step of
-# that stop -- the TERM, the SIGKILL and the exit status after it -- and with them the whole
-# wait past the deadline; only a lock no read answered (2 above) has it try again without a
-# bound. A job that has recorded nothing a grace after the TERM is sent one SIGKILL (the lock
-# read once more first, the same way), which the runner's sh wrapper answers with the job's
-# .rc, and the wait goes on polling for it. A kubectl that cannot reach the runner pod at all
-# (3: an exec into a pod that has gone answers "cannot exec into a container in a completed
-# pod") is tried again at every poll. It ends the wait non-zero once a grace has passed since
-# the deadline with no TERM delivered, two since the TERM with no SIGKILL delivered, or one
-# since the SIGKILL with no exit status read. Each of those ends names the runner pod the
-# wait could not reach and gives no exit status, so the step shell reading this output ends
-# there under errexit: its EXIT trap stops the disk watcher and the browser typing, the step
-# command exits, and with no command of the run alive the heartbeat stops renewing the lock
-# at its next pass -- rather than a step polling on for an exit status nothing is left to
-# record.
+# A TERM that left this pod (0) does not end the wait either: it keeps polling NAME's .rc and prints
+# timeout only once the job has recorded an exit status, so a step never goes on to its after-work
+# with its own load still running. RUNNER_STOP_GRACE_SECONDS bounds each step of that stop -- the
+# TERM, the SIGKILL and the exit status after it -- and with them the whole wait past the deadline;
+# only a lock no read answered (2 above) has it try again without a bound. A job that has recorded
+# nothing a grace after the TERM is sent one SIGKILL (the lock read once more first, the same way),
+# which the runner's sh wrapper answers with the job's .rc, and the wait goes on polling for it. A
+# kubectl that cannot reach the runner pod at all (3: an exec into a pod that has gone answers
+# "cannot exec into a container in a completed pod") is tried again at every poll. Each stop gets
+# one grace from when it fell due: the wait ends non-zero once a grace has passed since the deadline
+# with no TERM delivered, since the SIGKILL fell due (a grace after the TERM) with no SIGKILL
+# delivered, or since the SIGKILL with no exit status read. Each of those ends names the runner pod
+# and gives no exit status, so the step shell reading this output ends there under errexit: its EXIT
+# trap stops the disk watcher and the browser typing, the step command exits, and with no command of
+# the run alive the heartbeat stops renewing the lock at its next pass -- rather than a step polling
+# on for an exit status nothing is left to record.
 runner_wait() {
   local name=$1 deadline=$((EPOCHSECONDS + $2)) log_dir=${3:-$RUN_DIR/logs} pid=${4:-} start=${5:-} rc guard
-  local termed=0 killed=0
+  # signal is the stop that falls due next (TERM, then KILL, then none once both left this pod),
+  # and due the time it fell due: the deadline for the TERM, a grace after the TERM left for the
+  # KILL, and a grace after the KILL left for the exit status. Each gets one grace from due.
+  local signal=TERM due=$deadline sent=0
   while :; do
     if [ -n "$pid" ] && step_gone "$pid" "$start"; then
       note "job $name: the step that started this wait is gone; the wait ends, stopping no job"
       return 1
     fi
     if rc=$(kube_read exec runner -c runner -- cat "/work/logs/$name.rc" 2>/dev/null) && [[ $rc =~ ^[0-9]+$ ]]; then
-      ((termed == 0)) || rc=timeout
+      ((sent == 0)) || rc=timeout
       break
     fi
-    if ((termed == 0)) && ((EPOCHSECONDS >= deadline)); then
+    if [ -n "$signal" ] && ((EPOCHSECONDS >= due)); then
       guard=0
-      runner_stop "$name" || guard=$?
+      runner_stop "$name" "$signal" || guard=$?
       case $guard in
       0)
-        termed=$EPOCHSECONDS
-        note "job $name: the wait is past its deadline, so the runner job was sent its SIGTERM; it keeps polling for the job's exit status"
+        if [ "$signal" = TERM ]; then
+          note "job $name: the wait is past its deadline, so the runner job was sent its SIGTERM; it keeps polling for the job's exit status"
+          signal=KILL
+        else
+          note "job $name: no exit status within $RUNNER_STOP_GRACE_SECONDS s of the SIGTERM at its deadline, so the wait sent SIGKILL; it keeps polling for the job's exit status"
+          signal=""
+        fi
+        sent=1
+        due=$((EPOCHSECONDS + RUNNER_STOP_GRACE_SECONDS))
         ;;
       1)
-        note "job $name: the wait ends at its deadline, stopping no job and giving no exit status"
+        note "job $name: the wait ends, sending no SIG$signal and giving no exit status"
         return 1
         ;;
-      2) note "job $name: the wait is past its deadline and stops no job at this poll; it tries the stop again at the next one" ;;
+      2) note "job $name: no read of the lock answered, so the wait sends no SIG$signal at this poll; it reads the lock again at the next one" ;;
       *)
-        ((EPOCHSECONDS - deadline < RUNNER_STOP_GRACE_SECONDS)) || {
-          note "job $name: no SIGTERM reached the runner job within $RUNNER_STOP_GRACE_SECONDS s of the deadline, because kubectl could not exec into the runner pod; the wait ends, stopping no job and giving no exit status"
+        ((EPOCHSECONDS - due < RUNNER_STOP_GRACE_SECONDS)) || {
+          note "job $name: no SIG$signal reached the runner job within $RUNNER_STOP_GRACE_SECONDS s of when it fell due, because kubectl could not exec into the runner pod; the wait ends and gives no exit status"
           return 1
         }
-        note "job $name: kubectl could not send the runner job its SIGTERM at the deadline; the wait tries again at its next poll"
+        note "job $name: kubectl could not send the runner job its SIG$signal; the wait tries again at its next poll"
         ;;
       esac
-    elif ((termed != 0)) && ((killed == 0)) && ((EPOCHSECONDS - termed >= RUNNER_STOP_GRACE_SECONDS)); then
-      guard=0
-      runner_stop "$name" KILL || guard=$?
-      case $guard in
-      0)
-        killed=$EPOCHSECONDS
-        note "job $name: no exit status within $RUNNER_STOP_GRACE_SECONDS s of the SIGTERM at its deadline, so the wait sent SIGKILL; it keeps polling for the job's exit status"
-        ;;
-      1)
-        note "job $name: the wait ends, sending no SIGKILL and giving no exit status"
-        return 1
-        ;;
-      2) note "job $name: no read of the lock answered, so the wait sends no SIGKILL at this poll; it reads the lock again at the next one" ;;
-      *)
-        ((EPOCHSECONDS - termed < 2 * RUNNER_STOP_GRACE_SECONDS)) || {
-          note "job $name: no SIGKILL reached the runner job within $((2 * RUNNER_STOP_GRACE_SECONDS)) s of the SIGTERM at its deadline, because kubectl could not exec into the runner pod; the wait ends and gives no exit status"
-          return 1
-        }
-        note "job $name: kubectl could not send the runner job its SIGKILL; the wait tries again at its next poll"
-        ;;
-      esac
-    elif ((killed != 0)) && ((EPOCHSECONDS - killed >= RUNNER_STOP_GRACE_SECONDS)); then
-      note "job $name: no exit status within $RUNNER_STOP_GRACE_SECONDS s of the SIGKILL, and the runner pod could not be read; the wait ends and gives no exit status"
+    elif [ -z "$signal" ] && ((EPOCHSECONDS >= due)); then
+      note "job $name: no exit status was read from the runner pod within $RUNNER_STOP_GRACE_SECONDS s of the SIGKILL; the wait ends and gives no exit status"
       return 1
     fi
     sleep 15
