@@ -46,8 +46,9 @@ func TestTheDaemonsOwnCloseLandsOnScratchDispatchAfterAnEventOvertakesItsRead(t 
 			tc.close(t, pool, records, engine, issue)
 
 			// A person leaves a comment while the row is between its read and its write: the
-			// status is untouched, and Dispatch has moved the issue's sequence on, so the write
-			// the row carries is refused ISSUE_CHANGED and its retry decides what happens next.
+			// status is untouched, and Dispatch has moved the issue's sequence on. The merge's
+			// close carries no reason, so its write is refused ISSUE_CHANGED and its retry decides;
+			// close_root's posts its reason and reads the issue after it, so its write lands first.
 			client := &interleaving{Client: dispatch.New(baseURL, token), act: func() {
 				dispatchCall(t, baseURL, http.MethodPost, "/api/v1/issues/"+issue+"/messages", map[string]any{"body": "any news?"}, nil)
 			}}

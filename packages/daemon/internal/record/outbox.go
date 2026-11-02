@@ -109,7 +109,7 @@ type StatusRowKind string
 
 const (
 	// OrdinaryStatusRow is the workflow moving an issue along inside the workflow: the phase
-	// statuses, and the done a merge or an architect's close writes.
+	// statuses. The done a merge or an architect's close writes is a CloseStatusRow.
 	OrdinaryStatusRow StatusRowKind = "ordinary"
 	// PersonHandoverStatusRow is a person's handover: a person's legion label on an unrecorded
 	// root in triage, or a person's approval of a parked labelled root's primary document. It is
@@ -770,7 +770,7 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 func validateOutboxPayload(payload OutboxPayload) error {
 	switch value := payload.(type) {
 	case StatusWrite:
-		// A row whose kind is not one of the four can never be queued, and one stored by an
+		// A row whose kind is not one of StatusRowKinds can never be queued, and one stored by an
 		// older release is given its kind by migration 20261102003600 before this release reads
 		// it: so a kind the outbox has no rule for is a kind somebody added to StatusRowKinds
 		// and nowhere else, which fails here rather than reaching the outbox to be judged by

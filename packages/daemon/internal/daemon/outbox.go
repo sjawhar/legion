@@ -572,9 +572,9 @@ type statusRowRule interface {
 	// somebody moved the issue since — and what is left is the question each kind answers
 	// differently.
 	//
-	// Three of the four are queued at a status that reads as out of the workflow, and for them
-	// the ordinary rule reads backwards: a handover of either sort brings an issue into the
-	// workflow, and a re-assert undoes a session's own move out of it. Asking
+	// Every kind but the ordinary one is queued at a status that reads as out of the workflow, and
+	// for them the ordinary rule reads backwards: a handover of either sort brings an issue into
+	// the workflow, a re-assert undoes a session's own move out of it, and a close is the move out. Asking
 	// record.OutOfWorkflow of any of them would finish it without writing and log that its issue
 	// had left a workflow it never entered, or had left one this very row exists to put it back
 	// in.
@@ -591,7 +591,7 @@ type statusRowRule interface {
 // ruleFor is the one place a status row's kind is read: a value per kind and no fallback, so a
 // kind added to record.StatusRowKinds without one here fails its row, naming itself, rather than
 // being judged in silence by whichever rule a default would lend it. An ordinary default reads
-// backwards for three of the five kinds, which are queued at a status out of the workflow, and
+// backwards for every other kind, each queued at or writing a status out of the workflow, and
 // would drop the very row that exists to bring the issue back into one.
 // TestEveryStatusRowKindHasARule holds the list and this switch to each other, and
 // TestAStatusRowKindWithNoRuleFailsBothPathsWithoutWriting holds a row of a kind this switch has
