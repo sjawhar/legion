@@ -2,87 +2,26 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-627",
-  "previousHandoff": "a1be3cf90ef279a045b3782cbdce0d8e34423ae4",
-  "round": "2, at code head 29b084dac6da (handoff head cea3659e16cf), after the implementer's three commits answering round 1.",
-  "headReviewed": "cea3659e16cf8912715e02dbd87445cc83beb8b2",
-  "codeHead": "29b084dac6da1b5cd9564b4c3d13a9edb97f2785",
+  "previousHandoff": "a7a09c03c451c2539ea666001483186a9b003b39",
+  "round": "3, at code head 8445fe23a0a1 (handoff head b0b0f523768d): the implementer's fix commit 5d9eacea for round 2, and a forward merge of main whose one resolved line is in cmd/dispatch/main.go. The fingerprint differs, so this is a full round, not a confirmation.",
+  "headReviewed": "b0b0f523768d9525e87a295dc509c92ff6cfde0b",
+  "codeHead": "8445fe23a0a145c9dd81a93dc4c4824201403c4a",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 4,
-  "minor": 6,
-  "ci": "Read 2026-11-02T01:33Z: required set ci-ok and pr-title (rulesets; no branch protection). CI head 29b084da, run 41366903592, created 00:23:39Z, still queued with only changes and pr-title (41367279245) completed success; compare 29b084da...cea3659e is handoffs-only (2 files). A request for changes does not wait on CI.",
-  "thermonuclear": "Both ran on this round's diff (d74ea872..29b084da). Deep review: one medium (reproduced with a test in a scratch copy) and three minors. Code quality: one blocking (sweep.go over 1000 lines) and seven low. Judged below.",
-  "round1Threads": {
-    "accepted": [
-      "PRRT_kwDORFy7ds6yfdkO",
-      "PRRT_kwDORFy7ds6yfdkR",
-      "PRRT_kwDORFy7ds6yfdkV",
-      "PRRT_kwDORFy7ds6yfdkY",
-      "PRRT_kwDORFy7ds6yfdka",
-      "PRRT_kwDORFy7ds6yfdkd",
-      "PRRT_kwDORFy7ds6yfdkh",
-      "PRRT_kwDORFy7ds6yfdkk"
-    ],
-    "standing": [
-      "PRRT_kwDORFy7ds6yfdkQ (adoption does not cover a live older-build claim or a record created during a long rollback)",
-      "PRRT_kwDORFy7ds6yfdkT (stray margin has no test)",
-      "PRRT_kwDORFy7ds6yfdkg (sweep.go is still 1012 lines)"
-    ]
-  },
+  "important": 2,
+  "minor": 2,
+  "ci": "Read 2026-11-02T03:50Z and 04:04Z: the required set is ci-ok and pr-title (rulesets). The CI head is 8445fe23 (run 41379102664). At 04:04Z, 14 checks were success, 12 skipped, 7 in progress and 1 queued; ci-ok had not reported. The compare 8445fe23...b0b0f523 is handoffs-only (2 files). A request for changes does not wait on CI.",
+  "thermonuclear": "Both ran on this round's diff (29b084da..5d9eacea) and the merge's main.go line. Each reproduced the back-fill's take of a live claim in a scratch copy, and each showed that the margin test passes with strayMargin = cursorOverlap. The deep review also reproduced a cut-short older-build sweep stranding a record (40 sweeps, no request). Both confirmed that the move to state.go and the merge resolution change no behaviour.",
+  "architectQuestion": "Should backfillIndex treat a live claim as decide does? Yes. Its record write takes the claimant's revision, the claimant's outcome write loses its compare-and-set, and the delivery is asked for again. Both reviews reproduced this. So the back-fill must Put only the claim-end entry, as decide does.",
   "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/redeliver/sweep.go:654",
-      "description": "An adopted record (no Pending) held by an older build's claim that has not expired returns ClaimedElsewhere before any index write, so the adopted entry is never moved forward; the cursor passes it, the marker blocks the back-fill, and a refusal-only unlisted delivery is never asked for again. The deep review reproduced it with a test. Fix: on that path, when Pending is empty and not a dry run, Put pendingFor's entry (keyed at the claim's end) without writing the record, and return errPendingNotWritten if the Put fails."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/redeliver/index.go:261",
-      "description": "A record an older build creates during a rollback that outlasts Lookback, whose requests GitHub only refuses, has no entry, is not listed, and is not back-filled while the marker stands (up to 72 h, which can outlast the delivery). The comment says a rollback and roll-forward inside three days is covered. Fix: let the new build detect a cursor an older build wrote (a field in cursorRecord the older build drops) and run the back-fill then; correct the comment."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/redeliver/index.go:291",
-      "description": "backfillIndex's !written branch (a back-fill write that lost its compare-and-set must not mark the bucket) has no test that fails when it is removed (tester's mutation run)."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/redeliver/index.go:218",
-      "description": "openDue's stray margin has no test that fails when it is removed (tester's mutation run). The margin is also about one minute, not cursorOverlap, because keys are truncated to the minute."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/redeliver/sweep.go:990",
-      "description": "sweep.go is 1012 lines, still over 1000. Move the bucket layer (record helpers, readState/writeState/openState, cursor and record reads and writes, isConflict, scanOpenRecords with openRecord/sortOpenRecords) into a file of its own."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/redeliver/index.go:324",
-      "description": "Only errNotWritten is ever matched; the two sub-sentinels are names nothing checks. Keep one sentinel and put the kind in the message; collapse backfillIndex's two branches into one if !written."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/redeliver/index.go:172",
-      "description": "Comments now false: index.go:172-173 (cursorOverlap's clock-skew note lives in sweep.go; 'this minute' is wrong), index.go:226-227 (no decision takes an adopted entry over; it stays until TTL when behind the floor), index.go:344-346 (the 'behind the floor' reason holds only for the first write), sweep.go:487-490 (writes did land on the outcome paths; retention expiry is no GitHub answer)."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/redeliver/sweep_test.go:1467",
-      "description": "TestARefusedRecordWriteLeavesTheDeliveryForTheNextSweep's doc describes an indexed record behind the floor; the test fails a listed delivery whose Create is refused, so only the Complete and cursor checks catch the regression. Fix the comment or build the index-only case."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/redeliver/sweep_test.go:1742",
-      "description": "The assertion that the adopted entry is still in the bucket pins a leftover stray; the Redelivered and record-names-a-held-entry checks already prove adoption."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/dispatch/README.md:272",
-      "description": "waiting in the running sweep also counts an adopted entry whose record an older build rewrote with a future NextAttemptAt; README.md:272-273 and sweep.go:35-37 omit it."
-    }
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/redeliver/index.go:283", "description": "backfillIndex writes the record of an older build's live claim (no Pending), which moves the revision the claimant's outcome write depends on. That write loses its compare-and-set, and the delivery is requested again (reproduced by both reviews). This is reachable through an older build's operator command, which takes no lease, or through a lease lost mid-pass. It runs on every sweep under an older-build cursor and on every marker expiry. Fix: for a record under a live claim, Put pendingFor's entry and skip the record write, as decide does, ideally through one shared helper. Add the reproduction as a test."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/redeliver/index.go:252", "description": "Only a complete sweep writes the cursor. So an older build whose sweeps never complete (cut short by SIGTERM, the 300-request cap, or a rate limit) leaves an indexed:true cursor and the marker set. A record it created, refused and at the far edge of Lookback, is then read by nothing until the marker expires, up to 72 h (the deep review reproduced 40 sweeps with no request). Fix: give the marker a time and back-fill again once it is older than Lookback (one full scan an hour at most), and correct the olderBuild comment."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/redeliver/sweep_test.go:1604", "description": "TestAStrayIndexEntryIsDeletedOnlyPastTheMargin passes with strayMargin = cursorOverlap (both reviews), so the extra minute is not pinned. Put the clock off a minute boundary and add a stray keyed at minute(now) - cursorOverlap."},
+    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/README.md:287", "description": "Stale text: 'at most once every three days' (README.md:287) and 'happens once ... rather than every two minutes' (index.go:235-237). With olderBuild, and with the time-bounded marker, the back-fill runs more often."}
   ],
+  "threads": "The implementer resolved all 22 threads. I answered each of the 14 whose last reply was the implementer's. I accepted 12 and unresolved 2, which stand: PRRT_kwDORFy7ds6ygoa6 (the cursor field does not cover an older build whose sweeps never complete) and PRRT_kwDORFy7ds6ygobD (the margin test does not pin the extra minute).",
   "notCarried": [
-    "Quality 8 (docs-pages.yaml's *dispatch_server label says 50, the ci.yaml anchor holds 53): the label counts the block under it, which is the convention named in round 1; not a defect."
+    "Quality 4 (move cursorKey and recordPrefix into state.go): the implementer kept them in sweep.go's one const block, whose comments refer to each other. That is a reasonable placement and not a defect."
   ],
-  "prose": "Prose findings go to the implementer in this round: the code goes back anyway, and a push of mine would cancel CI run 41366903592, still queued at 29b084da."
+  "prBody": "I rewrote the 'Look at first' and 'Not proven / risk' lines, which were stale from round 2 (the deep review's minor)."
 }
