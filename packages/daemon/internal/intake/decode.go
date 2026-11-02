@@ -801,8 +801,10 @@ func decodeWorkflowRun(repository ghrepo.Repository, deploys []config.Deploy, re
 // repo, compared as renames compares two names — as GitHub compares names, without case, and a
 // configured rename's two names as one repository, so a `deploys:` entry naming the repository as
 // it was matches a run on the one it moved to — and its workflow file is path exactly. A project
-// names a repository's workflow once (config's readDeploys), so at most one matches. It is the one
-// matching rule the decoder's filter and the workflow's wake (deployRunCompleted) share.
+// names a repository's workflow once, the configured renames included (config's readDeploys and
+// checkDeployRenames, which refuses two entries a rename makes one repository), so at most one
+// matches. It is the one matching rule the decoder's filter and the workflow's wake
+// (deployRunCompleted) share.
 func DeployOf(deploys []config.Deploy, renames ghrepo.Renames, repo, path string) (config.Deploy, bool) {
 	at := slices.IndexFunc(deploys, func(deploy config.Deploy) bool {
 		return renames.Same(deploy.Repo.String(), repo) && deploy.Workflow == path

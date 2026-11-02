@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -271,6 +272,70 @@ func TestTheBackfillOfARepositoryGitHubRenamedNamesTheFix(t *testing.T) {
 		}
 		if got := recordedIssue(t, w, "LEGION-1"); got.Repo != "acme/old" || got.GitHubRepo != "" {
 			t.Fatalf("LEGION-1 = %s (GitHub's %s) after a refused backfill, want it unchanged", got.Repo, got.GitHubRepo)
+		}
+	})
+}
+
+// The same transfer with the pair configured (`repository_renames`) refuses no boot: GitHub holds
+// the repository under acme/new while Dispatch still resolves acme/old, and the record keeps the
+// name it was recorded under for its whole life, so the backfill writes the pair's spelling of
+// that same name as GitHub's spelling of it. A record's two repository columns must name one
+// repository (record.Store.FillIssueRepository, NameIssueRepository), which the name it moved to
+// would not. Both backfills do it: the record written before the record carried its repository,
+// whose shared clone keeps the old name, and the record on the old name with no GitHub spelling.
+// The repository is then heard under both names, so the events GitHub publishes under the name
+// it moved to reach the record all the same.
+func TestTheBackfillOfAConfiguredRenameFillsTheRecordsOwnName(t *testing.T) {
+	ctx := context.Background()
+	renames := ghrepo.MustRenames(ghrepo.MustRename("acme/old", "acme/new"))
+	github := newNamedGitHub(t, map[string]string{"acme/old": "301 acme/new", "acme/new": "acme/new@main"})
+	client := &listingDispatch{summaries: []dispatch.IssueSummary{{Key: "LEGION-1", ResolvedRepo: "acme/old"}}}
+	seed := func(t *testing.T, repo, branch string) (*workflowRuntime, string) {
+		t.Helper()
+		pool := isolatedOutboxPool(t)
+		if _, err := pool.Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, repo, default_branch)
+			values ('LEGION-1', 'LEGION-1', 'LEGION', 'root', 'implementing', 1, 'in_progress', 'A', 1, $1, $2)`, repo, branch); err != nil {
+			t.Fatal(err)
+		}
+		return &workflowRuntime{pool: pool, records: projectRecords{Store: record.NewStore(), project: "LEGION"}, log: quietLogger(),
+			repositories:    newRepositories("LEGION", renames),
+			defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}, t.TempDir()
+	}
+	backfill := func(w *workflowRuntime, state string) error {
+		return backfillRepositories(ctx, w.pool, w.records, client, "LEGION", state, w.defaultBranches, renames, quietLogger())
+	}
+
+	t.Run("a record with no repository whose shared clone keeps the old name", func(t *testing.T) {
+		w, state := seed(t, "", "")
+		clone, err := workspace.Location(state, ghrepo.MustParse("acme/old"), "LEGION-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(clone.Clone, ".git"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := backfill(w, state); err != nil {
+			t.Fatalf("backfill = %v, want the boot to go on: the pair names one repository", err)
+		}
+		if got := recordedIssue(t, w, "LEGION-1"); got.Repo != "acme/old" || got.DefaultBranch != "main" || got.GitHubRepo != "acme/old" {
+			t.Fatalf("LEGION-1 = %s@%s (GitHub's %s), want acme/old@main (GitHub's acme/old)", got.Repo, got.DefaultBranch, got.GitHubRepo)
+		}
+	})
+
+	t.Run("a record on the old name with no GitHub spelling", func(t *testing.T) {
+		w, state := seed(t, "acme/old", "main")
+		if err := backfill(w, state); err != nil {
+			t.Fatalf("backfill = %v, want the boot to go on: the pair names one repository", err)
+		}
+		if got := recordedIssue(t, w, "LEGION-1"); got.Repo != "acme/old" || got.GitHubRepo != "acme/old" {
+			t.Fatalf("LEGION-1 = %s (GitHub's %s), want acme/old under both names", got.Repo, got.GitHubRepo)
+		}
+		heard, err := w.heardAtBoot(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := repositoryNames(heard); !slices.Equal(got, []string{"acme/new", "acme/old"}) {
+			t.Fatalf("heard %v, want both names of the pair: the events now arrive under acme/new", got)
 		}
 	})
 }

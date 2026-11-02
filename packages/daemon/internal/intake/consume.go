@@ -646,11 +646,12 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 
 // recordedPullRequest says whether the daemon records the pull request a review or a checks
 // settlement names (PullRequestReview, PullRequestChecks), by repository and number as the workflow
-// looks it up (record.PullRequestRecorded), and is true for every other fact. It asks under each
-// name the fact's repository is looked up by (ghrepo.Renames.Lookups, ConsumerSpec.Renames), as
-// the workflow reads the row: a pull request already open when its repository was transferred is
-// recorded under the name it moved from, while the fact names the one it moved to. It is one read
-// of the pool per name within the one AckWait, in no transaction and under no lock, made before
+// looks it up (record.PullRequestRecorded), and is true for every other fact. It asks under the
+// name the fact carries and then, when that finds nothing, under the other name of the pair that
+// names it (ghrepo.Under, ConsumerSpec.Renames), as the workflow reads the row: a pull request
+// already open when its repository was transferred is recorded under the name it moved from,
+// while the fact names the one it moved to. It is one read of the pool per name within the one
+// AckWait, in no transaction and under no lock, made before
 // the review's GitHub reads (resolveReviewBody, resolveReviewPermission): the workflow applies
 // either fact only to a recorded pull request, so one of any other pull request is acknowledged
 // with no transaction under the fact lock (ApplyFact) and no GitHub read, whatever the number of
@@ -670,13 +671,9 @@ func recordedPullRequest(ctx context.Context, spec ConsumerSpec, pool *pgxpool.P
 	}
 	read, cancel := context.WithTimeout(ctx, spec.AckWait)
 	defer cancel()
-	for _, name := range spec.Renames.Lookups(repo) {
-		recorded, err := record.PullRequestRecorded(read, pool, name, number)
-		if err != nil || recorded {
-			return recorded, err
-		}
-	}
-	return false, nil
+	return ghrepo.Under(spec.Renames, repo, func(name string) (bool, error) {
+		return record.PullRequestRecorded(read, pool, name, number)
+	})
 }
 
 // readMapping runs ConsumerSpec.RepositoryMapping within AckWait; no reader reads nothing.

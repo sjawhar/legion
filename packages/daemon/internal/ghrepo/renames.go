@@ -94,21 +94,29 @@ func (r Renames) Partner(name string) (Repository, bool) {
 	return partner, found
 }
 
-// Lookups is the names a read keyed by repository must try for name, in the order it must try
-// them: name itself, as the fact that carries it spells it, and then the other name of the pair
-// that names it, when a pair does. It is a lookup order, not an equality — `Same` answers whether
-// two names are one repository, while this answers what to look under when a record may be held
-// under either — and it is the one place that order is written, so every read keyed by a
-// repository is one loop over it and none derives the rule again.
+// Under runs read for name and, when it answers the zero value with no error, again for the other
+// name of name's configured pair. It is the one place the order of a read keyed by a repository is
+// written: the name the fact carries, as the fact spells it, and then the pair's other name, since
+// a record keeps the repository it was written under for its whole life while the facts that
+// arrive after a transfer name the one it moved to. It is a lookup order, not an equality — `Same`
+// answers whether two names are one repository, while this reads what may be held under either.
 //
-// A deployment that configures no rename, and a name no pair holds, answer the one name, so such
-// a read stays exactly the one it was. A configured name answers two, and the second read is made
-// only when the first finds nothing.
-func (r Renames) Lookups(name string) []string {
-	if partner, found := r.Partner(name); found {
-		return []string{name, partner.String()}
+// The zero value of T is what read answers when it finds nothing: a nil *record.PullRequest, a
+// false. So a read that finds something, and a read that fails, is answered at once and the second
+// read is never made. A deployment that configures no rename, and a name no pair holds, make
+// exactly the one read they always made, and neither allocates: the order is two calls, never a
+// slice of names.
+func Under[T comparable](r Renames, name string, read func(string) (T, error)) (T, error) {
+	var zero T
+	found, err := read(name)
+	if err != nil || found != zero {
+		return found, err
 	}
-	return []string{name}
+	partner, paired := r.Partner(name)
+	if !paired {
+		return zero, nil
+	}
+	return read(partner.String())
 }
 
 // OwnerAliases is each owner a configured rename moved a repository away from, by the owner it

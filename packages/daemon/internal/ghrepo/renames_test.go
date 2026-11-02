@@ -1,6 +1,7 @@
 package ghrepo
 
 import (
+	"errors"
 	"maps"
 	"slices"
 	"strings"
@@ -145,37 +146,68 @@ func TestNewRenamesOfNoneIsTheZeroValue(t *testing.T) {
 	}
 }
 
-// Lookups is the order a read keyed by repository tries: the name the fact carries first, then
-// the other name of the pair that names it. A deployment that configures no rename, and a name no
-// pair holds, answer that one name alone, so such a read stays the one read it was.
-func TestLookupsAreTheNameThenItsPartner(t *testing.T) {
+// Under reads under the name the fact carries first and the pair's other name second: a
+// deployment that configures no rename, and a name no pair holds, make the one read they always
+// made; a configured name is read twice only when the first read found nothing; and a read that
+// fails stops where it failed.
+func TestUnderReadsTheNameThenItsPartner(t *testing.T) {
 	var zero Renames
-	for _, name := range []string{"sjawhar/legion", "cybermonklabs/legion", "", "not a repository"} {
-		if got := zero.Lookups(name); !slices.Equal(got, []string{name}) {
-			t.Errorf("zero Renames.Lookups(%q) = %q, want %q alone", name, got, name)
+	renames := MustRenames(MustRename("sjawhar/legion", "cybermonklabs/legion"), MustRename("acme/widgets", "acme/gadgets"))
+	// read answers the one name held, as a store holding one row does, and records every name it
+	// was read under. Its *string is nil — the zero value Under reads on — for every other name.
+	read := func(reads *[]string, held string) func(string) (*string, error) {
+		return func(name string) (*string, error) {
+			*reads = append(*reads, name)
+			if held != "" && strings.EqualFold(name, held) {
+				return &held, nil
+			}
+			return nil, nil
 		}
-	}
-	renames, err := NewRenames([]Rename{MustRename("sjawhar/legion", "cybermonklabs/legion"), MustRename("acme/widgets", "acme/gadgets")})
-	if err != nil {
-		t.Fatalf("NewRenames: %v", err)
 	}
 	for _, tc := range []struct {
-		name string
-		want []string
+		what       string
+		renames    Renames
+		name, held string
+		want       []string
+		found      bool
 	}{
-		{"sjawhar/legion", []string{"sjawhar/legion", "cybermonklabs/legion"}},
-		{"cybermonklabs/legion", []string{"cybermonklabs/legion", "sjawhar/legion"}},
-		{"SJAWHAR/Legion", []string{"SJAWHAR/Legion", "cybermonklabs/legion"}},
-		{"acme/gadgets", []string{"acme/gadgets", "acme/widgets"}},
-		{"other/repo", []string{"other/repo"}},
-		{"sjawhar/legion-smoke", []string{"sjawhar/legion-smoke"}},
-		{"", []string{""}},
-		{"not a repository", []string{"not a repository"}},
+		{"a deployment that configures no rename reads the name alone", zero, "sjawhar/legion", "sjawhar/legion", []string{"sjawhar/legion"}, true},
+		{"and reads it alone when it finds nothing", zero, "sjawhar/legion", "", []string{"sjawhar/legion"}, false},
+		{"a name no pair holds is read alone", renames, "other/repo", "", []string{"other/repo"}, false},
+		{"a configured name found at once is read once", renames, "cybermonklabs/legion", "cybermonklabs/legion", []string{"cybermonklabs/legion"}, true},
+		{"one that finds nothing is read again under its partner", renames, "cybermonklabs/legion", "sjawhar/legion", []string{"cybermonklabs/legion", "sjawhar/legion"}, true},
+		{"from either side, the name as the fact spells it", renames, "SJAWHAR/Legion", "cybermonklabs/legion", []string{"SJAWHAR/Legion", "cybermonklabs/legion"}, true},
+		{"and the partner as the pair spells it", renames, "acme/gadgets", "", []string{"acme/gadgets", "acme/widgets"}, false},
 	} {
-		if got := renames.Lookups(tc.name); !slices.Equal(got, tc.want) {
-			t.Errorf("Lookups(%q) = %q, want %q", tc.name, got, tc.want)
-		}
+		t.Run(tc.what, func(t *testing.T) {
+			var reads []string
+			found, err := Under(tc.renames, tc.name, read(&reads, tc.held))
+			if err != nil {
+				t.Fatalf("Under: %v", err)
+			}
+			if !slices.Equal(reads, tc.want) {
+				t.Errorf("Under read %q, want %q", reads, tc.want)
+			}
+			if (found != nil) != tc.found {
+				t.Errorf("Under = %v, want found = %v", found, tc.found)
+			}
+		})
 	}
+
+	t.Run("a read that fails stops at the name it failed under", func(t *testing.T) {
+		var reads []string
+		refusal := errors.New("the database is down")
+		found, err := Under(renames, "sjawhar/legion", func(name string) (*string, error) {
+			reads = append(reads, name)
+			return nil, refusal
+		})
+		if !errors.Is(err, refusal) || found != nil {
+			t.Fatalf("Under = %v, %v; want the read's own error and nothing found", found, err)
+		}
+		if !slices.Equal(reads, []string{"sjawhar/legion"}) {
+			t.Errorf("Under read %q after a failed read, want sjawhar/legion alone", reads)
+		}
+	})
 }
 
 // ownedBy is the owner predicate OwnerAliases and Serving take, over the owners a project serves

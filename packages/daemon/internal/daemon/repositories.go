@@ -217,32 +217,46 @@ func (r *repositories) Refused() []refusedRepository {
 // lookup is the served repository resolved names, in any spelling, or why Legion does not serve
 // it: left out (leftOut) with its reason, or not mapped to the project at all. unread is a
 // repository left out for now because its installation read failed (refusedRepository.readErr).
-// The mapping is read under each name resolved is looked up by (ghrepo.Renames.Lookups): the name
-// itself, and then the other name of the configured rename that names it, so an issue resolved to
-// the repository as it was is recorded on the one the project serves, under one name:
+// The mapping is read under the name resolved carries and then, when the mapping does not name
+// it, under the other name of the configured rename that names it (ghrepo.Under), so an issue
+// resolved to the repository as it was is recorded on the one the project serves, under one name:
 // Resolution.Repo and Resolution.GitHubRepo agree, as a record demands (record.Store.PutIssue).
 func (r *repositories) lookup(resolved string) (mapped mappedRepository, refusal string, leftOut, unread bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	for _, name := range r.renames.Lookups(resolved) {
-		if mapped, refusal, leftOut, unread, held := r.held(name); held {
-			return mapped, refusal, leftOut, unread
-		}
+	// The read is a map lookup under the lock already held, so it fails for no reason and its
+	// error is always nil; ghrepo.Under holds the order the two names are read in.
+	answer, _ := ghrepo.Under(r.renames, resolved, func(name string) (heldRepository, error) {
+		return r.held(name), nil
+	})
+	if answer.held {
+		return answer.mapped, answer.refusal, answer.leftOut, answer.unread
 	}
 	return mappedRepository{}, fmt.Sprintf("%s is not mapped to project %s in Dispatch", resolved, r.project), false, false
 }
 
-// held is the mapping's answer for the repository name names exactly, in any spelling, and
-// whether the mapping names it at all. Its caller holds the read lock.
-func (r *repositories) held(name string) (mapped mappedRepository, refusal string, leftOut, unread, held bool) {
+// heldRepository is the mapping's answer for one name (held): the served repository, or the
+// refusal that leaves it out, with whether the mapping names it at all. Its zero value is the
+// answer for a name the mapping does not name, which is what ghrepo.Under reads the other name
+// of the pair on.
+type heldRepository struct {
+	mapped          mappedRepository
+	refusal         string
+	leftOut, unread bool
+	held            bool
+}
+
+// held is the mapping's answer for the repository name names exactly, in any spelling. Its caller
+// holds the read lock.
+func (r *repositories) held(name string) heldRepository {
 	key := strings.ToLower(name)
 	if mapped, ok := r.accepted[key]; ok {
-		return mapped, "", false, false, true
+		return heldRepository{mapped: mapped, held: true}
 	}
 	if refused, ok := r.refused[key]; ok {
-		return mappedRepository{}, refused.Reason, true, refused.readErr != nil, true
+		return heldRepository{refusal: refused.Reason, leftOut: true, unread: refused.readErr != nil, held: true}
 	}
-	return mappedRepository{}, "", false, false, false
+	return heldRepository{}
 }
 
 // setUnverified records the served repositories the last read of the mapping kept on their last
@@ -1211,8 +1225,9 @@ func (w *workflowRuntime) heardAtBoot(ctx context.Context) ([]ghrepo.Repository,
 // Each is spelled as GitHub spells it, which Envoy's subjects carry and NATS
 // matches case-sensitively, whatever spelling a record keeps for its workspace (a backfilled
 // record keeps its clone's): a served repository as GitHub names it (nameAccepted), any other
-// as its record keeps GitHub's spelling (record.Issue.GitHubRepo), and a partner as the pair
-// configures it, so a restart subscribes with no read of GitHub.
+// as its record keeps GitHub's spelling (record.Issue.GitHubRepo), and a partner, for a name
+// nothing else heard names, as the pair configures it, so a restart subscribes with no read of
+// GitHub.
 func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, served []ghrepo.Repository) ([]ghrepo.Repository, error) {
 	heard := map[string]ghrepo.Repository{}
 	for _, repo := range served {
@@ -1233,18 +1248,21 @@ func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, serv
 		heard[strings.ToLower(repo.String())] = repo
 	}
 	// One pass over the configured pairs, not over everything heard: a deployment configures no
-	// pair at all nearly always, and this runs at every boot and consumer re-open. Both sides are
-	// read before either is added, so a pair whose two names are both heard replaces both with the
-	// pair's own spelling, as a pass over the heard set did, and neither addition is seen by the
-	// other's test.
+	// pair at all nearly always, and this runs at every boot and consumer re-open. A partner is
+	// added only when nothing heard already names it, so the spelling GitHub itself gave — the
+	// served repository's (nameAccepted) or a record's — always wins over the pair's, which NATS
+	// would otherwise match against no published subject at all; the pair's spelling is used only
+	// for a name nothing else names. Both sides are read before either is added, so neither
+	// addition is seen by the other's test.
 	for _, pair := range w.repositories.renames.Pairs() {
-		_, heardFrom := heard[strings.ToLower(pair.From.String())]
-		_, heardTo := heard[strings.ToLower(pair.To.String())]
-		if heardFrom {
-			heard[strings.ToLower(pair.To.String())] = pair.To
+		from, to := strings.ToLower(pair.From.String()), strings.ToLower(pair.To.String())
+		_, heardFrom := heard[from]
+		_, heardTo := heard[to]
+		if heardFrom && !heardTo {
+			heard[to] = pair.To
 		}
-		if heardTo {
-			heard[strings.ToLower(pair.From.String())] = pair.From
+		if heardTo && !heardFrom {
+			heard[from] = pair.From
 		}
 	}
 	repos := make([]ghrepo.Repository, 0, len(heard))

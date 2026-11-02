@@ -226,7 +226,7 @@ func TestAGitHubFactNamingARenamedRepositoryAppliesToTheTreeRecordedUnderItsOldN
 // the repository it moved to: its row keeps the name it opened under (sjawhar/legion) for its
 // whole life, while every event after the transfer names cybermonklabs/legion, so the row is
 // found only when the read is tried under both names of the configured pair
-// (ghrepo.Renames.Lookups, read by pullRequest and pullRequestByBranch). This is the tree the
+// (ghrepo.Under, read by pullRequest and pullRequestByBranch). This is the tree the
 // parent issue holds Legion to: one whose pull request was open at the transfer pushes a commit,
 // gets that commit's CI result, a review and its merge, with no restart of the tree. Each fact is
 // driven the three ways its sibling above drives them — under the pair, where it applies; under

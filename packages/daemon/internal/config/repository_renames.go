@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 
 	"gopkg.in/yaml.v3"
 
@@ -66,5 +68,32 @@ func checkRepositoryRenames(file fileConfig, cfg *Config) error {
 		return fmt.Errorf("%s: %w", repositoryRenamesKey, err)
 	}
 	cfg.RepositoryRenames = renames
+	return nil
+}
+
+// checkDeployRenames refuses two `deploys` entries of one project whose repositories a configured
+// rename makes one repository and whose workflow file is the same. readDeploys already refuses
+// one name twice (compared without case), but it reads a project before the renames settle and
+// knows nothing of them, so the pair is caught here, where both the equivalence and every
+// project's deploys stand. A workflow run matches both entries (intake.DeployOf), which answers
+// the first, so the second entry's step would never be read and one of the two production checks
+// a deployment configured would silently never wake.
+func checkDeployRenames(cfg *Config) error {
+	if cfg.RepositoryRenames.IsZero() {
+		return nil
+	}
+	for _, key := range slices.Sorted(maps.Keys(cfg.Projects)) {
+		deploys := cfg.Projects[key].Deploys
+		for index, deploy := range deploys {
+			for earlier, named := range deploys[:index] {
+				if named.Workflow != deploy.Workflow || !cfg.RepositoryRenames.Same(named.Repo.String(), deploy.Repo.String()) {
+					continue
+				}
+				return fmt.Errorf("projects.%s.deploys[%d] (%s %s) and projects.%s.deploys[%d] (%s %s) name one workflow of one repository: %s makes %s and %s one repository, so a run of %s matches both entries and only the first entry's step is ever read; name that workflow once",
+					key, earlier, named.Repo, named.Workflow, key, index, deploy.Repo, deploy.Workflow,
+					repositoryRenamesKey, named.Repo, deploy.Repo, deploy.Workflow)
+			}
+		}
+	}
 	return nil
 }

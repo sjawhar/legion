@@ -432,7 +432,7 @@ func reviewPermissionRuntimeRenamed(pool *pgxpool.Pool, githubAPI string, log *s
 // A review on a pull request already open when its repository was transferred finds the record:
 // the row keeps acme/widgets, the name the pull request opened under, while the review names
 // cybermonklabs/widgets, so the record is read under both names of the configured pair
-// (ghrepo.Renames.Lookups). The permission is then read on the repository the review names, the
+// (ghrepo.Under). The permission is then read on the repository the review names, the
 // one GitHub serves. With no pair configured no name finds the row, the review is one the daemon
 // does not record, and GitHub is asked nothing at all.
 func TestAReviewNamingARenamedRepositoryReadsThePermissionOfTheRecordedPullRequest(t *testing.T) {

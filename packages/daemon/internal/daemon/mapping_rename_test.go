@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
 // renamedWidgets is the pair a deployment configures on the day its key is deployed, before the
@@ -85,6 +86,52 @@ func TestARenameConfiguredBeforeTheTransferIsHeardWhileTheServedSetIsUnchanged(t
 			}
 			if tc.warnings > 0 && !strings.Contains(logged.String(), "from=acme/widgets to=cybermonklabs/widgets project=LEGION") {
 				t.Fatalf("the boot's line does not name the pair and the project:\n%s", logged.String())
+			}
+		})
+	}
+}
+
+// What GitHub intake hears is spelled as GitHub spells it, whatever case the pair is configured
+// in: NATS matches a subject case-sensitively and Envoy publishes under GitHub's own spelling, so
+// a pair spelled CyberMonkLabs/legion against GitHub's cybermonklabs/legion would subscribe to
+// subjects nothing publishes. A partner is therefore heard only where nothing else names it: the
+// served repository keeps the spelling GitHub gave the mapping (nameAccepted), a record keeps the
+// spelling it was written with (record.Issue.GitHubRepo), and the pair's own spelling is used for
+// the side nothing else names, which is how a pair configured before the transfer is heard.
+func TestHeardRepositoriesKeepGitHubsSpellingOverThePairs(t *testing.T) {
+	ctx := context.Background()
+	// The pair is written in the deployment's own case, which is neither name as GitHub spells it.
+	pair := ghrepo.MustRenames(ghrepo.MustRename("SJAWHAR/Legion", "CyberMonkLabs/legion"))
+	for _, tc := range []struct {
+		name string
+		// recorded is GitHub's spelling a record of the project keeps, none when "".
+		recorded string
+		heard    []string
+	}{
+		{name: "both names are heard already", recorded: "sjawhar/legion",
+			heard: []string{"cybermonklabs/legion", "sjawhar/legion"}},
+		{name: "the partner nothing names is heard as the pair spells it",
+			heard: []string{"cybermonklabs/legion", "SJAWHAR/Legion"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			if tc.recorded != "" {
+				if _, err := pool.Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, repo, default_branch, github_repo)
+					values ('LEGION-1', 'LEGION-1', 'LEGION', 'root', 'implementing', 1, 'in_progress', 'A', 1, $1, 'main', $1)`, tc.recorded); err != nil {
+					t.Fatal(err)
+				}
+			}
+			w := &workflowRuntime{pool: pool, records: projectRecords{Store: record.NewStore(), project: "LEGION"},
+				repositories: newRepositories("LEGION", pair), log: quietLogger()}
+			// The served repository as GitHub names it, which nameAccepted reads and Envoy's
+			// subjects carry.
+			w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse("cybermonklabs/legion")}}, nil)
+			heard, err := w.heardAtBoot(ctx)
+			if err != nil {
+				t.Fatalf("heardAtBoot: %v", err)
+			}
+			if got := repositoryNames(heard); !slices.Equal(got, tc.heard) {
+				t.Fatalf("heard %v, want %v", got, tc.heard)
 			}
 		})
 	}

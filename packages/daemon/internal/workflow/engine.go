@@ -1157,40 +1157,34 @@ func (e *Engine) issueForBranch(ctx context.Context, tx pgx.Tx, repo, branch str
 }
 
 // pullRequest is the recorded pull request number of repo, when its issue is recorded on repo.
-// The read is tried under each name the fact's repository is looked up by
-// (ghrepo.Renames.Lookups) and the first row found is the pull request: a record keeps the
-// repository it was written under for its whole life, so a pull request already open when its
-// repository was transferred is recorded under the name it moved from while every event after
-// names the one it moved to. A deployment that configures no rename makes exactly the one query
-// it always made; a configured one makes the second only when the first finds nothing, which is
-// the common case — an event of a pull request this daemon does not record at all.
+// The read is made under the name the fact carries and then, when it finds nothing, under the
+// other name of the pair that names it (ghrepo.Under): a record keeps the repository it was
+// written under for its whole life, so a pull request already open when its repository was
+// transferred is recorded under the name it moved from while every event after names the one it
+// moved to. A deployment that configures no rename makes exactly the one query it always made; a
+// configured one makes the second only when the first finds nothing, which is the common case —
+// an event of a pull request this daemon does not record at all.
 func (e *Engine) pullRequest(ctx context.Context, tx pgx.Tx, repo string, number int) (*record.PullRequest, error) {
-	for _, name := range e.cfg.RepositoryRenames.Lookups(repo) {
-		pr, err := e.store.PullRequestByNumber(ctx, tx, name, number)
-		if err != nil {
-			return nil, err
-		}
-		if pr != nil {
-			return e.ownPullRequest(ctx, tx, pr, repo)
-		}
+	pr, err := ghrepo.Under(e.cfg.RepositoryRenames, repo, func(name string) (*record.PullRequest, error) {
+		return e.store.PullRequestByNumber(ctx, tx, name, number)
+	})
+	if err != nil || pr == nil {
+		return nil, err
 	}
-	return nil, nil
+	return e.ownPullRequest(ctx, tx, pr, repo)
 }
 
 // pullRequestByBranch is the recorded pull request of repo on branch, when its issue is recorded
-// on repo. It reads under each name repo is looked up by, as pullRequest does and for the same
+// on repo. It reads under the same names as pullRequest, in the same order and for the same
 // reason.
 func (e *Engine) pullRequestByBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*record.PullRequest, error) {
-	for _, name := range e.cfg.RepositoryRenames.Lookups(repo) {
-		pr, err := e.store.PullRequestByBranch(ctx, tx, name, branch)
-		if err != nil {
-			return nil, err
-		}
-		if pr != nil {
-			return e.ownPullRequest(ctx, tx, pr, repo)
-		}
+	pr, err := ghrepo.Under(e.cfg.RepositoryRenames, repo, func(name string) (*record.PullRequest, error) {
+		return e.store.PullRequestByBranch(ctx, tx, name, branch)
+	})
+	if err != nil || pr == nil {
+		return nil, err
 	}
-	return nil, nil
+	return e.ownPullRequest(ctx, tx, pr, repo)
 }
 
 // ownPullRequest is pr when the issue it is recorded for is recorded on repo, as its record keeps

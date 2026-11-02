@@ -11,7 +11,7 @@ import (
 // A review or a checks settlement of a pull request already open when its repository was
 // transferred is one the daemon records: the row keeps sjawhar/legion, the name the pull request
 // opened under, while the event names cybermonklabs/legion, so the read asks under both names of
-// the configured pair (ghrepo.Renames.Lookups), as the workflow reads the row. Without the pair
+// the configured pair (ghrepo.Under), as the workflow reads the row. Without the pair
 // the fact names a pull request the daemon does not record, which is acknowledged with no
 // transaction and no GitHub read; so does a number neither name records. A fact that is no
 // review and no settlement is recorded whatever it names.
