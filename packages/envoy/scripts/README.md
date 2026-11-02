@@ -74,10 +74,13 @@ itself (`internal/testnats/cmd/natsd`), so it needs no container runtime. It
 posts signed public GitHub fixtures and a three-paragraph direct message,
 checks the one-warning response for a never-seen GitHub repository, reads the
 registered session back by id from `/v1/registry/<session_id>` and an id that
-never registered as `404 {"error":"no live session <id>","state":"gone"}` —
-dispatch://INFRA-392 puts the state the refusal was decided on beside the kept
-`no live session <id>` prefix, with a `last_seen` only when this listener still
-remembers a registration, which an id nothing ever registered has none of —
+never registered as `404 {"error":"no live session <id>; this listener does
+not know when it last registered","state":"gone"}` — dispatch://INFRA-392 puts
+the state the refusal was decided on beside the kept `no live session <id>`
+prefix, with a `last_seen` only when this listener still remembers a
+registration, and, when it remembers none, those words in its place rather
+than a missing field, so a sender can tell a session this listener watched
+reach the gone horizon from one it has never heard of —
 rejects an unheld role publish before claiming it for the fake session,
 captures the raw notification envelopes, and proves both the Go prompt text
 and the shared TypeScript renderer print the full direct message once, with no

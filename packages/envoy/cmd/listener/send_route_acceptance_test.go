@@ -666,9 +666,10 @@ func TestSendRefusesTheBusRatherThanTheSessionWhenTheStoreReadDoesNotAnswer(t *t
 	if answered.Code != http.StatusNotFound {
 		t.Fatalf("a send whose bucket read answered that the key is gone: status %d, body %s; want 404", answered.Code, answered.Body.String())
 	}
-	// The error keeps its wording - Dispatch classifies a delivery failure on the "no live
-	// session " prefix - and the state the refusal was decided on stands beside it.
-	if got, want := strings.TrimSpace(answered.Body.String()), fmt.Sprintf(`{"error":"no live session %s","state":"gone"}`, target); got != want {
+	// The error keeps its prefix - Dispatch classifies a delivery failure on the "no live
+	// session " one - the state the refusal was decided on stands beside it, and, this listener
+	// having no registration to name for a target that never registered, the error says so.
+	if got, want := strings.TrimSpace(answered.Body.String()), fmt.Sprintf(`{"error":"no live session %s; this listener does not know when it last registered","state":"gone"}`, target); got != want {
 		t.Fatalf("the 404 body is %s, want %s", got, want)
 	}
 	assertRecordFields(t, answeredRecord, map[string]any{

@@ -458,7 +458,7 @@ absent_status="$(curl -sS -o "$absent_session_response_file" -w '%{http_code}' \
   -X POST -H 'Content-Type: application/json' \
   "${listener_url}/v1/messages/send" -d "$absent_body")"
 if [[ "$absent_status" != 404 ]] || ! jq -e --arg session_id "$absent_session_id" \
-  '.error == ("no live session " + $session_id)' "$absent_session_response_file" >/dev/null; then
+  '.error | startswith("no live session " + $session_id)' "$absent_session_response_file" >/dev/null; then
   printf 'ERR: a send to the unregistered session %s answered HTTP %s, not a 404 naming it.\n' \
     "$absent_session_id" "$absent_status" >&2
   cat "$absent_session_response_file" >&2
@@ -532,8 +532,8 @@ missing_session_id="ses_e2e_local_never_registered"
 missing_status="$(curl -sS -o "$registry_missing_response_file" -w '%{http_code}' \
   "${listener_url}/v1/registry/${missing_session_id}")"
 if [[ "$missing_status" != 404 ]] || ! jq -e --arg session_id "$missing_session_id" \
-  '. == {error: ("no live session " + $session_id), state: "gone"}' "$registry_missing_response_file" >/dev/null; then
-  printf 'ERR: an unregistered session id was not refused 404 with "no live session <id>" and state gone.\n' >&2
+  '. == {error: ("no live session " + $session_id + "; this listener does not know when it last registered"), state: "gone"}' "$registry_missing_response_file" >/dev/null; then
+  printf 'ERR: an unregistered session id was not refused 404 with "no live session <id>", state gone and the listener saying it cannot name the last registration.\n' >&2
   exit 1
 fi
 

@@ -2912,9 +2912,10 @@ func TestSessionEntryRouteAnswers404OnlyForAGoneRecord(t *testing.T) {
 		t.Fatalf("GET /v1/registry/ses_gone for a session that never registered: status %d %s, want 404",
 			gone.Code, gone.Body.String())
 	}
-	// A session no record was ever held for has no last registration to name, so the body is the
-	// error and the state alone.
-	const want = `{"error":"no live session ses_gone","state":"gone"}`
+	// A session no record was ever held for has no last registration to name, so the body carries
+	// the error and the state alone, and the error says that this listener cannot name the time
+	// (noLiveSession) — after the prefix, which stays exact.
+	const want = `{"error":"no live session ses_gone; this listener does not know when it last registered","state":"gone"}`
 	if body := strings.TrimSpace(gone.Body.String()); body != want {
 		t.Fatalf("body = %s, want exactly %s, whose error Dispatch classifies a delivery failure on", body, want)
 	}

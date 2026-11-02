@@ -944,8 +944,9 @@ func TestSendHandler_RejectsUnknownTarget(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
 		t.Fatalf("decode error response: %v", err)
 	}
-	if response.Error != "no live session ses_missing" {
-		t.Fatalf("error = %q, want %q", response.Error, "no live session ses_missing")
+	const want = "no live session ses_missing; this listener does not know when it last registered"
+	if response.Error != want {
+		t.Fatalf("error = %q, want %q", response.Error, want)
 	}
 }
 

@@ -89,13 +89,21 @@ type noLiveSessionRefusal struct {
 }
 
 // noLiveSession is the refusal body for sessionID in state, with the last registration the
-// registry can still name for it (lastSeenOf).
+// registry can still name for it (lastSeenOf). When it can name none the text says so after the
+// kept prefix, because the two cases call for different acts and a missing field names neither:
+// a session this listener watched reach the gone horizon is dead, while one it has no record and
+// no remembered registration for — the state a restart leaves, and the state of an id that never
+// registered here — may be alive on another listener (dispatch://INFRA-392, A6).
 func noLiveSession(sessions *session.SessionRegistry, sessionID string, entry session.SessionEntry, state session.State) noLiveSessionRefusal {
-	return noLiveSessionRefusal{
+	refusal := noLiveSessionRefusal{
 		Error:    fmt.Sprintf("no live session %s", sessionID),
 		State:    state,
 		LastSeen: lastSeenOf(sessions, sessionID, entry),
 	}
+	if refusal.LastSeen == 0 {
+		refusal.Error += "; this listener does not know when it last registered"
+	}
+	return refusal
 }
 
 // lastSeenOf is the last registration this listener can still name for sessionID: the record's
