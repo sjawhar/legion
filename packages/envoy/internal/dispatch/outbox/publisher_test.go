@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"reflect"
 	"strings"
@@ -20,33 +18,148 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/retry"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
-	"github.com/sjawhar/envoy/internal/metrics"
 )
 
 // answered is a channel already holding err, the outcome of a test publisher that answers each
 // publish before it returns: the outbox reads such an answer the moment it sends, as it reads one
-// a bus.Client.Window's PublishAsync decides before anything is sent.
+// a bus.Client.WindowUntil window's PublishAsync decides before anything is sent.
 func answered(err error) <-chan error {
 	answer := make(chan error, 1)
 	answer <- err
 	return answer
 }
 
-// publish runs one attempt of event to its end, as scanBatch does for each event of a batch, with
-// the comment recipients read as scanBatch reads a batch's (resolveCommentRecipients), and returns
-// why it did not finish: errMentionPending when it held a mentioned session's copy back.
+// publishOnly completes Publisher and bus.Sender for a test publisher the outbox only publishes
+// through: a Request answers that it is not served, and the publisher is always connected, so its
+// connection never changes. A test publisher that takes role forwards serves Request itself.
+type publishOnly struct{}
+
+func (publishOnly) Request(subject string, _ contracts.Envelope, _ bus.RequestOptions) <-chan error {
+	return answered(fmt.Errorf("test publisher serves no Request (to %q)", subject))
+}
+
+func (publishOnly) Probe(time.Duration) error { return nil }
+
+func (publishOnly) Connected() bool { return true }
+
+func (publishOnly) ConnectionChanged() <-chan struct{} { return nil }
+
+// deadlineWindow is a test publisher's window of a deadline, as bus.Client.WindowUntil makes one:
+// a send at or past deadline answers bus.ErrWindowDeadline and is not sent. A nil
+// deadline is none.
+type deadlineWindow struct {
+	bus.Sender
+	deadline func() time.Time
+}
+
+func (w deadlineWindow) passed() bool {
+	return w.deadline != nil && !time.Now().Before(w.deadline())
+}
+
+func (w deadlineWindow) PublishAsync(item contracts.Envelope) <-chan error {
+	if w.passed() {
+		return answered(fmt.Errorf("test window: %w", bus.ErrWindowDeadline))
+	}
+	return w.Sender.PublishAsync(item)
+}
+
+func (w deadlineWindow) Request(subject string, item contracts.Envelope, opts bus.RequestOptions) <-chan error {
+	if w.passed() {
+		return answered(fmt.Errorf("test window: %w", bus.ErrWindowDeadline))
+	}
+	return w.Sender.Request(subject, item, opts)
+}
+
+// unfenced is a publisher hold whose deadline never comes, for a test that scans without one. The
+// record's back-offs need the hold's row too (recordBatch): holding gives an outbox one.
+type unfenced struct{}
+
+func (unfenced) Deadline() time.Time { return time.Now().Add(time.Hour) }
+
+// errMentionPending is what publish returns when the event's destinations held a mentioned
+// session's copy back for a mention still being sent (destinations.leftToMention), and nothing
+// else kept the event from finishing: the batch blocks such an event for mentionPendingDelay
+// (settleEvent).
+var errMentionPending = errors.New("a mention's delivery is still undecided")
+
+// publish sends event to each of its destinations not in delivered, as a batch of that one event
+// would, one at a time - a role route forwarded to its holder as deps resolves it - and returns
+// every failure, each named by its destination, or errMentionPending when there is none and a
+// mentioned session's copy was held back.
 func publish(ctx context.Context, deps Deps, event model.Event, slug string, routing routing, delivered map[string]struct{}) error {
-	pending := []pendingEvent{{event: event, slug: slug, routing: routing}}
-	resolveCommentRecipients(ctx, deps, pending)
-	a := send(ctx, deps, deps.Publisher.Window(), pending[0], delivered)
-	a.wait(ctx)
-	return a.err()
+	if event.IssueKey == nil && event.ArtifactID == nil && event.Project == "" {
+		return nil
+	}
+	item, err := envelope(event, slug)
+	if err != nil {
+		return err
+	}
+	want := newWanted()
+	_, _, _ = eventDestinations(event, item.Topic, routing, want)
+	found, err := loadLookups(ctx, deps.Store.Pool, want)
+	if err != nil {
+		return err
+	}
+	list, mentionPending, resolveErr := eventDestinations(event, item.Topic, routing, found)
+	single := &batchEvent{item: item, destinationsOf: list}
+	resolveRoleHolders(ctx, deps, []*batchEvent{single})
+	sender := deps.Publisher.WindowUntil(nil)
+	var failures []error
+	for _, dest := range single.destinationsOf {
+		if _, ok := delivered[dest.subject]; ok {
+			continue
+		}
+		routed := item
+		routed.Topic = dest.subject
+		var answer <-chan error
+		switch {
+		case dest.forward == nil:
+			answer = sender.PublishAsync(routed)
+		case dest.forward.skip != "":
+			continue
+		case dest.forward.err != nil:
+			answer = failedAnswer(dest.forward.err)
+		default:
+			answer = dest.forward.send(sender, routed)
+		}
+		if err := <-answer; err != nil && !errors.Is(err, bus.ErrRefused) {
+			failures = append(failures, fmt.Errorf("%s %q: %w", dest.label, dest.id, err))
+		}
+	}
+	if err := errors.Join(append(failures, resolveErr)...); err != nil {
+		return err
+	}
+	if mentionPending {
+		return errMentionPending
+	}
+	return nil
+}
+
+// routeTopics runs add, one of an event's route rules, over event with the followers and authors
+// it asks for read as a batch reads them, and returns the subjects it added.
+func routeTopics(t *testing.T, database *store.Store, event model.Event, add func(model.Event, lookup, *destinations) error) []string {
+	t.Helper()
+	want := newWanted()
+	_ = add(event, want, &destinations{seen: map[string]struct{}{}})
+	found, err := loadLookups(context.Background(), database.Pool, want)
+	if err != nil {
+		t.Fatalf("read the lookups: %v", err)
+	}
+	d := &destinations{seen: map[string]struct{}{}}
+	if err := add(event, found, d); err != nil {
+		t.Fatalf("add the routes: %v", err)
+	}
+	topics := []string{}
+	for _, dest := range d.list {
+		topics = append(topics, dest.subject)
+	}
+	return topics
 }
 
 type recordingPublisher struct {
+	publishOnly
 	mu          sync.Mutex
 	items       []contracts.Envelope
 	failures    int
@@ -72,9 +185,25 @@ func (p *recordingPublisher) Publish(item contracts.Envelope) error {
 	return nil
 }
 
-func (p *recordingPublisher) Window() bus.Sender { return p }
+func (p *recordingPublisher) WindowUntil(deadline func() time.Time) bus.Sender {
+	return deadlineWindow{Sender: p, deadline: deadline}
+}
 
+// PublishAsync answers a topic the stream does not capture as a window does (bus.ErrNotCaptured),
+// so a role route the outbox published to its role topic, rather than forwarding it, fails here.
 func (p *recordingPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	if !bus.StreamCaptures(item.Topic) {
+		return answered(fmt.Errorf("%w: %q", bus.ErrNotCaptured, item.Topic))
+	}
+	return answered(p.Publish(item))
+}
+
+// Request takes a role forward to roleHolder's subject under the forward's dedupe key as the
+// holder's receipt would answer it, recording the envelope, whose topic is still the role's.
+func (p *recordingPublisher) Request(subject string, item contracts.Envelope, _ bus.RequestOptions) <-chan error {
+	if subject != contracts.AgentSubject(roleHolder) || !strings.HasPrefix(item.DedupeKey, contracts.RoleForwardDedupePrefix) {
+		return answered(fmt.Errorf("a Request to %q with dedupe key %q is no role forward to %s", subject, item.DedupeKey, roleHolder))
+	}
 	return answered(p.Publish(item))
 }
 
@@ -91,6 +220,7 @@ func (p *recordingPublisher) setFailTopic(topic string) {
 }
 
 type blockingFailPublisher struct {
+	publishOnly
 	started chan struct{}
 	release chan struct{}
 	calls   atomic.Int64
@@ -104,9 +234,15 @@ func (p *blockingFailPublisher) Publish(contracts.Envelope) error {
 	return errors.New("publisher unavailable")
 }
 
-func (p *blockingFailPublisher) Window() bus.Sender { return p }
+func (p *blockingFailPublisher) WindowUntil(deadline func() time.Time) bus.Sender {
+	return deadlineWindow{Sender: p, deadline: deadline}
+}
 
 func (p *blockingFailPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	return answered(p.Publish(item))
+}
+
+func (p *blockingFailPublisher) Request(_ string, item contracts.Envelope, _ bus.RequestOptions) <-chan error {
 	return answered(p.Publish(item))
 }
 
@@ -335,25 +471,18 @@ func TestRunSkipsAnUnfollowedSession(t *testing.T) {
 
 // A human adding or removing a follower is told to that session directly: with no
 // whole-issue subscription (the default), its own topic is the only place it listens.
-func TestPublishAuthorRoutesNotifiesTheAddedOrRemovedFollowerDirectly(t *testing.T) {
+func TestAddAuthorRoutesNotifiesTheAddedOrRemovedFollowerDirectly(t *testing.T) {
 	for _, eventType := range []string{"ask.follower_added", "ask.follower_removed"} {
 		t.Run(eventType, func(t *testing.T) {
 			database := storetest.Open(t)
 			seedIssue(t, database, "T-1", nil)
-			publisher := &recordingPublisher{}
-			deps := Deps{Store: database, Publisher: publisher}
-			item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1." + eventType}
 			event := model.Event{
 				Type:    eventType,
 				Actor:   model.Actor{Kind: "user", ID: "alice"},
 				Payload: map[string]any{"ask_id": "5a660655-04ad-4ce0-8a9b-93dd03c412b7", "session_id": "session-asker"},
 			}
-			if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, recipientList{}, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
-				t.Fatalf("publish author routes: %v", err)
-			}
-			got := publisher.all()
-			if len(got) != 1 || got[0].Topic != "notifications.agent.session-asker" {
-				t.Fatalf("%s routes = %#v, want the named session's own topic only", eventType, topicsOf(got))
+			if got := routeTopics(t, database, event, addAuthorRoutes); !reflect.DeepEqual(got, []string{"notifications.agent.session-asker"}) {
+				t.Fatalf("%s routes = %#v, want the named session's own topic only", eventType, got)
 			}
 		})
 	}
@@ -406,14 +535,12 @@ func TestPublishPreviousClaimantTellsTheSessionThatLostTheClaim(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			database := storetest.Open(t)
 			seedIssue(t, database, "T-1", nil)
-			publisher := &recordingPublisher{}
-			deps := Deps{Store: database, Publisher: publisher}
-			item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1." + tc.eventType}
 			event := model.Event{Type: tc.eventType, Actor: tc.actor, Payload: tc.payload}
-			if err := publishPreviousClaimant(deps, 0, item, event, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
-				t.Fatalf("publish previous claimant: %v", err)
+			previousClaimant := func(event model.Event, _ lookup, d *destinations) error {
+				addPreviousClaimant(event, d)
+				return nil
 			}
-			if got := topicsOf(publisher.all()); !reflect.DeepEqual(got, tc.want) {
+			if got := routeTopics(t, database, event, previousClaimant); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("topics = %#v, want %#v", got, tc.want)
 			}
 		})
@@ -806,37 +933,23 @@ func TestRunRoutesCommentResolutionToRootAuthor(t *testing.T) {
 	}
 }
 
-func TestPublishAuthorRoutesSkipsAgentReplyingToItself(t *testing.T) {
+func TestAddAuthorRoutesSkipsAgentReplyingToItself(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	rootID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
-	publisher := &recordingPublisher{}
-	deps := Deps{Store: database, Publisher: publisher}
-	item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1.comment.created"}
 	event := model.Event{
 		Type:    "comment.created",
 		Actor:   model.Actor{Kind: "session", ID: "session-writer"},
 		Payload: map[string]any{"reply_to": rootID},
 	}
-	recipients, err := loadCommentRecipients(context.Background(), deps, []string{rootID})
-	if err != nil {
-		t.Fatalf("load comment recipients: %v", err)
-	}
-	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, recipientList{sessions: recipients[rootID]}, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
-		t.Fatalf("publish author routes: %v", err)
-	}
-
-	if got := publisher.all(); len(got) != 0 {
-		t.Fatalf("published %d author route(s) for an agent replying to itself, want 0: %#v", len(got), got)
+	if got := routeTopics(t, database, event, addAuthorRoutes); len(got) != 0 {
+		t.Fatalf("added %d author route(s) for an agent replying to itself, want 0: %#v", len(got), got)
 	}
 }
 
-func TestPublishAuthorRoutesNotifiesTheUnsubscribedSessionDirectly(t *testing.T) {
+func TestAddAuthorRoutesNotifiesTheUnsubscribedSessionDirectly(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
-	publisher := &recordingPublisher{}
-	deps := Deps{Store: database, Publisher: publisher}
-	item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1.subscription.removed"}
 	event := model.Event{
 		Type:  "subscription.removed",
 		Actor: model.Actor{Kind: "user", ID: "alice"},
@@ -846,33 +959,21 @@ func TestPublishAuthorRoutesNotifiesTheUnsubscribedSessionDirectly(t *testing.T)
 			"topics":     []any{"notifications.dispatch.issue.T-1.>"},
 		},
 	}
-	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, recipientList{}, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
-		t.Fatalf("publish author routes: %v", err)
-	}
-
-	got := publisher.all()
-	if len(got) != 1 || got[0].Topic != "notifications.agent.planner" {
+	if got := routeTopics(t, database, event, addAuthorRoutes); !reflect.DeepEqual(got, []string{"notifications.agent.planner"}) {
 		t.Fatalf("author routes = %#v, want a single notice to notifications.agent.planner", got)
 	}
 }
 
-func TestPublishAuthorRoutesSkipsSubscriptionRemovedWithoutASessionID(t *testing.T) {
+func TestAddAuthorRoutesSkipsSubscriptionRemovedWithoutASessionID(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
-	publisher := &recordingPublisher{}
-	deps := Deps{Store: database, Publisher: publisher}
-	item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1.subscription.removed"}
 	event := model.Event{
 		Type:    "subscription.removed",
 		Actor:   model.Actor{Kind: "user", ID: "alice"},
 		Payload: map[string]any{"by": map[string]any{"kind": "user", "id": "alice"}, "topics": []any{}},
 	}
-	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, recipientList{}, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
-		t.Fatalf("publish author routes: %v", err)
-	}
-
-	if got := publisher.all(); len(got) != 0 {
-		t.Fatalf("published %d author route(s) with no session_id, want 0: %#v", len(got), got)
+	if got := routeTopics(t, database, event, addAuthorRoutes); len(got) != 0 {
+		t.Fatalf("added %d author route(s) with no session_id, want 0: %#v", len(got), got)
 	}
 }
 
@@ -951,7 +1052,7 @@ func TestRunRetriesSubscriptionRemovedWhenTheAuthorRoutePublishFails(t *testing.
 	}
 }
 
-func TestLoadRootCommentAuthorTerminatesOnACycle(t *testing.T) {
+func TestLoadRootCommentAuthorsTerminatesOnACycle(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	commentID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
@@ -964,17 +1065,24 @@ func TestLoadRootCommentAuthorTerminatesOnACycle(t *testing.T) {
 
 	done := make(chan struct{})
 	var ok bool
+	var err error
 	go func() {
 		defer close(done)
-		_, ok, _ = loadRootCommentAuthor(context.Background(), Deps{Store: database}, commentID)
+		var found *lookups
+		if found, err = loadLookups(context.Background(), database.Pool, &wanted{comments: map[string]struct{}{commentID: {}}}); err == nil {
+			_, ok, err = found.rootCommentAuthor(commentID)
+		}
 	}()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("loadRootCommentAuthor did not terminate on a cyclic reply_to chain")
+		t.Fatal("loadRootCommentAuthors did not terminate on a cyclic reply_to chain")
+	}
+	if err != nil {
+		t.Fatalf("load the comment's root author: %v", err)
 	}
 	if ok {
-		t.Fatal("loadRootCommentAuthor reported a root for a cyclic reply_to chain, want none")
+		t.Fatal("loadRootCommentAuthors reported a root for a cyclic reply_to chain, want none")
 	}
 }
 
@@ -1190,24 +1298,30 @@ func TestRunPublishesEveryEventButRoutesOnlyNotifyingEvents(t *testing.T) {
 	waitFor(t, time.Second, "all event publication", func() bool {
 		return len(publisher.all()) == 3 && publishedAt(t, database, silent.ID) != nil && publishedAt(t, database, notifying.ID) != nil
 	})
-	items := publisher.all()
-	wantTopics := []string{
-		"notifications.dispatch.issue.T-1.message.created",
-		"notifications.dispatch.issue.T-1.message.created",
-		"notifications.role.legion-controller-x",
-	}
-	for index, want := range wantTopics {
-		if items[index].Topic != want {
-			t.Fatalf("publication %d topic = %q, want %q", index, items[index].Topic, want)
+	// Each destination takes the issue's events in id order; the two destinations' sends
+	// interleave as their answers allow.
+	var issueTopic, roleRoute []contracts.Envelope
+	for _, item := range publisher.all() {
+		switch item.Topic {
+		case "notifications.dispatch.issue.T-1.message.created":
+			issueTopic = append(issueTopic, item)
+		case "notifications.role.legion-controller-x":
+			roleRoute = append(roleRoute, item)
 		}
+	}
+	if len(issueTopic) != 2 || issueTopic[0].SourceEventID != fmt.Sprint(silent.ID) || issueTopic[1].SourceEventID != fmt.Sprint(notifying.ID) {
+		t.Fatalf("the issue topic carried %v, want the silent event and then the notifying one", topicsOf(issueTopic))
+	}
+	if len(roleRoute) != 1 || roleRoute[0].SourceEventID != fmt.Sprint(notifying.ID) {
+		t.Fatalf("the role route carried %d envelopes, want the notifying event's alone", len(roleRoute))
 	}
 	for _, tc := range []struct {
 		name string
 		item contracts.Envelope
 		want bool
 	}{
-		{name: "silent issue event", item: items[0], want: false},
-		{name: "notifying issue event", item: items[1], want: true},
+		{name: "silent issue event", item: issueTopic[0], want: false},
+		{name: "notifying issue event", item: issueTopic[1], want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var payload model.Event
@@ -1290,7 +1404,10 @@ func TestEnvelopePayloadStatesWhetherTheEventIsQuiet(t *testing.T) {
 			}},
 		})
 		publisher := &recordingPublisher{}
-		scan(context.Background(), Deps{Store: database, Publisher: publisher})
+		deps := Deps{Store: database, Publisher: publisher}
+		if _, err := scanBatch(context.Background(), deps, unfenced{}, holding(t, deps).instance); err != nil {
+			t.Fatalf("scan the batch: %v", err)
+		}
 
 		items := publisher.all()
 		if len(items) != 1 {
@@ -1306,86 +1423,6 @@ func TestEnvelopePayloadStatesWhetherTheEventIsQuiet(t *testing.T) {
 			t.Fatalf("payload quiet = false for a targeted message: %s", items[0].Payload)
 		}
 	})
-}
-
-// Every destination that did not reach NATS is counted, the one that ends the attempt included:
-// an answer already in when the send returns - NATS unreachable, the outage the metric exists for
-// - ends the attempt there, so attempt.wait never reads it and only publishDestination can count
-// it. It is counted once, because that destination is never added to the attempt's sent list.
-func TestAPublishFailureThatEndsTheAttemptIsCountedOnce(t *testing.T) {
-	database := storetest.Open(t)
-	broker := events.NewBroker()
-	seedIssue(t, database, "T-1", nil)
-	event := appendEvent(t, database, broker, model.Event{
-		IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
-		Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: new("T-1"), Body: "NATS is unreachable"},
-	})
-	registry := metrics.New()
-	publisher := &countingPublisher{fail: fmt.Errorf("bus: %w", bus.ErrUnavailable)}
-	deps := Deps{Store: database, Publisher: publisher,
-		PublishFailures: registry.NewCounter("envoy_dispatch_outbox_publish_failures_total",
-			"Destinations of an outbox publish attempt that did not reach NATS")}
-
-	err := publish(context.Background(), deps, event, "", routing{}, map[string]struct{}{})
-	if !errors.Is(err, bus.ErrUnavailable) {
-		t.Fatalf("publish returned %v, want the unreachable connection", err)
-	}
-	if topics := publisher.attempted(); len(topics) != 1 {
-		t.Fatalf("published %#v, want the attempt ended at its first destination", topics)
-	}
-	response := httptest.NewRecorder()
-	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if body := response.Body.String(); !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="failed"} 1`) {
-		t.Fatalf("/metrics body = %q, want the unreachable destination counted once", body)
-	}
-}
-
-func TestReadyEventScanUsesEventsUnpublishedIndex(t *testing.T) {
-	database := storetest.Open(t)
-	seedIssue(t, database, "T-1", nil)
-	if _, err := database.Pool.Exec(context.Background(), `
-		insert into events (issue_key, seq, type, actor, payload, notify, published_at)
-		select 'T-1', id, 'message.created', '{"kind":"session","id":"test"}', '{"body":"published"}', false, now()
-		from generate_series(1, 2000) as id
-	`); err != nil {
-		t.Fatalf("seed published events: %v", err)
-	}
-	if _, err := database.Pool.Exec(context.Background(), `
-		insert into events (issue_key, seq, type, actor, payload, notify)
-		values ('T-1', 2001, 'message.created', '{"kind":"session","id":"test"}', '{"body":"unpublished"}', false)
-	`); err != nil {
-		t.Fatalf("seed unpublished event: %v", err)
-	}
-	if _, err := database.Pool.Exec(context.Background(), "analyze events"); err != nil {
-		t.Fatalf("analyze events: %v", err)
-	}
-	rows, err := database.Pool.Query(context.Background(), `
-		explain (costs off)
-		select e.id, e.issue_key, e.seq, e.type, e.actor, e.notify, e.created_at, e.payload, i.route
-		from events e
-		join issues i on i.key = e.issue_key
-		where e.published_at is null and (e.next_attempt_at is null or e.next_attempt_at <= now())
-		order by e.id
-		limit $1
-	`, batchSize)
-	if err != nil {
-		t.Fatalf("explain ready event scan: %v", err)
-	}
-	defer rows.Close()
-	var plan []string
-	for rows.Next() {
-		var line string
-		if err := rows.Scan(&line); err != nil {
-			t.Fatalf("scan plan line: %v", err)
-		}
-		plan = append(plan, line)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate plan: %v", err)
-	}
-	if !strings.Contains(strings.Join(plan, "\n"), "Index Scan using events_unpublished") {
-		t.Fatalf("ready event scan plan =\n%s\nwant Index Scan using events_unpublished", strings.Join(plan, "\n"))
-	}
 }
 
 func TestRunRetriesEventWhenRequiredRoleRouteFails(t *testing.T) {
@@ -1476,7 +1513,7 @@ func TestRunRetriesFailedIssuePublication(t *testing.T) {
 	if publishedAt(t, database, event.ID) != nil {
 		t.Fatal("event was marked published after failed issue publication")
 	}
-	waitFor(t, 7*time.Second, "ticker retry publication", func() bool {
+	waitFor(t, 7*time.Second, "the back-off's retry publication", func() bool {
 		return len(publisher.all()) == 1 && publishedAt(t, database, event.ID) != nil
 	})
 	if publishedAt(t, database, event.ID) == nil {
@@ -1484,63 +1521,85 @@ func TestRunRetriesFailedIssuePublication(t *testing.T) {
 	}
 }
 
-func TestScanPublishesReadyEventAfterFullBatchOfPoisonRows(t *testing.T) {
+// A full batch of events that fail every attempt holds back only their own issue: the event that
+// failed first is backed off, every later one of its issue is held behind it on the issue's topic
+// family without an attempt of its own, and an event of another issue is published by the same
+// scan, which returns rather than read the failing batch again and again.
+func TestAFullBatchOfFailingEventsHoldsBackOnlyItsOwnIssue(t *testing.T) {
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into issues (key, project_key, number, title, created_by, rank)
+		values ('T-2', 'TT', 2, 'Other issue', '{"kind":"user","id":"alice"}', 'V')
+	`); err != nil {
+		t.Fatalf("create the other issue: %v", err)
+	}
+	var poison []model.Event
 	for range batchSize {
-		appendEvent(t, database, broker, model.Event{
+		poison = append(poison, appendEvent(t, database, broker, model.Event{
 			IssueKey: new("T-1"),
 			Type:     "message.created",
 			Actor:    model.Actor{Kind: "session", ID: "worker"},
 			Payload:  model.Message{ID: "message", IssueKey: new("T-1"), Body: "poison"},
-		})
+		}))
 	}
 	valid := appendEvent(t, database, broker, model.Event{
-		IssueKey: new("T-1"),
+		IssueKey: new("T-2"),
 		Type:     "message.created",
 		Actor:    model.Actor{Kind: "session", ID: "worker"},
-		Payload:  model.Message{ID: "valid", IssueKey: new("T-1"), Body: "deliver"},
+		Payload:  model.Message{ID: "valid", IssueKey: new("T-2"), Body: "deliver"},
 	})
-	// Poison rows fail every attempt. A row whose backoff elapses while the batch is still being
-	// scanned becomes eligible again within the same scan, which is correct; it must fail again, not
-	// publish.
 	publisher := &recordingPublisher{failSummary: "T-1 message created: poison"}
 
-	// A scan that reschedules failed rows without backoff keeps selecting the same full batch and
-	// never returns; the deadline turns that into a named failure instead of a package timeout.
+	// A scan that left failed rows due would read the same full batch again and never return; the
+	// deadline turns that into a named failure instead of a package timeout.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	scanStart := time.Now()
-	scan(ctx, Deps{Store: database, Publisher: publisher, Broker: broker})
+	holding(t, Deps{Store: database, Publisher: publisher, Broker: broker}).scan(ctx, unfenced{})
 	if ctx.Err() != nil {
-		t.Fatal("scan did not return within 30s: failed poison rows keep refilling every batch, as they do when a failure is rescheduled without backoff")
+		t.Fatal("scan did not return within 30s: the failed rows keep refilling every batch")
 	}
 
 	if publishedAt(t, database, valid.ID) == nil {
-		t.Fatal("ready event after poison batch was not published")
+		t.Fatal("the other issue's event was not published")
 	}
-	items := publisher.all()
-	if len(items) != 1 || items[0].SourceEventID != fmt.Sprint(valid.ID) {
-		t.Fatalf("published items = %#v, want only ready event %d", items, valid.ID)
+	if items := publisher.all(); len(items) != 1 || items[0].SourceEventID != fmt.Sprint(valid.ID) {
+		t.Fatalf("published items = %#v, want only the other issue's event %d", items, valid.ID)
 	}
+	var first time.Time
 	var attempts int
-	var nextAttempt *time.Time
-	if err := database.Pool.QueryRow(context.Background(), `select attempt_count, next_attempt_at from events where id = 1`).Scan(&attempts, &nextAttempt); err != nil {
-		t.Fatalf("read poison retry state: %v", err)
+	if err := database.Pool.QueryRow(context.Background(),
+		`select next_attempt_at, attempt_count from events where id = $1`, poison[0].ID).Scan(&first, &attempts); err != nil {
+		t.Fatalf("read the first failing event: %v", err)
 	}
-	// Every failure schedules the next attempt at least retry.BaseDelay after it, and the first
-	// failure happened after scanStart.
-	earliest := scanStart.Add(retry.BaseDelay).Truncate(time.Microsecond)
-	if attempts < 1 || nextAttempt == nil || nextAttempt.Before(earliest) {
-		t.Fatalf("poison retry state = attempts %d next=%v, want at least one attempt with a retry no earlier than %v", attempts, nextAttempt, earliest)
+	if attempts != 1 {
+		t.Fatalf("the first failing event counted %d attempts, want 1", attempts)
+	}
+	var held, heldAttempts int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) filter (where next_attempt_at = $2), count(*) filter (where attempt_count <> 0)
+		from events where id = any($1)
+	`, idsOf(poison[1:]), first).Scan(&held, &heldAttempts); err != nil {
+		t.Fatalf("read the held events: %v", err)
+	}
+	if held != len(poison)-1 || heldAttempts != 0 {
+		t.Fatalf("%d of the %d later events wait on the first one's retry and %d counted an attempt, want all of them and none",
+			held, len(poison)-1, heldAttempts)
 	}
 }
 
-// A row the scan cannot read must not stop the outbox. pgx treats a scan failure as fatal and
-// closes the cursor, so the events queued behind that row are unreachable until it stops
-// selecting into every batch: the unreadable row is backed off like any other unpublishable
-// event, and the next scan delivers what was behind it.
+func idsOf(events []model.Event) []int64 {
+	ids := make([]int64, 0, len(events))
+	for _, event := range events {
+		ids = append(ids, event.ID)
+	}
+	return ids
+}
+
+// A row the scan cannot read must not stop the outbox. It can never be published, so it is backed
+// off with its attempt and the reason recorded, and it holds back none of its issue's later
+// events: the event behind it is published by the same scan.
 func TestScanPublishesTheEventBehindAnUnreadableRow(t *testing.T) {
 	database := storetest.Open(t)
 	broker := events.NewBroker()
@@ -1557,54 +1616,35 @@ func TestScanPublishesTheEventBehindAnUnreadableRow(t *testing.T) {
 		Actor:    model.Actor{Kind: "session", ID: "worker"},
 		Payload:  model.Message{ID: "behind", IssueKey: new("T-1"), Body: "deliver"},
 	})
-	// A null element of published_destinations fails the scan into []string, which is how a
-	// column the code cannot read looks from here.
+	// A null element of published_destinations is a destination the code cannot read, which is how
+	// a column the code cannot read looks from here.
 	if _, err := database.Pool.Exec(context.Background(), `
 		update events set published_destinations = array[null]::text[] where id = $1
 	`, unreadable.ID); err != nil {
 		t.Fatalf("make the row unreadable: %v", err)
 	}
 
-	deps := Deps{Store: database, Publisher: &recordingPublisher{}, Broker: broker}
-	publisher := deps.Publisher.(*recordingPublisher)
-	scan(context.Background(), deps)
-	if items := publisher.all(); len(items) != 0 {
-		t.Fatalf("batch the unreadable row ended published %d envelopes: %#v", len(items), items)
-	}
-	// The unreadable row is backed off rather than published, so a scan run after that backoff
-	// reaches what was queued behind it. A scan that beats the backoff hits the same row again
-	// and doubles it, so this converges however loaded the box is.
-	//
-	// Each of those scans also claims the row behind the unreadable one (scanPendingEvents
-	// claims a whole batch before reading any of it) and then never reads it, so in production
-	// that row waits out claimWindow's minute. Lapsing its claim each time round is what that
-	// minute does, without spending a minute of the package's clock on it.
-	deadline := time.Now().Add(20 * time.Second)
-	for publishedAt(t, database, behind.ID) == nil {
-		if time.Now().After(deadline) {
-			t.Fatal("event behind the unreadable row was never published")
-		}
-		time.Sleep(10 * time.Millisecond)
-		if _, err := database.Pool.Exec(context.Background(),
-			`update events set next_attempt_at = now() - interval '1 second' where id = $1`, behind.ID); err != nil {
-			t.Fatalf("lapse the claim on the row behind the unreadable one: %v", err)
-		}
-		scan(context.Background(), deps)
-	}
-	items := publisher.all()
-	if len(items) != 1 || items[0].SourceEventID != fmt.Sprint(behind.ID) {
+	publisher := &recordingPublisher{}
+	holding(t, Deps{Store: database, Publisher: publisher, Broker: broker}).scan(context.Background(), unfenced{})
+	if items := publisher.all(); len(items) != 1 || items[0].SourceEventID != fmt.Sprint(behind.ID) {
 		t.Fatalf("published items = %#v, want only event %d", items, behind.ID)
+	}
+	if publishedAt(t, database, behind.ID) == nil {
+		t.Fatal("event behind the unreadable row was not published")
 	}
 	if publishedAt(t, database, unreadable.ID) != nil {
 		t.Fatal("unreadable row was marked published")
 	}
 	var nextAttempt *time.Time
+	var attempts int
+	var failure *string
 	if err := database.Pool.QueryRow(context.Background(),
-		`select next_attempt_at from events where id = $1`, unreadable.ID).Scan(&nextAttempt); err != nil {
+		`select next_attempt_at, attempt_count, publish_error from events where id = $1`, unreadable.ID).Scan(&nextAttempt, &attempts, &failure); err != nil {
 		t.Fatalf("read the unreadable row's retry state: %v", err)
 	}
-	if nextAttempt == nil {
-		t.Fatal("unreadable row stays eligible for every batch, so nothing behind it can be read")
+	if nextAttempt == nil || attempts != 1 || failure == nil || !strings.Contains(*failure, "read event") {
+		t.Fatalf("unreadable row: next_attempt_at %v, attempt_count %d, publish_error %v, want it backed off with the read's failure",
+			nextAttempt, attempts, failure)
 	}
 }
 
@@ -1633,7 +1673,7 @@ func TestRunReplacesOverflowedSubscriptionWithoutBusyLoop(t *testing.T) {
 	close(publisher.release)
 	time.Sleep(100 * time.Millisecond)
 	if calls := publisher.calls.Load(); calls > 70 {
-		t.Fatalf("overflowed subscription caused %d scans, want a bounded number before retry interval", calls)
+		t.Fatalf("overflowed subscription caused %d scans, want a bounded number", calls)
 	}
 }
 
@@ -1673,24 +1713,25 @@ func TestRunMarksIssueLessTargetedMessagesPublishedWithoutRepublishing(t *testin
 	}
 }
 
+// run runs an outbox on database, publishing through publisher, until the returned func stops it.
 func run(t *testing.T, database *store.Store, publisher Publisher, broker *events.Broker) func() {
 	t.Helper()
-	return runDeps(t, Deps{Store: database, Publisher: publisher, Broker: broker})
+	return runDeps(t, withHeldRoles(Deps{Store: database, Publisher: publisher, Broker: broker, Listen: database.Pool.Listener}), time.Second)
 }
 
-// runDeps runs the outbox over deps - a test that needs more of Deps than run's store, publisher
-// and broker, a metrics counter among them, builds it itself - and returns the stop every test
-// here defers.
-func runDeps(t *testing.T, deps Deps) func() {
+// runDeps runs New(deps) until the returned func stops it, which fails t unless Run returns within
+// stopWithin. A test that needs more of Deps than run's store, publisher and broker - a metrics
+// counter among them - builds it itself and calls this.
+func runDeps(t *testing.T, deps Deps, stopWithin time.Duration) func() {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { Run(ctx, deps); close(done) }()
+	go func() { New(deps).Run(ctx); close(done) }()
 	return func() {
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(time.Second):
+		case <-time.After(stopWithin):
 			t.Fatal("outbox did not stop")
 		}
 	}

@@ -80,10 +80,11 @@ type roomLoad struct {
 // beginRoomLoad records that room is loading, before the load reads the store: every version
 // appended from here on is one the instance this load leaves behind takes in. It replaces the
 // record of the room's last load, which ygo has finished with - one room loads at a time
-// (getOrCreateRoom) - so the records never outnumber the documents this process has loaded, and
-// each goes with the document of the load that left it (keepInstance). A replaced record whose
-// load never reached onLoadDocument still holds its state, its copy and its grant, which go with
-// it here.
+// (getOrCreateRoom) - so the records never outnumber the documents this process has loaded. A
+// record goes when the document of the load that left it is collected (keepInstance), or, for a
+// load that left none, where the failure that ended it was met (LoadDoc, onLoadDocument). A
+// record that is replaced, or dropped by such a failure, while it still holds what its load read
+// gives up its state, its copy and its grant with it (take, failRoomLoad).
 func (s *Service) beginRoomLoad(room string) *roomLoad {
 	load := &roomLoad{}
 	if previous, replaced := s.roomLoads.Swap(room, load); replaced {
@@ -114,16 +115,18 @@ func (load *roomLoad) take() loadedState {
 }
 
 // takeLoadedState is what room's load under way read and decoded (roomLoad.read), which it takes
-// off the load's record (take), and whether a load of room read the store through this service's
-// persistence at all. Only the room's load takes it, once (onLoadDocument), on the goroutine that
-// recorded it (ygo's loadRoom), and before anything that can refuse the room, so a refused load
-// leaves neither the state nor the copy on the record.
-func (s *Service) takeLoadedState(room string) (loadedState, bool) {
+// off the load's record (take), and that record, nil where no load of room read the store through
+// this service's persistence at all. Only the room's load takes it, once (onLoadDocument), on the
+// goroutine that recorded it (ygo's loadRoom), and before anything that can refuse the room, so a
+// refused load leaves neither the state nor the copy on the record, which that refusal then drops
+// (failRoomLoad).
+func (s *Service) takeLoadedState(room string) (loadedState, *roomLoad) {
 	value, ok := s.roomLoads.Load(room)
 	if !ok {
-		return loadedState{}, false
+		return loadedState{}, nil
 	}
-	return value.(*roomLoad).take(), true
+	load := value.(*roomLoad)
+	return load.take(), load
 }
 
 // took records version, which this process has made durable for the room while its load runs: on
@@ -174,8 +177,8 @@ func (s *Service) tookResidentVersion(room string, version persistence.Version) 
 // the instance's writes (instanceOf) while live is resident (listResident). The load is the first
 // advance of the instance's cursor: the instance holds every durable update through the head that
 // load read, and every version this process appended while it ran (roomLoad). The load's record
-// goes with the document, as the listing does: until then took still reaches this instance
-// through it, which is what ygo's loading window needs it for.
+// goes with the document from here, as the listing does: until then took still reaches this
+// instance through it, which is what ygo's loading window needs it for.
 func (s *Service) keepInstance(room string, live *crdt.Doc) *roomInstance {
 	value, ok := s.roomLoads.Load(room)
 	if !ok {
