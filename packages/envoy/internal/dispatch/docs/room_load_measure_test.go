@@ -6,6 +6,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/metrics"
+	"sync"
 	"testing"
 	"time"
 
@@ -68,7 +69,13 @@ func measureLoad(t *testing.T, load func() any) loadCost {
 	runtime.GC()
 	runtime.ReadMemStats(&before)
 	base := heapObjects()
-	stop, peaked := make(chan struct{}), make(chan uint64)
+	// The sampler is stopped whichever way this returns, since load fails the test (t.Fatal) from
+	// this goroutine: one left running would read the heap every millisecond for the rest of the
+	// run, under every measurement after it, and its reading, which no one would take, is left
+	// in peaked rather than blocking it there forever.
+	stop, peaked := make(chan struct{}), make(chan uint64, 1)
+	stopSampling := sync.OnceFunc(func() { close(stop) })
+	defer stopSampling()
 	go func() {
 		peak := base
 		ticker := time.NewTicker(time.Millisecond)
@@ -86,7 +93,7 @@ func measureLoad(t *testing.T, load func() any) loadCost {
 	started := time.Now()
 	kept := load()
 	took := time.Since(started)
-	close(stop)
+	stopSampling()
 	peak := <-peaked
 	runtime.ReadMemStats(&after)
 	allocated := after.TotalAlloc - before.TotalAlloc

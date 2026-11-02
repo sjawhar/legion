@@ -1,6 +1,8 @@
 package docs
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/reearth/ygo/crdt"
 )
@@ -28,6 +31,19 @@ import (
 // alone (measuredAlone).
 const heapPriceChild = "DISPATCH_HEAP_PRICE_CHILD"
 
+// measurementReportingMargin is how long before the run's own deadline (testing.T.Deadline, the
+// -timeout the test binary was started with) the process a measurement runs in is killed, so this
+// process has that long to report what it printed and to fail. Without it the binary's timeout
+// panic would end this process while the measurement runs, leaving that process running with
+// nothing waiting for it: it holds the pipe it prints to, a copy of this binary's heap and, under
+// the race detector, its shadow memory, for as long as it goes on.
+const measurementReportingMargin = time.Minute
+
+// measurementOutputWait is how long Wait waits for the measurement's output to end once the
+// process itself has gone (exec.Cmd.WaitDelay), so a process it left behind holding the write end
+// of that pipe cannot keep this test waiting for it.
+const measurementOutputWait = 10 * time.Second
+
 // measuredAlone runs the calling test, or subtest, again in a process of its own and reports
 // whether this is that process, the one to measure in; the caller returns when it is not. A
 // collection costs as much as the heap the process holds, and a whole run of this package holds a
@@ -38,7 +54,10 @@ const heapPriceChild = "DISPATCH_HEAP_PRICE_CHILD"
 // memory, and fails when it failed. The peak is the kernel's for the process, which folds in the
 // peak of the memory the process was started from (Go starts it sharing this process's memory
 // until its exec), so it reads no less than this process's own peak at the start, and bounds the
-// process's own from above.
+// process's own from above. The process outlives neither this test nor this process: it is killed,
+// as a group, once this test ends and in any case a minute before the run's own deadline
+// (measurementReportingMargin), and its output is waited for no longer than
+// measurementOutputWait past it.
 func measuredAlone(t *testing.T) bool {
 	t.Helper()
 	if os.Getenv(heapPriceChild) == t.Name() {
@@ -48,8 +67,25 @@ func measuredAlone(t *testing.T) bool {
 	for i, level := range levels {
 		levels[i] = "^" + regexp.QuoteMeta(level) + "$"
 	}
-	child := exec.Command(os.Args[0], "-test.run="+strings.Join(levels, "/"), "-test.count=1", "-test.v")
+	measuring, stopMeasuring := context.WithCancel(context.Background())
+	defer stopMeasuring()
+	if deadline, ok := t.Deadline(); ok {
+		measuring, stopMeasuring = context.WithDeadline(measuring, deadline.Add(-measurementReportingMargin))
+		defer stopMeasuring()
+	}
+	child := exec.CommandContext(measuring, os.Args[0], "-test.run="+strings.Join(levels, "/"), "-test.count=1", "-test.v")
 	child.Env = append(os.Environ(), heapPriceChild+"="+t.Name())
+	// The process is its own group, and the kill is the group's, so whatever it started goes with
+	// it; a kill that finds the group gone (ESRCH) is the process having just exited, which Wait
+	// reports as it does any other.
+	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	child.Cancel = func() error {
+		if err := syscall.Kill(-child.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
+		return nil
+	}
+	child.WaitDelay = measurementOutputWait
 	output, err := child.CombinedOutput()
 	t.Logf("measured in a process of its own:\n%s", output)
 	if child.ProcessState != nil {
