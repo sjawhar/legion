@@ -9,6 +9,8 @@ body: |-
     the five-attempt schedule, since each repeat sends its whole file again. When a write still
     ends with no answer after the command saw the keyed layer, the message says Dispatch finishes
     it and to read it back before sending it again, since a new command sends it under a new key.
+    A picture upload that ends that way says the picture may or may not have been uploaded, rather
+    than that it was not.
 time: 2026-11-02T08:30:00.000000000Z
 custom:
     Issue: pr2670
