@@ -1212,7 +1212,13 @@ func (maxBytesDiscarder) WriteHeader(int)                 {}
 // refuseUndeclaredMembers for a hook that reads its body itself). A string the body holds
 // anywhere that carries U+0000 is refused, naming where it stands (unstorableJSON).
 func decodeJSON(r *http.Request, value any) error {
-	body, err := readJSONBody(r, value)
+	return decodeJSONWithin(r, value, maxJSONRequestBytes, errJSONTooLarge)
+}
+
+// decodeJSONWithin is decodeJSON for a route whose body has a limit of its own (routeBody): a body
+// past limit bytes is tooLarge, the 413 that route answers one with.
+func decodeJSONWithin(r *http.Request, value any, limit int64, tooLarge *apiError) error {
+	body, err := readJSONBody(r, value, limit, tooLarge)
 	if err != nil {
 		return err
 	}
@@ -1225,7 +1231,7 @@ func decodeJSON(r *http.Request, value any) error {
 // hook does not declare is a mistake in the test that sent it, and is refused by name rather than
 // ignored.
 func decodeJSONTestHook(r *http.Request, value any) error {
-	body, err := readJSONBody(r, value)
+	body, err := readJSONBody(r, value, maxJSONRequestBytes, errJSONTooLarge)
 	if err != nil {
 		return err
 	}
@@ -1242,20 +1248,21 @@ func refuseUndeclaredMembers(value any, body []byte) error {
 	return nil
 }
 
-// readJSONBody decodes r's body into value and returns the bytes it read, for the caller to judge
-// the members value does not declare by.
-func readJSONBody(r *http.Request, value any) ([]byte, error) {
+// readJSONBody decodes r's body, at most limit bytes of it, into value and returns the bytes it
+// read, for the caller to judge the members value does not declare by. A body past limit is
+// tooLarge, the 413 the route answers one with.
+func readJSONBody(r *http.Request, value any, limit int64, tooLarge *apiError) ([]byte, error) {
 	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || (contentType != "application/json" && !strings.HasSuffix(contentType, "+json")) {
 		return nil, errorf(http.StatusUnsupportedMediaType, "JSON_CONTENT_TYPE", "JSON mutations require Content-Type application/json")
 	}
-	r.Body = http.MaxBytesReader(maxBytesDiscarder{}, r.Body, maxJSONRequestBytes)
+	r.Body = http.MaxBytesReader(maxBytesDiscarder{}, r.Body, limit)
 	var read bytes.Buffer
 	decoder := json.NewDecoder(io.TeeReader(r.Body, &read))
 	if err := decoder.Decode(value); err != nil {
 		var maxBytes *http.MaxBytesError
 		if errors.As(err, &maxBytes) {
-			return nil, errJSONTooLarge
+			return nil, tooLarge
 		}
 		return nil, errorf(http.StatusBadRequest, "INVALID_JSON", "invalid JSON body: %v", err)
 	}

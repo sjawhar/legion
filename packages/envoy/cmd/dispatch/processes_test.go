@@ -44,11 +44,13 @@ func multiprocessNATS(t *testing.T) string {
 // process whose key set a live peer does not share refuses to start (processes.Register).
 const multiprocessSigningKey = "multiprocess-signing-key"
 
-// dispatchPair is two envoy-dispatch processes on one database and one NATS server.
+// dispatchPair is two envoy-dispatch processes on one database and one NATS server, each reaching
+// NATS through a proxy of its own (proxies), so a row can cut one process off NATS alone.
 type dispatchPair struct {
 	a, b     *dispatchProcess
 	database *store.Store
 	nats     string
+	proxies  map[*dispatchProcess]*testnats.Proxy
 }
 
 // newPair opens the database and takes the NATS server the pair will share, and starts nothing:
@@ -57,7 +59,7 @@ type dispatchPair struct {
 // start.
 func newPair(t *testing.T) *dispatchPair {
 	t.Helper()
-	return &dispatchPair{database: storetest.Open(t), nats: multiprocessNATS(t)}
+	return &dispatchPair{database: storetest.Open(t), nats: multiprocessNATS(t), proxies: map[*dispatchProcess]*testnats.Proxy{}}
 }
 
 // databaseURL is the connection string a process is started with: the database storetest cloned
@@ -160,9 +162,9 @@ func (p *dispatchProcess) documentText(t *testing.T, artifactID string) string {
 
 // ───── the notification stream ──────────────────────────────────────────────
 
-// waitForEveryEventPublished waits for every event row the outbox takes to carry published_at.
-// A row whose payload says `pending` is not one the outbox claims (claimPendingEvents' own
-// predicate), so it is not waited for.
+// waitForEveryEventPublished waits for every event row the outbox publishes to carry published_at.
+// A row whose payload says `pending` is a subscription command the outbox never publishes, so it
+// is not waited for; the predicate is spelled as the outbox's own (outbox.readBatchSQL).
 func waitForEveryEventPublished(t *testing.T, database *store.Store, within time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(within)
@@ -170,7 +172,7 @@ func waitForEveryEventPublished(t *testing.T, database *store.Store, within time
 		var unpublished int
 		if err := database.Pool.QueryRow(context.Background(), `
 			select count(*) from events
-			where published_at is null and coalesce(payload ->> 'pending', 'false') <> 'true'
+			where published_at is null and (payload ->> 'pending') is distinct from 'true'
 		`).Scan(&unpublished); err != nil {
 			t.Fatalf("count unpublished events: %v", err)
 		}

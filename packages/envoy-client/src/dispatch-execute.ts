@@ -23,6 +23,8 @@ import type {
   Event,
   GraphNode,
   GraphReferences,
+  Handoff,
+  HandoffSummary,
   Issue,
   IssueClaim,
   IssueComponents,
@@ -2764,25 +2766,27 @@ export interface DocumentBlock {
   readonly text: string;
 }
 
-/** A live document's blocks, and the document's own name as Dispatch stores it. */
+/** A live document's blocks, and the document's own name and slug as Dispatch stores them. */
 export interface DocumentBlocks {
   /**
    * The document's name. The reference that found it may be a slug, an id or `spec`, while
-   * Dispatch finds the document an upload replaces by its exact name; a caller reading for an
-   * upload compares the two.
+   * Dispatch finds the document an upload replaces by its exact name or its exact slug; a caller
+   * reading for an upload compares the upload's name with both.
    */
   readonly name: string;
+  /** The document's slug, the other reference an upload's name finds it by. */
+  readonly slug: string;
   readonly blocks: DocumentBlock[];
 }
 
 /**
  * The blocks of the live document `target` names, in document order, each with its markdown: the
  * byte range Dispatch reports, sliced from the text it was computed over (`liveBlocks`), and the
- * document's own name. The document is the one `dispatch doc-edit` edits for the same arguments:
- * its owner from the target, its ref or `LEGION_ISSUE`, and its document by id, slug, filename,
- * the ref's slug, or `spec` for an issue's primary document. A target naming no document of its
- * owner answers "not-found", which is what the first upload of a file reads. Everything else
- * throws: a refused target, a filename two documents answer to, a failed read, and a document
+ * document's own name and slug. The document is the one `dispatch doc-edit` edits for the same
+ * arguments: its owner from the target, its ref or `LEGION_ISSUE`, and its document by id, slug,
+ * filename, the ref's slug, or `spec` for an issue's primary document. A target naming no document
+ * of its owner answers "not-found", which is what the first upload of a file reads. Everything
+ * else throws: a refused target, a filename two documents answer to, a failed read, and a document
  * that changed between its two text reads. Every request carries the client's signal, so a stop
  * ends the read.
  */
@@ -2824,6 +2828,7 @@ export async function readDocumentBlocks(
   const decoder = new TextDecoder();
   return {
     name: resolved.artifact.name,
+    slug: resolved.artifact.slug,
     blocks: live.blocks.map((block) => ({
       id: block.id,
       text: decoder.decode(live.bytes.subarray(block.from, block.to)),
@@ -4462,6 +4467,74 @@ export async function executeDispatchTool(
       return {
         text: `Following ask ${ask}: its answer and replies reach this session directly.`,
         details: await followedAskDetails(client, read.ask),
+      };
+    }
+    case "dispatch_handoff_write": {
+      // The Legion daemon accepts a handoff only from the session that holds the phase's claim,
+      // so a write names this session and no stand-in.
+      if (!input.sessionId?.trim()) {
+        throw new Error("host session id is required for dispatch handoff-write");
+      }
+      let recorded: HandoffSummary;
+      try {
+        // The body goes as the schema passed it, the text the caller wrote, never re-encoded.
+        recorded = await client.writeHandoff(issue(), stringArg(args, "phase"), {
+          actor,
+          body: stringArg(args, "body"),
+        });
+      } catch (error) {
+        // The description names ISSUE_CLOSED and CAP_EXCEEDED, so the code reaches the caller.
+        throw refusalWithCode(error);
+      }
+      return {
+        text: `Recorded the ${recorded.phase} handoff of ${recorded.issue_key}, version ${recorded.version} (id ${recorded.id})`,
+        details: {
+          issue: recorded.issue_key,
+          phase: recorded.phase,
+          version: recorded.version,
+          handoff: recorded.id,
+        },
+      };
+    }
+    case "dispatch_handoff_read": {
+      const issueKey = issue();
+      const phase = stringArg(args, "phase");
+      const version = optionalNumber(args, "version");
+      let handoff: Handoff;
+      try {
+        if (version === undefined) {
+          handoff = await client.latestHandoff(issueKey, phase);
+        } else {
+          // Dispatch reads a handoff by id or the phase's newest, so a named version is found in
+          // the issue's list (newest first, without bodies) and then read by its id.
+          const listed = await client.listHandoffs(issueKey);
+          const ofPhase = listed.filter((summary) => summary.phase === phase);
+          const match = ofPhase.find((summary) => summary.version === version);
+          if (match === undefined) {
+            const newest = Math.max(0, ...ofPhase.map((summary) => summary.version));
+            throw new Error(
+              `HANDOFF_NOT_FOUND: issue ${issueKey} has no ${phase} handoff version ${version}; ${
+                newest === 0
+                  ? `it has no ${phase} handoff at all`
+                  : `its newest ${phase} handoff is version ${newest}`
+              }`
+            );
+          }
+          handoff = await client.handoff(match.id);
+        }
+      } catch (error) {
+        // HANDOFF_NOT_FOUND is named in the description, so the code reaches the caller.
+        throw refusalWithCode(error);
+      }
+      // One line about the record, then the body exactly as stored.
+      return {
+        text: `${handoff.issue_key} ${handoff.phase} handoff, version ${handoff.version} (id ${handoff.id}), written by ${actorText(handoff.author)} at ${handoff.created_at}\n${handoff.body}`,
+        details: {
+          issue: handoff.issue_key,
+          phase: handoff.phase,
+          version: handoff.version,
+          handoff: handoff.id,
+        },
       };
     }
     // Reads report their owner and follow nothing; no result subscribes the session.

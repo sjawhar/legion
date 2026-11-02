@@ -25,9 +25,11 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
+	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -35,6 +37,7 @@ import (
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 	"github.com/sjawhar/envoy/internal/redact"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // signInEnvironment is a cookie-identity boot environment with all four sign-in settings.
@@ -488,7 +491,7 @@ func TestResolveBootConfigRequiresBothOIDCVariables(t *testing.T) {
 }
 
 func TestDispatchHandlerReportsDisabledNATS(t *testing.T) {
-	handler := dispatchHandler(http.NewServeMux(), metrics.New(), nil, nil, nil, "", nil, issuers{})
+	handler := dispatchHandler(http.NewServeMux(), metrics.New(), nil, nil, nil, nil, "", nil, issuers{})
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
@@ -506,7 +509,7 @@ func TestDispatchHandlerReportsDisabledNATS(t *testing.T) {
 // failed with the bus would take every server process out of service at once.
 func TestDispatchHandlerReportsDisconnectedNATS(t *testing.T) {
 	database := storetest.Open(t)
-	handler := dispatchHandler(http.NewServeMux(), metrics.New(), database, &bus.Client{}, nil, "", nil, issuers{})
+	handler := dispatchHandler(http.NewServeMux(), metrics.New(), database, &bus.Client{}, nil, nil, "", nil, issuers{})
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
@@ -534,7 +537,7 @@ func TestDispatchHandlerLivezAnswersWithoutDependencies(t *testing.T) {
 		t.Errorf("the router served %s %s", r.Method, r.URL.Path)
 	})
 	response := httptest.NewRecorder()
-	dispatchHandler(router, metrics.New(), nil, nil, untouchedFiles{}, "", nil, issuers{}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/livez", nil))
+	dispatchHandler(router, metrics.New(), nil, nil, nil, untouchedFiles{}, "", nil, issuers{}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/livez", nil))
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("GET /livez status = %d, want %d", response.Code, http.StatusNoContent)
 	}
@@ -556,7 +559,7 @@ func TestDispatchHandlerServesMetrics(t *testing.T) {
 	failures.Inc([2]string{"reason", "denied"})
 
 	response := httptest.NewRecorder()
-	dispatchHandler(router, registry, nil, nil, untouchedFiles{}, "", nil, issuers{}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	dispatchHandler(router, registry, nil, nil, nil, untouchedFiles{}, "", nil, issuers{}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("GET /metrics status = %d, want %d", response.Code, http.StatusOK)
 	}
@@ -577,7 +580,7 @@ func TestDispatchHandlerReportsTheFileStore(t *testing.T) {
 	probe := func(store files.Store) (int, map[string]any) {
 		t.Helper()
 		response := httptest.NewRecorder()
-		dispatchHandler(http.NewServeMux(), metrics.New(), database, nil, store, "", nil, issuers{}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		dispatchHandler(http.NewServeMux(), metrics.New(), database, nil, nil, store, "", nil, issuers{}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 		var health map[string]any
 		if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
 			t.Fatalf("decode health response: %v", err)
@@ -607,7 +610,7 @@ func TestDispatchHandlerReportsEachIssuersDiscovery(t *testing.T) {
 	probe := func(configured issuers) (int, map[string]any) {
 		t.Helper()
 		response := httptest.NewRecorder()
-		dispatchHandler(http.NewServeMux(), metrics.New(), database, nil, nil, "", nil, configured).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		dispatchHandler(http.NewServeMux(), metrics.New(), database, nil, nil, nil, "", nil, configured).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 		var health map[string]any
 		if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
 			t.Fatalf("decode health response: %v", err)
@@ -646,7 +649,7 @@ func TestDispatchHandlerReportsEachIssuersDiscovery(t *testing.T) {
 func TestHealthzReportsTheBuildCommitAndTheAppliedSchemaVersion(t *testing.T) {
 	database := storetest.Open(t)
 	const commit = "0123456789abcdef0123456789abcdef01234567"
-	handler := dispatchHandler(http.NewServeMux(), metrics.New(), database, nil, nil, commit, nil, issuers{})
+	handler := dispatchHandler(http.NewServeMux(), metrics.New(), database, nil, nil, nil, commit, nil, issuers{})
 	probe := func() map[string]any {
 		t.Helper()
 		response := httptest.NewRecorder()
@@ -679,18 +682,105 @@ func TestHealthzReportsTheBuildCommitAndTheAppliedSchemaVersion(t *testing.T) {
 }
 
 // A binary the image build did not stamp says so: null, never an empty string or a guess. So does
-// a process with no announcement of the fleet's build to report.
+// a process with no announcement of the fleet's build to report. Every field is always present,
+// the ones nothing filled as null, outbox_publisher false - a process with NATS disabled publishes
+// nothing - and idempotency_keys true, the binary's own fact.
 func TestHealthzReportsAnUnstampedCommitAsNull(t *testing.T) {
 	response := httptest.NewRecorder()
-	dispatchHandler(http.NewServeMux(), metrics.New(), nil, nil, nil, "", nil, issuers{}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	dispatchHandler(http.NewServeMux(), metrics.New(), nil, nil, nil, nil, "", nil, issuers{}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	var health map[string]any
 	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
 		t.Fatalf("decode health response: %v", err)
 	}
-	for _, field := range []string{"commit", "fleet_commit", "schema_version"} {
-		if value, found := health[field]; !found || value != nil {
-			t.Fatalf("healthz %s = %#v (present %t), want null", field, value, found)
+	want := map[string]any{
+		"ok": false, "db": false, "nats": nil, "files": nil, "signin": nil, "service_tokens": nil,
+		"commit": nil, "fleet_commit": nil, "schema_version": nil, "outbox_publisher": false,
+		"idempotency_keys": true,
+	}
+	for field, value := range want {
+		if got, found := health[field]; !found || got != value {
+			t.Fatalf("healthz %s = %#v (present %t), want %#v", field, got, found, value)
 		}
+	}
+	if len(health) != len(want) {
+		t.Fatalf("healthz = %#v, want exactly the fields %v", health, want)
+	}
+}
+
+// /healthz says whether this process publishes the events outbox: true while its outbox holds the
+// publisher hold, false while it stands by for the other process's, and false again once it has
+// stopped and released the hold. It never decides ok.
+func TestHealthzReportsWhetherThisProcessPublishesTheOutbox(t *testing.T) {
+	_, url := testnats.Start(t)
+	database := storetest.Open(t)
+	type process struct {
+		outbox  *outbox.Outbox
+		handler http.Handler
+		stop    func()
+	}
+	start := func(database *store.Store) *process {
+		t.Helper()
+		client, err := bus.ConnectOwningStream([]string{url})
+		if err != nil {
+			t.Fatalf("connect NATS: %v", err)
+		}
+		t.Cleanup(client.Close)
+		pool, err := database.Pool.Outbox()
+		if err != nil {
+			t.Fatalf("open the outbox's pool: %v", err)
+		}
+		publisher := outbox.New(outbox.Deps{
+			Store: &store.Store{Pool: pool}, Publisher: client, Broker: events.NewBroker(), Listen: database.Pool.Listener,
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { publisher.Run(ctx); close(done) }()
+		stop := func() { cancel(); <-done }
+		t.Cleanup(stop)
+		return &process{outbox: publisher, handler: dispatchHandler(http.NewServeMux(), metrics.New(), database, client, publisher, nil, "", nil, issuers{}), stop: stop}
+	}
+	probe := func(p *process) bool {
+		t.Helper()
+		response := httptest.NewRecorder()
+		p.handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		var health map[string]any
+		if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+			t.Fatalf("decode health response: %v", err)
+		}
+		if response.Code != http.StatusOK || health["ok"] != true {
+			t.Fatalf("healthz = %d %#v, want 200 and ok whether or not this process publishes", response.Code, health)
+		}
+		publishing, isBool := health["outbox_publisher"].(bool)
+		if !isBool {
+			t.Fatalf("healthz outbox_publisher = %#v, want a boolean", health["outbox_publisher"])
+		}
+		return publishing
+	}
+
+	first := start(database)
+	deadline := time.Now().Add(10 * time.Second)
+	for !probe(first) {
+		if time.Now().After(deadline) {
+			t.Fatal("healthz never reported the only outbox publishing")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	second := start(storetest.SecondProcess(t, database))
+	time.Sleep(time.Second)
+	if probe(second) || !probe(first) {
+		t.Fatalf("outbox_publisher: first %t, second %t, want only the first, which holds the publisher hold", probe(first), probe(second))
+	}
+
+	first.stop()
+	if probe(first) {
+		t.Fatal("healthz reported a stopped outbox publishing")
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for !probe(second) {
+		if time.Now().After(deadline) {
+			t.Fatal("healthz never reported the standby publishing once the holder stopped")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -711,7 +801,7 @@ func TestHealthzReportsThatWritesTakeIdempotencyKeys(t *testing.T) {
 		"no database":       {nil, http.StatusServiceUnavailable},
 	} {
 		response := httptest.NewRecorder()
-		dispatchHandler(http.NewServeMux(), metrics.New(), probe.database, nil, nil, "", nil, issuers{}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		dispatchHandler(http.NewServeMux(), metrics.New(), probe.database, nil, nil, nil, "", nil, issuers{}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 		if response.Code != probe.status {
 			t.Errorf("healthz with %s: status %d, want %d", name, response.Code, probe.status)
 		}
@@ -772,7 +862,7 @@ func TestHealthzAnswersWhileEveryPooledConnectionIsHeld(t *testing.T) {
 		defer connection.Release()
 	}
 
-	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), metrics.New(), database, nil, nil, "", nil, issuers{}))
+	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), metrics.New(), database, nil, nil, nil, "", nil, issuers{}))
 	defer server.Close()
 	client := &http.Client{Timeout: 3 * time.Second}
 	started := time.Now()
@@ -823,7 +913,7 @@ func TestHealthzAnswersWhilePostgresStopsAnswering(t *testing.T) {
 		database.Pool.Close()
 	})
 
-	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), metrics.New(), database, nil, nil, "", nil, issuers{}))
+	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), metrics.New(), database, nil, nil, nil, "", nil, issuers{}))
 	defer server.Close()
 	// The shared pool's own round trip is the control: the link works right up to the outage.
 	if _, err := database.Pool.Exec(context.Background(), "select 1"); err != nil {
@@ -883,7 +973,7 @@ func TestHealthzAnswersWhilePostgresAndTheBucketBothStopAnswering(t *testing.T) 
 		database.Pool.Close()
 	})
 	bucket := unansweringBucket{filestest.NewMemory()}
-	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), metrics.New(), database, nil, bucket, "", nil, issuers{}))
+	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), metrics.New(), database, nil, nil, bucket, "", nil, issuers{}))
 	defer server.Close()
 
 	client := &http.Client{Timeout: 3 * time.Second}

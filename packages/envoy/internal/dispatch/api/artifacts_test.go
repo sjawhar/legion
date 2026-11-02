@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -601,6 +602,173 @@ func TestDocumentRoutesRejectAmbiguousFilenameWithSlugChoices(t *testing.T) {
 			want := `"duplicate.md" names 2 documents on this ` + test.scope + "; use a slug: duplicate-md (duplicate.md), duplicate-md-2 (duplicate.md)"
 			if response.Code != http.StatusBadRequest || body.Code != "ARTIFACT_REFERENCE_AMBIGUOUS" || body.Error != want {
 				t.Fatalf("ambiguous document route: status=%d body=%s, want 400 ARTIFACT_REFERENCE_AMBIGUOUS %q", response.Code, raw, want)
+			}
+		})
+	}
+}
+
+// An upload whose name is an existing artifact's slug on the same owner is that artifact's next
+// version, for an issue's, a project's and an agent's conversation's uploads alike. Minting a
+// second artifact there (`plan-md-2`, named `plan-md`) would leave `plan-md` naming two documents,
+// one by its slug and one by its name, and nothing deletes a document.
+func TestAnUploadNamedAfterAnArtifactsSlugIsItsNextVersion(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
+	issue := createArtifactIssue(t, handler)
+	type answer struct {
+		Artifact model.Artifact `json:"artifact"`
+		Version  model.Version  `json:"version"`
+	}
+	upload := func(path string, body map[string]string) answer {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodPost, path, body, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("upload %q to %s: status=%d body=%s", body["name"], path, response.Code, response.Body.String())
+		}
+		return decodeBody[answer](t, response)
+	}
+	uploadImage := func(path, name string, content []byte) answer {
+		t.Helper()
+		response := multipartRequest(t, handler, path, map[string]string{"name": name}, name, "image/png", content, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("upload %q to %s: status=%d body=%s", name, path, response.Code, response.Body.String())
+		}
+		return decodeBody[answer](t, response)
+	}
+	sessionPath := "/api/v1/agents/" + agentSession + "/artifacts"
+	for _, test := range []struct {
+		name   string
+		owner  string
+		create func() answer
+		again  func() answer
+	}{
+		{
+			name:  "issue",
+			owner: issue.Key,
+			create: func() answer {
+				return upload("/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "plan.md", "content": "# Plan\n"})
+			},
+			again: func() answer {
+				return upload("/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "plan-md", "content": "# Plan, again\n"})
+			},
+		},
+		{
+			name:  "project",
+			owner: "TEST",
+			create: func() answer {
+				return upload("/api/v1/projects/TEST/artifacts", map[string]string{"name": "plan.md", "content": "# Plan\n"})
+			},
+			again: func() answer {
+				return upload("/api/v1/projects/TEST/artifacts", map[string]string{"name": "plan-md", "content": "# Plan, again\n"})
+			},
+		},
+		{
+			name:   "agent conversation",
+			owner:  "agent/" + agentSession,
+			create: func() answer { return uploadImage(sessionPath, "shot.png", pngBytes("first")) },
+			again:  func() answer { return uploadImage(sessionPath, "shot-png", pngBytes("second")) },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			first := test.create()
+			second := test.again()
+			if second.Artifact.ID != first.Artifact.ID || second.Artifact.Slug != first.Artifact.Slug || second.Version.Number != 2 {
+				t.Fatalf("upload under slug %q = artifact %s (%s, %q) version %d; want %s's version 2",
+					first.Artifact.Slug, second.Artifact.ID, second.Artifact.Slug, second.Artifact.Name, second.Version.Number, first.Artifact.ID)
+			}
+			// Every reference this test made, a slug or a name, names one artifact on the owner.
+			for _, reference := range []string{first.Artifact.Slug, first.Artifact.Name} {
+				var count int
+				if err := database.Pool.QueryRow(context.Background(), `
+					select count(*) from artifacts
+					where coalesce(issue_key, project_key, 'agent/' || session_id) = $1 and $2 in (slug, name)
+				`, test.owner, reference).Scan(&count); err != nil {
+					t.Fatalf("count artifacts: %v", err)
+				}
+				if count != 1 {
+					t.Fatalf("%q names %d artifacts on %s, want 1", reference, count, test.owner)
+				}
+			}
+		})
+	}
+}
+
+// An upload under an artifact's slug whose content is of another kind cannot be that artifact's
+// version, and is refused naming the artifact, rather than stored as a second artifact the slug
+// would also name.
+func TestAnUploadNamedAfterAnArtifactsSlugOfAnotherKindIsRefused(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
+	issue := createArtifactIssue(t, handler)
+	path := "/api/v1/issues/" + issue.Key + "/artifacts"
+	if created := dispatchRequest(t, handler, http.MethodPost, path, map[string]string{"name": "report.md", "content": "# Report\n"}, "alice"); created.Code != http.StatusCreated {
+		t.Fatalf("create report.md: status=%d body=%s", created.Code, created.Body.String())
+	}
+	response := multipartRequest(t, handler, path, map[string]string{"name": "report-md"}, "report-md", "application/octet-stream", []byte("report"), "alice")
+	body := decodeBody[struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}](t, response)
+	want := `"report-md" names artifact report-md (report.md), whose kind is doc; this upload's kind is file, so it cannot be its next version: give it another name`
+	if response.Code != http.StatusBadRequest || body.Code != "ARTIFACT_KIND_MISMATCH" || body.Error != want {
+		t.Fatalf("upload under a doc's slug as a file: status=%d body=%s, want 400 ARTIFACT_KIND_MISMATCH %q", response.Code, response.Body.String(), want)
+	}
+	var count int
+	if err := database.Pool.QueryRow(context.Background(), `select count(*) from artifacts where issue_key = $1 and slug like 'report-md%'`, issue.Key).Scan(&count); err != nil {
+		t.Fatalf("count artifacts: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("issue holds %d report-md artifacts, want 1", count)
+	}
+}
+
+// Uploads at once to one owner that holds no plan yet, some named `plan.md` and the rest `plan-md`,
+// are all stored, and leave no reference, a name or a slug, that names two artifacts. Which name
+// lands first decides whether they make one artifact or two: `plan-md` first holds that name and
+// slug, and `plan.md` then gets `plan-md-2`. Neither upload may look its artifact up while the
+// other is still creating one, which a project's upload, with no row to lock as an issue's has,
+// needs its own lock for.
+func TestConcurrentUploadsUnderOneNameAndItsSlugLeaveNoReferenceNamingTwo(t *testing.T) {
+	for _, owner := range []string{"issue", "project"} {
+		t.Run(owner, func(t *testing.T) {
+			handler, database, _ := newTestServer(t, testServerOptions{})
+			issue := createArtifactIssue(t, handler)
+			path, ownerKey := "/api/v1/projects/TEST/artifacts", "TEST"
+			if owner == "issue" {
+				path, ownerKey = "/api/v1/issues/"+issue.Key+"/artifacts", issue.Key
+			}
+			const uploads = 6
+			start := make(chan struct{})
+			responses := make(chan *httptest.ResponseRecorder, uploads)
+			for index := range uploads {
+				name := []string{"plan.md", "plan-md"}[index%2]
+				go func() {
+					<-start
+					responses <- dispatchRequest(t, handler, http.MethodPost, path, map[string]string{
+						"name": name, "content": "# Plan " + string(rune('a'+index)) + "\n",
+					}, "alice")
+				}()
+			}
+			close(start)
+			for range uploads {
+				if response := awaitResponse(t, responses); response.Code != http.StatusCreated {
+					t.Fatalf("concurrent upload: status=%d body=%s, want 201", response.Code, response.Body.String())
+				}
+			}
+
+			rows, err := database.Pool.Query(context.Background(), `
+				select a.slug || ' (' || a.name || ') and ' || b.slug || ' (' || b.name || ')'
+				from artifacts a join artifacts b
+					on coalesce(a.issue_key, a.project_key) = coalesce(b.issue_key, b.project_key) and a.id < b.id
+				where coalesce(a.issue_key, a.project_key) = $1 and (a.name in (b.name, b.slug) or a.slug in (b.name, b.slug))
+			`, ownerKey)
+			if err != nil {
+				t.Fatalf("read artifacts sharing a reference: %v", err)
+			}
+			shared, err := pgx.CollectRows(rows, pgx.RowTo[string])
+			if err != nil {
+				t.Fatalf("read artifacts sharing a reference: %v", err)
+			}
+			if len(shared) != 0 {
+				t.Fatalf("artifacts sharing a reference on %s: %v, want none", ownerKey, shared)
 			}
 		})
 	}
