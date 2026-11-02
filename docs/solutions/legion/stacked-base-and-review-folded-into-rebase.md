@@ -49,8 +49,9 @@ Rules that fall out:
   ask whether the fix is *correct* without it; if yes, the default is `main`, and the other PR's
   behaviour is named in the PR body as unchanged here.
 - When you do stack a duplicate, keep it as its own commit and never let it carry the other PR's
-  handoff/docs commits (they conflict with `main` and later phases would misread them as
-  predecessors). `jj duplicate <one commit> -d <plan handoff>` did exactly that.
+  docs commits: they conflict with `main`. Before sjawhar/legion#2354 its handoff commits were
+  the same hazard, and a later phase misread them as predecessors. `jj duplicate <one commit> -d
+  <plan handoff>` kept the duplicate to one commit.
 - Escalate the swap as a decision with the facts (`envoy_publish` to the architect: options,
   verified consequences, recommendation, and "I am holding the push until you answer") rather
   than doing it on the organizer's say-so alone: the organizer owns the queue, the architect owns
@@ -61,8 +62,9 @@ Rules that fall out:
 **Superseded 2026-09-27 (LEGION-118):** a rebase rooted at the branch's fork point also rewrites
 another tree's branch when one is stacked on it; resolve with a forward merge instead, from the
 bookmark rather than `@` (`jj new legion/<KEY> main@origin -m "<message>"`,
-`skills/legion-worker/references/conflicts-and-rewrites.md`; a handoff split leaves `@` empty and undescribed, and `jj git
-push` refuses a commit with no description). What follows records this PR's earlier workflow.
+`skills/legion-worker/references/conflicts-and-rewrites.md`; `@` is often an empty, undescribed
+commit that `jj git push` refuses, as a handoff split left it before sjawhar/legion#2354). What
+follows records this PR's earlier workflow.
 
 `main` moved 40 commits while #980 waited (LEGION-21's runtime boundary, LEGION-30's idle-retire
 config key, #978's CLI change). `jj rebase -s <plan handoff> -d main@origin`, then for each
@@ -76,7 +78,8 @@ extracted (`probeWorkerSocket`→`probeWorker`, `workerClient`→`clientFor`,
 `reconcileTmuxWindows`→`reconcileOrphans`, `WorkerLocator`→`Locator`, test fixtures moving to
 `ProcessManagerDeps & RuntimeOverrides` and reading locators through `recordedTmuxLocator`/
 `tmuxFields`). See `handoff-file-conflicts-during-rebases.md` for why resolving bottom-up with
-`squash` avoids re-conflicting descendants.
+`squash` avoids re-conflicting descendants. That note is superseded, and its mechanics still hold
+for any conflicting file.
 
 The one non-mechanical conflict was a **new boot check** `main` had added (`verifyLegionPluginContract`,
 #962) sitting between the two OMP probes this branch turns into a background chain. Its tests
@@ -123,7 +126,7 @@ A worker that lives across many rounds meets the daemon's rough edges:
 - **`handoff complete` 409 after a respawn (LEGION-37).** Documented in
   `worker-pane-shell-gotchas.md` §11; on this issue it happened on every round after the first.
   The architect accepted the completion report by `envoy_publish` message each time. Do not
-  retry and do not write a second handoff file.
+  retry and do not write a second handoff record.
 - **Operator-driven pane stop mid-work.** The process was stopped over the shutdown frame and
   relaunched with `--resume` (a plugin credential fix). What made it painless: every resolution
   already squashed into its jj commit, an empty working copy, and a checkpoint message to the

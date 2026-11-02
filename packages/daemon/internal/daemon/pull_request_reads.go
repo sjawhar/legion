@@ -7,9 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -44,14 +42,13 @@ import (
 // Before the synchronize it applies, oldest first, the pushes that took the branch to the new head,
 // as their push webhooks would have carried them (headPushes): those webhooks wait in the same
 // backlog, or were lost, and the workflow judges a move by the chain of its pushes - whether it is a
-// fix attempt, whether the red it leaves is the review App's planned one
-// (classify.AdvancePullRequestHead), and whether an approval of the head below stands for it
-// (classify.ApprovalStands). When no recorded push ends at the new head they are the pushes
-// GitHub's activity of the branch shows (lostPushes); otherwise, or when that activity cannot be
-// followed, the one push GitHub's compare shows changed only the issue's own .legion/<issue>/
-// (handoffPush), or none, and a push that may change code is left to its webhook: a code head with
-// no known push is judged as such, and the push's own handler settles what only the push says,
-// replaying the head run the head opened (classify.ApplyPush).
+// fix attempt, and whether the red it leaves is the review App's planned one
+// (classify.AdvancePullRequestHead). When a recorded push already ends at the new head it applies
+// none, and when no recorded push does they are the pushes GitHub's activity of the branch shows
+// (lostPushes); a push that activity cannot account for is left to its webhook, as when a
+// synchronize beats its push: a head with no known push is judged as such, and the push's own
+// handler settles what only the push says, replaying the head run the head opened
+// (classify.ApplyPush).
 //
 // It returns the record as the pass goes on with it: as it stands when the head did not move, and
 // otherwise as the synchronize left it, so the mergeability, review and required-check reads after
@@ -114,49 +111,6 @@ func (w *workflowRuntime) openRecord(ctx context.Context, pr record.PullRequest)
 	return *current, nil
 }
 
-// handoffPush is the intake.Push that took pr's branch from from to to, as the push webhook would
-// have carried it, when GitHub's compare of the two (githubrest.Client.Compare, the compare READY
-// reads) shows to is from with commits on top that change only the issue's own handoffs,
-// .legion/<issue>/ (classify.HandoffPath): followHead's recorded head and GitHub's, or
-// readApprovalCarry's approved head and the recorded one. Every other comparison says why it is not
-// one, and the push is left to its webhook: a path outside the issue's handoffs (code, or another
-// issue's handoffs, which READY refuses as code too), a rewritten history or a head behind from, no
-// file list or a list GitHub may have cut (githubrest.CompareFilesLimit), and a from GitHub does not
-// know. Any other failure of the read is an error. The push names no pusher: the pusher decides
-// only a code push's planned mark and whether a push spares a fix attempt, which a handoff-only
-// push spares whoever pushed it, on a chain from the head the counted move started from
-// (classify.sparedMove).
-func handoffPush(ctx context.Context, github githubrest.Client, pr record.PullRequest, from, to string) (intake.Push, string, error) {
-	compare, err := github.Compare(ctx, from, to)
-	if err != nil {
-		var answer *githubrest.Answer
-		if errors.As(err, &answer) && answer.Status == http.StatusNotFound {
-			return intake.Push{}, fmt.Sprintf("GitHub does not know %s, or cannot compare it with %s", from, to), nil
-		}
-		return intake.Push{}, "", fmt.Errorf("compare %s with %s: %w", from, to, err)
-	}
-	switch {
-	case compare.Status != "ahead":
-		return intake.Push{}, fmt.Sprintf("GitHub's compare of %s with %s is %q, so %s is not %s with commits on top", from, to, compare.Status, to, from), nil
-	case compare.Files == nil:
-		return intake.Push{}, fmt.Sprintf("GitHub's compare of %s with %s answered no file list", from, to), nil
-	case len(*compare.Files) == 0:
-		return intake.Push{}, fmt.Sprintf("GitHub's compare of %s with %s lists no changed file", from, to), nil
-	case len(*compare.Files) >= githubrest.CompareFilesLimit:
-		return intake.Push{}, fmt.Sprintf("GitHub's compare of %s with %s lists %d changed files, the most it lists, so a path past them is unread", from, to, len(*compare.Files)), nil
-	}
-	paths := githubrest.ChangedPaths(*compare.Files)
-	for _, path := range paths {
-		if !classify.HandoffPath(pr.Issue, path) {
-			return intake.Push{}, fmt.Sprintf("%s changed between %s and %s, outside .legion/%s/", path, from, to, pr.Issue), nil
-		}
-	}
-	// Not forced: GitHub's compare says ahead, so to is from with commits on top, and the paths
-	// above are what those commits did to from (classify.sparesAttempt, carriesApproval).
-	changed, whole, unforced := strings.Join(paths, "\n"), "false", "false"
-	return intake.Push{Repo: pr.Repo, Branch: pr.Branch, Before: from, After: to, ChangedPaths: &changed, Truncated: &whole, Forced: &unforced}, "", nil
-}
-
 // passPush is a push the pass rebuilt from its reads of GitHub, with the event id it is applied
 // under.
 type passPush struct {
@@ -165,49 +119,41 @@ type passPush struct {
 }
 
 // headPushes is the pushes followHead applies, oldest first, before the synchronize that moves pr
-// from its recorded head to head. When no recorded push ends at head (classify.HeadPushKnown), its
-// webhook lost or waiting behind the GitHub consumer's backlog, they are the pushes GitHub's
-// activity of the branch shows took it there (lostPushes). When a recorded push ends at head, or
-// that activity cannot be followed, which it logs, it is the one push from the recorded head to
-// head that GitHub's compare shows changed only the issue's own handoffs (handoffPush), or none. A
-// rate-limit answer, ctx ending, or any failure of handoffPush's compare is an error.
+// from its recorded head to head. When a recorded push already ends at head
+// (classify.HeadPushKnown) there are none: the record knows the move. When none does, its webhook
+// lost or waiting behind the GitHub consumer's backlog, they are the pushes GitHub's activity of
+// the branch shows took it there (lostPushes); when that activity cannot be followed, which it
+// logs, there are none either, and the pushes are left to their webhooks. A rate-limit answer, or
+// ctx ending, is an error.
 func (w *workflowRuntime) headPushes(ctx context.Context, github githubrest.Client, pr record.PullRequest, head string) ([]passPush, error) {
-	if !classify.HeadPushKnown(pr, head) {
-		pushes, unfollowed, err := w.lostPushes(ctx, github, pr, head)
-		if err != nil || unfollowed == "" {
-			return pushes, err
-		}
-		w.log.Warn("workflow: the pass cannot rebuild from GitHub's activity the pushes that moved a pull request's head; it applies none of them, and the synchronize",
-			"repo", pr.Repo, "pullRequest", pr.Number, "issue", pr.Issue, "branch", pr.Branch, "recorded", pr.HeadSHA, "head", head, "reason", unfollowed)
+	if classify.HeadPushKnown(pr, head) {
+		return nil, nil
 	}
-	read, cancel := context.WithTimeout(ctx, requiredChecksRead)
-	push, notHandoff, err := handoffPush(read, github, pr, pr.HeadSHA, head)
-	cancel()
-	if err != nil || notHandoff != "" {
-		return nil, err
+	pushes, unfollowed, err := w.lostPushes(ctx, github, pr, head)
+	if err != nil || unfollowed == "" {
+		return pushes, err
 	}
-	return []passPush{{eventID: w.pushReadEventID(pr, pr.HeadSHA, head), fact: push}}, nil
+	w.log.Warn("workflow: the pass cannot rebuild from GitHub's activity the pushes that moved a pull request's head; it applies none of them, and the synchronize",
+		"repo", pr.Repo, "pullRequest", pr.Number, "issue", pr.Issue, "branch", pr.Branch, "recorded", pr.HeadSHA, "head", head, "reason", unfollowed)
+	return nil, nil
 }
 
 // lostPushes is the pushes that took pr's branch from the recorded head to head, oldest first, as
 // their push webhooks would have carried them, less those the record holds already (its pushes and
 // the moves it made): GitHub's activity of the branch (githubrest.Client.BranchActivity, its newest
 // hundred entries) followed back from head to the recorded head (followActivity). Each is GitHub's
-// push, force push or branch creation, with Before and After its two commits, Pusher its actor's
-// login - an App's <slug>[bot], the form of the push webhook's pusher.name, by which the workflow
-// tells the review App's pushes - Forced whether it was a force push, ChangedPaths what GitHub's
-// compare of its two commits lists (githubrest.Client.Compare, ChangedPaths), and Truncated when
-// GitHub may have cut that list (githubrest.CompareFilesLimit) or answered none. Repo and Branch
-// are the record's, the names the webhook's push carries. The workflow judges a move by the chain
-// of its pushes, so one push from the recorded head to head, compared whole, would judge it wrong.
-// Each push's event id names the project, the pull request and the push's two commits
-// (pushReadEventID), so a later pass skips it before any transaction, and the push webhook arriving
-// later is the same push recorded again, which the record keeps as its move's push or a repeat of
-// it and which changes no judgement (classify.ApplyPush): a webhook whose list GitHub cut short
-// takes the paths the compare listed here, so a handoff-only push stays one.
+// push, force push or branch creation, with Before and After its two commits and Pusher its
+// actor's login - an App's <slug>[bot], the form of the push webhook's pusher.name, by which the
+// workflow tells the review App's pushes. Repo and Branch are the record's, the names the webhook's
+// push carries. The workflow judges a move by the chain of its pushes, so one push from the
+// recorded head to head would judge it wrong. Each push's event id names the project, the pull
+// request and the push's two commits (pushReadEventID), so a later pass skips it before any
+// transaction, and the push webhook arriving later is the same push recorded again, which the
+// record keeps as its move's push or a repeat of it and which changes no judgement
+// (classify.ApplyPush).
 //
 // unfollowed says why the pushes cannot be rebuilt, and then there are none: the page does not
-// lead back from head to the recorded head, an entry on the way is no push, or GitHub answered a
+// lead back from head to the recorded head, an entry on the way is no push, or GitHub answered the
 // read with an error. A rate-limit answer, or ctx ending, is an error: the pass ends there.
 func (w *workflowRuntime) lostPushes(ctx context.Context, github githubrest.Client, pr record.PullRequest, head string) ([]passPush, string, error) {
 	read, cancel := context.WithTimeout(ctx, requiredChecksRead)
@@ -235,31 +181,9 @@ func (w *workflowRuntime) lostPushes(ctx context.Context, github githubrest.Clie
 		if recorded[[2]string{entry.Before, entry.After}] {
 			continue
 		}
-		read, cancel := context.WithTimeout(ctx, requiredChecksRead)
-		compare, err := github.Compare(read, entry.Before, entry.After)
-		cancel()
-		if err != nil {
-			if endsPass(ctx, err) {
-				return nil, "", fmt.Errorf("compare %s with %s: %w", entry.Before, entry.After, err)
-			}
-			return nil, fmt.Sprintf("the compare of %s with %s failed: %v", entry.Before, entry.After, err), nil
-		}
-		var changed *string
-		truncated := "true"
-		if compare.Files != nil {
-			if len(*compare.Files) < githubrest.CompareFilesLimit {
-				truncated = "false"
-			}
-			// The webhook's push leaves out a push's changed paths when it lists none.
-			if paths := strings.Join(githubrest.ChangedPaths(*compare.Files), "\n"); paths != "" {
-				changed = &paths
-			}
-		}
-		forced := strconv.FormatBool(entry.Type == "force_push")
 		pushes = append(pushes, passPush{
 			eventID: w.pushReadEventID(pr, entry.Before, entry.After),
-			fact: intake.Push{Repo: pr.Repo, Branch: pr.Branch, Before: entry.Before, After: entry.After,
-				ChangedPaths: changed, Truncated: &truncated, Forced: &forced, Pusher: entry.Actor.Login},
+			fact:    intake.Push{Repo: pr.Repo, Branch: pr.Branch, Before: entry.Before, After: entry.After, Pusher: entry.Actor.Login},
 		})
 	}
 	return pushes, "", nil

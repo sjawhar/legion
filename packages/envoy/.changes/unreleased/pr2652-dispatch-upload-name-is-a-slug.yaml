@@ -1,0 +1,11 @@
+kind: Fixed
+body: |-
+    An upload whose name is an existing artifact's slug on the same issue, project or agent's
+    conversation (`plan-md` beside `plan.md`) is that artifact's next version, instead of a second
+    artifact `plan-md-2` named `plan-md` that left `plan-md` naming two documents. Under such a slug,
+    an upload of another kind is `400 ARTIFACT_KIND_MISMATCH`, whose message now names the artifact's
+    slug, name and kind. A project's uploads take a lock of their own, so two at once under a name
+    and its slug no longer fail with a 500 or store two documents that share a reference.
+time: 2026-11-02T01:10:00.000000000Z
+custom:
+    Issue: pr2652
