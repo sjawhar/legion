@@ -1780,7 +1780,7 @@ console.log(JSON.stringify(args, null, 2));
       {
         script: `dispatch ask --issue X-1 --question-file - --dry-run <<'EOF'\n${QUESTION}EOF`,
         cwd: work,
-        timeoutMs: 10_000,
+        timeoutMs: core.DRY_RUN_TIMEOUT_MS,
       },
     ]);
     const args = { issue: "X-1", question: QUESTION };
@@ -3058,7 +3058,7 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
       expect(g.dryRuns[0]).toMatchObject({
         script: "cd sub >/dev/null && pwd -P",
         cwd: work,
-        timeoutMs: 10_000,
+        timeoutMs: core.DRY_RUN_TIMEOUT_MS,
       });
       // The dry run names the file as the call wrote it: the gate copies nothing.
       expect(g.dryRuns[1]?.script).toBe(
@@ -3067,7 +3067,7 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
       expect(g.dryRuns[2]).toMatchObject({
         script: "cd inner >/dev/null && pwd -P",
         cwd: path.join(work, "sub"),
-        timeoutMs: 10_000,
+        timeoutMs: core.DRY_RUN_TIMEOUT_MS,
       });
       expect(g.dryRuns[3]?.script).toBe(
         "cd inner >/dev/null && dispatch message --issue X-1 --body-file note.txt --dry-run"
@@ -3183,15 +3183,71 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
     ]);
     expect(g.entries[0].reason).toContain("unknown flag --fail");
   });
-  test("a dry-run past its limit is recorded as an error and the command runs", async () => {
+  // A dry run contacts no Dispatch server, so only a busy machine makes it slow: the gate runs a
+  // cut run once more within half the call's deadline, and the review keeps the rest. The clock
+  // here moves only as each stand-in run spends its whole limit.
+  test("a dry-run cut at its limit runs once more within half the deadline, and the call is reviewed", async () => {
+    let clock = 1_000_000;
+    let runs = 0;
+    const g = bind({
+      env: { ...STUB, OMP_ASKGATE: "block" },
+      cwd: work,
+      now: () => clock,
+      dryRun: async (script, runOpts) => {
+        runs += 1;
+        if (runs > 1) return core.spawnDryRun(script, runOpts);
+        clock += runOpts.timeoutMs;
+        return { exitCode: null, stdout: "", stderr: "", timedOut: true };
+      },
+    });
+    expect(await g.bash("b1", ASK)).toBeUndefined();
+    // The deadline is 90 s at a 120 s ceiling: 20 s first, then what is left of its 45 s half.
+    expect(g.dryRuns.map((run) => run.timeoutMs)).toEqual([core.DRY_RUN_TIMEOUT_MS, 25_000]);
+    expect(g.entries).toMatchObject([{ tool: "dispatch_ask", outcome: "verdict" }]);
+    expect(g.calls.filter(isCharter)).toHaveLength(1);
+  }, 30_000);
+  test("a dry-run cut twice runs the call unreviewed and tells the agent why and what to do", async () => {
+    let clock = 1_000_000;
     const g = bind({
       env: { OMP_ASKGATE: "block" },
       cwd: work,
-      dryRun: async () => ({ exitCode: null, stdout: "", stderr: "", timedOut: true }),
+      now: () => clock,
+      dryRun: async (_script, runOpts) => {
+        clock += runOpts.timeoutMs;
+        return { exitCode: null, stdout: "", stderr: "", timedOut: true };
+      },
+    });
+    const result = await g.bash("b1", ASK);
+    expect(result?.block).toBeUndefined();
+    expect(g.dryRuns.map((run) => run.timeoutMs)).toEqual([core.DRY_RUN_TIMEOUT_MS, 25_000]);
+    expect(g.calls).toHaveLength(0);
+    expect(g.entries).toMatchObject([{ tool: "dispatch_ask", outcome: "error" }]);
+    expect(g.entries[0].reason).toBe(
+      "dispatch ask --dry-run did not finish within 20000 ms, nor within 25000 ms when run again"
+    );
+    const note = result?.additionalContext ?? "";
+    expect(note).toContain(g.entries[0].reason ?? "");
+    expect(note).toContain("contacts no Dispatch server");
+    expect(note).toContain("The call ran unreviewed: read back what it posted");
+  });
+  test("at a short deadline the reads keep to half of it, and a run cut there is not run again", async () => {
+    let clock = 1_000_000;
+    const g = bind({
+      env: { OMP_ASKGATE: "block" },
+      cwd: work,
+      // A 30 s ceiling holds the deadline at 25 s, so the reads get 12.5 s.
+      ceiling: 30_000,
+      now: () => clock,
+      dryRun: async (_script, runOpts) => {
+        clock += runOpts.timeoutMs;
+        return { exitCode: null, stdout: "", stderr: "", timedOut: true };
+      },
     });
     expect((await g.bash("b1", ASK))?.block).toBeUndefined();
-    expect(g.entries).toMatchObject([{ tool: "dispatch_ask", outcome: "error" }]);
-    expect(g.entries[0].reason).toContain("10000 ms");
+    expect(g.dryRuns.map((run) => run.timeoutMs)).toEqual([12_500]);
+    expect(g.entries[0].reason).toBe(
+      "dispatch ask --dry-run did not finish within 12500 ms, and the call's deadline left no time to run it again"
+    );
   });
   test("the runner kills a dry-run that outlives its limit", async () => {
     const began = Date.now();
@@ -3873,7 +3929,9 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
       expect(g.calls[0].user).toContain(JSON.stringify(`${BRIEF}(the copy in docs)\n`));
       // The directory comes from the command's own cd and then pwd -P, run as the dry run runs.
       expect(g.dryRuns.map((run) => run.script)).toContain("cd docs >/dev/null && pwd -P");
-      expect(g.dryRuns.every((run) => run.cwd === work && run.timeoutMs === 10_000)).toBe(true);
+      expect(
+        g.dryRuns.every((run) => run.cwd === work && run.timeoutMs === core.DRY_RUN_TIMEOUT_MS)
+      ).toBe(true);
     });
     // The second final review of #2159: Oh My Pi at its pin takes a leading `cd X &&` into the
     // call's directory with no CDPATH (`extractLeadingCdTarget`, then `resolveToCwd`), and its
