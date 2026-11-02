@@ -367,7 +367,10 @@ production_audit() {
   sessions=$(rig_sessions_json)
   printf '%s\n' "$sessions" >"$evidence/rig-sessions.json"
   # A non-200 (the refilling 503 included) is a list the audit could not read, never an empty one.
-  envoy=$(curl -fsS --max-time 10 "$prod_envoy_url/v1/sessions") || { printf 'could not read %s/v1/sessions\n' "$prod_envoy_url"; return 1; }
+  # include=unresponsive, because the default answers live sessions alone (dispatch://INFRA-392):
+  # a rig session that leaked and then stopped answering is the one this audit most needs to find,
+  # and without the parameter it would be absent from the list and the audit would pass over it.
+  envoy=$(curl -fsS --max-time 10 "$prod_envoy_url/v1/sessions?include=unresponsive") || { printf 'could not read %s/v1/sessions\n' "$prod_envoy_url"; return 1; }
   envoy=$(jq -c --argjson ids "$sessions" --arg work "$work" '[.[] | select((.session_id as $s | $ids | index($s)) or ((.dir // "") | startswith($work)))]' <<<"$envoy")
   printf '%s\n' "$envoy" >"$evidence/production-envoy-rig-sessions.json"
   if [ "$envoy" != "[]" ]; then printf 'production Envoy listener holds rig sessions: %s\n' "$envoy"; found=1; fi
