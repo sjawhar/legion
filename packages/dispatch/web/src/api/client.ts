@@ -464,6 +464,16 @@ export function threadReadRequest(threadId: string, readThrough: string): WriteR
   };
 }
 
+/** `PUT /api/v1/me/documents/{id}/read`: the person's last read version of a document
+ *  (`putDocumentRead`). */
+export function documentReadRequest(id: string, version: number): WriteRequest<DocumentRead> {
+  return {
+    body: { version },
+    method: "PUT",
+    path: `/api/v1/me/documents/${pathSegment(id)}/read`,
+  };
+}
+
 /** `PUT /api/v1/me/issues/{key}/state`: the person's state of an issue (`putIssueState`). */
 export function issueStateRequest(
   key: string,
@@ -1283,11 +1293,7 @@ export class DispatchApiClient {
   /** Record the caller's last read version of a document: the Spec tab marks each block that
    *  changed since it. */
   putDocumentRead(id: string, version: number, bounds: WriteBounds): Promise<DocumentRead> {
-    return this.put<DocumentRead>(
-      `/api/v1/me/documents/${pathSegment(id)}/read`,
-      { version },
-      bounds
-    );
+    return this.send(documentReadRequest(id, version), bounds);
   }
 
   /** One version's bytes. A large file on a slow line can take longer than any read deadline, so
@@ -1365,8 +1371,12 @@ export class DispatchApiClient {
   getIssueReferences(key: string): Promise<IssueReferences> {
     return this.json<IssueReferences>(`/api/v1/issues/${pathSegment(key)}/references`);
   }
-  getReferences(reference: string): Promise<GraphReferences> {
-    return this.json<GraphReferences>(pathWithQuery("/api/v1/references", { to: reference }));
+  /** The edges at a node; `kind` keeps those of one kind - `part_of` lists a document's blocks,
+   *  which a document's read otherwise leaves out. */
+  getReferences(reference: string, options: { kind?: string } = {}): Promise<GraphReferences> {
+    return this.json<GraphReferences>(
+      pathWithQuery("/api/v1/references", { kind: options.kind, to: reference })
+    );
   }
 
   /** One deploy-repository run with every job it ran, for the drill-down's job lists. */
