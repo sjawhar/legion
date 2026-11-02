@@ -137,11 +137,14 @@ test("the panel sorts the view into its four lists, in order", async () => {
     expect(within(waiting).getByText("Store notices in a table")).toBeDefined();
     expect(within(waiting).getByRole("button", { name: "Keep" })).toBeDefined();
     expect(within(waiting).getByRole("button", { name: "Change" })).toBeDefined();
-    // The paragraph's markdown renders after the commit that mounts it.
-    await waitFor(() =>
-      expect(within(waiting).getByTestId("decision-unsure").textContent).toContain(
-        "the index may be slow."
-      )
+    // The paragraph's markdown renders after the commit that mounts it, and the first body of
+    // the run waits for the block schema and the headless engine to load.
+    await waitFor(
+      () =>
+        expect(within(waiting).getByTestId("decision-unsure").textContent).toContain(
+          "the index may be slow."
+        ),
+      { timeout: 10_000 }
     );
     // Each link opens the spec at the block it shaped, its id written as `encodeBlockId` writes it.
     const shaped = within(waiting)
