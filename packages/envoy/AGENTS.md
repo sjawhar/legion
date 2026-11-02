@@ -2672,6 +2672,8 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   The interest change writes the record whatever the session's delivery mode, deliberately: the record says which topics a session follows and the consumer's filter says which of those the stream carries, and while the write sat inside `sessionDelivery.refollow`, which returns early for a session that holds its own NATS connection and has no consumer, a session that unsubscribed kept the topic in its record and a publish told its sender a running session got a message nobody got.
   A write of content equal to the stored record is skipped while that record is younger than `session.KnownSessionRefreshAge` (10 minutes), so a session's 90-second heartbeat costs one write per refresh age however many listeners serve the session;
   the comparison reads the stored record, as `store.Registry.UpsertWithin`'s does for an interest row, so the throttle holds across every listener.
+  A clean stop is written whatever the throttle would say (`session.KnownSessions.TouchWithin`, which skips it):
+  a live session rewrites its record at least once per refresh age, so at its stop the stored record is almost always younger than that and an unchanged-content write would be skipped, leaving `last_seen` up to a refresh age before the stop, which a send to the stopped session answers and both tools print.
   The bucket is in `bus.ListenerBuckets()`, so envoy-infra grants it to the listener, to the host user a host's sessions share and to Dispatch (`packages/envoy/infra/core/permissions.go`, and `packages/envoy/infra/README.md` for what that widens).
 
 - Opening that bucket is its own question, because the listener that cannot is the one production runs between this change's image pin and the grant release.
@@ -2680,6 +2682,9 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   That listener does not wait for the bucket at its start and does not give it up for the life of the process.
   One open attempt is bounded at `knownBucketOpenWait` (2 seconds) rather than the 10-second JetStream `MaxWait` the other stores take, because a denied JetStream request is dropped by the server rather than refused, so the attempt costs its whole wait and the start blocks on it before `/v1` opens; by then the stream and the four other buckets have been answered over the same API, so two seconds is far past a healthy remote leader.
   A failed attempt is retried in the background, first after a second and doubling to a five-minute cap, so the grant release that follows the listener's image pin is picked up without a restart.
+  The same retry repairs a move to a recovered NATS connection that failed (`session.KnownSessions.Rewatch`), which nothing else would:
+  the listener's reconnect hook answers nil over that error, so the bus counts the connection event as covered and runs no hook again until the next one, and the store is kept out of `listenerCaches` so that the self-health rebuild leaves it alone.
+  One repair runs at a time, a move that succeeded ends it, and a stop ends it wherever it is.
   An attempt that opens the bucket then waits for the watcher's first pass before the store reports the bucket open, and logs that one line after it, because a bucket is opened in one request and read in a pass over every key it holds:
   between the two the store answers for no session the bucket knows, so a send would be refused `404 no live session` for a session Envoy does know and a publish would count its recipients low, which are the two failures this store exists to remove.
   The listener's start gates the same hazard with `WaitForCacheReady` before it opens `/v1`; nothing gates the attempt that opens the bucket later, so the store holds that line itself (`session.KnownSessions.Opened`, which reports the bucket open and its cache filled, never the first alone).
@@ -3396,7 +3401,9 @@ Each item below names an endpoint and its method, then its contract, and an item
 
 - A topic that does not begin with `notifications.` is refused `400 {"error":"topic must begin with notifications.","expected":["topic"]}` and nothing is published, which closes the raw-subject route a bearer could otherwise use to write the listener's own key-value buckets
   — the role-claim records among them — and reach `$JS.API.*`.
-  A topic under `notifications.envoy.presence.` (`bus.PresenceSubjectPrefix`) is refused the same way, `400 {"error":"cannot publish to presence subjects; notifications.envoy.presence. is the listener's own check of whether a session's plugin holds a NATS connection, not a topic to publish on"}`, as an agent topic is.
+  A topic that reaches a session's presence subject is refused the same way, `400 {"error":"cannot publish to a topic that reaches the presence space; notifications.envoy.presence. is the listener's own check of whether a session's plugin holds a NATS connection, not a topic to publish on"}`, as an agent topic is.
+  The rule is an overlap test and not a prefix (`bus.ReachesPresenceSubject`), so one session's literal presence subject, the whole space, and every wildcard covering part of it (`notifications.envoy.*.<id>`, `notifications.envoy.>`, `notifications.>`) are refused alike:
+  what a subject reaches is decided by the subjects it matches, not by how it was spelled, and no real publish names a wildcard, so nothing legitimate is refused by the wider rule.
   An optional `dedupe_key` is used verbatim as the envelope's dedupe key (how a re-sent copy stays recognisable to the receiver's own dedupe);
   it is mutually exclusive with `idempotency_key` — both present is a 400 whose `expected` names both fields
   — it may not begin with the reserved forward mark `envoy.role.forward.` (a 400 naming `dedupe_key`;
@@ -3516,7 +3523,9 @@ Each item below names an endpoint and its method, then its contract, and an item
   the registry drops every such topic from the merged row, not only from the incoming topics (`store.Registry.Upsert`, which `/v1/roles/set` writes through too;
   `/v1/interests/unsubscribe` drops them from the row it rewrites as well), so `Match` stops fanning those messages out to the session after its next heartbeat.
 
-- A topic under `notifications.envoy.presence.` (`bus.PresenceSubjectPrefix`) is dropped from a registration the same way a private stream subject is, whichever session's it is, with its own `warnings` line.
+- A topic that reaches a session's presence subject is dropped from a registration the same way a private stream subject is, whichever session's it is, with its own `warnings` line.
+  It is the overlap test the publish route applies (`bus.ReachesPresenceSubject`), so a wildcard covering the presence space is dropped with the subjects that name it;
+  a broad wildcard — `notifications.>`, `notifications.envoy.>` — reaches a private stream subject as well, and that check runs first, so such a topic is named by the private-subject warning instead of this one.
   A plugin subscribes to its own presence subject on its own NATS connection and registers it as no interest, while a session registered on another session's presence subject would answer the listener's check for that session and make a stopped session read `connected`.
   Until dispatch://INFRA-840 gives each session a NATS user of its own, every session on a host shares one user, so nothing on the bus stops such a subscription;
   what it buys is today's answer, `sent`, and the probe carries no data.

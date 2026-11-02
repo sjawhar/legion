@@ -287,7 +287,7 @@ func TestPublishHandler_RejectsPresenceSubjects(t *testing.T) {
 			if recorder.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
 			}
-			const want = "cannot publish to presence subjects"
+			const want = "cannot publish to a topic that reaches the presence space"
 			if !strings.Contains(recorder.Body.String(), want) {
 				t.Fatalf("body = %s, want it to carry %q", recorder.Body.String(), want)
 			}

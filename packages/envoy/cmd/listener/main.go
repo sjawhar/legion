@@ -985,16 +985,19 @@ func main() {
 	// out of listenerCaches: an error here fails the whole hook run, which re-runs every hook on
 	// backoff, reports /healthz degraded after RepairGrace and writes the `envoy nats reconnect
 	// hooks have not succeeded` ERROR a metric filter alarms on - over a bucket whose grant was
-	// rolled back or which was deleted under its watcher, neither of which a delivery reads. What
-	// repairs it instead: a store whose bucket never opened is attempting it already
-	// (session.OpenKnownSessions, reopenUntilStopped), and a move this one failed is attempted
-	// again by the next connection event's hook run, on the connection the store keeps from this
-	// one. Until one of those lands, Opened answers false over a watcher that ended, so a
+	// rolled back or which was deleted under its watcher, neither of which a delivery reads.
+	// What repairs it instead is the store itself: a move that failed is retried in the
+	// background on the store's own backoff until one succeeds, the store is stopped, or a later
+	// connection event's move makes it (session.KnownSessions.Rewatch, repairUntilStopped), and
+	// a bucket that never opened is attempted by the same repair (session.OpenKnownSessions).
+	// Nothing else would: this hook run counts the connection event as covered whatever the move
+	// did (internal/bus/recovery.go), so no hook runs again until the next event, which can be
+	// days away. Until a move lands, Opened answers false over a watcher that ended, so a
 	// publish's recipient count is left out rather than answered from a cache that stopped
 	// following the bucket.
 	client.AddReconnectHook(func(conn *nats.Conn) error {
 		if err := known.Rewatch(conn); err != nil {
-			logger.Warn("the known-session cache did not move to the recovered connection; this listener leaves a publish's recipient count out until a later reconnect moves it",
+			logger.Warn("the known-session cache did not move to the recovered connection; the store retries the move on its own backoff, and this listener leaves a publish's recipient count out until one succeeds",
 				slog.String("bucket", bus.KnownSessionBucket), slog.String("error", err.Error()))
 		}
 		return nil

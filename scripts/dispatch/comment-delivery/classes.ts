@@ -172,8 +172,8 @@ export const CAUSES: Readonly<Record<string, CauseEntry>> = {
   },
   "not-addressed:mention": {
     meaning:
-      "The comment mentions the session or role, and Dispatch has no sent or failed delivery of " +
-      "the mention.",
+      "The comment mentions the session or role, and Dispatch has no sent, queued or failed " +
+      "delivery of the mention.",
     fix: "No fix yet. A mention that Dispatch did not try to deliver needs its own fix.",
   },
   "mention-failed:session-not-live": {
@@ -191,6 +191,14 @@ export const CAUSES: Readonly<Record<string, CauseEntry>> = {
       "Dispatch tried to deliver the mention, and it failed with another error. The pair rows " +
       "give the error.",
     fix: "No fix yet. Each such error needs its own fix.",
+  },
+  "mention-queued": {
+    meaning:
+      "The Envoy listener took the mention and stored it for the session, which was not " +
+      "running. The session reads it when it runs again.",
+    fix:
+      "Nothing to fix: the mention is stored, not thrown away. It is lost only when the " +
+      "session never runs again, since the stream drops a message 72 hours old.",
   },
   "not-running": {
     meaning:
@@ -258,21 +266,26 @@ export function describeCause(cause: string): CauseEntry {
 
 /** One pair, judged alone from its receipts.tsv status. A not_received pair gets the first cause
  *  that applies: never-published; not-addressed, when it was owed, the outbox did not send it,
- *  and no mention attempt was sent or failed; mention-failed; not-running, when published_at is
- *  outside the checked session's times; else running-no-row. */
+ *  and no mention attempt was sent, queued or failed; mention-failed; mention-queued, when the
+ *  listener stored the newest attempt for a session that was not running; not-running, when
+ *  published_at is outside the checked session's times; else running-no-row. */
 function judgePair(comment: Comment, pair: Pair): Verdict {
   const { receipt } = pair;
   if (receipt.status === "received") return { ...DELIVERED, evidence: receipt.evidence };
   if (receipt.status === "unknown")
     return { class: "unknown", cause: "", why: receipt.unknownReason };
   if (comment.publishedAt === "") return notDelivered("never-published");
-  const sent = pair.addressed || pair.mentionState === "sent";
-  if (pair.reasons.length > 0 && !sent && pair.mentionState !== "failed") {
+  // A queued attempt is one the listener took, as a sent one is: it stored the mention for a
+  // session it knows that was not running. So the mention did address the session, and the pair
+  // is never not-addressed; it has not reached the session yet, so it is not delivered either.
+  const taken = pair.mentionState === "sent" || pair.mentionState === "queued";
+  if (pair.reasons.length > 0 && !pair.addressed && !taken && pair.mentionState !== "failed") {
     return notDelivered(`not-addressed:${pair.reasons.join("+")}`);
   }
   if (pair.mentionState === "failed") {
     return notDelivered(`mention-failed:${mentionErrorClass(pair.mentionError)}`);
   }
+  if (pair.mentionState === "queued") return notDelivered("mention-queued");
   const at = comment.publishedUs ?? 0;
   const running =
     receipt.startedUs !== undefined &&

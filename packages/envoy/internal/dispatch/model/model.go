@@ -1637,11 +1637,14 @@ type MessageDelivery struct {
 	// session's own user turn. At most one attempt of a message is ever accepted.
 	AcceptedAt *time.Time `json:"accepted_at"`
 	AcceptedAs *string    `json:"accepted_as"`
-	// ConnectedOnly records that the send which opened the attempt asked for a session that is
-	// running now: the Agents page's model and effort switch, which must not be stored for a
-	// stopped session and applied at an unknown later time. Every later send of the attempt -
-	// the delivery sweep's, a repeat under the request's key - reads it back and asks the same,
-	// so a sender that died before its settle cannot turn a switch into a queued message.
+	// ConnectedOnly records that attempt 1's send asked for a session that is running now: the
+	// Agents page's model and effort switch, which must not be stored for a stopped session and
+	// applied at an unknown later time. It is not only what the send that opened this attempt
+	// asked for: a later attempt, opened by a person's Retry or by a mode change, is opened with
+	// the flag of the message's first attempt (api/message_delivery.go,
+	// insertMessageDeliveryAttempt). Every later send of an attempt - the delivery sweep's, a
+	// repeat under the request's key - reads it back and asks the same, so a sender that died
+	// before its settle cannot turn a switch into a queued message.
 	ConnectedOnly bool `json:"connected_only"`
 }
 

@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
+
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch/kvwatchtest"
 	"github.com/sjawhar/envoy/internal/store"
@@ -411,6 +413,194 @@ func TestAStoreWhoseFirstScanTimedOutOpensOnlyOnceItsRescanCompletes(t *testing.
 	}
 	if got := matchedIDs(known, topic); !slices.Equal(got, ids) {
 		t.Fatalf("the store answered %v at the moment it reported its bucket open, want every record the bucket holds, %v", got, ids)
+	}
+}
+
+// knownOverGrant opens a store whose bucket is open, on a server whose one user's grant the test
+// takes away and gives back (testnats.NkeyGrant): while it is away every request the store makes
+// is dropped by the server, so a move to a recovered connection fails as it fails against a
+// cluster that refuses this listener - a grant rolled back, or a bucket deleted under its
+// watcher - and succeeds again once it is back. The retry's waits are the test's, since the
+// production schedule's first wait is a second and its cap five minutes.
+func knownOverGrant(t *testing.T, first, longest time.Duration) (*KnownSessions, *nats.Conn, *testnats.NkeyGrant, func() string) {
+	t.Helper()
+	seed, public := testnats.User(t)
+	grant := testnats.StartNkeyGranted(t, public, knownBucketGrant()...)
+	conn, err := testnats.ConnectSeed(t, grant.URL, seed)
+	if err != nil {
+		t.Fatalf("connect as the user whose grant carries the bucket: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	var logs bytes.Buffer
+	var logsMu sync.Mutex
+	logged := func() string {
+		logsMu.Lock()
+		defer logsMu.Unlock()
+		return logs.String()
+	}
+	known, err := OpenKnownSessions(conn,
+		WithKnownSessionReplicas(1),
+		WithKnownSessionLogger(slog.New(slog.NewTextHandler(lockedWriter{&logs, &logsMu}, nil))),
+		withKnownSessionRetry(first, longest))
+	if err != nil {
+		t.Fatalf("open the known-session store: %v", err)
+	}
+	t.Cleanup(known.StopWatch)
+	if err := known.WaitForCacheReady(context.Background()); err != nil {
+		t.Fatalf("the known-session cache did not become ready: %v", err)
+	}
+	if !known.Opened() {
+		t.Fatal("the store does not report its bucket open before the grant is taken away")
+	}
+	return known, conn, grant, logged
+}
+
+// repairRunning reports whether the store's one background repair is running.
+func repairRunning(known *KnownSessions) bool {
+	known.repairMu.Lock()
+	defer known.repairMu.Unlock()
+	return known.repairing
+}
+
+// watchGeneration is the generation of the store's watcher (kvwatch.Watcher.Complete): a move
+// that succeeded installs a watcher and moves it on, and a move that failed leaves it where it
+// was. It is how a test tells a repair the store made from one it did not.
+func watchGeneration(known *KnownSessions) uint64 {
+	generation, _ := known.watch().Complete()
+	return generation
+}
+
+// awaitKnown waits for what to hold, failing the test when it has not within the wait.
+func awaitKnown(t *testing.T, within time.Duration, what string, holds func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for !holds() {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s within %s", what, within)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A move to a recovered connection that failed is repaired by the store itself, on its own
+// backoff. Nothing else repairs it: the listener's reconnect hook answers nil over the error,
+// since a cache no delivery reads must not report the listener degraded, so the bus counts the
+// connection event as covered and runs no hook again until the next one, which can be days away
+// (internal/bus/recovery.go); the store is kept out of listenerCaches, so the self-health
+// rebuild passes it by; and the attempts that open a bucket that never opened are not this.
+// Until the move is made the watcher and the write handle are on a connection the listener has
+// left, so every record written is lost and a publish's recipient count is left out.
+func TestAFailedMoveToARecoveredConnectionIsRepairedByTheStore(t *testing.T) {
+	known, conn, grant, logged := knownOverGrant(t, 200*time.Millisecond, time.Second)
+	before := watchGeneration(known)
+
+	grant.Grant(t, "nothing.this.store.uses")
+	if err := known.Rewatch(conn); err == nil {
+		t.Fatal("the move succeeded while the user's grant named none of the bucket's subjects; this test says nothing about a move that failed")
+	}
+	if moved := watchGeneration(known); moved != before {
+		t.Fatalf("the watcher moved to generation %d over a move that failed, want it left at %d", moved, before)
+	}
+	if !repairRunning(known) {
+		t.Fatal("no repair runs after a move that failed: nothing else moves the watcher off the connection the listener has left")
+	}
+
+	// The cluster takes this listener back, and nothing asks the store to move again: no
+	// connection event, no reconnect hook, no rebuild. The store's own retry is the whole repair.
+	grant.Grant(t, knownBucketGrant()...)
+	awaitKnown(t, 60*time.Second, "the store's own repair did not move the watcher", func() bool {
+		return watchGeneration(known) > before
+	})
+	awaitKnown(t, 60*time.Second, "the repair did not retire once it had nothing left to repair", func() bool {
+		return !repairRunning(known)
+	})
+	if lines := strings.Count(logged(), "the known-session cache is back"); lines != 1 {
+		t.Errorf("the repair logged %d lines, want the one that reports the move it made:\n%s", lines, logged())
+	}
+
+	// The cache the repair left behind is the bucket's again: it reports the bucket open once the
+	// moved watcher's scan has delivered every record, and the records written through it answer.
+	awaitKnown(t, 60*time.Second, "the repaired store did not report its bucket open", known.Opened)
+	const repaired = "ses_after_the_repair"
+	const topic = "notifications.team.repaired-move"
+	if err := known.RecordWithin(context.Background(), KnownSession{SessionID: repaired, Topics: []string{topic}}); err != nil {
+		t.Fatalf("record through the repaired store: %v", err)
+	}
+	if got := matchedIDs(known, topic); !slices.Equal(got, []string{repaired}) {
+		t.Errorf("the repaired store answered %v for the topic of the record just written, want %q", got, repaired)
+	}
+}
+
+// The move the next connection event makes ends the retry, and the retry moves nothing after it:
+// the connection event's move is the newer one, and a retry that moved the watcher again would
+// put it on the handle of a connection the store has already left. The waits here are long
+// enough that the connection event lands between the retry being armed and its first attempt,
+// which is the window this guards.
+func TestAMoveThatSucceedsEndsTheStoresRetry(t *testing.T) {
+	known, conn, grant, logged := knownOverGrant(t, 5*time.Second, 5*time.Second)
+	before := watchGeneration(known)
+
+	grant.Grant(t, "nothing.this.store.uses")
+	if err := known.Rewatch(conn); err == nil {
+		t.Fatal("the move succeeded while the user's grant named none of the bucket's subjects; this test says nothing about a move that failed")
+	}
+	if !repairRunning(known) {
+		t.Fatal("no repair runs after a move that failed")
+	}
+
+	grant.Grant(t, knownBucketGrant()...)
+	if err := known.Rewatch(conn); err != nil {
+		t.Fatalf("the move of the next connection event, once the cluster took this listener back: %v", err)
+	}
+	moved := watchGeneration(known)
+	if moved <= before {
+		t.Fatalf("the move that succeeded left the watcher at generation %d, want it past %d", moved, before)
+	}
+	awaitKnown(t, 60*time.Second, "the retry did not end after a move that succeeded", func() bool {
+		return !repairRunning(known)
+	})
+	if again := watchGeneration(known); again != moved {
+		t.Errorf("the retry moved the watcher again, to generation %d: the move the connection event made, at %d, is the newer one", again, moved)
+	}
+	if strings.Contains(logged(), "the known-session cache is back") {
+		t.Errorf("the retry reported a repair the connection event had already made:\n%s", logged())
+	}
+}
+
+// A stop ends the retry wherever it is, and a store that stopped repairs nothing afterwards: its
+// watcher is retired for the drain, and a move it made would arm a watcher nothing ends.
+func TestAStopEndsTheStoresRetry(t *testing.T) {
+	known, conn, grant, _ := knownOverGrant(t, 200*time.Millisecond, time.Second)
+	before := watchGeneration(known)
+
+	grant.Grant(t, "nothing.this.store.uses")
+	if err := known.Rewatch(conn); err == nil {
+		t.Fatal("the move succeeded while the user's grant named none of the bucket's subjects; this test says nothing about a move that failed")
+	}
+	if moved := watchGeneration(known); moved != before {
+		t.Fatalf("the watcher moved to generation %d over a move that failed, want it left at %d", moved, before)
+	}
+	if !repairRunning(known) {
+		t.Fatal("no repair runs after a move that failed")
+	}
+
+	known.StopWatch()
+	awaitKnown(t, 60*time.Second, "the retry did not end at the stop", func() bool {
+		return !repairRunning(known)
+	})
+	// The stop retires the watcher and moves the generation on itself (kvwatch.Watcher.Stop), so
+	// a move made after it is one past this.
+	retired := watchGeneration(known)
+
+	// The cluster takes the listener back, past several of the retry's waits: a store that
+	// stopped arms nothing, and moves nothing.
+	grant.Grant(t, knownBucketGrant()...)
+	time.Sleep(2 * time.Second)
+	if repairRunning(known) {
+		t.Error("a repair was armed after the stop")
+	}
+	if moved := watchGeneration(known); moved != retired {
+		t.Errorf("a stopped store moved its watcher to generation %d, want it left at %d", moved, retired)
 	}
 }
 

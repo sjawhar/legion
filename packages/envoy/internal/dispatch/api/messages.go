@@ -393,8 +393,8 @@ func (s *server) createStoredMessage(
 		// (createMessageInput.ConnectedOnly): a request that asked for a connected session
 		// refuses a stopped one rather than queueing for it - the model and effort switch,
 		// whose line applies to the session that runs it and would otherwise be applied at an
-		// unknown later time. Every other send queues, and so does every later attempt of this
-		// message, which inherits the flag (insertMessageDeliveryAttempt).
+		// unknown later time. Every other send queues, and every later attempt of this message
+		// asks what attempt 1 asked (insertMessageDeliveryAttempt).
 		attempt, err := s.deliverMessageResuming(sending, message, delivery, actor, &thread, 1)
 		switch {
 		case errors.Is(err, errAttemptNotPending):

@@ -533,8 +533,8 @@ func stoppedDeliveryModeVerdict(sessionID string, record session.KnownSession, p
 // deliveryModeVerdictFor is the judgement both of the above make: the payload's delivery mode is
 // unreadable, or advertised is set and capabilities do not carry that mode. An unreadable mode is
 // refused whatever the session is, since that refusal is about the payload and not about who it
-// is for; advertised is false only where the capability list is nobody's word, which is a
-// known-session record that carries none.
+// is for; advertised is false only for a known-session record that carries no capability at all,
+// whose send is left to the session that reads it to judge (stoppedDeliveryModeVerdict).
 func deliveryModeVerdictFor(sessionID, title string, capabilities []string, advertised bool, payload string) forwardVerdict {
 	var framed *string
 	if payload != "" {
@@ -899,8 +899,13 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to agent topics; use /v1/messages/send for direct agent messages")
 			return
 		}
+		// A wildcard that covers a presence subject is held off it exactly as one that names it
+		// is (bus.ReachesPresenceSubject is an overlap test), so the reason names what the rule
+		// reads, the presence space the topic reaches, rather than a prefix the topic need not
+		// carry. Nothing legitimate is refused by that: a publish carries one subject to publish
+		// on, and no real publish names a wildcard.
 		if bus.ReachesPresenceSubject(request.Topic) {
-			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to presence subjects; "+bus.PresenceSubjectPrefix+" is the listener's own check of whether a session's plugin holds a NATS connection, not a topic to publish on")
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to a topic that reaches the presence space; "+bus.PresenceSubjectPrefix+" is the listener's own check of whether a session's plugin holds a NATS connection, not a topic to publish on")
 			return
 		}
 		if message, field := validateMessageBody(request.messageBody); message != "" {
