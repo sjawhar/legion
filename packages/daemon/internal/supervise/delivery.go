@@ -160,7 +160,7 @@ func (c Claim) openRoundHoldsTask() bool {
 // task once the round is over (endPodUpdate).
 //
 // An ask of a round whose pod the claim's process no longer runs in is dropped here rather than
-// sent (Claim.leftPodRound), the way the round's own end drops one (dropUpdateTask): the worker
+// sent (Claim.LeftPodRound), the way the round's own end drops one (dropUpdateTask): the worker
 // that reads it would be asked to push work that died with the pod the round was opened over,
 // and it would refuse the answer the ask asks for. That drop and the phase check's are one shape
 // below, and both leave through the answer every drop of a delivery gives the mark armed for it

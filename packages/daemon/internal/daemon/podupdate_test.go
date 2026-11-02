@@ -1099,7 +1099,7 @@ func (r *podUpdateRig) suspendByOperator(role claim.Role) {
 // resumeInPod is the operator resuming a suspended claim of an open round: the session is
 // relaunched, and a launch into a pod that has merely drifted keeps that pod, so the process
 // comes up in the very pod the round is open over. The claim is a worker of that round again
-// with its answer standing (Claim.leftPodRound), and it registers and readies there as
+// with its answer standing (Claim.LeftPodRound), and it registers and readies there as
 // startInPod's role does.
 func (r *podUpdateRig) resumeInPod(role claim.Role) {
 	r.t.Helper()

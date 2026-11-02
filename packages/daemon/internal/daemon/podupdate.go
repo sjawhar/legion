@@ -535,7 +535,7 @@ func (s *supervision) podWentWithoutItsRound(ctx context.Context, issue string, 
 
 // endRoundOverAGonePod ends the round the sweep has just read the pod of as gone. The report is
 // decided from the parts of the round its claims hold: a claim the daemon started again in
-// another pod keeps the part the dead pod left it (Claim.leftPodRound, the round and the answer
+// another pod keeps the part the dead pod left it (Claim.LeftPodRound, the round and the answer
 // it left with), so no turn or answer of the process that replaced it changes the report.
 //
 // What was lost is the members of the round that neither answered it nor left it having

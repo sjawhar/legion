@@ -367,8 +367,10 @@ func (s *server) readRegisterBody(w http.ResponseWriter, r *http.Request, into *
 // token, so refusing them for the length of that turn would take away the one thing the hold
 // exists to protect: the turn would run on, unable to push and unable to hand off, and the work
 // would go with the relaunch the hold was waiting to start. Working, stale, relaunchable and in
-// no round is exactly the held relaunch, and the window this refusal describes opens when that
-// relaunch starts, not when the daemon decides on it.
+// no round is the held relaunch, the controller in the moment before its relaunch starts, or a
+// claim the boot pass has not decided yet; serving the last two for that moment is what degraded
+// mode does for every stale claim. The window this refusal describes opens when the relaunch
+// starts, not when the daemon decides on it.
 func (s *server) staleClaim(c supervise.Claim) (int, bool) {
 	if s.noPluginInstall != nil && s.noPluginInstall(c) {
 		return c.PluginContract, false

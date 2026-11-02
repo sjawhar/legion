@@ -233,7 +233,7 @@ func (c Claim) InPluginRound() bool { return IsPluginRound(c.UpdateRound) }
 
 func IsPluginRound(round string) bool { return strings.HasPrefix(round, PluginRoundPrefix) }
 
-// leftPodRound is a claim whose process no longer runs in the pod its pod round was opened over:
+// LeftPodRound is a claim whose process no longer runs in the pod its pod round was opened over:
 // that pod died and the claim was started again in another one while the round was still
 // recorded on it. The work the round asks about went with the dead pod's disk, so the process
 // now running takes no part in the round at all — it cannot answer for that work, and no turn of
@@ -523,7 +523,7 @@ var ErrRootStop = errors.New("the tree's root claim ends only when its tree clos
 var ErrForeignUpdateRound = errors.New("the answer names an update round this claim is not in")
 
 // ErrLeftPodRound is a ready_for_update from a claim the daemon started again in another pod
-// than the one its round was opened over (Claim.leftPodRound). The answer says the round's work
+// than the one its round was opened over (Claim.LeftPodRound). The answer says the round's work
 // is pushed, and the process that gives it never held that work: it came up in a pod the round
 // asks nothing of. It is refused rather than counted for a pod nobody pushed for. The refusal
 // adds the round the claim left and what the worker does next.
@@ -1197,7 +1197,7 @@ func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 // process did not come up in, so the work it asks about is on a disk that is gone: the claim's
 // part in the round is frozen here, as the dead pod left it, and the round the claim left with
 // whether it had answered by then is the whole of what any reader of that part needs
-// (Claim.leftPodRound, the sweep's report of what the pod took with it).
+// (Claim.LeftPodRound, the sweep's report of what the pod took with it).
 //
 // It is written once. A claim is asked nothing of a round it has left (askForUpdate), so it can
 // answer nothing between one launch and the next, and the first launch out of the round's own

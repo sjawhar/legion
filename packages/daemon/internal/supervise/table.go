@@ -1179,7 +1179,7 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 // keeps the answer (updatesRound): that is the turn the worker answers in.
 //
 // A claim relaunched into another pod than its round's own keeps its answer whatever turn starts
-// (Claim.leftPodRound): the answer was given in the pod the round is about, and no turn of the
+// (Claim.LeftPodRound): the answer was given in the pod the round is about, and no turn of the
 // pod that replaced it can move the branch that pod held.
 //
 // The claim is written by turnStarted's own confirm or persist, so the answer goes in the same
@@ -1299,7 +1299,7 @@ func (m *Machine) afterTurn(ctx context.Context) error {
 // agent's own get_state answer reported streaming (askTurnOver).
 //
 // A turn that ends in another pod than the round's own is no answer either
-// (Claim.leftPodRound): the pod the round is about is gone, and nothing this process does can
+// (Claim.LeftPodRound): the pod the round is about is gone, and nothing this process does can
 // push the work that died with it.
 //
 // A refusal takes the ask's own clock back (UpdateTaskedAt), so the next sweep asks again at once
@@ -1912,7 +1912,7 @@ func (m *Machine) dropUpdateTask(ctx context.Context) error {
 // A claim below PodUpdateContract is asked too, and answers by ending the turn
 // (answerByTurnEnd).
 //
-// A claim that has left the round's own pod is asked nothing (Claim.leftPodRound): the ask names
+// A claim that has left the round's own pod is asked nothing (Claim.LeftPodRound): the ask names
 // work that died with that pod, and no process the claim runs after it holds any of that work,
 // so the ask would cost one turn and teach the round nothing. It is asked nothing however often
 // it is started again, and a suspension does not bring it back into the round.
@@ -2115,7 +2115,7 @@ func (m *Machine) clearUpdate() {
 //
 // An answer counts only from a process in the round's own pod. A claim the daemon started again
 // in another pod answers for work the dead pod's disk held and that process never saw
-// (Claim.leftPodRound), so that answer is refused too, under a refusal of its own. What the
+// (Claim.LeftPodRound), so that answer is refused too, under a refusal of its own. What the
 // claim has left is the round's own record rather than where its process is now, so a claim
 // suspended since — its locator gone with its process (letGo) — refuses the late answer the
 // same way.

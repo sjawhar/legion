@@ -26,9 +26,10 @@ import (
 // (internal/daemon's noPluginInstall).
 //
 // It lives here rather than beside DaemonAPIVersion because internal/api imports this package.
-// internal/api's own test pins it to the contract that brought the op, so neither a later
-// contract bump nor a merge that renumbers this change can leave this constant behind. Behind is
-// the dangerous direction: at 45, with the op at 46, every worker of the released plugin is
+// internal/api's own test pins it to the contract that brought the op, so an edit of this
+// constant alone cannot move it; a merge that renumbers this change moves that test's literal
+// and api/version.go's entry with it, which names this constant. Behind is the dangerous
+// direction: at 45, with the op at 46, every worker of the released plugin is
 // judged able to answer an op it does not have, so the end of its turn is not taken as its
 // answer and the stale lane opens a plugin round instead of relaunching it. Every round of the
 // first roll would stall, which is the one deploy this change exists for.
